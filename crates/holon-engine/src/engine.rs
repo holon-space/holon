@@ -1,10 +1,18 @@
-use crate::guard::RhaiEvaluator;
-use crate::value::Value;
-use crate::yaml::history::{AttrChange, CreatedToken, Event};
-use crate::{Marking, NetDef, TokenState, TransitionDef};
 use std::collections::BTreeMap;
 
-/// A binding of input arc bind-names to actual token ids, plus captured placeholders.
+use crate::Marking;
+use crate::NetDef;
+use crate::TokenState;
+use crate::TransitionDef;
+use crate::arc::AttrInit;
+use crate::guard::RhaiEvaluator;
+use crate::value::Value;
+use crate::yaml::history::AttrChange;
+use crate::yaml::history::CreatedToken;
+use crate::yaml::history::Event;
+
+/// A binding of input arc bind-names to actual token ids, plus captured
+/// placeholders.
 #[derive(Clone, Debug)]
 pub struct Binding {
     pub transition_id: String,
@@ -77,9 +85,10 @@ impl Engine {
         }))
     }
 
-    /// Backtracking search for a token assignment that satisfies all input arcs.
-    /// A greedy first-match pass would starve later arcs when an earlier arc of
-    /// the same token type grabs the only token satisfying the later precond.
+    /// Backtracking search for a token assignment that satisfies all input
+    /// arcs. A greedy first-match pass would starve later arcs when an
+    /// earlier arc of the same token type grabs the only token satisfying
+    /// the later precond.
     fn bind_arcs<M: Marking>(
         &self,
         arcs: &[crate::InputArc],
@@ -165,7 +174,8 @@ impl Engine {
             marking.set_attr(&change.token, &change.attr, change.to.clone());
         }
 
-        // Handle create arcs — inject `step` so id_expr can produce unique IDs per firing
+        // Handle create arcs — inject `step` so id_expr can produce unique IDs per
+        // firing
         let mut create_maps = rhai_maps.clone();
         let mut step_map = rhai::Map::new();
         step_map.insert("n".into(), rhai::Dynamic::from(step as i64));
@@ -178,10 +188,14 @@ impl Engine {
                 .eval_postcond(&create_arc.id_expr, &create_maps, &binding.placeholders)?
                 .to_string();
             let mut attrs = BTreeMap::new();
-            for (attr, expr) in &create_arc.attrs {
-                let val = self
-                    .evaluator
-                    .eval_postcond(expr, &rhai_maps, &binding.placeholders)?;
+            for (attr, init) in &create_arc.attrs {
+                let val = match init {
+                    AttrInit::Literal(v) => v.clone(),
+                    AttrInit::Expr(expr) => {
+                        self.evaluator
+                            .eval_postcond(expr, &rhai_maps, &binding.placeholders)?
+                    }
+                };
                 attrs.insert(attr.clone(), val);
             }
             marking.create_token(new_id.clone(), create_arc.token_type.clone(), attrs.clone());
@@ -205,9 +219,25 @@ impl Engine {
             }
         }
 
-        // Advance clock
+        // Advance clock. `duration` ultimately comes from stored task data /
+        // YAML nets, so BOTH chrono steps must be checked: `Duration::minutes`
+        // panics beyond ~1.5e14 minutes and `DateTime + TimeDelta` panics on
+        // date overflow long before that. Out-of-range values return `Err`.
         let duration = transition.duration_minutes();
-        marking.set_clock(time + chrono::Duration::minutes(duration as i64));
+        let delta = chrono::Duration::try_minutes(duration as i64).ok_or_else(|| {
+            format!(
+                "transition '{}': duration {duration} minutes overflows chrono::Duration",
+                binding.transition_id
+            )
+        })?;
+        let new_clock = time.checked_add_signed(delta).ok_or_else(|| {
+            format!(
+                "transition '{}': advancing clock {time} by {duration} minutes overflows the \
+                 representable datetime range",
+                binding.transition_id
+            )
+        })?;
+        marking.set_clock(new_clock);
 
         Ok(Event {
             step,

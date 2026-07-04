@@ -19,12 +19,15 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::mpsc::{Receiver, sync_channel};
+use std::sync::mpsc::Receiver;
+use std::sync::mpsc::sync_channel;
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use std::time::Instant;
 
 use holon_frontend::geometry::GeometryProvider;
-use holon_frontend::reactive::{BuilderServices, ReactiveEngine};
+use holon_frontend::reactive::BuilderServices;
+use holon_frontend::reactive::ReactiveEngine;
 
 /// Default `PBT_MEMORY_MULTIPLIER` for a frontend PBT.
 ///
@@ -75,33 +78,35 @@ pub fn set_loro_peer_id_if_unset(default: &str) {
 }
 
 /// Print the per-transition rejection histogram on every panic. Without this
-/// the `proptest_state_machine!` path swallows the `print_rejection_histogram()`
-/// hook that the phased-PBT path runs in `pbt_teardown`, so the histogram is
-/// never surfaced when a headless case fails. Idempotent — installs once per
-/// process. Shared by the native-mode slices (`proptest_config:`); the
-/// cases-based macro arm wires its own.
+/// the `proptest_state_machine!` path swallows the
+/// `print_rejection_histogram()` hook that the phased-PBT path runs in
+/// `pbt_teardown`, so the histogram is never surfaced when a headless case
+/// fails. Idempotent — installs once per process. Shared by the native-mode
+/// slices (`proptest_config:`); the cases-based macro arm wires its own.
 pub fn install_rejection_histogram_panic_hook() {
     use std::sync::Once;
     static INSTALL: Once = Once::new();
     INSTALL.call_once(|| {
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            crate::pbt::validation::print_rejection_histogram();
+            holon_pbt_core::validation::print_rejection_histogram();
             prev(info);
         }));
     });
 }
 
 /// The standard `ProptestConfig` for a native-mode (`proptest_config:`) slice:
-/// activates the atomic editor, installs the rejection-histogram panic hook, and
-/// pins the failure-persistence file to `tests/<slice_name>.proptest-regressions`
-/// (the default `SourceParallel` mode mislocates `lib.rs`/`main.rs` for
-/// macro-generated tests and warns). `cases` defaults to 8 — `PROPTEST_CASES`
-/// overrides at runtime; `PROPTEST_MAX_SHRINK_ITERS` overrides the shrink budget
-/// (default 50). Slices sharing one state machine pass the *same* `slice_name`
-/// to share one regressions file (e.g. `general_e2e_pbt` + its `_sql_only` peer).
+/// activates the atomic editor, installs the rejection-histogram panic hook,
+/// and pins the failure-persistence file to
+/// `tests/<slice_name>.proptest-regressions` (the default `SourceParallel` mode
+/// mislocates `lib.rs`/`main.rs` for macro-generated tests and warns). `cases`
+/// defaults to 8 — `PROPTEST_CASES` overrides at runtime;
+/// `PROPTEST_MAX_SHRINK_ITERS` overrides the shrink budget (default 50). Slices
+/// sharing one state machine pass the *same* `slice_name` to share one
+/// regressions file (e.g. `general_e2e_pbt` + its `_sql_only` peer).
 pub fn standard_pbt_config(slice_name: &str) -> proptest::test_runner::Config {
-    use proptest::test_runner::{Config, FileFailurePersistence};
+    use proptest::test_runner::Config;
+    use proptest::test_runner::FileFailurePersistence;
 
     install_rejection_histogram_panic_hook();
     let max_shrink = std::env::var("PROPTEST_MAX_SHRINK_ITERS")
@@ -124,8 +129,8 @@ pub fn standard_pbt_config(slice_name: &str) -> proptest::test_runner::Config {
 
 /// Build `<cwd>/target/pbt-screenshots/<subdir>`.
 ///
-/// The directory itself is created lazily by `GeometryDriver::with_screenshots`,
-/// not by this helper.
+/// The directory itself is created lazily by
+/// `GeometryDriver::with_screenshots`, not by this helper.
 pub fn screenshot_dir(subdir: &str) -> PathBuf {
     std::env::current_dir()
         .expect("current_dir failed")
@@ -219,8 +224,8 @@ pub fn wait_for_geometry_ready(
                 .take(5)
                 .collect();
             eprintln!(
-                "[{label}] Window ready timeout — {} elements, widget_type hist={:?}, \
-                 has_content count={}, sample entity_ids={:?}",
+                "[{label}] Window ready timeout — {} elements, widget_type hist={:?}, has_content \
+                 count={}, sample entity_ids={:?}",
                 elements.len(),
                 hist,
                 elements.iter().filter(|(_, i)| i.has_content).count(),

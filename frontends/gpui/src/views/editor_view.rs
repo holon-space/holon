@@ -1,28 +1,41 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::Mutex;
 
-use futures_signals::signal::{ReadOnlyMutable, SignalExt};
+use futures_signals::signal::ReadOnlyMutable;
+use futures_signals::signal::SignalExt;
 use gpui::prelude::*;
 use gpui::*;
-use gpui_component::input::{
-    Backspace, Enter, Escape, IndentInline, Input, InputEvent, InputState, MoveDown, MoveUp,
-    OutdentInline, Paste,
-};
+use gpui_component::RopeExt;
+use gpui_component::input::Backspace;
+use gpui_component::input::Enter;
+use gpui_component::input::Escape;
+use gpui_component::input::IndentInline;
+use gpui_component::input::Input;
+use gpui_component::input::InputEvent;
+use gpui_component::input::InputState;
+use gpui_component::input::MoveDown;
+use gpui_component::input::MoveUp;
+use gpui_component::input::OutdentInline;
+use gpui_component::input::Paste;
 use gpui_component::menu::PopupMenuItem;
 use holon_api::widget_spec::DataRow;
-use holon_frontend::cell::{compute_text_delta, CursorBias};
-use holon_frontend::editor_view_model::{
-    structural_block_action, EditorAction, EditorKey, EditorViewModel,
-};
-use holon_frontend::input::{InputAction, WidgetInput};
-use holon_frontend::navigation::{Boundary, CursorHint, NavDirection};
+use holon_frontend::cell::CursorBias;
+use holon_frontend::cell::compute_text_delta;
+use holon_frontend::editor_view_model::EditorAction;
+use holon_frontend::editor_view_model::EditorKey;
+use holon_frontend::editor_view_model::EditorViewModel;
+use holon_frontend::editor_view_model::structural_block_action;
+use holon_frontend::input::InputAction;
+use holon_frontend::input::WidgetInput;
+use holon_frontend::navigation::Boundary;
+use holon_frontend::navigation::CursorHint;
+use holon_frontend::navigation::NavDirection;
 use holon_frontend::popup_menu::PopupState;
 use holon_frontend::reactive::BuilderServices;
 
 use crate::geometry::BoundsRegistry;
 use crate::navigation_state::NavigationState;
 use crate::share_ui::ShareTrigger;
-
-use gpui_component::RopeExt;
 
 /// A persistent GPUI view for an editable text field.
 ///
@@ -50,7 +63,8 @@ pub struct EditorView {
     /// `MutableText` itself lives on the `EditorViewModel`.
     previous_text: String,
     /// Cancelled on drop. Subscribes to `MutableText.remote_deltas()`
-    /// and splices remote edits into InputState via `replace_text_in_range_silent`.
+    /// and splices remote edits into InputState via
+    /// `replace_text_in_range_silent`.
     _remote_delta_subscription: Option<Task<()>>,
     /// Bounds registry threaded from `GpuiRenderContext` so the popup
     /// overlay can register each item as a tracked widget. Lets the PBT
@@ -112,7 +126,8 @@ impl EditorView {
         // Attach a `Cell<String>` if the cell registry can resolve one.
         // Headless / stub / test paths leave it unattached and the VM's
         // pass-through CRDT methods become no-ops.
-        // ALLOW(entity_uri_from_raw): boundary — `row_id` is the render-spec row id (a `String`); parse once here before handing a typed URI to the cell registry.
+        // ALLOW(entity_uri_from_raw): boundary — `row_id` is the render-spec row id (a
+        // `String`); parse once here before handing a typed URI to the cell registry.
         let row_uri = holon_api::EntityUri::from_raw(&row_id);
         if let Ok(cell) = services.editable_text(&row_uri, &field_for_subscription) {
             controller.attach_cell(cell);
@@ -130,7 +145,7 @@ impl EditorView {
                 move |this, entity, event, _window, cx| match event {
                     InputEvent::Focus => {
                         #[cfg(feature = "mobile")]
-                        gpui_mobile::show_keyboard();
+                        crate::mobile::editor_focus_gained();
 
                         // Promote this block to be the UiState.focused_block.
                         // Without this, clicking inside an editable_text gives the
@@ -140,7 +155,8 @@ impl EditorView {
                         // GeometryDriver read the focus from the engine's
                         // `focused_block_mutable()` Mutable, so this single write
                         // is the only update needed.
-                        // ALLOW(entity_uri_from_raw): EditorView.row_id from render-spec node.row_id() (parsed on Focus/Blur)
+                        // ALLOW(entity_uri_from_raw): EditorView.row_id from render-spec
+                        // node.row_id() (parsed on Focus/Blur)
                         let my_uri = holon_api::EntityUri::from_raw(&row_id_for_blur);
                         if services_clone.focused_block().as_ref() != Some(&my_uri) {
                             if caret_probe() {
@@ -156,13 +172,14 @@ impl EditorView {
                     }
                     InputEvent::Blur => {
                         #[cfg(feature = "mobile")]
-                        gpui_mobile::hide_keyboard();
+                        crate::mobile::editor_focus_lost(cx);
 
                         let value = entity.read(cx).value().to_string();
                         let action = ctrl.lock().unwrap().on_blur(&value);
                         execute_action(action, &services_clone, this.input.entity_id(), cx);
-                        // Cursor position is no longer persisted on blur: editor
-                        // focus + caret are pure in-memory UI state (ADR 0010),
+                        // Cursor position is no longer persisted on blur:
+                        // editor focus + caret are pure
+                        // in-memory UI state (ADR 0010),
                         // not round-tripped through the Turso `editor_cursor`
                         // matview. The old persist-on-blur existed only to feed
                         // that matview's CDC back into window focus, which is
@@ -249,18 +266,16 @@ impl EditorView {
         //
         // Two safeguards:
         //
-        // 1. **Skip when focused.** While the user has the editor focused
-        //    they are the source of truth — overwriting `InputState`
-        //    while they're typing yanks the cursor to position 0 and
-        //    drops the in-flight character. External changes during a
-        //    focused edit are dropped from the *visible* state until the
-        //    next focus cycle (data is still correct in the backend).
+        // 1. **Skip when focused.** While the user has the editor focused they are the
+        //    source of truth — overwriting `InputState` while they're typing yanks the
+        //    cursor to position 0 and drops the in-flight character. External changes
+        //    during a focused edit are dropped from the *visible* state until the next
+        //    focus cycle (data is still correct in the backend).
         //
-        // 2. **Dedupe on the field's value.** The signal fires on every
-        //    `.set()` of the per-row Mutable, including no-op writes
-        //    triggered by unrelated field changes. `.dedupe_cloned()` on
-        //    the extracted field value keeps the subscription quiet
-        //    unless the relevant column actually changed.
+        // 2. **Dedupe on the field's value.** The signal fires on every `.set()` of the
+        //    per-row Mutable, including no-op writes triggered by unrelated field
+        //    changes. `.dedupe_cloned()` on the extracted field value keeps the
+        //    subscription quiet unless the relevant column actually changed.
         //
         // The render path no longer touches `set_value` — propagation is
         // entirely event-driven through this subscription. The returned
@@ -385,7 +400,8 @@ impl EditorView {
         // re-emission can't steal focus. Handles focus arriving at an
         // already-mounted (cache-reused) editor; the synchronous first-mount
         // grab below covers the fast path. RAII-scoped to this EditorView.
-        // ALLOW(entity_uri_from_raw): render-spec row_id parsed once to match the focus signal
+        // ALLOW(entity_uri_from_raw): render-spec row_id parsed once to match the focus
+        // signal
         let row_uri_for_focus = holon_api::EntityUri::from_raw(&row_id);
         let _focus_subscription = spawn_focus_binding(cx, services.clone(), row_uri_for_focus);
 
@@ -472,7 +488,8 @@ impl EditorView {
         // never consumed at the wrong caret — the end default cannot yank a
         // caret the user already placed, because no user interaction can have
         // reached a not-yet-mounted InputState.
-        // ALLOW(entity_uri_from_raw): render-spec row_id parsed vs focused_block() on mount
+        // ALLOW(entity_uri_from_raw): render-spec row_id parsed vs focused_block() on
+        // mount
         let row_uri = holon_api::EntityUri::from_raw(&row_id);
         if services.focused_block().as_ref() == Some(&row_uri) {
             grab_focus_and_seed_caret(&input, window, cx, services.as_ref(), &row_uri, true);
@@ -499,9 +516,21 @@ impl EditorView {
     /// freshly-focused editor (e.g. click-to-edit) before any keystroke,
     /// without clobbering text a continuously-focused user is mid-typing.
     pub fn focus_arrived(&self, is_focused: bool) -> bool {
-        let just = is_focused && !self.prev_focused.get();
+        self.focus_transition(is_focused).0
+    }
+
+    /// Render-path focus-edge detector. Returns `(just_focused, just_blurred)`
+    /// — the false→true and true→false window-focus transitions since the last
+    /// call. On iOS/Android the gpui focus-change events never reach the
+    /// editor's `InputEvent::Focus`/`Blur` subscription, so this render-path
+    /// edge is the *only* reliable focus signal on mobile; the soft-keyboard
+    /// raise/hide is driven from it (see `editable_text` builder).
+    pub fn focus_transition(&self, is_focused: bool) -> (bool, bool) {
+        let prev = self.prev_focused.get();
+        let just_focused = is_focused && !prev;
+        let just_blurred = !is_focused && prev;
         self.prev_focused.set(is_focused);
-        just
+        (just_focused, just_blurred)
     }
 
     /// The single convergence entry point: set this editor's `InputState`
@@ -700,16 +729,16 @@ fn dispatch_structural_as_commit_point(
 ///
 /// - `default_caret_to_end = true` — the synchronous first-mount grab. A
 ///   genuinely fresh editor has no meaningful caret, so default end-of-text
-///   (matches the PBT ref's `model_chord_click_focus` and the headless
-///   mirror's `seed_for_click`). Pre-mount keystrokes can't have placed a
-///   caret here: blur-on-focus-leave drops them and the driver retries, so
-///   nothing user-placed exists to be yanked.
+///   (matches the PBT ref's `model_chord_click_focus` and the headless mirror's
+///   `seed_for_click`). Pre-mount keystrokes can't have placed a caret here:
+///   blur-on-focus-leave drops them and the driver retries, so nothing
+///   user-placed exists to be yanked.
 /// - `default_caret_to_end = false` — the async focus subscription, which
 ///   re-fires on every focus arrival, *after* `home`+arrow keys may already
-///   have moved the caret. An end-default there yanked the caret back to
-///   the end, so `Enter` split at the end (source kept its full content,
-///   new block empty — the SplitBlock-at-wrong-position bug). Leave an
-///   unseeded caret alone.
+///   have moved the caret. An end-default there yanked the caret back to the
+///   end, so `Enter` split at the end (source kept its full content, new block
+///   empty — the SplitBlock-at-wrong-position bug). Leave an unseeded caret
+///   alone.
 ///
 /// `peek_caret_seed` is non-destructive, so applying an armed seed from
 /// both callers is idempotent.
@@ -803,13 +832,11 @@ impl Render for EditorView {
                 move |_: &Enter, window, cx: &mut App| {
                     // Two layered guards keep Enter on a Page-level editor
                     // from acting on behalf of a focused child:
-                    //   1. only the editor whose own InputState owns
-                    //      keyboard focus runs the capture body, and
-                    //   2. the operation targets `services.focused_block()`
-                    //      (UiState's notion of focus), not this editor's
-                    //      own `row_id` — so even if the capture fires on a
-                    //      shared/ancestor editor, the split lands on the
-                    //      logically focused leaf.
+                    //   1. only the editor whose own InputState owns keyboard focus runs the
+                    //      capture body, and
+                    //   2. the operation targets `services.focused_block()` (UiState's notion of
+                    //      focus), not this editor's own `row_id` — so even if the capture fires on
+                    //      a shared/ancestor editor, the split lands on the logically focused leaf.
                     if !input.read(cx).focus_handle(cx).is_focused(window) {
                         return;
                     }
@@ -1179,7 +1206,8 @@ fn handle_cross_block_nav(
         }
         None => {
             tracing::debug!(
-                "cross_block_nav: bubble_input returned None for row_id={row_id}, direction={direction:?} (router={})",
+                "cross_block_nav: bubble_input returned None for row_id={row_id}, \
+                 direction={direction:?} (router={})",
                 nav.describe()
             );
         }
@@ -1196,8 +1224,9 @@ fn handle_cross_block_nav(
 /// highlighted item is also tagged `widget_type="popup_item_selected"`
 /// so a precondition can confirm Enter would fire the expected op.
 fn render_popup(state: &PopupState, bounds_registry: &BoundsRegistry, cx: &App) -> Deferred {
+    use gpui::div;
     use gpui::prelude::*;
-    use gpui::{div, px};
+    use gpui::px;
     use gpui_component::theme::ActiveTheme;
 
     let theme = cx.theme().colors;
@@ -1289,7 +1318,8 @@ fn save_clipboard_image(bytes: &[u8], extension: &str) -> Result<String, std::io
     let attachments = root.join("attachments");
     std::fs::create_dir_all(&attachments)?;
 
-    use std::hash::{Hash, Hasher};
+    use std::hash::Hash;
+    use std::hash::Hasher;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     bytes.hash(&mut hasher);
     let hash = hasher.finish();
@@ -1316,7 +1346,8 @@ fn org_root_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(".")
 }
 
-/// Execute an EditorAction in a context without window access (subscribe callbacks).
+/// Execute an EditorAction in a context without window access (subscribe
+/// callbacks).
 fn execute_action<T: 'static>(
     action: EditorAction,
     services: &Arc<dyn BuilderServices>,

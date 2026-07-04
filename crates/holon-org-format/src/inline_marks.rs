@@ -9,8 +9,8 @@
 //!
 //! Algorithm (recursive on orgize's syntax tree):
 //! 1. Parse `text` with `orgize::Org::parse`.
-//! 2. Walk the document tree skipping non-paragraph wrappers; emit text
-//!    tokens directly to the output.
+//! 2. Walk the document tree skipping non-paragraph wrappers; emit text tokens
+//!    directly to the output.
 //! 3. On encountering a mark node (BOLD/ITALIC/.../LINK/SUB/SUPER), strip its
 //!    delimiters, recurse on the inner string for nested marks, then emit a
 //!    `MarkSpan` covering the inner (already-stripped) range plus any nested
@@ -18,22 +18,41 @@
 //!
 //! Known limitations (per `docs/orgize_inline_audit.md`):
 //! - Backslash escapes (`\*not bold\*`) are not honored by orgize
-//!   0.10.0-alpha.10; the locked-in regression test asserts the current
-//!   lossy behavior so a future orgize bump will surface the change.
+//!   0.10.0-alpha.10; the locked-in regression test asserts the current lossy
+//!   behavior so a future orgize bump will surface the change.
 //! - Sub/Super only match orgize's `_{…}` / `^{…}` form; bare `_{` is not a
 //!   mark — that's correct Org behavior.
 
-use holon_api::link_parser::{classify_link, LinkTarget};
-use holon_api::{EntityRef, InlineMark, MarkSpan};
-use orgize::rowan::ast::AstNode;
+use holon_api::EntityRef;
+use holon_api::InlineMark;
+use holon_api::MarkSpan;
+use holon_api::link_parser::LinkTarget;
+use holon_api::link_parser::classify_link;
+use orgize::ParseConfig;
+use orgize::SyntaxKind;
+use orgize::SyntaxNode;
+use orgize::config::UseSubSuperscript;
 use orgize::rowan::NodeOrToken;
-use orgize::{Org, SyntaxKind, SyntaxNode};
+use orgize::rowan::ast::AstNode;
 
 /// Parse `text` as inline org content. Returns `(rendered_text, marks)` where
 /// `rendered_text` has all mark delimiters stripped and `marks` carries
 /// Unicode-scalar offsets into the rendered text.
+///
+/// Parses with `use_sub_superscript: Brace` (the org `#+OPTIONS: ^:{}`
+/// semantics): only the braced `_{…}` / `^{…}` forms are sub/superscript
+/// marks. A bare `_` in `focused_block` or a lone `^` is literal text — the
+/// default orgize setting (`True`) parses those as subscripts and the Sub/Super
+/// `strip_prefix_suffix(raw, 2, 1)` (which assumes the braced shape) then
+/// destroys the surrounding characters (`focused_block` → `focusedloc`). Brace
+/// mode is the only shape the emit path can round-trip losslessly, and it is
+/// what this module's contract has always documented.
 pub fn extract_inline_marks(text: &str) -> (String, Vec<MarkSpan>) {
-    let org = Org::parse(text);
+    let config = ParseConfig {
+        use_sub_superscript: UseSubSuperscript::Brace,
+        ..Default::default()
+    };
+    let org = config.parse(text);
     let mut state = ExtractState::default();
     walk_node(org.document().syntax(), &mut state);
     (state.out, state.marks)
@@ -103,8 +122,9 @@ fn emit_mark(node: SyntaxNode, kind_hint: MarkKindHint, state: &mut ExtractState
             push_with_inner_marks(state, &text, vec![], mark);
         }
         MarkKindHint::Sub | MarkKindHint::Super => {
-            // SUBSCRIPT / SUPERSCRIPT: `_{…}` / `^{…}` — strip 2-char prefix + 1-char suffix.
-            // No nested marks supported in sub/super for Phase 1 (rare in practice).
+            // SUBSCRIPT / SUPERSCRIPT: `_{…}` / `^{…}` — strip 2-char prefix + 1-char
+            // suffix. No nested marks supported in sub/super for Phase 1 (rare
+            // in practice).
             let inner = strip_prefix_suffix(&raw, 2, 1);
             let mark = match kind_hint {
                 MarkKindHint::Sub => InlineMark::Sub,
@@ -183,10 +203,13 @@ fn strip_prefix_suffix(s: &str, prefix_chars: usize, suffix_chars: usize) -> Str
     chars.into_iter().collect()
 }
 
-/// Parse a `[[…][…]]` or `[[…]]` link literal. Returns `(rendered_label, Link mark)`.
+/// Parse a `[[…][…]]` or `[[…]]` link literal. Returns `(rendered_label, Link
+/// mark)`.
 ///
-/// - `[[uri][label]]` → label is the rendered text; uri is classified into `EntityRef`.
-/// - `[[uri]]` (bare) → rendered text is the uri itself; classified the same way.
+/// - `[[uri][label]]` → label is the rendered text; uri is classified into
+///   `EntityRef`.
+/// - `[[uri]]` (bare) → rendered text is the uri itself; classified the same
+///   way.
 fn strip_link(raw: &str) -> (String, InlineMark) {
     // Strip outer `[[` and `]]`.
     let inside = raw
@@ -257,7 +280,8 @@ pub fn render_inline_marks(text: &str, marks: &[MarkSpan]) -> String {
     for v in opens_at.values_mut() {
         v.sort_by_key(|m| std::cmp::Reverse(m.end));
     }
-    // Sort closes at same position: most-recently-opened (later start) closes first.
+    // Sort closes at same position: most-recently-opened (later start) closes
+    // first.
     for v in closes_at.values_mut() {
         v.sort_by_key(|m| std::cmp::Reverse(m.start));
     }
@@ -331,7 +355,8 @@ fn detect_crossing_marks(marks: &[MarkSpan]) {
         for b in marks.iter().skip(i + 1) {
             if a.start < b.start && b.start < a.end && a.end < b.end {
                 tracing::warn!(
-                    "render_inline_marks: crossing marks detected — {a:?} crosses {b:?}; org output may be lossy"
+                    "render_inline_marks: crossing marks detected — {a:?} crosses {b:?}; org \
+                     output may be lossy"
                 );
             }
         }
@@ -611,5 +636,60 @@ mod tests {
         // Internal block link round-trip.
         let (org, _) = round_trip("[[block:abc-123][see also]]");
         assert_eq!(org, "[[block:abc-123][see also]]");
+    }
+
+    /// Regression for the vault data-loss bug: bare (unbraced) `_`/`^` in
+    /// snake_case identifiers must NOT be parsed as sub/superscript, so they
+    /// survive the extract→render round-trip byte-for-byte. Before the
+    /// `UseSubSuperscript::Brace` fix, orgize parsed `focused_block` as
+    /// `focused` + subscript `_block`, and the braced-form strip mangled it to
+    /// `focusedloc`. Each string here is a real token from the user's PKM
+    /// vault.
+    #[test]
+    fn bare_underscore_identifiers_survive_round_trip() {
+        for input in [
+            "focused_block",
+            "set_focus_with_caret",
+            "virtual_parent",
+            "sort_key",
+            "keyed_rows_signal_vec",
+            "watch_changes_since",
+            "change_set.rs",
+            "vector_distance",
+            "model_version",
+            "a_b_c",
+            "jxa_sbzys",
+            // bare superscripts too
+            "E=mc^2",
+            "x^y_z",
+        ] {
+            let (text, marks) = extract_inline_marks(input);
+            assert!(
+                marks.is_empty(),
+                "bare `_`/`^` must not produce marks: input={input:?} text={text:?} \
+                 marks={marks:?}",
+            );
+            assert_eq!(
+                text, input,
+                "ingest must preserve bare-underscore identifier"
+            );
+            let rendered = render_inline_marks(&text, &marks);
+            assert_eq!(rendered, input, "round-trip must be identity for {input:?}");
+        }
+    }
+
+    /// The braced sub/superscript forms remain real marks and round-trip.
+    #[test]
+    fn braced_sub_super_still_marks() {
+        let (text, marks) = extract_inline_marks("a_{sub} b^{sup}");
+        assert_eq!(text, "asub bsup");
+        assert_eq!(
+            marks,
+            vec![
+                MarkSpan::new(1, 4, InlineMark::Sub),
+                MarkSpan::new(6, 9, InlineMark::Super),
+            ]
+        );
+        assert_eq!(render_inline_marks(&text, &marks), "a_{sub} b^{sup}");
     }
 }

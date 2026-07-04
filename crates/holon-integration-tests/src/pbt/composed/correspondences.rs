@@ -6,24 +6,40 @@
 //! nothing else. Extraction/comparison strategies are named `fn`s in this
 //! module (greppable wiring; see the registry module doc's integrity rule).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
 
 use holon_api::Block;
-use holon_pbt_core::capabilities::{
-    EntityUri, RefBackend, RefBlockTree, RefEditorMirror, RefLayout, SutBackend,
-    SutEditorMirrorRead, SutLoroLog, SutOrgRead, SutRenderer, SutSqlProjection,
-};
-use holon_pbt_core::composition::{CapId, CapMap, Needs};
+use holon_pbt_core::capabilities::EntityUri;
+use holon_pbt_core::capabilities::RefAdvice;
+use holon_pbt_core::capabilities::RefBackend;
+use holon_pbt_core::capabilities::RefBlockTree;
+use holon_pbt_core::capabilities::RefEditorMirror;
+use holon_pbt_core::capabilities::RefLayout;
+use holon_pbt_core::capabilities::SutAdviceMatview;
+use holon_pbt_core::capabilities::SutBackend;
+use holon_pbt_core::capabilities::SutEditorMirrorRead;
+use holon_pbt_core::capabilities::SutLoroLog;
+use holon_pbt_core::capabilities::SutOrgRead;
+use holon_pbt_core::capabilities::SutRenderer;
+use holon_pbt_core::capabilities::SutSqlProjection;
+use holon_pbt_core::composition::CapId;
+use holon_pbt_core::composition::CapMap;
+use holon_pbt_core::composition::Needs;
 use holon_pbt_core::invariant::InvariantResult;
 
-use crate::pbt::correspondence::{
-    Converge, Correspondence, Extraction, NamedCompare, Observable, StoreProjection,
-};
-use crate::pbt::invariants::block_compare::{
-    BlockFacet, compare_block_fields, compare_block_subset, compare_blocks,
-};
+use crate::pbt::correspondence::Converge;
+use crate::pbt::correspondence::Correspondence;
+use crate::pbt::correspondence::Extraction;
+use crate::pbt::correspondence::NamedCompare;
+use crate::pbt::correspondence::Observable;
+use crate::pbt::correspondence::StoreProjection;
+use crate::pbt::invariants::block_compare::BlockFacet;
+use crate::pbt::invariants::block_compare::compare_block_fields;
+use crate::pbt::invariants::block_compare::compare_block_subset;
+use crate::pbt::invariants::block_compare::compare_blocks;
 
 // ─── Observable: non-seed blocks (the `inv-blocks-match-ref/*` family) ──────
 
@@ -90,6 +106,8 @@ pub fn non_seed_blocks() -> Correspondence<NonSeedBlocks> {
             // enabled on the variant; strict otherwise — seeds materialize
             // into the Loro store, so a non-seed divergence is a real bug.
             StoreProjection {
+                // BLOCKED on Phase 1a: part of the shared cross-store correspondence
+                // registry; splitting the /loro arm out fragments it. Stays central.
                 id: "inv-blocks-match-ref/loro",
                 store: "loro",
                 needs: Needs {
@@ -191,15 +209,15 @@ fn compare_block_raw_subset(sut: &Vec<Block>, ref_: &Vec<Block>) -> Result<(), S
 
 /// Per-block `content`, keyed by non-seed block id, as each store sees it. The
 /// reference projection enumerates the reference's non-synthetic non-seed block
-/// ids ([`RefBlockTree::all_non_seed_block_ids`]) and answers content per id via
-/// the borrow-returning [`RefBlockTree::block_content`]; ids the reference has
-/// no content for are dropped (they cannot be compared — the old body's
+/// ids ([`RefBlockTree::all_non_seed_block_ids`]) and answers content per id
+/// via the borrow-returning [`RefBlockTree::block_content`]; ids the reference
+/// has no content for are dropped (they cannot be compared — the old body's
 /// `None => continue`). Consolidates the two hand-written per-block-content
 /// bodies (the `SutSqlProjection` SQL-column read → `/sql`; the `SutBackend`
-/// snapshot → `/block_raw`). Synthetic ref ids (`block::split-N`, `block::bulk-N-M`)
-/// are remapped to UUIDs production-side, so the SUT has no row at the synthetic
-/// id — skipped on both projection paths (content equality on stable ids only;
-/// the wider PBT reconciles synthetic-id mapping).
+/// snapshot → `/block_raw`). Synthetic ref ids (`block::split-N`,
+/// `block::bulk-N-M`) are remapped to UUIDs production-side, so the SUT has no
+/// row at the synthetic id — skipped on both projection paths (content equality
+/// on stable ids only; the wider PBT reconciles synthetic-id mapping).
 pub struct BlockContent;
 
 impl Observable for BlockContent {
@@ -313,15 +331,14 @@ fn compare_block_content_block_raw(
             Some(sut_c) if sut_c == ref_content => {}
             Some(sut_c) => {
                 return Err(format!(
-                    "[inv-block-content/block_raw] block {id} content \
-                     diverges:\n  ref:       {ref_content:?}\n  block_raw: {sut_c:?}"
+                    "[inv-block-content/block_raw] block {id} content diverges:\n  ref:       \
+                     {ref_content:?}\n  block_raw: {sut_c:?}"
                 ));
             }
             None => {
                 return Err(format!(
-                    "[inv-block-content/block_raw] block {id} present in \
-                     ref (content {ref_content:?}) but missing from the SUT's \
-                     block_raw snapshot"
+                    "[inv-block-content/block_raw] block {id} present in ref (content \
+                     {ref_content:?}) but missing from the SUT's block_raw snapshot"
                 ));
             }
         }
@@ -338,14 +355,14 @@ fn compare_block_content_sql(
             Some(sql_content) if sql_content == ref_content => {}
             Some(sql_content) => {
                 return Err(format!(
-                    "[inv-block-content/sql] block {id} content diverges:\n  \
-                     ref: {ref_content:?}\n  sql: {sql_content:?}"
+                    "[inv-block-content/sql] block {id} content diverges:\n  ref: \
+                     {ref_content:?}\n  sql: {sql_content:?}"
                 ));
             }
             None => {
                 return Err(format!(
-                    "[inv-block-content/sql] block {id} present in ref \
-                     but missing from SQL projection (ref content = {ref_content:?})"
+                    "[inv-block-content/sql] block {id} present in ref but missing from SQL \
+                     projection (ref content = {ref_content:?})"
                 ));
             }
         }
@@ -435,8 +452,8 @@ fn compare_block_parent_block_raw(
         };
         if ref_parent != sut_parent_opt {
             return Err(format!(
-                "[inv-block-parent/block_raw] block {id} parent diverges:\n  \
-                 ref:       {ref_parent:?}\n  block_raw: {sut_parent_opt:?}"
+                "[inv-block-parent/block_raw] block {id} parent diverges:\n  ref:       \
+                 {ref_parent:?}\n  block_raw: {sut_parent_opt:?}"
             ));
         }
     }
@@ -454,7 +471,8 @@ fn compare_block_parent_block_raw(
 /// `inv-editor-text-matches-ref` body.
 ///
 /// `Value` carries the active block id alongside the text so the compare's
-/// fail message can name the block (the two-value compare has no other context).
+/// fail message can name the block (the two-value compare has no other
+/// context).
 pub struct ActiveEditorText;
 
 impl Observable for ActiveEditorText {
@@ -519,8 +537,8 @@ fn compare_editor_text(
         return Ok(());
     }
     Err(format!(
-        "[inv-editor-text/mirror] Live editor text mismatch on {block}:\n  \
-         reference: {ref_text:?}\n  SUT MutableText: {sut_text:?}"
+        "[inv-editor-text/mirror] Live editor text mismatch on {block}:\n  reference: \
+         {ref_text:?}\n  SUT MutableText: {sut_text:?}"
     ))
 }
 
@@ -598,16 +616,17 @@ fn compare_editor_caret(sut: &(EntityUri, usize), ref_: &(EntityUri, usize)) -> 
         return Ok(());
     }
     Err(format!(
-        "[inv-editor-caret/mirror] Caret mismatch on {block}: \
-         reference model cursor_byte={ref_cursor}, SUT tracked caret={sut_cursor}"
+        "[inv-editor-caret/mirror] Caret mismatch on {block}: reference model \
+         cursor_byte={ref_cursor}, SUT tracked caret={sut_cursor}"
     ))
 }
 
-// ─── Observable: org store of block-equivalence (`inv-blocks-match-ref/org`) ──
+// ─── Observable: org store of block-equivalence (`inv-blocks-match-ref/org`)
+// ──
 
 /// The blocks parsed back off the on-disk org files vs the reference's org
-/// view. Shares the `blocks-match-ref` family stem with [`NonSeedBlocks`] but is
-/// a SEPARATE correspondence: its reference value comes from a DIFFERENT
+/// view. Shares the `blocks-match-ref` family stem with [`NonSeedBlocks`] but
+/// is a SEPARATE correspondence: its reference value comes from a DIFFERENT
 /// projection (`RefBackend::org_blocks` — non-seed, non-page, with the org
 /// parser's `file:<filename>` parent for unresolved docs), so it cannot share
 /// `NonSeedBlocks`' single `ref_project`. It is also the only block store whose
@@ -664,7 +683,8 @@ fn compare_org_blocks(sut: &Vec<Block>, ref_: &Vec<Block>) -> Result<(), String>
     }
 }
 
-// ─── Observable: root-layout ghost rows (`inv-matview-consistent-with-ref/*`) ─
+// ─── Observable: root-layout ghost rows (`inv-matview-consistent-with-ref/*`)
+// ─
 
 /// The id set the root-layout matview surfaces as `data_rows`, guarded against
 /// GHOST ROWS: ids present in the matview but outside the reference universe
@@ -741,21 +761,144 @@ fn compare_no_ghost_rows(
         return Ok(());
     }
     Err(format!(
-        "[inv-matview-consistent-with-ref/root_layout] IVM MATVIEW GHOST ROW DETECTED!\n  \
-         data rows (from root-layout matview): {} ids\n  \
-         reference model: {} known ids\n  \
-         extra in matview (stale/ghost, not in ref universe): {extra:?}",
+        "[inv-matview-consistent-with-ref/root_layout] IVM MATVIEW GHOST ROW DETECTED!\n  data \
+         rows (from root-layout matview): {} ids\n  reference model: {} known ids\n  extra in \
+         matview (stale/ghost, not in ref universe): {extra:?}",
         data_block_ids.len(),
         ref_universe.len(),
     ))
 }
 
+// ─── Observable: advice matviews (`inv-advice-matview-matches-ref`) ──────────
+
+/// One (matview name, rows) pair. Rows are `(anchor_id, lesson_id,
+/// shared_tag_count)` — the pre-suppression, un-capped matview contract.
+type AdviceMatview = (String, Vec<(String, String, u32)>);
+
+/// The synthesized advice matviews (ADR 0022 step-6), SQL-level twin of the
+/// snapshot-level `inv-advice-rows-woven`. The reference projects the single
+/// active rule's expected matview name ([`RefAdvice::advice_matview_name`]) +
+/// its full un-suppressed, un-capped rows ([`RefAdvice::advice_matview_rows`]);
+/// the SUT projects every `advice_rule_%` materialized view actually present in
+/// `sqlite_master` with its rows. Suppression and top-K are read-time and
+/// belong to the snapshot invariant ONLY — this twin is the raw matview
+/// contract.
+///
+/// Driver-ladder localization: this twin flips GREEN the moment step-6
+/// synthesis creates the matview, even while `inv-advice-rows-woven` stays RED
+/// because the renderer has not yet woven the rows. Until synthesis lands the
+/// SUT observes no such matview (empty), so a reference that expects one drives
+/// the RED.
+pub struct AdviceMatviews;
+
+impl Observable for AdviceMatviews {
+    type Value = Vec<AdviceMatview>;
+    const NAME: &'static str = "advice-matview-matches-ref";
+}
+
+pub fn advice_matviews() -> Correspondence<AdviceMatviews> {
+    Correspondence {
+        ref_project: ref_advice_matviews,
+        stores: vec![StoreProjection {
+            id: "inv-advice-matview-matches-ref/matview",
+            store: "matview",
+            needs: Needs {
+                sut_present: vec![CapId::of::<dyn SutAdviceMatview>()],
+                sut_absent: Vec::new(),
+                ref_present: vec![CapId::of::<dyn RefAdvice>()],
+            },
+            extract: extract_advice_matviews,
+            compare: NamedCompare {
+                name: "compare_advice_matviews",
+                f: compare_advice_matviews,
+            },
+            converge: Converge::None,
+        }],
+    }
+}
+
+fn ref_advice_matviews(refs: &CapMap) -> Extraction<Vec<AdviceMatview>> {
+    // ≤1 active rule (v1). `Some(name)` ⇒ exactly one expected matview carrying
+    // the rule's rows; `None` ⇒ no advice matview may exist.
+    match RefAdvice::advice_matview_name(refs) {
+        None => Extraction::Value(Vec::new()),
+        Some(name) => Extraction::Value(vec![(name, RefAdvice::advice_matview_rows(refs))]),
+    }
+}
+
+fn extract_advice_matviews<'a>(
+    sut: &'a CapMap,
+    _: &'a CapMap,
+) -> Pin<Box<dyn Future<Output = Extraction<Vec<AdviceMatview>>> + 'a>> {
+    Box::pin(async move { Extraction::Value(SutAdviceMatview::advice_matviews(sut).await) })
+}
+
+/// Order-free multiset equality of a matview's rows.
+fn sorted_rows(mut rows: Vec<(String, String, u32)>) -> Vec<(String, String, u32)> {
+    rows.sort();
+    rows
+}
+
+fn compare_advice_matviews(
+    sut: &Vec<AdviceMatview>,
+    ref_: &Vec<AdviceMatview>,
+) -> Result<(), String> {
+    match ref_.as_slice() {
+        // No active rule ⇒ no advice matview may exist.
+        [] => {
+            if sut.is_empty() {
+                return Ok(());
+            }
+            let names: Vec<&String> = sut.iter().map(|(n, _)| n).collect();
+            Err(format!(
+                "[inv-advice-matview-matches-ref/matview] no active advice rule, but the SUT has \
+                 advice_rule_% matviews {names:?} (ghost matviews — synthesis left a view behind \
+                 after the rule was deleted/deactivated)"
+            ))
+        }
+        [(name, expected_rows)] => {
+            if sut.len() != 1 {
+                let names: Vec<&String> = sut.iter().map(|(n, _)| n).collect();
+                return Err(format!(
+                    "[inv-advice-matview-matches-ref/matview] expected exactly one advice matview \
+                     '{name}', but the SUT has {} ({names:?}) — pre-step-6 synthesis has created \
+                     none (EXPECTED RED), or created more than one",
+                    sut.len(),
+                ));
+            }
+            let (sut_name, sut_rows) = &sut[0];
+            if sut_name != name {
+                return Err(format!(
+                    "[inv-advice-matview-matches-ref/matview] advice matview name diverges: \
+                     reference expects '{name}', SUT has '{sut_name}'"
+                ));
+            }
+            let want = sorted_rows(expected_rows.clone());
+            let got = sorted_rows(sut_rows.clone());
+            if want != got {
+                return Err(format!(
+                    "[inv-advice-matview-matches-ref/matview] advice matview '{name}' rows \
+                     diverge (pre-suppression, un-capped):\n  reference: {want:?}\n  SUT:       \
+                     {got:?}"
+                ));
+            }
+            Ok(())
+        }
+        // v1 guarantees ≤1 active rule → ref side never yields >1 matview.
+        _ => Err(format!(
+            "[inv-advice-matview-matches-ref/matview] reference produced {} matviews; v1 \
+             guarantees at most one active rule (harness bug)",
+            ref_.len(),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::pbt::composed::fixtures::*;
-    use crate::pbt::composed::subsystem_seed::{
-        run_with_seeded_ref, seed_ref, seed_ref_with_editor,
-    };
+    use crate::pbt::composed::subsystem_seed::run_with_seeded_ref;
+    use crate::pbt::composed::subsystem_seed::seed_ref;
+    use crate::pbt::composed::subsystem_seed::seed_ref_with_editor;
 
     /// Catch (doc §6 gate): with the ref wired, a SUT `block_raw` whose content
     /// diverged from the reference is caught by the registry-emitted
@@ -970,5 +1113,66 @@ mod tests {
                 .any(|(id, _)| *id == "inv-editor-text/mirror"),
             "text agrees, so only the caret invariant fires; failures={failures:?}",
         );
+    }
+
+    // ── Pure comparator tests for the advice-matview twin ────────────────────
+
+    use super::AdviceMatview;
+    use super::compare_advice_matviews;
+
+    fn mv(name: &str, rows: &[(&str, &str, u32)]) -> AdviceMatview {
+        (
+            name.to_string(),
+            rows.iter()
+                .map(|(a, l, n)| (a.to_string(), l.to_string(), *n))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn advice_no_rule_no_matview_agrees() {
+        assert!(compare_advice_matviews(&Vec::new(), &Vec::new()).is_ok());
+    }
+
+    #[test]
+    fn advice_no_rule_but_ghost_matview_fails() {
+        let sut = vec![mv("advice_rule_x", &[])];
+        assert!(compare_advice_matviews(&sut, &Vec::new()).is_err());
+    }
+
+    #[test]
+    fn advice_rule_but_absent_matview_fails_step4_red() {
+        // The step-4→step-6 red case: ref expects the matview, synthesis hasn't
+        // created it yet.
+        let ref_ = vec![mv("advice_rule_l", &[("block:t", "block:a", 1)])];
+        assert!(compare_advice_matviews(&Vec::new(), &ref_).is_err());
+    }
+
+    #[test]
+    fn advice_matching_rows_order_free_agree() {
+        let ref_ = vec![mv(
+            "advice_rule_l",
+            &[("block:t", "block:a", 2), ("block:t", "block:b", 1)],
+        )];
+        // Same multiset, different order → agree.
+        let sut = vec![mv(
+            "advice_rule_l",
+            &[("block:t", "block:b", 1), ("block:t", "block:a", 2)],
+        )];
+        assert!(compare_advice_matviews(&sut, &ref_).is_ok());
+    }
+
+    #[test]
+    fn advice_wrong_name_fails() {
+        let ref_ = vec![mv("advice_rule_l", &[("block:t", "block:a", 1)])];
+        let sut = vec![mv("advice_rule_other", &[("block:t", "block:a", 1)])];
+        assert!(compare_advice_matviews(&sut, &ref_).is_err());
+    }
+
+    #[test]
+    fn advice_row_divergence_fails() {
+        let ref_ = vec![mv("advice_rule_l", &[("block:t", "block:a", 2)])];
+        let sut = vec![mv("advice_rule_l", &[("block:t", "block:a", 1)])];
+        assert!(compare_advice_matviews(&sut, &ref_).is_err());
     }
 }

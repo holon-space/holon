@@ -15,35 +15,48 @@
 //! This provider runs the trait default implementations from
 //! `BlockOperations`, which decompose into a sequence of `set_field` calls.
 //! In Loro mode block writes route through the `BlockCellRegistry` to Loro (the
-//! authority) and the outbound projector emits the SQL row; in SqlOnly mode they
-//! land in SQL directly via `SqlOperationProvider::execute_operation`. There is
-//! no SQL→Loro reflection. Reads come from `QueryableCache<Block>` — same
-//! backing store as the rest of the system.
+//! authority) and the outbound projector emits the SQL row; in SqlOnly mode
+//! they land in SQL directly via `SqlOperationProvider::execute_operation`.
+//! There is no SQL→Loro reflection. Reads come from `QueryableCache<Block>` —
+//! same backing store as the rest of the system.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use holon_api::EntityName;
+use holon_api::EntityUri;
+use holon_api::OperationDescriptor;
+use holon_api::Tags;
+use holon_api::Value;
 use holon_api::block::Block;
-use holon_api::{EntityName, Tags, Value};
+use holon_api::capability::Consolidator;
+use holon_api::capability::SessionCapabilities;
+use holon_core::BlockDataSourceHelpers;
+use holon_core::BlockMaintenanceHelpers;
+use holon_core::BlockOperations;
+use holon_core::BlockQueryHelpers;
+use holon_core::CrudOperations;
+use holon_core::DataSource;
+use holon_core::OperationProvider;
+use holon_core::OperationRegistry;
+use holon_core::OperationResult;
+use holon_core::OriginTaggedWrites;
+use holon_core::Result;
+use holon_core::UnknownOperationError;
+use holon_core::block_ordering::BlockOrdering;
+use holon_core::block_ordering::OrderKeyMinting;
+use holon_core::cell_registry::EntityCellRegistry;
+use holon_core::fractional_index::default_sort_key;
+use holon_core::fractional_index::gen_key_between;
+use holon_core::fractional_index::gen_n_keys;
+use holon_core::storage::types::StorageEntity;
 
 use crate::core::queryable_cache::HasCache;
 use crate::core::queryable_cache::QueryableCache;
 use crate::core::sql_operation_provider::SqlOperationProvider;
 use crate::sync::block_cell_registry::BlockCellRegistry;
 use crate::sync::event_bus::EventOrigin;
-use holon_api::EntityUri;
-use holon_api::OperationDescriptor;
-use holon_api::capability::{Consolidator, SessionCapabilities};
-use holon_core::block_ordering::{BlockOrdering, OrderKeyMinting};
-use holon_core::cell_registry::EntityCellRegistry;
-use holon_core::fractional_index::{default_sort_key, gen_key_between, gen_n_keys};
-use holon_core::storage::types::StorageEntity;
-use holon_core::{
-    BlockDataSourceHelpers, BlockMaintenanceHelpers, BlockOperations, BlockQueryHelpers,
-    CrudOperations, DataSource, OperationProvider, OperationRegistry, OperationResult,
-    OriginTaggedWrites, Result, UnknownOperationError,
-};
 
 pub struct SqlBlockOperations {
     sql_ops: Arc<SqlOperationProvider>,
@@ -223,11 +236,11 @@ impl BlockOperations<Block> for SqlBlockOperations {
 /// violators (out-of-place, or carrying the default sentinel) are re-minted
 /// strictly between their predecessor's final key and the next keepable anchor.
 ///
-/// The default sentinel is never "keepable": it is not a `gen_key_between` value
-/// and lands arbitrarily in the lexical keyspace (`"A0"` sorts *above* real
-/// hex-ish indices like `"80"`), so an unkeyed block must always receive a real
-/// minted key (projection totality). Idempotent: a fully-keyed, already-ordered
-/// input returns its input unchanged.
+/// The default sentinel is never "keepable": it is not a `gen_key_between`
+/// value and lands arbitrarily in the lexical keyspace (`"A0"` sorts *above*
+/// real hex-ish indices like `"80"`), so an unkeyed block must always receive a
+/// real minted key (projection totality). Idempotent: a fully-keyed,
+/// already-ordered input returns its input unchanged.
 fn relabel_order(ordered_ids: &[&str], cur_keys: &[String]) -> Result<Vec<String>> {
     let default_key = default_sort_key();
     let keepable =
@@ -445,10 +458,10 @@ impl BlockOrdering for SqlBlockOperations {
     /// the running maximum assigned key; a block whose current key is already
     /// strictly greater than its predecessor's final key is left untouched, and
     /// only an out-of-place block is re-minted with `gen_key_between` strictly
-    /// between its predecessor's final key and the next key we will keep. Result
-    /// is a strictly-increasing total order (correct) that touches only the
-    /// blocks that actually moved (low churn). Idempotent: an already-ordered
-    /// parent makes zero writes.
+    /// between its predecessor's final key and the next key we will keep.
+    /// Result is a strictly-increasing total order (correct) that touches
+    /// only the blocks that actually moved (low churn). Idempotent: an
+    /// already-ordered parent makes zero writes.
     async fn place_all(&self, parent_id: &EntityUri, ordered_ids: &[EntityUri]) -> Result<()> {
         if ordered_ids.is_empty() {
             return Ok(());
@@ -540,10 +553,18 @@ impl BlockOrdering for SqlBlockOperations {
         properties: &HashMap<String, Value>,
         tags: &Tags,
         requires: &[EntityUri],
+        advice_suppressed: &[EntityUri],
     ) -> Result<bool> {
         self.cell_registry
             .create_entity(
-                parent_id, after_id, new_id, content, properties, tags, requires,
+                parent_id,
+                after_id,
+                new_id,
+                content,
+                properties,
+                tags,
+                requires,
+                advice_suppressed,
             )
             .await
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })
@@ -559,10 +580,11 @@ impl BlockOrdering for SqlBlockOperations {
     /// Apply a block update intent — the single org→block mutation seam (no
     /// command bus behind it).
     ///
-    /// Loro mode: route each changed field through [`set_field`](CrudOperations::set_field)
-    /// (→ Loro via the cell registry; the outbound projector writes the SQL
-    /// row) and the position through [`place`](Self::place). SqlOnly mode:
-    /// write the SQL row directly, picking `create`/`update` by the row's prior
+    /// Loro mode: route each changed field through
+    /// [`set_field`](CrudOperations::set_field) (→ Loro via the cell
+    /// registry; the outbound projector writes the SQL row) and the
+    /// position through [`place`](Self::place). SqlOnly mode: write the SQL
+    /// row directly, picking `create`/`update` by the row's prior
     /// presence so the emitted CDC event kind matches (the cache subscriber
     /// distinguishes `Created`/`Updated`). A block is either a create or an
     /// update within a single org scan, never both, so the cache read is a
@@ -660,10 +682,11 @@ impl BlockOrdering for SqlBlockOperations {
     ///
     /// Loro mode: delete from the Loro tree (the authority) via the cell
     /// registry; the outbound projector emits the SQL DELETE. This mirrors
-    /// `create_in_tree` (creates go to Loro, the projector writes SQL). Deleting
-    /// only from SQL would race the armed projection, which re-creates the
-    /// still-present Loro node back into SQL — the block resurrects (observed as
-    /// `inv-backend-blocks-match-ref` spurious `bulk-*` rows).
+    /// `create_in_tree` (creates go to Loro, the projector writes SQL).
+    /// Deleting only from SQL would race the armed projection, which
+    /// re-creates the still-present Loro node back into SQL — the block
+    /// resurrects (observed as `inv-backend-blocks-match-ref` spurious
+    /// `bulk-*` rows).
     ///
     /// SqlOnly mode: the registry returns `false`; delete straight from SQL via
     /// the operation provider, preserving the `ROUTING_DOC_URI_KEY` hint so
@@ -695,9 +718,9 @@ impl BlockOrdering for SqlBlockOperations {
                  Transitional; re-seed adoption eliminates unseeded blocks."
             );
         }
-        // ALLOW(sole_block_writer) ALLOW(fallback): SQL delete fallback for unseeded blocks.
-        // Transitional — after sole-writer, all blocks originate in Loro, so
-        // this fires only for pre-existing unseeded vaults the re-seed
+        // ALLOW(sole_block_writer) ALLOW(fallback): SQL delete fallback for unseeded
+        // blocks. Transitional — after sole-writer, all blocks originate in
+        // Loro, so this fires only for pre-existing unseeded vaults the re-seed
         // adoption pass eliminates. NOT dead code: re-seed can fail mid-adoption.
         let entity = EntityName::new(Block::entity_name());
         self.sql_ops
@@ -714,42 +737,6 @@ impl BlockOrdering for SqlBlockOperations {
         self.caps.consolidator()
     }
 
-    /// Loro mode → read each block's live fractional index from the Loro tree
-    /// and write it to SQL `sort_key` via the standard `set_field` path. This
-    /// closes the projection-totality gap: a block created but never repositioned emits no
-    /// Loro mov delta, so the outbound projector never writes its fi and it
-    /// keeps the default `"A0"`. The write goes through
-    /// `SqlOperationProvider::set_field` (→ `prepare_update`) rather than a raw
-    /// `UPDATE block_raw`, so the `properties` column is read-merged and
-    /// re-canonicalised (`properties_to_canonical_json`) — a bare single-column
-    /// raw update desyncs the matview's `properties` projection
-    /// (the `props_check` invariant's "Value::Object serialization bug").
-    /// SqlOnly mode → no-op (SQL owns `sort_key`; `live_sort_key` returns
-    /// `None`).
-    async fn project_sort_keys(&self, ids: &[EntityUri]) -> Result<()> {
-        let entity = EntityName::new(Block::entity_name());
-        for id in ids {
-            let fi = match self
-                .cell_registry
-                .live_sort_key(id.as_str())
-                .await
-                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                    format!("project_sort_keys: live_sort_key({id}): {e:#}").into()
-                })? {
-                Some(fi) => fi,
-                None => return Ok(()), // SqlOnly — SQL already owns sort_key
-            };
-            let mut params: StorageEntity = HashMap::new();
-            params.insert("id".into(), Value::String(id.as_str().to_string()));
-            params.insert("field".into(), Value::String("sort_key".to_string()));
-            params.insert("value".into(), Value::String(fi));
-            self.sql_ops
-                .execute_operation(&entity, "set_field", params)
-                .await?;
-        }
-        Ok(())
-    }
-
     async fn prev_sibling(&self, id: &EntityUri) -> Result<Option<EntityUri>> {
         let id = id.as_str();
         let Some(block) = self.cache.get_by_id(id).await? else {
@@ -763,7 +750,8 @@ impl BlockOrdering for SqlBlockOperations {
         Ok(pos
             .and_then(|i| i.checked_sub(1))
             .and_then(|i| siblings.get(i))
-            // ALLOW(entity_uri_from_raw): sibling/child id String from sibling_keys() SQL-cache rows
+            // ALLOW(entity_uri_from_raw): sibling/child id String from sibling_keys() SQL-cache
+            // rows
             .map(|(sid, _)| EntityUri::from_raw(sid)))
     }
 
@@ -779,7 +767,8 @@ impl BlockOrdering for SqlBlockOperations {
         let pos = siblings.iter().position(|(sid, _)| sid == id);
         Ok(pos
             .and_then(|i| siblings.get(i + 1))
-            // ALLOW(entity_uri_from_raw): sibling/child id String from sibling_keys() SQL-cache rows
+            // ALLOW(entity_uri_from_raw): sibling/child id String from sibling_keys() SQL-cache
+            // rows
             .map(|(sid, _)| EntityUri::from_raw(sid)))
     }
 
@@ -789,7 +778,8 @@ impl BlockOrdering for SqlBlockOperations {
             .await?
             .into_iter()
             .next()
-            // ALLOW(entity_uri_from_raw): sibling/child id String from sibling_keys() SQL-cache rows
+            // ALLOW(entity_uri_from_raw): sibling/child id String from sibling_keys() SQL-cache
+            // rows
             .map(|(id, _)| EntityUri::from_raw(&id)))
     }
 
@@ -799,7 +789,8 @@ impl BlockOrdering for SqlBlockOperations {
             .await?
             .into_iter()
             .last()
-            // ALLOW(entity_uri_from_raw): sibling/child id String from sibling_keys() SQL-cache rows
+            // ALLOW(entity_uri_from_raw): sibling/child id String from sibling_keys() SQL-cache
+            // rows
             .map(|(id, _)| EntityUri::from_raw(&id)))
     }
 
@@ -816,14 +807,16 @@ impl BlockOrdering for SqlBlockOperations {
                 format!("children({parent_id}): {e:#}").into()
             },
         )? {
-            // ALLOW(entity_uri_from_raw): child id String from cell_registry.live_children() (Loro output)
+            // ALLOW(entity_uri_from_raw): child id String from
+            // cell_registry.live_children() (Loro output)
             return Ok(kids.iter().map(|k| EntityUri::from_raw(k)).collect());
         }
         Ok(self
             .sibling_keys(parent_id)
             .await?
             .into_iter()
-            // ALLOW(entity_uri_from_raw): sibling/child id String from sibling_keys() SQL-cache rows
+            // ALLOW(entity_uri_from_raw): sibling/child id String from sibling_keys() SQL-cache
+            // rows
             .map(|(id, _)| EntityUri::from_raw(&id))
             .collect())
     }
@@ -950,18 +943,22 @@ impl OperationProvider for SqlBlockOperations {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use holon_api::block::Block;
+    use holon_api::entity_uri::EntityUri;
+    use holon_core::__operations_block_operations;
+    use holon_core::OperationRegistry;
+    use holon_core::block_ordering::BlockOrdering;
+    use holon_turso::schema_modules::BlockMatviewSchemaModule;
+    use holon_turso::schema_modules::BlockSchemaModule;
+
     use super::SqlBlockOperations;
     use crate::core::queryable_cache::QueryableCache;
     use crate::core::sql_operation_provider::SqlOperationProvider;
     use crate::storage::BLOCK_WRITE_TABLE;
     use crate::storage::schema_module::SchemaModule;
     use crate::storage::turso::TursoBackend;
-    use holon_api::block::Block;
-    use holon_api::entity_uri::EntityUri;
-    use holon_core::block_ordering::BlockOrdering;
-    use holon_core::{__operations_block_operations, OperationRegistry};
-    use holon_turso::schema_modules::{BlockMatviewSchemaModule, BlockSchemaModule};
-    use std::sync::Arc;
 
     /// Sanity check: the macro-generated `block_operations()` descriptor
     /// list — what `SqlBlockOperations::operations` returns — advertises
@@ -1090,9 +1087,8 @@ mod tests {
             handle
                 .execute(
                     &format!(
-                        "INSERT INTO block_raw \
-                         (id, parent_id, sort_key, content, content_type, created_at, updated_at) \
-                         VALUES ('{}', '{}', '{}', '{}', 'text', 0, 0)",
+                        "INSERT INTO block_raw (id, parent_id, sort_key, content, content_type, \
+                         created_at, updated_at) VALUES ('{}', '{}', '{}', '{}', 'text', 0, 0)",
                         id, parent_val, sort_key, content
                     ),
                     vec![],
@@ -1119,8 +1115,8 @@ mod tests {
 
         assert_eq!(
             sort_key_after_first, sort_key_after_second,
-            "place() called twice with identical args must not change sort_key \
-             (idempotency guard regression)"
+            "place() called twice with identical args must not change sort_key (idempotency guard \
+             regression)"
         );
     }
 }

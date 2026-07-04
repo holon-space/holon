@@ -3,13 +3,19 @@ use crate::views::EditorView;
 
 pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     let content = node.prop_str("content").unwrap_or_default();
-    let field = node.prop_str("field").unwrap_or_else(|| "content".to_string());
+    let field = node
+        .prop_str("field")
+        .unwrap_or_else(|| "content".to_string());
 
     let Some(row_id) = node.row_id() else {
         return static_fallback(&content, ctx);
     };
 
-    let el_id = format!("editable-text-{row_id}-{field}");
+    // Suffix the occurrence coordinate (ADR 0016 §3) so a display-placed second
+    // occurrence of a block gets its own editor identity. `Canonical` → empty
+    // suffix → byte-identical key to before for every real row.
+    let occ = node.occurrence().key_suffix();
+    let el_id = format!("editable-text-{row_id}-{field}{occ}");
     let has_content = !content.is_empty();
 
     // The EditorView entity is parent-owned via `LocalEntityScope`'s
@@ -55,7 +61,8 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
             .into_any()
         })
     });
-    let entity: gpui::Entity<EditorView> = any.downcast().expect("editable_text cache type mismatch");
+    let entity: gpui::Entity<EditorView> =
+        any.downcast().expect("editable_text cache type mismatch");
 
     // Snapshot the live `InputState` value so PBT invariants can detect UI
     // staleness, and reconcile a stale editor against the live row content.
@@ -72,34 +79,53 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
     // pushing the live content into a stale `InputState` is always safe — it
     // is the backstop that keeps the displayed/edited text converged with the
     // backend even after the event-driven subscription has been orphaned.
-    let (displayed_text, is_window_focused): (std::sync::Arc<str>, bool) = ctx.with_gpui(|window, cx| {
-        use gpui::Focusable;
-        // Read phase: gather focus state, then DROP the `entity.read` borrow
-        // before mutating the entity. `converge_input` takes `&mut self` (→
-        // `entity.update`), which panics on a still-live `entity.read` borrow.
-        let (input, is_focused, just_focused) = {
-            let view = entity.read(cx);
-            let input = view.input_entity().clone();
-            let is_focused = input.focus_handle(cx).is_focused(window);
-            // `just_focused` is the false→true window-focus edge (e.g. click-to-edit).
-            let just_focused = view.focus_arrived(is_focused);
-            (input, is_focused, just_focused)
-        };
-        // Reconcile a stale `InputState` to the authority when the user cannot
-        // be mid-typing: either the editor is unfocused, or focus *just*
-        // arrived this frame (no keystroke yet). A continuously-focused editor
-        // is left alone so in-flight typing is never yanked. `converge_input`
-        // prefers the Loro cell authority over the SQL-lagged `content`
-        // (curing the projection lag) and keeps `previous_text` in lockstep.
-        if !is_focused || just_focused {
-            entity.update(cx, |this, cx| {
-                this.converge_input(&content, window, cx);
-            });
-        }
-        // Snapshot the post-convergence value for the PBT staleness invariants.
-        let displayed = input.read(cx).value().to_string();
-        (std::sync::Arc::from(displayed.as_str()), is_focused)
-    });
+    let (displayed_text, is_window_focused): (std::sync::Arc<str>, bool) =
+        ctx.with_gpui(|window, cx| {
+            use gpui::Focusable;
+            // Read phase: gather focus state, then DROP the `entity.read` borrow
+            // before mutating the entity. `converge_input` takes `&mut self` (→
+            // `entity.update`), which panics on a still-live `entity.read` borrow.
+            let (input, is_focused, just_focused) = {
+                let view = entity.read(cx);
+                let input = view.input_entity().clone();
+                let is_focused = input.focus_handle(cx).is_focused(window);
+                // `just_focused` is the false→true window-focus edge (e.g. click-to-edit);
+                // `just_blurred` is the true→false edge.
+                let (just_focused, just_blurred) = view.focus_transition(is_focused);
+                // On iOS/Android the platform focus-change events never reach the
+                // editor's `InputEvent::Focus`/`Blur` subscription (confirmed via
+                // MCP-driven clicks: the field focuses — caret renders — but no
+                // `InputEvent` fires), so the soft keyboard was never raised on
+                // focus. Drive it from the render-path focus edge, which is the
+                // reliable mobile focus signal. `editor_focus_gained/lost` are
+                // no-ops off `feature = "mobile"`.
+                #[cfg(feature = "mobile")]
+                {
+                    if just_focused {
+                        crate::mobile::editor_focus_gained();
+                    } else if just_blurred {
+                        crate::mobile::editor_focus_lost(cx);
+                    }
+                }
+                #[cfg(not(feature = "mobile"))]
+                let _ = just_blurred;
+                (input, is_focused, just_focused)
+            };
+            // Reconcile a stale `InputState` to the authority when the user cannot
+            // be mid-typing: either the editor is unfocused, or focus *just*
+            // arrived this frame (no keystroke yet). A continuously-focused editor
+            // is left alone so in-flight typing is never yanked. `converge_input`
+            // prefers the Loro cell authority over the SQL-lagged `content`
+            // (curing the projection lag) and keeps `previous_text` in lockstep.
+            if !is_focused || just_focused {
+                entity.update(cx, |this, cx| {
+                    this.converge_input(&content, window, cx);
+                });
+            }
+            // Snapshot the post-convergence value for the PBT staleness invariants.
+            let displayed = input.read(cx).value().to_string();
+            (std::sync::Arc::from(displayed.as_str()), is_focused)
+        });
     let inner = entity.into_any_element();
 
     // Grey placeholder hint for empty editors — helps users discover that

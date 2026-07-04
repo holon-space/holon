@@ -1,16 +1,19 @@
 use std::sync::Arc;
 
-use crate::render::builders::prelude::click_to_focus;
 use gpui::*;
 use holon_api::EntityUri;
+use holon_frontend::RenderContext;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
-use holon_frontend::RenderContext;
 
-use crate::entity_view_registry::{EntityCache, LiveBlockAncestors, LocalEntityScope};
+use crate::entity_view_registry::EntityCache;
+use crate::entity_view_registry::LiveBlockAncestors;
+use crate::entity_view_registry::LocalEntityScope;
 use crate::geometry::BoundsRegistry;
 use crate::navigation_state::NavigationState;
-use crate::render::builders::{self, GpuiRenderContext};
+use crate::render::builders::GpuiRenderContext;
+use crate::render::builders::prelude::click_to_focus;
+use crate::render::builders::{self};
 
 /// A persistent GPUI view for a single rendered entity (collection row).
 ///
@@ -156,7 +159,11 @@ impl Render for RenderEntityView {
             }
         }
 
-        let el_id = format!("render-entity-{}", id);
+        // Suffix the occurrence coordinate (ADR 0016 §3): a display-placed
+        // second occurrence renders under its own element identity. `Canonical`
+        // → empty suffix → byte-identical to the historical key.
+        let occ = self.current.occurrence().key_suffix();
+        let el_id = format!("render-entity-{}{}", id, occ);
         let services = gpui_ctx.services.clone();
         click_to_focus(&el_id, child_el, id.clone(), services).into_any_element()
     }

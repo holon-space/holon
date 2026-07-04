@@ -1,17 +1,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::prelude::*;
 use holon_api::Value;
+use holon_frontend::ReactiveViewModel;
 use holon_frontend::operations::OperationIntent;
 use holon_frontend::reactive::BuilderServices;
-use holon_frontend::ReactiveViewModel;
 
-fn dispatch_set_preference(
-    services: &Arc<dyn BuilderServices>,
-    key: &str,
-    value: Value,
-) {
+use super::prelude::*;
+
+fn dispatch_set_preference(services: &Arc<dyn BuilderServices>, key: &str, value: Value) {
     services.dispatch_intent(OperationIntent {
         entity_name: "preferences".into(),
         op_name: "set".into(),
@@ -25,7 +22,12 @@ fn dispatch_set_preference(
 pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
     let key = node.prop_str("key").unwrap_or_default();
     let pref_type = node.prop_str("pref_type").unwrap_or_default();
-    let value = node.props.lock_ref().get("value").cloned().unwrap_or(Value::Null);
+    let value = node
+        .props
+        .lock_ref()
+        .get("value")
+        .cloned()
+        .unwrap_or(Value::Null);
     let requires_restart = node.prop_bool("requires_restart").unwrap_or(false);
     let locked = node.prop_bool("locked").unwrap_or(false);
     let options: Vec<Value> = match node.props.lock_ref().get("options") {
@@ -51,16 +53,12 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
         build_input(ctx, &pref_type, &value, &value_str, &key, &options)
     };
 
-    let mut label_col = div()
-        .flex_col()
-        .flex_1()
-        .gap(px(2.0))
-        .child(
-            div()
-                .text_sm()
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .child(label),
-        );
+    let mut label_col = div().flex_col().flex_1().gap(px(2.0)).child(
+        div()
+            .text_sm()
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .child(label),
+    );
 
     if locked {
         label_col = label_col.child(
@@ -153,7 +151,8 @@ fn build_choice(
     key: &str,
     raw_options: &[Value],
 ) -> Div {
-    use gpui_component::button::{Button, DropdownButton};
+    use gpui_component::button::Button;
+    use gpui_component::button::DropdownButton;
     use gpui_component::menu::PopupMenuItem;
 
     let options = extract_options(raw_options);
@@ -202,9 +201,17 @@ fn build_choice(
 
 fn build_text_field(ctx: &GpuiRenderContext, key: &str, current: &str, is_secret: bool) -> Div {
     let display = if is_secret {
-        if current.is_empty() { "Not set".to_string() } else { "••••••••".to_string() }
+        if current.is_empty() {
+            "Not set".to_string()
+        } else {
+            "••••••••".to_string()
+        }
     } else {
-        if current.is_empty() { "Click to set".to_string() } else { current.to_string() }
+        if current.is_empty() {
+            "Click to set".to_string()
+        } else {
+            current.to_string()
+        }
     };
 
     let text_color = if current.is_empty() {
@@ -219,32 +226,34 @@ fn build_text_field(ctx: &GpuiRenderContext, key: &str, current: &str, is_secret
     let el_id = format!("pref-text-{key}");
     let hidden = is_secret;
 
-    div().child(div()
-        .id(hashed_id(&el_id))
-        .text_sm()
-        .px_3()
-        .py_1()
-        .min_w(px(160.0))
-        .rounded(px(6.0))
-        .bg(tc(ctx, |t| t.secondary))
-        .border_1()
-        .border_color(tc(ctx, |t| t.border))
-        .text_color(text_color)
-        .cursor_pointer()
-        .hover(|s| s.bg(gpui::rgba(0xffffff15)))
-        .child(display)
-        .on_mouse_down(gpui::MouseButton::Left, move |_, window, _| {
-            let services = services.clone();
-            let key = key_owned.clone();
-            let default = current_owned.clone();
-            // prompt_text_input is blocking (osascript), run on a thread
-            std::thread::spawn(move || {
-                if let Some(new_val) = prompt_text_input(&key, &default, hidden) {
-                    dispatch_set_preference(&services, &key, Value::String(new_val));
-                }
-            });
-            window.refresh();
-        }))
+    div().child(
+        div()
+            .id(hashed_id(&el_id))
+            .text_sm()
+            .px_3()
+            .py_1()
+            .min_w(px(160.0))
+            .rounded(px(6.0))
+            .bg(tc(ctx, |t| t.secondary))
+            .border_1()
+            .border_color(tc(ctx, |t| t.border))
+            .text_color(text_color)
+            .cursor_pointer()
+            .hover(|s| s.bg(gpui::rgba(0xffffff15)))
+            .child(display)
+            .on_mouse_down(gpui::MouseButton::Left, move |_, window, _| {
+                let services = services.clone();
+                let key = key_owned.clone();
+                let default = current_owned.clone();
+                // prompt_text_input is blocking (osascript), run on a thread
+                std::thread::spawn(move || {
+                    if let Some(new_val) = prompt_text_input(&key, &default, hidden) {
+                        dispatch_set_preference(&services, &key, Value::String(new_val));
+                    }
+                });
+                window.refresh();
+            }),
+    )
 }
 
 /// Show a native macOS text input dialog via osascript.
@@ -256,11 +265,24 @@ fn prompt_text_input(key: &str, default: &str, hidden: bool) -> Option<String> {
         default = if hidden { "" } else { default }.replace('"', r#"\""#),
         hidden_str = hidden_str,
     );
-    let output = std::process::Command::new("osascript")
+    let output = match std::process::Command::new("osascript")
         .arg("-e")
         .arg(&script)
         .output()
-        .ok()?; // ALLOW(ok): osascript best-effort
+    {
+        Ok(o) => o,
+        Err(e) => {
+            // Disclosed degradation (fail-loud rule): on iOS/Android (and
+            // Linux/Windows) there is no osascript — preference text entry
+            // needs a native dialog seam there. Log instead of silently
+            // treating the failure as user-cancelled.
+            tracing::warn!(
+                "pref_field: cannot prompt for '{key}' — osascript unavailable                  \
+                 on this platform ({e}); preference left unchanged"
+            );
+            return None;
+        }
+    };
     if !output.status.success() {
         return None; // user cancelled
     }
@@ -309,11 +331,7 @@ fn build_toggle(ctx: &GpuiRenderContext, value: &Value, key: &str) -> Div {
             .cursor_pointer()
             .child(track)
             .on_mouse_down(gpui::MouseButton::Left, move |_, window, _| {
-                dispatch_set_preference(
-                    &services,
-                    &key_owned,
-                    Value::Boolean(new_value),
-                );
+                dispatch_set_preference(&services, &key_owned, Value::Boolean(new_value));
                 window.refresh();
             }),
     )

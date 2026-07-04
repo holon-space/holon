@@ -1,15 +1,19 @@
-use super::prelude::*;
-
 use std::collections::HashMap;
 
-use gpui::{Axis, ElementId, Entity, IntoElement, SharedString};
-use gpui_component::sortable::{Sortable, SortableState};
+use gpui::Axis;
+use gpui::ElementId;
+use gpui::Entity;
+use gpui::IntoElement;
+use gpui::SharedString;
 use gpui_component::ActiveTheme as _;
-
+use gpui_component::sortable::Sortable;
+use gpui_component::sortable::SortableState;
 use holon_api::Value;
+use holon_frontend::OperationIntent;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
-use holon_frontend::OperationIntent;
+
+use super::prelude::*;
 
 const LANE_WIDTH_PX: f32 = 240.0;
 const LANE_GAP_PX: f32 = 16.0;
@@ -47,10 +51,11 @@ struct BoardCard {
     /// Persisted row id (e.g. `block:UUID`). `None` when the source row had
     /// no `id` column — drag/drop in that case is in-memory only.
     row_id: Option<String>,
-    /// Fractional-index sort_key. `None` when the row has no `sort_key`
-    /// column (rare today; non-block entities). Within-lane reorder updates
-    /// only fire when this is `Some`.
-    sort_key: Option<String>,
+    /// Parent block id of the source row. Used as the `move_block` target
+    /// when this card becomes the positional anchor of a reorder. `None`
+    /// when the row carries no `parent_id` column (non-block entities) —
+    /// reorders anchored on such a card are in-memory only.
+    parent_id: Option<String>,
     accent: Option<gpui::Hsla>,
     accent_hex: u32,
     lines: Vec<CardLine>,
@@ -73,7 +78,11 @@ fn parse_hex(hex: &str) -> Option<u32> {
         tracing::warn!(target: "holon.board", hex = %hex, "malformed hex colour — using default");
         return None;
     }
-    match (parse(&trimmed[0..2]), parse(&trimmed[2..4]), parse(&trimmed[4..6])) {
+    match (
+        parse(&trimmed[0..2]),
+        parse(&trimmed[2..4]),
+        parse(&trimmed[4..6]),
+    ) {
         (Ok(r), Ok(g), Ok(b)) => Some((r << 24) | (g << 16) | (b << 8) | 0xFF),
         _ => {
             tracing::warn!(target: "holon.board", hex = %hex, "malformed hex colour — using default");
@@ -125,7 +134,7 @@ fn extract_card(lane_index: usize, card_index: usize, card_vm: &ReactiveViewMode
     let accent_str = card_vm.prop_str("accent").unwrap_or_default();
     let accent_hex = parse_hex(&accent_str).unwrap_or(CARD_BG);
     let accent = parse_hex(&accent_str).map(|hex| gpui::rgba(hex).into());
-    // Static path attaches `row_id` / `sort_key` as card-level props.
+    // Static path attaches `row_id` / `parent_id` as card-level props.
     // Streaming path attaches the source row to `card_vm.data` (via
     // `flat_driver::interpret_and_attach`) — read both, props take
     // precedence so static-path tests stay deterministic.
@@ -136,17 +145,17 @@ fn extract_card(lane_index: usize, card_index: usize, card_vm: &ReactiveViewMode
             .get("id")
             .and_then(|v| v.as_string().map(|s| s.to_string()))
     });
-    let sort_key = card_vm.prop_str("sort_key").or_else(|| {
+    let parent_id = card_vm.prop_str("parent_id").or_else(|| {
         card_vm
             .data
             .get_cloned()
-            .get("sort_key")
+            .get("parent_id")
             .and_then(|v| v.as_string().map(|s| s.to_string()))
     });
     BoardCard {
         id: ((lane_index as u64) << 32) | (card_index as u64),
         row_id,
-        sort_key,
+        parent_id,
         accent,
         accent_hex,
         lines: extract_lines(card_vm),
@@ -156,21 +165,22 @@ fn extract_card(lane_index: usize, card_index: usize, card_vm: &ReactiveViewMode
 /// Extract the cards that should populate a single lane.
 ///
 /// Both paths put cards into `lane.children`:
-/// - Static path (gallery / inline rows): shadow board interprets cards
-///   eagerly and stores them as `lane.children`.
-/// - Streaming path: `ReactiveView::create_grouped_driver` rebuilds lane
-///   VMs (each with `children = cards`) atomically per upstream event.
+/// - Static path (gallery / inline rows): shadow board interprets cards eagerly
+///   and stores them as `lane.children`.
+/// - Streaming path: `ReactiveView::create_grouped_driver` rebuilds lane VMs
+///   (each with `children = cards`) atomically per upstream event.
 fn extract_lane_cards(lane: &ReactiveViewModel) -> Vec<std::sync::Arc<ReactiveViewModel>> {
     lane.children.to_vec()
 }
 
-/// Resolve the row's profile and its `set_field` op. Returns the
+/// Resolve the row's profile and its `op_name` op. Returns the
 /// entity-name owning that op so callers can build a typed intent. Logs
 /// and returns `None` on missing profile / op (callers skip silently —
 /// drag/drop must not crash mid-drag).
-fn resolve_set_field_entity(
+fn resolve_row_op_entity(
     services: &std::sync::Arc<dyn BuilderServices>,
     row_id: &str,
+    op_name: &str,
     context: &str,
 ) -> Option<holon_api::EntityName> {
     let mut probe: HashMap<String, Value> = HashMap::new();
@@ -179,10 +189,8 @@ fn resolve_set_field_entity(
         tracing::warn!("board {context}: resolve_profile None for row_id={row_id}");
         return None;
     };
-    let Some(op) = profile.operations.iter().find(|o| o.name == "set_field") else {
-        tracing::warn!(
-            "board {context}: set_field op not found on profile for row_id={row_id}"
-        );
+    let Some(op) = profile.operations.iter().find(|o| o.name == op_name) else {
+        tracing::warn!("board {context}: {op_name} op not found on profile for row_id={row_id}");
         return None;
     };
     Some(op.entity_name.clone())
@@ -197,7 +205,7 @@ fn dispatch_set_field(
     value: String,
     context: &str,
 ) {
-    let Some(entity_name) = resolve_set_field_entity(services, row_id, context) else {
+    let Some(entity_name) = resolve_row_op_entity(services, row_id, "set_field", context) else {
         return;
     };
     let intent = OperationIntent::set_field(
@@ -211,8 +219,8 @@ fn dispatch_set_field(
 }
 
 /// Cross-lane drag handler. Updates `lane_field` to the destination lane's
-/// title; the sort_key for the new position is updated separately by
-/// `dispatch_sort_key_for_position` after the optimistic state update.
+/// title; the drop position is persisted separately by
+/// `dispatch_move_for_position` after the optimistic state update.
 fn dispatch_lane_change(
     services: &std::sync::Arc<dyn BuilderServices>,
     row_id: &str,
@@ -228,11 +236,25 @@ fn dispatch_lane_change(
     );
 }
 
-/// Compute a fractional-index key that places `row_id` at `position` in
-/// `items` and dispatch a `set_field(sort_key)` intent. No-op when the
-/// row has no `sort_key` (non-block entity), or when both neighbors lack
-/// one (no anchor to bisect from).
-fn dispatch_sort_key_for_position(
+/// Persist the card at `position` by dispatching a positional `move_block`
+/// intent anchored on its new neighbors. The ordering authority
+/// (`BlockOrdering::place` behind the `move_block` op) mints the resulting
+/// order key — intent never carries one (Model.md invariant 3), so this
+/// path works identically in SqlOnly and Loro mode.
+///
+/// Anchor choice:
+/// - a previous card exists → "place after prev" under prev's parent (the exact
+///   positional meaning of the drop);
+/// - dropped at the top of the lane → "first child" of the next card's parent.
+///   When the lane is a filtered subset of a larger sibling set this can
+///   overshoot to the very front of that sibling set (still before `next`, so
+///   the lane order is correct).
+/// - no neighbors (single-card lane) → nothing to persist.
+///
+/// No-op with a `warn!` when the anchor card lacks `row_id`/`parent_id`
+/// (non-block entities, rows whose query doesn't select `parent_id`) —
+/// the drag stays in-memory only, disclosed in the log.
+fn dispatch_move_for_position(
     services: &std::sync::Arc<dyn BuilderServices>,
     items: &[BoardCard],
     position: usize,
@@ -244,30 +266,46 @@ fn dispatch_sort_key_for_position(
     let Some(row_id) = card.row_id.as_deref() else {
         return;
     };
-    let prev = position
-        .checked_sub(1)
-        .and_then(|i| items.get(i))
-        .and_then(|c| c.sort_key.as_deref());
-    let next = items.get(position + 1).and_then(|c| c.sort_key.as_deref());
-    if prev.is_none() && next.is_none() {
-        // No anchors — a single-card lane carries whatever sort_key it
-        // already had. Nothing to fix.
+    let prev = position.checked_sub(1).and_then(|i| items.get(i));
+    let next = items.get(position + 1);
+    let (parent_id, after_block_id) = match (prev, next) {
+        (Some(prev), _) => {
+            let (Some(parent), Some(prev_id)) = (prev.parent_id.as_deref(), prev.row_id.as_deref())
+            else {
+                tracing::warn!(
+                    "board {context}: reorder anchor lacks parent_id/row_id — not persisting \
+                     position of row_id={row_id}"
+                );
+                return;
+            };
+            (parent.to_string(), Some(prev_id.to_string()))
+        }
+        (None, Some(next)) => {
+            let Some(parent) = next.parent_id.as_deref() else {
+                tracing::warn!(
+                    "board {context}: top-of-lane anchor lacks parent_id — not persisting \
+                     position of row_id={row_id}"
+                );
+                return;
+            };
+            (parent.to_string(), None)
+        }
+        (None, None) => return,
+    };
+    let Some(entity_name) = resolve_row_op_entity(services, row_id, "move_block", context) else {
         return;
+    };
+    let mut params: HashMap<String, Value> = HashMap::new();
+    params.insert("id".into(), Value::String(row_id.to_string()));
+    params.insert("parent_id".into(), Value::String(parent_id));
+    if let Some(after) = after_block_id {
+        params.insert("after_block_id".into(), Value::String(after));
     }
-    // Known debt: the board reorder mints a sort_key in the frontend instead of
-    // routing through BlockOrdering (the order owner). Tracked for migration to
-    // the cell registry's positioned-move primitive.
-    // ALLOW(order_minting): frontend board reorder, pending BlockOrdering routing.
-    match holon::storage::gen_key_between(prev, next) {
-        Ok(new_key) => {
-            dispatch_set_field(services, row_id, "sort_key", new_key, context);
-        }
-        Err(err) => {
-            tracing::warn!(
-                "board {context}: gen_key_between failed for row_id={row_id}: {err}"
-            );
-        }
-    }
+    services.dispatch_intent(OperationIntent::new(
+        entity_name,
+        "move_block".to_string(),
+        params,
+    ));
 }
 
 fn lane_state(
@@ -280,12 +318,7 @@ fn lane_state(
     })
 }
 
-fn render_card(
-    item: &BoardCard,
-    _: usize,
-    _: &gpui::Window,
-    cx: &gpui::App,
-) -> gpui::AnyElement {
+fn render_card(item: &BoardCard, _: usize, _: &gpui::Window, cx: &gpui::App) -> gpui::AnyElement {
     let theme = cx.theme();
     let accent = item.accent.unwrap_or(theme.primary);
     let tinted = tint_rgba(item.accent_hex, CARD_BG);
@@ -328,8 +361,8 @@ fn render_card(
 pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     // Lanes come from one of two places:
     //   - Static path: `node.children` (gallery / inline rows).
-    //   - Streaming path: `node.collection.items` (the `Grouped` driver
-    //     atomically replaces the lane list on every upstream event).
+    //   - Streaming path: `node.collection.items` (the `Grouped` driver atomically
+    //     replaces the lane list on every upstream event).
     let lanes: Vec<std::sync::Arc<ReactiveViewModel>> = if let Some(ref view) = node.collection {
         view.items.lock_ref().iter().cloned().collect()
     } else {
@@ -355,13 +388,13 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     // the same view. Parent re-interprets the ViewModel tree every frame, so
     // a pointer-derived seed would miss the cache each frame and reset
     // `SortableState`, dropping any in-progress reorder. We seed from:
-    //   - `current_row.id` when the board renders inside a collection
-    //     profile (each collection entity's id distinguishes its board), and
-    //   - the lane structure (titles + child counts) as a structural
-    //     fingerprint for the gallery / standalone path where there is no
-    //     per-instance row.
+    //   - `current_row.id` when the board renders inside a collection profile (each
+    //     collection entity's id distinguishes its board), and
+    //   - the lane structure (titles + child counts) as a structural fingerprint
+    //     for the gallery / standalone path where there is no per-instance row.
     let board_key_seed = {
-        use std::hash::{Hash, Hasher};
+        use std::hash::Hash;
+        use std::hash::Hasher;
         let mut h = std::collections::hash_map::DefaultHasher::new();
         "board".hash(&mut h);
         if let Some(row) = ctx.ctx.current_row.as_ref() {
@@ -398,9 +431,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
         .p(px(LANE_GAP_PX));
 
     for (lane_index, lane) in lanes.iter().enumerate() {
-        let title = lane
-            .prop_str("title")
-            .unwrap_or_else(|| "Lane".to_string());
+        let title = lane.prop_str("title").unwrap_or_else(|| "Lane".to_string());
 
         let card_vms = extract_lane_cards(lane);
         let cards: Vec<BoardCard> = card_vms
@@ -438,15 +469,10 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
             .gap(px(CARD_GAP_PX))
             .on_reorder(move |_from, to, _w, cx| {
                 // Within-lane reorder: state already reflects the new order.
-                // Dispatch sort_key update for the moved card based on its
-                // new neighbors.
+                // Persist by dispatching a positional move anchored on the
+                // card's new neighbors (the ordering authority mints the key).
                 let items = state_for_reorder.read(cx).items().to_vec();
-                dispatch_sort_key_for_position(
-                    &services_for_reorder,
-                    &items,
-                    to,
-                    "on_reorder",
-                );
+                dispatch_move_for_position(&services_for_reorder, &items, to, "on_reorder");
             })
             .on_insert(move |item, insert_idx, _src_state, _w, cx| {
                 let Some(row_id) = item.row_id.as_deref() else {
@@ -460,15 +486,15 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
                     &lane_field_owned,
                     &target_lane_value,
                 );
-                // Also update sort_key so the card stays at this position
-                // on reload (otherwise the dropped row keeps its old
-                // sort_key from the source lane).
+                // Also persist the drop position so the card stays put on
+                // reload (otherwise the dropped row keeps its old order key
+                // from the source lane).
                 let items = state_for_insert.read(cx).items().to_vec();
-                dispatch_sort_key_for_position(
+                dispatch_move_for_position(
                     &services_for_insert,
                     &items,
                     insert_idx,
-                    "on_insert (sort_key)",
+                    "on_insert (position)",
                 );
             })
         };

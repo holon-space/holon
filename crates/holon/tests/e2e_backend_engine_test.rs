@@ -6,20 +6,28 @@
 //! - Operation execution
 //! - Stream change verification
 
-use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Result;
 use async_trait::async_trait;
 use holon::storage::sql_utils::value_to_sql_literal;
-use holon::storage::turso::{ChangeData, DbHandle};
-use holon::testing::e2e_test_helpers::{
-    ChangeType, E2ETestContext, assert_change_sequence, assert_change_type, wait_for_change,
-};
-use holon_api::{EntityName, OperationDescriptor, QueryLanguage, Value};
+use holon::storage::turso::ChangeData;
+use holon::storage::turso::DbHandle;
+use holon::testing::e2e_test_helpers::ChangeType;
+use holon::testing::e2e_test_helpers::E2ETestContext;
+use holon::testing::e2e_test_helpers::assert_change_sequence;
+use holon::testing::e2e_test_helpers::assert_change_type;
+use holon::testing::e2e_test_helpers::wait_for_change;
+use holon_api::EntityName;
+use holon_api::OperationDescriptor;
+use holon_api::QueryLanguage;
+use holon_api::Value;
+use holon_core::OperationProvider;
+use holon_core::OperationResult;
+use holon_core::Result as DatasourceResult;
 use holon_core::storage::types::StorageEntity;
-use holon_core::{OperationProvider, OperationResult, Result as DatasourceResult};
 
 /// Simple SQL-based operation provider for testing
 struct SqlOperationProvider {
@@ -191,7 +199,8 @@ async fn setup_test_table(ctx: &E2ETestContext, table_name: &str) -> Result<()> 
     let db = ctx.engine().db_handle();
 
     let create_sql = format!(
-        "CREATE TABLE IF NOT EXISTS {} (id TEXT PRIMARY KEY, content TEXT, completed INTEGER DEFAULT 0)",
+        "CREATE TABLE IF NOT EXISTS {} (id TEXT PRIMARY KEY, content TEXT, completed INTEGER \
+         DEFAULT 0)",
         table_name
     );
     db.execute_ddl(&create_sql)
@@ -199,7 +208,8 @@ async fn setup_test_table(ctx: &E2ETestContext, table_name: &str) -> Result<()> 
         .map_err(|e| anyhow::anyhow!("Failed to create table: {}", e))?;
 
     let insert_sql = format!(
-        "INSERT OR IGNORE INTO {} (id, content, completed) VALUES ('block-1', 'Initial content', 0)",
+        "INSERT OR IGNORE INTO {} (id, content, completed) VALUES ('block-1', 'Initial content', \
+         0)",
         table_name
     );
     db.execute(&insert_sql, vec![])
@@ -227,6 +237,36 @@ async fn test_basic_query_execution() -> Result<()> {
     assert!(!rows.is_empty(), "Should have at least one result");
     assert_eq!(rows[0].get("id").unwrap().as_string(), Some("block-1"));
 
+    Ok(())
+}
+
+/// The storage-agnostic `QueryEngine::execute_query` one-shot seam (the advice
+/// weave's canonical read, ADR 0022): the Turso `BackendEngine` must override
+/// the fail-loud default and return real rows without a matview/CDC setup.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_query_engine_trait_one_shot_execute_query() -> Result<()> {
+    use holon_api::query_engine::QueryEngine;
+
+    let ctx = E2ETestContext::new().await?;
+    // Own table: `block` is a materialized view in this booted schema, so the
+    // shared `setup_test_table(ctx, "block")` insert is rejected.
+    setup_test_table(&ctx, "one_shot_probe").await?;
+
+    let engine: &dyn QueryEngine = ctx.engine().as_ref();
+    let rows = engine
+        .execute_query(
+            "SELECT id, content FROM one_shot_probe ORDER BY id",
+            QueryLanguage::HolonSql,
+            HashMap::new(),
+            None,
+        )
+        .await?;
+    assert!(!rows.is_empty(), "one-shot read must return the seeded row");
+    assert_eq!(rows[0].get("id").unwrap().as_string(), Some("block-1"));
+    assert_eq!(
+        rows[0].get("content").unwrap().as_string(),
+        Some("Initial content")
+    );
     Ok(())
 }
 

@@ -1,21 +1,31 @@
 //! SQL-based operation provider for blocks
 //!
-//! Provides direct SQL access to block operations, bypassing the Loro CRDT layer.
-//! Used when OrgMode is enabled but Loro is disabled, or by any component that
-//! needs to write blocks directly to the database.
+//! Provides direct SQL access to block operations, bypassing the Loro CRDT
+//! layer. Used when OrgMode is enabled but Loro is disabled, or by any
+//! component that needs to write blocks directly to the database.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
 
 use async_trait::async_trait;
+use holon_api::EntityName;
+use holon_api::EntityUri;
+use holon_api::OperationDescriptor;
+use holon_api::OperationParam;
+use holon_api::ParentNotFound;
+use holon_api::TypeHint;
+use holon_api::Value;
+use holon_core::OperationProvider;
+use holon_core::OperationResult;
+use holon_core::OriginTaggedWrites;
+use holon_core::Result;
+use holon_core::storage::types::StorageEntity;
 
 use crate::storage::schema_module::EdgeFieldDescriptor;
 use crate::storage::sql_utils::value_to_sql_literal;
 use crate::storage::turso::DbHandle;
-use crate::sync::event_bus::{EventOrigin, POSITION_AFTER_BLOCK_ID_PARAM};
-use holon_api::{EntityName, OperationDescriptor, OperationParam, TypeHint, Value};
-use holon_core::storage::types::StorageEntity;
-use holon_core::{OperationProvider, OperationResult, OriginTaggedWrites, Result};
+use crate::sync::event_bus::EventOrigin;
+use crate::sync::event_bus::POSITION_AFTER_BLOCK_ID_PARAM;
 
 pub(crate) fn value_to_json(v: &Value) -> serde_json::Value {
     match v {
@@ -58,8 +68,8 @@ where
 /// Compare a SQL literal string (as produced by `value_to_sql`) with a stored
 /// `Value` from the DB. Returns `true` when they represent the same value.
 ///
-/// Used by `prepare_update`'s Rust diff guard to drop pairs that haven't changed
-/// without relying on Turso's `IS NOT` string-comparison semantics.
+/// Used by `prepare_update`'s Rust diff guard to drop pairs that haven't
+/// changed without relying on Turso's `IS NOT` string-comparison semantics.
 fn sql_literal_equals_value(sql_literal: &str, db_val: Option<&Value>) -> bool {
     // NULL on either side.
     if sql_literal == "NULL" {
@@ -126,7 +136,8 @@ fn sql_literal_equals_value(sql_literal: &str, db_val: Option<&Value>) -> bool {
                     let parsed: serde_json::Value = serde_json::from_str(s)
                         .map_err(|e| {
                             tracing::warn!(
-                                "sql_literal_equals_value: SQL literal is not valid JSON ({e}): {s:?}"
+                                "sql_literal_equals_value: SQL literal is not valid JSON ({e}): \
+                                 {s:?}"
                             )
                         })
                         .ok()?; // ALLOW(ok): None means "not valid JSON → treat as changed"
@@ -233,8 +244,9 @@ impl SqlOperationProvider {
         )
     }
 
-    /// Construct with an explicit edge-field registry (filtered to this entity).
-    /// Descriptors whose `entity` doesn't match `entity_name` are dropped.
+    /// Construct with an explicit edge-field registry (filtered to this
+    /// entity). Descriptors whose `entity` doesn't match `entity_name` are
+    /// dropped.
     pub fn with_edge_fields(
         db_handle: DbHandle,
         table_name: String,
@@ -353,7 +365,8 @@ impl SqlOperationProvider {
                 let arr = match value {
                     Value::Array(items) => items,
                     other => panic!(
-                        "SqlOperationProvider: edge field '{}' on '{}' must be Value::Array, got {:?}",
+                        "SqlOperationProvider: edge field '{}' on '{}' must be Value::Array, got \
+                         {:?}",
                         key, self.entity_name, other
                     ),
                 };
@@ -362,7 +375,8 @@ impl SqlOperationProvider {
                     .map(|v| match v {
                         Value::String(s) => s.clone(),
                         other => panic!(
-                            "SqlOperationProvider: edge field '{}' items must be Value::String, got {:?}",
+                            "SqlOperationProvider: edge field '{}' items must be Value::String, \
+                             got {:?}",
                             key, other
                         ),
                     })
@@ -437,6 +451,28 @@ impl SqlOperationProvider {
         out
     }
 
+    /// True when a Turso write error is a foreign-key-constraint failure
+    /// (immediate or the deferred-at-commit variant). The fork's `LimboError`
+    /// renders these as "... foreign key constraint failed ...".
+    fn is_parent_fk_violation(err_msg: &str) -> bool {
+        err_msg.to_lowercase().contains("foreign key constraint")
+    }
+
+    /// The shared typed rejection for a block write whose parent FK failed.
+    /// `child_id`/`parent_id` are the schemed strings from the operation params
+    /// crossing back into typed form at this write-boundary error edge.
+    fn parent_not_found(
+        child_id: &str,
+        parent_id: &str,
+    ) -> Box<dyn std::error::Error + Send + Sync> {
+        Box::new(ParentNotFound {
+            // ALLOW(entity_uri_from_raw): SQL-op param string at the write boundary.
+            parent_id: EntityUri::from_raw(parent_id),
+            // ALLOW(entity_uri_from_raw): SQL-op param string at the write boundary.
+            child_id: EntityUri::from_raw(child_id),
+        })
+    }
+
     /// Execute a prepared operation: run its SQL statements.
     async fn execute_prepared(&self, prepared: PreparedOp) -> Result<()> {
         for sql in &prepared.sql_statements {
@@ -451,7 +487,8 @@ impl SqlOperationProvider {
     /// Build SQL for a create operation without executing.
     fn prepare_create(&self, params: &StorageEntity) -> PreparedOp {
         // Ensure timestamps are present so the event payload is a complete Block.
-        // Without this, CacheEventSubscriber fails to deserialize: "missing field created_at".
+        // Without this, CacheEventSubscriber fails to deserialize: "missing field
+        // created_at".
         let mut params = params.clone();
         let now_ms = self.clock.now_millis();
         params
@@ -531,8 +568,8 @@ impl SqlOperationProvider {
     /// Build SQL for an update operation without executing.
     /// Returns None if there are no fields to update.
     ///
-    /// Async because it reads the existing row to merge `properties` JSON and to
-    /// run the per-column diff guard that suppresses no-op UPDATEs.
+    /// Async because it reads the existing row to merge `properties` JSON and
+    /// to run the per-column diff guard that suppresses no-op UPDATEs.
     async fn prepare_update(&self, params: &StorageEntity) -> Result<Option<PreparedOp>> {
         let id = params
             .get("id")
@@ -554,6 +591,7 @@ impl SqlOperationProvider {
         // TRACE: any non-standard custom property being written via update path
         const STANDARD_PROP_KEYS: &[&str] = &[
             "task_state",
+            "task_state_category",
             "priority",
             "tags",
             "scheduled",
@@ -569,7 +607,8 @@ impl SqlOperationProvider {
             .collect();
         if !custom_keys.is_empty() {
             tracing::trace!(
-                "[CUSTOMPROP-TRACE prepare_update] id={id} custom_keys={:?} extra_props={:?} sql_fields_keys={:?}",
+                "[CUSTOMPROP-TRACE prepare_update] id={id} custom_keys={:?} extra_props={:?} \
+                 sql_fields_keys={:?}",
                 custom_keys,
                 extra_props,
                 sql_fields.iter().map(|(k, _)| k).collect::<Vec<_>>()
@@ -758,8 +797,8 @@ impl SqlOperationProvider {
             for child in children {
                 if !visited.insert(child.clone()) {
                     return Err(format!(
-                        "prepare_delete: parent cycle detected while cascading delete of \
-                         '{id}' — block '{child}' is its own ancestor (corrupt block tree)"
+                        "prepare_delete: parent cycle detected while cascading delete of '{id}' — \
+                         block '{child}' is its own ancestor (corrupt block tree)"
                     )
                     .into());
                 }
@@ -997,26 +1036,72 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     )
                 } else if matches!(value, Value::Null) {
                     // Null means "remove this property" — use json_remove so we don't
-                    // leave a {"key": null} entry in the JSON column.
+                    // leave a {"key": null} entry in the JSON column. `task_state`
+                    // removal also removes its `task_state_category` sidecar (the
+                    // pair invariant `Block::set_task_state` establishes).
+                    if field == "task_state" {
+                        format!(
+                            "UPDATE {} SET properties = json_remove(COALESCE(properties, '{{}}'), \
+                             '$.task_state', '$.task_state_category') WHERE id = '{}'",
+                            self.table_name,
+                            id.replace('\'', "''")
+                        )
+                    } else {
+                        format!(
+                            "UPDATE {} SET properties = json_remove(COALESCE(properties, '{{}}'), \
+                             '$.{}') WHERE id = '{}'",
+                            self.table_name,
+                            field.replace('\'', "''"),
+                            id.replace('\'', "''")
+                        )
+                    }
+                } else if field == "task_state" {
+                    // A bare keyword write gets its `task_state_category` sidecar
+                    // derived and written in the SAME statement — otherwise every
+                    // UI cycle dropped/staled the category and a DONE keyword could
+                    // read back as Active (see `TaskState::category_str_for_keyword`).
+                    let keyword = value.as_string().ok_or_else(|| {
+                        format!("set_field('task_state'): expected String or Null, got {value:?}")
+                    })?;
+                    let category = holon_api::TaskState::category_str_for_keyword(keyword);
                     format!(
-                        "UPDATE {} SET properties = json_remove(COALESCE(properties, '{{}}'), '$.{}') WHERE id = '{}'",
+                        "UPDATE {} SET properties = json_set(COALESCE(properties, '{{}}'), \
+                         '$.task_state', {}, '$.task_state_category', '{}') WHERE id = '{}'",
                         self.table_name,
-                        field.replace('\'', "''"),
+                        sql_value,
+                        category,
                         id.replace('\'', "''")
                     )
                 } else {
                     format!(
-                        "UPDATE {} SET properties = json_set(COALESCE(properties, '{{}}'), '$.{}', {}) WHERE id = '{}'",
+                        "UPDATE {} SET properties = json_set(COALESCE(properties, '{{}}'), \
+                         '$.{}', {}) WHERE id = '{}'",
                         self.table_name,
                         field.replace('\'', "''"),
                         sql_value,
                         id.replace('\'', "''")
                     )
                 };
-                self.db_handle
-                    .execute(&sql, vec![])
-                    .await
-                    .map_err(|e| format!("Failed to execute SQL: {}", e))?;
+                // Reparenting writes `parent_id`, which the deferred block FK
+                // checks at COMMIT. Run it in a transaction so a rejected
+                // reparent ROLLS BACK (autocommit would leave the bad parent_id
+                // written despite the raised error). Other columns keep the
+                // cheaper autocommit path — none carry an FK.
+                let exec_res = if field == "parent_id" {
+                    self.db_handle
+                        .transaction(vec![(sql.clone(), vec![])])
+                        .await
+                } else {
+                    self.db_handle.execute(&sql, vec![]).await.map(|_| ())
+                };
+                if let Err(e) = exec_res {
+                    let msg = e.to_string();
+                    if field == "parent_id" && Self::is_parent_fk_violation(&msg) {
+                        let parent = value.as_string().unwrap_or_default();
+                        return Err(Self::parent_not_found(id, parent));
+                    }
+                    return Err(format!("Failed to execute SQL: {}", msg).into());
+                }
 
                 if field == "content" {
                     let verify_sql = format!(
@@ -1052,11 +1137,23 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     .expect("create: missing 'id'")
                     .to_string();
                 let prepared = self.prepare_create(&params);
-                for sql in &prepared.sql_statements {
-                    self.db_handle
-                        .execute(sql, vec![])
-                        .await
-                        .map_err(|e| format!("Failed to execute SQL: {}", e))?;
+                // Run the create atomically in one transaction. The block parent
+                // FK is DEFERRABLE INITIALLY DEFERRED, so it is checked at COMMIT.
+                // A transaction (unlike an autocommit statement) ROLLS BACK the
+                // offending row on that commit-time failure, so a rejected create
+                // leaves no partial row — integrity, not just a loud error.
+                let mut stmts = Vec::new();
+                stmts.extend(prepared.sql_statements.iter().map(|s| (s.clone(), vec![])));
+                if let Err(e) = self.db_handle.transaction(stmts).await {
+                    let msg = e.to_string();
+                    if Self::is_parent_fk_violation(&msg) {
+                        let parent = params
+                            .get("parent_id")
+                            .and_then(|v| v.as_string())
+                            .unwrap_or_default();
+                        return Err(Self::parent_not_found(&id, parent));
+                    }
+                    return Err(format!("Failed to execute SQL: {}", msg).into());
                 }
                 // After INSERT OR IGNORE, read back the actual row to detect
                 // whether the insert was ignored (duplicate name+parent_id).
@@ -1070,7 +1167,8 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     Ok(rows) => rows.into_iter().next().is_some(),
                     Err(e) => {
                         tracing::error!(
-                            "[SqlOp] SELECT after INSERT failed for '{}': {} — treating as not inserted",
+                            "[SqlOp] SELECT after INSERT failed for '{}': {} — treating as not \
+                             inserted",
                             id,
                             e,
                         );
@@ -1094,7 +1192,8 @@ impl OriginTaggedWrites for SqlOperationProvider {
                                 .db_handle
                                 .query(&find_sql, HashMap::new())
                                 .await
-                                .ok() // ALLOW(ok): id-collision lookup tolerance // ALLOW(fallback): pre-existing comment-only mention; not a real fallback.
+                                .ok() // ALLOW(ok): id-collision lookup tolerance // ALLOW(fallback):
+                                // pre-existing comment-only mention; not a real fallback.
                                 .and_then(|rows| rows.into_iter().next())
                                 .and_then(|row| row.get("id").cloned());
                             existing_id.map(|v| match v {
@@ -1131,7 +1230,8 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     .to_string();
 
                 let sql = format!(
-                    "SELECT json_extract(properties, '$.task_state') as task_state FROM {} WHERE id = '{}'",
+                    "SELECT json_extract(properties, '$.task_state') as task_state FROM {} WHERE \
+                     id = '{}'",
                     self.table_name,
                     id.replace('\'', "''")
                 );
@@ -1150,6 +1250,9 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     vec!["".into(), "TODO".into(), "DOING".into(), "DONE".into()];
                 let next = holon_api::render_eval::cycle_state(current, &states);
 
+                // `set_field("task_state")` pairs the `task_state_category`
+                // sidecar in the same UPDATE (see the set_field arm), keeping
+                // the pair invariant `Block::set_task_state` establishes.
                 let mut set_params = StorageEntity::new();
                 set_params.insert("id".into(), Value::String(id));
                 set_params.insert("field".into(), Value::String("task_state".into()));
@@ -1166,8 +1269,8 @@ impl OriginTaggedWrites for SqlOperationProvider {
     /// The `origin` argument is part of the `OriginTaggedWrites` write API
     /// (callers such as `LoroSyncController` tag their outbound batches
     /// `EventOrigin::Loro`), but the SQL writer no longer consumes it:
-    /// provenance for echo-suppression rides the `_change_origin` CDC column via
-    /// the trace context, not the (now-removed) EventBus.
+    /// provenance for echo-suppression rides the `_change_origin` CDC column
+    /// via the trace context, not the (now-removed) EventBus.
     async fn execute_batch_with_origin(
         &self,
         entity_name: &EntityName,
@@ -1186,7 +1289,8 @@ impl OriginTaggedWrites for SqlOperationProvider {
             return Ok(Vec::new());
         }
 
-        // Phase 1: Prepare all operations (may involve async DB reads for delete cascade)
+        // Phase 1: Prepare all operations (may involve async DB reads for delete
+        // cascade)
         let mut all_sql = Vec::new();
 
         for (op_name, params) in &operations {
@@ -1233,9 +1337,11 @@ mod sql_operation_provider_diff_test;
 
 #[cfg(test)]
 mod clock_tests {
-    use super::*;
-    use holon_api::TestClock;
     use std::sync::Arc;
+
+    use holon_api::TestClock;
+
+    use super::*;
 
     /// An injected clock drives the write-time `created_at`/`updated_at`
     /// timestamps instead of the ambient system clock.
@@ -1246,7 +1352,8 @@ mod clock_tests {
             .expect("in-memory turso");
         db_handle
             .execute(
-                "CREATE TABLE block_raw (id TEXT PRIMARY KEY, created_at INTEGER, updated_at INTEGER)",
+                "CREATE TABLE block_raw (id TEXT PRIMARY KEY, created_at INTEGER, updated_at \
+                 INTEGER)",
                 vec![],
             )
             .await

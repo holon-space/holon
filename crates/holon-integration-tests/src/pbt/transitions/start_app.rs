@@ -1,22 +1,55 @@
 //! Transition: start the application.
 //!
-//! Mirrors the legacy logic split across `state_machine.rs:339-351` (generator),
-//! `state_machine.rs:3109-3114` (precondition),
+//! Mirrors the legacy logic split across `state_machine.rs:339-351`
+//! (generator), `state_machine.rs:3109-3114` (precondition),
 //! `state_machine.rs:1947-2123` (ref-state apply),
 //! `sut.rs:716-944` (SUT apply), and
 //! `transition_budgets.rs:129-134` (expected SQL).
 
+use holon_api::ContentType;
+use holon_api::QueryLanguage;
+use holon_api::SourceLanguage;
 use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
-use holon_api::{ContentType, Region, SourceLanguage};
+use holon_pbt_core::TransitionFactory;
+use holon_pbt_core::TransitionImpl;
+use holon_pbt_core::TransitionRef;
+use holon_pbt_core::capabilities::RefBoot;
+use holon_pbt_core::capabilities::RefBootMut;
+use holon_pbt_core::capabilities::RefLifecycle;
+use holon_pbt_core::capabilities::SutAppLifecycle;
+use holon_pbt_core::capabilities::SutWatchRegister;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::check;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::local_caps::SutAppLifecycle;
+use crate::pbt::query::QuerySource;
+use crate::pbt::query::QueryTable;
+use crate::pbt::query::TestQuery;
+use crate::pbt::query::WatchSpec;
+use crate::pbt::query::all_block_columns;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::validation::{Reason, check};
-use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
+
+/// Query id of the production seeded left-sidebar watch
+/// (`assets/default/index.org`). Registered on BOTH ref and SUT after boot so
+/// `inv-watch-rows-match-ref` (which intersects the two sides) covers the
+/// sidebar's `PageBlocks` query.
+pub(crate) const SEEDED_SIDEBAR_WATCH_ID: &str = "seeded-left-sidebar-pages";
+
+/// The seeded left-sidebar watch spec (production `index.org` page query).
+pub(crate) fn seeded_sidebar_watch_spec() -> WatchSpec {
+    WatchSpec {
+        query: TestQuery {
+            table: QueryTable::Blocks,
+            columns: all_block_columns(),
+            predicates: vec![],
+            source: QuerySource::PageBlocks,
+        },
+        language: QueryLanguage::HolonSql,
+    }
+}
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
@@ -25,21 +58,22 @@ use crate::pbt::transition_budgets::ExpectedSql;
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct StartApp {
     pub wait_for_ready: bool,
-    /// Enable the fake external MCP provider (adds concurrent DDL during startup)
+    /// Enable the fake external MCP provider (adds concurrent DDL during
+    /// startup)
     pub enable_fake_mcp: bool,
     /// Enable Loro CRDT layer (false = SQL-only, matching Flutter default)
     pub enable_loro: bool,
 }
 
-impl TransitionFactory<ReferenceState> for StartApp {
+impl<R: RefLifecycle + RefBootMut> TransitionFactory<R> for StartApp {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
         vec![::holon_pbt_core::composition::CapId::of::<
-            dyn crate::pbt::local_caps::SutAppLifecycle,
+            dyn holon_pbt_core::capabilities::SutAppLifecycle,
         >()]
     }
 
     type Reason = Reason;
-    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let instance = StartApp {
             wait_for_ready: true,
             enable_fake_mcp: true,
@@ -53,20 +87,20 @@ impl TransitionFactory<ReferenceState> for StartApp {
             // raises StartApp's odds (capped to keep early steps able to
             // still pick CreateDirectory/WriteOrgFile/JjGitInit).
             let weight =
-                2u32.saturating_add((state.pre_startup_file_count as u32).saturating_mul(8));
+                2u32.saturating_add((state.pre_startup_file_count() as u32).saturating_mul(8));
             (weight, strat)
         })
     }
 }
 
-impl TransitionRef<ReferenceState> for StartApp {
+impl<R: RefLifecycle + RefBootMut> TransitionRef<R> for StartApp {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(!state.action.app_started, Reason::AppAlreadyStarted),
+            check(!state.app_started(), Reason::AppAlreadyStarted),
             check(
-                state.pre_startup_file_count > 0,
+                state.pre_startup_file_count() > 0,
                 Reason::PreStartupFileCountZero,
             ),
         ];
@@ -76,100 +110,45 @@ impl TransitionRef<ReferenceState> for StartApp {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
-        state.action.app_started = true;
-
-        // Freshness mirrors prod `seed_default_layout`: the default layout —
-        // and the journals focus + open default drawers that come with it —
-        // is only seeded when `block:root-layout` is absent at boot. A
-        // pre-startup user `index.org` keeps the well-known root id (the
-        // generator pins `:ID: root-layout`), file sync runs before seeding,
-        // so the user layout suppresses the entire default-layout seed.
-        let fresh = !state
-            .domain
-            .block_state
-            .blocks
-            .contains_key(&holon_api::root_layout_block_uri());
-
-        // Default layout boots both sidebars as open drawers — mirror that in ref state.
-        if fresh {
-            state
-                .ui
-                .tab
-                .drawer_open
-                .insert("block:default-left-sidebar".to_string(), true);
-            state
-                .ui
-                .tab
-                .drawer_open
-                .insert("block:default-right-sidebar".to_string(), true);
-        }
-
-        // Model the bundled default-asset layout the production boot seeds
-        // (page shells + `__default__` + parsed `index.org` + `layout_blocks`
-        // classification). Extracted so the composed/wide oracle's
-        // `build_started_ref` can model the SAME layout the booted SUT carries
-        // (replacing its phantom `started-ref-layout-query`), keeping
-        // `inv-watch-rows-match-ref` a full-fidelity comparison.
-        seed_booted_layout_into_ref(state, fresh);
-
-        // Load the seed entity profile from the TypeRegistry's bundled
-        // block_profile.yaml (not from org blocks — the seed index.org
-        // doesn't contain entity profile blocks).
-        let registry = holon_profiles::create_default_registry()
-            .expect("default TypeRegistry must initialize");
-        let block_type_def = registry
-            .get("block")
-            .expect("Block type must be registered");
-        state.domain.seed_profile = holon::entity_profile::profile_from_type_def(&block_type_def);
-
-        // FU-10 mirror: production `seed_default_layout` calls
-        // `navigation::focus(Main, block:journals)` on fresh DBs ONLY, which
-        // inserts a navigation_history row and updates the cursor. Mirror
-        // that here so the reference state's `current_focus` and
-        // `expected_focus_root_ids(Main)` line up with what the SUT
-        // actually has post-StartApp.
-        if fresh {
-            use crate::pbt::reference_state::OpenPinEntry;
-            let journals_uri = EntityUri::block("journals");
-            let history = state
-                .ui
-                .tab
-                .navigation_history
-                .entry(Region::Main)
-                .or_default();
-            history.entries.truncate(history.cursor + 1);
-            history.entries.push(Some(journals_uri.clone()));
-            history.cursor = history.entries.len() - 1;
-
-            let history_id = state.ui.tab.next_history_id;
-            state.ui.tab.next_history_id += 1;
-            let added_ts_logical = state.ui.user.next_pin_ts;
-            state.ui.user.next_pin_ts += 1;
-            let pins = state.ui.user.open_pins.entry(Region::Main).or_default();
-            pins.clear();
-            pins.push(OpenPinEntry {
-                history_id,
-                block_id: Some(journals_uri),
-                added_ts_logical,
-            });
-        }
+    fn apply_to_ref(&self, state: &mut R) {
+        // The whole boot reference effect (flip app_started, seed the bundled
+        // default layout / seed profile / sidebar watch, fresh-boot drawers +
+        // journals focus) lives in `RefBootMut::boot_app`.
+        state.boot_app();
     }
+}
+
+/// Load the bundled `block` entity profile (the TypeRegistry's
+/// `block_profile.yaml`) into `domain.seed_profile` — the SAME profile the
+/// production boot's ProfileResolver serves `render_entity`. Extracted from
+/// `StartApp::apply_to_ref` so pre-started oracles (`build_started_ref`, the
+/// keystone's `wide_e2e_ref`) carry it too: without it the ref-side
+/// `resolve_profile` returns `None`, `render_entity` interprets to `Empty`,
+/// the generator sees ZERO `state_toggle` widgets, and `ToggleState` silently
+/// vanishes from the composed alphabet (`NoTogglableStates` on every draw —
+/// the change-status coverage hole found in the 2026-07-05 dogfood triage).
+pub(crate) fn load_seed_profile_into_ref(state: &mut ReferenceState) {
+    let registry =
+        holon_profiles::create_default_registry().expect("default TypeRegistry must initialize");
+    let block_type_def = registry
+        .get("block")
+        .expect("Block type must be registered");
+    state.domain.seed_profile = holon::entity_profile::profile_from_type_def(&block_type_def);
 }
 
 /// Model the bundled default-asset layout the production boot's
 /// `seed_default_layout` (`holon-app/src/seed.rs`) creates, into the reference
 /// `block_state`: the fixed-ID page shells (`block:journals`, always), the
-/// `__default__` seed page + the parsed `assets/default/index.org` layout blocks
-/// (fresh only), all seed-classified (`block_documents[id]=no_parent`), and the
-/// `layout_blocks.{query_source_ids,render_source_ids,headline_ids}`
-/// classification. Extracted from `StartApp::apply_to_ref` (behavior-preserving)
-/// so the composed/wide oracle's `build_started_ref` can model the SAME layout
-/// the booted `full_headless` SUT carries — making `inv-watch-rows-match-ref` a
-/// full-fidelity full-block-set comparison rather than a seed-excluded one. Does
-/// NOT touch nav-focus / sidebar-drawer / seed-profile state (those stay with the
-/// caller: `StartApp` applies them; the composed oracle aligns nav in
-/// `structural_ref_wired`).
+/// `__default__` seed page + the parsed `assets/default/index.org` layout
+/// blocks (fresh only), all seed-classified (`block_documents[id]=no_parent`),
+/// and the `layout_blocks.{query_source_ids,render_source_ids,headline_ids}`
+/// classification. Extracted from `StartApp::apply_to_ref`
+/// (behavior-preserving) so the composed/wide oracle's `build_started_ref` can
+/// model the SAME layout the booted `full_headless` SUT carries — making
+/// `inv-watch-rows-match-ref` a full-fidelity full-block-set comparison rather
+/// than a seed-excluded one. Does NOT touch nav-focus / sidebar-drawer /
+/// seed-profile state (those stay with the caller: `StartApp` applies them; the
+/// composed oracle aligns nav in `structural_ref_wired`).
 pub(crate) fn seed_booted_layout_into_ref(state: &mut ReferenceState, fresh: bool) {
     // The production system always seeds default layout blocks on first startup.
     // `default_doc_uri` is the *document* the seed layout belongs to (the
@@ -354,9 +333,34 @@ pub(crate) fn seed_booted_layout_into_ref(state: &mut ReferenceState, fresh: boo
     } // end fresh-only default-layout seed
 }
 
+/// The composed `CapMap` registers the watch only when it actually hosts
+/// `SutWatchRegister`. If the cap is absent, this is a deliberate no-op:
+/// `inv-watch-rows-match-ref` intersects the two sides, so a ref-only entry is
+/// simply skipped — no phantom comparison.
 #[allow(async_fn_in_trait)]
-impl<S: SutAppLifecycle> TransitionImpl<ReferenceState, S> for StartApp {
-    async fn apply_to_sut(&self, state: &ReferenceState, sut: &mut S) {
+pub trait SutBootWatches {
+    async fn register_seeded_sidebar_watch(&self);
+}
+
+#[allow(async_fn_in_trait)]
+impl SutBootWatches for holon_pbt_core::composition::CapMap {
+    async fn register_seeded_sidebar_watch(&self) {
+        if let Some(reg) = self.get::<dyn SutWatchRegister>() {
+            let spec = seeded_sidebar_watch_spec();
+            reg.register_watch(SEEDED_SIDEBAR_WATCH_ID, &spec.query.to_sql(), spec.language)
+                .await;
+        }
+    }
+}
+
+// Hand-written (not `cap_transition!`): StartApp binds TWO SUT caps
+// (`SutAppLifecycle + SutBootWatches`) and its `apply_to_sut` READS `state`
+// (root-layout id + setup validity), which the single-cap macro can't express.
+#[allow(async_fn_in_trait)]
+impl<R: RefLifecycle + RefBoot, S: SutAppLifecycle + SutBootWatches> TransitionImpl<R, S>
+    for StartApp
+{
+    async fn apply_to_sut(&self, state: &R, sut: &mut S) {
         // Boundary-precompute the `ref_state`-derived values the cap consumes
         // at action time (the HARD RULE forbids `ref_state` in the cap sig, not
         // derived args). The doc-uri reconcile + seed-count settle run in the
@@ -373,12 +377,15 @@ impl<S: SutAppLifecycle> TransitionImpl<ReferenceState, S> for StartApp {
             self.enable_loro,
         )
         .await;
+        sut.register_seeded_sidebar_watch().await;
     }
 }
 
 #[cfg(feature = "otel-testing")]
+use holon_pbt_core::capabilities::RefSqlCardinality;
+#[cfg(feature = "otel-testing")]
 impl crate::pbt::transition_budgets::SqlBudget for StartApp {
-    fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
+    fn expected_sql<R: RefSqlCardinality>(&self, _: &R) -> ExpectedSql {
         ExpectedSql {
             reads: 200,
             writes: 60,

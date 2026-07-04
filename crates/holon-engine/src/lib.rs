@@ -3,7 +3,8 @@
 //! Pattern: Interpreter
 //! @c4 uses holon-expr "compiled Rhai expressions" "Rust"
 //!
-//! Standalone Petri-net engine: YAML-defined nets with Rhai guards, WSJF ranking, and what-if analysis.
+//! Standalone Petri-net engine: YAML-defined nets with Rhai guards, WSJF
+//! ranking, and what-if analysis.
 
 pub mod arc;
 pub mod display;
@@ -13,12 +14,19 @@ pub mod objective;
 pub mod value;
 pub mod yaml;
 
-use chrono::{DateTime, Utc};
 use std::collections::BTreeMap;
-use value::Value;
 
-pub use arc::{CmpOp, CreateArc, InputArc, OutputArc, PrecondSpec};
+pub use arc::AttrInit;
+pub use arc::CmpOp;
+pub use arc::CreateArc;
+pub use arc::InputArc;
+pub use arc::OutputArc;
+pub use arc::PostcondExpr;
+pub use arc::PrecondSpec;
+use chrono::DateTime;
+use chrono::Utc;
 pub use guard::CompiledExpr;
+use value::Value;
 
 pub trait TokenState {
     fn id(&self) -> &str;

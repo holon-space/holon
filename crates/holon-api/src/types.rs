@@ -1,7 +1,9 @@
-use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fmt;
 use std::str::FromStr;
+
+use serde::Deserialize;
+use serde::Serialize;
 
 use crate::Value;
 
@@ -9,14 +11,17 @@ use crate::Value;
 // EntityName
 // =============================================================================
 
-/// Typed entity name — the canonical name for a domain entity (e.g., "block", "document").
+/// Typed entity name — the canonical name for a domain entity (e.g., "block",
+/// "document").
 ///
 /// Two variants:
-/// - `Named`: stores a **URI-scheme-safe** form (underscores replaced with hyphens).
-///   Use `as_str()` for URI schemes / profile lookup / operation dispatch.
-///   Use `table_name()` for SQL identifiers (converts hyphens back to underscores).
-/// - `Wildcard`: the `*` sentinel used by `OperationDispatcher` for broadcast operations.
-///   `as_str()` returns `"*"`. `table_name()` panics — wildcards have no SQL table.
+/// - `Named`: stores a **URI-scheme-safe** form (underscores replaced with
+///   hyphens). Use `as_str()` for URI schemes / profile lookup / operation
+///   dispatch. Use `table_name()` for SQL identifiers (converts hyphens back to
+///   underscores).
+/// - `Wildcard`: the `*` sentinel used by `OperationDispatcher` for broadcast
+///   operations. `as_str()` returns `"*"`. `table_name()` panics — wildcards
+///   have no SQL table.
 ///
 /// Serializes as a plain string over FFI (Flutter sees `String`).
 ///
@@ -162,19 +167,41 @@ pub enum ContentType {
 impl ContentType {
     /// Sibling-ordering group for the canonical child list (ADR 0005).
     ///
-    /// Non-heading "section content" (`Source`/`Image`) sorts **before** heading
-    /// content (`Text`). This is not an aesthetic preference — it is a structural
-    /// requirement of outline formats (org-mode, Markdown): a heading captures
-    /// everything after it until the next heading, so any non-heading child must
-    /// precede the parent's child headings or it would re-parent under the first
-    /// heading on the next read. The domain therefore *defines* the ordered child
-    /// list as "section content first, then headings", insertion/`after` order
-    /// preserved within each group. Every renderer and the reference oracle order
+    /// Non-heading "section content" (`Source`/`Image`) sorts **before**
+    /// heading content (`Text`). This is not an aesthetic preference — it
+    /// is a structural requirement of outline formats (org-mode, Markdown):
+    /// a heading captures everything after it until the next heading, so
+    /// any non-heading child must precede the parent's child headings or it
+    /// would re-parent under the first heading on the next read. The domain
+    /// therefore *defines* the ordered child list as "section content
+    /// first, then headings", insertion/`after` order preserved within each
+    /// group. Every renderer and the reference oracle order
     /// siblings through this one rule.
     pub fn sibling_order_group(self) -> u8 {
         match self {
             ContentType::Source | ContentType::Image => 0,
             ContentType::Text => 1,
+        }
+    }
+
+    /// Finer sibling-ordering rank that the render→parse round trip actually
+    /// realises. The renderer hoists section content (`Source`/`Image`) ahead
+    /// of headings (`Text`) via [`Self::sibling_order_group`], but the org
+    /// parser additionally re-emits **all `Source` blocks before all `Image`
+    /// blocks** (the source loop precedes the image loop in
+    /// `process_headlines`). So the post-round-trip kind order is `Source <
+    /// Image < Text`.
+    ///
+    /// This is DISTINCT from [`Self::sibling_order_group`] on purpose: the
+    /// renderer relies on the coarse grouping (both section-content kinds share
+    /// group 0, insertion order preserved within the group), while a reference
+    /// model that must reproduce the *stored* order after a round trip needs
+    /// this finer rank as its primary sort key.
+    pub fn parse_order_rank(self) -> u8 {
+        match self {
+            ContentType::Source => 0,
+            ContentType::Image => 1,
+            ContentType::Text => 2,
         }
     }
 }
@@ -248,7 +275,8 @@ impl QueryLanguage {
         QueryLanguage::HolonSql,
     ];
 
-    /// Returns a SQL `IN (...)` list of all query language string values, for use in SQL queries.
+    /// Returns a SQL `IN (...)` list of all query language string values, for
+    /// use in SQL queries.
     pub fn sql_in_list() -> String {
         let items: Vec<_> = Self::ALL.iter().map(|q| format!("'{q}'")).collect();
         format!("({})", items.join(", "))
@@ -442,6 +470,19 @@ pub enum StateCategory {
     Done,
 }
 
+impl StateCategory {
+    /// Canonical stored spelling of the `task_state_category` sidecar
+    /// property ("active" / "done"). One source of truth for every writer
+    /// (org parse boundary, Loro `set_state`, SQL `cycle_task_state`) so the
+    /// stored strings can never drift apart.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Done => "done",
+        }
+    }
+}
+
 /// Well-known done keywords (everything after `|` in org `#+TODO:` config).
 const DEFAULT_DONE_KEYWORDS: &[&str] = &["DONE", "CANCELLED", "CLOSED"];
 
@@ -492,6 +533,14 @@ impl TaskState {
             StateCategory::Active
         };
         Self::new(keyword, category)
+    }
+
+    /// The `task_state_category` sidecar value for a BARE keyword write
+    /// arriving at a storage boundary (widget click intent, `set_state`,
+    /// `cycle_task_state`) — i.e. one with no org `#+TODO:` config in hand.
+    /// Uses the default done-keyword list, exactly like [`Self::from_keyword`].
+    pub fn category_str_for_keyword(keyword: &str) -> &'static str {
+        Self::from_keyword(keyword).category.as_str()
     }
 
     pub fn is_done(&self) -> bool {
@@ -668,7 +717,8 @@ impl FromStr for Region {
             "left_sidebar" => Ok(Region::LeftSidebar),
             "right_sidebar" => Ok(Region::RightSidebar),
             other => anyhow::bail!(
-                "Invalid region: {other:?} (expected \"main\", \"left_sidebar\", or \"right_sidebar\")"
+                "Invalid region: {other:?} (expected \"main\", \"left_sidebar\", or \
+                 \"right_sidebar\")"
             ),
         }
     }
@@ -696,7 +746,8 @@ impl TryFrom<Value> for Region {
 // Timestamp
 // =============================================================================
 
-/// Parsed timestamp with org-mode angle-bracket format: `<2026-02-21 Fri>` or `<2026-02-21 Fri 10:00>`.
+/// Parsed timestamp with org-mode angle-bracket format: `<2026-02-21 Fri>` or
+/// `<2026-02-21 Fri 10:00>`.
 ///
 /// Named generically — org is just the first SerDe format, not a core concept.
 ///
@@ -708,7 +759,8 @@ pub struct Timestamp {
 }
 
 impl Timestamp {
-    /// Parse an org-mode timestamp string like `<2026-02-21 Fri>` or just `2026-02-21`.
+    /// Parse an org-mode timestamp string like `<2026-02-21 Fri>` or just
+    /// `2026-02-21`.
     pub fn parse(raw: &str) -> anyhow::Result<Self> {
         let stripped = raw.trim().trim_start_matches('<').trim_end_matches('>');
         // Take only the date part (first 10 chars or up to first space)
@@ -961,7 +1013,8 @@ impl From<Vec<String>> for DependsOn {
 // UiInfo
 // =============================================================================
 
-/// Frontend capability descriptor — tells the backend what the frontend can render.
+/// Frontend capability descriptor — tells the backend what the frontend can
+/// render.
 ///
 /// Profiles are filtered against this: variants referencing widgets not in
 /// `available_widgets` are dropped, so a TUI never receives `tree()` specs.
@@ -982,7 +1035,8 @@ impl UiInfo {
         }
     }
 
-    /// Returns true if this UiInfo performs no filtering (empty available_widgets = all allowed).
+    /// Returns true if this UiInfo performs no filtering (empty
+    /// available_widgets = all allowed).
     pub fn is_permissive(&self) -> bool {
         self.available_widgets.is_empty()
     }

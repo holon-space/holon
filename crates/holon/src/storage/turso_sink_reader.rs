@@ -16,8 +16,8 @@ use crate::storage::BLOCK_WRITE_TABLE;
 use crate::storage::turso::DbHandle;
 use crate::sync::SinkReader;
 
-/// Production [`SinkReader`]: reads the `block_raw` base table directly — NOT the
-/// `block` matview, which can lag `block_raw` under IVM and would make the
+/// Production [`SinkReader`]: reads the `block_raw` base table directly — NOT
+/// the `block` matview, which can lag `block_raw` under IVM and would make the
 /// projection see stale state and re-emit redundant writes. `tags`/`requires`
 /// are hydrated from their junction tables; both are part of the block
 /// equivalence relation (`blocks_differ` iterates `EdgeField::ALL`).
@@ -35,14 +35,12 @@ impl TursoSinkReader {
 impl SinkReader for TursoSinkReader {
     async fn read_blocks(&self) -> Result<HashMap<String, SnapshotBlock>> {
         let sql = format!(
-            "SELECT b.id, b.parent_id, b.sort_key, b.content, b.content_type, \
-                    b.source_language, b.source_name, b.properties, b.marks, \
-                    b.created_at, b.updated_at, \
-                    COALESCE((SELECT json_group_array(tag) FROM block_tags \
-                              WHERE block_id = b.id), '[]') AS tags, \
-                    COALESCE((SELECT json_group_array(required_id) FROM block_requires \
-                              WHERE block_id = b.id), '[]') AS requires \
-             FROM {table} b",
+            "SELECT b.id, b.parent_id, b.sort_key, b.content, b.content_type, b.source_language, \
+             b.source_name, b.properties, b.marks, b.created_at, b.updated_at, COALESCE((SELECT \
+             json_group_array(tag) FROM block_tags WHERE block_id = b.id), '[]') AS tags, \
+             COALESCE((SELECT json_group_array(required_id) FROM block_requires WHERE block_id = \
+             b.id), '[]') AS requires, COALESCE((SELECT json_group_array(lesson_id) FROM \
+             advice_suppressed WHERE anchor_id = b.id), '[]') AS advice_suppressed FROM {table} b",
             table = BLOCK_WRITE_TABLE,
         );
         let rows = self

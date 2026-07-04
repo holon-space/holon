@@ -1,8 +1,9 @@
-use gpui::{AnyView, StyleRefinement};
+use gpui::AnyView;
+use gpui::StyleRefinement;
+use holon_frontend::ReactiveViewModel;
 
 use super::prelude::*;
 use crate::views::ReactiveShell;
-use holon_frontend::ReactiveViewModel;
 
 /// Render a live_query node by lazily creating a `ReactiveShell` entity in
 /// the parent's `entity_cache`, fed by the engine's streaming
@@ -47,9 +48,10 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
                 let render_ctx = holon_frontend::RenderContext::default();
                 ctx.with_gpui(|_window, cx| {
                     cx.new(|cx| {
-                        // The shell's `block_id` is the engine's query-watcher
-                        // key, so its Drop releases the query watcher via
-                        // `unwatch` — the same lifecycle live blocks get.
+                        // The `LiveBlock` carries a `WatchGuard` for the
+                        // engine's query-watcher key; the shell holds it, so
+                        // dropping the shell releases the query watcher —
+                        // the same RAII lifecycle live blocks get.
                         ReactiveShell::new_for_block(
                             watch_key.to_string(),
                             render_ctx,
@@ -72,7 +74,8 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
         }
     }
 
-    // Fallback: render the static content snapshot. // ALLOW(fallback): describes default-branch path, not error swallowing
+    // Fallback: render the static content snapshot. // ALLOW(fallback): describes
+    // default-branch path, not error swallowing
     let content = slot.content.lock_ref();
     super::render(&content, ctx)
 }

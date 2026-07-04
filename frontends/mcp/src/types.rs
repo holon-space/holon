@@ -1,13 +1,16 @@
+use std::collections::HashMap;
+
 use holon_api::QueryLanguage;
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use serde::Deserialize;
+use serde::Serialize;
 
 /// Wrapper for TypeDefinition JSON — the tool description explains the shape.
 /// We use serde_json::Value because TypeDefinition doesn't derive JsonSchema.
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct CreateEntityTypeParams {
-    /// TypeDefinition as JSON object. Shape: {name, fields: [{name, sql_type, ...}], primary_key?, graph_label?, id_references?}
+    /// TypeDefinition as JSON object. Shape: {name, fields: [{name, sql_type,
+    /// ...}], primary_key?, graph_label?, id_references?}
     pub type_definition: serde_json::Value,
 }
 
@@ -40,16 +43,17 @@ pub struct ExecuteQueryParams {
     pub language: String,
     #[serde(default)]
     pub params: HashMap<String, serde_json::Value>,
-    /// Block ID for `from children` context resolution. When set, `from children` returns
-    /// children of this block. Without this, `from children` returns empty results.
+    /// Block ID for `from children` context resolution. When set, `from
+    /// children` returns children of this block. Without this, `from
+    /// children` returns empty results.
     pub context_id: Option<String>,
     /// Parent block ID for `from siblings` context resolution.
     pub context_parent_id: Option<String>,
     /// Render spec for GQL/SQL queries. Parsed as PRQL render expression.
     /// Example: "list item_template:(row (text this.name))"
     pub render: Option<String>,
-    /// When true, each row gets a `_profile` key with resolved entity profile info
-    /// (profile name, render expression, available operations).
+    /// When true, each row gets a `_profile` key with resolved entity profile
+    /// info (profile name, render expression, available operations).
     #[serde(default)]
     pub include_profile: Option<bool>,
 }
@@ -71,7 +75,8 @@ pub struct ExecuteSourceBlockParams {
     pub context_parent_id: Option<String>,
     /// Render spec override (mirrors `execute_query`).
     pub render: Option<String>,
-    /// When true, each row gets a `_profile` key with resolved entity profile info.
+    /// When true, each row gets a `_profile` key with resolved entity profile
+    /// info.
     #[serde(default)]
     pub include_profile: Option<bool>,
 }
@@ -87,7 +92,8 @@ pub struct ExecuteOperationParams {
 pub struct WatchQueryParams {
     /// The query string to watch
     pub query: String,
-    /// Query language: "holon_prql", "holon_gql", or "holon_sql". Defaults to "holon_prql".
+    /// Query language: "holon_prql", "holon_gql", or "holon_sql". Defaults to
+    /// "holon_prql".
     #[serde(default = "default_language")]
     pub language: String,
     #[serde(default)]
@@ -110,7 +116,8 @@ pub struct WatchHandle {
 pub struct QueryResult {
     pub rows: Vec<HashMap<String, serde_json::Value>>,
     pub row_count: usize,
-    /// Query execution time in milliseconds (wall clock, excluding serialization).
+    /// Query execution time in milliseconds (wall clock, excluding
+    /// serialization).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<f64>,
 }
@@ -177,7 +184,8 @@ pub struct CanUndoRedoResult {
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ExecuteRawSqlParams {
-    /// Raw SQL to send directly to Turso. No PRQL/GQL compilation, no SQL transforms.
+    /// Raw SQL to send directly to Turso. No PRQL/GQL compilation, no SQL
+    /// transforms.
     pub sql: String,
     #[serde(default)]
     pub params: HashMap<String, serde_json::Value>,
@@ -215,7 +223,8 @@ pub struct DiffLoroSqlParams {
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ReadOrgFileParams {
-    /// Document ID — can be a UUID or a file path. Resolved to file path via aliases.
+    /// Document ID — can be a UUID or a file path. Resolved to file path via
+    /// aliases.
     pub doc_id: String,
 }
 
@@ -229,7 +238,8 @@ pub struct RenderOrgParams {
 pub struct DescribeUiParams {
     /// Block ID to render and describe
     pub block_id: String,
-    /// Output format: "text" for pretty-printed tree, "json" for structured JSON
+    /// Output format: "text" for pretty-printed tree, "json" for structured
+    /// JSON
     #[serde(default = "default_text_format")]
     pub format: String,
 }
@@ -239,9 +249,38 @@ fn default_text_format() -> String {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ResetVaultFile {
+    /// File name (e.g. `"structural-page.org"`). Its stem becomes a Page in the
+    /// left sidebar.
+    pub name: String,
+    /// Org file body.
+    pub content: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ResetVaultParams {
+    /// Seed `.org` files to materialize into a FRESH temp vault. The running
+    /// window is rebound onto the freshly-booted engine in place — no second
+    /// MCP server, no window relaunch. Client supplies the seed so the server
+    /// embeds no seed copy (single source of truth).
+    pub files: Vec<ResetVaultFile>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct AwaitQuiescenceParams {
+    /// Upper bound on the combined-fixed-point wait, in milliseconds. When the
+    /// budget is exhausted before every reachable signal is simultaneously
+    /// stable, the tool returns an error naming the still-moving signal(s) —
+    /// it never reports a non-converged wait as success. Defaults to 30000.
+    #[serde(default)]
+    pub budget_ms: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ScreenshotParams {
-    /// Window title or app name substring to match (e.g. "Holon" for GPUI, "Blinc").
-    /// If omitted, tries known frontend names in order: "Holon", "Blinc".
+    /// Window title or app name substring to match (e.g. "Holon" for GPUI,
+    /// "Blinc"). If omitted, tries known frontend names in order: "Holon",
+    /// "Blinc".
     pub window_title: Option<String>,
 }
 
@@ -382,7 +421,8 @@ pub struct ClaimTaskParams {
     pub agent_id: Option<String>,
 }
 
-/// Parameters for `add_subtask` — append a new TODO block under an existing one.
+/// Parameters for `add_subtask` — append a new TODO block under an existing
+/// one.
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct AddSubtaskParams {
     /// Parent block id (bare slug or `block:` prefixed).

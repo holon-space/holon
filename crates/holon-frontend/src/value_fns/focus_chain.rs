@@ -26,18 +26,24 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use futures_signals::signal::{Mutable, SignalExt};
-use futures_signals::signal_vec::{SignalVec, SignalVecExt};
-
+use futures_signals::signal::Mutable;
+use futures_signals::signal::SignalExt;
+use futures_signals::signal_vec::SignalVec;
+use futures_signals::signal_vec::SignalVecExt;
+use holon_api::EntityUri;
+use holon_api::InterpValue;
+use holon_api::ReactiveRowProvider;
+use holon_api::Value;
+use holon_api::ptr_identity;
 use holon_api::render_eval::ResolvedArgs;
 use holon_api::widget_spec::DataRow;
-use holon_api::{ptr_identity, EntityUri, InterpValue, ReactiveRowProvider, Value};
 
+use crate::ReactiveViewModel;
 use crate::reactive::BuilderServices;
 use crate::render_context::RenderContext;
-use crate::render_interpreter::{RenderInterpreter, ValueFn};
+use crate::render_interpreter::RenderInterpreter;
+use crate::render_interpreter::ValueFn;
 use crate::value_fns::synthetic::SyntheticRows;
-use crate::ReactiveViewModel;
 
 /// `ReactiveRowProvider` backed by the focused-block `Mutable`.
 /// Pure projection — no spawned task, no internal accumulator.
@@ -83,7 +89,7 @@ impl ReactiveRowProvider for FocusChainProvider {
 
     fn keyed_rows_signal_vec(
         &self,
-    ) -> Pin<Box<dyn SignalVec<Item = (EntityUri, Arc<DataRow>)> + Send>> {
+    ) -> Pin<Box<dyn SignalVec<Item = (holon_api::RowKey, Arc<DataRow>)> + Send>> {
         Box::pin(
             self.focused
                 .signal_cloned()
@@ -92,7 +98,7 @@ impl ReactiveRowProvider for FocusChainProvider {
                 .map(|row| {
                     let id = holon_api::data_row_entity_uri(&row)
                         .unwrap_or_else(|| EntityUri::block(""));
-                    (id, row)
+                    ((id, holon_api::Occurrence::Canonical), row)
                 }),
         )
     }

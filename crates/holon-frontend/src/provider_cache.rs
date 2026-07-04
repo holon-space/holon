@@ -15,10 +15,12 @@
 //! the full rationale.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::Weak;
 
-use holon_api::render_eval::ResolvedArgs;
 use holon_api::ReactiveRowProvider;
+use holon_api::render_eval::ResolvedArgs;
 
 /// Cache key — function name + fingerprint of resolved args.
 ///
@@ -83,7 +85,8 @@ impl Default for ProviderCache {
 /// fingerprint. Named / template entries are hashed key-sorted so map
 /// iteration order does not affect the result.
 fn fingerprint(args: &ResolvedArgs) -> u64 {
-    use std::hash::{Hash, Hasher};
+    use std::hash::Hash;
+    use std::hash::Hasher;
     let mut h = std::collections::hash_map::DefaultHasher::new();
 
     args.positional.len().hash(&mut h);
@@ -117,8 +120,9 @@ fn fingerprint(args: &ResolvedArgs) -> u64 {
 /// key-sorted; floats by `to_bits` (NaN payloads distinguish, which only
 /// splits cache entries — never aliases them).
 fn hash_value(v: &holon_api::Value, h: &mut impl std::hash::Hasher) {
-    use holon_api::Value;
     use std::hash::Hash;
+
+    use holon_api::Value;
     std::mem::discriminant(v).hash(h);
     match v {
         Value::String(s) | Value::DateTime(s) | Value::Json(s) => s.hash(h),
@@ -146,8 +150,9 @@ fn hash_value(v: &holon_api::Value, h: &mut impl std::hash::Hasher) {
 
 /// Structural hash of a `RenderExpr` (the templates side of the key).
 fn hash_expr(e: &holon_api::render_types::RenderExpr, h: &mut impl std::hash::Hasher) {
-    use holon_api::render_types::RenderExpr;
     use std::hash::Hash;
+
+    use holon_api::render_types::RenderExpr;
     std::mem::discriminant(e).hash(h);
     match e {
         RenderExpr::FunctionCall { name, args } => {
@@ -186,11 +191,14 @@ fn hash_expr(e: &holon_api::render_types::RenderExpr, h: &mut impl std::hash::Ha
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use futures_signals::signal_vec::{MutableVec, SignalVec};
-    use holon_api::widget_spec::DataRow;
-    use holon_api::Value;
     use std::pin::Pin;
+
+    use futures_signals::signal_vec::MutableVec;
+    use futures_signals::signal_vec::SignalVec;
+    use holon_api::Value;
+    use holon_api::widget_spec::DataRow;
+
+    use super::*;
 
     struct DummyProvider;
     impl ReactiveRowProvider for DummyProvider {
@@ -202,8 +210,8 @@ mod tests {
         }
         fn keyed_rows_signal_vec(
             &self,
-        ) -> Pin<Box<dyn SignalVec<Item = (holon_api::EntityUri, Arc<DataRow>)> + Send>> {
-            Box::pin(MutableVec::<(holon_api::EntityUri, Arc<DataRow>)>::new().signal_vec_cloned())
+        ) -> Pin<Box<dyn SignalVec<Item = (holon_api::RowKey, Arc<DataRow>)> + Send>> {
+            Box::pin(MutableVec::<(holon_api::RowKey, Arc<DataRow>)>::new().signal_vec_cloned())
         }
         fn cache_identity(&self) -> u64 {
             holon_api::ptr_identity(self)

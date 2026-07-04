@@ -1,5 +1,6 @@
-use super::prelude::*;
 use holon_frontend::ReactiveViewModel;
+
+use super::prelude::*;
 
 /// Two-slot anchored layout for the mobile action bar.
 ///
@@ -14,10 +15,7 @@ use holon_frontend::ReactiveViewModel;
 /// `safe_area_bottom_px()` only reserves the nav-bar / home-indicator
 /// inset; on desktop it returns `0.0` so this widget still works outside
 /// mobile (MCP / desktop testing).
-pub fn render(
-    node: &ReactiveViewModel,
-    ctx: &GpuiRenderContext,
-) -> Div {
+pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
     let children = &node.children;
     assert_eq!(
         children.len(),
@@ -42,7 +40,17 @@ pub fn render(
                 .overflow_hidden()
                 .child(main),
         )
-        .child(div().w_full().pb(px(bottom_inset)).child(dock))
+        .child(
+            // `id` + `overflow_x_scroll`: the dock hosts one op_button per
+            // registered block op — more than fits a phone width — so the
+            // bar scrolls horizontally instead of clipping ops off-screen.
+            div()
+                .id("bottom-dock-scroll")
+                .w_full()
+                .overflow_x_scroll()
+                .pb(px(bottom_inset))
+                .child(dock),
+        )
 }
 
 /// Logical-px bottom safe-area inset (nav bar / home indicator). Folds in

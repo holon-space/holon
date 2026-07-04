@@ -7,11 +7,11 @@
 //! ## Recipe — adding an invariant (the parallelizable unit)
 //! 1. Pick the registry body (`crate::pbt::invariants::bodies::*`) and the caps
 //!    its `where` bounds require.
-//! 2. Copy the nearest existing module here (e.g. `no_orphan` for a
-//!    `SutBackend + RefBackend` body) and adjust the `wire()` `Needs`.
-//! 3. Write the test triad against `crate::pbt::composed::fixtures::*`:
-//!    a positive (cap wired ⇒ selected + passes), a negative-containment
-//!    (cap absent ⇒ in `report.deselected`, not faked), and a catch (inject a
+//! 2. Copy the nearest existing module here (e.g. `no_orphan` for a `SutBackend
+//!    + RefBackend` body) and adjust the `wire()` `Needs`.
+//! 3. Write the test triad against `crate::pbt::composed::fixtures::*`: a
+//!    positive (cap wired ⇒ selected + passes), a negative-containment (cap
+//!    absent ⇒ in `report.deselected`, not faked), and a catch (inject a
 //!    divergence ⇒ the invariant id appears in `report.failures()`).
 //! 4. Append one `invariants::<name>::wire()` line to [`super::catalog`].
 //!
@@ -21,6 +21,7 @@
 //! Full process (router, recipes, anti-patterns, the §8.10 convergence litmus):
 //! the `pbt-composition` skill (`.claude/skills/pbt-composition/`).
 
+pub mod advice_rows_woven;
 pub mod displayed_text;
 pub mod editable_text_has_draggable;
 pub mod focus_matches_ref;
@@ -33,16 +34,18 @@ pub mod live_children_match_ref;
 pub mod live_tree_matches_fresh;
 pub mod loro_children_match_ref;
 pub mod loro_no_errors;
-// `navigation_focus` is now auto-derived by `capability_pair! { pub trait Focus }`
-// in holon-pbt-core (`inv_pair_focus_current_focus_rows`); its hand-written
+pub mod main_panel_rows_match_focus;
+pub mod observed_errors;
+// `navigation_focus` is now auto-derived by `capability_pair! { pub trait Focus
+// }` in holon-pbt-core (`inv_pair_focus_current_focus_rows`); its hand-written
 // wiring + body files were deleted.
 pub mod no_errors;
 pub mod no_orphan;
 pub mod no_parent_cycles;
 pub mod org_render_fixed_point;
 pub mod source_language;
-/// `inv-sql-budget` — `otel-testing`-gated (the budget body + composed host both
-/// require the OTel span collector; the `pbt` feature always enables it).
+/// `inv-sql-budget` — `otel-testing`-gated (the budget body + composed host
+/// both require the OTel span collector; the `pbt` feature always enables it).
 #[cfg(feature = "otel-testing")]
 pub mod sql_budget;
 pub mod task_state_storage_coherence;

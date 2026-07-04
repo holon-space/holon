@@ -1,39 +1,49 @@
-use anyhow::Result;
-use holon_api::EntityName;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
+use anyhow::Result;
+use holon_api::BatchWithMetadata;
+use holon_api::EntityName;
+use holon_api::OperationDescriptor;
+use holon_api::QueryContext;
+use holon_api::QueryLanguage;
+use holon_api::Value;
+use holon_core::storage::types::StorageEntity;
+use tokio::sync::RwLock;
 use tokio::sync::broadcast;
 
 use crate::api::operation_dispatcher::OperationDispatcher;
-use crate::api::operation_engine::{DispatchingOperationEngine, OperationEngine as _};
+use crate::api::operation_engine::DispatchingOperationEngine;
+use crate::api::operation_engine::OperationEngine as _;
+use crate::storage::DbHandle;
+use crate::storage::SqlTransformer;
 use crate::storage::sql_utils::value_to_sql_literal;
-use crate::storage::turso::{RowChange, RowChangeStream};
-use crate::storage::{DbHandle, SqlTransformer};
-use holon_api::{BatchWithMetadata, OperationDescriptor, QueryContext, QueryLanguage, Value};
-use holon_core::storage::types::StorageEntity;
+use crate::storage::turso::RowChange;
+use crate::storage::turso::RowChangeStream;
 
 /// PRQL stdlib defining virtual tables for hierarchical queries
 ///
-/// Note: When $context_id is NULL, PRQL generates `parent_id = NULL` which is always false in SQL.
-/// The `children` virtual table should be used with QueryContext::for_block() which sets a non-NULL context_id.
+/// Note: When $context_id is NULL, PRQL generates `parent_id = NULL` which is
+/// always false in SQL. The `children` virtual table should be used with
+/// QueryContext::for_block() which sets a non-NULL context_id.
 ///
 /// The `descendants` virtual table uses `block_with_path` materialized
-/// view with path prefix matching. This enables efficient tree traversal using precomputed
-/// hierarchical paths.
+/// view with path prefix matching. This enables efficient tree traversal using
+/// precomputed hierarchical paths.
 ///
-/// Note: We use `block_with_path` for descendants rather than PRQL's `loop` because
-/// `let descendants = (... loop ...)` creates nested CTEs (outer CTE for `let`, inner
-/// recursive CTE for `loop`) which prqlc doesn't flatten. The path-prefix approach is
-/// also more efficient since `block_with_path` is a pre-existing materialized view.
+/// Note: We use `block_with_path` for descendants rather than PRQL's `loop`
+/// because `let descendants = (... loop ...)` creates nested CTEs (outer CTE
+/// for `let`, inner recursive CTE for `loop`) which prqlc doesn't flatten. The
+/// path-prefix approach is also more efficient since `block_with_path` is a
+/// pre-existing materialized view.
 const PRQL_STDLIB: &str = include_str!("../../sql/prql_stdlib.prql");
 
 use crate::api::block_domain::BlockDomain;
 
 /// Main render engine managing database, query compilation, and operations
 pub struct BackendEngine {
-    /// Handle for all database operations (query, execute, DDL, CDC subscriptions)
+    /// Handle for all database operations (query, execute, DDL, CDC
+    /// subscriptions)
     db_handle: DbHandle,
     /// Operation dispatcher for routing operations
     dispatcher: Arc<OperationDispatcher>,
@@ -48,20 +58,33 @@ pub struct BackendEngine {
     matview_manager: crate::sync::MatviewManager,
     /// Entity profile resolver for per-row render + operation resolution
     profile_resolver: Arc<dyn crate::entity_profile::ProfileResolving>,
-    /// SQL-level transformers applied after compilation (entity_name, _change_origin, json_agg)
+    /// SQL-level transformers applied after compilation (entity_name,
+    /// _change_origin, json_agg)
     sql_transformers: Vec<Box<dyn SqlTransformer>>,
-    /// GQL graph schema registry — mutable to support runtime entity registration (MCP).
+    /// GQL graph schema registry — mutable to support runtime entity
+    /// registration (MCP).
     graph_schema_registry:
         Arc<std::sync::RwLock<crate::storage::graph_schema::GraphSchemaRegistry>>,
     /// Cached GQL graph schema, rebuilt from registry on mutation.
     graph_schema_cache: Arc<std::sync::RwLock<gql_transform::resolver::GraphSchema>>,
+    /// Advice-rule compilation/runtime status (ADR 0022). Written by the advice
+    /// reconciler task, read by the UI watcher so a broken rule renders its
+    /// error in place. Empty until an advice reconciler is installed (see
+    /// `create_initialized_engine`).
+    advice_status: holon_advice::AdviceRuleStatusHandle,
+    /// Keeps the advice reconciler's background tasks alive (mirrors how the
+    /// profile watcher / `LinkEventSubscriberHandle` stay alive by being
+    /// held on the engine). `None` in configs that never install one
+    /// (tests, no-advice sessions).
+    _advice_reconciler: Option<Arc<crate::sync::AdviceReconcilerHandle>>,
 }
 
 impl BackendEngine {
     /// Create BackendEngine from dependencies (for dependency injection)
     ///
-    /// Takes a `DbHandle` (for all database operations, DDL, and CDC subscriptions),
-    /// a dispatcher, profile resolver, and SQL transformers.
+    /// Takes a `DbHandle` (for all database operations, DDL, and CDC
+    /// subscriptions), a dispatcher, profile resolver, and SQL
+    /// transformers.
     ///
     /// The database actor stays alive as long as any `DbHandle` clone exists,
     /// since `DbHandle` holds an `mpsc::Sender` to the actor's command channel.
@@ -86,7 +109,27 @@ impl BackendEngine {
             sql_transformers,
             graph_schema_registry: Arc::new(std::sync::RwLock::new(graph_schema_registry)),
             graph_schema_cache: Arc::new(std::sync::RwLock::new(graph_schema)),
+            advice_status: holon_advice::AdviceRuleStatusHandle::new(),
+            _advice_reconciler: None,
         })
+    }
+
+    /// The advice-rule status map (ADR 0022) — read by the UI watcher to
+    /// replace a broken rule block's render with its error.
+    pub fn advice_status(&self) -> &holon_advice::AdviceRuleStatusHandle {
+        &self.advice_status
+    }
+
+    /// Install the advice reconciler: share the status handle the reconciler
+    /// writes to and hold its keep-alive handle. Called once during engine
+    /// initialization.
+    pub fn install_advice_reconciler(
+        &mut self,
+        status: holon_advice::AdviceRuleStatusHandle,
+        handle: crate::sync::AdviceReconcilerHandle,
+    ) {
+        self.advice_status = status;
+        self._advice_reconciler = Some(Arc::new(handle));
     }
 
     /// Apply all registered SQL-level transformers to a SQL string.
@@ -111,7 +154,8 @@ impl BackendEngine {
         self.db_handle.cdc_broadcast()
     }
 
-    /// Register a cache table as FDW-backed so that `ensure_view` primes the cache.
+    /// Register a cache table as FDW-backed so that `ensure_view` primes the
+    /// cache.
     pub async fn register_fdw_table(&self, cache_table: &str) {
         self.matview_manager.register_fdw_table(cache_table).await;
     }
@@ -121,12 +165,14 @@ impl BackendEngine {
         self.matview_manager.set_hook(hook).await;
     }
 
-    /// Drop all `watch_view_*` matviews. Used by `full_sync` to force fresh recreation.
+    /// Drop all `watch_view_*` matviews. Used by `full_sync` to force fresh
+    /// recreation.
     pub async fn drop_stale_matviews(&self) -> Result<()> {
         self.matview_manager.drop_stale_views().await
     }
 
-    /// Snapshot of (cache_hits, exists_calls, ddl_creates) from the matview manager.
+    /// Snapshot of (cache_hits, exists_calls, ddl_creates) from the matview
+    /// manager.
     pub fn matview_cache_metrics(&self) -> (u64, u64, u64) {
         self.matview_manager.cache_metrics()
     }
@@ -246,7 +292,9 @@ impl BackendEngine {
         Ok(Self::gql_params_to_dollar(&sql))
     }
 
-    /// Convert GQL `:param` syntax to `$param` so `inline_parameters` can read it. // ALLOW(compatibility): doc describes parameter normalisation, not a shim
+    /// Convert GQL `:param` syntax to `$param` so `inline_parameters` can read
+    /// it. // ALLOW(compatibility): doc describes parameter normalisation, not
+    /// a shim
     fn gql_params_to_dollar(sql: &str) -> String {
         use std::fmt::Write;
         let mut result = String::with_capacity(sql.len());
@@ -283,11 +331,13 @@ impl BackendEngine {
         result
     }
 
-    /// Inline parameter values directly into SQL (for materialized view definitions)
+    /// Inline parameter values directly into SQL (for materialized view
+    /// definitions)
     ///
-    /// Unlike bind_parameters which uses `?` placeholders, this function substitutes
-    /// actual values into the SQL string. This is necessary for CREATE MATERIALIZED VIEW
-    /// statements where the view definition must contain literal values, not parameters.
+    /// Unlike bind_parameters which uses `?` placeholders, this function
+    /// substitutes actual values into the SQL string. This is necessary for
+    /// CREATE MATERIALIZED VIEW statements where the view definition must
+    /// contain literal values, not parameters.
     ///
     /// Values are properly escaped/quoted:
     /// - Strings: 'escaped''quotes'
@@ -333,12 +383,13 @@ impl BackendEngine {
 
     /// Compute a deterministic view name for a given SQL query and parameters.
     ///
-    /// This is used to create materialized views with consistent names, allowing
-    /// us to create the view first and then query it for initial data.
-    /// Bind context parameters to the parameter map
+    /// This is used to create materialized views with consistent names,
+    /// allowing us to create the view first and then query it for initial
+    /// data. Bind context parameters to the parameter map
     ///
-    /// Adds `$context_id`, `$context_parent_id`, and `$context_path_prefix` parameters
-    /// based on QueryContext. None values are bound as Value::Null.
+    /// Adds `$context_id`, `$context_parent_id`, and `$context_path_prefix`
+    /// parameters based on QueryContext. None values are bound as
+    /// Value::Null.
     fn bind_context_params(&self, params: &mut HashMap<String, Value>, context: &QueryContext) {
         match &context.current_block_id {
             Some(id) => {
@@ -376,8 +427,9 @@ impl BackendEngine {
 
     /// Execute a SQL query and return the result set
     ///
-    /// Supports parameter binding by replacing `$param_name` placeholders with actual values.
-    /// Parameters are bound safely using SQL parameter binding to prevent SQL injection.
+    /// Supports parameter binding by replacing `$param_name` placeholders with
+    /// actual values. Parameters are bound safely using SQL parameter
+    /// binding to prevent SQL injection.
     ///
     /// # Arguments
     /// * `sql` - The SQL query to execute
@@ -391,7 +443,8 @@ impl BackendEngine {
         context: Option<QueryContext>,
     ) -> Result<Vec<holon_api::StorageEntity>> {
         // Always bind context params (using NULL if no context provided).
-        // This enables stdlib virtual tables like `from children` to compile even without context.
+        // This enables stdlib virtual tables like `from children` to compile even
+        // without context.
         let ctx = context.unwrap_or_else(QueryContext::root);
         self.bind_context_params(&mut params, &ctx);
 
@@ -433,9 +486,9 @@ impl BackendEngine {
     /// Returns a stream of RowChange events from the underlying database.
     /// The CDC connection is stored in the BackendEngine to keep it alive.
     ///
-    /// Note: The SQL should include `_change_origin` column for CDC trace propagation.
-    /// When using `compile_query` or `query_and_watch`, this is handled automatically
-    /// by the SQL transformers.
+    /// Note: The SQL should include `_change_origin` column for CDC trace
+    /// propagation. When using `compile_query` or `query_and_watch`, this
+    /// is handled automatically by the SQL transformers.
     ///
     /// # Arguments
     /// * `sql` - The SQL query to watch
@@ -455,7 +508,8 @@ impl BackendEngine {
         self.matview_manager.subscribe_cdc(&view_name).await
     }
 
-    /// Execute a SQL query, set up CDC streaming, and return initial data + change stream.
+    /// Execute a SQL query, set up CDC streaming, and return initial data +
+    /// change stream.
     ///
     /// # Arguments
     /// * `sql` - The SQL query to execute and watch
@@ -463,8 +517,8 @@ impl BackendEngine {
     /// * `context` - Optional query context for virtual table parameter binding
     ///
     /// # Returns
-    /// A `RowChangeStream` where the first batch contains the initial query results
-    /// as `Change::Created` items, followed by CDC deltas.
+    /// A `RowChangeStream` where the first batch contains the initial query
+    /// results as `Change::Created` items, followed by CDC deltas.
     #[tracing::instrument(skip(self, sql, params, context))]
     pub async fn query_and_watch(
         &self,
@@ -510,7 +564,8 @@ impl BackendEngine {
                 Err(e) => {
                     let err_str = format!("{:?}", e);
                     let is_retryable = err_str.contains("no such table")
-                        || err_str.contains("Database schema changed");
+                        || err_str.contains("Database schema changed")
+                        || err_str.contains("database is locked");
                     if is_retryable && attempt < 9 {
                         tracing::debug!(
                             "[query_and_watch] Retryable error (attempt {}): {}",
@@ -538,14 +593,17 @@ impl BackendEngine {
         Ok(Self::prepend_initial_data(data, &view_name, cdc_stream))
     }
 
-    /// Create a RowChangeStream that emits initial rows as the first `Created` batch,
-    /// then forwards CDC updates from the underlying stream.
+    /// Create a RowChangeStream that emits initial rows as the first `Created`
+    /// batch, then forwards CDC updates from the underlying stream.
     fn prepend_initial_data(
         initial_rows: Vec<holon_core::storage::types::StorageEntity>,
         view_name: &str,
         mut cdc_stream: RowChangeStream,
     ) -> RowChangeStream {
-        use holon_api::streaming::{Batch, BatchMetadata, Change, WithMetadata};
+        use holon_api::streaming::Batch;
+        use holon_api::streaming::BatchMetadata;
+        use holon_api::streaming::Change;
+        use holon_api::streaming::WithMetadata;
         use tokio_stream::StreamExt;
 
         let view_name = view_name.to_string();
@@ -594,15 +652,19 @@ impl BackendEngine {
 
     /// Execute a block operation
     ///
-    /// This method provides a clean interface for executing operations without exposing
-    /// the internal TursoBackend. It handles locking and passes the current UI state.
+    /// This method provides a clean interface for executing operations without
+    /// exposing the internal TursoBackend. It handles locking and passes
+    /// the current UI state.
     ///
     /// # Arguments
-    /// * `op_name` - Name of the operation to execute (e.g., "indent", "outdent", "move_block")
-    /// * `params` - Parameters for the operation (typically includes block ID and operation-specific fields)
+    /// * `op_name` - Name of the operation to execute (e.g., "indent",
+    ///   "outdent", "move_block")
+    /// * `params` - Parameters for the operation (typically includes block ID
+    ///   and operation-specific fields)
     ///
     /// # Returns
-    /// Result indicating success or failure. On success, UI should re-query to get updated data.
+    /// Result indicating success or failure. On success, UI should re-query to
+    /// get updated data.
     ///
     /// # Example
     /// ```no_run
@@ -714,8 +776,10 @@ impl BackendEngine {
     /// entity type operations are available for a given table.
     ///
     /// # Arguments
-    /// * `table_name` - Database table name (e.g., "todoist_task", "logseq_block")
-    /// * `entity_name` - Entity identifier (e.g., "todoist-task", "logseq-block")
+    /// * `table_name` - Database table name (e.g., "todoist_task",
+    ///   "logseq_block")
+    /// * `entity_name` - Entity identifier (e.g., "todoist-task",
+    ///   "logseq-block")
     pub async fn map_table_to_entity(&self, table_name: String, entity_name: String) {
         let mut map = self.table_to_entity_map.write().await;
         map.insert(table_name, entity_name);
@@ -735,7 +799,8 @@ impl BackendEngine {
 
     /// Get a clone of the operation dispatcher Arc
     ///
-    /// This allows querying available operations without mutating the dispatcher.
+    /// This allows querying available operations without mutating the
+    /// dispatcher.
     pub fn get_dispatcher(&self) -> Arc<OperationDispatcher> {
         self.dispatcher.clone()
     }
@@ -743,11 +808,14 @@ impl BackendEngine {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use holon_api::EntityUri;
+
     use super::*;
     use crate::core::sql_operation_provider::SqlOperationProvider;
-    use crate::di::test_helpers::{create_test_engine, create_test_engine_with_providers};
-    use holon_api::EntityUri;
-    use std::sync::Arc;
+    use crate::di::test_helpers::create_test_engine;
+    use crate::di::test_helpers::create_test_engine_with_providers;
 
     #[test]
     fn prql_stdlib_compiles_successfully() {
@@ -875,12 +943,11 @@ mod tests {
             .execute(
                 &format!(
                     "INSERT INTO {table} (id, parent_id, content, content_type) VALUES \
-                     ('block:p', NULL, 'Parent', 'text'), \
-                     ('block:p::child::0', 'block:p', 'Child A', 'text'), \
-                     ('block:p::child::1', 'block:p', 'Child B', 'text'), \
-                     ('block:p::src::0', 'block:p', 'from children', 'source'), \
-                     ('block:other', NULL, 'Unrelated Root', 'text'), \
-                     ('block:other::child::0', 'block:other', 'Unrelated Child', 'text')",
+                     ('block:p', NULL, 'Parent', 'text'), ('block:p::child::0', 'block:p', 'Child \
+                     A', 'text'), ('block:p::child::1', 'block:p', 'Child B', 'text'), \
+                     ('block:p::src::0', 'block:p', 'from children', 'source'), ('block:other', \
+                     NULL, 'Unrelated Root', 'text'), ('block:other::child::0', 'block:other', \
+                     'Unrelated Child', 'text')",
                     table = crate::storage::BLOCK_WRITE_TABLE,
                 ),
                 vec![],
@@ -1001,7 +1068,8 @@ mod tests {
         engine
             .db_handle()
             .execute(
-                "INSERT INTO users VALUES ('u1', 'Alice', 30), ('u2', 'Bob', 25), ('u3', 'Charlie', 35)",
+                "INSERT INTO users VALUES ('u1', 'Alice', 30), ('u2', 'Bob', 25), ('u3', \
+                 'Charlie', 35)",
                 vec![],
             )
             .await

@@ -22,13 +22,13 @@
 //!
 //! - Real users cannot mutate engine state. Anything reachable from
 //!   `apply_to_sut` should be reachable from a real keyboard or pointer.
-//! - Bypasses (silently mirroring focus, executing a navigation op
-//!   without a chord) hide regressions in the keyboard pipeline,
-//!   chord resolution, focus-pin reconciliation, and the renderer's
-//!   selectable registry. Catching those is the entire point.
-//! - When the production code lacks a binding for an action, ADD the
-//!   binding (in `frontends/<frontend>/config/keybindings.yaml` or
-//!   the analogous registry), do not paper over it in the test.
+//! - Bypasses (silently mirroring focus, executing a navigation op without a
+//!   chord) hide regressions in the keyboard pipeline, chord resolution,
+//!   focus-pin reconciliation, and the renderer's selectable registry. Catching
+//!   those is the entire point.
+//! - When the production code lacks a binding for an action, ADD the binding
+//!   (in `frontends/<frontend>/config/keybindings.yaml` or the analogous
+//!   registry), do not paper over it in the test.
 //!
 //! Setup helpers (loading fixtures, seeding files, harness DI wiring)
 //! are exempt — they aren't simulating a user action.
@@ -58,7 +58,9 @@ pub fn model_chord_click_focus<
     block_id: &holon_api::EntityUri,
     state: &mut R,
 ) {
-    use holon_pbt_core::capabilities::{CapCursor, CapRegion, commit_active_editor_if_dirty};
+    use holon_pbt_core::capabilities::CapCursor;
+    use holon_pbt_core::capabilities::CapRegion;
+    use holon_pbt_core::capabilities::commit_active_editor_if_dirty;
     if state.active_editor_block().as_ref() == Some(block_id) {
         return;
     }
@@ -83,10 +85,12 @@ mod arrow_navigate;
 pub mod bulk_external_add;
 pub mod click_block;
 mod concurrent_schema_init;
+mod create_block_under_focus;
 mod create_directory;
 mod create_document;
 mod create_stale_loro;
 pub mod delete_backward;
+mod delete_document;
 mod drag_drop_block;
 mod emit_mcp_data;
 mod epoch_flip_rejected;
@@ -125,12 +129,20 @@ pub mod trigger_slash_command;
 pub mod type_chars;
 mod undo_last_mutation;
 mod unpin_block;
-mod write_org_file;
+pub(crate) mod write_org_file;
 
-// Shared layout-PBT variants (delegate to holon-pbt-core + holon-layout-testing).
+// Shared layout-PBT variants (delegate to holon-pbt-core +
+// holon-layout-testing).
 mod deliver_block_content;
 mod switch_view_mode;
 mod toggle_drawer;
+
+// ── Shared helper types for peer-sync transitions ──────────────────
+// These would naturally live in `peer_edit.rs` / `peer_char_edit.rs`
+// but they're referenced as field types from BOTH the variant
+// definitions and outside callers (sut.rs SutHandle impls), so they
+// stay at the module root for ergonomic imports.
+use std::hash::{Hash, Hasher};
 
 pub use add_peer::AddPeer;
 pub use apply_mutation::ApplyMutation;
@@ -138,10 +150,13 @@ pub use arrow_navigate::ArrowNavigate;
 pub use bulk_external_add::BulkExternalAdd;
 pub use click_block::ClickBlock;
 pub use concurrent_schema_init::ConcurrentSchemaInit;
+pub use create_block_under_focus::CreateBlockUnderFocus;
 pub use create_directory::CreateDirectory;
 pub use create_document::CreateDocument;
 pub use create_stale_loro::CreateStaleLoro;
 pub use delete_backward::DeleteBackward;
+pub use delete_document::DeleteDocument;
+pub use deliver_block_content::DeliverBlockContent;
 pub use drag_drop_block::DragDropBlock;
 pub use emit_mcp_data::EmitMcpData;
 pub use epoch_flip_rejected::EpochFlipRejected;
@@ -173,26 +188,16 @@ pub use simulate_restart::SimulateRestart;
 pub use split_block::SplitBlock;
 pub use start_app::StartApp;
 pub use switch_view::SwitchView;
+pub use switch_view_mode::SwitchViewMode;
 pub use sync_with_peer::SyncWithPeer;
+pub use toggle_collapse::ToggleCollapse;
+pub use toggle_drawer::ToggleDrawer;
 pub use toggle_state::ToggleState;
 pub use trigger_slash_command::TriggerSlashCommand;
 pub use type_chars::TypeChars;
 pub use undo_last_mutation::UndoLastMutation;
 pub use unpin_block::UnpinBlock;
 pub use write_org_file::WriteOrgFile;
-
-pub use deliver_block_content::DeliverBlockContent;
-pub use switch_view_mode::SwitchViewMode;
-pub use toggle_collapse::ToggleCollapse;
-pub use toggle_drawer::ToggleDrawer;
-
-// ── Shared helper types for peer-sync transitions ──────────────────
-// These would naturally live in `peer_edit.rs` / `peer_char_edit.rs`
-// but they're referenced as field types from BOTH the variant
-// definitions and outside callers (sut.rs SutHandle impls), so they
-// stay at the module root for ergonomic imports.
-
-use std::hash::{Hash, Hasher};
 
 /// Generate a deterministic, UUID-like stable ID from inputs.
 /// Both the reference model and SUT use this to produce identical
@@ -216,7 +221,6 @@ pub fn deterministic_peer_block_id(
 
 // Peer edit operations live in `holon-pbt-core` so the `SutLoro` capability
 // trait there can name them. Re-exported here for the transition call sites.
-pub use holon_pbt_core::capabilities::{PeerEditOp, TextOp};
 
 crate::declare_e2e_transitions! {
     pub enum E2ETransition {
@@ -229,10 +233,12 @@ crate::declare_e2e_transitions! {
         NavigateBack(NavigateBack),
         BulkExternalAdd(BulkExternalAdd),
         ClickBlock(ClickBlock),
+        CreateBlockUnderFocus(CreateBlockUnderFocus),
         CreateDocument(CreateDocument),
         WriteOrgFile(WriteOrgFile),
         CreateDirectory(CreateDirectory),
         DeleteBackward(DeleteBackward),
+        DeleteDocument(DeleteDocument),
         DragDropBlock(DragDropBlock),
         EmitMcpData(EmitMcpData),
         EpochFlipRejected(EpochFlipRejected),
@@ -435,18 +441,20 @@ mod arch_tests {
 }
 
 /// PCG-3 guard: each transition's `required_caps()` matches the capability its
-/// `TransitionImpl` is bound on, so the cap gate (PCG-2) admits a transition into a
-/// composed `CapMap`'s alphabet only when `apply_to_sut`'s cap is present — never
-/// generating one that would panic on an absent `expect`. For the 43 fine-grained-bound
-/// transitions the body is type-guaranteed to use only that cap; the 5 peer ops defer to
-/// PCG-4 (`SutLoro` isn't dyn-compatible yet, and they're already wiring-gated on
-/// `HasStorage(Loro)`); `Nothing`/`DeliverBlockContent` use no cap.
+/// `TransitionImpl` is bound on, so the cap gate (PCG-2) admits a transition
+/// into a composed `CapMap`'s alphabet only when `apply_to_sut`'s cap is
+/// present — never generating one that would panic on an absent `expect`. For
+/// the 43 fine-grained-bound transitions the body is type-guaranteed to use
+/// only that cap; the 5 peer ops defer to PCG-4 (`SutLoro` isn't dyn-compatible
+/// yet, and they're already wiring-gated on `HasStorage(Loro)`);
+/// `Nothing`/`DeliverBlockContent` use no cap.
 #[cfg(test)]
 mod required_caps_guard {
-    use super::*;
-    use crate::pbt::reference_state::ReferenceState;
     use holon_pbt_core::TransitionFactory;
     use holon_pbt_core::composition::CapId;
+
+    use super::*;
+    use crate::pbt::reference_state::ReferenceState;
 
     fn caps<T: TransitionFactory<ReferenceState>>() -> Vec<CapId> {
         T::required_caps()
@@ -454,8 +462,8 @@ mod required_caps_guard {
 
     #[test]
     fn required_caps_match_transition_impl_bounds() {
-        use crate::pbt::local_caps as lc;
         use holon_frontend::pbt_caps as fe;
+        use holon_pbt_core::capabilities as lc;
         use holon_pbt_core::capabilities as c;
 
         macro_rules! one {
@@ -526,9 +534,10 @@ mod required_caps_guard {
         // Mutate (test-local)
         one!(ToggleState, lc::SutMutate);
         // ApplyMutation is now SOURCE-ROUTED via `SutApplyMutation` (one transition,
-        // source as a shrinkable axis), so its dispatch trait and its GATE cap legitimately
-        // differ: the gate names `SutLoro` (the implemented composed arm — LoroPeer), while
-        // dispatch goes through `SutApplyMutation`. The "one fine-grained cap == bound" drift
+        // source as a shrinkable axis), so its dispatch trait and its GATE cap
+        // legitimately differ: the gate names `SutLoro` (the implemented
+        // composed arm — LoroPeer), while dispatch goes through
+        // `SutApplyMutation`. The "one fine-grained cap == bound" drift
         // guard therefore tracks the GATE cap here, not the dispatch trait.
         one!(ApplyMutation, c::SutLoro);
         // BulkExternalAdd still binds the `SutSeamMutate` seam cap (pre-existing).
@@ -542,6 +551,7 @@ mod required_caps_guard {
         // AppLifecycle (test-local)
         one!(ConcurrentSchemaInit, lc::SutAppLifecycle);
         one!(CreateDocument, lc::SutAppLifecycle);
+        one!(DeleteDocument, lc::SutAppLifecycle);
         one!(EpochFlipRejected, lc::SutAppLifecycle);
         one!(SimulateRestart, lc::SutAppLifecycle);
         one!(StartApp, lc::SutAppLifecycle);
@@ -554,7 +564,8 @@ mod required_caps_guard {
         one!(SyncWithPeer, c::SutLoro);
         one!(MergeFromPeer, c::SutLoro);
         // No SUT capability needed.
-        // Nothing omitted: migrated to `cap_transition!` (no-cap form) — single-sourced.
+        // Nothing omitted: migrated to `cap_transition!` (no-cap form) —
+        // single-sourced.
         none!(DeliverBlockContent);
     }
 }

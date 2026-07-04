@@ -1,28 +1,46 @@
 //! Turso DI wiring for the frontend session (relocated from
 //! `holon-frontend::frontend_module` in storage de-leak Stage 6).
 //!
-//! `FrontendInjectorExt::add_frontend()` registers all frontend-specific services
-//! (ThemeRegistry, conditional modules, FrontendSession factory)
+//! `FrontendInjectorExt::add_frontend()` registers all frontend-specific
+//! services (ThemeRegistry, conditional modules, FrontendSession factory)
 //! so that callers can `injector.resolve_async::<FrontendSession>().await`.
+//!
+//! **Relationship to the PBT `CapMap` (ADR 0019 §5) — NESTED, not parallel.**
+//! This `fluxdi` wiring *assembles the real application*. The PBT composition
+//! spine (`holon_pbt_core::composition::CapMap`) is a capability-*disclosure
+//! facade* that wraps a fluxdi-assembled app: the headless PBT host boots this
+//! exact wiring via `new_from_config_with_di` and exposes the result as
+//! `Sut*`/`Ref*` capabilities. `CapMap` does NOT duplicate this wiring, and
+//! prod does NOT boot through `CapMap`. The two DI containers must stay
+//! separate — see ADR 0019 (do-not-unify).
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
-use fluxdi::{Injector, Module, ModuleLifecycleFuture, Provider, Shared};
-
+use fluxdi::Injector;
+use fluxdi::Module;
+use fluxdi::ModuleLifecycleFuture;
+use fluxdi::Provider;
+use fluxdi::Shared;
 use holon::api::BackendEngine;
 use holon::di::DbHandleProvider;
-use holon::sync::{
-    EventInfraModule, LoroBlockOperations, LoroConfig, LoroModule, PublishErrorTracker,
-};
-use holon_core::{CrudAuthority, OperationProvider};
-use holon_frontend::config::{HolonConfig, SessionConfig};
-use holon_frontend::preferences::{self, PrefKey};
+use holon::sync::EventInfraModule;
+use holon::sync::LoroBlockOperations;
+use holon::sync::LoroConfig;
+use holon::sync::LoroModule;
+use holon::sync::PublishErrorTracker;
+use holon_core::CrudAuthority;
+use holon_core::OperationProvider;
+use holon_frontend::FrontendSession;
+use holon_frontend::SessionParts;
+use holon_frontend::config::HolonConfig;
+use holon_frontend::config::SessionConfig;
+use holon_frontend::preferences::PrefKey;
+use holon_frontend::preferences::{self};
 use holon_frontend::render_services::register_render_services;
 use holon_frontend::theme;
-use holon_frontend::{FrontendSession, SessionParts};
 
 use crate::mcp_integrations::McpIntegrationRegistry;
 
@@ -38,8 +56,9 @@ pub struct LockedKeys(pub HashSet<PrefKey>);
 pub trait FrontendInjectorExt {
     /// Register all frontend services.
     ///
-    /// After calling this, `injector.resolve_async::<FrontendSession>()` returns
-    /// a fully initialized session with all conditional modules wired.
+    /// After calling this, `injector.resolve_async::<FrontendSession>()`
+    /// returns a fully initialized session with all conditional modules
+    /// wired.
     fn add_frontend(
         &self,
         holon_config: HolonConfig,
@@ -113,9 +132,10 @@ impl FrontendInjectorExt for Injector {
 
         // Model.md invariant 10: consolidator handover is an epoch, not a runtime
         // lookup. Fail loud if a durable vault was consolidated by a different
-        // mode than the one configured now (escape hatch: HOLON_CONSOLIDATOR_MIGRATE=1).
-        // The identity comes from the same SessionCapabilities pin the rest of the
-        // session uses; each component describes its own durable footprint.
+        // mode than the one configured now (escape hatch:
+        // HOLON_CONSOLIDATOR_MIGRATE=1). The identity comes from the same
+        // SessionCapabilities pin the rest of the session uses; each component
+        // describes its own durable footprint.
         #[cfg(not(target_arch = "wasm32"))]
         {
             let configured =
@@ -186,8 +206,9 @@ impl FrontendInjectorExt for Injector {
         // OrgMode (native-only — holon-orgmode uses tokio::fs + tokio::process)
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(root) = orgmode_root {
-            use crate::turso_seams::OrgModeModule;
             use holon_orgmode::di::OrgModeConfig;
+
+            use crate::turso_seams::OrgModeModule;
 
             // Ensure the org root exists on the real disk so the config-time
             // canonicalize below resolves. The empty-vault default-document
@@ -362,8 +383,8 @@ impl FrontendInjectorExt for Injector {
                     {
                         if let Err(e) = projection.flush().await {
                             tracing::warn!(
-                                "[FrontendSession] seed-layout projection flush failed \
-                                 (run-loop will reconcile): {e:#}"
+                                "[FrontendSession] seed-layout projection flush failed (run-loop \
+                                 will reconcile): {e:#}"
                             );
                         }
                     } else {
@@ -483,10 +504,13 @@ impl FrontendInjectorExt for Injector {
     }
 }
 
-/// Reusable module for frontend services: config, conditional modules, session factory.
+/// Reusable module for frontend services: config, conditional modules, session
+/// factory.
 ///
-/// - `configure()`: registers all frontend services via [`FrontendInjectorExt::add_frontend`]
-/// - `on_start()`: resolves `FrontendSession` (triggers the async factory chain)
+/// - `configure()`: registers all frontend services via
+///   [`FrontendInjectorExt::add_frontend`]
+/// - `on_start()`: resolves `FrontendSession` (triggers the async factory
+///   chain)
 ///
 /// Compose this into frontend-specific modules via explicit delegation
 /// (not `imports()`, which creates child injector scopes).

@@ -3,23 +3,27 @@
 //! (`wait_for_cache_caught_up`).
 //!
 //! The contract this pins (and that the Phase-5 cutover must preserve):
-//!   1. `wait_until` returns `true` as soon as the predicate holds over the feed.
-//!   2. It wakes promptly when the awaited rows arrive concurrently — via the CDC
-//!      `apply_changes` path *and* via the optimistic `insert` path — not on a
-//!      poll timer.
-//!   3. It returns `false` on timeout when the rows never arrive — and crucially
-//!      it does NOT return early just because the feed is *quiet* (no traffic).
-//!      That is the load-bearing difference from `wait_for_quiescent`: a
-//!      quiescence-only wait could return before the projection producing the
-//!      rows has even started, reintroducing the stale-cache re-render race (R1).
+//!   1. `wait_until` returns `true` as soon as the predicate holds over the
+//!      feed.
+//!   2. It wakes promptly when the awaited rows arrive concurrently — via the
+//!      CDC `apply_changes` path *and* via the optimistic `insert` path — not
+//!      on a poll timer.
+//!   3. It returns `false` on timeout when the rows never arrive — and
+//!      crucially it does NOT return early just because the feed is *quiet* (no
+//!      traffic). That is the load-bearing difference from
+//!      `wait_for_quiescent`: a quiescence-only wait could return before the
+//!      projection producing the rows has even started, reintroducing the
+//!      stale-cache re-render race (R1).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use holon::sync::live_data::LiveData;
+use holon_api::Change;
+use holon_api::EntityUri;
+use holon_api::Value;
 use holon_api::block::Block;
-use holon_api::{Change, EntityUri, Value};
 use holon_core::storage::types::StorageEntity;
 
 fn live_blocks() -> Arc<LiveData<Block>> {
@@ -63,6 +67,7 @@ fn block_row(id: &str, content: &str) -> holon_api::StorageEntity {
     row.insert("updated_at".into(), Value::Integer(0));
     row.insert("tags".into(), Value::Json("[]".to_string()));
     row.insert("requires".into(), Value::Json("[]".to_string()));
+    row.insert("advice_suppressed".into(), Value::Json("[]".to_string()));
     row
 }
 
@@ -154,13 +159,11 @@ async fn times_out_false_on_quiet_feed_without_rows() {
 
     assert!(
         !caught_up,
-        "no blocks ever arrived; wait_until must time out to false, \
-         not false-return on quiescence"
+        "no blocks ever arrived; wait_until must time out to false, not false-return on quiescence"
     );
     assert!(
         elapsed >= Duration::from_millis(300),
-        "wait_until must wait the full timeout on a quiet, unsatisfied feed; \
-         took {elapsed:?}"
+        "wait_until must wait the full timeout on a quiet, unsatisfied feed; took {elapsed:?}"
     );
 }
 

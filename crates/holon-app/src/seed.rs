@@ -10,7 +10,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use holon::api::BackendEngine;
 use holon::storage::BLOCK_READ_TABLE;
-use holon_api::{EntityName, EntityUri};
+use holon_api::EntityName;
+use holon_api::EntityUri;
 use holon_frontend::FrontendSession;
 
 /// Seed a default layout from the bundled `index.org`.
@@ -86,6 +87,7 @@ pub async fn seed_default_layout(
                 &block.properties,
                 &block.tags,
                 &block.requires,
+                &block.advice_suppressed,
             )
             .await
             .map_err(|e| anyhow::anyhow!("seed create_in_tree({}): {e:#}", block.id))?;
@@ -133,8 +135,8 @@ pub async fn seed_default_layout(
             .execute_operation(&EntityName::from("navigation"), "focus", nav_params)
             .await?;
         tracing::info!(
-            "[holon-app] Seeded default layout via intents ({} entries); \
-             main panel focused on block:journals",
+            "[holon-app] Seeded default layout via intents ({} entries); main panel focused on \
+             block:journals",
             entries.len()
         );
     }

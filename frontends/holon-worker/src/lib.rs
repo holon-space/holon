@@ -18,7 +18,13 @@
 mod turso_browser_shim;
 
 #[cfg(feature = "browser")]
-pub use turso_browser_shim::{complete_opfs, init_thread_pool, opfs, Opfs};
+pub use turso_browser_shim::Opfs;
+#[cfg(feature = "browser")]
+pub use turso_browser_shim::complete_opfs;
+#[cfg(feature = "browser")]
+pub use turso_browser_shim::init_thread_pool;
+#[cfg(feature = "browser")]
+pub use turso_browser_shim::opfs;
 
 #[cfg(feature = "browser")]
 mod subscriptions;
@@ -26,11 +32,13 @@ mod subscriptions;
 #[cfg(feature = "browser")]
 mod seed;
 
+use std::sync::Arc;
+use std::sync::OnceLock;
+use std::time::Duration;
+
 use holon::storage::BLOCK_READ_TABLE;
 use napi_derive::napi;
 use parking_lot::Mutex;
-use std::sync::{Arc, OnceLock};
-use std::time::Duration;
 
 /// H4 step 1 — tokio timers work inside a `#[napi] async fn`.
 ///
@@ -57,7 +65,8 @@ pub async fn ping(s: String) -> String {
 /// (See `tokio/src/lib.rs` line 478 in the installed crate version.) That
 /// means the worker MUST drive `BackendEngine` from a current-thread runtime.
 /// This function builds one and asserts that `tokio::spawn` + `tokio::time`
-// ALLOW(fallback): historical doc-comment quoting an architectural plan that uses the word; not a runtime fallback
+// ALLOW(fallback): historical doc-comment quoting an architectural plan that uses the word; not a
+// runtime fallback
 /// still work on a current-thread driver — which is the entire fallback path
 /// the plan called out under H4. If this also fails, the whole architecture
 /// has to rethink async.
@@ -106,19 +115,31 @@ pub fn spawn_check() -> napi::Result<String> {
 
 #[cfg(feature = "browser")]
 mod backend {
-    use super::*;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::atomic::AtomicU32;
+    use std::sync::atomic::Ordering;
+
     use holon::api::backend_engine::BackendEngine;
     use holon::api::holon_service::HolonService;
     use holon::di::lifecycle::create_backend_engine;
+    use holon_api::Change;
+    use holon_api::EntityName;
+    use holon_api::EntityUri;
+    use holon_api::QueryContext;
+    use holon_api::QueryLanguage;
+    use holon_api::Value;
     use holon_core::storage::types::StorageEntity;
-    use holon_api::{Change, EntityName, EntityUri, QueryContext, QueryLanguage, Value};
+    use holon_frontend::FrontendSession;
+    use holon_frontend::ReactiveViewModel;
+    use holon_frontend::SessionParts;
     use holon_frontend::command_provider::CommandProvider;
-    use holon_frontend::reactive::{BuilderServices, ReactiveEngine};
+    use holon_frontend::interpret_pure;
+    use holon_frontend::reactive::BuilderServices;
+    use holon_frontend::reactive::ReactiveEngine;
     use holon_frontend::shadow_builders::build_shadow_interpreter;
-    use holon_frontend::{interpret_pure, FrontendSession, ReactiveViewModel, SessionParts};
-    use std::collections::HashMap;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use super::*;
 
     pub(super) struct EngineState {
         pub engine: Arc<BackendEngine>,
@@ -152,10 +173,20 @@ mod backend {
         ENGINE.get_or_init(|| Mutex::new(None))
     }
 
-    /// Initialize the global `BackendEngine` + `FrontendSession` + `ReactiveEngine`
-    /// against the OPFS-backed DB at `db_path`. Idempotent: a second call replaces
-    /// the state.
+    /// Initialize the global `BackendEngine` + `FrontendSession` +
+    /// `ReactiveEngine` against the OPFS-backed DB at `db_path`.
+    /// Idempotent: a second call replaces the state.
     pub(super) fn init(db_path: String) -> napi::Result<()> {
+        // Install the worker's log sink exactly once (init may be re-entered).
+        static TRACING: OnceLock<()> = OnceLock::new();
+        TRACING.get_or_init(|| {
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::INFO)
+                .with_ansi(false)
+                .with_writer(std::io::stderr)
+                .init();
+        });
+
         let runtime = Arc::new(
             tokio::runtime::Builder::new_current_thread()
                 .enable_time()
@@ -163,6 +194,13 @@ mod backend {
                 .map_err(|e| super::nerr("runtime build", e))?,
         );
 
+        // File-backed DBs on wasm32 need a host IO: register the OPFS shim
+        // before the engine opens the database. The page must have
+        // `registerFile`d the db + wal paths first (OPFS sync handles are
+        // created ahead of time — see web/opfs-bridge.mjs).
+        if db_path != ":memory:" && holon::storage::turso::wasm_io::registered().is_none() {
+            holon::storage::turso::wasm_io::register(super::turso_browser_shim::opfs());
+        }
         let path = PathBuf::from(db_path);
         // EventInfraModule registers `SqlBlockOperations` as the "block"
         // OperationProvider (update / set_field / split_block / join_block /
@@ -175,7 +213,36 @@ mod backend {
                     use fluxdi::Module as _;
                     holon::sync::EventInfraModule
                         .configure(injector)
-                        .map_err(|e| anyhow::anyhow!("EventInfraModule: {e}"))
+                        .map_err(|e| anyhow::anyhow!("EventInfraModule: {e}"))?;
+
+                    // EventInfraModule's `SqlBlockOperations` only advertises
+                    // structural block ops (indent / split / move_*). CRUD ops
+                    // (set_field / create / delete) are advertised by a second
+                    // provider — native holon-app registers it in
+                    // `turso_seams.rs`, but the worker doesn't load that module,
+                    // so editor content writes and state_toggle dispatches died
+                    // as "No provider registered for entity: block". The worker
+                    // is always SqlOnly (no Loro), so a bare
+                    // `SqlOperationProvider` is the correct CRUD authority (in
+                    // Loro mode native routes CRUD through Loro instead — see the
+                    // drift note in turso_seams.rs). Structural ops still win on
+                    // `SqlBlockOperations` by registration order.
+                    injector.provide_into_set::<dyn holon_core::OperationProvider>(
+                        fluxdi::Provider::root(|resolver| {
+                            let db = resolver
+                                .resolve::<dyn holon::di::DbHandleProvider>()
+                                .handle();
+                            let provider = holon::core::SqlOperationProvider::new(
+                                db,
+                                holon::storage::BLOCK_WRITE_TABLE.to_string(),
+                                "block".to_string(),
+                                "block".to_string(),
+                            );
+                            std::sync::Arc::new(provider)
+                                as std::sync::Arc<dyn holon_core::OperationProvider>
+                        }),
+                    );
+                    Ok(())
                 })
                 .await
             })
@@ -200,13 +267,15 @@ mod backend {
         let query_engine = Some(engine.clone() as Arc<dyn holon::api::QueryEngine>);
         let operation_engine = Some(engine.clone() as Arc<dyn holon::api::OperationEngine>);
         let ui_watcher = engine.clone() as Arc<dyn holon::api::UiWatcher>;
-        let session = Arc::new(FrontendSession::from_parts(SessionParts::with_capabilities(
-            query_engine,
-            Arc::new(block_query),
-            operation_engine,
-            ui_watcher,
-            profiles,
-        )));
+        let session = Arc::new(FrontendSession::from_parts(
+            SessionParts::with_capabilities(
+                query_engine,
+                Arc::new(block_query),
+                operation_engine,
+                ui_watcher,
+                profiles,
+            ),
+        ));
 
         // OnceLock breaks the circular dep: ReactiveEngine needs itself as
         // BuilderServices inside interpret_fn, but exists only after construction.
@@ -342,7 +411,8 @@ mod backend {
         callback: napi::bindgen_prelude::Function<'_, (String,), ()>,
     ) -> napi::Result<u32> {
         use futures::StreamExt;
-        use napi::threadsafe_function::{ThreadsafeCallContext, ThreadsafeFunctionCallMode};
+        use napi::threadsafe_function::ThreadsafeCallContext;
+        use napi::threadsafe_function::ThreadsafeFunctionCallMode;
 
         let tsfn = Arc::new(
             callback
@@ -423,7 +493,8 @@ mod backend {
         crate::subscriptions::cancel(handle);
     }
 
-    /// B4: dispatch an operation via FrontendSession and return the result as JSON.
+    /// B4: dispatch an operation via FrontendSession and return the result as
+    /// JSON.
     ///
     /// `params_json` is a JSON object string (e.g. `{"id":"block:foo"}`).
     /// Returns `"null"` when the operation returns `None`.
@@ -481,17 +552,22 @@ mod backend {
             .iter()
             .map(|item| {
                 let entity = item.get("entity").and_then(|v| v.as_str()).ok_or_else(|| {
-                    super::nerr("dispatch_intents", format!("intent missing 'entity': {item}"))
+                    super::nerr(
+                        "dispatch_intents",
+                        format!("intent missing 'entity': {item}"),
+                    )
                 })?;
                 let op = item.get("op").and_then(|v| v.as_str()).ok_or_else(|| {
                     super::nerr("dispatch_intents", format!("intent missing 'op': {item}"))
                 })?;
                 let params_val = item.get("params").cloned().ok_or_else(|| {
-                    super::nerr("dispatch_intents", format!("intent missing 'params': {item}"))
+                    super::nerr(
+                        "dispatch_intents",
+                        format!("intent missing 'params': {item}"),
+                    )
                 })?;
-                let params: HashMap<String, holon_api::Value> =
-                    serde_json::from_value(params_val)
-                        .map_err(|e| super::nerr("parse intent params", e))?;
+                let params: HashMap<String, holon_api::Value> = serde_json::from_value(params_val)
+                    .map_err(|e| super::nerr("parse intent params", e))?;
                 Ok(holon_frontend::OperationIntent::new(
                     EntityName::from(entity),
                     op.to_string(),
@@ -720,7 +796,9 @@ mod backend {
                         let primary_key = match obj.get("primary_key") {
                             None | Some(serde_json::Value::Null) => false,
                             Some(v) => v.as_bool().ok_or_else(|| {
-                                anyhow::anyhow!("column {i}: 'primary_key' must be a boolean, got {v}")
+                                anyhow::anyhow!(
+                                    "column {i}: 'primary_key' must be a boolean, got {v}"
+                                )
                             })?,
                         };
                         let default = match obj.get("default") {
@@ -1213,7 +1291,8 @@ mod engine_exports {
     /// the chain advances on subsequent `engine_tick` calls.
     ///
     /// `intents_json` is a JSON array:
-    /// `[{"entity":"block","op":"split_block","params":{"id":"block:x","position":5}}, …]`
+    /// `[{"entity":"block","op":"split_block","params":{"id":"block:x","
+    /// position":5}}, …]`
     #[napi_derive::napi]
     pub fn engine_dispatch_intents(intents_json: String) -> napi::Result<()> {
         backend::dispatch_intents(intents_json)
@@ -1263,9 +1342,9 @@ mod engine_exports {
     /// Dispatch an MCP tool call by name. `args_json` is a JSON object string
     /// with the tool's arguments. Returns the result as a JSON string.
     ///
-    /// Used by the Dioxus page relay bridge: it receives `{id, tool, arguments}`
-    /// over WebSocket from the native relay, serialises `arguments` to a JSON
-    /// string, and calls this function.
+    /// Used by the Dioxus page relay bridge: it receives `{id, tool,
+    /// arguments}` over WebSocket from the native relay, serialises
+    /// `arguments` to a JSON string, and calls this function.
     #[napi_derive::napi]
     pub fn engine_mcp_tool(name: String, args_json: String) -> napi::Result<String> {
         backend::mcp_tool(name, args_json)
@@ -1371,8 +1450,9 @@ pub fn db_query(sql: String) -> napi::Result<String> {
 
 #[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
-    use holon_api::Value;
     use std::collections::HashMap;
+
+    use holon_api::Value;
 
     /// `execute_operation` deserializes `params_json` into
     /// `HashMap<String, holon_api::Value>`. `Value` is `#[serde(untagged)]`,

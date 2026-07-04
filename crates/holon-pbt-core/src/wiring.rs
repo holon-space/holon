@@ -4,8 +4,8 @@
 //! are present in a given composition of Holon. It is the single input to
 //! both:
 //!
-//! - **PBT framework** — which transition alphabet to generate from and
-//!   which invariants to run (each transition / invariant declares a
+//! - **PBT framework** — which transition alphabet to generate from and which
+//!   invariants to run (each transition / invariant declares a
 //!   [`RequiredWiring`] that the manifest must satisfy), and
 //! - **production DI** (future) — which fragments to construct.
 //!
@@ -22,8 +22,12 @@
 
 use std::collections::BTreeSet;
 
-use proptest::strategy::{BoxedStrategy, Just, Strategy, Union};
-use serde::{Deserialize, Serialize};
+use proptest::strategy::BoxedStrategy;
+use proptest::strategy::Just;
+use proptest::strategy::Strategy;
+use proptest::strategy::Union;
+use serde::Deserialize;
+use serde::Serialize;
 
 /// A storage adapter: authoritative state is local; events are reliable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -145,8 +149,8 @@ impl Wiring {
 
     // ── Blessed presets (ADR 0007 §"Blessed vs valid manifests") ────────
 
-    /// `{Loro, Org, Markdown, Turso} + {Todoist} + {UI, MCPServer, ActionEngine}`
-    /// — replaces `general_e2e_pbt_full`.
+    /// `{Loro, Org, Markdown, Turso} + {Todoist} + {UI, MCPServer,
+    /// ActionEngine}` — replaces `general_e2e_pbt_full`.
     pub fn full() -> Self {
         Self::custom(
             [
@@ -312,12 +316,14 @@ const QUERY_ADAPTER_INCLUSION_PROB: f64 = 0.15;
 /// `{}`, actors `{MCPServer, ActionEngine}`. Deliberately **no [`Actor::UI`]**
 /// (whether a headless `E2ESut` honestly executes editor transitions is
 /// unverified, so editor transitions must not generate here yet) and no
-/// `Markdown`/`GCal`/`GMail` (the SUT only faithfully backs Turso-vs-LoroMemory).
+/// `Markdown`/`GCal`/`GMail` (the SUT only faithfully backs
+/// Turso-vs-LoroMemory).
 ///
 /// Overridable via `HOLON_PBT_WIRING_AXES`, three `;`-separated comma lists
-/// `"storage;sync;actors"` — e.g. `"Loro,Turso,Org;Todoist;MCPServer,ActionEngine"`
-/// or `"Loro,Turso;;"` to scope a run to two storage axes and no sync/actors.
-/// **Fail-loud on a typo** (unknown token or wrong section count panics).
+/// `"storage;sync;actors"` — e.g.
+/// `"Loro,Turso,Org;Todoist;MCPServer,ActionEngine"` or `"Loro,Turso;;"` to
+/// scope a run to two storage axes and no sync/actors. **Fail-loud on a typo**
+/// (unknown token or wrong section count panics).
 pub fn wiring_axes() -> (Vec<StorageAdapter>, Vec<SyncAdapter>, Vec<Actor>) {
     match std::env::var("HOLON_PBT_WIRING_AXES") {
         Err(_) => (
@@ -338,8 +344,8 @@ fn parse_wiring_axes(spec: &str) -> (Vec<StorageAdapter>, Vec<SyncAdapter>, Vec<
     let sections: Vec<&str> = spec.split(';').collect();
     assert!(
         sections.len() == 3,
-        "HOLON_PBT_WIRING_AXES must have exactly 3 ';'-separated sections \
-         (storage;sync;actors), got {} in {spec:?}",
+        "HOLON_PBT_WIRING_AXES must have exactly 3 ';'-separated sections (storage;sync;actors), \
+         got {} in {spec:?}",
         sections.len()
     );
     (
@@ -347,6 +353,20 @@ fn parse_wiring_axes(spec: &str) -> (Vec<StorageAdapter>, Vec<SyncAdapter>, Vec<
         parse_axis(sections[1], parse_sync_adapter, "sync adapter"),
         parse_axis(sections[2], parse_actor, "actor"),
     )
+}
+
+/// Parse an EXACT pinned manifest (the `HOLON_PBT_PIN_WIRING` format): the same
+/// `"storage;sync;actors"` spec as `HOLON_PBT_WIRING_AXES`, but interpreted as
+/// the exact component sets of ONE wiring rather than a drawable universe.
+/// Fail-loud on a malformed spec or an invalid manifest -- a typo'd pin must
+/// never silently test a different grid point.
+pub fn wiring_from_exact_spec(spec: &str) -> Wiring {
+    let (storage, sync, actors) = parse_wiring_axes(spec);
+    let wiring = Wiring::custom(storage, sync, actors);
+    if let Err(e) = wiring.validate() {
+        panic!("pinned wiring {spec:?} is invalid: {e}");
+    }
+    wiring
 }
 
 /// Parse one comma-separated axis section into a deduplicated, order-preserving
@@ -400,8 +420,8 @@ fn parse_actor(tok: &str) -> Option<Actor> {
     }
 }
 
-/// A uniform shrinkable subset (`btree_set`, size `0..=len`, shrinks by removing
-/// elements) over a fixed axis. An empty axis yields the empty set.
+/// A uniform shrinkable subset (`btree_set`, size `0..=len`, shrinks by
+/// removing elements) over a fixed axis. An empty axis yields the empty set.
 fn uniform_subset<T>(items: &[T]) -> BoxedStrategy<BTreeSet<T>>
 where
     T: Copy + Ord + std::fmt::Debug + 'static,
@@ -484,8 +504,9 @@ pub fn any_valid_wiring() -> BoxedStrategy<Wiring> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use proptest::prelude::*;
+
+    use super::*;
 
     #[test]
     fn blessed_manifests_are_all_valid() {

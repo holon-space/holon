@@ -9,7 +9,7 @@
 //! - `stderr:json` — JSON lines to stderr
 //! - `file:///path/to/log:json` — JSON lines to file
 //! - `otlp` — OpenTelemetry OTLP exporter (reads `OTEL_EXPORTER_OTLP_ENDPOINT`,
-//!            default `http://localhost:4318`)
+//!   default `http://localhost:4318`)
 //!
 //! Examples:
 //! ```text
@@ -22,11 +22,12 @@
 //! ```
 //!
 //! `RUST_LOG` controls filtering for all destinations.
-// TODO: Why is this in holon-frontend? Logging is not frontend-specific. Is there a duplicate implementation outside of holon-frontend?
+// TODO: Why is this in holon-frontend? Logging is not frontend-specific. Is
+// there a duplicate implementation outside of holon-frontend?
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::EnvFilter;
 
 const HOLON_LOG_ENV: &str = "HOLON_LOG";
 const DEFAULT_FILTER: &str = "holon_gpui=info,holon=info,holon_tui=info";
@@ -178,8 +179,29 @@ fn init_with_destinations(destinations: &[LogDest]) -> LogGuard {
         }
     }
 
+    // tokio-console async-stall profiler. `spawn()` starts the gRPC aggregator
+    // on its own background thread so the `tokio-console` CLI can attach. Only
+    // records task busy/idle data when built with `--cfg tokio_unstable` (plus
+    // tokio's `tracing` feature, pulled in by the `tokio-console` cargo
+    // feature). Bind address overridable via `TOKIO_CONSOLE_BIND`.
+    #[cfg(feature = "tokio-console")]
+    layers.push(Box::new(
+        console_subscriber::ConsoleLayer::builder()
+            .with_default_env()
+            .spawn(),
+    ));
+
     #[cfg(feature = "chrome-trace")]
     let (chrome_layer, chrome_guard) = crate::memory_monitor::chrome_trace::layer();
+
+    // Live-oracle latency SLO (debug builds): watch the existing
+    // `holon_latency` stage events (dispatch/rows always; projection when
+    // CRDT is on); a stage slower than the SLO becomes a violation (banner +
+    // error log). HOLON_ORACLES=off opts out; HOLON_ORACLES_SLO_MS tunes.
+    #[cfg(debug_assertions)]
+    if holon_oracles::OracleMode::from_env().enabled() {
+        layers.push(Box::new(holon_oracles::latency::LatencySloLayer::from_env()));
+    }
 
     let registry = tracing_subscriber::registry().with(layers);
 
@@ -222,11 +244,11 @@ fn install_panic_hook() {
 
 #[cfg(feature = "otel")]
 fn init_otlp_layer() -> impl tracing_subscriber::Layer<tracing_subscriber::Registry> + Send + Sync {
-    use opentelemetry::global;
     use opentelemetry::KeyValue;
+    use opentelemetry::global;
     use opentelemetry_otlp::WithExportConfig;
-    use opentelemetry_sdk::trace::SdkTracerProvider;
     use opentelemetry_sdk::Resource;
+    use opentelemetry_sdk::trace::SdkTracerProvider;
 
     let service_name = std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "holon".to_string());
 

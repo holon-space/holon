@@ -1,11 +1,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::interp_value::{InterpValue, ReactiveRowProvider};
-use crate::render_types::{Arg, BinaryOperator, RenderExpr};
+use crate::Value;
+use crate::interp_value::InterpValue;
+use crate::interp_value::ReactiveRowProvider;
+use crate::render_types::Arg;
+use crate::render_types::BinaryOperator;
+use crate::render_types::RenderExpr;
 use crate::types::TaskState;
 use crate::widget_spec::DataRow;
-use crate::Value;
 
 // =========================================================================
 // Shared builder utilities
@@ -19,7 +22,13 @@ pub fn column_ref_name(expr: &RenderExpr) -> Option<&str> {
 }
 
 pub fn sort_key_column(args: &ResolvedArgs) -> Option<&str> {
-    match args.get_template("sort_key") {
+    // Both spellings are accepted template args (see `is_template_arg`);
+    // profiles/index.org write `sortkey:`, so ignoring it here silently
+    // fell back to `data_row_sort_key`.
+    match args
+        .get_template("sortkey")
+        .or_else(|| args.get_template("sort_key"))
+    {
         Some(RenderExpr::ColumnRef { name }) => Some(name.as_str()),
         _ => None,
     }
@@ -429,16 +438,18 @@ fn value_to_f64(v: &Value) -> Option<f64> {
 /// Implementations are provided by the render interpreter (widget +
 /// value-function registry). Unknown names return `None`; the caller
 /// in `eval_to_interp` then resolves the name to `Value::Null` (F1 in
-/// the design plan — no silent first-arg fallback). // ALLOW(fallback): historical name in doc comment
+/// the design plan — no silent first-arg fallback). // ALLOW(fallback):
+/// historical name in doc comment
 pub trait ValueFnLookup {
     fn invoke(&self, name: &str, args: &ResolvedArgs) -> Option<InterpValue>;
 }
 
 /// Built-in value functions available to every caller — `concat` for
 /// now, more added later. Frontend registries chain through this as a
-/// fallback so user-supplied registrations can still override built-in // ALLOW(fallback): doc describes registry chaining order
-/// names (collision check at `register_value_fn` enforces uniqueness
-/// against widgets, not against the core list).
+/// fallback so user-supplied registrations can still override built-in //
+/// ALLOW(fallback): doc describes registry chaining order names (collision
+/// check at `register_value_fn` enforces uniqueness against widgets, not
+/// against the core list).
 ///
 /// Replaces the previous `EmptyValueFnLookup` + inline `if name ==
 /// "concat"` shim that lived in `eval_to_interp`.
@@ -518,8 +529,8 @@ pub fn resolve_args_with<K: RowKey>(
                 match eval_to_interp(&arg.value, row, fns) {
                     InterpValue::Value(v) => positional.push(v),
                     InterpValue::Rows(_) => panic!(
-                        "value-function returned Rows in positional position; \
-                         use a named arg (e.g. `collection:`) instead"
+                        "value-function returned Rows in positional position; use a named arg \
+                         (e.g. `collection:`) instead"
                     ),
                 }
             }
@@ -571,8 +582,9 @@ pub fn eval_to_value<K: RowKey>(expr: &RenderExpr, row: &HashMap<K, Value>) -> V
 /// Drives argument evaluation for `resolve_args_with`. Dispatches
 /// `FunctionCall`s through the provided registry; unknown names
 /// (other than the legacy `concat` shim) produce `Value::Null`. The
-/// pre-F1 "silently return first arg" fallback is gone — a typo'd // ALLOW(fallback): historical name in doc comment
-/// function call now produces a visible `Null` at the consumer.
+/// pre-F1 "silently return first arg" fallback is gone — a typo'd //
+/// ALLOW(fallback): historical name in doc comment function call now produces a
+/// visible `Null` at the consumer.
 pub fn eval_to_interp<K: RowKey>(
     expr: &RenderExpr,
     row: &HashMap<K, Value>,
@@ -597,10 +609,10 @@ pub fn eval_to_interp<K: RowKey>(
             let resolved = resolve_args_with(args, row, fns);
             match fns.invoke(name, &resolved) {
                 Some(v) => v,
-                // F1: silent first-arg default removed. Unknown name // ALLOW(fallback): historical reference in code comment
-                // → Null. Built-in fns (`concat`, ...) are reachable
-                // through `CORE_VALUE_FN_LOOKUP` and should be chained
-                // into the caller's lookup if a frontend wants to keep
+                // F1: silent first-arg default removed. Unknown name // ALLOW(fallback): historical
+                // reference in code comment → Null. Built-in fns (`concat`, ...)
+                // are reachable through `CORE_VALUE_FN_LOOKUP` and should be
+                // chained into the caller's lookup if a frontend wants to keep
                 // them; the api-level entry points already do that.
                 None => Value(crate::Value::Null),
             }

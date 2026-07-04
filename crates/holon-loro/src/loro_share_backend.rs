@@ -2,25 +2,15 @@
 //!
 //! Registered on entity `"tree"`. Two operations:
 //! - `share_subtree(id, retention)` → returns a base64 ticket in `response`
-//! - `accept_shared_subtree(parent_id, ticket)` → returns the new mount
-//!   block's stable id in `response`
+//! - `accept_shared_subtree(parent_id, ticket)` → returns the new mount block's
+//!   stable id in `response`
 //!
-//! See the crate-level plan in docs/Reference/SUBTREE_SHARING.md for the threat model.
+//! See the crate-level plan in docs/Reference/SUBTREE_SHARING.md for the threat
+//! model.
 
-use crate::debounced_commit_worker::{self, DebouncedCommitWorkerHandle, any_commit, local_only};
-use crate::degraded_signal_bus::{DegradedSignalBus, ShareDegraded, ShareDegradedReason};
-use crate::iroh_advertiser::{ALPN_PREFIX, IrohAdvertiser, OnPeerConnected};
-use crate::iroh_sync_adapter::{
-    SharedTreeSyncManager, create_endpoint, make_alpn, sync_doc_initiate,
-};
-use crate::loro_document_store::LoroDocumentStore;
-use crate::loro_sync_controller::project_shared_doc_to_ops;
-use crate::share_peer_id::stable_peer_id;
-use crate::shared_snapshot_store::SharedSnapshotStore;
-use crate::shared_tree::{
-    self, HistoryRetention, SHARE_ROLE_MOUNT, SHARE_ROLE_PROPERTY, SHARED_TREE_ID_PROPERTY,
-};
-use crate::ticket::Ticket;
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use holon_api::EntityName;
 use holon_api::EntityUri;
@@ -29,16 +19,47 @@ use holon_api::StorageEntity;
 use holon_api::Value;
 use holon_core::DownstreamProjection;
 use holon_core::MaybeSendSync;
-use holon_core::{OperationProvider, OriginTaggedWrites};
-use holon_core::{OperationResult, Result, UndoAction};
-use iroh::{EndpointAddr, SecretKey};
-use loro::{LoroDoc, TreeID, TreeParentId, ValueOrContainer};
-use std::collections::HashMap;
-use std::sync::Arc;
+use holon_core::OperationProvider;
+use holon_core::OperationResult;
+use holon_core::OriginTaggedWrites;
+use holon_core::Result;
+use holon_core::UndoAction;
+use iroh::EndpointAddr;
+use iroh::SecretKey;
+use loro::LoroDoc;
+use loro::TreeID;
+use loro::TreeParentId;
+use loro::ValueOrContainer;
 use tokio::sync::RwLock;
-use tokio::time::{Duration, timeout};
+use tokio::time::Duration;
+use tokio::time::timeout;
 use tracing::warn;
 use uuid::Uuid;
+
+use crate::debounced_commit_worker::DebouncedCommitWorkerHandle;
+use crate::debounced_commit_worker::any_commit;
+use crate::debounced_commit_worker::local_only;
+use crate::debounced_commit_worker::{self};
+use crate::degraded_signal_bus::DegradedSignalBus;
+use crate::degraded_signal_bus::ShareDegraded;
+use crate::degraded_signal_bus::ShareDegradedReason;
+use crate::iroh_advertiser::ALPN_PREFIX;
+use crate::iroh_advertiser::IrohAdvertiser;
+use crate::iroh_advertiser::OnPeerConnected;
+use crate::iroh_sync_adapter::SharedTreeSyncManager;
+use crate::iroh_sync_adapter::create_endpoint;
+use crate::iroh_sync_adapter::make_alpn;
+use crate::iroh_sync_adapter::sync_doc_initiate;
+use crate::loro_document_store::LoroDocumentStore;
+use crate::loro_sync_controller::project_shared_doc_to_ops;
+use crate::share_peer_id::stable_peer_id;
+use crate::shared_snapshot_store::SharedSnapshotStore;
+use crate::shared_tree::HistoryRetention;
+use crate::shared_tree::SHARE_ROLE_MOUNT;
+use crate::shared_tree::SHARE_ROLE_PROPERTY;
+use crate::shared_tree::SHARED_TREE_ID_PROPERTY;
+use crate::shared_tree::{self};
+use crate::ticket::Ticket;
 
 fn err(msg: impl Into<String>) -> Box<dyn std::error::Error + Send + Sync> {
     Box::<dyn std::error::Error + Send + Sync>::from(msg.into())
@@ -294,9 +315,10 @@ fn spawn_projection_worker(
     shared_tree_id: String,
     global_doc: Arc<crate::loro_document::LoroDocument>,
 ) -> ProjectionWorker {
-    use crate::loro_backend::snapshot_blocks_from_doc;
-    use crate::loro_sync_controller::{diff_snapshots_to_ops, is_empty_frontiers};
     use std::sync::Mutex as StdMutex;
+
+    use crate::loro_backend::snapshot_blocks_from_doc;
+    use crate::loro_sync_controller::is_empty_frontiers;
 
     let watermark = Arc::new(StdMutex::new(doc.oplog_frontiers()));
     let mount_uri =
@@ -334,9 +356,6 @@ fn spawn_projection_worker(
                     }
                 };
 
-                let mut after = snapshot_blocks_from_doc(&doc);
-                patch(&mut after);
-
                 let before = if is_empty_frontiers(&last) {
                     HashMap::new()
                 } else {
@@ -350,7 +369,7 @@ fn spawn_projection_worker(
                     snap
                 };
 
-                let ops = diff_snapshots_to_ops(&before, &after);
+                let (ops, after_settled) = share_diff_ops(&doc, &before, &patch, &stid);
                 if !ops.is_empty() {
                     // Integrity guard (see `first_local_collision`): a synced-in
                     // remote edit must never project a block whose id shadows a
@@ -370,8 +389,8 @@ fn spawn_projection_worker(
                             reason: ShareDegradedReason::ForeignIdCollision(bad.clone()),
                         });
                         return Err(Box::<dyn std::error::Error + Send + Sync>::from(format!(
-                            "shared doc {stid} projection refused: block id {bad:?} collides \
-                             with a live local block — refusing to clobber local content"
+                            "shared doc {stid} projection refused: block id {bad:?} collides with \
+                             a live local block — refusing to clobber local content"
                         )));
                     }
                     let entity = EntityName::new("block");
@@ -400,12 +419,61 @@ fn spawn_projection_worker(
                     }
                 }
 
-                *watermark.lock().unwrap() = current;
+                if after_settled {
+                    *watermark.lock().unwrap() = current;
+                } else {
+                    // Freezing the watermark keeps the pre-mutation base:
+                    // withheld deletes (including LEGITIMATE ones that
+                    // happened to land in an unsettled pass) are re-diffed
+                    // and emitted on the next settled pass. Advancing it
+                    // here would drop them permanently.
+                    tracing::warn!(
+                        "shared doc {stid}: snapshot unsettled — watermark frozen; deletes \
+                         withheld until the next settled projection pass"
+                    );
+                }
                 Ok(())
             }
         },
     );
     ProjectionWorker { _handle: handle }
+}
+
+/// One share-projection diff step: snapshot `after` settled-aware, apply the
+/// share `patch`, diff against `before`, and WITHHOLD delete ops when the
+/// snapshot is unsettled — mirroring the main-doc gate in
+/// `LoroSyncController` (loro_sync_controller.rs delete-pass gate).
+///
+/// Why: an unsettled snapshot under-reports the live set (a node was
+/// transiently meta-incomplete or missing its fractional index). Diffing it
+/// naively makes that withheld node look "gone" and would emit a REAL SQL
+/// DELETE for a block that is alive in the shared Loro tree. Legitimate
+/// deletes (node parented to Deleted/Unexist) keep the snapshot settled and
+/// still flow.
+fn share_diff_ops(
+    doc: &loro::LoroDoc,
+    before: &HashMap<String, crate::loro_backend::SnapshotBlock>,
+    patch: &impl Fn(&mut HashMap<String, crate::loro_backend::SnapshotBlock>),
+    stid: &str,
+) -> (Vec<(String, StorageEntity)>, bool) {
+    use crate::loro_backend::snapshot_blocks_from_doc_settled;
+    use crate::loro_sync_controller::diff_snapshots_to_ops;
+    let (mut after, after_settled) = snapshot_blocks_from_doc_settled(doc);
+    patch(&mut after);
+    let mut ops = diff_snapshots_to_ops(before, &after);
+    if !after_settled {
+        let before_len = ops.len();
+        ops.retain(|(name, _)| name != "delete");
+        let withheld = before_len - ops.len();
+        if withheld > 0 {
+            tracing::warn!(
+                "shared doc {stid}: withholding {withheld} delete(s) — snapshot unsettled (a live \
+                 node was transiently unreadable or missing its fractional index); real deletes \
+                 flow on the next settled pass"
+            );
+        }
+    }
+    (ops, after_settled)
 }
 
 impl LoroShareBackend {
@@ -580,11 +648,11 @@ impl LoroShareBackend {
     /// Block row with:
     /// - `id = mount_block_uri` (e.g. `block:<uuid>`)
     /// - `parent_id = parent_block_uri`
-    /// - `content = fallback_title` (placeholder until descendant
-    ///   projection fills in the real content)
-    /// - `share-role = "mount"` and `shared-tree-id = <uuid>` packed
-    ///   into the `properties` JSON column, so downstream queries can
-    ///   locate mount rows without traversing Loro metadata.
+    /// - `content = fallback_title` (placeholder until descendant projection
+    ///   fills in the real content)
+    /// - `share-role = "mount"` and `shared-tree-id = <uuid>` packed into the
+    ///   `properties` JSON column, so downstream queries can locate mount rows
+    ///   without traversing Loro metadata.
     ///
     /// Uses the SQL operation provider's `create` op, which emits an
     /// `EventKind::Created` — `CacheEventSubscriber` picks it up and
@@ -675,8 +743,8 @@ impl LoroShareBackend {
             .map_err(|e| err(format!("global-doc read for collision guard: {e:#}")))?
         {
             return Err(err(format!(
-                "shared doc {shared_tree_id} projection refused: block id {bad:?} \
-                 collides with a live local block — refusing to shadow local content"
+                "shared doc {shared_tree_id} projection refused: block id {bad:?} collides with a \
+                 live local block — refusing to shadow local content"
             )));
         }
         let entity = EntityName::new("block");
@@ -909,11 +977,9 @@ fn parse_retention(s: &str) -> Result<HistoryRetention> {
         // vault). Sharing that is a whole-vault history leak, so it is disabled
         // at the boundary. The variant is kept for internal/test use only.
         // See docs/Reference/SUBTREE_SHARING.md B1.
-        "full" => Err(err(
-            "retention 'full' is disabled: it would leak the content and history \
-             of your other (non-shared) notes to the recipient. Use 'none' \
-             (state-only sharing).",
-        )),
+        "full" => Err(err("retention 'full' is disabled: it would leak the \
+                           content and history of your other (non-shared) notes \
+                           to the recipient. Use 'none' (state-only sharing).")),
         "since" => Err(err("retention 'since' is not yet supported; use 'none'")),
         other => Err(err(format!(
             "unknown retention '{other}' (expected 'none')"
@@ -954,15 +1020,16 @@ fn find_tree_id_by_stable_id(doc: &LoroDoc, stable_id: &EntityUri) -> Option<Tre
 /// subtree is shared, so under honest operation NO projected id is alive in the
 /// global tree. A collision therefore means the shared doc is trying to
 /// *shadow* a LOCAL block id — e.g. a hostile sharer naming a node
-/// `block:journals`. Because SQL `block` rows are keyed by these ids, projecting
-/// such an op would let the remote peer's `update`/`delete` clobber the
-/// recipient's own row (the UI reads SQL). The global tree is the authority for
-/// local block identity (SQL is projected from it), so it is the correct place
-/// to detect the shadow. Callers fail loud instead of clobbering.
+/// `block:journals`. Because SQL `block` rows are keyed by these ids,
+/// projecting such an op would let the remote peer's `update`/`delete` clobber
+/// the recipient's own row (the UI reads SQL). The global tree is the authority
+/// for local block identity (SQL is projected from it), so it is the correct
+/// place to detect the shadow. Callers fail loud instead of clobbering.
 fn first_local_collision(global: &LoroDoc, ops: &[(String, StorageEntity)]) -> Option<String> {
     for (_op, params) in ops {
         if let Some(Value::String(id)) = params.get("id") {
-            // ALLOW(entity_uri_from_raw): op id is a canonical block URI string built by block_to_params for the SQL op batch
+            // ALLOW(entity_uri_from_raw): op id is a canonical block URI string built by
+            // block_to_params for the SQL op batch
             let uri = EntityUri::from_raw(id);
             if find_tree_id_by_stable_id(global, &uri).is_some() {
                 return Some(id.clone());
@@ -1154,10 +1221,9 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         // "safe" to skip. We defeat it deterministically:
         //   1. project the mount row (INSERT OR IGNORE; carries `share-role`);
         //   2. flush the global projection — this acquires its project lock
-        //      (serializing with the background loop), drains the pending
-        //      prune-delete, and advances its base, so no later pass can
-        //      re-delete the descendants (the mount CREATE is IGNOREd, leaving
-        //      our `share-role` row intact);
+        //      (serializing with the background loop), drains the pending prune-delete,
+        //      and advances its base, so no later pass can re-delete the descendants
+        //      (the mount CREATE is IGNOREd, leaving our `share-role` row intact);
         //   3. re-project the descendants under the mount as the LAST write.
         // Without the DI-wired projection (tests) there is no global loop to
         // race, so the flush is simply skipped.
@@ -1220,7 +1286,8 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
             .map_err(|e| err(format!("invalid parent URI {parent_id:?}: {e:#}")))?;
         if !parent_uri.is_block() {
             return Err(err(format!(
-                "accept_shared_subtree expects a `block:` URI as parent, got scheme {:?} (full URI: {parent_id:?})",
+                "accept_shared_subtree expects a `block:` URI as parent, got scheme {:?} (full \
+                 URI: {parent_id:?})",
                 parent_uri.scheme()
             )));
         }
@@ -1918,9 +1985,10 @@ fn block_uri_from_bare(stored: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use tempfile::TempDir;
+
     use super::*;
     use crate::loro_document_store::LoroDocumentStore;
-    use tempfile::TempDir;
 
     fn make_backend() -> (Arc<LoroShareBackend>, TempDir) {
         let dir = TempDir::new().unwrap();
@@ -1941,6 +2009,87 @@ mod tests {
             LoroShareBackend::new(store, snapshot_store, manager, advertiser, bus, key),
             dir,
         )
+    }
+
+    /// F1.1 regression: a node WITHHELD from the settled snapshot (here:
+    /// `STABLE_ID` transiently unreadable, the same shape as an in-flight
+    /// create/move whose meta hasn't landed) must NOT diff as a real SQL
+    /// DELETE on the share-projection path. The ungated diff DOES see a
+    /// delete — the gate in `share_diff_ops` is what withholds it.
+    #[test]
+    fn withheld_node_emits_no_delete_on_share_path() {
+        use crate::loro_backend::TREE_NAME;
+        use crate::loro_backend::snapshot_blocks_from_doc;
+        use crate::loro_sync_controller::diff_snapshots_to_ops;
+
+        let doc = loro::LoroDoc::new();
+        let tree = doc.get_tree(TREE_NAME);
+        let node = tree.create(None).unwrap();
+        tree.get_meta(node)
+            .unwrap()
+            .insert(STABLE_ID, "11111111-1111-1111-1111-111111111111")
+            .unwrap();
+        doc.commit();
+        let watermark = doc.oplog_frontiers();
+
+        // Mid-mutation shape: node alive, meta momentarily incomplete.
+        tree.get_meta(node).unwrap().delete(STABLE_ID).unwrap();
+        doc.commit();
+
+        let fork = doc.fork_at(&watermark).unwrap();
+        let before = snapshot_blocks_from_doc(&fork);
+        assert_eq!(before.len(), 1, "node must be present in the base snapshot");
+
+        // Precondition: the ungated diff (the pre-fix worker behaviour)
+        // really does classify the withheld node as a delete.
+        let naive_after = snapshot_blocks_from_doc(&doc);
+        let naive = diff_snapshots_to_ops(&before, &naive_after);
+        assert!(
+            naive.iter().any(|(name, _)| name == "delete"),
+            "precondition: ungated diff must see a delete, got {naive:?}"
+        );
+
+        let (ops, settled) = share_diff_ops(&doc, &before, &|_| {}, "test-tree");
+        assert!(
+            !settled,
+            "snapshot with unreadable node meta must be unsettled"
+        );
+        assert!(
+            !ops.iter().any(|(name, _)| name == "delete"),
+            "withheld node must not become a SQL DELETE on the share path: {ops:?}"
+        );
+    }
+
+    /// Companion to the withhold test: a LEGITIMATE delete (node parented to
+    /// Deleted) keeps the snapshot settled and its DELETE op still flows.
+    #[test]
+    fn legitimate_delete_still_flows_on_share_path() {
+        use crate::loro_backend::TREE_NAME;
+        use crate::loro_backend::snapshot_blocks_from_doc;
+
+        let doc = loro::LoroDoc::new();
+        let tree = doc.get_tree(TREE_NAME);
+        let node = tree.create(None).unwrap();
+        tree.get_meta(node)
+            .unwrap()
+            .insert(STABLE_ID, "22222222-2222-2222-2222-222222222222")
+            .unwrap();
+        doc.commit();
+        let watermark = doc.oplog_frontiers();
+
+        tree.delete(node).unwrap();
+        doc.commit();
+
+        let fork = doc.fork_at(&watermark).unwrap();
+        let before = snapshot_blocks_from_doc(&fork);
+        assert_eq!(before.len(), 1);
+
+        let (ops, settled) = share_diff_ops(&doc, &before, &|_| {}, "test-tree");
+        assert!(settled, "a genuine delete must not unsettle the snapshot");
+        assert!(
+            ops.iter().any(|(name, _)| name == "delete"),
+            "a genuine delete must still project: {ops:?}"
+        );
     }
 
     #[test]
@@ -2243,13 +2392,15 @@ mod tests {
         }
     }
 
-    /// B3 (mount-aware write routing): a write to a block INSIDE a shared subtree
-    /// must land in the shared doc — not silently no-op on the global doc, from
-    /// which the subtree was pruned at share time — and then sync to the peer.
+    /// B3 (mount-aware write routing): a write to a block INSIDE a shared
+    /// subtree must land in the shared doc — not silently no-op on the
+    /// global doc, from which the subtree was pruned at share time — and
+    /// then sync to the peer.
     ///
-    /// Drives the REAL wired write path: a `LoroBackend` over A's global doc with
-    /// `with_shared_trees` pointed at the same `SharedTreeSyncManager` the share
-    /// machinery uses (the exact wiring `LoroBlockOperations` receives in DI).
+    /// Drives the REAL wired write path: a `LoroBackend` over A's global doc
+    /// with `with_shared_trees` pointed at the same `SharedTreeSyncManager`
+    /// the share machinery uses (the exact wiring `LoroBlockOperations`
+    /// receives in DI).
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
     async fn shared_block_write_routes_to_shared_doc_and_syncs() {
@@ -2337,11 +2488,11 @@ mod tests {
         backend_b.advertiser.close_all().await;
     }
 
-    /// Share A's `shared-parent` subtree (root-a → shared-parent → shared-child)
-    /// and accept it into B. Returns both share backends plus a `LoroBackend`
-    /// wired over A's global doc + A's share manager — the exact DI wiring
-    /// `LoroBlockOperations` receives. TempDirs are returned so the on-disk
-    /// stores outlive the test body.
+    /// Share A's `shared-parent` subtree (root-a → shared-parent →
+    /// shared-child) and accept it into B. Returns both share backends plus
+    /// a `LoroBackend` wired over A's global doc + A's share manager — the
+    /// exact DI wiring `LoroBlockOperations` receives. TempDirs are
+    /// returned so the on-disk stores outlive the test body.
     #[allow(clippy::type_complexity)]
     async fn share_setup() -> (
         Arc<LoroShareBackend>,
@@ -2434,8 +2585,9 @@ mod tests {
         backend_b.advertiser.close_all().await;
     }
 
-    /// Group-A routed writers: `update_block_properties` and `update_block_fields`
-    /// on a shared block land in the shared doc and converge to the peer.
+    /// Group-A routed writers: `update_block_properties` and
+    /// `update_block_fields` on a shared block land in the shared doc and
+    /// converge to the peer.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
     async fn routed_property_writes_round_trip_and_sync() {
@@ -2489,9 +2641,9 @@ mod tests {
         backend_b.advertiser.close_all().await;
     }
 
-    /// Create-family routing: a child created under a SHARED parent lands in the
-    /// shared doc (not the global doc), never pollutes the global `id_cache`,
-    /// and syncs to the peer.
+    /// Create-family routing: a child created under a SHARED parent lands in
+    /// the shared doc (not the global doc), never pollutes the global
+    /// `id_cache`, and syncs to the peer.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
     async fn create_under_shared_parent_lands_in_shared_doc() {
@@ -2592,7 +2744,8 @@ mod tests {
             "expected a cross-boundary rejection, got: {msg}"
         );
 
-        // Same-doc: shared-child2 → under shared-child (both in the shared doc) succeeds.
+        // Same-doc: shared-child2 → under shared-child (both in the shared doc)
+        // succeeds.
         write_backend
             .move_block(
                 &EntityUri::block("shared-child2"),
@@ -2694,10 +2847,10 @@ mod tests {
     /// Focused debug test for the known_peers+auto-resync feature
     /// path. Seeds A and B, does share→accept, then:
     ///   1. verifies A has B's addr in its sidecar after the accept
-    ///   2. verifies that after a direct `sync_with_peers` from A,
-    ///      B's sidecar records A's addr too
-    ///   3. verifies `remember_peer` replaces an entry when a newer
-    ///      addr for the same EndpointId arrives
+    ///   2. verifies that after a direct `sync_with_peers` from A, B's sidecar
+    ///      records A's addr too
+    ///   3. verifies `remember_peer` replaces an entry when a newer addr for
+    ///      the same EndpointId arrives
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
     async fn known_peers_sidecar_round_trip() {

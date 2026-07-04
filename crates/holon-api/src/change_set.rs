@@ -42,9 +42,10 @@
 
 use std::collections::BTreeMap;
 
-use crate::entity::{StorageEntity, POSITION_AFTER_BLOCK_ID_PARAM};
-use crate::entity_uri::EntityUri;
 use crate::Value;
+use crate::entity::POSITION_AFTER_BLOCK_ID_PARAM;
+use crate::entity::StorageEntity;
+use crate::entity_uri::EntityUri;
 
 /// Fields that an `update` op carries for bookkeeping, not as a representable
 /// field mutation. They never decode to a [`ChangeOp::SetField`].
@@ -54,6 +55,12 @@ const UPDATE_BOOKKEEPING_FIELDS: &[&str] = &["id", "updated_at"];
 /// [`ChangeOp::Relocate`] rather than a [`ChangeOp::SetField`].
 /// `after_block_id` joins preemptively: any future update carrying it
 /// would otherwise leak as `SetField`.
+///
+/// Note: `sort_key` appearing here does NOT mean intent may carry one —
+/// a block `set_field("sort_key")` intent is rejected at the boundary by
+/// [`crate::BlockWriteField`] (Model.md invariant 3). The `sort_key`
+/// updates this decoder sees are the ordering authority's own minted
+/// writes flowing through the op bus ("until the Phase 5 flip").
 const RELOCATE_FIELDS: &[&str] = &["parent_id", "sort_key", "after_block_id"];
 
 /// Create params injected by the storage boundary, never domain content.
@@ -118,8 +125,9 @@ pub enum ChangeOp {
 }
 
 impl ChangeOp {
-    /// The source op-name this typed op re-encodes to (`create`/`update`/`delete`).
-    /// `SetField` and `Relocate` both came from an `update`.
+    /// The source op-name this typed op re-encodes to
+    /// (`create`/`update`/`delete`). `SetField` and `Relocate` both came
+    /// from an `update`.
     pub fn source_op_name(&self) -> &'static str {
         match self {
             ChangeOp::Create { .. } => "create",
@@ -238,7 +246,8 @@ fn decode_create(params: &StorageEntity) -> ChangeOp {
     // default it away.
     let parent_id = match params.get("parent_id") {
         None => EntityUri::no_parent(),
-        // ALLOW(entity_uri_from_raw): parent_id arrives as a raw string in the StorageEntity operation-params map
+        // ALLOW(entity_uri_from_raw): parent_id arrives as a raw string in the StorageEntity
+        // operation-params map
         Some(Value::String(s)) => EntityUri::from_raw(s),
         Some(other) => {
             panic!("create op for block {id}: parent_id must be a string, got {other:?}")
@@ -248,7 +257,8 @@ fn decode_create(params: &StorageEntity) -> ChangeOp {
     let after_sibling = params
         .get(POSITION_AFTER_BLOCK_ID_PARAM)
         .and_then(Value::as_string)
-        // ALLOW(entity_uri_from_raw): after_block_id arrives as a raw string in the StorageEntity operation-params map
+        // ALLOW(entity_uri_from_raw): after_block_id arrives as a raw string in the StorageEntity
+        // operation-params map
         .map(|s| EntityUri::from_raw(s));
     // from_raw is infallible: bare strings → EntityUri::block(s),
     // schemed strings → parse; as_string already filtered non-String Values.
@@ -281,7 +291,8 @@ fn decode_update(params: &StorageEntity, out: &mut Vec<ChangeOp>) {
         out.push(ChangeOp::Relocate {
             id: id.clone(),
             parent: params.get("parent_id").map(|v| match v {
-                // ALLOW(entity_uri_from_raw): parent_id arrives as a raw string in the StorageEntity operation-params map
+                // ALLOW(entity_uri_from_raw): parent_id arrives as a raw string in the
+                // StorageEntity operation-params map
                 Value::String(s) => EntityUri::from_raw(s),
                 other => {
                     panic!("update op for block {id}: parent_id must be a string, got {other:?}")
@@ -290,7 +301,8 @@ fn decode_update(params: &StorageEntity, out: &mut Vec<ChangeOp>) {
             after_sibling: params
                 .get(POSITION_AFTER_BLOCK_ID_PARAM)
                 .and_then(Value::as_string)
-                // ALLOW(entity_uri_from_raw): after_block_id arrives as a raw string in the StorageEntity operation-params map
+                // ALLOW(entity_uri_from_raw): after_block_id arrives as a raw string in the
+                // StorageEntity operation-params map
                 .map(|s| EntityUri::from_raw(s)),
         });
     }
@@ -432,14 +444,16 @@ mod tests {
         let cs = ChangeSet::from_ops(&ops, Provenance::default());
         // One Relocate + one SetField (content); sort_key/parent_id fold into Relocate.
         assert_eq!(cs.ops.len(), 2);
-        assert!(cs
-            .ops
-            .iter()
-            .any(|o| matches!(o, ChangeOp::Relocate { .. })));
-        assert!(cs
-            .ops
-            .iter()
-            .any(|o| matches!(o, ChangeOp::SetField { field, .. } if field == "content")));
+        assert!(
+            cs.ops
+                .iter()
+                .any(|o| matches!(o, ChangeOp::Relocate { .. }))
+        );
+        assert!(
+            cs.ops
+                .iter()
+                .any(|o| matches!(o, ChangeOp::SetField { field, .. } if field == "content"))
+        );
         // Re-encodes to exactly one `update` for block:a.
         assert_eq!(*cs.reencode_op_names().get("update").unwrap(), 1);
         assert!(agrees_with_ops(&cs, &ops).is_ok());

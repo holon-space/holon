@@ -10,9 +10,9 @@
 //!
 //! - `DirectUserDriver` (in `holon-integration-tests`) — calls
 //!   `BackendEngine::execute_operation` directly. Legacy PBT path.
-//! - `GpuiUserDriver` (in `frontends/gpui`) — dispatches
-//!   `InteractionEvent`s on the MCP `interaction_tx` channel. Works
-//!   off-screen, doesn't touch the OS cursor.
+//! - `GpuiUserDriver` (in `frontends/gpui`) — dispatches `InteractionEvent`s on
+//!   the MCP `interaction_tx` channel. Works off-screen, doesn't touch the OS
+//!   cursor.
 //! - `FlutterUserDriver` (in `frontends/flutter`) — calls DartFnFuture
 //!   callbacks.
 //!
@@ -20,21 +20,35 @@
 //! tests simulate a real key press. The default impl uses
 //! `bubble_input_oneshot` to DFS the tree and match keybindings.
 
-use anyhow::{Context, Result};
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::OnceLock;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+use std::time::Instant;
 
-use holon_api::{EntityName, EntityUri, KeyChord, Value};
+use anyhow::Context;
+use anyhow::Result;
+use holon_api::EntityName;
+use holon_api::EntityUri;
+use holon_api::KeyChord;
+use holon_api::Value;
 
-use crate::input::{InputAction, WidgetInput};
+use crate::editor_view_model::EditorViewModel;
+use crate::input::InputAction;
+use crate::input::WidgetInput;
 use crate::operations::OperationIntent;
-use crate::reactive::{BuilderServices, ReactiveEngine};
+use crate::reactive::BuilderServices;
+use crate::reactive::ReactiveEngine;
 use crate::reactive_view_model::ReactiveViewModel;
+use crate::row_origin::RowOrigin;
 
 /// Default operation dispatched when a drop completes on a block drop zone.
-/// Used as fallback when `ViewKind::DropZone { op_name }` isn't readable. // ALLOW(fallback): doc comment describing pre-existing default-op semantics
+/// Used as fallback when `ViewKind::DropZone { op_name }` isn't readable. //
+/// ALLOW(fallback): doc comment describing pre-existing default-op semantics
 pub const DEFAULT_DROP_OP_NAME: &str = "move_block";
 
 /// Param key for the source block id on a drop dispatch.
@@ -81,13 +95,13 @@ pub trait UserDriver: Send + Sync {
     /// gesture exists.
     ///
     /// Legitimate uses:
-    /// - PBT fuzz targets (e.g. `block::update` with random content) that
-    ///   have no corresponding keybinding and are synthetic by design.
+    /// - PBT fuzz targets (e.g. `block::update` with random content) that have
+    ///   no corresponding keybinding and are synthetic by design.
     /// - Concurrent-mutation race tests whose timing depends on synchronous
     ///   dispatch.
     /// - Fallbacks when a native UI driver couldn't handle an input.
-    /// - Flutter FFI entry where the Dart side hasn't wrapped the user
-    ///   verbs yet.
+    /// - Flutter FFI entry where the Dart side hasn't wrapped the user verbs
+    ///   yet.
     ///
     /// If you're reaching for this because a test is easier to write
     /// synthetically than through the real pipeline, stop — either add a
@@ -127,7 +141,8 @@ pub trait UserDriver: Send + Sync {
     /// real OS or channel input cannot thread this through the window
     /// pipeline, so chord dispatch falls through to a focus-path that
     /// injects `extra_params` into the matched operation's params.
-    /// This is NOT a fallback — it is the intended path for that feature. // ALLOW(fallback): doc explicitly says "NOT a fallback"
+    /// This is NOT a fallback — it is the intended path for that feature. //
+    /// ALLOW(fallback): doc explicitly says "NOT a fallback"
     ///
     /// Returns `true` if the chord matched an operation and was dispatched.
     async fn send_key_chord(
@@ -201,9 +216,10 @@ pub trait UserDriver: Send + Sync {
     /// `block::update { content }`.
     ///
     /// The default impl composes the medium-agnostic real-input verbs, so it is
-    /// correct for both headless (`send_raw_keystroke` → `HeadlessEditorMirror`)
-    /// and screen drivers (real `InputState`) without per-driver code — unlike
-    /// the synthetic `type_text`, it cannot launder a shortcut past the editor.
+    /// correct for both headless (`send_raw_keystroke` →
+    /// `HeadlessEditorMirror`) and screen drivers (real `InputState`)
+    /// without per-driver code — unlike the synthetic `type_text`, it
+    /// cannot launder a shortcut past the editor.
     async fn replace_text(&self, entity_id: &EntityUri, text: &str) -> Result<()> {
         // Focus the editor the same way `FocusEditableText` does.
         self.click_entity(entity_id, "main").await?;
@@ -342,10 +358,9 @@ pub trait UserDriver: Send + Sync {
     async fn send_raw_keystroke(&self, keystroke: &str, modifiers: &[&str]) -> Result<()> {
         let _ = (keystroke, modifiers);
         anyhow::bail!(
-            "send_raw_keystroke is unimplemented for this UserDriver. \
-             Atomic editor primitives need a real-input driver (GpuiUserDriver). \
-             Was an atomic-editor transition generated for a headless run \
-             (the editor buffer capability requires a real-input driver)?"
+            "send_raw_keystroke is unimplemented for this UserDriver. Atomic editor primitives \
+             need a real-input driver (GpuiUserDriver). Was an atomic-editor transition generated \
+             for a headless run (the editor buffer capability requires a real-input driver)?"
         )
     }
 
@@ -396,9 +411,9 @@ pub trait UserDriver: Send + Sync {
         anyhow::bail!(
             "set_block_expanded is unimplemented for this UserDriver. Block expansion is \
              view-local widget state; only a driver with a reactive view tree \
-             (ReactiveEngineDriver) or a real window (GpuiUserDriver/SimUserDriver) can drive \
-             the chevron. Was an ExpandToggle/CollapseToggle transition generated for a driver \
-             that cannot reach the view?"
+             (ReactiveEngineDriver) or a real window (GpuiUserDriver/SimUserDriver) can drive the \
+             chevron. Was an ExpandToggle/CollapseToggle transition generated for a driver that \
+             cannot reach the view?"
         )
     }
 
@@ -460,6 +475,95 @@ impl ReactiveEngineDriver {
             router,
             editor_mirror,
         }
+    }
+
+    /// Headless equivalent of GPUI `editor_view.rs`'s on-blur / authority-leave
+    /// commit for the focused main panel's creation slot. Resolves the slot's
+    /// parent the SAME way the render pipeline keys the `:__virtual:<parent>`
+    /// slot — `row_origin::resolve_creation_parent` over the main panel's LIVE
+    /// query rows (WP-E's navigation focus root) — then runs the production
+    /// `ViewEventHandler::handle_text_sync` create path
+    /// ([`EditorViewModel::pending_commit_intent`]) to obtain the
+    /// `block.create{parent_id, content}` intent and dispatches it exactly as
+    /// GPUI does via `dispatch_intent`.
+    ///
+    /// Why compute the parent instead of reading a rendered slot node: the slot
+    /// materializes only on the streaming `create_tree_driver` render path (the
+    /// `AppendedRowsProvider` creation-slot). The pure `engine.snapshot` /
+    /// MCP render path a headless reader sees does NOT append it for a panel
+    /// rendered via `live_block` — `virtual_parent: true` is resolved only in
+    /// the `live_query` builder (`resolve_virtual_parent`), the documented
+    /// "live_block still pending" gap in `shadow_builders::tree`. So there is
+    /// no rendered virtual node to read here. Rather than re-derive from
+    /// the editor caret (`engine.focused_block()`, ADR 0010 — WRONG,
+    /// diverges from the nav root under
+    /// `SplitBlock`/`JoinBlock`/`FocusEditableText`), this reuses the exact
+    /// production parent-resolution (`resolve_creation_parent`) on the
+    /// exact rows the render uses, so the committed parent is byte-identical to
+    /// the slot id the streaming render keys. It is NOT a new create path — the
+    /// `create` intent still comes from `handle_text_sync`.
+    ///
+    /// This is the shared seam the iOS render-path focus edge (B1, deferred)
+    /// will later call; here it lets the headless keystone drive WP-E's
+    /// creation-slot focus-root parenting cross-backend. Fails loud (per the
+    /// project's error policy) if the focused main panel resolves no creation
+    /// parent (empty / cold-boot rowset) or the commit yields no intent.
+    pub async fn commit_creation_slot(&self, content: &str) -> Result<EntityUri> {
+        let main_panel = region_panel_block_id(holon_api::Region::Main);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let parent = loop {
+            let (_expr, rows) = self.engine.ensure_watching(&main_panel).snapshot();
+            // WP-E: the slot parents to the main panel's navigation focus root,
+            // resolved from the rendered rowset (NOT the caret, NOT the panel
+            // container). This is the SAME call the render's `build_trailing_slot`
+            // makes, so the parent matches the rendered slot id exactly.
+            if let Some(parent) = crate::row_origin::resolve_creation_parent(&rows, &main_panel) {
+                break parent;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                let row_ids: Vec<String> = rows
+                    .iter()
+                    .filter_map(|r| r.get("id").and_then(|v| v.as_string()).map(String::from))
+                    .collect();
+                anyhow::bail!(
+                    "commit_creation_slot: main panel {main_panel} resolves NO creation parent \
+                     after 3s (caret focus {:?}; {} live rows {row_ids:?}) — the focused main \
+                     panel query returned an empty / not-yet-resolvable rowset (cold-boot \
+                     empty-page case). WP-E's `resolve_creation_parent` needs at least one real \
+                     row to key the slot on the nav focus root.",
+                    self.engine.focused_block(),
+                    rows.len()
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(120)).await;
+        };
+
+        // Build the `:__virtual:<parent>` slot id exactly as the render does, and
+        // commit through the production `handle_text_sync` create path. The
+        // editor node only needs `context_params["id"]` = this virtual id; the
+        // create branch reads the parent back out of it (never the caret).
+        let slot_id = RowOrigin::creation_placeholder_id(&parent);
+        let slot_uri = EntityUri::parse(&slot_id)
+            .with_context(|| format!("creation-slot id {slot_id:?} is not a valid EntityUri"))?;
+        let mut context_params = std::collections::HashMap::new();
+        context_params.insert("id".to_string(), holon_api::Value::String(slot_id.clone()));
+        let intent = EditorViewModel::new(
+            Vec::new(),
+            Vec::new(),
+            context_params,
+            "content".to_string(),
+            String::new(),
+        )
+        .pending_commit_intent(content)
+        .with_context(|| {
+            format!(
+                "creation-slot commit produced no create intent for slot {slot_id} content \
+                 {content:?} — the slot id did not parse as a CreationPlaceholder, or the content \
+                 was empty"
+            )
+        })?;
+        self.engine.dispatch_intent_sync(intent).await?;
+        Ok(slot_uri)
     }
 
     /// Ensure the router is warmed for `root_block_id`. Idempotent — safe to
@@ -525,7 +629,8 @@ impl UserDriver for ReactiveEngineDriver {
     /// Poll for the entity in the resolved tree: nested `live_block`
     /// watches stream in async, so a click that lands immediately after
     /// `apply_start_app` may see an empty list. Same pattern
-    /// `send_key_chord` uses for its router fallback. If the entity is // ALLOW(fallback): pre-existing doc on router-poll behavior
+    /// `send_key_chord` uses for its router fallback. If the entity is //
+    /// ALLOW(fallback): pre-existing doc on router-poll behavior
     /// never found, we fall through to cursor placement — same as GPUI
     /// when nothing intercepts the click.
     async fn click_entity(&self, entity_id: &EntityUri, region: &str) -> Result<()> {
@@ -566,7 +671,23 @@ impl UserDriver for ReactiveEngineDriver {
         // focusing the block, matching GPUI's `render_entity` click handler.
         // Focus is pure in-memory state (ADR 0010): set the authority
         // directly instead of dispatching `navigation.editor_focus`.
+        //
+        // A real click also RE-PLACES the caret: GPUI re-mounts the block's
+        // editor at the click position (modeled as end-of-text, see
+        // `model_chord_click_focus` in the PBT ref). Seed the headless caret
+        // mirror the same way `send_key_chord` does, or a cursor tracked
+        // during an earlier editor session on this block — or a stale armed
+        // caret seed (split → 0) that `set_focus` keeps for the same block —
+        // survives the click and diverges from the freshly-mounted editor.
+        // Clicking the already-focused block is a no-op on the caret, like
+        // the already-active early-return in the ref model.
         let _ = region;
+        if self.engine.focused_block().as_ref() != Some(entity_id) {
+            self.editor_mirror
+                .seed_for_click(&self.engine, entity_id)
+                .await
+                .with_context(|| format!("click_entity: caret seed for clicked {entity_id}"))?;
+        }
         self.engine.set_focus(Some(entity_id.clone()));
         Ok(())
     }
@@ -589,9 +710,9 @@ impl UserDriver for ReactiveEngineDriver {
             }
             if Instant::now() >= deadline {
                 anyhow::bail!(
-                    "cycle_state_toggle: no state_toggle glyph for {entity_id} in region \
-                     {region} within 2s — the target rendered no state_toggle (not a visible \
-                     task row?), so its cycle set_field intent could not be resolved."
+                    "cycle_state_toggle: no state_toggle glyph for {entity_id} in region {region} \
+                     within 2s — the target rendered no state_toggle (not a visible task row?), \
+                     so its cycle set_field intent could not be resolved."
                 );
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -613,10 +734,9 @@ impl UserDriver for ReactiveEngineDriver {
         let bare = target_str.strip_prefix("block:").unwrap_or(target_str);
         let gate = root.find_expand_toggle_gate(bare).ok_or_else(|| {
             anyhow::anyhow!(
-                "set_block_expanded: no expand_toggle node with target_id={bare} in the \
-                 reactive tree under {root_uri}. The fixture grew an expand_toggle render but \
-                 the engine didn't produce a matching node — likely a shadow_builder or \
-                 interpret regression."
+                "set_block_expanded: no expand_toggle node with target_id={bare} in the reactive \
+                 tree under {root_uri}. The fixture grew an expand_toggle render but the engine \
+                 didn't produce a matching node — likely a shadow_builder or interpret regression."
             )
         })?;
         gate.set(expanded);
@@ -683,7 +803,8 @@ impl UserDriver for ReactiveEngineDriver {
             tokio::time::sleep(Duration::from_millis(10)).await;
         };
 
-        // Final fallback: if the router never saw the entity within the // ALLOW(fallback): pre-existing one-shot DFS escape hatch with explicit warn
+        // Final fallback: if the router never saw the entity within the //
+        // ALLOW(fallback): pre-existing one-shot DFS escape hatch with explicit warn
         // poll window, build a fresh engine-snapshot focus path. This is
         // the same pattern GPUI uses for chord resolution when its router
         // is mid-fan-out, and it forces `ensure_watching` for every
@@ -706,8 +827,8 @@ impl UserDriver for ReactiveEngineDriver {
                 if std::env::var("HOLON_DEBUG_CHORD").is_ok() {
                     eprintln!(
                         // ALLOW(fallback): debug message describing existing fallback path
-                        "[CHORD-FALLBACK] router timeout for entity={} chord={:?}; \
-                         engine fp_found={}",
+                        "[CHORD-FALLBACK] router timeout for entity={} chord={:?}; engine \
+                         fp_found={}",
                         entity_id,
                         chord,
                         fp.is_some(),
@@ -766,7 +887,8 @@ impl UserDriver for ReactiveEngineDriver {
                 _ => return None,
             }
         }
-        // Fallback: one-shot DFS+bubble from the tree snapshot. // ALLOW(fallback): pre-existing one-shot escape hatch when router has no path
+        // Fallback: one-shot DFS+bubble from the tree snapshot. // ALLOW(fallback):
+        // pre-existing one-shot escape hatch when router has no path
         let input = WidgetInput::KeyChord {
             keys: chord.0.clone(),
         };
@@ -846,20 +968,18 @@ impl UserDriver for ReactiveEngineDriver {
                 let diag = self.router.diagnostic_snapshot();
                 if !found_source {
                     anyhow::bail!(
-                        "drop_entity: no Draggable widget covers source block {source_id} \
-                         after {:?} — the source's block tree never populated in the \
-                         router (live_block slot didn't resolve, or the block's render \
-                         template doesn't include `draggable(...)`).\n\
-                         Router diagnostic:\n{diag}",
+                        "drop_entity: no Draggable widget covers source block {source_id} after \
+                         {:?} — the source's block tree never populated in the router (live_block \
+                         slot didn't resolve, or the block's render template doesn't include \
+                         `draggable(...)`).\nRouter diagnostic:\n{diag}",
                         drop_widget_timeout()
                     );
                 }
                 anyhow::bail!(
-                    "drop_entity: no DropZone widget renders for target block {target_id} \
-                     after {:?} — the target's block tree never populated in the router \
-                     (live_block slot didn't resolve, or the block's render template \
-                     doesn't include `drop_zone(...)`).\n\
-                     Router diagnostic:\n{diag}",
+                    "drop_entity: no DropZone widget renders for target block {target_id} after \
+                     {:?} — the target's block tree never populated in the router (live_block \
+                     slot didn't resolve, or the block's render template doesn't include \
+                     `drop_zone(...)`).\nRouter diagnostic:\n{diag}",
                     drop_widget_timeout()
                 );
             }

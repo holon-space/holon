@@ -7,52 +7,55 @@
 //! ## Pre-Startup Testing
 //!
 //! TestEnvironment supports two phases:
-//! 1. **Pre-startup** (`session: None`): Can write org files to temp_dir before the app starts
+//! 1. **Pre-startup** (`session: None`): Can write org files to temp_dir before
+//!    the app starts
 //! 2. **Running** (`session: Some`): Full application functionality
 //!
-//! This enables testing scenarios where files exist before the application starts,
-//! reproducing the Flutter startup bug where DDL operations race with sync of existing files.
+//! This enables testing scenarios where files exist before the application
+//! starts, reproducing the Flutter startup bug where DDL operations race with
+//! sync of existing files.
 
-use std::cell::{Cell, OnceCell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::cell::Cell;
+use std::cell::OnceCell;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
 use futures::StreamExt;
-use tempfile::TempDir;
-use tokio::sync::RwLock;
-
-use holon_api::reactive::CdcAccumulator;
-
-use holon::api::{BackendEngine, RowChangeStream};
-use holon::di::{StorageSelector, build_no_turso_container};
+use holon::api::BackendEngine;
+use holon::api::RowChangeStream;
+use holon::di::StorageSelector;
+use holon::di::build_no_turso_container;
 use holon::sync::LoroDocumentStore;
 use holon::sync::event_bus::PublishErrorTracker;
-use holon::sync::loro_block_query_source::{
-    register_loro_block_query_source, register_loro_operation_engine,
-};
+use holon::sync::loro_block_query_source::register_loro_block_query_source;
+use holon::sync::loro_block_query_source::register_loro_operation_engine;
 use holon::testing::e2e_test_helpers::E2ETestContext;
+use holon_api::ContentType;
 use holon_api::EntityUri;
 use holon_api::QueryContext;
+use holon_api::QueryLanguage;
+use holon_api::Region;
+use holon_api::RenderExpr;
+use holon_api::SourceLanguage;
+use holon_api::Value;
 use holon_api::block::Block;
-use holon_api::{ContentType, QueryLanguage, Region, RenderExpr, SourceLanguage, Value};
+use holon_api::reactive::CdcAccumulator;
 use holon_app::register_block_query_frontend;
 use holon_filesystem::FileSystem;
-use holon_frontend::reactive::{BuilderServices, BuilderServicesSlot, ReactiveEngine};
-use holon_frontend::{FrontendSession, HolonConfig, SessionConfig};
+use holon_frontend::FrontendSession;
+use holon_frontend::HolonConfig;
+use holon_frontend::SessionConfig;
+use holon_frontend::reactive::BuilderServices;
+use holon_frontend::reactive::BuilderServicesSlot;
+use holon_frontend::reactive::ReactiveEngine;
 use holon_loro::LoroBackend;
-
-/// Types of corruption for stale .loro files (for testing recovery)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum LoroCorruptionType {
-    /// Empty file (0 bytes)
-    Empty,
-    /// File with partial/truncated Loro header
-    Truncated,
-    /// File with invalid magic bytes
-    InvalidHeader,
-}
+use holon_pbt_core::types::LoroCorruptionType;
+use tempfile::TempDir;
+use tokio::sync::RwLock;
 
 /// Resolve the DI-registered `DebugServices` and pre-populate its
 /// optional fields (`loro_doc_store`) from other DI services. Mirrors
@@ -100,11 +103,12 @@ pub struct TestEnvironment {
     /// The running application (empty before start_app()).
     ///
     /// `OnceCell` so `start_app` can latch it via `&self` (the prerequisite for
-    /// an `&self` `apply_start_app`). `OnceCell::get()` hands out a borrow-guard-free
-    /// `&FrontendSession`, so the `session()`/`test_ctx()` accessors keep returning
-    /// `&T` and holding it across `.await` is sound. The rare config-change restart
-    /// (`stop_app`) resets via `OnceCell::take()` — available because `stop_app`
-    /// keeps `&mut self`.
+    /// an `&self` `apply_start_app`). `OnceCell::get()` hands out a
+    /// borrow-guard-free `&FrontendSession`, so the
+    /// `session()`/`test_ctx()` accessors keep returning `&T` and holding
+    /// it across `.await` is sound. The rare config-change restart
+    /// (`stop_app`) resets via `OnceCell::take()` — available because
+    /// `stop_app` keeps `&mut self`.
     session: OnceCell<Arc<FrontendSession>>,
 
     /// DI injector clone, captured during startup. Lets read-only inspection
@@ -123,9 +127,9 @@ pub struct TestEnvironment {
     /// PBTs.
     debug_services: OnceCell<Arc<holon_mcp::server::DebugServices>>,
 
-    /// Loro sync controller handle, resolved from DI (None when Loro is disabled).
-    /// Used by `wait_for_loro_quiescence` to poll until the controller has
-    /// caught up with the current Loro state.
+    /// Loro sync controller handle, resolved from DI (None when Loro is
+    /// disabled). Used by `wait_for_loro_quiescence` to poll until the
+    /// controller has caught up with the current Loro state.
     loro_sync_handle: OnceCell<Arc<holon::sync::LoroSyncControllerHandle>>,
 
     /// Reactive engine, resolved from DI (same instance as GPUI uses).
@@ -136,7 +140,8 @@ pub struct TestEnvironment {
     /// `wait_for_org_files_stable` skip filesystem polling on the hot path.
     org_sync_idle: OnceCell<Arc<holon_orgmode::OrgSyncIdleSignal>>,
 
-    /// The E2ETestContext for operations (wraps BackendEngine) - only valid after start_app()
+    /// The E2ETestContext for operations (wraps BackendEngine) - only valid
+    /// after start_app()
     ctx: OnceCell<E2ETestContext>,
 
     /// Created documents (doc_uri -> file path).
@@ -151,16 +156,18 @@ pub struct TestEnvironment {
 
     /// Active CDC watches (query_id -> stream).
     ///
-    /// Interior-mutable so the watch-write path (`setup_watch`) can be `&self` —
-    /// the prerequisite for decomposing the `SetupWatch` transition onto the
-    /// fine-grained `SutWatchRegister` cap (`&self`, as all `capmap_adapter` caps
-    /// must be). No borrow is ever held across an `.await`, and `E2ESut` is never
-    /// `Send`-bound (all its async cap impls are `?Send`, driven via `block_on`),
-    /// so `RefCell` is sound here.
+    /// Interior-mutable so the watch-write path (`setup_watch`) can be `&self`
+    /// — the prerequisite for decomposing the `SetupWatch` transition onto
+    /// the fine-grained `SutWatchRegister` cap (`&self`, as all
+    /// `capmap_adapter` caps must be). No borrow is ever held across an
+    /// `.await`, and `E2ESut` is never `Send`-bound (all its async cap
+    /// impls are `?Send`, driven via `block_on`), so `RefCell` is sound
+    /// here.
     pub active_watches: RefCell<HashMap<String, RowChangeStream>>,
 
-    /// Watch query metadata for fallback re-query (query_id -> (source, language)).
-    /// Interior-mutable for the same reason as [`Self::active_watches`].
+    /// Watch query metadata for fallback re-query (query_id -> (source,
+    /// language)). Interior-mutable for the same reason as
+    /// [`Self::active_watches`].
     pub watch_queries: RefCell<HashMap<String, (String, QueryLanguage)>>,
 
     /// UI model built from CDC events (query_id -> accumulator).
@@ -177,16 +184,17 @@ pub struct TestEnvironment {
     /// as [`Self::active_watches`].
     pub region_streams: RefCell<HashMap<String, RowChangeStream>>,
 
-    /// Region data built from CDC events (region_id -> accumulator). Interior-mutable
-    /// for the same reason as [`Self::region_streams`].
+    /// Region data built from CDC events (region_id -> accumulator).
+    /// Interior-mutable for the same reason as [`Self::region_streams`].
     pub region_data: RefCell<HashMap<String, CdcAccumulator<holon_api::StorageEntity>>>,
 
     /// All-blocks CDC watch for invariant #1 (uses production CdcAccumulator).
     ///
-    /// Interior-mutable so the block-convergence settle (`wait_for_blocks_synced`,
-    /// reached from `simulate_restart`) can be `&self`. The await-driven drain
-    /// loops `take()` the accumulator+stream into locals (dropping the guard)
-    /// before any `.await`, then restore them — no `RefCell` borrow ever crosses
+    /// Interior-mutable so the block-convergence settle
+    /// (`wait_for_blocks_synced`, reached from `simulate_restart`) can be
+    /// `&self`. The await-driven drain loops `take()` the
+    /// accumulator+stream into locals (dropping the guard) before any
+    /// `.await`, then restore them — no `RefCell` borrow ever crosses
     /// a suspension point. Same `?Send`/single-threaded soundness as
     /// [`Self::active_watches`].
     pub all_blocks: RefCell<Option<CdcAccumulator<holon_api::StorageEntity>>>,
@@ -204,8 +212,8 @@ pub struct TestEnvironment {
     /// Interior-mutable (`Cell`) for the same reason as [`Self::all_blocks`].
     seed_count: Cell<Option<usize>>,
 
-    /// Whether to enable Todoist fake mode (adds concurrent DDL during startup).
-    /// `Cell` so `set_enable_fake_mcp` can write via `&self`.
+    /// Whether to enable Todoist fake mode (adds concurrent DDL during
+    /// startup). `Cell` so `set_enable_fake_mcp` can write via `&self`.
     enable_fake_mcp: Cell<bool>,
 
     /// Whether to enable Loro CRDT layer (default: true for backward compat).
@@ -221,10 +229,10 @@ pub struct TestEnvironment {
     /// `start_app`; `None` for a Turso session or before startup.
     loro_backend: OnceCell<Arc<LoroBackend>>,
 
-    /// Idle signal + keepalive for the no-Turso `FileSyncController` loop started
-    /// by resolving `FileSyncStarted`. Holding this strong `Arc` keeps the loop
-    /// alive (the loop holds a `Weak` and exits when this drops). `None` for a
-    /// Turso session or before startup.
+    /// Idle signal + keepalive for the no-Turso `FileSyncController` loop
+    /// started by resolving `FileSyncStarted`. Holding this strong `Arc`
+    /// keeps the loop alive (the loop holds a `Weak` and exits when this
+    /// drops). `None` for a Turso session or before startup.
     loro_org_idle: OnceCell<std::sync::Arc<holon_orgmode::di::OrgSyncIdleSignal>>,
 
     /// Shared in-memory org filesystem (ADR 0011 P3). All harness org-file
@@ -253,7 +261,8 @@ impl std::fmt::Debug for TestEnvironment {
     }
 }
 
-/// Builder for TestEnvironment that allows pre-populating org files before engine initialization.
+/// Builder for TestEnvironment that allows pre-populating org files before
+/// engine initialization.
 ///
 /// This is critical for reproducing the Flutter startup bug where:
 /// 1. Org files already exist when the app starts
@@ -331,9 +340,9 @@ impl TestEnvironmentBuilder {
     /// Enable a fake external MCP provider via an in-memory duplex transport.
     ///
     /// Drives the real MCP client pipeline (McpSyncEngine → QueryableCache →
-    /// Turso), creating its cache table and running an initial sync concurrently
-    /// with startup. Replaces the old Todoist fake as the concurrent-DDL race
-    /// stressor — see `fake_mcp_module`.
+    /// Turso), creating its cache table and running an initial sync
+    /// concurrently with startup. Replaces the old Todoist fake as the
+    /// concurrent-DDL race stressor — see `fake_mcp_module`.
     pub fn with_fake_mcp(mut self) -> Self {
         self.enable_fake_mcp = true;
         self
@@ -348,8 +357,9 @@ impl TestEnvironmentBuilder {
 
     /// Build the TestEnvironment, creating any pre-populated org files first
     ///
-    /// Uses FrontendSession to ensure identical initialization path with production frontends.
-    /// This simulates the Flutter scenario where files exist before the app starts.
+    /// Uses FrontendSession to ensure identical initialization path with
+    /// production frontends. This simulates the Flutter scenario where
+    /// files exist before the app starts.
     pub async fn build(self, runtime: Arc<tokio::runtime::Runtime>) -> Result<TestEnvironment> {
         let temp_dir =
             TempDir::new().map_err(|e| anyhow::anyhow!("Failed to create temp dir: {}", e))?;
@@ -407,12 +417,7 @@ impl TestEnvironmentBuilder {
             config_dir,
             std::collections::HashSet::new(),
             move |injector| {
-                use holon_frontend::reactive::{BuilderServicesSlot, RenderInterpreterInjectorExt};
-                override_org_fs_bindings(injector, &org_fs_for_di);
-                let slot = injector.resolve::<BuilderServicesSlot>();
-                injector.set_render_interpreter(holon_frontend::reactive::make_interpret_fn(
-                    slot.0.clone(),
-                ));
+                install_headless_render_interpreter(injector, &org_fs_for_di);
                 holon_mcp::di::register_debug_services(injector);
                 if enable_fake_mcp {
                     crate::fake_mcp_module::register_fake_mcp(injector);
@@ -420,13 +425,7 @@ impl TestEnvironmentBuilder {
                 Ok(())
             },
             move |injector| {
-                use holon_frontend::reactive::{
-                    BuilderServices, BuilderServicesSlot, ReactiveEngine,
-                };
-                let engine = injector.resolve::<ReactiveEngine>();
-                let slot = injector.resolve::<BuilderServicesSlot>();
-                let services: Arc<dyn BuilderServices> = engine.clone();
-                slot.0.set(services).ok(); // ALLOW(ok): OnceLock set — idempotent
+                let engine = publish_reactive_builder_services(injector);
 
                 let doc_store = if enable_loro {
                     injector
@@ -526,6 +525,41 @@ pub(crate) fn override_org_fs_bindings(
     ));
 }
 
+/// The CapMap↔fluxdi bridge, `extra_setup` half (ADR 0019 §5). fluxdi's
+/// `add_frontend` / `new_from_config_with_di` assembles the REAL frontend app;
+/// a headless PBT host then wraps that assembled app as CapMap capabilities —
+/// it does NOT re-implement the wiring. This is the one shared adapter every
+/// headless boot runs in its `extra_setup` closure: rebind the org filesystem
+/// to the in-memory `org_fs` and install the render interpreter over
+/// `BuilderServicesSlot`. Site-specific registrations (debug services, fake
+/// MCP) run AFTER this, in the caller. Keeping it in ONE place is why the boot
+/// sites (`TestEnvironment`, `HeadlessFrontendComponent`) no longer each copy
+/// the block.
+pub(crate) fn install_headless_render_interpreter(
+    injector: &fluxdi::Injector,
+    org_fs: &Arc<holon_filesystem::InMemoryFileSystem>,
+) {
+    use holon_frontend::reactive::RenderInterpreterInjectorExt;
+    override_org_fs_bindings(injector, org_fs);
+    let slot = injector.resolve::<BuilderServicesSlot>();
+    injector.set_render_interpreter(holon_frontend::reactive::make_interpret_fn(slot.0.clone()));
+}
+
+/// The CapMap↔fluxdi bridge, `build` half (ADR 0019 §5): resolve the production
+/// `ReactiveEngine` and publish it into `BuilderServicesSlot` — breaking the
+/// engine↔interpreter cycle so render interpretation and the engine share one
+/// instance — then return the engine. Shared by every headless boot so the
+/// "publish ReactiveEngine as BuilderServices" step lives in ONE place.
+pub(crate) fn publish_reactive_builder_services(
+    injector: &fluxdi::Injector,
+) -> Arc<ReactiveEngine> {
+    let engine = injector.resolve::<ReactiveEngine>();
+    let slot = injector.resolve::<BuilderServicesSlot>();
+    let services: Arc<dyn BuilderServices> = engine.clone();
+    slot.0.set(services).ok(); // ALLOW(ok): OnceLock set — idempotent
+    engine
+}
+
 /// Spec 0008 §4.2(b) — re-boot the app IN-PROCESS with the consolidator flipped
 /// against the persisted epoch marker and assert Model.md invariant 10's hard
 /// error fires through the REAL boot path (`holon_app::new_from_config_with_di`
@@ -536,12 +570,12 @@ pub(crate) fn override_org_fs_bindings(
 /// path). `currently_loro_enabled` is the consolidator the live app pinned; we
 /// boot the opposite to force the epoch mismatch.
 ///
-/// Faithfulness: this drives the exact production entry point (no direct call to
-/// `guard_consolidator_epoch`, which would only re-test the guard fn its own unit
-/// tests already cover — the point is the WIRING ORDER: the guard runs inside the
-/// setup phase and `?`-propagates before EventInfraModule / `BackendEngine`
-/// resolution). The no-op DI closures never run because the guard's `Err`
-/// short-circuits `add_frontend`.
+/// Faithfulness: this drives the exact production entry point (no direct call
+/// to `guard_consolidator_epoch`, which would only re-test the guard fn its own
+/// unit tests already cover — the point is the WIRING ORDER: the guard runs
+/// inside the setup phase and `?`-propagates before EventInfraModule /
+/// `BackendEngine` resolution). The no-op DI closures never run because the
+/// guard's `Err` short-circuits `add_frontend`.
 pub(crate) async fn run_epoch_flip_rejection_check(
     temp_path: &std::path::Path,
     currently_loro_enabled: bool,
@@ -585,8 +619,8 @@ pub(crate) async fn run_epoch_flip_rejection_check(
     let session_config = SessionConfig::new(holon_api::UiInfo::permissive()).without_wait();
 
     eprintln!(
-        "[EpochFlipRejected] attempting flipped boot (live consolidator loro={currently_loro_enabled} \
-         → flipped) over {temp_path:?}"
+        "[EpochFlipRejected] attempting flipped boot (live consolidator \
+         loro={currently_loro_enabled} → flipped) over {temp_path:?}"
     );
     let result = holon_app::new_from_config_with_di(
         flipped_config,
@@ -619,7 +653,8 @@ pub(crate) async fn run_epoch_flip_rejection_check(
     assert_eq!(
         marker_before, marker_after,
         "[EpochFlipRejected] the rejected boot mutated the consolidator marker {marker_path:?} — \
-         the guard must reject WITHOUT wiping or rewriting when HOLON_CONSOLIDATOR_MIGRATE is unset."
+         the guard must reject WITHOUT wiping or rewriting when HOLON_CONSOLIDATOR_MIGRATE is \
+         unset."
     );
     tracing::info!(
         marker = %marker_path.display(),
@@ -630,7 +665,8 @@ pub(crate) async fn run_epoch_flip_rejection_check(
 impl TestEnvironment {
     /// Create a new test environment (app not started yet).
     ///
-    /// Use this for pre-startup testing scenarios. Call `start_app()` to start the application.
+    /// Use this for pre-startup testing scenarios. Call `start_app()` to start
+    /// the application.
     pub fn new(runtime: Arc<tokio::runtime::Runtime>) -> Result<Self> {
         let temp_dir =
             TempDir::new().map_err(|e| anyhow::anyhow!("Failed to create temp dir: {}", e))?;
@@ -722,11 +758,12 @@ impl TestEnvironment {
         self.loro_backend.get()
     }
 
-    /// Create and immediately start (existing behavior for backward compatibility).
+    /// Create and immediately start (existing behavior for backward
+    /// compatibility).
     ///
     /// Equivalent to `new()` followed by `start_app(true)`.
     pub async fn new_running(runtime: Arc<tokio::runtime::Runtime>) -> Result<Self> {
-        let mut env = Self::new(runtime)?;
+        let env = Self::new(runtime)?;
         env.start_app(true).await?;
         Ok(env)
     }
@@ -784,8 +821,10 @@ impl TestEnvironment {
 
         let content = match corruption_type {
             LoroCorruptionType::Empty => Vec::new(),
-            LoroCorruptionType::Truncated => vec![0x4C, 0x6F, 0x72, 0x6F], // "Loro" prefix but truncated
-            LoroCorruptionType::InvalidHeader => vec![0xFF, 0xFE, 0x00, 0x01], // Invalid magic bytes
+            LoroCorruptionType::Truncated => vec![0x4C, 0x6F, 0x72, 0x6F], /* "Loro" prefix but
+                                                                             * truncated */
+            LoroCorruptionType::InvalidHeader => vec![0xFF, 0xFE, 0x00, 0x01], /* Invalid magic
+                                                                                * bytes */
         };
 
         tokio::fs::write(&loro_path, &content)
@@ -798,9 +837,9 @@ impl TestEnvironment {
     /// Enable the fake external MCP provider for the next start_app() call.
     ///
     /// When enabled, start_app() registers an in-memory MCP provider that adds
-    /// concurrent DDL (cache-table creation) and an initial sync during startup.
-    /// This widens the race window and exercises the real external-provider DI
-    /// path.
+    /// concurrent DDL (cache-table creation) and an initial sync during
+    /// startup. This widens the race window and exercises the real
+    /// external-provider DI path.
     pub fn set_enable_fake_mcp(&self, enable: bool) {
         self.enable_fake_mcp.set(enable);
     }
@@ -828,7 +867,8 @@ impl TestEnvironment {
     /// This triggers sync of any pre-existing files and may race with DDL.
     ///
     /// # Arguments
-    /// * `wait_for_ready` - If true, wait for file watcher to be ready before returning
+    /// * `wait_for_ready` - If true, wait for file watcher to be ready before
+    ///   returning
     #[tracing::instrument(skip(self), fields(wait_for_ready), name = "test_env.start_app")]
     pub async fn start_app(&self, wait_for_ready: bool) -> Result<()> {
         assert!(self.session.get().is_none(), "App already started");
@@ -872,12 +912,7 @@ impl TestEnvironment {
             config_dir,
             std::collections::HashSet::new(),
             move |injector| {
-                use holon_frontend::reactive::{BuilderServicesSlot, RenderInterpreterInjectorExt};
-                override_org_fs_bindings(injector, &org_fs_for_di);
-                let slot = injector.resolve::<BuilderServicesSlot>();
-                injector.set_render_interpreter(holon_frontend::reactive::make_interpret_fn(
-                    slot.0.clone(),
-                ));
+                install_headless_render_interpreter(injector, &org_fs_for_di);
                 holon_mcp::di::register_debug_services(injector);
                 if enable_fake_mcp {
                     crate::fake_mcp_module::register_fake_mcp(injector);
@@ -885,13 +920,7 @@ impl TestEnvironment {
                 Ok(())
             },
             move |injector| {
-                use holon_frontend::reactive::{
-                    BuilderServices, BuilderServicesSlot, ReactiveEngine,
-                };
-                let engine = injector.resolve::<ReactiveEngine>();
-                let slot = injector.resolve::<BuilderServicesSlot>();
-                let services: Arc<dyn BuilderServices> = engine.clone();
-                slot.0.set(services).ok(); // ALLOW(ok): OnceLock set — idempotent
+                let engine = publish_reactive_builder_services(injector);
 
                 let doc_store = if enable_loro {
                     injector
@@ -994,17 +1023,18 @@ impl TestEnvironment {
     /// Builds a Turso-free container ([`build_no_turso_container`]), registers
     /// the Loro storage adapter (`register_loro_block_query_source`), the
     /// Loro-native operation engine (`register_loro_operation_engine`), and the
-    /// block-query frontend (`register_block_query_frontend`), then **resolves**
-    /// `FrontendSession` + `ReactiveEngine` — the same resolve the Turso path
-    /// does, just over a container with no `BackendEngine`. The backend choice
-    /// is a DI registration, not a hand-built session. The Turso-heavy services
-    /// (`DebugServices`, CDC watches, org sync, seed priming) are simply not
-    /// registered in this wiring, so those fields stay `None`.
+    /// block-query frontend (`register_block_query_frontend`), then
+    /// **resolves** `FrontendSession` + `ReactiveEngine` — the same resolve
+    /// the Turso path does, just over a container with no `BackendEngine`.
+    /// The backend choice is a DI registration, not a hand-built session.
+    /// The Turso-heavy services (`DebugServices`, CDC watches, org sync,
+    /// seed priming) are simply not registered in this wiring, so those
+    /// fields stay `None`.
     ///
     /// Reads and writes share a single [`LoroDocumentStore`]: its global doc is
     /// resolved once up front, the read seam snapshots it, and the operation
-    /// engine's `LoroBlockOperations` mutates the same `Arc<LoroDocument>`, so a
-    /// mutation is immediately visible to the next read.
+    /// engine's `LoroBlockOperations` mutates the same `Arc<LoroDocument>`, so
+    /// a mutation is immediately visible to the next read.
     async fn start_app_loro_memory(&self) -> Result<()> {
         let storage_dir = self.temp_dir.path().join("loro-memory");
         std::fs::create_dir_all(&storage_dir)
@@ -1025,9 +1055,10 @@ impl TestEnvironment {
             let org_fs = self.org_fs.clone();
             let org_root = self.org_root.clone();
             move |injector| {
-                use holon_app::loro_seams::{
-                    LoroAliasRegistrar, LoroBlockOrdering, LoroBlockReader, LoroDocumentManager,
-                };
+                use holon_app::loro_seams::LoroAliasRegistrar;
+                use holon_app::loro_seams::LoroBlockOrdering;
+                use holon_app::loro_seams::LoroBlockReader;
+                use holon_app::loro_seams::LoroDocumentManager;
                 register_loro_block_query_source(injector, backend.clone());
                 register_loro_operation_engine(injector, shared_store.clone());
                 register_block_query_frontend(injector);
@@ -1090,12 +1121,7 @@ impl TestEnvironment {
         .await?;
 
         let session = injector.resolve::<FrontendSession>();
-        let reactive_engine = injector.resolve::<ReactiveEngine>();
-        // Populate the OnceLock that breaks the engine↔interpreter cycle — the
-        // same step the Turso path performs after resolving the engine.
-        let slot = injector.resolve::<BuilderServicesSlot>();
-        let services: Arc<dyn BuilderServices> = reactive_engine.clone();
-        slot.0.set(services).ok(); // ALLOW(ok): OnceLock set — idempotent
+        let reactive_engine = publish_reactive_builder_services(&injector);
 
         self.latch_injector((*injector).clone());
         self.latch_session(session);
@@ -1278,7 +1304,8 @@ impl TestEnvironment {
     /// Get the underlying engine (requires running app).
     ///
     /// Sourced from the `E2ETestContext` captured at startup, not from
-    /// `FrontendSession` (which no longer stores the engine — ADR 0004 Phase 9).
+    /// `FrontendSession` (which no longer stores the engine — ADR 0004 Phase
+    /// 9).
     pub fn engine(&self) -> &Arc<BackendEngine> {
         self.test_ctx().engine()
     }
@@ -1322,8 +1349,9 @@ impl TestEnvironment {
     /// file/directory CDC isn't mistaken for post-settlement churn. It reads
     /// the same `cdc_emitted_watermark` the quiescence assert itself trusts.
     ///
-    /// Best-effort: returns on timeout (the hard gate is `assert_cdc_quiescent`).
-    /// No-op when the app isn't running (pre-`StartApp` transitions).
+    /// Best-effort: returns on timeout (the hard gate is
+    /// `assert_cdc_quiescent`). No-op when the app isn't running
+    /// (pre-`StartApp` transitions).
     pub async fn wait_for_cdc_quiescent(
         &self,
         quiet_for: std::time::Duration,
@@ -1441,8 +1469,8 @@ impl TestEnvironment {
             .ok_or_else(|| anyhow::anyhow!("Cannot extract name from URI: {}", file_uri))?;
 
         let sql = format!(
-            "SELECT b.id FROM block_raw b JOIN block_tags bt ON bt.block_id = b.id WHERE bt.tag = 'Page' \
-             AND substr(b.content, 1, instr(b.content || char(10), char(10)) - 1) = '{}'",
+            "SELECT b.id FROM block_raw b JOIN block_tags bt ON bt.block_id = b.id WHERE bt.tag = \
+             'Page' AND substr(b.content, 1, instr(b.content || char(10), char(10)) - 1) = '{}'",
             name
         );
         let rows = self.query_sql(&sql).await?;
@@ -1460,7 +1488,8 @@ impl TestEnvironment {
         EntityUri::parse(id)
     }
 
-    /// Resolve a document by filename (e.g. "index.org") to its `block:uuid` URI.
+    /// Resolve a document by filename (e.g. "index.org") to its `block:uuid`
+    /// URI.
     pub async fn resolve_page_uri_by_name(&self, filename: &str) -> Result<EntityUri> {
         let name = std::path::Path::new(filename)
             .file_stem()
@@ -1497,8 +1526,8 @@ impl TestEnvironment {
         }
 
         let sql = format!(
-            "SELECT b.id FROM block_raw b JOIN block_tags bt ON bt.block_id = b.id WHERE bt.tag = 'Page' \
-             AND substr(b.content, 1, instr(b.content || char(10), char(10)) - 1) = '{}'",
+            "SELECT b.id FROM block_raw b JOIN block_tags bt ON bt.block_id = b.id WHERE bt.tag = \
+             'Page' AND substr(b.content, 1, instr(b.content || char(10), char(10)) - 1) = '{}'",
             name
         );
         let rows = self.query_sql(&sql).await?;
@@ -1523,10 +1552,11 @@ impl TestEnvironment {
 
     /// Non-page content block rows as `{id, parent_id, sort_key}`, read
     /// backend-agnostically: Turso queries `block_raw`; no-Turso reads the
-    /// `BlockQuerySource` snapshot (the Loro tree, already in document order) and
-    /// synthesizes a zero-padded `sort_key` from that order so callers that sort
-    /// by it preserve sibling order. Used by the SplitBlock/JoinBlock
-    /// reconciliation that the `{Loro}` slice exercises.
+    /// `BlockQuerySource` snapshot (the Loro tree, already in document order)
+    /// and synthesizes a zero-padded `sort_key` from that order so callers
+    /// that sort by it preserve sibling order. Used by the
+    /// SplitBlock/JoinBlock reconciliation that the `{Loro}` slice
+    /// exercises.
     pub async fn non_page_block_rows(&self) -> Vec<holon_api::StorageEntity> {
         if matches!(self.storage, StorageSelector::LoroMemory) {
             let session = self
@@ -1551,8 +1581,8 @@ impl TestEnvironment {
                 })
                 .collect();
         }
-        let sql = "SELECT id, parent_id, sort_key FROM block_raw \
-                   WHERE id NOT IN (SELECT block_id FROM block_tags WHERE tag = 'Page')"
+        let sql = "SELECT id, parent_id, sort_key FROM block_raw WHERE id NOT IN (SELECT block_id \
+                   FROM block_tags WHERE tag = 'Page')"
             .to_string();
         self.engine()
             .execute_query(sql, HashMap::new(), None)
@@ -1562,8 +1592,8 @@ impl TestEnvironment {
 
     /// Watch a block's UI and wait for the first Structure event.
     ///
-    /// Returns the RenderExpr from the first Structure event, plus the WatchHandle
-    /// for further interaction.
+    /// Returns the RenderExpr from the first Structure event, plus the
+    /// WatchHandle for further interaction.
     pub async fn watch_ui_first_structure(
         &self,
         block_id: &EntityUri,
@@ -1636,7 +1666,8 @@ impl TestEnvironment {
         Ok(())
     }
 
-    /// Call initial_widget and return both the render expression and CDC stream.
+    /// Call initial_widget and return both the render expression and CDC
+    /// stream.
     ///
     /// Render the root layout block, returning RenderExpr + CDC stream.
     pub async fn initial_widget_with_stream(&self) -> Result<(RenderExpr, RowChangeStream)> {
@@ -1657,7 +1688,8 @@ impl TestEnvironment {
     /// This simulates what the Flutter UI does:
     /// 1. Call initial_widget to get the root layout
     /// 2. Query root layout children directly
-    /// 3. For each row that is a PRQL source block, execute its query with parent context
+    /// 3. For each row that is a PRQL source block, execute its query with
+    ///    parent context
     /// 4. Collect all rendered data
     ///
     /// Returns the root RenderExpr and combined data from all rendered panels.
@@ -1671,7 +1703,8 @@ impl TestEnvironment {
         // Get root layout children via execute_query
         let root_data: Vec<DataRow> = self
             .query(
-                "SELECT id, content, content_type, source_language, parent_id FROM block_raw WHERE parent_id = 'block:root-layout' OR id = 'block:root-layout'",
+                "SELECT id, content, content_type, source_language, parent_id FROM block_raw \
+                 WHERE parent_id = 'block:root-layout' OR id = 'block:root-layout'",
                 QueryLanguage::HolonSql,
             )
             .await?;
@@ -1727,15 +1760,19 @@ impl TestEnvironment {
 
     /// Execute a query with context (simulating nested render_entity).
     ///
-    /// This simulates what the Flutter UI does when it encounters `render_entity this`:
+    /// This simulates what the Flutter UI does when it encounters
+    /// `render_entity this`:
     /// - Takes a query source from a block
     /// - Executes it with the parent block's ID as context for `from children`
-    /// Uses FrontendSession directly to ensure identical code path with Flutter.
+    /// Uses FrontendSession directly to ensure identical code path with
+    /// Flutter.
     ///
     /// # Arguments
     /// * `source` - The query source to execute
-    /// * `language` - The query language ("holon_prql", "holon_gql", "holon_sql")
-    /// * `context_block_id` - The block ID to use for `from children` resolution
+    /// * `language` - The query language ("holon_prql", "holon_gql",
+    ///   "holon_sql")
+    /// * `context_block_id` - The block ID to use for `from children`
+    ///   resolution
     pub async fn query_with_context(
         &self,
         source: &str,
@@ -1764,10 +1801,12 @@ impl TestEnvironment {
     /// the heading (parent), not children of the source block itself.
     ///
     /// # Arguments
-    /// * `source_block_id` - The ID of the source block (e.g., "right_sidebar::src::0")
+    /// * `source_block_id` - The ID of the source block (e.g.,
+    ///   "right_sidebar::src::0")
     ///
     /// # Returns
-    /// The data rows from executing the source block's query with parent context
+    /// The data rows from executing the source block's query with parent
+    /// context
     pub async fn render_source_block(
         &self,
         source_block_id: &str,
@@ -1859,7 +1898,8 @@ impl TestEnvironment {
         // Turso-side, and pure `yield_now` caused Loro quiescence races in
         // the cross-executor PBT variant.
         //
-        // Correctness gate: inv-backend-blocks-match-ref (SQL = ref), inv-watch-rows-match-ref (UI model = ref), and inv-region-focus-roots
+        // Correctness gate: inv-backend-blocks-match-ref (SQL = ref),
+        // inv-watch-rows-match-ref (UI model = ref), and inv-region-focus-roots
         // (region focus roots) all start failing if the producer hasn't
         // actually delivered events by the time we poll.
         self.drain_delivery_barrier().await;
@@ -2147,7 +2187,8 @@ impl TestEnvironment {
 
         if churned {
             eprintln!(
-                "[inv-editable-text-has-draggable] CDC not quiescent — post-watermark({target_seq}) events kept arriving past {budget:?}: {:?}",
+                "[inv-editable-text-has-draggable] CDC not quiescent — \
+                 post-watermark({target_seq}) events kept arriving past {budget:?}: {:?}",
                 spurious,
             );
             // Dump every leaked change so the panic log is enough to
@@ -2163,17 +2204,17 @@ impl TestEnvironment {
             // Benign tail: one or more late re-projections that quiesced
             // within `quiet_for`. Surface it (don't hide it) but don't flake.
             eprintln!(
-                "[inv-editable-text-has-draggable] NOTE: post-settlement CDC tail settled within {quiet_for:?} \
-                 (benign file-sync convergence echo, not churn): {:?}",
+                "[inv-editable-text-has-draggable] NOTE: post-settlement CDC tail settled within \
+                 {quiet_for:?} (benign file-sync convergence echo, not churn): {:?}",
                 spurious,
             );
         }
 
         assert!(
             !churned,
-            "[inv-editable-text-has-draggable] CDC not quiescent: backend kept churning past {budget:?} \
-             (post-settlement events still arriving): {:?}. This indicates the backend is \
-             emitting add/remove cycles for unchanged data.",
+            "[inv-editable-text-has-draggable] CDC not quiescent: backend kept churning past \
+             {budget:?} (post-settlement events still arriving): {:?}. This indicates the backend \
+             is emitting add/remove cycles for unchanged data.",
             spurious,
         );
     }
@@ -2183,10 +2224,10 @@ impl TestEnvironment {
     /// Uses the production `Block` struct for accurate testing.
     /// Parse all Org files in the temp directory and return blocks.
     ///
-    /// If `todo_header` is provided (e.g. `"#+TODO: STARTED | DONE CANCELLED"`),
-    /// it is prepended to each file's content before parsing so the parser
-    /// recognizes custom keywords — matching how production FileSyncController
-    /// stores keywords on the Document entity.
+    /// If `todo_header` is provided (e.g. `"#+TODO: STARTED | DONE
+    /// CANCELLED"`), it is prepended to each file's content before parsing
+    /// so the parser recognizes custom keywords — matching how production
+    /// FileSyncController stores keywords on the Document entity.
     pub async fn parse_org_file_blocks(&self, todo_header: Option<&str>) -> Result<Vec<Block>> {
         use holon_orgmode::parser::parse_org_file;
 
@@ -2208,13 +2249,12 @@ impl TestEnvironment {
     }
 
     /// Set up a CDC-driven region watch that tracks `focus_roots JOIN block`.
-    /// When navigation changes `focus_roots` via IVM, CDC propagates to this chained matview.
+    /// When navigation changes `focus_roots` via IVM, CDC propagates to this
+    /// chained matview.
     pub async fn setup_region_watch(&self, region: Region) -> Result<()> {
         let sql = format!(
-            "SELECT fr.root_id AS id, b.content, b.parent_id \
-             FROM focus_roots fr \
-             JOIN block b ON b.id = fr.root_id \
-             WHERE fr.region = '{}'",
+            "SELECT fr.root_id AS id, b.content, b.parent_id FROM focus_roots fr JOIN block b ON \
+             b.id = fr.root_id WHERE fr.region = '{}'",
             region.as_str()
         );
         let stream = self
@@ -2266,8 +2306,9 @@ impl TestEnvironment {
     ///
     /// `&self` (not `&mut self`): the watch state is interior-mutable (see
     /// [`Self::active_watches`]), so this write path can be driven through the
-    /// `&self` `SutWatchRegister` cap by the decomposed `SetupWatch` transition.
-    /// The `.await` happens before any borrow is taken, so no guard crosses it.
+    /// `&self` `SutWatchRegister` cap by the decomposed `SetupWatch`
+    /// transition. The `.await` happens before any borrow is taken, so no
+    /// guard crosses it.
     pub async fn setup_watch(
         &self,
         query_id: &str,
@@ -2315,12 +2356,14 @@ impl TestEnvironment {
         let mut params: holon_api::StorageEntity = HashMap::new();
         params.insert(
             "id".into(),
-            // ALLOW(entity_uri_from_raw): test-caller-supplied bare id entering helper; bare→schemed normalization at boundary
+            // ALLOW(entity_uri_from_raw): test-caller-supplied bare id entering helper;
+            // bare→schemed normalization at boundary
             Value::String(EntityUri::from_raw(id).to_string()),
         );
         params.insert(
             "parent_id".into(),
-            // ALLOW(entity_uri_from_raw): test-caller-supplied bare id entering helper; bare→schemed normalization at boundary
+            // ALLOW(entity_uri_from_raw): test-caller-supplied bare id entering helper;
+            // bare→schemed normalization at boundary
             Value::String(EntityUri::from_raw(parent_id).to_string()),
         );
         params.insert("content".into(), Value::String(content.to_string()));
@@ -2340,12 +2383,14 @@ impl TestEnvironment {
         let mut params: holon_api::StorageEntity = HashMap::new();
         params.insert(
             "id".into(),
-            // ALLOW(entity_uri_from_raw): test-caller-supplied bare id entering helper; bare→schemed normalization at boundary
+            // ALLOW(entity_uri_from_raw): test-caller-supplied bare id entering helper;
+            // bare→schemed normalization at boundary
             Value::String(EntityUri::from_raw(id).to_string()),
         );
         params.insert(
             "parent_id".into(),
-            // ALLOW(entity_uri_from_raw): test-caller-supplied bare id entering helper; bare→schemed normalization at boundary
+            // ALLOW(entity_uri_from_raw): test-caller-supplied bare id entering helper;
+            // bare→schemed normalization at boundary
             Value::String(EntityUri::from_raw(parent_id).to_string()),
         );
         params.insert("content".into(), Value::String(content.to_string()));
@@ -2360,7 +2405,8 @@ impl TestEnvironment {
         let mut params: holon_api::StorageEntity = HashMap::new();
         params.insert(
             "id".into(),
-            // ALLOW(entity_uri_from_raw): test-caller-supplied bare id entering helper; bare→schemed normalization at boundary
+            // ALLOW(entity_uri_from_raw): test-caller-supplied bare id entering helper;
+            // bare→schemed normalization at boundary
             Value::String(EntityUri::from_raw(id).to_string()),
         );
         params.insert("field".into(), Value::String("content".to_string()));
@@ -2376,7 +2422,8 @@ impl TestEnvironment {
         let mut params: holon_api::StorageEntity = HashMap::new();
         params.insert(
             "id".into(),
-            // ALLOW(entity_uri_from_raw): test-caller-supplied bare id entering helper; bare→schemed normalization at boundary
+            // ALLOW(entity_uri_from_raw): test-caller-supplied bare id entering helper;
+            // bare→schemed normalization at boundary
             Value::String(EntityUri::from_raw(id).to_string()),
         );
 
@@ -2396,7 +2443,8 @@ impl TestEnvironment {
         // ("block:block-1"). Normalize at this boundary — idempotent for
         // already-schemed input (per ORG_SYNTAX: schemes live everywhere
         // outside org files).
-        // ALLOW(entity_uri_from_raw): test-caller-supplied bare id entering helper; bare→schemed normalization at boundary
+        // ALLOW(entity_uri_from_raw): test-caller-supplied bare id entering helper;
+        // bare→schemed normalization at boundary
         let schemed = EntityUri::from_raw(block_id).to_string();
         let sql = format!("SELECT id FROM block_raw WHERE id = '{}'", schemed);
         let poll_interval = std::time::Duration::from_millis(50);
@@ -2452,7 +2500,8 @@ impl TestEnvironment {
         expected_contents: &HashMap<EntityUri, String>,
         timeout: std::time::Duration,
     ) -> Vec<holon_api::StorageEntity> {
-        use tokio::time::{Duration, timeout as tokio_timeout};
+        use tokio::time::Duration;
+        use tokio::time::timeout as tokio_timeout;
 
         let start = std::time::Instant::now();
         let seed_count = self.seed_count.get();
@@ -2515,12 +2564,12 @@ impl TestEnvironment {
         // matview. After `wait_for_blocks_synced` succeeds (CDC accumulator
         // has all expected ids), an immediate SELECT against the matview
         // can still return fewer rows because the matview's IVM state is
-        // mid-propagation — same class of race as the inv-viewmodel-root-matches-render-expr
-        // `block_with_query_source.sql` issue
-        // (devlog/2026-05-05-110311.md). `block_raw` is synchronously
+        // mid-propagation — same class of race as the
+        // inv-viewmodel-root-matches-render-expr `block_with_query_source.sql`
+        // issue (devlog/2026-05-05-110311.md). `block_raw` is synchronously
         // written; the page-tag exclusion via `block_tags` is unaffected.
-        let sql = "SELECT id FROM block_raw \
-                   WHERE id NOT IN (SELECT block_id FROM block_tags WHERE tag = 'Page')"
+        let sql = "SELECT id FROM block_raw WHERE id NOT IN (SELECT block_id FROM block_tags \
+                   WHERE tag = 'Page')"
             .to_string();
         self.engine()
             .execute_query(sql, HashMap::new(), None)
@@ -2539,7 +2588,8 @@ impl TestEnvironment {
         expected_ids: &HashSet<EntityUri>,
         timeout: std::time::Duration,
     ) {
-        use tokio::time::{Duration, timeout as tokio_timeout};
+        use tokio::time::Duration;
+        use tokio::time::timeout as tokio_timeout;
 
         let start = std::time::Instant::now();
 
@@ -2575,10 +2625,11 @@ impl TestEnvironment {
 
     /// Simulate app restart by touching all org files to trigger re-parsing.
     /// This tests that re-parsing doesn't create orphan blocks.
-    /// Spec 0008 §4.2(b) — see [`run_epoch_flip_rejection_check`]. Delegates with
-    /// this env's boot paths: the un-canonicalized `temp_dir` (where the marker
-    /// was written) and the pinned `enable_loro`. Named to match the
-    /// `SutAppLifecycle` cap method so the `E2ESut` impl reaches it via `deref()`.
+    /// Spec 0008 §4.2(b) — see [`run_epoch_flip_rejection_check`]. Delegates
+    /// with this env's boot paths: the un-canonicalized `temp_dir` (where
+    /// the marker was written) and the pinned `enable_loro`. Named to match
+    /// the `SutAppLifecycle` cap method so the `E2ESut` impl reaches it via
+    /// `deref()`.
     pub async fn assert_epoch_flip_rejected(&self) {
         run_epoch_flip_rejection_check(self.temp_dir.path(), self.enable_loro.get()).await;
     }
@@ -2745,7 +2796,8 @@ impl TestEnvironment {
                 return;
             }
             eprintln!(
-                "[wait_for_org_files_stable] Idle signal did not quiesce within {:?}, falling back to mtime polling",
+                "[wait_for_org_files_stable] Idle signal did not quiesce within {:?}, falling \
+                 back to mtime polling",
                 signal_budget
             );
         }
@@ -2803,7 +2855,8 @@ impl TestEnvironment {
         }
     }
 
-    /// Poll until org files stop changing. Convenience wrapper with default parameters.
+    /// Poll until org files stop changing. Convenience wrapper with default
+    /// parameters.
     pub async fn wait_for_write_window_expiry(&self) {
         self.wait_for_org_files_stable(25, std::time::Duration::from_millis(5000))
             .await;
@@ -2892,10 +2945,11 @@ pub(crate) fn pbt_quiet_floor() -> std::time::Duration {
         .unwrap_or_else(|| std::time::Duration::from_millis(25))
 }
 
-/// Compact one-line summary of a CDC change record. Used by inv-editable-text-has-draggable to
-/// dump spurious leaked items without the noise of full Debug output.
-/// Re-key a `Change<StorageEntity>` to the String-keyed `MapChange` shape that
-/// `CdcAccumulator`/`ReactiveTable` (serde-facing `DataRow`) consume.
+/// Compact one-line summary of a CDC change record. Used by
+/// inv-editable-text-has-draggable to dump spurious leaked items without the
+/// noise of full Debug output. Re-key a `Change<StorageEntity>` to the
+/// String-keyed `MapChange` shape that `CdcAccumulator`/`ReactiveTable`
+/// (serde-facing `DataRow`) consume.
 fn rekey_change(
     change: holon_api::Change<holon_api::StorageEntity>,
 ) -> holon_api::Change<holon_api::StorageEntity> {

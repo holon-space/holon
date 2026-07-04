@@ -1,18 +1,21 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use holon_api::EntityUri;
+use holon_api::reactive::ReactiveStreamExt;
+use holon_api::render_types::Arg;
+use holon_api::render_types::RenderExpr;
+use holon_api::streaming::ActorAbortGuard;
+use holon_api::streaming::BatchMapChange;
+use holon_api::streaming::BatchMapChangeWithMetadata;
+use holon_api::streaming::Change;
+use holon_api::streaming::UiEvent;
+use holon_api::streaming::WatchHandle;
+use holon_api::streaming::WatcherCommand;
+use holon_api::widget_spec::EnrichedRow;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
-
-use holon_api::EntityUri;
-use holon_api::reactive::ReactiveStreamExt;
-use holon_api::render_types::{Arg, RenderExpr};
-use holon_api::streaming::{
-    ActorAbortGuard, BatchMapChange, BatchMapChangeWithMetadata, Change, UiEvent, WatchHandle,
-    WatcherCommand,
-};
-use holon_api::widget_spec::EnrichedRow;
 
 use super::backend_engine::BackendEngine;
 use crate::entity_profile::ProfileResolving;
@@ -39,11 +42,13 @@ enum RenderTrigger {
     Initial,
 }
 
-/// Start watching a block's UI, returning a stream of UiEvents and a command channel.
+/// Start watching a block's UI, returning a stream of UiEvents and a command
+/// channel.
 ///
-/// Creates a structural matview that detects when the block or its children change,
-/// then re-renders via `BlockDomain::render_entity()`. The output stream carries both
-/// structural updates (new WidgetSpec) and data deltas (CDC batches).
+/// Creates a structural matview that detects when the block or its children
+/// change, then re-renders via `BlockDomain::render_entity()`. The output
+/// stream carries both structural updates (new WidgetSpec) and data deltas (CDC
+/// batches).
 #[tracing::instrument(skip(engine), fields(block_id = %block_id, is_root))]
 pub async fn watch_ui(engine: Arc<BackendEngine>, block_id: EntityUri) -> Result<WatchHandle> {
     let structural_sql = format!(
@@ -240,6 +245,24 @@ async fn render_and_forward(
     variant: &Option<String>,
     generation: u64,
 ) {
+    // Advice-rule status surface (ADR 0022 "rule blocks render their own status"):
+    // a rule block whose id carries a NON-Active status has its render replaced
+    // by the error surface, so parse errors and async DDL failures are visible
+    // in place (v1 replaces, like the existing render-failure path; over-cap
+    // banner comes later).
+    if let Some(status) = engine.advice_status().get(block_id.as_str()) {
+        if !status.is_active() {
+            let _ = tx
+                .send(UiEvent::Structure {
+                    render_expr: error_render_expr(&format!("advice rule: {status}")),
+                    candidates: Vec::new(),
+                    generation,
+                })
+                .await;
+            return;
+        }
+    }
+
     match engine.blocks().render_entity(block_id, variant).await {
         Ok((render_expr, data_stream)) => {
             tracing::info!(
@@ -270,7 +293,7 @@ async fn render_and_forward(
             tracing::warn!("[UiWatcher] render_entity('{}') failed: {}", block_id, e);
             let _ = tx
                 .send(UiEvent::Structure {
-                    render_expr: error_render_expr(&format!("{e}")),
+                    render_expr: error_render_expr(&format!("{e:#}")),
                     candidates: Vec::new(),
                     generation,
                 })
@@ -295,7 +318,8 @@ async fn forward_data_stream(
         let metadata = batch_with_metadata.metadata.clone();
         let enriched = enrich_batch(batch_with_metadata.inner.items, &profile_resolver);
         // Convert Change<EnrichedRow> → Change<DataRow> at the UiEvent boundary.
-        // UiEvent::Data uses MapChange (= Change<DataRow>) — the FFI boundary requires this shape.
+        // UiEvent::Data uses MapChange (= Change<DataRow>) — the FFI boundary requires
+        // this shape.
         let map_changes: Vec<holon_api::MapChange> = enriched
             .into_iter()
             .map(|c| c.map(EnrichedRow::into_inner))
@@ -319,8 +343,8 @@ async fn forward_data_stream(
 
 /// Convert a batch of RowChange items to enriched changes.
 ///
-/// Returns `Change<EnrichedRow>` — the type-safe proof that enrichment happened.
-/// Used by `enrich_stream` and `forward_data_stream`.
+/// Returns `Change<EnrichedRow>` — the type-safe proof that enrichment
+/// happened. Used by `enrich_stream` and `forward_data_stream`.
 pub fn enrich_batch(
     items: Vec<crate::storage::turso::RowChange>,
     profile_resolver: &Arc<dyn ProfileResolving>,
@@ -366,19 +390,21 @@ pub fn enrich_row(
 
 use holon_api::EnrichedChangeStream;
 
-/// Wrap a raw `RowChangeStream` with enrichment (flatten_properties + computed fields).
+/// Wrap a raw `RowChangeStream` with enrichment (flatten_properties + computed
+/// fields).
 ///
 /// Spawns a forwarding task that enriches each batch before delivering it.
 /// Returns an `EnrichedChangeStream` carrying `Change<EnrichedRow>` — the type
 /// proves enrichment happened.  No trust boundaries needed downstream.
 ///
-/// This is the canonical enrichment boundary — call this once at the point where
-/// raw storage data enters the frontend.
+/// This is the canonical enrichment boundary — call this once at the point
+/// where raw storage data enters the frontend.
 pub fn enrich_stream(
     raw: RowChangeStream,
     profile_resolver: Arc<dyn ProfileResolving>,
 ) -> EnrichedChangeStream {
-    use holon_api::streaming::{Batch, WithMetadata};
+    use holon_api::streaming::Batch;
+    use holon_api::streaming::WithMetadata;
     use tokio::sync::mpsc;
     use tokio_stream::StreamExt;
 

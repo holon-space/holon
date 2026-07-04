@@ -3,15 +3,26 @@
 //! self-consistency checks and therefore blind to "everything is disabled" and
 //! "storage is a no-op" failure modes.
 
-use chrono::{DateTime, Utc};
+use std::collections::BTreeMap;
+
+use chrono::DateTime;
+use chrono::Utc;
+use holon_engine::Marking;
+use holon_engine::NetDef;
+use holon_engine::PrecondSpec;
+use holon_engine::TransitionDef;
 use holon_engine::engine::Engine;
 use holon_engine::guard::RhaiEvaluator;
+use holon_engine::objective;
 use holon_engine::value::Value;
-use holon_engine::yaml::history::{AttrChange, CreatedToken, Event, History};
-use holon_engine::yaml::net::{YamlNet, YamlNetFile};
-use holon_engine::yaml::state::{YamlMarking, YamlToken};
-use holon_engine::{objective, Marking, NetDef, PrecondSpec, TransitionDef};
-use std::collections::BTreeMap;
+use holon_engine::yaml::history::AttrChange;
+use holon_engine::yaml::history::CreatedToken;
+use holon_engine::yaml::history::Event;
+use holon_engine::yaml::history::History;
+use holon_engine::yaml::net::YamlNet;
+use holon_engine::yaml::net::YamlNetFile;
+use holon_engine::yaml::state::YamlMarking;
+use holon_engine::yaml::state::YamlToken;
 
 fn net_from_yaml(yaml: &str) -> YamlNet {
     let file: YamlNetFile = serde_yaml::from_str(yaml).expect("net yaml must parse");
@@ -419,9 +430,11 @@ transitions:
     let errors = net.validate();
     assert_eq!(errors.len(), 2, "errors: {errors:?}");
     assert!(errors.iter().any(|e| e.contains("unbound name 'ghost'")));
-    assert!(errors
-        .iter()
-        .any(|e| e.contains("'x' not re-produced in any output")));
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.contains("'x' not re-produced in any output"))
+    );
 }
 
 #[test]
@@ -549,4 +562,52 @@ fn evaluator_expr_and_bool() {
     assert_eq!(ev.eval_expr("2.0 + 3.0", &mut scope), Ok(5.0));
     assert_eq!(ev.eval_bool("1 < 2", &mut scope), Ok(true));
     assert_eq!(ev.eval_bool("2 < 1", &mut scope), Ok(false));
+}
+
+/// F3.1 regression: a duration past chrono::Duration's minute range must be
+/// an `Err` from `fire()`, never a panic — `rank()` simulates `fire` on the
+/// live `rank_tasks` MCP path with vault-stored durations.
+#[test]
+fn fire_returns_err_on_duration_overflowing_chrono_duration() {
+    let net = net_from_yaml(
+        r#"
+transitions:
+  megatask:
+    duration: 200000000000000
+    inputs:
+      - { bind: doc, token_type: document, consume: false }
+    outputs: []
+"#,
+    );
+    let mut m = marking(vec![("doc1", "document", vec![])]);
+    let engine = Engine::new();
+    let enabled = engine.enabled(&net, &m).unwrap();
+    assert_eq!(enabled.len(), 1);
+    let err = engine
+        .fire(&net, &mut m, &enabled[0], 0)
+        .expect_err("2e14 minutes must be an Err, not a chrono panic");
+    assert!(err.contains("overflow"), "got: {err}");
+}
+
+/// Companion: a duration that fits in `chrono::Duration` but overflows the
+/// representable `DateTime` range hits the second checked step.
+#[test]
+fn fire_returns_err_on_duration_overflowing_datetime_range() {
+    let net = net_from_yaml(
+        r#"
+transitions:
+  megatask:
+    duration: 200000000000
+    inputs:
+      - { bind: doc, token_type: document, consume: false }
+    outputs: []
+"#,
+    );
+    let mut m = marking(vec![("doc1", "document", vec![])]);
+    let engine = Engine::new();
+    let enabled = engine.enabled(&net, &m).unwrap();
+    let err = engine
+        .fire(&net, &mut m, &enabled[0], 0)
+        .expect_err("2e11 minutes must be an Err, not a chrono panic");
+    assert!(err.contains("overflow"), "got: {err}");
 }

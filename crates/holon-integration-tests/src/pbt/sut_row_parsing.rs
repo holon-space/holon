@@ -1,36 +1,46 @@
 //! Row-shape ↔ `Block` conversion + mutation-property projection helpers.
 //!
-//! - [`parse_block_row`] turns a SQL row from the `block` matview into a
-//!   typed [`Block`]. Used by `inv-backend-blocks-match-ref`'s SQL path
-//!   and the `LiveData<Block>` mirror.
-//! - [`mutation_expected_properties`] + [`row_properties_to_map`] are
-//!   used by the per-mutation property spot-check (inv-properties-match-mutation).
+//! - [`parse_block_row`] turns a SQL row from the `block` matview into a typed
+//!   [`Block`]. Used by `inv-backend-blocks-match-ref`'s SQL path and the
+//!   `LiveData<Block>` mirror.
+//! - [`mutation_expected_properties`] + [`row_properties_to_map`] are used by
+//!   the per-mutation property spot-check (inv-properties-match-mutation).
 //!
 //! Extracted from `sut.rs` (Phase D2).
 
 use std::collections::HashMap;
 
+use holon_api::ContentType;
+use holon_api::SourceLanguage;
+use holon_api::Value;
 use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
-use holon_api::{ContentType, SourceLanguage, Value};
 use holon_orgmode::OrgBlockExt;
 
-use super::types::Mutation;
-
 /// Snapshot SQL for the `block` MATVIEW — the canonical projection that carries
-/// the junction edge fields (`tags`/`requires`) as `json_group_array` columns.
-/// Backs the `inv-blocks-match-ref/matview` reader (`SutBackend::live_block_snapshot`).
-/// Centralised here, next to [`parse_block_row`], so the column list and its
-/// parser stay in lockstep and the SQL isn't duplicated across SUT impls.
-pub(super) const BLOCK_MATVIEW_SNAPSHOT_SQL: &str = "SELECT id, parent_id, content, content_type, source_language, properties, tags, requires \
-     FROM block";
+/// the junction edge fields (`tags`/`requires`/`advice_suppressed`) as
+/// `json_group_array` columns.
+/// Backs the `inv-blocks-match-ref/matview` reader
+/// (`SutBackend::live_block_snapshot`). Centralised here, next to
+/// [`parse_block_row`], so the column list and its parser stay in lockstep and
+/// the SQL isn't duplicated across SUT impls.
+pub(super) const BLOCK_MATVIEW_SNAPSHOT_SQL: &str = "SELECT id, parent_id, content, content_type, \
+                                                     source_language, properties, tags, requires, \
+                                                     advice_suppressed FROM block";
 
-/// Snapshot SQL for the write-side `block_raw` BASE TABLE. Native columns only —
-/// `block_raw` has no junction `tags`/`requires`, so [`parse_block_row`] leaves
-/// those empty and the `/block_raw` invariant compares a field subset. Backs
-/// `SutBackend::block_raw_snapshot`.
-pub(super) const BLOCK_RAW_SNAPSHOT_SQL: &str = "SELECT id, parent_id, content, content_type, source_language, properties \
-     FROM block_raw";
+/// Snapshot SQL for the write-side `block_raw` BASE TABLE. Native columns only
+/// — `block_raw` has no junction `tags`/`requires`, so [`parse_block_row`]
+/// leaves those empty and the `/block_raw` invariant compares a field subset.
+/// Backs `SutBackend::block_raw_snapshot`.
+///
+/// Excludes the self-parented `sentinel:no_parent` FK-anchor row that
+/// `CoreSchemaModule` seeds to satisfy the `block_raw.parent_id` FK — it is not
+/// a real block and never appears in the reference model. Production's `block`
+/// matview drops it the same way (`schema_modules.rs`: `WHERE b.id !=
+/// 'sentinel:no_parent'`).
+pub(super) const BLOCK_RAW_SNAPSHOT_SQL: &str = "SELECT id, parent_id, content, content_type, \
+                                                 source_language, properties FROM block_raw WHERE \
+                                                 id != 'sentinel:no_parent'";
 
 /// Parse a batch of snapshot rows into typed [`Block`]s, fail-loud on any row
 /// that won't parse (a malformed row is a bug, never silently skipped).
@@ -45,16 +55,17 @@ pub(super) fn parse_block_rows(rows: &[holon_core::storage::types::StorageEntity
 
 /// Build a `Block` from a SQL row that includes id/content/content_type/
 /// source_language/parent_id/properties (and optionally tags + org fields).
-/// Used both by inv-backend-blocks-match-ref's SQL path and by the LiveData<Block> experiment so
-/// the two stay byte-for-byte equivalent.
+/// Used both by inv-backend-blocks-match-ref's SQL path and by the
+/// LiveData<Block> experiment so the two stay byte-for-byte equivalent.
 pub(super) fn parse_block_row(row: &holon_core::storage::types::StorageEntity) -> Option<Block> {
     let id =
         EntityUri::parse(row.get("id")?.as_string()?).expect("block id from DB must be valid URI");
     // A NULL/missing `parent_id` in `block_raw` is a top-level block — semantically
-    // `no_parent()` (the sentinel `no_orphan`/`block_parent` already recognize as the
-    // valid root). Splitting a top-level block mints such a sibling; coalescing here
-    // (rather than returning `None`, which every caller treats as a hard error) lets
-    // the SQL slice parse top-level blocks instead of panicking.
+    // `no_parent()` (the sentinel `no_orphan`/`block_parent` already recognize as
+    // the valid root). Splitting a top-level block mints such a sibling;
+    // coalescing here (rather than returning `None`, which every caller treats
+    // as a hard error) lets the SQL slice parse top-level blocks instead of
+    // panicking.
     let parent_id = match row.get("parent_id").and_then(|v| v.as_string()) {
         Some(s) => EntityUri::parse(s).expect("block parent_id from DB must be valid URI"),
         None => EntityUri::no_parent(),
@@ -101,6 +112,32 @@ pub(super) fn parse_block_row(row: &holon_core::storage::types::StorageEntity) -
             };
             raw.into_iter()
                 .map(|s| EntityUri::parse_owned(s).expect("stored requires must be a valid URI"))
+                .collect::<Vec<EntityUri>>()
+        })
+        .unwrap_or_default();
+
+    // `advice_suppressed` (ADR 0021 dismissal exclusion set) is hydrated from the
+    // `advice_suppressed` junction by the matview's json_group_array, exactly like
+    // `requires`. Parse it so the backend mirror carries the edge field for
+    // `inv-blocks-match-ref/matview` comparison — omitting it silently pinned the
+    // SUT side to `[]` and diverged from any oracle dismissal.
+    block.advice_suppressed = row
+        .get("advice_suppressed")
+        .map(|v| {
+            let raw: Vec<String> = match v {
+                Value::Array(arr) => arr
+                    .iter()
+                    .filter_map(|x| x.as_string().map(|s| s.to_string()))
+                    .collect(),
+                Value::Json(s) | Value::String(s) => {
+                    serde_json::from_str::<Vec<String>>(s).unwrap_or_default()
+                }
+                _ => Vec::new(),
+            };
+            raw.into_iter()
+                .map(|s| {
+                    EntityUri::parse_owned(s).expect("stored advice_suppressed must be a valid URI")
+                })
                 .collect::<Vec<EntityUri>>()
         })
         .unwrap_or_default();
@@ -170,48 +207,4 @@ pub(super) fn parse_block_row(row: &holon_core::storage::types::StorageEntity) -
     }
 
     Some(block)
-}
-
-/// Fields that are SQL columns on `block` rather than entries in the
-/// `properties` JSON column. When an External mutation's `fields` map contains
-/// one of these, the expected effect lands in a column — not in `properties` —
-/// so it's excluded from the post-mutation property spot-check.
-const BLOCK_SQL_COLUMNS: &[&str] = &[
-    "id",
-    "parent_id",
-    "name",
-    "content",
-    "content_type",
-    "source_language",
-    "source_name",
-    "collapsed",
-    "completed",
-    "block_type",
-    "created_at",
-    "updated_at",
-];
-
-/// Extract the subset of a mutation's `fields` that should land in the DB
-/// row's `properties` JSON column (i.e. custom properties and org drawer
-/// props like `task_state`, `effort`, `column-order`, …).
-pub(super) fn mutation_expected_properties(mutation: &Mutation) -> HashMap<String, Value> {
-    let fields = match mutation {
-        Mutation::Create { fields, .. } | Mutation::Update { fields, .. } => fields,
-        _ => return HashMap::new(),
-    };
-    fields
-        .iter()
-        .filter(|(k, _)| !BLOCK_SQL_COLUMNS.contains(&k.as_str()))
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect()
-}
-
-/// Parse a `properties` column value into a flat map, handling the two
-/// shapes Turso may return (raw JSON string or already-parsed Object).
-pub(super) fn row_properties_to_map(props_val: &Value) -> HashMap<String, Value> {
-    match props_val {
-        Value::String(s) => serde_json::from_str::<HashMap<String, Value>>(s).unwrap_or_default(),
-        Value::Object(m) => m.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-        _ => HashMap::new(),
-    }
 }

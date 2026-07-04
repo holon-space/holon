@@ -1,8 +1,9 @@
-//! Cross-cutting tests of the frontend slice. The headline: the shared catalog's
-//! `SutViewSelection`/`SutRenderer` invariants run over a **real** headless
-//! `ReactiveEngine` (the production CDC→watch→interpret render path, windowless),
-//! and the `SutBackend` block-tree invariants run over the same engine's
-//! `block_raw` — a fourth realization backing the same catalog, zero duplication.
+//! Cross-cutting tests of the frontend slice. The headline: the shared
+//! catalog's `SutViewSelection`/`SutRenderer` invariants run over a **real**
+//! headless `ReactiveEngine` (the production CDC→watch→interpret render path,
+//! windowless), and the `SutBackend` block-tree invariants run over the same
+//! engine's `block_raw` — a fourth realization backing the same catalog, zero
+//! duplication.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,17 +24,21 @@ async fn new_component() -> Arc<HeadlessFrontendComponent> {
     )
 }
 
-/// E1 make-or-break PROBE (Step-A): does `SutWatch` over the PRODUCTION reactive
-/// watch surface actually deliver rows in the windowless session? Register an
-/// `AllBlocks` query watch through `register_query_watch` (→
-/// `ReactiveEngine::watch_query_live`, the real CDC pump), settle, and read it back
-/// through the `SutWatch` cap. If this returns the seeded blocks, the redesign
-/// (read the real `ReactiveRenderedRows`, not E2ESut's bespoke `ui_model`) is viable.
+/// E1 make-or-break PROBE (Step-A): does `SutWatch` over the PRODUCTION
+/// reactive watch surface actually deliver rows in the windowless session?
+/// Register an `AllBlocks` query watch through `register_query_watch` (→
+/// `ReactiveEngine::watch_query_live`, the real CDC pump), settle, and read it
+/// back through the `SutWatch` cap. If this returns the seeded blocks, the
+/// redesign (read the real `ReactiveRenderedRows`, not E2ESut's bespoke
+/// `ui_model`) is viable.
 #[tokio::test]
 async fn frontend_slice_watch_rows_deliver_over_production_reactive_surface() {
-    use crate::pbt::query::{QuerySource, QueryTable, TestQuery};
     use holon_api::QueryLanguage;
     use holon_pbt_core::capabilities::SutWatch;
+
+    use crate::pbt::query::QuerySource;
+    use crate::pbt::query::QueryTable;
+    use crate::pbt::query::TestQuery;
 
     let comp = new_component().await;
     let query = TestQuery {
@@ -63,15 +68,15 @@ async fn frontend_slice_watch_rows_deliver_over_production_reactive_surface() {
 
     let rows = comp.watch_rows("query-probe").await;
     eprintln!(
-        "[watch-probe] AllBlocks watch delivered {} rows over the production reactive \
-         surface; sample={:?}",
+        "[watch-probe] AllBlocks watch delivered {} rows over the production reactive surface; \
+         sample={:?}",
         rows.len(),
         rows.first()
     );
     assert!(
         !rows.is_empty(),
-        "the production reactive watch must deliver the seeded blocks' rows headlessly \
-         (else SutWatch can't read the real ReactiveRenderedRows); got 0 rows"
+        "the production reactive watch must deliver the seeded blocks' rows headlessly (else \
+         SutWatch can't read the real ReactiveRenderedRows); got 0 rows"
     );
     // Every row must carry an `id` column (the AllBlocks projection).
     assert!(
@@ -81,21 +86,26 @@ async fn frontend_slice_watch_rows_deliver_over_production_reactive_surface() {
 }
 
 /// The deep `/viewmodel` content oracle, headless edition: graft the fixed
-/// `parent`/`c1`/`c2` tree under the Main focus root (`block:journals`), seed the
-/// ref with the same ids+content, and prove `inv-displayed-text/viewmodel`
+/// `parent`/`c1`/`c2` tree under the Main focus root (`block:journals`), seed
+/// the ref with the same ids+content, and prove `inv-displayed-text/viewmodel`
 /// *compares the nested Main-panel content* (not just panel chrome) — reaching
 /// `Ok` clean and `Fail` on a planted `c1` divergence. This works because the
-/// component resolves the FULL tree via the engine's recursive `snapshot` warmed
-/// to a fixed point (rich ViewModel: no window needed). `/widget` is deselected
-/// (no `SutLayout` geometry headless), so `/viewmodel` carries it.
+/// component resolves the FULL tree via the engine's recursive `snapshot`
+/// warmed to a fixed point (rich ViewModel: no window needed). `/widget` is
+/// deselected (no `SutLayout` geometry headless), so `/viewmodel` carries it.
 #[tokio::test(flavor = "multi_thread")]
 async fn frontend_slice_displayed_text_viewmodel_bites_on_nested_content() {
-    use crate::pbt::composed::seed_primitives::{
-        C1, C2, PARENT, Plant, apply_plant, fixed_ids, seed_ref_tree,
-    };
+    use holon_pbt_core::invariant::InvariantResult;
+
+    use crate::pbt::composed::seed_primitives::C1;
+    use crate::pbt::composed::seed_primitives::C2;
+    use crate::pbt::composed::seed_primitives::PARENT;
+    use crate::pbt::composed::seed_primitives::Plant;
+    use crate::pbt::composed::seed_primitives::apply_plant;
+    use crate::pbt::composed::seed_primitives::fixed_ids;
+    use crate::pbt::composed::seed_primitives::seed_ref_tree;
     use crate::pbt::composed::subsystem_seed::run_with_seeded_ref;
     use crate::pbt::state_machine::fresh_reference_state;
-    use holon_pbt_core::invariant::InvariantResult;
 
     let comp = new_component().await;
     let ids = fixed_ids();
@@ -119,7 +129,8 @@ async fn frontend_slice_displayed_text_viewmodel_bites_on_nested_content() {
     // vault) and legitimately diverge — those need a full-vault oracle and are
     // covered elsewhere. So we assert the `/viewmodel` arm directly, not overall
     // emptiness. `/viewmodel` skips ref-unknown blocks, so the partial ref is fine.
-    // (`run_with_seeded_ref` drops the `ReferenceState`'s tokio runtime off-thread.)
+    // (`run_with_seeded_ref` drops the `ReferenceState`'s tokio runtime
+    // off-thread.)
     let report = run_with_seeded_ref(
         &composed_invariant_catalog(),
         &sut,
@@ -133,9 +144,9 @@ async fn frontend_slice_displayed_text_viewmodel_bites_on_nested_content() {
         .map(|(_, r)| r.clone());
     assert!(
         matches!(vm_result, Some(InvariantResult::Ok)),
-        "headless /viewmodel must reach Ok over the grafted nested content (NOT \
-         Skipped — that would mean the recursive snapshot didn't resolve the \
-         Main-panel content), got {vm_result:?}; ran={:?}",
+        "headless /viewmodel must reach Ok over the grafted nested content (NOT Skipped — that \
+         would mean the recursive snapshot didn't resolve the Main-panel content), got \
+         {vm_result:?}; ran={:?}",
         report.ran_ids(),
     );
 
@@ -158,8 +169,8 @@ async fn frontend_slice_displayed_text_viewmodel_bites_on_nested_content() {
         .collect();
     assert!(
         failed.contains(&"inv-displayed-text/viewmodel"),
-        "planted c1 divergence must make headless /viewmodel FAIL (the oracle \
-         bites on nested content); failures={:?}",
+        "planted c1 divergence must make headless /viewmodel FAIL (the oracle bites on nested \
+         content); failures={:?}",
         planted_report.failures(),
     );
 }
@@ -170,7 +181,8 @@ async fn frontend_slice_displayed_text_viewmodel_bites_on_nested_content() {
 /// `DirectChildren(parent)` watch projecting only `id`, and seed the ref with a
 /// matching `active_watches` entry + block tree:
 ///   - clean → `inv-active-watches-match-ref` (id-set agrees) AND
-///     `inv-watch-rows-match-ref` (the watched children {c1,c2} agree) both `Ok`.
+///     `inv-watch-rows-match-ref` (the watched children {c1,c2} agree) both
+///     `Ok`.
 ///   - drop c2 from the ref → the watch's id-set diverges, block_raw truth
 ///     ({c1,c2}) ≠ the ref ({c1}) → `inv-watch-rows-match-ref` `Fail` (a real
 ///     write-pipeline divergence, not a CDC-lag skip).
@@ -179,12 +191,20 @@ async fn frontend_slice_displayed_text_viewmodel_bites_on_nested_content() {
 /// alignment), so the oracle is exact.
 #[tokio::test(flavor = "multi_thread")]
 async fn frontend_slice_watch_invariants_bite_over_production_watches() {
-    use crate::pbt::composed::seed_primitives::{C1, C2, PARENT, fixed_ids, seed_ref_tree};
-    use crate::pbt::composed::subsystem_seed::run_with_seeded_ref;
-    use crate::pbt::query::{QuerySource, QueryTable, TestQuery, WatchSpec};
-    use crate::pbt::state_machine::fresh_reference_state;
     use holon_api::QueryLanguage;
     use holon_pbt_core::invariant::InvariantResult;
+
+    use crate::pbt::composed::seed_primitives::C1;
+    use crate::pbt::composed::seed_primitives::C2;
+    use crate::pbt::composed::seed_primitives::PARENT;
+    use crate::pbt::composed::seed_primitives::fixed_ids;
+    use crate::pbt::composed::seed_primitives::seed_ref_tree;
+    use crate::pbt::composed::subsystem_seed::run_with_seeded_ref;
+    use crate::pbt::query::QuerySource;
+    use crate::pbt::query::QueryTable;
+    use crate::pbt::query::TestQuery;
+    use crate::pbt::query::WatchSpec;
+    use crate::pbt::state_machine::fresh_reference_state;
 
     const WATCH_ID: &str = "query-children";
 
@@ -250,8 +270,8 @@ async fn frontend_slice_watch_invariants_bite_over_production_watches() {
             result_of(&report, "inv-watch-rows-match-ref"),
             Some(InvariantResult::Ok)
         ),
-        "watch-rows must reach Ok over the production watch (children {{c1,c2}} agree); \
-         got {:?}; ran={:?}",
+        "watch-rows must reach Ok over the production watch (children {{c1,c2}} agree); got {:?}; \
+         ran={:?}",
         result_of(&report, "inv-watch-rows-match-ref"),
         report.ran_ids(),
     );
@@ -282,8 +302,8 @@ async fn frontend_slice_watch_invariants_bite_over_production_watches() {
         .collect();
     assert!(
         dropped_failures.contains(&"inv-watch-rows-match-ref"),
-        "dropping c2 from the ref must make inv-watch-rows-match-ref FAIL (block_raw \
-         truth {{c1,c2}} ≠ ref {{c1}}, not a CDC-lag skip); failures={dropped_failures:?}",
+        "dropping c2 from the ref must make inv-watch-rows-match-ref FAIL (block_raw truth \
+         {{c1,c2}} ≠ ref {{c1}}, not a CDC-lag skip); failures={dropped_failures:?}",
     );
 
     // ── catch B: ref watches a DIFFERENT id → active-watches Fail ──
@@ -313,25 +333,35 @@ async fn frontend_slice_watch_invariants_bite_over_production_watches() {
     );
 }
 
-/// INC 3 teeth: the `SetupWatch` transition, decomposed onto the `SutWatchRegister`
-/// cap, registers the watch by driving the **composed `CapMap`** through
-/// `apply_to_sut` — the same path the wide PBT's `StateMachineTest` would use —
-/// rather than calling the `register_query_watch` test helper directly. This
-/// proves the decomposition end-to-end: a watch set up through the composed cap
-/// makes the B5 watch invariants bite exactly as a directly-registered one does.
+/// INC 3 teeth: the `SetupWatch` transition, decomposed onto the
+/// `SutWatchRegister` cap, registers the watch by driving the **composed
+/// `CapMap`** through `apply_to_sut` — the same path the wide PBT's
+/// `StateMachineTest` would use — rather than calling the
+/// `register_query_watch` test helper directly. This proves the decomposition
+/// end-to-end: a watch set up through the composed cap makes the B5 watch
+/// invariants bite exactly as a directly-registered one does.
 ///   - clean → `inv-watch-rows-match-ref` `Ok` (the composed-registered watch's
 ///     children {c1,c2} agree with the ref).
-///   - drop c2 from the ref → `inv-watch-rows-match-ref` `Fail` (real divergence).
+///   - drop c2 from the ref → `inv-watch-rows-match-ref` `Fail` (real
+///     divergence).
 #[tokio::test(flavor = "multi_thread")]
 async fn frontend_slice_setup_watch_via_cap_makes_invariants_bite() {
-    use crate::pbt::composed::seed_primitives::{C1, C2, PARENT, fixed_ids, seed_ref_tree};
-    use crate::pbt::composed::subsystem_seed::run_with_seeded_ref;
-    use crate::pbt::query::{QuerySource, QueryTable, TestQuery, WatchSpec};
-    use crate::pbt::state_machine::fresh_reference_state;
-    use crate::pbt::transitions::SetupWatch;
     use holon_api::QueryLanguage;
     use holon_pbt_core::TransitionImpl;
     use holon_pbt_core::invariant::InvariantResult;
+
+    use crate::pbt::composed::seed_primitives::C1;
+    use crate::pbt::composed::seed_primitives::C2;
+    use crate::pbt::composed::seed_primitives::PARENT;
+    use crate::pbt::composed::seed_primitives::fixed_ids;
+    use crate::pbt::composed::seed_primitives::seed_ref_tree;
+    use crate::pbt::composed::subsystem_seed::run_with_seeded_ref;
+    use crate::pbt::query::QuerySource;
+    use crate::pbt::query::QueryTable;
+    use crate::pbt::query::TestQuery;
+    use crate::pbt::query::WatchSpec;
+    use crate::pbt::state_machine::fresh_reference_state;
+    use crate::pbt::transitions::SetupWatch;
 
     const WATCH_ID: &str = "query-children";
 
@@ -433,19 +463,20 @@ async fn frontend_slice_setup_watch_via_cap_makes_invariants_bite() {
          SetupWatch-via-cap registered watch; failures={dropped_failures:?}",
     );
     eprintln!(
-        "[setup-watch-cap-teeth] SetupWatch driven through the composed CapMap registers a \
-         watch that makes inv-watch-rows-match-ref bite (Ok clean, Fail on dropped child)"
+        "[setup-watch-cap-teeth] SetupWatch driven through the composed CapMap registers a watch \
+         that makes inv-watch-rows-match-ref bite (Ok clean, Fail on dropped child)"
     );
 }
 
 /// E1 PROBE: `SutOrgRead::org_block_snapshot` parses the on-disk org files back
-/// into blocks via the production `holon_orgmode` parser. Prints the parsed blocks
-/// so I can see the id/parent shape before aligning a ref for `inv-blocks-match-ref/org`.
+/// into blocks via the production `holon_orgmode` parser. Prints the parsed
+/// blocks so I can see the id/parent shape before aligning a ref for
+/// `inv-blocks-match-ref/org`.
 #[tokio::test(flavor = "multi_thread")]
 async fn frontend_slice_org_read_parses_on_disk_files() {
-    use holon_pbt_core::capabilities::SutOrgRead;
-
     use std::collections::BTreeSet;
+
+    use holon_pbt_core::capabilities::SutOrgRead;
     let comp = new_component().await;
     let blocks = comp.org_block_snapshot().await;
     eprintln!(
@@ -467,10 +498,11 @@ async fn frontend_slice_org_read_parses_on_disk_files() {
     eprintln!("[org-probe] re-parse id-set stable: {}", ids1 == ids2);
 }
 
-/// E1 PROBE (make-or-break): does `SutOrgRender::snapshot_org_render_pairs` render
-/// each tracked org file from the headless SQL state so it matches the on-disk bytes
-/// (the render-fixed-point the `FileSyncController`'s echo-suppression depends on)?
-/// If disk == rendered for every pair, the production render path works headlessly.
+/// E1 PROBE (make-or-break): does `SutOrgRender::snapshot_org_render_pairs`
+/// render each tracked org file from the headless SQL state so it matches the
+/// on-disk bytes (the render-fixed-point the `FileSyncController`'s
+/// echo-suppression depends on)? If disk == rendered for every pair, the
+/// production render path works headlessly.
 #[tokio::test(flavor = "multi_thread")]
 async fn frontend_slice_org_render_pairs_reach_fixed_point() {
     use holon_pbt_core::capabilities::SutOrgRender;
@@ -489,12 +521,29 @@ async fn frontend_slice_org_render_pairs_reach_fixed_point() {
 }
 
 /// E1 teeth: the relocated `SutOrgRender` (production `CacheBlockReader` +
-/// `OrgRenderer`) makes `inv-org-render-fixed-point` **bite** on the composition
-/// path — no ref needed (it compares the SUT's render against the SUT's disk). Clean
-/// → `Ok` (the booted session settled the seed file to a fixed point); overwrite the
-/// disk file so it diverges from the SQL render → `Fail`.
+/// `OrgRenderer`) makes `inv-org-render-fixed-point` **bite** on the
+/// composition path — no ref needed (it compares the SUT's render against the
+/// SUT's disk).
+///
+/// - clean → `Ok`: the booted session settled the seed file to a fixed point.
+/// - catch → `Fail`: a `render(SQL) != disk` divergence that PERSISTS.
+///
+/// The catch injects the divergence through a wrapper `SutOrgRender` rather
+/// than by editing the disk. A live disk edit does NOT work here: the headless
+/// session runs the real `FileSyncController`, which re-ingests any changed org
+/// bytes into SQL and re-renders them straight back to a NEW fixed point —
+/// self-healing the divergence within the run (verified: the corrupted file
+/// comes back rewritten with `:ID:` drawers, `disk == render`). That
+/// self-healing is CORRECT: a healthy session never sustains a permanent
+/// disagreement, so `inv-org-render-fixed-point` rightly returns
+/// `Ok`. The invariant only fires on a divergence that persists (the May-2026
+/// property-drawer round-trip echo-loop). To exercise that Fail path
+/// deterministically — without a real echo-loop bug and without racing the
+/// re-render loop — the wrapper reports a disk side the renderer will never
+/// emit, so the disagreement holds for the invariant's whole stability budget.
 #[tokio::test(flavor = "multi_thread")]
 async fn frontend_slice_org_render_fixed_point_bites() {
+    use holon_pbt_core::capabilities::SutOrgRender;
     use holon_pbt_core::composition::CapMap;
     use holon_pbt_core::invariant::InvariantResult;
 
@@ -520,32 +569,59 @@ async fn frontend_slice_org_render_fixed_point_bites() {
     );
     eprintln!("[org-render-teeth] clean: inv-org-render-fixed-point Ok");
 
-    // catch: corrupt the disk so it diverges from the SQL render → Fail.
-    comp.overwrite_first_org_file("* a totally different on-disk heading\n")
-        .await;
-    let corrupted = run_selected(&composed_invariant_catalog(), &sut, &ref_).await;
-    let failed: Vec<&str> = corrupted.failures().iter().map(|(id, _)| *id).collect();
+    // catch: a persistent `render(SQL) != disk` divergence must make the invariant
+    // FAIL. Override the `SutOrgRender` cap with a wrapper over the SAME component
+    // whose reported disk bytes carry a heading the render never emits — a
+    // disagreement the session cannot self-heal (nothing re-ingests the wrapper's
+    // synthetic bytes), so it holds across the invariant's stability window.
+    let mut divergent = frontend_wide(comp.clone());
+    divergent.replace(Arc::new(DivergentOrgRender(comp.clone())) as Arc<dyn SutOrgRender>);
+    let corrupted = run_selected(&composed_invariant_catalog(), &divergent, &ref_).await;
     assert!(
-        failed.contains(&wf_id),
-        "a disk/render divergence must make {wf_id} FAIL; failures={failed:?}",
+        matches!(result_of(&corrupted), Some(InvariantResult::Fail(_))),
+        "a persistent disk/render divergence must make {wf_id} FAIL; got {:?}; ran={:?}",
+        result_of(&corrupted),
+        corrupted.ran_ids(),
     );
     eprintln!("[org-render-teeth] catch: inv-org-render-fixed-point FAILED on disk divergence");
 }
 
-/// E1 teeth: the relocated `SutOrgRead` (production `holon_orgmode` parser) makes
-/// `inv-blocks-match-ref/org` **bite** on the composition path. The org block ids are
-/// random-per-boot, so read the parsed blocks at runtime and seed the ref's
-/// `block_state` with exactly them (`RefBackend::org_blocks` returns non-seed blocks
-/// verbatim): clean → `/org` `Ok`; mutate one block's content on the ref → `/org`
-/// `Fail`. Scoped to the `/org` arm — the component's `SutBackend` sees the whole
-/// booted vault, so the `block_raw` block-tree invariants diverge against this
-/// 2-block partial ref (covered elsewhere).
+/// A `SutOrgRender` that delegates to the real component but perturbs the disk
+/// side of the first tracked pair so `disk != rendered` — the echo-loop
+/// precondition `inv-org-render-fixed-point` guards. Injecting it (rather than
+/// editing the disk) is what makes the teeth deterministic: the live
+/// `FileSyncController` would ingest and re-render a real disk edit back to a
+/// fixed point, but nothing re-ingests these synthetic bytes, so the divergence
+/// persists across the invariant's stability budget.
+struct DivergentOrgRender(Arc<HeadlessFrontendComponent>);
+
+#[async_trait::async_trait(?Send)]
+impl holon_pbt_core::capabilities::SutOrgRender for DivergentOrgRender {
+    async fn snapshot_org_render_pairs(&self) -> Vec<(String, String, String)> {
+        let mut pairs = self.0.snapshot_org_render_pairs().await;
+        let first = pairs
+            .first_mut()
+            .expect("component must track \u{2265}1 org file to perturb");
+        first.1 = format!("* a totally different on-disk heading\n{}", first.1);
+        pairs
+    }
+}
+
+/// E1 teeth: the relocated `SutOrgRead` (production `holon_orgmode` parser)
+/// makes `inv-blocks-match-ref/org` **bite** on the composition path. The org
+/// block ids are random-per-boot, so read the parsed blocks at runtime and seed
+/// the ref's `block_state` with exactly them (`RefBackend::org_blocks` returns
+/// non-seed blocks verbatim): clean → `/org` `Ok`; mutate one block's content
+/// on the ref → `/org` `Fail`. Scoped to the `/org` arm — the component's
+/// `SutBackend` sees the whole booted vault, so the `block_raw` block-tree
+/// invariants diverge against this 2-block partial ref (covered elsewhere).
 #[tokio::test(flavor = "multi_thread")]
 async fn frontend_slice_org_blocks_match_ref_bites() {
-    use crate::pbt::composed::subsystem_seed::run_with_seeded_ref;
-    use crate::pbt::state_machine::fresh_reference_state;
     use holon_pbt_core::capabilities::SutOrgRead;
     use holon_pbt_core::invariant::InvariantResult;
+
+    use crate::pbt::composed::subsystem_seed::run_with_seeded_ref;
+    use crate::pbt::state_machine::fresh_reference_state;
 
     let comp = new_component().await;
     let parsed = comp.org_block_snapshot().await;
@@ -576,8 +652,8 @@ async fn frontend_slice_org_blocks_match_ref_bites() {
     .await;
     assert!(
         matches!(result_of(&report), Some(InvariantResult::Ok)),
-        "inv-blocks-match-ref/org must reach Ok when the ref's org view matches the \
-         on-disk parse; got {:?}; ran={:?}",
+        "inv-blocks-match-ref/org must reach Ok when the ref's org view matches the on-disk \
+         parse; got {:?}; ran={:?}",
         result_of(&report),
         report.ran_ids(),
     );
@@ -608,8 +684,8 @@ async fn frontend_slice_org_blocks_match_ref_bites() {
         .collect();
     assert!(
         failed.contains(&"inv-blocks-match-ref/org"),
-        "a content divergence on the ref must make inv-blocks-match-ref/org FAIL (the \
-         org-parse oracle bites); failures={failed:?}",
+        "a content divergence on the ref must make inv-blocks-match-ref/org FAIL (the org-parse \
+         oracle bites); failures={failed:?}",
     );
     eprintln!("[org-teeth] catch: inv-blocks-match-ref/org FAILED on the content divergence");
 }
@@ -663,19 +739,20 @@ async fn frontend_slice_runs_structural_block_invariants() {
     );
 }
 
-/// Bundle D minimal positive: the degraded ("shows source") twin. A real no-Turso
-/// block-query frontend (no query engine) boots over a Loro tree whose root has a
-/// query-source child, so the production `derive_render_expr` degrades to a
-/// `source_editor` render. With NO `SutQueryResults` cap wired, the catalog selects
-/// the degraded `inv-viewmodel-shows-source-when-no-query` (and DESELECTS the
-/// full-mode `inv-viewmodel-decompiled-rows-match-query`). The twin must pass — the
-/// root really renders `source_editor`.
+/// Bundle D minimal positive: the degraded ("shows source") twin. A real
+/// no-Turso block-query frontend (no query engine) boots over a Loro tree whose
+/// root has a query-source child, so the production `derive_render_expr`
+/// degrades to a `source_editor` render. With NO `SutQueryResults` cap wired,
+/// the catalog selects the degraded `inv-viewmodel-shows-source-when-no-query`
+/// (and DESELECTS the full-mode `inv-viewmodel-decompiled-rows-match-query`).
+/// The twin must pass — the root really renders `source_editor`.
 #[tokio::test(flavor = "multi_thread")]
 async fn frontend_slice_degraded_shows_source_twin_selects_and_passes() {
-    use crate::pbt::frontend_slice::block_query_component::BlockQueryFrontendComponent;
-    use crate::pbt::frontend_slice::builders::block_query_degraded;
     use holon_pbt_core::capabilities::SutRenderer;
     use holon_pbt_core::invariant::InvariantResult;
+
+    use crate::pbt::frontend_slice::block_query_component::BlockQueryFrontendComponent;
+    use crate::pbt::frontend_slice::builders::block_query_degraded;
 
     let comp = Arc::new(BlockQueryFrontendComponent::new().await);
 
@@ -701,7 +778,8 @@ async fn frontend_slice_degraded_shows_source_twin_selects_and_passes() {
         .map(|(_, r)| r.clone());
     assert!(
         matches!(degraded_result, Some(InvariantResult::Ok)),
-        "the degraded twin must SELECT and pass (root renders source_editor); got {degraded_result:?}; ran={:?}",
+        "the degraded twin must SELECT and pass (root renders source_editor); got \
+         {degraded_result:?}; ran={:?}",
         report.ran_ids(),
     );
 

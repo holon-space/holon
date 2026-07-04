@@ -21,9 +21,10 @@
 use std::pin::Pin;
 use std::sync::Arc;
 
-use futures_signals::signal_vec::{SignalVec, SignalVecExt};
-use holon_api::widget_spec::DataRow;
+use futures_signals::signal_vec::SignalVec;
+use futures_signals::signal_vec::SignalVecExt;
 use holon_api::ReactiveRowProvider;
+use holon_api::widget_spec::DataRow;
 
 pub struct LaneFilteredProvider {
     upstream: Arc<dyn ReactiveRowProvider>,
@@ -74,7 +75,7 @@ impl ReactiveRowProvider for LaneFilteredProvider {
 
     fn keyed_rows_signal_vec(
         &self,
-    ) -> Pin<Box<dyn SignalVec<Item = (holon_api::EntityUri, Arc<DataRow>)> + Send>> {
+    ) -> Pin<Box<dyn SignalVec<Item = (holon_api::RowKey, Arc<DataRow>)> + Send>> {
         let lane_field = self.lane_field.clone();
         let lane_value = self.lane_value.clone();
         Box::pin(self.upstream.keyed_rows_signal_vec().filter(move |entry| {
@@ -120,10 +121,12 @@ impl ReactiveRowProvider for LaneFilteredProvider {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use holon_api::Value;
+
     use super::*;
     use crate::value_fns::synthetic::SyntheticRows;
-    use holon_api::Value;
-    use std::collections::HashMap;
 
     fn row(id: &str, lane: &str) -> Arc<DataRow> {
         let mut m: HashMap<String, Value> = HashMap::new();

@@ -15,28 +15,42 @@
 //! CDC events; the watermark on `LoroSyncController` is the single source
 //! of truth for "what has been propagated."
 
-use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
-use holon_api::block::{Block, BlockContent};
-use holon_api::{ContentType, EntityName, EntityUri, Operation, Value};
+use async_trait::async_trait;
+use holon_api::ApiError;
+use holon_api::ContentType;
+use holon_api::EntityName;
+use holon_api::EntityUri;
+use holon_api::Operation;
+use holon_api::OperationDescriptor;
+use holon_api::StorageEntity;
+use holon_api::Value;
+use holon_api::block::Block;
+use holon_api::block::BlockContent;
+use holon_api::repository::CoreOperations;
+use holon_api::repository::Traversal;
+use holon_core::BlockDataSourceHelpers;
+use holon_core::BlockMaintenanceHelpers;
+use holon_core::BlockOperations;
+use holon_core::BlockQueryHelpers;
+use holon_core::CompletionStateInfo;
+use holon_core::CrudOperations;
+use holon_core::DataSource;
+use holon_core::MarkOperations;
+use holon_core::OperationProvider;
+use holon_core::OperationRegistry;
+use holon_core::OperationResult;
+use holon_core::Result;
+use holon_core::TaskOperations;
+use holon_core::TextOperations;
+use holon_core::UnknownOperationError;
+use tokio::sync::RwLock;
 
 use crate::LoroDocumentStore;
 use crate::loro_backend::LoroBackend;
 use crate::shared_tree::SharedTreeStore;
-use holon_api::ApiError;
-use holon_api::OperationDescriptor;
-use holon_api::StorageEntity;
-use holon_api::repository::CoreOperations;
-use holon_api::repository::Traversal;
-use holon_core::{
-    BlockDataSourceHelpers, BlockMaintenanceHelpers, BlockOperations, BlockQueryHelpers,
-    CompletionStateInfo, CrudOperations, DataSource, MarkOperations, OperationProvider,
-    OperationRegistry, OperationResult, Result, TaskOperations, TextOperations,
-    UnknownOperationError,
-};
 
 /// Generic operations on Loro blocks.
 ///
@@ -48,7 +62,8 @@ pub struct LoroBlockOperations {
     /// Registry of shared subtree docs. When present, the per-operation write
     /// backend can route writes for blocks that were pruned into a shared doc
     /// (mount-aware write routing). `None` in configs without share machinery
-    /// (no-Turso sessions, wasm, iroh-sync off), where no subtree is ever shared.
+    /// (no-Turso sessions, wasm, iroh-sync off), where no subtree is ever
+    /// shared.
     shared_trees: Option<Arc<dyn SharedTreeStore>>,
 }
 
@@ -61,7 +76,8 @@ impl LoroBlockOperations {
     }
 
     /// Attach the shared-tree registry so per-operation write backends can
-    /// route writes into shared subtree docs (see `LoroBackend::with_shared_trees`).
+    /// route writes into shared subtree docs (see
+    /// `LoroBackend::with_shared_trees`).
     pub fn with_shared_trees(mut self, store: Arc<dyn SharedTreeStore>) -> Self {
         self.shared_trees = Some(store);
         self
@@ -97,6 +113,51 @@ impl LoroBlockOperations {
         let store = self.doc_store.read().await;
         store.save_all().await?;
         Ok(())
+    }
+
+    /// Dismiss one advice lesson under an anchor (ADR 0021 suppression + ADR
+    /// 0022).
+    ///
+    /// A dismiss gesture appends `lesson_id` to the anchor's
+    /// `advice_suppressed` set. This is a **read-modify-write**: read the
+    /// anchor's current set, append the lesson if absent (idempotent), and
+    /// write the whole set back via the production
+    /// writer [`LoroBackend::set_block_advice_suppressed`].
+    ///
+    /// NOTE: the production writer is a **whole-set REPLACE over one LWW meta
+    /// key**, so two concurrent dismissals of *different* lessons on the
+    /// same anchor can lose one (last-writer-wins on the whole array).
+    /// Per-element suppression (an H3-properties nested-map, one LWW key
+    /// per dismissed lesson) is deferred.
+    async fn dismiss_advice(&self, params: &StorageEntity) -> Result<OperationResult> {
+        let anchor_id = params
+            .get("anchor_id")
+            .and_then(|v| v.as_string())
+            .ok_or("dismiss_advice: missing 'anchor_id' parameter")?;
+        let lesson_id = params
+            .get("lesson_id")
+            .and_then(|v| v.as_string())
+            .ok_or("dismiss_advice: missing 'lesson_id' parameter")?;
+        let lesson_uri = EntityUri::parse_owned(lesson_id.to_string())
+            .map_err(|e| format!("dismiss_advice: invalid 'lesson_id' URI {lesson_id:?}: {e}"))?;
+
+        let (doc_path, backend) = self.find_doc_for_block(anchor_id).await?;
+        // Fail loud on a missing anchor — never silently write a fresh set.
+        let anchor = backend
+            .get_block(anchor_id)
+            .await
+            .map_err(|e| format!("dismiss_advice: anchor block {anchor_id:?} not found: {e}"))?;
+
+        let mut suppressed = anchor.advice_suppressed.clone();
+        if !suppressed.contains(&lesson_uri) {
+            suppressed.push(lesson_uri);
+        }
+        backend
+            .set_block_advice_suppressed(anchor_id, &suppressed)
+            .await
+            .map_err(|e| format!("dismiss_advice: {e}"))?;
+        self.save_doc(&doc_path).await?;
+        Ok(OperationResult::irreversible(vec![]))
     }
 }
 
@@ -139,6 +200,40 @@ impl BlockOperations<Block> for LoroBlockOperations {}
 /// inverses are executed by the undo stack, not surfaced as user actions).
 fn block_op(op_name: &str, params: HashMap<String, Value>) -> Operation {
     Operation::new(EntityName::from("block"), op_name, "", params)
+}
+
+/// Hand-built descriptor for the `dismiss_advice` operation (ADR 0021/0022).
+///
+/// Params: `anchor_id` (the block the advice is woven under) and `lesson_id`
+/// (the dismissed advice row). Both are block ids. The frontend emits this op
+/// with those two params from a per-lesson dismiss affordance.
+fn dismiss_advice_descriptor() -> OperationDescriptor {
+    use holon_api::render_types::OperationParam;
+    use holon_api::render_types::TypeHint;
+    let block = EntityName::from("block");
+    OperationDescriptor {
+        entity_name: block.clone(),
+        entity_short_name: "block".to_string(),
+        id_column: "id".to_string(),
+        name: "dismiss_advice".to_string(),
+        display_name: "Dismiss advice".to_string(),
+        description: "Suppress this advice lesson under its anchor block".to_string(),
+        required_params: vec![
+            OperationParam {
+                name: "anchor_id".to_string(),
+                type_hint: TypeHint::EntityId {
+                    entity_name: block.clone(),
+                },
+                description: "The anchor block the advice is woven under".to_string(),
+            },
+            OperationParam {
+                name: "lesson_id".to_string(),
+                type_hint: TypeHint::EntityId { entity_name: block },
+                description: "The advice lesson block to dismiss".to_string(),
+            },
+        ],
+        ..Default::default()
+    }
 }
 
 #[async_trait]
@@ -186,12 +281,14 @@ impl CrudOperations<Block> for LoroBlockOperations {
                         // `obj` is a Value::Object payload (set_field caller serialized
                         // marks as a JSON string), not a CDC row from the jsonb column.
                         // ALLOW(jsonb_as_string): payload field, not CDC row.
-                        let marks_json = obj.get("marks").and_then(|v| v.as_string()).ok_or_else(
-                            || {
-                                "set_field('content', Object): missing 'marks' JSON string field"
-                                    .to_string()
-                            },
-                        )?;
+                        let marks_json =
+                            obj.get("marks")
+                                .and_then(|v| v.as_string())
+                                .ok_or_else(|| {
+                                    "set_field('content', Object): missing 'marks' JSON string \
+                                     field"
+                                        .to_string()
+                                })?;
                         let marks: Vec<holon_api::MarkSpan> =
                             holon_api::marks_from_json(marks_json).map_err(|e| {
                                 format!("set_field('content'): marks JSON parse error: {e}")
@@ -256,8 +353,28 @@ impl CrudOperations<Block> for LoroBlockOperations {
                     .map_err(|e| format!("set_field(\"parent_id\") for {id}: {e}"))?;
             }
             _ => {
-                // Store in properties
+                // Store in properties. A bare `task_state` keyword write gets
+                // its `task_state_category` sidecar derived and written in the
+                // SAME commit — the pair invariant `Block::set_task_state`
+                // establishes at the org parse boundary (see
+                // `TaskState::category_str_for_keyword`); without this every
+                // UI cycle dropped/staled the category.
                 let mut props = HashMap::new();
+                if field == "task_state" {
+                    let category = match &value {
+                        Value::Null => Value::Null,
+                        Value::String(kw) => Value::String(
+                            holon_api::TaskState::category_str_for_keyword(kw).to_string(),
+                        ),
+                        other => {
+                            return Err(format!(
+                                "set_field('task_state'): expected String or Null, got {other:?}"
+                            )
+                            .into());
+                        }
+                    };
+                    props.insert("task_state_category".to_string(), category);
+                }
                 props.insert(field.to_string(), value);
                 backend
                     .update_block_properties(id, &props)
@@ -311,7 +428,8 @@ impl CrudOperations<Block> for LoroBlockOperations {
             .map(|s| s.to_string());
 
         tracing::debug!(
-            "[LoroBlockOperations::create] doc_id={:?}, block_id={:?}, parent_id={:?}, content_type={:?}, source_language={:?}",
+            "[LoroBlockOperations::create] doc_id={:?}, block_id={:?}, parent_id={:?}, \
+             content_type={:?}, source_language={:?}",
             doc_id,
             block_id,
             parent_id,
@@ -377,7 +495,8 @@ impl CrudOperations<Block> for LoroBlockOperations {
                 .map_err(|e| format!("Failed to create block: {}", e))?
         };
 
-        // Set additional properties (excluding fields handled above and source block fields)
+        // Set additional properties (excluding fields handled above and source block
+        // fields)
         let mut props = HashMap::new();
         let handled_fields = [
             "parent_id",
@@ -441,7 +560,8 @@ impl CrudOperations<Block> for LoroBlockOperations {
 impl LoroBlockOperations {
     /// Update a block with the given fields.
     ///
-    /// Forwards to `create` which does upsert (create if not exists, update if exists).
+    /// Forwards to `create` which does upsert (create if not exists, update if
+    /// exists).
     async fn update_block(&self, fields: holon_api::StorageEntity) -> Result<OperationResult> {
         let (_block_id, result) = self.create(fields).await?;
         Ok(result)
@@ -489,10 +609,14 @@ impl TaskOperations<Block> for LoroBlockOperations {
 
     async fn set_state(&self, id: &str, state: String) -> Result<OperationResult> {
         // The canonical task-state property key is `task_state` — the org parser
-        // (`block_params`), the SQL provider's `cycle_task_state`, and `Block::task_state()`
-        // all read/write `properties["task_state"]`. Writing `"TODO"` here stored a stray
-        // property the cycle never read back, so `cycle_task_state` (read `task_state`, write
-        // `TODO`) was a no-op in Loro mode — Cmd+Enter never advanced the keyword.
+        // (`block_params`), the SQL provider's `cycle_task_state`, and
+        // `Block::task_state()` all read/write `properties["task_state"]`.
+        // Writing `"TODO"` here stored a stray property the cycle never read
+        // back, so `cycle_task_state` (read `task_state`, write `TODO`) was a
+        // no-op in Loro mode — Cmd+Enter never advanced the keyword.
+        // `set_field("task_state")` pairs the `task_state_category` sidecar in
+        // the same commit (see its properties branch), so this delegate keeps
+        // the pair invariant.
         self.set_field(id, "task_state", Value::String(state)).await
     }
 
@@ -630,11 +754,11 @@ impl TextOperations<Block> for LoroBlockOperations {
 #[async_trait]
 impl OperationProvider for LoroBlockOperations {
     fn operations(&self) -> Vec<OperationDescriptor> {
-        use holon_core::{
-            __operations_block_operations, __operations_crud_operations,
-            __operations_mark_operations, __operations_task_operations,
-            __operations_text_operations,
-        };
+        use holon_core::__operations_block_operations;
+        use holon_core::__operations_crud_operations;
+        use holon_core::__operations_mark_operations;
+        use holon_core::__operations_task_operations;
+        use holon_core::__operations_text_operations;
 
         let entity_name = Block::entity_name();
         let short_name = Block::short_name().expect("Block must have short_name");
@@ -675,6 +799,11 @@ impl OperationProvider for LoroBlockOperations {
             id_column,
         ));
 
+        // Advice dismissal (ADR 0021/0022) — a bespoke read-modify-write append that
+        // isn't one of the macro-generated CRUD/block/text traits, so its descriptor
+        // is built by hand. The frontend binds this to a per-lesson dismiss affordance.
+        ops.push(dismiss_advice_descriptor());
+
         ops
     }
 
@@ -684,11 +813,11 @@ impl OperationProvider for LoroBlockOperations {
         op_name: &str,
         params: StorageEntity,
     ) -> Result<OperationResult> {
-        use holon_core::{
-            __operations_block_operations, __operations_crud_operations,
-            __operations_mark_operations, __operations_task_operations,
-            __operations_text_operations,
-        };
+        use holon_core::__operations_block_operations;
+        use holon_core::__operations_crud_operations;
+        use holon_core::__operations_mark_operations;
+        use holon_core::__operations_task_operations;
+        use holon_core::__operations_text_operations;
 
         tracing::debug!(
             "[LoroBlockOperations::execute_operation] entity={}, op={}",
@@ -698,6 +827,23 @@ impl OperationProvider for LoroBlockOperations {
 
         if entity_name != "block" {
             return Err(format!("Expected entity_name 'block', got '{}'", entity_name).into());
+        }
+
+        // Intent boundary (Model.md invariant 3): `execute_operation` is the
+        // provider surface intents arrive on (dispatcher, MCP, and
+        // no-dispatcher configs that hold this provider directly). Parse the
+        // `set_field` field into the closed `BlockWriteField` vocabulary —
+        // order keys and storage-internal fields fail loud instead of being
+        // silently discarded downstream. Internal callers (move_block's
+        // depth write, the task-state convenience setters) call the
+        // `CrudOperations::set_field` method directly and are unaffected.
+        if op_name == "set_field" {
+            let field = params
+                .get("field")
+                .and_then(|v| v.as_string())
+                .ok_or("block set_field: missing 'field' parameter")?;
+            holon_api::BlockWriteField::parse(field)
+                .map_err(|e| format!("intent boundary: {e}"))?;
         }
 
         // Try CRUD operations
@@ -711,8 +857,9 @@ impl OperationProvider for LoroBlockOperations {
             }
             Err(err) => {
                 if !UnknownOperationError::is_unknown(err.as_ref()) {
-                    tracing::debug!(
-                        "[LoroBlockOperations::execute_operation] CRUD error: {}",
+                    tracing::warn!(
+                        "[LoroBlockOperations::execute_operation] CRUD op '{}' failed: {:#}",
+                        op_name,
                         err
                     );
                     return Err(err);
@@ -724,6 +871,12 @@ impl OperationProvider for LoroBlockOperations {
         if op_name == "update" {
             tracing::debug!("[LoroBlockOperations::execute_operation] Handling update operation");
             return self.update_block(params).await;
+        }
+
+        // Advice dismissal (ADR 0021/0022): append-one RMW over the anchor's
+        // `advice_suppressed` set. Not a macro-trait op — dispatched by hand here.
+        if op_name == "dismiss_advice" {
+            return self.dismiss_advice(&params).await;
         }
 
         // Try block operations
@@ -764,5 +917,177 @@ impl OperationProvider for LoroBlockOperations {
 
         // Try task operations
         __operations_task_operations::dispatch_operation::<_, Block>(self, op_name, &params).await
+    }
+}
+
+#[cfg(test)]
+mod advice_dismiss_tests {
+    use std::collections::HashMap;
+
+    use holon_api::block::BlockContent;
+    use holon_api::repository::CoreOperations;
+
+    use super::*;
+
+    /// Build ops over a temp store with one anchor block `block:anchor` (empty
+    /// `advice_suppressed`), returning the anchor id.
+    async fn ops_with_anchor() -> (LoroBlockOperations, tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(RwLock::new(LoroDocumentStore::new(
+            dir.path().to_path_buf(),
+        )));
+        let ops = LoroBlockOperations::new(store);
+        let backend = ops.get_backend("").await.expect("backend");
+        let root = backend.create_placeholder_root("root").await.expect("root");
+        let root_uri = EntityUri::parse_owned(root).expect("root uri");
+        let anchor = backend
+            .create_block(
+                root_uri,
+                BlockContent::text("a task"),
+                Some(EntityUri::block("anchor")),
+            )
+            .await
+            .expect("anchor block");
+        ops.save_doc("").await.expect("save");
+        let anchor_id = anchor.id.to_string();
+        (ops, dir, anchor_id)
+    }
+
+    fn dismiss_params(anchor_id: &str, lesson_id: &str) -> StorageEntity {
+        let mut p: StorageEntity = HashMap::new();
+        p.insert("anchor_id".into(), Value::String(anchor_id.into()));
+        p.insert("lesson_id".into(), Value::String(lesson_id.into()));
+        p
+    }
+
+    async fn read_suppressed(ops: &LoroBlockOperations, anchor_id: &str) -> Vec<String> {
+        let backend = ops.get_backend("").await.expect("backend");
+        backend
+            .get_block(anchor_id)
+            .await
+            .expect("anchor")
+            .advice_suppressed
+            .iter()
+            .map(|u| u.to_string())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn dismiss_appends_then_is_idempotent() {
+        let (ops, _dir, anchor) = ops_with_anchor().await;
+        let entity = EntityName::new("block");
+
+        ops.execute_operation(
+            &entity,
+            "dismiss_advice",
+            dismiss_params(&anchor, "block:l1"),
+        )
+        .await
+        .expect("first dismiss");
+        assert_eq!(read_suppressed(&ops, &anchor).await, vec!["block:l1"]);
+
+        // Second dismiss of the SAME lesson is a no-op (idempotent RMW).
+        ops.execute_operation(
+            &entity,
+            "dismiss_advice",
+            dismiss_params(&anchor, "block:l1"),
+        )
+        .await
+        .expect("idempotent dismiss");
+        assert_eq!(read_suppressed(&ops, &anchor).await, vec!["block:l1"]);
+    }
+
+    #[tokio::test]
+    async fn dismiss_second_lesson_preserves_first() {
+        let (ops, _dir, anchor) = ops_with_anchor().await;
+        let entity = EntityName::new("block");
+
+        ops.execute_operation(
+            &entity,
+            "dismiss_advice",
+            dismiss_params(&anchor, "block:l1"),
+        )
+        .await
+        .expect("dismiss l1");
+        // Append-one, not whole-set replace: the first dismissal survives.
+        ops.execute_operation(
+            &entity,
+            "dismiss_advice",
+            dismiss_params(&anchor, "block:l2"),
+        )
+        .await
+        .expect("dismiss l2");
+        let got = read_suppressed(&ops, &anchor).await;
+        assert!(
+            got.contains(&"block:l1".to_string()),
+            "l1 preserved: {got:?}"
+        );
+        assert!(
+            got.contains(&"block:l2".to_string()),
+            "l2 appended: {got:?}"
+        );
+        assert_eq!(got.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn dismiss_missing_anchor_fails_loud() {
+        let (ops, _dir, _anchor) = ops_with_anchor().await;
+        let entity = EntityName::new("block");
+        let err = ops
+            .execute_operation(
+                &entity,
+                "dismiss_advice",
+                dismiss_params("block:ghost", "block:l1"),
+            )
+            .await
+            .expect_err("missing anchor must fail loud");
+        assert!(err.to_string().contains("dismiss_advice"), "got: {err}");
+    }
+
+    #[test]
+    fn dismiss_advice_descriptor_shape() {
+        let d = dismiss_advice_descriptor();
+        assert_eq!(d.name, "dismiss_advice");
+        assert_eq!(d.entity_name, EntityName::new("block"));
+        let names: Vec<&str> = d.required_params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["anchor_id", "lesson_id"]);
+    }
+}
+
+#[cfg(test)]
+mod intent_boundary_tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    fn ops_over_temp_store() -> (LoroBlockOperations, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(RwLock::new(LoroDocumentStore::new(
+            dir.path().to_path_buf(),
+        )));
+        (LoroBlockOperations::new(store), dir)
+    }
+
+    /// Model.md invariant 3 at the provider surface: a `set_field` intent
+    /// carrying an order key is rejected before any CRUD dispatch — the
+    /// guard fires even in configs where no `OperationDispatcher` sits in
+    /// front of this provider (no-Turso sessions, wasm).
+    #[tokio::test]
+    async fn execute_operation_rejects_set_field_over_order_keys() {
+        let (ops, _dir) = ops_over_temp_store();
+        for field in ["sort_key", "after_block_id"] {
+            let mut params: StorageEntity = HashMap::new();
+            params.insert("id".into(), Value::String("block:a".into()));
+            params.insert("field".into(), Value::String(field.into()));
+            params.insert("value".into(), Value::String("A5".into()));
+            let err = ops
+                .execute_operation(&EntityName::new("block"), "set_field", params)
+                .await
+                .expect_err("set_field over an order key must be rejected at the boundary");
+            assert!(
+                err.to_string().contains("order key"),
+                "rejection must name the invariant, got: {err}"
+            );
+        }
     }
 }

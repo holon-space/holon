@@ -1,38 +1,57 @@
 use std::collections::HashMap;
-
-use anyhow::Result;
-use fluxdi::{Injector, Module, Provider, Shared};
-
 use std::path::PathBuf;
 use std::sync::Arc;
+
+use anyhow::Result;
+use fluxdi::Injector;
+use fluxdi::Module;
+use fluxdi::Provider;
+use fluxdi::Shared;
+use holon_core::OperationObserver;
+use holon_core::OperationProvider;
+use holon_core::SyncTokenStore;
+use holon_profiles::TypeRegistry;
+use holon_profiles::create_default_registry;
+use holon_turso::schema_modules::BlockSchemaModule;
+use holon_turso::schema_modules::LinkSchemaModule;
+use holon_turso::schema_modules::NavigationSchemaModule;
 use tokio::sync::RwLock;
 
+use super::DatabasePathConfig;
+use super::DbHandleProvider;
+use super::DbHandleProviderImpl;
+use super::TursoBackendProvider;
+use super::TursoBackendProviderImpl;
+use super::lifecycle::preload_startup_views;
+use super::schema_providers::BlockHierarchyView;
+use super::schema_providers::CoreTables;
+use super::schema_providers::DbReady;
+use super::schema_providers::GraphEavSchema;
+use super::schema_providers::IdentityTables;
+use super::schema_providers::LinkTables;
+use super::schema_providers::NavigationTables;
+use super::schema_providers::OperationTables;
+use super::schema_providers::SyncStateTables;
+use super::schema_providers::register_schema_providers;
 use crate::api::backend_engine::BackendEngine;
-use crate::api::operation_dispatcher::{OperationDispatcher, OperationModule};
-use crate::core::operation_log::{OperationLogObserver, OperationLogStore};
-use crate::entity_profile::{LiveEntities, ProfileResolver, parse_entity_profile};
+use crate::api::operation_dispatcher::OperationDispatcher;
+use crate::api::operation_dispatcher::OperationModule;
+use crate::core::operation_log::OperationLogObserver;
+use crate::core::operation_log::OperationLogStore;
+use crate::entity_profile::LiveEntities;
+use crate::entity_profile::ProfileResolver;
+use crate::entity_profile::parse_entity_profile;
 use crate::identity::IdentityProvider;
 use crate::navigation::NavigationProvider;
+use crate::storage::ChangeOriginInjector;
+use crate::storage::JsonAggregationSqlTransformer;
+use crate::storage::SqlTransformer;
 use crate::storage::graph_schema::GraphSchemaRegistry;
 use crate::storage::schema_module::SchemaModule;
 use crate::storage::sync_token_store::DatabaseSyncTokenStore;
-use crate::storage::turso::{DbHandle, TursoBackend};
-use crate::storage::{ChangeOriginInjector, JsonAggregationSqlTransformer, SqlTransformer};
+use crate::storage::turso::DbHandle;
+use crate::storage::turso::TursoBackend;
 use crate::sync::LiveData;
-use holon_core::{OperationObserver, OperationProvider, SyncTokenStore};
-use holon_profiles::{TypeRegistry, create_default_registry};
-use holon_turso::schema_modules::{BlockSchemaModule, LinkSchemaModule, NavigationSchemaModule};
-
-use super::schema_providers::{
-    BlockHierarchyView, CoreTables, DbReady, GraphEavSchema, IdentityTables, LinkTables,
-    NavigationTables, OperationTables, SyncStateTables, register_schema_providers,
-};
-use super::{
-    DatabasePathConfig, DbHandleProvider, DbHandleProviderImpl, TursoBackendProvider,
-    TursoBackendProviderImpl,
-};
-
-use super::lifecycle::preload_startup_views;
 
 /// Build the default set of SQL-level transformers (applied after compilation).
 fn build_sql_transformers() -> Vec<Box<dyn SqlTransformer>> {
@@ -62,7 +81,8 @@ async fn init_sync_token_store(db_handle: DbHandle) -> Arc<dyn SyncTokenStore> {
     Arc::new(store)
 }
 
-/// Build a populated GraphSchemaRegistry from the TypeRegistry + module contributions.
+/// Build a populated GraphSchemaRegistry from the TypeRegistry + module
+/// contributions.
 fn build_graph_schema_registry(type_registry: &TypeRegistry) -> GraphSchemaRegistry {
     let mut registry = GraphSchemaRegistry::new();
 
@@ -83,7 +103,8 @@ fn build_graph_schema_registry(type_registry: &TypeRegistry) -> GraphSchemaRegis
     registry
 }
 
-/// Create and initialize a BackendEngine from a backend, dispatcher, and config.
+/// Create and initialize a BackendEngine from a backend, dispatcher, and
+/// config.
 ///
 /// Schema initialization is handled by `resolve_all_eager()` in the lifecycle
 /// layer (called before BackendEngine resolution). The `DbReady<*>` markers
@@ -115,14 +136,29 @@ async fn create_initialized_engine(
     )
     .await;
 
-    let engine = BackendEngine::new(
-        db_handle,
+    let mut engine = BackendEngine::new(
+        db_handle.clone(),
         dispatcher,
         profile_resolver.clone(),
         build_sql_transformers(),
         graph_schema_registry,
     )
     .expect("Failed to create BackendEngine");
+
+    // Advice-rule reconciler (ADR 0022): discover `holon_advice_rule_yaml` blocks
+    // and keep their `advice_rule_{slug}` matviews synthesized/diffed/torn-down
+    // as the rule blocks are edited — the exact profile-resolver pattern, one
+    // view per *rule*. DDL runs off the CDC delivery path (see
+    // `spawn_advice_reconciler`).
+    let advice_status = holon_advice::AdviceRuleStatusHandle::new();
+    match crate::sync::spawn_advice_reconciler(&matview_mgr, db_handle, advice_status.clone()).await
+    {
+        Ok(handle) => engine.install_advice_reconciler(advice_status, handle),
+        Err(e) => tracing::error!(
+            error = %format!("{e:#}"),
+            "[DI] advice-rule reconciler failed to start — advice rules will not be synthesized"
+        ),
+    }
 
     // Preload startup matviews (reuses existing ones from previous sessions).
     preload_startup_views(&engine, None)
@@ -193,14 +229,15 @@ pub fn register_core_services_no_turso(injector: &Injector, db_path: PathBuf) ->
 const PROFILE_SQL: &str = include_str!("../../sql/profiles/get_profiles.sql");
 fn query_source_blocks_sql() -> String {
     format!(
-        "SELECT id, parent_id, source_language FROM {table} \
-         WHERE content_type = 'source' AND source_language IN {langs}",
+        "SELECT id, parent_id, source_language FROM {table} WHERE content_type = 'source' AND \
+         source_language IN {langs}",
         table = crate::storage::BLOCK_READ_TABLE,
         langs = holon_api::QueryLanguage::sql_in_list(),
     )
 }
 
-/// Create a CDC-driven LiveData<StorageEntity> from a SQL query, keyed by a given column.
+/// Create a CDC-driven LiveData<StorageEntity> from a SQL query, keyed by a
+/// given column.
 async fn create_live_data_keyed_by(
     matview_manager: &crate::sync::MatviewManager,
     sql: &str,

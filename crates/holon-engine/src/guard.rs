@@ -1,10 +1,15 @@
-use crate::arc::PrecondSpec;
-use crate::value::Value;
-use crate::{InputArc, Marking, TokenState};
-use rhai::{Engine, Scope};
 use std::collections::BTreeMap;
 
 pub use holon_expr::CompiledExpr;
+use rhai::Engine;
+use rhai::Scope;
+
+use crate::InputArc;
+use crate::Marking;
+use crate::TokenState;
+use crate::arc::PostcondExpr;
+use crate::arc::PrecondSpec;
+use crate::value::Value;
 
 pub struct RhaiEvaluator {
     engine: Engine,
@@ -19,7 +24,7 @@ impl Default for RhaiEvaluator {
 impl RhaiEvaluator {
     pub fn new() -> Self {
         RhaiEvaluator {
-            engine: Engine::new(),
+            engine: holon_expr::bounded_engine(),
         }
     }
 
@@ -131,7 +136,7 @@ impl RhaiEvaluator {
                             return Err(format!(
                                 "precondition '{attr}: {spec}' on arc '{}' failed to evaluate: {e}",
                                 arc.bind
-                            ))
+                            ));
                         }
                     }
                 }
@@ -179,17 +184,19 @@ impl RhaiEvaluator {
     /// Evaluate a postcondition expression in the context of bound tokens.
     pub fn eval_postcond(
         &self,
-        expr: &str,
+        spec: &PostcondExpr,
         bound_tokens: &BTreeMap<String, rhai::Map>,
         placeholders: &BTreeMap<String, Value>,
     ) -> Result<Value, String> {
-        if expr.starts_with('$') {
-            // Placeholder reference
-            return placeholders
-                .get(expr)
-                .cloned()
-                .ok_or_else(|| format!("unresolved placeholder: {expr}"));
-        }
+        let compiled = match spec {
+            PostcondExpr::Placeholder(name) => {
+                return placeholders
+                    .get(name)
+                    .cloned()
+                    .ok_or_else(|| format!("unresolved placeholder: {name}"));
+            }
+            PostcondExpr::Expr(compiled) => compiled,
+        };
 
         let mut scope = Scope::new();
         for (name, map) in bound_tokens {
@@ -199,10 +206,7 @@ impl RhaiEvaluator {
             scope.push(k.clone(), v.to_rhai_dynamic());
         }
 
-        self.engine
-            .eval_with_scope::<rhai::Dynamic>(&mut scope, expr)
-            .map(Value::from)
-            .map_err(|e| format!("postcond eval error: {e}"))
+        self.eval_compiled_dynamic(compiled, &mut scope)
     }
 
     /// Build a Rhai scope with all tokens registered by their id.

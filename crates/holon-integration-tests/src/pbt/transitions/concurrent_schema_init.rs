@@ -1,19 +1,22 @@
 //! Transition: concurrent schema init stress test (post-startup).
 //!
-//! Mirrors the legacy logic split across `state_machine.rs:862-868` (generator),
-//! `state_machine.rs:3190-3194` (precondition),
+//! Mirrors the legacy logic split across `state_machine.rs:862-868`
+//! (generator), `state_machine.rs:3190-3194` (precondition),
 //! `state_machine.rs:2481-2484` (ref-state apply),
 //! `sut.rs:1849-1940` (SUT apply), and
 //! `transition_budgets.rs:253-259` (expected SQL).
 
-use crate::pbt::validation::{Reason, check};
+use holon_pbt_core::TransitionFactory;
+use holon_pbt_core::TransitionRef;
+use holon_pbt_core::capabilities::RefLayout;
+use holon_pbt_core::capabilities::RefLifecycle;
+use holon_pbt_core::capabilities::RefWatch;
+use holon_pbt_core::capabilities::SutAppLifecycle;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::check;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
-
-use crate::pbt::local_caps::SutAppLifecycle;
-use crate::pbt::reference_state::ReferenceState;
-use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
@@ -22,11 +25,9 @@ use crate::pbt::transition_budgets::ExpectedSql;
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ConcurrentSchemaInit;
 
-impl TransitionFactory<ReferenceState> for ConcurrentSchemaInit {
+impl<R: RefLifecycle + RefLayout + RefWatch> TransitionFactory<R> for ConcurrentSchemaInit {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        vec![::holon_pbt_core::composition::CapId::of::<
-            dyn crate::pbt::local_caps::SutAppLifecycle,
-        >()]
+        Self::declared_caps()
     }
 
     type Reason = Reason;
@@ -35,25 +36,22 @@ impl TransitionFactory<ReferenceState> for ConcurrentSchemaInit {
         // via `ctx.engine()`; there is no engine in the no-Turso wiring.
         ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Turso)
     }
-    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         ConcurrentSchemaInit
             .preconditions(state)
             .map(|()| (1, Just(ConcurrentSchemaInit).boxed()))
     }
 }
 
-impl TransitionRef<ReferenceState> for ConcurrentSchemaInit {
+impl<R: RefLifecycle + RefLayout + RefWatch> TransitionRef<R> for ConcurrentSchemaInit {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(state.action.app_started, Reason::AppNotStarted),
+            check(state.app_started(), Reason::AppNotStarted),
+            check(!state.all_block_ids().is_empty(), Reason::BlockStateEmpty),
             check(
-                !state.domain.block_state.blocks.is_empty(),
-                Reason::BlockStateEmpty,
-            ),
-            check(
-                !state.mcp.active_watches.is_empty(),
+                !state.active_watch_ids().is_empty(),
                 Reason::NoWatchesActive,
             ),
         ];
@@ -64,22 +62,20 @@ impl TransitionRef<ReferenceState> for ConcurrentSchemaInit {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, _: &mut ReferenceState) {
+    fn apply_to_ref(&self, _: &mut R) {
         // ConcurrentSchemaInit doesn't change reference state - it only tests
-        // that the database doesn't get locked when schema init runs concurrently.
+        // that the database doesn't get locked when schema init runs
+        // concurrently.
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutAppLifecycle> TransitionImpl<ReferenceState, S> for ConcurrentSchemaInit {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
+crate::cap_transition! {
+    ConcurrentSchemaInit: SutAppLifecycle,
+    where R: [ RefLifecycle + RefLayout + RefWatch ],
+    |_me, _state, sut| {
         sut.concurrent_schema_init().await;
     }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for ConcurrentSchemaInit {
-    fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
+    sql_budget: |_me, _state| {
         ExpectedSql {
             reads: 100,
             writes: 30,

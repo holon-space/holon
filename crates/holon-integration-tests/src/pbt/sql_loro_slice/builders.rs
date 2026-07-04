@@ -1,18 +1,19 @@
 //! Compose the combined SQL+Loro slice's SUT `CapMap`. Unlike the single-store
 //! slices this one registers two components, but deliberately *not* through two
 //! `Config::with` calls: both provide `SutBackend` and the typemap keeps one
-//! provider per cap, so a second `with` would PANIC on the duplicate `SutBackend`
-//! ([`CapMap::insert`] is fail-loud). Instead SQL registers fully (its `register`
-//! provides `SutBackend` + `SutSqlProjection`) and Loro contributes only its
-//! non-overlapping `SutLoroTaskState` — a precedence composition, not a shadow —
-//! see the slice module doc.
+//! provider per cap, so a second `with` would PANIC on the duplicate
+//! `SutBackend` ([`CapMap::insert`] is fail-loud). Instead SQL registers fully
+//! (its `register` provides `SutBackend` + `SutSqlProjection`) and Loro
+//! contributes only its non-overlapping `SutLoroTaskState` — a precedence
+//! composition, not a shadow — see the slice module doc.
 
 use std::sync::Arc;
 
+use holon_loro_testing::LoroBackendComponent;
 use holon_pbt_core::capabilities::SutLoroTaskState;
-use holon_pbt_core::composition::{CapMap, CapProvider};
+use holon_pbt_core::composition::CapMap;
+use holon_pbt_core::composition::CapProvider;
 
-use crate::pbt::loro_slice::components::LoroBackendComponent;
 use crate::pbt::sql_slice::components::SqlProjectionComponent;
 
 /// Build the combined SUT: SQL is the canonical block store, Loro the second

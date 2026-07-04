@@ -5,9 +5,11 @@
 //! @c4 uses holon-core "core datasource traits" "Rust"
 //! @c4 uses holon-macros "entity/operation derive macros" "Rust"
 //!
-//! FileSystem + FileChangeSource ports with in-memory and notify-based adapters (ADR 0011).
+//! FileSystem + FileChangeSource ports with in-memory and notify-based adapters
+//! (ADR 0011).
 //!
-//! This crate provides the filesystem port traits and their adapters used by other Holon crates.
+//! This crate provides the filesystem port traits and their adapters used by
+//! other Holon crates.
 
 // Native-only half: filesystem/watcher adapters and the file-sync controller
 // (tokio::fs / tokio::process / notify are rejected on wasm targets). The wasm
@@ -28,29 +30,53 @@ pub mod sync_base_store;
 pub mod sync_conflict;
 pub mod sync_ports;
 
+use std::path::Path;
+
 #[cfg(not(target_arch = "wasm32"))]
-pub use change_source::{FileChange, FileChangeKind, FileChangeSource, NotifyWatcher};
+pub use change_source::FileChange;
 #[cfg(not(target_arch = "wasm32"))]
-pub use directory::{ChangesWithMetadata, DirectoryChangeProvider};
+pub use change_source::FileChangeKind;
 #[cfg(not(target_arch = "wasm32"))]
-pub use directory::{Directory, ROOT_ID};
+pub use change_source::FileChangeSource;
+#[cfg(not(target_arch = "wasm32"))]
+pub use change_source::NotifyWatcher;
+#[cfg(not(target_arch = "wasm32"))]
+pub use directory::ChangesWithMetadata;
+#[cfg(not(target_arch = "wasm32"))]
+pub use directory::Directory;
+#[cfg(not(target_arch = "wasm32"))]
+pub use directory::DirectoryChangeProvider;
+#[cfg(not(target_arch = "wasm32"))]
+pub use directory::ROOT_ID;
 pub use error::FilesystemError;
 pub use file::File;
 #[cfg(not(target_arch = "wasm32"))]
-pub use file_sync_controller::{FileSyncController, RENDERER_VERSION};
+pub use file_sync_controller::BlockDelta;
 #[cfg(not(target_arch = "wasm32"))]
-pub use fs_port::{FileMeta, FileSystem, RealFileSystem, ScannedEntries};
+pub use file_sync_controller::FileSyncController;
+#[cfg(not(target_arch = "wasm32"))]
+pub use file_sync_controller::RENDERER_VERSION;
+#[cfg(not(target_arch = "wasm32"))]
+pub use fs_port::FileMeta;
+#[cfg(not(target_arch = "wasm32"))]
+pub use fs_port::FileSystem;
+#[cfg(not(target_arch = "wasm32"))]
+pub use fs_port::RealFileSystem;
+#[cfg(not(target_arch = "wasm32"))]
+pub use fs_port::ScannedEntries;
 #[cfg(not(target_arch = "wasm32"))]
 pub use in_memory::InMemoryFileSystem;
-pub use sync_base_store::{BaseKey, BaseStore, SyncBaseStore};
-pub use sync_conflict::{
-    conflict_artifacts_error, find_sync_conflict_artifacts, is_sync_conflict_artifact,
-};
-pub use sync_ports::{
-    AliasRegistrar, BlockReader, DocumentManager, ImageDataProvider, ThreeWayTextMerge,
-};
-
-use std::path::Path;
+pub use sync_base_store::BaseKey;
+pub use sync_base_store::BaseStore;
+pub use sync_base_store::SyncBaseStore;
+pub use sync_conflict::conflict_artifacts_error;
+pub use sync_conflict::find_sync_conflict_artifacts;
+pub use sync_conflict::is_sync_conflict_artifact;
+pub use sync_ports::AliasRegistrar;
+pub use sync_ports::BlockReader;
+pub use sync_ports::DocumentManager;
+pub use sync_ports::ImageDataProvider;
+pub use sync_ports::ThreeWayTextMerge;
 
 /// Filesystem utilities
 pub struct Filesystem;

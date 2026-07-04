@@ -2,7 +2,9 @@
 //! @c4 layer UI
 //! Pattern: MVVM View
 //!
-//! GPUI desktop frontend (primary; mobile via gpui-mobile feature) — the MVVM **View** layer; its render functions build native GPUI widgets from holon-frontend's `ReactiveViewModel`.
+//! GPUI desktop frontend (primary; mobile via gpui-mobile feature) — the MVVM
+//! **View** layer; its render functions build native GPUI widgets from
+//! holon-frontend's `ReactiveViewModel`.
 
 #![recursion_limit = "1024"]
 
@@ -14,8 +16,11 @@ pub mod inspector;
 #[cfg(feature = "mobile")]
 pub mod mobile;
 pub mod navigation_state;
+#[cfg(debug_assertions)]
+pub mod oracles_ui;
 pub mod reactive_vm_poc;
 pub mod render;
+pub mod reset;
 pub mod share_ui;
 
 pub mod user_driver;
@@ -23,30 +28,33 @@ pub mod views;
 
 use std::sync::Arc;
 
+use entity_view_registry::LocalEntityScope;
+use geometry::BoundsRegistry;
 use gpui::prelude::*;
 use gpui::*;
 use holon_api::EntityName;
-use holon_frontend::input::{InputAction, WidgetInput};
-use holon_frontend::reactive::{BuilderServices, ReactiveEngine};
-use holon_frontend::theme::ThemeRegistry;
-use holon_frontend::view_model::ViewModel;
-use holon_frontend::{FrontendSession, ReactiveViewModel, RenderContext};
-
-use entity_view_registry::LocalEntityScope;
-use geometry::BoundsRegistry;
-use navigation_state::NavigationState;
-use render::builders::GpuiRenderContext;
-
+use holon_frontend::FrontendSession;
+use holon_frontend::ReactiveViewModel;
+use holon_frontend::RenderContext;
+use holon_frontend::input::InputAction;
+use holon_frontend::input::WidgetInput;
+use holon_frontend::reactive::BuilderServices;
+use holon_frontend::reactive::ReactiveEngine;
 // Re-export the shared interpret function for DI wiring
 pub use holon_frontend::reactive::make_interpret_fn;
+use holon_frontend::theme::ThemeRegistry;
+use holon_frontend::view_model::ViewModel;
+use navigation_state::NavigationState;
+use render::builders::GpuiRenderContext;
 
 // ── AppModel: Entity-based reactive state ──────────────────────────────────
 
 /// Reactive model backed by `ReactiveEngine`.
 ///
 /// The root layout is watched via `engine.watch(root_uri)`. Sub-blocks
-/// (block- and query-backed ReactiveShells) each have their own independent streams.
-/// `rebuild()` is only called for the root — sub-blocks update independently.
+/// (block- and query-backed ReactiveShells) each have their own independent
+/// streams. `rebuild()` is only called for the root — sub-blocks update
+/// independently.
 struct AppModel {
     session: Arc<FrontendSession>,
     engine: Arc<ReactiveEngine>,
@@ -63,7 +71,8 @@ struct AppModel {
     show_widget_gallery: bool,
     /// Per-window share/accept UI state (modals, toasts, quarantines).
     share_ui: Entity<share_ui::ShareUiState>,
-    /// Root-level ReactiveShell entities (sidebars, main panel), keyed by block_id.
+    /// Root-level ReactiveShell entities (sidebars, main panel), keyed by
+    /// block_id.
     root_live_blocks: std::collections::HashMap<String, Entity<views::ReactiveShell>>,
     /// Handle to the root layout's ReactiveView, extracted from `root_vm` each
     /// time it's rebuilt. Used by the viewport observer to push container-query
@@ -71,6 +80,10 @@ struct AppModel {
     /// triggering a full tree rebuild. Present iff the current root is a
     /// Reactive variant (i.e. a streaming container like `columns`).
     root_view: Option<Arc<holon_frontend::ReactiveView>>,
+    /// Last observed navigation focus. Used to auto-close overlay-mode
+    /// (phone) drawers when navigation focus changes — see
+    /// [`AppModel::close_overlay_drawers_on_nav`].
+    last_focused_block: Option<holon_api::EntityUri>,
 }
 
 /// Extract the root `ReactiveView` from a `ReactiveViewModel`, if its top
@@ -134,6 +147,33 @@ impl AppModel {
         self.nav.set_root(self.root_vm.clone());
     }
 
+    /// When navigation focus changes, auto-close any OPEN overlay-mode drawers
+    /// (the phone left/right sidebars). Shrink-mode (desktop) sidebars are left
+    /// alone — keeping them open after navigation is the correct desktop UX.
+    /// Gated on [`DrawerMode::Overlay`], NOT `cfg(feature = "mobile")`, so a
+    /// narrow desktop window (which also gets overlay drawers via `if_space`)
+    /// behaves identically. Returns true iff at least one drawer was closed.
+    ///
+    /// Note: keyed on a *change* of focus, so re-selecting the already-focused
+    /// page does not re-close the drawer (an accepted edge case).
+    fn close_overlay_drawers_on_nav(&mut self) -> bool {
+        let focused = self.engine.ui_state().focused_block();
+        if focused == self.last_focused_block {
+            return false;
+        }
+        self.last_focused_block = focused;
+        let mut closed = false;
+        for (bid, mode) in self.view_model.collect_drawers() {
+            if matches!(mode, holon_frontend::view_model::DrawerMode::Overlay)
+                && self.session.drawer_open(&bid, mode)
+            {
+                self.session.set_widget_open(&bid, false);
+                closed = true;
+            }
+        }
+        closed
+    }
+
     /// Re-point this window's root view at a *different* SUT — a fresh
     /// `session` + `engine` — without re-opening the GPUI window. Used by the
     /// windowed capture-minimizer (`RebindHandle`) to reuse one live window
@@ -180,14 +220,16 @@ impl AppModel {
         }
     }
 
-    /// Walk the root reactive tree to find LiveBlock nodes and create/GC their entities.
+    /// Walk the root reactive tree to find LiveBlock nodes and create/GC their
+    /// entities.
     fn reconcile_root_live_blocks(&mut self, cx: &mut gpui::Context<Self>) {
         let mut needed = std::collections::HashSet::new();
         collect_root_live_blocks(&self.root_vm, &mut needed);
 
         for block_id in &needed {
             if !self.root_live_blocks.contains_key(block_id) {
-                // ALLOW(entity_uri_from_raw): block_id string from LiveBlock nodes in root ViewModel tree
+                // ALLOW(entity_uri_from_raw): block_id string from LiveBlock nodes in root
+                // ViewModel tree
                 let uri = holon_api::EntityUri::from_raw(block_id);
                 let services: Arc<dyn BuilderServices> = self.engine.clone();
                 let live_block = services.watch_live(&uri, services.clone());
@@ -303,10 +345,15 @@ fn modal_overlay(
         .flex()
         .items_center()
         .justify_center()
+        // Inset so the panel keeps a margin on narrow (phone) viewports; the
+        // panel is `w_full` capped at 640px, so this padding is what stops it
+        // from touching the screen edges on mobile.
+        .p(px(16.0))
         .child(
             div()
                 .id(SharedString::from(format!("{id}-panel")))
-                .w(px(640.0))
+                .w_full()
+                .max_w(px(640.0))
                 .max_h(px(720.0))
                 .overflow_y_scroll()
                 .bg(panel_bg)
@@ -374,14 +421,24 @@ pub struct HolonApp {
     pub bounds_registry: BoundsRegistry,
     /// Persistent entity cache for the root render (survives across frames).
     entity_cache: entity_view_registry::EntityCache,
-    /// Top safe area inset in logical pixels (status bar on mobile, 0 on desktop).
+    /// Top safe area inset in logical pixels (status bar on mobile, 0 on
+    /// desktop).
     pub safe_area_top: f32,
-    /// Bottom safe area inset in logical pixels (home indicator on mobile, 0 on desktop).
+    /// Bottom safe area inset in logical pixels (home indicator on mobile, 0 on
+    /// desktop).
     pub safe_area_bottom: f32,
     /// Share/accept UI state. Shared with `AppModel.share_ui` — lives here too
     /// so the render pass can build overlays without a double-read through
     /// `app_model.read(cx).share_ui.read(cx)`.
     pub share_ui: Entity<share_ui::ShareUiState>,
+    /// Live-oracle violations (debug builds): mirrors the global
+    /// `holon_oracles` status; rendered as an impossible-to-miss top banner.
+    #[cfg(debug_assertions)]
+    pub oracle_ui: Entity<oracles_ui::OracleUiState>,
+    /// Name of the theme currently applied to the `gpui_component` global.
+    /// Compared against the session's selected theme on every render so a
+    /// theme change (settings dropdown, or any other path) re-applies live.
+    applied_theme: String,
 }
 
 impl Render for HolonApp {
@@ -397,6 +454,22 @@ impl Render for HolonApp {
         {
             self.safe_area_top = crate::mobile::safe_area_top_px();
             self.safe_area_bottom = crate::mobile::safe_area_bottom_px();
+        }
+        // Live theme application. The gpui_component `Theme` global is seeded
+        // once at launch; the settings dropdown only persists the pref and
+        // calls `window.refresh()`. Re-apply here whenever the selected theme
+        // differs from what's applied, so a theme switch repaints immediately
+        // (and the correct theme is applied on the first frame). Must run
+        // before `cx.theme()` is read below.
+        let desired_theme = self
+            .session
+            .ui_settings()
+            .theme
+            .clone()
+            .unwrap_or_else(|| "holonLight".to_string());
+        if desired_theme != self.applied_theme {
+            apply_holon_theme(&self.session, cx);
+            self.applied_theme = desired_theme;
         }
         let (view_model, shadow_ctx, services, show_settings, show_widget_gallery) = {
             let model = self.app_model.read(cx);
@@ -659,27 +732,30 @@ impl Render for HolonApp {
                                 });
                             })
                     })
-                    .when(cfg!(debug_assertions), |this| {
-                        this.child(
-                            div()
-                                .id("inspector-toggle")
-                                .cursor_pointer()
-                                .text_size(px(15.0))
-                                .px(px(6.0))
-                                .py(px(4.0))
-                                .rounded(px(4.0))
-                                .hover(|s| s.bg(gpui::rgba(0x00000010)))
-                                .child("🔎")
-                                .on_mouse_down(MouseButton::Left, |_, window, cx| {
-                                    #[cfg(debug_assertions)]
-                                    window.toggle_inspector(cx);
-                                    #[cfg(not(debug_assertions))]
-                                    {
-                                        let _ = (window, cx);
-                                    }
-                                }),
-                        )
-                    }),
+                    .when(
+                        cfg!(all(debug_assertions, not(feature = "mobile"))),
+                        |this| {
+                            this.child(
+                                div()
+                                    .id("inspector-toggle")
+                                    .cursor_pointer()
+                                    .text_size(px(15.0))
+                                    .px(px(6.0))
+                                    .py(px(4.0))
+                                    .rounded(px(4.0))
+                                    .hover(|s| s.bg(gpui::rgba(0x00000010)))
+                                    .child("🔎")
+                                    .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                                        #[cfg(debug_assertions)]
+                                        window.toggle_inspector(cx);
+                                        #[cfg(not(debug_assertions))]
+                                        {
+                                            let _ = (window, cx);
+                                        }
+                                    }),
+                            )
+                        },
+                    ),
             );
 
         // Page-level chord pump. Cross-block navigation (MoveUp/MoveDown
@@ -796,11 +872,24 @@ impl Render for HolonApp {
             }
         }
 
+        // Live-oracle violation banner (debug builds) — rendered LAST so it
+        // sits on top of everything: a violation must be impossible to miss.
+        #[cfg(debug_assertions)]
+        {
+            let oracle_state_read = self.oracle_ui.read(cx);
+            if let Some(banner) =
+                oracles_ui::render_banner(oracle_state_read, self.oracle_ui.clone())
+            {
+                page = page.child(banner);
+            }
+        }
+
         page.into_any_element()
     }
 }
 
-/// Launch a Holon window, creating a new `BoundsRegistry` from the session's theme.
+/// Launch a Holon window, creating a new `BoundsRegistry` from the session's
+/// theme.
 pub fn launch_holon_window(
     session: Arc<FrontendSession>,
     rt_handle: tokio::runtime::Handle,
@@ -854,10 +943,11 @@ pub fn launch_holon_window_with_engine_and_share(
     bounds_registry
 }
 
-/// Launch a Holon window with a pre-created `ReactiveEngine` and `BoundsRegistry`.
+/// Launch a Holon window with a pre-created `ReactiveEngine` and
+/// `BoundsRegistry`.
 ///
-/// Used by the GPUI PBT test: reuses the PBT's DI-resolved ReactiveEngine so all
-/// watch_ui tasks and CDC subscriptions share the same tokio runtime.
+/// Used by the GPUI PBT test: reuses the PBT's DI-resolved ReactiveEngine so
+/// all watch_ui tasks and CDC subscriptions share the same tokio runtime.
 /// Launch a GPUI window with a custom title (used by PBT to avoid xcap
 /// capturing the real Holon window when both are open).
 pub fn launch_holon_window_with_title(
@@ -884,20 +974,23 @@ pub fn launch_holon_window_with_title(
 }
 
 /// Shared cell holding the window's *currently bound* engine. The interaction
-/// pump reads it per command so scroll-into-view targets the rebound engine, not
-/// the one captured when the window opened. [`RebindHandle::rebind`] writes it.
+/// pump reads it per command so scroll-into-view targets the rebound engine,
+/// not the one captured when the window opened. [`RebindHandle::rebind`] writes
+/// it.
 type LiveEngine = std::sync::Arc<std::sync::RwLock<Arc<ReactiveEngine>>>;
 
 /// A handle to a live Holon window whose root view can be *re-pointed* at a
 /// different SUT (`session` + `engine`) without re-opening the window. Returned
-/// by [`launch_holon_window_rebindable`]; used by the windowed capture-minimizer
-/// to reuse one window across many ddmin candidates instead of one process each.
+/// by [`launch_holon_window_rebindable`]; used by the windowed
+/// capture-minimizer to reuse one window across many ddmin candidates instead
+/// of one process each.
 pub struct RebindHandle {
     window: AnyWindowHandle,
     app_model: Entity<AppModel>,
-    /// `HolonApp`'s persistent render cache. Its panel `ReactiveShell`s are keyed
-    /// by *static* panel ids, so the render's `or_insert_with` would keep the
-    /// previous engine's shells; rebind clears it so fresh shells are built.
+    /// `HolonApp`'s persistent render cache. Its panel `ReactiveShell`s are
+    /// keyed by *static* panel ids, so the render's `or_insert_with` would
+    /// keep the previous engine's shells; rebind clears it so fresh shells
+    /// are built.
     entity_cache: entity_view_registry::EntityCache,
     /// The live-engine cell the interaction pump reads (see [`LiveEngine`]).
     live_engine: LiveEngine,
@@ -908,9 +1001,9 @@ impl RebindHandle {
         self.window
     }
 
-    /// Re-point the window at `session` + `engine`, re-seed the viewport from the
-    /// window's current size, and request a repaint. Must run on the GPUI main
-    /// thread (holds `cx: &mut App`).
+    /// Re-point the window at `session` + `engine`, re-seed the viewport from
+    /// the window's current size, and request a repaint. Must run on the
+    /// GPUI main thread (holds `cx: &mut App`).
     pub fn rebind(&self, session: Arc<FrontendSession>, engine: Arc<ReactiveEngine>, cx: &mut App) {
         // Re-point the pump's engine and drop the stale panel shells *before* the
         // render so scroll-into-view and the rebuilt tree both see the new engine.
@@ -933,9 +1026,9 @@ impl RebindHandle {
     }
 }
 
-/// Like [`launch_holon_window_with_title`] but returns a [`RebindHandle`] so the
-/// caller can re-point the window at fresh SUTs over its lifetime. `None` if the
-/// window failed to open.
+/// Like [`launch_holon_window_with_title`] but returns a [`RebindHandle`] so
+/// the caller can re-point the window at fresh SUTs over its lifetime. `None`
+/// if the window failed to open.
 pub fn launch_holon_window_rebindable(
     session: Arc<FrontendSession>,
     engine: Arc<ReactiveEngine>,
@@ -1018,8 +1111,8 @@ pub fn launch_holon_window_with_registry(
 /// Factored out so [`RebindHandle::rebind`] can re-point it at a *new* engine:
 /// the loop is bound to one engine's signal stream and can't swap it, so rebind
 /// spawns a fresh loop. Stale loops (on a prior engine) self-suppress via the
-/// `Arc::ptr_eq` guard — they no-op once `app_model.engine` is a different Arc —
-/// so a late fire from an old engine can't clobber the freshly-bound window.
+/// `Arc::ptr_eq` guard — they no-op once `app_model.engine` is a different Arc
+/// — so a late fire from an old engine can't clobber the freshly-bound window.
 fn spawn_root_layout_signal(
     app_model: Entity<AppModel>,
     engine: Arc<ReactiveEngine>,
@@ -1043,6 +1136,14 @@ fn spawn_root_layout_signal(
                         m.reconcile_root_live_blocks(cx);
                         m.view_model =
                             resolved_view_model(&m.root_vm, &m.engine, &m.root_live_blocks, cx);
+                        // Auto-close phone overlay sidebars when navigation
+                        // focus changed (e.g. a page tap in the drawer), then
+                        // re-resolve so the closed state renders this frame.
+                        if m.close_overlay_drawers_on_nav() {
+                            m.reconcile_root_live_blocks(cx);
+                            m.view_model =
+                                resolved_view_model(&m.root_vm, &m.engine, &m.root_live_blocks, cx);
+                        }
                         m.nav.set_root(m.root_vm.clone());
                         cx.notify();
                     });
@@ -1089,6 +1190,14 @@ fn launch_holon_window_impl(
     let model_entity: Arc<std::sync::OnceLock<Entity<AppModel>>> =
         Arc::new(std::sync::OnceLock::new());
     let model_slot = model_entity.clone();
+
+    // Slot to carry the oracle-UI entity out of the window-creation closure
+    // so the status bridge (needs the window handle) can be wired after.
+    #[cfg(debug_assertions)]
+    let oracle_entity_slot: Arc<std::sync::OnceLock<Entity<oracles_ui::OracleUiState>>> =
+        Arc::new(std::sync::OnceLock::new());
+    #[cfg(debug_assertions)]
+    let oracle_entity_slot_for_window = oracle_entity_slot.clone();
 
     let glass = session_clone
         .ui_settings()
@@ -1141,8 +1250,9 @@ fn launch_holon_window_impl(
     // stays on the main thread and the outer cx.spawn wrapper (which
     // breaks on iOS) can be avoided.
     if let Some(ref engine) = existing_engine {
-        use futures::future::{select, Either};
         use futures::StreamExt;
+        use futures::future::Either;
+        use futures::future::select;
         use futures_signals::signal::SignalExt;
         let root_uri = holon_api::root_layout_block_uri();
         let signal = engine.watch_data_signal(&root_uri);
@@ -1246,6 +1356,12 @@ fn launch_holon_window_impl(
 
         let initial_root_view = root_reactive_view(&root_vm);
         let share_ui_entity = cx.new(|_cx| share_ui::ShareUiState::new());
+        #[cfg(debug_assertions)]
+        let oracle_ui_entity = cx.new(|_cx| oracles_ui::OracleUiState::default());
+        #[cfg(debug_assertions)]
+        oracle_entity_slot_for_window
+            .set(oracle_ui_entity.clone())
+            .ok();
         let app_model = cx.new(|cx| {
             let mut model = AppModel {
                 session: Arc::clone(&session_clone),
@@ -1261,6 +1377,7 @@ fn launch_holon_window_impl(
                 share_ui: share_ui_entity.clone(),
                 root_live_blocks: std::collections::HashMap::new(),
                 root_view: initial_root_view,
+                last_focused_block: None,
             };
             // Initial reconciliation — create root LiveBlockView entities.
             // Each LiveBlockView manages its own child entities (editors, live queries).
@@ -1303,6 +1420,17 @@ fn launch_holon_window_impl(
             )
             .detach();
 
+            // Re-render whenever the live-oracle status changes, so a
+            // violation banner appears the moment an oracle fires.
+            #[cfg(debug_assertions)]
+            cx.subscribe(
+                &oracle_ui_entity,
+                move |_, _, _: &oracles_ui::NotifyOracleUi, cx| {
+                    cx.notify();
+                },
+            )
+            .detach();
+
             HolonApp {
                 session: session_clone,
                 rt_handle: handle_clone,
@@ -1313,6 +1441,9 @@ fn launch_holon_window_impl(
                 safe_area_top: 0.0,
                 safe_area_bottom: 0.0,
                 share_ui: share_ui_entity,
+                #[cfg(debug_assertions)]
+                oracle_ui: oracle_ui_entity.clone(),
+                applied_theme: String::new(),
             }
         });
         let any_view: AnyView = view.into();
@@ -1359,6 +1490,25 @@ fn launch_holon_window_impl(
             bounds_registry_for_pump,
             live_engine.clone(),
             entity_cache.clone(),
+        );
+    }
+
+    // Wire the live-oracle status bridge (debug builds): global OracleStatus
+    // changes → OracleUiState entity → top banner. The runner itself is
+    // spawned in main.rs (plain tokio, no GPUI needed); this only wires the
+    // surfacing. Gated on the same env switch as the runner.
+    #[cfg(debug_assertions)]
+    if holon_oracles::OracleMode::from_env().enabled() {
+        let async_cx = cx.to_async();
+        let oracle_ui_entity = oracle_entity_slot
+            .get()
+            .expect("oracle entity slot must be populated by the window closure")
+            .clone();
+        oracles_ui::spawn_oracle_bridge(
+            &rt_handle,
+            oracle_ui_entity,
+            window_handle.into(),
+            &async_cx,
         );
     }
 
@@ -1457,8 +1607,9 @@ pub fn render_supported_widgets() -> std::collections::HashSet<String> {
         .iter()
         .map(|s| s.to_string())
         .collect();
-    // Collection layouts are handled via ReactiveShell, not individual GPUI builders.
-    // They must be in the supported set so profile variant filtering doesn't drop them.
+    // Collection layouts are handled via ReactiveShell, not individual GPUI
+    // builders. They must be in the supported set so profile variant filtering
+    // doesn't drop them.
     for name in ["table", "tree", "list", "outline", "columns"] {
         widgets.insert(name.to_string());
     }
@@ -1471,8 +1622,8 @@ pub fn is_theme_dark(session: &FrontendSession) -> bool {
 
 /// Dispatch an interaction event into the GPUI window.
 ///
-/// Uses `dispatch_keystroke` for key events (which calls `dispatch_input` on the
-/// input handler for text insertion) and `dispatch_event` for mouse events.
+/// Uses `dispatch_keystroke` for key events (which calls `dispatch_input` on
+/// the input handler for text insertion) and `dispatch_event` for mouse events.
 /// Wire up the MCP → GPUI interaction channel.
 ///
 /// Creates a sync channel, registers the sender on `DebugServices`, and spawns
@@ -1492,7 +1643,10 @@ pub fn setup_interaction_pump(
     // UI mutations through the same pipeline as click/key/scroll. The MCP-facing
     // driver binds the *current* engine at install time (re-pointing it on rebind
     // is out of scope — MCP isn't driven during minimization).
-    let geometry: Arc<dyn holon_frontend::geometry::GeometryProvider> = Arc::new(bounds_registry);
+    // Flush-on-read: the MCP driver reads geometry from a window that may have
+    // gone idle after its last paint (iOS) — see `FlushOnReadGeometry`.
+    let geometry: Arc<dyn holon_frontend::geometry::GeometryProvider> =
+        Arc::new(geometry::FlushOnReadGeometry(bounds_registry));
     let driver: Arc<dyn holon_frontend::user_driver::UserDriver> = Arc::new(
         user_driver::GpuiUserDriver::new(tx, geometry, engine.read().unwrap().clone()),
     );
@@ -1545,11 +1699,10 @@ pub fn setup_interaction_pump(
                                 // the caret (displayed-text rotation face). Data
                                 // loss is prevented by commit-on-authority-move.
                                 let msg = format!(
-                                    "[interaction-pump] WINDOW-INACTIVE while \
-                                     dispatching {:?} — input IS delivered, but \
-                                     deactivation blur may have re-seeded the \
-                                     caret mid-typing (caret-position faces \
-                                     possible; data loss is not)",
+                                    "[interaction-pump] WINDOW-INACTIVE while dispatching {:?} — \
+                                     input IS delivered, but deactivation blur may have re-seeded \
+                                     the caret mid-typing (caret-position faces possible; data \
+                                     loss is not)",
                                     cmd.event
                                 );
                                 eprintln!("{msg}");
@@ -1614,9 +1767,11 @@ pub fn setup_interaction_pump(
 /// this function is the only way to give them any.
 fn scroll_entity_into_view(
     entity_id: &str,               // MCP boundary — parsed below, fail-loud
-    _engine: &Arc<ReactiveEngine>, // ALLOW(unused_param): kept for signature stability of the interaction pump
+    _engine: &Arc<ReactiveEngine>, /* ALLOW(unused_param): kept for signature stability of the
+                                    * interaction pump */
     entity_cache: &entity_view_registry::EntityCache,
-    _window: &mut Window, // ALLOW(unused_param): signature parity with other scroll helpers in this module
+    _window: &mut Window, /* ALLOW(unused_param): signature parity with other scroll helpers in
+                           * this module */
     cx: &mut App,
 ) -> Result<bool, String> {
     use crate::entity_view_registry::CacheKey;
@@ -1651,7 +1806,8 @@ fn scroll_entity_into_view(
             let cache = panel_cache.read().unwrap();
             cache
                 .values()
-                // ALLOW(filter_map_ok): downcast Err just means this cache entry isn't a ReactiveShell — skipping is the semantics, not error hiding
+                // ALLOW(filter_map_ok): downcast Err just means this cache entry isn't a
+                // ReactiveShell — skipping is the semantics, not error hiding
                 .filter_map(|any| any.clone().downcast::<ReactiveShell>().ok()) // ALLOW(ok): see filter_map_ok above
                 .collect()
         };
@@ -1664,10 +1820,9 @@ fn scroll_entity_into_view(
                 let before = state.logical_scroll_top();
                 state.scroll_to_reveal_item(ix);
                 eprintln!(
-                    "[scroll-reveal] {entity_id} ix={ix} scroll_top_before={:?} \
-                     (snap-back diagnosis: compare consecutive reveals for the \
-                     same entity — a repeating `before` offset means something \
-                     resets the viewport between frames)",
+                    "[scroll-reveal] {entity_id} ix={ix} scroll_top_before={:?} (snap-back \
+                     diagnosis: compare consecutive reveals for the same entity — a repeating \
+                     `before` offset means something resets the viewport between frames)",
                     before
                 );
                 cx.notify();
@@ -1716,7 +1871,8 @@ pub fn dispatch_interaction(
 }
 
 /// Convert an MCP InteractionEvent to one or more GPUI PlatformInputs.
-/// MouseClick produces both MouseDown + MouseUp (GPUI needs both for click handlers).
+/// MouseClick produces both MouseDown + MouseUp (GPUI needs both for click
+/// handlers).
 pub fn interaction_event_to_platform_inputs(
     event: &holon_mcp::server::InteractionEvent,
 ) -> Vec<gpui::PlatformInput> {
@@ -1972,7 +2128,11 @@ fn load_theme_def(session: &FrontendSession) -> holon_frontend::theme::ThemeDef 
         .map(|h| std::path::PathBuf::from(h).join(".config/holon/themes"));
     let registry = ThemeRegistry::load(user_dir.as_deref());
     let ui = session.ui_settings();
-    let name = ui.theme.as_deref().unwrap_or("holonDark");
+    // Default must match the preferences schema default ("holonLight",
+    // preferences.rs) so the settings UI and the renderer agree on a fresh
+    // install (no `ui.theme` set) — otherwise the modal shows Light while the
+    // renderer applies Dark.
+    let name = ui.theme.as_deref().unwrap_or("holonLight");
     registry.get(name).cloned().unwrap_or_else(|| {
         tracing::warn!("Theme '{name}' not found, using holonDark");
         registry

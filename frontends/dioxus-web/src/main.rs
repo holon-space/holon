@@ -7,6 +7,7 @@
 //! the only coupling is the JSON wire format.
 
 mod bridge;
+mod dnd;
 mod editor;
 mod render;
 
@@ -14,11 +15,12 @@ use std::cell::RefCell;
 
 use bridge::WorkerBridge;
 use dioxus::prelude::*;
-use holon_frontend::view_model::{ViewModel, WatchEnvelope};
+use holon_frontend::view_model::ViewModel;
+use holon_frontend::view_model::WatchEnvelope;
 use js_sys::Reflect;
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
+use wasm_bindgen::prelude::*;
 
 /// The read-side block table name, mirroring `holon_turso::BLOCK_READ_TABLE`.
 /// That const lives in the native-only `holon-turso` crate, which the wasm
@@ -28,7 +30,10 @@ const BLOCK_READ_TABLE: &str = "block";
 
 /// URL of the worker entry module, relative to the serving root.
 const WORKER_URL: &str = "/web/worker-entry.mjs";
-const DB_PATH: &str = ":memory:";
+/// OPFS-backed database file. The worker's OPFS bridge requires every file
+/// Turso will open to be `registerFile`d ahead of `engineInit` (sync access
+/// handles must be created in advance) — see the boot sequence below.
+const DB_PATH: &str = "holon.db";
 
 // WorkerBridge wraps Rc<_> so it is !Send. We keep it alive in a thread-local
 // so Dioxus signals (which require Send) never need to hold it directly.
@@ -68,12 +73,41 @@ fn App() -> Element {
             }
         };
 
+        // Pre-register the OPFS files (db + WAL) so the worker's OPFS shim
+        // can hand Turso sync access handles for them. On a page reload the
+        // PREVIOUS worker's sync handles may not have been released yet
+        // (worker teardown is async), which surfaces as
+        // NoModificationAllowedError — retry with backoff instead of failing
+        // the boot on a race the browser resolves itself moments later.
+        'files: for file in [DB_PATH.to_string(), format!("{DB_PATH}-wal")] {
+            const ATTEMPTS: u32 = 10;
+            let mut last_err = String::new();
+            for attempt in 0..ATTEMPTS {
+                match bridge.call("registerFile", [file.clone().into()]).await {
+                    Ok(_) => continue 'files,
+                    Err(e) => {
+                        last_err = format!("{e}");
+                        tracing::warn!(
+                            "[boot] registerFile {file} attempt {}/{ATTEMPTS} failed: {last_err}",
+                            attempt + 1
+                        );
+                        gloo_timers::future::TimeoutFuture::new(300).await;
+                    }
+                }
+            }
+            boot_state.set(BootState::Failed(format!(
+                "registerFile {file} after {ATTEMPTS} attempts: {last_err}"
+            )));
+            return;
+        }
+
         if let Err(e) = bridge.call("engineInit", [DB_PATH.into()]).await {
             boot_state.set(BootState::Failed(format!("engineInit: {e}")));
             return;
         }
 
-        // Connect the MCP relay bridge (best-effort; reconnects automatically on close).
+        // Connect the MCP relay bridge (best-effort; reconnects automatically on
+        // close).
         connect_mcp_relay(bridge.clone());
 
         // Seed the viewport BEFORE the first watch so the root
@@ -83,19 +117,23 @@ fn App() -> Element {
         install_resize_listener(bridge.clone());
 
         // The root layout block has a well-known id set by seed_default_layout.
-        let root_val = match bridge
-            .call(
-                "engineExecuteQuery",
-                [format!("SELECT id FROM {BLOCK_READ_TABLE} WHERE id='block:root-layout' LIMIT 1").into()], // ALLOW(sql): startup readiness probe before BackendEngine is wired
-            )
-            .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                boot_state.set(BootState::Failed(format!("root block query: {e}")));
-                return;
-            }
-        };
+        let root_val =
+            match bridge
+                .call(
+                    "engineExecuteQuery",
+                    [format!(
+                        "SELECT id FROM {BLOCK_READ_TABLE} WHERE id='block:root-layout' LIMIT 1"
+                    )
+                    .into()], // ALLOW(sql): startup readiness probe before BackendEngine is wired
+                )
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    boot_state.set(BootState::Failed(format!("root block query: {e}")));
+                    return;
+                }
+            };
 
         let root_id = match extract_first_id(&root_val) {
             Some(id) => id,
@@ -283,8 +321,7 @@ fn install_resize_listener(bridge: WorkerBridge) {
             send_viewport(&bridge).await;
         });
     }));
-    if let Err(e) =
-        win.add_event_listener_with_callback("resize", closure.as_ref().unchecked_ref())
+    if let Err(e) = win.add_event_listener_with_callback("resize", closure.as_ref().unchecked_ref())
     {
         tracing::error!("[viewport] resize listener install failed: {e:?}");
     }
@@ -292,8 +329,8 @@ fn install_resize_listener(bridge: WorkerBridge) {
 }
 
 /// Connect to the MCP relay hub as `role=browser`. All incoming tool calls
-/// are forwarded to the worker via `engineMcpTool` and the results are sent back.
-/// Reconnects automatically after 1 second when the hub closes (handles
+/// are forwarded to the worker via `engineMcpTool` and the results are sent
+/// back. Reconnects automatically after 1 second when the hub closes (handles
 /// `trunk --watch` restarts without requiring a page reload).
 fn connect_mcp_relay(bridge: WorkerBridge) {
     let host = web_sys::window()

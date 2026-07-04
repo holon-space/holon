@@ -22,13 +22,15 @@ Library + binary crates under `crates/` (C4 components of the Holon system).
 | `holon-frontend` | component | Core | MVVM ViewModel | Frontend session abstraction and the MVVM **ViewModel** layer — owns the reactive `ReactiveViewModel` tree that the GPUI and TUI Views observe. |
 | `holon-integration-tests` | component | Testing | Test Harness | Shared test infrastructure for Holon integration tests |
 | `holon-layout-testing` | component | Testing | Test Harness | Shared layout-testing primitives for Holon's property-based UI tests. |
+| `holon-loro` | component | Adapters | Adapter | Loro CRDT document engine and peer-to-peer synchronization. |
 | `holon-macros` | component | Core | Code Generation | Procedural macros: `#[operations_trait]`, `#[affects(...)]`, and entity derives. |
 | `holon-macros-test` | component | Testing | Test Harness | Macro-expansion tests for `holon-macros`. |
-| `holon-markdown` | component | Adapters | Adapter | Obsidian-flavored Markdown parsing + rendering and the `MarkdownFormatAdapter` impl of `holon_core::FileFormatAdapter`. |
 | `holon-mcp-client` | component | Adapters | Adapter | Reusable MCP client: connects to MCP servers and exposes their tools as `OperationProvider`s. |
-| `holon-org-format` | component | Adapters | Adapter | Org-mode format: pure parsing, rendering, and diffing. |
+| `holon-org-format` | component | Adapters | Adapter | Org-mode format: pure parsing and rendering. |
 | `holon-orgmode` | component | Adapters | Adapter | Org-mode disk I/O and sync layer. |
 | `holon-pbt-core` | component | Testing | Strategy | Cross-PBT transition traits shared between `holon-layout-testing` and `holon-integration-tests`. |
+| `holon-petri` | component | Engine | Adapter | Materialization layer: Holon task blocks → Petri Net for WSJF ranking. |
+| `holon-profiles` | component | Core | Strategy | EntityProfile system: per-entity, per-row render + operation resolution. |
 | `holon-turso` | component | Adapters | Adapter | `holon-turso` — the Turso (SQLite-IVM) storage adapter. |
 
 ## Frontends

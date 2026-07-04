@@ -1,13 +1,21 @@
-use holon_engine::arc::{CreateArc, InputArc, OutputArc};
+use std::collections::BTreeMap;
+
+use holon_engine::Marking;
+use holon_engine::TokenState;
+use holon_engine::arc::CreateArc;
+use holon_engine::arc::InputArc;
+use holon_engine::arc::OutputArc;
 use holon_engine::engine::Engine;
 use holon_engine::guard::RhaiEvaluator;
+use holon_engine::objective;
 use holon_engine::value::Value;
 use holon_engine::yaml::history::History;
-use holon_engine::yaml::net::{ObjectiveDef, YamlNet, YamlTransition};
-use holon_engine::yaml::state::{YamlMarking, YamlToken};
-use holon_engine::{objective, Marking, TokenState};
+use holon_engine::yaml::net::ObjectiveDef;
+use holon_engine::yaml::net::YamlNet;
+use holon_engine::yaml::net::YamlTransition;
+use holon_engine::yaml::state::YamlMarking;
+use holon_engine::yaml::state::YamlToken;
 use proptest::prelude::*;
-use std::collections::BTreeMap;
 
 const TOKEN_TYPES: &[&str] = &["person", "document", "asset", "monetary"];
 const STATUSES: &[&str] = &["active", "pending", "done", "available", "missing"];
@@ -18,7 +26,14 @@ fn arb_token(id: String) -> impl Strategy<Value = YamlToken> {
     (
         type_strategy,
         status_strategy,
-        proptest::collection::btree_map("[a-z]{3,6}".prop_map(|s| s), -10.0f64..10.0, 0..3),
+        proptest::collection::btree_map(
+            // Prefixed so a generated attribute name can never collide with a Rhai
+            // keyword (e.g. `for`, `nil`), which would make `tok.<name>` in the
+            // generated objective fail to compile.
+            "[a-z]{3,6}".prop_map(|s| format!("attr_{s}")),
+            -10.0f64..10.0,
+            0..3,
+        ),
     )
         .prop_map(move |(token_type, status, float_attrs)| {
             let mut attributes = BTreeMap::new();
@@ -110,7 +125,10 @@ fn arb_transition(
                     });
                     let mut postcond = BTreeMap::new();
                     if let Some(post_status) = &postconds[i] {
-                        postcond.insert("status".to_string(), format!("\"{}\"", post_status));
+                        postcond.insert(
+                            "status".to_string(),
+                            format!("\"{}\"", post_status).parse().unwrap(),
+                        );
                     }
                     if !consume {
                         outputs.push(OutputArc {
@@ -126,9 +144,14 @@ fn arb_transition(
                     .map(|i| {
                         let tt = all_types[i % all_types.len()].to_string();
                         CreateArc {
-                            id_expr: format!("\"created-{}-{}-\" + step.n", name, i),
+                            id_expr: format!("\"created-{}-{}-\" + step.n", name, i)
+                                .parse()
+                                .unwrap(),
                             token_type: tt,
-                            attrs: BTreeMap::from([("status".to_string(), "\"new\"".to_string())]),
+                            attrs: BTreeMap::from([(
+                                "status".to_string(),
+                                holon_engine::AttrInit::Expr("\"new\"".parse().unwrap()),
+                            )]),
                         }
                     })
                     .collect();

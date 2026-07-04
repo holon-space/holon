@@ -23,13 +23,15 @@ pub mod matchers;
 
 use std::path::Path;
 
+use assert::Assertion;
 use holon_pbt_core::capabilities::RefLifecycle;
-use proptest::strategy::{Strategy, ValueTree};
+use proptest::strategy::Strategy;
+use proptest::strategy::ValueTree;
 use proptest::test_runner::TestRunner;
-use proptest_state_machine::{ReferenceStateMachine, StateMachineTest};
+use proptest_state_machine::ReferenceStateMachine;
+use proptest_state_machine::StateMachineTest;
 
 use crate::pbt::transitions::E2ETransition;
-use assert::Assertion;
 
 /// One replayable step: a `Given`/`When` action or a `Then` assertion.
 pub enum FixtureStep {
@@ -38,29 +40,14 @@ pub enum FixtureStep {
 }
 
 /// Bridge that lets the generic runner evaluate an [`Assertion`] against the
-/// SUT's capability traits. `E2ESut` implements it directly (it owns the
-/// capabilities); the `declare_pbt_slice!` wrapper SUT delegates to its inner
-/// `E2ESut`.
+/// SUT's capability traits. `ComposedSut` implements it by dispatching through
+/// its `CapMap` (`evaluate_assertion_caps`).
 pub trait FixtureAssertable {
     fn evaluate_assert(
         &self,
         assertion: &Assertion,
         ref_state: &crate::pbt::ReferenceState,
     ) -> Result<(), String>;
-}
-
-/// The inner `E2ESut` carries the capability impls, so it evaluates assertions
-/// directly. The `declare_pbt_slice!` wrapper SUT delegates here. The real-GPUI
-/// replay drives `E2ESut<Full>` as `S` directly, so it uses this impl too.
-impl FixtureAssertable for crate::pbt::E2ESut {
-    fn evaluate_assert(
-        &self,
-        assertion: &Assertion,
-        ref_state: &crate::pbt::ReferenceState,
-    ) -> Result<(), String> {
-        self.runtime
-            .block_on(assert::evaluate_assertion(assertion, ref_state, self))
-    }
 }
 
 /// A named, self-contained transition sequence to replay from a fresh init.
@@ -222,8 +209,8 @@ where
             FixtureStep::Action(t) => {
                 assert!(
                     M::preconditions(&ref_state, t),
-                    "[{label}] step {i}: preconditions FAILED for {} \
-                     — the fixture encodes a stale assumption",
+                    "[{label}] step {i}: preconditions FAILED for {} — the fixture encodes a \
+                     stale assumption",
                     t.variant_name()
                 );
                 // Mark this transition seen BEFORE applying it (matching
@@ -271,8 +258,8 @@ where
                 if let Ok(n) = std::env::var("HOLON_PBT_FORCE_FAIL_AT_STEP") {
                     if n.parse::<usize>().ok() == Some(i + 1) {
                         panic!(
-                            "HOLON_PBT_FORCE_FAIL_AT_STEP={n}: forced failure after step {} \
-                             ({}) — trouble begins at: forced-fault",
+                            "HOLON_PBT_FORCE_FAIL_AT_STEP={n}: forced failure after step {} ({}) \
+                             — trouble begins at: forced-fault",
                             i + 1,
                             t.variant_name()
                         );
@@ -284,8 +271,8 @@ where
                 // rendered state to assert against.
                 assert!(
                     ref_state.app_started(),
-                    "[{label}] step {i}: assertion before app startup is vacuous \
-                     — put `Then` steps after the app is started",
+                    "[{label}] step {i}: assertion before app startup is vacuous — put `Then` \
+                     steps after the app is started",
                 );
                 if let Err(msg) = sut.evaluate_assert(assertion, &ref_state) {
                     panic!("[{label}] step {i}: {msg}");

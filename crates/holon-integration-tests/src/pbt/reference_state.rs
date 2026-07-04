@@ -1,21 +1,31 @@
 //! Reference model for the PBT state machine.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
+use holon_api::ContentType;
+use holon_api::EntityName;
+use holon_api::Region;
+use holon_api::Value;
 use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
-use holon_api::render_types::{Arg, RenderExpr};
-use holon_api::{ContentType, EntityName, Region, Value};
+use holon_api::render_types::Arg;
+use holon_api::render_types::RenderExpr;
 use holon_frontend::editor_caret;
+use holon_pbt_core::Wiring;
 
 use super::action_actor_state::ActionActorState;
 use super::file_adapter_state::FileAdapterState;
 use super::mcp_server_actor_state::MCPServerActorState;
-use super::query::{QuerySource, TestQuery, WatchSpec};
+use super::query::QuerySource;
+use super::query::TestQuery;
+use super::query::WatchSpec;
 use super::reference_domain_state::ReferenceDomainState;
 use super::ui_actor_state::UIActorState;
-use holon_pbt_core::Wiring;
+use crate::pbt::types::MutationApply;
 
 pub type ShadowInterpreter =
     holon_frontend::render_interpreter::RenderInterpreter<holon_frontend::ReactiveViewModel>;
@@ -110,7 +120,8 @@ pub fn valid_render_expressions() -> Vec<RenderExpr> {
                 ),
             )],
         ),
-        // list(#{item_template: row(state_toggle(col("task_state")), editable_text(col("content")))})
+        // list(#{item_template: row(state_toggle(col("task_state")),
+        // editable_text(col("content")))})
         fc(
             "list",
             vec![named(
@@ -220,7 +231,10 @@ pub struct TestEntityProfile {
 impl TestEntityProfile {
     fn to_yaml(&self) -> String {
         format!(
-            "entity_name: block\ncomputed:\n  has_{field}: \"= {field} != ()\"\nvariants:\n  - name: {name}\n    priority: 1\n    condition: \"= has_{field}\"\n    render: 'row(editable_text(col(\"content\")))'\n  - name: default\n    priority: -1\n    render: 'row(editable_text(col(\"content\")))'",
+            "entity_name: block\ncomputed:\n  has_{field}: \"= {field} != ()\"\nvariants:\n  - \
+             name: {name}\n    priority: 1\n    condition: \"= has_{field}\"\n    render: \
+             'row(editable_text(col(\"content\")))'\n  - name: default\n    priority: -1\n    \
+             render: 'row(editable_text(col(\"content\")))'",
             field = self.field_name,
             name = self.profile_name,
         )
@@ -240,7 +254,9 @@ pub const TEST_PROFILES: &[TestEntityProfile] = &[
     },
 ];
 
-const NO_VARIANTS_YAML: &str = "entity_name: block\ncomputed: {}\nvariants:\n  - name: default\n    priority: -1\n    render: 'row(editable_text(col(\"content\")))'";
+const NO_VARIANTS_YAML: &str =
+    "entity_name: block\ncomputed: {}\nvariants:\n  - name: default\n    priority: -1\n    \
+     render: 'row(editable_text(col(\"content\")))'";
 
 pub static VALID_PROFILE_YAMLS: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| {
     let mut yamls = vec![NO_VARIANTS_YAML.to_string()];
@@ -253,12 +269,12 @@ pub static VALID_PROFILE_YAMLS: std::sync::LazyLock<Vec<String>> = std::sync::La
 /// Typed classification of layout block IDs in index.org.
 ///
 /// Layout blocks are split into three categories with different mutation rules:
-/// - **headline_ids**: The text headline blocks that parent query/render sources.
-///   These can have content, task_state, priority, tags mutated.
-/// - **query_source_ids**: PRQL/GQL/SQL source blocks. These are truly immutable
-///   because changing them would break `initial_widget()`.
-/// - **render_source_ids**: Render DSL source blocks. These can have their content
-///   changed to any valid render expression.
+/// - **headline_ids**: The text headline blocks that parent query/render
+///   sources. These can have content, task_state, priority, tags mutated.
+/// - **query_source_ids**: PRQL/GQL/SQL source blocks. These are truly
+///   immutable because changing them would break `initial_widget()`.
+/// - **render_source_ids**: Render DSL source blocks. These can have their
+///   content changed to any valid render expression.
 #[derive(Debug, Clone, Default)]
 pub struct LayoutBlockInfo {
     pub headline_ids: HashSet<EntityUri>,
@@ -279,12 +295,12 @@ impl LayoutBlockInfo {
         self.query_source_ids.contains(id)
     }
 
-    /// Returns true if the block is focusable — i.e. it has an EditableText node.
-    /// Source blocks (query/render) are NOT focusable. Headline blocks (parents
-    /// of source blocks) ARE focusable in the current reference model because
-    /// the PBT uses them as navigation targets; marking them non-focusable
-    /// would break ClickBlock generation entirely (see note in the editable
-    /// transition generation).
+    /// Returns true if the block is focusable — i.e. it has an EditableText
+    /// node. Source blocks (query/render) are NOT focusable. Headline
+    /// blocks (parents of source blocks) ARE focusable in the current
+    /// reference model because the PBT uses them as navigation targets;
+    /// marking them non-focusable would break ClickBlock generation
+    /// entirely (see note in the editable transition generation).
     pub fn is_focusable(&self, id: &EntityUri) -> bool {
         !self.query_source_ids.contains(id) && !self.render_source_ids.contains(id)
     }
@@ -345,6 +361,11 @@ impl BlockState {
                 // (e.g. `/matview`) matches when a dependency points at a
                 // minted (split-reconciled) block, not just a stable seed id.
                 b.requires = b.requires.iter().map(|u| resolve(u)).collect();
+                // `advice_suppressed` is likewise an edge field of block-id
+                // references (ADR 0021 dismissal set); remap its targets the
+                // same way, or a dismissal pointing at a split-reconciled block
+                // keeps the synthetic id and diverges from the SUT's resolved id.
+                b.advice_suppressed = b.advice_suppressed.iter().map(|u| resolve(u)).collect();
                 (b.id.clone(), b)
             })
             .collect();
@@ -410,20 +431,23 @@ pub struct ReferenceState {
     /// `RequiredWiring` gating (ADR 0007).
     pub wiring: Wiring,
 
-    /// The capability set the SUT supplies, when the SUT is a composed `CapMap`.
-    /// `None` = unrestricted: a concrete SUT (`E2ESut`) provides every cap, or this is
-    /// a non-composed run, so the cap gate passes everything and the alphabet behaves
-    /// exactly as before. `Some(set)` = a composed/partial SUT, so transitions whose
-    /// [`TransitionFactory::required_caps`] aren't all present are gated out of the
-    /// alphabet — the cap-analog of [`wiring`](Self::wiring)/`RequiredWiring` (PCG-2).
+    /// The capability set the SUT supplies, when the SUT is a composed
+    /// `CapMap`. `None` = unrestricted: a concrete SUT (`E2ESut`) provides
+    /// every cap, or this is a non-composed run, so the cap gate passes
+    /// everything and the alphabet behaves exactly as before. `Some(set)` =
+    /// a composed/partial SUT, so transitions whose
+    /// [`TransitionFactory::required_caps`] aren't all present are gated out of
+    /// the alphabet — the cap-analog of
+    /// [`wiring`](Self::wiring)/`RequiredWiring` (PCG-2).
     pub cap_set: Option<holon_pbt_core::composition::CapSet>,
 
     /// Whether a **real editor** (a live `InputState` driven by the GPUI/TUI
-    /// `UserDriver`) — not the headless `HeadlessEditorMirror` — drives the SUT.
-    /// Set by the real-editor driver harness (`phased.rs`), which builds the
-    /// reference state directly. When true, [`Self::blur_active_editor`] commits
-    /// the editor's dirty buffer to block content on blur, mirroring prod's
-    /// `on_blur` → `set_field("content")`. Replaces the former process-global
+    /// `UserDriver`) — not the headless `HeadlessEditorMirror` — drives the
+    /// SUT. Set by the real-editor driver harness (`phased.rs`), which
+    /// builds the reference state directly. When true,
+    /// [`Self::blur_active_editor`] commits the editor's dirty buffer to
+    /// block content on blur, mirroring prod's `on_blur` →
+    /// `set_field("content")`. Replaces the former process-global
     /// `PBT_REAL_EDITOR` env gate — the property now lives on the state the
     /// driver constructs, so it is deterministic and capture/replay-faithful
     /// without an env-var side channel. Headless slices leave it `false`.
@@ -440,13 +464,14 @@ pub struct ReferenceState {
     pub shadow_mesh: Option<super::shadow_mesh::ShadowMesh>,
 
     /// Clock side-channel (the `IdResolver` pattern): the composed harness
-    /// writes the SUT's scalar Lamport height (`SutLoroLog::loro_lamport_height`)
-    /// here after every apply+settle (and once after build); the ref pads the
-    /// shadow primary to it before boundary ops. `Clone` SHARES the cell — it
-    /// is a harness seam, not model state. Empty/stale during proptest's
-    /// generation phase, which is harmless: generation consumes no
-    /// clock-dependent predictions and execution re-evolves the ref fresh
-    /// (padding is lenient — see `ShadowMesh::pad_primary_to`).
+    /// writes the SUT's scalar Lamport height
+    /// (`SutLoroLog::loro_lamport_height`) here after every apply+settle
+    /// (and once after build); the ref pads the shadow primary to it before
+    /// boundary ops. `Clone` SHARES the cell — it is a harness seam, not
+    /// model state. Empty/stale during proptest's generation phase, which
+    /// is harmless: generation consumes no clock-dependent predictions and
+    /// execution re-evolves the ref fresh (padding is lenient — see
+    /// `ShadowMesh::pad_primary_to`).
     pub clock_feed: Arc<std::sync::Mutex<Option<u32>>>,
 
     /// Shadow interpreter resolved from FluxDI — source of truth for widget
@@ -523,7 +548,8 @@ impl ActiveEditor {
         self.dirty = true;
     }
 
-    /// Delete `count` chars before the cursor (Backspace ×count). Stops at start.
+    /// Delete `count` chars before the cursor (Backspace ×count). Stops at
+    /// start.
     pub fn delete_backward(&mut self, count: usize) {
         if count == 0 {
             return;
@@ -592,9 +618,10 @@ impl NavigationHistory {
 }
 
 /// Witness that a [`ReferenceState`]'s ids live in the SUT's id space — either
-/// [`ReferenceState::with_resolved_doc_uris`] has run (synthetic `block::split-N`
-/// / `block:ref-doc-N` placeholders remapped to the SUT's real ids), or the ref
-/// was built over a backend that mints no new ids (see [`Resolved::identity`]).
+/// [`ReferenceState::with_resolved_doc_uris`] has run (synthetic
+/// `block::split-N` / `block:ref-doc-N` placeholders remapped to the SUT's real
+/// ids), or the ref was built over a backend that mints no new ids (see
+/// [`Resolved::identity`]).
 ///
 /// The capability-bound comparison entry points (`reference_state_ref_caps`,
 /// `run_with_seeded_ref`) require this witness, so an **unresolved** reference
@@ -618,8 +645,9 @@ impl<T> Resolved<T> {
     }
 
     /// Map the inner value while carrying the witness forward — e.g.
-    /// `Resolved<ReferenceState>` → `Resolved<Arc<ReferenceState>>`. The closure
-    /// only repackages an already-resolved value, so the witness still holds.
+    /// `Resolved<ReferenceState>` → `Resolved<Arc<ReferenceState>>`. The
+    /// closure only repackages an already-resolved value, so the witness
+    /// still holds.
     pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Resolved<U> {
         Resolved(f(self.0))
     }
@@ -633,10 +661,11 @@ impl<T> Resolved<T> {
 }
 
 impl Resolved<ReferenceState> {
-    /// Witness that no id resolution is needed: the reference state was built over
-    /// a backend that mints no fresh ids (seed/started refs, or the counter-sync
-    /// `MemoryBackend` whose `align_ids` keeps mints in lockstep with the oracle),
-    /// so the synthetic and real id spaces already coincide.
+    /// Witness that no id resolution is needed: the reference state was built
+    /// over a backend that mints no fresh ids (seed/started refs, or the
+    /// counter-sync `MemoryBackend` whose `align_ids` keeps mints in
+    /// lockstep with the oracle), so the synthetic and real id spaces
+    /// already coincide.
     pub fn identity(state: ReferenceState) -> Self {
         Resolved(state)
     }
@@ -644,10 +673,10 @@ impl Resolved<ReferenceState> {
 
 impl ReferenceState {
     /// Return a [`Resolved`] clone of this reference state with its block tree
-    /// remapped into the SUT's ID space via `map` (synthetic doc URI → real UUID).
-    /// Capability-bound invariant bodies run against this resolved view so
-    /// they can compare block IDs/parents directly against the SUT without
-    /// any per-comparison resolution.
+    /// remapped into the SUT's ID space via `map` (synthetic doc URI → real
+    /// UUID). Capability-bound invariant bodies run against this resolved
+    /// view so they can compare block IDs/parents directly against the SUT
+    /// without any per-comparison resolution.
     ///
     /// Scope: currently remaps `block_state` only (covers the block-tree /
     /// SQL-projection invariants). Focus/navigation/watch fields also carry
@@ -741,18 +770,20 @@ impl ReferenceState {
         }
     }
 
-    /// Set the composed SUT's capability set (the cap gate's RHS). The composed harness
-    /// calls this with `caps.cap_set()` so the alphabet auto-narrows to the transitions
-    /// whose caps the `CapMap` actually supplies. Concrete-SUT runs leave it `None`.
+    /// Set the composed SUT's capability set (the cap gate's RHS). The composed
+    /// harness calls this with `caps.cap_set()` so the alphabet
+    /// auto-narrows to the transitions whose caps the `CapMap` actually
+    /// supplies. Concrete-SUT runs leave it `None`.
     pub fn with_cap_set(mut self, cap_set: holon_pbt_core::composition::CapSet) -> Self {
         self.cap_set = Some(cap_set);
         self
     }
 
-    /// Whether the active SUT supplies every cap in `required` — the cap gate mirroring
-    /// `RequiredWiring::satisfied_by(&self.wiring)`. Unrestricted (`cap_set == None`)
-    /// always passes, so concrete-SUT runs gate nothing (regression-safe). **Necessary,
-    /// not sufficient**, exactly like the wiring gate.
+    /// Whether the active SUT supplies every cap in `required` — the cap gate
+    /// mirroring `RequiredWiring::satisfied_by(&self.wiring)`. Unrestricted
+    /// (`cap_set == None`) always passes, so concrete-SUT runs gate nothing
+    /// (regression-safe). **Necessary, not sufficient**, exactly like the
+    /// wiring gate.
     pub fn caps_available(&self, required: &[holon_pbt_core::composition::CapId]) -> bool {
         match &self.cap_set {
             None => true,
@@ -770,11 +801,12 @@ impl ReferenceState {
     }
 
     /// Whether this reference owns an editor buffer carrying uncommitted text —
-    /// the headless atomic-editor capability (the single editor-transition gate;
-    /// see [`RefLifecycle::has_editor_buffer`]). Inherent mirror of the trait
-    /// method so transition bodies holding a concrete `&ReferenceState` can read
-    /// it without importing the trait. Derived from the wiring's UI actor (the
-    /// editor's `InputState`/buffer host), not Loro-as-storage or an env var.
+    /// the headless atomic-editor capability (the single editor-transition
+    /// gate; see [`RefLifecycle::has_editor_buffer`]). Inherent mirror of
+    /// the trait method so transition bodies holding a concrete
+    /// `&ReferenceState` can read it without importing the trait. Derived
+    /// from the wiring's UI actor (the editor's `InputState`/buffer host),
+    /// not Loro-as-storage or an env var.
     pub fn has_editor_buffer(&self) -> bool {
         self.wiring.has_actor(holon_pbt_core::Actor::UI)
     }
@@ -789,8 +821,8 @@ impl ReferenceState {
     /// Close the active editor, committing its pending text first when a real
     /// editor is driving (see [`Self::real_editor`]). The commit is idempotent
     /// under Loro (per-keystroke writes already committed it) and a no-op when
-    /// no editor is active, so call sites can swap a bare `active_editor = None`
-    /// for this unconditionally.
+    /// no editor is active, so call sites can swap a bare `active_editor =
+    /// None` for this unconditionally.
     pub fn blur_active_editor(&mut self) {
         // Dirty-gated: only user-authored pending text commits on an
         // authority move (prod commits via the focus-binding's
@@ -857,9 +889,10 @@ impl ReferenceState {
             .unwrap_or(false)
     }
 
-    /// If `block_id` is the focused entity in any region, reset the cursor to start.
-    /// Called after mutations that change block content — the real editor would
-    /// reposition the cursor (blur/refocus cycle), so the reference model must too.
+    /// If `block_id` is the focused entity in any region, reset the cursor to
+    /// start. Called after mutations that change block content — the real
+    /// editor would reposition the cursor (blur/refocus cycle), so the
+    /// reference model must too.
     pub fn reset_cursor_if_focused(&mut self, block_id: &EntityUri) {
         for (region, focused_id) in &self.ui.tab.focused_entity_id {
             if focused_id == block_id {
@@ -902,7 +935,8 @@ impl ReferenceState {
         }
     }
 
-    /// Whether any region currently has a focused entity (required for ArrowNavigate).
+    /// Whether any region currently has a focused entity (required for
+    /// ArrowNavigate).
     pub fn has_focus(&self) -> bool {
         !self.ui.tab.focused_entity_id.is_empty()
     }
@@ -925,13 +959,15 @@ impl ReferenceState {
         self.ui.user.current_view.clone()
     }
 
-    /// Returns expected query results for a watch using the TestQuery evaluator.
+    /// Returns expected query results for a watch using the TestQuery
+    /// evaluator.
     pub fn query_results(&self, watch_spec: &WatchSpec) -> Vec<HashMap<String, Value>> {
         watch_spec.query.evaluate(&self.domain.block_state.blocks)
     }
 
-    /// Check if index.org exists with the structure required by initial_widget().
-    /// Generate a synthetic `block:ref-doc-N` URI for a new document and bump the counter.
+    /// Check if index.org exists with the structure required by
+    /// initial_widget(). Generate a synthetic `block:ref-doc-N` URI for a
+    /// new document and bump the counter.
     pub fn next_synthetic_doc_uri(&mut self) -> EntityUri {
         let uri = EntityUri::block(&format!("ref-doc-{}", self.action.next_doc_id));
         self.action.next_doc_id += 1;
@@ -948,14 +984,16 @@ impl ReferenceState {
             .map(|b| b.id.clone())
     }
 
-    /// Whether the system has a valid root layout (from seed blocks or user-written index.org).
-    /// Used to gate render_entity, ReactiveEngine, and ViewModel checks.
+    /// Whether the system has a valid root layout (from seed blocks or
+    /// user-written index.org). Used to gate render_entity, ReactiveEngine,
+    /// and ViewModel checks.
     pub fn is_properly_setup(&self) -> bool {
         !self.domain.layout_blocks.query_source_ids.is_empty() || self.has_user_index_org()
     }
 
     /// Whether the user has written an index.org with query+render blocks.
-    /// Used to gate block comparison invariants (seed blocks don't round-trip through org files).
+    /// Used to gate block comparison invariants (seed blocks don't round-trip
+    /// through org files).
     pub fn has_user_index_org(&self) -> bool {
         let index_doc_uri = match self.doc_uri_by_name("index") {
             Some(uri) => uri,
@@ -983,7 +1021,8 @@ impl ReferenceState {
         })
     }
 
-    /// Get the first root layout block ID from index.org (a heading with a query source child).
+    /// Get the first root layout block ID from index.org (a heading with a
+    /// query source child).
     pub fn root_layout_block_id(&self) -> Option<EntityUri> {
         let index_doc_uri = self.doc_uri_by_name("index")?;
         self.domain
@@ -1022,12 +1061,13 @@ impl ReferenceState {
         self.main_layout_renders_widget(block_id, &["draggable"])
     }
 
-    /// Whether the active main-panel layout's item template renders `block_id`'s
-    /// row with any of `widgets` (by `widget_name`). Renders the row through the
-    /// shadow interpreter (the same `BuilderServices::interpret` the SUT uses)
-    /// and walks the resulting `ViewModel`. Returns `false` when no main-panel
-    /// render template is tracked (the template-interactivity axis is only
-    /// consulted for user `index.org` layouts, which always have one).
+    /// Whether the active main-panel layout's item template renders
+    /// `block_id`'s row with any of `widgets` (by `widget_name`). Renders
+    /// the row through the shadow interpreter (the same
+    /// `BuilderServices::interpret` the SUT uses) and walks the resulting
+    /// `ViewModel`. Returns `false` when no main-panel render template is
+    /// tracked (the template-interactivity axis is only consulted for user
+    /// `index.org` layouts, which always have one).
     fn main_layout_renders_widget(&self, block_id: &EntityUri, widgets: &[&str]) -> bool {
         use holon_frontend::reactive::BuilderServices;
 
@@ -1053,10 +1093,11 @@ impl ReferenceState {
     /// The active main-panel layout query, as a [`TestQuery`].
     ///
     /// Default layout (no user `index.org`) → the navigation-aware
-    /// [`QuerySource::FocusRootDescendants`] (GQL `focus_root` + `CHILD_OF*0..20`).
-    /// A user `index.org` → the [`QuerySource`] recovered from its main-panel
-    /// query source block (via [`QuerySource::recognize`]), bound to the layout
-    /// block as the navigation-blind `from children` context.
+    /// [`QuerySource::FocusRootDescendants`] (GQL `focus_root` +
+    /// `CHILD_OF*0..20`). A user `index.org` → the [`QuerySource`]
+    /// recovered from its main-panel query source block (via
+    /// [`QuerySource::recognize`]), bound to the layout block as the
+    /// navigation-blind `from children` context.
     pub fn active_main_query(&self) -> TestQuery {
         if !self.has_user_index_org() {
             return TestQuery::layout(QuerySource::FocusRootDescendants {
@@ -1092,11 +1133,12 @@ impl ReferenceState {
         TestQuery::layout(source)
     }
 
-    /// Block ids the active main-panel layout renders — its query's rendered set.
-    /// The faithful replacement for the `is_descendant_of_any(focus_roots)`
-    /// proxy: it agrees with the default layout (focus-root descendants) and is
-    /// correct for custom layouts (a `from children` layout renders only the
-    /// layout block's direct children, an all-blocks layout renders everything).
+    /// Block ids the active main-panel layout renders — its query's rendered
+    /// set. The faithful replacement for the
+    /// `is_descendant_of_any(focus_roots)` proxy: it agrees with the
+    /// default layout (focus-root descendants) and is correct for custom
+    /// layouts (a `from children` layout renders only the layout block's
+    /// direct children, an all-blocks layout renders everything).
     pub fn main_rendered_block_ids(&self) -> BTreeSet<EntityUri> {
         let query = self.active_main_query();
         let mut focus_roots = std::collections::BTreeMap::new();
@@ -1113,11 +1155,12 @@ impl ReferenceState {
     /// Whether the active layout's item template renders blocks interactively —
     /// i.e. with a widget a block-interaction transition can dispatch against.
     ///
-    /// The default layout renders every block through the block entity profile's
-    /// `render_entity()` (which attaches operations, a `draggable`, and an
-    /// `editable_text`) — interactive by construction. A user `index.org`
-    /// renders through an explicit template that may be static (`row(text(…))`,
-    /// no operations) or interactive; we walk the actual template to decide.
+    /// The default layout renders every block through the block entity
+    /// profile's `render_entity()` (which attaches operations, a
+    /// `draggable`, and an `editable_text`) — interactive by construction.
+    /// A user `index.org` renders through an explicit template that may be
+    /// static (`row(text(…))`, no operations) or interactive; we walk the
+    /// actual template to decide.
     fn layout_renders_interactively(&self, block_id: &EntityUri) -> bool {
         if !self.has_user_index_org() {
             return true;
@@ -1183,7 +1226,8 @@ impl ReferenceState {
         &self,
         region: Region,
     ) -> Option<Box<dyn holon_frontend::navigation::CollectionNavigator>> {
-        use holon_frontend::navigation::{ListNavigator, TreeNavigator};
+        use holon_frontend::navigation::ListNavigator;
+        use holon_frontend::navigation::TreeNavigator;
 
         let focus_id = self.current_focus(region)?;
 
@@ -1403,7 +1447,8 @@ impl ReferenceState {
 
     // ── Block hierarchy query helpers ──────────────────────────────────
 
-    /// Children of parent sorted by sequence then ID (matching canonical ordering).
+    /// Children of parent sorted by sequence then ID (matching canonical
+    /// ordering).
     pub fn sorted_children_of(&self, parent_id: &EntityUri) -> Vec<&Block> {
         use holon_orgmode::models::OrgBlockExt;
         let mut children: Vec<&Block> = self
@@ -1433,7 +1478,8 @@ impl ReferenceState {
             .collect()
     }
 
-    /// Previous sibling of block_id (same parent, immediately before in sequence order).
+    /// Previous sibling of block_id (same parent, immediately before in
+    /// sequence order).
     pub fn previous_sibling(&self, block_id: &EntityUri) -> Option<EntityUri> {
         let block = self.domain.block_state.blocks.get(block_id)?;
         let children = self.sorted_children_of(&block.parent_id);
@@ -1445,7 +1491,8 @@ impl ReferenceState {
         }
     }
 
-    /// Next sibling of block_id (same parent, immediately after in sequence order).
+    /// Next sibling of block_id (same parent, immediately after in sequence
+    /// order).
     pub fn next_sibling(&self, block_id: &EntityUri) -> Option<EntityUri> {
         let block = self.domain.block_state.blocks.get(block_id)?;
         let children = self.sorted_children_of(&block.parent_id);
@@ -1569,7 +1616,8 @@ impl ReferenceState {
         self.recanon_and_rebuild();
     }
 
-    /// Split a block at the given byte position, mirroring `traits.rs::split_block`.
+    /// Split a block at the given byte position, mirroring
+    /// `traits.rs::split_block`.
     ///
     /// Original block keeps `content[..position].trim_end()`.
     /// New block gets `content[position..].trim_start()` with a synthetic ID.
@@ -1639,6 +1687,57 @@ impl ReferenceState {
         new_id
     }
 
+    /// Create a new text block under `parent` as its LAST child — the oracle
+    /// prediction for the creation-slot "type here to create" gesture
+    /// (`CreateBlockUnderFocus`). Prod's `block.create` from the
+    /// `:__virtual:<parent>` slot appends the block at the end of the parent's
+    /// children (the slot sorts last, then the created block takes a fresh
+    /// fractional index at the tail); mirror that ordering with `max_seq + 1`
+    /// so `recanon_and_rebuild`'s canonical pass lands it last. The synthetic
+    /// `block::create-N` id pairs 1:1 with the SUT's minted uuid via the
+    /// composed harness's per-tick reconcile. `recanon_and_rebuild` bumps
+    /// `next_id` (same as `split_block`), so this does not increment it.
+    pub fn create_block_under(&mut self, parent: &EntityUri, content: &str) -> EntityUri {
+        use holon_orgmode::models::OrgBlockExt;
+
+        let new_id = EntityUri::block(&format!(":create-{}", self.domain.block_state.next_id));
+        let mut new_block = Block::new_text(new_id.clone(), parent.clone(), content.to_string());
+        let max_seq = self
+            .domain
+            .block_state
+            .blocks
+            .values()
+            .filter(|b| b.parent_id == *parent)
+            .map(|b| b.sequence())
+            .max();
+        new_block.set_sequence(max_seq.map_or(0, |s| s + 1));
+
+        // The new block belongs to the DOCUMENT that contains it, mirroring
+        // `split_block`. When the focus-root `parent` is itself a page /
+        // document root (its own `block_documents` entry is the sentinel
+        // `no_parent` — a page IS its own doc), the child lives in that page's
+        // document, i.e. the page id ITSELF — not the sentinel. Writing the
+        // sentinel here would make `seed_block_ids` misclassify the created
+        // block as a seed and `RefBackend::org_blocks` drop it from the org
+        // projection (while the SQL projection keeps it), diverging `/org` only.
+        // A regular-block parent contributes its own document unchanged.
+        let doc_uri = match self.domain.block_state.block_documents.get(parent) {
+            Some(doc) if doc.is_no_parent() || doc.is_sentinel() => parent.clone(),
+            Some(doc) => doc.clone(),
+            None => parent.clone(),
+        };
+        self.domain
+            .block_state
+            .block_documents
+            .insert(new_id.clone(), doc_uri);
+        self.domain
+            .block_state
+            .blocks
+            .insert(new_id.clone(), new_block);
+        self.recanon_and_rebuild();
+        new_id
+    }
+
     /// Join `block_id` into its merge target.
     ///
     /// Two cases, both triggered by Backspace at position 0:
@@ -1650,8 +1749,8 @@ impl ReferenceState {
     ///   2. **No previous sibling, parent is text** (target = parent;
     ///      child→parent join):
     ///      - parent.content = parent.content + block.content
-    ///      - re-parent block's children to parent, placed at block's old
-    ///        slot (before block's old siblings)
+    ///      - re-parent block's children to parent, placed at block's old slot
+    ///        (before block's old siblings)
     ///      - delete block
     ///
     /// Returns the byte offset in the target where the join happened (i.e.
@@ -1766,8 +1865,9 @@ impl ReferenceState {
         join_offset
     }
 
-    /// Apply a mutation to the block state, re-canonicalize, and rebuild profiles.
-    pub fn apply_mutation(&mut self, event: &super::types::MutationEvent) {
+    /// Apply a mutation to the block state, re-canonicalize, and rebuild
+    /// profiles.
+    pub fn apply_mutation(&mut self, event: &holon_pbt_core::types::MutationEvent) {
         let mut blocks: Vec<Block> = self.domain.block_state.blocks.values().cloned().collect();
         event.mutation.apply_to(&mut blocks);
         self.domain.block_state.blocks = blocks.into_iter().map(|b| (b.id.clone(), b)).collect();
@@ -1801,9 +1901,9 @@ impl ReferenceState {
         self.domain.block_state.next_id += 1;
     }
 
-    /// Returns the set of block IDs that should appear in `focus_roots` for a region.
-    /// Mirrors `schema/matview_focus_roots.sql`: a flat projection of
-    /// `navigation_history WHERE closed_at IS NULL`, excluding home rows
+    /// Returns the set of block IDs that should appear in `focus_roots` for a
+    /// region. Mirrors `schema/matview_focus_roots.sql`: a flat projection
+    /// of `navigation_history WHERE closed_at IS NULL`, excluding home rows
     /// (block_id NULL — they don't JOIN against `root.id` in the consumer GQL).
     ///
     /// For Region::Main, the close-prior-then-insert contract of
@@ -1827,7 +1927,8 @@ impl ReferenceState {
     // intentionally trimmed body; downstream test files reference offsets.
     // Removing this comment shifts following ALLOW directives.
 
-    /// Check if `block_id` is a descendant of any block in `roots` (or is itself in `roots`).
+    /// Check if `block_id` is a descendant of any block in `roots` (or is
+    /// itself in `roots`).
     pub fn is_descendant_of_any(
         &self,
         block_id: &EntityUri,
@@ -1926,7 +2027,8 @@ impl ReferenceState {
         self.recompute_derived();
     }
 
-    /// Recompute derived fields (profiles, render expressions) after undo/redo restore.
+    /// Recompute derived fields (profiles, render expressions) after undo/redo
+    /// restore.
     fn recompute_derived(&mut self) {
         self.rebuild_profile_tracking();
         self.domain.render_expressions.clear();
@@ -1957,7 +2059,8 @@ impl ReferenceState {
             .then(|| main_panel_id.clone())
     }
 
-    /// Get the main panel's render expression (the render source child of the main panel headline).
+    /// Get the main panel's render expression (the render source child of the
+    /// main panel headline).
     pub fn main_panel_render_expr(&self) -> Option<&RenderExpr> {
         let main_panel_id = self.main_panel_block_id()?;
         self.domain
@@ -2013,7 +2116,8 @@ fn view_model_has_widget(node: &holon_frontend::ReactiveViewModel, widgets: &[&s
     false
 }
 
-/// Convert a Block to a DataRow (HashMap<String, Value>) for ViewModel construction.
+/// Convert a Block to a DataRow (HashMap<String, Value>) for ViewModel
+/// construction.
 pub fn block_to_data_row(block: &Block) -> holon_api::widget_spec::DataRow {
     let mut row = HashMap::new();
     row.insert("id".into(), Value::String(block.id.as_str().to_string()));
@@ -2026,7 +2130,8 @@ pub fn block_to_data_row(block: &Block) -> holon_api::widget_spec::DataRow {
         "parent_id".into(),
         Value::String(block.parent_id.as_str().to_string()),
     );
-    // document_id removed from Block struct; looked up via block_documents map if needed
+    // document_id removed from Block struct; looked up via block_documents map if
+    // needed
     if let Some(Value::String(ts)) = block.properties.get("task_state") {
         row.insert("task_state".into(), Value::String(ts.clone()));
     }
@@ -2052,12 +2157,11 @@ impl holon_frontend::reactive::BuilderServices for ReferenceState {
         // Find render source child of this block in layout_blocks.
         // Two distinct "no expr" cases, previously conflated by a silent
         // `table()` fallback:
-        // - a render-source child IS tracked but `render_expressions` has no
-        //   entry → ref bookkeeping inconsistency, fail loud;
-        // - no render-source child at all → the ref genuinely doesn't track
-        //   a render for this block; fall back to `table()` like the prod
-        //   stub services, but DISCLOSED (warn) so a vacuous comparison is
-        //   attributable in the log.
+        // - a render-source child IS tracked but `render_expressions` has no entry →
+        //   ref bookkeeping inconsistency, fail loud;
+        // - no render-source child at all → the ref genuinely doesn't track a render
+        //   for this block; fall back to `table()` like the prod stub services, but
+        //   DISCLOSED (warn) so a vacuous comparison is attributable in the log.
         let render_source_child = self
             .domain
             .layout_blocks
@@ -2077,16 +2181,16 @@ impl holon_frontend::reactive::BuilderServices for ReferenceState {
                 .get(rid)
                 .unwrap_or_else(|| {
                     panic!(
-                        "[ref get_block_data] block {id} has a tracked render-source child \
-                         {rid} but no compiled entry in render_expressions — reference-model \
+                        "[ref get_block_data] block {id} has a tracked render-source child {rid} \
+                         but no compiled entry in render_expressions — reference-model \
                          bookkeeping inconsistency"
                     )
                 })
                 .clone(),
             None => {
                 tracing::warn!(
-                    "[ref get_block_data] no render-source child tracked for {id}; \
-                     falling back to table() (untracked-by-reference render)"
+                    "[ref get_block_data] no render-source child tracked for {id}; falling back \
+                     to table() (untracked-by-reference render)"
                 );
                 RenderExpr::FunctionCall {
                     name: "table".into(),

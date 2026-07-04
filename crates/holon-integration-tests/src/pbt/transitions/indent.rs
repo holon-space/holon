@@ -1,26 +1,33 @@
-//! Transition: indent the focused block (make it a child of its previous sibling).
+//! Transition: indent the focused block (make it a child of its previous
+//! sibling).
 //!
-//! Mirrors the legacy logic split across `state_machine.rs:1106-1121` (generator),
-//! `state_machine.rs:3314-3328` (precondition),
+//! Mirrors the legacy logic split across `state_machine.rs:1106-1121`
+//! (generator), `state_machine.rs:3314-3328` (precondition),
 //! `state_machine.rs:2648-2660` (ref-state apply),
 //! `sut.rs:3541-3546` (SUT apply), and
 //! `transition_budgets.rs:298-302` (expected SQL).
 
 use holon_api::EntityUri;
-use holon_pbt_core::capabilities::{
-    CapRegion, RefBlockTree, RefBlockTreeMut, RefEditorMirrorMut, RefFocus, RefFocusMut,
-    RefLifecycle, SutBlockTreeWrite,
-};
+use holon_pbt_core::TransitionFactory;
+use holon_pbt_core::TransitionRef;
+use holon_pbt_core::capabilities::CapRegion;
+use holon_pbt_core::capabilities::RefBlockTree;
+use holon_pbt_core::capabilities::RefBlockTreeMut;
+use holon_pbt_core::capabilities::RefEditorMirrorMut;
+use holon_pbt_core::capabilities::RefFocus;
+use holon_pbt_core::capabilities::RefFocusMut;
+use holon_pbt_core::capabilities::RefLifecycle;
+use holon_pbt_core::capabilities::SutBlockTreeWrite;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::check;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::validation::{Reason, check};
-use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
-
 #[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::{ExpectedSql, MutationKind, expected_sql_for_kind};
+use crate::pbt::transition_budgets::MutationKind;
+#[cfg(feature = "otel-testing")]
+use crate::pbt::transition_budgets::expected_sql_for_kind;
 
 /// Indent the focused block: re-parent it under its previous sibling via the
 /// `Alt+Right` / Tab chord.
@@ -112,9 +119,7 @@ pub fn indent_apply_to_ref<
 
 impl<R: RefBlockTree + RefLifecycle> TransitionFactory<R> for Indent {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        vec![::holon_pbt_core::composition::CapId::of::<
-            dyn ::holon_pbt_core::capabilities::SutBlockTreeWrite,
-        >()]
+        Self::declared_caps()
     }
 
     type Reason = Reason;
@@ -137,21 +142,18 @@ impl<R: RefBlockTree + RefBlockTreeMut + RefFocus + RefFocusMut + RefEditorMirro
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutBlockTreeWrite> TransitionImpl<ReferenceState, S> for Indent {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.apply_indent(&self.block_id).await;
+crate::cap_transition! {
+    Indent: SutBlockTreeWrite,
+    where R: [ RefBlockTree + RefLifecycle ],
+    |me, _state, sut| {
+        sut.apply_indent(&me.block_id).await;
     }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for Indent {
-    fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
+    sql_budget: |_me, state| {
         let mut sql = expected_sql_for_kind(
             MutationKind::Update,
-            state.mcp.active_watches.len(),
-            state.domain.block_state.blocks.len(),
-            state.files.documents.len(),
+            state.active_watch_count(),
+            state.block_count(),
+            state.document_count(),
         );
         sql.tolerance += 5; // extra margin for ordering operations
         sql

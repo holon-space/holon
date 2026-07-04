@@ -1,16 +1,22 @@
 //! Org-mode specific extensions for Block types.
 //!
-//! This module provides extension traits that add org-mode specific functionality
-//! to the generic Block type. Org-specific fields are stored in the
-//! `properties` JSON field.
+//! This module provides extension traits that add org-mode specific
+//! functionality to the generic Block type. Org-specific fields are stored in
+//! the `properties` JSON field.
 
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 // Import Block for use in extension traits (not re-exported to avoid FRB issues)
 use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
-use holon_api::types::{ContentType, Priority, StateCategory, Tags, TaskState, Timestamp};
+use holon_api::types::ContentType;
+use holon_api::types::Priority;
+use holon_api::types::StateCategory;
+use holon_api::types::Tags;
+use holon_api::types::TaskState;
+use holon_api::types::Timestamp;
+use serde::Deserialize;
+use serde::Serialize;
 
 /// Property keys for org-specific fields stored in properties JSON.
 pub mod org_props {
@@ -224,13 +230,15 @@ fn format_header_args_value(args: &HashMap<String, holon_api::Value>) -> String 
 // OrgDocumentExt - Extension trait for Document with org-specific functionality
 // =============================================================================
 
-/// Extension trait for document blocks (those with a `name`) with org-mode specific functionality.
+/// Extension trait for document blocks (those with a `name`) with org-mode
+/// specific functionality.
 ///
 /// Provides accessors for org-specific fields stored in the properties JSON:
 /// - title: #+TITLE value
 /// - todo_keywords: Custom TODO keyword configuration
 pub trait OrgDocumentExt {
-    /// Get the org file title (#+TITLE value) from the document block's properties.
+    /// Get the org file title (#+TITLE value) from the document block's
+    /// properties.
     fn file_title(&self) -> Option<String>;
 
     /// Set the org file title (#+TITLE value)
@@ -266,7 +274,8 @@ impl OrgDocumentExt for Block {
     fn todo_keywords(&self) -> Option<Vec<TaskState>> {
         let value = self.get_property(org_props::TODO_KEYWORDS)?;
         let json_str = value.as_string()?;
-        // Try new JSON array format first, fall back to legacy "ACTIVE1,ACTIVE2|DONE1,DONE2"
+        // Try new JSON array format first, fall back to legacy
+        // "ACTIVE1,ACTIVE2|DONE1,DONE2"
         if let Ok(states) = serde_json::from_str::<Vec<TaskState>>(json_str) {
             return Some(states);
         }
@@ -340,7 +349,8 @@ impl OrgDocumentExt for Block {
     }
 }
 
-/// Renders the file-level org header (#+TITLE, #+TODO) from a document block's properties.
+/// Renders the file-level org header (#+TITLE, #+TODO) from a document block's
+/// properties.
 pub fn render_document_header(doc_block: &Block) -> String {
     let mut result = String::new();
 
@@ -532,7 +542,8 @@ impl OrgBlockExt for Block {
                     Some("active") => StateCategory::Active,
                     Some("done") => StateCategory::Done,
                     other => panic!(
-                        "corrupt task_state_category {:?} on block {} (expected \"active\" or \"done\")",
+                        "corrupt task_state_category {:?} on block {} (expected \"active\" or \
+                         \"done\")",
                         other, self.id
                     ),
                 };
@@ -545,10 +556,7 @@ impl OrgBlockExt for Block {
 
     fn set_task_state(&mut self, state: Option<TaskState>) {
         if let Some(s) = state {
-            let category = match s.category {
-                StateCategory::Active => "active",
-                StateCategory::Done => "done",
-            };
+            let category = s.category.as_str();
             self.set_property(
                 org_props::TASK_STATE,
                 holon_api::Value::String(s.keyword.clone()),
@@ -660,6 +668,7 @@ impl OrgBlockExt for Block {
             "priority",
             "tags",
             "requires",
+            "advice_suppressed",
             "scheduled",
             "deadline",
             "org_properties",
@@ -722,6 +731,19 @@ impl OrgBlockExt for Block {
                 .map(|uri| uri.id().to_string())
                 .collect();
             result.insert("REQUIRES".to_string(), bare.join(" "));
+        }
+
+        // `advice_suppressed` mirrors `requires`: a typed edge field on Block
+        // (hydrated from the advice_suppressed junction) reconstructed into the
+        // `:ADVICE_SUPPRESSED:` drawer with the scheme stripped (bare slugs).
+        // See ADR 0021.
+        if !self.advice_suppressed.is_empty() {
+            let bare: Vec<String> = self
+                .advice_suppressed
+                .iter()
+                .map(|uri| uri.id().to_string())
+                .collect();
+            result.insert("ADVICE_SUPPRESSED".to_string(), bare.join(" "));
         }
 
         result
@@ -837,7 +859,8 @@ impl ToOrg for Block {
             result.push_str(&planning);
         }
 
-        // Body text (source blocks are child Block entities, rendered via tree traversal)
+        // Body text (source blocks are child Block entities, rendered via tree
+        // traversal)
         if let Some(body) = body_str {
             let trimmed_body = body.trim();
             if !trimmed_body.is_empty() {
@@ -890,8 +913,9 @@ fn source_block_to_org(block: &Block) -> String {
         result.push_str(&header_args_str);
     }
 
-    // Custom properties stored as flat keys by the parser (non-standard header args)
-    // These were split out during parsing and need to be rendered back as header args.
+    // Custom properties stored as flat keys by the parser (non-standard header
+    // args) These were split out during parsing and need to be rendered back as
+    // header args.
     let mut drawer_props: Vec<_> = block.drawer_properties().into_iter().collect();
     drawer_props.sort_by(|(a, _), (b, _)| a.cmp(b));
     for (k, v) in &drawer_props {

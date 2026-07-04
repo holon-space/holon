@@ -5,11 +5,13 @@
 //! concrete storage backend (Loro, Turso, in-memory). The impls live in the
 //! DI wiring layer of each backend crate.
 
+use std::path::Path;
+use std::path::PathBuf;
+
 use anyhow::Result;
 use async_trait::async_trait;
-use holon_api::block::Block;
 use holon_api::EntityUri;
-use std::path::{Path, PathBuf};
+use holon_api::block::Block;
 
 /// Read-only access to blocks, organized by document.
 ///
@@ -19,6 +21,19 @@ use std::path::{Path, PathBuf};
 pub trait BlockReader: Send + Sync {
     /// Get all blocks for a document by its ID.
     async fn get_blocks(&self, doc_id: &EntityUri) -> Result<Vec<Block>>;
+
+    /// Authoritative single-block point read, fully edge-hydrated
+    /// (`tags`/`requires`/`advice_suppressed`). Reads the **write-authority**
+    /// store — `block_raw` under Turso, the Loro tree under Loro — NOT the
+    /// lagging `block` matview, and NOT the doc-scoped recursive-CTE walk. An
+    /// O(1) indexed lookup.
+    ///
+    /// Powers the org-writeback incremental cache: after a content-only block
+    /// edit, the controller refreshes just the changed block from the same
+    /// authority its cache was seeded from (`get_blocks` reads `block_raw`
+    /// too), so seed and refresh never straddle the matview-vs-`block_raw`
+    /// authority boundary. Returns `None` if the id is absent.
+    async fn get_block_authoritative(&self, id: &EntityUri) -> Result<Option<Block>>;
 
     /// List all known documents with their blocks (for startup initialization).
     /// Returns (doc_id, blocks) pairs. Path resolution is the caller's concern.
@@ -55,19 +70,21 @@ pub trait BlockReader: Send + Sync {
     /// `block_ids`. Returns `true` if all are present before `timeout_ms`,
     /// `false` on timeout.
     ///
-    /// This replaced the `event_acks` watermark wait (`wait_for_cache_caught_up`):
-    /// that wait was only a *timestamp proxy* for "the projection that produced
-    /// these blocks has landed", whereas this is a *positional* predicate over
-    /// the actual rows — it cannot return before the rows are visible, so it
-    /// closes the load-bearing stale-cache re-render race (R1) without the
-    /// watermark machinery. Default impl returns `true` for backends without a
-    /// feed (in-memory tests).
+    /// This replaced the `event_acks` watermark wait
+    /// (`wait_for_cache_caught_up`): that wait was only a *timestamp proxy*
+    /// for "the projection that produced these blocks has landed", whereas
+    /// this is a *positional* predicate over the actual rows — it cannot
+    /// return before the rows are visible, so it closes the load-bearing
+    /// stale-cache re-render race (R1) without the watermark machinery.
+    /// Default impl returns `true` for backends without a feed (in-memory
+    /// tests).
     async fn wait_for_blocks_in_feed(&self, _: &[String], _: u64) -> bool {
         true
     }
 
-    /// Check if any of the given block IDs already exist under a DIFFERENT document.
-    /// Returns Vec<(block_id, owning_doc_uri)> for conflicts found.
+    /// Check if any of the given block IDs already exist under a DIFFERENT
+    /// document. Returns Vec<(block_id, owning_doc_uri)> for conflicts
+    /// found.
     ///
     /// Default implementation uses `iter_documents_with_blocks()` to correctly
     /// attribute nested blocks to their document root (not just direct parent).
@@ -167,7 +184,8 @@ pub trait DocumentManager: Send + Sync {
         Ok(current_doc)
     }
 
-    /// Get or create the full chain, creating intermediate page blocks as needed.
+    /// Get or create the full chain, creating intermediate page blocks as
+    /// needed.
     async fn get_or_create_by_name_chain(&self, chain: &[&str]) -> Result<Block> {
         assert!(!chain.is_empty(), "name chain must not be empty");
 

@@ -10,14 +10,15 @@
 //! not added to any weighted strategy. `weighted_generator` therefore returns
 //! `None` unconditionally, matching that behaviour exactly.
 
+use holon_pbt_core::TransitionFactory;
+use holon_pbt_core::TransitionRef;
+use holon_pbt_core::capabilities::RefLifecycle;
+use holon_pbt_core::capabilities::RefPeers;
+use holon_pbt_core::capabilities::TextOp;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::check;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
-
-use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::SutHandle;
-use crate::pbt::transitions::TextOp;
-use crate::pbt::validation::{Reason, check};
-use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
@@ -30,15 +31,13 @@ pub struct PeerCharEdit {
     pub op: TextOp,
 }
 
-impl TransitionFactory<ReferenceState> for PeerCharEdit {
+impl<R: RefLifecycle + RefPeers> TransitionFactory<R> for PeerCharEdit {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        vec![::holon_pbt_core::composition::CapId::of::<
-            dyn ::holon_pbt_core::capabilities::SutLoro,
-        >()]
+        Self::declared_caps()
     }
 
     type Reason = Reason;
-    fn weighted_generator(_: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+    fn weighted_generator(_: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // The legacy generator never emits PeerCharEdit — it has no
         // `strategies.add_weighted("peer_char_edit", ...)` call. Mirror that
         // exactly: return None so this variant is never selected.
@@ -46,24 +45,24 @@ impl TransitionFactory<ReferenceState> for PeerCharEdit {
     }
 }
 
-impl TransitionRef<ReferenceState> for PeerCharEdit {
+impl<R: RefLifecycle + RefPeers> TransitionRef<R> for PeerCharEdit {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         let mut checks: Vec<Validated<(), Reason>> = vec![
-            check(ReferenceState::mutable_text_enabled(), Reason::Unmigrated),
-            check(state.action.app_started, Reason::AppNotStarted),
+            check(state.mutable_text_enabled(), Reason::Unmigrated),
+            check(state.app_started(), Reason::AppNotStarted),
             check(
-                self.peer_idx < state.peers.len(),
+                self.peer_idx < state.peers_len(),
                 Reason::PeerIndexOutOfBounds,
             ),
         ];
 
-        if self.peer_idx < state.peers.len() {
+        if self.peer_idx < state.peers_len() {
             checks.push(check(
-                state.peers[self.peer_idx]
-                    .blocks
-                    .contains_key(&self.block_id),
+                state
+                    .peer_block_content(self.peer_idx, &self.block_id)
+                    .is_some(),
                 Reason::PeerBlockMissing,
             ));
         }
@@ -74,7 +73,7 @@ impl TransitionRef<ReferenceState> for PeerCharEdit {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, _: &mut ReferenceState) {
+    fn apply_to_ref(&self, _: &mut R) {
         // Reference model: PeerCharEdit doesn't change block-level
         // content (it operates at the LoroText character level).
         // The block content in the reference model stays the same;
@@ -84,17 +83,14 @@ impl TransitionRef<ReferenceState> for PeerCharEdit {
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutHandle> TransitionImpl<ReferenceState, S> for PeerCharEdit {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.apply_peer_char_edit(self.peer_idx, &self.block_id, &self.op)
+crate::cap_transition! {
+    PeerCharEdit: holon_pbt_core::capabilities::SutLoro,
+    where R: [ RefLifecycle + RefPeers ],
+    |me, _state, sut| {
+        sut.apply_peer_char_edit(me.peer_idx, &me.block_id, &me.op)
             .await;
     }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for PeerCharEdit {
-    fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
+    sql_budget: |_me, _state| {
         // PeerCharEdit: async CDC drain from previous transitions can land here.
         ExpectedSql {
             reads: 5,

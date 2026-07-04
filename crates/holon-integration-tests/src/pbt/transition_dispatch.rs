@@ -2,7 +2,7 @@
 //!
 //! Each transition kind owns its data (a struct), generation strategy
 //! (`holon_pbt_core::TransitionFactory<ReferenceState>`), and behaviour
-//! (`holon_pbt_core::TransitionImpl<ReferenceState, dyn SutHandle>`). The
+//! (`holon_pbt_core::TransitionImpl<Ref, S>`, bound on fine-grained SUT caps). The
 //! `declare_e2e_transitions!` macro generates the dispatch enum, the
 //! `From<variant>` impls, the hand-rolled trait dispatch on the enum, the
 //! `SqlBudget` dispatch, and the strategy aggregator.
@@ -21,10 +21,12 @@
 //! `transition_budgets::SqlBudget` trait so the shared behaviour trait stays
 //! medium-agnostic.
 //!
-//! - `SutHandle` (this file) is the object-safe view a transition
-//!   uses to drive the SUT. `#[async_trait]` so `&mut dyn SutHandle`
-//!   works under generic-V SUTs. The trait grows methods as variants
-//!   are migrated; today it is empty.
+//! - There is no bundle trait. Each transition's `TransitionImpl` is
+//!   bound on exactly the fine-grained SUT capability traits it drives
+//!   (via `cap_transition!`); the `E2ETransition` enum's `TransitionImpl`
+//!   is bound on the inlined union of every variant's caps (via
+//!   `declare_e2e_transitions!`), so a variant narrowed to a single cap
+//!   still satisfies it. The former coarse `SutHandle` view was deleted.
 
 /// Per-variant weight multiplier read from the `HOLON_PBT_WEIGHTS`
 /// environment variable. The macro `declare_e2e_transitions!` applies
@@ -133,86 +135,6 @@ fn parse_weight_env() -> Vec<(WeightPattern, u32)> {
     rules
 }
 
-// TODO- Split this up into smaller Sut structs. Some of these might already exist
-/// Coarse SUT capability bundle for the E2E PBT. Transitions are
-/// dispatched generically over `S: SutHandle` (concrete-`S` dispatch,
-/// no `dyn`), so the trait uses **native `async fn`** rather than
-/// `#[async_trait]` boxing. This is what lets a transition's
-/// `TransitionImpl<R, S>` impl be narrowed to fine-grained capability
-/// bounds (`S: SutEditorMirrorWrite`, …) while the enum still dispatches
-/// `S: SutHandle` — `SutHandle` is (becoming) a supertrait bundle of the
-/// fine caps.
-///
-/// Non-`Send` futures: `E2ESut<V>` holds `RefCell` fields (interior
-/// mutability for the reactive engine) and can't be `Sync`. Native
-/// `async fn` futures are `?Send` by default, which matches — proptest's
-/// state-machine driver runs single-threaded via `runtime.block_on`.
-///
-/// Implemented for `E2ESut<V>` in `sut_handle.rs`. The trait grows
-/// methods as variants are migrated; each migration that needs a new SUT
-/// capability adds one method here and one impl in `sut_handle.rs`
-/// (delegating to existing helpers).
-/// `SutHandle` is now a pure **marker bundle**: it declares no methods of its
-/// own — the entire transition alphabet is hosted by the fine-grained capability
-/// traits below. The cluster-peel relocated every former `SutHandle::apply_*`
-/// method into a `#[capmap_adapter]` cap (placed per the cap home-rule:
-/// holon-api-typed → `holon-pbt-core`; frontend-typed → `holon-frontend`;
-/// test-only-typed → `crate::pbt::local_caps`). `ref_state` is never in a cap
-/// signature — action-time needs are precomputed at the transition boundary
-/// (e.g. `StartApp`'s `root_id`) and settle/reconcile work lives in
-/// `E2ESut::block_tree_post_action`.
-///
-/// Because the bundle is a pure conjunction of caps, a composed `CapMap` that
-/// holds all of them satisfies `SutHandle` exactly as `E2ESut` does — which is
-/// the whole point of the decomposition (E3/E5 can then delete `E2ESut`).
-pub trait SutHandle:
-    ::holon_pbt_core::capabilities::SutEditorMirrorWrite
-    + ::holon_pbt_core::capabilities::SutBlockTreeWrite
-    + ::holon_pbt_core::capabilities::SutEdgeFieldWrite
-    + ::holon_pbt_core::capabilities::SutLoro
-    + ::holon_pbt_core::capabilities::SutFocusWrite
-    + ::holon_pbt_core::capabilities::SutNavHistoryWrite
-    + ::holon_pbt_core::capabilities::SutWatchRegister
-    + ::holon_pbt_core::capabilities::SutViewControl
-    + ::holon_pbt_core::capabilities::SutMcpEmit
-    + ::holon_pbt_core::capabilities::SutHistoryWrite
-    + ::holon_pbt_core::capabilities::SutNavHistoryDrive
-    + ::holon_pbt_core::capabilities::SutBlockInteract
-    + ::holon_frontend::pbt_caps::SutArrowNavigate
-    + crate::pbt::local_caps::SutMutate
-    + crate::pbt::local_caps::SutSeamMutate
-    + crate::pbt::transitions::apply_mutation::SutApplyMutation
-    + crate::pbt::local_caps::SutFixtureFs
-    + crate::pbt::local_caps::SutAppLifecycle
-{
-}
-
-/// Blanket marker impl: any type providing the full capability bundle IS a
-/// `SutHandle`. No explicit `impl SutHandle for E2ESut` is needed (or allowed
-/// alongside this) — `E2ESut` implements every cap, so it satisfies the bundle
-/// automatically, as will the composed `CapMap`.
-impl<T> SutHandle for T where
-    T: ::holon_pbt_core::capabilities::SutEditorMirrorWrite
-        + ::holon_pbt_core::capabilities::SutBlockTreeWrite
-        + ::holon_pbt_core::capabilities::SutEdgeFieldWrite
-        + ::holon_pbt_core::capabilities::SutLoro
-        + ::holon_pbt_core::capabilities::SutFocusWrite
-        + ::holon_pbt_core::capabilities::SutNavHistoryWrite
-        + ::holon_pbt_core::capabilities::SutWatchRegister
-        + ::holon_pbt_core::capabilities::SutViewControl
-        + ::holon_pbt_core::capabilities::SutMcpEmit
-        + ::holon_pbt_core::capabilities::SutHistoryWrite
-        + ::holon_pbt_core::capabilities::SutNavHistoryDrive
-        + ::holon_pbt_core::capabilities::SutBlockInteract
-        + ::holon_frontend::pbt_caps::SutArrowNavigate
-        + crate::pbt::local_caps::SutMutate
-        + crate::pbt::local_caps::SutSeamMutate
-        + crate::pbt::transitions::apply_mutation::SutApplyMutation
-        + crate::pbt::local_caps::SutFixtureFs
-        + crate::pbt::local_caps::SutAppLifecycle
-{
-}
-
 /// `cap_transition!` — terse, single-sourced SUT dispatch + cap declaration.
 ///
 /// Generates a transition's `TransitionImpl<ReferenceState, S>` block (bound on
@@ -238,10 +160,33 @@ impl<T> SutHandle for T where
 /// }
 /// ```
 ///
-/// No-cap form (bound on the full `SutHandle` bundle; `required_caps` stays the
-/// trait default of empty):
+/// No-cap form (generic, unbounded `S`; `required_caps` stays the trait
+/// default of empty):
 /// ```ignore
 /// cap_transition! { Nothing, |_me, _state, _sut| {} }
+/// ```
+///
+/// Generic-over-reference form (Step-3 target): makes `TransitionImpl`
+/// generic over the reference type `R` (instead of pinning the concrete
+/// `ReferenceState`) and folds in the transition's SQL budget via the
+/// optional `sql_budget:` clause. The `Ref*` bounds go in brackets
+/// (`where R: [Bound + Bound]`) so the list may be `+`-joined — a bare
+/// `:path` fragment can't be followed by `+`. The `sql_budget:` lambda
+/// body becomes the transition's
+/// `#[cfg(feature = "otel-testing")] impl SqlBudget::expected_sql` (its
+/// `state` is `&impl RefSqlCardinality`); omit the clause for a SQL-free
+/// transition. `declared_caps()` is single-sourced from `$cap` exactly as
+/// in the single-cap arm.
+/// ```ignore
+/// cap_transition! {
+///     SplitBlock: SutBlockTreeWrite,
+///     where R: [RefBlockTree + RefFocus],
+///     |me, _state, sut| { sut.apply_split_block(&me.block_id, me.position).await; }
+///     sql_budget: |_me, state| {
+///         let blocks = state.block_count();
+///         ExpectedSql { reads: blocks + 5, writes: 2, ddl: 0, tolerance: 1 }
+///     }
+/// }
 /// ```
 #[macro_export]
 macro_rules! cap_transition {
@@ -274,14 +219,64 @@ macro_rules! cap_transition {
         }
     };
 
-    // ── no cap (bound on the full SutHandle bundle) ──────────────────
+    // ── generic over the reference type `R` (+ optional SQL budget) ──
+    //
+    // Step-3 form. Emits a `TransitionImpl<R, S>` generic over the
+    // reference type `R` (bounded by the caller's bracketed `Ref*` list)
+    // instead of pinning `ReferenceState`, plus — when the optional
+    // `sql_budget:` clause is present — the matching
+    // `#[cfg(feature = "otel-testing")] impl SqlBudget`. Behaviour, cap,
+    // and SQL budget are single-sourced at one call site. The `R` bounds
+    // are captured as bracketed token-trees so the list may use `+`
+    // (a `:path` fragment can't be followed by `+`).
+    (
+        $name:ident : $cap:path,
+        where R : [ $( $rbound:tt )+ ] $(,)?
+        | $me:ident, $state:ident, $sut:ident | $body:block
+        $(
+            sql_budget: | $bme:ident, $bstate:ident | $budget:block
+        )?
+    ) => {
+        impl $name {
+            /// Single source of this transition's cap: `required_caps()` forwards
+            /// here, and the generic `TransitionImpl` bound below binds the same `$cap`.
+            pub(crate) fn declared_caps() -> ::std::vec::Vec<::holon_pbt_core::composition::CapId> {
+                ::std::vec![::holon_pbt_core::composition::CapId::of::<dyn $cap>()]
+            }
+        }
+
+        #[allow(async_fn_in_trait)]
+        impl<R: $( $rbound )+, S: $cap>
+            ::holon_pbt_core::TransitionImpl<R, S>
+            for $name
+        {
+            async fn apply_to_sut(&self, $state: &R, $sut: &mut S) {
+                let $me = self;
+                $body
+            }
+        }
+
+        $(
+            #[cfg(feature = "otel-testing")]
+            impl $crate::pbt::transition_budgets::SqlBudget for $name {
+                fn expected_sql<R2: ::holon_pbt_core::capabilities::RefSqlCardinality>(
+                    &self,
+                    $bstate: &R2,
+                ) -> $crate::pbt::transition_budgets::ExpectedSql {
+                    let $bme = self;
+                    $budget
+                }
+            }
+        )?
+    };
+
+    // ── no cap (generic, unbounded S) ────────────────────────────────
     (
         $name:ident,
         | $me:ident, $state:ident, $sut:ident | $body:block
     ) => {
         #[allow(async_fn_in_trait)]
-        impl<S: $crate::pbt::transition_dispatch::SutHandle>
-            ::holon_pbt_core::TransitionImpl<$crate::pbt::reference_state::ReferenceState, S>
+        impl<S> ::holon_pbt_core::TransitionImpl<$crate::pbt::reference_state::ReferenceState, S>
             for $name
         {
             async fn apply_to_sut(
@@ -326,22 +321,22 @@ macro_rules! declare_e2e_transitions {
         // Dispatch the FOREIGN generic behaviour trait onto the enum by a
         // hand-rolled match (replaces `declarative_enum_dispatch`, which can
         // only define+dispatch its own local trait, not a foreign generic
-        // one). Concrete-`S` dispatch: generic over `S: SutHandle` rather
-        // than `dyn SutHandle`, so the SUT is monomorphised (the runner
-        // passes `&mut E2ESut<V>`). This is what lets each variant's
-        // `TransitionImpl<R, S>` impl narrow `S` to fine-grained capability
-        // bounds — `SutHandle` is a supertrait bundle of those caps, so a
-        // variant bound on `S: SutEditorMirrorWrite` still satisfies this
-        // enum impl's `S: SutHandle`.
+        // one). Concrete-`S` dispatch: generic over `S` (bound on the inlined
+        // union of every variant's fine-grained caps, below), so the SUT is
+        // monomorphised (the runner passes `&mut E2ESut<V>`). This is what
+        // lets each variant's `TransitionImpl<R, S>` impl narrow `S` to just
+        // the one capability it needs — that narrower bound is implied by the
+        // enum impl's union, so a variant bound on `S: SutEditorMirrorWrite`
+        // still satisfies this enum impl.
         // Ref-side dispatch (S-independent): preconditions + apply_to_ref.
         impl ::holon_pbt_core::TransitionRef<$crate::pbt::reference_state::ReferenceState>
             for $enum_name {
-            type Reason = $crate::pbt::validation::Reason;
+            type Reason = ::holon_pbt_core::validation::Reason;
 
             fn preconditions(
                 &self,
                 state: &$crate::pbt::reference_state::ReferenceState,
-            ) -> ::validated::Validated<(), $crate::pbt::validation::Reason> {
+            ) -> ::validated::Validated<(), ::holon_pbt_core::validation::Reason> {
                 match self {
                     $( $enum_name::$variant(v) => <$ty as ::holon_pbt_core::TransitionRef<
                         $crate::pbt::reference_state::ReferenceState,
@@ -364,16 +359,34 @@ macro_rules! declare_e2e_transitions {
             }
         }
 
-        // SUT-side dispatch (concrete-`S`): apply_to_sut. Generic over
-        // `S: SutHandle`; variants may narrow `S` to fine-grained caps —
-        // `SutHandle` is a supertrait bundle of them, so they still satisfy this.
-        // `SutFocusWrite` / `SutNavHistoryWrite` / `SutWatchRegister` (the caps
-        // the `NavigateFocus` / `NavigateHome` / `SetupWatch` variants bind) are
-        // now `SutHandle` supertraits (decomposition #4 deleted the duplicate
-        // `SutHandle` copies that previously forced the method-name clash), so the
-        // dispatch bound is once again just `S: SutHandle` — no extra `+` bounds.
+        // SUT-side dispatch (concrete-`S`): apply_to_sut. Generic over `S`
+        // bound on the inlined union (below) of every variant's fine-grained
+        // caps; a variant may narrow `S` to just the cap it needs and still
+        // satisfy this union. The union is spelled out explicitly here rather
+        // than behind a single `SutHandle` supertrait bundle (which was
+        // deleted), so adding a cap to one variant surfaces as one `+ Sut…`
+        // line here — the single place the enum's cap requirements live.
         #[allow(async_fn_in_trait)]
-        impl<S: $crate::pbt::transition_dispatch::SutHandle>
+        impl<S: ::holon_pbt_core::capabilities::SutEditorMirrorWrite
+            + ::holon_pbt_core::capabilities::SutBlockTreeWrite
+            + ::holon_pbt_core::capabilities::SutEdgeFieldWrite
+            + ::holon_pbt_core::capabilities::SutLoro
+            + ::holon_pbt_core::capabilities::SutFocusWrite
+            + ::holon_pbt_core::capabilities::SutNavHistoryWrite
+            + ::holon_pbt_core::capabilities::SutWatchRegister
+            + ::holon_pbt_core::capabilities::SutViewControl
+            + ::holon_pbt_core::capabilities::SutMcpEmit
+            + ::holon_pbt_core::capabilities::SutHistoryWrite
+            + ::holon_pbt_core::capabilities::SutNavHistoryDrive
+            + ::holon_pbt_core::capabilities::SutBlockInteract
+            + ::holon_frontend::pbt_caps::SutArrowNavigate
+            + ::holon_pbt_core::capabilities::SutMutate
+            + ::holon_pbt_core::capabilities::SutSeamMutate
+            + ::holon_pbt_core::capabilities::SutBlockCreate
+            + ::holon_pbt_core::capabilities::SutFixtureFs
+            + ::holon_pbt_core::capabilities::SutAppLifecycle
+            + $crate::pbt::transitions::apply_mutation::SutApplyMutation
+            + $crate::pbt::transitions::start_app::SutBootWatches>
             ::holon_pbt_core::TransitionImpl<
                 $crate::pbt::reference_state::ReferenceState,
                 S,
@@ -394,9 +407,9 @@ macro_rules! declare_e2e_transitions {
 
         #[cfg(feature = "otel-testing")]
         impl $crate::pbt::transition_budgets::SqlBudget for $enum_name {
-            fn expected_sql(
+            fn expected_sql<R: ::holon_pbt_core::capabilities::RefSqlCardinality>(
                 &self,
-                state: &$crate::pbt::reference_state::ReferenceState,
+                state: &R,
             ) -> $crate::pbt::transition_budgets::ExpectedSql {
                 match self {
                     $( $enum_name::$variant(v) =>
@@ -477,7 +490,7 @@ macro_rules! declare_e2e_transitions {
                         ::validated::Validated::Good(Some(arm)) => arms.push(arm),
                         ::validated::Validated::Good(None) => {}
                         ::validated::Validated::Fail(reasons) => {
-                            $crate::pbt::validation::record_rejection(
+                            ::holon_pbt_core::validation::record_rejection(
                                 stringify!($variant),
                                 &reasons,
                             );
@@ -494,4 +507,70 @@ macro_rules! declare_e2e_transitions {
             Union::new_weighted(arms).boxed()
         }
     };
+}
+
+/// Confined proof that the generic-over-`R` `cap_transition!` arm expands and
+/// type-checks. An *uninvoked* macro arm is unchecked, so this dummy transition
+/// exercises it (generic `R` bound + `sql_budget:` clause) WITHOUT touching any
+/// real transition file. Asserts `declared_caps()` single-sources the cap and,
+/// under `otel-testing`, that the `sql_budget:` clause emits a working generic
+/// `SqlBudget::expected_sql`.
+#[cfg(test)]
+mod cap_transition_generic_arm_selftest {
+    use ::holon_pbt_core::capabilities::{RefBlockTree, SutBlockTreeWrite};
+    use ::holon_pbt_core::composition::CapId;
+
+    #[derive(Clone, Debug)]
+    struct DummyGenericTransition;
+
+    crate::cap_transition! {
+        DummyGenericTransition: SutBlockTreeWrite,
+        where R: [RefBlockTree],
+        |_me, _state, _sut| { /* generic over R + S: SutBlockTreeWrite; body unused */ }
+        sql_budget: |_me, state| {
+            crate::pbt::transition_budgets::ExpectedSql {
+                reads: state.block_count() + 10,
+                writes: 2,
+                ddl: 0,
+                tolerance: 1,
+            }
+        }
+    }
+
+    #[test]
+    fn declared_caps_single_sources_the_cap() {
+        assert_eq!(
+            DummyGenericTransition::declared_caps(),
+            vec![CapId::of::<dyn SutBlockTreeWrite>()],
+        );
+    }
+
+    #[cfg(feature = "otel-testing")]
+    #[test]
+    fn sql_budget_clause_emits_generic_expected_sql() {
+        use crate::pbt::transition_budgets::SqlBudget;
+        use ::holon_pbt_core::capabilities::RefSqlCardinality;
+
+        struct DummyRef;
+        impl RefSqlCardinality for DummyRef {
+            fn block_count(&self) -> usize {
+                3
+            }
+            fn document_count(&self) -> usize {
+                1
+            }
+            fn active_watch_count(&self) -> usize {
+                0
+            }
+            fn last_navigate_first_visit(&self) -> bool {
+                false
+            }
+        }
+
+        let sql = DummyGenericTransition.expected_sql(&DummyRef);
+        assert_eq!(sql.reads, 13); // block_count (3) + 10
+        assert_eq!(sql.writes, 2);
+        assert_eq!(sql.ddl, 0);
+        assert_eq!(sql.tolerance, 1);
+    }
 }

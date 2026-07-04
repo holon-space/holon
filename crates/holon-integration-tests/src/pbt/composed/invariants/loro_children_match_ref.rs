@@ -1,34 +1,16 @@
-//! `inv-loro-children-match-ref` — `SutLoroLog` + `RefBlockTree`. Per-parent
-//! sibling-order equality between the **Loro** adapter (the tree's fractional
-//! index, via `loro_children_of`) and the reference model's document order
-//! (`sorted_children`). The Loro-side companion to `inv-live-children-match-ref`
-//! (SQL projection). Real teeth in the Loro slice: a CRDT reorder bug surfaces
-//! as a per-parent order divergence against the independent reference.
-
-use holon_pbt_core::RunMode;
-use holon_pbt_core::capabilities::{RefBlockTree, SutLoroLog};
-use holon_pbt_core::composition::{BridgedInvariant, CapId, CapInvariant, Needs};
-
-use crate::pbt::invariants::bodies::loro_children_match_ref::InvLoroChildrenMatchRef;
-
-pub fn wire() -> Box<dyn CapInvariant> {
-    Box::new(BridgedInvariant::new(
-        InvLoroChildrenMatchRef,
-        RunMode::Strict,
-        Needs {
-            sut_present: vec![CapId::of::<dyn SutLoroLog>()],
-            sut_absent: Vec::new(),
-            ref_present: vec![CapId::of::<dyn RefBlockTree>()],
-        },
-    ))
-}
+//! Selection tests for `inv-loro-children-match-ref` — the invariant BODY +
+//! `wire()` now live in the `holon-loro-testing` companion crate (co-location
+//! Phase 1) and reach the composed catalog via the central fold. These
+//! fixture-driven selection/catch tests stay here because they exercise the
+//! central `composed_invariant_catalog()` + shared fixtures.
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
     use crate::pbt::composed::fixtures::*;
-    use crate::pbt::composed::subsystem_seed::{run_with_seeded_ref, seed_ref};
+    use crate::pbt::composed::subsystem_seed::run_with_seeded_ref;
+    use crate::pbt::composed::subsystem_seed::seed_ref;
 
     /// A parent `p` with two children `c1, c2` in document order, plus the Loro
     /// double's reported child order — `agree` ⇒ same as the reference. Returns

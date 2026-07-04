@@ -3,9 +3,9 @@
 //!
 //! Each cap is a narrow trait hosted on `CapMap` (via `#[capmap_adapter]`, or
 //! emitted in pairs by `capability_pair!`). Reference impls live in
-//! `reference_capabilities.rs`; SUT impls in the composed components. Pure-slice
-//! impls return constants; the wide PBT delegates to `ReferenceState` / the real
-//! SUT.
+//! `reference_capabilities.rs`; SUT impls in the composed components.
+//! Pure-slice impls return constants; the wide PBT delegates to
+//! `ReferenceState` / the real SUT.
 //!
 //! ## Three axes × two access modes (the editor/block/focus core)
 //!
@@ -13,18 +13,18 @@
 //!   content, tags). `RefBlockTree` (read) / `RefBlockTreeMut` (write).
 //! - **EditorMirror**: active-editor text + cursor mirror — what the GPUI
 //!   `InputState` shows. `RefEditorMirror` / `RefEditorMirrorMut`.
-//! - **Focus**: per-region focused block id + cursor position.
-//!   `RefFocus` / `RefFocusMut`.
+//! - **Focus**: per-region focused block id + cursor position. `RefFocus` /
+//!   `RefFocusMut`.
 //!
-//! Plus [`RefLifecycle`] for gate predicates (`app_started`, `has_editor_buffer`,
-//! …) that transitions check, and the SUT write mirror ([`SutBlockTreeWrite`],
-//! [`SutEditorMirrorWrite`], [`SutFocusWrite`], [`SutQuiesce`]). SUT methods take
-//! only what they need — no `ref_state` leak (the SUT keeps its `doc_uri_map` and
-//! similar state via interior mutability).
+//! Plus [`RefLifecycle`] for gate predicates (`app_started`,
+//! `has_editor_buffer`, …) that transitions check, and the SUT write mirror
+//! ([`SutBlockTreeWrite`], [`SutEditorMirrorWrite`], [`SutFocusWrite`],
+//! [`SutQuiesce`]). SUT methods take only what they need — no `ref_state` leak
+//! (the SUT keeps its `doc_uri_map` and similar state via interior mutability).
 //!
-//! Beyond that core, the file hosts the full projection/renderer/driver/Loro cap
-//! set the wide catalog needs; each trait's own doc explains what it observes and
-//! which invariants bind it.
+//! Beyond that core, the file hosts the full projection/renderer/driver/Loro
+//! cap set the wide catalog needs; each trait's own doc explains what it
+//! observes and which invariants bind it.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -57,6 +57,61 @@ pub enum CapRegion {
 pub struct CapCursor {
     pub line: usize,
     pub column: usize,
+}
+
+// ─── Reference-side: Advice ───────────────────────────────────────────
+
+/// Expected advice rows for one anchor (read-time contract of ADR 0022's
+/// advice matview: suppression anti-join + top-K happen at read time).
+/// Total: `scored` is empty and `k == 0` when no active rule targets the
+/// anchor.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AdviceExpectation {
+    /// Eligible candidates AFTER the suppression anti-join, as
+    /// (candidate id, shared-tag count), sorted by count DESC (tie order
+    /// unspecified).
+    pub scored: Vec<(String, u32)>,
+    /// The rule's read-time top-K. 0 iff no active rule matches the anchor.
+    pub k: u8,
+}
+
+/// Reference-side advice-weave contract for the `advice rows woven` keystone
+/// invariant. `#[capmap_adapter]` hosts it on `CapMap` exactly like
+/// [`RefBlockTree`] (sync, owned returns → no `#[async_trait]`); ids are
+/// rendered as `EntityUri::as_str()` strings, the same form `block_raw.id`
+/// carries in the SUT so the anchor/candidate strings compare directly against
+/// the advice matview.
+#[holon_macros::capmap_adapter]
+pub trait RefAdvice {
+    /// Total over all anchors: empty expectation when no rule matches.
+    fn advice_expectation(&self, anchor: &str) -> AdviceExpectation;
+    /// The matview-level contract: ALL (anchor, candidate, shared_tag_count)
+    /// pairs of the single active rule, WITHOUT suppression and WITHOUT top-K
+    /// (those are read-time). Empty when no active rule exists.
+    fn advice_matview_rows(&self) -> Vec<(String, String, u32)>;
+    /// Name of the matview the single active rule synthesizes
+    /// (`advice_rule_{slug}`), or `None` when no active rule exists. The
+    /// SQL-level twin `inv-advice-matview-matches-ref` compares this against
+    /// the `advice_rule_%` matviews actually present in the SUT's
+    /// `sqlite_master`.
+    fn advice_matview_name(&self) -> Option<String>;
+}
+
+/// SUT-side observation of the synthesized advice matviews (ADR 0022 step-6).
+/// One materialized view per active rule, named `advice_rule_{slug}`,
+/// projecting `(anchor_id, lesson_id, shared_tag_count)` — the pre-suppression,
+/// un-capped matview contract. The `inv-advice-matview-matches-ref` twin reads
+/// this and compares it against [`RefAdvice::advice_matview_name`] +
+/// [`RefAdvice::advice_matview_rows`]. Until synthesis lands (step 6) the SUT
+/// has no such matview, so this observes an empty set — that IS the
+/// observed-absent state the twin flips out of once synthesis wires the DDL.
+#[holon_macros::capmap_adapter]
+pub trait SutAdviceMatview {
+    /// Every materialized view named `advice_rule_%` present in the SUT's
+    /// `sqlite_master`, paired with its full row set as
+    /// `(anchor_id, lesson_id, shared_tag_count)`. Empty when synthesis has
+    /// created none. Read AFTER CDC quiescence.
+    async fn advice_matviews(&self) -> Vec<(String, Vec<(String, String, u32)>)>;
 }
 
 // ─── Reference-side: BlockTree ────────────────────────────────────────
@@ -132,19 +187,6 @@ pub trait RefBlockTree {
     /// `SutSqlProjection::all_block_ids()` for set-equality drift
     /// detection at the storage layer.
     fn all_non_seed_block_ids(&self) -> BTreeSet<EntityUri>;
-
-    /// True if `id`'s content type makes its *sibling order* non-canonical:
-    /// `Source` / `Image` render artifacts (`::src::`, `::render::`) whose
-    /// relative order legitimately differs between the SQL projection (ordered
-    /// by `sort_key`) and the ref model (ordered by `(sequence, id)`) after a
-    /// file-sync round trip reassigns sort_keys. `inv-live-children-match-ref`
-    /// uses this to exempt intra-source-group *reordering* — membership is
-    /// still enforced, only order is relaxed.
-    ///
-    /// Default `false` (pure slices have no source/image render artifacts).
-    fn is_order_exempt_sibling(&self, _: &EntityUri) -> bool {
-        false
-    }
 }
 
 /// Block-tree mutations. Concrete impls maintain whatever bookkeeping
@@ -183,15 +225,26 @@ pub trait RefBlockTreeMut: RefBlockTree {
 
     /// Swap two siblings (used by MoveUp / MoveDown).
     fn swap_siblings(&mut self, a: &EntityUri, b: &EntityUri);
+
+    /// Undo the last mutation (pop undo→redo) and reset every region cursor to
+    /// start — the whole `UndoLastMutation` reference effect. Defaults to a
+    /// no-op for slices that don't model an undo stack.
+    fn undo_last_and_reset_cursors(&mut self) {}
+
+    /// Redo the last undone mutation (pop redo→undo) and reset every region
+    /// cursor to start — the whole `Redo` reference effect. Defaults to a
+    /// no-op for slices that don't model a redo stack.
+    fn redo_last_and_reset_cursors(&mut self) {}
 }
 
 // ─── Reference-side: EditorMirror ────────────────────────────────────
 
 /// Read-side active-editor state.
 ///
-/// `#[capmap_adapter]` hosts this on `CapMap` (sync trait → no `#[async_trait]`,
-/// `impl RefEditorMirror for ReferenceState` untouched). The borrow-returning
-/// `active_editor_text -> Option<&str>` forwards through `CapMap::expect_ref`.
+/// `#[capmap_adapter]` hosts this on `CapMap` (sync trait → no
+/// `#[async_trait]`, `impl RefEditorMirror for ReferenceState` untouched). The
+/// borrow-returning `active_editor_text -> Option<&str>` forwards through
+/// `CapMap::expect_ref`.
 #[holon_macros::capmap_adapter]
 pub trait RefEditorMirror {
     /// Block id whose editor is currently active, or `None` if no editor
@@ -246,7 +299,8 @@ pub fn compare_navigation_focus(
     sut_rows: &[(String, Option<String>)],
     ref_rows: &[(String, Option<String>)],
 ) -> Result<(), String> {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
+    use std::collections::HashSet;
 
     // region -> block_id (None = NULL/home). Presence of the key = the matview
     // has a row for that region.
@@ -275,8 +329,8 @@ pub fn compare_navigation_focus(
             (false, None) => {}
             (false, Some(exp)) => {
                 return Err(format!(
-                    "[inv-navigation-focus] region '{region}' should have focus on {exp:?} \
-                     but has no row in the current_focus matview"
+                    "[inv-navigation-focus] region '{region}' should have focus on {exp:?} but \
+                     has no row in the current_focus matview"
                 ));
             }
         }
@@ -291,8 +345,8 @@ pub fn compare_navigation_focus(
             if !ref_regions.contains(region) {
                 return Err(format!(
                     "[inv-navigation-focus] ghost row: current_focus matview has region \
-                     '{region}' focused on {ghost:?}, but the reference has no navigation \
-                     history for that region"
+                     '{region}' focused on {ghost:?}, but the reference has no navigation history \
+                     for that region"
                 ));
             }
         }
@@ -308,7 +362,8 @@ pub fn compare_navigation_focus(
 // slice teeth) via [`compare_navigation_focus`]; `focus_roots` fan-out stays a
 // hand-written invariant (it reads three SUT sources + a ref source, so it is
 // not a two-value compare) but its cap methods live here as `#[sut_only]` /
-// `#[ref_only]`. The stem `Focus` yields the trait names `SutFocus` / `RefFocus`.
+// `#[ref_only]`. The stem `Focus` yields the trait names `SutFocus` /
+// `RefFocus`.
 holon_macros::capability_pair! {
     /// Focus read surface: SUT `current_focus`/`focus_roots`/`navigation_history`
     /// projection (Turso, post-CDC-quiescence) vs the reference navigation-focus
@@ -407,18 +462,18 @@ pub trait RefLifecycle {
     /// FocusEditableText / PressKey), replacing the old pairing of
     /// `atomic_editor_enabled()` (env-var gated) and `enable_loro() ||
     /// real_editor_enabled()` (storage-coupled). Editor buffering is a property
-    /// of the wired editor component, independent of *Loro-as-storage* (the CRDT
-    /// can buffer text regardless of where blocks persist) and of any process
-    /// env var. Defaults to `false`: a ref with no editor buffer never
-    /// generates editor transitions.
+    /// of the wired editor component, independent of *Loro-as-storage* (the
+    /// CRDT can buffer text regardless of where blocks persist) and of any
+    /// process env var. Defaults to `false`: a ref with no editor buffer
+    /// never generates editor transitions.
     fn has_editor_buffer(&self) -> bool {
         false
     }
 
     /// Whether a block-interaction transition (indent / drag / chord / …) can
-    /// dispatch against `block_id` under the active main-panel layout: the block
-    /// must be in the layout query's rendered set AND rendered with an
-    /// interactive widget.
+    /// dispatch against `block_id` under the active main-panel layout: the
+    /// block must be in the layout query's rendered set AND rendered with
+    /// an interactive widget.
     ///
     /// The default layout queries `focus_root` (navigation-aware, transitive)
     /// and renders each block via `render_entity()` (operations + `draggable` +
@@ -427,8 +482,8 @@ pub trait RefLifecycle {
     /// query surfaces only the layout block's direct children; an all-blocks
     /// query surfaces everything) through a possibly-static template
     /// (`row(text(...))`, no operations) — the reference evaluates BOTH axes
-    /// faithfully (see `ReferenceState::renders_block_interactively`) rather than
-    /// blanket-excluding every custom layout. Defaults to `true`;
+    /// faithfully (see `ReferenceState::renders_block_interactively`) rather
+    /// than blanket-excluding every custom layout. Defaults to `true`;
     /// `ReferenceState` overrides it.
     fn renders_block_interactively(&self, block_id: &EntityUri) -> bool {
         let _ = block_id;
@@ -438,6 +493,44 @@ pub trait RefLifecycle {
     /// The previous-transition kind, for Markov weighting. Returns
     /// `None` on the first step or when the impl doesn't track history.
     fn last_transition_kind(&self) -> Option<&'static str>;
+
+    /// The next synthetic-document id counter (`action.next_doc_id`). Read by
+    /// `CreateDocument`'s generator to mint the `doc_<n>.org` filename.
+    /// Defaults to `0`: a slice that never mints synthetic documents (the
+    /// pure editor slice) has no counter to advance.
+    fn next_doc_id(&self) -> usize {
+        0
+    }
+
+    /// The next synthetic-block id counter (`domain.block_state.next_id`). Read
+    /// by `BulkExternalAdd` (and `ApplyMutation`) to mint `bulk-<n>-<i>`
+    /// block ids. Defaults to `0` for slices with no block-minting counter.
+    fn next_block_id(&self) -> usize {
+        0
+    }
+
+    /// Whether codepoint-level peer text edits are enabled (`PBT_MUTABLE_TEXT`
+    /// process env gate). Read by `PeerCharEdit`'s precondition. This is a
+    /// process-global gate, not per-ref state; the default reads the env var so
+    /// every reference agrees without pinning a concrete state type.
+    fn mutable_text_enabled(&self) -> bool {
+        std::env::var("PBT_MUTABLE_TEXT")
+            .ok()
+            .map(|v| v != "0" && !v.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Whether the undo stack is non-empty (`UndoLastMutation` precondition).
+    /// Defaults to `false`: a slice with no undo stack never generates undo.
+    fn has_undo_history(&self) -> bool {
+        false
+    }
+
+    /// Whether the redo stack is non-empty (`Redo` precondition). Defaults to
+    /// `false` for slices that don't model a redo stack.
+    fn has_redo_history(&self) -> bool {
+        false
+    }
 }
 
 // ─── SUT-side traits (mirror of reference-side write traits) ─────────
@@ -465,13 +558,14 @@ pub trait SutBlockTreeWrite {
 /// junction-backed set-valued attributes) on an EXISTING block, parameterized
 /// over *which* field via [`EdgeFieldUpdate`] so neither is special-cased.
 ///
-/// `&self` + interior mutability like the other write caps, so `#[capmap_adapter]`
-/// hosts it on `CapMap` — the composed `CapMap` IS the `SutTransitionTarget`. The
-/// realization calls the production edge-field writers (`set_block_tags` /
-/// `set_block_requires` on the Loro backend — the same functions the org re-scan
-/// reconciliation uses), so the write flows Loro → `project()` → SQL exactly as
-/// production does. That is what lets the composed `/matview` invariant observe a
-/// dropped edge-field re-projection (e.g. H12: `blocks_differ` omitting `requires`).
+/// `&self` + interior mutability like the other write caps, so
+/// `#[capmap_adapter]` hosts it on `CapMap` — the composed `CapMap` IS the
+/// `SutTransitionTarget`. The realization calls the production edge-field
+/// writers (`set_block_tags` / `set_block_requires` on the Loro backend — the
+/// same functions the org re-scan reconciliation uses), so the write flows Loro
+/// → `project()` → SQL exactly as production does. That is what lets the
+/// composed `/matview` invariant observe a dropped edge-field re-projection
+/// (e.g. H12: `blocks_differ` omitting `requires`).
 #[holon_macros::capmap_adapter]
 pub trait SutEdgeFieldWrite {
     async fn apply_set_edge_field(&self, id: &EntityUri, update: &EdgeFieldUpdate);
@@ -484,11 +578,11 @@ pub trait SutEditorMirrorWrite {
     async fn apply_move_cursor(&self, byte_position: usize);
 }
 
-/// Drive an `Arc`-shared write component through `SutTransitionTarget::apply_to_sut`
-/// (which takes `&mut S`). The editor write component is held behind `Arc` because
-/// the SAME instance is also registered as the read-side `SutEditorMirrorRead` cap;
-/// the write methods are `&self` (interior mutability), so forwarding through the
-/// shared `Arc` is sound.
+/// Drive an `Arc`-shared write component through
+/// `SutTransitionTarget::apply_to_sut` (which takes `&mut S`). The editor write
+/// component is held behind `Arc` because the SAME instance is also registered
+/// as the read-side `SutEditorMirrorRead` cap; the write methods are `&self`
+/// (interior mutability), so forwarding through the shared `Arc` is sound.
 #[async_trait::async_trait(?Send)]
 impl<T: SutEditorMirrorWrite + ?Sized> SutEditorMirrorWrite for std::sync::Arc<T> {
     async fn apply_type_chars(&self, text: &str) {
@@ -532,11 +626,12 @@ pub trait SutFocusWrite {
 
 /// Navigation-history writes (`go_home`/`go_back`/`go_forward`) — distinct from
 /// `SutFocusWrite` (focus → a specific block) because these traverse the
-/// navigation history. `go_home` is `navigation.focus(region, None)`: it *clears*
-/// current focus and the region's open pins (so it moves both current focus and
-/// focus roots). `apply_navigate_back`/`apply_navigate_forward` are deferred to the
-/// windowed `GpuiWindowComponent` (E4) — headless prod does not yet mirror them
-/// (see `maybe_mirror_navigation_focus`), so only `apply_navigate_home` lands now.
+/// navigation history. `go_home` is `navigation.focus(region, None)`: it
+/// *clears* current focus and the region's open pins (so it moves both current
+/// focus and focus roots). `apply_navigate_back`/`apply_navigate_forward` are
+/// deferred to the windowed `GpuiWindowComponent` (E4) — headless prod does not
+/// yet mirror them (see `maybe_mirror_navigation_focus`), so only
+/// `apply_navigate_home` lands now.
 #[holon_macros::capmap_adapter]
 pub trait SutNavHistoryWrite {
     async fn apply_navigate_home(&self, region: CapRegion);
@@ -544,9 +639,9 @@ pub trait SutNavHistoryWrite {
 
 /// Watch registration — the `setup_watch` write path decomposed off `SutHandle`
 /// (SutHandle decomposition INC 3). Takes the **already-compiled** query
-/// (`source` + `lang`) rather than the integration-test-local `TestQuery`, which
-/// pbt-core cannot name; the `SetupWatch` transition compiles `TestQuery` at the
-/// boundary (`compile_for`) and passes the result here. The read side
+/// (`source` + `lang`) rather than the integration-test-local `TestQuery`,
+/// which pbt-core cannot name; the `SetupWatch` transition compiles `TestQuery`
+/// at the boundary (`compile_for`) and passes the result here. The read side
 /// (`SutWatch`) and the watch invariants already exist and bite headlessly
 /// (`frontend_slice` B5 teeth) — this is the missing **write** cap that lets a
 /// composed `CapMap` drive `SetupWatch`, so the watch invariants run over a
@@ -578,8 +673,9 @@ pub trait SutMcpEmit {
 
 /// SUT capability: undo/redo the last committed mutation. Drives the
 /// `UndoLastMutation` / `Redo` PBT transitions. The block-convergence settle is
-/// `ref_state`-dependent and lives in the harness seam (`block_tree_post_action`),
-/// so the cap itself is a pure `&self` action over the engine's undo stack.
+/// `ref_state`-dependent and lives in the harness seam
+/// (`block_tree_post_action`), so the cap itself is a pure `&self` action over
+/// the engine's undo stack.
 #[holon_macros::capmap_adapter]
 pub trait SutHistoryWrite {
     async fn undo_last_mutation(&self);
@@ -618,9 +714,10 @@ pub trait SutBlockInteract {
     async fn trigger_slash_command(&self, block_id: &holon_api::EntityUri);
     async fn press_key(&self, chord: &holon_api::KeyChord);
     /// Click a rendered element by its bounds-registry id (a plain block
-    /// `EntityUri` or a geometry handle `<kind>::<block-uri>`). Drives the shared
-    /// `holon_layout_testing` bodies (`ToggleCollapse`/`ToggleDrawer`/
-    /// `SwitchViewMode`) via `SutClickAdapter`.
+    /// `EntityUri` or a geometry handle `<kind>::<block-uri>`). Drives the
+    /// shared `holon_layout_testing` bodies
+    /// (`ToggleCollapse`/`ToggleDrawer`/ `SwitchViewMode`) via
+    /// `SutClickAdapter`.
     async fn click_at_element(&self, element_id: &str);
 }
 
@@ -744,11 +841,12 @@ pub enum PeerEditOp {
 /// wide-PBT SUT performs real LoroDoc imports/exports + reactive-engine
 /// quiescence between ops.
 ///
-/// `&self` (not `&mut self`): the peer mesh's only structurally-mutated state is the
-/// `peers` vec (one `push` in `apply_add_peer`, never across an `.await`), so its
-/// provider holds it behind interior mutability. This makes the trait object-safe so
-/// `#[capmap_adapter]` can host it on `CapMap` (the `&self`/`Arc<dyn SutLoro>` adapter),
-/// which is what lets a composed `CapMap` satisfy `SutHandle` (PCG-4).
+/// `&self` (not `&mut self`): the peer mesh's only structurally-mutated state
+/// is the `peers` vec (one `push` in `apply_add_peer`, never across an
+/// `.await`), so its provider holds it behind interior mutability. This makes
+/// the trait object-safe so `#[capmap_adapter]` can host it on `CapMap` (the
+/// `&self`/`Arc<dyn SutLoro>` adapter), which is what lets a composed `CapMap`
+/// satisfy `SutHandle` (PCG-4).
 #[holon_macros::capmap_adapter]
 pub trait SutLoro {
     async fn apply_add_peer(&self);
@@ -796,7 +894,8 @@ pub trait SutLoro {
     /// Post-startup: edit a block on a peer's LoroDoc directly.
     async fn apply_peer_edit(&self, peer_idx: usize, op: &PeerEditOp);
 
-    /// Post-startup: edit a block's LoroText container on a peer at character level.
+    /// Post-startup: edit a block's LoroText container on a peer at character
+    /// level.
     async fn apply_peer_char_edit(&self, peer_idx: usize, block_id: &str, op: &TextOp);
 }
 
@@ -893,12 +992,12 @@ pub trait SutSqlProjection {
 }
 
 // `SutFocus` is the SUT side of the focus read duality, single-sourced
-// with `RefFocus` by the `capability_pair! { pub trait Focus … }` above. It is a
-// SEPARATE cap from `SutSqlProjection` so a storage-only slice (no navigation
+// with `RefFocus` by the `capability_pair! { pub trait Focus … }` above. It is
+// a SEPARATE cap from `SutSqlProjection` so a storage-only slice (no navigation
 // driven, e.g. `sql_slice`) does NOT register it and the focus/navigation
 // invariants honestly DESELECT there instead of passing vacuously against an
-// unnavigated ref. Registered only where navigation is actually driven through a
-// Turso `current_focus`/`focus_roots`/`navigation_history` projection (the
+// unnavigated ref. Registered only where navigation is actually driven through
+// a Turso `current_focus`/`focus_roots`/`navigation_history` projection (the
 // frontend slice / `full_headless`); methods reflect Turso state AFTER CDC
 // quiescence.
 
@@ -976,7 +1075,8 @@ pub struct ProviderStabilityReport {
     pub mentions_bottom_dock: bool,
     /// Count of `BottomDock` nodes in the interpreted tree.
     pub bottom_dock_count: usize,
-    /// The active render_expr mentions `focus_chain` (arg-variance precondition).
+    /// The active render_expr mentions `focus_chain` (arg-variance
+    /// precondition).
     pub mentions_focus_chain: bool,
     /// Total streaming providers collected in pass 1.
     pub total_providers: usize,
@@ -1009,12 +1109,15 @@ pub struct FrontendRootVm {
 // ─── ViewSelection: SUT ViewModel × reference render, single-sourced ──
 //
 // `capability_pair!` emits BOTH read traits from one declaration:
-//   - `SutViewSelection` (async, owned returns) — the SUT-side ViewModel surface
-//   - `RefViewSelection`    (sync, verbatim)       — the reference render-expr surface
+//   - `SutViewSelection` (async, owned returns) — the SUT-side ViewModel
+//     surface
+//   - `RefViewSelection`    (sync, verbatim)       — the reference render-expr
+//     surface
 // plus the CapMap hosting glue for each, plus (for the `#[compare]` method)
 // the auto-derived `inv-pair-view-selection-current-view` equality invariant
-// (constructor `inv_pair_view_selection_current_view()`). The stem `ViewSelection`
-// yields the trait names `SutViewSelection` / `RefViewSelection`.
+// (constructor `inv_pair_view_selection_current_view()`). The stem
+// `ViewSelection` yields the trait names `SutViewSelection` /
+// `RefViewSelection`.
 //
 // Methods are written ONCE, sync; the macro adds `async` for the SUT side.
 // `drain_vm_emissions` keeps `&mut self` (a drain, not a snapshot): the CapMap
@@ -1111,11 +1214,12 @@ holon_macros::capability_pair! {
 /// window, so [`HeadlessFrontendComponent`] does NOT register this cap and
 /// `inv-frontend-engine` / `inv-frontend-root-not-error` honestly DESELECT
 /// there (this cap is a windowed-only entry on the wide cap-presence guard's
-/// `WIDE_HEADLESS_ABSENT_CAPS` exclusion list) instead of "running" vacuously against
-/// an honest-`None`/`false` shadow. Registered only where a live window's engine
-/// is present (the windowed composition). `inv-frontend-bounds-rendered` (the
-/// windowed geometry family) also reads `frontend_root_vm` for the entity order
-/// its y-order / contiguity / coverage checks compare against.
+/// `WIDE_HEADLESS_ABSENT_CAPS` exclusion list) instead of "running" vacuously
+/// against an honest-`None`/`false` shadow. Registered only where a live
+/// window's engine is present (the windowed composition).
+/// `inv-frontend-bounds-rendered` (the windowed geometry family) also reads
+/// `frontend_root_vm` for the entity order its y-order / contiguity / coverage
+/// checks compare against.
 ///
 /// [`HeadlessFrontendComponent`]: (test-crate component)
 #[holon_macros::capmap_adapter]
@@ -1170,8 +1274,8 @@ pub trait SutFrontendEmissions {
     /// `set_data` path, mirroring the GPUI frontend) against a freshly
     /// re-interpreted tree built from the same data rows. The fresh tree always
     /// reflects current data, so it can't catch bugs where `set_data` fails to
-    /// propagate updated props to child widgets — only the live tree can. Drives
-    /// `inv-live-tree-matches-fresh`.
+    /// propagate updated props to child widgets — only the live tree can.
+    /// Drives `inv-live-tree-matches-fresh`.
     ///
     /// Returns:
     /// - `None` when the comparison can't run yet (no engine, root/main-panel
@@ -1330,17 +1434,19 @@ pub trait SutRenderer {
     /// `"source_editor"` (the degraded no-query-engine render). `None` when the
     /// root is not ready: no watch resolved, a `loading`/`spacer` placeholder,
     /// or the render expr is not a `FunctionCall`. The degraded twin
-    /// `inv-viewmodel-shows-source-when-no-query` reads this; `None` → it Skips.
+    /// `inv-viewmodel-shows-source-when-no-query` reads this; `None` → it
+    /// Skips.
     async fn root_render_kind(&self) -> Option<String>;
 }
 
 /// SUT-side query-results read surface. Present only when a real query engine
 /// backs the render path (the Turso `BackendEngine` + `ReactiveEngine`
-/// `watch_query_live` surface the full-mode frontend component owns). A degraded
-/// no-Turso ("shows source") frontend has NO query engine and so does NOT
-/// provide this cap — making it the negative-selection (`sut_absent`)
-/// discriminator between the full-mode `inv-viewmodel-decompiled-rows-match-query`
-/// twin and the degraded `inv-viewmodel-shows-source-when-no-query` twin.
+/// `watch_query_live` surface the full-mode frontend component owns). A
+/// degraded no-Turso ("shows source") frontend has NO query engine and so does
+/// NOT provide this cap — making it the negative-selection (`sut_absent`)
+/// discriminator between the full-mode
+/// `inv-viewmodel-decompiled-rows-match-query` twin and the degraded
+/// `inv-viewmodel-shows-source-when-no-query` twin.
 #[holon_macros::capmap_adapter]
 pub trait SutQueryResults {
     /// Number of rows the root layout's watch query produced. `None` when the
@@ -1360,8 +1466,9 @@ pub trait SutQueryResults {
 ///
 /// Verdicts that depend on `holon-frontend`-only logic are computed on the
 /// SUT side and stored here, keeping the invariant bodies pure:
-/// - `expected_size_violation` is the result of `ElementInfo::expected_size.check(..)`
-///   evaluated against the full element snapshot (`ProviderEvalCtx`).
+/// - `expected_size_violation` is the result of
+///   `ElementInfo::expected_size.check(..)` evaluated against the full element
+///   snapshot (`ProviderEvalCtx`).
 /// - `is_error_widget` is `widget_type == "error"`.
 #[derive(Debug, Clone)]
 pub struct RenderedElement {
@@ -1559,10 +1666,11 @@ pub trait SutOrgRead {
     /// Wait for the FileSyncController's background re-render to settle, then
     /// parse every tracked org file on disk back into `holon_api::Block`s.
     ///
-    /// Folds the monolith's `wait_for_org_files_stable` + `parse_org_file_blocks`
-    /// into one snapshot, mirroring the other block-store snapshot caps
-    /// ([`SutBackend::block_raw_snapshot`], [`SutLoroLog::loro_block_snapshot`]).
-    /// The org parser produces `block:<uuid>` parents for `#+ID:`-resolved docs
+    /// Folds the monolith's `wait_for_org_files_stable` +
+    /// `parse_org_file_blocks` into one snapshot, mirroring the other
+    /// block-store snapshot caps ([`SutBackend::block_raw_snapshot`],
+    /// [`SutLoroLog::loro_block_snapshot`]). The org parser produces
+    /// `block:<uuid>` parents for `#+ID:`-resolved docs
     /// and `file:<filename>` parents for unresolved ones — the reference side
     /// (`RefBackend::org_blocks`) mirrors that same parent resolution.
     async fn org_block_snapshot(&self) -> Vec<holon_api::Block>;
@@ -1597,6 +1705,11 @@ pub trait RefLayout {
     /// Wide PBT: `ReferenceState::has_blocks_profile()`; pure slice: `false`.
     fn has_blocks_profile(&self) -> bool;
 
+    /// True when a user-provided `index.org` custom layout is active — the
+    /// `CreateBlockUnderFocus` slot-parenting guarantee only holds under the
+    /// default layout. Wide PBT: `ReferenceState::has_user_index_org()`.
+    fn has_user_index_org(&self) -> bool;
+
     /// Every block id the reference model tracks, **including** seed and
     /// source blocks. Unlike `RefBlockTree::all_non_seed_block_ids`, this
     /// keeps seed blocks so the matview-consistency invariant can build
@@ -1606,9 +1719,10 @@ pub trait RefLayout {
 
     /// The blocks the reactive root layout is *expected* to surface for
     /// `region`: non-source blocks that are descendants of the region's
-    /// expected focus roots. Used by `inv-matview-consistent-with-ref/root_layout` to
-    /// detect rows the matview is missing. Wide PBT filters
-    /// `block_state.blocks` by `content_type != Source` and
+    /// expected focus roots. Used by
+    /// `inv-matview-consistent-with-ref/root_layout` to detect rows the
+    /// matview is missing. Wide PBT filters `block_state.blocks` by
+    /// `content_type != Source` and
     /// `is_descendant_of_any(expected_focus_root_ids(region))`; pure
     /// slice: empty.
     fn expected_visible_content_ids(&self, region: CapRegion) -> BTreeSet<EntityUri>;
@@ -1626,6 +1740,344 @@ pub trait RefLayout {
     /// `ReferenceState::focused_entity_id.contains_key(region)`; pure slice:
     /// `false`.
     fn region_entity_focused(&self, region: CapRegion) -> bool;
+}
+
+/// Reference-side open-pin READ surface (`UnpinBlock`'s generator +
+/// precondition). Returns plain ids / bools — never the integration-test-only
+/// open-pin row type (`OpenPinEntry`) — so `holon-pbt-core` stays decoupled
+/// from the harness row layout. Region-precise focus lookups stay inside the
+/// impl.
+pub trait RefPins {
+    /// `history_id` of every open pin across all regions — the `UnpinBlock`
+    /// candidate set (both closeable and not; `is_closeable_pin` narrows it).
+    fn open_pin_history_ids(&self) -> Vec<i64>;
+    /// True iff an open pin with `history_id` exists whose `block_id` is
+    /// non-null AND is not its region's current cursor focus — the
+    /// X-button-closeable predicate. The active cursor focus is closed by
+    /// navigating away, never by the X button, so closing it via
+    /// `navigation.close` is a no-op the ref must not predict.
+    fn is_closeable_pin(&self, history_id: i64) -> bool;
+}
+
+/// Reference-side open-pin mutation surface — the LogSeq shift-click
+/// (`navigation.focus_pin`) / X-button (`navigation.close`) semantics the
+/// `PinBlock` / `UnpinBlock` transitions model.
+///
+/// Each mutation encapsulates its whole update/insert/delete bookkeeping so the
+/// integration-test-only open-pin row type (`OpenPinEntry`) never has to cross
+/// into `holon-pbt-core`.
+pub trait RefPinsMut: RefPins {
+    /// Pin `block_id` in `region` with move-to-top semantics, mirroring
+    /// `provider.rs::focus_pin`: if an open pin already exists for
+    /// `(region, block_id)`, bump its logical timestamp in place (UPDATE — no
+    /// new row); otherwise mint a fresh open-pin row (INSERT), advancing both
+    /// the pin-timestamp and the history-id counters. Wide PBT mutates
+    /// `ui.user.open_pins` / `ui.user.next_pin_ts` / `ui.tab.next_history_id`;
+    /// a pin-less pure slice no-ops.
+    fn upsert_open_pin(&mut self, region: holon_api::Region, block_id: &EntityUri);
+    /// `UnpinBlock`: close (remove) the open pin with `history_id` from every
+    /// region's open-pin set. Mirrors `navigation.close`'s `closed_at` UPDATE.
+    fn close_pin(&mut self, history_id: i64);
+}
+
+/// Reference-side navigation-history read surface — the per-region back/forward
+/// stack plus the sidebar-navigation prediction gates the `Navigate*`
+/// transitions read. Region-precise (`holon_api::Region`, not the lossy
+/// `CapRegion`) because the nav history is keyed per exact region.
+pub trait RefNavHistory {
+    /// True iff the region's history cursor can move back (has a prior entry).
+    fn can_go_back(&self, region: holon_api::Region) -> bool;
+    /// True iff the region's history cursor can move forward.
+    fn can_go_forward(&self, region: holon_api::Region) -> bool;
+    /// True iff production would bind `navigation.focus(region)` on `block_id`
+    /// (the default sidebar's rendered doc list). Pure predicate over ref
+    /// state.
+    fn predicts_navigation_focus(&self, block_id: &EntityUri, region: holon_api::Region) -> bool;
+    /// The page blocks the default sidebar renders as nav-focus targets.
+    fn predicted_sidebar_navigation_targets(&self) -> Vec<EntityUri>;
+    /// True iff the drawer panel `panel_id` is open — sidebar clicks only reach
+    /// their targets while the panel is expanded. Defaults open when untracked.
+    fn drawer_is_open(&self, panel_id: &str) -> bool;
+}
+
+/// Reference-side navigation-history + focus mutation surface for the
+/// `Navigate*` transitions. Each method is the WHOLE per-transition reference
+/// effect (cursor move / history push / open-pin reset / region-focus clear /
+/// editor blur / global-focus update), encapsulated so the
+/// integration-test-only `OpenPinEntry` / `NavigationHistory` row types never
+/// cross into `holon-pbt-core`.
+pub trait RefNavHistoryMut: RefNavHistory {
+    /// `NavigateBack`: step the region cursor back one entry (if possible),
+    /// clear the region's per-block focus, and blur the active editor.
+    fn nav_step_back(&mut self, region: holon_api::Region);
+    /// `NavigateForward`: symmetric forward cursor step + focus clear + blur.
+    fn nav_step_forward(&mut self, region: holon_api::Region);
+    /// `NavigateHome`: `focus(region, None)` — push a home (NULL) history row
+    /// and reset the region's open pins to that single home row (idempotent
+    /// when already home), clear region + global focus, blur.
+    fn nav_go_home(&mut self, region: holon_api::Region);
+    /// `NavigateFocus`: `focus(region, block_id)` — push a focus history row
+    /// and reset the region's open pins to that single focus row
+    /// (idempotent when already focused there), record the first-visit
+    /// budget flag, set the block as global focus, clear region focus,
+    /// blur.
+    fn nav_focus(&mut self, region: holon_api::Region, block_id: &EntityUri);
+}
+
+/// Reference-side document read surface — the `files.documents` map (uri →
+/// filename) that the document + boot transitions query. Returns names / uris /
+/// counts / bools; never the integration-test-only map type.
+pub trait RefDocuments {
+    /// Every tracked document filename (values of `files.documents`).
+    fn document_names(&self) -> Vec<String>;
+    /// True iff a document with this exact filename is tracked.
+    fn has_document(&self, file_name: &str) -> bool;
+    /// Number of tracked documents (`files.documents.len()`).
+    fn document_count(&self) -> usize;
+    /// Resolve a document's uri from its NAME (file stem), if tracked.
+    fn doc_uri_by_name(&self, name: &str) -> Option<EntityUri>;
+    /// The document uri a block currently belongs to (`block_documents[id]`),
+    /// if any.
+    fn block_document_of(&self, block_id: &EntityUri) -> Option<EntityUri>;
+    /// True iff the reference holds a NON-SEED advice-rule block — the
+    /// ≤1-active-rule gate `WriteOrgFile` consults before seeding another
+    /// rule.
+    fn has_non_seed_advice_rule(&self) -> bool;
+    /// Every tracked document uri (keys of `files.documents`) —
+    /// `BulkExternalAdd`'s candidate-doc set.
+    fn document_uris(&self) -> Vec<EntityUri>;
+    /// True iff `uri` is a tracked document.
+    fn has_document_uri(&self, uri: &EntityUri) -> bool;
+}
+
+/// Reference-side document mutation surface. Each method encapsulates the whole
+/// per-transition reference effect (page-block creation, block-tree surgery,
+/// canonical re-sequencing, profile rebuild) so integration-test-only
+/// block/layout internals never cross into `holon-pbt-core`.
+pub trait RefDocumentsMut: RefDocuments {
+    /// `CreateDocument`: mint a synthetic doc uri, register the filename, and
+    /// insert the empty page block. Advances the synthetic-doc counter.
+    fn insert_document(&mut self, file_name: &str);
+    /// `DeleteDocument`: remove the document and cascade-delete its page block
+    /// + all descendants, re-canonicalizing sibling order and clearing
+    /// dangling focus.
+    fn remove_document(&mut self, file_name: &str);
+    /// `WriteOrgFile`: (re)seed a document's blocks from generator-produced
+    /// `Block`s before startup — remap placeholder parents, normalize the
+    /// org round-trip, classify index-layout source blocks,
+    /// re-canonicalize, and advance the pre-startup file counter.
+    /// `todo_keywords` is the file's `#+TODO:` set (adopted by the document
+    /// block).
+    fn seed_org_file(
+        &mut self,
+        filename: &str,
+        blocks: &[holon_api::block::Block],
+        todo_keywords: Option<Vec<holon_api::TaskState>>,
+    );
+}
+
+/// Reference-side pre-startup boot read surface — the fixture counters and
+/// VCS-init flags the boot / fixture transitions gate on.
+pub trait RefBoot {
+    /// Number of directories staged pre-startup
+    /// (`pre_startup_directories.len()`).
+    fn pre_startup_directory_count(&self) -> usize;
+    /// Number of org files written pre-startup (`pre_startup_file_count`).
+    fn pre_startup_file_count(&self) -> usize;
+    /// Whether a git repo has been initialized in the fixture.
+    fn git_initialized(&self) -> bool;
+    /// Whether a jj repo has been initialized in the fixture.
+    fn jj_initialized(&self) -> bool;
+    /// The resolved root-layout block id post-boot, if present — `StartApp`'s
+    /// SUT arg.
+    fn root_layout_block_id(&self) -> Option<EntityUri>;
+}
+
+/// Reference-side pre-startup boot mutations.
+pub trait RefBootMut: RefBoot {
+    /// `CreateDirectory`: stage a directory to be created before startup.
+    fn push_pre_startup_directory(&mut self, path: &str);
+    /// `GitInit`: mark the fixture git-initialized.
+    fn mark_git_initialized(&mut self);
+    /// `JjGitInit`: mark the fixture jj-initialized (also creates `.git`).
+    fn mark_jj_initialized(&mut self);
+    /// `StartApp`: the whole boot reference effect — flip `app_started`, seed
+    /// the bundled default layout / seed profile / sidebar watch, and
+    /// (fresh boot only) open the default drawers + focus `block:journals`.
+    fn boot_app(&mut self);
+}
+
+/// Reference-side active-watch mutation surface for `SetupWatch` /
+/// `RemoveWatch`.
+///
+/// The watch-spec value (query + language) is an integration-test-only type, so
+/// it is abstracted as an associated type — the concrete `WatchSpec` /
+/// `TestQuery` never appears in a `holon-pbt-core` signature; the wide
+/// `ReferenceState` binds it. Watch READS go through the existing [`RefWatch`]
+/// surface (`active_watch_ids`), so no read base is added here.
+pub trait RefWatchesMut {
+    /// The watch specification value (query + language). `ReferenceState` sets
+    /// this to its `pbt::query::WatchSpec`; a watch-less pure slice would bind
+    /// its own (or `()`).
+    type WatchSpec;
+    /// `SetupWatch`: register `spec` under `query_id` in the reference's active
+    /// watches (last-writer-wins on a repeated id, mirroring the SUT's
+    /// `register_watch`).
+    fn insert_watch(&mut self, query_id: &str, spec: Self::WatchSpec);
+    /// `RemoveWatch`: drop the active watch `query_id` (no-op if absent).
+    fn remove_watch(&mut self, query_id: &str);
+}
+
+/// Reference-side expand-toggle read surface (`ExpandToggle`'s generator +
+/// precondition). Backing: `ui.tab.expanded_toggles`.
+pub trait RefToggle {
+    /// True iff `id`'s `expand_toggle` widget is currently expanded.
+    fn is_expanded(&self, id: &EntityUri) -> bool;
+}
+
+/// Reference-side toggle-widget mutations (`ExpandToggle` / `ToggleCollapse` /
+/// `ToggleDrawer`). Each flip is single-sourced here so the generic transitions
+/// and the concrete `LayoutRef` adapters share one implementation.
+pub trait RefToggleMut: RefToggle {
+    /// Set `id`'s expand-toggle expanded state (`ExpandToggle` → `true`,
+    /// `ToggleCollapse` → `false`).
+    fn set_expanded(&mut self, id: &EntityUri, expanded: bool);
+    /// `ToggleDrawer`: flip the drawer panel `id`'s open/closed bit
+    /// (default-open, so an untracked drawer flips to closed).
+    fn toggle_drawer(&mut self, id: &str);
+}
+
+/// Reference-side render-expression read surface (`ExpandToggle`'s candidate
+/// enumeration). The render-expr AST (`holon_api::render_types::RenderExpr`)
+/// stays inside the impl — callers get ids / bools / a "mentions this builtin"
+/// predicate, never the AST itself.
+pub trait RefRenderExpr {
+    /// Block ids that currently carry a render expression
+    /// (`domain.render_expressions` keys).
+    fn render_expr_ids(&self) -> Vec<EntityUri>;
+    /// True iff `id` has a render expression.
+    fn has_render_expr(&self, id: &EntityUri) -> bool;
+    /// True iff `id`'s render expression mentions the value-fn builtin `needle`
+    /// (e.g. `"expand_toggle"`). False when `id` has no render expression.
+    fn render_expr_mentions(&self, id: &EntityUri, needle: &str) -> bool;
+}
+
+/// Reference-side view-selection mutation (`SwitchView`). The read side is the
+/// existing [`RefViewSelection`] (`current_view`); a standalone mut trait
+/// suffices because `SwitchView` writes without reading view state.
+pub trait RefViewSelectionMut {
+    /// Set the current view filter (`"all"` / `"main"` / `"sidebar"`).
+    fn set_current_view(&mut self, view: &str);
+}
+
+/// Reference-side wiring/config reads the mutation transitions gate on.
+/// Backing: `cap_set` (the composed CapMap discriminator). `enable_loro` stays
+/// on [`RefLifecycle`]; this trait carries only what isn't already exposed.
+pub trait RefWiring {
+    /// True iff this reference carries a composed `cap_set` (i.e. it is a
+    /// composed config, not the monolithic `E2ESut`). `SetEdgeField` /
+    /// `ApplyMutation` gate their Loro-authority-dependent arms on this.
+    fn has_cap_set(&self) -> bool;
+}
+
+/// Reference-side wide-PBT layout / render / focus read surface for the
+/// block-interaction transitions (`ClickBlock`, `TriggerSlashCommand`,
+/// `DragDropBlock`, `SetEdgeField`, `BulkExternalAdd`). A ref-only surface
+/// (never hosted on the CapMap) whose reads only the wide `ReferenceState` can
+/// answer — a pure slice has no layout/render model, so it simply doesn't
+/// implement it.
+pub trait RefLayoutInteract {
+    /// Ids of render-source blocks (`layout_blocks.render_source_ids`).
+    fn render_source_ids(&self) -> BTreeSet<EntityUri>;
+    /// Ids of query-source blocks (`layout_blocks.query_source_ids`).
+    fn query_source_ids(&self) -> BTreeSet<EntityUri>;
+    /// True iff `id` is an immutable layout block
+    /// (`layout_blocks.is_immutable`).
+    fn is_immutable(&self, id: &EntityUri) -> bool;
+    /// True iff the active layout renders `id` as a `draggable(...)` in the
+    /// main panel (shadow-interpreted) — `DragDropBlock`'s source gate.
+    fn block_renders_draggable(&self, id: &EntityUri) -> bool;
+    /// Block ids in the main panel's active-layout rendered set.
+    fn main_rendered_block_ids(&self) -> BTreeSet<EntityUri>;
+    /// The click-focused entity in `region` (`focused_entity_id[region]`).
+    fn region_focused_entity(&self, region: CapRegion) -> Option<EntityUri>;
+    /// The currently-focused editable block in Main (`DragDropBlock`'s source).
+    fn focused_main_editable(&self) -> Option<EntityUri>;
+    /// True iff `id`'s block carries `tag` in its `tags`.
+    fn block_has_tag(&self, id: &EntityUri, tag: &str) -> bool;
+    /// True iff `doc_uri` has at least one editable (Text, non-page,
+    /// non-layout) child block — `BulkExternalAdd`'s empty-doc weighting.
+    fn doc_has_editable_text(&self, doc_uri: &EntityUri) -> bool;
+}
+
+/// Reference-side wide-PBT block-interaction mutation surface. Each method is
+/// the whole per-transition reference effect, encapsulated so
+/// integration-test-only row/AST internals never cross into `holon-pbt-core`.
+/// Wide-only (no pure-slice impl); the payload types (`Region`,
+/// `EdgeFieldUpdate`, `Block`) are all `holon_api` and thus pbt-core-nameable.
+pub trait RefLayoutMutate {
+    /// `ClickBlock`: focus `block_id` via a click in `region` — blur any other
+    /// active editor, then either push a navigation-history entry (sidebar
+    /// nav-focus) or set editor focus, mirroring `provider.rs`.
+    fn apply_click_focus(&mut self, region: holon_api::Region, block_id: &EntityUri);
+    /// `TriggerSlashCommand`: snapshot undo, delete `block_id` via the shared
+    /// mutation machinery, and clear focus if it pointed at the deleted block.
+    fn apply_slash_delete(&mut self, block_id: &EntityUri);
+    /// `SetEdgeField`: assign the edge field
+    /// (`tags`/`requires`/`advice_suppressed`) carried by `update` on the
+    /// existing block `id`.
+    fn set_edge_field_value(&mut self, id: &EntityUri, update: &EdgeFieldUpdate);
+    /// `BulkExternalAdd`: insert `blocks` under `doc_uri` (org round-trip
+    /// normalized), register doc ownership, re-canonicalize, and advance the
+    /// block-id counter.
+    fn bulk_add_blocks(&mut self, doc_uri: &EntityUri, blocks: &[holon_api::block::Block]);
+
+    /// `CreateBlockUnderFocus`: append a new text block carrying `content` as
+    /// the last child of `parent` (the focused page's creation-slot parent).
+    fn create_block_under(&mut self, parent: &EntityUri, content: &str);
+}
+
+/// Reference-side arrow-key navigation surface (`ArrowNavigate`). The
+/// direction type is **associated** so `holon-pbt-core` needn't depend on
+/// `holon-frontend` (mirrors [`RefWatchesMut::WatchSpec`]); the
+/// integration-test `ReferenceState` binds `Direction =
+/// holon_frontend::navigation::NavDirection`. The whole cross-block
+/// cursor/focus walk is encapsulated because it drives `holon_frontend`'s
+/// `CollectionNavigator`, which is not nameable here.
+pub trait RefArrowNav {
+    /// Arrow-key direction (`holon_frontend::navigation::NavDirection` in the
+    /// wide PBT).
+    type Direction;
+
+    /// Whether `region` currently has a focused entity — the arrow-nav
+    /// precondition. Region-granular (Left/RightSidebar distinct), so it does
+    /// not collapse through `CapRegion`.
+    fn region_has_focus(&self, region: holon_api::Region) -> bool;
+
+    /// Apply `steps` arrow presses in `direction` from the focused block of
+    /// `region`: moves editor focus + cursor (navigation history untouched),
+    /// mirroring production's GPUI arrow handler.
+    fn apply_arrow_navigate(
+        &mut self,
+        region: holon_api::Region,
+        direction: Self::Direction,
+        steps: u8,
+    );
+}
+
+/// Reference-side task-state toggling surface (`ToggleState`). The candidate
+/// computation interprets the render expr (via
+/// `holon_frontend::interpret_pure`), so its body lives in the integration-test
+/// `ReferenceState` impl; pbt-core declares only the surface over
+/// pbt-core-native [`CycleTarget`].
+pub trait RefTaskStateToggle {
+    /// Block ids that render an interactive `state_toggle` widget in Main —
+    /// the `ToggleState` generator's candidate set before target pairing.
+    fn rendered_state_toggle_ids(&self) -> Vec<EntityUri>;
+
+    /// Apply a task-state toggle to the reference model: push an undo snapshot,
+    /// then an `Update { task_state }` mutation for `block_id`.
+    fn apply_toggle_state(&mut self, block_id: &EntityUri, new_state: CycleTarget);
 }
 
 /// A single watch-result row, field name → stringified value. `None`
@@ -1724,8 +2176,9 @@ pub trait RefGlobalFocus {
     fn global_focused_block(&self) -> Option<EntityUri>;
 }
 
-/// Task-state read-side projection. Used by `inv-viewmodel-state-toggle-correct`
-/// to compare block task_state values against ViewModel StateToggle nodes.
+/// Task-state read-side projection. Used by
+/// `inv-viewmodel-state-toggle-correct` to compare block task_state values
+/// against ViewModel StateToggle nodes.
 ///
 /// `#[capmap_adapter]` hosts this on `CapMap` (sync, owned return). The
 /// production `ReferenceState` provides it; the composed ref `CapMap` forwards.
@@ -1734,6 +2187,19 @@ pub trait RefTaskState {
     /// Task state string for `id` (`"TODO"`, `"DONE"`, etc.), or `None`
     /// if the block has no task_state property.
     fn task_state_of(&self, id: &EntityUri) -> Option<String>;
+}
+
+/// SQL-budget cardinality inputs: the handful of reference-state counts the
+/// per-transition `SqlBudget` formulas read. Lets a transition's
+/// `SqlBudget::expected_sql` be generic over `R` instead of binding the
+/// concrete `ReferenceState` (Phase 1a Step 1). `last_navigate_first_visit`
+/// rides along because `NavigateFocus`'s budget switches on it (first visit
+/// creates watch matviews); it is a per-step budget input, not a nav mutation.
+pub trait RefSqlCardinality {
+    fn block_count(&self) -> usize;
+    fn document_count(&self) -> usize;
+    fn active_watch_count(&self) -> usize;
+    fn last_navigate_first_visit(&self) -> bool;
 }
 
 /// Reference-side typed block surface for `inv-backend-blocks-match-ref`.
@@ -1814,4 +2280,87 @@ where
         return false;
     }
     commit_active_editor_if_changed(state)
+}
+
+// ── Formerly integration-test-local SUT caps (Phase 1a Step 2 / B1) ─────────
+// Relocated from `holon-integration-tests::pbt::local_caps` (and the
+// apply_mutation / start_app transition modules) once the types they name
+// (`CycleTarget`, `MutationEvent`, `LoroCorruptionType`) moved to
+// `crate::types`. This unblocks the mutation/fixture-driven transitions +
+// SUT adapters co-locating into companion `*-testing` crates.
+use crate::types::CycleTarget;
+use crate::types::LoroCorruptionType;
+use crate::types::MutationEvent;
+
+/// SUT capability: task-state cycling (`ToggleState`). A genuinely composable
+/// `&self` mutation realized headlessly via the production `set_field
+/// task_state` op.
+#[holon_macros::capmap_adapter]
+pub trait SutMutate {
+    async fn toggle_state(&self, block_id: &holon_api::EntityUri, new_state: CycleTarget);
+}
+
+/// SUT capability: the SEAM-relocated mutations — generic UI/external mutations
+/// (`ApplyMutation`) and bulk external block adds (`BulkExternalAdd`). Their
+/// real, `ref_state`-dependent dispatch lives in the `E2ESut` harness seam;
+/// the composed frontend does NOT provide it, so those transitions auto-narrow
+/// out of the composed alphabet rather than faking a no-op.
+#[holon_macros::capmap_adapter]
+pub trait SutSeamMutate {
+    async fn apply_mutation(&self, event: MutationEvent);
+    async fn bulk_external_add(
+        &self,
+        doc_uri: &holon_api::EntityUri,
+        blocks: &[holon_api::block::Block],
+    );
+}
+
+/// SUT capability: create a block through the focused panel's creation slot
+/// (`CreateBlockUnderFocus`). The composed `HeadlessFrontendComponent` realizes
+/// it through the PRODUCTION creation-slot commit seam
+/// (`ReactiveEngineDriver::commit_creation_slot` →
+/// `ViewEventHandler::handle_text_sync` → `block.create`), so the headless
+/// keystone drives WP-E's focus-root parenting exactly as a real user's "type
+/// here to create" gesture does — the parent comes from the live
+/// `:__virtual:<parent>` slot id, never re-derived. A genuinely composable
+/// `&self` gesture: any composed config whose frontend renders the default
+/// `creation_slot: true` layout can drive it, so the transition auto-narrows to
+/// exactly those configs.
+#[holon_macros::capmap_adapter]
+pub trait SutBlockCreate {
+    async fn apply_create_under_focus(&self, content: &str);
+}
+
+/// SUT capability: app lifecycle for the wide PBT — boot, restart, document
+/// creation, and the concurrent-schema-init regression probe. `&self`,
+/// `ref_state`-free; `ref_state`-derived values are precomputed at the
+/// transition boundary and passed as typed args.
+#[holon_macros::capmap_adapter]
+pub trait SutAppLifecycle {
+    #[allow(clippy::too_many_arguments)]
+    async fn start_app(
+        &self,
+        root_id: holon_api::EntityUri,
+        expects_valid_index: bool,
+        wait_for_ready: bool,
+        enable_fake_mcp: bool,
+        enable_loro: bool,
+    );
+    async fn simulate_restart(&self);
+    async fn create_document(&self, file_name: &str);
+    async fn delete_document(&self, file_name: &str);
+    async fn concurrent_schema_init(&self);
+    async fn assert_epoch_flip_rejected(&self);
+}
+
+/// SUT capability: pre-startup org-filesystem fixture setup — writing org
+/// files, creating directories, `git`/`jj` init, and planting a stale/corrupt
+/// Loro snapshot. `E2ESut`-only (no headless filesystem).
+#[holon_macros::capmap_adapter]
+pub trait SutFixtureFs {
+    async fn write_org_file(&self, filename: &str, content: &str);
+    async fn create_directory(&self, path: &str);
+    async fn git_init(&self);
+    async fn jj_git_init(&self);
+    async fn create_stale_loro(&self, org_filename: &str, corruption_type: LoroCorruptionType);
 }

@@ -6,11 +6,12 @@
 //! @c4 uses holon-filesystem "filesystem ports" "Rust"
 //! @c4 uses holon-macros "entity/operation derive macros" "Rust"
 //!
-//! Frontend session abstraction and the MVVM **ViewModel** layer — owns the reactive `ReactiveViewModel` tree that the GPUI and TUI Views observe.
+//! Frontend session abstraction and the MVVM **ViewModel** layer — owns the
+//! reactive `ReactiveViewModel` tree that the GPUI and TUI Views observe.
 //!
-//! Uses `premortem` for layered config (Defaults → TOML → CLI/env) and `clap` for
-//! CLI parsing. Configuration is defined once in [`config::HolonConfig`] and automatically
-//! gets CLI + env var + TOML file support.
+//! Uses `premortem` for layered config (Defaults → TOML → CLI/env) and `clap`
+//! for CLI parsing. Configuration is defined once in [`config::HolonConfig`]
+//! and automatically gets CLI + env var + TOML file support.
 //!
 //! # Usage
 //!
@@ -24,6 +25,7 @@
 //! ).await?;
 //! ```
 
+pub mod advice_weaver;
 pub mod cdc;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cli;
@@ -34,19 +36,28 @@ pub mod lane_filtered_provider;
 /// depend on `holon-frontend` already; this saves them adding a direct
 /// `holon-core` dep just to import `Cell<String>` / `TextOp` / etc.
 pub mod cell {
-    pub use holon_core::cell::{
-        compute_text_delta, Cell, CellBacking, CursorAnchor, CursorBias, DeltaOp,
-        LwwTextCellBacking, TextCellBacking, TextDelta, TextOp,
-    };
-    pub use holon_core::cell_registry::{CellCache, EntityCellRegistry, EntityCellRegistryExt};
+    pub use holon_core::cell::Cell;
+    pub use holon_core::cell::CellBacking;
+    pub use holon_core::cell::CursorAnchor;
+    pub use holon_core::cell::CursorBias;
+    pub use holon_core::cell::DeltaOp;
+    pub use holon_core::cell::LwwTextCellBacking;
+    pub use holon_core::cell::TextCellBacking;
+    pub use holon_core::cell::TextDelta;
+    pub use holon_core::cell::TextOp;
+    pub use holon_core::cell::compute_text_delta;
+    pub use holon_core::cell_registry::CellCache;
+    pub use holon_core::cell_registry::EntityCellRegistry;
+    pub use holon_core::cell_registry::EntityCellRegistryExt;
 }
 
 /// A default org file bundled with the app, seeded on first launch.
 pub struct DefaultAsset {
     pub filename: &'static str,
     pub content: &'static str,
-    /// Fixed document block ID. Enables org content to reference its own document
-    /// (e.g., `parent_id == 'block:journals'`). `None` means random UUID.
+    /// Fixed document block ID. Enables org content to reference its own
+    /// document (e.g., `parent_id == 'block:journals'`). `None` means
+    /// random UUID.
     pub fixed_doc_id: Option<&'static str>,
 }
 
@@ -63,7 +74,9 @@ pub mod editor_view_model;
 pub mod focus_path;
 pub mod geometry;
 pub mod render_services;
-pub use geometry::{drawer_toggle_id_for, expand_toggle_id_for, vms_button_id_for};
+pub use geometry::drawer_toggle_id_for;
+pub use geometry::expand_toggle_id_for;
+pub use geometry::vms_button_id_for;
 pub mod editor_caret;
 pub mod headless_editor_mirror;
 pub mod input;
@@ -75,8 +88,8 @@ pub mod mutable_tree;
 pub mod navigation;
 pub(crate) mod operation_matcher;
 pub mod operations;
-/// PBT SUT capability traits owned by the frontend (cap home-rule). Gated behind
-/// the `pbt` feature so production builds never pull `holon-pbt-core`.
+/// PBT SUT capability traits owned by the frontend (cap home-rule). Gated
+/// behind the `pbt` feature so production builds never pull `holon-pbt-core`.
 #[cfg(feature = "pbt")]
 pub mod pbt_caps;
 pub mod popup_menu;
@@ -88,6 +101,7 @@ pub mod reactive_view_model;
 mod render_context;
 pub mod render_interpreter;
 pub mod rich_text_selection;
+pub mod row_origin;
 pub mod row_pipeline;
 pub mod shadow_builders;
 pub mod size_expectation;
@@ -100,41 +114,68 @@ pub mod widget_gallery;
 
 // cdc module gutted — AppState, spawn_ui_listener, CdcState removed.
 // Use reactive::ReactiveEngine instead.
-pub use config::{HolonConfig, SessionConfig, UiConfig, WidgetState};
-use holon_api::{EntityName, EntityUri};
-pub use input::{InputAction, Key, WidgetInput};
-pub use navigation::{
-    CollectionNavigator, CursorHint, CursorPlacement, ListNavigator, NavDirection, NavTarget,
-    TableNavigator, TreeNavigator,
-};
-pub use preferences::{PrefKey, PrefSection, PrefType, PreferenceDef};
-pub use reactive::interpret_pure;
-pub use reactive_view::{CollectionConfig, ReactiveView};
-pub use reactive_view_model::{
-    collection_variant_of, extract_item_template, variants_match, CollectionVariant, InterpretFn,
-    ReactiveSlot, ReactiveViewModel,
-};
-pub use render_context::{AvailableSpace, LayoutHint, RenderContext};
-pub use shadow_builders::DEFAULT_DRAWER_WIDTH;
-pub use user_driver::{ReactiveEngineDriver, UserDriver};
-pub use view_model::ViewModel;
-
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use anyhow::Result;
-use holon_core::PublishErrorTracker;
-
-pub use holon_api::UiInfo;
-
+pub use config::HolonConfig;
+pub use config::SessionConfig;
+pub use config::UiConfig;
+pub use config::WidgetState;
 // Re-export types needed by consumers
 pub use editor_view_model::{EditorAction, EditorKey, EditorViewModel};
+use holon_api::EntityName;
+use holon_api::EntityUri;
+pub use holon_api::OperationDescriptor;
+pub use holon_api::ProviderAuthStatus;
 pub use holon_api::QueryContext;
-pub use holon_api::{OperationDescriptor, ProviderAuthStatus, UiEvent, Value, WatcherCommand};
+pub use holon_api::UiEvent;
+pub use holon_api::UiInfo;
+pub use holon_api::Value;
+pub use holon_api::WatcherCommand;
+use holon_core::PublishErrorTracker;
+pub use input::InputAction;
+pub use input::Key;
+pub use input::WidgetInput;
+pub use navigation::CollectionNavigator;
+pub use navigation::CursorHint;
+pub use navigation::CursorPlacement;
+pub use navigation::ListNavigator;
+pub use navigation::NavDirection;
+pub use navigation::NavTarget;
+pub use navigation::TableNavigator;
+pub use navigation::TreeNavigator;
 pub use operations::OperationIntent;
+pub use preferences::PrefKey;
+pub use preferences::PrefSection;
+pub use preferences::PrefType;
+pub use preferences::PreferenceDef;
 pub use reactive::LiveBlock;
 pub use reactive::StubBuilderServices;
+pub use reactive::WatchGuard;
+pub use reactive::interpret_pure;
+pub use reactive_view::CollectionConfig;
+pub use reactive_view::ReactiveView;
+pub use reactive_view_model::CollectionVariant;
+pub use reactive_view_model::InterpretFn;
+pub use reactive_view_model::ReactiveSlot;
+pub use reactive_view_model::ReactiveViewModel;
+pub use reactive_view_model::collection_variant_of;
+pub use reactive_view_model::extract_item_template;
+pub use reactive_view_model::variants_match;
+pub use render_context::AvailableSpace;
+pub use render_context::LayoutHint;
+pub use render_context::RenderContext;
+pub use row_origin::Occurrence;
+pub use row_origin::OccurrenceId;
+pub use row_origin::RowOrigin;
+pub use shadow_builders::DEFAULT_DRAWER_WIDTH;
+pub use user_driver::ReactiveEngineDriver;
+pub use user_driver::UserDriver;
+pub use view_model::ViewModel;
 
 /// Unified session for all frontend consumers (Flutter, TUI, tests)
 ///
@@ -147,32 +188,36 @@ pub use reactive::StubBuilderServices;
 /// `new_with_extras` which allows resolving additional services from DI.
 pub struct FrontendSession<T = ()> {
     /// The query-execution capability (ADR 0004 Phase 9). `Some` only when the
-    /// Turso query engine is wired (an upcast of its `BackendEngine`); `None` for
-    /// a no-Turso (Loro-only) session, which renders from `block_query` instead.
-    /// Consumers reach it through [`FrontendSession::query_engine`] and degrade
-    /// visibly when it is absent rather than branching on the storage backend.
+    /// Turso query engine is wired (an upcast of its `BackendEngine`); `None`
+    /// for a no-Turso (Loro-only) session, which renders from `block_query`
+    /// instead. Consumers reach it through
+    /// [`FrontendSession::query_engine`] and degrade visibly when it is
+    /// absent rather than branching on the storage backend.
     query_engine: Option<Arc<dyn holon_api::QueryEngine>>,
     /// The block read seam (ADR 0004 Phase 9). Present in **both** wirings: the
     /// Turso session holds a `TursoBlockQuerySource` over its CDC mirrors, a
     /// no-Turso session a `LoroBlockQuerySource`. Consumers read blocks through
     /// this handle and never branch on which storage backend is wired.
     block_query: Arc<dyn holon_core::storage::BlockQuerySource>,
-    /// The operation-execution capability (ADR 0004 Phase 9, Stage 4). Present in
-    /// **both** wirings: the Turso session holds an upcast of its `BackendEngine`,
-    /// a no-Turso session a `DispatchingOperationEngine` over Loro-native
-    /// providers. `None` only when no operation capability is wired at all. The
-    /// mutating paths route through here, never through `engine()`.
+    /// The operation-execution capability (ADR 0004 Phase 9, Stage 4). Present
+    /// in **both** wirings: the Turso session holds an upcast of its
+    /// `BackendEngine`, a no-Turso session a `DispatchingOperationEngine`
+    /// over Loro-native providers. `None` only when no operation capability
+    /// is wired at all. The mutating paths route through here, never
+    /// through `engine()`.
     operation_engine: Option<Arc<dyn holon_api::OperationEngine>>,
     /// The UI-render/watch capability (ADR 0004 Phase 9). Present in **both**
     /// wirings: a Turso session holds its `BackendEngine` (renders off CDC), a
-    /// no-Turso session a `LoroUiWatcher` (renders from `block_query`). `watch_ui`
-    /// dispatches through this capability with no backend branch.
+    /// no-Turso session a `LoroUiWatcher` (renders from `block_query`).
+    /// `watch_ui` dispatches through this capability with no backend
+    /// branch.
     ui_watcher: Arc<dyn holon_api::UiWatcher>,
-    /// The profile resolver — an `Arc<dyn ProfileResolving>`, present in **both**
-    /// wirings (ADR 0004 Phase 9). Profile resolution is not a Turso-only
-    /// capability: the Turso session populates this from `engine.profile_resolver()`,
-    /// a no-Turso session from the bundled type registry. Consumers read profiles
-    /// through this handle and never branch on which storage backend is wired.
+    /// The profile resolver — an `Arc<dyn ProfileResolving>`, present in
+    /// **both** wirings (ADR 0004 Phase 9). Profile resolution is not a
+    /// Turso-only capability: the Turso session populates this from
+    /// `engine.profile_resolver()`, a no-Turso session from the bundled
+    /// type registry. Consumers read profiles through this handle and never
+    /// branch on which storage backend is wired.
     profiles: Arc<dyn holon_api::entity_profile::ProfileResolving>,
     error_tracker: PublishErrorTracker,
     ready_signal: Option<tokio::sync::watch::Receiver<Option<Result<(), String>>>>,
@@ -276,7 +321,8 @@ impl<T> FrontendSession<T> {
     }
 
     /// The block read seam, present in **both** wirings (ADR 0004 Phase 9).
-    /// Consumers capture a [`BlockSnapshot`](holon_core::storage::BlockSnapshot)
+    /// Consumers capture a
+    /// [`BlockSnapshot`](holon_core::storage::BlockSnapshot)
     /// via `snapshot()` and never branch on the storage backend.
     pub fn block_query(&self) -> &Arc<dyn holon_core::storage::BlockQuerySource> {
         &self.block_query
@@ -286,8 +332,8 @@ impl<T> FrontendSession<T> {
     ///
     /// Profile resolution is not a Turso-only capability: a no-Turso session
     /// builds this from the bundled type registry, and the Turso session reuses
-    /// `engine().profile_resolver()`. The render path reads profiles through here
-    /// so it never panics for lack of an engine.
+    /// `engine().profile_resolver()`. The render path reads profiles through
+    /// here so it never panics for lack of an engine.
     pub fn profiles(&self) -> &Arc<dyn holon_api::entity_profile::ProfileResolving> {
         &self.profiles
     }
@@ -295,31 +341,34 @@ impl<T> FrontendSession<T> {
     /// The query-execution capability (ADR 0004 — "Turso is one of four").
     ///
     /// `Some` only when the Turso query engine is wired; `None` for a no-Turso
-    /// (Loro-only) session. The frontend's query path depends on this capability
-    /// rather than the concrete `BackendEngine`, and degrades visibly (query
-    /// blocks show their `source`) when it is absent — never panicking.
+    /// (Loro-only) session. The frontend's query path depends on this
+    /// capability rather than the concrete `BackendEngine`, and degrades
+    /// visibly (query blocks show their `source`) when it is absent — never
+    /// panicking.
     pub fn query_engine(&self) -> Option<Arc<dyn holon_api::QueryEngine>> {
         self.query_engine.clone()
     }
 
     /// The operation-execution capability (ADR 0004 — "Turso is one of four").
     ///
-    /// Covers dispatching operations, operation discovery, and undo/redo. Present
-    /// in both wirings — the Turso session upcasts its `BackendEngine`, a no-Turso
-    /// session holds a `DispatchingOperationEngine` over Loro-native providers
-    /// (Stage 4). `None` only when no operation capability is wired. Callers route
+    /// Covers dispatching operations, operation discovery, and undo/redo.
+    /// Present in both wirings — the Turso session upcasts its
+    /// `BackendEngine`, a no-Turso session holds a
+    /// `DispatchingOperationEngine` over Loro-native providers (Stage 4).
+    /// `None` only when no operation capability is wired. Callers route
     /// through this rather than `engine()`, surfacing absence as a typed error.
     pub fn operation_engine(&self) -> Option<Arc<dyn holon_api::OperationEngine>> {
         self.operation_engine.clone()
     }
 
     /// The operation engine, or a typed error when none is wired. Used by the
-    /// mutating operation paths (dispatch, undo, redo) that must fail loud rather
-    /// than silently no-op when the capability is absent.
+    /// mutating operation paths (dispatch, undo, redo) that must fail loud
+    /// rather than silently no-op when the capability is absent.
     fn require_operation_engine(&self) -> Result<Arc<dyn holon_api::OperationEngine>> {
         self.operation_engine().ok_or_else(|| {
             anyhow::anyhow!(
-                "this operation requires an operation engine, which is not wired in this (no-Turso) session"
+                "this operation requires an operation engine, which is not wired in this \
+                 (no-Turso) session"
             )
         })
     }
@@ -350,16 +399,17 @@ impl<T> FrontendSession<T> {
         guard.save_runtime(&self.config_dir);
     }
 
-    /// Look up widget state by block ID. Returns default (open=true) if not found.
+    /// Look up widget state by block ID. Returns default (open=true) if not
+    /// found.
     pub fn widget_state(&self, block_id: &str) -> WidgetState {
         self.widget_state_explicit(block_id).unwrap_or_default()
     }
 
-    /// Look up the *explicitly stored* widget state, or `None` when the user has
-    /// never toggled this widget. Callers that need a mode-aware default (e.g.
-    /// overlay drawers, which must start closed) use this instead of
-    /// [`Self::widget_state`], whose `unwrap_or_default` collapses "never set"
-    /// into `open = true`.
+    /// Look up the *explicitly stored* widget state, or `None` when the user
+    /// has never toggled this widget. Callers that need a mode-aware
+    /// default (e.g. overlay drawers, which must start closed) use this
+    /// instead of [`Self::widget_state`], whose `unwrap_or_default`
+    /// collapses "never set" into `open = true`.
     pub fn widget_state_explicit(&self, block_id: &str) -> Option<WidgetState> {
         self.holon_config
             .lock()
@@ -371,9 +421,10 @@ impl<T> FrontendSession<T> {
     }
 
     /// Effective open state for a drawer in the given mode. Mirrors
-    /// [`crate::reactive::BuilderServices::drawer_open`] for callers that hold a
-    /// `FrontendSession` directly (e.g. the GPUI toolbar toggles): explicit user
-    /// state wins; otherwise `Overlay` drawers default closed, `Shrink` open.
+    /// [`crate::reactive::BuilderServices::drawer_open`] for callers that hold
+    /// a `FrontendSession` directly (e.g. the GPUI toolbar toggles):
+    /// explicit user state wins; otherwise `Overlay` drawers default
+    /// closed, `Shrink` open.
     pub fn drawer_open(&self, block_id: &str, mode: crate::view_model::DrawerMode) -> bool {
         self.widget_state_explicit(block_id)
             .map(|s| s.open)
@@ -401,7 +452,8 @@ impl<T> FrontendSession<T> {
         &self.theme_registry
     }
 
-    /// Read a preference value. Returns the stored value or the definition's default.
+    /// Read a preference value. Returns the stored value or the definition's
+    /// default.
     pub fn get_preference(&self, key: &preferences::PrefKey) -> toml::Value {
         let guard = self.holon_config.lock().unwrap();
         guard.get_preference(key).cloned().unwrap_or_else(|| {
@@ -547,12 +599,14 @@ impl<T> FrontendSession<T> {
     // =========================================================================
 
     /// Get the initial widget for the application root
-    /// Watch a block's UI with automatic error recovery and structural hot-swap.
+    /// Watch a block's UI with automatic error recovery and structural
+    /// hot-swap.
     ///
-    /// Returns a long-lived stream of `UiEvent`s (Structure + Data) and a command
-    /// channel for variant switching. Unlike `render_entity`, errors become
-    /// `UiEvent::Structure` events with error WidgetSpecs — the stream stays open
-    /// and recovers when the underlying block is fixed.
+    /// Returns a long-lived stream of `UiEvent`s (Structure + Data) and a
+    /// command channel for variant switching. Unlike `render_entity`,
+    /// errors become `UiEvent::Structure` events with error WidgetSpecs —
+    /// the stream stays open and recovers when the underlying block is
+    /// fixed.
     pub async fn watch_ui(&self, block_id: &EntityUri) -> Result<holon_api::WatchHandle> {
         // Dispatch through the `UiWatcher` capability — `BackendEngine` (CDC) for
         // Turso, `LoroUiWatcher` (block_query snapshot) for no-Turso. No branch.
@@ -578,7 +632,12 @@ impl<T> FrontendSession<T> {
         context: Option<QueryContext>,
     ) -> Result<holon_api::EnrichedChangeStream> {
         self.query_engine()
-            .ok_or_else(|| anyhow::anyhow!("watch_query requires the Turso query engine, which is not wired in this (no-Turso) session"))?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "watch_query requires the Turso query engine, which is not wired in this \
+                     (no-Turso) session"
+                )
+            })?
             .watch_query(query, language, params, context)
             .await
     }
@@ -609,9 +668,10 @@ impl<T> FrontendSession<T> {
 
     /// Get available operations for an entity
     ///
-    /// Returns a list of operation descriptors available for the given entity_name.
-    /// Use "*" as entity_name to get wildcard operations. Empty when no operation
-    /// engine is wired (a no-Turso session has no operations to offer yet).
+    /// Returns a list of operation descriptors available for the given
+    /// entity_name. Use "*" as entity_name to get wildcard operations.
+    /// Empty when no operation engine is wired (a no-Turso session has no
+    /// operations to offer yet).
     pub async fn available_operations(&self, entity_name: &str) -> Vec<OperationDescriptor> {
         match self.operation_engine() {
             Some(ops) => ops.available_operations(entity_name).await,
@@ -629,14 +689,16 @@ impl<T> FrontendSession<T> {
 
     /// Undo the last operation
     ///
-    /// Returns true if an operation was undone, false if the undo stack is empty.
+    /// Returns true if an operation was undone, false if the undo stack is
+    /// empty.
     pub async fn undo(&self) -> Result<bool> {
         self.require_operation_engine()?.undo().await
     }
 
     /// Redo the last undone operation
     ///
-    /// Returns true if an operation was redone, false if the redo stack is empty.
+    /// Returns true if an operation was redone, false if the redo stack is
+    /// empty.
     pub async fn redo(&self) -> Result<bool> {
         self.require_operation_engine()?.redo().await
     }
@@ -665,7 +727,8 @@ impl<T> FrontendSession<T> {
         self.query_engine()
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "lookup_block_path requires the Turso query engine, which is not wired in this (no-Turso) session"
+                    "lookup_block_path requires the Turso query engine, which is not wired in \
+                     this (no-Turso) session"
                 )
             })?
             .lookup_block_path(block_id)

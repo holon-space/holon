@@ -2,17 +2,22 @@
 //! between the **SQL projection** (`SutSqlProjection::block_task_state`, a
 //! `json_extract(properties,'$.task_state')` read) and the **Loro projection**
 //! (`SutLoroTaskState::loro_task_state_of`, the same `properties["task_state"]`
-//! scalar off the live CRDT tree). No reference side — both truths come from the
-//! SUT, so this catches a Loro↔SQL desync at the data layer before any render
-//! bug surfaces. It selects only in a slice that wires **both** caps (the
-//! combined SQL+Loro slice), the only non-redundant consumer of
+//! scalar off the live CRDT tree). No reference side — both truths come from
+//! the SUT, so this catches a Loro↔SQL desync at the data layer before any
+//! render bug surfaces. It selects only in a slice that wires **both** caps
+//! (the combined SQL+Loro slice), the only non-redundant consumer of
 //! `SutLoroTaskState`.
 
 use std::marker::PhantomData;
 
 use holon_pbt_core::RunMode;
-use holon_pbt_core::capabilities::{SutLoroTaskState, SutSqlProjection};
-use holon_pbt_core::composition::{BridgedInvariant, CapId, CapInvariant, CapMap, Needs};
+use holon_pbt_core::capabilities::SutLoroTaskState;
+use holon_pbt_core::capabilities::SutSqlProjection;
+use holon_pbt_core::composition::BridgedInvariant;
+use holon_pbt_core::composition::CapId;
+use holon_pbt_core::composition::CapInvariant;
+use holon_pbt_core::composition::CapMap;
+use holon_pbt_core::composition::Needs;
 
 use crate::pbt::invariants::bodies::task_state_storage_coherence::InvTaskStateStorageCoherence;
 
@@ -35,8 +40,8 @@ pub fn wire() -> Box<dyn CapInvariant> {
 mod tests {
     use crate::pbt::composed::fixtures::*;
 
-    /// Positive: both projections agree on every block's `task_state` ⇒ selected
-    /// (both caps wired) and passing.
+    /// Positive: both projections agree on every block's `task_state` ⇒
+    /// selected (both caps wired) and passing.
     #[tokio::test]
     async fn task_state_coherence_passes_when_sql_and_loro_agree() {
         let a = uri("block:a");
@@ -52,8 +57,8 @@ mod tests {
             report
                 .ran_ids()
                 .contains(&"inv-task-state-storage-coherence"),
-            "wiring SutSqlProjection + SutLoroTaskState must select the coherence \
-             invariant; ran={:?}",
+            "wiring SutSqlProjection + SutLoroTaskState must select the coherence invariant; \
+             ran={:?}",
             report.ran_ids(),
         );
         assert!(
@@ -64,8 +69,9 @@ mod tests {
     }
 
     /// Negative containment (§2): deselected — disclosed, not faked — when only
-    /// the SQL projection is wired (no `SutLoroTaskState`). A SQL-only slice must
-    /// not silently "pass" a cross-store coherence check it can't perform.
+    /// the SQL projection is wired (no `SutLoroTaskState`). A SQL-only slice
+    /// must not silently "pass" a cross-store coherence check it can't
+    /// perform.
     #[tokio::test]
     async fn task_state_coherence_deselected_without_loro_task_state() {
         let sut = sql_projection_map(vec![(uri("block:a"), "content")]);
@@ -77,15 +83,16 @@ mod tests {
                 .deselected
                 .iter()
                 .any(|d| d.0 == "inv-task-state-storage-coherence"),
-            "without SutLoroTaskState the coherence invariant must be deselected; \
-             ran={:?} deselected={:?}",
+            "without SutLoroTaskState the coherence invariant must be deselected; ran={:?} \
+             deselected={:?}",
             report.ran_ids(),
             report.deselected,
         );
     }
 
-    /// Catch (doc §6 gate): SQL says `TODO`, Loro says `DONE` for the same block —
-    /// a desync the synced component pair can't produce, injected via the fixtures.
+    /// Catch (doc §6 gate): SQL says `TODO`, Loro says `DONE` for the same
+    /// block — a desync the synced component pair can't produce, injected
+    /// via the fixtures.
     #[tokio::test]
     async fn task_state_coherence_catches_sql_loro_divergence() {
         let a = uri("block:a");
@@ -103,46 +110,54 @@ mod tests {
     }
 }
 
-/// Real-SUT non-vacuity teeth (relocated from the deleted `task_state_slice.rs`).
+/// Real-SUT non-vacuity teeth (relocated from the deleted
+/// `task_state_slice.rs`).
 ///
-/// The ONE PBT (`general_e2e_composed_pbt` / `WideE2E`) selects this invariant in the wide
-/// config (its caps are present — the cap-presence guard proves it) and the per-draw floor
-/// runs it every tick — but "runs" is satisfied even
-/// by a never-toggled tree (both projections read `None` ⇒ trivially coherent). This
-/// test is the guard that the check is *meaningful*: a real `ToggleState` over the
-/// composed `full_headless` CapMap must move BOTH the SQL `block_raw.properties`
-/// projection AND the Loro tag projection `None` → `TODO` in lockstep — exactly the
-/// coherence the invariant guards. It is the only test that asserts the **Loro** side
-/// (`loro_task_state_of`) moves with the SQL side directly; the frontend-slice toggle
-/// teeth only proves `inv-blocks-match-ref/block_raw` catches a SUT-only divergence.
+/// The ONE PBT (`general_e2e_composed_pbt` / `WideE2E`) selects this invariant
+/// in the wide config (its caps are present — the cap-presence guard proves it)
+/// and the per-draw floor runs it every tick — but "runs" is satisfied even
+/// by a never-toggled tree (both projections read `None` ⇒ trivially coherent).
+/// This test is the guard that the check is *meaningful*: a real `ToggleState`
+/// over the composed `full_headless` CapMap must move BOTH the SQL
+/// `block_raw.properties` projection AND the Loro tag projection `None` →
+/// `TODO` in lockstep — exactly the coherence the invariant guards. It is the
+/// only test that asserts the **Loro** side (`loro_task_state_of`) moves with
+/// the SQL side directly; the frontend-slice toggle teeth only proves
+/// `inv-blocks-match-ref/block_raw` catches a SUT-only divergence.
 ///
-/// (The SQL↔Loro *divergence catch* is proven at the fixture level by the `tests`
-/// module above; this proves the real write path is non-vacuous.)
+/// (The SQL↔Loro *divergence catch* is proven at the fixture level by the
+/// `tests` module above; this proves the real write path is non-vacuous.)
 #[cfg(test)]
 mod real_sut_teeth {
     use std::collections::BTreeMap;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
+    use std::sync::Mutex;
 
     use holon_pbt_core::TransitionImpl;
-    use holon_pbt_core::capabilities::{SutLoroTaskState, SutSqlProjection};
+    use holon_pbt_core::capabilities::SutLoroTaskState;
+    use holon_pbt_core::capabilities::SutSqlProjection;
+    use holon_pbt_core::types::CycleTarget;
 
     use crate::pbt::composed::seed_primitives::fixed_ids;
-    use crate::pbt::composed::wide_e2e::{SETTLE, boot_and_seed_wide, wide_e2e_ref};
+    use crate::pbt::composed::wide_e2e::SETTLE;
+    use crate::pbt::composed::wide_e2e::boot_and_seed_wide;
+    use crate::pbt::composed::wide_e2e::wide_e2e_ref;
     use crate::pbt::op_write_cap::IdResolver;
     use crate::pbt::transitions::ToggleState;
-    use crate::pbt::transitions::toggle_state::CycleTarget;
 
-    /// A real `ToggleState(c1 → TODO)` over the composed `full_headless` CapMap must
-    /// land in BOTH stores. Before the toggle both read `None` (plain seed block);
-    /// after, both read `"TODO"`. Proves (a) the `SutMutate::toggle_state` write path
-    /// is real over composed components, and (b) the ONE PBT's required coherence check
+    /// A real `ToggleState(c1 → TODO)` over the composed `full_headless` CapMap
+    /// must land in BOTH stores. Before the toggle both read `None` (plain
+    /// seed block); after, both read `"TODO"`. Proves (a) the
+    /// `SutMutate::toggle_state` write path is real over composed
+    /// components, and (b) the ONE PBT's required coherence check
     /// is exercised non-trivially — guarding against a vacuous green.
     ///
-    /// Structured as a plain `#[test]` building its own multi-thread runtime: the ref is
-    /// computed **synchronously before** `block_on`, so `wide_e2e_ref()`'s internal
-    /// `full_headless_cap_set()` (which builds + drives its own runtime to extract the
-    /// cap set) runs outside any runtime and memoizes its `OnceLock` — avoiding a
-    /// "runtime within a runtime" panic that a `#[tokio::test]` would hit.
+    /// Structured as a plain `#[test]` building its own multi-thread runtime:
+    /// the ref is computed **synchronously before** `block_on`, so
+    /// `wide_e2e_ref()`'s internal `full_headless_cap_set()` (which builds
+    /// + drives its own runtime to extract the cap set) runs outside any
+    /// runtime and memoizes its `OnceLock` — avoiding a "runtime within a
+    /// runtime" panic that a `#[tokio::test]` would hit.
     #[test]
     fn toggle_state_moves_sql_and_loro_in_lockstep() {
         // Synchronously (outside any runtime): seed the oracle, which initializes the

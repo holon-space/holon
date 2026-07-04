@@ -483,9 +483,12 @@ See [Sync.md](Sync.md) for the current implementation surface this evolves.
 > `codev/specs/0007-architecture-improvement-plan.md` — the tracking spec for
 > the sole-writer / authority-first-delete / intent-vocabulary work — still has
 > those Phase 1 items open (spec header: Phase 0 in progress).
-> Cell backing types `LoroMetaCellBacking<T>`, `LoroTreeParentCellBacking`,
-> `LoroTreePositionCellBacking`, and `LwwScalarBacking<T>` are documented but
-> not implemented; `LoroTextCellBacking` **and** `LwwTextCellBacking` are. The
-> `write_field` carve-outs in `block_cell_registry.rs` handle routing correctly
-> without them.
+> Cell backing types `LoroMetaCellBacking<T>`
+> (`holon-loro/src/loro_meta_cell_backing.rs:95`) and `LwwScalarBacking<T>`
+> (`holon-core/src/cell.rs:301`) **are implemented and wired** via
+> `block_cell_registry.rs` (scalar resolution at :547, meta at :609), alongside
+> `LoroTextCellBacking` **and** `LwwTextCellBacking`. The tree-position backings
+> `LoroTreeParentCellBacking` / `LoroTreePositionCellBacking` remain
+> unimplemented; the `write_field` carve-outs in `block_cell_registry.rs` route
+> parent/position writes correctly without them.
 > See `devlog/2026-05-22-blocksync-p3-basediff-handoff.md`.

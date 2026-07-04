@@ -10,10 +10,10 @@
 //!
 //! Two directions, both polled (window focus is allowed to LAG one or two
 //! frames, never to settle elsewhere):
-//! - A window-focused editor whose entity differs from `focused_block`
-//!   (or with `focused_block == None`) → Fail (steal-back / zombie editor).
-//! - `focused_block == Some(id)` while id's `editable_text` is mounted in
-//!   the frame but does NOT hold window focus → Fail (lost handoff). When no
+//! - A window-focused editor whose entity differs from `focused_block` (or with
+//!   `focused_block == None`) → Fail (steal-back / zombie editor).
+//! - `focused_block == Some(id)` while id's `editable_text` is mounted in the
+//!   frame but does NOT hold window focus → Fail (lost handoff). When no
 //!   `editable_text` for id is in the frame at all the check skips — engine
 //!   focus on a row without an editor (e.g. sidebar navigation focus) is
 //!   legitimate.
@@ -24,10 +24,14 @@
 //!
 //! Status: functional.
 
-use holon_pbt_core::capabilities::{EngineFocus, EntityUri, SutDriver, SutLayout};
-use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
-
-use crate::pbt::retry::retry_until_ok;
+use holon_pbt_core::capabilities::EngineFocus;
+use holon_pbt_core::capabilities::EntityUri;
+use holon_pbt_core::capabilities::SutDriver;
+use holon_pbt_core::capabilities::SutLayout;
+use holon_pbt_core::invariant::Invariant;
+use holon_pbt_core::invariant::InvariantId;
+use holon_pbt_core::invariant::InvariantResult;
+use holon_pbt_core::retry::retry_until_ok;
 
 pub struct InvWindowFocusMatchesEngineFocus;
 
@@ -141,11 +145,10 @@ where
                 editor_mounted,
             }) => InvariantResult::Fail(format!(
                 "[{label}] window focus diverged from engine focus (settled, polled 1s): \
-                 engine.focused_block() = {engine:?}, window-focused editor(s) in the \
-                 committed frame = {window:?}, engine block's editable_text mounted: \
-                 {editor_mounted}. A stale window-focused editor consumes keystrokes \
-                 meant for the engine-focused block (steal-back / zombie-editor, \
-                 ADR 0010).",
+                 engine.focused_block() = {engine:?}, window-focused editor(s) in the committed \
+                 frame = {window:?}, engine block's editable_text mounted: {editor_mounted}. A \
+                 stale window-focused editor consumes keystrokes meant for the engine-focused \
+                 block (steal-back / zombie-editor, ADR 0010).",
                 label = Self::LABEL,
             )),
         }

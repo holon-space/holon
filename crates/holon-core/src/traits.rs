@@ -4,16 +4,24 @@
 //! These traits are designed to work with external datasources that provide
 //! both read and write capabilities.
 
-use async_trait::async_trait;
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 
+use async_trait::async_trait;
+use chrono::DateTime;
+use chrono::Utc;
+use holon_api::Change;
+use holon_api::EntityName;
+use holon_api::EntityUri;
+use holon_api::Operation;
+use holon_api::OperationDescriptor;
+use holon_api::StreamPosition;
+use holon_api::Tags;
+use holon_api::Value;
+use serde::Deserialize;
+use serde::Serialize;
+
 use crate::cell_registry::EntityCellRegistryExt;
-use holon_api::{
-    Change, EntityName, EntityUri, Operation, OperationDescriptor, StreamPosition, Tags, Value,
-};
 
 // Define Result type using Send + Sync for error
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -140,7 +148,8 @@ pub trait OriginTaggedWrites: OperationProvider {
         origin: EventOrigin,
     ) -> Result<OperationResult>;
 
-    /// Execute a batch of operations and tag the resulting events with `origin`.
+    /// Execute a batch of operations and tag the resulting events with
+    /// `origin`.
     async fn execute_batch_with_origin(
         &self,
         entity_name: &EntityName,
@@ -184,9 +193,11 @@ pub struct CompletionStateInfo {
 /// and if so, what operation would undo them.
 #[derive(Debug, Clone)]
 pub enum UndoAction {
-    /// The operation can be undone by executing the contained inverse operation.
+    /// The operation can be undone by executing the contained inverse
+    /// operation.
     Undo(Operation),
-    /// The operation cannot be undone (e.g., complex operations like split_block).
+    /// The operation cannot be undone (e.g., complex operations like
+    /// split_block).
     Irreversible,
 }
 
@@ -252,15 +263,16 @@ impl FieldDelta {
 ///
 /// - `changes`: Field-level changes for propagation to cache/sync systems
 /// - `undo`: Semantic undo operation (same code path as forward)
-/// - `follow_ups`: Operations to execute after this one completes (e.g., cursor update after split)
+/// - `follow_ups`: Operations to execute after this one completes (e.g., cursor
+///   update after split)
 ///
 /// @c4 code
 #[derive(Debug, Clone)]
 pub struct OperationResult {
     pub changes: Vec<FieldDelta>,
     pub undo: UndoAction,
-    /// Optional response payload from the operation (e.g. MCP tool call results).
-    /// Non-MCP providers return `None`.
+    /// Optional response payload from the operation (e.g. MCP tool call
+    /// results). Non-MCP providers return `None`.
     pub response: Option<Value>,
     /// Operations to execute after this one completes successfully.
     /// Used for side-effects like updating editor cursor after split_block.
@@ -323,7 +335,8 @@ impl From<UndoAction> for OperationResult {
 
 pub type CreateResult = (String, OperationResult);
 
-/// Error raised when a trait's dispatch helper does not recognize an operation name.
+/// Error raised when a trait's dispatch helper does not recognize an operation
+/// name.
 #[derive(Debug)]
 pub struct UnknownOperationError {
     trait_name: String,
@@ -404,10 +417,12 @@ where
     T: MaybeSendSync + 'static,
 {
     /// Set single field (returns changes and inverse operation for undo)
-    /// Note: affected_fields is determined dynamically based on the field parameter
+    /// Note: affected_fields is determined dynamically based on the field
+    /// parameter
     async fn set_field(&self, id: &str, field: &str, value: Value) -> Result<OperationResult>;
 
-    /// Create new entity (returns new ID, changes, and inverse operation for undo)
+    /// Create new entity (returns new ID, changes, and inverse operation for
+    /// undo)
     async fn create(
         &self,
         fields: crate::storage::types::StorageEntity,
@@ -436,7 +451,8 @@ pub trait OperationRegistry: MaybeSendSync {
     /// Returns all operations supported by this entity type
     fn all_operations() -> Vec<OperationDescriptor>;
 
-    /// Returns the entity name for this registry (e.g., "todoist_task", "block")
+    /// Returns the entity name for this registry (e.g., "todoist_task",
+    /// "block")
     fn entity_name() -> &'static str;
 
     /// Returns the short name for this entity type (e.g., "task", "project")
@@ -469,7 +485,8 @@ where
     }
 
     /// Get all descendants of a parent (recursive). Default uses iterative BFS
-    /// over `get_children()`. Implementations may override with a recursive CTE.
+    /// over `get_children()`. Implementations may override with a recursive
+    /// CTE.
     async fn get_descendants(&self, parent_id: &EntityUri) -> Result<Vec<T>>
     where
         T: BlockEntity,
@@ -582,13 +599,15 @@ where
     }
 }
 
-/// Mutating maintenance operations on block hierarchies (depth updates, rebalancing)
+/// Mutating maintenance operations on block hierarchies (depth updates,
+/// rebalancing)
 #[async_trait]
 pub trait BlockMaintenanceHelpers<T>: CrudOperations<T> + DataSource<T>
 where
     T: BlockEntity + MaybeSendSync + 'static,
 {
-    /// Recursively update depths of all descendants when a parent's depth changes
+    /// Recursively update depths of all descendants when a parent's depth
+    /// changes
     async fn update_descendant_depths(
         &self,
         parent_id: &EntityUri,
@@ -650,7 +669,8 @@ fn read_content_via_cells(
 /// drops as an unmigrated chord-op write.
 ///
 /// Returns `Ok(false)` when no cell route is available (synthetic
-/// stores, SqlOnly mode); caller invokes `BlockOperations::create`. // ALLOW(fallback): doc describes default path
+/// stores, SqlOnly mode); caller invokes `BlockOperations::create`. //
+/// ALLOW(fallback): doc describes default path
 async fn create_block_via_cells(
     registry: Option<&dyn crate::cell_registry::EntityCellRegistry>,
     parent_id: &EntityUri,
@@ -669,6 +689,7 @@ async fn create_block_via_cells(
         &std::collections::HashMap::<String, holon_api::Value>::new(),
         &Tags::default(),
         &[],
+        &[],
     )
     .await
     .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })
@@ -684,7 +705,8 @@ async fn create_block_via_cells(
 /// tree (the Full-slice SplitBlock→DeleteBackward divergence).
 ///
 /// Returns `Ok(false)` when no cell route is available (synthetic stores,
-/// SqlOnly mode); caller invokes `BlockOperations::delete`. // ALLOW(fallback): doc describes default path
+/// SqlOnly mode); caller invokes `BlockOperations::delete`. // ALLOW(fallback):
+/// doc describes default path
 async fn delete_block_via_cells(
     registry: Option<&dyn crate::cell_registry::EntityCellRegistry>,
     id: &EntityUri,
@@ -731,14 +753,15 @@ where
     }
 
     /// The order-key minter for this store, present **only** when this store is
-    /// the `Store` consolidator that owns sibling order (SqlOnly mode). Loro-mode
-    /// stores return `None` here by construction: in Loro mode the tree owns the
-    /// fractional index and `apply_create` derives it from
-    /// `position_after_block_id`, so no key is ever minted on that path. This is
-    /// the type-level successor to the former Loro-mode `new_child_anchor`
-    /// placeholder (Replication.md §5): `split_block`'s SqlOnly create branch
-    /// reaches minting through this seam, and the Loro path can't reach it at
-    /// all — the method doesn't exist on the Loro ordering seam.
+    /// the `Store` consolidator that owns sibling order (SqlOnly mode).
+    /// Loro-mode stores return `None` here by construction: in Loro mode
+    /// the tree owns the fractional index and `apply_create` derives it
+    /// from `position_after_block_id`, so no key is ever minted on that
+    /// path. This is the type-level successor to the former Loro-mode
+    /// `new_child_anchor` placeholder (Replication.md §5): `split_block`'s
+    /// SqlOnly create branch reaches minting through this seam, and the
+    /// Loro path can't reach it at all — the method doesn't exist on the
+    /// Loro ordering seam.
     fn order_key_minter(&self) -> Option<&dyn crate::block_ordering::OrderKeyMinting> {
         None
     }
@@ -804,20 +827,22 @@ where
     ) -> Result<Vec<FieldDelta>> {
         let ordering = self.ordering().ok_or_else(|| {
             anyhow::anyhow!(
-                "move_to_position requires a BlockOrdering — this BlockOperations \
-                 impl returned None from ordering()"
+                "move_to_position requires a BlockOrdering — this BlockOperations impl returned \
+                 None from ordering()"
             )
         })?;
         ordering.place(id, parent_id, after_block_id).await?;
         Ok(Vec::new())
     }
 
-    /// Move block to different position (reorder within same parent or different parent)
+    /// Move block to different position (reorder within same parent or
+    /// different parent)
     ///
     /// # Parameters
     /// * `id` - Block ID to move
     /// * `parent_id` - Target parent ID (must always have a parent)
-    /// * `after_block_id` - Optional anchor block (move after this block, or beginning if None)
+    /// * `after_block_id` - Optional anchor block (move after this block, or
+    ///   beginning if None)
     #[holon_macros::affects("parent_id", "depth", "sort_key")]
     #[holon_macros::triggered_by(availability_of = "tree_position", providing = ["parent_id", "after_block_id"])]
     #[holon_macros::triggered_by(availability_of = "selected_id", providing = ["parent_id"])]
@@ -852,8 +877,9 @@ where
         changes.extend(depth_result.changes);
 
         // Recursively update all descendants' depths by the same delta
-        // Note: update_descendant_depths calls set_field internally, so it will also return FieldDeltas
-        // For now, we'll skip collecting those to avoid complexity
+        // Note: update_descendant_depths calls set_field internally, so it will also
+        // return FieldDeltas For now, we'll skip collecting those to avoid
+        // complexity
         if depth_delta != 0 {
             self.update_descendant_depths(id, depth_delta).await?;
         }
@@ -866,7 +892,10 @@ where
         Ok(OperationResult::new(
             changes,
             __operations_block_operations::move_block_op(
-                "placeholder", // OperationDispatcher overwrites this with the resolved entity_name (see operation_dispatcher.rs:504). EntityName::new debug-asserts on empty/invalid scheme, so we use a valid placeholder.
+                "placeholder", /* OperationDispatcher overwrites this with the resolved
+                                * entity_name (see operation_dispatcher.rs:504). EntityName::new
+                                * debug-asserts on empty/invalid scheme, so we use a valid
+                                * placeholder. */
                 id,
                 &old_parent_uri,
                 old_pred_uri.as_ref(),
@@ -911,7 +940,10 @@ where
         Ok(OperationResult::new(
             move_result.changes,
             __operations_block_operations::move_block_op(
-                "placeholder", // OperationDispatcher overwrites this with the resolved entity_name (see operation_dispatcher.rs:504). EntityName::new debug-asserts on empty/invalid scheme, so we use a valid placeholder.
+                "placeholder", /* OperationDispatcher overwrites this with the resolved
+                                * entity_name (see operation_dispatcher.rs:504). EntityName::new
+                                * debug-asserts on empty/invalid scheme, so we use a valid
+                                * placeholder. */
                 id,
                 &old_parent_uri,
                 old_pred_uri.as_ref(),
@@ -927,7 +959,8 @@ where
     ///
     /// # Parameters
     /// * `id` - Block ID to split
-    /// * `position` - Character position to split at (as i64, will be converted to usize)
+    /// * `position` - Character position to split at (as i64, will be converted
+    ///   to usize)
     #[holon_macros::affects("content")]
     async fn split_block(&self, id: &EntityUri, position: i64) -> Result<OperationResult> {
         use uuid::Uuid;
@@ -1054,13 +1087,14 @@ where
                 .unwrap_or_else(EntityUri::no_parent);
             let minter = self.order_key_minter().ok_or_else(|| {
                 anyhow::anyhow!(
-                    "split_block's SqlOnly create path requires an OrderKeyMinting \
-                     seam (the Store consolidator's order owner) — this \
-                     BlockOperations impl returned None from order_key_minter()"
+                    "split_block's SqlOnly create path requires an OrderKeyMinting seam (the \
+                     Store consolidator's order owner) — this BlockOperations impl returned None \
+                     from order_key_minter()"
                 )
             })?;
             let new_sort_key = minter
-                .new_child_anchor(&parent_for_anchor, Some(id)) // ALLOW(order_minting): routed through the sibling-set owner's OrderKeyMinting seam via order_key_minter() above, not minted locally
+                .new_child_anchor(&parent_for_anchor, Some(id)) // ALLOW(order_minting): routed through the sibling-set owner's OrderKeyMinting seam
+                // via order_key_minter() above, not minted locally
                 .await?;
 
             let mut new_block_fields = crate::storage::types::StorageEntity::new();
@@ -1115,7 +1149,8 @@ where
         // follow-up): the frontend reads it off the result and moves the
         // in-memory focus authority in-process, so focus never round-trips
         // through the Turso `editor_cursor` cache (ADR 0010).
-        // TODO: Return inverse operation (combine set_field inverses + delete for new block)
+        // TODO: Return inverse operation (combine set_field inverses + delete for new
+        // block)
         Ok(OperationResult::irreversible(changes).with_response(focus_response(&new_block_id, 0)))
     }
 
@@ -1140,9 +1175,9 @@ where
     /// # Parameters
     /// * `id` - Block to join
     /// * `position` - Cursor position; non-zero positions are no-ops (returns
-    ///   `Ok` with no changes). Real frontends only dispatch this op when
-    ///   the cursor is at byte 0, but the SQL caller path may pass through
-    ///   stale positions, so we re-check here.
+    ///   `Ok` with no changes). Real frontends only dispatch this op when the
+    ///   cursor is at byte 0, but the SQL caller path may pass through stale
+    ///   positions, so we re-check here.
     #[holon_macros::affects("content", "parent_id", "sort_key")]
     async fn join_block(&self, id: &EntityUri, position: i64) -> Result<OperationResult> {
         if position != 0 {
@@ -1316,15 +1351,19 @@ where
             self.move_block(id, &parent_uri, None).await?
         };
 
-        // Return inverse (move down - restore original position) using macro-generated helper
-        // Use move_block_op to restore exact old position (move_up_op is relative, not absolute)
+        // Return inverse (move down - restore original position) using macro-generated
+        // helper Use move_block_op to restore exact old position (move_up_op is
+        // relative, not absolute)
         use crate::__operations_block_operations;
 
         let old_pred_uri = old_predecessor.as_ref().map(|p| p.id().clone());
         Ok(OperationResult::new(
             move_result.changes,
             __operations_block_operations::move_block_op(
-                "placeholder", // OperationDispatcher overwrites this with the resolved entity_name (see operation_dispatcher.rs:504). EntityName::new debug-asserts on empty/invalid scheme, so we use a valid placeholder.
+                "placeholder", /* OperationDispatcher overwrites this with the resolved
+                                * entity_name (see operation_dispatcher.rs:504). EntityName::new
+                                * debug-asserts on empty/invalid scheme, so we use a valid
+                                * placeholder. */
                 id,
                 &parent_uri,
                 old_pred_uri.as_ref(),
@@ -1332,10 +1371,12 @@ where
         ))
     }
 
-    /// Embed another entity inline by inserting a transclusion marker into the content.
+    /// Embed another entity inline by inserting a transclusion marker into the
+    /// content.
     ///
-    /// The `target_uri` is an EntityUri string (e.g. `block:some-id`, `todoist-task:123`).
-    /// Inserts `{{transclude:target_uri}}` at the end of the block's content.
+    /// The `target_uri` is an EntityUri string (e.g. `block:some-id`,
+    /// `todoist-task:123`). Inserts `{{transclude:target_uri}}` at the end
+    /// of the block's content.
     #[holon_macros::affects("content")]
     #[holon_macros::triggered_by(availability_of = "selected_id", providing = ["target_uri"])]
     async fn embed_entity(
@@ -1373,7 +1414,8 @@ where
         Ok(OperationResult::new(
             changes,
             __operations_crud_operations::set_field_op(
-                "placeholder", // Overwritten by OperationDispatcher post-execute (see operation_dispatcher.rs:504)
+                "placeholder", /* Overwritten by OperationDispatcher post-execute (see
+                                * operation_dispatcher.rs:504) */
                 id_str,
                 "content",
                 Value::String(old_content),
@@ -1407,14 +1449,18 @@ where
             .move_block(id, &parent_uri, Some(&next_sibling_uri))
             .await?;
 
-        // Return inverse (move up - restore original position) using macro-generated helper
+        // Return inverse (move up - restore original position) using macro-generated
+        // helper
         use crate::__operations_block_operations;
 
         let old_pred_uri = old_predecessor.as_ref().map(|p| p.id().clone());
         Ok(OperationResult::new(
             move_result.changes,
             __operations_block_operations::move_block_op(
-                "placeholder", // OperationDispatcher overwrites this with the resolved entity_name (see operation_dispatcher.rs:504). EntityName::new debug-asserts on empty/invalid scheme, so we use a valid placeholder.
+                "placeholder", /* OperationDispatcher overwrites this with the resolved
+                                * entity_name (see operation_dispatcher.rs:504). EntityName::new
+                                * debug-asserts on empty/invalid scheme, so we use a valid
+                                * placeholder. */
                 id,
                 &parent_uri,
                 old_pred_uri.as_ref(),
@@ -1425,8 +1471,8 @@ where
 
 /// Rename operations (for entities with a name field)
 ///
-/// This trait provides a rename operation for entities that have a name or title
-/// that can be changed.
+/// This trait provides a rename operation for entities that have a name or
+/// title that can be changed.
 #[holon_macros::operations_trait]
 #[async_trait]
 pub trait RenameOperations<T>: MaybeSendSync
@@ -1453,7 +1499,8 @@ where
     /// # Parameters
     /// * `id` - Entity ID to move
     /// * `parent_id` - Target parent ID
-    /// * `after_id` - Optional anchor entity (move after this entity, or beginning if None)
+    /// * `after_id` - Optional anchor entity (move after this entity, or
+    ///   beginning if None)
     #[holon_macros::affects("parent_id", "depth", "sort_key")]
     async fn move_entity(
         &self,
@@ -1541,7 +1588,8 @@ where
 /// Task management operations (for any task-like entity)
 ///
 /// This trait provides operations for managing task properties like completion,
-/// priority, and due dates. It requires that the entity type implements `TaskEntity`
+/// priority, and due dates. It requires that the entity type implements
+/// `TaskEntity`
 #[holon_macros::operations_trait]
 #[async_trait]
 pub trait TaskOperations<T>: MaybeSendSync
@@ -1556,8 +1604,10 @@ where
     /// Returns the valid states for this task type with progress information
     ///
     /// Examples:
-    /// - Todoist: `[{state: "active", progress: 0.0, is_done: false, is_active: true}, ...]`
-    /// - Org Mode: `[{state: "TODO", progress: 0.0, ...}, {state: "DOING", progress: 50.0, ...}, ...]`
+    /// - Todoist: `[{state: "active", progress: 0.0, is_done: false, is_active:
+    ///   true}, ...]`
+    /// - Org Mode: `[{state: "TODO", progress: 0.0, ...}, {state: "DOING",
+    ///   progress: 50.0, ...}, ...]`
     fn completion_states_with_progress(&self) -> Vec<CompletionStateInfo>;
 
     /// Set task state (e.g., "completed", "TODO", "DOING", "DONE", "WAITING")
@@ -1584,8 +1634,8 @@ where
     ) -> Result<OperationResult>;
 }
 
-// Types that need BlockDataSourceHelpers and BlockOperations must opt in explicitly.
-// Example:
+// Types that need BlockDataSourceHelpers and BlockOperations must opt in
+// explicitly. Example:
 //   impl BlockDataSourceHelpers<MyBlock> for MyDataSource {}
 //   impl BlockOperations<MyBlock> for MyDataSource {}
 
@@ -1727,7 +1777,8 @@ impl OperationRegistry for holon_api::block::Block {
 /// observe the results. They cannot modify or veto operations.
 ///
 /// # Entity Filter
-/// Observers specify which entities they're interested in via `entity_filter()`:
+/// Observers specify which entities they're interested in via
+/// `entity_filter()`:
 /// - Return `"*"` to observe all operations (e.g., operation log, audit)
 /// - Return a specific entity name to observe only that entity
 #[async_trait]
@@ -1742,22 +1793,24 @@ pub trait OperationObserver: Send + Sync {
     ///
     /// # Arguments
     /// * `operation` - The operation that was executed
-    /// * `undo_action` - The undo action returned by the operation (may be Irreversible)
+    /// * `undo_action` - The undo action returned by the operation (may be
+    ///   Irreversible)
     ///
     /// # Note
-    /// This is called only for successful operations. Failed operations are not observed.
-    /// Observers should not perform operations that could fail and block the main flow.
+    /// This is called only for successful operations. Failed operations are not
+    /// observed. Observers should not perform operations that could fail
+    /// and block the main flow.
     async fn on_operation_executed(&self, operation: &Operation, undo_action: &UndoAction);
 }
 
 /// Trait for persisting and loading sync tokens
 ///
-/// SyncableProviders use this trait to persist their sync tokens across app restarts.
-/// Implementations typically store tokens in a database or file system.
-/// Trait for storing sync tokens for external providers.
+/// SyncableProviders use this trait to persist their sync tokens across app
+/// restarts. Implementations typically store tokens in a database or file
+/// system. Trait for storing sync tokens for external providers.
 ///
-/// This trait is used internally for dependency injection and should not be exposed to FFI.
-/// flutter_rust_bridge:ignore
+/// This trait is used internally for dependency injection and should not be
+/// exposed to FFI. flutter_rust_bridge:ignore
 #[async_trait]
 pub trait SyncTokenStore: Send + Sync {
     /// Load sync token for a provider
@@ -1770,7 +1823,8 @@ pub trait SyncTokenStore: Send + Sync {
 
     /// Clear all sync tokens
     ///
-    /// Used for full sync operations where all providers need to start from the beginning.
+    /// Used for full sync operations where all providers need to start from the
+    /// beginning.
     async fn clear_all_tokens(&self) -> Result<()>;
 }
 
@@ -1802,10 +1856,12 @@ pub trait SyncableProvider: Send + Sync {
     /// - Return the new stream position
     ///
     /// # Arguments
-    /// * `position` - Current stream position (StreamPosition::Beginning for full sync, StreamPosition::Version(token) for incremental sync)
+    /// * `position` - Current stream position (StreamPosition::Beginning for
+    ///   full sync, StreamPosition::Version(token) for incremental sync)
     ///
     /// # Returns
-    /// The new stream position (typically StreamPosition::Version with new token, or StreamPosition::Beginning if no token)
+    /// The new stream position (typically StreamPosition::Version with new
+    /// token, or StreamPosition::Beginning if no token)
     async fn sync(&self, position: StreamPosition) -> Result<StreamPosition>;
 
     /// Sync pending changes after operation execution.
@@ -1863,15 +1919,17 @@ pub fn generate_sync_operation(provider_name: &str) -> OperationDescriptor {
 /// implement it without naming the backend.
 #[async_trait]
 pub trait MatviewHook: Send + Sync {
-    /// Called after a successful FDW prime query. `cache_table` is the primed table
-    /// (e.g. `"cc_message"`), `fdw_sql` is the executed query including WHERE clause.
+    /// Called after a successful FDW prime query. `cache_table` is the primed
+    /// table (e.g. `"cc_message"`), `fdw_sql` is the executed query
+    /// including WHERE clause.
     async fn on_fdw_primed(&self, cache_table: &str, fdw_sql: &str);
 }
 
 #[cfg(test)]
 mod trait_unit_tests {
-    use super::*;
     use holon_api::block::Block;
+
+    use super::*;
 
     #[test]
     fn event_origin_round_trips_through_str() {

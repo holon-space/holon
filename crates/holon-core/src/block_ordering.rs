@@ -12,8 +12,10 @@
 //! `holon-core::traits` — chord ops are purely positional.
 
 use async_trait::async_trait;
+use holon_api::BlockContent;
+use holon_api::EntityUri;
+use holon_api::Tags;
 use holon_api::capability::Consolidator;
-use holon_api::{BlockContent, EntityUri, Tags};
 
 use crate::traits::Result;
 
@@ -22,13 +24,13 @@ use crate::traits::Result;
 /// Implementations:
 /// - `LoroBlockOrdering` (in `holon`) — routes `place` through the cell
 ///   registry's `write_position`, which calls
-///   `LoroBackend::update_block_position` (tree.mov_after). Loro generates
-///   the resulting fractional index; new block sort_keys come back as
-///   placeholders that the outbound projector overwrites.
+///   `LoroBackend::update_block_position` (tree.mov_after). Loro generates the
+///   resulting fractional index; new block sort_keys come back as placeholders
+///   that the outbound projector overwrites.
 /// - `SqlBlockOrdering` (in `holon`) — runs `gen_key_between` against the
-///   neighbor SQL `block.sort_key` values and emits paired `set_field`
-///   writes via the underlying `OperationProvider`. The fractional-index
-///   string is what the SQL column persists.
+///   neighbor SQL `block.sort_key` values and emits paired `set_field` writes
+///   via the underlying `OperationProvider`. The fractional-index string is
+///   what the SQL column persists.
 #[async_trait]
 pub trait BlockOrdering: Send + Sync {
     /// Place `uri` under `parent_id` immediately after `after_id` (or
@@ -113,6 +115,7 @@ pub trait BlockOrdering: Send + Sync {
         _: &std::collections::HashMap<String, holon_api::Value>,
         _: &Tags,
         _: &[EntityUri],
+        _: &[EntityUri],
     ) -> Result<bool> {
         Ok(false)
     }
@@ -190,17 +193,6 @@ pub trait BlockOrdering: Send + Sync {
     /// assertions instead of computing order from a `Block`'s
     /// `sort_key` / `sequence` field — those are encoding-specific.
     async fn children(&self, parent_id: &EntityUri) -> Result<Vec<EntityUri>>;
-
-    /// Project the authoritative order key (Loro fractional index) to the
-    /// SQL `sort_key` sink for `ids`. A block created but never repositioned
-    /// emits no Loro mov delta, so the outbound projector never writes its fi
-    /// to SQL and it keeps the default `"A0"`, mis-sorting against moved
-    /// siblings (real fi). The org-scan reconciler calls this after its place
-    /// loop so freshly-created-but-unmoved blocks get a real `sort_key`.
-    /// Default + SqlOnly: no-op (SQL itself owns `sort_key` there).
-    async fn project_sort_keys(&self, _: &[EntityUri]) -> Result<()> {
-        Ok(())
-    }
 }
 
 /// Order-key minting — the store-owner's exclusive right to synthesize a
@@ -232,8 +224,9 @@ pub trait OrderKeyMinting: Send + Sync {
 
 #[cfg(test)]
 mod default_contract_tests {
-    use super::*;
     use std::sync::Mutex;
+
+    use super::*;
 
     /// Minimal ordering impl: records `place` calls, everything else is
     /// irrelevant to the default-method contracts under test.
@@ -336,6 +329,7 @@ mod default_contract_tests {
                     BlockContent::text("x"),
                     &std::collections::HashMap::new(),
                     &Tags::default(),
+                    &[],
                     &[],
                 )
                 .await

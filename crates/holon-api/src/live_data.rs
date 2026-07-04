@@ -4,16 +4,22 @@
 //! change events are broadcast natively as `MapDiff` values — no separate
 //! version channel needed.
 
-use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
-use crate::{Change, Value};
 use anyhow::Result;
-use futures_signals::signal_map::{MutableBTreeMap, MutableBTreeMapLockRef, MutableSignalMap};
+use futures_signals::signal_map::MutableBTreeMap;
+use futures_signals::signal_map::MutableBTreeMapLockRef;
+use futures_signals::signal_map::MutableSignalMap;
 use tokio::sync::Notify;
 
+use crate::Change;
 use crate::StorageEntity;
+use crate::Value;
 
 /// Pull `_rowid` (set by `process_cdc_event`) out of a row's data, if present.
 fn extract_rowid(data: &StorageEntity) -> Option<String> {
@@ -26,16 +32,17 @@ fn extract_rowid(data: &StorageEntity) -> Option<String> {
 
 /// A live, CDC-driven collection of items keyed by entity ID.
 ///
-/// `T` is the item type. Items are parsed from `StorageEntity` (HashMap<String, Value>)
-/// via the `parse_fn` provided at construction.
+/// `T` is the item type. Items are parsed from `StorageEntity` (HashMap<String,
+/// Value>) via the `parse_fn` provided at construction.
 /// CDC events (Created/Updated/Deleted) are applied incrementally.
 ///
-/// Change notifications are emitted reactively via `MutableBTreeMap`'s signal map.
-/// Consumers can subscribe via [`signal_map()`](Self::signal_map) for push-based
-/// cache invalidation.
+/// Change notifications are emitted reactively via `MutableBTreeMap`'s signal
+/// map. Consumers can subscribe via [`signal_map()`](Self::signal_map) for
+/// push-based cache invalidation.
 ///
-/// Both `id_fn` and `parse_fn` return `Result` — if they fail, it's a programming
-/// error (wrong table, schema mismatch) and should be loud, not silently swallowed.
+/// Both `id_fn` and `parse_fn` return `Result` — if they fail, it's a
+/// programming error (wrong table, schema mismatch) and should be loud, not
+/// silently swallowed.
 type IdFn = Box<dyn Fn(&StorageEntity) -> Result<String> + Send + Sync>;
 type ParseFn<T> = Box<dyn Fn(&StorageEntity) -> Result<T> + Send + Sync>;
 
@@ -237,8 +244,8 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
     /// followed by `MapDiff::Insert` / `MapDiff::Update` / `MapDiff::Remove`
     /// for each subsequent change.
     ///
-    /// Use [`SignalMapExt::for_each`] (or [`SignalMapExt::key_cloned`]) to react
-    /// to changes in a background task.
+    /// Use [`SignalMapExt::for_each`] (or [`SignalMapExt::key_cloned`]) to
+    /// react to changes in a background task.
     pub fn signal_map(&self) -> MutableSignalMap<String, Arc<T>> {
         self.items.signal_map_cloned()
     }
@@ -297,14 +304,16 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
         }
     }
 
-    /// Spawn a background task that listens to the CDC stream and applies changes.
+    /// Spawn a background task that listens to the CDC stream and applies
+    /// changes.
     ///
     /// Each batch's `metadata.seq` is recorded after `apply_changes` returns,
     /// so callers can `wait_for_seq` until the mirror has caught up to a
     /// specific CDC watermark.
     ///
-    /// `source_name` should identify the underlying table/matview (e.g. "block",
-    /// "focus_roots") so traces can tell mirrors apart when one stops draining.
+    /// `source_name` should identify the underlying table/matview (e.g.
+    /// "block", "focus_roots") so traces can tell mirrors apart when one
+    /// stops draining.
     pub fn subscribe<C, S>(self: &Arc<Self>, source_name: &'static str, mut stream: S)
     where
         C: Into<Change<StorageEntity>> + Send + 'static,
@@ -341,7 +350,41 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
                 let changes: Vec<Change<StorageEntity>> =
                     batch.inner.items.into_iter().map(Into::into).collect();
                 let change_count = changes.len();
+                // Entity ids this batch makes visible — feeds the e2e
+                // interaction-latency correlator AFTER apply below. Row ids
+                // plus `parent_id` of created/updated rows (a create/split op
+                // dispatched at a parent completes via its new child's row).
+                let touched_ids: Vec<String> = changes
+                    .iter()
+                    .flat_map(|c| {
+                        let row_fields = |data: &StorageEntity| {
+                            ["id", "parent_id"]
+                                .iter()
+                                .filter_map(|k| {
+                                    data.get(*k)
+                                        .and_then(|v| v.as_string())
+                                        .map(|s| s.to_string())
+                                })
+                                .collect::<Vec<_>>()
+                        };
+                        match c {
+                            Change::Created { data, .. } => row_fields(data),
+                            Change::Updated { id, data, .. } => {
+                                let mut ids = row_fields(data);
+                                ids.push(id.clone());
+                                ids
+                            }
+                            Change::Deleted { id, .. } => vec![id.clone()],
+                            Change::FieldsChanged { entity_id, .. } => vec![entity_id.clone()],
+                        }
+                    })
+                    .collect();
+                let t_rows = std::time::Instant::now();
                 live.apply_changes(changes);
+                crate::latency_e2e::rows_delivered(
+                    source_name,
+                    touched_ids.iter().map(String::as_str),
+                );
                 if seq > 0 {
                     live.last_consumed_seq.store(seq, Ordering::SeqCst);
                     live.seq_advanced.notify_waiters();
@@ -352,6 +395,21 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
                     changes = change_count,
                     "LiveData batch applied"
                 );
+                // Latency stage (projection->rows): a CDC batch from the matview
+                // lands and the reactive mirror applies it — the point at which a
+                // projected change becomes visible to the view model / widgets
+                // (final GPU paint excluded). Greppable via target="holon_latency".
+                if change_count > 0 {
+                    tracing::debug!(
+                        target: "holon_latency",
+                        stage = "rows",
+                        source = source_name,
+                        rows = change_count,
+                        seq,
+                        ms = t_rows.elapsed().as_millis() as u64,
+                        "holon_latency",
+                    );
+                }
             }
         });
     }
@@ -368,11 +426,14 @@ pub struct BlockFeed(pub Arc<LiveData<crate::block::Block>>);
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::task::{Context, Poll};
+    use std::task::Context;
+    use std::task::Poll;
 
+    use futures_signals::signal_map::MapDiff;
+    use futures_signals::signal_map::SignalMapExt;
+
+    use super::*;
     use crate::Value;
-    use futures_signals::signal_map::{MapDiff, SignalMapExt};
 
     fn make_row(id: &str, content: &str) -> StorageEntity {
         let mut row: StorageEntity = crate::StorageEntity::new();

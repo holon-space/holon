@@ -1,8 +1,9 @@
 //! Dependency Injection module for MCP server
 //!
 //! This module provides DI integration for embedding the MCP server within
-//! applications that use Ferrous DI. The MCP server shares the same BackendEngine
-//! instance as the host application, enabling shared undo/redo, CDC streams, and operations.
+//! applications that use Ferrous DI. The MCP server shares the same
+//! BackendEngine instance as the host application, enabling shared undo/redo,
+//! CDC streams, and operations.
 //!
 //! # Usage
 //!
@@ -23,15 +24,18 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use fluxdi::{Injector, Module, Provider, Shared};
+use fluxdi::Injector;
+use fluxdi::Module;
+use fluxdi::Provider;
+use fluxdi::Shared;
+use holon::api::backend_engine::BackendEngine;
+use holon_frontend::reactive::BuilderServices;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use holon::api::backend_engine::BackendEngine;
-use holon_frontend::reactive::BuilderServices;
-
-use crate::server::{DebugServices, HolonMcpServer};
+use crate::server::DebugServices;
+use crate::server::HolonMcpServer;
 
 /// Register `DebugServices` as a DI singleton.
 /// Call from the frontend's DI setup closure so both the MCP server
@@ -227,11 +231,12 @@ impl McpServerHandle {
 
 /// Run the MCP HTTP server
 ///
-/// This is the core server loop, extracted for reuse by both the standalone binary
-/// and the DI-managed server handle.
+/// This is the core server loop, extracted for reuse by both the standalone
+/// binary and the DI-managed server handle.
 ///
-/// When `HOLON_BROWSER_RELAY_URL` is set, tool calls are forwarded to the browser
-/// via the serve.mjs WebSocket hub instead of being handled by a local engine.
+/// When `HOLON_BROWSER_RELAY_URL` is set, tool calls are forwarded to the
+/// browser via the serve.mjs WebSocket hub instead of being handled by a local
+/// engine.
 pub async fn run_http_server(
     engine: Option<Arc<BackendEngine>>,
     debug: Arc<DebugServices>,
@@ -239,19 +244,19 @@ pub async fn run_http_server(
     bind_address: SocketAddr,
     cancellation_token: CancellationToken,
 ) -> anyhow::Result<()> {
-    use axum::{response::Html, routing::get, Router};
-    use rmcp::transport::{
-        streamable_http_server::{
-            session::local::LocalSessionManager, tower::StreamableHttpService,
-        },
-        StreamableHttpServerConfig,
-    };
+    use axum::Router;
+    use axum::response::Html;
+    use axum::routing::get;
+    use rmcp::transport::StreamableHttpServerConfig;
+    use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+    use rmcp::transport::streamable_http_server::tower::StreamableHttpService;
 
     let cancellation_token_for_service = cancellation_token.clone();
 
     // Check for browser relay mode.
     if let Ok(hub_url) = std::env::var("HOLON_BROWSER_RELAY_URL") {
-        use crate::browser_relay::{BrowserRelay, BrowserRelayServer};
+        use crate::browser_relay::BrowserRelay;
+        use crate::browser_relay::BrowserRelayServer;
 
         tracing::info!("[mcp] browser relay mode — hub: {}", hub_url);
         let relay = BrowserRelay::start(hub_url);
@@ -287,15 +292,30 @@ pub async fn run_http_server(
         return Ok(());
     }
 
+    // ONE shared, swappable backend cell across every streamable-http session:
+    // a per-case `reset_vault` rebind swaps its contents so all sessions — even
+    // ones opened before the reset — read the fresh engine (plan C2). Each
+    // session's server holds a CLONE of this same `Arc<RwLock<..>>`, so a swap
+    // through any server's `self.backend` is visible everywhere.
+    let backend_cell: crate::server::LiveMcpBackend =
+        Arc::new(std::sync::RwLock::new(crate::server::McpBackendCell {
+            engine,
+            builder_services,
+        }));
+
     // Create streamable HTTP service
     let mcp_service: StreamableHttpService<HolonMcpServer, LocalSessionManager> =
         StreamableHttpService::new(
-            move || {
-                Ok(HolonMcpServer::new(
-                    engine.clone(),
-                    debug.clone(),
-                    builder_services.clone(),
-                ))
+            {
+                let backend_cell = backend_cell.clone();
+                let debug = debug.clone();
+                move || {
+                    Ok(HolonMcpServer::with_backend_cell(
+                        backend_cell.clone(),
+                        None,
+                        debug.clone(),
+                    ))
+                }
             },
             LocalSessionManager::default().into(),
             StreamableHttpServerConfig {
@@ -401,7 +421,8 @@ impl Module for McpServerModule {
 /// Reads `MCP_SERVER_PORT` from env (default: `default_port`), registers the
 /// MCP server module in DI, resolves the handle, and spawns the server task.
 ///
-/// Replaces the ~15 lines of boilerplate previously duplicated in every frontend.
+/// Replaces the ~15 lines of boilerplate previously duplicated in every
+/// frontend.
 pub fn start_embedded_mcp_server(
     engine: Option<Arc<BackendEngine>>,
     builder_services: Option<Arc<dyn BuilderServices>>,
@@ -444,7 +465,8 @@ pub fn start_embedded_mcp_server_with_debug(
     });
 }
 
-/// Extension trait for registering MCP server services in a [`ServiceCollection`]
+/// Extension trait for registering MCP server services in a
+/// [`ServiceCollection`]
 ///
 /// This trait provides a convenient method to register the MCP server
 /// with a single call, taking just the port as a parameter.

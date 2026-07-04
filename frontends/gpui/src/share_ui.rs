@@ -2,16 +2,16 @@
 //!
 //! Three user-visible entry points:
 //! - **Share:** context menu on a block (wired in `lib.rs`) → "Share subtree"
-//!   calls `execute_operation("tree", "share_subtree", ...)` and opens
-//!   a modal with the returned ticket + a bearer-capability warning quoted
-//!   from `docs/Reference/SUBTREE_SHARING.md` + a reserved area for degraded events.
+//!   calls `execute_operation("tree", "share_subtree", ...)` and opens a modal
+//!   with the returned ticket + a bearer-capability warning quoted from
+//!   `docs/Reference/SUBTREE_SHARING.md` + a reserved area for degraded events.
 //! - **Accept:** title-bar button "🔗" opens a modal; the current flow uses
-//!   "Paste from clipboard + use focused block as parent" because wiring a
-//!   full in-modal text-editing form requires gpui_component::input focus
-//!   plumbing that's orthogonal to this pass.
+//!   "Paste from clipboard + use focused block as parent" because wiring a full
+//!   in-modal text-editing form requires gpui_component::input focus plumbing
+//!   that's orthogonal to this pass.
 //! - **Degraded signals:** a background task drains
-//!   `LoroShareBackend::degraded_bus()` and renders toasts / a red modal
-//!   for `SnapshotSaveFailed`, `SnapshotLoadFailed`, `RehydrationFailed`.
+//!   `LoroShareBackend::degraded_bus()` and renders toasts / a red modal for
+//!   `SnapshotSaveFailed`, `SnapshotLoadFailed`, `RehydrationFailed`.
 //!
 //! Bridge from the tokio broadcast into GPUI's reactive model:
 //! `rt_handle.spawn` runs the `recv().await` loop inside the tokio runtime
@@ -22,23 +22,40 @@
 
 use std::sync::Arc;
 
+use gpui::AnyElement;
+use gpui::AnyWindowHandle;
+use gpui::AsyncApp;
+use gpui::ClipboardItem;
+use gpui::Entity;
+use gpui::EventEmitter;
+use gpui::Hsla;
+use gpui::IntoElement;
+use gpui::MouseButton;
+use gpui::SharedString;
+use gpui::Stateful;
+use gpui::div;
 use gpui::prelude::*;
-use gpui::{
-    div, px, AnyElement, AnyWindowHandle, AsyncApp, ClipboardItem, Entity, EventEmitter, Hsla,
-    IntoElement, MouseButton, SharedString, Stateful,
-};
-use holon::sync::{ShareDegraded, ShareDegradedReason};
-use holon_api::{EntityName, Value};
-use holon_frontend::reactive::{BuilderServices, ReactiveEngine};
+use gpui::px;
+use holon::sync::ShareDegraded;
+use holon::sync::ShareDegradedReason;
+use holon_api::EntityName;
+use holon_api::Value;
 use holon_frontend::FrontendSession;
+use holon_frontend::reactive::BuilderServices;
+use holon_frontend::reactive::ReactiveEngine;
 
-/// Threat-model sentences from `docs/Reference/SUBTREE_SHARING.md` (lines 34–35).
-/// Quoted verbatim — users of the share UI must see the exact wording so
-/// there's no doubt this is a bearer capability.
-pub const BEARER_CAPABILITY_WARNING: &str = "A ticket is a bearer capability. Anyone who obtains it can read and write the shared subtree until the share is dropped. There is no authn/authz layer inside iroh — peer identity is the only gate, and the initial handshake does not verify \"who you are\" beyond a cryptographic node id.";
+/// Threat-model sentences from `docs/Reference/SUBTREE_SHARING.md` (lines
+/// 34–35). Quoted verbatim — users of the share UI must see the exact wording
+/// so there's no doubt this is a bearer capability.
+pub const BEARER_CAPABILITY_WARNING: &str =
+    "A ticket is a bearer capability. Anyone who obtains it can read and write the shared subtree \
+     until the share is dropped. There is no authn/authz layer inside iroh — peer identity is the \
+     only gate, and the initial handshake does not verify \"who you are\" beyond a cryptographic \
+     node id.";
 
 /// Parsed response from `share_subtree` — the op returns a JSON string in
-/// `OperationResult::response` with `ticket`, `shared_tree_id`, `mount_block_id`.
+/// `OperationResult::response` with `ticket`, `shared_tree_id`,
+/// `mount_block_id`.
 #[derive(Clone, Debug)]
 pub struct ShareTicket {
     pub ticket: String,
@@ -239,8 +256,8 @@ impl ShareTrigger {
             (t.0)(block_id, cx);
         } else {
             tracing::warn!(
-                "[share-ui] ShareTrigger global missing; share context menu is inert \
-                 (iroh-sync disabled?)"
+                "[share-ui] ShareTrigger global missing; share context menu is inert (iroh-sync \
+                 disabled?)"
             );
         }
     }
@@ -473,12 +490,19 @@ fn overlay_backdrop(id: &str) -> Stateful<gpui::Div> {
         .flex()
         .items_center()
         .justify_center()
+        // Inset so the capped-width panel keeps a margin on narrow (phone)
+        // viewports instead of running off both screen edges.
+        .p(px(16.0))
 }
 
 fn modal_panel(id: &str, width: f32, theme: OverlayTheme) -> Stateful<gpui::Div> {
     div()
         .id(SharedString::from(format!("{id}-panel")))
-        .w(px(width))
+        // `width` is a MAX, not a demand: on a phone (~402pt) the panel becomes
+        // a full-width card; on desktop it caps at `width`. Fixes the accept/
+        // share/quarantine/error dialogs overflowing the mobile viewport.
+        .w_full()
+        .max_w(px(width))
         .max_h(px(720.0))
         .overflow_y_scroll()
         .bg(theme.bg)
@@ -693,8 +717,8 @@ fn render_accept_modal(
                         ),
                 )
                 .child(div().text_size(px(13.0)).text_color(theme.muted_fg).child(
-                    "Click 'Paste & accept' to read a ticket from the clipboard and attach \
-                            the shared subtree under the currently focused block.",
+                    "Click 'Paste & accept' to read a ticket from the clipboard and attach the \
+                     shared subtree under the currently focused block.",
                 ))
                 .child(
                     div()
@@ -821,10 +845,9 @@ fn render_quarantine_modal(
                         .child("Share snapshot could not be restored"),
                 )
                 .child(div().text_size(px(13.0)).child(format!(
-                    "Share `{shared_tree_id}` could not be restored. \
-                        Your edits before the corruption are quarantined at \
-                        `{quarantine_path}`. \
-                        Re-accept the ticket from the other peer to restore."
+                    "Share `{shared_tree_id}` could not be restored. Your edits before the \
+                     corruption are quarantined at `{quarantine_path}`. Re-accept the ticket from \
+                     the other peer to restore."
                 )))
                 .child(
                     div()
@@ -1003,8 +1026,10 @@ fn render_error_modal(
 
 #[cfg(test)]
 mod tests {
+    use holon::sync::ShareDegraded;
+    use holon::sync::ShareDegradedReason;
+
     use super::*;
-    use holon::sync::{ShareDegraded, ShareDegradedReason};
 
     #[test]
     fn apply_degraded_routes_save_failed_to_toast() {

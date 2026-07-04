@@ -1,49 +1,98 @@
 //! The SUT component of the frontend slice: a [`CapProvider`] wrapping a
 //! **real** headless frontend stack — the production `FrontendSession` +
-//! `ReactiveEngine` over a Turso `BackendEngine`, built through the exact DI path
-//! the GPUI/CLI frontends use ([`holon_app::new_from_config_with_di`]) — but
-//! **windowless**: no GPUI, no geometry, no display link. This is the
+//! `ReactiveEngine` over a Turso `BackendEngine`, built through the exact DI
+//! path the GPUI/CLI frontends use ([`holon_app::new_from_config_with_di`]) —
+//! but **windowless**: no GPUI, no geometry, no display link. This is the
 //! ViewModel/Renderer slice of the future `E2ESut` replacement.
 //!
 //! It provides [`SutRenderer`] over the same headless interpret pipeline
 //! `E2ESut` uses for its render invariants: `ReactiveEngine::ensure_watching` →
-//! `ReactiveRenderedRows::snapshot` → `holon_frontend::interpret_pure` against a
-//! `HeadlessBuilderServices`, then the shared `view_model_to_snapshot`. So the
-//! catalog's renderer invariants run over the **real** CDC→watch→render path,
-//! not a re-implementation.
+//! `ReactiveRenderedRows::snapshot` → `holon_frontend::interpret_pure` against
+//! a `HeadlessBuilderServices`, then the shared `view_model_to_snapshot`. So
+//! the catalog's renderer invariants run over the **real** CDC→watch→render
+//! path, not a re-implementation.
 //!
 //! It also provides [`SutBackend`] over `block_raw` (so the block-tree catalog
 //! runs over this realization too, §6) and hosts the sync owned-return
 //! [`RefViewSelection`] cap (folded in here so it is never dead code, §F4).
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use holon::api::BackendEngine;
-use holon_api::{Block, EntityUri, QueryLanguage};
+use holon_api::Block;
+use holon_api::EntityUri;
+use holon_api::QueryLanguage;
 use holon_app::HeadlessBuilderServices;
-use holon_frontend::reactive::{BuilderServices, ReactiveEngine, ReactiveRenderedRows, table_expr};
-use holon_frontend::{FrontendSession, ReactiveEngineDriver, UserDriver};
-use holon_pbt_core::capabilities::{
-    CapRegion, SutBackend, SutBlockTreeWrite, SutEditorMirrorRead, SutEditorMirrorWrite,
-    SutErrorLog, SutFocus, SutFocusWrite, SutHistoryWrite, SutMcpEmit, SutNavHistoryDrive,
-    SutNavHistoryWrite, SutOrgRead, SutOrgRender, SutQueryResults, SutRenderer, SutSqlProjection,
-    SutViewControl, SutViewSelection, SutWatch, SutWatchRegister, WatchRow, WidgetSnapshot,
-};
-use holon_pbt_core::composition::{CapMap, CapProvider};
+use holon_frontend::FrontendSession;
+use holon_frontend::ReactiveEngineDriver;
+use holon_frontend::UserDriver;
+use holon_frontend::reactive::BuilderServices;
+use holon_frontend::reactive::ReactiveEngine;
+use holon_frontend::reactive::ReactiveRenderedRows;
+use holon_frontend::reactive::table_expr;
+use holon_pbt_core::capabilities::CapRegion;
+use holon_pbt_core::capabilities::SutAdviceMatview;
+use holon_pbt_core::capabilities::SutAppLifecycle;
+use holon_pbt_core::capabilities::SutBackend;
+use holon_pbt_core::capabilities::SutBlockCreate;
+use holon_pbt_core::capabilities::SutBlockTreeWrite;
+use holon_pbt_core::capabilities::SutEditorMirrorRead;
+use holon_pbt_core::capabilities::SutEditorMirrorWrite;
+use holon_pbt_core::capabilities::SutErrorLog;
+use holon_pbt_core::capabilities::SutFocus;
+use holon_pbt_core::capabilities::SutFocusWrite;
+use holon_pbt_core::capabilities::SutHistoryWrite;
+use holon_pbt_core::capabilities::SutMcpEmit;
+use holon_pbt_core::capabilities::SutMutate;
+use holon_pbt_core::capabilities::SutNavHistoryDrive;
+use holon_pbt_core::capabilities::SutNavHistoryWrite;
+use holon_pbt_core::capabilities::SutOrgRead;
+use holon_pbt_core::capabilities::SutOrgRender;
+use holon_pbt_core::capabilities::SutQueryResults;
+use holon_pbt_core::capabilities::SutRenderer;
+use holon_pbt_core::capabilities::SutSeamMutate;
+use holon_pbt_core::capabilities::SutSqlProjection;
+use holon_pbt_core::capabilities::SutViewControl;
+use holon_pbt_core::capabilities::SutViewSelection;
+use holon_pbt_core::capabilities::SutWatch;
+use holon_pbt_core::capabilities::SutWatchRegister;
+use holon_pbt_core::capabilities::WatchRow;
+use holon_pbt_core::capabilities::WidgetSnapshot;
+use holon_pbt_core::composition::CapMap;
+use holon_pbt_core::composition::CapProvider;
+use holon_pbt_core::types::CycleTarget;
+use holon_pbt_core::types::Mutation;
+use holon_pbt_core::types::MutationEvent;
 use tempfile::TempDir;
 
-use crate::pbt::local_caps::{SutAppLifecycle, SutMutate, SutSeamMutate};
 use crate::pbt::query::TestQuery;
-use crate::pbt::transitions::toggle_state::{CycleTarget, cycle_click_count};
-use crate::pbt::types::{Mutation, MutationEvent};
+use crate::pbt::sut_row_parsing::BLOCK_MATVIEW_SNAPSHOT_SQL;
+use crate::pbt::sut_row_parsing::BLOCK_RAW_SNAPSHOT_SQL;
+use crate::pbt::sut_row_parsing::parse_block_rows;
+use crate::pbt::transitions::toggle_state::cycle_click_count;
+use crate::pbt::types::MutationApply;
+use crate::pbt::vm_snapshot::view_model_to_snapshot;
 
-use crate::pbt::sut_capabilities::view_model_to_snapshot;
-use crate::pbt::sut_row_parsing::{
-    BLOCK_MATVIEW_SNAPSHOT_SQL, BLOCK_RAW_SNAPSHOT_SQL, parse_block_rows,
-};
+/// Raise a fixed test deadline to the scale-soak settle budget
+/// (`HOLON_SOAK_SETTLE_MS`) when the soak is on. The frontend component's
+/// settle/bind/postcondition deadlines (3-10s) are tuned for the keystone's
+/// 3-block doc; at a 5-10k-block soak vault the sidebar/CDC streams
+/// legitimately take longer, and a too-small deadline turns honest lag into a
+/// false fail-loud. No-op (the fixed default) when the env var is unset.
+fn soak_deadline(default: Duration) -> Duration {
+    match std::env::var("HOLON_SOAK_SETTLE_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        Some(ms) => default.max(Duration::from_millis(ms)),
+        None => default,
+    }
+}
 
 /// A composition component wrapping a real headless frontend stack. Owns the
 /// `TempDir`, `FrontendSession`, and `ReactiveEngine` so background tasks and
@@ -53,57 +102,66 @@ pub struct HeadlessFrontendComponent {
     reactive: Arc<ReactiveEngine>,
     /// The production headless `UserDriver` over `reactive` — the SAME
     /// `ReactiveEngineDriver` the GPUI/TUI/CLI frontends install. Hosts the
-    /// production `HeadlessEditorMirror`, so `apply_focus_editable_text` (open an
-    /// editor = `click_entity`) and the keystroke-driven `SutEditorMirrorWrite`
-    /// caps (`apply_type_chars`/`apply_delete_backward`/`apply_move_cursor` →
-    /// `send_raw_keystroke`) drive the EXACT production headless editor pipeline —
+    /// production `HeadlessEditorMirror`, so `apply_focus_editable_text` (open
+    /// an editor = `click_entity`) and the keystroke-driven
+    /// `SutEditorMirrorWrite` caps (`apply_type_chars`/
+    /// `apply_delete_backward`/`apply_move_cursor` → `send_raw_keystroke`)
+    /// drive the EXACT production headless editor pipeline —
     /// no `InMemEditorComponent` stand-in, no GPUI window/geometry. Caret reads
-    /// (`SutEditorMirrorRead::editor_caret_byte`) come from this driver's mirror.
+    /// (`SutEditorMirrorRead::editor_caret_byte`) come from this driver's
+    /// mirror.
     driver: Arc<ReactiveEngineDriver>,
     /// The production `FrontendSession` — drives navigation through the same
     /// `execute_operation("navigation", "focus", …)` op path the GPUI/CLI
-    /// frontends use (`SutFocusWrite`). Retained (no longer `_`-prefixed) so the
-    /// focus write cap can dispatch through it.
+    /// frontends use (`SutFocusWrite`). Retained (no longer `_`-prefixed) so
+    /// the focus write cap can dispatch through it.
     session: Arc<FrontendSession>,
     _temp: TempDir,
     /// `query_id → query:<hash>` registry-key mapping for the watches this
     /// component has registered (E1: `SutWatch` over the PRODUCTION reactive
     /// watch surface). Production keys query watches by content hash, so the
-    /// component tracks the test's `query_id` against the engine key it got back
-    /// from [`ReactiveEngine::watch_query_live`] — the only bookkeeping needed.
-    watches: Mutex<Vec<(String, EntityUri)>>,
-    /// The in-memory org FS, its root, and the tracked org file paths — retained
-    /// so the component can provide `SutOrgRead` by parsing the on-disk org files
-    /// back into blocks (E1: org block-equivalence over the PRODUCTION
-    /// `holon_orgmode::parser::parse_org_file`, no `FileSyncController` needed).
+    /// component tracks the test's `query_id` against the engine key it got
+    /// back from [`ReactiveEngine::watch_query_live`], plus the
+    /// `WatchGuard` that keeps the query watcher alive (dropping the entry
+    /// releases it).
+    watches: Mutex<Vec<(String, EntityUri, holon_frontend::WatchGuard)>>,
+    /// The in-memory org FS, its root, and the tracked org file paths —
+    /// retained so the component can provide `SutOrgRead` by parsing the
+    /// on-disk org files back into blocks (E1: org block-equivalence over
+    /// the PRODUCTION `holon_orgmode::parser::parse_org_file`, no
+    /// `FileSyncController` needed).
     org_fs: Arc<holon_filesystem::InMemoryFileSystem>,
     org_root: PathBuf,
     org_paths: Vec<PathBuf>,
     /// `(resolved doc-block id, file path)` per tracked org file, cached from a
-    /// clean boot parse — the disk-independent doc mapping `SutOrgRender` renders by.
-    /// Tracked user-doc org files (doc page id → path). Interior-mutable: seeded at
-    /// boot AND appended by `create_document` so a mid-run `CreateDocument` doc becomes a
-    /// valid target for `BulkExternalAdd`/External `ApplyMutation` (which look up the file).
+    /// clean boot parse — the disk-independent doc mapping `SutOrgRender`
+    /// renders by. Tracked user-doc org files (doc page id → path).
+    /// Interior-mutable: seeded at boot AND appended by `create_document`
+    /// so a mid-run `CreateDocument` doc becomes a valid target for
+    /// `BulkExternalAdd`/External `ApplyMutation` (which look up the file).
     documents: Mutex<Vec<(EntityUri, PathBuf)>>,
     /// The captured DI injector — `SutOrgRender` resolves the
-    /// `QueryableCache<Block>` from it to build the production `CacheBlockReader`
-    /// (the doc-scoped recursive CTE ordered by `sort_key, id`, so descendants
-    /// render in the exact order the `FileSyncController` writes them).
+    /// `QueryableCache<Block>` from it to build the production
+    /// `CacheBlockReader` (the doc-scoped recursive CTE ordered by
+    /// `sort_key, id`, so descendants render in the exact order the
+    /// `FileSyncController` writes them).
     injector: fluxdi::Injector,
     /// The active view/mode name (`SutViewControl::switch_view` writes it,
-    /// `SutViewSelection::current_view` reads it). Honest tracked state replacing the
-    /// former hardcoded `"all"` stub — a faithful port of `TestEnvironment`'s
-    /// `current_view` (default `"all"`). Drives the `SwitchView` PBT transition's
-    /// effect so the view-selection oracle observes it on the composed path.
+    /// `SutViewSelection::current_view` reads it). Honest tracked state
+    /// replacing the former hardcoded `"all"` stub — a faithful port of
+    /// `TestEnvironment`'s `current_view` (default `"all"`). Drives the
+    /// `SwitchView` PBT transition's effect so the view-selection oracle
+    /// observes it on the composed path.
     current_view: Mutex<String>,
     /// Shared oracle-synthetic → SUT-real id map (the same [`IdResolver`] the
-    /// composed [`OpDispatchWriter`] accumulates split reconciliations into). Set by
-    /// the composed builder so the id-taking nav/focus caps
-    /// (`pin_block`/`apply_navigate_focus`/`apply_focus_editable_text`) translate an
-    /// oracle id (e.g. a synthetic `block::split-N` the generator drew from the
-    /// oracle's descendants) to the real minted id before dispatching — exactly as the
-    /// block-tree writer already does. Unset (`OnceLock` empty) ⇒ identity resolution
-    /// (the fixed-id slices, where oracle id == store id).
+    /// composed [`OpDispatchWriter`] accumulates split reconciliations into).
+    /// Set by the composed builder so the id-taking nav/focus caps
+    /// (`pin_block`/`apply_navigate_focus`/`apply_focus_editable_text`)
+    /// translate an oracle id (e.g. a synthetic `block::split-N` the
+    /// generator drew from the oracle's descendants) to the real minted id
+    /// before dispatching — exactly as the block-tree writer already does.
+    /// Unset (`OnceLock` empty) ⇒ identity resolution (the fixed-id slices,
+    /// where oracle id == store id).
     resolver: std::sync::OnceLock<crate::pbt::op_write_cap::IdResolver>,
 }
 
@@ -119,17 +177,19 @@ impl HeadlessFrontendComponent {
 
     /// Like [`Self::new`] but with the Loro CRDT layer ENABLED — the production
     /// bootstrap then registers `LoroModule` (the `BlockCellRegistry` backing
-    /// `MutableText`) and ingests the org tree through Loro storage, so the editor
-    /// caps (`SutEditorMirrorWrite`) can resolve a block's `content_raw` cell and
-    /// type into it. Required for any config that drives `TypeChars`/`DeleteBackward`
-    /// (the editor primitives are no-ops without a `MutableText`, exactly why
+    /// `MutableText`) and ingests the org tree through Loro storage, so the
+    /// editor caps (`SutEditorMirrorWrite`) can resolve a block's
+    /// `content_raw` cell and type into it. Required for any config that
+    /// drives `TypeChars`/`DeleteBackward` (the editor primitives are
+    /// no-ops without a `MutableText`, exactly why
     /// `general_e2e_pbt_sql_only` can't run them).
     pub async fn new_with_loro(
         org_files: &[(&str, &str)],
         settle: Duration,
         loro_enabled: bool,
     ) -> Self {
-        use holon_frontend::{HolonConfig, SessionConfig};
+        use holon_frontend::HolonConfig;
+        use holon_frontend::SessionConfig;
 
         let temp = TempDir::new().expect("temp dir");
         let org_root = std::fs::canonicalize(temp.path()).expect("canonicalize temp dir");
@@ -145,7 +205,16 @@ impl HeadlessFrontendComponent {
             holon_filesystem::FileSystem::write(org_fs.as_ref(), &file_path, content.as_bytes())
                 .await
                 .expect("write seed org file");
-            org_paths.push(file_path);
+            // Scale-soak vault docs (`soak-*.org`) are background LOAD: written to disk
+            // (so the session's file-sync ingests them into the store — the whole point)
+            // but NOT tracked in `org_paths`. Tracking them would drag thousands of
+            // oracle-unknown blocks into the org readers (`SutOrgRead` /
+            // `SutOrgRender` / the external-mutation doc rewriter) and false-RED
+            // `inv-blocks-match-ref/org`. The org invariants keep the keystone-sized
+            // comparison surface; the soak load is exercised via store/CDC/Loro.
+            if !filename.starts_with("soak-") {
+                org_paths.push(file_path);
+            }
         }
 
         let holon_config = HolonConfig {
@@ -174,20 +243,14 @@ impl HeadlessFrontendComponent {
             config_dir,
             std::collections::HashSet::new(),
             move |injector| {
-                use holon_frontend::reactive::{BuilderServicesSlot, RenderInterpreterInjectorExt};
-                crate::test_environment::override_org_fs_bindings(injector, &org_fs_for_di);
-                let slot = injector.resolve::<BuilderServicesSlot>();
-                injector.set_render_interpreter(holon_frontend::reactive::make_interpret_fn(
-                    slot.0.clone(),
-                ));
+                crate::test_environment::install_headless_render_interpreter(
+                    injector,
+                    &org_fs_for_di,
+                );
                 Ok(())
             },
             move |injector| {
-                use holon_frontend::reactive::{BuilderServicesSlot, ReactiveEngine};
-                let engine = injector.resolve::<ReactiveEngine>();
-                let slot = injector.resolve::<BuilderServicesSlot>();
-                let services: Arc<dyn BuilderServices> = engine.clone();
-                slot.0.set(services).ok(); // ALLOW(ok): OnceLock set — idempotent
+                let engine = crate::test_environment::publish_reactive_builder_services(injector);
                 injector_slot_c.set(injector.clone()).ok(); // ALLOW(ok): OnceLock set
                 engine
             },
@@ -251,7 +314,11 @@ impl HeadlessFrontendComponent {
                 .ok() // ALLOW(ok): optional DI service — absent when Loro is off
                 .map(|s| (*s).clone());
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            crate::pbt::convergence::converge_signals(
+            // Boot settle: tolerate non-convergence (returns bool) — the sync
+            // controller / idle signal resolve on a spawned post_ready_work task,
+            // so a not-yet-wired signal at boot is expected, not a race. The
+            // per-transition composed settle is the one that fails loud.
+            let _boot_converged = crate::pbt::convergence::converge_signals(
                 Some(&engine),
                 sync,
                 store,
@@ -305,51 +372,58 @@ impl HeadlessFrontendComponent {
         }
     }
 
-    /// The production `BackendEngine` backing this session — shared (`Arc`) so a
-    /// composed structural SUT (`frontend_slice::structural_pbt`) can build the
-    /// resolver-sharing [`OpDispatchWriter`] over it and seed the working tree via
-    /// the production create op (`crate::pbt::sql_slice::SqlProjectionComponent`).
+    /// The production `BackendEngine` backing this session — shared (`Arc`) so
+    /// a composed structural SUT (`frontend_slice::structural_pbt`) can
+    /// build the resolver-sharing [`OpDispatchWriter`] over it and seed the
+    /// working tree via the production create op
+    /// (`crate::pbt::sql_slice::SqlProjectionComponent`).
     pub(crate) fn engine(&self) -> Arc<BackendEngine> {
         self.engine.clone()
     }
 
-    /// The production windowless `FrontendSession` this component booted. Handed to a
-    /// gpui window (`launch_holon_window_rebindable`) so the window RENDERS the same
-    /// reactive tree the composed backend/storage caps read — the windowed repoint
-    /// reuses this headless boot and attaches the window as a pure renderer (§ Round 5).
+    /// The production windowless `FrontendSession` this component booted.
+    /// Handed to a gpui window (`launch_holon_window_rebindable`) so the
+    /// window RENDERS the same reactive tree the composed backend/storage
+    /// caps read — the windowed repoint reuses this headless boot and
+    /// attaches the window as a pure renderer (§ Round 5).
     pub(crate) fn session(&self) -> Arc<FrontendSession> {
         self.session.clone()
     }
 
-    /// The production `ReactiveEngine` (the `BuilderServices` host). The wide PBT's
-    /// resolver-sharing [`OpDispatchWriter`] uses it as a focus sink so `split_block`/
-    /// `join_block` dispatch through the frontend's `dispatch_intent_sync` and the new/
-    /// merged block becomes the focused block (the frontend split focus-handoff).
+    /// The production `ReactiveEngine` (the `BuilderServices` host). The wide
+    /// PBT's resolver-sharing [`OpDispatchWriter`] uses it as a focus sink
+    /// so `split_block`/ `join_block` dispatch through the frontend's
+    /// `dispatch_intent_sync` and the new/ merged block becomes the focused
+    /// block (the frontend split focus-handoff).
     pub(crate) fn reactive(&self) -> Arc<ReactiveEngine> {
         self.reactive.clone()
     }
 
-    /// The production headless [`UserDriver`] (`ReactiveEngineDriver`) — the SAME
-    /// instance the editor/focus caps drive through, so it hosts the one live
-    /// `HeadlessEditorMirror`. Handed to the headless driver-backed input component
-    /// (`DriverInputComponent::with_input_headless`) so the composed `CapMap`'s gesture
-    /// caps (`SutBlockInteract`/`SutArrowNavigate`/`SutDriver`) drive the UI-adjacent
-    /// logic layer over ONE driver (the VM rung, §8.11). MUST be this instance, not a
-    /// fresh `ReactiveEngineDriver::new` — a second one would carry a separate editor
-    /// mirror and desync caret/text from the editor-write caps.
+    /// The production headless [`UserDriver`] (`ReactiveEngineDriver`) — the
+    /// SAME instance the editor/focus caps drive through, so it hosts the
+    /// one live `HeadlessEditorMirror`. Handed to the headless
+    /// driver-backed input component
+    /// (`DriverInputComponent::with_input_headless`) so the composed `CapMap`'s
+    /// gesture caps (`SutBlockInteract`/`SutArrowNavigate`/`SutDriver`)
+    /// drive the UI-adjacent logic layer over ONE driver (the VM rung,
+    /// §8.11). MUST be this instance, not a
+    /// fresh `ReactiveEngineDriver::new` — a second one would carry a separate
+    /// editor mirror and desync caret/text from the editor-write caps.
     pub(crate) fn driver(&self) -> Arc<dyn UserDriver> {
         self.driver.clone()
     }
 
-    /// Build a `KeystrokeBlockTreeWriter` backed by `driver` (§8.12 C-3 mechanism 1):
-    /// the SAME production keystroke sequences the base install uses, but over the given
-    /// driver — so the windowed overlay can rebind `SutBlockTreeWrite` onto the window's
-    /// `GpuiUserDriver`/`SimUserDriver`. Reuses the component's own `reactive` (live
-    /// editor content reads + the chord-binding registry) and the shared `resolver`
-    /// (oracle→minted id remap). The whole structural family — including `move_up`/
-    /// `move_down` (C-3 mechanism 3, chord-resolved via `send_key_chord`) — now rides
-    /// `driver`; nothing is left on raw op dispatch. Fail-loud if the resolver was never
-    /// set (only the composed builder wires it; a caller without it drove nothing).
+    /// Build a `KeystrokeBlockTreeWriter` backed by `driver` (§8.12 C-3
+    /// mechanism 1): the SAME production keystroke sequences the base
+    /// install uses, but over the given driver — so the windowed overlay
+    /// can rebind `SutBlockTreeWrite` onto the window's `GpuiUserDriver`/
+    /// `SimUserDriver`. Reuses the component's own `reactive` (live
+    /// editor content reads + the chord-binding registry) and the shared
+    /// `resolver` (oracle→minted id remap). The whole structural family —
+    /// including `move_up`/ `move_down` (C-3 mechanism 3, chord-resolved
+    /// via `send_key_chord`) — now rides `driver`; nothing is left on raw
+    /// op dispatch. Fail-loud if the resolver was never set (only the
+    /// composed builder wires it; a caller without it drove nothing).
     pub(crate) fn keystroke_writer_with(
         &self,
         driver: Arc<dyn UserDriver>,
@@ -363,14 +437,16 @@ impl HeadlessFrontendComponent {
         KeystrokeBlockTreeWriter::new(driver, self.reactive.clone(), resolver)
     }
 
-    /// The frontend's `LoroDocumentStore` — the authority store the production op
-    /// pipeline writes (`LoroBlockOperations`) and `block_raw` projects from. `None`
-    /// when Loro is disabled on this build (`new_with_loro(.., false)` → no
-    /// `LoroModule` registered). The composed builder's Loro arm reads its
-    /// `SutLoroTaskState`/`SutLoroLog` caps over THIS store's global doc (not a
-    /// separate one) so a write through the frontend is visible to the Loro read
-    /// caps — the read-doc unification (task #4). The clone shares the underlying
-    /// `Arc<RwLock<Option<Arc<LoroDocument>>>>`, so it observes the SAME live doc.
+    /// The frontend's `LoroDocumentStore` — the authority store the production
+    /// op pipeline writes (`LoroBlockOperations`) and `block_raw` projects
+    /// from. `None` when Loro is disabled on this build (`new_with_loro(..,
+    /// false)` → no `LoroModule` registered). The composed builder's Loro
+    /// arm reads its `SutLoroTaskState`/`SutLoroLog` caps over THIS store's
+    /// global doc (not a separate one) so a write through the frontend is
+    /// visible to the Loro read caps — the read-doc unification (task #4).
+    /// The clone shares the underlying
+    /// `Arc<RwLock<Option<Arc<LoroDocument>>>>`, so it observes the SAME live
+    /// doc.
     pub(crate) fn loro_doc_store(&self) -> Option<holon::sync::LoroDocumentStore> {
         self.injector
             .try_resolve::<holon::sync::LoroDocumentStore>()
@@ -380,39 +456,43 @@ impl HeadlessFrontendComponent {
 
     /// The frontend session's `LoroSyncController` handle — the controller that
     /// watches the authority doc (`subscribe_root`) and projects imported peer
-    /// deltas into the Turso `block_raw` the block invariants read. The composed
-    /// builder's Loro arm hands this to `LoroSut` in full mode so a `MergeFromPeer`
-    /// can `wait_for_quiescence` on it before the merged block is read back (the
-    /// projection is async — `loro_sync_controller.rs` runs it on a spawned loop).
+    /// deltas into the Turso `block_raw` the block invariants read. The
+    /// composed builder's Loro arm hands this to `LoroSut` in full mode so
+    /// a `MergeFromPeer` can `wait_for_quiescence` on it before the merged
+    /// block is read back (the projection is async —
+    /// `loro_sync_controller.rs` runs it on a spawned loop).
     /// Mirrors E2ESut's `ctx.loro_sync_handle()` (`sut_handle.rs:197`).
     ///
-    /// Resolution is RACE-prone: the headless build uses `without_wait()`, so the
-    /// controller is started on a spawned `post_ready_work` task and is NOT awaited
-    /// at boot (`wiring.rs:360`). Callers that need it present must poll until the
-    /// boot settle completes (see the A0 readiness probe). `None` when Loro/sync is
-    /// disabled OR the spawned start task has not yet resolved the handle.
+    /// Resolution is RACE-prone: the headless build uses `without_wait()`, so
+    /// the controller is started on a spawned `post_ready_work` task and is
+    /// NOT awaited at boot (`wiring.rs:360`). Callers that need it present
+    /// must poll until the boot settle completes (see the A0 readiness
+    /// probe). `None` when Loro/sync is disabled OR the spawned start task
+    /// has not yet resolved the handle.
     pub(crate) fn loro_sync_handle(&self) -> Option<Arc<holon::sync::LoroSyncControllerHandle>> {
         self.injector
             .try_resolve::<holon::sync::LoroSyncControllerHandle>()
             .ok() // ALLOW(ok): optional DI service — absent when Loro/sync is disabled
     }
 
-    /// The file-sync controller's [`OrgSyncIdleSignal`] — advanced (`mark_progress`)
-    /// after every processed file/block change, so a settle can `wait_quiescent` on it
-    /// instead of a flat sleep. `None` when this build has no org file-sync wired.
-    /// Resolved lazily (like [`Self::loro_sync_handle`]): the controller is started on a
-    /// spawned `post_ready_work` task, so callers that settle after a write get the
-    /// resolved signal by then. Mirrors `TestEnvironment`'s `org_sync_idle` latch.
+    /// The file-sync controller's [`OrgSyncIdleSignal`] — advanced
+    /// (`mark_progress`) after every processed file/block change, so a
+    /// settle can `wait_quiescent` on it instead of a flat sleep. `None`
+    /// when this build has no org file-sync wired. Resolved lazily (like
+    /// [`Self::loro_sync_handle`]): the controller is started on a
+    /// spawned `post_ready_work` task, so callers that settle after a write get
+    /// the resolved signal by then. Mirrors `TestEnvironment`'s
+    /// `org_sync_idle` latch.
     pub(crate) fn org_idle_signal(&self) -> Option<Arc<holon_orgmode::OrgSyncIdleSignal>> {
         self.injector
             .try_resolve::<holon_orgmode::OrgSyncIdleSignal>()
             .ok() // ALLOW(ok): optional DI service — absent when org file-sync is disabled
     }
 
-    /// Share the composed runner's [`IdResolver`] so the id-taking nav/focus caps
-    /// translate oracle ids to SUT-real ids (see the `resolver` field). Called once
-    /// by the composed builder; the storage-only/fixed-id slices leave it unset
-    /// (identity resolution).
+    /// Share the composed runner's [`IdResolver`] so the id-taking nav/focus
+    /// caps translate oracle ids to SUT-real ids (see the `resolver`
+    /// field). Called once by the composed builder; the
+    /// storage-only/fixed-id slices leave it unset (identity resolution).
     pub(crate) fn set_resolver(&self, resolver: crate::pbt::op_write_cap::IdResolver) {
         self.resolver
             .set(resolver)
@@ -420,8 +500,8 @@ impl HeadlessFrontendComponent {
             .expect("set resolver once");
     }
 
-    /// Resolve an oracle-space id to its SUT-space id (identity if the resolver is
-    /// unset or the id is unmapped) — the component-side analog of
+    /// Resolve an oracle-space id to its SUT-space id (identity if the resolver
+    /// is unset or the id is unmapped) — the component-side analog of
     /// [`OpDispatchWriter::resolve`].
     fn resolve_id(&self, id: &EntityUri) -> EntityUri {
         match self.resolver.get() {
@@ -435,14 +515,15 @@ impl HeadlessFrontendComponent {
         }
     }
 
-    /// Register a watched query through the **production** reactive watch surface
-    /// ([`ReactiveEngine::watch_query_live`] → `ensure_query_watching` → the real
-    /// `registry`/`watchers` + CDC pump into [`ReactiveRenderedRows`]), and record
-    /// the `query_id → query:<hash>` key mapping. This is the production analogue of
+    /// Register a watched query through the **production** reactive watch
+    /// surface ([`ReactiveEngine::watch_query_live`] →
+    /// `ensure_query_watching` → the real `registry`/`watchers` + CDC pump
+    /// into [`ReactiveRenderedRows`]), and record the `query_id →
+    /// query:<hash>` key mapping. This is the production analogue of
     /// the E2ESut harness's hand-rolled `setup_watch`/`ui_model` — the same
-    /// `TestQuery::compile_for` source the wide PBT uses, but driven through the
-    /// reactive engine the headless frontend actually runs, not a bespoke
-    /// `CdcAccumulator`.
+    /// `TestQuery::compile_for` source the wide PBT uses, but driven through
+    /// the reactive engine the headless frontend actually runs, not a
+    /// bespoke `CdcAccumulator`.
     pub fn register_query_watch(&self, query_id: &str, query: &TestQuery, lang: QueryLanguage) {
         let (source, lang) = query.compile_for(lang);
         self.register_watch_compiled(query_id, source, lang);
@@ -450,26 +531,30 @@ impl HeadlessFrontendComponent {
 
     /// Shared core: register a watch from an already-compiled `(source, lang)`
     /// through the production reactive watch surface. Used by both the test
-    /// helper [`Self::register_query_watch`] and the `SutWatchRegister` cap (the
-    /// decomposed `SetupWatch` drive path — INC 3), which receives the query
-    /// pre-compiled at the transition boundary.
+    /// helper [`Self::register_query_watch`] and the `SutWatchRegister` cap
+    /// (the decomposed `SetupWatch` drive path — INC 3), which receives the
+    /// query pre-compiled at the transition boundary.
     fn register_watch_compiled(&self, query_id: &str, source: String, lang: QueryLanguage) {
         let services: Arc<dyn BuilderServices> = self.reactive.clone();
-        let (key, _live) =
+        let (key, mut live) =
             self.reactive
                 .watch_query_live(source, lang, table_expr(), None, services);
+        let guard = live
+            .watch_guard
+            .take()
+            .expect("watch_query_live must return a WatchGuard");
         self.watches
             .lock()
             .expect("watches lock")
-            .push((query_id.to_string(), key));
+            .push((query_id.to_string(), key, guard));
     }
 
     /// Resolve a ready (non-loading) reactive watch for `uri`, polling the
-    /// headless engine until its first results load (background tasks fill it on
-    /// the shared runtime). Mirrors `E2ESut::resolve_watch`'s no-frontend-engine
-    /// branch.
+    /// headless engine until its first results load (background tasks fill it
+    /// on the shared runtime). Mirrors `E2ESut::resolve_watch`'s
+    /// no-frontend-engine branch.
     async fn resolve_watch(&self, uri: &EntityUri) -> Option<Arc<ReactiveRenderedRows>> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let deadline = tokio::time::Instant::now() + soak_deadline(Duration::from_secs(3));
         loop {
             let rqr = self.reactive.ensure_watching(uri);
             if !rqr.is_loading() {
@@ -486,13 +571,16 @@ impl HeadlessFrontendComponent {
         Arc::new(HeadlessBuilderServices::new(self.engine.clone()))
     }
 
-    /// Graft a block into the headless backend (used to attach a fixed-id subtree
-    /// under the Main focus root so `inv-displayed-text` has known content to
-    /// compare). Mirrors the windowed slice's `graft_displayed_text_tree`, but via
-    /// the `BackendEngine` directly (no `TestEnvironment`).
+    /// Graft a block into the headless backend (used to attach a fixed-id
+    /// subtree under the Main focus root so `inv-displayed-text` has known
+    /// content to compare). Mirrors the windowed slice's
+    /// `graft_displayed_text_tree`, but via the `BackendEngine` directly
+    /// (no `TestEnvironment`).
     pub async fn create_block(&self, id: &str, parent_id: &str, content: &str) {
+        use holon_api::EntityName;
+        use holon_api::StorageEntity;
+        use holon_api::Value;
         use holon_api::types::ContentType;
-        use holon_api::{EntityName, StorageEntity, Value};
         let mut params: StorageEntity = std::collections::HashMap::new();
         params.insert(
             "id".into(),
@@ -508,17 +596,6 @@ impl HeadlessFrontendComponent {
             .execute_operation(&EntityName::new("block"), "create", params)
             .await
             .expect("headless create_block");
-    }
-
-    /// Overwrite the first tracked org file's on-disk bytes — the negative control
-    /// for `inv-org-render-fixed-point` (make disk diverge from what the SQL state
-    /// renders, so the fixed-point check must `Fail`).
-    pub async fn overwrite_first_org_file(&self, content: &str) {
-        use holon_filesystem::FileSystem;
-        let path = self.org_paths.first().expect("≥1 tracked org file");
-        FileSystem::write(self.org_fs.as_ref(), path, content.as_bytes())
-            .await
-            .expect("overwrite org file for test");
     }
 
     async fn all_blocks(&self) -> Vec<Block> {
@@ -555,14 +632,15 @@ impl HeadlessFrontendComponent {
         fields
     }
 
-    /// Settle the navigation matviews (`current_focus` / `focus_roots`) to a fixed
-    /// point after a `navigation.focus` write, so the focus invariants read a
-    /// converged projection. A query watch / op clears `is_loading` before its CDC
-    /// pump delivers, so poll the row counts to a stable fixed point (mirrors the
-    /// `watch_rows` settle loop). Reaching the fixed point is what makes the
-    /// `focus_roots` teeth produce a real `Fail` (not a CDC-lag `Skipped`, V4).
+    /// Settle the navigation matviews (`current_focus` / `focus_roots`) to a
+    /// fixed point after a `navigation.focus` write, so the focus
+    /// invariants read a converged projection. A query watch / op clears
+    /// `is_loading` before its CDC pump delivers, so poll the row counts to
+    /// a stable fixed point (mirrors the `watch_rows` settle loop).
+    /// Reaching the fixed point is what makes the `focus_roots` teeth
+    /// produce a real `Fail` (not a CDC-lag `Skipped`, V4).
     async fn settle_focus_matviews(&self) {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let deadline = tokio::time::Instant::now() + soak_deadline(Duration::from_secs(3));
         let mut last = (usize::MAX, usize::MAX);
         let mut stable = 0u32;
         loop {
@@ -590,19 +668,21 @@ impl HeadlessFrontendComponent {
         }
     }
 
-    /// Wait until the LeftSidebar has bound a clickable `navigation.focus` intent
-    /// for `id` before a sidebar-nav click is issued. The sidebar page list is a
-    /// nested `live_block` watch that streams its rows AND their bound `selectable`
-    /// intents in asynchronously after boot/seed; a click that outruns it makes the
-    /// production `click_entity` fall through to an in-memory `set_focus` (which
-    /// writes NO `navigation_history` row — see the doc on `ReactiveEngine::set_focus`)
-    /// so the `current_focus` matview stays on the boot-default `journals`. Poll the
-    /// resolved layout for the exact predicate `click_entity` dispatches on
-    /// (`find_click_intent_in_region`), and fail loud if the entry never binds rather
-    /// than let the click silently fake focus.
+    /// Wait until the LeftSidebar has bound a clickable `navigation.focus`
+    /// intent for `id` before a sidebar-nav click is issued. The sidebar
+    /// page list is a nested `live_block` watch that streams its rows AND
+    /// their bound `selectable` intents in asynchronously after boot/seed;
+    /// a click that outruns it makes the production `click_entity` fall
+    /// through to an in-memory `set_focus` (which
+    /// writes NO `navigation_history` row — see the doc on
+    /// `ReactiveEngine::set_focus`) so the `current_focus` matview stays on
+    /// the boot-default `journals`. Poll the resolved layout for the exact
+    /// predicate `click_entity` dispatches on
+    /// (`find_click_intent_in_region`), and fail loud if the entry never binds
+    /// rather than let the click silently fake focus.
     async fn await_sidebar_nav_intent(&self, id: &EntityUri) {
         let root_uri = holon_api::root_layout_block_uri();
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let deadline = tokio::time::Instant::now() + soak_deadline(Duration::from_secs(5));
         loop {
             let resolved = self.reactive.snapshot_resolved(&root_uri);
             if holon_frontend::focus_path::find_click_intent_in_region(
@@ -616,12 +696,12 @@ impl HeadlessFrontendComponent {
             }
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "[SutFocusWrite::apply_navigate_focus] LeftSidebar never bound a \
-                 navigation.focus click-intent for {id} within 5s — the sidebar page list \
-                 (nested live_block watch) did not stream the target's selectable, so a \
-                 click would fall through to an in-memory set_focus (no navigation_history \
-                 write) and leave current_focus on the boot default. Sidebar-render / \
-                 CDC-settle faithfulness gap, not a fake-focus escape."
+                "[SutFocusWrite::apply_navigate_focus] LeftSidebar never bound a navigation.focus \
+                 click-intent for {id} within 5s — the sidebar page list (nested live_block \
+                 watch) did not stream the target's selectable, so a click would fall through to \
+                 an in-memory set_focus (no navigation_history write) and leave current_focus on \
+                 the boot default. Sidebar-render / CDC-settle faithfulness gap, not a fake-focus \
+                 escape."
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -629,10 +709,11 @@ impl HeadlessFrontendComponent {
 
     /// Loud postcondition for a sidebar-nav click: `current_focus(main)` must
     /// reflect `id` once CDC settles. If it does not, the click dispatched no
-    /// `navigation.focus` SQL write (silent set_focus fallthrough) or the matview
-    /// lagged past `settle_focus_matviews` — either way, never fake focus: fail loud.
+    /// `navigation.focus` SQL write (silent set_focus fallthrough) or the
+    /// matview lagged past `settle_focus_matviews` — either way, never fake
+    /// focus: fail loud.
     async fn assert_navigate_focus_landed(&self, id: &EntityUri) {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let deadline = tokio::time::Instant::now() + soak_deadline(Duration::from_secs(3));
         loop {
             let focus = self
                 .sql_query("SELECT block_id FROM current_focus WHERE region = 'main'")
@@ -644,27 +725,28 @@ impl HeadlessFrontendComponent {
             }
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "[SutFocusWrite::apply_navigate_focus] after clicking the LeftSidebar entry \
-                 for {id} and settling, current_focus(main) is {focus:?} — the navigation.focus \
-                 SQL write did not land (click fell through to an in-memory set_focus, or the \
-                 matview lagged). Never fake focus: failing loud."
+                "[SutFocusWrite::apply_navigate_focus] after clicking the LeftSidebar entry for \
+                 {id} and settling, current_focus(main) is {focus:?} — the navigation.focus SQL \
+                 write did not land (click fell through to an in-memory set_focus, or the matview \
+                 lagged). Never fake focus: failing loud."
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
 
-    /// Settle `block_id`'s `block_raw.content` to a fixed point after a keystroke
-    /// edit. A char insert mutates the editor's `MutableText` (Loro) cell; the
-    /// per-keystroke pipeline then syncs that through to the `block_raw` projection
-    /// where `inv-blocks-match-ref/block_raw` reads. That sync is CDC-driven and
-    /// can lag the synchronous keystroke return, so poll the projected content to a
-    /// stable value (3 equal reads) — the content analogue of
-    /// `settle_focus_matviews`. This is what gives committed-content parity with the
-    /// reference's eager `commit_active_editor_if_changed`.
+    /// Settle `block_id`'s `block_raw.content` to a fixed point after a
+    /// keystroke edit. A char insert mutates the editor's `MutableText`
+    /// (Loro) cell; the per-keystroke pipeline then syncs that through to
+    /// the `block_raw` projection where `inv-blocks-match-ref/block_raw`
+    /// reads. That sync is CDC-driven and can lag the synchronous keystroke
+    /// return, so poll the projected content to a stable value (3 equal
+    /// reads) — the content analogue of `settle_focus_matviews`. This is
+    /// what gives committed-content parity with the reference's eager
+    /// `commit_active_editor_if_changed`.
     async fn settle_block_content(&self, block_id: &EntityUri) {
         let escaped = block_id.as_str().replace('\'', "''");
         let sql = format!("SELECT content FROM block_raw WHERE id = '{escaped}'");
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let deadline = tokio::time::Instant::now() + soak_deadline(Duration::from_secs(3));
         let mut last: Option<String> = None;
         let mut stable = 0u32;
         loop {
@@ -690,10 +772,11 @@ impl HeadlessFrontendComponent {
         }
     }
 
-    /// Dispatch a `navigation` provider op through the windowless `FrontendSession`
-    /// (the headless analogue of `E2ESut`'s driver `synthetic_dispatch` / leader
-    /// chords), then settle the focus matviews. `block_id`/`history_id` are passed
-    /// only for the ops that take them (`focus_pin` / `close`); `close` ignores the
+    /// Dispatch a `navigation` provider op through the windowless
+    /// `FrontendSession` (the headless analogue of `E2ESut`'s driver
+    /// `synthetic_dispatch` / leader chords), then settle the focus
+    /// matviews. `block_id`/`history_id` are passed only for the ops that
+    /// take them (`focus_pin` / `close`); `close` ignores the
     /// region. Drives `SutNavHistoryDrive`.
     async fn dispatch_navigation(
         &self,
@@ -702,7 +785,8 @@ impl HeadlessFrontendComponent {
         block_id: Option<String>,
         history_id: Option<i64>,
     ) {
-        use holon_api::{EntityName, Value};
+        use holon_api::EntityName;
+        use holon_api::Value;
         let mut params = std::collections::HashMap::new();
         params.insert(
             "region".to_string(),
@@ -719,8 +803,8 @@ impl HeadlessFrontendComponent {
             .await
             .unwrap_or_else(|e| {
                 panic!(
-                    "[SutNavHistoryDrive::dispatch_navigation] navigation.{op}(region=\
-                     {region:?}) through the headless session failed: {e:#}"
+                    "[SutNavHistoryDrive::dispatch_navigation] navigation.{op}(region={region:?}) \
+                     through the headless session failed: {e:#}"
                 )
             });
         self.settle_focus_matviews().await;
@@ -759,7 +843,7 @@ impl SutRenderer for HeadlessFrontendComponent {
         // analogue of the windowed slice's pump-settle. (Rich ViewModel, thin
         // frontend: the shared `shadow_builders` produce the whole tree here; the
         // only thing a real frontend adds is *waiting* for CDC, which we do too.)
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let deadline = tokio::time::Instant::now() + soak_deadline(Duration::from_secs(5));
         let mut snap = view_model_to_snapshot(&self.reactive.snapshot(&root_uri));
         let mut last = (usize::MAX, usize::MAX);
         let mut stable = 0u32;
@@ -925,12 +1009,13 @@ impl SutBackend for HeadlessFrontendComponent {
     async fn block_raw_snapshot(&self) -> Vec<Block> {
         self.all_blocks().await
     }
-    /// The CDC-driven focus-root mirror `inv-focus-roots` reads. Headlessly there
-    /// is no separate `LiveData<FocusRoot>` mirror, so this reads the same
-    /// `focus_roots` matview as [`SutSqlProjection::focus_roots_rows`]. Reading one
-    /// source for both means the invariant's mirror==matview check never triggers
-    /// the CDC-lag → `Skipped` downgrade — so the navigation slice's teeth produce
-    /// a real `Fail` (not `Skipped`) on divergence (V4).
+    /// The CDC-driven focus-root mirror `inv-focus-roots` reads. Headlessly
+    /// there is no separate `LiveData<FocusRoot>` mirror, so this reads the
+    /// same `focus_roots` matview as
+    /// [`SutSqlProjection::focus_roots_rows`]. Reading one source for both
+    /// means the invariant's mirror==matview check never triggers
+    /// the CDC-lag → `Skipped` downgrade — so the navigation slice's teeth
+    /// produce a real `Fail` (not `Skipped`) on divergence (V4).
     async fn live_focus_root_rows(&self) -> Vec<(String, String)> {
         self.focus_roots_rows().await
     }
@@ -979,9 +1064,10 @@ impl SutViewSelection for HeadlessFrontendComponent {
 
 /// `SutWatch` over the **production** reactive watch surface (E1 relocation;
 /// the redesign away from E2ESut's bespoke `ui_model`). `watch_query_ids` /
-/// `watch_rows` read the live `ReactiveRenderedRows` the engine's CDC pump fills;
-/// the two `block_raw` truth reads (used by the invariant's CDC-lag classifier) go
-/// straight to the write-side base table via the `BackendEngine`.
+/// `watch_rows` read the live `ReactiveRenderedRows` the engine's CDC pump
+/// fills; the two `block_raw` truth reads (used by the invariant's CDC-lag
+/// classifier) go straight to the write-side base table via the
+/// `BackendEngine`.
 #[async_trait::async_trait(?Send)]
 impl SutWatch for HeadlessFrontendComponent {
     async fn watch_query_ids(&self) -> Vec<String> {
@@ -990,7 +1076,7 @@ impl SutWatch for HeadlessFrontendComponent {
             .lock()
             .expect("watches lock")
             .iter()
-            .map(|(qid, _)| qid.clone())
+            .map(|(qid, _, _)| qid.clone())
             .collect();
         ids.sort();
         ids
@@ -1002,8 +1088,8 @@ impl SutWatch for HeadlessFrontendComponent {
             .lock()
             .expect("watches lock")
             .iter()
-            .find(|(qid, _)| qid == query_id)
-            .map(|(_, key)| key.clone());
+            .find(|(qid, _, _)| qid == query_id)
+            .map(|(_, key, _)| key.clone());
         let Some(key) = key else {
             return Vec::new();
         };
@@ -1014,7 +1100,7 @@ impl SutWatch for HeadlessFrontendComponent {
         // few reads) — converges fast for an empty watch (0,0,0) and a populated one
         // (…,N,N,N alike).
         let rqr = self.reactive.ensure_watching(&key);
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let deadline = tokio::time::Instant::now() + soak_deadline(Duration::from_secs(3));
         let mut last = usize::MAX;
         let mut stable = 0u32;
         loop {
@@ -1051,8 +1137,8 @@ impl SutWatch for HeadlessFrontendComponent {
             .await
             .unwrap_or_else(|e| {
                 panic!(
-                    "[inv-watch-rows-match-ref truth check] block_raw query failed\n\
-                     sql: {sql}\n error: {e}"
+                    "[inv-watch-rows-match-ref truth check] block_raw query failed\nsql: {sql}\n \
+                     error: {e}"
                 )
             });
         rows.into_iter()
@@ -1068,9 +1154,9 @@ impl SutWatch for HeadlessFrontendComponent {
 /// `SutOrgRead` over the **production** org parser (E1 org block-equivalence):
 /// parse the on-disk org files back into blocks via
 /// `holon_orgmode::parser::parse_org_file` — the same parser
-/// `TestContext::parse_org_file_blocks` runs, no `TestContext`/`FileSyncController`
-/// coupling. Binds `inv-blocks-match-ref/org` (org-parsed blocks vs the ref's org
-/// view).
+/// `TestContext::parse_org_file_blocks` runs, no
+/// `TestContext`/`FileSyncController` coupling. Binds
+/// `inv-blocks-match-ref/org` (org-parsed blocks vs the ref's org view).
 #[async_trait::async_trait(?Send)]
 impl SutOrgRead for HeadlessFrontendComponent {
     async fn org_block_snapshot(&self) -> Vec<Block> {
@@ -1100,14 +1186,15 @@ impl SutOrgRead for HeadlessFrontendComponent {
     }
 }
 
-/// `SutOrgRender` over the **production** render path (E1): render each tracked org
-/// file from the current SQL state through the same `CacheBlockReader` (doc-scoped
-/// recursive CTE ordered by `sort_key, id`) + `OrgRenderer::render_document` the
-/// `FileSyncController` uses, and pair it with the on-disk bytes. Binds
-/// `inv-org-render-fixed-point` (disk == rendered). Mirrors
-/// `TestContext::snapshot_org_render_pairs` but over the component's own injector +
-/// org_fs. The doc-block id per file is the parent the production parser reconstructs
-/// from the file's persisted `:ID:` drawer (== the block_raw doc row).
+/// `SutOrgRender` over the **production** render path (E1): render each tracked
+/// org file from the current SQL state through the same `CacheBlockReader`
+/// (doc-scoped recursive CTE ordered by `sort_key, id`) +
+/// `OrgRenderer::render_document` the `FileSyncController` uses, and pair it
+/// with the on-disk bytes. Binds `inv-org-render-fixed-point` (disk ==
+/// rendered). Mirrors `TestContext::snapshot_org_render_pairs` but over the
+/// component's own injector + org_fs. The doc-block id per file is the parent
+/// the production parser reconstructs from the file's persisted `:ID:` drawer
+/// (== the block_raw doc row).
 #[async_trait::async_trait(?Send)]
 impl SutOrgRender for HeadlessFrontendComponent {
     async fn snapshot_org_render_pairs(&self) -> Vec<(String, String, String)> {
@@ -1123,12 +1210,14 @@ impl SutOrgRender for HeadlessFrontendComponent {
         let reader = CacheBlockReader::new(block_cache);
 
         // All block_raw rows by id — to resolve each file's doc (header) block.
-        let header_sql = "SELECT b.id, b.parent_id, b.depth, b.sort_key, b.content, \
-             b.content_type, b.source_language, b.source_name, b.properties, b.marks, \
-             b.collapsed, b.completed, b.block_type, b.created_at, b.updated_at, \
-             COALESCE((SELECT json_group_array(tag) FROM block_tags WHERE block_id = b.id), '[]') AS tags, \
-             COALESCE((SELECT json_group_array(required_id) FROM block_requires WHERE block_id = b.id), '[]') AS requires \
-             FROM block_raw b";
+        let header_sql =
+            "SELECT b.id, b.parent_id, b.depth, b.sort_key, b.content, b.content_type, \
+             b.source_language, b.source_name, b.properties, b.marks, b.collapsed, b.completed, \
+             b.block_type, b.created_at, b.updated_at, COALESCE((SELECT json_group_array(tag) \
+             FROM block_tags WHERE block_id = b.id), '[]') AS tags, COALESCE((SELECT \
+             json_group_array(required_id) FROM block_requires WHERE block_id = b.id), '[]') AS \
+             requires, COALESCE((SELECT json_group_array(lesson_id) FROM advice_suppressed WHERE \
+             anchor_id = b.id), '[]') AS advice_suppressed FROM block_raw b";
         let rows = self
             .engine
             .db_handle()
@@ -1164,30 +1253,34 @@ impl SutOrgRender for HeadlessFrontendComponent {
     }
 }
 
-/// `SutFocusWrite` over the **production** navigation op (SutHandle decomposition
-/// — NavigateFocus onto SutFocusWrite): drive `navigation.focus(region, block_id)`
-/// through the windowless `FrontendSession` (the same op the GPUI/CLI sidebar
-/// click dispatches), then settle CDC to the focus-matview fixed point. The
-/// `NavigateFocus` transition's `apply_to_sut(&mut CapMap)` reaches this through
+/// `SutFocusWrite` over the **production** navigation op (SutHandle
+/// decomposition — NavigateFocus onto SutFocusWrite): drive
+/// `navigation.focus(region, block_id)` through the windowless
+/// `FrontendSession` (the same op the GPUI/CLI sidebar click dispatches), then
+/// settle CDC to the focus-matview fixed point. The `NavigateFocus`
+/// transition's `apply_to_sut(&mut CapMap)` reaches this through
 /// the `#[capmap_adapter]`-generated `impl SutFocusWrite for CapMap`.
 impl HeadlessFrontendComponent {
-    /// `NavigateFocus` driven through an explicit `driver` (§8.12 C-3 mechanism 2).
-    /// The sidebar click + intent-await + focus-matview settle + landing assert are
-    /// driver-invariant; parameterizing the driver is what lets the windowed sibling
-    /// (`window_slice::WindowFrontendWrite`) rebind the click onto the window's
-    /// `GpuiUserDriver`/`SimUserDriver` (the HIGHEST-available rung when a window
-    /// exists) while the headless base keeps its VM-rung `ReactiveEngineDriver`.
+    /// `NavigateFocus` driven through an explicit `driver` (§8.12 C-3 mechanism
+    /// 2). The sidebar click + intent-await + focus-matview settle +
+    /// landing assert are driver-invariant; parameterizing the driver is
+    /// what lets the windowed sibling (`window_slice::WindowFrontendWrite`)
+    /// rebind the click onto the window's `GpuiUserDriver`/`SimUserDriver`
+    /// (the HIGHEST-available rung when a window exists) while the headless
+    /// base keeps its VM-rung `ReactiveEngineDriver`.
     pub(crate) async fn apply_navigate_focus_via(&self, driver: &dyn UserDriver, id: &EntityUri) {
-        // Focus is set by CLICKING the LeftSidebar entry through `driver` — the SAME way a
-        // real user (and E2ESut, and the sibling `apply_focus_editable_text_via`) does it,
-        // NOT a synthesized `navigation.focus` dispatch that skips the UI. The click-intent
-        // resolver dispatches the entry's bound `navigation.focus(region:"main")` action
-        // (find_click_intent -> apply_intent -> dispatch_intent), which mirrors focus into
-        // `engine.focused_block()` AND writes the SQL nav tables — so both the headless
-        // keystone (focus read deselected) and the WINDOWED SUT (window `SutDriver` reads
-        // `engine.focused_block()`) see a faithful, consistent focus. The generator
-        // restricts `NavigateFocus` to `Region::Main` on sidebar-listed pages, so the click
-        // always targets the `left_sidebar` entry.
+        // Focus is set by CLICKING the LeftSidebar entry through `driver` — the SAME
+        // way a real user (and E2ESut, and the sibling
+        // `apply_focus_editable_text_via`) does it, NOT a synthesized
+        // `navigation.focus` dispatch that skips the UI. The click-intent
+        // resolver dispatches the entry's bound `navigation.focus(region:"main")`
+        // action (find_click_intent -> apply_intent -> dispatch_intent), which
+        // mirrors focus into `engine.focused_block()` AND writes the SQL nav
+        // tables — so both the headless keystone (focus read deselected) and
+        // the WINDOWED SUT (window `SutDriver` reads `engine.focused_block()`)
+        // see a faithful, consistent focus. The generator
+        // restricts `NavigateFocus` to `Region::Main` on sidebar-listed pages, so the
+        // click always targets the `left_sidebar` entry.
         let id = self.resolve_id(id);
         // Do not let the click outrun the async sidebar render: wait until the
         // target's `navigation.focus` intent is actually bound, so `click_entity`
@@ -1207,11 +1300,12 @@ impl HeadlessFrontendComponent {
         self.assert_navigate_focus_landed(&id).await;
     }
 
-    /// `FocusEditableText` driven through an explicit `driver` (§8.12 C-3 mechanism 2).
-    /// Open an editor on `id` the production way: a main-panel `click_entity`. For an
-    /// `editable_text` block the click binds no intent, so it falls through to
-    /// `engine.set_focus(id)` (ADR 0010: focus is pure in-memory state). The windowed
-    /// sibling passes the window driver so the click is a real geometry hit-test.
+    /// `FocusEditableText` driven through an explicit `driver` (§8.12 C-3
+    /// mechanism 2). Open an editor on `id` the production way: a
+    /// main-panel `click_entity`. For an `editable_text` block the click
+    /// binds no intent, so it falls through to `engine.set_focus(id)` (ADR
+    /// 0010: focus is pure in-memory state). The windowed sibling passes
+    /// the window driver so the click is a real geometry hit-test.
     pub(crate) async fn apply_focus_editable_text_via(
         &self,
         driver: &dyn UserDriver,
@@ -1230,21 +1324,26 @@ impl HeadlessFrontendComponent {
 /// pipeline (`ReactiveEngineDriver` → `HeadlessEditorMirror` → `MutableText`),
 /// the headless analogue of `E2ESut`'s `send_raw_keystroke`-based
 /// `SutEditorMirrorWrite` — no GPUI window, no `InMemEditorComponent` stand-in.
-/// Each `apply_*` settles the focused block's `block_raw.content` to a fixed point
-/// so committed-content parity with the reference's eager
-/// `commit_active_editor_if_changed` holds for `inv-blocks-match-ref/block_raw`.
+/// Each `apply_*` settles the focused block's `block_raw.content` to a fixed
+/// point so committed-content parity with the reference's eager
+/// `commit_active_editor_if_changed` holds for
+/// `inv-blocks-match-ref/block_raw`.
 impl HeadlessFrontendComponent {
-    /// `TypeChars` driven through an explicit `driver` (§8.12 C-3 mechanism 1, editor
-    /// family). Each char rides `send_raw_keystroke` — driver-parameterized so the
-    /// windowed sibling routes keystrokes through the window's real `InputState`
-    /// (`GpuiUserDriver`/`SimUserDriver`) while headless keeps the `HeadlessEditorMirror`.
+    /// `TypeChars` driven through an explicit `driver` (§8.12 C-3 mechanism 1,
+    /// editor family). Each char rides `send_raw_keystroke` —
+    /// driver-parameterized so the windowed sibling routes keystrokes
+    /// through the window's real `InputState` (`GpuiUserDriver`/
+    /// `SimUserDriver`) while headless keeps the `HeadlessEditorMirror`.
     pub(crate) async fn apply_type_chars_via(&self, driver: &dyn UserDriver, text: &str) {
         for ch in text.chars() {
             driver
                 .send_raw_keystroke(&ch.to_string(), &[])
                 .await
                 .unwrap_or_else(|e| {
-                    panic!("[SutEditorMirrorWrite::apply_type_chars] send_raw_keystroke({ch:?}) failed: {e:#}")
+                    panic!(
+                        "[SutEditorMirrorWrite::apply_type_chars] send_raw_keystroke({ch:?}) \
+                         failed: {e:#}"
+                    )
                 });
         }
         if let Some(block) = self.reactive.focused_block() {
@@ -1252,7 +1351,8 @@ impl HeadlessFrontendComponent {
         }
     }
 
-    /// `DeleteBackward` driven through an explicit `driver` (§8.12 C-3 mechanism 1).
+    /// `DeleteBackward` driven through an explicit `driver` (§8.12 C-3
+    /// mechanism 1).
     pub(crate) async fn apply_delete_backward_via(&self, driver: &dyn UserDriver, count: usize) {
         for _ in 0..count {
             driver
@@ -1267,10 +1367,12 @@ impl HeadlessFrontendComponent {
         }
     }
 
-    /// `MoveCursor` driven through an explicit `driver` (§8.12 C-3 mechanism 1). Convert
-    /// the byte offset to `home` + N `right` keystrokes against the focused block's live
-    /// editor text, exactly as `E2ESut::apply_move_cursor` does (each `right` advances one
-    /// char). No content settle — MoveCursor doesn't write block content (mirrors the ref).
+    /// `MoveCursor` driven through an explicit `driver` (§8.12 C-3 mechanism
+    /// 1). Convert the byte offset to `home` + N `right` keystrokes against
+    /// the focused block's live editor text, exactly as
+    /// `E2ESut::apply_move_cursor` does (each `right` advances one
+    /// char). No content settle — MoveCursor doesn't write block content
+    /// (mirrors the ref).
     pub(crate) async fn apply_move_cursor_via(
         &self,
         driver: &dyn UserDriver,
@@ -1303,9 +1405,9 @@ impl HeadlessFrontendComponent {
     }
 }
 
-/// Editor-mirror reads: caret from the driver's `HeadlessEditorMirror` (same map
-/// the keystrokes advance), live text from the block's `MutableText` cell (the
-/// pre-commit value, same source `E2ESut::editor_live_text` reads).
+/// Editor-mirror reads: caret from the driver's `HeadlessEditorMirror` (same
+/// map the keystrokes advance), live text from the block's `MutableText` cell
+/// (the pre-commit value, same source `E2ESut::editor_live_text` reads).
 impl SutEditorMirrorRead for HeadlessFrontendComponent {
     fn editor_caret_byte(&self, block_id: &EntityUri) -> Result<Option<usize>, String> {
         self.driver.editor_cursor_byte(block_id)
@@ -1320,17 +1422,18 @@ impl SutEditorMirrorRead for HeadlessFrontendComponent {
     }
 }
 
-/// `SutNavHistoryWrite` over the **production** `navigation.go_home` op (SutHandle
-/// decomposition increment 2): drive `navigation.go_home(region)` through the
-/// windowless `FrontendSession` (the same op the GPUI/CLI leader-`h` chord
-/// dispatches — `set_focus(None)` + close the region's open pins), then settle CDC
-/// to the focus-matview fixed point. The `NavigateHome` transition's
-/// `apply_to_sut(&mut CapMap)` reaches this through the `#[capmap_adapter]`-generated
-/// `impl SutNavHistoryWrite for CapMap`.
+/// `SutNavHistoryWrite` over the **production** `navigation.go_home` op
+/// (SutHandle decomposition increment 2): drive `navigation.go_home(region)`
+/// through the windowless `FrontendSession` (the same op the GPUI/CLI
+/// leader-`h` chord dispatches — `set_focus(None)` + close the region's open
+/// pins), then settle CDC to the focus-matview fixed point. The `NavigateHome`
+/// transition's `apply_to_sut(&mut CapMap)` reaches this through the
+/// `#[capmap_adapter]`-generated `impl SutNavHistoryWrite for CapMap`.
 #[async_trait::async_trait(?Send)]
 impl SutNavHistoryWrite for HeadlessFrontendComponent {
     async fn apply_navigate_home(&self, region: CapRegion) {
-        use holon_api::{EntityName, Value};
+        use holon_api::EntityName;
+        use holon_api::Value;
         let region_str = match region {
             CapRegion::Main | CapRegion::Single => "main",
             CapRegion::Sidebar => "left_sidebar",
@@ -1342,20 +1445,22 @@ impl SutNavHistoryWrite for HeadlessFrontendComponent {
             .await
             .unwrap_or_else(|e| {
                 panic!(
-                    "[SutNavHistoryWrite::apply_navigate_home] navigation.go_home(region=\
-                     {region_str}) through the headless session failed: {e:#}"
+                    "[SutNavHistoryWrite::apply_navigate_home] \
+                     navigation.go_home(region={region_str}) through the headless session failed: \
+                     {e:#}"
                 )
             });
         self.settle_focus_matviews().await;
     }
 }
 
-/// `SutSqlProjection` over the headless engine's matviews/base tables. The focus
-/// rows (`current_focus_rows` / `focus_roots_rows` / `nav_history_open_rows`) read
-/// the live navigation matviews navigation wrote to; the block rows mirror the
-/// sql_slice's projection (real `block`/`block_raw` reads). Wired only into the
-/// navigation slice's CapMap (not the general `register`), so existing frontend
-/// slices keep their current selection.
+/// `SutSqlProjection` over the headless engine's matviews/base tables. The
+/// focus rows (`current_focus_rows` / `focus_roots_rows` /
+/// `nav_history_open_rows`) read the live navigation matviews navigation wrote
+/// to; the block rows mirror the sql_slice's projection (real
+/// `block`/`block_raw` reads). Wired only into the navigation slice's CapMap
+/// (not the general `register`), so existing frontend slices keep their current
+/// selection.
 #[async_trait::async_trait(?Send)]
 impl SutSqlProjection for HeadlessFrontendComponent {
     async fn block_row(&self, id: &EntityUri) -> Option<Vec<String>> {
@@ -1392,8 +1497,8 @@ impl SutSqlProjection for HeadlessFrontendComponent {
         .collect()
     }
 
-    /// No `SutSqlProjection`-tracked CDC watch-count surface here (the watch set is
-    /// `SutWatch`' concern); honest `None`.
+    /// No `SutSqlProjection`-tracked CDC watch-count surface here (the watch
+    /// set is `SutWatch`' concern); honest `None`.
     async fn watch_row_count(&self, _: &str) -> Option<usize> {
         None
     }
@@ -1422,8 +1527,8 @@ impl SutSqlProjection for HeadlessFrontendComponent {
         let escaped = id.as_str().replace('\'', "''");
         let rows = self
             .sql_query(&format!(
-                "SELECT json_extract(properties, '$.task_state') AS task_state \
-                 FROM block_raw WHERE id = '{escaped}'"
+                "SELECT json_extract(properties, '$.task_state') AS task_state FROM block_raw \
+                 WHERE id = '{escaped}'"
             ))
             .await;
         rows.into_iter()
@@ -1444,10 +1549,54 @@ impl SutSqlProjection for HeadlessFrontendComponent {
     }
 }
 
+/// `SutAdviceMatview` over the live Turso projection — the SQL-level twin
+/// `inv-advice-matview-matches-ref` reads this. Discovers the `advice_rule_%`
+/// materialized views from `sqlite_master` (same `sql_query` plumbing every
+/// other SUT SQL read uses) and reads each one's full row set. Pre-step-6 there
+/// is no such matview, so this returns empty (observed-absent).
+#[async_trait::async_trait(?Send)]
+impl SutAdviceMatview for HeadlessFrontendComponent {
+    async fn advice_matviews(&self) -> Vec<(String, Vec<(String, String, u32)>)> {
+        let names: Vec<String> = self
+            .sql_query("SELECT name FROM sqlite_master WHERE name LIKE 'advice_rule_%'")
+            .await
+            .iter()
+            .filter_map(|r| Self::cell(r, "name"))
+            .collect();
+        let mut out = Vec::new();
+        for name in names {
+            // `name` came verbatim from sqlite_master, so it is a live identifier;
+            // interpolating it is sound (no user-controlled string reaches here).
+            let rows = self
+                .sql_query(&format!(
+                    "SELECT anchor_id, lesson_id, shared_tag_count FROM {name}"
+                ))
+                .await
+                .iter()
+                .map(|r| {
+                    let anchor = Self::cell(r, "anchor_id")
+                        .expect("advice matview row must carry anchor_id");
+                    let lesson = Self::cell(r, "lesson_id")
+                        .expect("advice matview row must carry lesson_id");
+                    let count = r
+                        .get("shared_tag_count")
+                        .and_then(|v| v.as_i64())
+                        .expect("advice matview row must carry integer shared_tag_count")
+                        as u32;
+                    (anchor, lesson, count)
+                })
+                .collect();
+            out.push((name, rows));
+        }
+        out
+    }
+}
+
 /// `SutFocus` over the live Turso navigation projection — the real
 /// teeth for `inv-navigation-focus` / `inv-focus-roots`. Split off
 /// `SutSqlProjection` (C-5, 2026-07-02) so a storage-only slice that drives no
-/// navigation does not register it and those invariants deselect honestly there.
+/// navigation does not register it and those invariants deselect honestly
+/// there.
 #[async_trait::async_trait(?Send)]
 impl SutFocus for HeadlessFrontendComponent {
     async fn current_focus_rows(&self) -> Vec<(String, Option<String>)> {
@@ -1474,8 +1623,8 @@ impl SutFocus for HeadlessFrontendComponent {
 
     async fn nav_history_open_rows(&self) -> Vec<(String, String)> {
         self.sql_query(
-            "SELECT region, block_id FROM navigation_history \
-             WHERE closed_at IS NULL AND block_id IS NOT NULL",
+            "SELECT region, block_id FROM navigation_history WHERE closed_at IS NULL AND block_id \
+             IS NOT NULL",
         )
         .await
         .iter()
@@ -1490,11 +1639,11 @@ impl SutFocus for HeadlessFrontendComponent {
 
 /// `SutWatchRegister` over the **production** reactive watch surface (SutHandle
 /// decomposition INC 3) — the write cap the decomposed `SetupWatch` transition
-/// binds. Shares the `register_watch_compiled` core with the `register_query_watch`
-/// test helper, so a composed `CapMap` registers a watch through the SAME
-/// `ReactiveEngine::watch_query_live` path the existing B5 teeth already prove
-/// deliver headlessly. The transition compiles `TestQuery → (source, lang)` at
-/// the boundary; this takes the compiled form.
+/// binds. Shares the `register_watch_compiled` core with the
+/// `register_query_watch` test helper, so a composed `CapMap` registers a watch
+/// through the SAME `ReactiveEngine::watch_query_live` path the existing B5
+/// teeth already prove deliver headlessly. The transition compiles `TestQuery →
+/// (source, lang)` at the boundary; this takes the compiled form.
 #[async_trait::async_trait(?Send)]
 impl SutWatchRegister for HeadlessFrontendComponent {
     async fn register_watch(&self, query_id: &str, source: &str, lang: QueryLanguage) {
@@ -1502,19 +1651,18 @@ impl SutWatchRegister for HeadlessFrontendComponent {
     }
 
     async fn unregister_watch(&self, query_id: &str) {
-        // Drop the tracked watch entry; the production reactive watch surface
-        // reclaims the underlying watcher when its last `ReactiveRenderedRows`
-        // handle is released.
+        // Drop the tracked watch entry; dropping its `WatchGuard` releases
+        // the underlying query watcher when this was the last consumer.
         self.watches
             .lock()
             .expect("watches lock")
-            .retain(|(id, _)| id != query_id);
+            .retain(|(id, _, _)| id != query_id);
     }
 }
 
 /// `SutViewControl` (the `SwitchView` transition): set the active view name.
-/// Faithful port of `E2ESut`/`TestEnvironment::switch_view` — a pure interior-mut
-/// write the `SutViewSelection::current_view` oracle reads back.
+/// Faithful port of `E2ESut`/`TestEnvironment::switch_view` — a pure
+/// interior-mut write the `SutViewSelection::current_view` oracle reads back.
 #[async_trait::async_trait(?Send)]
 impl SutViewControl for HeadlessFrontendComponent {
     async fn switch_view(&self, view_name: &str) {
@@ -1522,10 +1670,11 @@ impl SutViewControl for HeadlessFrontendComponent {
     }
 }
 
-/// `SutMcpEmit` (the `EmitMcpData` transition): emit the current state over the MCP
-/// integration. The windowless headless stack has no `PbtMcpIntegration` attached
-/// (just as `E2ESut::emit_mcp_data` is a no-op when its `pbt_mcp` slot is empty), so
-/// this is a faithful no-op — no invariant observes an MCP emission on this path.
+/// `SutMcpEmit` (the `EmitMcpData` transition): emit the current state over the
+/// MCP integration. The windowless headless stack has no `PbtMcpIntegration`
+/// attached (just as `E2ESut::emit_mcp_data` is a no-op when its `pbt_mcp` slot
+/// is empty), so this is a faithful no-op — no invariant observes an MCP
+/// emission on this path.
 #[async_trait::async_trait(?Send)]
 impl SutMcpEmit for HeadlessFrontendComponent {
     async fn emit_mcp_data(&self) {
@@ -1533,11 +1682,11 @@ impl SutMcpEmit for HeadlessFrontendComponent {
     }
 }
 
-/// `SutHistoryWrite` (the `UndoLastMutation` / `Redo` transitions): undo/redo the
-/// last committed mutation through the production `BackendEngine` undo stack — the
-/// same `engine().undo()/redo()` path `E2ESut` drives. The `ref_state`-dependent
-/// block-convergence settle lives in the harness seam (`block_tree_post_action`),
-/// so the cap is a pure `&self` action here.
+/// `SutHistoryWrite` (the `UndoLastMutation` / `Redo` transitions): undo/redo
+/// the last committed mutation through the production `BackendEngine` undo
+/// stack — the same `engine().undo()/redo()` path `E2ESut` drives. The
+/// `ref_state`-dependent block-convergence settle lives in the harness seam
+/// (`block_tree_post_action`), so the cap is a pure `&self` action here.
 #[async_trait::async_trait(?Send)]
 impl SutHistoryWrite for HeadlessFrontendComponent {
     async fn undo_last_mutation(&self) {
@@ -1555,17 +1704,19 @@ impl SutHistoryWrite for HeadlessFrontendComponent {
     }
 }
 
-/// `SutNavHistoryDrive` (the `NavigateBack`/`NavigateForward`/`PinBlock`/`UnpinBlock`
-/// transitions) over the **production** navigation provider ops, dispatched through
-/// the windowless `FrontendSession` — the same `execute_operation("navigation", …)`
-/// path `SutFocusWrite` (focus) and `SutNavHistoryWrite` (go_home) already drive.
-/// `E2ESut` reaches these ops via the GPUI driver's `synthetic_dispatch` /
-/// leader-chords; headlessly there is no driver, but every op (`go_back`,
+/// `SutNavHistoryDrive` (the
+/// `NavigateBack`/`NavigateForward`/`PinBlock`/`UnpinBlock` transitions) over
+/// the **production** navigation provider ops, dispatched through
+/// the windowless `FrontendSession` — the same `execute_operation("navigation",
+/// …)` path `SutFocusWrite` (focus) and `SutNavHistoryWrite` (go_home) already
+/// drive. `E2ESut` reaches these ops via the GPUI driver's `synthetic_dispatch`
+/// / leader-chords; headlessly there is no driver, but every op (`go_back`,
 /// `go_forward`, `focus_pin`, `close`) is a `navigation` provider op
-/// (`holon/src/navigation/provider.rs`), so the session dispatches them directly.
-/// Note: this realizes the *drive* path (op reachable + applied); whether the
-/// headless reactive engine mirrors back/forward history *semantics* into the
-/// nav matviews to oracle parity is a Phase-B concern, probed separately.
+/// (`holon/src/navigation/provider.rs`), so the session dispatches them
+/// directly. Note: this realizes the *drive* path (op reachable + applied);
+/// whether the headless reactive engine mirrors back/forward history
+/// *semantics* into the nav matviews to oracle parity is a Phase-B concern,
+/// probed separately.
 #[async_trait::async_trait(?Send)]
 impl SutNavHistoryDrive for HeadlessFrontendComponent {
     async fn navigate_back(&self, region: holon_api::Region) {
@@ -1597,42 +1748,46 @@ impl SutNavHistoryDrive for HeadlessFrontendComponent {
     }
 }
 
-/// `SutMutate` over the headless engine. Only `toggle_state` does real work — and
-/// FAITHFULLY: it dispatches the production `block`/`cycle_task_state` op (the one
-/// Cmd+Enter / the `state_toggle` widget fires) `click_count` times, computed from
-/// the current `task_state` exactly like E2ESut's `apply_toggle_state_to_sut`. This
-/// drives `LoroBlockOperations::cycle_task_state` → the Loro authority doc → the
-/// `block_raw` projection, rather than a `set_field` shortcut that bypasses the real
-/// cycle. Combined with the read-doc unification (`compose_sut` builds the Loro read
-/// cap over the frontend's authority doc), `inv-task-state-storage-coherence` and
-/// `inv-blocks-match-ref` stay in lockstep with `ToggleState::apply_to_ref`.
-/// `apply_mutation`/`bulk_external_add` are faithful `&self` no-ops, EXACTLY as on
+/// `SutMutate` over the headless engine. Only `toggle_state` does real work —
+/// and FAITHFULLY: it dispatches the production `block`/`cycle_task_state` op
+/// (the one Cmd+Enter / the `state_toggle` widget fires) `click_count` times,
+/// computed from the current `task_state` exactly like E2ESut's
+/// `apply_toggle_state_to_sut`. This
+/// drives `LoroBlockOperations::cycle_task_state` → the Loro authority doc →
+/// the `block_raw` projection, rather than a `set_field` shortcut that bypasses
+/// the real cycle. Combined with the read-doc unification (`compose_sut` builds
+/// the Loro read cap over the frontend's authority doc),
+/// `inv-task-state-storage-coherence` and `inv-blocks-match-ref` stay in
+/// lockstep with `ToggleState::apply_to_ref`. `apply_mutation`/
+/// `bulk_external_add` are faithful `&self` no-ops, EXACTLY as on
 /// `E2ESut`: their real, `ref_state`-dependent dispatch lives in the
-/// `block_tree_post_action` seam, which the composed harness does not yet rebuild — so
-/// those transitions stay out of the composed alphabet (driving them would diverge),
-/// while `ToggleState` drives faithfully.
+/// `block_tree_post_action` seam, which the composed harness does not yet
+/// rebuild — so those transitions stay out of the composed alphabet (driving
+/// them would diverge), while `ToggleState` drives faithfully.
 impl HeadlessFrontendComponent {
-    /// Shared `ToggleState` click-count math: how many `state_toggle` clicks advance
-    /// the cycle from the pre-mutation state to `new_state`. Read `current` from the
-    /// settled projection (== the Loro doc at a settled point). Fail loud on a no-op
-    /// toggle (the generator excludes them).
+    /// Shared `ToggleState` click-count math: how many `state_toggle` clicks
+    /// advance the cycle from the pre-mutation state to `new_state`. Read
+    /// `current` from the settled projection (== the Loro doc at a settled
+    /// point). Fail loud on a no-op toggle (the generator excludes them).
     async fn toggle_click_count(&self, id: &EntityUri, new_state: CycleTarget) -> u8 {
         let current = self.block_task_state(id).await.unwrap_or_default();
         let click_count = cycle_click_count(&current, new_state);
         assert!(
             click_count > 0,
-            "[toggle_state] click_count=0 ({current:?} == {new_state:?}) — the generator \
-             should exclude no-op toggles"
+            "[toggle_state] click_count=0 ({current:?} == {new_state:?}) — the generator should \
+             exclude no-op toggles"
         );
         click_count
     }
 
-    /// `ToggleState` driven through an explicit `driver` (§8.12 C-3 mechanism 2). CLICK
-    /// the `state_toggle` widget `click_count` times — the faithful user gesture the
-    /// generic `apply_toggle_state_to_sut` runs — so the windowed sibling drives the real
-    /// window `state_toggle` while headless keeps the direct-dispatch path below. Each
-    /// click's bound `cycle_task_state` reads the current state off the Loro backend and
-    /// advances by one, so the up-front `click_count` is stable across the loop.
+    /// `ToggleState` driven through an explicit `driver` (§8.12 C-3 mechanism
+    /// 2). CLICK the `state_toggle` widget `click_count` times — the
+    /// faithful user gesture the generic `apply_toggle_state_to_sut` runs —
+    /// so the windowed sibling drives the real window `state_toggle` while
+    /// headless keeps the direct-dispatch path below. Each click's bound
+    /// `cycle_task_state` reads the current state off the Loro backend and
+    /// advances by one, so the up-front `click_count` is stable across the
+    /// loop.
     pub(crate) async fn toggle_state_via(
         &self,
         driver: &dyn UserDriver,
@@ -1641,6 +1796,7 @@ impl HeadlessFrontendComponent {
     ) {
         let id = self.resolve_id(block_id);
         let click_count = self.toggle_click_count(&id, new_state).await;
+        let mut current = self.block_task_state(&id).await.unwrap_or_default();
         for n in 0..click_count {
             // Click the `state_toggle` GLYPH (not a plain row click, which would
             // just focus): `cycle_state_toggle` targets the widget's own
@@ -1652,18 +1808,54 @@ impl HeadlessFrontendComponent {
                 .unwrap_or_else(|e| {
                     panic!("[toggle_state] click #{} failed for {id}: {e:#}", n + 1)
                 });
-            // Let CDC propagate so the widget's `current` prop (and its registered
-            // bounds) stay warm for the next click.
-            tokio::task::yield_now().await;
-            tokio::task::yield_now().await;
+            // WAIT until the projection shows THIS click landed before the
+            // next one, RE-CLICKING while the resolved view is stale. Each
+            // click's intent computes `next` from the resolved view's
+            // `current` prop; while that view still serves the pre-click
+            // value, a click re-dispatches the SAME keyword — a no-op write
+            // that can never advance the cycle (the stale-read double
+            // dispatch `inv-viewmodel-state-toggle-correct` caught when
+            // ToggleState first fired in the keystone: DOING != DONE, and
+            // the pure block_raw-settle variant of this loop then hung on a
+            // no-op click). Stale re-clicks are idempotent (same value), and
+            // the first click after the view refreshes advances exactly one
+            // step — a user hammering an unresponsive toggle sees the same.
+            // The generator excludes no-op toggles, so every landed click
+            // changes `task_state`.
+            let overall = tokio::time::Instant::now() + soak_deadline(Duration::from_secs(10));
+            'landing: loop {
+                let attempt_deadline =
+                    (tokio::time::Instant::now() + Duration::from_millis(500)).min(overall);
+                while tokio::time::Instant::now() < attempt_deadline {
+                    let now_state = self.block_task_state(&id).await.unwrap_or_default();
+                    if now_state != current {
+                        current = now_state;
+                        break 'landing;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                assert!(
+                    tokio::time::Instant::now() < overall,
+                    "[toggle_state] click #{} never landed for {id} (task_state still {current:?} \
+                     after 10s of re-clicks)",
+                    n + 1
+                );
+                driver
+                    .cycle_state_toggle(&id, "main")
+                    .await
+                    .unwrap_or_else(|e| {
+                        panic!("[toggle_state] re-click #{} failed for {id}: {e:#}", n + 1)
+                    });
+            }
         }
     }
 }
 
 impl HeadlessFrontendComponent {
-    /// Settle barrier shared by the seam-mutate methods: poll `block_raw` until its
-    /// id-set is stable across two consecutive reads (the live `FileSyncController`
-    /// finished re-ingesting the org write). Same shape as `simulate_restart`'s settle.
+    /// Settle barrier shared by the seam-mutate methods: poll `block_raw` until
+    /// its id-set is stable across two consecutive reads (the live
+    /// `FileSyncController` finished re-ingesting the org write). Same
+    /// shape as `simulate_restart`'s settle.
     async fn settle_block_ids_stable(&self, timeout: Duration) {
         let start = std::time::Instant::now();
         let mut prev: BTreeSet<EntityUri> =
@@ -1691,7 +1883,8 @@ impl HeadlessFrontendComponent {
     /// block's random UUID lands wherever its hex sorts), which the live
     /// `FileSyncController` re-ingest then faithfully applies to SQL AND Loro.
     /// Stamp each block's `sequence` from its per-parent `sort_key` rank so the
-    /// re-serialized file reproduces the order a faithful external rewrite sees.
+    /// re-serialized file reproduces the order a faithful external rewrite
+    /// sees.
     async fn stamp_sequence_from_sort_key(&self, blocks: &mut [Block]) {
         use holon_orgmode::models::OrgBlockExt;
         let order_rows = self
@@ -1714,9 +1907,10 @@ impl HeadlessFrontendComponent {
     }
 }
 
-/// Resolve a mutation's *referenced* ids (oracle synthetic → SUT real) via `resolve`, so
-/// `Mutation::apply_to` matches the live `block_raw` rows. A `Create`'s NEW id is left as-is
-/// (born-equal: the org write carries it in an `:ID:` drawer and both sides agree).
+/// Resolve a mutation's *referenced* ids (oracle synthetic → SUT real) via
+/// `resolve`, so `Mutation::apply_to` matches the live `block_raw` rows. A
+/// `Create`'s NEW id is left as-is (born-equal: the org write carries it in an
+/// `:ID:` drawer and both sides agree).
 fn resolve_mutation_ids(
     mutation: &Mutation,
     resolve: &dyn Fn(&EntityUri) -> EntityUri,
@@ -1737,26 +1931,29 @@ fn resolve_mutation_ids(
     m
 }
 
-/// `SutSeamMutate` over the headless component — the real composed equivalent of the
-/// `E2ESut` `block_tree_post_action` seam (which is `ref_state`-driven). Both methods
-/// rewrite the seeded USER docs' org files and let the live `FileSyncController`
-/// re-ingest — `documents` excludes the layout `index.org`, so a full rewrite is safe.
-/// `ref_state`-free: the post-state is reconstructed from the live `block` matview snapshot
-/// plus the typed transition args, not the oracle. Hosting this un-narrows `ApplyMutation`'s
-/// External arm AND `BulkExternalAdd` onto the composed alphabet. (The `BulkExternalAdd`
-/// Flutter-startup concurrent-watch race the `E2ESut` seam adds is NOT replicated here — it
-/// is a startup-scheduler probe already gated by `phantom_loro_exists_repro`; the composed
-/// catalog verifies the blocks landed every tick.)
+/// `SutSeamMutate` over the headless component — the real composed equivalent
+/// of the `E2ESut` `block_tree_post_action` seam (which is `ref_state`-driven).
+/// Both methods rewrite the seeded USER docs' org files and let the live
+/// `FileSyncController` re-ingest — `documents` excludes the layout
+/// `index.org`, so a full rewrite is safe. `ref_state`-free: the post-state is
+/// reconstructed from the live `block` matview snapshot plus the typed
+/// transition args, not the oracle. Hosting this un-narrows `ApplyMutation`'s
+/// External arm AND `BulkExternalAdd` onto the composed alphabet. (The
+/// `BulkExternalAdd` Flutter-startup concurrent-watch race the `E2ESut` seam
+/// adds is NOT replicated here — it is a startup-scheduler probe already gated
+/// by `phantom_loro_exists_repro`; the composed catalog verifies the blocks
+/// landed every tick.)
 #[async_trait::async_trait(?Send)]
 impl SutSeamMutate for HeadlessFrontendComponent {
     async fn apply_mutation(&self, event: MutationEvent) {
         use holon_filesystem::FileSystem;
         let resolved = resolve_mutation_ids(&event.mutation, &|id| self.resolve_id(id));
-        // Source from the `block` MATVIEW (`live_block_snapshot`), NOT the base `block_raw`
-        // table (`all_blocks`): block_raw has no `tags` column, so the doc block's `Page`
-        // tag is lost and `blocks_by_document` finds no page → it would serialize an EMPTY
-        // org file and the live re-ingest would WIPE the whole tree. The matview carries
-        // tags/requires, so page-ness (and any other edge fields) round-trip faithfully.
+        // Source from the `block` MATVIEW (`live_block_snapshot`), NOT the base
+        // `block_raw` table (`all_blocks`): block_raw has no `tags` column, so
+        // the doc block's `Page` tag is lost and `blocks_by_document` finds no
+        // page → it would serialize an EMPTY org file and the live re-ingest
+        // would WIPE the whole tree. The matview carries tags/requires, so
+        // page-ness (and any other edge fields) round-trip faithfully.
         let mut current = self.live_block_snapshot().await;
         // Stamp real sibling order BEFORE applying the mutation: a `Create`'s
         // canonical slot is `max_sibling_seq + 1` (lands last, matching the
@@ -1799,10 +1996,11 @@ impl SutSeamMutate for HeadlessFrontendComponent {
                 panic!("[bulk_external_add] no file for doc {doc_uri} (resolved {resolved_doc})")
             });
         // New blocks are born with their oracle ids (`block:bulk-N-i`) → write verbatim
-        // (matched born-equal). Only resolve parent refs to pre-existing entities (the doc);
-        // refs to sibling bulk-N-k stay (born too, present in `current` after this loop).
-        // Matview snapshot (not `all_blocks`) so the doc block's `Page` tag survives — see
-        // `apply_mutation` above for why block_raw's missing tags would wipe the tree.
+        // (matched born-equal). Only resolve parent refs to pre-existing entities (the
+        // doc); refs to sibling bulk-N-k stay (born too, present in `current`
+        // after this loop). Matview snapshot (not `all_blocks`) so the doc
+        // block's `Page` tag survives — see `apply_mutation` above for why
+        // block_raw's missing tags would wipe the tree.
         let mut current = self.live_block_snapshot().await;
         // Stamp real sibling order first (see `stamp_sequence_from_sort_key`);
         // the new bulk blocks below keep `sequence()==0` (front), matching the
@@ -1828,39 +2026,65 @@ impl SutSeamMutate for HeadlessFrontendComponent {
     }
 }
 
-/// `SutAppLifecycle` over the headless component — the seam-rebuild entry point.
-/// Only `create_document` is realized so far: it writes an empty org file into the
-/// session's watched `org_root` (the production `FileSyncController` watcher then
-/// ingests it and mints the page block in `block_raw`), the headless analogue of
-/// `TestContext::create_document`. No `ref_state` is read — the synthetic→real
-/// doc-uri reconcile is the composed harness's generic per-tick id reconcile (the
-/// minted page is one new `block_raw` id paired 1:1 with the oracle's one new
-/// synthetic `block:ref-doc-N`). The action only WAITS until that page actually
-/// lands so the harness's post-apply id snapshot observes it (mirrors
-/// `TestContext`'s `resolve_page_uri_by_name` poll). `simulate_restart` and
-/// `concurrent_schema_init` ARE dispatched by the composed alphabet (both ported);
-/// `start_app` is not part of any composed alphabet yet (lifecycle/deferred-boot is a
-/// later increment) — it fails loud if ever dispatched.
+/// `SutBlockCreate` over the headless component — the composed home for the
+/// `CreateBlockUnderFocus` transition. Delegates to the PRODUCTION
+/// creation-slot commit seam on this component's own `ReactiveEngineDriver`
+/// (`commit_creation_slot` → `ViewEventHandler::handle_text_sync` →
+/// `block.create`), so the "type here to create" gesture materializes a block
+/// under the query's focus root exactly as GPUI's on-blur does — the parent is
+/// read from the live `:__virtual:<parent>` slot id WP-E resolved, never
+/// re-derived here. The one minted block pairs 1:1 with the oracle's synthetic
+/// `block::create-N` via the harness's generic per-tick id reconcile. Fails
+/// loud (never a silent no-op) if no slot renders or the commit yields no
+/// intent.
+#[async_trait::async_trait(?Send)]
+impl SutBlockCreate for HeadlessFrontendComponent {
+    async fn apply_create_under_focus(&self, content: &str) {
+        self.driver
+            .commit_creation_slot(content)
+            .await
+            .unwrap_or_else(|e| panic!("[SutBlockCreate::apply_create_under_focus] {e:#}"));
+        self.settle_block_ids_stable(Duration::from_secs(5)).await;
+    }
+}
+
+/// `SutAppLifecycle` over the headless component — the seam-rebuild entry
+/// point. Only `create_document` is realized so far: it writes an empty org
+/// file into the session's watched `org_root` (the production
+/// `FileSyncController` watcher then ingests it and mints the page block in
+/// `block_raw`), the headless analogue of `TestContext::create_document`. No
+/// `ref_state` is read — the synthetic→real doc-uri reconcile is the composed
+/// harness's generic per-tick id reconcile (the minted page is one new
+/// `block_raw` id paired 1:1 with the oracle's one new synthetic `block:
+/// ref-doc-N`). The action only WAITS until that page actually lands so the
+/// harness's post-apply id snapshot observes it (mirrors `TestContext`'s
+/// `resolve_page_uri_by_name` poll). `simulate_restart` and
+/// `concurrent_schema_init` ARE dispatched by the composed alphabet (both
+/// ported); `start_app` is not part of any composed alphabet yet
+/// (lifecycle/deferred-boot is a later increment) — it fails loud if ever
+/// dispatched.
 #[async_trait::async_trait(?Send)]
 impl SutAppLifecycle for HeadlessFrontendComponent {
     async fn start_app(&self, _: EntityUri, _: bool, _: bool, _: bool, _: bool) {
         unimplemented!(
-            "[SutAppLifecycle::start_app] not yet ported to HeadlessFrontendComponent — \
-             lifecycle (deferred-boot) is a later seam-rebuild increment; StartApp is not in \
-             any composed alphabet"
+            "[SutAppLifecycle::start_app] not yet ported to HeadlessFrontendComponent — lifecycle \
+             (deferred-boot) is a later seam-rebuild increment; StartApp is not in any composed \
+             alphabet"
         );
     }
 
     async fn simulate_restart(&self) {
         use holon_filesystem::FileSystem;
         // Faithful to `E2ESut`/`TestEnvironment::simulate_restart` (which is itself a
-        // file-touch, NOT a true reboot): re-trigger the production `FileSyncController`
-        // watcher by touch-writing each tracked org file (append a space, settle, restore),
-        // forcing a re-parse. Blocks are PRESERVED — the `:ID:` drawers persisted on disk
-        // make the re-parse id-stable — so `SimulateRestart::apply_to_ref` is a no-op and
-        // this only re-exercises the ingest path. The post-action block-convergence settle
-        // (E2ESut's `wait_for_blocks_synced`, relocated to the seam) lives HERE in the cap
-        // since the composed harness has no seam: poll `block_raw` to a stable id-set.
+        // file-touch, NOT a true reboot): re-trigger the production
+        // `FileSyncController` watcher by touch-writing each tracked org file
+        // (append a space, settle, restore), forcing a re-parse. Blocks are
+        // PRESERVED — the `:ID:` drawers persisted on disk make the re-parse
+        // id-stable — so `SimulateRestart::apply_to_ref` is a no-op and
+        // this only re-exercises the ingest path. The post-action block-convergence
+        // settle (E2ESut's `wait_for_blocks_synced`, relocated to the seam)
+        // lives HERE in the cap since the composed harness has no seam: poll
+        // `block_raw` to a stable id-set.
         for path in &self.org_paths {
             let content = FileSystem::read_to_string(self.org_fs.as_ref(), path)
                 .await
@@ -1874,7 +2098,8 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
                 .unwrap_or_else(|e| panic!("[simulate_restart] restore {path:?} failed: {e:#}"));
         }
 
-        // Settle: poll until the block_raw id-set is stable across two consecutive reads.
+        // Settle: poll until the block_raw id-set is stable across two consecutive
+        // reads.
         let ids = || async {
             self.all_blocks()
                 .await
@@ -1908,14 +2133,16 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
                 panic!("[SutAppLifecycle::create_document] write {file_name} failed: {e:#}")
             });
 
-        // Wait for the production `FileSyncController` watcher to ingest the new file and
-        // mint the doc block in `block_raw` (the convergence `TestContext::create_document`
-        // polls for via `resolve_page_uri_by_name`). The doc block's title is the file stem
-        // — exactly what `CreateDocument::apply_to_ref` sets the oracle page's content to —
-        // so poll the `block_raw` snapshot for a block with that title. (NB: `is_page()` is
-        // false on these projected rows — page-ness is a `block_tags` Page tag, not a
-        // `Block` field post-projection — so match on title alone.) Self-contained: no
-        // `ref_state`, no resolver; the harness reconcile maps the minted id afterwards.
+        // Wait for the production `FileSyncController` watcher to ingest the new file
+        // and mint the doc block in `block_raw` (the convergence
+        // `TestContext::create_document` polls for via
+        // `resolve_page_uri_by_name`). The doc block's title is the file stem —
+        // exactly what `CreateDocument::apply_to_ref` sets the oracle page's content to
+        // — so poll the `block_raw` snapshot for a block with that title. (NB:
+        // `is_page()` is false on these projected rows — page-ness is a
+        // `block_tags` Page tag, not a `Block` field post-projection — so match
+        // on title alone.) Self-contained: no `ref_state`, no resolver; the
+        // harness reconcile maps the minted id afterwards.
         let stem = std::path::Path::new(file_name)
             .file_stem()
             .and_then(|s| s.to_str())
@@ -1934,15 +2161,16 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
             }
             assert!(
                 start.elapsed() < timeout,
-                "[SutAppLifecycle::create_document] timeout waiting for the doc block \
-                 (title {stem:?}) to land in block_raw after writing {file_name}"
+                "[SutAppLifecycle::create_document] timeout waiting for the doc block (title \
+                 {stem:?}) to land in block_raw after writing {file_name}"
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         };
-        // Track the new doc so a later `BulkExternalAdd` / External `ApplyMutation` targeting
-        // it resolves a file path. `doc_id` is the minted doc-page block (title == file stem)
-        // — the SAME real id the harness reconcile maps the oracle's `block:ref-doc-N` to (the
-        // single block minted by this ingest), so the seam lookup keyed on `resolve_id(...)`
+        // Track the new doc so a later `BulkExternalAdd` / External `ApplyMutation`
+        // targeting it resolves a file path. `doc_id` is the minted doc-page
+        // block (title == file stem) — the SAME real id the harness reconcile
+        // maps the oracle's `block:ref-doc-N` to (the single block minted by
+        // this ingest), so the seam lookup keyed on `resolve_id(...)`
         // hits. Idempotent: skip if already tracked (re-create of the same file).
         {
             let mut docs = self.documents.lock().expect("documents lock");
@@ -1952,14 +2180,65 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
         }
     }
 
+    async fn delete_document(&self, file_name: &str) {
+        use holon_filesystem::FileSystem;
+        let file_path = self.org_root.join(file_name);
+        FileSystem::remove(self.org_fs.as_ref(), &file_path)
+            .await
+            .unwrap_or_else(|e| {
+                panic!("[SutAppLifecycle::delete_document] remove {file_name} failed: {e:#}")
+            });
+
+        // Inverse of `create_document`'s poll: wait for the page block whose
+        // title is the file stem to VANISH from `block_raw`. The removal went
+        // through the bare fs port — the harness analog of the user deleting
+        // the file OUTSIDE Holon (the scenario the prod bug was observed in) —
+        // and the in-memory fs emitted a `Remove` change, so the production
+        // `FileSyncController::on_file_deleted` cascade ran for the vanished
+        // path. Fail loud on timeout — it means that cascade regressed and
+        // blocks linger after an external deletion.
+        let stem = std::path::Path::new(file_name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(file_name)
+            .to_string();
+        let timeout = Duration::from_secs(5);
+        let start = std::time::Instant::now();
+        loop {
+            if !self
+                .all_blocks()
+                .await
+                .into_iter()
+                .any(|b| b.title() == stem)
+            {
+                break;
+            }
+            assert!(
+                start.elapsed() < timeout,
+                "[SutAppLifecycle::delete_document] timeout: the doc block (title {stem:?}) is \
+                 still in the block set 5s after removing {file_name} — prod is not deleting \
+                 blocks when an org file is deleted outside Holon (regression of \
+                 FileSyncController::on_file_deleted's cascade)"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // Untrack the doc so later file-seam lookups don't resolve a dead path.
+        self.documents
+            .lock()
+            .expect("documents lock")
+            .retain(|(_, p)| *p != file_path);
+    }
+
     async fn concurrent_schema_init(&self) {
         // Ported from the E2ESut/`SutHandle` impl: the regression this guards is the
-        // double-`ensure_navigation_schema` "database is locked" bug — sequential schema
-        // ops (each `query_and_watch` creates a matview) must NOT lock the DB. The test's
-        // only ASSERTION is the absence of a "database is locked" error; other errors
-        // (e.g. transient "Database schema changed" from concurrent IVM) are tolerated.
-        // `apply_to_ref` is a no-op, so this must not perturb the compared projections —
-        // the watches created here are anonymous (`None` query id), not the named watches
+        // double-`ensure_navigation_schema` "database is locked" bug — sequential
+        // schema ops (each `query_and_watch` creates a matview) must NOT lock
+        // the DB. The test's only ASSERTION is the absence of a "database is
+        // locked" error; other errors (e.g. transient "Database schema changed"
+        // from concurrent IVM) are tolerated. `apply_to_ref` is a no-op, so
+        // this must not perturb the compared projections — the watches created
+        // here are anonymous (`None` query id), not the named watches
         // `SutWatchRegister`/`inv-active-watches-match-ref` track.
         let engine = self.engine();
         for i in 0..3 {
@@ -1975,9 +2254,8 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
                 let error_str = format!("{e:?}");
                 assert!(
                     !error_str.contains("database is locked"),
-                    "DATABASE LOCK BUG: sequential query_and_watch {i} hit 'database is \
-                     locked' — ensure_navigation_schema is being called concurrently again: \
-                     {error_str}"
+                    "DATABASE LOCK BUG: sequential query_and_watch {i} hit 'database is locked' — \
+                     ensure_navigation_schema is being called concurrently again: {error_str}"
                 );
             }
         }
@@ -2013,10 +2291,108 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
     }
 }
 
+/// `SutFixtureFs` over the headless component — the org-file fixture rung.
+/// Only `write_org_file` is realized: it writes rendered org into the session's
+/// watched `org_root` (the production `FileSyncController` watcher ingests it,
+/// the same path `create_document` exercises), which is what makes
+/// `WriteOrgFile` — and with it the advice-rule minting arm (ADR 0022 step 4) —
+/// reachable in the composed keystone at all. The other four fixture ops
+/// (`create_directory`, `git_init`, `jj_git_init`, `create_stale_loro`) back
+/// transitions that are all gated on `!app_started`; the composed keystone's
+/// oracle boots pre-started (`build_started_ref`), so they can never be
+/// dispatched here — fail loud if that ever changes (same convention as
+/// `start_app` above).
+#[async_trait::async_trait(?Send)]
+impl holon_pbt_core::capabilities::SutFixtureFs for HeadlessFrontendComponent {
+    async fn write_org_file(&self, filename: &str, content: &str) {
+        use holon_filesystem::FileSystem;
+        let file_path = self.org_root.join(filename);
+        if let Some(parent) = file_path.parent() {
+            self.org_fs.mkdir_all(parent);
+        }
+        FileSystem::write(self.org_fs.as_ref(), &file_path, content.as_bytes())
+            .await
+            .unwrap_or_else(|e| {
+                panic!("[SutFixtureFs::write_org_file] write {filename} failed: {e:#}")
+            });
+
+        // Wait for the watcher ingest to mint the doc-page block (title == file
+        // stem — `WriteOrgFile::apply_to_ref` gives the oracle page the same
+        // content), mirroring `SutAppLifecycle::create_document`'s poll; then
+        // settle the full block id-set so the content blocks landed too.
+        let stem = std::path::Path::new(filename)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(filename)
+            .to_string();
+        let timeout = Duration::from_secs(5);
+        let start = std::time::Instant::now();
+        let doc_id = loop {
+            if let Some(b) = self
+                .all_blocks()
+                .await
+                .into_iter()
+                .find(|b| b.title() == stem)
+            {
+                break b.id;
+            }
+            assert!(
+                start.elapsed() < timeout,
+                "[SutFixtureFs::write_org_file] timeout waiting for the doc block (title \
+                 {stem:?}) to land in block_raw after writing {filename}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        self.settle_block_ids_stable(Duration::from_secs(5)).await;
+
+        // Track the doc for later file-seam lookups (BulkExternalAdd / External
+        // ApplyMutation) — idempotent for a same-file rewrite.
+        let mut docs = self.documents.lock().expect("documents lock");
+        if !docs.iter().any(|(u, _)| *u == doc_id) {
+            docs.push((doc_id, file_path));
+        }
+    }
+
+    async fn create_directory(&self, path: &str) {
+        unimplemented!(
+            "[SutFixtureFs::create_directory] CreateDirectory is `!app_started`-gated and the \
+             composed oracle boots pre-started — unreachable until a deferred-boot increment \
+             lands (path: {path})"
+        );
+    }
+
+    async fn git_init(&self) {
+        unimplemented!(
+            "[SutFixtureFs::git_init] GitInit is `!app_started`-gated and the composed oracle \
+             boots pre-started — unreachable until a deferred-boot increment lands"
+        );
+    }
+
+    async fn jj_git_init(&self) {
+        unimplemented!(
+            "[SutFixtureFs::jj_git_init] JjGitInit is `!app_started`-gated and the composed \
+             oracle boots pre-started — unreachable until a deferred-boot increment lands"
+        );
+    }
+
+    async fn create_stale_loro(
+        &self,
+        org_filename: &str,
+        _: holon_pbt_core::types::LoroCorruptionType,
+    ) {
+        unimplemented!(
+            "[SutFixtureFs::create_stale_loro] CreateStaleLoro is `!app_started`-gated and the \
+             composed oracle boots pre-started — unreachable until a deferred-boot increment \
+             lands (file: {org_filename})"
+        );
+    }
+}
+
 #[async_trait::async_trait(?Send)]
 impl SutErrorLog for HeadlessFrontendComponent {
     /// Flutter/event publish errors logged during the initial document sync —
-    /// the SAME production `FrontendSession` publish-error tracker `E2ESut` read.
+    /// the SAME production `FrontendSession` publish-error tracker `E2ESut`
+    /// read.
     async fn app_error_count(&self) -> usize {
         self.session.startup_error_count()
     }
@@ -2032,13 +2408,14 @@ impl SutErrorLog for HeadlessFrontendComponent {
     }
 }
 
-// Direct gesture-write trait impls over the component's OWN headless driver — thin
-// wrappers on the `*_via` bodies. Registered CapMaps route these caps through
-// `DriverBoundFrontendWrite` (`register_gesture_writes`); these direct impls exist for
-// the make-or-break PROBE tests (and the `assert_cap_union` compile check) that exercise
-// the component directly rather than through a composed `CapMap`. Same bodies, bound to
-// `self.driver()`. `SutMutate` is intentionally NOT among them — no direct caller needs
-// it, so `state_toggle` toggling has a single path (the shim's `toggle_state_via`).
+// Direct gesture-write trait impls over the component's OWN headless driver —
+// thin wrappers on the `*_via` bodies. Registered CapMaps route these caps
+// through `DriverBoundFrontendWrite` (`register_gesture_writes`); these direct
+// impls exist for the make-or-break PROBE tests (and the `assert_cap_union`
+// compile check) that exercise the component directly rather than through a
+// composed `CapMap`. Same bodies, bound to `self.driver()`. `SutMutate` is
+// intentionally NOT among them — no direct caller needs it, so `state_toggle`
+// toggling has a single path (the shim's `toggle_state_via`).
 #[async_trait::async_trait(?Send)]
 impl SutFocusWrite for HeadlessFrontendComponent {
     // ALLOW(unused_param): region is fixed to main by the click-driven focus path
@@ -2071,13 +2448,14 @@ impl SutEditorMirrorWrite for HeadlessFrontendComponent {
 }
 
 impl CapProvider for HeadlessFrontendComponent {
-    /// Backward-compatible entry: the non-gesture caps PLUS the gesture-write caps
-    /// bound to this component's OWN headless driver. Direct callers (lib slices that
-    /// build a CapMap via `Config`/`register` and never attach a window) get the full
-    /// set. The composed builder instead calls [`Self::register_non_gesture`] +
-    /// [`GestureWriteSource::register_gesture_writes`] separately so the windowed
-    /// `DriverPlacement::Deferred` base can withhold the gesture rung until a window
-    /// exists (§8.12 insert-only overlay).
+    /// Backward-compatible entry: the non-gesture caps PLUS the gesture-write
+    /// caps bound to this component's OWN headless driver. Direct callers
+    /// (lib slices that build a CapMap via `Config`/`register` and never
+    /// attach a window) get the full set. The composed builder instead
+    /// calls [`Self::register_non_gesture`] +
+    /// [`GestureWriteSource::register_gesture_writes`] separately so the
+    /// windowed `DriverPlacement::Deferred` base can withhold the gesture
+    /// rung until a window exists (§8.12 insert-only overlay).
     fn register(self: Arc<Self>, caps: &mut CapMap) {
         let driver = self.driver();
         self.clone().register_non_gesture(caps);
@@ -2086,11 +2464,13 @@ impl CapProvider for HeadlessFrontendComponent {
 }
 
 impl HeadlessFrontendComponent {
-    /// Every cap this component provides EXCEPT the driver-bound gesture-write family
-    /// (`SutBlockTreeWrite`/`SutFocusWrite`/`SutEditorMirrorWrite`/`SutMutate`), which
-    /// is enumerated once in [`GestureWriteSource::register_gesture_writes`]. Split out
-    /// so `DriverPlacement` can gate the gesture rung (the windowed base registers the
-    /// reads/projections here and inserts the gesture writes only once a window exists).
+    /// Every cap this component provides EXCEPT the driver-bound gesture-write
+    /// family (`SutBlockTreeWrite`/`SutFocusWrite`/`SutEditorMirrorWrite`/
+    /// `SutMutate`), which is enumerated once in
+    /// [`GestureWriteSource::register_gesture_writes`]. Split out
+    /// so `DriverPlacement` can gate the gesture rung (the windowed base
+    /// registers the reads/projections here and inserts the gesture writes
+    /// only once a window exists).
     pub(crate) fn register_non_gesture(self: Arc<Self>, caps: &mut CapMap) {
         caps.insert(self.clone() as Arc<dyn SutErrorLog>);
         caps.insert(self.clone() as Arc<dyn SutRenderer>);
@@ -2098,6 +2478,12 @@ impl HeadlessFrontendComponent {
         caps.insert(self.clone() as Arc<dyn SutBackend>);
         caps.insert(self.clone() as Arc<dyn SutWatch>);
         caps.insert(self.clone() as Arc<dyn SutOrgRead>);
+        // `SutAdviceMatview` — the SQL-level advice twin's SUT read. Selecting
+        // `inv-advice-matview-matches-ref` here is intended (unlike
+        // `SutSqlProjection` below): the twin must run wherever the block matviews
+        // do so the driver-ladder localization (matview twin green vs weave red)
+        // holds. Pre-step-6 it observes no `advice_rule_%` matview.
+        caps.insert(self.clone() as Arc<dyn SutAdviceMatview>);
         // `SutNavHistoryWrite` (go_home) — selection-neutral write cap (no invariant
         // `Needs` it), it just lets the `NavigateHome` transition drive this component
         // through `apply_to_sut(&mut CapMap)`. `SutSqlProjection` is deliberately NOT
@@ -2124,30 +2510,40 @@ impl HeadlessFrontendComponent {
         // over the production navigation provider ops via the headless session —
         // same selection-neutral rationale (no invariant `Needs` it).
         caps.insert(self.clone() as Arc<dyn SutNavHistoryDrive>);
-        // `SutSeamMutate` over the live `FileSyncController`: the real composed home for
-        // `ApplyMutation`'s External (org) arm and `BulkExternalAdd`, un-narrowing both onto
-        // any frontend CapMap. A write cap (no invariant `Needs` it), safe here.
+        // `SutSeamMutate` over the live `FileSyncController`: the real composed home
+        // for `ApplyMutation`'s External (org) arm and `BulkExternalAdd`,
+        // un-narrowing both onto any frontend CapMap. A write cap (no invariant
+        // `Needs` it), safe here.
         caps.insert(self.clone() as Arc<dyn SutSeamMutate>);
+        // `SutBlockCreate` (CreateBlockUnderFocus) — creation-slot gesture over this
+        // component's own `ReactiveEngineDriver` commit seam. A write cap (no invariant
+        // `Needs` it); its presence makes the WP-E creation-slot create cap-feasible on
+        // any frontend CapMap, so the transition auto-narrows to configs whose default
+        // layout renders the `creation_slot: true` collection.
+        caps.insert(self.clone() as Arc<dyn SutBlockCreate>);
         // `SutAppLifecycle` (CreateDocument) — selection-neutral lifecycle cap (no
-        // invariant `Needs` it); lets the `CreateDocument` transition mint a doc through
-        // `apply_to_sut(&mut CapMap)`. Only `create_document` is realized; the other
-        // lifecycle methods fail loud (not in any composed alphabet yet). This is the
-        // seam-rebuild entry point — the synthetic→real doc-uri mapping is the harness's
-        // generic per-tick reconcile, not E2ESut's `block_tree_post_action`.
+        // invariant `Needs` it); lets the `CreateDocument` transition mint a doc
+        // through `apply_to_sut(&mut CapMap)`. Only `create_document` is
+        // realized; the other lifecycle methods fail loud (not in any composed
+        // alphabet yet). This is the seam-rebuild entry point — the
+        // synthetic→real doc-uri mapping is the harness's generic per-tick
+        // reconcile, not E2ESut's `block_tree_post_action`.
         caps.insert(self.clone() as Arc<dyn SutAppLifecycle>);
         caps.insert(self as Arc<dyn SutOrgRender>);
     }
 }
 
 impl HeadlessFrontendComponent {
-    /// The driver-parameterized registration of the gesture-write cap family — the ONE
-    /// place that enumerates which caps are gesture writes. Given a `UserDriver`, it binds
-    /// all of them to that driver: the headless base passes its own `ReactiveEngineDriver`
-    /// (§8.11 VM rung); the windowed overlay passes the live window's
-    /// `GpuiUserDriver`/`SimUserDriver` (§8.11 highest-available). Both go through the SAME
-    /// production keystroke/click/toggle bodies via [`DriverBoundFrontendWrite`] — only the
-    /// driver changes. This is the insert-only realization the §8.12 C-3 windowed repoint
-    /// wants: the deferred base registers none of these, the overlay `insert`s them once.
+    /// The driver-parameterized registration of the gesture-write cap family —
+    /// the ONE place that enumerates which caps are gesture writes. Given a
+    /// `UserDriver`, it binds all of them to that driver: the headless base
+    /// passes its own `ReactiveEngineDriver` (§8.11 VM rung); the windowed
+    /// overlay passes the live window's `GpuiUserDriver`/`SimUserDriver`
+    /// (§8.11 highest-available). Both go through the SAME production
+    /// keystroke/click/toggle bodies via [`DriverBoundFrontendWrite`] — only
+    /// the driver changes. This is the insert-only realization the §8.12
+    /// C-3 windowed repoint wants: the deferred base registers none of
+    /// these, the overlay `insert`s them once.
     pub(crate) fn register_gesture_writes(
         self: Arc<Self>,
         caps: &mut CapMap,
@@ -2158,17 +2554,19 @@ impl HeadlessFrontendComponent {
         // reconcile resolver is wired (the composed/windowed builder shares one so a
         // split-minted id maps oracle→real). When no resolver is set — the fixed-id lib
         // slices that build via `register` and never mint — fall back to the plain
-        // `OpDispatchWriter` dispatch floor (behaviour-identical to the former default),
-        // so `keystroke_writer_with`'s fail-loud resolver assert never trips here.
+        // `OpDispatchWriter` dispatch floor (behaviour-identical to the former
+        // default), so `keystroke_writer_with`'s fail-loud resolver assert
+        // never trips here.
         let block_tree: Arc<dyn SutBlockTreeWrite> = if self.resolver.get().is_some() {
             Arc::new(self.keystroke_writer_with(driver.clone()))
         } else {
             Arc::new(OpDispatchWriter::new(self.engine.clone()))
         };
         caps.insert(block_tree);
-        // `SutFocusWrite`/`SutEditorMirrorWrite`/`SutMutate`: the driver-bound shim that
-        // delegates to the component's `*_via` bodies (sidebar-click focus, editor
-        // keystrokes, `state_toggle` clicks) so the whole family rides ONE driver.
+        // `SutFocusWrite`/`SutEditorMirrorWrite`/`SutMutate`: the driver-bound shim
+        // that delegates to the component's `*_via` bodies (sidebar-click
+        // focus, editor keystrokes, `state_toggle` clicks) so the whole family
+        // rides ONE driver.
         let shim = Arc::new(DriverBoundFrontendWrite::new(self.clone(), driver));
         caps.insert(shim.clone() as Arc<dyn SutFocusWrite>);
         caps.insert(shim.clone() as Arc<dyn SutEditorMirrorWrite>);
@@ -2177,14 +2575,16 @@ impl HeadlessFrontendComponent {
 }
 
 /// Rebinds the frontend's gesture-write caps ([`SutFocusWrite`],
-/// [`SutEditorMirrorWrite`], [`SutMutate`]) onto a chosen [`UserDriver`] by delegating
-/// every method to the base [`HeadlessFrontendComponent`]'s driver-parameterized `*_via`
-/// bodies — the sidebar-click / editor-keystroke / `state_toggle`-click logic is
-/// driver-invariant, so no logic is re-implemented, only the driver is swapped. Used for
-/// BOTH the headless base (driver = the component's own `ReactiveEngineDriver`) and the
-/// windowed overlay (driver = the window's `GpuiUserDriver`/`SimUserDriver`), §8.12 C-3.
+/// [`SutEditorMirrorWrite`], [`SutMutate`]) onto a chosen [`UserDriver`] by
+/// delegating every method to the base [`HeadlessFrontendComponent`]'s
+/// driver-parameterized `*_via` bodies — the sidebar-click / editor-keystroke /
+/// `state_toggle`-click logic is driver-invariant, so no logic is
+/// re-implemented, only the driver is swapped. Used for BOTH the headless base
+/// (driver = the component's own `ReactiveEngineDriver`) and the
+/// windowed overlay (driver = the window's `GpuiUserDriver`/`SimUserDriver`),
+/// §8.12 C-3.
 ///
-/// [`SutMutate`]: crate::pbt::local_caps::SutMutate
+/// [`SutMutate`]: holon_pbt_core::capabilities::SutMutate
 pub(crate) struct DriverBoundFrontendWrite {
     base: Arc<HeadlessFrontendComponent>,
     driver: Arc<dyn UserDriver>,
@@ -2244,23 +2644,25 @@ impl SutMutate for DriverBoundFrontendWrite {
 
 #[cfg(test)]
 mod tests {
+    use holon_api::EntityName;
+    use holon_api::Value;
+
     use super::*;
-    use holon_api::{EntityName, Value};
 
     /// A0 make-or-break PROBE (full-mode peer mesh): when the headless frontend
     /// boots with Loro ON (the `full_headless` shape), does its DI injector
     /// eventually resolve a `LoroSyncControllerHandle`, and is the controller
     /// watching the SAME global doc the builder's Loro arm reads? Resolution is
-    /// RACE-prone (`without_wait()` → spawned `post_ready_work`, `wiring.rs:360`),
-    /// so this POLLS for readiness rather than snapshotting — a flaky one-shot
-    /// `assert Ok` would be the wrong probe. If the handle never resolves headless,
-    /// full-mode peer projection has no controller and Part A must fall back to an
+    /// RACE-prone (`without_wait()` → spawned `post_ready_work`,
+    /// `wiring.rs:360`), so this POLLS for readiness rather than
+    /// snapshotting — a flaky one-shot `assert Ok` would be the wrong
+    /// probe. If the handle never resolves headless, full-mode peer
+    /// projection has no controller and Part A must fall back to an
     /// explicit `project()` drive (don't fake it — surface the absence).
     #[tokio::test(flavor = "multi_thread")]
     async fn headless_loro_sync_controller_resolves_after_boot() {
-        const TREE_ORG: &str = "#+ID: structural-page\n\
-            * parent\n:PROPERTIES:\n:ID: parent\n:END:\n\
-            * c1\n:PROPERTIES:\n:ID: c1\n:END:\n";
+        const TREE_ORG: &str = "#+ID: structural-page\n* parent\n:PROPERTIES:\n:ID: \
+                                parent\n:END:\n* c1\n:PROPERTIES:\n:ID: c1\n:END:\n";
         let comp = HeadlessFrontendComponent::new_with_loro(
             &[("structural-page.org", TREE_ORG)],
             Duration::from_millis(300),
@@ -2280,8 +2682,8 @@ mod tests {
         }
         assert!(
             handle.is_some(),
-            "[A0-probe] LoroSyncControllerHandle never resolved headless within 2s — \
-             full-mode peer projection has no controller; fall back to explicit project()"
+            "[A0-probe] LoroSyncControllerHandle never resolved headless within 2s — full-mode \
+             peer projection has no controller; fall back to explicit project()"
         );
         eprintln!("[A0-probe] sync controller handle resolved headless ✓");
 
@@ -2301,19 +2703,20 @@ mod tests {
             .expect("[A0-probe] global doc #2");
         assert!(
             Arc::ptr_eq(&doc_a, &doc_b),
-            "[A0-probe] get_global_doc() must return the cached doc (same Arc), else a \
-             peer import would not wake the controller"
+            "[A0-probe] get_global_doc() must return the cached doc (same Arc), else a peer \
+             import would not wake the controller"
         );
         eprintln!("[A0-probe] global doc is cached/shared ✓");
     }
 
-    /// Step 0 make-or-break PROBE (SutHandle decomposition / NavigateFocus): does
-    /// driving the production `navigation.focus` op through the **windowless**
-    /// `FrontendSession` actually update the `current_focus` / `focus_roots`
-    /// matviews — with no GPUI window, no driver, no geometry pump? If yes, the
-    /// `NavigateFocus` transition can rebind onto `SutFocusWrite` realized on this
-    /// component. If the headless session has no operation engine, or the matviews
-    /// need a window/driver pump, this STOPS the increment (don't fake the read,
+    /// Step 0 make-or-break PROBE (SutHandle decomposition / NavigateFocus):
+    /// does driving the production `navigation.focus` op through the
+    /// **windowless** `FrontendSession` actually update the `current_focus`
+    /// / `focus_roots` matviews — with no GPUI window, no driver, no
+    /// geometry pump? If yes, the `NavigateFocus` transition can rebind
+    /// onto `SutFocusWrite` realized on this component. If the headless
+    /// session has no operation engine, or the matviews need a window/
+    /// driver pump, this STOPS the increment (don't fake the read,
     /// don't swallow the `execute_operation` error).
     #[tokio::test(flavor = "multi_thread")]
     async fn headless_navigate_focus_updates_matview() {
@@ -2363,8 +2766,8 @@ mod tests {
             .await;
         assert!(
             result.is_ok(),
-            "[nav-probe] navigation.focus through the headless session failed — \
-             the windowless session has no operation engine (make-or-break): {:?}",
+            "[nav-probe] navigation.focus through the headless session failed — the windowless \
+             session has no operation engine (make-or-break): {:?}",
             result.err()
         );
 
@@ -2412,20 +2815,21 @@ mod tests {
     /// Editor-keystone make-or-break PROBE (`SutEditorMirrorWrite` over the
     /// production `HeadlessEditorMirror`): does opening an editor headlessly
     /// (`apply_focus_editable_text` = `click_entity`) + typing a char
-    /// (`apply_type_chars` = `send_raw_keystroke`) actually land the typed text in
-    /// `block_raw.content` — the projection `inv-blocks-match-ref/block_raw` reads?
-    /// The reference commits typed text into block content on every TypeChars
-    /// (`commit_active_editor_if_changed`), so committed-content parity requires the
-    /// SUT's MutableText edit to sync through to `block_raw`. If the headless
-    /// pipeline never propagates the edit (no automatic Loro→Turso sync without a
-    /// window), this STOPS the keystone — don't fake the commit, surface it.
+    /// (`apply_type_chars` = `send_raw_keystroke`) actually land the typed text
+    /// in `block_raw.content` — the projection
+    /// `inv-blocks-match-ref/block_raw` reads? The reference commits typed
+    /// text into block content on every TypeChars
+    /// (`commit_active_editor_if_changed`), so committed-content parity
+    /// requires the SUT's MutableText edit to sync through to `block_raw`.
+    /// If the headless pipeline never propagates the edit (no automatic
+    /// Loro→Turso sync without a window), this STOPS the keystone — don't
+    /// fake the commit, surface it.
     #[tokio::test(flavor = "multi_thread")]
     async fn headless_type_chars_commits_to_block_raw() {
         // The wide PBT's working tree: a seed page with three text-leaf children.
-        const TREE_ORG: &str = "#+ID: structural-page\n\
-            * parent\n:PROPERTIES:\n:ID: parent\n:END:\n\
-            * c1\n:PROPERTIES:\n:ID: c1\n:END:\n\
-            * c2\n:PROPERTIES:\n:ID: c2\n:END:\n";
+        const TREE_ORG: &str = "#+ID: structural-page\n* parent\n:PROPERTIES:\n:ID: \
+                                parent\n:END:\n* c1\n:PROPERTIES:\n:ID: c1\n:END:\n* \
+                                c2\n:PROPERTIES:\n:ID: c2\n:END:\n";
         let comp = HeadlessFrontendComponent::new_with_loro(
             &[("structural-page.org", TREE_ORG)],
             Duration::from_millis(300),
@@ -2480,15 +2884,85 @@ mod tests {
         );
     }
 
+    /// SPIKE (Phase 1b) END-TO-END: with focus on a DISPLAY occurrence
+    /// (`focused_occurrence = Some(1)`), a typed char must STILL commit to the
+    /// block's CANONICAL `block_raw.content`. Proves
+    /// `editable_text(&block_uri)` resolves by the canonical id regardless
+    /// of occurrence (write → canonical home) — the runtime companion to
+    /// the mirror unit test `occurrence_keyed_cursors_are_independent`,
+    /// which covers caret isolation.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spike_display_occurrence_write_routes_to_canonical() {
+        const TREE_ORG: &str = "#+ID: structural-page\n* parent\n:PROPERTIES:\n:ID: \
+                                parent\n:END:\n* c1\n:PROPERTIES:\n:ID: c1\n:END:\n";
+        let comp = HeadlessFrontendComponent::new_with_loro(
+            &[("structural-page.org", TREE_ORG)],
+            Duration::from_millis(300),
+            true,
+        )
+        .await;
+
+        let page = EntityUri::block("structural-page");
+        comp.apply_navigate_focus(CapRegion::Main, &page).await;
+
+        let c1 = EntityUri::block("c1");
+        let c1_sql = format!(
+            "SELECT content FROM block_raw WHERE id = '{}'",
+            c1.as_str().replace('\'', "''")
+        );
+
+        // 1) Canonical occurrence (None): open the editor and type 'A' → "c1A".
+        comp.apply_focus_editable_text(&c1).await;
+        assert_eq!(
+            comp.reactive.focused_occurrence(),
+            None,
+            "[spike-1b] focus starts at the canonical occurrence"
+        );
+        comp.apply_type_chars("A").await;
+
+        // 2) Switch focus to a DISPLAY occurrence and re-open the editor there.
+        //    `set_focus_occurrence` is additive — it does NOT touch `focused_block`,
+        //    and the production focus path leaves it intact.
+        comp.reactive.set_focus_occurrence(Some(1));
+        comp.apply_focus_editable_text(&c1).await;
+        assert_eq!(
+            comp.reactive.focused_block().as_ref(),
+            Some(&c1),
+            "[spike-1b] block still focused"
+        );
+        assert_eq!(
+            comp.reactive.focused_occurrence(),
+            Some(1),
+            "[spike-1b] occurrence persists across the production focus path"
+        );
+        comp.apply_type_chars("B").await;
+
+        // Both writes landed on the CANONICAL block, despite focus being on the
+        // display occurrence — editable_text resolves by block id, not occurrence.
+        let after = comp
+            .sql_query(&c1_sql)
+            .await
+            .into_iter()
+            .next()
+            .and_then(|r| HeadlessFrontendComponent::cell(&r, "content"));
+        assert_eq!(
+            after.as_deref(),
+            Some("c1AB"),
+            "[spike-1b] typing at display occurrence Some(1) must commit to CANONICAL c1 content \
+             (write → canonical home); got {after:?}"
+        );
+    }
+
     /// A2 make-or-break PROBE (`SutNavHistoryDrive`): can the **windowless**
     /// `FrontendSession` drive the nav-history ops (`focus_pin`, `go_back`,
     /// `go_forward`) the way `E2ESut` drives them through the GPUI driver's
     /// `synthetic_dispatch` / leader chords? The memory flagged back/forward as
     /// historically "driver-realized only — the headless slice does not drive
-    /// these". This asserts: `focus_pin` reaches the matviews (observable effect),
-    /// and `go_back`/`go_forward` dispatch headlessly without error (reachability —
-    /// their full history *semantics* are a Phase-B oracle-parity concern). If the
-    /// session has no operation engine for these ops, this STOPS A2 (don't fake it).
+    /// these". This asserts: `focus_pin` reaches the matviews (observable
+    /// effect), and `go_back`/`go_forward` dispatch headlessly without
+    /// error (reachability — their full history *semantics* are a Phase-B
+    /// oracle-parity concern). If the session has no operation engine for
+    /// these ops, this STOPS A2 (don't fake it).
     #[tokio::test(flavor = "multi_thread")]
     async fn headless_nav_history_ops_dispatch() {
         let doc0 = "#+ID: ref-doc-0\n* Doc zero heading\n";
@@ -2543,14 +3017,17 @@ mod tests {
     }
 
     /// C1 PinBlock make-or-break PROBE (diagnostic — prints, asserts only the
-    /// dispatch). Two unknowns gate adding `PinBlock` to the composed nav alphabet:
-    /// (a) does the seed contain a pinnable `ContentType::Text`, non-page block under
-    /// Main? (b) does headless `focus_pin(RightSidebar, block)` populate
-    /// `focus_roots(right_sidebar)` (which inv-focus-roots reads) with NO window?
-    /// Uses an enriched seed (a paragraph under a heading = a Text child block).
+    /// dispatch). Two unknowns gate adding `PinBlock` to the composed nav
+    /// alphabet: (a) does the seed contain a pinnable `ContentType::Text`,
+    /// non-page block under Main? (b) does headless
+    /// `focus_pin(RightSidebar, block)` populate
+    /// `focus_roots(right_sidebar)` (which inv-focus-roots reads) with NO
+    /// window? Uses an enriched seed (a paragraph under a heading = a Text
+    /// child block).
     #[tokio::test(flavor = "multi_thread")]
     async fn headless_pin_block_right_sidebar_probe() {
-        let doc0 = "#+ID: ref-doc-0\n* Heading zero\n:PROPERTIES:\n:ID: ref-block-0\n:END:\nFirst pinnable paragraph\n";
+        let doc0 = "#+ID: ref-doc-0\n* Heading zero\n:PROPERTIES:\n:ID: ref-block-0\n:END:\nFirst \
+                    pinnable paragraph\n";
         let comp =
             HeadlessFrontendComponent::new(&[("doc0.org", doc0)], Duration::from_millis(300)).await;
 
@@ -2559,7 +3036,11 @@ mod tests {
             .engine
             .db_handle()
             .query(
-                "SELECT id, parent_id, content_type, content FROM block_raw",
+                // Exclude the `sentinel:no_parent` FK-anchor row (CoreSchemaModule
+                // seeds it for the parent FK; it is not a real block, and
+                // production's `block` matview drops it the same way).
+                "SELECT id, parent_id, content_type, content FROM block_raw WHERE id != \
+                 'sentinel:no_parent'",
                 std::collections::HashMap::new(),
             )
             .await
@@ -2581,7 +3062,8 @@ mod tests {
             );
         }
 
-        // Pick a Text, non-doc block (content_type text + has a parent that isn't no_parent).
+        // Pick a Text, non-doc block (content_type text + has a parent that isn't
+        // no_parent).
         let pinnable: Option<String> = rows
             .iter()
             .filter(|r| {
@@ -2607,7 +3089,8 @@ mod tests {
 
         // Dispatch focus_pin into the RIGHT sidebar (PinBlock's region) and assert it
         // populates `focus_roots(right_sidebar)` headlessly — the make-or-break:
-        // inv-focus-roots reads this matview, and without a window it might never update.
+        // inv-focus-roots reads this matview, and without a window it might never
+        // update.
         SutNavHistoryDrive::pin_block(&comp, holon_api::Region::RightSidebar, &pin_uri).await;
 
         let mut params = std::collections::HashMap::new();
@@ -2633,11 +3116,13 @@ mod tests {
         assert!(
             roots.contains(&pin_id),
             "[pin-probe] headless focus_pin(right_sidebar, {pin_id}) must populate \
-             focus_roots(right_sidebar) — the matview did not update without a window; got {roots:?}"
+             focus_roots(right_sidebar) — the matview did not update without a window; got \
+             {roots:?}"
         );
     }
 
-    /// Read `current_focus(main)`'s block_id from the matview (None when empty).
+    /// Read `current_focus(main)`'s block_id from the matview (None when
+    /// empty).
     async fn current_focus_main(comp: &HeadlessFrontendComponent) -> Option<String> {
         let rows = comp
             .engine
@@ -2655,12 +3140,13 @@ mod tests {
     }
 
     /// C1 back/forward make-or-break PROBE: the historically-doubted question —
-    /// does headless `go_back`/`go_forward` move the `current_focus(main)` matview
-    /// the way the ref's `navigation_history.cursor` moves (so inv-navigation-focus
-    /// would stay green), with NO window? Build history journals(boot)→d0→d1, then
-    /// `go_back` must return focus to d0 and `go_forward` back to d1. If focus does
-    /// NOT track the cursor, NavigateBack/Forward must NOT join the composed alphabet
-    /// (they stay E4/windowed) — this probe is the gate.
+    /// does headless `go_back`/`go_forward` move the `current_focus(main)`
+    /// matview the way the ref's `navigation_history.cursor` moves (so
+    /// inv-navigation-focus would stay green), with NO window? Build
+    /// history journals(boot)→d0→d1, then `go_back` must return focus to d0
+    /// and `go_forward` back to d1. If focus does NOT track the cursor,
+    /// NavigateBack/Forward must NOT join the composed alphabet (they stay
+    /// E4/windowed) — this probe is the gate.
     #[tokio::test(flavor = "multi_thread")]
     async fn headless_back_forward_focus_parity_probe() {
         let doc0 = "#+ID: ref-doc-0\n* Doc zero\n";
@@ -2704,23 +3190,27 @@ mod tests {
         );
     }
 
-    /// C1 UnpinBlock make-or-break PROBE: (a) what `history_id` does the headless SUT
-    /// assign to a right-sidebar pin (the `navigation_history.id` AUTOINCREMENT), and
+    /// C1 UnpinBlock make-or-break PROBE: (a) what `history_id` does the
+    /// headless SUT assign to a right-sidebar pin (the
+    /// `navigation_history.id` AUTOINCREMENT), and
     /// (b) does `close(history_id)` actually remove the pin (clear
-    /// `focus_roots(right_sidebar)`) headlessly? `UnpinBlock`'s generator draws the
-    /// `history_id` from the ref's `open_pins` — so the ref's predicted id must equal
-    /// the SUT's real row id (the "risk C" alignment). This probe establishes the SUT
-    /// side: pin, read the assigned id, unpin it, confirm the pin is gone.
+    /// `focus_roots(right_sidebar)`) headlessly? `UnpinBlock`'s generator draws
+    /// the `history_id` from the ref's `open_pins` — so the ref's predicted
+    /// id must equal the SUT's real row id (the "risk C" alignment). This
+    /// probe establishes the SUT side: pin, read the assigned id, unpin it,
+    /// confirm the pin is gone.
     #[tokio::test(flavor = "multi_thread")]
     async fn headless_unpin_block_probe() {
-        let doc0 = "#+ID: ref-doc-0\n* Heading zero\n:PROPERTIES:\n:ID: ref-block-0\n:END:\nFirst pinnable paragraph\n";
+        let doc0 = "#+ID: ref-doc-0\n* Heading zero\n:PROPERTIES:\n:ID: ref-block-0\n:END:\nFirst \
+                    pinnable paragraph\n";
         let comp =
             HeadlessFrontendComponent::new(&[("doc0.org", doc0)], Duration::from_millis(300)).await;
         let pin_uri = EntityUri::parse("block:ref-block-0").expect("pin id");
 
         SutNavHistoryDrive::pin_block(&comp, holon_api::Region::RightSidebar, &pin_uri).await;
 
-        // Dump navigation_history to find the pin row's `id` (the SUT-assigned history_id).
+        // Dump navigation_history to find the pin row's `id` (the SUT-assigned
+        // history_id).
         let rows = comp
             .engine
             .db_handle()
@@ -2788,12 +3278,13 @@ mod tests {
     /// PROBE — is headless `go_home` IDEMPOTENT when already home? The
     /// `NavigateHome → NavigateBack` divergence hinges on this: the ref's
     /// `navigate_home::apply_to_ref` pushes a `None` entry on EVERY call (no
-    /// already-home guard), so `NavigateHome`×N → N home entries. If the headless SUT
-    /// (production `navigation.focus(None)`) instead writes NO new row when already
-    /// home (like `navigate_focus`'s same-target idempotency), then the ref over-counts
-    /// and `NavigateBack` walks it through phantom home entries the SUT lacks — a
-    /// ref-model bug. Drive `go_home`×3 from the boot (journals) state and count the
-    /// NULL (home) rows in `navigation_history`.
+    /// already-home guard), so `NavigateHome`×N → N home entries. If the
+    /// headless SUT (production `navigation.focus(None)`) instead writes NO
+    /// new row when already home (like `navigate_focus`'s same-target
+    /// idempotency), then the ref over-counts and `NavigateBack` walks it
+    /// through phantom home entries the SUT lacks — a ref-model bug. Drive
+    /// `go_home`×3 from the boot (journals) state and count the NULL (home)
+    /// rows in `navigation_history`.
     #[tokio::test(flavor = "multi_thread")]
     async fn headless_go_home_idempotency_probe() {
         let comp = HeadlessFrontendComponent::new(
@@ -2842,20 +3333,21 @@ mod tests {
         );
     }
 
-    /// PROBE (nav-history fold into the wide PBT): two questions, answered empirically.
-    /// (1) What `navigation_history.id`s does the WIDE boot assign (boot focus + the
-    /// driven `NavigateFocus(page_root)`)? These set the exact `next_history_id` /
-    /// `open_pins.history_id` constants the wide oracle must mirror to fold Pin/Unpin.
-    /// (2) Do `FocusEditableText` / `create_document` — already in the wide alphabet —
-    /// write SUT `navigation_history` rows the oracle wouldn't mirror? If so, they
-    /// silently advance the AUTOINCREMENT and would desync Pin/Unpin id alignment +
-    /// Back/Forward stack depth. The counts after each step decide the fold scope.
+    /// PROBE (nav-history fold into the wide PBT): two questions, answered
+    /// empirically. (1) What `navigation_history.id`s does the WIDE boot
+    /// assign (boot focus + the driven `NavigateFocus(page_root)`)? These
+    /// set the exact `next_history_id` / `open_pins.history_id` constants
+    /// the wide oracle must mirror to fold Pin/Unpin.
+    /// (2) Do `FocusEditableText` / `create_document` — already in the wide
+    /// alphabet — write SUT `navigation_history` rows the oracle wouldn't
+    /// mirror? If so, they silently advance the AUTOINCREMENT and would
+    /// desync Pin/Unpin id alignment + Back/Forward stack depth. The counts
+    /// after each step decide the fold scope.
     #[tokio::test(flavor = "multi_thread")]
     async fn wide_boot_navigation_history_id_probe() {
-        const TREE_ORG: &str = "#+ID: structural-page\n\
-            * parent\n:PROPERTIES:\n:ID: parent\n:END:\n\
-            * c1\n:PROPERTIES:\n:ID: c1\n:END:\n\
-            * c2\n:PROPERTIES:\n:ID: c2\n:END:\n";
+        const TREE_ORG: &str = "#+ID: structural-page\n* parent\n:PROPERTIES:\n:ID: \
+                                parent\n:END:\n* c1\n:PROPERTIES:\n:ID: c1\n:END:\n* \
+                                c2\n:PROPERTIES:\n:ID: c2\n:END:\n";
         let comp = HeadlessFrontendComponent::new_with_loro(
             &[("structural-page.org", TREE_ORG)],
             Duration::from_millis(300),
@@ -2924,28 +3416,39 @@ mod tests {
         );
     }
 
-    /// **C2.0 make-or-break PROBE — does the real headless component's `block_raw`
-    /// reduce to the spike's fixed `parent/c1/c2` tree after a production-create
-    /// seed, so the structural reconcile loop can run over it?** The spike proves
-    /// reconcile over a *bare* `new_sql_engine_with_structural_ops` (no boot
-    /// bootstrap). `HeadlessFrontendComponent` runs the FULL production boot — which
-    /// may create journals/default pages (the nav slice's `block:journals` came from
-    /// here). If boot leaves extra blocks, `inv-blocks-match-ref/block_raw` (a
-    /// full-set compare) would false-RED against `build_started_ref`'s parent/c1/c2.
-    /// This probe DUMPS the booted block_raw, seeds the tree via the SAME production
-    /// create op the spike uses, dumps again, then runs split→reconcile→catalog so
-    /// the seed/oracle alignment is decided EMPIRICALLY before the SUT is built.
+    /// **C2.0 make-or-break PROBE — does the real headless component's
+    /// `block_raw` reduce to the spike's fixed `parent/c1/c2` tree after a
+    /// production-create seed, so the structural reconcile loop can run
+    /// over it?** The spike proves reconcile over a *bare*
+    /// `new_sql_engine_with_structural_ops` (no boot bootstrap).
+    /// `HeadlessFrontendComponent` runs the FULL production boot — which
+    /// may create journals/default pages (the nav slice's `block:journals` came
+    /// from here). If boot leaves extra blocks,
+    /// `inv-blocks-match-ref/block_raw` (a full-set compare) would
+    /// false-RED against `build_started_ref`'s parent/c1/c2. This probe
+    /// DUMPS the booted block_raw, seeds the tree via the SAME production
+    /// create op the spike uses, dumps again, then runs split→reconcile→catalog
+    /// so the seed/oracle alignment is decided EMPIRICALLY before the SUT
+    /// is built.
     #[tokio::test(flavor = "multi_thread")]
     async fn headless_structural_seed_and_reconcile_probe() {
-        use crate::pbt::composed::seed_primitives::{C1, C2, PARENT, fixed_ids};
-        use crate::pbt::composed::subsystem_seed::{build_started_ref, run_with_seeded_ref};
-        use crate::pbt::is_synthetic_ref_id;
-        use crate::pbt::op_write_cap::{IdResolver, OpDispatchWriter};
-        use crate::pbt::sql_slice::SqlProjectionComponent;
+        use std::collections::BTreeSet;
+
         use holon_api::EntityUri;
         use holon_pbt_core::TransitionRef;
-        use holon_pbt_core::capabilities::{SutBackend, SutBlockTreeWrite};
-        use std::collections::BTreeSet;
+        use holon_pbt_core::capabilities::SutBackend;
+        use holon_pbt_core::capabilities::SutBlockTreeWrite;
+
+        use crate::pbt::composed::seed_primitives::C1;
+        use crate::pbt::composed::seed_primitives::C2;
+        use crate::pbt::composed::seed_primitives::PARENT;
+        use crate::pbt::composed::seed_primitives::fixed_ids;
+        use crate::pbt::composed::subsystem_seed::build_started_ref;
+        use crate::pbt::composed::subsystem_seed::run_with_seeded_ref;
+        use crate::pbt::is_synthetic_ref_id;
+        use crate::pbt::op_write_cap::IdResolver;
+        use crate::pbt::op_write_cap::OpDispatchWriter;
+        use crate::pbt::sql_slice::SqlProjectionComponent;
 
         async fn dump(comp: &HeadlessFrontendComponent, tag: &str) {
             let rows = comp
@@ -3078,8 +3581,9 @@ mod tests {
 
         // (2) Drive a split through the CapMap (real uuid minted), reconcile the
         // oracle's synthetic `block::split-N` against it, re-run the catalog.
-        use crate::pbt::transitions::SplitBlock;
         use holon_pbt_core::TransitionImpl;
+
+        use crate::pbt::transitions::SplitBlock;
         let mut oracle = build_started_ref(&BTreeSet::new());
         inject_seed(&mut oracle);
         let before = sut_ids(&caps).await;
@@ -3137,11 +3641,13 @@ mod tests {
         );
         assert!(
             report.ran_ids().contains(&"inv-blocks-match-ref/block_raw"),
-            "[struct-probe] non-vacuity (post-split): inv-blocks-match-ref/block_raw must RUN (ran: {:?})",
+            "[struct-probe] non-vacuity (post-split): inv-blocks-match-ref/block_raw must RUN \
+             (ran: {:?})",
             report.ran_ids()
         );
         eprintln!(
-            "[struct-probe] OK — reconciled structural catalog green over HeadlessFrontendComponent"
+            "[struct-probe] OK — reconciled structural catalog green over \
+             HeadlessFrontendComponent"
         );
     }
 }

@@ -1,27 +1,32 @@
 //! Transition: move the focused block down (swap with its next sibling).
 //!
-//! Mirrors the legacy logic split across `state_machine.rs:1154-1169` (generator),
-//! `state_machine.rs:3359-3373` (precondition),
+//! Mirrors the legacy logic split across `state_machine.rs:1154-1169`
+//! (generator), `state_machine.rs:3359-3373` (precondition),
 //! `state_machine.rs:2673-2677` (ref-state apply),
 //! `sut.rs:3562-3567` (SUT apply), and
 //! `transition_budgets.rs:298-302` (expected SQL).
 
-use holon_pbt_core::capabilities::{
-    CapRegion, RefBlockTree, RefBlockTreeMut, RefEditorMirrorMut, RefFocus, RefFocusMut,
-    RefLifecycle, SutBlockTreeWrite,
-};
+use holon_api::EntityUri;
+use holon_pbt_core::TransitionFactory;
+use holon_pbt_core::TransitionRef;
+use holon_pbt_core::capabilities::CapRegion;
+use holon_pbt_core::capabilities::RefBlockTree;
+use holon_pbt_core::capabilities::RefBlockTreeMut;
+use holon_pbt_core::capabilities::RefEditorMirrorMut;
+use holon_pbt_core::capabilities::RefFocus;
+use holon_pbt_core::capabilities::RefFocusMut;
+use holon_pbt_core::capabilities::RefLifecycle;
+use holon_pbt_core::capabilities::SutBlockTreeWrite;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::check;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::validation::{Reason, check};
-use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
-
 #[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::{ExpectedSql, MutationKind, expected_sql_for_kind};
-
-use holon_api::EntityUri;
+use crate::pbt::transition_budgets::MutationKind;
+#[cfg(feature = "otel-testing")]
+use crate::pbt::transition_budgets::expected_sql_for_kind;
 
 /// Move the focused block down: swap its sort_key with its next sibling's.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -120,9 +125,7 @@ pub fn move_down_apply_to_ref<
 
 impl<R: RefBlockTree + RefFocus + RefLifecycle> TransitionFactory<R> for MoveDown {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        vec![::holon_pbt_core::composition::CapId::of::<
-            dyn ::holon_pbt_core::capabilities::SutBlockTreeWrite,
-        >()]
+        Self::declared_caps()
     }
 
     type Reason = Reason;
@@ -145,21 +148,18 @@ impl<R: RefBlockTree + RefBlockTreeMut + RefFocus + RefFocusMut + RefEditorMirro
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutBlockTreeWrite> TransitionImpl<ReferenceState, S> for MoveDown {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.apply_move_down(&self.block_id).await;
+crate::cap_transition! {
+    MoveDown: SutBlockTreeWrite,
+    where R: [ RefBlockTree + RefFocus + RefLifecycle ],
+    |me, _state, sut| {
+        sut.apply_move_down(&me.block_id).await;
     }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for MoveDown {
-    fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
+    sql_budget: |_me, state| {
         let mut sql = expected_sql_for_kind(
             MutationKind::Update,
-            state.mcp.active_watches.len(),
-            state.domain.block_state.blocks.len(),
-            state.files.documents.len(),
+            state.active_watch_count(),
+            state.block_count(),
+            state.document_count(),
         );
         sql.tolerance += 5; // extra margin for ordering operations
         sql

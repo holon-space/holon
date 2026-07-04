@@ -1,34 +1,36 @@
-use super::prelude::*;
-use holon_api::ReactiveRowProvider;
 use std::collections::HashMap;
+
+use holon_api::ReactiveRowProvider;
+
+use super::prelude::*;
 
 // Kanban-style board: a horizontal arrangement of vertical lanes.
 //
 // Three call shapes (selected in order of precedence):
 //
-// 1. Inline rows: `board(item_template: card(...), lane_field: "status",
-//    rows: [...])`. Used by the design gallery and tests where rows are a
-//    DSL literal. Snapshot-only — no live updates.
+// 1. Inline rows: `board(item_template: card(...), lane_field: "status", rows:
+//    [...])`. Used by the design gallery and tests where rows are a DSL
+//    literal. Snapshot-only — no live updates.
 //
 // 2. Streaming: `board(item_template: card(...), lane_field: "status")` with
-//    `ctx.data_source` set. Each lane gets its own `streaming_collection`
-//    with a `LaneFilteredProvider` over the upstream data source, so cards
-//    update reactively when the row set changes (CDC, peer sync, drag-drop
-//    persistence). Lane KEYS are seeded from a snapshot at interpretation
-//    time; new lanes that appear later require a board re-interpretation
-//    (e.g. mode toggle / nav). Most kanban use cases pin lanes via
-//    `lane_order` so this is fine.
+//    `ctx.data_source` set. Each lane gets its own `streaming_collection` with
+//    a `LaneFilteredProvider` over the upstream data source, so cards update
+//    reactively when the row set changes (CDC, peer sync, drag-drop
+//    persistence). Lane KEYS are seeded from a snapshot at interpretation time;
+//    new lanes that appear later require a board re-interpretation (e.g. mode
+//    toggle / nav). Most kanban use cases pin lanes via `lane_order` so this is
+//    fine.
 //
-// 3. Static (non-streaming): `board(item_template: card(...), lane_field: "status")`
-//    with only `ctx.data_rows` (no streaming source). Same grouping as the
-//    streaming path but the cards are materialized once.
+// 3. Static (non-streaming): `board(item_template: card(...), lane_field:
+//    "status")` with only `ctx.data_rows` (no streaming source). Same grouping
+//    as the streaming path but the cards are materialized once.
 //
 // Optional named args (apply to all three shapes):
 // - `lane_order: ["To Do", "In Progress", "Done"]` — explicit lane sequence.
-//   Lanes not in the list are appended in lexicographic order. When absent,
-//   all lanes sort lexicographically (deterministic across reloads).
-// - `lane_label_default: "No status"` — title used for the lane that
-//   collects rows whose `lane_field` value is missing or the empty string.
+//   Lanes not in the list are appended in lexicographic order. When absent, all
+//   lanes sort lexicographically (deterministic across reloads).
+// - `lane_label_default: "No status"` — title used for the lane that collects
+//   rows whose `lane_field` value is missing or the empty string.
 // - `lane_width` — pixel width override for each lane (default: GPUI side).
 //
 // The "static positional" shape (`board(board_lane(...), board_lane(...))`)
@@ -219,10 +221,11 @@ fn interpret_static(
     }
 }
 
-/// Interpret a single static card and attach `row_id` / `sort_key` props
-/// so the GPUI renderer can dispatch persistence ops on drag/drop. The
-/// streaming path doesn't need this — it gets row metadata via
-/// `card_vm.data` (set by `flat_driver::interpret_and_attach`).
+/// Interpret a single static card and attach `row_id` / `parent_id` /
+/// `sort_key` props so the GPUI renderer can dispatch persistence ops on
+/// drag/drop (`move_block` anchored on neighbor cards). The streaming path
+/// doesn't need this — it gets row metadata via `card_vm.data` (set by
+/// `flat_driver::interpret_and_attach`).
 fn build_static_card(
     tmpl: &holon_api::render_types::RenderExpr,
     row: Arc<HashMap<String, Value>>,
@@ -234,14 +237,21 @@ fn build_static_card(
         .get("id")
         .and_then(|v| v.as_string())
         .map(|s| s.to_string());
+    let parent_id_val = row
+        .get("parent_id")
+        .and_then(|v| v.as_string())
+        .map(|s| s.to_string());
     let sort_key_val = row
         .get("sort_key")
         .and_then(|v| v.as_string())
         .map(|s| s.to_string());
-    if row_id_val.is_some() || sort_key_val.is_some() {
+    if row_id_val.is_some() || parent_id_val.is_some() || sort_key_val.is_some() {
         let mut extended = card_vm.props.get_cloned();
         if let Some(id) = row_id_val {
             extended.insert("row_id".to_string(), Value::String(id));
+        }
+        if let Some(pid) = parent_id_val {
+            extended.insert("parent_id".to_string(), Value::String(pid));
         }
         if let Some(sk) = sort_key_val {
             extended.insert("sort_key".to_string(), Value::String(sk));

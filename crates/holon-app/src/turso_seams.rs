@@ -9,30 +9,39 @@
 //! provider wiring; holon-orgmode itself stays backend-blind
 //! (`register_org_file_sync_core`).
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use fluxdi::{Injector, Module, Provider, Shared};
-
+use fluxdi::Injector;
+use fluxdi::Module;
+use fluxdi::Provider;
+use fluxdi::Shared;
 use holon::core::queryable_cache::QueryableCache;
+use holon::storage::BLOCK_READ_TABLE;
+use holon::storage::BLOCK_WRITE_TABLE;
 use holon::storage::schema_module::SchemaModule;
-use holon::storage::{BLOCK_READ_TABLE, BLOCK_WRITE_TABLE};
-use holon_api::block::{blocks_by_document, Block};
-use holon_api::{EntityName, EntityUri};
+use holon_api::EntityName;
+use holon_api::EntityUri;
+use holon_api::block::Block;
+use holon_api::block::blocks_by_document;
 use holon_core::CrudAuthority;
 use holon_core::EventOrigin;
-use holon_core::{
-    OperationProvider, OperationWrapper, OriginTaggedWrites, SyncTokenStore, SyncableProvider,
-};
-use holon_filesystem::directory::Directory;
+use holon_core::OperationProvider;
+use holon_core::OperationWrapper;
+use holon_core::OriginTaggedWrites;
+use holon_core::SyncTokenStore;
+use holon_core::SyncableProvider;
+use holon_filesystem::BlockReader;
+use holon_filesystem::DocumentManager;
 use holon_filesystem::File;
-use holon_filesystem::{BlockReader, DocumentManager};
-use holon_orgmode::di::{
-    register_org_file_sync_core, seed_default_org_assets, FileSyncStarted, OrgModeConfig,
-};
+use holon_filesystem::directory::Directory;
 use holon_orgmode::OrgModeSyncProvider;
+use holon_orgmode::di::FileSyncStarted;
+use holon_orgmode::di::OrgModeConfig;
+use holon_orgmode::di::register_org_file_sync_core;
+use holon_orgmode::di::seed_default_org_assets;
 use holon_profiles::TypeRegistry;
 use holon_turso::schema_modules::BlockSchemaModule;
-use std::path::PathBuf;
 
 /// BlockReader backed by `QueryableCache<Block>`.
 ///
@@ -84,18 +93,18 @@ impl CacheBlockReader {
     /// transaction has already committed to `block_raw`, but the `block`
     /// matview may not yet reflect it. Reading the matview here renders a
     /// stale snapshot and writes a stale org file. Same race class as
-    /// inv-viewmodel-root-matches-render-expr (`block_with_query_source.sql` → `block_raw`); see
-    /// devlog/2026-05-05-110315.md.
+    /// inv-viewmodel-root-matches-render-expr (`block_with_query_source.sql` →
+    /// `block_raw`); see devlog/2026-05-05-110315.md.
     async fn load_all_blocks_with_hydration(&self) -> anyhow::Result<Vec<Block>> {
         let sql = format!(
-            "SELECT b.id, b.parent_id, b.depth, b.sort_key, b.content, \
-             b.content_type, b.source_language, b.source_name, \
-             b.properties, b.marks, b.collapsed, b.completed, \
-             b.block_type, b.created_at, b.updated_at, \
-             COALESCE((SELECT json_group_array(tag) FROM block_tags WHERE block_id = b.id), '[]') AS tags, \
-             COALESCE((SELECT json_group_array(required_id) FROM block_requires WHERE block_id = b.id), '[]') AS requires \
-             FROM {BLOCK_WRITE_TABLE} b \
-             ORDER BY b.sort_key, b.id"
+            "SELECT b.id, b.parent_id, b.depth, b.sort_key, b.content, b.content_type, \
+             b.source_language, b.source_name, b.properties, b.marks, b.collapsed, b.completed, \
+             b.block_type, b.created_at, b.updated_at, COALESCE((SELECT json_group_array(tag) \
+             FROM block_tags WHERE block_id = b.id), '[]') AS tags, COALESCE((SELECT \
+             json_group_array(required_id) FROM block_requires WHERE block_id = b.id), '[]') AS \
+             requires, COALESCE((SELECT json_group_array(lesson_id) FROM advice_suppressed WHERE \
+             anchor_id = b.id), '[]') AS advice_suppressed FROM {BLOCK_WRITE_TABLE} b ORDER BY \
+             b.sort_key, b.id"
         );
 
         let rows = self
@@ -134,28 +143,19 @@ impl BlockReader for CacheBlockReader {
         // `block.is_page()`). Depth bound 100 matches existing
         // `find_document_uri` shape.
         let sql = format!(
-            "WITH RECURSIVE descendants(id, depth_acc) AS ( \
-                SELECT b.id, 0 \
-                FROM {table} b \
-                LEFT JOIN block_tags bt ON bt.block_id = b.id AND bt.tag = 'Page' \
-                WHERE b.parent_id = $doc_id \
-                  AND bt.block_id IS NULL \
-                UNION ALL \
-                SELECT b.id, d.depth_acc + 1 \
-                FROM {table} b \
-                JOIN descendants d ON b.parent_id = d.id \
-                LEFT JOIN block_tags bt ON bt.block_id = b.id AND bt.tag = 'Page' \
-                WHERE bt.block_id IS NULL AND d.depth_acc < 100 \
-            ) \
-            SELECT b.id, b.parent_id, b.depth, b.sort_key, b.content, \
-                   b.content_type, b.source_language, b.source_name, \
-                   b.properties, b.marks, b.collapsed, b.completed, \
-                   b.block_type, b.created_at, b.updated_at, \
-                   COALESCE((SELECT json_group_array(tag) FROM block_tags WHERE block_id = b.id), '[]') AS tags, \
-                   COALESCE((SELECT json_group_array(required_id) FROM block_requires WHERE block_id = b.id), '[]') AS requires \
-            FROM {table} b \
-            JOIN descendants d ON d.id = b.id \
-            ORDER BY b.sort_key, b.id",
+            "WITH RECURSIVE descendants(id, depth_acc) AS ( SELECT b.id, 0 FROM {table} b LEFT \
+             JOIN block_tags bt ON bt.block_id = b.id AND bt.tag = 'Page' WHERE b.parent_id = \
+             $doc_id AND bt.block_id IS NULL UNION ALL SELECT b.id, d.depth_acc + 1 FROM {table} \
+             b JOIN descendants d ON b.parent_id = d.id LEFT JOIN block_tags bt ON bt.block_id = \
+             b.id AND bt.tag = 'Page' WHERE bt.block_id IS NULL AND d.depth_acc < 100 ) SELECT \
+             b.id, b.parent_id, b.depth, b.sort_key, b.content, b.content_type, \
+             b.source_language, b.source_name, b.properties, b.marks, b.collapsed, b.completed, \
+             b.block_type, b.created_at, b.updated_at, COALESCE((SELECT json_group_array(tag) \
+             FROM block_tags WHERE block_id = b.id), '[]') AS tags, COALESCE((SELECT \
+             json_group_array(required_id) FROM block_requires WHERE block_id = b.id), '[]') AS \
+             requires, COALESCE((SELECT json_group_array(lesson_id) FROM advice_suppressed WHERE \
+             anchor_id = b.id), '[]') AS advice_suppressed FROM {table} b JOIN descendants d ON \
+             d.id = b.id ORDER BY b.sort_key, b.id",
             table = BLOCK_WRITE_TABLE,
         );
 
@@ -184,6 +184,48 @@ impl BlockReader for CacheBlockReader {
                 })
             })
             .collect()
+    }
+
+    async fn get_block_authoritative(&self, id: &EntityUri) -> anyhow::Result<Option<Block>> {
+        // Single-block point read on the write authority (`block_raw`), edge-
+        // hydrated identically to `get_blocks` (same COALESCE(json_group_array)
+        // subqueries). `id` is the primary key → O(1) indexed lookup, NO
+        // recursive CTE and NO read of the lagging `block` matview. This is the
+        // per-edit refresh for the org-writeback incremental cache; it shares
+        // `block_raw` authority with the cache's `get_blocks` seed.
+        let sql = format!(
+            "SELECT b.id, b.parent_id, b.depth, b.sort_key, b.content, b.content_type, \
+             b.source_language, b.source_name, b.properties, b.marks, b.collapsed, b.completed, \
+             b.block_type, b.created_at, b.updated_at, COALESCE((SELECT json_group_array(tag) \
+             FROM block_tags WHERE block_id = b.id), '[]') AS tags, COALESCE((SELECT \
+             json_group_array(required_id) FROM block_requires WHERE block_id = b.id), '[]') AS \
+             requires, COALESCE((SELECT json_group_array(lesson_id) FROM advice_suppressed WHERE \
+             anchor_id = b.id), '[]') AS advice_suppressed FROM {table} b WHERE b.id = $id",
+            table = BLOCK_WRITE_TABLE,
+        );
+
+        let mut params = std::collections::HashMap::new();
+        params.insert("id".to_string(), holon_api::Value::String(id.to_string()));
+
+        let rows = self
+            .cache
+            .db_handle()
+            .query(&sql, params)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "[CacheBlockReader::get_block_authoritative] point read failed: {e}"
+                )
+            })?;
+
+        match rows.into_iter().next() {
+            Some(row) => Ok(Some(Block::try_from(row).map_err(|e| {
+                anyhow::anyhow!(
+                    "[CacheBlockReader::get_block_authoritative] Block::try_from row failed: {e}"
+                )
+            })?)),
+            None => Ok(None),
+        }
     }
 
     async fn iter_documents_with_blocks(&self) -> anyhow::Result<Vec<(EntityUri, Vec<Block>)>> {
@@ -281,7 +323,8 @@ pub struct LiveDocumentManager {
 }
 
 impl LiveDocumentManager {
-    /// Create a LiveDocumentManager backed by a materialized view over document blocks.
+    /// Create a LiveDocumentManager backed by a materialized view over document
+    /// blocks.
     pub async fn new(
         command_bus: Arc<dyn OriginTaggedWrites>,
         db_handle: holon::storage::DbHandle,
@@ -291,7 +334,8 @@ impl LiveDocumentManager {
 
         // Match any block that has the "Page" tag in the block_tags junction table.
         let watch_sql = format!(
-            "SELECT b.* FROM {BLOCK_READ_TABLE} b JOIN block_tags bt ON bt.block_id = b.id WHERE bt.tag = 'Page'"
+            "SELECT b.* FROM {BLOCK_READ_TABLE} b JOIN block_tags bt ON bt.block_id = b.id WHERE \
+             bt.tag = 'Page'"
         );
         let result = matview_mgr.watch(&watch_sql).await?;
 
@@ -388,7 +432,8 @@ impl DocumentManager for LiveDocumentManager {
                 existing_id,
                 doc.id,
             );
-            // ALLOW(entity_uri_from_raw): existing_id from command_bus execute_operation response (SQL Value::String)
+            // ALLOW(entity_uri_from_raw): existing_id from command_bus execute_operation
+            // response (SQL Value::String)
             let existing_uri = EntityUri::from_raw(&existing_id);
             if let Some(existing) = self.get_by_id(&existing_uri).await? {
                 return Ok(existing);
@@ -456,7 +501,8 @@ impl DocumentManager for LiveDocumentManager {
 /// ServiceModule for OrgMode integration (Turso container).
 ///
 /// Registers OrgMode-specific services in the DI container.
-/// Loro services are NOT registered here — they come from LoroModule (if enabled).
+/// Loro services are NOT registered here — they come from LoroModule (if
+/// enabled).
 ///
 /// OrgMode will detect if LoroBlockOperations is available in DI and use it;
 /// otherwise it falls back to SqlOperationProvider.
@@ -464,7 +510,8 @@ pub struct OrgModeModule;
 
 impl Module for OrgModeModule {
     fn configure(&self, injector: &Injector) -> std::result::Result<(), fluxdi::Error> {
-        use tracing::{error, info};
+        use tracing::error;
+        use tracing::info;
 
         info!("[OrgModeModule] register_services called");
 
@@ -586,8 +633,9 @@ impl Module for OrgModeModule {
                 let db_handle_provider = resolver.resolve::<dyn holon::di::DbHandleProvider>();
                 let db_handle = db_handle_provider.handle();
 
-                // FileSyncController writes through SQL ops; CacheBlockReader reads from QueryableCache
-                // which is also backed by the same Turso database, ensuring consistency.
+                // FileSyncController writes through SQL ops; CacheBlockReader reads from
+                // QueryableCache which is also backed by the same Turso
+                // database, ensuring consistency.
                 let sql_ops = Arc::new(holon::core::SqlOperationProvider::with_edge_fields(
                     db_handle.clone(),
                     BLOCK_WRITE_TABLE.to_string(),

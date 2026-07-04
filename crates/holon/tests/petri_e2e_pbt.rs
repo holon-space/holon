@@ -1,28 +1,43 @@
 //! Invariant-based PBT for Petri net materialization & ranking.
 //!
-//! Instead of duplicating the materialization logic in a reference model (gold standard),
-//! we check a set of structural invariants after every operation. Each invariant is
-//! independently simple to verify, and together they tightly constrain the implementation.
+//! Instead of duplicating the materialization logic in a reference model (gold
+//! standard), we check a set of structural invariants after every operation.
+//! Each invariant is independently simple to verify, and together they tightly
+//! constrain the implementation.
 //!
 //! Generators produce diverse task content (wiki links, delegations, questions,
 //! sequential deps, combined prefixes) with dynamic parent/person names.
 //! Additionally, optional self blocks and prototype blocks verify that the
 //! materialization layer correctly reads attributes from persistent blocks.
 
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::collections::HashSet;
+
 use chrono::Utc;
-use holon::petri::{
-    Engine, Executor, PrototypeValue, SelfDescriptor, TaskMarking, TaskNet,
-    default_prototype_props, materialize_at, rank_tasks, rhai_ident_fragment,
-};
+use holon::petri::Engine;
+use holon::petri::Executor;
+use holon::petri::PrototypeValue;
+use holon::petri::SelfDescriptor;
+use holon::petri::TaskMarking;
+use holon::petri::TaskNet;
+use holon::petri::default_prototype_props;
+use holon::petri::materialize_at;
+use holon::petri::rank_tasks;
+use holon::petri::rhai_ident_fragment;
 use holon_api::EntityUri;
 use holon_api::Priority;
 use holon_api::Value as HValue;
 use holon_api::block::Block;
 use holon_api::types::DependsOn;
-use holon_engine::{Marking, NetDef, TokenState, TransitionDef};
+use holon_engine::Marking;
+use holon_engine::NetDef;
+use holon_engine::TokenState;
+use holon_engine::TransitionDef;
 use proptest::prelude::*;
-use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state_machine};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use proptest_state_machine::ReferenceStateMachine;
+use proptest_state_machine::StateMachineTest;
+use proptest_state_machine::prop_state_machine;
 
 const DONE_KEYWORDS: &[&str] = &["DONE", "CANCELLED", "CLOSED"];
 
@@ -57,8 +72,6 @@ impl RefBlock {
 
 #[derive(Clone, Debug)]
 struct RefSelfBlock {
-    energy: f64,
-    focus: f64,
     mental_slots_capacity: i64,
 }
 
@@ -76,10 +89,11 @@ struct PetriRefState {
 }
 
 impl PetriRefState {
-    /// Create initial state with two canary blocks that have a known weight relationship.
-    /// canary_aaa (position 0, no priority) vs canary_zzz (position 1, priority 3).
-    /// With working weights, priority dominates → canary_zzz ranks first.
-    /// With broken weights (fallback 1.0), alphabetical ID tiebreak puts canary_aaa first → CAUGHT.
+    /// Create initial state with two canary blocks that have a known weight
+    /// relationship. canary_aaa (position 0, no priority) vs canary_zzz
+    /// (position 1, priority 3). With working weights, priority dominates →
+    /// canary_zzz ranks first. With broken weights (fallback 1.0),
+    /// alphabetical ID tiebreak puts canary_aaa first → CAUGHT.
     fn with_canaries() -> Self {
         let mut blocks = BTreeMap::new();
         blocks.insert(
@@ -158,8 +172,6 @@ impl PetriRefState {
     fn effective_self(&self) -> SelfDescriptor {
         match &self.self_block {
             Some(sb) => SelfDescriptor {
-                energy: sb.energy,
-                focus: sb.focus,
                 mental_slots_capacity: sb.mental_slots_capacity,
             },
             None => SelfDescriptor::defaults(),
@@ -314,14 +326,8 @@ impl PetriRefState {
     }
 
     fn gen_set_self_block() -> BoxedStrategy<PetriTransition> {
-        (
-            prop::sample::select(vec![0.3, 0.5, 0.7, 1.0]),
-            prop::sample::select(vec![0.2, 0.5, 0.8, 1.0]),
-            prop::sample::select(vec![3i64, 5, 7, 10]),
-        )
-            .prop_map(|(energy, focus, cap)| PetriTransition::SetSelfBlock {
-                energy,
-                focus,
+        prop::sample::select(vec![3i64, 5, 7, 10])
+            .prop_map(|cap| PetriTransition::SetSelfBlock {
                 mental_slots_capacity: cap,
             })
             .boxed()
@@ -348,7 +354,8 @@ impl PetriRefState {
         let blocks = PetriSUT::rebuild_blocks(self);
         let prototype_props = self.effective_prototype_props();
         let self_desc = self.effective_self();
-        let (net, marking) = materialize_at(&blocks, &self_desc, &prototype_props, Utc::now());
+        let (net, marking) = materialize_at(&blocks, &self_desc, &prototype_props, Utc::now())
+            .expect("materialize_at");
         let engine = Engine::new();
         let enabled = engine
             .enabled(&net, &marking)
@@ -402,8 +409,6 @@ enum PetriTransition {
         id: String,
     },
     SetSelfBlock {
-        energy: f64,
-        focus: f64,
         mental_slots_capacity: i64,
     },
     SetPrototype {
@@ -505,13 +510,9 @@ impl ReferenceStateMachine for PetriRefState {
                 state.blocks.remove(id);
             }
             PetriTransition::SetSelfBlock {
-                energy,
-                focus,
                 mental_slots_capacity,
             } => {
                 state.self_block = Some(RefSelfBlock {
-                    energy: *energy,
-                    focus: *focus,
                     mental_slots_capacity: *mental_slots_capacity,
                 });
             }
@@ -625,7 +626,8 @@ fn serialize_content(has_seq: bool, exec: &Executor, is_question: bool, base_tex
 }
 
 /// Structured content: independently generates prefixes/links, then serializes.
-/// Returns (content, base_text, has_sequential_dep, executor, is_question, wiki_links).
+/// Returns (content, base_text, has_sequential_dep, executor, is_question,
+/// wiki_links).
 fn structured_content_strategy(
     counter: usize,
 ) -> BoxedStrategy<(String, String, bool, Executor, bool, Vec<String>)> {
@@ -755,7 +757,11 @@ fn find_previous_sibling(ref_state: &PetriRefState, block: &RefBlock) -> Option<
 
 // --- Individual invariant functions ---
 
-fn check_self_token(ref_state: &PetriRefState, marking: &TaskMarking, self_desc: &SelfDescriptor) {
+fn check_self_token(
+    _ref_state: &PetriRefState,
+    marking: &TaskMarking,
+    _self_desc: &SelfDescriptor,
+) {
     let self_tok = marking.token("self").expect("self token must always exist");
     assert_eq!(self_tok.id(), "self", "self token id() must return 'self'");
     assert_eq!(
@@ -763,42 +769,28 @@ fn check_self_token(ref_state: &PetriRefState, marking: &TaskMarking, self_desc:
         "person",
         "self token must be type person"
     );
-
-    let cap = self_tok.get("mental_slots_capacity");
     assert_eq!(
-        cap,
-        Some(&holon_engine::value::Value::Int(
-            self_desc.mental_slots_capacity
-        )),
-        "mental_slots_capacity must match self descriptor"
+        self_tok.get("status"),
+        Some(&holon_engine::value::Value::String("active".to_string())),
+        "self token must carry status=active"
     );
 
-    let energy = self_tok.get("energy");
-    assert_eq!(
-        energy,
-        Some(&holon_engine::value::Value::Float(self_desc.energy)),
-        "energy must match self descriptor"
-    );
-
-    let focus = self_tok.get("focus");
-    assert_eq!(
-        focus,
-        Some(&holon_engine::value::Value::Float(self_desc.focus)),
-        "focus must match self descriptor"
-    );
-
-    // mental_slots_occupied must match DOING count
-    let doing_count = ref_state
-        .blocks
-        .values()
-        .filter(|b| b.task_state == "DOING")
-        .count() as i64;
-    let occupied = self_tok.get("mental_slots_occupied");
-    assert_eq!(
-        occupied,
-        Some(&holon_engine::value::Value::Int(doing_count)),
-        "mental_slots_occupied must match DOING task count"
-    );
+    // energy / focus / mental_slots_* were dead economic knobs (never read by
+    // any precond or objective) and were removed from the self token. Mental
+    // slots survive only as RankResult display info (checked separately). Pin
+    // that the dead attributes stay off the token.
+    for dead in [
+        "energy",
+        "focus",
+        "mental_slots_occupied",
+        "mental_slots_capacity",
+    ] {
+        assert_eq!(
+            self_tok.get(dead),
+            None,
+            "removed dead knob {dead:?} must not reappear on the self token"
+        );
+    }
 }
 
 fn check_no_duplicate_token_ids(marking: &TaskMarking) {
@@ -836,8 +828,8 @@ fn check_active_task_transition_bijection(ref_state: &PetriRefState, net: &TaskN
     assert_eq!(
         active_ids,
         transition_ids,
-        "Active tasks and non-delegate transitions must be in bijection.\n\
-         Active only: {:?}\nTransitions only: {:?}",
+        "Active tasks and non-delegate transitions must be in bijection.\nActive only: \
+         {:?}\nTransitions only: {:?}",
         active_ids.difference(&transition_ids).collect::<Vec<_>>(),
         transition_ids.difference(&active_ids).collect::<Vec<_>>(),
     );
@@ -1044,9 +1036,9 @@ fn check_question_knowledge(ref_state: &PetriRefState, net: &TaskNet) {
     }
 }
 
-/// Every non-consumed input arc must have a matching output arc (token flows back).
-/// This is a fundamental Petri net structural invariant: tokens borrowed by a transition
-/// are returned when it fires.
+/// Every non-consumed input arc must have a matching output arc (token flows
+/// back). This is a fundamental Petri net structural invariant: tokens borrowed
+/// by a transition are returned when it fires.
 fn check_output_arcs(net: &TaskNet) {
     for t in net.transitions() {
         let output_froms: HashSet<&str> = t.outputs().iter().map(|o| o.from.as_str()).collect();
@@ -1054,8 +1046,8 @@ fn check_output_arcs(net: &TaskNet) {
             if !input.consume {
                 assert!(
                     output_froms.contains(input.bind.as_str()),
-                    "Transition {}: non-consumed input '{}' has no matching output arc. \
-                     Outputs: {:?}",
+                    "Transition {}: non-consumed input '{}' has no matching output arc. Outputs: \
+                     {:?}",
                     t.id(),
                     input.bind,
                     output_froms,
@@ -1084,7 +1076,8 @@ fn check_net_constraints(net: &TaskNet) {
 // ---------------------------------------------------------------------------
 
 /// Fire the specified transition and verify the resulting marking.
-/// The transition_id is chosen by the PBT generator from the ranked enabled set.
+/// The transition_id is chosen by the PBT generator from the ranked enabled
+/// set.
 fn check_fire_invariants(
     ref_state: &PetriRefState,
     net: &TaskNet,
@@ -1100,8 +1093,7 @@ fn check_fire_invariants(
         .find(|b| b.transition_id == transition_id)
         .unwrap_or_else(|| {
             panic!(
-                "Generator chose transition '{transition_id}' but it is not enabled. \
-                 Enabled: {:?}",
+                "Generator chose transition '{transition_id}' but it is not enabled. Enabled: {:?}",
                 enabled.iter().map(|b| &b.transition_id).collect::<Vec<_>>()
             )
         });
@@ -1211,8 +1203,8 @@ fn check_ranking_reflects_priority(
                         // b has higher priority but ranks lower — that's wrong
                         assert!(
                             ranked[i].delta_per_minute >= ranked[j].delta_per_minute,
-                            "Task {} (priority {}) ranks above {} (priority {}) \
-                             but has lower priority. delta_per_min: {} vs {}",
+                            "Task {} (priority {}) ranks above {} (priority {}) but has lower \
+                             priority. delta_per_min: {} vs {}",
                             id_a,
                             pa,
                             id_b,
@@ -1242,7 +1234,8 @@ fn check_objective_references_all_tasks(ref_state: &PetriRefState, net: &TaskNet
     }
 }
 
-/// Exercise rank_tasks() end-to-end: builds blocks, calls rank_tasks, checks result.
+/// Exercise rank_tasks() end-to-end: builds blocks, calls rank_tasks, checks
+/// result.
 fn check_rank_tasks_e2e(ref_state: &PetriRefState, blocks: &[Block]) {
     let result = rank_tasks(blocks).expect("rank_tasks should succeed for generated blocks");
 
@@ -1293,9 +1286,10 @@ fn check_rank_tasks_e2e(ref_state: &PetriRefState, blocks: &[Block]) {
 }
 
 /// Canary ordering invariant: canary_zzz (priority 3) must always rank above
-/// canary_aaa (no priority). If the weight pipeline is broken (resolve_prototype,
-/// build_context_props, etc. return empty), both get fallback weight 1.0 and
-/// position tiebreak favors canary_aaa (position 0) → ordering violated → CAUGHT.
+/// canary_aaa (no priority). If the weight pipeline is broken
+/// (resolve_prototype, build_context_props, etc. return empty), both get
+/// fallback weight 1.0 and position tiebreak favors canary_aaa (position 0) →
+/// ordering violated → CAUGHT.
 fn check_canary_ordering(net: &TaskNet, marking: &TaskMarking) {
     let engine = Engine::new();
     let enabled = engine
@@ -1316,10 +1310,9 @@ fn check_canary_ordering(net: &TaskNet, marking: &TaskMarking) {
     if let (Some(h), Some(l)) = (high_pos, low_pos) {
         assert!(
             h < l,
-            "Canary ordering violated: canary_zzz (priority 3) at position {h}, \
-             canary_aaa (no priority) at position {l}. \
-             canary_zzz must rank before canary_aaa. \
-             Ranked order: {ranked_ids:?}"
+            "Canary ordering violated: canary_zzz (priority 3) at position {h}, canary_aaa (no \
+             priority) at position {l}. canary_zzz must rank before canary_aaa. Ranked order: \
+             {ranked_ids:?}"
         );
     }
 }
@@ -1369,8 +1362,6 @@ impl PetriSUT {
                 "Self",
             );
             self_block.set_property("is_self", HValue::Boolean(true));
-            self_block.set_property("energy", HValue::Float(sb.energy));
-            self_block.set_property("focus", HValue::Float(sb.focus));
             self_block.set_property(
                 "mental_slots_capacity",
                 HValue::Integer(sb.mental_slots_capacity),
@@ -1425,7 +1416,8 @@ impl StateMachineTest for PetriSUT {
         let self_desc = ref_state.effective_self();
         let test_clock = Utc::now();
         let (net, marking) =
-            materialize_at(&state.blocks, &self_desc, &prototype_props, test_clock);
+            materialize_at(&state.blocks, &self_desc, &prototype_props, test_clock)
+                .expect("materialize_at");
 
         // Check structural invariants after every operation
         check_all_invariants(ref_state, &net, &marking, &self_desc, &prototype_props);

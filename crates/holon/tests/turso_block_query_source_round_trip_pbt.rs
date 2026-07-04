@@ -12,7 +12,11 @@
 //! ```
 //!
 //! Generators + the `NormalizedDocument` comparison come from
-//! `holon-block-roundtrip-testing`, shared with the org / cache round-trip PBTs.
+//! `holon-block-roundtrip-testing`, shared with the org / cache round-trip
+//! PBTs.
+
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use holon::api::backend_engine::BackendEngine;
 use holon::core::SqlOperationProvider;
@@ -22,26 +26,32 @@ use holon::storage::schema_module::SchemaModule;
 use holon::sync::block_to_params;
 use holon::sync::loro_block_query_source::LoroBlockQuerySource;
 use holon::sync::turso_block_query_source::TursoBlockQuerySource;
+use holon_api::BlockContent;
+use holon_api::ContentType;
+use holon_api::EntityName;
+use holon_api::EntityUri;
+use holon_api::SourceBlock;
+use holon_api::Tags;
+use holon_api::Value;
+use holon_api::block::Block;
 use holon_api::repository::Lifecycle;
-use holon_api::{
-    BlockContent, ContentType, EntityName, EntityUri, SourceBlock, Tags, block::Block,
-};
-use holon_block_roundtrip_testing::{
-    NormalizedDocument, assert_normalized_docs_equal, assert_sibling_order_matches, build_blocks,
-    root_headlines_strategy,
-};
+use holon_block_roundtrip_testing::NormalizedDocument;
+use holon_block_roundtrip_testing::assert_normalized_docs_equal;
+use holon_block_roundtrip_testing::assert_sibling_order_matches;
+use holon_block_roundtrip_testing::build_blocks;
+use holon_block_roundtrip_testing::root_headlines_strategy;
 use holon_core::OperationProvider;
 use holon_core::storage::BlockQuerySource;
+use holon_core::storage::types::StorageEntity;
 use holon_loro::LoroBackend;
 use holon_turso::schema_modules::BlockSchemaModule;
 use proptest::prelude::*;
-use std::collections::HashMap;
-use std::sync::Arc;
 use tokio::runtime::Runtime;
 use uuid::Uuid;
 
 fn unique_db_path() -> std::path::PathBuf {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
     let id = COUNTER.fetch_add(1, Ordering::SeqCst);
     std::env::temp_dir().join(format!(
@@ -55,7 +65,11 @@ fn unique_db_path() -> std::path::PathBuf {
 /// document-order `sort_key` so canonical sibling order round-trips. `blocks`
 /// arrives in pre-order from `build_blocks`, so the enumeration index is a
 /// monotonic per-parent order key.
-async fn write_blocks(engine: &BackendEngine, blocks: &[Block]) -> Result<(), TestCaseError> {
+async fn write_blocks(
+    engine: &BackendEngine,
+    doc_id: &EntityUri,
+    blocks: &[Block],
+) -> Result<(), TestCaseError> {
     // Write through the production block provider directly on the engine's
     // handle (the core test engine doesn't auto-register a "block" provider);
     // the matview projects incrementally, so the engine's `watch_view` sees the
@@ -68,6 +82,22 @@ async fn write_blocks(engine: &BackendEngine, blocks: &[Block]) -> Result<(), Te
         BlockSchemaModule.edge_fields(),
     );
     let entity: EntityName = "block".to_string().into();
+    // Seed the document root the generated roots hang under (their `parent_id`
+    // is `doc_id`), mirroring `seed_loro_backend`. Its own parent is the
+    // `sentinel:no_parent` root anchor. Without it the generated roots would
+    // reference a nonexistent parent and the block_raw parent FK rejects them.
+    let mut root_params = StorageEntity::new();
+    root_params.insert("id".into(), Value::String(doc_id.as_str().to_string()));
+    root_params.insert(
+        "parent_id".into(),
+        Value::String(EntityUri::no_parent().as_str().to_string()),
+    );
+    root_params.insert("content".into(), Value::String("doc".to_string()));
+    root_params.insert("sort_key".into(), Value::String("0000000000".to_string()));
+    provider
+        .execute_operation(&entity, "create", root_params)
+        .await
+        .map_err(|e| TestCaseError::fail(format!("create doc root {doc_id}: {e}")))?;
     for (i, b) in blocks.iter().enumerate() {
         let params = block_to_params(&holon::api::SnapshotBlock {
             block: b.clone(),
@@ -97,7 +127,7 @@ proptest! {
             let doc_id = EntityUri::block(&Uuid::new_v4().to_string());
             let blocks = build_blocks(&doc_id, &headlines);
 
-            write_blocks(&engine, &blocks).await?;
+            write_blocks(&engine, &doc_id, &blocks).await?;
 
             let source = TursoBlockQuerySource::watch_default(&engine)
                 .await
@@ -107,8 +137,14 @@ proptest! {
                 .await
                 .map_err(|e| TestCaseError::fail(format!("snapshot: {e}")))?;
 
+            // Drop the physical doc root; the reference store has no doc block.
+            let actual_blocks: Vec<Block> = snapshot
+                .iter_blocks()
+                .filter(|b| b.id != doc_id)
+                .cloned()
+                .collect();
             let expected = NormalizedDocument::from_blocks(None, &blocks);
-            let actual = NormalizedDocument::from_block_snapshot(None, &snapshot);
+            let actual = NormalizedDocument::from_blocks(None, &actual_blocks);
             assert_normalized_docs_equal(&expected, &actual, "turso_block_query_round_trip")?;
             assert_sibling_order_matches(&blocks, &snapshot, "turso_block_query_round_trip")?;
 
@@ -118,12 +154,13 @@ proptest! {
     }
 }
 
-/// Seed a fresh, Turso-free [`LoroBackend`] with `blocks` (pre-order), preserving
-/// each block's id, content, source fields, properties (which carry `level`,
-/// `sequence`, and `_source_header_args`), tags, and requires — the same fields
-/// `block_to_params` fans into Turso. `doc_id` is materialized as a physical root
-/// node so the generated roots (whose `parent_id` is `doc_id`) resolve to a tree
-/// parent and read back with `parent_id == doc_id`, matching the Turso arm.
+/// Seed a fresh, Turso-free [`LoroBackend`] with `blocks` (pre-order),
+/// preserving each block's id, content, source fields, properties (which carry
+/// `level`, `sequence`, and `_source_header_args`), tags, and requires — the
+/// same fields `block_to_params` fans into Turso. `doc_id` is materialized as a
+/// physical root node so the generated roots (whose `parent_id` is `doc_id`)
+/// resolve to a tree parent and read back with `parent_id == doc_id`, matching
+/// the Turso arm.
 async fn seed_loro_backend(
     doc_id: &EntityUri,
     blocks: &[Block],
@@ -138,6 +175,7 @@ async fn seed_loro_backend(
             Some(doc_id.clone()),
             &HashMap::new(),
             &Tags::default(),
+            &[],
             &[],
         )
         .await
@@ -163,6 +201,7 @@ async fn seed_loro_backend(
                 &b.properties_map(),
                 &b.tags,
                 &b.requires,
+                &b.advice_suppressed,
             )
             .await
             .map_err(|e| TestCaseError::fail(format!("loro seed {}: {e}", b.id)))?;
@@ -193,7 +232,7 @@ proptest! {
             let blocks = build_blocks(&doc_id, &headlines);
 
             // Turso arm: production create path → matview → CDC mirror read.
-            write_blocks(&engine, &blocks).await?;
+            write_blocks(&engine, &doc_id, &blocks).await?;
             let turso_source = TursoBlockQuerySource::watch_default(&engine)
                 .await
                 .map_err(|e| TestCaseError::fail(format!("turso watch: {e}")))?;
@@ -201,7 +240,13 @@ proptest! {
                 .snapshot()
                 .await
                 .map_err(|e| TestCaseError::fail(format!("turso snapshot: {e}")))?;
-            let turso_doc = NormalizedDocument::from_block_snapshot(None, &turso_snapshot);
+            // Drop the physical doc root; the reference store has no doc block.
+            let turso_blocks: Vec<Block> = turso_snapshot
+                .iter_blocks()
+                .filter(|b| b.id != doc_id)
+                .cloned()
+                .collect();
+            let turso_doc = NormalizedDocument::from_blocks(None, &turso_blocks);
 
             // Loro arm: Turso-free tree walk over the same generated store.
             let backend = seed_loro_backend(&doc_id, &blocks).await?;

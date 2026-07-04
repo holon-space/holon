@@ -5,17 +5,15 @@
 //! that always returns real data — no deferred placeholders to deliver.
 //! So `weighted_generator` rejects unconditionally with a typed reason.
 
+pub use holon_pbt_core::DeliverBlockContent;
+use holon_pbt_core::TransitionFactory;
+use holon_pbt_core::TransitionImpl;
+use holon_pbt_core::TransitionRef;
+use holon_pbt_core::validation::Reason;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-pub use holon_pbt_core::DeliverBlockContent;
-
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::validation::Reason;
-use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
-
-#[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::{ExpectedSql, REACTIVE_BASE, docs_tolerance};
 
 impl TransitionFactory<ReferenceState> for DeliverBlockContent {
     type Reason = Reason;
@@ -42,21 +40,9 @@ impl<S> TransitionImpl<ReferenceState, S> for DeliverBlockContent {
         // generated or applied. Fail loud if that ever changes.
         panic!(
             "[DeliverBlockContent] reached apply_to_sut for {} — backend PBT rejects \
-             DeliverBlockContent in its generator/preconditions; the live-block \
-             delivery axis is dead here.",
+             DeliverBlockContent in its generator/preconditions; the live-block delivery axis is \
+             dead here.",
             self.block_id
         );
-    }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for DeliverBlockContent {
-    fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
-        ExpectedSql {
-            reads: REACTIVE_BASE + 10,
-            writes: 0,
-            ddl: 0,
-            tolerance: docs_tolerance(state) + 5,
-        }
     }
 }

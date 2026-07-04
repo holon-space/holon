@@ -7,12 +7,12 @@
 //! - [`seed_store`] — seed the `parent/c1/c2` working tree into a real store
 //!   with the fixed shared ids (so the SUT store and the ref tree agree).
 //! - [`seed_ref`] / [`seed_ref_with_editor`] — a started `ReferenceState` whose
-//!   working tree is exactly the given blocks (all non-seed), optionally with an
-//!   open editor.
+//!   working tree is exactly the given blocks (all non-seed), optionally with
+//!   an open editor.
 //! - [`build_started_ref`] — the live `ReferenceState` oracle for a config:
-//!   started, the booted default layout modeled (via `seed_booted_layout_into_ref`),
-//!   the `parent/c1/c2` tree, and — only when the UI actor is wired — an open
-//!   editor on `c1`.
+//!   started, the booted default layout modeled (via
+//!   `seed_booted_layout_into_ref`), the `parent/c1/c2` tree, and — only when
+//!   the UI actor is wired — an open editor on `c1`.
 //! - [`run_with_seeded_ref`] — run the shared catalog against a freshly-seeded
 //!   ref from an async test context (handles the off-executor runtime drop).
 //! - [`assert_ref_seeded`] / [`ref_non_seed_ids`] — fail-loud non-vacuity +
@@ -26,25 +26,30 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use holon_api::Block;
+use holon_api::EntityUri;
 use holon_api::Region;
-use holon_pbt_core::composition::RunReport;
-
-use crate::pbt::invariants::registry::Subsystem;
-use holon_api::{Block, EntityUri};
-use holon_pbt_core::composition::{CapMap, run_selected};
-
 use holon_orgmode::models::OrgBlockExt;
-use holon_pbt_core::capabilities::{CapCursor, CapRegion, RefFocusMut};
-use holon_pbt_core::{Actor, StorageAdapter, Wiring};
-
-use crate::pbt::reference_capabilities::reference_state_ref_caps;
-use crate::pbt::reference_state::{ReferenceState, Resolved};
-use crate::pbt::state_machine::{fresh_reference_state, started_reference_state};
-use crate::pbt::transitions::start_app::seed_booted_layout_into_ref;
+use holon_pbt_core::Actor;
+use holon_pbt_core::StorageAdapter;
+use holon_pbt_core::Wiring;
+use holon_pbt_core::capabilities::CapCursor;
+use holon_pbt_core::capabilities::CapRegion;
+use holon_pbt_core::capabilities::RefFocusMut;
+use holon_pbt_core::composition::CapMap;
+use holon_pbt_core::composition::RunReport;
+use holon_pbt_core::composition::run_selected;
 
 // Fixed-id seeding primitives (`C1`, `fixed_ids`, `seed_ref_tree`) live in
 // `super::seed_primitives` so the windowed slice can share them in the `pbt` build.
 use super::seed_primitives::{C1, fixed_ids, seed_ref_tree};
+use crate::pbt::invariants::registry::Subsystem;
+use crate::pbt::reference_capabilities::reference_state_ref_caps;
+use crate::pbt::reference_state::ReferenceState;
+use crate::pbt::reference_state::Resolved;
+use crate::pbt::state_machine::fresh_reference_state;
+use crate::pbt::state_machine::started_reference_state;
+use crate::pbt::transitions::start_app::seed_booted_layout_into_ref;
 
 // ─────────────────────────────────────────────────────────────────
 // Shared SUT/oracle construction — seeding primitives used by the
@@ -52,9 +57,10 @@ use super::seed_primitives::{C1, fixed_ids, seed_ref_tree};
 // ─────────────────────────────────────────────────────────────────
 
 /// Map the generated active set onto a PBT [`Wiring`]: `Loro` ⇒ the Loro
-/// storage adapter, `EditorState` ⇒ the `UI` actor (the honest `has_editor_buffer`
-/// source). `BlockTree` is the always-on substrate and needs no manifest entry.
-/// No `validate()` — the ref only reads `has_storage(Loro)` / `has_actor(UI)`.
+/// storage adapter, `EditorState` ⇒ the `UI` actor (the honest
+/// `has_editor_buffer` source). `BlockTree` is the always-on substrate and
+/// needs no manifest entry. No `validate()` — the ref only reads
+/// `has_storage(Loro)` / `has_actor(UI)`.
 pub(crate) fn wiring_for_subsystems(subsystems: &BTreeSet<Subsystem>) -> Wiring {
     let storage = subsystems
         .contains(&Subsystem::Loro)
@@ -91,7 +97,8 @@ pub(crate) fn seed_ref(blocks: Vec<Block>) -> ReferenceState {
 /// [`InMemEditorComponent::open`](crate::pbt::memory_slice::components::InMemEditorComponent),
 /// which seeds the caret to `text.len()`. The editor mirror is driven afterward
 /// via the [`RefEditorMirrorMut`] methods (`type_chars`/`delete_backward`/
-/// `move_cursor`) in lockstep with the SUT — replacing the retired `EditorModel`.
+/// `move_cursor`) in lockstep with the SUT — replacing the retired
+/// `EditorModel`.
 pub(crate) fn seed_ref_with_editor(
     blocks: Vec<Block>,
     editor_block: EntityUri,
@@ -124,28 +131,29 @@ pub(crate) fn ref_non_seed_ids(state: &ReferenceState) -> BTreeSet<EntityUri> {
 }
 
 /// Fail-loud non-vacuity + seed-parity guard for a positive static slice: the
-/// ref must expose **exactly** `expected` non-seed block ids and the set must be
-/// **non-empty**. A ref seeded empty/wrong otherwise passes the ref-comparing
-/// invariants *vacuously* (empty-vs-empty → green) — the CLAUDE.md "silently
-/// degrades to look fine" trap. Pair with the invariants' own `ran_ids` checks
-/// (R4): together they prove the comparison ran AND had real data on both sides.
+/// ref must expose **exactly** `expected` non-seed block ids and the set must
+/// be **non-empty**. A ref seeded empty/wrong otherwise passes the
+/// ref-comparing invariants *vacuously* (empty-vs-empty → green) — the
+/// CLAUDE.md "silently degrades to look fine" trap. Pair with the invariants'
+/// own `ran_ids` checks (R4): together they prove the comparison ran AND had
+/// real data on both sides.
 pub(crate) fn assert_ref_seeded(state: &ReferenceState, expected: &[EntityUri]) {
     let expected: BTreeSet<EntityUri> = expected.iter().cloned().collect();
     assert!(
         !expected.is_empty(),
-        "seed-parity: a positive slice must seed a non-empty block set (else the \
-         ref-comparison invariants pass vacuously)"
+        "seed-parity: a positive slice must seed a non-empty block set (else the ref-comparison \
+         invariants pass vacuously)"
     );
     assert_eq!(
         ref_non_seed_ids(state),
         expected,
-        "seed-parity: the ref's non-seed block ids must match the SUT-seeded ids \
-         (id-scheme drift / missing seed is the historical failure mode)"
+        "seed-parity: the ref's non-seed block ids must match the SUT-seeded ids (id-scheme drift \
+         / missing seed is the historical failure mode)"
     );
 }
 
-/// Run the shared catalog with a freshly-seeded [`ReferenceState`] ref against a
-/// SUT cap map from within an **async** (`#[tokio::test]`) context.
+/// Run the shared catalog with a freshly-seeded [`ReferenceState`] ref against
+/// a SUT cap map from within an **async** (`#[tokio::test]`) context.
 ///
 /// `ReferenceState` owns an `Arc<tokio::runtime::Runtime>` (it drives its own
 /// async ops). Dropping that runtime on the test's async executor panics
@@ -185,10 +193,15 @@ pub(crate) fn build_started_ref(subsystems: &BTreeSet<Subsystem>) -> ReferenceSt
     // result set) sees the same blocks on both sides. The real `*::src::0` query
     // blocks populate `layout_blocks.query_source_ids`, so `is_properly_setup()`
     // (the `SetupWatch` precondition) stays true. Nav focus/history is left to
-    // `structural_ref_wired`; the SUT boots fresh (no user index.org), so `fresh=true`.
+    // `structural_ref_wired`; the SUT boots fresh (no user index.org), so
+    // `fresh=true`.
     let mut state = fresh_reference_state(wiring_for_subsystems(subsystems));
     state.action.app_started = true;
     seed_booted_layout_into_ref(&mut state, true);
+    // The booted SUT's ProfileResolver serves the bundled block profile; the
+    // oracle must carry the same one or `render_entity` interprets to Empty
+    // and ToggleState never generates (see `load_seed_profile_into_ref`).
+    crate::pbt::transitions::start_app::load_seed_profile_into_ref(&mut state);
     seed_ref_tree(&mut state);
     if state.wiring.has_actor(Actor::UI) {
         let c1 = fixed_ids().c1;

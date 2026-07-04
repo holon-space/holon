@@ -15,9 +15,9 @@ use std::sync::Arc;
 
 use futures_signals::signal_vec::SignalVec;
 
-use crate::widget_spec::DataRow;
 use crate::EntityUri;
 use crate::Value;
+use crate::widget_spec::DataRow;
 
 /// A value produced during render-expression interpretation.
 ///
@@ -38,6 +38,69 @@ pub enum InterpValue {
     // Closed-enum form is pragmatic given Rust's lack of HKTs. Adding a
     // new kind is additive — no existing call site needs updating.
 }
+
+/// Opaque identifier for one display-placement occurrence of a block.
+///
+/// "Which display placement produced this row." Deliberately opaque — no
+/// arithmetic exposed — so no caller can assume it is a positional/render-path
+/// index (ADR 0016 rejects that identity). It is `Ord`/`Hash` so it can key the
+/// driver-local `(EntityUri, Occurrence)` keyspace. The inner payload is a
+/// deterministic function of the placement (canonical id + anchor), so a fresh
+/// provider construction reproduces the same key — the invariant the provider
+/// cache's `Weak` lifecycle relies on.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct OccurrenceId(u64);
+
+impl OccurrenceId {
+    /// Mint the id for a display placement of `canonical` under `anchor`.
+    /// Deterministic (a hash), not a counter — the provider must be a pure
+    /// function of its inputs (see [`ReactiveRowProvider`] doc).
+    pub fn for_placement(canonical: &EntityUri, anchor: &EntityUri) -> Self {
+        use std::hash::Hash;
+        use std::hash::Hasher;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        canonical.as_str().hash(&mut h);
+        anchor.as_str().hash(&mut h);
+        Self(h.finish())
+    }
+
+    /// The stringly suffix appended to a GPUI identity key for a placed
+    /// occurrence. This is the ONE stringly-typed boundary for the occurrence
+    /// coordinate (parse-don't-validate: the type is authoritative everywhere
+    /// else).
+    pub fn key_suffix(&self) -> String {
+        format!("-occ{:016x}", self.0)
+    }
+}
+
+/// The occurrence coordinate of a focus/caret/row-identity key (ADR 0016 §1
+/// widened tuple). `Canonical` is the default that keeps the widening
+/// behavior-preserving: every existing key carries `Occurrence::Canonical` and
+/// so renders byte-identical GPUI identity keys.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Occurrence {
+    #[default]
+    Canonical,
+    Placed(OccurrenceId),
+}
+
+impl Occurrence {
+    /// Suffix for a GPUI identity key. Empty for `Canonical` (byte-identical
+    /// keys), the occurrence suffix for `Placed`.
+    pub fn key_suffix(&self) -> String {
+        match self {
+            Occurrence::Canonical => String::new(),
+            Occurrence::Placed(occ) => occ.key_suffix(),
+        }
+    }
+}
+
+/// The per-row identity key carried by
+/// [`ReactiveRowProvider::keyed_rows_signal_vec`]: the entity plus which
+/// display occurrence of it this row is. The `ReactiveRowSet` store stays
+/// `EntityUri`-keyed — this widened key lives only in the driver-local diffing
+/// layer (ADR 0016 §3).
+pub type RowKey = (EntityUri, Occurrence);
 
 /// Reactive row-set surface consumed by streaming collections.
 ///
@@ -63,7 +126,7 @@ pub trait ReactiveRowProvider: Send + Sync {
     /// code that needs to track per-row identity for `VecDiff::RemoveAt`.
     fn keyed_rows_signal_vec(
         &self,
-    ) -> Pin<Box<dyn SignalVec<Item = (EntityUri, Arc<DataRow>)> + Send>>;
+    ) -> Pin<Box<dyn SignalVec<Item = (RowKey, Arc<DataRow>)> + Send>>;
 
     /// Stable identity for caching and widget-identity keys. Must be
     /// stable for the lifetime of the provider; equal providers should

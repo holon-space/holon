@@ -1,4 +1,5 @@
-//! BrowserRelay: forwards MCP tool calls to the Dioxus browser page via WebSocket hub.
+//! BrowserRelay: forwards MCP tool calls to the Dioxus browser page via
+//! WebSocket hub.
 //!
 //! Architecture:
 //!   Claude Code → HTTP /mcp → serve.mjs (proxy) → this relay (RELAY_PORT)
@@ -7,25 +8,34 @@
 //!
 //! Wire protocol:
 //!   native→browser: {"id": "uuid", "tool": "...", "arguments": {...}}
-//!   browser→native: {"id": "uuid", "content": "[{\"type\":\"text\",\"text\":\"...\"}]"}
-//!               or: {"id": "uuid", "is_error": true, "content": "..."}
+//!   browser→native: {"id": "uuid", "content":
+//! "[{\"type\":\"text\",\"text\":\"...\"}]"}               or: {"id": "uuid",
+//! "is_error": true, "content": "..."}
 //!
 //! The relay connects to the hub as role=native and reconnects automatically on
-//! disconnect (handles trunk --watch restarts without dropping in-flight MCP sessions).
+//! disconnect (handles trunk --watch restarts without dropping in-flight MCP
+//! sessions).
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
 
-use futures::{SinkExt, StreamExt};
-use rmcp::{
-    model::{
-        CallToolRequestParam, CallToolResult, Content, ListToolsResult, PaginatedRequestParam,
-        ServerInfo,
-    },
-    service::RequestContext,
-    ErrorData as McpError, RoleServer, ServerHandler,
-};
-use tokio::sync::{oneshot, Mutex};
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use futures::SinkExt;
+use futures::StreamExt;
+use rmcp::ErrorData as McpError;
+use rmcp::RoleServer;
+use rmcp::ServerHandler;
+use rmcp::model::CallToolRequestParam;
+use rmcp::model::CallToolResult;
+use rmcp::model::Content;
+use rmcp::model::ListToolsResult;
+use rmcp::model::PaginatedRequestParam;
+use rmcp::model::ServerInfo;
+use rmcp::service::RequestContext;
+use tokio::sync::Mutex;
+use tokio::sync::oneshot;
+use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 
 use crate::server::HolonMcpServer;
@@ -218,7 +228,8 @@ async fn dispatch_response(pending: Arc<Mutex<HashMap<String, ResultSender>>>, t
         .unwrap_or(false);
     let content_str = msg.get("content").and_then(|v| v.as_str()).unwrap_or("[]");
 
-    // content_str is a JSON-encoded Vec<Content>: "[{\"type\":\"text\",\"text\":\"...\"}]"
+    // content_str is a JSON-encoded Vec<Content>:
+    // "[{\"type\":\"text\",\"text\":\"...\"}]"
     let content: Vec<Content> = serde_json::from_str(content_str)
         .unwrap_or_else(|_| vec![Content::text(content_str.to_string())]);
 
@@ -252,8 +263,10 @@ impl ServerHandler for BrowserRelayServer {
         _: Option<PaginatedRequestParam>,
         _: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
-        let tools =
-            (HolonMcpServer::tool_router_ui() + HolonMcpServer::tool_router_backend()).list_all();
+        let router = HolonMcpServer::tool_router_ui() + HolonMcpServer::tool_router_backend();
+        #[cfg(debug_assertions)]
+        let router = router + HolonMcpServer::tool_router_reset();
+        let tools = router.list_all();
         async move { Ok(ListToolsResult::with_all_items(tools)) }
     }
 

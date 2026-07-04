@@ -1,9 +1,68 @@
-use super::prelude::*;
+use std::collections::HashMap;
+
+use holon_api::ClickModifiers;
+use holon_frontend::operations::OperationIntent;
 use holon_frontend::view_model::ViewKind;
 
+use super::prelude::*;
+use crate::editor::dispatch_chain;
+use crate::editor::intent_to_wire;
+
+/// Click-action wrapper (GPUI parity: `gpui/render/builders/selectable.rs`).
+/// Pre-resolves every click-bound operation on the node into a
+/// modifier-set → intent map and dispatches the matching intent on click.
+/// Sidebar page rows use this: `selectable(row(…), #{action:
+/// navigation_focus(…)})`.
 pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
     let ViewKind::Selectable { child } = &node.kind else {
         return rsx! {};
     };
-    rsx! { RenderNode { node: (**child).clone() } }
+    let child_vm = (**child).clone();
+
+    let click_intents: HashMap<ClickModifiers, OperationIntent> = node
+        .operations
+        .iter()
+        .filter_map(|ow| {
+            ow.descriptor.click_modifiers().map(|m| {
+                (
+                    m,
+                    OperationIntent::new(
+                        ow.descriptor.entity_name.clone(),
+                        ow.descriptor.name.clone(),
+                        ow.descriptor.bound_params.clone(),
+                    ),
+                )
+            })
+        })
+        .collect();
+    if click_intents.is_empty() {
+        return rsx! { RenderNode { node: child_vm } };
+    }
+
+    rsx! {
+        div {
+            "data-role": "selectable",
+            style: "cursor: pointer;",
+            onclick: move |evt| {
+                let m = evt.modifiers();
+                let modifiers = ClickModifiers {
+                    shift: m.shift(),
+                    alt: m.alt(),
+                    cmd: m.meta(),
+                    ctrl: m.ctrl(),
+                };
+                let Some(intent) = click_intents.get(&modifiers) else {
+                    return;
+                };
+                tracing::info!(
+                    "[selectable] click ({modifiers:?}) → {}.{}",
+                    intent.entity_name,
+                    intent.op_name
+                );
+                evt.stop_propagation();
+                dispatch_chain(vec![intent_to_wire(intent)]);
+            },
+            RenderNode { node: child_vm.clone() }
+        }
+    }
 }

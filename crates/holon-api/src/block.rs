@@ -1,11 +1,17 @@
-use holon_macros::Entity;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use holon_macros::Entity;
+use serde::Deserialize;
+use serde::Serialize;
+
+use crate::Value;
 use crate::entity_uri::EntityUri;
 use crate::inline_mark::MarkSpan;
-use crate::types::{ContentType, SourceLanguage, Tags};
-use crate::{row_id, uri_from_row, Value};
+use crate::row_id;
+use crate::types::ContentType;
+use crate::types::SourceLanguage;
+use crate::types::Tags;
+use crate::uri_from_row;
 
 // =============================================================================
 // BlockContent - Discriminated union for block content types
@@ -243,7 +249,8 @@ pub enum ResultOutput {
 /// source block metadata) are stored as JSON strings.
 ///
 /// Blocks use URI-based IDs to support integration with external systems:
-/// - Local blocks: `local://<uuid-v4>` (e.g., `local://550e8400-e29b-41d4-a716-446655440000`)
+/// - Local blocks: `local://<uuid-v4>` (e.g.,
+///   `local://550e8400-e29b-41d4-a716-446655440000`)
 /// - External systems: `todoist://task/12345`, `logseq://page/abc123`
 ///
 /// # Example
@@ -258,10 +265,10 @@ pub enum ResultOutput {
 /// let query_block = Block::new_source(EntityUri::block("query-1"), EntityUri::no_parent(), "holon_prql", "from tasks");
 /// ```
 /// `Block` is deliberately **serde-free** (H1 residue closed): the domain type
-/// carries `tags`/`requires` as junction-derived edge fields that a naive derive
-/// would silently drop, so every on-disk/wire path goes through [`BlockWire`]
-/// instead (see [`block_wire_vec`] / [`SnapshotBlock`]). Do not add `Serialize`/
-/// `Deserialize` here — add a `BlockWire` boundary conversion.
+/// carries `tags`/`requires` as junction-derived edge fields that a naive
+/// derive would silently drop, so every on-disk/wire path goes through
+/// [`BlockWire`] instead (see [`block_wire_vec`] / [`SnapshotBlock`]). Do not
+/// add `Serialize`/ `Deserialize` here — add a `BlockWire` boundary conversion.
 /// flutter_rust_bridge:non_opaque
 #[derive(Debug, Clone, PartialEq, Entity)]
 #[entity(
@@ -295,6 +302,14 @@ pub struct Block {
     #[edge_field]
     pub requires: Vec<EntityUri>,
 
+    /// Advice-suppression exclusion set: lesson block IDs this (anchor) block
+    /// has dismissed as advice. Stored in the `advice_suppressed` junction
+    /// table (edge field), serialized as the `:ADVICE_SUPPRESSED:` drawer, and
+    /// read from the `block` matview's hydrated `advice_suppressed` JSON array.
+    /// See ADR 0021.
+    #[edge_field]
+    pub advice_suppressed: Vec<EntityUri>,
+
     // --- Content fields (flattened from BlockContent) ---
     /// Text content (raw text or source code)
     pub content: String,
@@ -305,8 +320,8 @@ pub struct Block {
     /// For source blocks: programming language (e.g., prql, python).
     pub source_language: Option<SourceLanguage>,
 
-    /// For source blocks: optional block name for references (#+NAME: in Org Mode)
-    /// Tier 2: Supported in Org Mode and Loro, lost in Markdown
+    /// For source blocks: optional block name for references (#+NAME: in Org
+    /// Mode) Tier 2: Supported in Org Mode and Loro, lost in Markdown
     pub source_name: Option<String>,
 
     // --- Properties (JSON strings) ---
@@ -318,9 +333,9 @@ pub struct Block {
 
     /// Inline rich-text marks (Bold, Italic, Link, etc.) over `content`.
     /// `None` means the block is plain text (today's behavior); `Some(empty)`
-    /// is reserved for "rich block with no active marks". The `marks IS NOT NULL`
-    /// projection is the discriminator the renderer uses to decide rich vs plain.
-    /// Source/Image blocks always carry `None`.
+    /// is reserved for "rich block with no active marks". The `marks IS NOT
+    /// NULL` projection is the discriminator the renderer uses to decide
+    /// rich vs plain. Source/Image blocks always carry `None`.
     #[jsonb]
     pub marks: Option<Vec<MarkSpan>>,
 
@@ -340,6 +355,7 @@ impl Default for Block {
             parent_id: EntityUri::no_parent(),
             tags: Tags::default(),
             requires: Vec::new(),
+            advice_suppressed: Vec::new(),
             content: String::new(),
             content_type: ContentType::Text,
             source_language: None,
@@ -420,7 +436,8 @@ impl Block {
         }
     }
 
-    /// Create a new image block. `path` is the relative file path (e.g. "attachments/abc.png").
+    /// Create a new image block. `path` is the relative file path (e.g.
+    /// "attachments/abc.png").
     pub fn new_image(id: EntityUri, parent_id: EntityUri, path: impl Into<String>) -> Self {
         Self {
             id,
@@ -485,8 +502,8 @@ impl Block {
     }
 
     /// Get the content as a BlockContent enum (used at the API surface).
-    /// `marks IS NOT NULL` reconstitutes `RichText`; `None` flattens to plain `Text`.
-    /// flutter_rust_bridge:ignore
+    /// `marks IS NOT NULL` reconstitutes `RichText`; `None` flattens to plain
+    /// `Text`. flutter_rust_bridge:ignore
     pub fn to_block_content(&self) -> BlockContent {
         match self.content_type {
             ContentType::Source => BlockContent::Source(SourceBlock {
@@ -603,8 +620,8 @@ impl Block {
         self.updated_at = crate::clock::now_millis();
     }
 
-    /// Get source header arguments from properties (used by the Org Mode round-trip)
-    /// flutter_rust_bridge:ignore
+    /// Get source header arguments from properties (used by the Org Mode
+    /// round-trip) flutter_rust_bridge:ignore
     pub fn get_source_header_args(&self) -> HashMap<String, Value> {
         self.properties
             .get("_source_header_args")
@@ -618,8 +635,8 @@ impl Block {
             .unwrap_or_default()
     }
 
-    /// Set source header arguments in properties (used by the Org Mode round-trip)
-    /// flutter_rust_bridge:ignore
+    /// Set source header arguments in properties (used by the Org Mode
+    /// round-trip) flutter_rust_bridge:ignore
     pub fn set_source_header_args(&mut self, header_args: HashMap<String, Value>) {
         if !header_args.is_empty() {
             if let Ok(json) = serde_json::to_string(&header_args) {
@@ -748,8 +765,8 @@ fn require_string_array(
             anyhow::anyhow!("block {id}: column '{col}' holds invalid JSON {s:?}: {e}")
         }),
         other => anyhow::bail!(
-            "block {id}: column '{col}' must be a JSON string array, got {other:?} \
-             (the reader's projection must COALESCE it to '[]')"
+            "block {id}: column '{col}' must be a JSON string array, got {other:?} (the reader's \
+             projection must COALESCE it to '[]')"
         ),
     }
 }
@@ -828,6 +845,16 @@ impl TryFrom<crate::StorageEntity> for Block {
                 })
             })
             .collect::<anyhow::Result<Vec<EntityUri>>>()?;
+        let advice_suppressed = require_string_array(&row, "advice_suppressed", &id)?
+            .into_iter()
+            .map(|s| {
+                EntityUri::parse_owned(s.clone()).map_err(|e| {
+                    anyhow::anyhow!(
+                        "block {id}: 'advice_suppressed' entry {s:?} is not a valid URI: {e}"
+                    )
+                })
+            })
+            .collect::<anyhow::Result<Vec<EntityUri>>>()?;
         let marks = match row.get("marks") {
             None | Some(Value::Null) => None,
             Some(Value::Json(s)) | Some(Value::String(s)) => {
@@ -848,6 +875,7 @@ impl TryFrom<crate::StorageEntity> for Block {
             parent_id,
             tags,
             requires,
+            advice_suppressed,
             content,
             content_type,
             source_language,
@@ -882,7 +910,9 @@ pub struct BlockMetadata {
 /// Returns `(page_id, Vec<Block>)` pairs. The page block itself is NOT
 /// included in its own descendant list.
 pub fn blocks_by_document(blocks: &[Block]) -> Vec<(EntityUri, Vec<Block>)> {
-    use std::collections::{HashMap, HashSet, VecDeque};
+    use std::collections::HashMap;
+    use std::collections::HashSet;
+    use std::collections::VecDeque;
 
     let mut children_of: HashMap<&str, Vec<usize>> = HashMap::new();
     for (i, block) in blocks.iter().enumerate() {
@@ -969,13 +999,16 @@ pub struct BlockWire {
     pub marks: Option<Vec<MarkSpan>>,
     pub created_at: i64,
     pub updated_at: i64,
-    /// Junction-derived edge field, carried explicitly (disclosed legacy default
-    /// so pre-milestone files parse). See type-level doc.
+    /// Junction-derived edge field, carried explicitly (disclosed legacy
+    /// default so pre-milestone files parse). See type-level doc.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
     /// Junction-derived edge field, carried explicitly. See `tags`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requires: Vec<EntityUri>,
+    /// Junction-derived edge field (advice-suppression set). See `tags`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub advice_suppressed: Vec<EntityUri>,
 }
 
 impl From<&Block> for BlockWire {
@@ -993,6 +1026,7 @@ impl From<&Block> for BlockWire {
             updated_at: b.updated_at,
             tags: b.tags.to_vec(),
             requires: b.requires.clone(),
+            advice_suppressed: b.advice_suppressed.clone(),
         }
     }
 }
@@ -1004,6 +1038,7 @@ impl From<BlockWire> for Block {
             parent_id: w.parent_id,
             tags: w.tags.into(),
             requires: w.requires,
+            advice_suppressed: w.advice_suppressed,
             content: w.content,
             content_type: w.content_type,
             source_language: w.source_language,
@@ -1020,8 +1055,13 @@ impl From<BlockWire> for Block {
 /// [`BlockWire`]. Lets a serde-deriving container (PBT transitions, fixtures)
 /// keep an in-memory `Vec<Block>` while persisting the lossless wire form.
 pub mod block_wire_vec {
-    use super::{Block, BlockWire};
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use serde::Deserialize;
+    use serde::Deserializer;
+    use serde::Serialize;
+    use serde::Serializer;
+
+    use super::Block;
+    use super::BlockWire;
 
     pub fn serialize<S: Serializer>(blocks: &[Block], s: S) -> Result<S::Ok, S::Error> {
         let wires: Vec<BlockWire> = blocks.iter().map(BlockWire::from).collect();
@@ -1048,14 +1088,14 @@ pub struct SnapshotBlock {
 
 /// On-disk serde representation for [`SnapshotBlock`]. Embeds a [`BlockWire`],
 /// which carries the junction-derived `tags`/`requires` edge fields as real
-/// fields — a plain `Block` derive would round-trip them as empty and make every
-/// cold boot re-emit a spurious edge-field write (BUG H1).
+/// fields — a plain `Block` derive would round-trip them as empty and make
+/// every cold boot re-emit a spurious edge-field write (BUG H1).
 ///
-/// `legacy_tags`/`legacy_requires` are a **read-only backward-compat allowance**:
-/// sidecars written before this milestone stored the edge fields as siblings of
-/// `block` (which then lacked them). They are never emitted (empty ones elide);
-/// on read they seed the block only when the wire itself carried none. Back-
-/// conversion is infallible, so `from` (not `try_from`).
+/// `legacy_tags`/`legacy_requires` are a **read-only backward-compat
+/// allowance**: sidecars written before this milestone stored the edge fields
+/// as siblings of `block` (which then lacked them). They are never emitted
+/// (empty ones elide); on read they seed the block only when the wire itself
+/// carried none. Back- conversion is infallible, so `from` (not `try_from`).
 #[derive(Serialize, Deserialize)]
 struct SnapshotBlockWire {
     block: BlockWire,
@@ -1118,9 +1158,10 @@ mod tests {
 
     /// BUG H1 regression: the file-sync diff base / projection sidecar serde-
     /// persists `SnapshotBlock`, which embeds a `Block` whose `tags`/`requires`
-    /// are `#[serde(skip)]`. Without the `SnapshotBlockWire` DTO this round-trip
-    /// drops both edge fields, so a cold boot re-emits spurious edge-field writes
-    /// for every tagged block. Must carry NON-empty `tags` AND `requires`.
+    /// are `#[serde(skip)]`. Without the `SnapshotBlockWire` DTO this
+    /// round-trip drops both edge fields, so a cold boot re-emits spurious
+    /// edge-field writes for every tagged block. Must carry NON-empty
+    /// `tags` AND `requires`.
     #[test]
     fn snapshot_block_serde_round_trip_preserves_edge_fields() {
         let expected_tags: Tags = vec!["Inbox".to_string(), "Page".to_string()].into();
@@ -1298,6 +1339,7 @@ mod mutation_gap_tests {
                 ("updated_at", Value::Integer(2)),
                 ("tags", Value::Array(vec![Value::String("a".to_string())])),
                 ("requires", Value::Array(vec![])),
+                ("advice_suppressed", Value::Array(vec![])),
             ]
             .into_iter()
             .map(|(k, v)| (std::sync::Arc::<str>::from(k), v))
@@ -1310,7 +1352,14 @@ mod mutation_gap_tests {
         assert_eq!(ok.updated_at, 2);
         assert!(ok.tags.contains("a"));
         assert!(ok.requires.is_empty());
+        assert!(ok.advice_suppressed.is_empty());
         assert!(ok.parent_id.as_block_id().is_none());
+
+        // Absent advice_suppressed column = broken projection, must error.
+        let mut no_advice = base_row();
+        no_advice.remove("advice_suppressed");
+        let err = Block::try_from(no_advice).unwrap_err().to_string();
+        assert!(err.contains("advice_suppressed"), "got: {err}");
 
         // Absent tags column = broken projection, must error mentioning the column.
         let mut no_tags = base_row();

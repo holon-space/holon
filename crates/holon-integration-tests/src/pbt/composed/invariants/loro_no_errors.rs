@@ -1,28 +1,8 @@
-//! `inv-loro-no-errors` — `SutLoroLog` only, ignores the reference, so it runs
-//! whenever a Loro store is wired. Asserts the LoroSyncController logged no
-//! error since startup. Inert-but-honest in the pure-Loro slice (a standalone
-//! CRDT has no sync controller, so `loro_had_errors` is structurally `false`);
-//! its real teeth run in the ONE PBT (full mode), where `compose_sut` backs
-//! `SutLoroLog` with the live `LoroSyncControllerHandle` error counter, plus the
-//! fixture-driven catch test below.
-
-use holon_pbt_core::RunMode;
-use holon_pbt_core::capabilities::SutLoroLog;
-use holon_pbt_core::composition::{BridgedInvariant, CapId, CapInvariant, Needs};
-
-use crate::pbt::invariants::bodies::loro_no_errors::InvLoroNoErrors;
-
-pub fn wire() -> Box<dyn CapInvariant> {
-    Box::new(BridgedInvariant::new(
-        InvLoroNoErrors,
-        RunMode::Strict,
-        Needs {
-            sut_present: vec![CapId::of::<dyn SutLoroLog>()],
-            sut_absent: Vec::new(),
-            ref_present: Vec::new(),
-        },
-    ))
-}
+//! Selection tests for `inv-loro-no-errors` — the invariant BODY + `wire()` now
+//! live in the `holon-loro-testing` companion crate (co-location Phase 1) and
+//! reach the composed catalog via the central fold. These fixture-driven
+//! selection/catch tests stay here because they exercise the central
+//! `composed_invariant_catalog()` + shared fixtures.
 
 #[cfg(test)]
 mod tests {
@@ -30,8 +10,8 @@ mod tests {
 
     use crate::pbt::composed::fixtures::*;
 
-    /// Positive: a Loro store that logged no error ⇒ selected (a `SutLoroLog` is
-    /// wired) and passing.
+    /// Positive: a Loro store that logged no error ⇒ selected (a `SutLoroLog`
+    /// is wired) and passing.
     #[tokio::test]
     async fn loro_no_errors_passes_when_clean() {
         let sut = loro_log_map(FixtureLoroLog::default());
@@ -50,8 +30,8 @@ mod tests {
     }
 
     /// Negative containment (§2): without a `SutLoroLog` the invariant is
-    /// *deselected* — disclosed, not faked. A backend-only SUT must not silently
-    /// "pass" the Loro check.
+    /// *deselected* — disclosed, not faked. A backend-only SUT must not
+    /// silently "pass" the Loro check.
     #[tokio::test]
     async fn loro_no_errors_deselected_without_loro() {
         let blocks = vec![Block::new_text(

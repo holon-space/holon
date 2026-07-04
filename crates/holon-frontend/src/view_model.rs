@@ -3,11 +3,13 @@ use std::fmt::Write;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use holon_api::EntityName;
+use holon_api::EntityUri;
+use holon_api::Value;
 use holon_api::render_types::OperationWiring;
 use holon_api::widget_spec::DataRow;
-use holon_api::EntityUri;
-use holon_api::{EntityName, Value};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 
 use crate::input_trigger::InputTrigger;
 use crate::render_context::LayoutHint;
@@ -58,8 +60,8 @@ pub struct WatchEnvelope {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DrawerMode {
-    /// The drawer shrinks sibling content when open (default sidebar behaviour).
-    /// Width = sidebar_width when open, 0 when closed.
+    /// The drawer shrinks sibling content when open (default sidebar
+    /// behaviour). Width = sidebar_width when open, 0 when closed.
     #[default]
     Shrink,
     /// The drawer floats over sibling content without affecting their size.
@@ -95,8 +97,8 @@ impl DrawerMode {
 pub struct ViewModel {
     /// The underlying data row from which this node was constructed. Frontends
     /// can read any property (id, collapse_to, etc.) without the shadow layer
-    /// having to forward individual fields. Arc-wrapped for cheap cloning through
-    /// the reactive pipeline.
+    /// having to forward individual fields. Arc-wrapped for cheap cloning
+    /// through the reactive pipeline.
     #[serde(default, skip_serializing_if = "arc_map_is_empty")]
     pub entity: Arc<DataRow>,
 
@@ -113,11 +115,21 @@ pub struct ViewModel {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub triggers: Vec<InputTrigger>,
 
-    /// Hint to the parent layout container about how much space this node needs.
-    /// `Flex { weight: 1 }` is the default (equal share of remaining space).
-    /// `Fixed { px }` claims an exact number of pixels.
+    /// Hint to the parent layout container about how much space this node
+    /// needs. `Flex { weight: 1 }` is the default (equal share of remaining
+    /// space). `Fixed { px }` claims an exact number of pixels.
     #[serde(default, skip_serializing_if = "is_default_layout_hint")]
     pub layout_hint: LayoutHint,
+
+    /// Which display occurrence of the row this node renders (ADR 0015 rule 4:
+    /// node metadata, NEVER an id-infix). `Canonical` for every real row;
+    /// `ReactiveViewModel::snapshot` threads the stamped `Placed` occurrence
+    /// through so PBT snapshots can observe display-placed rows without the
+    /// occurrence ever touching the `EntityUri`. `#[serde(skip)]`: the
+    /// coordinate is in-memory only — it never rides the serialized wire
+    /// form, keeping the ViewModel bytes identical to before this widening.
+    #[serde(skip)]
+    pub occurrence: holon_api::Occurrence,
 }
 
 /// The kind of widget this node represents.
@@ -164,9 +176,9 @@ pub enum ViewKind {
         field: String,
     },
     /// Read-only sibling of `EditableText`. Renders the same content but
-    /// does not mount a live editor — click dispatches `navigation.editor_focus`
-    /// which flips the block_profile variant to `is_focused` and swaps in
-    /// `editable_text` on the next render.
+    /// does not mount a live editor — click dispatches
+    /// `navigation.editor_focus` which flips the block_profile variant to
+    /// `is_focused` and swaps in `editable_text` on the next render.
     RenderedText {
         content: String,
         #[serde(default = "default_editable_field")]
@@ -630,6 +642,7 @@ impl Default for ViewModel {
             operations: vec![],
             triggers: vec![],
             layout_hint: LayoutHint::default(),
+            occurrence: holon_api::Occurrence::Canonical,
         }
     }
 }
@@ -1336,7 +1349,8 @@ impl ViewModel {
         }
     }
 
-    /// Collect entity IDs of all blocks that have a StateToggle in their subtree.
+    /// Collect entity IDs of all blocks that have a StateToggle in their
+    /// subtree.
     pub fn state_toggle_block_ids(&self) -> Vec<String> {
         let mut ids = Vec::new();
         self.collect_state_toggle_ids(&mut ids);
@@ -1422,8 +1436,8 @@ impl ViewModel {
         }
     }
 
-    /// Extract the entity name from this node's ID scheme (e.g. `"block:uuid"` → `"block"`),
-    /// falling back to an explicit `entity_name` field.
+    /// Extract the entity name from this node's ID scheme (e.g. `"block:uuid"`
+    /// → `"block"`), falling back to an explicit `entity_name` field.
     pub fn entity_name(&self) -> Option<EntityName> {
         if let Some(Value::String(id)) = self.entity.get("id") {
             if let Some(scheme) = id.split_once(':').map(|(s, _)| s) {
@@ -1445,7 +1459,8 @@ impl ViewModel {
         }
     }
 
-    /// Find the first `EditableText` descendant whose entity `id` matches `entity_id`.
+    /// Find the first `EditableText` descendant whose entity `id` matches
+    /// `entity_id`.
     pub fn find_editable_text(&self, entity_id: &str) -> Option<&ViewModel> {
         if matches!(&self.kind, ViewKind::EditableText { .. }) {
             if self

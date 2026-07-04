@@ -1,18 +1,28 @@
 //! Per-transition performance budgets.
 //!
-//! SQL counts are **deterministic** — they depend on the number of active watches,
-//! documents, blocks, etc. They are computed from `ReferenceState`, not recorded.
+//! SQL counts are **deterministic** — they depend on the number of active
+//! watches, documents, blocks, etc. They are computed from `ReferenceState`,
+//! not recorded.
 //!
 //! Timing is **non-deterministic** — wall-clock and query durations are checked
 //! against generous hard limits only.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::time::Duration;
 
+// Budget formulas + inputs live in holon-pbt-core (Phase 1a Step 1); re-exported
+// so existing `crate::pbt::transition_budgets::…` import sites keep resolving.
+pub use holon_pbt_core::budget::{
+    CACHE_EVENT_READS, ExpectedSql, FIRST_VISIT_VIEW_DDL, FIRST_VISIT_VIEW_READS, JOURNAL_READS,
+    MutationKind, NAV_DML_READS, REACTIVE_BASE, READS_PER_WATCH, SqlBudget, cdc_tolerance,
+    docs_tolerance, expected_sql_for_kind,
+};
+use holon_pbt_core::types::Mutation;
+
 use super::reference_state::ReferenceState;
-use super::types::Mutation;
 use crate::test_tracing::TransitionMetrics;
 
 // ── SQL count model ───────────────────────────────────────────────
@@ -29,16 +39,16 @@ use crate::test_tracing::TransitionMetrics;
 //
 //   JOURNAL_READS = 2:
 //     1× UPDATE operation SET status = ...     (clear redo stack)
-//     1× INSERT INTO operation (...) RETURNING id  (insert + get ID in one query)
-//   (COUNT(*) for trim is amortized to every 10th operation)
+//     1× INSERT INTO operation (...) RETURNING id  (insert + get ID in one
+// query)   (COUNT(*) for trim is amortized to every 10th operation)
 //
 // Navigation operations execute DML tracked as "query" spans:
 //
 //   NAV_DML_READS = 5:
 //     1× DELETE FROM navigation_history WHERE region = ... AND id > ...
 //     1× INSERT INTO navigation_history (region, block_id) VALUES (...)
-//     1× INSERT OR REPLACE INTO navigation_cursor (region, history_id) VALUES (...)
-//     1× SELECT MAX(id) FROM navigation_history WHERE region = ...
+//     1× INSERT OR REPLACE INTO navigation_cursor (region, history_id) VALUES
+// (...)     1× SELECT MAX(id) FROM navigation_history WHERE region = ...
 //     1× SELECT history_id FROM navigation_cursor WHERE region = ...
 //
 // Org sync CDC events trigger cache subscriber reads:
@@ -50,65 +60,19 @@ use crate::test_tracing::TransitionMetrics;
 // User watches (from SetupWatch) add matview existence checks:
 //
 //   READS_PER_WATCH = 2:
-//     1× SELECT name FROM sqlite_master WHERE type='view' AND name='watch_view_...'
-//     1× SELECT * FROM watch_view_...
+//     1× SELECT name FROM sqlite_master WHERE type='view' AND
+// name='watch_view_...'     1× SELECT * FROM watch_view_...
 //
-// NOTE: Internal watches (region watches, all-blocks watch, structural watch_ui)
-// use subscribe_sql → matview CDC broadcast and do NOT generate "query" spans
-// during post-startup transitions. Only user watches from SetupWatch contribute.
+// NOTE: Internal watches (region watches, all-blocks watch, structural
+// watch_ui) use subscribe_sql → matview CDC broadcast and do NOT generate
+// "query" spans during post-startup transitions. Only user watches from
+// SetupWatch contribute.
 
-pub(crate) const REACTIVE_BASE: usize = 5;
-pub(crate) const JOURNAL_READS: usize = 2;
-pub(crate) const NAV_DML_READS: usize = 5;
-pub(crate) const CACHE_EVENT_READS: usize = 3;
-pub(crate) const READS_PER_WATCH: usize = 2;
-
-// First navigation to a root renders it for the first time: each watch
-// matview takes `ensure_view`'s create path (2 sqlite_master existence
-// checks, one before and one under the DDL mutex, + the initial view
-// SELECT). Measured on the minimal WriteOrgFile×2 → StartApp →
-// NavigateFocus capture: 6 new views ⇒ ~18 reads + 6 CREATEs. Revisits hit
-// the known-views cache and get no allowance. The duplicate render-pass
-// reads (watch_ui trigger storm re-rendering 2-3× per focus change) ride
-// on the tolerance until the trigger coalescing lands.
-pub(crate) const FIRST_VISIT_VIEW_READS: usize = 18;
-pub(crate) const FIRST_VISIT_VIEW_DDL: usize = 6;
-
-/// Per-variant budget files share this tolerance helper. Mirrors the
-/// inline computation at the top of `expected_sql` — base jitter (4)
-/// plus extra matview checks (~2 reads per extra doc) for restarts
-/// reusing matviews via `ensure_view`.
-pub(crate) fn docs_tolerance(state: &ReferenceState) -> usize {
-    let docs = state.files.documents.len();
-    4 + if docs > 1 { (docs - 1) * 2 } else { 0 }
-}
-
-/// Expected SQL counts for a transition, computed from current state.
-#[derive(Debug)]
-pub struct ExpectedSql {
-    /// Expected number of SQL reads (via turso query())
-    pub reads: usize,
-    /// Expected number of SQL writes (via turso execute())
-    pub writes: usize,
-    /// Expected number of DDL statements
-    pub ddl: usize,
-    /// Tolerance: actual may exceed expected by this many (for async race margins)
-    pub tolerance: usize,
-}
-
-/// Per-transition SQL budget. Separated from the behaviour trait
-/// (`holon_pbt_core::TransitionImpl`) because the budget is an
-/// integration-test concern that has no meaning for the layout /
-/// editor-pure PBTs — those slices never touch SQL. Each transition
-/// variant implements this; the `E2ETransition` enum dispatches it.
-pub trait SqlBudget {
-    fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql;
-}
-
-/// Compute expected SQL counts for a transition given the current reference state.
+/// Compute expected SQL counts for a transition given the current reference
+/// state.
 ///
-/// The formulas are derived from SQL span analysis (HOLON_PERF_DETAIL=1, 2026-04-05).
-/// When a formula doesn't match reality, it means either:
+/// The formulas are derived from SQL span analysis (HOLON_PERF_DETAIL=1,
+/// 2026-04-05). When a formula doesn't match reality, it means either:
 /// 1. The code changed (update the formula), or
 /// 2. There's an N+1 bug (fix the code).
 ///
@@ -123,133 +87,6 @@ pub fn expected_sql(
     transition.expected_sql(ref_state)
 }
 
-/// Mutation kind discriminant — avoids constructing dummy Mutation values.
-pub(crate) enum MutationKind {
-    Create,
-    Update,
-    Delete,
-    Move,
-    RestartApp,
-}
-
-impl MutationKind {
-    fn from_mutation(m: &Mutation) -> Self {
-        match m {
-            Mutation::Create { .. } => Self::Create,
-            Mutation::Update { .. } => Self::Update,
-            Mutation::Delete { .. } => Self::Delete,
-            Mutation::Move { .. } => Self::Move,
-            Mutation::RestartApp => Self::RestartApp,
-        }
-    }
-}
-
-/// Expected SQL for a specific mutation type.
-///
-/// ## Read breakdown (from HOLON_PERF_DETAIL=1 analysis, 2026-04-05):
-///
-/// **Create** (external, via org file write — no operation journal):
-///   reactive base (5) + cache events (3) = 8 reads
-///   + per-watch: matview existence + data read (READS_PER_WATCH)
-///   + per-watch: block_with_path + render source load (2)
-///   Observed: 8 (0 watches), 14 (1 watch)
-///
-/// **Update** (UI dispatch — has operation journal):
-///   reactive base (5) + journal (4) + parent chain walk (4)
-///   + block content fetch (1) + name IS NULL (1) + properties IS NOT NULL (1)
-///   = 16 reads
-///   + per-watch: matview existence + data read (READS_PER_WATCH)
-///   + per-watch: block_with_path + render source load (2)
-///   Observed: 16 (0 watches), 18 (1 watch)
-///
-/// **Delete**: like Update + doc_uri lookup (1)
-///   = 17 + watches × (READS_PER_WATCH + 2)
-///
-/// ## CDC cascade tolerance
-///
-/// When a mutation triggers org sync, the org file gets re-written, which triggers
-/// file watcher → re-parse → CDC events. Each cascade cycle adds:
-///   - name IS NULL checks (1-2 per event)
-///   - property lookups (1-2 per affected block)
-///
-/// After the recursive CTE fix for find_document_uri, parent chain walks no longer
-/// scale with block count (O(1) instead of O(depth)). The remaining CDC overhead
-/// is mostly constant per mutation.
-pub(crate) fn cdc_tolerance(blocks: usize, docs: usize) -> usize {
-    // Empirical after CTE fix: CDC overhead is much flatter for single-doc.
-    // Multi-doc amplifies heavily: org sync re-writes ALL documents, each
-    // triggering CDC events with name IS NULL polls + property lookups.
-    // The cross-doc cost scales with blocks × (docs-1).
-    if docs > 1 {
-        4 + blocks / 2 + (docs - 1) * blocks / 3
-    } else {
-        4 + blocks / 3
-    }
-}
-
-pub(crate) fn expected_sql_for_kind(
-    kind: MutationKind,
-    watches: usize,
-    blocks: usize,
-    docs: usize,
-) -> ExpectedSql {
-    let tol = cdc_tolerance(blocks, docs);
-    match kind {
-        // Create goes through external mutation (org file write), no operation journal.
-        // reactive base (5) + cache events (3) + find_document_uri CTE (2) + properties (2)
-        // = 12 reads observed.
-        // Loro outbound reconcile adds: post-update row read (1) + find_document_uri (2)
-        //   + cache event reads (3) + properties merge (1) = 7.
-        // Per-watch: matview existence + data read + block_with_path + render source load = 4.
-        MutationKind::Create => ExpectedSql {
-            reads: REACTIVE_BASE
-                + CACHE_EVENT_READS
-                + 2
-                + 2
-                + 1
-                + 2
-                + CACHE_EVENT_READS
-                + 1
-                + watches * (READS_PER_WATCH + 2),
-            writes: 2 + watches.min(2),
-            ddl: 0,
-            tolerance: tol,
-        },
-        // Update (external path): reactive base (5) + find_document_uri CTE (2)
-        //   + name IS NULL (1) + properties IS NOT NULL (1) + per-block properties (2)
-        //   = 11 reads observed.
-        // Update (UI path): adds journal (4) + block content fetch (1) = 16 reads.
-        // Per-watch: matview existence + data read = 2.
-        MutationKind::Update => ExpectedSql {
-            reads: REACTIVE_BASE + JOURNAL_READS + 2 + 1 + 1 + 1 + 2 + watches * READS_PER_WATCH,
-            writes: 3,
-            ddl: 0,
-            tolerance: tol,
-        },
-        // Delete: like Update + doc_uri extra CTE (1).
-        MutationKind::Delete => ExpectedSql {
-            reads: REACTIVE_BASE + JOURNAL_READS + 3 + 1 + 1 + 1 + 2 + watches * READS_PER_WATCH,
-            writes: 3,
-            ddl: 0,
-            tolerance: tol,
-        },
-        // Move: 2× find_document_uri CTE (2) + content fetch (1) + name IS NULL (1)
-        //   + properties IS NOT NULL (1) + per-block properties (2).
-        MutationKind::Move => ExpectedSql {
-            reads: REACTIVE_BASE + JOURNAL_READS + 2 + 1 + 1 + 1 + 2 + watches * READS_PER_WATCH,
-            writes: 3,
-            ddl: 0,
-            tolerance: tol,
-        },
-        MutationKind::RestartApp => ExpectedSql {
-            reads: REACTIVE_BASE + 4,
-            writes: 2,
-            ddl: 0,
-            tolerance: 3,
-        },
-    }
-}
-
 /// Expected SQL for a mutation via its `Mutation` value.
 pub(crate) fn expected_mutation_sql(
     mutation: &Mutation,
@@ -257,7 +94,14 @@ pub(crate) fn expected_mutation_sql(
     blocks: usize,
     docs: usize,
 ) -> ExpectedSql {
-    expected_sql_for_kind(MutationKind::from_mutation(mutation), watches, blocks, docs)
+    let kind = match mutation {
+        Mutation::Create { .. } => MutationKind::Create,
+        Mutation::Update { .. } => MutationKind::Update,
+        Mutation::Delete { .. } => MutationKind::Delete,
+        Mutation::Move { .. } => MutationKind::Move,
+        Mutation::RestartApp => MutationKind::RestartApp,
+    };
+    expected_sql_for_kind(kind, watches, blocks, docs)
 }
 
 // ── Transition key ────────────────────────────────────────────────
@@ -350,8 +194,8 @@ pub struct MetricSample {
     pub message: String,
 }
 
-/// Build the per-metric samples for a transition. The messages are byte-for-byte
-/// what `check_budget` emitted before the generic refactor.
+/// Build the per-metric samples for a transition. The messages are
+/// byte-for-byte what `check_budget` emitted before the generic refactor.
 pub fn build_samples(
     transition: &crate::pbt::transitions::E2ETransition,
     ref_state: &ReferenceState,
@@ -503,9 +347,10 @@ pub fn evaluate(samples: &[MetricSample]) -> Vec<Violation> {
         .collect()
 }
 
-/// Check observed metrics against computed expected SQL counts + timing + memory
-/// limits, plus baseline-relative regressions (C3). Absolute hard-cap breaches
-/// keep their original `Warning`/`Error` severity; regressions are `Warning`s.
+/// Check observed metrics against computed expected SQL counts + timing +
+/// memory limits, plus baseline-relative regressions (C3). Absolute hard-cap
+/// breaches keep their original `Warning`/`Error` severity; regressions are
+/// `Warning`s.
 pub fn check_budget(
     transition: &crate::pbt::transitions::E2ETransition,
     ref_state: &ReferenceState,
@@ -542,8 +387,9 @@ pub fn check_budget(
 /// `transition_key -> (metric.key() -> value)`.
 type BaselineMap = BTreeMap<String, BTreeMap<String, f64>>;
 
-/// Fraction over baseline that counts as a regression. `HOLON_NFR_REGRESSION_TOL`
-/// overrides (e.g. `0.5` = 50%). Default 25% — RSS/wall are noisy.
+/// Fraction over baseline that counts as a regression.
+/// `HOLON_NFR_REGRESSION_TOL` overrides (e.g. `0.5` = 50%). Default 25% —
+/// RSS/wall are noisy.
 fn regression_tolerance() -> f64 {
     static TOL: OnceLock<f64> = OnceLock::new();
     *TOL.get_or_init(|| {
@@ -602,8 +448,8 @@ fn compute_regressions(
             let threshold = base * (1.0 + tol);
             (s.actual > threshold).then(|| {
                 Violation::Warning(format!(
-                    "{key}.{metric} regression: {actual:.1} vs baseline {base:.1} \
-                     (+{pct:.0}%, threshold {threshold:.1} at {tol_pct:.0}% tolerance)",
+                    "{key}.{metric} regression: {actual:.1} vs baseline {base:.1} (+{pct:.0}%, \
+                     threshold {threshold:.1} at {tol_pct:.0}% tolerance)",
                     metric = s.metric.key(),
                     actual = s.actual,
                     pct = (s.actual - base) / base * 100.0,
@@ -708,7 +554,8 @@ pub const MAX_CUMULATIVE_RSS_GROWTH: usize = 2000 * MB;
 ///   ApplyMutation:   +9MB  (single block mutation)
 ///   Navigation/View: <1MB
 ///
-/// Limits are ~2x observed max to avoid flaky failures from OS page reclaim jitter.
+/// Limits are ~2x observed max to avoid flaky failures from OS page reclaim
+/// jitter.
 pub fn max_rss_delta_bytes(transition: &crate::pbt::transitions::E2ETransition) -> usize {
     match transition.variant_name() {
         "StartApp" => 1500 * MB,
@@ -718,7 +565,7 @@ pub fn max_rss_delta_bytes(transition: &crate::pbt::transitions::E2ETransition) 
         // wiring guard rejects the flipped consolidator (no matviews/CDC/spans of a
         // full boot, but a fresh backend + DI allocations); budget alongside StartApp.
         "EpochFlipRejected" => 1500 * MB,
-        "BulkExternalAdd" | "CreateDocument" => 200 * MB,
+        "BulkExternalAdd" | "CreateDocument" | "DeleteDocument" => 200 * MB,
         "SimulateRestart" => 80 * MB,
         "ApplyMutation" => 50 * MB,
         "SetupWatch" => 15 * MB,
@@ -733,7 +580,8 @@ pub struct MemoryMetrics {
     pub rss_before: usize,
     /// RSS after the transition (bytes).
     pub rss_after: usize,
-    /// RSS at the very start of the PBT run (first transition), for cumulative tracking.
+    /// RSS at the very start of the PBT run (first transition), for cumulative
+    /// tracking.
     pub rss_baseline: usize,
 }
 
@@ -756,7 +604,8 @@ impl MemoryMetrics {
 }
 
 /// Dump system-level memory diagnostics to stderr.
-/// Called when an RSS budget is breached to help identify what's consuming memory.
+/// Called when an RSS budget is breached to help identify what's consuming
+/// memory.
 #[cfg(target_os = "macos")]
 pub fn diagnose_memory(key: &str) {
     eprintln!("[MEMORY DIAG] {key}: dumping macOS memory stats...");
@@ -851,9 +700,10 @@ mod tests {
     fn evaluate_flags_only_breaches_with_correct_severity() {
         let samples = vec![
             sample(Metric::SqlReads, 10.0, 12.0, Severity::Error), // under cap → ok
-            sample(Metric::SqlReads, 12.0, 12.0, Severity::Error), // exactly at cap → ok (strict >)
+            sample(Metric::SqlReads, 12.0, 12.0, Severity::Error), /* exactly at cap → ok
+                                                                    * (strict >) */
             sample(Metric::SqlWrites, 13.0, 12.0, Severity::Error), // over → Error
-            sample(Metric::WallMs, 99.0, 30.0, Severity::Warn),    // over → Warning
+            sample(Metric::WallMs, 99.0, 30.0, Severity::Warn),     // over → Warning
         ];
         let v = evaluate(&samples);
         assert_eq!(v.len(), 2, "only the two over-cap samples should fire");
@@ -884,7 +734,8 @@ mod tests {
         base.insert(Metric::SqlWrites.key().to_string(), 0.0); // zero → skip
 
         let samples = vec![
-            sample(Metric::SqlReads, 9999.0, f64::MAX, Severity::Error), // absent in baseline → skip
+            sample(Metric::SqlReads, 9999.0, f64::MAX, Severity::Error), /* absent in baseline →
+                                                                          * skip */
             sample(Metric::SqlWrites, 9999.0, f64::MAX, Severity::Error), // zero baseline → skip
         ];
         assert!(compute_regressions("Key", &base, &samples, 0.25).is_empty());

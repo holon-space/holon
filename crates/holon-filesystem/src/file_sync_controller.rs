@@ -4,40 +4,74 @@
 //! that uses the **projection + diff-ingestion** pattern:
 //!
 //! - `last_projection`: what we last wrote to (or confirmed on) disk, per file.
-//! - Echo suppression: `disk_content == last_projection[file]` (no timing window).
+//! - Echo suppression: `disk_content == last_projection[file]` (no timing
+//!   window).
 //! - External edits: detected by diffing against `last_projection`.
 //!
-//! The controller runs on a single task via `tokio::select!`, so `on_file_changed`
-//! and `on_block_changed` are serialized — no concurrent access to `last_projection`.
+//! The controller runs on a single task via `tokio::select!`, so
+//! `on_file_changed` and `on_block_changed` are serialized — no concurrent
+//! access to `last_projection`.
 //!
-//! **Decoupled from Loro/Turso**: uses `BlockReader` and `DocumentManager` traits.
+//! **Decoupled from Loro/Turso**: uses `BlockReader` and `DocumentManager`
+//! traits.
 
-use anyhow::{Context, Result};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use anyhow::Context;
+use anyhow::Result;
+use holon_api::EntityUri;
+use holon_api::POSITION_AFTER_BLOCK_ID_PARAM;
+use holon_api::ROUTING_DOC_URI_KEY;
+use holon_api::SnapshotBlock;
+use holon_api::Value;
 use holon_api::block::Block;
 use holon_api::capability::Consolidator;
-use holon_api::{EntityUri, SnapshotBlock, Value};
-use holon_api::{POSITION_AFTER_BLOCK_ID_PARAM, ROUTING_DOC_URI_KEY};
+use holon_core::CanonicalPath;
+use holon_core::DownstreamProjection;
+use holon_core::block_ordering::BlockOrdering;
 use holon_core::file_format::FileFormatAdapter;
 use holon_core::fractional_index::default_sort_key;
-use holon_core::CanonicalPath;
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use tracing::{debug, info, warn};
+use indexmap::IndexMap;
+use tracing::debug;
+use tracing::info;
+use tracing::warn;
 
-use holon_core::block_ordering::BlockOrdering;
-use holon_core::DownstreamProjection;
-
-use crate::sync_ports::{
-    AliasRegistrar, BlockReader, DocumentManager, ImageDataProvider, ThreeWayTextMerge,
-};
-use crate::{BaseKey, BaseStore, FileSystem, SyncBaseStore};
+use crate::BaseKey;
+use crate::BaseStore;
+use crate::FileSystem;
+use crate::SyncBaseStore;
+use crate::sync_ports::AliasRegistrar;
+use crate::sync_ports::BlockReader;
+use crate::sync_ports::DocumentManager;
+use crate::sync_ports::ImageDataProvider;
+use crate::sync_ports::ThreeWayTextMerge;
 
 /// Bump when the org renderer changes in a way that alters the canonical
 /// projection bytes (formatting, property ordering, directive layout, …).
 /// Mismatch on next boot forces a one-shot re-ingest per file so the stored
 /// `file.content_hash` snaps to the new canonical form.
 pub const RENDERER_VERSION: &str = "1";
+
+/// A single block change carried from the CDC block feed to the org controller,
+/// so a per-edit re-render can update just the changed block instead of
+/// re-reading the whole document (the O(N) recursive-CTE `get_blocks`).
+///
+/// `Upsert` carries the feed's (matview-derived) block only for classification
+/// — the controller refreshes the block's authoritative content via
+/// [`BlockReader::get_block_authoritative`] before writing, so seed and refresh
+/// share one authority (`block_raw`).
+#[derive(Debug, Clone)]
+pub enum BlockDelta {
+    /// A block was inserted or updated.
+    Upsert(Block),
+    /// A block was removed (id only — its document is no longer resolvable
+    /// from the feed, so the controller takes the full re-render path).
+    Remove(EntityUri),
+}
 
 pub struct FileSyncController {
     /// What we last wrote to (or confirmed on) disk, per file.
@@ -71,8 +105,8 @@ pub struct FileSyncController {
     /// The exact `last_projection` string each `base_store` entry was parsed
     /// from. The base for a file is fresh iff this matches the current
     /// `last_projection[file]`; otherwise it is re-parsed. This keys freshness
-    /// on content, so the base can never desync from `last_projection` no matter
-    /// which render path last updated it.
+    /// on content, so the base can never desync from `last_projection` no
+    /// matter which render path last updated it.
     base_source: HashMap<CanonicalPath, String>,
 
     /// Reads blocks by document ID.
@@ -116,14 +150,24 @@ pub struct FileSyncController {
     /// Disk access port (ADR 0011). Real fs in production; in-memory in tests.
     fs: Arc<dyn FileSystem>,
 
+    /// Per-doc incrementally-maintained block cache, seeded from `get_blocks`
+    /// (authoritative `block_raw`, ordered `sort_key, id`) and mutated in place
+    /// on content-only edits. `IndexMap` preserves the seed's insertion order —
+    /// the order the renderer relies on for sibling layout (`Block` carries no
+    /// `sort_key`, so order is trusted from the seed, never re-derived). Keyed
+    /// by doc id; evicted implicitly by never being seeded until first edited.
+    /// Structural changes (insert/remove/move/`tags`) reseed the whole doc.
+    doc_blocks: HashMap<EntityUri, IndexMap<EntityUri, Block>>,
+
     /// 3-way text-content merger for the no-store conflict path. Present only
-    /// when wired (production, via a transient LoroText impl). Consulted only in
-    /// `Consolidator::Store` (SqlOnly) mode: when an org-file edit and a UI edit
-    /// concurrently changed the SAME block's text content (both diverged from
-    /// the BaseStore base), the disk edit is 3-way merged with the current store
-    /// content instead of clobbering it (whole-value LWW). In `Upstream` (Loro)
-    /// mode this is left unused — the live CRDT already merges concurrent edits,
-    /// so adding a second merge here would be wrong.
+    /// when wired (production, via a transient LoroText impl). Consulted only
+    /// in `Consolidator::Store` (SqlOnly) mode: when an org-file edit and a
+    /// UI edit concurrently changed the SAME block's text content (both
+    /// diverged from the BaseStore base), the disk edit is 3-way merged
+    /// with the current store content instead of clobbering it (whole-value
+    /// LWW). In `Upstream` (Loro) mode this is left unused — the live CRDT
+    /// already merges concurrent edits, so adding a second merge here would
+    /// be wrong.
     text_merge: Option<Arc<dyn ThreeWayTextMerge>>,
 }
 
@@ -159,6 +203,7 @@ impl FileSyncController {
             ordering,
             downstream: None,
             fs,
+            doc_blocks: HashMap::new(),
             text_merge: None,
         }
     }
@@ -236,15 +281,15 @@ impl FileSyncController {
                     }
                 }
                 info!(
-                    "[FileSyncController] Loaded last_projection_hash for {} files \
-                     (will skip ingest when disk_bytes hash matches)",
+                    "[FileSyncController] Loaded last_projection_hash for {} files (will skip \
+                     ingest when disk_bytes hash matches)",
                     self.last_projection_hash.len()
                 );
             }
             Err(e) => {
                 warn!(
-                    "[FileSyncController] load_file_hashes failed; cold-boot fast \
-                     path disabled, will re-ingest every file. Error: {e}"
+                    "[FileSyncController] load_file_hashes failed; cold-boot fast path disabled, \
+                     will re-ingest every file. Error: {e}"
                 );
             }
         }
@@ -291,7 +336,8 @@ impl FileSyncController {
     /// re-seed pass; the hash is then re-stamped under the new tag, so only
     /// the first boot after a flip pays the full parse.
     fn projection_hash(&self, disk_bytes: &str) -> String {
-        use sha2::{Digest, Sha256};
+        use sha2::Digest;
+        use sha2::Sha256;
         let mut hasher = Sha256::new();
         hasher.update(RENDERER_VERSION.as_bytes());
         hasher.update(b"\0");
@@ -301,10 +347,184 @@ impl FileSyncController {
         hex::encode(hasher.finalize())
     }
 
+    /// Cold-boot fast-path guard: is this file's content present in EVERY
+    /// active store? The caller has already proven the SQL side (its stored
+    /// `content_hash` matched the disk bytes); this proves the Loro side.
+    ///
+    /// - SqlOnly mode (Loro not an active store): `in_tree` answers `None`, so
+    ///   the check degrades to SQL-only — the historical behavior. `true`.
+    /// - Loro mode: the doc's root block (`block:<#+ID>`) must resolve to a
+    ///   Loro tree node. `Some(false)` is the reset hole — SQL kept the row but
+    ///   the Loro tree was reset to empty — so refuse the skip and re-ingest.
+    ///
+    /// A file the fast path can even reach was rendered by Holon (its hash
+    /// matched a hash we stamped), so it always carries `#+ID:`. If it somehow
+    /// does not, we cannot cheaply resolve the root block, so we refuse the
+    /// skip and let the full ingest resolve identity — never skip blind.
+    async fn content_present_in_all_stores(&self, disk_content: &str) -> Result<bool> {
+        let Some(bare) = self.format.doc_id_from_content(disk_content) else {
+            return Ok(false);
+        };
+        let root = EntityUri::block(&bare);
+        let present = self
+            .ordering
+            .in_tree(&root)
+            .await
+            .map_err(|e| anyhow::anyhow!("[FileSyncController] in_tree({root}): {e:#}"))?;
+        // None → no separate tree (SqlOnly): SQL is the only active store.
+        Ok(present.unwrap_or(true))
+    }
+
+    /// Handle an EXTERNAL file deletion (the user removed the org file outside
+    /// Holon — `rm` in the vault, a file manager, a git checkout). Reached from
+    /// `on_file_changed` when the changed path no longer exists, and from
+    /// `poll_tracked_files` when a tracked path stops stat-ing.
+    ///
+    /// Cascade-deletes the vanished document's blocks from the store: content
+    /// blocks bottom-up (children before parents, so each delete targets a
+    /// still-present node regardless of whether the tree backing cascades
+    /// subtree deletes), then the page block itself. All deletes go through
+    /// `BlockOrdering::delete_in_tree` — the same single org→block write seam
+    /// the diff-ingestion delete pass uses.
+    #[tracing::instrument(skip(self, canonical), name = "org.on_file_deleted", fields(path = %path.display()))]
+    async fn on_file_deleted(&mut self, path: &Path, canonical: &CanonicalPath) -> Result<()> {
+        // Resolve the vanished file's document. The disk bytes are gone, so
+        // identity comes from the last projected content's `#+ID:` (survives
+        // renames, same authority as the ingest path); when this session never
+        // projected the file, fall back to name-chain lookup (get-only — a
+        // deletion must never mint page blocks).
+        let last = self.last_projection.get(canonical).cloned();
+        let document = match last
+            .as_deref()
+            .and_then(|l| self.format.doc_id_from_content(l))
+        {
+            Some(bare) => self.doc_manager.get_by_id(&EntityUri::block(&bare)).await?,
+            None => {
+                let rel_path = path.strip_prefix(&self.root_dir).map_err(|e| {
+                    anyhow::anyhow!(
+                        "Deleted file {} not under root {}: {}",
+                        path.display(),
+                        self.root_dir.display(),
+                        e
+                    )
+                })?;
+                let segments = path_to_name_chain(rel_path);
+                let segment_refs: Vec<&str> = segments.iter().map(|s| s.as_str()).collect();
+                self.doc_manager.find_by_name_chain(&segment_refs).await?
+            }
+        };
+        let Some(document) = document else {
+            // A file we never ingested vanished — nothing in the store to
+            // delete. Disclosed, then drop any per-file tracking state.
+            debug!(
+                "[FileSyncController] Deleted file {} has no document entity — nothing to cascade",
+                path.display()
+            );
+            self.forget_file_state(canonical);
+            return Ok(());
+        };
+        let document_uri = document.id.clone();
+
+        let blocks = self.block_reader.get_blocks(&document_uri).await?;
+        info!(
+            "[FileSyncController] File deleted externally: {} — cascade-deleting document {} ({} \
+             blocks)",
+            path.display(),
+            document_uri,
+            blocks.len(),
+        );
+
+        // Order children before parents: depth (hops until the parent leaves
+        // the doc's block set) descending.
+        // Owned parent map (no borrows of `blocks` escape into the closure —
+        // the `#[instrument]` async wrapper otherwise infers a 'static bound).
+        let parent_of: HashMap<EntityUri, EntityUri> = blocks
+            .iter()
+            .map(|b| (b.id.clone(), b.parent_id.clone()))
+            .collect();
+        let depth_of = |id: &EntityUri| -> usize {
+            let mut depth = 0;
+            let mut cur = id;
+            while let Some(parent) = parent_of.get(cur) {
+                if parent == cur {
+                    break; // self-parent guard
+                }
+                cur = parent;
+                depth += 1;
+                if depth > 100 {
+                    break; // cycle guard, matches the parser's depth bound
+                }
+            }
+            depth
+        };
+        let mut ordered: Vec<EntityUri> = blocks
+            .iter()
+            .map(|b| b.id.clone())
+            .filter(|id| *id != document_uri)
+            .collect();
+        ordered.sort_by_key(|id| std::cmp::Reverse(depth_of(id)));
+
+        for block_id in ordered {
+            let mut params: holon_api::StorageEntity = HashMap::new();
+            params.insert("id".into(), Value::String(block_id.to_string()));
+            params.insert(
+                ROUTING_DOC_URI_KEY.into(),
+                Value::String(document_uri.to_string()),
+            );
+            self.ordering.delete_in_tree(params).await.map_err(|e| {
+                anyhow::anyhow!(
+                    "delete_in_tree({block_id}) for deleted file {}: {e:#}",
+                    path.display()
+                )
+            })?;
+        }
+
+        // The page block last — its children are gone.
+        let mut params: holon_api::StorageEntity = HashMap::new();
+        params.insert("id".into(), Value::String(document_uri.to_string()));
+        params.insert(
+            ROUTING_DOC_URI_KEY.into(),
+            Value::String(document_uri.to_string()),
+        );
+        self.ordering.delete_in_tree(params).await.map_err(|e| {
+            anyhow::anyhow!(
+                "delete_in_tree(page {}) for deleted file {}: {e:#}",
+                document_uri,
+                path.display()
+            )
+        })?;
+
+        // Publish the consolidator's accumulated deletes to the SQL sink
+        // (same single-sink-writer contract as the ingest path's flush).
+        if let Some(downstream) = &self.downstream {
+            downstream
+                .flush()
+                .await
+                .map_err(|e| anyhow::anyhow!("downstream projection flush after delete: {e}"))?;
+        }
+
+        self.forget_file_state(canonical);
+        // Also clear the diff base so a later re-create of the same document
+        // id starts from an empty base (all blocks are creates), not from the
+        // deleted snapshot.
+        self.base_store
+            .put_base(&BaseKey::file("org", document_uri.as_str()), HashMap::new());
+        Ok(())
+    }
+
+    /// Drop every per-file tracking entry for a vanished path.
+    fn forget_file_state(&mut self, canonical: &CanonicalPath) {
+        self.last_projection.remove(canonical);
+        self.last_projection_hash.remove(canonical);
+        self.disk_signatures.remove(canonical);
+        self.base_source.remove(canonical);
+    }
+
     /// Handle a file change event from the FileWatcher.
     ///
     /// Echo suppression: if disk content matches last_projection, skip.
-    /// Otherwise, diff against last_projection to compute create/update/delete ops.
+    /// Otherwise, diff against last_projection to compute create/update/delete
+    /// ops.
     #[tracing::instrument(skip(self), name = "org.on_file_changed", fields(path = %path.display()))]
     pub async fn on_file_changed(&mut self, path: &Path) -> Result<()> {
         // Model.md invariant 11: skip (only) a byte-syncer conflict artifact that
@@ -324,8 +544,11 @@ impl FileSyncController {
         let disk_content = match self.fs.read_to_string(path).await {
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                debug!("[FileSyncController] File deleted: {}", path.display(),);
-                return Ok(());
+                // External deletion (user removed the file outside Holon):
+                // cascade-delete the document's blocks. No echo-suppression
+                // needed — no Holon code path removes org files, so a vanished
+                // file is always an external deletion.
+                return self.on_file_deleted(path, &canonical).await;
             }
             Err(e) => {
                 return Err(e).with_context(|| {
@@ -378,10 +601,18 @@ impl FileSyncController {
         // guaranteed cost per boot we don't pay here.
         let disk_hash = self.projection_hash(&disk_content);
         if let Some(stored) = self.last_projection_hash.get(&canonical) {
-            if stored == &disk_hash {
+            // Invariant: fast-path skip requires the content present in EVERY
+            // active store, not just SQL. The matching hash proves the SQL side;
+            // `content_present_in_all_stores` additionally proves the Loro side
+            // when Loro is an active store. A SQL hash match with an empty Loro
+            // tree (the 2026-07-06 reset hole: fresh `.loro` + retained SQL row)
+            // must NOT skip — skipping leaves SQL and Loro silently diverged and
+            // the next Loro create fails at `resolve_parent_tree_id`.
+            if stored == &disk_hash && self.content_present_in_all_stores(&disk_content).await? {
                 debug!(
-                    "[FileSyncController] Skipping {} — disk hash matches \
-                     stored file.content_hash (cold-boot fast path)",
+                    "[FileSyncController] Skipping {} — disk hash matches stored \
+                     file.content_hash and content present in all active stores (cold-boot fast \
+                     path)",
                     path.display()
                 );
                 self.last_projection.insert(canonical.clone(), disk_content);
@@ -393,6 +624,16 @@ impl FileSyncController {
             "[FileSyncController] Processing external change: {}",
             path.display()
         );
+
+        // An external ingest mutates `block_raw` for arbitrary blocks of this
+        // file's document — invalidate the incremental block cache so the next
+        // `on_block_changed` reseeds from authority rather than rendering stale
+        // cached content. Reached only past echo-suppression and the cold-boot
+        // fast path, so our own write-back echo never clears it. Coarse (whole
+        // map) because external ingests are rare relative to block edits and
+        // resolving this path's doc id here would cost an extra lookup; the only
+        // effect is a one-time reseed on each doc's next edit.
+        self.doc_blocks.clear();
 
         let rel_path = path.strip_prefix(&self.root_dir).map_err(|e| {
             anyhow::anyhow!(
@@ -461,6 +702,7 @@ impl FileSyncController {
                 &document.properties,
                 &document.tags,
                 &document.requires,
+                &document.advice_suppressed,
             )
             .await
             .map_err(|e| anyhow::anyhow!("create_in_tree(document {document_uri}): {e:#}"))?;
@@ -574,9 +816,8 @@ impl FileSyncController {
             conflicts.iter().map(|(id, _)| id.clone()).collect();
         if !conflicts.is_empty() {
             info!(
-                "[FileSyncController] Re-parenting {} blocks from other documents to {} \
-                 (blocks exist under different doc URIs, e.g. from seed_default_layout). \
-                 File: {}",
+                "[FileSyncController] Re-parenting {} blocks from other documents to {} (blocks \
+                 exist under different doc URIs, e.g. from seed_default_layout). File: {}",
                 conflicts.len(),
                 document_uri,
                 path.display(),
@@ -708,6 +949,7 @@ impl FileSyncController {
                         &block.properties,
                         &block.tags,
                         &block.requires,
+                        &block.advice_suppressed,
                     )
                     .await
                     .map_err(|e| anyhow::anyhow!("re-seed create_in_tree({}): {e:#}", block.id))?;
@@ -776,6 +1018,7 @@ impl FileSyncController {
                             &block.properties,
                             &block.tags,
                             &block.requires,
+                            &block.advice_suppressed,
                         )
                         .await
                         .map_err(|e| anyhow::anyhow!("create_in_tree({}): {e:#}", block.id))?;
@@ -968,8 +1211,8 @@ impl FileSyncController {
             let cached_blocks = self.block_reader.get_blocks(&document_uri).await?;
             if cached_blocks.len() < expected_block_count {
                 anyhow::bail!(
-                    "[on_file_changed] block feed did not catch up within 2s for {} \
-                     (expected {} blocks, cache has {}, feed_caught_up={})",
+                    "[on_file_changed] block feed did not catch up within 2s for {} (expected {} \
+                     blocks, cache has {}, feed_caught_up={})",
                     path.display(),
                     expected_block_count,
                     cached_blocks.len(),
@@ -1045,9 +1288,9 @@ impl FileSyncController {
                             .filter(|id| !present.contains(id.as_str()))
                             .collect();
                         anyhow::bail!(
-                            "[on_file_changed] new blocks did not appear in ordering for \
-                             parent {parent_key} within 2s: missing {missing:?}; \
-                             present children: {kids:?}"
+                            "[on_file_changed] new blocks did not appear in ordering for parent \
+                             {parent_key} within 2s: missing {missing:?}; present children: \
+                             {kids:?}"
                         );
                     }
                     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -1112,7 +1355,8 @@ impl FileSyncController {
                     if !siblings.iter().any(|s| s == new_block.id.as_str()) {
                         if created_ids.contains(&new_block.id.to_string()) {
                             anyhow::bail!(
-                                "[on_file_changed] block {} not found in live_children under {}: {:?}",
+                                "[on_file_changed] block {} not found in live_children under {}: \
+                                 {:?}",
                                 new_block.id.as_str(),
                                 parent.as_str(),
                                 siblings
@@ -1201,10 +1445,10 @@ impl FileSyncController {
                 // not a degraded-but-fine state.
                 if consolidator_creates > 0 {
                     anyhow::bail!(
-                        "[on_file_changed] {consolidator_creates} block create(s) were \
-                         persisted by a separate consolidator (create_in_tree returned \
-                         true) but no downstream projection is wired — their sink rows \
-                         would never be written. DI wiring bug."
+                        "[on_file_changed] {consolidator_creates} block create(s) were persisted \
+                         by a separate consolidator (create_in_tree returned true) but no \
+                         downstream projection is wired — their sink rows would never be written. \
+                         DI wiring bug."
                     );
                 }
             }
@@ -1224,8 +1468,8 @@ impl FileSyncController {
                 .await;
             if !feed_caught_up {
                 anyhow::bail!(
-                    "[on_file_changed] LiveData<Block> feed did not contain all {} \
-                     created id(s) within 2s for {} — projection/CDC stalled",
+                    "[on_file_changed] LiveData<Block> feed did not contain all {} created id(s) \
+                     within 2s for {} — projection/CDC stalled",
                     created_ids.len(),
                     path.display()
                 );
@@ -1267,9 +1511,8 @@ impl FileSyncController {
         let rendered = self.render_file_by_doc_id(&document_uri, path).await?;
         assert!(
             new_blocks.is_empty() || !rendered.trim().is_empty(),
-            "[FileSyncController] BUG: Just created/updated {} blocks for doc_id={} \
-             but render_file_by_doc_id returned empty for {}. \
-             This would wipe the file!",
+            "[FileSyncController] BUG: Just created/updated {} blocks for doc_id={} but \
+             render_file_by_doc_id returned empty for {}. This would wipe the file!",
             new_blocks.len(),
             document_uri,
             path.display(),
@@ -1286,10 +1529,9 @@ impl FileSyncController {
             match self.fs.read_to_string(path).await {
                 Ok(now) if now != disk_content => {
                     tracing::debug!(
-                        "[ORGSYNC_TOCTOU] {} disk changed during processing \
-                         (parsed_len={} disk_now_len={}); skipping write-back, \
-                         stamping last_projection with parsed content so next \
-                         diff picks up the external delta.",
+                        "[ORGSYNC_TOCTOU] {} disk changed during processing (parsed_len={} \
+                         disk_now_len={}); skipping write-back, stamping last_projection with \
+                         parsed content so next diff picks up the external delta.",
                         path.display(),
                         disk_content.len(),
                         now.len(),
@@ -1356,8 +1598,8 @@ impl FileSyncController {
         let file_uri = EntityUri::file(&rel);
         if let Err(e) = self.block_reader.persist_file_hash(&file_uri, hash).await {
             warn!(
-                "[FileSyncController] persist_file_hash failed for {} ({}): {} \
-                 (in-memory hash updated; next boot will re-ingest)",
+                "[FileSyncController] persist_file_hash failed for {} ({}): {} (in-memory hash \
+                 updated; next boot will re-ingest)",
                 file_uri,
                 canonical.as_path_buf().display(),
                 e
@@ -1370,8 +1612,12 @@ impl FileSyncController {
     /// Re-renders the affected file and writes if content changed.
     /// Returns `true` if a matching document file was found and re-rendered,
     /// `false` if the doc_id didn't map to any known file.
-    #[tracing::instrument(skip(self), name = "org.on_block_changed", fields(doc_id = %doc_id))]
-    pub async fn on_block_changed(&mut self, doc_id: &EntityUri) -> Result<bool> {
+    #[tracing::instrument(skip(self, delta), name = "org.on_block_changed", fields(doc_id = %doc_id))]
+    pub async fn on_block_changed(
+        &mut self,
+        doc_id: &EntityUri,
+        delta: &BlockDelta,
+    ) -> Result<bool> {
         let path = match self.doc_id_to_path(doc_id).await {
             Some(p) => p,
             None => return Ok(false),
@@ -1402,7 +1648,7 @@ impl FileSyncController {
             self.on_file_changed(&path).await?;
         }
 
-        let rendered = self.render_file_by_doc_id(doc_id, &path).await?;
+        let rendered = self.render_with_cache(doc_id, &path, delta).await?;
 
         let current_last = self
             .last_projection
@@ -1435,7 +1681,15 @@ impl FileSyncController {
         }
         self.fs.write(&path, rendered.as_bytes()).await?;
         self.run_post_write_hook(&path);
-        self.materialize_images(doc_id).await?;
+        // H2 image-gate: `materialize_images` re-reads the whole doc (a 2nd
+        // recursive-CTE `get_blocks`). Content-only keystrokes never add images,
+        // so only pay it when THIS delta upserts an image block. Image edits are
+        // rare and can afford the full read.
+        if let BlockDelta::Upsert(b) = delta {
+            if b.is_image_block() {
+                self.materialize_images(doc_id).await?;
+            }
+        }
         self.last_projection.insert(canonical, rendered);
 
         info!(
@@ -1444,6 +1698,83 @@ impl FileSyncController {
         );
 
         Ok(true)
+    }
+
+    /// Render `doc_id`'s file, serving the block list from the per-doc
+    /// incremental cache (`doc_blocks`) and updating that cache from `delta`.
+    ///
+    /// Hot path (content-only upsert of a block already cached with unchanged
+    /// structure): refresh just that block via an authoritative `block_raw`
+    /// point read (`get_block_authoritative`, O(1), no recursive CTE) and
+    /// replace it in place, preserving sibling order. Everything else — cold
+    /// doc, `Remove`, an id not yet cached (structural insert), a `parent_id`
+    /// move, or any `tags` change (H4: a `Page` toggle re-partitions the doc's
+    /// subtree) — reseeds the whole doc via `get_blocks` (authoritative,
+    /// `sort_key, id`-ordered). Structural intent is decided from the
+    /// AUTHORITATIVE row, not the (matview-lagged) feed delta, so a structural
+    /// change the delta didn't yet reflect still reseeds.
+    async fn render_with_cache(
+        &mut self,
+        doc_id: &EntityUri,
+        path: &Path,
+        delta: &BlockDelta,
+    ) -> Result<String> {
+        let cheap_incremental_candidate = match delta {
+            BlockDelta::Upsert(b) => self
+                .doc_blocks
+                .get(doc_id)
+                .and_then(|c| c.get(&b.id))
+                .is_some_and(|cached| cached.parent_id == b.parent_id && cached.tags == b.tags),
+            BlockDelta::Remove(_) => false,
+        };
+
+        if cheap_incremental_candidate {
+            let BlockDelta::Upsert(b) = delta else {
+                unreachable!("cheap_incremental_candidate implies Upsert")
+            };
+            if let Some(auth) = self.block_reader.get_block_authoritative(&b.id).await? {
+                let cached = self
+                    .doc_blocks
+                    .get(doc_id)
+                    .and_then(|c| c.get(&b.id))
+                    .expect("warm + present by cheap_incremental_candidate");
+                if auth.parent_id == cached.parent_id && auth.tags == cached.tags {
+                    // Content-only: `IndexMap::insert` on an existing key keeps
+                    // its position, so sibling order is unchanged.
+                    self.doc_blocks
+                        .get_mut(doc_id)
+                        .expect("warm by cheap_incremental_candidate")
+                        .insert(auth.id.clone(), auth);
+                    return self.render_cached_doc(doc_id, path).await;
+                }
+            }
+        }
+
+        self.reseed_doc_blocks(doc_id).await?;
+        self.render_cached_doc(doc_id, path).await
+    }
+
+    /// Reseed the per-doc block cache from the authoritative doc-scoped read
+    /// (`get_blocks` over `block_raw`, ordered `sort_key, id`). The resulting
+    /// `IndexMap` preserves that order for the renderer.
+    async fn reseed_doc_blocks(&mut self, doc_id: &EntityUri) -> Result<()> {
+        let blocks = self.block_reader.get_blocks(doc_id).await?;
+        let map: IndexMap<EntityUri, Block> =
+            blocks.into_iter().map(|b| (b.id.clone(), b)).collect();
+        self.doc_blocks.insert(doc_id.clone(), map);
+        Ok(())
+    }
+
+    /// Render `doc_id` from its (already-seeded) cache values, in cache order.
+    async fn render_cached_doc(&self, doc_id: &EntityUri, path: &Path) -> Result<String> {
+        let blocks: Vec<Block> = self
+            .doc_blocks
+            .get(doc_id)
+            .expect("render_cached_doc requires a seeded doc cache")
+            .values()
+            .cloned()
+            .collect();
+        self.render_doc_blocks(doc_id, path, &blocks).await
     }
 
     /// Poll all tracked files for pending external changes that the file
@@ -1480,7 +1811,15 @@ impl FileSyncController {
             // dominated idle CPU before this).
             let meta = match self.fs.metadata(&path).await {
                 Ok(m) => m,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // Backstop for a deletion the event watcher missed: a
+                    // tracked file vanished — cascade-delete its document
+                    // (also drops the path from `last_projection`, so the
+                    // next poll no longer visits it).
+                    self.on_file_deleted(&path, &canonical).await?;
+                    ingested += 1;
+                    continue;
+                }
                 Err(e) => {
                     return Err(e).with_context(|| {
                         format!("[poll_external_changes] Cannot stat {}", path.display())
@@ -1494,7 +1833,13 @@ impl FileSyncController {
 
             let disk_content = match self.fs.read_to_string(&path).await {
                 Ok(c) => c,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // Deleted between the stat above and this read (TOCTOU) —
+                    // same external-deletion handling as the stat arm.
+                    self.on_file_deleted(&path, &canonical).await?;
+                    ingested += 1;
+                    continue;
+                }
                 Err(e) => {
                     return Err(e).with_context(|| {
                         format!("[poll_external_changes] Cannot read {}", path.display())
@@ -1513,7 +1858,8 @@ impl FileSyncController {
                 .unwrap_or("");
             if disk_content != last {
                 info!(
-                    "[FileSyncController] poll_external_changes: ingesting {} (disk != last_projection)",
+                    "[FileSyncController] poll_external_changes: ingesting {} (disk != \
+                     last_projection)",
                     path.display()
                 );
                 self.on_file_changed(&path).await?;
@@ -1562,15 +1908,16 @@ impl FileSyncController {
         Ok(ingested)
     }
 
-    /// Re-render all tracked files (used for events where the doc_id is unknown,
-    /// e.g. block.deleted, block.fields_changed).
+    /// Re-render all tracked files (used for events where the doc_id is
+    /// unknown, e.g. block.deleted, block.fields_changed).
     pub async fn re_render_all_tracked(&mut self) -> Result<()> {
         let keys: Vec<CanonicalPath> = self.last_projection.keys().cloned().collect();
 
         for canonical in keys {
             let path: PathBuf = (*canonical).to_path_buf();
             // If disk content differs from last_projection, ingest the pending external
-            // change first so the re-render includes both the block event and external edit.
+            // change first so the re-render includes both the block event and external
+            // edit.
             let disk_content = match self.fs.read_to_string(&path).await {
                 Ok(c) => c,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -1590,7 +1937,8 @@ impl FileSyncController {
                 .unwrap_or("");
             if disk_content != last {
                 info!(
-                    "[FileSyncController] Processing pending external change for {} before re-render",
+                    "[FileSyncController] Processing pending external change for {} before \
+                     re-render",
                     path.display()
                 );
                 self.on_file_changed(&path).await?;
@@ -1615,7 +1963,8 @@ impl FileSyncController {
                     // debounced and runs on every burst, so warn-level would
                     // flood the log on every initial scan.
                     debug!(
-                        "[re_render_all_tracked] No document found for path {} (segments: {:?}) — skipping",
+                        "[re_render_all_tracked] No document found for path {} (segments: {:?}) — \
+                         skipping",
                         path.display(),
                         segment_refs
                     );
@@ -1675,22 +2024,34 @@ impl FileSyncController {
 
     /// Render blocks for a document by its ID.
     ///
-    /// Fetches the Document to preserve file-level metadata (e.g. `#+TODO:` keywords)
-    /// in the rendered output. Falls back to block-only rendering if the Document
-    /// is not found.
+    /// Fetches the Document to preserve file-level metadata (e.g. `#+TODO:`
+    /// keywords) in the rendered output. Falls back to block-only rendering
+    /// if the Document is not found.
     async fn render_file_by_doc_id(&self, doc_id: &EntityUri, path: &Path) -> Result<String> {
         let blocks = self.block_reader.get_blocks(doc_id).await?;
+        self.render_doc_blocks(doc_id, path, &blocks).await
+    }
+
+    /// Render an already-resolved, ordered block slice for `doc_id`. Shared by
+    /// the full-read path (`render_file_by_doc_id`) and the incremental cache
+    /// path (`render_cached_doc`) — the renderer is fed a full `&[Block]`
+    /// either way, so output is byte-identical regardless of the block source.
+    async fn render_doc_blocks(
+        &self,
+        doc_id: &EntityUri,
+        path: &Path,
+        blocks: &[Block],
+    ) -> Result<String> {
         let rendered = match self.doc_manager.get_by_id(doc_id).await? {
             // Use the document block's actual ID as the root parent reference,
             // since blocks have parent_id = doc.id (may differ from the doc_id
             // used for lookup, e.g. file: vs block: URI schemes).
-            Some(doc) => self.format.render_document(&doc, &blocks, path, &doc.id),
-            None => self.format.render_blocks(&blocks, path, doc_id),
+            Some(doc) => self.format.render_document(&doc, blocks, path, &doc.id),
+            None => self.format.render_blocks(blocks, path, doc_id),
         };
         assert!(
             blocks.is_empty() || !rendered.trim().is_empty(),
-            "[render_file_by_doc_id] {} blocks from get_blocks({}) but render is empty!\n\
-             Blocks: {:?}",
+            "[render_doc_blocks] {} blocks for doc {} but render is empty!\nBlocks: {:?}",
             blocks.len(),
             doc_id,
             blocks
@@ -1706,10 +2067,11 @@ impl FileSyncController {
 
     /// Write image files to disk for all image blocks in this document.
     ///
-    /// Called after rendering an org file — the `[[file:path]]` links exist in the
-    /// org text, but the actual binary files may not yet be on disk. Reads bytes
-    /// from the `ImageDataProvider` and writes to `{root_dir}/{block.content}`.
-    /// Skips blocks whose files already exist.
+    /// Called after rendering an org file — the `[[file:path]]` links exist in
+    /// the org text, but the actual binary files may not yet be on disk.
+    /// Reads bytes from the `ImageDataProvider` and writes to
+    /// `{root_dir}/{block.content}`. Skips blocks whose files already
+    /// exist.
     async fn materialize_images(&self, doc_id: &EntityUri) -> Result<()> {
         let Some(ref provider) = self.image_data else {
             return Ok(());
@@ -1731,8 +2093,8 @@ impl FileSyncController {
 
             let Some(data) = data else {
                 debug!(
-                    "[FileSyncController] No image data stored for block {} — \
-                     file {} will be missing on disk",
+                    "[FileSyncController] No image data stored for block {} — file {} will be \
+                     missing on disk",
                     block.id, block.content
                 );
                 continue;
@@ -1759,9 +2121,10 @@ impl FileSyncController {
 
     /// Read image files from disk and store them via `ImageDataProvider`.
     ///
-    /// Called after parsing an org file that contains `[[file:path]]` image links.
-    /// The blocks have been created in the store, but the binary data needs to be
-    /// ingested so it's available for cross-peer sync and Loro storage.
+    /// Called after parsing an org file that contains `[[file:path]]` image
+    /// links. The blocks have been created in the store, but the binary
+    /// data needs to be ingested so it's available for cross-peer sync and
+    /// Loro storage.
     async fn ingest_images(&self, doc_id: &EntityUri) -> Result<()> {
         let Some(ref provider) = self.image_data else {
             return Ok(());
@@ -1809,14 +2172,16 @@ impl FileSyncController {
     }
 
     /// Resolve a relative image path to an absolute path under root_dir.
-    /// Returns Err if the resolved path escapes the root directory (path traversal).
+    /// Returns Err if the resolved path escapes the root directory (path
+    /// traversal).
     fn resolve_image_path(&self, relative_path: &str) -> Result<PathBuf> {
         let joined = self.root_dir.join(relative_path);
         let canonical_root = self
             .fs
             .canonicalize(&self.root_dir)
             .unwrap_or_else(|_| self.root_dir.clone());
-        // For paths that don't exist yet, canonicalize the parent and append the filename
+        // For paths that don't exist yet, canonicalize the parent and append the
+        // filename
         let resolved = if self.fs.exists(&joined) {
             self.fs.canonicalize(&joined)?
         } else if let Some(parent) = joined.parent() {
@@ -1903,10 +2268,11 @@ impl FileSyncController {
     }
 }
 
-/// Read a file's content, treating a missing file as empty content (a legitimate
-/// "no baseline yet" state for org sync) but propagating any other IO error loudly.
-/// Distinguishing absence from a real read failure prevents a transient IO error
-/// from masquerading as empty disk content and wiping the user's data on write-back.
+/// Read a file's content, treating a missing file as empty content (a
+/// legitimate "no baseline yet" state for org sync) but propagating any other
+/// IO error loudly. Distinguishing absence from a real read failure prevents a
+/// transient IO error from masquerading as empty disk content and wiping the
+/// user's data on write-back.
 async fn read_disk_or_empty(fs: &Arc<dyn FileSystem>, path: &Path) -> Result<String> {
     match fs.read_to_string(path).await {
         Ok(s) => Ok(s),
@@ -1915,7 +2281,8 @@ async fn read_disk_or_empty(fs: &Arc<dyn FileSystem>, path: &Path) -> Result<Str
     }
 }
 
-/// Convert a relative path (e.g. "projects/todo.org") to a name chain (["projects", "todo"]).
+/// Convert a relative path (e.g. "projects/todo.org") to a name chain
+/// (["projects", "todo"]).
 fn path_to_name_chain(rel_path: &Path) -> Vec<String> {
     let doc_path = rel_path.with_extension("");
     doc_path

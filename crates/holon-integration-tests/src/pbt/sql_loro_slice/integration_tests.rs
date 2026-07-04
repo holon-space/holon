@@ -1,21 +1,22 @@
 //! Selection tests of the combined SQL+Loro slice. The slice's job is to wire
-//! **both** `SutSqlProjection` (SQL) and `SutLoroTaskState` (Loro) so the shared
-//! catalog's `inv-task-state-storage-coherence` selects and runs over two real
-//! stores. The invariant body, its `Needs`, and the fixture-driven catch triad
-//! all live in `composed/` (reused, not re-authored here); these tests only
-//! prove the *real* combined SUT lights it up — a positive (stores agree) and a
-//! catch (stores diverge). No bespoke generator: the engine builder is reused
-//! from `sql_slice::builders`, and the mutation-driven coverage of the catalog
-//! lives in the per-store slices.
+//! **both** `SutSqlProjection` (SQL) and `SutLoroTaskState` (Loro) so the
+//! shared catalog's `inv-task-state-storage-coherence` selects and runs over
+//! two real stores. The invariant body, its `Needs`, and the fixture-driven
+//! catch triad all live in `composed/` (reused, not re-authored here); these
+//! tests only prove the *real* combined SUT lights it up — a positive (stores
+//! agree) and a catch (stores diverge). No bespoke generator: the engine
+//! builder is reused from `sql_slice::builders`, and the mutation-driven
+//! coverage of the catalog lives in the per-store slices.
 
 use std::collections::HashMap;
 
 use holon_api::Value;
-use holon_api::repository::{CoreOperations, Lifecycle};
+use holon_api::repository::CoreOperations;
+use holon_api::repository::Lifecycle;
 use holon_loro::LoroBackend;
+use holon_loro_testing::LoroBackendComponent;
 
 use crate::pbt::composed::fixtures::*;
-use crate::pbt::loro_slice::components::LoroBackendComponent;
 use crate::pbt::sql_loro_slice::builders::sql_loro_wide;
 use crate::pbt::sql_slice::builders::new_sql_engine;
 use crate::pbt::sql_slice::components::SqlProjectionComponent;
@@ -27,7 +28,8 @@ fn task_state_props(state: &str) -> HashMap<String, Value> {
 }
 
 /// Seed the SAME block (same explicit id) into both stores, optionally with a
-/// `task_state` property — SQL via `set_field`, Loro via `update_block_properties`.
+/// `task_state` property — SQL via `set_field`, Loro via
+/// `update_block_properties`.
 async fn seed_block(
     sql: &SqlProjectionComponent,
     loro: &LoroBackend,
@@ -78,8 +80,8 @@ async fn sql_loro_slice_task_state_coherent_across_stores() {
         report
             .ran_ids()
             .contains(&"inv-task-state-storage-coherence"),
-        "the combined slice wires both SutSqlProjection and SutLoroTaskState, so \
-         the coherence invariant must be selected; ran={:?} deselected={:?}",
+        "the combined slice wires both SutSqlProjection and SutLoroTaskState, so the coherence \
+         invariant must be selected; ran={:?} deselected={:?}",
         report.ran_ids(),
         report.deselected,
     );
@@ -91,8 +93,8 @@ async fn sql_loro_slice_task_state_coherent_across_stores() {
 }
 
 /// Catch over real stores: the SAME block carries `TODO` in SQL but `DONE` in
-/// Loro — a desync the synced pair can't produce, hand-built here by writing the
-/// two stores independently. The coherence invariant fires.
+/// Loro — a desync the synced pair can't produce, hand-built here by writing
+/// the two stores independently. The coherence invariant fires.
 #[tokio::test(flavor = "multi_thread")]
 async fn sql_loro_slice_catches_task_state_divergence() {
     let engine = new_sql_engine().await;

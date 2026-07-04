@@ -5,12 +5,12 @@
 //!   `weighted_generator` / `preconditions` bodies in
 //!   `holon_layout_testing::transitions::*` consume our reference state
 //!   directly (via `LayoutRef::new(&state)`).
-//! - `SutClickAdapter`: wraps `&mut dyn SutHandle` so it implements the
-//!   capability traits (`Clickable`, `LiveBlockSink`) the shared
-//!   `apply_to_sut` bodies require. Delegates to two new `SutHandle`
-//!   methods (`apply_click_at_element` and `apply_deliver_block_content_loaded`).
+//! - `SutClickAdapter`: wraps `&mut dyn SUT caps` so it implements the
+//!   capability traits (`Clickable`, `LiveBlockSink`) the shared `apply_to_sut`
+//!   bodies require. Delegates to two new `SutHandle` methods
+//!   (`apply_click_at_element` and `apply_deliver_block_content_loaded`).
 //!
-//! ## Why a bridge instead of impls on `SutHandle` directly?
+//! ## Why a bridge instead of impls on the SUT cap bundle directly?
 //!
 //! `SutHandle` is `dyn`-safe and already big. The capability impls live
 //! on a wrapper so the trait surface of `SutHandle` doesn't grow a
@@ -20,11 +20,13 @@
 
 use std::sync::OnceLock;
 
-use holon_layout_testing::blueprint::{BlockHandle, DrawerHandle};
-use holon_layout_testing::{Clickable, LayoutRefState};
+use holon_layout_testing::Clickable;
+use holon_layout_testing::LayoutRefState;
+use holon_layout_testing::blueprint::BlockHandle;
+use holon_layout_testing::blueprint::DrawerHandle;
+use holon_pbt_core::capabilities::SutBlockInteract;
 
 use super::reference_state::ReferenceState;
-use holon_pbt_core::capabilities::SutBlockInteract;
 
 /// Default-layout drawer handles. The integration-tests PBT always boots the
 /// default layout, which renders two sidebars (`block:default-left-sidebar`
@@ -53,8 +55,8 @@ impl LayoutRefState for ReferenceState {
     /// means the shared `SwitchViewMode::weighted_generator` will
     /// rightly `Fail(NoSwitchableHandles)`.
     ///
-    /// TODO: walk the rendered VM tree for `widget_name == "view_mode_switcher"`
-    /// nodes and surface them here.
+    /// TODO: walk the rendered VM tree for `widget_name ==
+    /// "view_mode_switcher"` nodes and surface them here.
     fn switchable_handles(&self) -> &[BlockHandle] {
         &[]
     }
@@ -131,7 +133,7 @@ impl<S: SutBlockInteract> Clickable for SutClickAdapter<'_, S> {
     }
 }
 
-// `LiveBlockSink` impl deleted: `DeliverBlockContent` is unreachable in this PBT
-// (generator + preconditions both hard-fail), so the live-block-delivery axis is
-// dead. `DeliverBlockContent::apply_to_sut` now panics directly instead of
-// routing through this adapter.
+// `LiveBlockSink` impl deleted: `DeliverBlockContent` is unreachable in this
+// PBT (generator + preconditions both hard-fail), so the live-block-delivery
+// axis is dead. `DeliverBlockContent::apply_to_sut` now panics directly instead
+// of routing through this adapter.

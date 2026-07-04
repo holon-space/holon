@@ -5,22 +5,13 @@ use holon_api::EntityUri;
 use holon_api::Value;
 use holon_api::block::Block;
 use holon_orgmode::models::OrgBlockExt;
-
 /// Internal properties that Loro/Org adds but reference model doesn't track
-pub const INTERNAL_PROPS: &[&str] = &[
-    "sequence",
-    "level",
-    "ID",
-    "id",
-    "created_at",
-    "updated_at",
-    "document_id",
-    "todo_keywords",
-];
+pub use holon_orgmode_testing::INTERNAL_PROPS;
 
 /// Extract the first :ID: property value from org content.
 ///
-/// This is useful for waiting on a specific block to sync after writing an org file.
+/// This is useful for waiting on a specific block to sync after writing an org
+/// file.
 pub fn extract_first_block_id(content: &str) -> Option<String> {
     for line in content.lines() {
         let trimmed = line.trim();
@@ -232,15 +223,17 @@ pub fn serialize_block_recursive(
 
 /// Assign sequence numbers to blocks that don't already have them set.
 ///
-/// For each parent group where no child has a non-zero sequence (i.e., sequences
-/// were not set from file order by WriteOrgFile), assigns the canonical ordering:
-/// source blocks first, then text blocks, sorted by ID within each group.
-/// This matches the ordering used by `serialize_blocks_to_org`.
+/// For each parent group where no child has a non-zero sequence (i.e.,
+/// sequences were not set from file order by WriteOrgFile), assigns the
+/// canonical ordering: source blocks first, then text blocks, sorted by ID
+/// within each group. This matches the ordering used by
+/// `serialize_blocks_to_org`.
 ///
 /// Parent groups where any child already has sequence > 0 are skipped, since
 /// those sequences were set from actual file order and should be preserved.
 pub fn assign_reference_sequences(blocks: &mut [Block]) {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
+    use std::collections::HashSet;
 
     let parent_ids: HashSet<String> = blocks.iter().map(|b| b.parent_id.to_string()).collect();
 
@@ -272,13 +265,15 @@ pub fn assign_reference_sequences(blocks: &mut [Block]) {
     }
 }
 
-/// Force-assign canonical sequence numbers to all blocks, overwriting any existing values.
+/// Force-assign canonical sequence numbers to all blocks, overwriting any
+/// existing values.
 ///
-/// Used when the org file is re-written via `serialize_blocks_to_org` (e.g., after
-/// an external mutation), which always sorts in canonical order regardless of
-/// existing sequences.
+/// Used when the org file is re-written via `serialize_blocks_to_org` (e.g.,
+/// after an external mutation), which always sorts in canonical order
+/// regardless of existing sequences.
 pub fn assign_reference_sequences_canonical(blocks: &mut [Block]) {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
+    use std::collections::HashSet;
 
     let parent_ids: HashSet<String> = blocks.iter().map(|b| b.parent_id.to_string()).collect();
 
@@ -290,16 +285,20 @@ pub fn assign_reference_sequences_canonical(blocks: &mut [Block]) {
             .map(|b| {
                 (
                     b.id.to_string(),
-                    b.content_type.sibling_order_group(),
+                    b.content_type.parse_order_rank(),
                     b.sequence(),
                 )
             })
             .collect();
-        // Match production OrgRenderer sorting: section content (Source/Image)
-        // first, then sequence, then ID — via the one domain rule (ADR 0005).
-        children.sort_by(|(a_id, a_grp, a_seq), (b_id, b_grp, b_seq)| {
-            a_grp
-                .cmp(b_grp)
+        // Reproduce the store's post-round-trip sibling order: the renderer
+        // hoists section content (Source/Image) ahead of headings (Text), and
+        // the org parser additionally re-emits all Source blocks before all
+        // Image blocks (source loop precedes image loop in `process_headlines`).
+        // So the finer `parse_order_rank` (Source < Image < Text) is the primary
+        // key — NOT the coarse `sibling_order_group` — then sequence, then ID.
+        children.sort_by(|(a_id, a_rank, a_seq), (b_id, b_rank, b_seq)| {
+            a_rank
+                .cmp(b_rank)
                 .then_with(|| a_seq.cmp(b_seq))
                 .then_with(|| a_id.cmp(b_id))
         });

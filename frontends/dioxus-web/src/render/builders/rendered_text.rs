@@ -1,6 +1,7 @@
+use holon_frontend::view_model::ViewKind;
+
 use super::prelude::*;
 use crate::render::EntityContext;
-use holon_frontend::view_model::ViewKind;
 
 /// Read-only sibling of `editable_text` (mirrors GPUI
 /// `render/builders/rendered_text.rs`). A click calls `engineSetFocus`
@@ -31,14 +32,19 @@ fn RenderedTextNode(content: String, row_id: Option<String>) -> Element {
         content.clone()
     };
     let style = if empty {
-        "white-space: pre-wrap; word-break: break-word; min-height: 1.4em; padding: 1px 2px; cursor: text; color: rgba(128,128,128,0.5);"
+        "white-space: pre-wrap; word-break: break-word; min-height: 1.4em; padding: 1px 2px; \
+         cursor: text; color: rgba(128,128,128,0.5);"
     } else {
-        "white-space: pre-wrap; word-break: break-word; min-height: 1.4em; padding: 1px 2px; cursor: text;"
+        "white-space: pre-wrap; word-break: break-word; min-height: 1.4em; padding: 1px 2px; \
+         cursor: text;"
     };
 
+    let dom_entity_id = entity_id.clone().unwrap_or_default();
     rsx! {
         div {
             "data-role": "rendered-text",
+            // Consumed by editor::focus_ring for cross-block caret nav.
+            "data-entity-id": "{dom_entity_id}",
             style: "{style}",
             onclick: move |_| {
                 let Some(eid) = entity_id.clone() else {

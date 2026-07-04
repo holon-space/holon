@@ -1,19 +1,28 @@
 //! Transition: split a block at a byte position.
 //!
-//! Mirrors the legacy logic split across `state_machine.rs:1171-1191` (generator),
-//! `state_machine.rs:3426-3436` (precondition),
+//! Mirrors the legacy logic split across `state_machine.rs:1171-1191`
+//! (generator), `state_machine.rs:3426-3436` (precondition),
 //! `state_machine.rs:2687-2691` (ref-state apply),
 //! `sut.rs:4052-4127` (SUT apply), and
 //! `transition_budgets.rs:303-312` (expected SQL).
 
+use std::time::Duration;
+
 use holon_api::entity_uri::EntityUri;
-use holon_pbt_core::capabilities::{
-    CapCursor, CapRegion, RefBlockTree, RefBlockTreeMut, RefEditorMirrorMut, RefFocus, RefFocusMut,
-    RefLifecycle, SutBlockTreeWrite, SutDriver, SutLayout, commit_active_editor_if_dirty,
-};
+use holon_pbt_core::capabilities::CapCursor;
+use holon_pbt_core::capabilities::CapRegion;
+use holon_pbt_core::capabilities::RefBlockTree;
+use holon_pbt_core::capabilities::RefBlockTreeMut;
+use holon_pbt_core::capabilities::RefEditorMirrorMut;
+use holon_pbt_core::capabilities::RefFocus;
+use holon_pbt_core::capabilities::RefFocusMut;
+use holon_pbt_core::capabilities::RefLifecycle;
+use holon_pbt_core::capabilities::SutBlockTreeWrite;
+use holon_pbt_core::capabilities::SutDriver;
+use holon_pbt_core::capabilities::SutLayout;
+use holon_pbt_core::capabilities::commit_active_editor_if_dirty;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
-use std::time::Duration;
 use validated::Validated;
 
 // ── Capability-bound free function (Phase C input pipeline) ──────────
@@ -79,8 +88,8 @@ pub async fn apply_split_block_input_pipeline_to_sut<S: SutLayout + SutDriver>(
                 panic!("[SplitBlock] click_entity failed for {id}: {e}");
             }
             eprintln!(
-                "[SplitBlock] click_entity could not resolve {id} (row likely \
-                 scrolled out of view); re-revealing: {e}"
+                "[SplitBlock] click_entity could not resolve {id} (row likely scrolled out of \
+                 view); re-revealing: {e}"
             );
             if let Err(e2) = sut.wait_for_bounds(id, Duration::from_secs(2)).await {
                 eprintln!("[SplitBlock] re-reveal of {id} failed (will retry): {e2}");
@@ -92,14 +101,13 @@ pub async fn apply_split_block_input_pipeline_to_sut<S: SutLayout + SutDriver>(
             Err(e) => {
                 if tokio::time::Instant::now() >= click_deadline {
                     panic!(
-                        "[SplitBlock] click_entity did not focus {id} before Enter \
-                         (after re-click attempts) — split would have hit the \
-                         wrong block: {e}"
+                        "[SplitBlock] click_entity did not focus {id} before Enter (after \
+                         re-click attempts) — split would have hit the wrong block: {e}"
                     );
                 }
                 eprintln!(
-                    "[SplitBlock] click did not land focus on {id} (re-render likely \
-                     shifted bounds mid-click); re-clicking: {e}"
+                    "[SplitBlock] click did not land focus on {id} (re-render likely shifted \
+                     bounds mid-click); re-clicking: {e}"
                 );
             }
         }
@@ -127,14 +135,19 @@ pub async fn apply_split_block_input_pipeline_to_sut<S: SutLayout + SutDriver>(
         .unwrap_or_else(|e| panic!("[SplitBlock] enter failed: {e}"));
 }
 
-use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::validation::{Reason, check};
-use holon_pbt_core::{TransitionFactory, TransitionRef};
+use holon_pbt_core::TransitionFactory;
+use holon_pbt_core::TransitionRef;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::check;
 
 #[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::{
-    ExpectedSql, MutationKind, REACTIVE_BASE, expected_sql_for_kind,
-};
+use crate::pbt::transition_budgets::ExpectedSql;
+#[cfg(feature = "otel-testing")]
+use crate::pbt::transition_budgets::MutationKind;
+#[cfg(feature = "otel-testing")]
+use crate::pbt::transition_budgets::REACTIVE_BASE;
+#[cfg(feature = "otel-testing")]
+use crate::pbt::transition_budgets::expected_sql_for_kind;
 
 /// Split an editable text block at a byte position.
 /// Only the currently focused (editable) block is a candidate.
@@ -300,11 +313,13 @@ crate::cap_transition! {
 }
 
 #[cfg(feature = "otel-testing")]
+use holon_pbt_core::capabilities::RefSqlCardinality;
+#[cfg(feature = "otel-testing")]
 impl crate::pbt::transition_budgets::SqlBudget for SplitBlock {
-    fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
-        let watches = state.mcp.active_watches.len();
-        let blocks = state.domain.block_state.blocks.len();
-        let docs = state.files.documents.len();
+    fn expected_sql<R: RefSqlCardinality>(&self, state: &R) -> ExpectedSql {
+        let watches = state.active_watch_count();
+        let blocks = state.block_count();
+        let docs = state.document_count();
         let update = expected_sql_for_kind(MutationKind::Update, watches, blocks, docs);
         let create = expected_sql_for_kind(MutationKind::Create, watches, blocks, docs);
         ExpectedSql {

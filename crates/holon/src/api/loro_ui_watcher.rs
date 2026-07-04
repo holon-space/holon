@@ -13,29 +13,39 @@
 //!
 //! **Phase 0 (V2 paint-proof gate):** the render expression is a hard-coded
 //! placeholder and the watcher is one-shot (no Loro re-snapshot on change). The
-//! point this proves is the async `snapshot()` → sync `UiEvent` bridge — the one
-//! load-bearing unknown of the slice. Phase 1 replaces the placeholder with a
-//! profile-derived render expression and makes the watcher re-emit on Loro
+//! point this proves is the async `snapshot()` → sync `UiEvent` bridge — the
+//! one load-bearing unknown of the slice. Phase 1 replaces the placeholder with
+//! a profile-derived render expression and makes the watcher re-emit on Loro
 //! change. See `~/.claude/plans/playful-waddling-flute.md`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
+use holon_api::EntityUri;
+use holon_api::RenderExpr;
+use holon_api::UiEvent;
+use holon_api::Value;
+use holon_api::WatchHandle;
 use holon_api::block::Block;
 use holon_api::entity::IntoEntity;
-use holon_api::streaming::{
-    ActorAbortGuard, Batch, BatchMetadata, Change, ChangeOrigin, WithMetadata,
-};
-use holon_api::{EntityUri, RenderExpr, UiEvent, Value, WatchHandle};
-use holon_core::storage::{BlockQuery, BlockQuerySource};
+use holon_api::streaming::ActorAbortGuard;
+use holon_api::streaming::Batch;
+use holon_api::streaming::BatchMetadata;
+use holon_api::streaming::Change;
+use holon_api::streaming::ChangeOrigin;
+use holon_api::streaming::WithMetadata;
+use holon_core::storage::BlockQuery;
+use holon_core::storage::BlockQuerySource;
 use tokio::sync::mpsc;
 
 use crate::api::block_domain::BlockDomain;
-use crate::entity_profile::{LiveEntities, ProfileResolver, ProfileResolving};
+use crate::entity_profile::LiveEntities;
+use crate::entity_profile::ProfileResolver;
+use crate::entity_profile::ProfileResolving;
 
-/// Build the Turso-free [`ProfileResolving`] the Loro render path uses to derive
-/// collection render expressions.
+/// Build the Turso-free [`ProfileResolving`] the Loro render path uses to
+/// derive collection render expressions.
 ///
 /// The production resolver is fed by a Turso matview watching `PROFILE_SQL`
 /// (user-authored profile blocks); a no-Turso session has no such matview. We
@@ -45,8 +55,9 @@ use crate::entity_profile::{LiveEntities, ProfileResolver, ProfileResolving};
 /// `collection` variants (tree/table/board) so `collection_render_from_profile`
 /// resolves a real `view_mode_switcher`, minus user-defined profile overrides.
 ///
-/// Must be called from within a Tokio runtime: `ProfileResolver::with_type_profiles`
-/// spawns a background actor that watches the (empty) profile source.
+/// Must be called from within a Tokio runtime:
+/// `ProfileResolver::with_type_profiles` spawns a background actor that watches
+/// the (empty) profile source.
 pub fn build_turso_free_profile_resolver() -> Arc<dyn ProfileResolving> {
     let type_registry = holon_profiles::create_default_registry().expect("default TypeRegistry");
     let type_profiles = holon_profiles::type_profiles_from_registry(&type_registry);
@@ -86,13 +97,14 @@ const LORO_WATCH_POLL: std::time::Duration = std::time::Duration::from_millis(25
 pub async fn loro_watch_ui(
     source: Arc<dyn BlockQuerySource>,
     block_id: EntityUri,
+    advice_status: holon_advice::AdviceRuleStatusHandle,
 ) -> Result<WatchHandle> {
     let (output_tx, output_rx) = mpsc::channel(64);
     let (command_tx, _command_rx) = mpsc::channel(16);
     let mut aborts = ActorAbortGuard::new();
 
     let task = tokio::spawn(async move {
-        run_watch_loop(source, block_id, output_tx).await;
+        run_watch_loop(source, block_id, advice_status, output_tx).await;
     });
     aborts.push(task.abort_handle());
 
@@ -106,18 +118,38 @@ pub async fn loro_watch_ui(
 /// dispatches through the capability with no backend branch.
 pub struct LoroUiWatcher {
     source: Arc<dyn BlockQuerySource>,
+    /// Advice-rule status surface (ADR 0022). Empty in a no-Turso session (no
+    /// advice reconciler synthesizes matviews there), but wired for parity
+    /// with the Turso watcher so a rule block's error would render in place
+    /// if one is ever recorded.
+    advice_status: holon_advice::AdviceRuleStatusHandle,
 }
 
 impl LoroUiWatcher {
     pub fn new(source: Arc<dyn BlockQuerySource>) -> Self {
-        Self { source }
+        Self {
+            source,
+            advice_status: holon_advice::AdviceRuleStatusHandle::new(),
+        }
+    }
+
+    /// Wire a shared advice-rule status handle (the reader side of ADR 0022's
+    /// surface).
+    pub fn with_advice_status(mut self, status: holon_advice::AdviceRuleStatusHandle) -> Self {
+        self.advice_status = status;
+        self
     }
 }
 
 #[async_trait::async_trait]
 impl crate::api::ui_watcher::UiWatcher for LoroUiWatcher {
     async fn watch_ui(self: Arc<Self>, block_id: EntityUri) -> Result<WatchHandle> {
-        loro_watch_ui(Arc::clone(&self.source), block_id).await
+        loro_watch_ui(
+            Arc::clone(&self.source),
+            block_id,
+            self.advice_status.clone(),
+        )
+        .await
     }
 }
 
@@ -133,6 +165,7 @@ fn local_origin() -> ChangeOrigin {
 async fn run_watch_loop(
     source: Arc<dyn BlockQuerySource>,
     block_id: EntityUri,
+    advice_status: holon_advice::AdviceRuleStatusHandle,
     output_tx: mpsc::Sender<UiEvent>,
 ) {
     let mut generation: u64 = 0;
@@ -146,12 +179,20 @@ async fn run_watch_loop(
         // through the same diff path, so the watcher recovers automatically
         // when the underlying block is fixed (matches the Turso watcher's
         // error-recovery semantics) — it never silently stalls.
-        let (expr, ordered) = match render_state(&source, &block_id).await {
-            Ok(state) => state,
-            Err(e) => {
-                tracing::warn!("[LoroWatcher] render of '{block_id}' failed: {e}");
-                (error_render_expr(&format!("{e}")), Vec::new())
-            }
+        // Advice-rule status surface (ADR 0022): a NON-Active rule block renders its
+        // error in place. Inert in a no-Turso session (the map is empty there).
+        let (expr, ordered) = match advice_status.get(block_id.as_str()) {
+            Some(status) if !status.is_active() => (
+                error_render_expr(&format!("advice rule: {status}")),
+                Vec::new(),
+            ),
+            _ => match render_state(&source, &block_id).await {
+                Ok(state) => state,
+                Err(e) => {
+                    tracing::warn!("[LoroWatcher] render of '{block_id}' failed: {e}");
+                    (error_render_expr(&format!("{e:#}")), Vec::new())
+                }
+            },
         };
 
         let structure_changed = prev_expr.as_ref() != Some(&expr);
@@ -279,13 +320,14 @@ async fn render_state(
 /// the snapshot (those joins are just "children of `block_id` that are source
 /// blocks").
 ///
-/// **Capability-driven degradation (ADR 0004 Phase 9).** The data-rendering view
-/// modes (tree/table/board) render *query results*, which only the Turso query
-/// engine can produce. A no-Turso session has no query engine, so those modes
-/// are not offered: a query-source block degrades to the one view mode that needs
-/// no engine — `source`, the raw query text — rendered bare (no view-mode-switcher
-/// chrome, since it is the only mode). The Turso path keeps the full
-/// tree/table/board + source switcher via [`BlockDomain::render_entity`].
+/// **Capability-driven degradation (ADR 0004 Phase 9).** The data-rendering
+/// view modes (tree/table/board) render *query results*, which only the Turso
+/// query engine can produce. A no-Turso session has no query engine, so those
+/// modes are not offered: a query-source block degrades to the one view mode
+/// that needs no engine — `source`, the raw query text — rendered bare (no
+/// view-mode-switcher chrome, since it is the only mode). The Turso path keeps
+/// the full tree/table/board + source switcher via
+/// [`BlockDomain::render_entity`].
 ///
 /// A block with no query-source child is a leaf, rendered via `render_entity()`
 /// (mirrors `BlockDomain::render_leaf_block`).
@@ -347,20 +389,23 @@ fn error_render_expr(message: &str) -> RenderExpr {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::api::repository::{CoreOperations, Lifecycle};
-    use crate::sync::loro_block_query_source::LoroBlockQuerySource;
     use holon_api::BlockContent;
     use holon_loro::LoroBackend;
+
+    use super::*;
+    use crate::api::repository::CoreOperations;
+    use crate::api::repository::Lifecycle;
+    use crate::sync::loro_block_query_source::LoroBlockQuerySource;
 
     /// The V2 paint-proof gate, headless at the `watch_ui` seam: a pure-Loro
     /// `BlockQuerySource` snapshot drives the same `UiEvent::Structure` +
     /// `UiEvent::Data` the reactive engine consumes — with no Turso engine.
     ///
-    /// With no query engine in this wiring, a query-source block degrades to the
-    /// `source` view mode only (ADR 0004 Phase 9): the Structure is a bare
-    /// `source_editor` (the raw query text), not a tree/table/board switcher —
-    /// those modes render query *results*, which need the Turso engine.
+    /// With no query engine in this wiring, a query-source block degrades to
+    /// the `source` view mode only (ADR 0004 Phase 9): the Structure is a
+    /// bare `source_editor` (the raw query text), not a tree/table/board
+    /// switcher — those modes render query *results*, which need the Turso
+    /// engine.
     #[tokio::test]
     async fn loro_watch_ui_emits_source_render_then_children_data() {
         let backend = LoroBackend::create_new("loro-watch-ui-test".to_string())
@@ -392,7 +437,13 @@ mod tests {
         let source: Arc<dyn BlockQuerySource> =
             Arc::new(LoroBlockQuerySource::new(Arc::new(backend)));
 
-        let mut handle = loro_watch_ui(source, root.id.clone()).await.unwrap();
+        let mut handle = loro_watch_ui(
+            source,
+            root.id.clone(),
+            holon_advice::AdviceRuleStatusHandle::new(),
+        )
+        .await
+        .unwrap();
 
         // First event: the source-only degradation — a bare `source_editor`
         // showing the query text, not a tree/table/board switcher.
@@ -477,7 +528,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn loro_watch_ui_reemits_on_loro_churn() {
         use std::collections::HashSet;
-        use std::time::{Duration, Instant};
+        use std::time::Duration;
+        use std::time::Instant;
 
         let backend = Arc::new(
             LoroBackend::create_new("loro-watch-churn-test".to_string())
@@ -495,7 +547,13 @@ mod tests {
 
         let source: Arc<dyn BlockQuerySource> =
             Arc::new(LoroBlockQuerySource::new(backend.clone()));
-        let mut handle = loro_watch_ui(source, root.id.clone()).await.unwrap();
+        let mut handle = loro_watch_ui(
+            source,
+            root.id.clone(),
+            holon_advice::AdviceRuleStatusHandle::new(),
+        )
+        .await
+        .unwrap();
 
         // Fold the watcher's generation-gated Structure/Data deltas into a live
         // id set, exactly as `ReactiveRowSet` does, until `want` holds.
@@ -584,16 +642,17 @@ mod tests {
     }
 
     /// The user-chosen render fidelity: the Turso-free resolver must actually
-    /// carry the built-in `collection` variants, so `collection_render_from_profile`
-    /// resolves a real multi-mode switcher rather than degrading to bare `table()`.
+    /// carry the built-in `collection` variants, so
+    /// `collection_render_from_profile` resolves a real multi-mode switcher
+    /// rather than degrading to bare `table()`.
     #[tokio::test]
     async fn turso_free_resolver_has_collection_variants() {
         let resolver = build_turso_free_profile_resolver();
         let variants = resolver.resolve_collection_variants();
         assert!(
             !variants.is_empty(),
-            "Turso-free resolver must seed the built-in collection variants \
-             (tree/table/board); got none — render would degrade to table()"
+            "Turso-free resolver must seed the built-in collection variants (tree/table/board); \
+             got none — render would degrade to table()"
         );
     }
 }

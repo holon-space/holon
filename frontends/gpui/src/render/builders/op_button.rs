@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
-use super::prelude::*;
 use holon_api::Value;
+
+use super::prelude::*;
 
 /// Render a tappable op affordance: icon above an accessible label.
 ///
@@ -9,7 +10,8 @@ use holon_api::Value;
 /// routes id-only ops to direct dispatch and multi-param ops to the
 /// popup param-collection flow.
 ///
-/// Sighted-user fallback label sits underneath the icon because GPUI // ALLOW(fallback): describes default-branch path, not error swallowing
+/// Sighted-user fallback label sits underneath the icon because GPUI //
+/// ALLOW(fallback): describes default-branch path, not error swallowing
 /// has no accessibility surface yet (see V2 in the mobile-bar plan —
 /// `Android TalkBack` / `iOS VoiceOver` need upstream GPUI work).
 ///
@@ -17,10 +19,7 @@ use holon_api::Value;
 /// long-press-to-confirm or tap→popup-dialog; until GPUI gives us a
 /// clean long-press primitive we route `delete` the same as any other
 /// id-only op. Follow-up to this PR gates on a confirmation UX decision.
-pub fn render(
-    node: &holon_frontend::ReactiveViewModel,
-    ctx: &GpuiRenderContext,
-) -> AnyElement {
+pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     let op_name = node.prop_str("op_name").unwrap_or_default();
     let target_id = node.prop_str("target_id").unwrap_or_default();
     let display_name = node.prop_str("display_name").unwrap_or_default();
@@ -78,9 +77,7 @@ fn present_op_from_context(
     let mut probe: HashMap<String, Value> = HashMap::new();
     probe.insert("id".into(), Value::String(target_id.to_string()));
     let Some(profile) = services.resolve_profile(&probe) else {
-        tracing::warn!(
-            "op_button tap: resolve_profile returned None for target_id={target_id}"
-        );
+        tracing::warn!("op_button tap: resolve_profile returned None for target_id={target_id}");
         return;
     };
     let Some(op) = profile.operations.into_iter().find(|o| o.name == op_name) else {
@@ -99,14 +96,15 @@ fn present_op_from_context(
 fn op_icon_char(op_name: &str) -> &'static str {
     match op_name {
         "cycle_task_state" => "\u{27F3}", // ⟳
-        "delete" => "\u{1F5D1}",           // 🗑
+        "delete" => "\u{1F5D1}",          // 🗑
+        "dismiss_advice" => "\u{2715}",   // ✕ (dismiss a woven advice suggestion, ADR 0022)
         "create" => "+",
-        "update" | "set_field" => "\u{270E}", // ✎
+        "update" | "set_field" => "\u{270E}",   // ✎
         "embed_entity" | "embed" => "\u{29C9}", // ⧉
-        "indent" => "\u{21E5}",                // ⇥
-        "outdent" => "\u{21E4}",               // ⇤
-        "move_up" => "\u{2191}",               // ↑
-        "move_down" => "\u{2193}",             // ↓
+        "indent" => "\u{21E5}",                 // ⇥
+        "outdent" => "\u{21E4}",                // ⇤
+        "move_up" => "\u{2191}",                // ↑
+        "move_down" => "\u{2193}",              // ↓
         _ => "",
     }
 }

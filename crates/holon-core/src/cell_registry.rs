@@ -10,15 +10,22 @@
 //! The trait surface is generic so Phase 2 can add scalar/meta backings
 //! without breaking the API.
 
-use std::any::{Any, TypeId};
+use std::any::Any;
+use std::any::TypeId;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::Weak;
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
+use anyhow::anyhow;
 use async_trait::async_trait;
-use holon_api::{BlockContent, EntityUri, Tags};
+use holon_api::BlockContent;
+use holon_api::EntityUri;
+use holon_api::Tags;
 
-use crate::cell::{Cell, CellBacking};
+use crate::cell::Cell;
+use crate::cell::CellBacking;
 
 /// Registry surface used by chord ops, frontend handlers, and sync
 /// providers. Implementations live per entity type
@@ -82,6 +89,7 @@ pub trait EntityCellRegistry: Send + Sync {
         _: &std::collections::HashMap<String, holon_api::Value>,
         _: &Tags,
         _: &[EntityUri],
+        _: &[EntityUri],
     ) -> Result<bool> {
         Ok(false)
     }
@@ -130,8 +138,8 @@ impl EntityCellRegistryExt for dyn EntityCellRegistry + '_ {
             .map(|arc_cell| (*arc_cell).clone())
             .map_err(|_| {
                 anyhow!(
-                    "EntityCellRegistry returned a cell of an unexpected type for \
-                     ({uri}, {field}). Expected Cell<{}>; this is a registry-impl bug.",
+                    "EntityCellRegistry returned a cell of an unexpected type for ({uri}, \
+                     {field}). Expected Cell<{}>; this is a registry-impl bug.",
                     std::any::type_name::<T>()
                 )
             })
@@ -189,8 +197,8 @@ impl CellCache {
 
     /// Look up an existing live cell for `(uri, field, T)`, or construct
     /// one via `make_backing` and cache its `Weak` reference. The returned
-    /// `Arc<dyn Any>` wraps a `Cell<T>` (so [`EntityCellRegistryExt::live_field`]
-    /// can downcast).
+    /// `Arc<dyn Any>` wraps a `Cell<T>` (so
+    /// [`EntityCellRegistryExt::live_field`] can downcast).
     pub fn get_or_construct<T, F>(
         &self,
         uri: &EntityUri,
@@ -243,10 +251,11 @@ impl CellCache {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::cell::LwwTextCellBacking;
     use futures::future::BoxFuture;
     use futures::stream::BoxStream;
+
+    use super::*;
+    use crate::cell::LwwTextCellBacking;
 
     fn dummy_text_backing() -> Arc<dyn CellBacking<String>> {
         Arc::new(LwwTextCellBacking::new(
@@ -381,18 +390,21 @@ mod tests {
         let parent = EntityUri::block("p");
 
         assert!(!registry.write_position(&uri, "p", None).await.unwrap());
-        assert!(!registry
-            .create_entity(
-                &parent,
-                None,
-                &uri,
-                holon_api::BlockContent::text("x"),
-                &std::collections::HashMap::new(),
-                &holon_api::Tags::default(),
-                &[],
-            )
-            .await
-            .unwrap());
+        assert!(
+            !registry
+                .create_entity(
+                    &parent,
+                    None,
+                    &uri,
+                    holon_api::BlockContent::text("x"),
+                    &std::collections::HashMap::new(),
+                    &holon_api::Tags::default(),
+                    &[],
+                    &[],
+                )
+                .await
+                .unwrap()
+        );
         assert!(!registry.delete_entity(&uri).await.unwrap());
     }
 }

@@ -1,4 +1,5 @@
-//! Thin GPUI shell for ReactiveView — replaces both LiveBlockView and CollectionView.
+//! Thin GPUI shell for ReactiveView — replaces both LiveBlockView and
+//! CollectionView.
 //!
 //! Subscribes to a ReactiveView's `items: MutableVec` for VecDiff events,
 //! applies diffs to a local items vec + GPUI entity cache, and renders.
@@ -9,18 +10,21 @@ use std::sync::Arc;
 
 use gpui::*;
 use holon_api::EntityUri;
+use holon_frontend::RenderContext;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive_view::ReactiveView;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
-use holon_frontend::RenderContext;
 
-use crate::entity_view_registry::{
-    wipe_ephemeral, CacheKey, EntityCache, LiveBlockAncestors, LocalEntityScope,
-};
+use crate::entity_view_registry::CacheKey;
+use crate::entity_view_registry::EntityCache;
+use crate::entity_view_registry::LiveBlockAncestors;
+use crate::entity_view_registry::LocalEntityScope;
+use crate::entity_view_registry::wipe_ephemeral;
 use crate::geometry::BoundsRegistry;
 use crate::navigation_state::NavigationState;
+use crate::render::builders::GpuiRenderContext;
 use crate::render::builders::live_query_key;
-use crate::render::builders::{self, GpuiRenderContext};
+use crate::render::builders::{self};
 use crate::views::RenderEntityView;
 
 /// Pixels of content measured above/below the viewport before the list
@@ -93,6 +97,11 @@ pub struct ReactiveShell {
     /// is already on the chain (cycle prevention across GPUI's async
     /// render boundary).
     live_block_ancestors: LiveBlockAncestors,
+    /// RAII pin on the engine watcher this shell consumes (block mode /
+    /// live-query mode; `None` in collection mode). Dropping the shell drops
+    /// the guard, which releases the watcher when this was the last
+    /// consumer — replaces the old manual `Drop → services.unwatch` path.
+    _watch_guard: Option<holon_frontend::WatchGuard>,
 }
 
 impl ReactiveShell {
@@ -135,6 +144,7 @@ impl ReactiveShell {
         let holon_frontend::LiveBlock {
             tree,
             structural_changes,
+            watch_guard,
         } = live_block;
 
         // Subscribe to structural changes (render_expr or ui_state changed).
@@ -204,13 +214,15 @@ impl ReactiveShell {
             collection_subs: Vec::new(),
             render_probe_last: std::cell::Cell::new(usize::MAX),
             live_block_ancestors,
+            _watch_guard: watch_guard,
         };
         view.subscribe_inner_collections(cx);
         cx.notify();
         view
     }
 
-    /// Create a shell for a collection (subscribes to ReactiveView's MutableVec).
+    /// Create a shell for a collection (subscribes to ReactiveView's
+    /// MutableVec).
     ///
     /// Collections don't add their own block id to `live_block_ancestors`
     /// — they're a render layer, not a referent — but they propagate the
@@ -262,6 +274,7 @@ impl ReactiveShell {
             collection_subs: Vec::new(),
             render_probe_last: std::cell::Cell::new(usize::MAX),
             live_block_ancestors,
+            _watch_guard: None,
         }
     }
 
@@ -303,7 +316,8 @@ impl ReactiveShell {
                     let cache = self.entity_cache.read().unwrap();
                     cache
                         .get(&CacheKey::LiveBlock(nested_id.to_string()))
-                        // ALLOW(ok): downcast Option<Entity<T>> miss is "not the type we asked for", treated as cache miss
+                        // ALLOW(ok): downcast Option<Entity<T>> miss is "not the type we asked
+                        // for", treated as cache miss
                         .and_then(|any| any.clone().downcast::<ReactiveShell>().ok())
                 };
                 if let Some(entity) = nested_entity {
@@ -347,7 +361,8 @@ impl ReactiveShell {
                         let cache = self.entity_cache.read().unwrap();
                         cache
                             .get(&CacheKey::RenderEntity(row_id))
-                            // ALLOW(ok): downcast Option<Entity<T>> miss is "not the type we asked for", treated as cache miss
+                            // ALLOW(ok): downcast Option<Entity<T>> miss is "not the type we asked
+                            // for", treated as cache miss
                             .and_then(|any| any.clone().downcast::<RenderEntityView>().ok())
                     };
                     if let Some(entity) = cached {
@@ -741,9 +756,9 @@ impl Render for ReactiveShell {
             debug_assert_eq!(
                 self.visible_indices.len(),
                 self.list_state.item_count(),
-                "ReactiveShell: visible_indices.len() ({}) != list_state.item_count() ({}). \
-                 Some code path mutated visible_indices without splicing list_state. \
-                 The next `list` paint will panic indexing visible_indices.",
+                "ReactiveShell: visible_indices.len() ({}) != list_state.item_count() ({}). Some \
+                 code path mutated visible_indices without splicing list_state. The next `list` \
+                 paint will panic indexing visible_indices.",
                 self.visible_indices.len(),
                 self.list_state.item_count()
             );
@@ -846,17 +861,6 @@ impl Render for ReactiveShell {
     }
 }
 
-impl Drop for ReactiveShell {
-    fn drop(&mut self) {
-        if let Some(ref block_id) = self.block_id {
-            // ALLOW(entity_uri_from_raw): render-spec ReactiveShell.block_id (parsed in Drop to unwatch)
-            let uri = EntityUri::from_raw(block_id);
-            tracing::debug!("[ReactiveShell] Dropping shell for '{block_id}', unwatching");
-            self.services.unwatch(&uri);
-        }
-    }
-}
-
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 /// `HOLON_EAGER_PANEL_RENDER=1` restores the pre-virtualization eager
@@ -928,11 +932,11 @@ fn render_row(item: &Arc<ReactiveViewModel>, gpui_ctx: &GpuiRenderContext) -> An
 /// union of every tree the shell has ever rendered.
 ///
 /// State-bearing keys collected:
-/// - `CacheKey::ReactiveShell(stable_cache_key)` — every nested
-///   `Reactive { view }` collection.
-/// - `CacheKey::LiveBlock(canonical_block_id)` — every `live_block`
-///   widget. The id is canonicalized via [`EntityUri`] to match the
-///   canonical form the lazy builder uses.
+/// - `CacheKey::ReactiveShell(stable_cache_key)` — every nested `Reactive {
+///   view }` collection.
+/// - `CacheKey::LiveBlock(canonical_block_id)` — every `live_block` widget. The
+///   id is canonicalized via [`EntityUri`] to match the canonical form the lazy
+///   builder uses.
 /// - `CacheKey::LiveQuery(live_query_key(sql, ctx))` — every `live_query`
 ///   widget that has the props the builder needs to subscribe.
 /// - `CacheKey::RenderEntity(row_id)` — every `render_entity` widget.

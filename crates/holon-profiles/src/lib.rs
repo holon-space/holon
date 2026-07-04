@@ -1,3 +1,11 @@
+//! @c4 component
+//! @c4 layer Core
+//! Pattern: Strategy
+//! @c4 uses holon-api "shared value & operation types" "Rust"
+//! @c4 uses holon-core "core datasource traits" "Rust"
+//! @c4 uses holon-engine "Petri-net engine" "Rust"
+//! @c4 uses holon-macros "entity/operation derive macros" "Rust"
+//!
 //! EntityProfile system: per-entity, per-row render + operation resolution.
 //!
 //! Each entity (e.g., "block") can have a profile that defines:
@@ -14,22 +22,28 @@
 //! expressions (<1µs each).
 
 pub mod type_registry;
-pub use type_registry::{TypeRegistry, create_default_registry, type_profiles_from_registry};
-
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
-use holon_api::CompiledExpr;
-use holon_api::predicate::Predicate;
-use holon_api::render_types::{OperationDescriptor, RenderExpr, RenderVariant};
-use holon_api::{EntityName, Value, row_id};
-use rhai::Engine as RhaiEngine;
-
+use anyhow::Context;
+use anyhow::Result;
 use futures_signals::signal_map::SignalMapExt;
-
+use holon_api::CompiledExpr;
+use holon_api::EntityName;
 use holon_api::StorageEntity;
+use holon_api::Value;
 use holon_api::live_data::LiveData;
+use holon_api::predicate::Predicate;
+use holon_api::render_types::OperationDescriptor;
+use holon_api::render_types::RenderExpr;
+use holon_api::render_types::RenderVariant;
+use holon_api::row_id;
+use rhai::Engine as RhaiEngine;
+pub use type_registry::TypeRegistry;
+pub use type_registry::create_default_registry;
+pub use type_registry::type_profiles_from_registry;
 
 /// Variables that are frontend-local (UI state), not data-dependent.
 /// Conditions referencing only these variables are extracted as `Predicate`
@@ -38,13 +52,18 @@ const UI_STATE_VARIABLES: &[&str] = &[
     "is_focused",
     "is_expanded",
     "view_mode",
+    // Render-context flag set by tree-builder `rules:` overrides (e.g.
+    // `role: "page_title"`); merged into ui_state by `pick_active_variant`.
+    // Classifying it as data would drop the variant at resolve time (rows
+    // have no `role` column).
+    "role",
     // Container-query inputs: refined per subtree during render interpretation.
     "available_width_px",
     "available_height_px",
     "available_width_physical_px",
     "available_height_physical_px",
-    // Global viewport default: emitted by UiState::context_for when no // ALLOW(fallback): comment describes default-context emission
-    // refinement has reached this block.
+    // Global viewport default: emitted by UiState::context_for when no // ALLOW(fallback): comment
+    // describes default-context emission refinement has reached this block.
     "viewport_width_px",
     "viewport_height_px",
     "viewport_width_physical_px",
@@ -61,10 +80,15 @@ pub type LiveEntities = HashMap<EntityName, Arc<LiveData<StorageEntity>>>;
 // *sources*: YAML/org parsing below and the LiveData-backed ProfileResolver.
 // ---------------------------------------------------------------------------
 
-pub use holon_api::entity_profile::{
-    CompiledComputedField, EntityProfile, ProfileCache, ProfileResolving, RowVariant,
-    StoredProfile, StoredVariant, VirtualChildConfig, value_to_dynamic,
-};
+pub use holon_api::entity_profile::CompiledComputedField;
+pub use holon_api::entity_profile::EntityProfile;
+pub use holon_api::entity_profile::ProfileCache;
+pub use holon_api::entity_profile::ProfileResolving;
+pub use holon_api::entity_profile::RowVariant;
+pub use holon_api::entity_profile::StoredProfile;
+pub use holon_api::entity_profile::StoredVariant;
+pub use holon_api::entity_profile::VirtualChildConfig;
+pub use holon_api::entity_profile::value_to_dynamic;
 pub use holon_api::render_types::RenderProfile;
 
 // ---------------------------------------------------------------------------
@@ -188,7 +212,8 @@ fn split_condition(source: &str) -> Result<(Option<String>, Predicate)> {
     Ok((data_condition, ui_condition))
 }
 
-/// Check if a conjunct references any variables that are NOT UI state variables.
+/// Check if a conjunct references any variables that are NOT UI state
+/// variables.
 fn has_non_ui_references(conjunct: &str) -> bool {
     let ident_chars = |c: char| c.is_ascii_alphanumeric() || c == '_';
     let mut i = 0;
@@ -237,8 +262,8 @@ fn has_non_ui_references(conjunct: &str) -> bool {
 /// would make the variant never activate with no diagnostic):
 /// - `is_focused` → `Var("is_focused")`
 /// - `!is_focused` → `Not(Var("is_focused"))`
-/// - `view_mode == "table"` → `Eq { field: "view_mode", value: "table" }`
-///   (also `!=`, `<`, `<=`, `>`, `>=` against a literal)
+/// - `view_mode == "table"` → `Eq { field: "view_mode", value: "table" }` (also
+///   `!=`, `<`, `<=`, `>`, `>=` against a literal)
 fn parse_conjunct_to_predicate(conjunct: &str) -> Result<Predicate> {
     let s = conjunct.trim();
 
@@ -281,8 +306,8 @@ fn parse_conjunct_to_predicate(conjunct: &str) -> Result<Predicate> {
     }
 
     anyhow::bail!(
-        "unsupported UI condition `{s}`: expected `var`, `!var`, or `var <op> literal` \
-         (rewrite `a || b` as separate variants)"
+        "unsupported UI condition `{s}`: expected `var`, `!var`, or `var <op> literal` (rewrite \
+         `a || b` as separate variants)"
     )
 }
 
@@ -340,7 +365,8 @@ fn parse_literal_value(s: &str) -> Value {
 /// Convert `ProfileVariant`s into `StoredVariant`s.
 ///
 /// `ProfileVariant` conditions are already pre-compiled (CompiledExpr serde).
-/// This function splits conditions into data/ui predicates and parses render expressions.
+/// This function splits conditions into data/ui predicates and parses render
+/// expressions.
 pub fn profile_variants_to_stored(
     profile_variants: &[holon_api::ProfileVariant],
 ) -> Result<Vec<StoredVariant>> {
@@ -474,12 +500,14 @@ fn topo_sort_computed_fields(
 
 /// Register per-entity lookup functions on a Rhai engine.
 ///
-/// For each entry in `live_entities`, registers a function named after the entity
-/// (e.g. `document("block:<uuid>")`) that returns the entity's properties as a Rhai map.
+/// For each entry in `live_entities`, registers a function named after the
+/// entity (e.g. `document("block:<uuid>")`) that returns the entity's
+/// properties as a Rhai map.
 fn register_entity_lookups(engine: &mut RhaiEngine, live_entities: &LiveEntities) {
     for (entity_name, live_data) in live_entities {
         let data = Arc::clone(live_data);
-        // Rhai identifiers use underscores; EntityName normalizes to hyphens for URI schemes.
+        // Rhai identifiers use underscores; EntityName normalizes to hyphens for URI
+        // schemes.
         let name = entity_name.as_str().replace('-', "_");
         engine.register_fn(&name, move |id: String| -> rhai::Dynamic {
             let items = data.read();
@@ -558,7 +586,8 @@ impl ProfileResolver {
 
     /// Create a ProfileResolver seeded with type-defined profiles.
     ///
-    /// Type-defined profiles are seeded first; org-based profiles override them.
+    /// Type-defined profiles are seeded first; org-based profiles override
+    /// them.
     pub fn with_type_profiles(
         source: Arc<holon_api::live_data::LiveData<EntityProfile>>,
         ui_info: holon_api::UiInfo,
@@ -626,9 +655,10 @@ impl ProfileResolver {
         *self.live_entities.write().unwrap() = entities;
     }
 
-    /// Look up operations for an entity name. Entity-level (keyed by id scheme),
-    /// so this returns exactly the operations the renderer attaches to a row of
-    /// that entity (see `materialize`). Exposed via the `ProfileResolving` trait.
+    /// Look up operations for an entity name. Entity-level (keyed by id
+    /// scheme), so this returns exactly the operations the renderer
+    /// attaches to a row of that entity (see `materialize`). Exposed via
+    /// the `ProfileResolving` trait.
     fn lookup_operations(&self, entity_name: &str) -> Vec<OperationDescriptor> {
         self.entity_operations
             .get(&EntityName::new(entity_name))
@@ -636,10 +666,12 @@ impl ProfileResolver {
             .unwrap_or_default()
     }
 
-    /// Combine a StoredProfile with entity operations to produce a RenderProfile.
+    /// Combine a StoredProfile with entity operations to produce a
+    /// RenderProfile.
     ///
-    /// Operations are looked up by the ID scheme (e.g. "block" from "block:xxx"),
-    /// not by `entity_name` which may be a view/matview alias like "focus_roots".
+    /// Operations are looked up by the ID scheme (e.g. "block" from
+    /// "block:xxx"), not by `entity_name` which may be a view/matview alias
+    /// like "focus_roots".
     fn materialize(
         &self,
         stored: &StoredProfile,
@@ -663,7 +695,8 @@ impl ProfileResolver {
     ) -> ProfileCache {
         let mut profiles = HashMap::new();
 
-        // Seed with type-defined profiles (baseline layer) // ALLOW(fallback): describes profile layering, not error swallowing
+        // Seed with type-defined profiles (baseline layer) // ALLOW(fallback):
+        // describes profile layering, not error swallowing
         for profile in type_profiles {
             let name = profile.entity_name.clone();
             profiles.insert(name, profile.clone());
@@ -685,10 +718,12 @@ impl ProfileResolver {
 
     /// Merge a new profile into an existing one with the same entity name.
     /// Variant lists are combined (not replaced) and re-sorted by priority.
-    /// Computed fields from the incoming profile are added (incoming wins on name conflict).
+    /// Computed fields from the incoming profile are added (incoming wins on
+    /// name conflict).
     fn merge_profile(existing: &mut EntityProfile, incoming: &EntityProfile) {
         tracing::info!(
-            "[ProfileResolver::merge_profile] entity='{}', existing_variants={}, incoming_variants={}",
+            "[ProfileResolver::merge_profile] entity='{}', existing_variants={}, \
+             incoming_variants={}",
             existing.entity_name,
             existing.variants.len(),
             incoming.variants.len(),
@@ -754,7 +789,17 @@ impl ProfileResolving for ProfileResolver {
     ) -> (Arc<RenderProfile>, HashMap<String, holon_api::Value>) {
         let cache = self.cache_signal.get_cloned();
 
-        let entity_uri = row_id(row).expect("No id found");
+        let entity_uri = row_id(row).unwrap_or_else(|e| {
+            // The enrichment boundary REQUIRES entity-shaped rows (a scheme'd
+            // `id`). A row without one is almost always a `watch_query` pointed at a
+            // junction/aggregate projection (e.g. the advice `advice_suppressed`
+            // watch, 2026-07-09): project `... AS id` or route it through a
+            // signal-only path instead of the enriched watch. Fail loud with the row.
+            panic!(
+                "profile resolver: row has no entity `id` — watch_query/enrichment requires \
+                 entity-shaped rows (project `... AS id`): {e}"
+            )
+        });
         let entity_name_str = entity_uri.scheme();
         let entity_name = EntityName::new(entity_name_str);
 
@@ -810,7 +855,17 @@ impl ProfileResolving for ProfileResolver {
         row: &HashMap<String, holon_api::Value>,
     ) -> (Arc<RenderProfile>, HashMap<String, holon_api::Value>) {
         let cache = self.cache_signal.get_cloned();
-        let entity_uri = row_id(row).expect("No id found");
+        let entity_uri = row_id(row).unwrap_or_else(|e| {
+            // The enrichment boundary REQUIRES entity-shaped rows (a scheme'd
+            // `id`). A row without one is almost always a `watch_query` pointed at a
+            // junction/aggregate projection (e.g. the advice `advice_suppressed`
+            // watch, 2026-07-09): project `... AS id` or route it through a
+            // signal-only path instead of the enriched watch. Fail loud with the row.
+            panic!(
+                "profile resolver: row has no entity `id` — watch_query/enrichment requires \
+                 entity-shaped rows (project `... AS id`): {e}"
+            )
+        });
         let entity_name_str = entity_uri.scheme();
         let entity_name = EntityName::new(entity_name_str);
 
@@ -906,7 +961,8 @@ impl ProfileResolving for ProfileResolver {
     }
 }
 
-/// Check if a block is an entity profile block (source_language = holon_entity_profile_yaml).
+/// Check if a block is an entity profile block (source_language =
+/// holon_entity_profile_yaml).
 pub fn is_profile_block_by_source_language(source_language: Option<&str>) -> bool {
     source_language == Some("holon_entity_profile_yaml")
 }
@@ -1168,7 +1224,8 @@ variants:
 "#,
         );
 
-        // task_state nested inside properties (as it comes from `from children` queries)
+        // task_state nested inside properties (as it comes from `from children`
+        // queries)
         let mut props = HashMap::new();
         props.insert(
             "task_state".to_string(),

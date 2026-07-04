@@ -8,8 +8,12 @@
 //! @c4 uses holon-frontend "frontend session abstraction" "Rust"
 //! @c4 uses holon-mcp-client "MCP client providers" "Rust"
 //! @c4 uses holon-orgmode "org-mode sync I/O" "Rust"
+//! @c4 uses holon-loro "Loro CRDT backend & P2P sync" "Rust"
+//! @c4 uses holon-profiles "entity profile resolution" "Rust"
 //!
-//! DI assembly crate (composition root) — owns every wiring that names concrete backends: Turso/Loro/OrgMode modules, MCP integrations, and `FrontendSession`.
+//! DI assembly crate (composition root) — owns every wiring that names concrete
+//! backends: Turso/Loro/OrgMode modules, MCP integrations, and
+//! `FrontendSession`.
 //!
 //! Owns all DI assembly that names concrete backends: the Turso
 //! `BackendEngine` stack ([`wiring`]), the no-Turso Loro stack ([`no_turso`]),
@@ -35,8 +39,14 @@ pub mod turso_seams;
 pub mod wiring;
 
 pub use headless_builder_services::HeadlessBuilderServices;
-pub use mcp_integrations::{McpIntegrationRegistry, McpIntegrationsModule};
-pub use no_turso::{from_block_query_source, register_block_query_frontend};
+pub use mcp_integrations::McpIntegrationRegistry;
+pub use mcp_integrations::McpIntegrationsModule;
+pub use no_turso::from_block_query_source;
+pub use no_turso::register_block_query_frontend;
 pub use seed::seed_default_layout;
-pub use session::{new_from_config, new_from_config_with_di};
-pub use wiring::{ConfigDir, FrontendInjectorExt, HolonFrontendModule, LockedKeys};
+pub use session::new_from_config;
+pub use session::new_from_config_with_di;
+pub use wiring::ConfigDir;
+pub use wiring::FrontendInjectorExt;
+pub use wiring::HolonFrontendModule;
+pub use wiring::LockedKeys;

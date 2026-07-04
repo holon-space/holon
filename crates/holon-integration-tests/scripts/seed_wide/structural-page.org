@@ -1,0 +1,13 @@
+#+ID: structural-page
+* parent
+:PROPERTIES:
+:ID: parent
+:END:
+* c1
+:PROPERTIES:
+:ID: c1
+:END:
+* c2
+:PROPERTIES:
+:ID: c2
+:END:

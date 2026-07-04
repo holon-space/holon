@@ -7,15 +7,17 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use fluxdi::{Injector, Provider, Shared};
-use proptest::prelude::*;
-use proptest_state_machine::ReferenceStateMachine;
-
+use fluxdi::Injector;
+use fluxdi::Provider;
+use fluxdi::Shared;
 use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
 use holon_orgmode::OrgBlockExt;
+use proptest::prelude::*;
+use proptest_state_machine::ReferenceStateMachine;
 
-use super::reference_state::{ReferenceState, ShadowInterpreter};
+use super::reference_state::ReferenceState;
+use super::reference_state::ShadowInterpreter;
 
 /// Whether the PBT generator may produce mutations that overwrite the root
 /// layout (render-source content, layout headline content). The original
@@ -26,26 +28,28 @@ use super::reference_state::{ReferenceState, ShadowInterpreter};
 /// `reactive_view_model::tests::shared_data_cell_updates_propagate_to_state_toggle_child`).
 ///
 /// Custom `index.org` layouts that drop a sidebar (and layout-mutated panel
-/// render sources) are handled in the generator: `ref_state.region_predictable(region)`
-/// short-circuits `focusable_rendered_block_ids` so ClickBlock candidates only
+/// render sources) are handled in the generator:
+/// `ref_state.region_predictable(region)` short-circuits
+/// `focusable_rendered_block_ids` so ClickBlock candidates only
 /// arise for regions where ref_state can predict production's rendering.
 pub(crate) const LAYOUT_MUTATIONS_ENABLED: bool = true;
 
 /// Gate for `DragDropBlock` transition generation.
 ///
 /// Wiring:
-/// - `assets/default/types/block_profile.yaml` `editing` and `default`
-///   variants wrap each block in `column(row(draggable(icon), …), drop_zone())`.
+/// - `assets/default/types/block_profile.yaml` `editing` and `default` variants
+///   wrap each block in `column(row(draggable(icon), …), drop_zone())`.
 /// - `ViewKind::DropZone { op_name }` carries the dispatched op declaratively.
-/// - `UserDriver::drop_entity` overrides drive headless (shadow tree walk
-///   via `HeadlessInputRouter::block_contents`) and GPUI (real
-///   `MouseDown` → `MouseMove(pressed=Left)` → `MouseUp` events).
+/// - `UserDriver::drop_entity` overrides drive headless (shadow tree walk via
+///   `HeadlessInputRouter::block_contents`) and GPUI (real `MouseDown` →
+///   `MouseMove(pressed=Left)` → `MouseUp` events).
 ///
 /// Wiring complete (Apr 2026): block_profile draggable/drop_zone widgets
 /// now bind their `data` to the current row so `row_id()` returns the
 /// block's id. Headless `drop_entity` polls `block_contents` for both
-/// widgets to appear and bootstraps the router on first call. inv-editable-text-has-draggable is
-/// a hard panic if any focus-tree text block lacks a Draggable wrapper.
+/// widgets to appear and bootstraps the router on first call.
+/// inv-editable-text-has-draggable is a hard panic if any focus-tree text block
+/// lacks a Draggable wrapper.
 pub(crate) const DRAG_DROP_ENABLED: bool = true;
 
 /// Build a fresh, constant `ReferenceState` for the given [`Wiring`]. Used by
@@ -106,9 +110,9 @@ pub fn started_reference_state(wiring: holon_pbt_core::Wiring) -> ReferenceState
 /// substrate it implies (ADR 0004 Phase 9, part (a)). A manifest that includes
 /// the query-capable `Turso` adapter builds the historical Turso SUT; a
 /// Loro-only manifest (`Wiring::loro_backend()`) builds the no-Turso
-/// `LoroMemory` SUT (no `BackendEngine`; reads via `BlockQuerySource`, mutations
-/// via the Loro-native `OperationEngine`). This is what makes a slice's
-/// `wiring:` select its backend instead of always getting Turso.
+/// `LoroMemory` SUT (no `BackendEngine`; reads via `BlockQuerySource`,
+/// mutations via the Loro-native `OperationEngine`). This is what makes a
+/// slice's `wiring:` select its backend instead of always getting Turso.
 pub fn storage_selector_for_wiring(wiring: &holon_pbt_core::Wiring) -> holon::di::StorageSelector {
     if wiring
         .storage_adapters
@@ -136,15 +140,15 @@ pub struct ReferenceMachine;
 ///   `modified_stable_ids`) take the SHADOW primary's converged text — the
 ///   actual Loro merge outcome (concurrent-insert interleaving included),
 ///   predicted by the shadow instead of modeled or adopted from the SUT.
-/// - Inherited-at-AddPeer blocks the primary may have since deleted are
-///   NOT re-added — Loro's CRDT keeps primary-side deletes.
+/// - Inherited-at-AddPeer blocks the primary may have since deleted are NOT
+///   re-added — Loro's CRDT keeps primary-side deletes.
 /// - Peer-created blocks are stamped with a `sequence` AFTER the parent's
 ///   existing children, modeling Loro's append-at-end create (their tree
-///   fractional index sorts after every sibling the creating peer saw).
-///   Their order WITHIN one merge is CRDT-arbitrary (Loro breaks fi ties by
-///   op id = (lamport, peer id)), so it is stamped from the SHADOW primary's
-///   converged child order — the clock-padded shadow reproduces the op-id
-///   tie-break exactly (`clock_parity_spike`).
+///   fractional index sorts after every sibling the creating peer saw). Their
+///   order WITHIN one merge is CRDT-arbitrary (Loro breaks fi ties by op id =
+///   (lamport, peer id)), so it is stamped from the SHADOW primary's converged
+///   child order — the clock-padded shadow reproduces the op-id tie-break
+///   exactly (`clock_parity_spike`).
 pub(crate) fn merge_peer_blocks_into_primary(
     block_state: &mut super::reference_state::BlockState,
     peer_blocks: &[super::peer_ops::PeerBlock],
@@ -242,8 +246,8 @@ pub(crate) fn merge_peer_blocks_into_primary(
         for m in &members {
             assert!(
                 rank.contains_key(m.id()),
-                "created block {m} missing from the shadow's child order under \
-                 {parent_uri} (observed: {observed:?}) — shadow mesh desynced"
+                "created block {m} missing from the shadow's child order under {parent_uri} \
+                 (observed: {observed:?}) — shadow mesh desynced"
             );
         }
         let mut seqs: Vec<i64> = members
@@ -283,7 +287,7 @@ impl ReferenceStateMachine for ReferenceMachine {
         match transition.preconditions(state) {
             Validated::Good(()) => true,
             Validated::Fail(reasons) => {
-                crate::pbt::validation::record_rejection(transition.variant_name(), &reasons);
+                holon_pbt_core::validation::record_rejection(transition.variant_name(), &reasons);
                 false
             }
         }

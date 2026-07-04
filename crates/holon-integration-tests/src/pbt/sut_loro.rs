@@ -9,19 +9,23 @@ use std::fmt::Write;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::RwLock;
-
-use crate::assertions::normalize_block;
-use crate::pbt::retry::retry_until_ok;
-use crate::pbt::types::DocUriMap;
-use crate::test_environment::wait_for_loro_quiescence_on;
 use holon::api::CoreOperations;
-use holon::sync::{LoroDocumentStore, LoroSyncControllerHandle};
+use holon::sync::LoroDocumentStore;
+use holon::sync::LoroSyncControllerHandle;
 use holon_api::EntityUri;
 use holon_api::block::Block;
 use holon_loro::LoroBackend;
-use holon_pbt_core::capabilities::{PeerEditOp, SutLoro, TextOp};
-use holon_pbt_core::composition::{CapMap, CapProvider};
+use holon_pbt_core::capabilities::PeerEditOp;
+use holon_pbt_core::capabilities::SutLoro;
+use holon_pbt_core::capabilities::TextOp;
+use holon_pbt_core::composition::CapMap;
+use holon_pbt_core::composition::CapProvider;
+use holon_pbt_core::retry::retry_until_ok;
+use holon_pbt_core::types::DocUriMap;
+use tokio::sync::RwLock;
+
+use crate::assertions::normalize_block;
+use crate::test_environment::wait_for_loro_quiescence_on;
 
 /// Encapsulates Loro-specific PBT validation **and** ownership of the
 /// multi-peer sync surface. With stable IDs, blocks from the LoroTree already
@@ -32,6 +36,8 @@ use holon_pbt_core::composition::{CapMap, CapProvider};
 /// `doc_uri_map` (for resolving reference stable-ids to real Loro UUIDs).
 /// `E2ESut` keeps a one-line-per-method forwarding `impl SutLoro` that simply
 /// delegates here.
+// BLOCKED on Phase 1a: binds concrete ReferenceState/SutHandle — cannot
+// co-locate to holon-loro-testing until those are lifted to a shared crate.
 pub struct LoroSut {
     doc_store: Arc<RwLock<LoroDocumentStore>>,
     /// Loro-only peer instances for multi-instance sync testing.
@@ -199,9 +205,10 @@ impl LoroSut {
     }
 }
 
-// `?Send` because `LoroSut` is single-threaded (`RefCell` peers + `block_on`); no
-// `RefCell` borrow is ever held across an `.await` (the one `peers.push` is the final
-// synchronous statement of `apply_add_peer`; every indexed read is a short scoped borrow).
+// `?Send` because `LoroSut` is single-threaded (`RefCell` peers + `block_on`);
+// no `RefCell` borrow is ever held across an `.await` (the one `peers.push` is
+// the final synchronous statement of `apply_add_peer`; every indexed read is a
+// short scoped borrow).
 #[async_trait::async_trait(?Send)]
 impl SutLoro for LoroSut {
     async fn apply_add_peer(&self) {
@@ -336,9 +343,9 @@ impl SutLoro for LoroSut {
         &self,
         peer_idx: usize,
         block_id: &str,
-        op: &crate::pbt::transitions::TextOp,
+        op: &holon_pbt_core::capabilities::TextOp,
     ) {
-        use super::transitions::TextOp;
+        use holon_pbt_core::capabilities::TextOp;
         let peers = self.peers.borrow();
         let peer = &peers[peer_idx];
         let resolved_id = self.resolve_stable_id(block_id);
@@ -418,10 +425,9 @@ impl SutLoro for LoroSut {
     /// keep them separate. Until then this panics loudly if called.
     async fn apply_create_stale_peer(&self, _: usize) {
         unimplemented!(
-            "SutLoro::apply_create_stale_peer: lag_steps-based peer snapshots \
-             are not wired yet. The file-corruption variant lives on \
-             SutHandle::apply_create_stale_loro (org_filename, \
-             LoroCorruptionType) — a different model. Wire in Phase 7 once the \
+            "SutLoro::apply_create_stale_peer: lag_steps-based peer snapshots are not wired yet. \
+             The file-corruption variant lives on SutHandle::apply_create_stale_loro \
+             (org_filename, LoroCorruptionType) — a different model. Wire in Phase 7 once the \
              semantics are reconciled."
         )
     }
@@ -430,15 +436,17 @@ impl SutLoro for LoroSut {
 /// `LoroSut` IS the composed peer-mesh surface: registering it on a `CapMap`
 /// hosts the `SutLoro` cap, so a Loro-only composed SUT can drive the peer
 /// transitions (`AddPeer`/`PeerEdit`/`SyncWithPeer`/`MergeFromPeer`) — the
-/// loro-only fast-config payoff. The `&self` peer methods (PCG-4) make `SutLoro`
-/// dyn-compatible, so the one `Arc` backs the cap through the adapter.
+/// loro-only fast-config payoff. The `&self` peer methods (PCG-4) make
+/// `SutLoro` dyn-compatible, so the one `Arc` backs the cap through the
+/// adapter.
 impl CapProvider for LoroSut {
     fn register(self: Arc<Self>, caps: &mut CapMap) {
         caps.insert(self as Arc<dyn SutLoro>);
     }
 }
 
-/// Build a diagnostic string showing exactly what differs between Loro and reference.
+/// Build a diagnostic string showing exactly what differs between Loro and
+/// reference.
 fn build_diagnostic(loro: &[Block], reference: &[Block]) -> String {
     let mut out = String::new();
 

@@ -1,8 +1,9 @@
-//! Persistent reactive ViewModel — the primary representation for all frontends.
+//! Persistent reactive ViewModel — the primary representation for all
+//! frontends.
 //!
-//! Each node owns reactive inputs (`Mutable<RenderExpr>`, `Mutable<Arc<DataRow>>`)
-//! and self-interprets when any input changes. Changes push DOWN the tree —
-//! no external tree walks, no reconciliation.
+//! Each node owns reactive inputs (`Mutable<RenderExpr>`,
+//! `Mutable<Arc<DataRow>>`) and self-interprets when any input changes. Changes
+//! push DOWN the tree — no external tree walks, no reconciliation.
 //!
 //! ```text
 //! (expr, data) → interpret → display → frontend subscribes
@@ -13,14 +14,21 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use futures_signals::signal::{Mutable, ReadOnlyMutable};
-use holon_api::render_types::{OperationWiring, RenderExpr};
+use futures_signals::signal::Mutable;
+use futures_signals::signal::ReadOnlyMutable;
+use holon_api::EntityName;
+use holon_api::EntityUri;
+use holon_api::Value;
+use holon_api::render_types::OperationWiring;
+use holon_api::render_types::RenderExpr;
 use holon_api::widget_spec::DataRow;
-use holon_api::{EntityName, EntityUri, Value};
 
 use crate::input_trigger::InputTrigger;
 use crate::render_context::LayoutHint;
-use crate::view_model::{DrawerMode, LazyChildren, ViewKind, ViewModel};
+use crate::view_model::DrawerMode;
+use crate::view_model::LazyChildren;
+use crate::view_model::ViewKind;
+use crate::view_model::ViewModel;
 
 /// Self-interpretation function stored on each node.
 ///
@@ -35,8 +43,8 @@ pub type InterpretFn =
 // ── CollectionData (builder-time helper) ───────────────────────────────
 
 /// Builder-time helper for the `widget_builder!` macro's Collection extraction.
-/// NOT part of the persistent node structure — just plumbing between the macro's
-/// extraction code and the manual builder body.
+/// NOT part of the persistent node structure — just plumbing between the
+/// macro's extraction code and the manual builder body.
 pub enum CollectionData {
     Streaming {
         item_template: RenderExpr,
@@ -64,8 +72,8 @@ impl CollectionData {
         match self {
             Self::Static { items } => items,
             Self::Streaming { .. } => panic!(
-                "CollectionData::into_static_items called on a Streaming variant — \
-                 this builder does not support streaming collections."
+                "CollectionData::into_static_items called on a Streaming variant — this builder \
+                 does not support streaming collections."
             ),
         }
     }
@@ -182,7 +190,8 @@ pub fn variants_match(a: Option<CollectionVariant>, b: Option<CollectionVariant>
     }
 }
 
-/// Extract the `item_template` (or `item`) named arg from a collection expression.
+/// Extract the `item_template` (or `item`) named arg from a collection
+/// expression.
 pub fn extract_item_template(collection_expr: &RenderExpr) -> Option<RenderExpr> {
     match collection_expr {
         RenderExpr::FunctionCall { args, .. } => args
@@ -294,13 +303,14 @@ impl LazyReactiveSlot {
 /// @c4 code
 ///
 /// Each node owns its render expression and data row as reactive Mutables.
-/// When either changes, the node self-interprets and pushes updates to children.
-/// The **View** layer — the GPUI and TUI render functions in the frontend
-/// crates — observes these Mutables and rebuilds the platform widgets, so the
-/// same ViewModel tree drives every frontend.
+/// When either changes, the node self-interprets and pushes updates to
+/// children. The **View** layer — the GPUI and TUI render functions in the
+/// frontend crates — observes these Mutables and rebuilds the platform widgets,
+/// so the same ViewModel tree drives every frontend.
 ///
-/// This replaces the old snapshot-based `ReactiveViewModel` + `ReactiveViewKind`
-/// enum. Widget type is determined by the `expr` function name, not an enum tag.
+/// This replaces the old snapshot-based `ReactiveViewModel` +
+/// `ReactiveViewKind` enum. Widget type is determined by the `expr` function
+/// name, not an enum tag.
 pub struct ReactiveViewModel {
     /// The render expression this node was built from.
     /// For leaf nodes: `text(...)`, `badge(...)`, etc.
@@ -364,6 +374,13 @@ pub struct ReactiveViewModel {
     /// `props` on `data` changes). Aborted when the node is dropped so
     /// removed rows don't leak background work.
     pub subscriptions: Vec<DropTask>,
+
+    /// Which display occurrence of the row this node renders (ADR 0015 rule 4:
+    /// node metadata, NEVER an id-infix). `Canonical` for every real row; the
+    /// collection drivers stamp `Placed` onto the display-placed occurrence a
+    /// row's key carries so GPUI can suffix its per-row identity keys without
+    /// the occurrence ever touching the `EntityUri`.
+    pub occurrence: holon_api::Occurrence,
 }
 
 /// A `tokio::task::JoinHandle<()>` that aborts the task on drop.
@@ -416,7 +433,8 @@ impl ReactiveViewModel {
     /// Block expansion has no engine representation — it is per-widget view
     /// state (the GPUI chevron's `on_mouse_down` flips this very gate, and
     /// `Block` documents "collapsed is NOT stored ... kept locally"). This is
-    /// the single walk shared by the headless test gate (`set_expand_toggle_gate`)
+    /// the single walk shared by the headless test gate
+    /// (`set_expand_toggle_gate`)
     /// and `ReactiveEngineDriver::set_block_expanded`, so both poke the exact
     /// node the production handler does. Returns a clone of the gate handle
     /// (cheap — `Mutable` is `Arc`-backed).
@@ -492,8 +510,9 @@ impl ReactiveViewModel {
     /// expand states, and GPUI entity caches survive. Non-matching children
     /// are adopted from the fresh tree.
     ///
-    /// Use this when you own the root node (e.g. `ReactiveShell::current_tree`).
-    /// For the `Arc<Self>` case use `with_update`.
+    /// Use this when you own the root node (e.g.
+    /// `ReactiveShell::current_tree`). For the `Arc<Self>` case use
+    /// `with_update`.
     pub fn apply_update(&mut self, fresh: &ReactiveViewModel) {
         self.patch_mutables(fresh);
         self.children = Self::push_down_children(&self.children, &fresh.children);
@@ -531,13 +550,16 @@ impl ReactiveViewModel {
             render_ctx: fresh.render_ctx.clone(),
             interpret_fn: self.interpret_fn.clone(),
             subscriptions: Vec::new(),
+            // Occurrence is stable node identity — preserve across data updates.
+            occurrence: self.occurrence.clone(),
         }
     }
 
     /// Push updates down to children, preserving matching nodes.
     ///
     /// At each position: same widget name → update in place + recurse;
-    /// different widget name → adopt fresh. Extra fresh → adopt. Extra old → drop.
+    /// different widget name → adopt fresh. Extra fresh → adopt. Extra old →
+    /// drop.
     fn push_down_children(
         old: &[Arc<ReactiveViewModel>],
         fresh: &[Arc<ReactiveViewModel>],
@@ -577,6 +599,7 @@ impl ReactiveViewModel {
                             render_ctx: fresh_child.render_ctx.clone(),
                             interpret_fn: old_child.interpret_fn.clone(),
                             subscriptions: Vec::new(),
+                            occurrence: old_child.occurrence.clone(),
                             ..ReactiveViewModel::empty()
                         }));
                     } else {
@@ -758,7 +781,8 @@ impl ReactiveViewModel {
 // ── Snapshot ───────────────────────────────────────────────────────────
 
 impl ReactiveViewModel {
-    /// Materialize into a static `ViewModel` by reading all current signal values.
+    /// Materialize into a static `ViewModel` by reading all current signal
+    /// values.
     pub fn snapshot(&self) -> ViewModel {
         let expr = self.expr.get_cloned();
         let data = self.data.get_cloned();
@@ -769,10 +793,12 @@ impl ReactiveViewModel {
             operations: self.operations.clone(),
             triggers: self.triggers.clone(),
             layout_hint: self.layout_hint,
+            occurrence: self.occurrence.clone(),
         }
     }
 
-    /// Materialize into a static `ViewModel`, resolving `LiveBlock` placeholders.
+    /// Materialize into a static `ViewModel`, resolving `LiveBlock`
+    /// placeholders.
     pub fn snapshot_resolved(&self, resolve_block: &dyn Fn(&EntityUri) -> ViewModel) -> ViewModel {
         let expr = self.expr.get_cloned();
         let data = self.data.get_cloned();
@@ -783,6 +809,7 @@ impl ReactiveViewModel {
             operations: self.operations.clone(),
             triggers: self.triggers.clone(),
             layout_hint: self.layout_hint,
+            occurrence: self.occurrence.clone(),
         }
     }
 
@@ -1021,7 +1048,8 @@ impl ReactiveViewModel {
             "view_mode_switcher" => {
                 let entity_uri = self
                     .prop_str("entity_uri")
-                    // ALLOW(entity_uri_from_raw): prop_str('entity_uri') render-spec node prop value
+                    // ALLOW(entity_uri_from_raw): prop_str('entity_uri') render-spec node prop
+                    // value
                     .map(|s| EntityUri::from_raw(&s))
                     // ALLOW(entity_uri_from_raw): hardcoded 'unknown' sentinel default literal
                     .unwrap_or_else(|| EntityUri::from_raw("unknown"));
@@ -1150,6 +1178,7 @@ impl Default for ReactiveViewModel {
             render_ctx: None,
             interpret_fn: None,
             subscriptions: Vec::new(),
+            occurrence: holon_api::Occurrence::Canonical,
         }
     }
 }
@@ -1182,6 +1211,19 @@ impl ReactiveViewModel {
         self
     }
 
+    /// Stamp the display-occurrence coordinate this node renders (ADR 0015
+    /// rule 4). Canonical nodes leave this at its default.
+    pub fn with_occurrence(mut self, occurrence: holon_api::Occurrence) -> Self {
+        self.occurrence = occurrence;
+        self
+    }
+
+    /// The display occurrence this node renders. `Canonical` unless a driver
+    /// stamped a display placement.
+    pub fn occurrence(&self) -> &holon_api::Occurrence {
+        &self.occurrence
+    }
+
     pub fn with_layout_hint(mut self, hint: LayoutHint) -> Self {
         self.layout_hint = hint;
         self
@@ -1204,7 +1246,8 @@ impl ReactiveViewModel {
         }
     }
 
-    // ALLOW(unused_param): _widget kept in signature for caller readability and future use
+    // ALLOW(unused_param): _widget kept in signature for caller readability and
+    // future use
     pub fn error(_widget: impl Into<String>, message: impl Into<String>) -> Self {
         let mut props = HashMap::new();
         props.insert("message".to_string(), Value::String(message.into()));
@@ -1538,11 +1581,14 @@ impl crate::render_interpreter::WithEntity for ReactiveViewModel {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use futures_signals::signal::Mutable;
-    use holon_api::{RenderExpr, Value};
     use std::collections::HashMap;
     use std::sync::Arc;
+
+    use futures_signals::signal::Mutable;
+    use holon_api::RenderExpr;
+    use holon_api::Value;
+
+    use super::*;
 
     fn make_data(task_state: &str) -> Arc<DataRow> {
         Arc::new(
@@ -1694,9 +1740,10 @@ mod tests {
 
     #[test]
     fn click_intent_builds_from_click_triggered_op() {
-        use holon_api::render_types::{
-            ClickModifiers, OperationDescriptor, OperationWiring, Trigger,
-        };
+        use holon_api::render_types::ClickModifiers;
+        use holon_api::render_types::OperationDescriptor;
+        use holon_api::render_types::OperationWiring;
+        use holon_api::render_types::Trigger;
 
         let mut bound = HashMap::new();
         bound.insert("region".to_string(), Value::String("main".into()));
@@ -1726,9 +1773,10 @@ mod tests {
 
     #[test]
     fn intent_for_modifiers_disambiguates_shift_from_plain() {
-        use holon_api::render_types::{
-            ClickModifiers, OperationDescriptor, OperationWiring, Trigger,
-        };
+        use holon_api::render_types::ClickModifiers;
+        use holon_api::render_types::OperationDescriptor;
+        use holon_api::render_types::OperationWiring;
+        use holon_api::render_types::Trigger;
 
         let mut node = ReactiveViewModel::default();
         node.operations.push(OperationWiring {
@@ -1770,7 +1818,9 @@ mod tests {
 
     #[test]
     fn click_intent_ignores_keychord_triggered_ops() {
-        use holon_api::render_types::{OperationDescriptor, OperationWiring, Trigger};
+        use holon_api::render_types::OperationDescriptor;
+        use holon_api::render_types::OperationWiring;
+        use holon_api::render_types::Trigger;
 
         let mut node = ReactiveViewModel::default();
         node.operations.push(OperationWiring {
@@ -1798,8 +1848,8 @@ mod tests {
     //   1. Closed gate → no materialisation.
     //   2. First open → thunk fires exactly once.
     //   3. Re-snapshot while open → cache hit, thunk does not re-fire.
-    //   4. Close again → cache preserved (subscriptions stay live; this is
-    //      the conscious "no suspend-on-collapse" choice).
+    //   4. Close again → cache preserved (subscriptions stay live; this is the
+    //      conscious "no suspend-on-collapse" choice).
     //   5. Re-open → cache hit, still no thunk re-fire.
 
     fn counting_thunk() -> (

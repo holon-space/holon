@@ -1,6 +1,6 @@
 use super::prelude::*;
-use crate::shadow_builders::tree::flat_tree_items;
 use crate::render_interpreter::shared_tree_build;
+use crate::shadow_builders::tree::flat_tree_items;
 
 holon_macros::widget_builder! {
     raw fn outline(ba: BA<'_>) -> ViewModel {
@@ -28,7 +28,8 @@ holon_macros::widget_builder! {
                         flat.push((vc, 0, std::collections::HashMap::new()));
                     }
                 }
-                ViewModel::static_collection("outline", flat_tree_items(flat), 4.0)
+                let items = weave_advice_into_items(&ba, flat_tree_items(flat));
+                ViewModel::static_collection("outline", items, 4.0)
             }
         }
     }

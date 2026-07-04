@@ -1,12 +1,12 @@
 //! **Loro** seam adapters for the backend-blind file-sync controller.
 //!
 //! ADR 0004 Phase 9: the file-sync controller speaks only to the
-//! [`BlockReader`], [`DocumentManager`], and [`BlockOrdering`] seams. These three
-//! adapters implement those seams directly against a [`LoroBackend`] tree — no
-//! Turso, no `QueryableCache`, no cell registry, no command bus. They are the
-//! Loro counterparts of `CacheBlockReader` / `LiveDocumentManager` (Turso) in
-//! [`crate::turso_seams`] and of the `Upstream` branch of `impl BlockOrdering
-//! for SqlBlockOperations`.
+//! [`BlockReader`], [`DocumentManager`], and [`BlockOrdering`] seams. These
+//! three adapters implement those seams directly against a [`LoroBackend`] tree
+//! — no Turso, no `QueryableCache`, no cell registry, no command bus. They are
+//! the Loro counterparts of `CacheBlockReader` / `LiveDocumentManager` (Turso)
+//! in [`crate::turso_seams`] and of the `Upstream` branch of `impl
+//! BlockOrdering for SqlBlockOperations`.
 //!
 //! These are registered as the `dyn BlockReader` / `dyn DocumentManager` /
 //! `dyn BlockOrdering` providers in the no-Turso container; resolving
@@ -23,7 +23,8 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -32,17 +33,20 @@ use async_trait::async_trait;
 use holon::api::repository::CoreOperations;
 use holon::api::types::Traversal;
 use holon::sync::LoroDocumentStore;
+use holon_api::BlockContent;
+use holon_api::Value;
 use holon_api::block::Block;
 use holon_api::capability::Consolidator;
 use holon_api::entity_uri::EntityUri;
-use holon_api::types::{ContentType, Tags};
-use holon_api::{BlockContent, Value};
+use holon_api::types::ContentType;
+use holon_api::types::Tags;
 use holon_core::block_ordering::BlockOrdering;
 use holon_core::traits::Result as BlockOrderingResult;
+use holon_filesystem::AliasRegistrar;
+use holon_filesystem::BlockReader;
+use holon_filesystem::DocumentManager;
 use holon_loro::LoroBackend;
 use tokio::sync::RwLock;
-
-use holon_filesystem::{AliasRegistrar, BlockReader, DocumentManager};
 
 /// Box a Loro `ApiError` (or any error) into the `BlockOrdering` error type,
 /// preserving the full chain via `{e:#}` — mirrors `SqlBlockOperations`.
@@ -66,8 +70,9 @@ fn block_content_for(doc: &Block) -> BlockContent {
     }
 }
 
-/// Parse the `tags`/`requires` edge field from a `build_block_params` map value,
-/// which the org reconciler emits either as a `Value::Array` or a CSV string.
+/// Parse the `tags`/`requires` edge field from a `build_block_params` map
+/// value, which the org reconciler emits either as a `Value::Array` or a CSV
+/// string.
 fn parse_string_list(value: &Value) -> BlockOrderingResult<Vec<String>> {
     match value {
         Value::Array(items) => Ok(items
@@ -95,8 +100,9 @@ impl LoroBlockReader {
 
     /// Append `parent`'s subtree to `out` in pre-order, siblings in Loro tree
     /// order, **excluding Page-tagged blocks** (and not descending into them):
-    /// a Page is a sub-document boundary, mirroring the Turso recursive CTE that
-    /// `LEFT JOIN block_tags ... tag='Page' WHERE bt.block_id IS NULL`.
+    /// a Page is a sub-document boundary, mirroring the Turso recursive CTE
+    /// that `LEFT JOIN block_tags ... tag='Page' WHERE bt.block_id IS
+    /// NULL`.
     fn collect_subtree<'a>(
         &'a self,
         parent: &'a EntityUri,
@@ -124,6 +130,17 @@ impl BlockReader for LoroBlockReader {
         let mut out = Vec::new();
         self.collect_subtree(doc_id, &mut out).await?;
         Ok(out)
+    }
+
+    async fn get_block_authoritative(&self, id: &EntityUri) -> AnyhowResult<Option<Block>> {
+        // The Loro tree is the write authority (no matview/`block_raw` split);
+        // a direct node read is the authoritative O(1) point lookup used by the
+        // org-writeback incremental cache's per-edit refresh.
+        match self.backend.get_block(id.as_str()).await {
+            Ok(block) => Ok(Some(block)),
+            Err(holon_api::ApiError::BlockNotFound { .. }) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     async fn iter_documents_with_blocks(&self) -> AnyhowResult<Vec<(EntityUri, Vec<Block>)>> {
@@ -168,7 +185,8 @@ impl BlockReader for LoroBlockReader {
         true
     }
 
-    // find_foreign_blocks: trait default over iter_documents_with_blocks is correct.
+    // find_foreign_blocks: trait default over iter_documents_with_blocks is
+    // correct.
 }
 
 // ============================================================================
@@ -272,7 +290,8 @@ impl LoroBlockOrdering {
             .list_children(parent_id.as_str())
             .await
             .map_err(boxed)?;
-        // ALLOW(entity_uri_from_raw): ids from backend.list_children() (Vec<String> Loro output)
+        // ALLOW(entity_uri_from_raw): ids from backend.list_children() (Vec<String>
+        // Loro output)
         Ok(ids.iter().map(|s| EntityUri::from_raw(s)).collect())
     }
 
@@ -374,17 +393,19 @@ impl BlockOrdering for LoroBlockOrdering {
         _: &HashMap<String, Value>,
         _: &Tags,
         _: &[EntityUri],
+        _: &[EntityUri],
     ) -> BlockOrderingResult<bool> {
         Ok(false)
     }
 
     /// The single org→block write seam in the degraded/Store model. Both the
     /// controller's `"create"` and `"update"` ops land here (see
-    /// `file_sync_controller.rs:744`), so this **upserts**: a block the Loro tree
-    /// doesn't have yet is created (with its typed content under `parent_id`),
-    /// an existing one has its content replaced; either way tags/requires/
-    /// properties are written and the block is positioned via `place`. Writes go
-    /// straight to `LoroBackend` (no cell registry, no SQL, no command bus).
+    /// `file_sync_controller.rs:744`), so this **upserts**: a block the Loro
+    /// tree doesn't have yet is created (with its typed content under
+    /// `parent_id`), an existing one has its content replaced; either way
+    /// tags/requires/ properties are written and the block is positioned
+    /// via `place`. Writes go straight to `LoroBackend` (no cell registry,
+    /// no SQL, no command bus).
     async fn update_in_tree(
         &self,
         mut params: holon_api::StorageEntity,
@@ -428,6 +449,12 @@ impl BlockOrdering for LoroBlockOrdering {
             Some(v) => Some(parse_string_list(&v).map_err(|e| boxed(format!("'requires': {e}")))?),
             None => None,
         };
+        let advice_suppressed = match params.remove("advice_suppressed") {
+            Some(v) => Some(
+                parse_string_list(&v).map_err(|e| boxed(format!("'advice_suppressed': {e}")))?,
+            ),
+            None => None,
+        };
         // Everything remaining is a property.
         let properties = params;
 
@@ -438,7 +465,8 @@ impl BlockOrdering for LoroBlockOrdering {
             BlockContent::text(content.clone().unwrap_or_default())
         };
 
-        // ALLOW(entity_uri_from_raw): id/parent_id/after_id from operation param HashMap<String,Value> bag
+        // ALLOW(entity_uri_from_raw): id/parent_id/after_id from operation param
+        // HashMap<String,Value> bag
         let block_uri = EntityUri::from_raw(&id);
         let exists = self.backend.get_block(&id).await.is_ok();
         if !exists {
@@ -447,7 +475,8 @@ impl BlockOrdering for LoroBlockOrdering {
                 .ok_or_else(|| boxed("update_in_tree: create requires a 'parent_id'"))?;
             self.backend
                 .create_block(
-                    // ALLOW(entity_uri_from_raw): id/parent_id/after_id from operation param HashMap<String,Value> bag
+                    // ALLOW(entity_uri_from_raw): id/parent_id/after_id from operation param
+                    // HashMap<String,Value> bag
                     EntityUri::from_raw(&parent),
                     built_content,
                     Some(block_uri.clone()),
@@ -480,6 +509,22 @@ impl BlockOrdering for LoroBlockOrdering {
                 .await
                 .map_err(boxed)?;
         }
+        if let Some(advice_suppressed) = advice_suppressed {
+            let advice_suppressed: Vec<EntityUri> = advice_suppressed
+                .into_iter()
+                .map(|r| {
+                    EntityUri::parse_owned(r).map_err(|e| {
+                        boxed(format!(
+                            "update_in_tree: invalid 'advice_suppressed' URI: {e}"
+                        ))
+                    })
+                })
+                .collect::<Result<_, _>>()?;
+            self.backend
+                .set_block_advice_suppressed(&id, &advice_suppressed)
+                .await
+                .map_err(boxed)?;
+        }
         if !properties.is_empty() {
             // LoroBackend's property maps are String-keyed (serde surface);
             // re-key the Arc<str> param bag at this boundary.
@@ -495,9 +540,11 @@ impl BlockOrdering for LoroBlockOrdering {
 
         match (parent_id, after) {
             (Some(parent), Some(after_id)) => {
-                // ALLOW(entity_uri_from_raw): id/parent_id/after_id from operation param HashMap<String,Value> bag
+                // ALLOW(entity_uri_from_raw): id/parent_id/after_id from operation param
+                // HashMap<String,Value> bag
                 let parent_uri = EntityUri::from_raw(&parent);
-                // ALLOW(entity_uri_from_raw): id/parent_id/after_id from operation param HashMap<String,Value> bag
+                // ALLOW(entity_uri_from_raw): id/parent_id/after_id from operation param
+                // HashMap<String,Value> bag
                 let after_uri = EntityUri::from_raw(&after_id);
                 self.place(&block_uri, &parent_uri, Some(&after_uri))
                     .await?;
@@ -505,7 +552,8 @@ impl BlockOrdering for LoroBlockOrdering {
             // No recorded predecessor: place as first child under the parent;
             // the org reconciler's disk-order replay finalises sibling order.
             (Some(parent), None) => {
-                // ALLOW(entity_uri_from_raw): id/parent_id/after_id from operation param HashMap<String,Value> bag
+                // ALLOW(entity_uri_from_raw): id/parent_id/after_id from operation param
+                // HashMap<String,Value> bag
                 let parent_uri = EntityUri::from_raw(&parent);
                 self.place(&block_uri, &parent_uri, None).await?;
             }
@@ -524,7 +572,8 @@ impl BlockOrdering for LoroBlockOrdering {
 
     /// No separate upstream consolidator: the Loro tree is the store AND the
     /// order authority, written directly by `update_in_tree`. There is no
-    /// downstream sink projection to flush to (cf. `file_sync_controller.rs:988`).
+    /// downstream sink projection to flush to (cf.
+    /// `file_sync_controller.rs:988`).
     fn has_upstream_consolidator(&self) -> bool {
         false
     }
@@ -532,16 +581,12 @@ impl BlockOrdering for LoroBlockOrdering {
     fn consolidator(&self) -> Consolidator {
         Consolidator::Store
     }
-
-    /// Loro owns the order key; there is no SQL `sort_key` sink to project to.
-    async fn project_sort_keys(&self, _: &[EntityUri]) -> BlockOrderingResult<()> {
-        Ok(())
-    }
 }
 
 /// `AliasRegistrar` backed by `LoroDocumentStore` — registers and resolves the
 /// `doc_id ↔ path` aliases the file-sync controller needs. Must share the same
-/// `Arc<RwLock<LoroDocumentStore>>` as the other Loro seams / `LoroBlockOperations`.
+/// `Arc<RwLock<LoroDocumentStore>>` as the other Loro seams /
+/// `LoroBlockOperations`.
 pub struct LoroAliasRegistrar {
     pub doc_store: Arc<RwLock<LoroDocumentStore>>,
 }
@@ -568,8 +613,10 @@ mod order_minting_type_level {
     //! key-minting method. The former placeholder `new_child_anchor` that
     //! returned a `default_sort_key()` here is gone and cannot be re-added
     //! without also (illegally) implementing `OrderKeyMinting` for a Loro seam.
+    use holon_core::block_ordering::BlockOrdering;
+    use holon_core::block_ordering::OrderKeyMinting;
+
     use super::LoroBlockOrdering;
-    use holon_core::block_ordering::{BlockOrdering, OrderKeyMinting};
 
     // Positive: the Loro seam IS a positional ordering provider.
     fn _is_block_ordering(x: &LoroBlockOrdering) -> &dyn BlockOrdering {

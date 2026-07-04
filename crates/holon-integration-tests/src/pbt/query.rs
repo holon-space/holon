@@ -1,15 +1,21 @@
 //! Language-neutral query representation for PBT testing.
 //!
-//! `TestQuery` compiles to PRQL, SQL, or GQL and evaluates against the reference model.
-//! Uses `holon_api::Predicate` directly — no separate TestPredicate type.
+//! `TestQuery` compiles to PRQL, SQL, or GQL and evaluates against the
+//! reference model. Uses `holon_api::Predicate` directly — no separate
+//! TestPredicate type.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::collections::HashMap;
 
+use holon_api::EntityUri;
+use holon_api::QueryLanguage;
+use holon_api::Value;
 use holon_api::block::Block;
 use holon_api::predicate::Predicate;
-use holon_api::{EntityUri, QueryLanguage, Value};
 
-/// Backward-compat alias — old code that references `TestPredicate` still compiles.
+/// Backward-compat alias — old code that references `TestPredicate` still
+/// compiles.
 pub type TestPredicate = Predicate;
 
 /// A watched query specification: query + language.
@@ -44,14 +50,21 @@ pub enum QuerySource {
     /// Navigation-blind: bound to the layout block that owns the query.
     DirectChildren { context: EntityUri },
     /// Transitive descendants (depth in `min_depth..=max_depth`) of ANY block —
-    /// GQL `MATCH (root:block)<-[:CHILD_OF*min..max]-(d:block) RETURN d` with an
-    /// unbound root. Navigation-blind. `max_depth == 0` means unbounded.
+    /// GQL `MATCH (root:block)<-[:CHILD_OF*min..max]-(d:block) RETURN d` with
+    /// an unbound root. Navigation-blind. `max_depth == 0` means unbounded.
     DescendantsOfAny { min_depth: u32, max_depth: u32 },
     /// Navigation-aware: descendants (including self, depth `0..=max_depth`) of
     /// the focus-root(s) for `region`. The default layout's panel form
     /// (`MATCH (fr:focus_root),(root:block)<-[:CHILD_OF*0..max]-(d:block)
     /// WHERE fr.region = R AND root.id = fr.root_id RETURN d`).
     FocusRootDescendants { region: String, max_depth: u32 },
+    /// The production seeded left-sidebar watch from
+    /// `assets/default/index.org`: every page block except the
+    /// `__default__` seed page. SQL-only — `SELECT b.* FROM block b JOIN
+    /// block_tags bt ON bt.block_id = b.id WHERE bt.tag = 'Page' AND b.id
+    /// != 'block:__default__'`. No PRQL/GQL surface (the sidebar is
+    /// authored in holon_sql).
+    PageBlocks,
 }
 
 impl Default for QuerySource {
@@ -252,6 +265,9 @@ impl TestQuery {
             QuerySource::DirectChildren { .. } => "from children".to_string(),
             QuerySource::DescendantsOfAny { .. } => "from descendants".to_string(),
             QuerySource::FocusRootDescendants { .. } => "from focused_children".to_string(),
+            QuerySource::PageBlocks => {
+                unreachable!("PageBlocks is SQL-only (seeded sidebar watch)")
+            }
         };
         let cols = self.columns.join(", ");
         let mut q = format!("{from} | select {{{cols}}} ");
@@ -261,7 +277,38 @@ impl TestQuery {
         q
     }
 
+    /// The seeded-sidebar watch SQL over `table` (`block` for the matview
+    /// read-path, `block_raw` for the lag-classifier truth-path). Reproduces
+    /// the production `index.org` left-sidebar query, projecting
+    /// `self.columns` qualified with the `b.` alias (both tables carry
+    /// `id`, so the JOIN needs disambiguation). Single source for both
+    /// [`to_sql`](Self::to_sql) and
+    /// [`to_block_raw_sql`](Self::to_block_raw_sql).
+    fn page_blocks_sql(&self, table: &str) -> String {
+        let cols = self
+            .columns
+            .iter()
+            .map(|c| format!("b.{c}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut wheres = vec![
+            "bt.tag = 'Page'".to_string(),
+            format!(
+                "b.id != {}",
+                value_to_sql_literal(&Value::String("block:__default__".to_string()))
+            ),
+        ];
+        wheres.extend(self.predicates.iter().map(pred_to_sql_where));
+        format!(
+            "SELECT {cols} FROM {table} b JOIN block_tags bt ON bt.block_id = b.id WHERE {}",
+            wheres.join(" AND ")
+        )
+    }
+
     pub fn to_sql(&self) -> String {
+        if let QuerySource::PageBlocks = &self.source {
+            return self.page_blocks_sql("block");
+        }
         let cols = self.columns.join(", ");
         let mut wheres: Vec<String> = Vec::new();
         let from = match &self.source {
@@ -279,6 +326,7 @@ impl TestQuery {
                 // watched-query path (always AllBlocks/DirectChildren).
                 "block".to_string()
             }
+            QuerySource::PageBlocks => unreachable!("handled by early return above"),
         };
         let mut q = format!("SELECT {cols} FROM {from}");
         wheres.extend(self.predicates.iter().map(pred_to_sql_where));
@@ -290,9 +338,10 @@ impl TestQuery {
     }
 
     /// SQL truth-check variant: reads from `block_raw` (the write-side base
-    /// table) instead of the `block` matview. Used by inv-watch-rows-match-ref's lag classifier
-    /// to distinguish a CDC delivery race (matview state correct, stream
-    /// stale) from a real write-pipeline divergence.
+    /// table) instead of the `block` matview. Used by
+    /// inv-watch-rows-match-ref's lag classifier to distinguish a CDC
+    /// delivery race (matview state correct, stream stale) from a real
+    /// write-pipeline divergence.
     ///
     /// `block` is a matview hydrated from `block_raw` + junction tables for
     /// `tags`/`requires`. For predicates that don't touch the hydrated
@@ -300,6 +349,11 @@ impl TestQuery {
     /// IDs returned by `block_raw` and `block` are identical, so this is a
     /// safe truth source.
     pub fn to_block_raw_sql(&self) -> String {
+        if let QuerySource::PageBlocks = &self.source {
+            // block_tags is a base table in both wirings, so the seeded-sidebar
+            // JOIN reads straight from `block_raw`.
+            return self.page_blocks_sql("block_raw");
+        }
         let cols = self.columns.join(", ");
         let mut q = format!("SELECT {cols} FROM block_raw");
         let wheres: Vec<String> = self.predicates.iter().map(pred_to_sql_where).collect();
@@ -317,7 +371,8 @@ impl TestQuery {
             QuerySource::AllBlocks => ("MATCH (n:block)".to_string(), "n"),
             QuerySource::DirectChildren { context } => (
                 format!(
-                    "MATCH (root:block)<-[:CHILD_OF]-(d:block) WHERE root.id = {} AND d.content_type != 'source'",
+                    "MATCH (root:block)<-[:CHILD_OF]-(d:block) WHERE root.id = {} AND \
+                     d.content_type != 'source'",
                     value_to_sql_literal(&Value::String(context.as_str().to_string()))
                 ),
                 "d",
@@ -331,10 +386,14 @@ impl TestQuery {
             ),
             QuerySource::FocusRootDescendants { region, max_depth } => (
                 format!(
-                    "MATCH (fr:focus_root), (root:block)<-[:CHILD_OF*0..{max_depth}]-(d:block) WHERE fr.region = '{region}' AND root.id = fr.root_id"
+                    "MATCH (fr:focus_root), (root:block)<-[:CHILD_OF*0..{max_depth}]-(d:block) \
+                     WHERE fr.region = '{region}' AND root.id = fr.root_id"
                 ),
                 "d",
             ),
+            QuerySource::PageBlocks => {
+                unreachable!("PageBlocks is SQL-only (seeded sidebar watch)")
+            }
         };
         let returns = self
             .columns
@@ -375,9 +434,10 @@ impl TestQuery {
     /// WHOLE rows (`from children`, `RETURN d`, `SELECT *`) rather than a fixed
     /// column projection — render templates read columns beyond the canonical
     /// six (`task_state`, `properties`, …). The row-selection (FROM/WHERE/
-    /// traversal) is identical to `compile_for`, so the rendered SET is the same
-    /// (pinned by the query-equivalence PBT). The reference recovers the
-    /// `QuerySource` from the emitted string via [`QuerySource::recognize`].
+    /// traversal) is identical to `compile_for`, so the rendered SET is the
+    /// same (pinned by the query-equivalence PBT). The reference recovers
+    /// the `QuerySource` from the emitted string via
+    /// [`QuerySource::recognize`].
     pub fn compile_layout_for(&self, lang: QueryLanguage) -> (String, QueryLanguage) {
         let q = match (&self.source, lang) {
             (QuerySource::AllBlocks, QueryLanguage::HolonPrql) => "from block".to_string(),
@@ -393,7 +453,8 @@ impl TestQuery {
                 value_to_sql_literal(&Value::String(context.as_str().to_string()))
             ),
             (QuerySource::DirectChildren { context }, QueryLanguage::HolonGql) => format!(
-                "MATCH (root:block)<-[:CHILD_OF]-(d:block) WHERE root.id = {} AND d.content_type != 'source' RETURN d",
+                "MATCH (root:block)<-[:CHILD_OF]-(d:block) WHERE root.id = {} AND d.content_type \
+                 != 'source' RETURN d",
                 value_to_sql_literal(&Value::String(context.as_str().to_string()))
             ),
             (
@@ -406,8 +467,12 @@ impl TestQuery {
                 "MATCH (root:block)<-[:CHILD_OF*{min_depth}..{max_depth}]-(d:block) RETURN d"
             ),
             (QuerySource::FocusRootDescendants { region, max_depth }, _) => format!(
-                "MATCH (fr:focus_root), (root:block)<-[:CHILD_OF*0..{max_depth}]-(d:block) WHERE fr.region = '{region}' AND root.id = fr.root_id RETURN d"
+                "MATCH (fr:focus_root), (root:block)<-[:CHILD_OF*0..{max_depth}]-(d:block) WHERE \
+                 fr.region = '{region}' AND root.id = fr.root_id RETURN d"
             ),
+            (QuerySource::PageBlocks, _) => {
+                unreachable!("PageBlocks is a watched query, not a layout query")
+            }
         };
         // DescendantsOfAny / FocusRootDescendants only have a GQL surface.
         let effective = match &self.source {
@@ -427,8 +492,9 @@ impl TestQuery {
     }
 
     /// Like [`evaluate`](Self::evaluate) but supplies the per-region focus
-    /// roots needed by the navigation-aware [`QuerySource::FocusRootDescendants`]
-    /// form. Watched queries (always `AllBlocks`) ignore it.
+    /// roots needed by the navigation-aware
+    /// [`QuerySource::FocusRootDescendants`] form. Watched queries (always
+    /// `AllBlocks`) ignore it.
     pub fn evaluate_with_focus(
         &self,
         blocks: &BTreeMap<EntityUri, Block>,
@@ -481,12 +547,21 @@ impl TestQuery {
                     .map(|b| b.id.clone())
                     .collect()
             }
+            QuerySource::PageBlocks => {
+                let default_page = EntityUri::block("__default__");
+                blocks
+                    .values()
+                    .filter(|b| b.is_page() && b.id != default_page)
+                    .map(|b| b.id.clone())
+                    .collect()
+            }
         }
     }
 
     /// The rendered set: the [`QuerySource`] base intersected with the
     /// predicates. These are the block ids the SUT's compiled layout query
-    /// would surface — the candidate universe for block-interaction transitions.
+    /// would surface — the candidate universe for block-interaction
+    /// transitions.
     pub fn rendered_block_ids(
         &self,
         blocks: &BTreeMap<EntityUri, Block>,

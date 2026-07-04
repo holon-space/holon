@@ -4,15 +4,19 @@
 //! @c4 uses holon-expr "compiled Rhai expressions" "Rust"
 //! @c4 uses holon-macros "entity/operation derive macros" "Rust"
 //!
-//! Shared value types, Operation descriptors, Change/CDC types, and entity conversion traits. No frontend deps.
+//! Shared value types, Operation descriptors, Change/CDC types, and entity
+//! conversion traits. No frontend deps.
 
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+use serde::Deserialize;
+use serde::Serialize;
 
 pub mod action_dsl;
 pub mod auth;
 pub mod block;
 pub mod block_mutation;
+pub mod block_write_field;
 pub mod capability;
 pub mod change_set;
 pub mod clock;
@@ -26,6 +30,7 @@ pub mod inline_mark;
 pub mod input_types;
 /// flutter_rust_bridge:ignore
 pub mod interp_value;
+pub mod latency_e2e;
 pub mod link_candidate;
 pub mod link_parser;
 pub mod live_data;
@@ -39,19 +44,25 @@ pub mod render_dsl;
 pub mod render_eval;
 pub mod render_types;
 pub mod repository;
+pub mod storage_error;
 pub mod streaming;
 pub mod types;
 pub mod ui_watcher;
 pub mod widget_meta;
 pub mod widget_spec;
 
-pub use entity_profile::{EntityProfile, ProfileCache, ProfileResolving, VirtualChildConfig};
+pub use entity_profile::EntityProfile;
+pub use entity_profile::ProfileCache;
+pub use entity_profile::ProfileResolving;
+pub use entity_profile::VirtualChildConfig;
 pub use operation_engine::OperationEngine;
 pub use query_engine::QueryEngine;
+pub use storage_error::ParentNotFound;
+pub use storage_error::ProjectionInvariantViolated;
 pub use ui_watcher::UiWatcher;
 
-/// Fixed root layout block ID — must match `:ID:` property on the root heading in index.org.
-/// Stored with the `block:` EntityUri scheme prefix.
+/// Fixed root layout block ID — must match `:ID:` property on the root heading
+/// in index.org. Stored with the `block:` EntityUri scheme prefix.
 pub const ROOT_LAYOUT_BLOCK_ID: &str = "block:root-layout";
 
 /// Returns ROOT_LAYOUT_BLOCK_ID as a typed EntityUri.
@@ -72,95 +83,99 @@ pub fn default_doc_block_uri() -> EntityUri {
 }
 
 // Re-export block types
-pub use block::{
-    blocks_by_document, Block, BlockContent, BlockMetadata, BlockResult, BlockWire, ResultOutput,
-    SnapshotBlock, SourceBlock, PAGE_TAG,
-};
-
+// Re-export auth types
+pub use auth::ProviderAuthStatus;
+pub use block::Block;
+pub use block::BlockContent;
+pub use block::BlockMetadata;
+pub use block::BlockResult;
+pub use block::BlockWire;
+pub use block::PAGE_TAG;
+pub use block::ResultOutput;
+pub use block::SnapshotBlock;
+pub use block::SourceBlock;
+pub use block::blocks_by_document;
 // Re-export the intent ChangeSet vocabulary (block-sync rework, Phase 2)
-pub use change_set::{agrees_with_ops, source_op_names, ChangeOp, ChangeSet, Provenance};
-pub use clock::{Clock, SystemClock, TestClock};
-
-// Re-export typed domain types
-pub use types::{
-    ContentType, DependsOn, EntityName, NavigationOp, Priority, QueryLanguage, Region,
-    SourceLanguage, StateCategory, Tags, TaskState, Timestamp, UiInfo,
-};
-
-// Re-export entity URI type
-pub use entity_uri::EntityUri;
-
+pub use block_write_field::{BlockWriteField, BlockWriteFieldError, PropertyKey};
+pub use change_set::ChangeOp;
+pub use change_set::ChangeSet;
+pub use change_set::Provenance;
+pub use change_set::agrees_with_ops;
+pub use change_set::source_op_names;
+pub use clock::Clock;
+pub use clock::SystemClock;
+pub use clock::TestClock;
 // Re-export the block edge-field category
 pub use edge_field::{EdgeField, EdgeFieldUpdate};
-
-// Re-export inline-mark types (rich text)
-pub use inline_mark::{
-    canonicalize_marks, marks_from_json, marks_to_json, EntityRef, InlineMark, MarkSpan,
-};
-
 // Re-export entity types (for Entity derive macro)
 pub use entity::{
-    DynamicEntity, FieldLifetime, FieldSchema, IntoEntity, ProfileVariant, StorageEntity,
-    TryFromEntity, TypeDefinition, TypeSource, POSITION_AFTER_BLOCK_ID_PARAM, ROUTING_DOC_URI_KEY,
+    DynamicEntity, FieldLifetime, FieldSchema, IntoEntity, POSITION_AFTER_BLOCK_ID_PARAM,
+    ProfileVariant, ROUTING_DOC_URI_KEY, StorageEntity, TryFromEntity, TypeDefinition, TypeSource,
 };
-
+// Re-export entity URI type
+pub use entity_uri::EntityUri;
 // Re-export CompiledExpr from holon-expr for FieldLifetime::Computed
 pub use holon_expr::CompiledExpr;
-
-/// flutter_rust_bridge:ignore
-pub use render_eval::{eval_binary_op, eval_to_value, is_template_arg, resolve_args, ResolvedArgs};
-
-// Re-export interpreter-level value type (non-serializable — runtime only).
-/// flutter_rust_bridge:ignore
-pub use interp_value::{ptr_identity, InterpValue, ReactiveRowProvider};
-
-// Re-export predicate types
-pub use predicate::Predicate;
-
+// Re-export inline-mark types (rich text)
+pub use inline_mark::{
+    EntityRef, InlineMark, MarkSpan, canonicalize_marks, marks_from_json, marks_to_json,
+};
 // Re-export input types
 pub use input_types::{Key, KeyChord};
-
-// Re-export render types
-pub use render_types::{
-    extract_widget_names, Arg, BinaryOperator, ClickModifiers, Operation, OperationDescriptor,
-    OperationParam, OperationWiring, ParamMapping, PreconditionChecker, RenderExpr, RenderProfile,
-    RenderVariant, RenderableItem, RowProfile, RowTemplate, Trigger, TypeHint, ViewSpec,
+// Re-export interpreter-level value type (non-serializable — runtime only).
+/// flutter_rust_bridge:ignore
+pub use interp_value::{
+    InterpValue, Occurrence, OccurrenceId, ReactiveRowProvider, RowKey, ptr_identity,
 };
-
 // CompletionStateInfo is defined in holon-core and re-exported here for frontend use
 // The actual definition is in holon-core/src/traits.rs
 
 // Re-export link search candidate
 pub use link_candidate::LinkCandidate;
-
+// Re-export predicate types
+pub use predicate::Predicate;
 // Re-export query context
 pub use query_context::QueryContext;
-
+// Re-export reactive types
+pub use reactive::{
+    CdcAccumulator, MapDiff, OperatorStream, ReactiveStreamExt, UiEventResult, UiState,
+    apply_map_diff, coalesce, combine_latest, materialize_map,
+};
+/// flutter_rust_bridge:ignore
+pub use render_eval::ResolvedArgs;
+/// flutter_rust_bridge:ignore
+pub use render_eval::eval_binary_op;
+/// flutter_rust_bridge:ignore
+pub use render_eval::eval_to_value;
+/// flutter_rust_bridge:ignore
+pub use render_eval::is_template_arg;
+/// flutter_rust_bridge:ignore
+pub use render_eval::resolve_args;
+// Re-export render types
+pub use render_types::{
+    Arg, BinaryOperator, ClickModifiers, Operation, OperationDescriptor, OperationParam,
+    OperationWiring, ParamMapping, PreconditionChecker, RenderExpr, RenderProfile, RenderVariant,
+    RenderableItem, RowProfile, RowTemplate, Trigger, TypeHint, ViewSpec, extract_widget_names,
+};
 // Re-export streaming types
 pub use streaming::{
     Batch, BatchMapChange, BatchMapChangeWithMetadata, BatchMetadata, BatchTraceContext,
-    BatchWithMetadata, BlockChange, Change, ChangeOrigin, EnrichedChangeStream, MapChange,
-    StreamPosition, SyncTokenUpdate, UiEvent, WatchHandle, WatcherCommand, WithMetadata,
-    CHANGE_ORIGIN_COLUMN, CURRENT_TRACE_CONTEXT,
+    BatchWithMetadata, BlockChange, CHANGE_ORIGIN_COLUMN, CURRENT_TRACE_CONTEXT, Change,
+    ChangeOrigin, EnrichedChangeStream, MapChange, StreamPosition, SyncTokenUpdate, UiEvent,
+    WatchHandle, WatcherCommand, WithMetadata,
 };
-
-// Re-export auth types
-pub use auth::ProviderAuthStatus;
-
+// Re-export typed domain types
+pub use types::{
+    ContentType, DependsOn, EntityName, NavigationOp, Priority, QueryLanguage, Region,
+    SourceLanguage, StateCategory, Tags, TaskState, Timestamp, UiInfo,
+};
 // Re-export widget meta types
 // Note: StaticParam and WidgetMeta use &'static str which FRB wraps as unsized `str`.
 // They are marked flutter_rust_bridge:ignore but still need pub use for Rust macro codegen.
 pub use widget_meta::{StaticParam, WidgetCategory, WidgetMeta};
-
 // Re-export widget spec types
 pub use widget_spec::{
-    data_row_entity_uri, entity_uri_from_id_str, DataRow, DataRowAccumulator, EnrichedRow,
-};
-
-// Re-export reactive types
-pub use reactive::{
-    apply_map_diff, coalesce, combine_latest, materialize_map, CdcAccumulator, MapDiff,
-    OperatorStream, ReactiveStreamExt, UiEventResult, UiState,
+    DataRow, DataRowAccumulator, EnrichedRow, data_row_entity_uri, entity_uri_from_id_str,
 };
 
 /// flutter_rust_bridge:non_opaque
@@ -170,7 +185,8 @@ pub enum Number {
     Float(f64),
 }
 
-/// Value type shaped for flutter_rust_bridge interop. // ALLOW(compatibility): FRB constrains the variant shape
+/// Value type shaped for flutter_rust_bridge interop. // ALLOW(compatibility):
+/// FRB constrains the variant shape
 ///
 /// This type is used in holon-prql-render and re-exported by holon
 /// to ensure type consistency across the codebase.
@@ -184,11 +200,13 @@ pub enum Value {
     Integer(i64),
     Float(f64),
     Boolean(bool),
-    // DateTime variant: stored as RFC3339 string for flutter_rust_bridge interop. // ALLOW(compatibility): FRB doesn't expose chrono::DateTime
-    // Use as_datetime() to get the parsed chrono::DateTime
+    // DateTime variant: stored as RFC3339 string for flutter_rust_bridge interop. //
+    // ALLOW(compatibility): FRB doesn't expose chrono::DateTime Use as_datetime() to get the
+    // parsed chrono::DateTime
     DateTime(String),
-    // Json variant: stored as String for flutter_rust_bridge interop. // ALLOW(compatibility): FRB doesn't expose serde_json::Value
-    // Use as_json_value() to get the parsed serde_json::Value
+    // Json variant: stored as String for flutter_rust_bridge interop. // ALLOW(compatibility):
+    // FRB doesn't expose serde_json::Value Use as_json_value() to get the parsed
+    // serde_json::Value
     Json(String),
     Array(Vec<Value>),
     Object(HashMap<String, Value>),
@@ -665,12 +683,16 @@ mod tests {
         // Critically: there is NO `{"Text": {"value": "..."}}` or
         // `{"String": "..."}` tagged representation. Any frontend that
         // probes for such a shape is working from a wrong mental model.
-        assert!(!serde_json::to_string(&Value::String("hi".into()))
-            .unwrap()
-            .contains("Text"),);
-        assert!(!serde_json::to_string(&Value::String("hi".into()))
-            .unwrap()
-            .contains("String"),);
+        assert!(
+            !serde_json::to_string(&Value::String("hi".into()))
+                .unwrap()
+                .contains("Text"),
+        );
+        assert!(
+            !serde_json::to_string(&Value::String("hi".into()))
+                .unwrap()
+                .contains("String"),
+        );
     }
 
     /// Operation params come in as a flat JSON object from frontends:

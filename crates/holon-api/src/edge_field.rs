@@ -6,13 +6,14 @@
 //! one edge field is parameterized over *which* field — neither `tags` nor
 //! `requires` is special-cased. [`EdgeField`] is the closed enumeration of the
 //! edge fields themselves: any code that projects edge fields iterates
-//! [`EdgeField::ALL`] and therefore cannot silently omit one. (That omission was
-//! the H12 bug class — `blocks_differ` compared `tags` but not `requires`, so a
-//! `requires`-only edit never propagated to the SQL projection.)
+//! [`EdgeField::ALL`] and therefore cannot silently omit one. (That omission
+//! was the H12 bug class — `blocks_differ` compared `tags` but not `requires`,
+//! so a `requires`-only edit never propagated to the SQL projection.)
 
+use crate::EntityUri;
+use crate::Value;
 use crate::block::Block;
 use crate::types::Tags;
-use crate::{EntityUri, Value};
 
 /// The closed set of block edge fields. A write/projection that enumerates edge
 /// fields does so over [`EdgeField::ALL`] — adding a new edge field is a single
@@ -22,22 +23,32 @@ use crate::{EntityUri, Value};
 pub enum EdgeField {
     Tags,
     Requires,
+    /// Authored advice-suppression exclusion set: the `(anchor, lesson)` pairs
+    /// this anchor block has dismissed. Projected to the `advice_suppressed`
+    /// junction; serialized as the `:ADVICE_SUPPRESSED:` drawer (ADR 0021).
+    AdviceSuppressed,
 }
 
 impl EdgeField {
     /// Every edge field. Iterate this — never hand-list `tags`/`requires`.
-    pub const ALL: [EdgeField; 2] = [EdgeField::Tags, EdgeField::Requires];
+    pub const ALL: [EdgeField; 3] = [
+        EdgeField::Tags,
+        EdgeField::Requires,
+        EdgeField::AdviceSuppressed,
+    ];
 
     /// The SQL/params column name (and the key used in flattened params).
     pub fn column(self) -> &'static str {
         match self {
             EdgeField::Tags => "tags",
             EdgeField::Requires => "requires",
+            EdgeField::AdviceSuppressed => "advice_suppressed",
         }
     }
 
     /// Whether `key` names an edge field — used by property-flatten guards to
-    /// skip edge keys (they belong in junction tables, not the properties blob).
+    /// skip edge keys (they belong in junction tables, not the properties
+    /// blob).
     pub fn is_edge_column(key: &str) -> bool {
         Self::ALL.iter().any(|f| f.column() == key)
     }
@@ -47,6 +58,7 @@ impl EdgeField {
         match self {
             EdgeField::Tags => block.tags.is_empty(),
             EdgeField::Requires => block.requires.is_empty(),
+            EdgeField::AdviceSuppressed => block.advice_suppressed.is_empty(),
         }
     }
 
@@ -55,6 +67,7 @@ impl EdgeField {
         match self {
             EdgeField::Tags => a.tags != b.tags,
             EdgeField::Requires => a.requires != b.requires,
+            EdgeField::AdviceSuppressed => a.advice_suppressed != b.advice_suppressed,
         }
     }
 
@@ -77,6 +90,13 @@ impl EdgeField {
                     .map(|r| Value::String(r.to_string()))
                     .collect(),
             ),
+            EdgeField::AdviceSuppressed => Value::Array(
+                block
+                    .advice_suppressed
+                    .iter()
+                    .map(|r| Value::String(r.to_string()))
+                    .collect(),
+            ),
         }
     }
 }
@@ -91,6 +111,10 @@ pub enum EdgeFieldUpdate {
     /// Replace the block's `requires` dependency edges (the `block_requires`
     /// junction): the block ids this block depends on / is blocked by.
     Requires(Vec<EntityUri>),
+    /// Replace the block's `advice_suppressed` exclusion set (the
+    /// `advice_suppressed` junction): the `(anchor, lesson)` pairs this anchor
+    /// block has dismissed (ADR 0021).
+    AdviceSuppressed(Vec<EntityUri>),
 }
 
 impl EdgeFieldUpdate {
@@ -99,6 +123,7 @@ impl EdgeFieldUpdate {
         match self {
             EdgeFieldUpdate::Tags(_) => EdgeField::Tags,
             EdgeFieldUpdate::Requires(_) => EdgeField::Requires,
+            EdgeFieldUpdate::AdviceSuppressed(_) => EdgeField::AdviceSuppressed,
         }
     }
 
@@ -130,9 +155,11 @@ mod mutation_gap_tests {
     fn edge_field_closed_enum_surface() {
         assert_eq!(EdgeField::Tags.column(), "tags");
         assert_eq!(EdgeField::Requires.column(), "requires");
+        assert_eq!(EdgeField::AdviceSuppressed.column(), "advice_suppressed");
 
         assert!(EdgeField::is_edge_column("tags"));
         assert!(EdgeField::is_edge_column("requires"));
+        assert!(EdgeField::is_edge_column("advice_suppressed"));
         assert!(!EdgeField::is_edge_column("content"));
         assert!(!EdgeField::is_edge_column("tag"));
 

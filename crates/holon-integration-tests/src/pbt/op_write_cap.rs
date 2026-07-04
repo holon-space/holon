@@ -5,53 +5,63 @@
 //! are the production `block` operations dispatched through
 //! [`BackendEngine::execute_operation`] — the same path the keychord handler
 //! drives. So instead of hand-forwarding these on every storage component
-//! (`SqlProjectionComponent`, the headless frontend, `E2ESut`, …), we define the
-//! cap **once** on a thin newtype over the engine and let every component register
-//! the same impl.
+//! (`SqlProjectionComponent`, the headless frontend, `E2ESut`, …), we define
+//! the cap **once** on a thin newtype over the engine and let every component
+//! register the same impl.
 //!
-//! This is the "don't reinvent the wheel" form the γ design intends: a write cap
-//! is a thin shim over a *production* operation, single-sourced. As more
+//! This is the "don't reinvent the wheel" form the γ design intends: a write
+//! cap is a thin shim over a *production* operation, single-sourced. As more
 //! op-dispatch-backed write caps are decomposed off `SutHandle` (the mutation
 //! family, `cycle_task_state`, create/delete), they land here too — one writer,
 //! many components.
 //!
 //! Orphan/layering note: `SutBlockTreeWrite` lives in `holon-pbt-core` (which
-//! deliberately depends only on `holon-api`) and `OperationProvider`/`BackendEngine`
-//! live in `holon`/`holon-core`, so a blanket `impl<T: OperationProvider>
-//! SutBlockTreeWrite for T` is impossible (both foreign). A **local newtype**
-//! (`OpDispatchWriter`) carrying a foreign trait impl is the orphan-legal way to
-//! single-source it here in `holon-integration-tests`.
+//! deliberately depends only on `holon-api`) and
+//! `OperationProvider`/`BackendEngine` live in `holon`/`holon-core`, so a
+//! blanket `impl<T: OperationProvider> SutBlockTreeWrite for T` is impossible
+//! (both foreign). A **local newtype** (`OpDispatchWriter`) carrying a foreign
+//! trait impl is the orphan-legal way to single-source it here in
+//! `holon-integration-tests`.
 
-use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex};
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use holon::api::BackendEngine;
 use holon::sync::LoroDocumentStore;
-use holon_api::{EdgeFieldUpdate, EntityUri, StorageEntity, Value};
-use holon_frontend::reactive::{BuilderServices, ReactiveEngine};
+use holon_api::EdgeFieldUpdate;
+use holon_api::EntityUri;
+use holon_api::StorageEntity;
+use holon_api::Value;
+use holon_frontend::reactive::BuilderServices;
+use holon_frontend::reactive::ReactiveEngine;
 use holon_frontend::user_driver::UserDriver;
 use holon_loro::LoroBackend;
-use holon_pbt_core::capabilities::{SutBlockTreeWrite, SutEdgeFieldWrite};
+use holon_pbt_core::capabilities::SutBlockTreeWrite;
+use holon_pbt_core::capabilities::SutEdgeFieldWrite;
 
 /// Shared oracle-synthetic → SUT-real id map (the `doc_uri_map` analog). The
-/// composed runner accumulates split reconciliations into it; the writer resolves
-/// every incoming id through it before dispatching — exactly `E2ESut::resolve_uri`.
+/// composed runner accumulates split reconciliations into it; the writer
+/// resolves every incoming id through it before dispatching — exactly
+/// `E2ESut::resolve_uri`.
 pub type IdResolver = Arc<Mutex<BTreeMap<EntityUri, EntityUri>>>;
 
 /// A `SutBlockTreeWrite` realization that dispatches the production `block`
-/// structural operations through a real [`BackendEngine`]. `&self` (the engine is
-/// `Arc`-shared), so it hosts on `CapMap` via the cap's `#[capmap_adapter]` like
-/// any read cap. Unlike `MemoryBackendComponent`'s synchronous mirror,
-/// `split_block` mints a fresh **real** id (production `uuid::Uuid`), so a runner
-/// driving this must reconcile the oracle's synthetic `block::split-N` against the
-/// minted id (the EXP-2/3 `ComposedRunner`).
+/// structural operations through a real [`BackendEngine`]. `&self` (the engine
+/// is `Arc`-shared), so it hosts on `CapMap` via the cap's `#[capmap_adapter]`
+/// like any read cap. Unlike `MemoryBackendComponent`'s synchronous mirror,
+/// `split_block` mints a fresh **real** id (production `uuid::Uuid`), so a
+/// runner driving this must reconcile the oracle's synthetic `block::split-N`
+/// against the minted id (the EXP-2/3 `ComposedRunner`).
 pub struct OpDispatchWriter {
     engine: Arc<BackendEngine>,
-    /// Synthetic→real id map. Empty (`new`) ⇒ identity resolution (every id passes
-    /// through), which is correct for fixed-id slices. A multi-tick composed runner
-    /// over an id-minting backend shares a populated map (`with_resolver`) so a
-    /// transition referencing an earlier split's oracle id resolves to the real id.
+    /// Synthetic→real id map. Empty (`new`) ⇒ identity resolution (every id
+    /// passes through), which is correct for fixed-id slices. A multi-tick
+    /// composed runner over an id-minting backend shares a populated map
+    /// (`with_resolver`) so a transition referencing an earlier split's
+    /// oracle id resolves to the real id.
     resolver: IdResolver,
 }
 
@@ -129,42 +139,46 @@ impl SutBlockTreeWrite for OpDispatchWriter {
 }
 
 /// VM-rung **keystroke-driven** `SutBlockTreeWrite` (LL-3, §8.11). Structural
-/// mutations are driven through the production [`UserDriver`]'s editor-keystroke
-/// pipeline — the UI-adjacent interaction layer — NOT raw op dispatch. This is the
-/// "drive interactions UI-adjacent, even headless" directive applied to structural
-/// edits: the construction-time-installed driver (here a `ReactiveEngineDriver`
-/// over the booted frontend) IS what performs the split, so a bug in the
-/// keystroke→intent→reducer path reproduces here and localizes to the VM layer.
+/// mutations are driven through the production [`UserDriver`]'s
+/// editor-keystroke pipeline — the UI-adjacent interaction layer — NOT raw op
+/// dispatch. This is the "drive interactions UI-adjacent, even headless"
+/// directive applied to structural edits: the construction-time-installed
+/// driver (here a `ReactiveEngineDriver` over the booted frontend) IS what
+/// performs the split, so a bug in the keystroke→intent→reducer path reproduces
+/// here and localizes to the VM layer.
 ///
 /// `apply_split_block` = focus the block's editor (`click_entity`, exactly the
-/// production focus-on-click — `HeadlessFrontendComponent::apply_focus_editable_text`
-/// IS `click_entity`) + `home` + N×`right` + `Enter`. The `HeadlessEditorMirror`
-/// maps `Enter` (no slash match) to `split_block` at the live cursor, so the split
-/// lands at the same byte the user's caret sits on — the same physical sequence
-/// `E2ESut`'s windowed `apply_split_block_input_pipeline` performs, minus the
+/// production focus-on-click —
+/// `HeadlessFrontendComponent::apply_focus_editable_text` IS `click_entity`) +
+/// `home` + N×`right` + `Enter`. The `HeadlessEditorMirror` maps `Enter` (no
+/// slash match) to `split_block` at the live cursor, so the split lands at the
+/// same byte the user's caret sits on — the same physical sequence `E2ESut`'s
+/// windowed `apply_split_block_input_pipeline` performs, minus the
 /// geometry/window-focus prechecks (no platform window headless).
 ///
-/// The whole structural family rides `driver`: `split`/`join`/`indent`/`outdent`
-/// via editor keystrokes, and `move_up`/`move_down` via the production
-/// chord-resolution path (`send_key_chord`, C-3 mechanism 3) — the reorder ops
-/// have no editor-mirror keystroke, so they resolve their bound chord (Alt+Up /
-/// Alt+Down, `reactive.rs`) through `bubble_input` → `ExecuteOperation` exactly
-/// as the GPUI page-level chord pump does. No op is left on raw op dispatch.
+/// The whole structural family rides `driver`:
+/// `split`/`join`/`indent`/`outdent` via editor keystrokes, and
+/// `move_up`/`move_down` via the production chord-resolution path
+/// (`send_key_chord`, C-3 mechanism 3) — the reorder ops have no editor-mirror
+/// keystroke, so they resolve their bound chord (Alt+Up / Alt+Down, `reactive.
+/// rs`) through `bubble_input` → `ExecuteOperation` exactly as the GPUI
+/// page-level chord pump does. No op is left on raw op dispatch.
 pub struct KeystrokeBlockTreeWriter {
     driver: Arc<dyn UserDriver>,
-    /// The frontend `ReactiveEngine` (as `BuilderServices`) — read the block's live
-    /// `MutableText` content cell for the byte→keystroke conversion (the same source
-    /// `editor_live_text` reads; populated by rendering, not the router cache that
-    /// `displayed_text` consults). Also the source of truth for the chord registry
-    /// (`key_bindings()`) and the reactive root snapshot the chord path needs.
+    /// The frontend `ReactiveEngine` (as `BuilderServices`) — read the block's
+    /// live `MutableText` content cell for the byte→keystroke conversion
+    /// (the same source `editor_live_text` reads; populated by rendering,
+    /// not the router cache that `displayed_text` consults). Also the
+    /// source of truth for the chord registry (`key_bindings()`) and the
+    /// reactive root snapshot the chord path needs.
     reactive: Arc<ReactiveEngine>,
     resolver: IdResolver,
 }
 
 impl KeystrokeBlockTreeWriter {
-    /// `driver` drives the keystrokes and chords; `reactive` reads live editor content
-    /// AND the keybinding registry; `resolver` translates oracle synthetic ids to the
-    /// SUT-minted ids.
+    /// `driver` drives the keystrokes and chords; `reactive` reads live editor
+    /// content AND the keybinding registry; `resolver` translates oracle
+    /// synthetic ids to the SUT-minted ids.
     pub fn new(
         driver: Arc<dyn UserDriver>,
         reactive: Arc<ReactiveEngine>,
@@ -187,8 +201,9 @@ impl KeystrokeBlockTreeWriter {
     }
 
     /// Focus/open the block's editor — the production focus-on-click path
-    /// (`HeadlessFrontendComponent::apply_focus_editable_text` IS `click_entity`),
-    /// so a subsequent keystroke routes to THIS block's editor.
+    /// (`HeadlessFrontendComponent::apply_focus_editable_text` IS
+    /// `click_entity`), so a subsequent keystroke routes to THIS block's
+    /// editor.
     async fn focus_editor(&self, resolved: &EntityUri, ctx: &str) {
         self.driver
             .click_entity(resolved, "main")
@@ -196,7 +211,8 @@ impl KeystrokeBlockTreeWriter {
             .unwrap_or_else(|e| panic!("[{ctx}/keystroke] focus {resolved} failed: {e:#}"));
     }
 
-    /// Send one raw keystroke through the driver, fail-loud with the gesture context.
+    /// Send one raw keystroke through the driver, fail-loud with the gesture
+    /// context.
     async fn key(&self, keystroke: &str, modifiers: &[&str], ctx: &str) {
         self.driver
             .send_raw_keystroke(keystroke, modifiers)
@@ -207,14 +223,16 @@ impl KeystrokeBlockTreeWriter {
     }
 
     /// Drive a block-reorder op (`move_up`/`move_down`) through the production
-    /// chord-resolution path — the SAME `find_keybinding_for_op` + `send_key_chord`
-    /// binding the keystone `E2ESut` uses (`sut_capabilities.rs`). The chord is read
-    /// from the live `key_bindings` registry (prod's Alt+Up / Alt+Down), so the test
-    /// follows whatever prod binds; `send_key_chord` clicks-to-focus then resolves the
-    /// chord via `bubble_input` → `ExecuteOperation`. The driver decides HOW (headless
-    /// router vs window `PlatformInput`), so both rungs exercise the real chord→intent
-    /// binding. Fail loud if the op has no registered chord (a prod regression) or the
-    /// chord fails to dispatch.
+    /// chord-resolution path — the SAME `find_keybinding_for_op` +
+    /// `send_key_chord` binding the keystone `E2ESut` uses
+    /// (`sut_capabilities.rs`). The chord is read from the live
+    /// `key_bindings` registry (prod's Alt+Up / Alt+Down), so the test
+    /// follows whatever prod binds; `send_key_chord` clicks-to-focus then
+    /// resolves the chord via `bubble_input` → `ExecuteOperation`. The
+    /// driver decides HOW (headless router vs window `PlatformInput`), so
+    /// both rungs exercise the real chord→intent binding. Fail loud if the
+    /// op has no registered chord (a prod regression) or the chord fails to
+    /// dispatch.
     async fn send_block_chord(&self, resolved: &EntityUri, op: &str, ctx: &str) {
         let chord = self
             .reactive
@@ -261,8 +279,8 @@ impl SutBlockTreeWrite for KeystrokeBlockTreeWriter {
                     if tokio::time::Instant::now() >= deadline {
                         panic!(
                             "[SplitBlock/keystroke] no editable content cell for {resolved} \
-                             within 2s — cannot convert byte position {position} to \
-                             keystrokes: {e:#}"
+                             within 2s — cannot convert byte position {position} to keystrokes: \
+                             {e:#}"
                         );
                     }
                 }
@@ -285,14 +303,16 @@ impl SutBlockTreeWrite for KeystrokeBlockTreeWriter {
     async fn apply_join_block(&self, id: &EntityUri) {
         let resolved = self.resolve(id);
         // Backspace at caret 0 → `join_block` (merge into previous sibling) in the
-        // `HeadlessEditorMirror`. Focus the block, home to pin the caret at 0, Backspace.
+        // `HeadlessEditorMirror`. Focus the block, home to pin the caret at 0,
+        // Backspace.
         self.focus_editor(&resolved, "JoinBlock").await;
         self.key("home", &[], "JoinBlock").await;
         self.key("backspace", &[], "JoinBlock").await;
     }
 
     async fn apply_indent(&self, id: &EntityUri) {
-        // Tab → `indent` in the `HeadlessEditorMirror` (block-level; caret-independent).
+        // Tab → `indent` in the `HeadlessEditorMirror` (block-level;
+        // caret-independent).
         let resolved = self.resolve(id);
         self.focus_editor(&resolved, "Indent").await;
         self.key("tab", &[], "Indent").await;
@@ -305,14 +325,16 @@ impl SutBlockTreeWrite for KeystrokeBlockTreeWriter {
         self.key("tab", &["shift"], "Outdent").await;
     }
 
-    // `move_up`/`move_down` are block-reorder ops with NO editor-mirror keystroke (they
-    // move siblings, they don't edit text). Prod binds them to a key chord (Alt+Up /
-    // Alt+Down, `reactive.rs` `key_bindings`), so they ride the SAME chord-resolution
-    // path the GPUI page-level chord pump uses — `send_key_chord` clicks-to-focus then
-    // dispatches the chord through `bubble_input` → `ExecuteOperation`. This is the C-3
-    // mechanism-3 rebind: the driver (headless `ReactiveEngineDriver` in the base,
-    // window `GpuiUserDriver`/`SimUserDriver` in the overlay) resolves the chord itself,
-    // so BOTH rungs exercise prod's chord→intent binding — no op left on op dispatch.
+    // `move_up`/`move_down` are block-reorder ops with NO editor-mirror keystroke
+    // (they move siblings, they don't edit text). Prod binds them to a key
+    // chord (Alt+Up / Alt+Down, `reactive.rs` `key_bindings`), so they ride the
+    // SAME chord-resolution path the GPUI page-level chord pump uses —
+    // `send_key_chord` clicks-to-focus then dispatches the chord through
+    // `bubble_input` → `ExecuteOperation`. This is the C-3 mechanism-3 rebind:
+    // the driver (headless `ReactiveEngineDriver` in the base,
+    // window `GpuiUserDriver`/`SimUserDriver` in the overlay) resolves the chord
+    // itself, so BOTH rungs exercise prod's chord→intent binding — no op left
+    // on op dispatch.
     async fn apply_move_up(&self, id: &EntityUri) {
         let resolved = self.resolve(id);
         self.send_block_chord(&resolved, "move_up", "MoveBlockUp")
@@ -330,8 +352,8 @@ impl SutBlockTreeWrite for KeystrokeBlockTreeWriter {
 /// `full_headless` frontend). Writes a block edge field (`tags` / `requires`)
 /// through the production `LoroBackend` setters (`set_block_tags` /
 /// `set_block_requires`) over the frontend's authority doc — the SAME functions
-/// the org re-scan reconciliation calls, so the write flows Loro → `project()` →
-/// SQL exactly as production does. That is what lets the composed `/matview`
+/// the org re-scan reconciliation calls, so the write flows Loro → `project()`
+/// → SQL exactly as production does. That is what lets the composed `/matview`
 /// invariant observe whether an edge-field change re-projects (H12 =
 /// `blocks_differ` dropping `requires` from its change gate).
 ///
@@ -360,10 +382,10 @@ impl EdgeFieldWriter {
             .unwrap_or_else(|| id.clone())
     }
 
-    /// A `LoroBackend` over the frontend's authority doc — the same construction
-    /// the production `LoroBlockOperations::get_backend` uses (`from_document`
-    /// over the global doc), so the write targets the doc the op pipeline and the
-    /// outbound projector share.
+    /// A `LoroBackend` over the frontend's authority doc — the same
+    /// construction the production `LoroBlockOperations::get_backend` uses
+    /// (`from_document` over the global doc), so the write targets the doc
+    /// the op pipeline and the outbound projector share.
     async fn backend(&self) -> LoroBackend {
         let collab_doc = self
             .doc_store
@@ -392,6 +414,13 @@ impl SutEdgeFieldWrite for EdgeFieldWriter {
                     .set_block_requires(rid.as_str(), &resolved)
                     .await
                     .unwrap_or_else(|e| panic!("set_block_requires({rid}) failed: {e:#}"));
+            }
+            EdgeFieldUpdate::AdviceSuppressed(reqs) => {
+                let resolved: Vec<EntityUri> = reqs.iter().map(|t| self.resolve(t)).collect();
+                backend
+                    .set_block_advice_suppressed(rid.as_str(), &resolved)
+                    .await
+                    .unwrap_or_else(|e| panic!("set_block_advice_suppressed({rid}) failed: {e:#}"));
             }
         }
     }

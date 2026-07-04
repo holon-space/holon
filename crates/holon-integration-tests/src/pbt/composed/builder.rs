@@ -4,22 +4,26 @@
 //! [`ComponentSet`] by registering exactly the components that set's subsystems
 //! realize, resolving cap overlaps with [`CapMap::merge_missing`] (precedence =
 //! registration order, shadowed caps disclosed). This is the one function that
-//! replaces the dozen hand-written per-slice `*_wide` builders — see the backlog
-//! "★ SCOPED: the CapMap-by-subsystem builder".
+//! replaces the dozen hand-written per-slice `*_wide` builders — see the
+//! backlog "★ SCOPED: the CapMap-by-subsystem builder".
 //!
-//! **Contract (the honest framing).** `compose_sut` provides the **full** cap-set
-//! the active subsystems realize — NOT the hand-tuned minimal subsets the slice
-//! builders carry (e.g. `sql_loro_wide` drops Loro's `SutLoroLog` to avoid selecting
-//! Loro block invariants its seed can't satisfy). Selection (`Needs::selected_against`)
-//! + the seed then decide what runs. So this is verified by **cap-set membership +
-//! precedence-shadow reporting**, not byte-parity with the old builders. (Unifying
-//! the *seed* so every selected invariant passes is the next increment — the harness.)
+//! **Contract (the honest framing).** `compose_sut` provides the **full**
+//! cap-set the active subsystems realize — NOT the hand-tuned minimal subsets
+//! the slice builders carry (e.g. `sql_loro_wide` drops Loro's `SutLoroLog` to
+//! avoid selecting Loro block invariants its seed can't satisfy). Selection
+//! (`Needs::selected_against`)
+//! + the seed then decide what runs. So this is verified by **cap-set
+//!   membership +
+//! precedence-shadow reporting**, not byte-parity with the old builders.
+//! (Unifying the *seed* so every selected invariant passes is the next
+//! increment — the harness.)
 //!
-//! **Scope (increment 2a).** Storage backends only: Turso (`SqlProjectionComponent`)
-//! and Loro (`LoroBackendComponent`), with the Turso+Loro precedence merge that
-//! `sql_loro_wide` hand-rolls today. The frontend (`HeadlessFrontendComponent`, async
-//! org boot + scaffold capture), editor (`InMemEditorComponent`), and windowed GPUI
-//! (E4) arms are not yet wired — guarded fail-loud below, not silently skipped.
+//! **Scope (increment 2a).** Storage backends only: Turso
+//! (`SqlProjectionComponent`) and Loro (`LoroBackendComponent`), with the
+//! Turso+Loro precedence merge that `sql_loro_wide` hand-rolls today. The
+//! frontend (`HeadlessFrontendComponent`, async org boot + scaffold capture),
+//! editor (`InMemEditorComponent`), and windowed GPUI (E4) arms are not yet
+//! wired — guarded fail-loud below, not silently skipped.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -28,31 +32,39 @@ use std::time::Duration;
 use holon::api::BackendEngine;
 use holon::sync::LoroDocumentStore;
 use holon_api::EntityUri;
-use holon_api::repository::{CoreOperations, NewBlock};
+use holon_api::repository::CoreOperations;
+use holon_api::repository::NewBlock;
 use holon_loro::LoroBackend;
-use holon_pbt_core::capabilities::{
-    SutBackend, SutBlockTreeWrite, SutEdgeFieldWrite, SutEditorMirrorRead, SutFocus,
-    SutQueryResults, SutSqlProjection,
-};
-use holon_pbt_core::composition::{CapMap, CapProvider};
-use holon_pbt_core::{Actor, ComponentSet, Projection, StorageAdapter};
+use holon_loro_testing::LoroBackendComponent;
+use holon_pbt_core::Actor;
+use holon_pbt_core::ComponentSet;
+use holon_pbt_core::Projection;
+use holon_pbt_core::StorageAdapter;
+use holon_pbt_core::capabilities::SutBackend;
+use holon_pbt_core::capabilities::SutBlockTreeWrite;
+use holon_pbt_core::capabilities::SutEdgeFieldWrite;
+use holon_pbt_core::capabilities::SutEditorMirrorRead;
+use holon_pbt_core::capabilities::SutFocus;
+use holon_pbt_core::capabilities::SutQueryResults;
+use holon_pbt_core::capabilities::SutSqlProjection;
+use holon_pbt_core::composition::CapMap;
+use holon_pbt_core::composition::CapProvider;
+use holon_pbt_core::types::DocUriMap;
 
 use crate::mutation_driver::DirectUserDriver;
 use crate::pbt::driver_input::DriverInputComponent;
 use crate::pbt::frontend_slice::components::HeadlessFrontendComponent;
 use crate::pbt::is_synthetic_ref_id;
-use crate::pbt::loro_slice::components::LoroBackendComponent;
-use crate::pbt::memory_slice::components::{
-    CoreOpsCommit, EditorCommitTarget, InMemEditorComponent,
-};
+use crate::pbt::memory_slice::components::CoreOpsCommit;
+use crate::pbt::memory_slice::components::EditorCommitTarget;
+use crate::pbt::memory_slice::components::InMemEditorComponent;
 use crate::pbt::op_write_cap::IdResolver;
 use crate::pbt::sql_slice::SqlProjectionComponent;
 use crate::pbt::sql_slice::builders::new_sql_engine_with_structural_ops;
 use crate::pbt::sut_loro::LoroSut;
-use crate::pbt::types::DocUriMap;
 
-/// The booted-frontend ids present BEFORE any working tree is seeded — captured so
-/// the harness can seed-inject them into the oracle (they filter out of the
+/// The booted-frontend ids present BEFORE any working tree is seeded — captured
+/// so the harness can seed-inject them into the oracle (they filter out of the
 /// id-set-exact block comparison). Reads through the `SutBackend` cap.
 async fn booted_scaffold_ids(caps: &CapMap) -> BTreeSet<EntityUri> {
     caps.expect::<dyn SutBackend>()
@@ -64,46 +76,55 @@ async fn booted_scaffold_ids(caps: &CapMap) -> BTreeSet<EntityUri> {
         .collect()
 }
 
-/// The composed SUT plus the aux a `StateMachineTest` harness needs to drive it.
+/// The composed SUT plus the aux a `StateMachineTest` harness needs to drive
+/// it.
 pub struct ComposedSut {
-    /// The assembled SUT capability map — what invariant selection runs against.
+    /// The assembled SUT capability map — what invariant selection runs
+    /// against.
     pub caps: CapMap,
-    /// The Turso `BackendEngine` backing the canonical store, when present — the
-    /// caller seeds the working tree through it (production create op) and it backs
-    /// the resolver-sharing block-tree writer. `None` for Loro-only configs.
+    /// The Turso `BackendEngine` backing the canonical store, when present —
+    /// the caller seeds the working tree through it (production create op)
+    /// and it backs the resolver-sharing block-tree writer. `None` for
+    /// Loro-only configs.
     pub engine: Option<Arc<BackendEngine>>,
-    /// The booted windowless `FrontendSession` (frontend arm only; `None` otherwise) —
-    /// so the windowed repoint can hand it to a gpui window that RENDERS this same
-    /// reactive tree while the composed backend/storage caps read it (§ Round 5,
-    /// "reuse compose_sut's boot"). The window binds `session` + `reactive`; `engine`
-    /// is for MCP only.
+    /// The booted windowless `FrontendSession` (frontend arm only; `None`
+    /// otherwise) — so the windowed repoint can hand it to a gpui window
+    /// that RENDERS this same reactive tree while the composed
+    /// backend/storage caps read it (§ Round 5, "reuse compose_sut's
+    /// boot"). The window binds `session` + `reactive`; `engine` is for MCP
+    /// only.
     pub session: Option<Arc<holon_frontend::FrontendSession>>,
-    /// The booted frontend `ReactiveEngine` (frontend arm only; `None` otherwise) — the
-    /// render tree a gpui window paints. Pairs with `session` for the windowed bind.
+    /// The booted frontend `ReactiveEngine` (frontend arm only; `None`
+    /// otherwise) — the render tree a gpui window paints. Pairs with
+    /// `session` for the windowed bind.
     pub reactive: Option<Arc<holon_frontend::reactive::ReactiveEngine>>,
-    /// The booted frontend component (frontend arm only; `None` otherwise) — surfaced so the
-    /// windowed overlay (`overlay_windowed_caps`) can INSERT the gesture-write caps bound to
-    /// the window driver via `register_gesture_writes` (§8.12 C-3). Kept CONCRETE (not a
-    /// `dyn GestureWriteSource`) because the windowed base's pre-overlay seed focus-align
-    /// (`boot_and_seed_wide_windowed_base`) needs the component's own headless `driver()` to
-    /// drive `NavigateFocus` through a throwaway gesture map — a bare trait object can't
-    /// provide that, so the trait indirection is net-negative.
+    /// The booted frontend component (frontend arm only; `None` otherwise) —
+    /// surfaced so the windowed overlay (`overlay_windowed_caps`) can
+    /// INSERT the gesture-write caps bound to the window driver via
+    /// `register_gesture_writes` (§8.12 C-3). Kept CONCRETE (not a
+    /// `dyn GestureWriteSource`) because the windowed base's pre-overlay seed
+    /// focus-align (`boot_and_seed_wide_windowed_base`) needs the
+    /// component's own headless `driver()` to drive `NavigateFocus` through
+    /// a throwaway gesture map — a bare trait object can't provide that, so
+    /// the trait indirection is net-negative.
     pub frontend: Option<Arc<HeadlessFrontendComponent>>,
     /// Whether the harness must use a multi-thread runtime (a booted
     /// `FrontendSession` needs it). False for the synchronous storage backends.
     pub multi_thread: bool,
-    /// CDC settle window after a write (≈0 for the synchronous in-memory stores).
+    /// CDC settle window after a write (≈0 for the synchronous in-memory
+    /// stores).
     pub settle: Duration,
-    /// Booted-frontend scaffold ids to seed-inject into the oracle (empty until the
-    /// frontend arm lands).
+    /// Booted-frontend scaffold ids to seed-inject into the oracle (empty until
+    /// the frontend arm lands).
     pub scaffold_ids: BTreeSet<EntityUri>,
     /// Caps a lower-precedence component would have provided but were already
     /// supplied by a higher-precedence one — disclosed, never silently dropped.
     pub shadowed: Vec<&'static str>,
 }
 
-/// Assemble the SUT `CapMap` for `set`, threading `resolver` into the block-tree
-/// writer so the generic reconcile loop works for id-minting (Turso) backends.
+/// Assemble the SUT `CapMap` for `set`, threading `resolver` into the
+/// block-tree writer so the generic reconcile loop works for id-minting (Turso)
+/// backends.
 ///
 /// Precedence (registration order, first wins): **Turso** is the canonical
 /// `SutBackend`; Loro then contributes only its non-overlapping read caps
@@ -113,29 +134,34 @@ pub async fn compose_sut(set: &ComponentSet, resolver: &IdResolver) -> ComposedS
     compose_sut_seeded(set, resolver, DEFAULT_FRONTEND_SEED_ORG, &[]).await
 }
 
-/// Which driver backs the composed gesture caps (`SutDriver` / `SutBlockInteract` /
-/// `SutArrowNavigate`) — §8.11 layer-localization. Making this an explicit choice (not a
-/// registration-order accident) lets the windowed repoint build a base with NO driver caps
-/// and then INSERT the window's `GpuiUserDriver`-backed ones exactly once, instead of
-/// registering the headless driver and silently overriding it.
+/// Which driver backs the composed gesture caps (`SutDriver` /
+/// `SutBlockInteract` / `SutArrowNavigate`) — §8.11 layer-localization. Making
+/// this an explicit choice (not a registration-order accident) lets the
+/// windowed repoint build a base with NO driver caps and then INSERT the
+/// window's `GpuiUserDriver`-backed ones exactly once, instead of registering
+/// the headless driver and silently overriding it.
 pub enum DriverPlacement {
-    /// Install the frontend's own headless `ReactiveEngineDriver` as the VM-rung driver
-    /// (the default for every headless config — the gesture alphabet drives UI-adjacently
-    /// over the same live `HeadlessEditorMirror` the editor-write caps share).
+    /// Install the frontend's own headless `ReactiveEngineDriver` as the
+    /// VM-rung driver (the default for every headless config — the gesture
+    /// alphabet drives UI-adjacently over the same live
+    /// `HeadlessEditorMirror` the editor-write caps share).
     HeadlessReactive,
-    /// Do NOT install any driver — leave the gesture caps ABSENT so a higher rung (the
-    /// windowed `GpuiUserDriver`, via [`crate::pbt::window_slice::builders::overlay_windowed_caps`])
+    /// Do NOT install any driver — leave the gesture caps ABSENT so a higher
+    /// rung (the windowed `GpuiUserDriver`, via
+    /// [`crate::pbt::window_slice::builders::overlay_windowed_caps`])
     /// supplies them. Used only by [`compose_sut_windowed_base`].
     Deferred,
 }
 
-/// The headless BASE for the §Round-5 windowed repoint: a full `compose_sut` CapMap with the
-/// driver rung **deferred** (`DriverPlacement::Deferred`) — everything (backend / storage /
-/// editor / ViewModel caps + the `IdResolver` reconcile) EXCEPT the gesture-driver caps. A
-/// windowed harness boots this headless, attaches a gpui window as a pure renderer over the
-/// same `reactive`, and inserts the window's `GpuiUserDriver`-backed gesture caps via
-/// `overlay_windowed_caps`. Because the base never registered a driver, those inserts are the
-/// SOLE providers — no cap is registered-then-overridden.
+/// The headless BASE for the §Round-5 windowed repoint: a full `compose_sut`
+/// CapMap with the driver rung **deferred** (`DriverPlacement::Deferred`) —
+/// everything (backend / storage / editor / ViewModel caps + the `IdResolver`
+/// reconcile) EXCEPT the gesture-driver caps. A windowed harness boots this
+/// headless, attaches a gpui window as a pure renderer over the
+/// same `reactive`, and inserts the window's `GpuiUserDriver`-backed gesture
+/// caps via `overlay_windowed_caps`. Because the base never registered a
+/// driver, those inserts are the SOLE providers — no cap is
+/// registered-then-overridden.
 pub async fn compose_sut_windowed_base(set: &ComponentSet, resolver: &IdResolver) -> ComposedSut {
     compose_sut_seeded_impl(
         set,
@@ -147,9 +173,10 @@ pub async fn compose_sut_windowed_base(set: &ComponentSet, resolver: &IdResolver
     .await
 }
 
-/// [`compose_sut_windowed_base`] with a caller-chosen boot seed: the wide windowed repoint
-/// boots its working tree AS org (`WIDE_TREE_ORG`, so the attached window RENDERS it) with the
-/// driver rung deferred for `overlay_windowed_caps`. Same body as [`compose_sut_seeded`] but
+/// [`compose_sut_windowed_base`] with a caller-chosen boot seed: the wide
+/// windowed repoint boots its working tree AS org (`WIDE_TREE_ORG`, so the
+/// attached window RENDERS it) with the driver rung deferred for
+/// `overlay_windowed_caps`. Same body as [`compose_sut_seeded`] but
 /// `DriverPlacement::Deferred` — the driver-deferred dual of the seeded entry.
 pub async fn compose_sut_windowed_base_seeded(
     set: &ComponentSet,
@@ -167,26 +194,28 @@ pub async fn compose_sut_windowed_base_seeded(
     .await
 }
 
-/// The frontend arm's default boot org — a minimal one-heading doc. Callers that
-/// need the working tree to live IN the org (so `SutOrgRead`/`inv-blocks-match-ref/org`
-/// see it, rather than an engine-only seed that the org parse misses) pass their tree
-/// AS org via [`compose_sut_seeded`].
+/// The frontend arm's default boot org — a minimal one-heading doc. Callers
+/// that need the working tree to live IN the org (so
+/// `SutOrgRead`/`inv-blocks-match-ref/org` see it, rather than an engine-only
+/// seed that the org parse misses) pass their tree AS org via
+/// [`compose_sut_seeded`].
 pub const DEFAULT_FRONTEND_SEED_ORG: &[(&str, &str)] =
     &[("doc0.org", "#+ID: ref-doc-0\n* Doc zero\n")];
 
-/// [`compose_sut`] with the boot seed chosen by the caller. The seed has two faces,
-/// one per arm, so the **builder owns boot+seed for every config** (the backend never
-/// escapes it):
-/// - `frontend_seed_org` — the org files the **frontend (ViewModel) arm** boots from;
-///   its session ingests them into the store (this is how the wide swap boots its
-///   working tree AS org over the SAME production builder the `general_e2e_pbt` swap
-///   targets — no hand-rolled CapMap lookalike). The non-frontend arms have no session
-///   and ignore it.
-/// - `seed_tree` — the working tree the **non-frontend arms** create directly into the
-///   canonical backend via `CoreOperations::create_block` (in list order, so children
-///   follow their parent). Empty for configs that need no working tree; the frontend
-///   arm ignores it (it seeds from org). The caller keeps the two faces in agreement
-///   (the wide swap derives both from the same fixed ids + contents).
+/// [`compose_sut`] with the boot seed chosen by the caller. The seed has two
+/// faces, one per arm, so the **builder owns boot+seed for every config** (the
+/// backend never escapes it):
+/// - `frontend_seed_org` — the org files the **frontend (ViewModel) arm** boots
+///   from; its session ingests them into the store (this is how the wide swap
+///   boots its working tree AS org over the SAME production builder the
+///   `general_e2e_pbt` swap targets — no hand-rolled CapMap lookalike). The
+///   non-frontend arms have no session and ignore it.
+/// - `seed_tree` — the working tree the **non-frontend arms** create directly
+///   into the canonical backend via `CoreOperations::create_block` (in list
+///   order, so children follow their parent). Empty for configs that need no
+///   working tree; the frontend arm ignores it (it seeds from org). The caller
+///   keeps the two faces in agreement (the wide swap derives both from the same
+///   fixed ids + contents).
 pub async fn compose_sut_seeded(
     set: &ComponentSet,
     resolver: &IdResolver,
@@ -203,8 +232,9 @@ pub async fn compose_sut_seeded(
     .await
 }
 
-/// The workhorse behind [`compose_sut_seeded`] / [`compose_sut_windowed_base`]. Identical for
-/// every config except the driver rung, chosen by `driver_placement` (see [`DriverPlacement`]).
+/// The workhorse behind [`compose_sut_seeded`] / [`compose_sut_windowed_base`].
+/// Identical for every config except the driver rung, chosen by
+/// `driver_placement` (see [`DriverPlacement`]).
 async fn compose_sut_seeded_impl(
     set: &ComponentSet,
     resolver: &IdResolver,
@@ -223,8 +253,8 @@ async fn compose_sut_seeded_impl(
     );
     assert!(
         !has_frontend || has_turso,
-        "compose_sut: the frontend (ViewModel) arm boots over a Turso backend; a \
-         ViewModel projection without Turso storage is unsupported. got {set:?}"
+        "compose_sut: the frontend (ViewModel) arm boots over a Turso backend; a ViewModel \
+         projection without Turso storage is unsupported. got {set:?}"
     );
     // `compose_sut` builds the HEADLESS CapMap on the tokio runtime. A GPUI window
     // has thread affinity — it must be launched on the gpui thread by the windowed
@@ -250,18 +280,20 @@ async fn compose_sut_seeded_impl(
     let mut multi_thread = false;
     let mut settle = Duration::ZERO;
     let mut scaffold_ids = BTreeSet::new();
-    // The Loro backend Arc, kept for the editor arm's commit target when Loro is the
-    // canonical (no-Turso) backend (`LoroBackend: CoreOperations`).
+    // The Loro backend Arc, kept for the editor arm's commit target when Loro is
+    // the canonical (no-Turso) backend (`LoroBackend: CoreOperations`).
     let mut loro_backend: Option<Arc<LoroBackend>> = None;
-    // The frontend's `LoroDocumentStore` (when the frontend boots with Loro on, i.e.
-    // an editor config). The Loro arm builds its read caps over THIS store's authority
-    // doc so a write through the frontend op pipeline is visible to them (task #4).
+    // The frontend's `LoroDocumentStore` (when the frontend boots with Loro on,
+    // i.e. an editor config). The Loro arm builds its read caps over THIS
+    // store's authority doc so a write through the frontend op pipeline is
+    // visible to them (task #4).
     let mut frontend_loro_store: Option<holon::sync::LoroDocumentStore> = None;
-    // The frontend session's `LoroSyncController` handle (when the frontend boots with
-    // Loro on). In full mode (`has_turso && has_loro`) the Loro arm hands this to
-    // `LoroSut` so a `MergeFromPeer` waits for the controller to project the imported
-    // peer delta into Turso `block_raw` before the block invariants read it. `None` in
-    // the pure-Loro fast path (no controller, no SQL mirror — quiescence is a no-op).
+    // The frontend session's `LoroSyncController` handle (when the frontend boots
+    // with Loro on). In full mode (`has_turso && has_loro`) the Loro arm hands
+    // this to `LoroSut` so a `MergeFromPeer` waits for the controller to
+    // project the imported peer delta into Turso `block_raw` before the block
+    // invariants read it. `None` in the pure-Loro fast path (no controller, no
+    // SQL mirror — quiescence is a no-op).
     let mut frontend_sync_handle: Option<Arc<holon::sync::LoroSyncControllerHandle>> = None;
 
     // Canonical backend (Turso wins precedence, registered first).
@@ -271,10 +303,11 @@ async fn compose_sut_seeded_impl(
         // Boots from a fixed minimal org page; the caller seeds the working tree
         // through `engine` afterward (the boot scaffold is captured here, pre-seed).
         // Loro ON when this config drives the editor: the frontend session then hosts
-        // the REAL headless editor (`HeadlessEditorMirror` over `MutableText`), which is
-        // why the editor arm below uses these caps instead of the `InMemEditorComponent`
-        // stand-in. Loro OFF for non-editor frontend configs (the Loro read caps, when
-        // `has_loro`, still come from the separate Loro arm below).
+        // the REAL headless editor (`HeadlessEditorMirror` over `MutableText`), which
+        // is why the editor arm below uses these caps instead of the
+        // `InMemEditorComponent` stand-in. Loro OFF for non-editor frontend
+        // configs (the Loro read caps, when `has_loro`, still come from the
+        // separate Loro arm below).
         let comp = Arc::new(
             HeadlessFrontendComponent::new_with_loro(
                 frontend_seed_org,
@@ -290,10 +323,11 @@ async fn compose_sut_seeded_impl(
         // block-tree writer below uses. Without this, pinning/focusing a post-split
         // synthetic id targets a ghost and diverges `inv-focus-roots`/`inv-nav-focus`.
         comp.set_resolver(resolver.clone());
-        // Register the NON-gesture caps (reads/projections/lifecycle). The gesture-write
-        // family (`SutBlockTreeWrite`/`SutFocusWrite`/`SutEditorMirrorWrite`/`SutMutate`)
-        // is registered separately, gated by `driver_placement`, so the windowed Deferred
-        // base can withhold it until a window exists (see the driver-placement block below).
+        // Register the NON-gesture caps (reads/projections/lifecycle). The
+        // gesture-write family (`SutBlockTreeWrite`/`SutFocusWrite`/
+        // `SutEditorMirrorWrite`/`SutMutate`) is registered separately, gated
+        // by `driver_placement`, so the windowed Deferred base can withhold it
+        // until a window exists (see the driver-placement block below).
         comp.clone().register_non_gesture(&mut caps);
         // `SutSqlProjection` (the TursoProjection focus/nav matview cap) is NOT in the
         // component's `register` (the nav slice adds it explicitly); add it here since
@@ -319,6 +353,16 @@ async fn compose_sut_seeded_impl(
         if has_editor {
             caps.insert(comp.clone() as Arc<dyn SutEditorMirrorRead>);
         }
+        // `SutFixtureFs` (write_org_file into the session's watched org_root) —
+        // admits `WriteOrgFile` into the composed alphabet. This is the ONLY
+        // transition that can mint an advice-rule block (ADR 0022 step 4), so
+        // without this cap the two advice keystone invariants are structurally
+        // vacuous (no rule ever enters the reference; empty-vs-empty stays
+        // green). The four other `SutFixtureFs` transitions (CreateDirectory /
+        // GitInit / JjGitInit / CreateStaleLoro) are `!app_started`-gated and
+        // the composed oracle boots pre-started, so they stay honestly
+        // unreachable (their cap methods fail loud if that ever changes).
+        caps.insert(comp.clone() as Arc<dyn holon_pbt_core::capabilities::SutFixtureFs>);
         // Edge-field write cap (`tags` / `requires` on an existing block) — hosted
         // only when a Loro authority doc is present (`loro_doc_store()` is `Some`
         // iff Loro is on for this build). Routes through the production
@@ -337,20 +381,23 @@ async fn compose_sut_seeded_impl(
         // resolution + `MutableText`/`InputState` editing — the same production logic
         // the GPUI window runs, minus geometry/platform), not via `OpDispatchWriter`
         // dispatch. This admits the `SutBlockInteract`/`SutArrowNavigate` gesture
-        // alphabet headless (ClickBlock/ExpandToggle/PressKey/…). Reuses the component's
-        // driver (not a fresh one) so the single live `HeadlessEditorMirror` stays shared
-        // with the editor-write caps. No geometry → its `require_bounds` precheck is a
-        // no-op (the driver resolves targets itself).
-        // Driver rung placement (§8.11): install the headless VM-rung driver AND the
-        // gesture-write family bound to it ONLY when the caller asked for it. The windowed
-        // repoint passes `Deferred` and later INSERTs the live window's `GpuiUserDriver`-backed
+        // alphabet headless (ClickBlock/ExpandToggle/PressKey/…). Reuses the
+        // component's driver (not a fresh one) so the single live
+        // `HeadlessEditorMirror` stays shared with the editor-write caps. No
+        // geometry → its `require_bounds` precheck is a no-op (the driver
+        // resolves targets itself). Driver rung placement (§8.11): install the
+        // headless VM-rung driver AND the gesture-write family bound to it ONLY
+        // when the caller asked for it. The windowed repoint passes `Deferred`
+        // and later INSERTs the live window's `GpuiUserDriver`-backed
         // gesture caps via `overlay_windowed_caps`, so the whole gesture rung
-        // (`SutDriver`/`SutBlockInteract`/`SutArrowNavigate` + `SutBlockTreeWrite`/`SutFocusWrite`/
-        // `SutEditorMirrorWrite`/`SutMutate`) is inserted ONCE by whoever owns the rung — never
-        // registered here and then overridden. The gesture writes ride the component's OWN
-        // `ReactiveEngineDriver` (keystroke split / sidebar-click focus / editor keystrokes /
-        // `state_toggle` clicks) — the UI-adjacent VM rung, not raw op dispatch; the resolver
-        // set above makes `SutBlockTreeWrite` the shared-resolver keystroke writer.
+        // (`SutDriver`/`SutBlockInteract`/`SutArrowNavigate` +
+        // `SutBlockTreeWrite`/`SutFocusWrite`/ `SutEditorMirrorWrite`/
+        // `SutMutate`) is inserted ONCE by whoever owns the rung — never
+        // registered here and then overridden. The gesture writes ride the component's
+        // OWN `ReactiveEngineDriver` (keystroke split / sidebar-click focus /
+        // editor keystrokes / `state_toggle` clicks) — the UI-adjacent VM rung,
+        // not raw op dispatch; the resolver set above makes `SutBlockTreeWrite`
+        // the shared-resolver keystroke writer.
         if matches!(driver_placement, DriverPlacement::HeadlessReactive) {
             comp.clone()
                 .register_gesture_writes(&mut caps, comp.driver());
@@ -365,15 +412,24 @@ async fn compose_sut_seeded_impl(
         // build = an editor config) so the Loro arm below reads its caps over the SAME
         // doc the frontend op pipeline writes (task #4 read-doc unification).
         frontend_loro_store = comp.loro_doc_store();
-        // In full mode (Loro on = editor config) also capture the sync-controller handle
-        // so the Loro arm's `LoroSut` can wait for the controller to project an imported
-        // peer delta into Turso `block_raw`. Resolution is RACE-prone (`without_wait()` →
-        // spawned `post_ready_work`, `wiring.rs:360`), so POLL until present — and FAIL
-        // LOUD if it never resolves, because full-mode peer projection has no controller
-        // without it (don't silently degrade to a no-op quiescence wait). Validated by
+        // In full mode (Loro on = editor config) also capture the sync-controller
+        // handle so the Loro arm's `LoroSut` can wait for the controller to
+        // project an imported peer delta into Turso `block_raw`. Resolution is
+        // RACE-prone (`without_wait()` → spawned `post_ready_work`,
+        // `wiring.rs:360`), so POLL until present — and FAIL LOUD if it never
+        // resolves, because full-mode peer projection has no controller without
+        // it (don't silently degrade to a no-op quiescence wait). Validated by
         // the A0 probe `headless_loro_sync_controller_resolves_after_boot`.
         if has_editor {
-            for _ in 0..40 {
+            // Scale-soak: a 5-10k-block org ingest delays controller resolution far past
+            // the 2s default; scale the poll budget with `HOLON_SOAK_SETTLE_MS` (never
+            // below the 2s default) so the fail-loud assert below stays meaningful.
+            let boot_poll_ms: u64 = std::env::var("HOLON_SOAK_SETTLE_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(2_000)
+                .max(2_000);
+            for _ in 0..(boot_poll_ms / 50) {
                 frontend_sync_handle = comp.loro_sync_handle();
                 if frontend_sync_handle.is_some() {
                     break;
@@ -382,19 +438,22 @@ async fn compose_sut_seeded_impl(
             }
             assert!(
                 frontend_sync_handle.is_some(),
-                "compose_sut full mode: LoroSyncControllerHandle never resolved within 2s \
-                 of headless boot — peer deltas would not project to Turso. See the A0 probe."
+                "compose_sut full mode: LoroSyncControllerHandle never resolved within the boot \
+                 poll budget (>=2s, HOLON_SOAK_SETTLE_MS-scaled) of headless boot — peer deltas \
+                 would not project to Turso. See the A0 probe."
             );
         }
         scaffold_ids = booted_scaffold_ids(&caps).await;
         engine = Some(eng);
         // Surface the booted session + reactive so a windowed harness can attach a gpui
-        // window as a renderer over this same reactive tree (§Round 5 windowed repoint).
+        // window as a renderer over this same reactive tree (§Round 5 windowed
+        // repoint).
         session = Some(comp.session());
         reactive = Some(comp.reactive());
-        // Surface the component so the windowed overlay can INSERT its gesture-write caps
-        // bound to the window driver (§8.12 C-3), and so the base seed focus-align can drive
-        // `NavigateFocus` through the component's own headless driver.
+        // Surface the component so the windowed overlay can INSERT its gesture-write
+        // caps bound to the window driver (§8.12 C-3), and so the base seed
+        // focus-align can drive `NavigateFocus` through the component's own
+        // headless driver.
         frontend = Some(comp.clone());
         multi_thread = true; // the booted FrontendSession needs a multi-thread runtime
         settle = Duration::from_millis(150);
@@ -416,10 +475,11 @@ async fn compose_sut_seeded_impl(
         engine = Some(eng);
     }
 
-    // Loro: canonical `SutBackend` only when Turso is absent; otherwise `merge_missing`
-    // keeps Turso's backend and adds Loro's read caps (`SutLoroLog`/`SutLoroTaskState`),
-    // reporting the shadowed overlap. The peer-mesh surface (`SutLoro`) is contributed
-    // ONLY when Loro is the canonical backend (no Turso) — see the gate below.
+    // Loro: canonical `SutBackend` only when Turso is absent; otherwise
+    // `merge_missing` keeps Turso's backend and adds Loro's read caps
+    // (`SutLoroLog`/`SutLoroTaskState`), reporting the shadowed overlap. The
+    // peer-mesh surface (`SutLoro`) is contributed ONLY when Loro is the
+    // canonical backend (no Turso) — see the gate below.
     if has_loro {
         // Build a `LoroDocumentStore` and hand the read component a backend over its
         // global doc, so the read caps AND the peer-mesh `LoroSut` observe ONE shared
@@ -465,23 +525,26 @@ async fn compose_sut_seeded_impl(
         // drives over is the SAME doc whose mutations reach the canonical `SutBackend`
         // the block invariants read — so a merged peer block is observable there:
         //
-        //   * Pure-Loro (`!has_turso`): the Loro doc IS the canonical backend; read caps
+        //   * Pure-Loro (`!has_turso`): the Loro doc IS the canonical backend; read
+        //     caps
         //     + peer mesh + `SutBackend` all observe the one shared global doc. No
         //     `LoroSyncController` (no SQL mirror), so `sync_handle = None` and
         //     `wait_for_quiescence` no-ops.
-        //   * Full mode (`has_turso` + editor): `frontend_loro_store`/`frontend_sync_handle`
-        //     are present, so `doc_store` IS the frontend's authority doc and the captured
-        //     controller projects an imported peer delta into Turso `block_raw` (the
-        //     canonical `SutBackend`). `wait_for_quiescence(sync_handle)` inside
-        //     `apply_merge_from_peer`/`apply_sync_with_peer` blocks until that projection
-        //     lands — so the peer-aware per-tick reconcile (`harness.rs`) sees the row.
+        //   * Full mode (`has_turso` + editor):
+        //     `frontend_loro_store`/`frontend_sync_handle` are present, so `doc_store`
+        //     IS the frontend's authority doc and the captured controller projects an
+        //     imported peer delta into Turso `block_raw` (the canonical `SutBackend`).
+        //     `wait_for_quiescence(sync_handle)` inside
+        //     `apply_merge_from_peer`/`apply_sync_with_peer` blocks until that
+        //     projection lands — so the peer-aware per-tick reconcile (`harness.rs`)
+        //     sees the row.
         //
         // WITHHELD only in full mode WITHOUT an editor: there the frontend booted Loro
-        // OFF, so `doc_store` is a FRESH store no controller watches — a peer merge would
-        // land in a Loro doc invisible to the Turso backend and diverge
+        // OFF, so `doc_store` is a FRESH store no controller watches — a peer merge
+        // would land in a Loro doc invisible to the Turso backend and diverge
         // `inv-blocks-match-ref`. `frontend_sync_handle` is `None` there, so the gate
-        // `!has_turso || frontend_sync_handle.is_some()` correctly skips it and the peer
-        // transitions AUTO-NARROW out (honest cap-presence).
+        // `!has_turso || frontend_sync_handle.is_some()` correctly skips it and the
+        // peer transitions AUTO-NARROW out (honest cap-presence).
         //
         // `doc_uri_map` stays empty/identity: peer blocks carry a stable deterministic
         // `peer-…` id agreed by both oracle and SUT (no UUID minted), so
@@ -499,15 +562,16 @@ async fn compose_sut_seeded_impl(
         shadowed.extend(caps.merge_missing(loro_caps));
     }
 
-    // Editor arm. When a frontend is present it already hosts the REAL headless editor
-    // (the frontend arm above registered the read+write caps over the production
-    // `HeadlessEditorMirror`, Loro on) — the North Star end state, so no stand-in here.
-    // For a NON-frontend editor config (e.g. loro+editor, or turso+editor without a
-    // ViewModel) there is no frontend session, so a headless `InMemEditorComponent`
-    // provides `SutEditorMirrorRead/Write`, committing into the CANONICAL backend so a
-    // committed keystroke lands where the block invariants read: the Turso
-    // `BackendEngine` (`set_field` op) when Turso is canonical, else the Loro store
-    // (`CoreOperations`). The editor caps don't overlap any storage cap, so no shadow.
+    // Editor arm. When a frontend is present it already hosts the REAL headless
+    // editor (the frontend arm above registered the read+write caps over the
+    // production `HeadlessEditorMirror`, Loro on) — the North Star end state,
+    // so no stand-in here. For a NON-frontend editor config (e.g. loro+editor,
+    // or turso+editor without a ViewModel) there is no frontend session, so a
+    // headless `InMemEditorComponent` provides `SutEditorMirrorRead/Write`,
+    // committing into the CANONICAL backend so a committed keystroke lands
+    // where the block invariants read: the Turso `BackendEngine` (`set_field`
+    // op) when Turso is canonical, else the Loro store (`CoreOperations`). The
+    // editor caps don't overlap any storage cap, so no shadow.
     if has_editor && !has_frontend {
         let commit: Arc<dyn EditorCommitTarget> = if let Some(eng) = &engine {
             eng.clone() as Arc<dyn EditorCommitTarget>
@@ -519,12 +583,13 @@ async fn compose_sut_seeded_impl(
         Arc::new(InMemEditorComponent::new_commit(commit)).register(&mut caps);
     }
 
-    // Non-frontend seed: a storage-only config (Loro-only / Turso-only) has no session
-    // to ingest `frontend_seed_org`, so create the working tree directly into the
-    // canonical backend (the SAME store backing the `SutBackend` cap) — the transition
-    // alphabet only EDITS a pre-seeded tree (split/join/…); creating the initial tree is
-    // a boot concern, done here so the backend never leaves the builder. Frontend configs
-    // already seeded via the org boot above, so skip.
+    // Non-frontend seed: a storage-only config (Loro-only / Turso-only) has no
+    // session to ingest `frontend_seed_org`, so create the working tree
+    // directly into the canonical backend (the SAME store backing the
+    // `SutBackend` cap) — the transition alphabet only EDITS a pre-seeded tree
+    // (split/join/…); creating the initial tree is a boot concern, done here so
+    // the backend never leaves the builder. Frontend configs already seeded via
+    // the org boot above, so skip.
     if !has_frontend && !seed_tree.is_empty() {
         // Loro is the canonical backend for every non-frontend config the wide swap
         // reaches (`set_for_wiring` makes Turso ⟹ ViewModel ⟹ frontend, so a
@@ -557,15 +622,20 @@ async fn compose_sut_seeded_impl(
 
 #[cfg(test)]
 mod tests {
+    use holon_pbt_core::capabilities::SutBackend;
+    use holon_pbt_core::capabilities::SutBlockTreeWrite;
+    use holon_pbt_core::capabilities::SutEditorMirrorRead;
+    use holon_pbt_core::capabilities::SutEditorMirrorWrite;
+    use holon_pbt_core::capabilities::SutLoro;
+    use holon_pbt_core::capabilities::SutLoroLog;
+    use holon_pbt_core::capabilities::SutLoroTaskState;
+    use holon_pbt_core::capabilities::SutSqlProjection;
+
     use super::*;
-    use holon_pbt_core::capabilities::{
-        SutBackend, SutBlockTreeWrite, SutEditorMirrorRead, SutEditorMirrorWrite, SutLoro,
-        SutLoroLog, SutLoroTaskState, SutSqlProjection,
-    };
 
     // Bare storage sets (no ViewModel/EditorState projections — those arms are
-    // deferred). `ComponentSet::sql_only()` bundles projections, so it can't be used
-    // for the storage-only cap test yet.
+    // deferred). `ComponentSet::sql_only()` bundles projections, so it can't be
+    // used for the storage-only cap test yet.
     fn turso_only() -> ComponentSet {
         ComponentSet::of([StorageAdapter::Turso.into()])
     }
@@ -593,7 +663,8 @@ mod tests {
         Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()))
     }
 
-    /// Turso-only: the SQL backend caps, nothing shadowed, an engine to seed through.
+    /// Turso-only: the SQL backend caps, nothing shadowed, an engine to seed
+    /// through.
     #[tokio::test]
     async fn compose_sut_turso_only_caps() {
         let sut = compose_sut(&turso_only(), &resolver()).await;
@@ -608,11 +679,13 @@ mod tests {
         );
     }
 
-    /// Loro-only: the Loro backend + read caps + the **`SutLoro` peer-mesh surface**
-    /// (so the peer transitions `AddPeer`/`PeerEdit`/`SyncWithPeer`/`MergeFromPeer`
-    /// become cap-feasible — the loro-only fast config). Still NO block-tree write cap:
-    /// Loro structural block-tree writes have no `SutBlockTreeWrite` provider here, so
-    /// the *structural* alphabet (Split/Join/…) self-gates out, by design.
+    /// Loro-only: the Loro backend + read caps + the **`SutLoro` peer-mesh
+    /// surface** (so the peer transitions
+    /// `AddPeer`/`PeerEdit`/`SyncWithPeer`/`MergeFromPeer`
+    /// become cap-feasible — the loro-only fast config). Still NO block-tree
+    /// write cap: Loro structural block-tree writes have no
+    /// `SutBlockTreeWrite` provider here, so the *structural* alphabet
+    /// (Split/Join/…) self-gates out, by design.
     #[tokio::test]
     async fn compose_sut_loro_only_caps() {
         let sut = compose_sut(&loro_only(), &resolver()).await;
@@ -627,25 +700,31 @@ mod tests {
         assert!(sut.engine.is_none());
     }
 
-    /// **The loro-only fast-config payoff: peer transitions drive over the composed
-    /// `CapMap`.** Before the `LoroSut`-as-`CapProvider` arm, a Loro `CapMap` had no
-    /// `SutLoro` so the peer transitions gated out (PCG-5a). Now the arm wires the
-    /// peer mesh over the SAME shared global doc the read caps observe, so the WIDE
-    /// `E2ETransition` enum dispatches `AddPeer`→`PeerEdit`→`MergeFromPeer` over
-    /// `&mut CapMap` and a peer-created block actually lands in the primary store the
-    /// `SutBackend` cap reads — the end-to-end shared-doc proof (a non-shared store
-    /// would leave the merged block invisible and fail this assertion).
+    /// **The loro-only fast-config payoff: peer transitions drive over the
+    /// composed `CapMap`.** Before the `LoroSut`-as-`CapProvider` arm, a
+    /// Loro `CapMap` had no `SutLoro` so the peer transitions gated out
+    /// (PCG-5a). Now the arm wires the peer mesh over the SAME shared
+    /// global doc the read caps observe, so the WIDE `E2ETransition` enum
+    /// dispatches `AddPeer`→`PeerEdit`→`MergeFromPeer` over `&mut CapMap`
+    /// and a peer-created block actually lands in the primary store the
+    /// `SutBackend` cap reads — the end-to-end shared-doc proof (a non-shared
+    /// store would leave the merged block invisible and fail this
+    /// assertion).
     #[tokio::test(flavor = "multi_thread")]
     async fn compose_sut_loro_arm_drives_peer_transitions() {
+        use holon_pbt_core::TransitionImpl;
+        use holon_pbt_core::capabilities::PeerEditOp;
+
         use crate::pbt::reference_state::ReferenceState;
         use crate::pbt::state_machine::fresh_reference_state;
-        use crate::pbt::transitions::{
-            AddPeer, E2ETransition, MergeFromPeer, PeerEdit, PeerEditOp,
-        };
-        use holon_pbt_core::TransitionImpl;
+        use crate::pbt::transitions::AddPeer;
+        use crate::pbt::transitions::E2ETransition;
+        use crate::pbt::transitions::MergeFromPeer;
+        use crate::pbt::transitions::PeerEdit;
 
-        /// Drop a `ReferenceState` (owns an `Arc<tokio::Runtime>`) off the async
-        /// executor — dropping it inside a `#[tokio::test]` context panics.
+        /// Drop a `ReferenceState` (owns an `Arc<tokio::Runtime>`) off the
+        /// async executor — dropping it inside a `#[tokio::test]`
+        /// context panics.
         fn drop_ref_off_thread(state: ReferenceState) {
             std::thread::spawn(move || drop(state))
                 .join()
@@ -686,31 +765,35 @@ mod tests {
         let blocks = caps.expect::<dyn SutBackend>().block_raw_snapshot().await;
         assert!(
             blocks.iter().any(|b| b.content == "from-peer"),
-            "the peer-created+merged block must appear in the shared primary store; \
-             got {:?}",
+            "the peer-created+merged block must appear in the shared primary store; got {:?}",
             blocks.iter().map(|b| b.content.clone()).collect::<Vec<_>>()
         );
 
         drop_ref_off_thread(oracle);
     }
 
-    /// A5 TEETH (full-mode peer mesh): the full-mode analogue of the loro-only proof
-    /// above. Over `compose_sut(full_headless())` — Turso is the canonical `SutBackend`,
-    /// Loro is the authority store the frontend's `LoroSyncController` watches — drive
-    /// `AddPeer → PeerEdit(Create) → MergeFromPeer` and assert the merged block lands in
-    /// the **Turso** `block_raw` the block invariants read. The merge's internal
-    /// `wait_for_quiescence(sync_handle)` (now wired via A2) blocks until the controller
-    /// projects the imported delta — the evidence that the async projection completed
-    /// (no bare sleep). Also asserts the row's id is `block:peer-…` (the stable id A2's
-    /// identity resolution and A-RECONCILE's peer-scheme exclusion both depend on).
+    /// A5 TEETH (full-mode peer mesh): the full-mode analogue of the loro-only
+    /// proof above. Over `compose_sut(full_headless())` — Turso is the
+    /// canonical `SutBackend`, Loro is the authority store the frontend's
+    /// `LoroSyncController` watches — drive `AddPeer → PeerEdit(Create) →
+    /// MergeFromPeer` and assert the merged block lands in the **Turso**
+    /// `block_raw` the block invariants read. The merge's internal
+    /// `wait_for_quiescence(sync_handle)` (now wired via A2) blocks until the
+    /// controller projects the imported delta — the evidence that the async
+    /// projection completed (no bare sleep). Also asserts the row's id is
+    /// `block:peer-…` (the stable id A2's identity resolution and
+    /// A-RECONCILE's peer-scheme exclusion both depend on).
     #[tokio::test(flavor = "multi_thread")]
     async fn compose_sut_full_headless_peer_mesh_projects_to_turso() {
+        use holon_pbt_core::TransitionImpl;
+        use holon_pbt_core::capabilities::PeerEditOp;
+
         use crate::pbt::reference_state::ReferenceState;
         use crate::pbt::state_machine::fresh_reference_state;
-        use crate::pbt::transitions::{
-            AddPeer, E2ETransition, MergeFromPeer, PeerEdit, PeerEditOp,
-        };
-        use holon_pbt_core::TransitionImpl;
+        use crate::pbt::transitions::AddPeer;
+        use crate::pbt::transitions::E2ETransition;
+        use crate::pbt::transitions::MergeFromPeer;
+        use crate::pbt::transitions::PeerEdit;
 
         fn drop_ref_off_thread(state: ReferenceState) {
             std::thread::spawn(move || drop(state))
@@ -747,8 +830,9 @@ mod tests {
         let merge = E2ETransition::MergeFromPeer(MergeFromPeer { peer_idx: 0 });
         TransitionImpl::apply_to_sut(&merge, &oracle, &mut caps).await;
 
-        // After the merge's internal `wait_for_quiescence`, the controller has projected
-        // the peer delta into the Turso `block_raw` the canonical `SutBackend` reads.
+        // After the merge's internal `wait_for_quiescence`, the controller has
+        // projected the peer delta into the Turso `block_raw` the canonical
+        // `SutBackend` reads.
         let blocks = caps.expect::<dyn SutBackend>().block_raw_snapshot().await;
         let merged = blocks.iter().find(|b| b.content == "from-peer");
         assert!(
@@ -765,9 +849,10 @@ mod tests {
         drop_ref_off_thread(oracle);
     }
 
-    /// Turso+Loro: the precedence merge that `sql_loro_wide` hand-rolls. Turso is the
-    /// canonical `SutBackend` (Loro's is reported shadowed); Loro's read caps are
-    /// added. Proves `merge_missing` replaces the hand-written non-overlap insert.
+    /// Turso+Loro: the precedence merge that `sql_loro_wide` hand-rolls. Turso
+    /// is the canonical `SutBackend` (Loro's is reported shadowed); Loro's
+    /// read caps are added. Proves `merge_missing` replaces the
+    /// hand-written non-overlap insert.
     #[tokio::test]
     async fn compose_sut_turso_and_loro_precedence_merge() {
         let sut = compose_sut(&turso_and_loro(), &resolver()).await;
@@ -785,13 +870,17 @@ mod tests {
         );
     }
 
-    /// Frontend arm: a real windowless `HeadlessFrontendComponent` over Turso is the
-    /// canonical backend AND supplies the ViewModel/Renderer/Org/watch/nav caps +
-    /// `SutSqlProjection`. Boot leaves a scaffold (captured), needs a multi-thread
-    /// runtime + a settle window. This is the arm that folds C2.0's `boot_and_seed`.
+    /// Frontend arm: a real windowless `HeadlessFrontendComponent` over Turso
+    /// is the canonical backend AND supplies the
+    /// ViewModel/Renderer/Org/watch/nav caps + `SutSqlProjection`. Boot
+    /// leaves a scaffold (captured), needs a multi-thread runtime + a
+    /// settle window. This is the arm that folds C2.0's `boot_and_seed`.
     #[tokio::test(flavor = "multi_thread")]
     async fn compose_sut_frontend_arm_caps_and_aux() {
-        use holon_pbt_core::capabilities::{SutOrgRead, SutRenderer, SutViewSelection, SutWatch};
+        use holon_pbt_core::capabilities::SutOrgRead;
+        use holon_pbt_core::capabilities::SutRenderer;
+        use holon_pbt_core::capabilities::SutViewSelection;
+        use holon_pbt_core::capabilities::SutWatch;
         let sut = compose_sut(&turso_frontend(), &resolver()).await;
         // Backend + structural write + Turso projection.
         assert!(sut.caps.get::<dyn SutBackend>().is_some());
@@ -816,11 +905,12 @@ mod tests {
         );
     }
 
-    /// Editor arm (increment 2c) over a **Turso-canonical** config (the swap target
-    /// shape: Turso + ViewModel + EditorState, no UI). The editor hosts both mirror
-    /// caps, committing through the canonical `BackendEngine`'s `set_field` op — so
-    /// `compose_sut` no longer panics on `EditorState` and an editor write lands in
-    /// `block_raw`. Backend/projection/frontend caps remain present alongside.
+    /// Editor arm (increment 2c) over a **Turso-canonical** config (the swap
+    /// target shape: Turso + ViewModel + EditorState, no UI). The editor
+    /// hosts both mirror caps, committing through the canonical
+    /// `BackendEngine`'s `set_field` op — so `compose_sut` no longer panics
+    /// on `EditorState` and an editor write lands in `block_raw`.
+    /// Backend/projection/frontend caps remain present alongside.
     #[tokio::test(flavor = "multi_thread")]
     async fn compose_sut_editor_arm_turso_caps() {
         let sut = compose_sut(&turso_frontend_editor(), &resolver()).await;
@@ -835,8 +925,9 @@ mod tests {
         );
     }
 
-    /// Editor arm over a **Loro-canonical** config: the editor commits into the Loro
-    /// store (`LoroBackend: CoreOperations`, via `CoreOpsCommit`) — the no-Turso path.
+    /// Editor arm over a **Loro-canonical** config: the editor commits into the
+    /// Loro store (`LoroBackend: CoreOperations`, via `CoreOpsCommit`) —
+    /// the no-Turso path.
     #[tokio::test]
     async fn compose_sut_editor_arm_loro_caps() {
         let sut = compose_sut(&loro_editor(), &resolver()).await;
@@ -850,13 +941,15 @@ mod tests {
         );
     }
 
-    /// **The swap-target config composes.** `ComponentSet::full_headless()` (Loro+Org+
-    /// Turso storage + ViewModel + EditorState, no UI) is exactly what `general_e2e_pbt`
-    /// drives. Before the editor arm, `compose_sut` PANICKED on its `EditorState`; now it
-    /// assembles the full SUT — the canonical Turso frontend backend, the Loro read caps,
-    /// AND the editor mirror caps. This is the unblock that lets a later increment point
-    /// the wide PBT at `compose_sut(full_headless)` (still pending lifecycle/mutate/fixture
-    /// arms + reconcile generalization + committed-content parity before it can DRIVE green).
+    /// **The swap-target config composes.** `ComponentSet::full_headless()`
+    /// (Loro+Org+ Turso storage + ViewModel + EditorState, no UI) is
+    /// exactly what `general_e2e_pbt` drives. Before the editor arm,
+    /// `compose_sut` PANICKED on its `EditorState`; now it assembles the
+    /// full SUT — the canonical Turso frontend backend, the Loro read caps,
+    /// AND the editor mirror caps. This is the unblock that lets a later
+    /// increment point the wide PBT at `compose_sut(full_headless)` (still
+    /// pending lifecycle/mutate/fixture arms + reconcile generalization +
+    /// committed-content parity before it can DRIVE green).
     #[tokio::test(flavor = "multi_thread")]
     async fn compose_sut_full_headless_composes() {
         let sut = compose_sut(&ComponentSet::full_headless(), &resolver()).await;
@@ -864,13 +957,15 @@ mod tests {
         assert!(sut.caps.get::<dyn SutBackend>().is_some());
         assert!(sut.caps.get::<dyn SutSqlProjection>().is_some());
         assert!(sut.caps.get::<dyn SutBlockTreeWrite>().is_some());
-        // Loro read caps (storage also has Loro; SutBackend shadowed by Turso, disclosed).
+        // Loro read caps (storage also has Loro; SutBackend shadowed by Turso,
+        // disclosed).
         assert!(sut.caps.get::<dyn SutLoroLog>().is_some());
-        // The peer-mesh `SutLoro` is now PRESENT in full mode (Part A): the Loro arm drives
-        // over the frontend's shared authority doc with the real sync-controller handle, so
-        // a merged peer delta projects into the canonical Turso backend the block invariants
-        // read. Peer transitions therefore auto-SELECT into the full_headless swap alphabet
-        // (proved by `compose_sut_full_headless_peer_mesh_projects_to_turso` +
+        // The peer-mesh `SutLoro` is now PRESENT in full mode (Part A): the Loro arm
+        // drives over the frontend's shared authority doc with the real
+        // sync-controller handle, so a merged peer delta projects into the
+        // canonical Turso backend the block invariants read. Peer transitions
+        // therefore auto-SELECT into the full_headless swap alphabet (proved by
+        // `compose_sut_full_headless_peer_mesh_projects_to_turso` +
         // `full_headless_cap_set_admits_peer_transitions`).
         assert!(sut.caps.get::<dyn SutLoro>().is_some());
         assert!(
@@ -881,10 +976,11 @@ mod tests {
         // The editor arm.
         assert!(sut.caps.get::<dyn SutEditorMirrorRead>().is_some());
         assert!(sut.caps.get::<dyn SutEditorMirrorWrite>().is_some());
-        // The mutate arm (ToggleState) — headless `set_field task_state` via the engine.
+        // The mutate arm (ToggleState) — headless `set_field task_state` via the
+        // engine.
         assert!(
             sut.caps
-                .get::<dyn crate::pbt::local_caps::SutMutate>()
+                .get::<dyn holon_pbt_core::capabilities::SutMutate>()
                 .is_some()
         );
         assert!(sut.engine.is_some());
@@ -898,11 +994,13 @@ mod tests {
         let _ = compose_sut(&ComponentSet::of([]), &resolver()).await;
     }
 
-    /// **PCG-5a (early, pre-PCG-4): the wide alphabet auto-narrows to a real partial
-    /// `compose_sut` cap set.** This is the North-Star "env-selected subsystems pick the
-    /// feasible transitions" property, proven on the GENERATION side over a genuine
-    /// `CapMap` (not a hand-built set). Driving the narrowed alphabet on the `CapMap` is
-    /// PCG-5b, gated on PCG-4 (`CapMap: SutHandle` needs the `SutLoro` dyn-compat flip).
+    /// **PCG-5a (early, pre-PCG-4): the wide alphabet auto-narrows to a real
+    /// partial `compose_sut` cap set.** This is the North-Star
+    /// "env-selected subsystems pick the feasible transitions" property,
+    /// proven on the GENERATION side over a genuine `CapMap` (not a
+    /// hand-built set). Driving the narrowed alphabet on the `CapMap` is
+    /// PCG-5b, gated on PCG-4 (`CapMap: SutHandle` needs the `SutLoro`
+    /// dyn-compat flip).
     // Plain `#[test]`, not `#[tokio::test]`: each `ReferenceState` owns an
     // `Arc<tokio::Runtime>`, and dropping that inside an async context panics. We boot
     // `compose_sut` on a scoped current-thread runtime, extract the (runtime-free)
@@ -910,17 +1008,21 @@ mod tests {
     // nested runtimes drop cleanly.
     #[test]
     fn wide_alphabet_narrows_to_partial_compose_sut_capset() {
-        use crate::pbt::reference_state::ReferenceState;
-        use crate::pbt::state_machine::fresh_reference_state;
-        use crate::pbt::transitions::{self as t, aggregate_transitions};
-        use holon_pbt_core::TransitionFactory;
-        use proptest::strategy::{Strategy, ValueTree};
-        use proptest::test_runner::TestRunner;
         use std::collections::BTreeSet;
 
-        // Monomorphize the generic `TransitionFactory<R>` methods at `R = ReferenceState`
-        // (the fine-grained transitions impl the factory for any `R`, so a bare
-        // `T::required_caps()` can't infer `R`).
+        use holon_pbt_core::TransitionFactory;
+        use proptest::strategy::Strategy;
+        use proptest::strategy::ValueTree;
+        use proptest::test_runner::TestRunner;
+
+        use crate::pbt::reference_state::ReferenceState;
+        use crate::pbt::state_machine::fresh_reference_state;
+        use crate::pbt::transitions::aggregate_transitions;
+        use crate::pbt::transitions::{self as t};
+
+        // Monomorphize the generic `TransitionFactory<R>` methods at `R =
+        // ReferenceState` (the fine-grained transitions impl the factory for
+        // any `R`, so a bare `T::required_caps()` can't infer `R`).
         fn rc<T: TransitionFactory<ReferenceState>>() -> Vec<holon_pbt_core::composition::CapId> {
             T::required_caps()
         }
@@ -944,8 +1046,9 @@ mod tests {
         // The gate's RHS, wired exactly as the composed harness will wire it.
         let state = fresh_reference_state(set.wiring.clone()).with_cap_set(cap_set.clone());
 
-        // ── A. Deterministic discrimination on the real cap set (the gate fn itself). ──
-        // Block-tree transitions are cap-feasible; the absent-cap families are not.
+        // ── A. Deterministic discrimination on the real cap set (the gate fn itself).
+        // ── Block-tree transitions are cap-feasible; the absent-cap families
+        // are not.
         assert!(state.caps_available(&rc::<t::SplitBlock>()));
         assert!(state.caps_available(&rc::<t::JoinBlock>()));
         assert!(state.caps_available(&rc::<t::Indent>()));
@@ -967,9 +1070,9 @@ mod tests {
         }
 
         // The cap gate is STRICTLY FINER than the wiring gate: NavigateFocus passes the
-        // wiring gate under Turso, yet its cap is absent — so only the cap gate excludes
-        // it. (Without PCG-2 this transition would have generated and panicked at
-        // `expect::<dyn SutFocusWrite>()`.)
+        // wiring gate under Turso, yet its cap is absent — so only the cap gate
+        // excludes it. (Without PCG-2 this transition would have generated and
+        // panicked at `expect::<dyn SutFocusWrite>()`.)
         assert!(
             rw::<t::NavigateFocus>().satisfied_by(&set.wiring),
             "NavigateFocus passes the WIRING gate under Turso"
@@ -978,10 +1081,12 @@ mod tests {
 
         // ── B. The gate is actually applied inside `aggregate_transitions`. ──
         // A fresh state (app not started) makes the FS-fixture transitions feasible
-        // (CreateDirectory/GitInit/…), all of which need `SutFixtureFs` — absent from the
-        // partial cap set. So FULL (no cap gate) generates them and NARROW does not.
+        // (CreateDirectory/GitInit/…), all of which need `SutFixtureFs` — absent from
+        // the partial cap set. So FULL (no cap gate) generates them and NARROW
+        // does not.
         let mut runner = TestRunner::deterministic();
-        // Sample the FULL alphabet as VALUES so we can read each variant's `required_caps`.
+        // Sample the FULL alphabet as VALUES so we can read each variant's
+        // `required_caps`.
         let full_strat = aggregate_transitions(&fresh_reference_state(set.wiring.clone()));
         let mut caps_by_name: std::collections::BTreeMap<&'static str, Vec<_>> =
             std::collections::BTreeMap::new();
@@ -1008,10 +1113,11 @@ mod tests {
             narrow.is_subset(&full) && narrow != full,
             "the cap gate strictly narrows the wide alphabet: full={full:?} narrow={narrow:?}"
         );
-        // The narrowing is EXACTLY the cap gate: every variant FULL has but NARROW drops
-        // is cap-infeasible under the partial set (it was removed for the right reason,
-        // not by sampling noise — on a fresh state the only cap-feasible variant is the
-        // always-on `Nothing`, which appears in both).
+        // The narrowing is EXACTLY the cap gate: every variant FULL has but NARROW
+        // drops is cap-infeasible under the partial set (it was removed for the
+        // right reason, not by sampling noise — on a fresh state the only
+        // cap-feasible variant is the always-on `Nothing`, which appears in
+        // both).
         for removed in full.difference(&narrow) {
             assert!(
                 !state.caps_available(&caps_by_name[removed]),
@@ -1034,22 +1140,27 @@ mod tests {
         }
     }
 
-    /// Swap-track discrimination under the FULL `full_headless` composed config:
-    /// - `ToggleState` is cap-feasible (the headless component provides `SutMutate`).
-    /// - `ApplyMutation` is NOW cap-feasible too: it is SOURCE-ROUTED via `SutApplyMutation`
-    ///   and its gate names `SutLoro` (the implemented LoroPeer arm), which `full_headless`
-    ///   provides. The composed generator restricts its source set to the implemented arms
+    /// Swap-track discrimination under the FULL `full_headless` composed
+    /// config:
+    /// - `ToggleState` is cap-feasible (the headless component provides
+    ///   `SutMutate`).
+    /// - `ApplyMutation` is NOW cap-feasible too: it is SOURCE-ROUTED via
+    ///   `SutApplyMutation` and its gate names `SutLoro` (the implemented
+    ///   LoroPeer arm), which `full_headless` provides. The composed generator
+    ///   restricts its source set to the implemented arms
     ///   (`state.cap_set.is_some()` → LoroPeer only for now).
-    /// - `BulkExternalAdd` is NOW cap-feasible too: `HeadlessFrontendComponent` provides a real
-    ///   composed `SutSeamMutate` (org write via the live FileSyncController), which is its gate.
-    /// (`E2ESut`'s own runs keep everything: concrete-SUT runs leave `cap_set = None`, so the
-    /// gate admits all.)
+    /// - `BulkExternalAdd` is NOW cap-feasible too: `HeadlessFrontendComponent`
+    ///   provides a real composed `SutSeamMutate` (org write via the live
+    ///   FileSyncController), which is its gate.
+    /// (`E2ESut`'s own runs keep everything: concrete-SUT runs leave `cap_set =
+    /// None`, so the gate admits all.)
     #[test]
     fn full_headless_capset_admits_toggle_apply_mutation_and_bulk() {
+        use holon_pbt_core::TransitionFactory;
+
         use crate::pbt::reference_state::ReferenceState;
         use crate::pbt::state_machine::fresh_reference_state;
         use crate::pbt::transitions as t;
-        use holon_pbt_core::TransitionFactory;
 
         fn rc<T: TransitionFactory<ReferenceState>>() -> Vec<holon_pbt_core::composition::CapId> {
             T::required_caps()
@@ -1085,22 +1196,28 @@ mod tests {
         );
     }
 
-    /// SWAP PROBE (run with `--nocapture`): print the auto-narrowed `full_headless`
-    /// alphabet so the swap's drive surface is explicit. Sampled from a FRESH state, so
-    /// this is the wiring+precondition+cap-feasible-from-fresh upper bound (a booted/
-    /// seeded swap ref unlocks more, e.g. Join once blocks exist). Reports FULL (no cap
-    /// gate) vs NARROW (full_headless cap_set) and the cap-gated-out delta — the latter is
-    /// the E4/seam set that stays on `E2ESut`. Peer ops (`AddPeer`/…) appear in NARROW
-    /// because `full_headless` registers `SutLoro` — and as of Part A this is now
-    /// load-bearing: the full-mode peer mesh drives over the frontend's shared authority
-    /// doc + real sync controller, so a merged peer delta projects into the Turso
-    /// `SutBackend` and the peer ops are part of the swap alphabet (no longer excluded).
+    /// SWAP PROBE (run with `--nocapture`): print the auto-narrowed
+    /// `full_headless` alphabet so the swap's drive surface is explicit.
+    /// Sampled from a FRESH state, so this is the
+    /// wiring+precondition+cap-feasible-from-fresh upper bound (a booted/
+    /// seeded swap ref unlocks more, e.g. Join once blocks exist). Reports FULL
+    /// (no cap gate) vs NARROW (full_headless cap_set) and the
+    /// cap-gated-out delta — the latter is the E4/seam set that stays on
+    /// `E2ESut`. Peer ops (`AddPeer`/…) appear in NARROW
+    /// because `full_headless` registers `SutLoro` — and as of Part A this is
+    /// now load-bearing: the full-mode peer mesh drives over the frontend's
+    /// shared authority doc + real sync controller, so a merged peer delta
+    /// projects into the Turso `SutBackend` and the peer ops are part of
+    /// the swap alphabet (no longer excluded).
     #[test]
     fn swap_probe_full_headless_narrowed_alphabet() {
+        use std::collections::BTreeMap;
+        use std::collections::BTreeSet;
+
+        use holon_pbt_core::TransitionFactory;
+
         use crate::pbt::state_machine::fresh_reference_state;
         use crate::pbt::transitions as t;
-        use holon_pbt_core::TransitionFactory;
-        use std::collections::{BTreeMap, BTreeSet};
 
         let set = ComponentSet::full_headless();
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -1163,6 +1280,7 @@ mod tests {
             UndoLastMutation,
             ToggleState,
             CreateDocument,
+            DeleteDocument,
             SimulateRestart,
             StartApp,
             ConcurrentSchemaInit,
@@ -1188,7 +1306,7 @@ mod tests {
         eprintln!("\n=== SWAP PROBE: full_headless cap-feasibility ===");
         eprintln!("CAP-FEASIBLE ({}): {:?}", feasible.len(), feasible);
         eprintln!(
-            "CAP-INFEASIBLE ({}, stay on E2ESut): {:?}",
+            "CAP-INFEASIBLE ({}): {:?}",
             infeasible.len(),
             infeasible.keys().collect::<Vec<_>>()
         );

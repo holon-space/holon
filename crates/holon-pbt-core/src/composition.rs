@@ -1,13 +1,26 @@
 //! Capability-composition spine for trivially-sliceable PBT (γ design).
 //!
+//! **Relationship to production DI (`fluxdi`) — NESTED, not parallel (ADR 0019
+//! §5).** `fluxdi` (`holon_app::wiring::add_frontend`) *assembles the real
+//! application*; `CapMap` is a capability-*disclosure facade* that a PBT run
+//! wraps AROUND a fluxdi-assembled app — a headless component boots the real
+//! app via `holon_app::new_from_config_with_di` and then registers that ONE app
+//! under many `Sut*`/`Ref*` capability trait-objects here. `CapMap` never
+//! re-implements the wiring and prod never boots through `CapMap`. Do NOT try
+//! to unify the two containers: `CapMap` is insert-only / fail-loud (selection
+//! + honesty), `fluxdi` is a permissive async runtime container — opposite
+//! optimization targets. The shared boot→cap adapter lives in ONE place:
+//! `install_headless_render_interpreter` / `publish_reactive_builder_services`
+//! in `holon-integration-tests::test_environment`.
+//!
 //! This is the PoC backbone for the refactor discussed in
 //! `docs/Testing/PbtSlicing_Trivialization_Handoff.md` and its design
 //! follow-up. It de-risks the three pieces that were genuinely uncertain:
 //!
 //!   1. **The capability typemap** ([`CapMap`]) — a map from a capability
 //!      *trait object type* (`dyn SutBackend`) to an `Arc<dyn Cap>` provider,
-//!      so a SUT/Ref is *composed* from independent components instead of
-//!      being one god-type that implements the union of every cap. This is the
+//!      so a SUT/Ref is *composed* from independent components instead of being
+//!      one god-type that implements the union of every cap. This is the
 //!      mechanically-risky part (storing + downcasting `Arc<dyn Trait>` through
 //!      `Any`); the tests below prove it compiles and round-trips.
 //!
@@ -29,9 +42,9 @@
 //! SutBackend` is illegal) and `&mut self` (uncallable through a shared `Arc`).
 //! The typemap forces `dyn`, so the PoC proves the two resolutions:
 //! - **async caps as boxed futures** ([`CapInvariant::check_boxed`] + the toy
-//!   async caps) — object-safe, awaitable through `Arc<dyn Cap>`, zero new
-//!   deps (same hand-rolled shape as the existing `DynInvariant`). The real
-//!   traits get this ergonomically via `#[async_trait]`.
+//!   async caps) — object-safe, awaitable through `Arc<dyn Cap>`, zero new deps
+//!   (same hand-rolled shape as the existing `DynInvariant`). The real traits
+//!   get this ergonomically via `#[async_trait]`.
 //! - **`&mut self` → `&self` + interior mutability** (toy `SutBlockTreeWrite`
 //!   mutates a `Mutex` through `Arc<dyn Cap>`), so write caps compose into the
 //!   same map as read caps.
@@ -46,13 +59,17 @@
 //!   `Sut*`/`Ref*` traits; implementing them over `MemoryBackend` is the
 //!   refactor's labor, not a risk.
 
-use std::any::{Any, TypeId};
-use std::collections::{HashMap, HashSet};
+use std::any::Any;
+use std::any::TypeId;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-pub use crate::invariant::{InvariantId, InvariantResult, RunMode};
+pub use crate::invariant::InvariantId;
+pub use crate::invariant::InvariantResult;
+pub use crate::invariant::RunMode;
 
 // ─────────────────────────────────────────────────────────────────────────
 // Capability identity
@@ -116,17 +133,18 @@ impl CapMap {
         Self::default()
     }
 
-    /// Register a provider for capability `C`. Typically called by a component's
-    /// [`CapProvider::register`]; one `Arc<Concrete>` is cast to `Arc<dyn C>`
-    /// per cap it provides.
+    /// Register a provider for capability `C`. Typically called by a
+    /// component's [`CapProvider::register`]; one `Arc<Concrete>` is cast
+    /// to `Arc<dyn C>` per cap it provides.
     ///
-    /// **Fail-loud on duplicate**: registering a cap that is already present is a
-    /// composition bug (two components both claiming the same cap would silently
-    /// shadow one another, invalidating whichever invariants read the loser).
-    /// Panics naming the cap. To assemble maps whose cap sets legitimately overlap
-    /// with a precedence rule, use [`merge_missing`](Self::merge_missing) (keeps
-    /// the first-registered provider and *discloses* the shadowed caps) rather
-    /// than a second `insert`.
+    /// **Fail-loud on duplicate**: registering a cap that is already present is
+    /// a composition bug (two components both claiming the same cap would
+    /// silently shadow one another, invalidating whichever invariants read
+    /// the loser). Panics naming the cap. To assemble maps whose cap sets
+    /// legitimately overlap with a precedence rule, use
+    /// [`merge_missing`](Self::merge_missing) (keeps the first-registered
+    /// provider and *discloses* the shadowed caps) rather than a second
+    /// `insert`.
     pub fn insert<C: ?Sized + CapName>(&mut self, provider: Arc<C>) {
         let tid = TypeId::of::<C>();
         if self.names.contains_key(&tid) {
@@ -134,16 +152,14 @@ impl CapMap {
             // name to report — the earlier "existing vs incoming" duo was a fiction
             // (both sides printed the same string).
             panic!(
-                "duplicate capability registration: `{}` is already provided. Two \
-                 registrations claim this cap; the second would silently shadow the \
-                 first, invalidating whichever invariants read the loser. Pick the \
-                 intended remedy:\n\
-                 - `merge_missing`: fold two overlapping cap sets, FIRST-registered \
-                 wins (register the precedence-winner, then `merge_missing` the rest; \
-                 skipped caps are disclosed).\n\
-                 - `replace`: intentionally specialize/override an already-registered \
-                 cap, SECOND wins (e.g. swap a default provider for a driver-bound one \
-                 under the same cap `TypeId`).",
+                "duplicate capability registration: `{}` is already provided. Two registrations \
+                 claim this cap; the second would silently shadow the first, invalidating \
+                 whichever invariants read the loser. Pick the intended remedy:\n- \
+                 `merge_missing`: fold two overlapping cap sets, FIRST-registered wins (register \
+                 the precedence-winner, then `merge_missing` the rest; skipped caps are \
+                 disclosed).\n- `replace`: intentionally specialize/override an \
+                 already-registered cap, SECOND wins (e.g. swap a default provider for a \
+                 driver-bound one under the same cap `TypeId`).",
                 C::NAME,
             );
         }
@@ -152,21 +168,23 @@ impl CapMap {
         self.providers.insert(tid, Box::new(provider));
     }
 
-    /// Deliberately OVERWRITE the provider for a cap that is **already present** —
-    /// the honest counterpart to [`insert`](Self::insert)'s fail-loud-on-duplicate.
-    /// Use this when a builder registers a component's default provider and then
-    /// intentionally swaps in a specialised one under the SAME cap `TypeId` (e.g.
-    /// the composed Turso builder replaces `SqlProjectionComponent`'s fresh-resolver
-    /// block-tree writer with the shared-resolver dispatch-floor writer). Distinct
-    /// from a silent overwrite: replacing a cap that was NOT first registered is a
-    /// composition bug (the precedence assumption is wrong), so this panics on
-    /// absence — `insert` first, `replace` second.
+    /// Deliberately OVERWRITE the provider for a cap that is **already
+    /// present** — the honest counterpart to [`insert`](Self::insert)'s
+    /// fail-loud-on-duplicate. Use this when a builder registers a
+    /// component's default provider and then intentionally swaps in a
+    /// specialised one under the SAME cap `TypeId` (e.g. the composed Turso
+    /// builder replaces `SqlProjectionComponent`'s fresh-resolver
+    /// block-tree writer with the shared-resolver dispatch-floor writer).
+    /// Distinct from a silent overwrite: replacing a cap that was NOT first
+    /// registered is a composition bug (the precedence assumption is
+    /// wrong), so this panics on absence — `insert` first, `replace`
+    /// second.
     pub fn replace<C: ?Sized + CapName>(&mut self, provider: Arc<C>) {
         let tid = TypeId::of::<C>();
         assert!(
             self.names.contains_key(&tid),
-            "replace::<{}> but no provider was registered first — `replace` \
-             overwrites an existing cap; use `insert` for the initial registration",
+            "replace::<{}> but no provider was registered first — `replace` overwrites an \
+             existing cap; use `insert` for the initial registration",
             C::NAME,
         );
         // Keep the names table in lock-step with providers. `C::NAME` is invariant
@@ -186,9 +204,10 @@ impl CapMap {
         })
     }
 
-    /// Look up a capability that selection has already proven present. Panicking
-    /// here means the selection predicate disagreed with the map — an internal
-    /// harness bug, not a missing feature (the fail-loud-correct kind).
+    /// Look up a capability that selection has already proven present.
+    /// Panicking here means the selection predicate disagreed with the map
+    /// — an internal harness bug, not a missing feature (the
+    /// fail-loud-correct kind).
     pub fn expect<C: ?Sized + CapName>(&self) -> Arc<C> {
         self.get::<C>().unwrap_or_else(|| {
             panic!(
@@ -228,19 +247,20 @@ impl CapMap {
     /// Merge `other`'s providers into `self`, keeping the EXISTING provider for
     /// any capability already present — **first-registered wins**.
     ///
-    /// This is the composition primitive for assembling a `CapMap` from multiple
-    /// components whose cap sets overlap (e.g. several backends all provide
-    /// `SutBackend`): register the precedence-winning component first, then
-    /// `merge_missing` the rest, and each contributes only the caps not already
-    /// supplied. This is the ONLY way to fold overlapping cap sets: a plain
-    /// [`insert`](Self::insert) of an already-present cap **panics** (the typemap
-    /// keeps exactly one provider per cap `TypeId`, so shadowing is forbidden);
-    /// `merge_missing` instead keeps the first-registered provider and *discloses*
-    /// the skipped caps.
+    /// This is the composition primitive for assembling a `CapMap` from
+    /// multiple components whose cap sets overlap (e.g. several backends
+    /// all provide `SutBackend`): register the precedence-winning component
+    /// first, then `merge_missing` the rest, and each contributes only the
+    /// caps not already supplied. This is the ONLY way to fold overlapping
+    /// cap sets: a plain [`insert`](Self::insert) of an already-present cap
+    /// **panics** (the typemap keeps exactly one provider per cap `TypeId`,
+    /// so shadowing is forbidden); `merge_missing` instead keeps the
+    /// first-registered provider and *discloses* the skipped caps.
     ///
-    /// Returns the names of the caps that were **skipped** because `self` already
-    /// had them — so a caller can disclose precedence collisions (log / assert)
-    /// rather than hide them. An empty return means the two maps were disjoint.
+    /// Returns the names of the caps that were **skipped** because `self`
+    /// already had them — so a caller can disclose precedence collisions
+    /// (log / assert) rather than hide them. An empty return means the two
+    /// maps were disjoint.
     pub fn merge_missing(&mut self, other: CapMap) -> Vec<&'static str> {
         let mut shadowed = Vec::new();
         for (tid, provider) in other.providers {
@@ -273,10 +293,11 @@ impl CapSet {
     }
 
     /// Return a copy of this cap set with `cap` removed. Used to express a
-    /// DELIBERATE, DOCUMENTED narrowing of the generation alphabet for a config that
-    /// *provides* a cap but cannot yet faithfully drive its transitions (the cap stays
-    /// in the `CapMap` so its read invariants keep selecting; only the generation gate
-    /// drops the unconverged transitions). Identity if `cap` is absent.
+    /// DELIBERATE, DOCUMENTED narrowing of the generation alphabet for a config
+    /// that *provides* a cap but cannot yet faithfully drive its
+    /// transitions (the cap stays in the `CapMap` so its read invariants
+    /// keep selecting; only the generation gate drops the unconverged
+    /// transitions). Identity if `cap` is absent.
     pub fn without(mut self, cap: &CapId) -> Self {
         self.0.remove(&cap.type_id);
         self
@@ -284,8 +305,8 @@ impl CapSet {
 }
 
 /// A component (sub-SUT or sub-Ref): something that contributes capabilities to
-/// a composed map. `register` is `self: Arc<Self>` so the same `Arc` backs every
-/// cap the component provides.
+/// a composed map. `register` is `self: Arc<Self>` so the same `Arc` backs
+/// every cap the component provides.
 pub trait CapProvider {
     fn register(self: Arc<Self>, caps: &mut CapMap);
 }
@@ -320,8 +341,8 @@ impl Config {
 // Invariants: needs + dispatch
 // ─────────────────────────────────────────────────────────────────────────
 
-/// What an invariant requires to be *selected*. Positive sets must be subsets of
-/// the provided caps; the negative set must be disjoint from them.
+/// What an invariant requires to be *selected*. Positive sets must be subsets
+/// of the provided caps; the negative set must be disjoint from them.
 #[derive(Clone, Debug, Default)]
 pub struct Needs {
     pub sut_present: Vec<CapId>,
@@ -339,7 +360,8 @@ impl Needs {
 }
 
 /// Object-safe invariant dispatched against composed maps rather than a typed
-/// `S`. The body looks up exactly the caps it declared — see [`cap_invariant!`].
+/// `S`. The body looks up exactly the caps it declared — see
+/// [`cap_invariant!`].
 ///
 /// `check_boxed` returns a boxed future (real bodies are `async` and `.await`
 /// cap methods); the hand-rolled box keeps the trait object-safe with no async
@@ -465,8 +487,8 @@ pub async fn run_selected(
 
 /// Bridge a statically-typed [`Invariant`](crate::invariant::Invariant) body —
 /// the real registry bodies in `holon-integration-tests`, written generic over
-/// `R`/`S` with a `where S: <caps>` bound — into an object-safe [`CapInvariant`]
-/// dispatched against composed [`CapMap`]s.
+/// `R`/`S` with a `where S: <caps>` bound — into an object-safe
+/// [`CapInvariant`] dispatched against composed [`CapMap`]s.
 ///
 /// The body is monomorphised at `R = S = CapMap`, so it reads its caps through
 /// the macro-generated `impl <Cap> for CapMap` adapters (`#[capmap_adapter]`).
@@ -528,9 +550,14 @@ where
 #[cfg(test)]
 #[allow(dead_code)] // toy stand-ins: not every cap method is exercised by a test
 mod poc {
-    use super::*;
     use std::sync::Mutex;
-    use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+    use std::task::Context;
+    use std::task::Poll;
+    use std::task::RawWaker;
+    use std::task::RawWakerVTable;
+    use std::task::Waker;
+
+    use super::*;
 
     /// Boxed-future alias — what `#[async_trait]` desugars an `async fn` cap
     /// method to. Hand-written here to prove `dyn`-cap async works with zero
@@ -538,7 +565,8 @@ mod poc {
     type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
     /// Minimal sync→async bridge (no tokio dep): the real glue uses
-    /// `runtime.block_on`. Toy futures are always-ready, so this returns at once.
+    /// `runtime.block_on`. Toy futures are always-ready, so this returns at
+    /// once.
     fn block_on<F: Future>(fut: F) -> F::Output {
         fn raw() -> RawWaker {
             fn clone(_: *const ()) -> RawWaker {
@@ -871,20 +899,24 @@ mod poc {
             vec!["inv-no-orphan-blocks", "inv-editor-caret-matches-ref"],
         );
         // No renderer → neither render invariant selects.
-        assert!(mem
-            .deselected
-            .iter()
-            .any(|i| i.0 == "inv-decompiled-rows-rendered"));
-        assert!(mem
-            .deselected
-            .iter()
-            .any(|i| i.0 == "inv-shows-source-when-no-query"));
+        assert!(
+            mem.deselected
+                .iter()
+                .any(|i| i.0 == "inv-decompiled-rows-rendered")
+        );
+        assert!(
+            mem.deselected
+                .iter()
+                .any(|i| i.0 == "inv-shows-source-when-no-query")
+        );
 
         let degraded = block_on(run_selected(&reg, &gpui_memory_degraded(), &r));
         // Renderer present, query ABSENT → degraded twin selects, full does not.
-        assert!(degraded
-            .ran_ids()
-            .contains(&"inv-shows-source-when-no-query"));
+        assert!(
+            degraded
+                .ran_ids()
+                .contains(&"inv-shows-source-when-no-query")
+        );
         assert!(!degraded.ran_ids().contains(&"inv-decompiled-rows-rendered"));
 
         let full = block_on(run_selected(&reg, &full_e2e(), &r));
@@ -961,11 +993,11 @@ mod poc {
         assert_eq!(a.expect::<dyn SutRender>().root_kind(), "query_result");
     }
 
-    /// `merge_missing` is FIRST-REGISTERED-WINS: when two components provide the
-    /// same caps (both backends provide `SutBackend`/…), the precedence-winning
-    /// (already-present) provider is kept and the loser's overlapping caps are
-    /// returned for disclosure. This is the silent-shadow hazard the primitive
-    /// exists to make explicit.
+    /// `merge_missing` is FIRST-REGISTERED-WINS: when two components provide
+    /// the same caps (both backends provide `SutBackend`/…), the
+    /// precedence-winning (already-present) provider is kept and the
+    /// loser's overlapping caps are returned for disclosure. This is the
+    /// silent-shadow hazard the primitive exists to make explicit.
     #[test]
     fn merge_missing_keeps_first_registered_and_reports_shadow() {
         let mut a = Config::new()

@@ -3,8 +3,8 @@
 //! Mirrors the `navigation.close(history_id)` op invoked by the right
 //! sidebar's per-row X button. Production behavior:
 //! - UPDATE `closed_at` on one specific `navigation_history` row.
-//! - Cursor is untouched (close removes from the open-pins set, not from
-//!   the back/forward stack).
+//! - Cursor is untouched (close removes from the open-pins set, not from the
+//!   back/forward stack).
 //!
 //! Generator picks an open pin that has a non-NULL `block_id` and is NOT its
 //! region's current cursor focus. The X button renders on *pins* — open
@@ -16,17 +16,25 @@
 //! (pin regions have no cursor focus → all their pins are closeable; the main
 //! panel's single focus row matches `current_focus(region)` → excluded).
 
-use crate::pbt::validation::{Reason, check};
+use holon_pbt_core::TransitionFactory;
+use holon_pbt_core::TransitionRef;
+use holon_pbt_core::capabilities::RefLifecycle;
+use holon_pbt_core::capabilities::RefPinsMut;
+use holon_pbt_core::capabilities::SutNavHistoryDrive;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::check;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::reference_state::ReferenceState;
-use holon_pbt_core::capabilities::SutNavHistoryDrive;
-use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
-
 #[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::{ExpectedSql, JOURNAL_READS, REACTIVE_BASE, docs_tolerance};
+use crate::pbt::transition_budgets::ExpectedSql;
+#[cfg(feature = "otel-testing")]
+use crate::pbt::transition_budgets::JOURNAL_READS;
+#[cfg(feature = "otel-testing")]
+use crate::pbt::transition_budgets::REACTIVE_BASE;
+#[cfg(feature = "otel-testing")]
+use crate::pbt::transition_budgets::docs_tolerance;
 
 /// Unpin (close) one open `navigation_history` row by its id.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -34,11 +42,9 @@ pub struct UnpinBlock {
     pub history_id: i64,
 }
 
-impl TransitionFactory<ReferenceState> for UnpinBlock {
+impl<R: RefLifecycle + RefPinsMut> TransitionFactory<R> for UnpinBlock {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        vec![::holon_pbt_core::composition::CapId::of::<
-            dyn ::holon_pbt_core::capabilities::SutNavHistoryDrive,
-        >()]
+        Self::declared_caps()
     }
 
     type Reason = Reason;
@@ -49,25 +55,21 @@ impl TransitionFactory<ReferenceState> for UnpinBlock {
         // Gate it out of {Loro} slices.
         ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Turso)
     }
-    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
-        // Enumerate every region's open pins, excluding each region's current
-        // cursor focus (handled by `preconditions`, the single source of truth
-        // for unpinnability). A region's active focus row is the cursor target
-        // — closed via focus_replace, not the X button.
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+        // Enumerate every region's open-pin ids, then let `preconditions` (the
+        // single source of truth for unpinnability) narrow to closeable pins: a
+        // region's active cursor-focus row is closed via focus_replace, not the X
+        // button, so `is_closeable_pin` excludes it.
         let candidates: Vec<i64> = state
-            .ui
-            .user
-            .open_pins
-            .values()
-            .flatten()
-            .filter(|p| {
+            .open_pin_history_ids()
+            .into_iter()
+            .filter(|history_id| {
                 UnpinBlock {
-                    history_id: p.history_id,
+                    history_id: *history_id,
                 }
                 .preconditions(state)
                 .is_good()
             })
-            .map(|p| p.history_id)
             .collect();
         check(!candidates.is_empty(), Reason::NoPinsToRemove).map(|_| {
             let strat = prop::sample::select(candidates)
@@ -79,21 +81,14 @@ impl TransitionFactory<ReferenceState> for UnpinBlock {
     }
 }
 
-impl TransitionRef<ReferenceState> for UnpinBlock {
+impl<R: RefLifecycle + RefPinsMut> TransitionRef<R> for UnpinBlock {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(state.action.app_started, Reason::AppNotStarted),
+            check(state.app_started(), Reason::AppNotStarted),
             check(
-                state.ui.user.open_pins.iter().any(|(region, pins)| {
-                    let focus = state.current_focus(*region);
-                    pins.iter().any(|p| {
-                        p.history_id == self.history_id
-                            && p.block_id.is_some()
-                            && p.block_id != focus
-                    })
-                }),
+                state.is_closeable_pin(self.history_id),
                 Reason::NoPinsToRemove,
             ),
         ];
@@ -103,23 +98,18 @@ impl TransitionRef<ReferenceState> for UnpinBlock {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
-        for pins in state.ui.user.open_pins.values_mut() {
-            pins.retain(|p| p.history_id != self.history_id);
-        }
+    fn apply_to_ref(&self, state: &mut R) {
+        state.close_pin(self.history_id);
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutNavHistoryDrive> TransitionImpl<ReferenceState, S> for UnpinBlock {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.unpin_block(self.history_id).await;
+crate::cap_transition! {
+    UnpinBlock: SutNavHistoryDrive,
+    where R: [ RefLifecycle + RefPinsMut ],
+    |me, _state, sut| {
+        sut.unpin_block(me.history_id).await;
     }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for UnpinBlock {
-    fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
+    sql_budget: |_me, state| {
         // close = single UPDATE statement; reactive watchers re-run on the CDC
         // delta. No SELECT round-trip needed (the X button supplied the id).
         ExpectedSql {

@@ -74,6 +74,9 @@ chrome-trace = [
     "holon-integration-tests?/chrome-trace",
 ]
 heap-profile = ["holon-frontend/heap-profile"]
+# tokio-console async-stall profiler for the live app. Build with
+# RUSTFLAGS="--cfg tokio_unstable" cargo run -p holon-gpui --features tokio-console
+tokio-console = ["holon-frontend/tokio-console", "tokio/tracing"]
 hot-reload = ["dep:subsecond", "dep:dioxus-devtools"]
 pbt = ["dep:holon-integration-tests", "dep:enigo"]
 
@@ -97,8 +100,10 @@ holon-frontend = { workspace = true, features = ["otel"] }
 holon-app.workspace = true
 holon-api.workspace = true
 holon-core.workspace = true
+holon-orgmode.workspace = true
 holon-macros.workspace = true
 holon-mcp = { path = "../mcp" }
+holon-oracles.workspace = true
 holon-integration-tests = { path = "../../crates/holon-integration-tests", optional = true }
 enigo = { version = "0.6", optional = true }
 
@@ -119,6 +124,9 @@ toml.workspace = true
 # Error handling
 anyhow.workspace = true
 
+# Per-case reset (Phase 1 Option A): fresh temp org/db/config paths per rebind.
+tempfile = "3"
+
 # Observability
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -137,6 +145,7 @@ android-activity = { version = "0.6", features = ["native-activity"] }
 log = "0.4"
 
 [dev-dependencies]
+tempfile = "3"
 holon-integration-tests = { path = "../../crates/holon-integration-tests" }
 holon-layout-testing = { path = "../../crates/holon-layout-testing" }
 holon-pbt-core = { path = "../../crates/holon-pbt-core" }

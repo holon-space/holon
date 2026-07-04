@@ -14,24 +14,37 @@
 //! plus an `on_entity_deleted` proactive prune so a same-id re-create
 //! can't observe a stale cell wrapping an orphaned `LoroText` container.
 
-use std::any::{Any, TypeId};
+use std::any::Any;
+use std::any::TypeId;
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
+use anyhow::anyhow;
 use futures::future::BoxFuture;
-use futures::stream::{BoxStream, StreamExt};
-use loro::{LoroDoc, LoroText};
-
+use futures::stream::BoxStream;
+use futures::stream::StreamExt;
+use holon_api::EntityUri;
+use holon_api::Tags;
+use holon_api::Value;
 use holon_api::block::Block;
 use holon_api::live_data::LiveData;
 use holon_api::repository::CoreOperations;
-use holon_api::{EntityUri, Tags, Value};
-use holon_core::cell::{CellBacking, LwwScalarBacking, LwwTextCellBacking};
-use holon_core::cell_registry::{CellCache, EntityCellRegistry, EntityCellRegistryExt};
+use holon_core::cell::CellBacking;
+use holon_core::cell::LwwScalarBacking;
+use holon_core::cell::LwwTextCellBacking;
+use holon_core::cell_registry::CellCache;
+use holon_core::cell_registry::EntityCellRegistry;
+use holon_core::cell_registry::EntityCellRegistryExt;
+use loro::LoroDoc;
+use loro::LoroText;
 
-use crate::loro_backend::{CONTENT_RAW, LoroBackend, STABLE_ID, TREE_NAME};
+use crate::loro_backend::CONTENT_RAW;
+use crate::loro_backend::LoroBackend;
+use crate::loro_backend::STABLE_ID;
+use crate::loro_backend::TREE_NAME;
 use crate::loro_document::LoroDocument;
-use crate::loro_meta_cell_backing::{LoroMetaCellBacking, LoroScalarField};
+use crate::loro_meta_cell_backing::LoroMetaCellBacking;
+use crate::loro_meta_cell_backing::LoroScalarField;
 use crate::loro_text_cell_backing::LoroTextCellBacking;
 
 /// Injected write path for SqlOnly cells: routes a `(uri, field, value)` scalar
@@ -58,9 +71,9 @@ struct SqlCellWiring {
 /// Construction modes:
 /// - `with_loro(doc)` — Full mode; `content` returns a Loro-backed cell.
 /// - `sql_only()` — SqlOnly mode; ANY `live_field_any` call errors loudly
-///   because Phase 1 has no editor in SqlOnly mode and synthetic test
-///   stores bypass the registry entirely (they get `cells() == None`
-///   from the `BlockOperations` default).
+///   because Phase 1 has no editor in SqlOnly mode and synthetic test stores
+///   bypass the registry entirely (they get `cells() == None` from the
+///   `BlockOperations` default).
 pub struct BlockCellRegistry {
     cache: CellCache,
     backing_source: BackingSource,
@@ -138,9 +151,9 @@ impl BlockCellRegistry {
         match &self.backing_source {
             BackingSource::Loro { doc, .. } => Ok(doc.clone()),
             BackingSource::SqlOnly { .. } => Err(anyhow!(
-                "BlockCellRegistry is in SqlOnly mode; no Loro backing is available. \
-                 SqlOnly cells are not wired yet (they need the entity-cache read + CDC \
-                 signal injection; see LwwScalarBacking / LwwTextCellBacking)."
+                "BlockCellRegistry is in SqlOnly mode; no Loro backing is available. SqlOnly \
+                 cells are not wired yet (they need the entity-cache read + CDC signal injection; \
+                 see LwwScalarBacking / LwwTextCellBacking)."
             )),
         }
     }
@@ -175,8 +188,8 @@ impl BlockCellRegistry {
             }
         }
         Err(anyhow!(
-            "Block {block_id} not found in Loro tree (inbound consumer hasn't applied the \
-             create event yet, or the block was never imported)"
+            "Block {block_id} not found in Loro tree (inbound consumer hasn't applied the create \
+             event yet, or the block was never imported)"
         ))
     }
 
@@ -232,8 +245,8 @@ impl BlockCellRegistry {
         // - `id`: the row's primary key, never reassigned
         // - `depth`: derived from the tree structure on snapshot
         // - `content_type`, `source_name`: stored in Loro but written by
-        //   `update_block_text` / chord-time content create paths, not by
-        //   `set_field` callers
+        //   `update_block_text` / chord-time content create paths, not by `set_field`
+        //   callers
         // (`source_language` IS handled below: the org re-ingest of an
         // `index.org` swap legitimately changes a src block's language via
         // `set_field`, and an SQL-direct write would fork the authority.)
@@ -257,9 +270,8 @@ impl BlockCellRegistry {
                 // anchor guard.
                 if backend.resolve_to_tree_id(uri.id()).await.is_none() {
                     tracing::warn!(
-                        "write_field(content) for {uri}: no Loro tree node — \
-                         writing through the SQL path (Loro authority missing or \
-                         unseeded for this block)"
+                        "write_field(content) for {uri}: no Loro tree node — writing through the \
+                         SQL path (Loro authority missing or unseeded for this block)"
                     );
                     return Ok(false);
                 }
@@ -321,20 +333,49 @@ impl BlockCellRegistry {
             }
             "sort_key" => {
                 // Sibling order is owned by `place()`/`tree.mov_after` and
-                // projected to SQL from the Loro fractional index — a block's
-                // `sort_key` is never written through `set_field`. The org sync
-                // path explicitly omits it (`build_block_params`), and
-                // `project_sort_keys` writes the projected key straight to SQL
-                // (bypassing this registry). A `set_field("sort_key")` reaching
+                // projected to SQL from the Loro fractional index by the outbound
+                // snapshot projection — a block's `sort_key` is never written
+                // through `set_field`. The org sync path explicitly omits it
+                // (`build_block_params`). A `set_field("sort_key")` reaching
                 // here is a bug, not a positional intent — fail loud rather than
                 // silently mis-route it to the meta `properties` map (which
                 // `read_block_from_tree` ignores in favour of the fractional
                 // index).
                 Err(anyhow!(
-                    "write_field(sort_key) is unsupported: order is owned by \
-                     place()/mov_after and projected from the fractional index; \
-                     a set_field(\"sort_key\") reached the cell registry for {id} — bug"
+                    "write_field(sort_key) is unsupported: order is owned by place()/mov_after \
+                     and projected from the fractional index; a set_field(\"sort_key\") reached \
+                     the cell registry for {id} — bug"
                 ))
+            }
+            "task_state" => {
+                // `task_state` travels with its `task_state_category` sidecar:
+                // the org parse boundary (`Block::set_task_state`) writes BOTH
+                // keys and `Block::task_state()` reads the pair back into a
+                // `TaskState`. The widget click intent (`state_toggle` →
+                // `set_field("task_state", next)`) carries only the keyword, so
+                // this boundary derives and writes the sidecar alongside —
+                // otherwise every UI cycle dropped/staled the category (a DONE
+                // keyword could read back as Active). Both keys land in ONE
+                // `update_block_properties` commit (per-key LWW merge, H3).
+                let category = match &value {
+                    Value::Null => Value::Null,
+                    Value::String(kw) => Value::String(
+                        holon_api::TaskState::category_str_for_keyword(kw).to_string(),
+                    ),
+                    other => {
+                        return Err(anyhow!(
+                            "write_field(task_state): expected String or Null, got {other:?}"
+                        ));
+                    }
+                };
+                let mut props = std::collections::HashMap::new();
+                props.insert("task_state".to_string(), value);
+                props.insert("task_state_category".to_string(), category);
+                backend
+                    .update_block_properties(&id, &props)
+                    .await
+                    .map_err(|e| anyhow!("update_block_properties(task_state) for {id}: {e:#}"))?;
+                Ok(true)
             }
             "marks" => {
                 // Phase 3.2: marks go through the Peritext write path
@@ -563,9 +604,9 @@ impl EntityCellRegistry for BlockCellRegistry {
             }
             BackingSource::SqlOnly { wiring: None } => {
                 return Err(anyhow!(
-                    "BlockCellRegistry::live_field_any: SqlOnly mode has no scalar cell for \
-                     field {field:?}; the entity-cache read + set_field write seam was not \
-                     injected (use BlockCellRegistry::sql_only_wired)."
+                    "BlockCellRegistry::live_field_any: SqlOnly mode has no scalar cell for field \
+                     {field:?}; the entity-cache read + set_field write seam was not injected \
+                     (use BlockCellRegistry::sql_only_wired)."
                 ));
             }
         };
@@ -679,6 +720,7 @@ impl EntityCellRegistry for BlockCellRegistry {
         properties: &std::collections::HashMap<String, holon_api::Value>,
         tags: &Tags,
         requires: &[EntityUri],
+        advice_suppressed: &[EntityUri],
     ) -> Result<bool> {
         let backend = match &self.backing_source {
             BackingSource::Loro { backend, .. } => backend.clone(),
@@ -697,9 +739,9 @@ impl EntityCellRegistry for BlockCellRegistry {
         if let Some(after) = after_id {
             if backend.resolve_to_tree_id(after.id()).await.is_none() {
                 tracing::warn!(
-                    "create_entity({new_id}): after-block {after} has no Loro tree node — \
-                     falling back to the SQL create path (Loro authority missing or \
-                     unseeded for this block family)"
+                    "create_entity({new_id}): after-block {after} has no Loro tree node — falling \
+                     back to the SQL create path (Loro authority missing or unseeded for this \
+                     block family)"
                 );
                 return Ok(false);
             }
@@ -736,6 +778,13 @@ impl EntityCellRegistry for BlockCellRegistry {
                     .await
                     .map_err(|e| anyhow!("set_block_requires({new_id}): {e:#}"))?;
             }
+            // Reconcile the advice-suppression set too (mirrors requires).
+            if !advice_suppressed.is_empty() {
+                backend
+                    .set_block_advice_suppressed(new_id.id(), advice_suppressed)
+                    .await
+                    .map_err(|e| anyhow!("set_block_advice_suppressed({new_id}): {e:#}"))?;
+            }
             return Ok(true);
         }
         // Resolve the parent in the tree; if it's a real block not yet
@@ -753,7 +802,8 @@ impl EntityCellRegistry for BlockCellRegistry {
                 .create_placeholder_root(parent_id.id())
                 .await
                 .map_err(|e| anyhow!("create_placeholder_root({parent_id}): {e:#}"))?;
-            // ALLOW(entity_uri_from_raw): placeholder id String from backend.create_placeholder_root() (Loro adapter output)
+            // ALLOW(entity_uri_from_raw): placeholder id String from
+            // backend.create_placeholder_root() (Loro adapter output)
             EntityUri::from_raw(&placeholder)
         };
         backend
@@ -764,6 +814,7 @@ impl EntityCellRegistry for BlockCellRegistry {
                 properties,
                 tags,
                 requires,
+                advice_suppressed,
             )
             .await
             .map_err(|e| anyhow!("create_block({new_id}): {e:#}"))?;
@@ -784,8 +835,8 @@ impl EntityCellRegistry for BlockCellRegistry {
     /// the direct SQL delete path. Loro mode: checks tree membership first
     /// and returns `Ok(false)` for unseeded blocks (caller falls through to the
     /// direct SQL delete path — transitional; after sole-writer all blocks
-    /// originate in Loro). `delete_block` is idempotent on the tree side, so the TOCTOU
-    /// between the resolve_ check and the call is harmless.
+    /// originate in Loro). `delete_block` is idempotent on the tree side, so
+    /// the TOCTOU between the resolve_ check and the call is harmless.
     async fn delete_entity(&self, uri: &EntityUri) -> Result<bool> {
         let backend = match &self.backing_source {
             BackingSource::Loro { backend, .. } => backend.clone(),
@@ -815,12 +866,11 @@ impl BlockCellRegistry {
         matches!(self.backing_source, BackingSource::Loro { .. })
     }
     /// Read a block's authoritative Loro fractional index — the value the
-    /// outbound projector writes to SQL `sort_key`. Returns `None` in SqlOnly
-    /// mode, where SQL itself owns `sort_key`. Used by the org-scan order
-    /// writeback (`BlockOrdering::project_sort_keys`) to project blocks that
-    /// were created but never repositioned: those emit no Loro mov delta, so
-    /// the projector never writes their fi and they would keep the default
-    /// `"A0"` and mis-sort against moved siblings.
+    /// outbound snapshot projection writes to SQL `sort_key`. Returns `None` in
+    /// SqlOnly mode, where SQL itself owns `sort_key`. A read accessor for
+    /// diagnostics / order-verification (e.g. comparing the live fi against the
+    /// projected `block_raw.sort_key`); the projection itself writes every
+    /// sibling's key each pass, so no separate writeback pass is needed.
     pub async fn live_sort_key(&self, id: &str) -> Result<Option<String>> {
         let backend = match &self.backing_source {
             BackingSource::Loro { backend, .. } => backend.clone(),
@@ -863,7 +913,8 @@ impl BlockCellRegistry {
         // resolve parent_id to TreeID") and the app never started on
         // upgraded vaults. Sentinel/no-parent parents read `tree.roots()`
         // and need no node, so they go straight through.
-        // ALLOW(entity_uri_from_raw): parent_id &str backend API param (accepts both id formats)
+        // ALLOW(entity_uri_from_raw): parent_id &str backend API param (accepts both id
+        // formats)
         let parent_uri = EntityUri::from_raw(parent_id);
         if !parent_uri.is_no_parent()
             && !parent_uri.is_sentinel()
@@ -871,8 +922,8 @@ impl BlockCellRegistry {
         {
             tracing::warn!(
                 parent_id,
-                "live_children: parent has no Loro tree node (unseeded vault) — \
-                 SQL cache owns this subtree's order"
+                "live_children: parent has no Loro tree node (unseeded vault) — SQL cache owns \
+                 this subtree's order"
             );
             return Ok(None);
         }
@@ -886,9 +937,10 @@ impl BlockCellRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use holon_core::cell::Cell;
     use holon_core::cell_registry::EntityCellRegistryExt;
+
+    use super::*;
 
     fn make_loro_doc_with_block(block_id: &str) -> Arc<LoroDoc> {
         let doc = Arc::new(LoroDoc::new());
@@ -1039,6 +1091,7 @@ mod tests {
             holon_api::BlockContent::text("x"),
             &std::collections::HashMap::new(),
             &Tags::default(),
+            &[],
             &[],
         ))?;
         assert!(

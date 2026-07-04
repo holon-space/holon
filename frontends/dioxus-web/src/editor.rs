@@ -46,8 +46,9 @@ use std::collections::HashMap;
 
 use dioxus::prelude::*;
 use gloo_timers::callback::Timeout;
-use holon_frontend::editor_view_model::{structural_block_action, EditorKey};
 use holon_frontend::OperationIntent;
+use holon_frontend::editor_view_model::EditorKey;
+use holon_frontend::editor_view_model::structural_block_action;
 
 use crate::BRIDGE;
 
@@ -130,6 +131,9 @@ pub fn EditorCell(entity_id: String, content: String) -> Element {
                 let eid = entity_id.clone();
                 let prop_content = content.clone();
                 move |evt: KeyboardEvent| {
+                    if handle_caret_nav(&evt, &eid) {
+                        return;
+                    }
                     handle_structural_key(&evt, &eid, &prop_content);
                 }
             },
@@ -143,14 +147,14 @@ pub fn EditorCell(entity_id: String, content: String) -> Element {
 
 /// Reconcile the contenteditable's `textContent` with the latest prop.
 ///
-/// - `current == content`: nothing to do. Drop any stale pending cursor
-///   restore so a later trigger doesn't misfire.
-/// - `current != content` and the element is **focused**: the user is
-///   actively editing. Their local state wins; skip the overwrite and
-///   drop any stale pending restore.
+/// - `current == content`: nothing to do. Drop any stale pending cursor restore
+///   so a later trigger doesn't misfire.
+/// - `current != content` and the element is **focused**: the user is actively
+///   editing. Their local state wins; skip the overwrite and drop any stale
+///   pending restore.
 /// - `current != content` and the element is **not focused**: safe to
-///   overwrite. Apply an enqueued restore for this entity (this is how
-///   the cursor survives a structural re-render / remount).
+///   overwrite. Apply an enqueued restore for this entity (this is how the
+///   cursor survives a structural re-render / remount).
 fn sync_dom_to_prop(entity_id: &str, content: &str) {
     let Some(el) = cursor::find_element(entity_id) else {
         return;
@@ -173,6 +177,105 @@ thread_local! {
     /// the previous `Timeout`, which cancels the pending callback.
     static PENDING_DISPATCH: RefCell<HashMap<String, Timeout>> =
         RefCell::new(HashMap::new());
+}
+
+/// Cross-block caret navigation (GPUI parity: MoveUp/MoveDown propagate to
+/// the outline when the editor doesn't consume them). ArrowUp with a
+/// collapsed caret at offset 0 focuses the previous block (caret at end —
+/// the worker's default seed); ArrowDown with the caret at the end of the
+/// text focuses the next block (caret 0). "Previous/next" is DOM document
+/// order over every focusable cell (`editor-cell` + `rendered-text`), which
+/// matches the visual outline order. Returns true when the event was
+/// consumed by a focus jump.
+fn handle_caret_nav(evt: &KeyboardEvent, entity_id: &str) -> bool {
+    let dir: i32 = match evt.key() {
+        Key::ArrowUp => -1,
+        Key::ArrowDown => 1,
+        _ => return false,
+    };
+    let m = evt.modifiers();
+    if m.shift() || m.alt() || m.ctrl() || m.meta() {
+        return false;
+    }
+    let Some(saved) = cursor::save().filter(|s| s.entity_id == entity_id && s.anchor == s.focus)
+    else {
+        return false;
+    };
+    let live_text = cursor::find_element(entity_id)
+        .and_then(|el| el.text_content())
+        .unwrap_or_default();
+    let at_boundary = if dir < 0 {
+        saved.focus == 0
+    } else {
+        saved.focus as usize == live_text.encode_utf16().count()
+    };
+    if !at_boundary {
+        return false;
+    }
+
+    let ring = focus_ring();
+    let Some(idx) = ring.iter().position(|id| id == entity_id) else {
+        return false;
+    };
+    let target_idx = idx as i32 + dir;
+    if target_idx < 0 || target_idx as usize >= ring.len() {
+        return false;
+    }
+    let target = ring[target_idx as usize].clone();
+    evt.prevent_default();
+
+    let Some(bridge) = BRIDGE.with(|cell| cell.borrow().clone()) else {
+        tracing::error!("[EditorCell] BRIDGE missing on caret nav from {entity_id}");
+        return true;
+    };
+    // Caret seed: end-of-text default (NULL) when moving up, 0 when moving
+    // down — mirrors how a caret visually "passes through" the boundary.
+    let caret: wasm_bindgen::JsValue = if dir < 0 {
+        wasm_bindgen::JsValue::NULL
+    } else {
+        0u32.into()
+    };
+    wasm_bindgen_futures::spawn_local(async move {
+        if let Err(e) = bridge
+            .call("engineSetFocus", [target.clone().into(), caret])
+            .await
+        {
+            tracing::error!("[EditorCell] caret-nav engineSetFocus({target}) failed: {e}");
+        }
+    });
+    true
+}
+
+/// Every focusable block cell in DOM document order: mounted editors plus
+/// read-only `rendered_text` rows (which mount an editor once focused).
+fn focus_ring() -> Vec<String> {
+    let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
+        return Vec::new();
+    };
+    let Ok(list) = doc.query_selector_all(
+        "[data-role=\"editor-cell\"][data-entity-id], \
+         [data-role=\"rendered-text\"][data-entity-id]",
+    ) else {
+        tracing::error!("[EditorCell] focus_ring selector failed");
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(list.length() as usize);
+    for i in 0..list.length() {
+        use wasm_bindgen::JsCast;
+        let Some(node) = list.item(i) else { continue };
+        let Some(el) = node.dyn_ref::<web_sys::Element>() else {
+            continue;
+        };
+        let Some(id) = el.get_attribute("data-entity-id") else {
+            continue;
+        };
+        if !id.is_empty()
+            && !holon_frontend::row_origin::RowOrigin::from_id(&id).is_creation_placeholder()
+        {
+            out.push(id);
+        }
+    }
+    out
 }
 
 /// Route Enter / Backspace-at-0 / Tab / Shift+Tab through the shared
@@ -285,10 +388,15 @@ fn flush_pending_now(entity_id: &str) -> bool {
 }
 
 pub(crate) fn update_wire(entity_id: &str, content: &str) -> serde_json::Value {
+    // `set_field`, not `update`: the block OperationProvider registered by
+    // EventInfraModule (`SqlBlockOperations`) exposes set_field / create /
+    // delete + structural ops — it has NO "update" op, and a dispatched
+    // "update" dies as UnknownOperation inside the worker. Same wire GPUI's
+    // editor and state_toggle produce.
     serde_json::json!({
         "entity": "block",
-        "op": "update",
-        "params": { "id": entity_id, "content": content },
+        "op": "set_field",
+        "params": { "id": entity_id, "field": "content", "value": content },
     })
 }
 
@@ -489,7 +597,10 @@ pub mod cursor {
     use std::cell::RefCell;
 
     use wasm_bindgen::JsCast;
-    use web_sys::{window, Element, HtmlElement, Node};
+    use web_sys::Element;
+    use web_sys::HtmlElement;
+    use web_sys::Node;
+    use web_sys::window;
 
     /// A saved cursor position for a specific entity. Offsets are flat
     /// UTF-16 code units from the start of the element's concatenated
@@ -502,7 +613,10 @@ pub mod cursor {
 
     /// Look up an editable element by its `data-entity-id` attribute.
     pub fn find_element(entity_id: &str) -> Option<Element> {
-        let selector = format!("[data-entity-id=\"{entity_id}\"]");
+        // Scoped to editor cells: rendered_text rows now carry
+        // data-entity-id too (for focus_ring), and this lookup must never
+        // hand sync_dom_to_prop a Dioxus-owned rendered-text div.
+        let selector = format!("[data-role=\"editor-cell\"][data-entity-id=\"{entity_id}\"]");
         window()?.document()?.query_selector(&selector).ok()? // ALLOW(ok): DOM selector miss → None
     }
 

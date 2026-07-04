@@ -1,28 +1,36 @@
 //! Transition: join a block into its previous sibling (or parent).
 //!
-//! Mirrors the legacy logic split across `state_machine.rs:1194-1245` (generator),
-//! `state_machine.rs:3438-3486` (precondition),
+//! Mirrors the legacy logic split across `state_machine.rs:1194-1245`
+//! (generator), `state_machine.rs:3438-3486` (precondition),
 //! `state_machine.rs:2693-2718` (ref-state apply),
 //! `sut.rs:4129-4147` (SUT apply), and
 //! `transition_budgets.rs:314-323` (expected SQL).
 
 use holon_api::entity_uri::EntityUri;
-use holon_pbt_core::capabilities::{
-    CapCursor, CapRegion, RefBlockTree, RefBlockTreeMut, RefFocus, RefFocusMut, RefLifecycle,
-    SutBlockTreeWrite,
-};
+use holon_pbt_core::TransitionFactory;
+use holon_pbt_core::TransitionRef;
+use holon_pbt_core::capabilities::CapCursor;
+use holon_pbt_core::capabilities::CapRegion;
+use holon_pbt_core::capabilities::RefBlockTree;
+use holon_pbt_core::capabilities::RefBlockTreeMut;
+use holon_pbt_core::capabilities::RefFocus;
+use holon_pbt_core::capabilities::RefFocusMut;
+use holon_pbt_core::capabilities::RefLifecycle;
+use holon_pbt_core::capabilities::SutBlockTreeWrite;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::check;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::validation::{Reason, check};
-use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
-
 #[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::{
-    ExpectedSql, MutationKind, REACTIVE_BASE, expected_sql_for_kind,
-};
+use crate::pbt::transition_budgets::ExpectedSql;
+#[cfg(feature = "otel-testing")]
+use crate::pbt::transition_budgets::MutationKind;
+#[cfg(feature = "otel-testing")]
+use crate::pbt::transition_budgets::REACTIVE_BASE;
+#[cfg(feature = "otel-testing")]
+use crate::pbt::transition_budgets::expected_sql_for_kind;
 
 /// Join a block into its previous text sibling, or (when first child) into
 /// its non-layout text parent. Mirrors Backspace-at-position-0 semantics.
@@ -136,9 +144,7 @@ pub fn join_block_apply_to_ref<R: RefBlockTree + RefBlockTreeMut + RefFocusMut>(
 
 impl<R: RefBlockTree + RefFocus + RefLifecycle> TransitionFactory<R> for JoinBlock {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        vec![::holon_pbt_core::composition::CapId::of::<
-            dyn ::holon_pbt_core::capabilities::SutBlockTreeWrite,
-        >()]
+        Self::declared_caps()
     }
 
     type Reason = Reason;
@@ -161,19 +167,16 @@ impl<R: RefBlockTree + RefBlockTreeMut + RefFocus + RefFocusMut + RefLifecycle> 
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutBlockTreeWrite> TransitionImpl<ReferenceState, S> for JoinBlock {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.apply_join_block(&self.block_id).await;
+crate::cap_transition! {
+    JoinBlock: SutBlockTreeWrite,
+    where R: [ RefBlockTree + RefFocus + RefLifecycle ],
+    |me, _state, sut| {
+        sut.apply_join_block(&me.block_id).await;
     }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for JoinBlock {
-    fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
-        let watches = state.mcp.active_watches.len();
-        let blocks = state.domain.block_state.blocks.len();
-        let docs = state.files.documents.len();
+    sql_budget: |_me, state| {
+        let watches = state.active_watch_count();
+        let blocks = state.block_count();
+        let docs = state.document_count();
         let update = expected_sql_for_kind(MutationKind::Update, watches, blocks, docs);
         let delete = expected_sql_for_kind(MutationKind::Delete, watches, blocks, docs);
         ExpectedSql {

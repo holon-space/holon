@@ -55,10 +55,12 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use holon_pbt_core::RunMode;
-use holon_pbt_core::composition::{CapInvariant, CapMap, Needs};
-use holon_pbt_core::invariant::{InvariantId, InvariantResult};
-
-use crate::pbt::retry::retry_until_ok;
+use holon_pbt_core::composition::CapInvariant;
+use holon_pbt_core::composition::CapMap;
+use holon_pbt_core::composition::Needs;
+use holon_pbt_core::invariant::InvariantId;
+use holon_pbt_core::invariant::InvariantResult;
+use holon_pbt_core::retry::retry_until_ok;
 
 /// A logical observable: one named reference projection with an owned value
 /// type. `NAME` is the invariant-id family stem: each store emits
@@ -214,8 +216,8 @@ impl<O: Observable> CapInvariant for StoreInvariant<O> {
                     match retry_until_ok(deadline, interval, attempt).await {
                         Ok(result) => result,
                         Err(msg) => InvariantResult::Fail(format!(
-                            "[{id}] still diverged after the {deadline:?} retry window \
-                             (disclosed Converge::Retry exception): {msg}"
+                            "[{id}] still diverged after the {deadline:?} retry window (disclosed \
+                             Converge::Retry exception): {msg}"
                         )),
                     }
                 }

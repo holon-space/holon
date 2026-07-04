@@ -9,25 +9,44 @@
 //! CRDT, and is used as the SQL primary key — ensuring all peers share the
 //! same block identity.
 
-use crate::LoroDocument;
-use crate::event_ring::{DEFAULT_EVENT_RING_CAPACITY, EventRing, deliver_to_subscribers};
-use crate::shared_tree::{SharedTreeStore, is_mount_node, read_mount_info};
-use async_trait::async_trait;
-use holon_api::EntityUri;
-use holon_api::block_mutation::{BlockMutation, BlockTreeView};
-use holon_api::repository::NewBlock;
-use holon_api::repository::{CoreOperations, Lifecycle, P2POperations};
-use holon_api::streaming::{ChangeNotifications, ChangeSubscribers};
-use holon_api::{
-    ApiError, Block, BlockContent, Change, ChangeOrigin, ContentType, SourceBlock, StreamPosition,
-    Tags, Value,
-};
-use holon_core::fractional_index::default_sort_key;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::Mutex;
+
+use async_trait::async_trait;
+use holon_api::ApiError;
+use holon_api::Block;
+use holon_api::BlockContent;
+use holon_api::Change;
+use holon_api::ChangeOrigin;
+use holon_api::ContentType;
+use holon_api::EntityUri;
+use holon_api::SourceBlock;
+use holon_api::StreamPosition;
+use holon_api::Tags;
+use holon_api::Value;
+use holon_api::block_mutation::BlockMutation;
+use holon_api::block_mutation::BlockTreeView;
+use holon_api::repository::CoreOperations;
+use holon_api::repository::Lifecycle;
+use holon_api::repository::NewBlock;
+use holon_api::repository::P2POperations;
+use holon_api::streaming::ChangeNotifications;
+use holon_api::streaming::ChangeSubscribers;
 use tokio::sync::mpsc;
-use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
+use tokio_stream::Stream;
+use tokio_stream::StreamExt;
+use tokio_stream::wrappers::ReceiverStream;
+
+use crate::LoroDocument;
+use crate::event_ring::DEFAULT_EVENT_RING_CAPACITY;
+use crate::event_ring::EventRing;
+use crate::event_ring::deliver_to_subscribers;
+use crate::shared_tree::SharedTreeStore;
+use crate::shared_tree::is_mount_node;
+use crate::shared_tree::read_mount_info;
 
 // Field name constants
 pub const CONTENT_TYPE: &str = "content_type";
@@ -38,13 +57,13 @@ const SOURCE_NAME: &str = "source_name";
 const SOURCE_HEADER_ARGS: &str = "source_header_args";
 /// Legacy single-blob property storage: one `LoroMap` key holding the whole
 /// property map as one opaque JSON string. Read-only now (read when migrating a
-/// pre-H3 block) — blob-level LWW meant two peers setting *different* properties
-/// clobbered each other (H3). Superseded by [`PROPERTIES_MAP`].
+/// pre-H3 block) — blob-level LWW meant two peers setting *different*
+/// properties clobbered each other (H3). Superseded by [`PROPERTIES_MAP`].
 const PROPERTIES: &str = "properties";
-/// H3: properties stored as a nested `LoroMap`, one key per property. A `LoroMap`
-/// resolves conflicts per key, so concurrent edits to *different* properties
-/// (e.g. `TODO` vs `PRIORITY`) merge instead of one peer's blob winning. Each
-/// value is its `serde_json::Value` JSON-encoded into a string.
+/// H3: properties stored as a nested `LoroMap`, one key per property. A
+/// `LoroMap` resolves conflicts per key, so concurrent edits to *different*
+/// properties (e.g. `TODO` vs `PRIORITY`) merge instead of one peer's blob
+/// winning. Each value is its `serde_json::Value` JSON-encoded into a string.
 const PROPERTIES_MAP: &str = "properties_map";
 /// Stable block identity — a UUID assigned at creation that travels with the
 /// CRDT node across peers. Used as the SQL primary key.
@@ -60,7 +79,9 @@ pub const EXTERNAL_ID: &str = "external_id";
 /// data, but unknown keys are dropped silently — they came from a peer
 /// running a newer version).
 pub fn mark_from_loro_value(key: &str, value: &loro::LoroValue) -> Option<holon_api::InlineMark> {
-    use holon_api::{EntityRef, EntityUri, InlineMark};
+    use holon_api::EntityRef;
+    use holon_api::EntityUri;
+    use holon_api::InlineMark;
     match key {
         "bold" => Some(InlineMark::Bold),
         "italic" => Some(InlineMark::Italic),
@@ -100,7 +121,8 @@ pub fn mark_from_loro_value(key: &str, value: &loro::LoroValue) -> Option<holon_
                         _ => None,
                     })?;
                     EntityRef::Internal {
-                        // ALLOW(entity_uri_from_raw): internal-link target id from Loro mark map field
+                        // ALLOW(entity_uri_from_raw): internal-link target id from Loro mark map
+                        // field
                         id: EntityUri::from_raw(&id_str),
                     }
                 }
@@ -183,7 +205,8 @@ pub fn read_marks_from_text(text: &loro::LoroText) -> Vec<holon_api::MarkSpan> {
 /// ..., "label": ... }` so the render layer can reconstruct the full
 /// `EntityRef`+label without going back to `Block.marks`.
 pub fn mark_to_loro_value(mark: &holon_api::InlineMark) -> loro::LoroValue {
-    use holon_api::{EntityRef, InlineMark};
+    use holon_api::EntityRef;
+    use holon_api::InlineMark;
     match mark {
         InlineMark::Bold
         | InlineMark::Italic
@@ -227,7 +250,9 @@ pub fn mark_to_loro_value(mark: &holon_api::InlineMark) -> loro::LoroValue {
 /// - `link/verbatim` → `ExpandType::None` (typing at the boundary escapes)
 pub fn configure_text_styles(doc: &loro::LoroDoc) {
     use holon_api::InlineMark;
-    use loro::{ExpandType, StyleConfig, StyleConfigMap};
+    use loro::ExpandType;
+    use loro::StyleConfig;
+    use loro::StyleConfigMap;
 
     let mut cfg = StyleConfigMap::new();
     for key in InlineMark::all_loro_keys() {
@@ -272,7 +297,8 @@ fn uri_to_tree_id(uri: &EntityUri) -> Option<loro::TreeID> {
 }
 
 fn str_to_tree_id(s: &str) -> Option<loro::TreeID> {
-    // ALLOW(entity_uri_from_raw): str_to_tree_id(&str) backend string-id resolve surface
+    // ALLOW(entity_uri_from_raw): str_to_tree_id(&str) backend string-id resolve
+    // surface
     let uri = EntityUri::from_raw(s);
     uri_to_tree_id(&uri)
 }
@@ -380,6 +406,7 @@ fn read_properties_from_meta(meta: &loro::LoroMap) -> HashMap<String, Value> {
     // the stray keys.
     props.remove("tags");
     props.remove("requires");
+    props.remove("advice_suppressed");
     props
 }
 
@@ -430,11 +457,13 @@ fn read_block_from_tree(
 
     let tags = read_tags_from_meta(&meta);
     let requires = read_requires_from_meta(&meta);
+    let advice_suppressed = read_advice_suppressed_from_meta(&meta);
 
     let mut block = Block::from_block_content(id, parent_id, content);
     block.set_properties_map(properties);
     block.tags = tags.into();
     block.requires = requires;
+    block.advice_suppressed = advice_suppressed;
     block.created_at = created_at;
     block.updated_at = updated_at;
     block
@@ -442,9 +471,10 @@ fn read_block_from_tree(
 
 // `SnapshotBlock` is a backend-neutral data type (a `Block` + its fractional
 // `sort_key`); it now lives in `holon-api` (along with the `SnapshotBlockWire`
-// lossless-serde representation — BUG H1). The Loro adapter still builds it here
-// from a `LoroDoc` (see `snapshot_blocks_from_doc*`), but the type itself is
-// shared. Re-exported so `crate::loro_backend::SnapshotBlock` keeps resolving.
+// lossless-serde representation — BUG H1). The Loro adapter still builds it
+// here from a `LoroDoc` (see `snapshot_blocks_from_doc*`), but the type itself
+// is shared. Re-exported so `crate::loro_backend::SnapshotBlock` keeps
+// resolving.
 pub use holon_api::SnapshotBlock;
 
 /// Read the `tags` JSON-encoded list from a node's metadata. Returns an empty
@@ -460,10 +490,10 @@ fn read_tags_from_meta(meta: &loro::LoroMap) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Read the `requires` JSON-encoded list (org-edna dependency edge field) from a
-/// node's metadata. Stored under a dedicated `requires` meta key — like `tags`,
-/// it is an edge field (the `block_requires` junction), never part of the
-/// generic `properties` blob. Returns an empty `Vec` when absent. Malformed
+/// Read the `requires` JSON-encoded list (org-edna dependency edge field) from
+/// a node's metadata. Stored under a dedicated `requires` meta key — like
+/// `tags`, it is an edge field (the `block_requires` junction), never part of
+/// the generic `properties` blob. Returns an empty `Vec` when absent. Malformed
 /// JSON in a present value is corruption of our own metadata — fail loud.
 fn read_requires_from_meta(meta: &loro::LoroMap) -> Vec<EntityUri> {
     meta.get_typed("requires", |val| val.as_string().map(|s| s.to_string()))
@@ -475,6 +505,27 @@ fn read_requires_from_meta(meta: &loro::LoroMap) -> Vec<EntityUri> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Read the `advice_suppressed` JSON-encoded list (advice-suppression exclusion
+/// set, ADR 0021) from a node's metadata. Mirrors `read_requires_from_meta`:
+/// an edge field stored under its own meta key (the `advice_suppressed`
+/// junction), never in the generic `properties` blob. Empty when absent;
+/// malformed JSON is corruption of our own metadata — fail loud.
+fn read_advice_suppressed_from_meta(meta: &loro::LoroMap) -> Vec<EntityUri> {
+    meta.get_typed("advice_suppressed", |val| {
+        val.as_string().map(|s| s.to_string())
+    })
+    .map(|s| {
+        serde_json::from_str::<Vec<String>>(&s)
+            .unwrap_or_else(|e| panic!("corrupt `advice_suppressed` metadata JSON {s:?}: {e}"))
+            .into_iter()
+            .map(|r| {
+                EntityUri::parse_owned(r).expect("stored advice_suppressed must be a valid URI")
+            })
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 /// Check if two snapshotted blocks differ in content, structure, ordering, or
@@ -536,18 +587,19 @@ fn write_content_to_meta(
     Ok(())
 }
 
-/// Open (creating if absent) the nested per-property `LoroMap` (H3, [`PROPERTIES_MAP`]).
+/// Open (creating if absent) the nested per-property `LoroMap` (H3,
+/// [`PROPERTIES_MAP`]).
 pub(crate) fn properties_map_container(meta: &loro::LoroMap) -> anyhow::Result<loro::LoroMap> {
     Ok(meta.get_or_create_container(PROPERTIES_MAP, loro::LoroMap::new())?)
 }
 
 /// Read one scalar block field's [`Value`] straight from a tree node's `meta`
 /// map, mirroring the decode `read_properties_from_meta` performs at the whole-
-/// block level: prefer the nested per-property map (H3), fall back to the legacy
-/// single-blob until a write migrates it. `None` when the key is absent. This is
-/// the per-field read the `LoroMetaCellBacking<T>` scalar cell projects — it must
-/// agree with the whole-block projection so a cell read and a `get_block` read of
-/// the same field never diverge.
+/// block level: prefer the nested per-property map (H3), fall back to the
+/// legacy single-blob until a write migrates it. `None` when the key is absent.
+/// This is the per-field read the `LoroMetaCellBacking<T>` scalar cell projects
+/// — it must agree with the whole-block projection so a cell read and a
+/// `get_block` read of the same field never diverge.
 pub(crate) fn read_scalar_field_from_meta(meta: &loro::LoroMap, key: &str) -> Option<Value> {
     if let Some(loro::ValueOrContainer::Container(loro::Container::Map(map))) =
         meta.get(PROPERTIES_MAP)
@@ -565,25 +617,27 @@ pub(crate) fn read_scalar_field_from_meta(meta: &loro::LoroMap, key: &str) -> Op
             panic!("Property {key:?} unexpectedly holds a container, not a JSON string");
         }
     }
-    // Legacy pre-H3 single-blob path (self-heals on the next write, which migrates).
+    // Legacy pre-H3 single-blob path (self-heals on the next write, which
+    // migrates).
     let json = meta.get_typed(PROPERTIES, |val| val.as_string().map(|s| s.to_string()))?;
     let legacy: HashMap<String, Value> = serde_json::from_str(&json)
         .unwrap_or_else(|e| panic!("Corrupt properties JSON in Loro tree: {json:?}: {e}"));
     legacy.get(key).cloned()
 }
 
-/// Encode one property value as the JSON string stored under its key. Properties
-/// are arbitrary `serde_json::Value`; the per-key granularity (not per-field) is
-/// what H3 needs — concurrent edits to *different* properties are different keys.
+/// Encode one property value as the JSON string stored under its key.
+/// Properties are arbitrary `serde_json::Value`; the per-key granularity (not
+/// per-field) is what H3 needs — concurrent edits to *different* properties are
+/// different keys.
 fn encode_property_value(value: &Value) -> anyhow::Result<loro::LoroValue> {
     Ok(loro::LoroValue::from(
         serde_json::to_string(value)?.as_str(),
     ))
 }
 
-/// Decode the nested per-property `LoroMap` back into a property map. Each value
-/// must be the JSON string an H3 write produced — anything else is corruption,
-/// so panic rather than silently dropping it.
+/// Decode the nested per-property `LoroMap` back into a property map. Each
+/// value must be the JSON string an H3 write produced — anything else is
+/// corruption, so panic rather than silently dropping it.
 fn decode_properties_map(map: &loro::LoroMap) -> HashMap<String, Value> {
     let mut out = HashMap::new();
     map.for_each(|key, value| {
@@ -604,8 +658,8 @@ fn decode_properties_map(map: &loro::LoroMap) -> HashMap<String, Value> {
 }
 
 /// Drop the legacy single-blob `PROPERTIES` key. Authoritative full-set writers
-/// ([`replace_properties_in_meta`]) use this — they already define the entire set,
-/// so the blob's contents are intentionally discarded.
+/// ([`replace_properties_in_meta`]) use this — they already define the entire
+/// set, so the blob's contents are intentionally discarded.
 fn drop_legacy_properties_blob(meta: &loro::LoroMap) -> anyhow::Result<()> {
     if meta.get(PROPERTIES).is_some() {
         meta.delete(PROPERTIES)?;
@@ -614,9 +668,9 @@ fn drop_legacy_properties_blob(meta: &loro::LoroMap) -> anyhow::Result<()> {
 }
 
 /// Copy any legacy single-blob properties into the nested map (only keys not
-/// already present) and drop the legacy key. Partial writers (merge / per-field)
-/// call this first so a pre-H3 block's *untouched* properties survive its first
-/// partial write instead of being dropped with the blob.
+/// already present) and drop the legacy key. Partial writers (merge /
+/// per-field) call this first so a pre-H3 block's *untouched* properties
+/// survive its first partial write instead of being dropped with the blob.
 fn migrate_legacy_blob_into_map(meta: &loro::LoroMap, map: &loro::LoroMap) -> anyhow::Result<()> {
     let Some(json) = meta.get_typed(PROPERTIES, |val| val.as_string().map(|s| s.to_string()))
     else {
@@ -636,7 +690,8 @@ fn migrate_legacy_blob_into_map(meta: &loro::LoroMap, map: &loro::LoroMap) -> an
 /// Insert/overwrite only the given properties — other keys are left untouched
 /// (merge semantics). Writing only the keys that changed is what gives H3 its
 /// convergence: an update touching `TODO` leaves a concurrent peer's `PRIORITY`
-/// write intact, instead of a read-modify-write re-stamping it with a stale value.
+/// write intact, instead of a read-modify-write re-stamping it with a stale
+/// value.
 fn merge_properties_into_meta(
     meta: &loro::LoroMap,
     properties: &HashMap<String, Value>,
@@ -650,7 +705,8 @@ fn merge_properties_into_meta(
 }
 
 /// Replace the block's EXACT property set: keys absent from `properties` are
-/// deleted. Authoritative full-set writes (block creation, org re-parse) use this.
+/// deleted. Authoritative full-set writes (block creation, org re-parse) use
+/// this.
 fn replace_properties_in_meta(
     meta: &loro::LoroMap,
     properties: &HashMap<String, Value>,
@@ -692,13 +748,26 @@ fn apply_field_changes_to_meta(
 
 // -- Resolving parent TreeID from EntityUri --
 
-fn resolve_parent_tree_id(
+/// Outcome of resolving a parent `EntityUri` to a live tree node. Classifying
+/// the failure here (rather than returning an error) lets the write-boundary
+/// wrappers pick the right *typed* error: the create path surfaces the shared
+/// [`holon_api::ParentNotFound`], while read/move paths keep a generic message.
+enum ParentResolution {
+    /// No parent — the node is a tree root (no_parent / sentinel URI).
+    Root,
+    /// Parent resolved to this live tree node.
+    Node(loro::TreeID),
+    /// The parent URI could not be resolved to a live node in this tree.
+    Unresolvable,
+}
+
+fn resolve_parent_core(
     tree: &loro::LoroTree,
     id_cache: &Arc<Mutex<HashMap<String, loro::TreeID>>>,
     parent_uri: &EntityUri,
-) -> anyhow::Result<Option<loro::TreeID>> {
+) -> ParentResolution {
     if parent_uri.is_no_parent() || parent_uri.is_sentinel() {
-        return Ok(None);
+        return ParentResolution::Root;
     }
     // Try TreeID format first, then stable ID cache, then walk the tree.
     // The tree walk handles the seed phase: when blocks are
@@ -743,11 +812,48 @@ fn resolve_parent_tree_id(
                 }
             }
             None
-        })
-        .ok_or_else(|| anyhow::anyhow!("Cannot resolve parent URI to TreeID: {}", parent_uri))?;
-    tree.get_meta(tree_id)
-        .map_err(|_| anyhow::anyhow!("Parent node does not exist: {}", parent_uri))?;
-    Ok(Some(tree_id))
+        });
+    match tree_id {
+        // Confirm the resolved node actually carries meta (i.e. it is a live
+        // node, not a stale cache hit into a deleted/unexist slot).
+        Some(tid) if tree.get_meta(tid).is_ok() => ParentResolution::Node(tid),
+        _ => ParentResolution::Unresolvable,
+    }
+}
+
+/// Read/move-path parent resolution: a missing parent is a generic anyhow
+/// error.
+fn resolve_parent_tree_id(
+    tree: &loro::LoroTree,
+    id_cache: &Arc<Mutex<HashMap<String, loro::TreeID>>>,
+    parent_uri: &EntityUri,
+) -> anyhow::Result<Option<loro::TreeID>> {
+    match resolve_parent_core(tree, id_cache, parent_uri) {
+        ParentResolution::Root => Ok(None),
+        ParentResolution::Node(tid) => Ok(Some(tid)),
+        ParentResolution::Unresolvable => Err(anyhow::anyhow!(
+            "Cannot resolve parent URI to TreeID: {parent_uri}"
+        )),
+    }
+}
+
+/// Create-path parent resolution at the write boundary: an unresolvable parent
+/// is the shared, typed [`holon_api::ParentNotFound`] — the anyhow *source*, so
+/// callers up the stack can downcast to it (and can add context freely on top).
+fn resolve_parent_tree_id_for_create(
+    tree: &loro::LoroTree,
+    id_cache: &Arc<Mutex<HashMap<String, loro::TreeID>>>,
+    parent_uri: &EntityUri,
+    child_uri: &EntityUri,
+) -> anyhow::Result<Option<loro::TreeID>> {
+    match resolve_parent_core(tree, id_cache, parent_uri) {
+        ParentResolution::Root => Ok(None),
+        ParentResolution::Node(tid) => Ok(Some(tid)),
+        ParentResolution::Unresolvable => Err(anyhow::Error::new(holon_api::ParentNotFound {
+            parent_id: parent_uri.clone(),
+            child_id: child_uri.clone(),
+        })),
+    }
 }
 
 /// Get the parent TreeID of a node.
@@ -831,17 +937,17 @@ pub fn snapshot_blocks_from_doc(doc: &loro::LoroDoc) -> HashMap<String, Snapshot
 /// Why callers need this: an unsettled snapshot under-reports the live set. A
 /// caller that diffs it for **deletes** must withhold them — the missing block
 /// still exists in the tree; treating it as absent would spuriously delete its
-/// sink row, which the next settled snapshot re-creates (an add/remove CDC churn
-/// cycle — `inv-editable-text-has-draggable`). A genuinely deleted node parents
-/// to `Deleted`/`Unexist` (the first `continue` below) and does **not** flip
-/// `settled`, so real deletes still flow.
+/// sink row, which the next settled snapshot re-creates (an add/remove CDC
+/// churn cycle — `inv-editable-text-has-draggable`). A genuinely deleted node
+/// parents to `Deleted`/`Unexist` (the first `continue` below) and does **not**
+/// flip `settled`, so real deletes still flow.
 pub fn snapshot_blocks_from_doc_settled(
     doc: &loro::LoroDoc,
 ) -> (HashMap<String, SnapshotBlock>, bool) {
     let tree = doc.get_tree(TREE_NAME);
     let mut blocks: HashMap<String, SnapshotBlock> = HashMap::new();
     let mut settled = true;
-    let mut sibling_keys: HashMap<Option<loro::TreeID>, HashMap<loro::TreeID, String>> =
+    let mut sibling_keys: HashMap<Option<loro::TreeID>, HashMap<loro::TreeID, Option<String>>> =
         HashMap::new();
     for node in tree.get_nodes(false) {
         if matches!(
@@ -869,7 +975,15 @@ pub fn snapshot_blocks_from_doc_settled(
         // Computed per sibling group so concurrently-created siblings whose
         // peers minted the SAME fi still project DISTINCT keys in Loro's true
         // child order (see `effective_sibling_sort_keys`).
-        let sort_key = sibling_keys
+        //
+        // A live node with no fractional index (inner `None`) or one absent from
+        // its parent's child list (outer `None`) is an ordering-invariant
+        // violation (ADR 0005). We MUST NOT fake a `default_sort_key()` ("A0")
+        // here: that is the exact historical fi-corruption shape and a fail-loud
+        // violation (CLAUDE.md "never fake"). Instead disclose the degraded node
+        // loudly and withhold it (like the missing-meta skip above), marking the
+        // snapshot unsettled so the caller withholds deletes.
+        let key_opt = sibling_keys
             .entry(parent_tid)
             .or_insert_with(|| {
                 let siblings = match parent_tid {
@@ -880,8 +994,19 @@ pub fn snapshot_blocks_from_doc_settled(
                 siblings.into_iter().zip(keys).collect()
             })
             .get(&node.id)
-            .cloned()
-            .unwrap_or_else(default_sort_key);
+            .cloned();
+        let Some(Some(sort_key)) = key_opt else {
+            tracing::error!(
+                block_id = %block.id,
+                ?parent_tid,
+                node = ?node.id,
+                "loro projection: live node has no fractional index (ADR 0005 \
+                 ordering-invariant violation); withholding from snapshot rather \
+                 than faking an A0 sort key"
+            );
+            settled = false;
+            continue;
+        };
         if std::env::var("HOLON_LORO_DUP_DEBUG").is_ok()
             && let Some(prev) = blocks.get(&block.id.to_string())
         {
@@ -902,28 +1027,336 @@ pub fn snapshot_blocks_from_doc_settled(
 /// index — but concurrent peer creates at the same position mint the SAME fi
 /// (jitter is 0), and Loro breaks that tie internally by op id, an order the
 /// plain fi string loses. Projecting the tied string would collapse SQL to its
-/// `ORDER BY sort_key, id` fallback — id-string order, random from the user's
+/// `ORDER BY sort_key, id` tiebreak — id-string order, random from the user's
 /// PoV and divergent from the Loro authority. Tied runs therefore get a
 /// `.<position>` suffix in child order; `.` (0x2E) sorts below every fi hex
 /// char, so a suffixed key keeps its place relative to every distinctly-keyed
 /// sibling (ties share the exact fi string as a common prefix).
-fn effective_sibling_sort_keys(tree: &loro::LoroTree, siblings: &[loro::TreeID]) -> Vec<String> {
-    let fis: Vec<String> = siblings
+fn effective_sibling_sort_keys(
+    tree: &loro::LoroTree,
+    siblings: &[loro::TreeID],
+) -> Vec<Option<String>> {
+    // `None` marks a sibling with no fractional index — a live-node ordering
+    // invariant violation (ADR 0005). It is propagated (never defaulted to
+    // "A0") so the caller can withhold that node and fail loud.
+    let fis: Vec<Option<String>> = siblings
         .iter()
-        .map(|&tid| tree.fractional_index(tid).unwrap_or_else(default_sort_key))
+        .map(|&tid| tree.fractional_index(tid))
         .collect();
     fis.iter()
         .enumerate()
         .map(|(i, fi)| {
-            let tied = fis.iter().filter(|f| *f == fi).count() > 1;
+            let fi = fi.as_ref()?;
+            let tied = fis
+                .iter()
+                .filter(|f| f.as_deref() == Some(fi.as_str()))
+                .count()
+                > 1;
             if tied {
-                let run_pos = fis[..i].iter().filter(|f| *f == fi).count();
-                format!("{fi}.{run_pos:06x}")
+                let run_pos = fis[..i]
+                    .iter()
+                    .filter(|f| f.as_deref() == Some(fi.as_str()))
+                    .count();
+                Some(format!("{fi}.{run_pos:06x}"))
             } else {
-                fi.clone()
+                Some(fi.clone())
             }
         })
         .collect()
+}
+
+/// Reverse-map a changed container (from `doc.diff`) to the tree node that owns
+/// it — the deepest `Index::Node` on its container path. A block's content
+/// (text) and properties (nested map) live in containers under the node's meta
+/// map, so a content/property edit surfaces as a `Map`/`Text` diff on such a
+/// container; this recovers the owning `TreeID`. Returns `None` for containers
+/// with no tree-node ancestor (not part of the block tree).
+fn owning_tree_node(doc: &loro::LoroDoc, cid: &loro::ContainerID) -> Option<loro::TreeID> {
+    let path = doc.get_path_to_container(cid)?;
+    path.iter().rev().find_map(|(_, idx)| match idx {
+        loro::Index::Node(tid) => Some(*tid),
+        _ => None,
+    })
+}
+
+/// Children `TreeID`s of a `TreeParentId` scope in Loro child order (the same
+/// order `snapshot_blocks_from_doc_settled` reads for sibling sort keys).
+fn children_of_scope(tree: &loro::LoroTree, scope: loro::TreeParentId) -> Vec<loro::TreeID> {
+    match scope {
+        loro::TreeParentId::Node(pid) => tree.children(pid).unwrap_or_default(),
+        loro::TreeParentId::Root => tree.roots(),
+        loro::TreeParentId::Deleted | loro::TreeParentId::Unexist => Vec::new(),
+    }
+}
+
+/// Read ONE live tree node into a `(stable_id, SnapshotBlock)`, sharing the
+/// sibling tie-break recompute across a group via `group_keys` (parent scope →
+/// {child → sort_key}). Returns `None` — WITHOUT faking an A0 key — when the
+/// node is transiently incomplete (missing meta / stable id / fractional
+/// index): identical withhold semantics to the full-snapshot reader
+/// (`snapshot_blocks_from_doc_settled`), so the caller can mark the pass
+/// unsettled and retry.
+fn read_one_node_snapshot(
+    tree: &loro::LoroTree,
+    node: loro::TreeID,
+    group_keys: &mut HashMap<loro::TreeParentId, HashMap<loro::TreeID, Option<String>>>,
+) -> Option<(String, SnapshotBlock)> {
+    let meta = tree.get_meta(node).ok()?;
+    let stable_id = read_stable_id(&meta)?;
+    let parent_tid = get_node_parent(tree, node);
+    let scope = match parent_tid {
+        Some(p) => loro::TreeParentId::Node(p),
+        None => loro::TreeParentId::Root,
+    };
+    let keys = group_keys.entry(scope).or_insert_with(|| {
+        let siblings = children_of_scope(tree, scope);
+        let ks = effective_sibling_sort_keys(tree, &siblings);
+        siblings.into_iter().zip(ks).collect()
+    });
+    let Some(Some(sort_key)) = keys.get(&node).cloned() else {
+        tracing::error!(
+            block_id = %stable_id,
+            ?scope,
+            node = ?node,
+            "loro incremental projection: live node has no fractional index (ADR \
+             0005 ordering-invariant violation); withholding rather than faking \
+             an A0 sort key"
+        );
+        return None;
+    };
+    let block = read_block_from_tree(tree, node, parent_tid);
+    // Key by the SCHEMED id (`block:<stable>`), exactly as the full-snapshot
+    // reader keys `blocks` — the `live`/SQL rows use the schemed id. Keying by
+    // the bare `stable_id` here would make every update look like a create
+    // (live grows unboundedly) and every delete miss its schemed sink row.
+    Some((block.id.to_string(), SnapshotBlock { block, sort_key }))
+}
+
+/// Incremental block changes from a batch of `PendingChange` facts (drained
+/// from the `subscribe_root` event stream), cost proportional to the number of
+/// changed nodes, NOT the total tree size. This is the O(changed) replacement
+/// for the full-document walk + full-map diff on every commit. It reads only
+/// the CURRENT tree state for the named nodes — it never calls `doc.diff`,
+/// which checked the shared live doc out and raced concurrent readers.
+///
+/// Returns `(changed, settled)` where `changed` maps each affected stable id to
+/// its new state (`None` = the node was deleted). `settled` is `false` when a
+/// touched live node was transiently incomplete (mid-mutation) — the caller
+/// discards the incremental result and falls back to a full reseed for that
+/// pass (which owns the delete-withhold gate), mirroring the full-snapshot
+/// reader's unsettled handling.
+///
+/// Invariant preservation:
+/// * **peer-sibling-order** — any Create/Move/Delete marks its parent scope(s)
+///   dirty; every current member of a dirty scope is re-read so the
+///   `effective_sibling_sort_keys` tie-break is recomputed for the WHOLE group
+///   (a new/removed tied sibling shifts the `.<run_pos>` suffix of its peers).
+///   A pure content/property edit touches no scope, so no sibling recompute.
+/// * **delete-pass** — deletes come from the tree diff's `Delete` items; the
+///   node's stable id is recovered from its (often still-present) meta or the
+///   maintained `tid_index`, so a delete is never silently dropped.
+///
+/// `tid_index` (TreeID -> stable id) is maintained across calls so a deleted
+/// node whose meta is already gone can still be mapped to the sink row.
+/// A single owned "dirty fact" extracted from a Loro `subscribe_root` DiffEvent
+/// on the committing thread. It names WHAT changed (a tree node create/move/
+/// delete, or a content/property sub-container edit) without touching the doc —
+/// so the subscribe callback appends these under a mutex with no `doc` access,
+/// no re-entrant lock, and crucially no checkout. `project()` drains a batch
+/// and reads the CURRENT tree state for the named nodes. This is the O(changed)
+/// replacement for `doc.diff(from, to)`, which checked out the shared live doc
+/// (to `from`, then `to`, then restored) and raced concurrent readers — the
+/// root cause of the flaky `SplitBlock … Block not found`.
+#[derive(Debug, Clone)]
+pub enum PendingChange {
+    Create {
+        parent: loro::TreeParentId,
+        target: loro::TreeID,
+    },
+    Move {
+        parent: loro::TreeParentId,
+        old_parent: loro::TreeParentId,
+        target: loro::TreeID,
+    },
+    Delete {
+        old_parent: loro::TreeParentId,
+        target: loro::TreeID,
+    },
+    /// A content (text) or property (map) edit on a node's sub-container; the
+    /// owning `TreeID` is recovered at drain time via `owning_tree_node`.
+    Container(loro::ContainerID),
+}
+
+/// Extract the dirty facts from a `subscribe_root` DiffEvent. A pure function
+/// of the event (no `doc` access), safe to call inside the subscribe callback.
+///
+/// **Checkout events are hard-filtered** (fail-loud): a checkout diff is a
+/// backward delta that, consumed as facts, would corrupt `live`. Once the
+/// projection stopped calling `doc.diff`, NOTHING checks the global live doc
+/// out (all other `fork()`/`fork_at()` are on separate/shared docs), so a
+/// Checkout firing here is an invariant breach — drop it and warn.
+pub fn extract_pending_changes(event: &loro::event::DiffEvent) -> Vec<PendingChange> {
+    if matches!(event.triggered_by, loro::EventTriggerKind::Checkout) {
+        tracing::warn!(
+            "[LoroProjection] unexpected Checkout DiffEvent on the global doc — ignoring;              no projection path should check the live doc out (would corrupt incremental live)"
+        );
+        return Vec::new();
+    }
+    let mut out: Vec<PendingChange> = Vec::new();
+    for cd in event.events.iter() {
+        match &cd.diff {
+            loro::event::Diff::Tree(td) => {
+                for item in td.diff.iter() {
+                    match &item.action {
+                        loro::TreeExternalDiff::Create { parent, .. } => {
+                            out.push(PendingChange::Create {
+                                parent: *parent,
+                                target: item.target,
+                            });
+                        }
+                        loro::TreeExternalDiff::Move {
+                            parent, old_parent, ..
+                        } => {
+                            out.push(PendingChange::Move {
+                                parent: *parent,
+                                old_parent: *old_parent,
+                                target: item.target,
+                            });
+                        }
+                        loro::TreeExternalDiff::Delete { old_parent, .. } => {
+                            out.push(PendingChange::Delete {
+                                old_parent: *old_parent,
+                                target: item.target,
+                            });
+                        }
+                    }
+                }
+            }
+            // A content (text) or property (map) edit on a node's sub-container.
+            _ => out.push(PendingChange::Container(cd.target.clone())),
+        }
+    }
+    out
+}
+
+pub fn incremental_block_changes(
+    doc: &loro::LoroDoc,
+    pending: &[PendingChange],
+    tid_index: &mut HashMap<loro::TreeID, String>,
+) -> anyhow::Result<(HashMap<String, Option<SnapshotBlock>>, bool)> {
+    let tree = doc.get_tree(TREE_NAME);
+
+    let mut reread: HashSet<loro::TreeID> = HashSet::new();
+    let mut deleted: HashSet<loro::TreeID> = HashSet::new();
+    let mut dirty_scopes: HashSet<loro::TreeParentId> = HashSet::new();
+
+    for change in pending {
+        match change {
+            PendingChange::Create { parent, target } => {
+                dirty_scopes.insert(*parent);
+                reread.insert(*target);
+            }
+            PendingChange::Move {
+                parent,
+                old_parent,
+                target,
+            } => {
+                dirty_scopes.insert(*parent);
+                dirty_scopes.insert(*old_parent);
+                reread.insert(*target);
+            }
+            PendingChange::Delete { old_parent, target } => {
+                dirty_scopes.insert(*old_parent);
+                deleted.insert(*target);
+            }
+            PendingChange::Container(cid) => {
+                if let Some(tid) = owning_tree_node(doc, cid) {
+                    reread.insert(tid);
+                }
+            }
+        }
+    }
+
+    // A structural change in a scope can shift the sibling tie-break key of
+    // EVERY current member (peer-sibling-order) — re-read the whole group.
+    for scope in &dirty_scopes {
+        for child in children_of_scope(&tree, *scope) {
+            reread.insert(child);
+        }
+    }
+    // A node explicitly deleted this interval is handled by `deleted`, never
+    // re-read as live.
+    reread.retain(|t| !deleted.contains(t));
+
+    let mut group_keys: HashMap<loro::TreeParentId, HashMap<loro::TreeID, Option<String>>> =
+        HashMap::new();
+    let mut changed: HashMap<String, Option<SnapshotBlock>> = HashMap::new();
+    let mut settled = true;
+
+    for node in reread {
+        // A node whose parent scope was dirtied may itself have been deleted in
+        // the same interval (e.g. subtree prune): if it is no longer alive,
+        // route it through the delete path instead of reading it as live.
+        if !is_node_alive(&tree, node) {
+            if let Some(sid) = tid_index.remove(&node) {
+                changed.insert(sid, None);
+            }
+            continue;
+        }
+        match read_one_node_snapshot(&tree, node, &mut group_keys) {
+            Some((sid, snap)) => {
+                tid_index.insert(node, sid.clone());
+                changed.insert(sid, Some(snap));
+            }
+            None => settled = false,
+        }
+    }
+
+    for node in deleted {
+        let sid = tree
+            .get_meta(node)
+            .ok()
+            .and_then(|m| read_stable_id(&m))
+            .map(|raw| EntityUri::block(&raw).to_string())
+            .or_else(|| tid_index.get(&node).cloned());
+        match sid {
+            Some(sid) => {
+                tid_index.remove(&node);
+                changed.insert(sid, None);
+            }
+            None => {
+                tracing::warn!(
+                    node = ?node,
+                    "loro incremental projection: deleted node has no known stable id \
+                     (never projected) - nothing to delete"
+                );
+            }
+        }
+    }
+
+    Ok((changed, settled))
+}
+
+/// Build a `TreeID -> stable id` index over all live nodes. (Re)seeds the
+/// incremental projector's index on a full reseed pass so subsequent deletes
+/// map even after Loro drops a deleted node's meta.
+pub fn build_tid_index(doc: &loro::LoroDoc) -> HashMap<loro::TreeID, String> {
+    let tree = doc.get_tree(TREE_NAME);
+    let mut index = HashMap::new();
+    for node in tree.get_nodes(false) {
+        if matches!(
+            node.parent,
+            loro::TreeParentId::Deleted | loro::TreeParentId::Unexist
+        ) {
+            continue;
+        }
+        if let Ok(meta) = tree.get_meta(node.id)
+            && let Some(sid) = read_stable_id(&meta)
+        {
+            index.insert(node.id, EntityUri::block(&sid).to_string());
+        }
+    }
+    index
 }
 
 /// A doc's Lamport height: 1 + the max lamport of any applied op, computed
@@ -984,9 +1417,10 @@ fn compute_depth(tree: &loro::LoroTree, parent: loro::TreeParentId) -> usize {
     d
 }
 
-/// Collect all alive blocks from a shared tree, grafting them into the personal tree hierarchy.
-/// Shared tree roots get `mount_parent` as their parent (the mount node's parent in the
-/// personal tree), making them appear inline. Deeper nodes keep their internal relationships.
+/// Collect all alive blocks from a shared tree, grafting them into the personal
+/// tree hierarchy. Shared tree roots get `mount_parent` as their parent (the
+/// mount node's parent in the personal tree), making them appear inline. Deeper
+/// nodes keep their internal relationships.
 fn collect_shared_tree_blocks(
     shared_tree: &loro::LoroTree,
     mount_parent: Option<loro::TreeID>,
@@ -1028,8 +1462,9 @@ fn collect_shared_tree_blocks(
 
 /// Where a resolved write must land. A block that was pruned into a shared
 /// subtree doc no longer lives in the global tree, so writing to it through
-/// the global doc silently no-ops (or fails `BlockNotFound`). `resolve_write_target`
-/// routes each write to the doc that actually holds the live node.
+/// the global doc silently no-ops (or fails `BlockNotFound`).
+/// `resolve_write_target` routes each write to the doc that actually holds the
+/// live node.
 enum WriteTarget {
     Global(loro::TreeID),
     Shared {
@@ -1041,7 +1476,8 @@ enum WriteTarget {
 
 impl WriteTarget {
     /// Doc-identity key: `None` = the global doc, `Some(shared_tree_id)` = a
-    /// shared subtree doc. Two writes land in the same doc iff their keys match.
+    /// shared subtree doc. Two writes land in the same doc iff their keys
+    /// match.
     fn doc_key(&self) -> Option<&str> {
         match self {
             WriteTarget::Global(_) => None,
@@ -1196,10 +1632,10 @@ impl LoroBackend {
     ///
     /// Global tree first (the common case), then — on a global miss or a stale
     /// tombstoned candidate — the shared subtree docs. A shared block's stable
-    /// id is absent from the global tree (its subtree was pruned at share time),
-    /// so the global resolver returns `None`; TreeIDs are globally unique
-    /// (peer+counter), so a stale global TreeID is still a valid key to probe
-    /// the shared docs with.
+    /// id is absent from the global tree (its subtree was pruned at share
+    /// time), so the global resolver returns `None`; TreeIDs are globally
+    /// unique (peer+counter), so a stale global TreeID is still a valid key
+    /// to probe the shared docs with.
     async fn resolve_write_target(&self, id: &str) -> Result<WriteTarget, ApiError> {
         if let Some(tree_id) = self.resolve_to_tree_id(id).await {
             let alive_global = self
@@ -1243,7 +1679,8 @@ impl LoroBackend {
     /// Find the shared doc whose tree holds a live node with stable id `id`.
     fn scan_shared_for_stable_id(&self, id: &str) -> Option<WriteTarget> {
         let store = self.shared_trees.as_ref()?;
-        // ALLOW(entity_uri_from_raw): backend string-id resolve surface (accepts both id formats)
+        // ALLOW(entity_uri_from_raw): backend string-id resolve surface (accepts both
+        // id formats)
         let uri = EntityUri::from_raw(id);
         let needle = uri.id();
         for shared_tree_id in store.shared_tree_ids() {
@@ -1261,12 +1698,13 @@ impl LoroBackend {
         None
     }
 
-    /// Wrap the resolved target's doc in a `LoroDocument` for writing. Both arms
-    /// use `from_existing` to reuse the already-configured inner `Arc<LoroDoc>`
-    /// (the shared doc's text styles were latched at accept; re-`configure` via
-    /// `LoroDocument::new` would corrupt them). A bare `doc.commit()` inside
-    /// `with_write` fires the shared doc's already-attached save/sync/projection
-    /// workers, so routed writes need no extra outbound plumbing.
+    /// Wrap the resolved target's doc in a `LoroDocument` for writing. Both
+    /// arms use `from_existing` to reuse the already-configured inner
+    /// `Arc<LoroDoc>` (the shared doc's text styles were latched at accept;
+    /// re-`configure` via `LoroDocument::new` would corrupt them). A bare
+    /// `doc.commit()` inside `with_write` fires the shared doc's
+    /// already-attached save/sync/projection workers, so routed writes need
+    /// no extra outbound plumbing.
     fn target_doc(&self, target: &WriteTarget) -> (LoroDocument, loro::TreeID) {
         match target {
             WriteTarget::Global(tree_id) => (
@@ -1326,8 +1764,8 @@ impl LoroBackend {
         if self.target_is_mount(&target)? {
             return Err(ApiError::InvalidOperation {
                 message: format!(
-                    "block {id} is a mount node (a pointer into a shared subtree); \
-                     mounts are not editable content — unshare instead of editing"
+                    "block {id} is a mount node (a pointer into a shared subtree); mounts are not \
+                     editable content — unshare instead of editing"
                 ),
             });
         }
@@ -1785,6 +2223,7 @@ impl LoroBackend {
         properties: &HashMap<String, Value>,
         tags: &Tags,
         requires: &[EntityUri],
+        advice_suppressed: &[EntityUri],
     ) -> Result<Block, ApiError> {
         let now = self.now_millis();
         let stable_id = match &id {
@@ -1804,10 +2243,14 @@ impl LoroBackend {
         } else {
             Arc::new(Mutex::new(HashMap::new()))
         };
+        // The child's URI drives the typed `ParentNotFound` if the parent is
+        // absent: use the caller-supplied id, else the freshly-minted stable id.
+        let child_uri = id.clone().unwrap_or_else(|| EntityUri::block(&stable_id));
         let (created_block, tree_id) = write_doc
             .with_write(|doc| {
                 let tree = doc.get_tree(TREE_NAME);
-                let parent_tree_id = resolve_parent_tree_id(&tree, &id_cache, &parent_id)?;
+                let parent_tree_id =
+                    resolve_parent_tree_id_for_create(&tree, &id_cache, &parent_id, &child_uri)?;
 
                 let node = tree.create(parent_tree_id)?;
                 let meta = tree.get_meta(node)?;
@@ -1834,6 +2277,16 @@ impl LoroBackend {
                         .map_err(|e| anyhow::anyhow!("serialize requires: {e}"))?;
                     meta.insert("requires", loro::LoroValue::from(serialized.as_str()))?;
                 }
+                // `advice_suppressed` mirrors `requires`: an edge field carried
+                // in the create commit under its own meta key (ADR 0021).
+                if !advice_suppressed.is_empty() {
+                    let serialized = serde_json::to_string(advice_suppressed)
+                        .map_err(|e| anyhow::anyhow!("serialize advice_suppressed: {e}"))?;
+                    meta.insert(
+                        "advice_suppressed",
+                        loro::LoroValue::from(serialized.as_str()),
+                    )?;
+                }
                 meta.insert("created_at", loro::LoroValue::from(now))?;
                 meta.insert("updated_at", loro::LoroValue::from(now))?;
                 doc.commit();
@@ -1851,6 +2304,7 @@ impl LoroBackend {
                 block.set_properties_map(properties.clone());
                 block.tags = tags.clone();
                 block.requires = requires.to_vec();
+                block.advice_suppressed = advice_suppressed.to_vec();
                 block.created_at = now;
                 block.updated_at = now;
                 Ok((block, node))
@@ -1987,7 +2441,8 @@ impl LoroBackend {
 
     pub async fn update_parent_id(&self, id: &str, new_parent_id: String) -> Result<(), ApiError> {
         // In the LoroTree model, changing parent_id means moving the node.
-        // ALLOW(entity_uri_from_raw): new_parent_id String from cell-registry field write Value
+        // ALLOW(entity_uri_from_raw): new_parent_id String from cell-registry field
+        // write Value
         let new_parent_uri = EntityUri::from_raw(&new_parent_id);
 
         // Reject a cross-doc re-parent (into/out of a shared subtree) before any
@@ -1999,8 +2454,8 @@ impl LoroBackend {
         if source_target.doc_key() != parent_target.doc_key() {
             return Err(ApiError::InvalidOperation {
                 message: format!(
-                    "cross-boundary move of a shared subtree is not supported yet: \
-                     block {id} lives in doc {:?} but new parent {new_parent_id} lives in doc {:?}",
+                    "cross-boundary move of a shared subtree is not supported yet: block {id} \
+                     lives in doc {:?} but new parent {new_parent_id} lives in doc {:?}",
                     source_target.doc_key(),
                     parent_target.doc_key()
                 ),
@@ -2056,7 +2511,8 @@ impl LoroBackend {
         new_parent_id: &str,
         predecessor_id: Option<&str>,
     ) -> Result<(), ApiError> {
-        // ALLOW(entity_uri_from_raw): id/parent_id &str backend API param (accepts both id formats)
+        // ALLOW(entity_uri_from_raw): id/parent_id &str backend API param (accepts both
+        // id formats)
         let new_parent_uri = EntityUri::from_raw(new_parent_id);
 
         // Reject a cross-doc positioned move before any mutation; same-doc moves
@@ -2068,9 +2524,9 @@ impl LoroBackend {
         if source_target.doc_key() != parent_target.doc_key() {
             return Err(ApiError::InvalidOperation {
                 message: format!(
-                    "cross-boundary move of a shared subtree is not supported yet: \
-                     block {target_id} lives in doc {:?} but new parent {new_parent_id} \
-                     lives in doc {:?}",
+                    "cross-boundary move of a shared subtree is not supported yet: block \
+                     {target_id} lives in doc {:?} but new parent {new_parent_id} lives in doc \
+                     {:?}",
                     source_target.doc_key(),
                     parent_target.doc_key()
                 ),
@@ -2227,6 +2683,40 @@ impl LoroBackend {
         })
     }
 
+    /// Set the `advice_suppressed` edge field (advice-suppression exclusion
+    /// set, ADR 0021) on a block's Loro meta. Mirrors
+    /// [`set_block_requires`](Self::set_block_requires): a dedicated
+    /// `advice_suppressed` meta key holding a JSON list, read back by
+    /// `read_block_from_tree`, projected to the `advice_suppressed` junction.
+    pub async fn set_block_advice_suppressed(
+        &self,
+        tree_id_str: &str,
+        advice_suppressed: &[EntityUri],
+    ) -> anyhow::Result<()> {
+        let target = self
+            .resolve_write_target_checked(tree_id_str)
+            .await
+            .map_err(|e| anyhow::anyhow!("set_block_advice_suppressed: {e}"))?;
+        let (write_doc, tree_id) = self.target_doc(&target);
+
+        let serialized = serde_json::to_string(advice_suppressed)?;
+
+        write_doc.with_write(|doc| {
+            let tree = doc.get_tree(TREE_NAME);
+            let meta = tree.get_meta(tree_id)?;
+            if advice_suppressed.is_empty() {
+                meta.delete("advice_suppressed")?;
+            } else {
+                meta.insert(
+                    "advice_suppressed",
+                    loro::LoroValue::from(serialized.as_str()),
+                )?;
+            }
+            doc.commit();
+            Ok(())
+        })
+    }
+
     /// Set the `source_language` meta field on a source block's Loro node.
     /// Needed by the org re-ingest update path: an `index.org` swap can change
     /// a `#+BEGIN_SRC` block's language (e.g. `holon_prql` → `holon_gql`);
@@ -2279,7 +2769,8 @@ impl LoroBackend {
     }
 
     /// Rebuild the stable ID cache from all alive nodes in the doc.
-    /// Call after `doc.import(delta)` to ensure newly imported nodes are resolvable.
+    /// Call after `doc.import(delta)` to ensure newly imported nodes are
+    /// resolvable.
     pub async fn warm_stable_id_cache(&self) {
         let id_cache = self.id_cache.clone();
         let _ = self.collab_doc.with_read(|doc| {
@@ -2305,7 +2796,8 @@ impl LoroBackend {
 
     // -- Diff-based CDC after remote sync --
 
-    /// Snapshot all alive blocks keyed by stable ID. Call before `doc.import(delta)`.
+    /// Snapshot all alive blocks keyed by stable ID. Call before
+    /// `doc.import(delta)`.
     pub async fn snapshot_blocks(&self) -> HashMap<String, SnapshotBlock> {
         self.collab_doc
             .with_read(|doc| Ok(snapshot_blocks_from_doc(doc)))
@@ -2344,7 +2836,7 @@ impl LoroBackend {
                 Ok(siblings
                     .iter()
                     .position(|t| *t == tree_id)
-                    .map(|i| keys[i].clone()))
+                    .and_then(|i| keys[i].clone()))
             })
             .map_err(|e| ApiError::InternalError {
                 message: format!("block_sort_key({id}): {e}"),
@@ -2355,7 +2847,8 @@ impl LoroBackend {
     /// for all Created, Updated, and Deleted blocks, and return the changes.
     /// Also warms the stable ID cache.
     ///
-    /// Call after `doc.import(delta)` with the snapshot from `snapshot_blocks()`.
+    /// Call after `doc.import(delta)` with the snapshot from
+    /// `snapshot_blocks()`.
     pub async fn diff_and_emit_after_import(
         &self,
         before: HashMap<String, SnapshotBlock>,
@@ -2451,15 +2944,16 @@ impl LoroBackend {
     }
 
     /// Resolve a block ID string to a TreeID.
-    /// Accepts both `block:{peer}:{counter}` (TreeID format) and `block:{uuid}` (stable ID).
-    /// Uses cache for stable ID lookups.
+    /// Accepts both `block:{peer}:{counter}` (TreeID format) and `block:{uuid}`
+    /// (stable ID). Uses cache for stable ID lookups.
     pub async fn resolve_to_tree_id(&self, id_str: &str) -> Option<loro::TreeID> {
         // Fast path: try parsing as TreeID directly
         if let Some(tid) = str_to_tree_id(id_str) {
             return Some(tid);
         }
         // Slow path: resolve via stable ID
-        // ALLOW(entity_uri_from_raw): id/parent_id &str backend API param (accepts both id formats)
+        // ALLOW(entity_uri_from_raw): id/parent_id &str backend API param (accepts both
+        // id formats)
         let uri = EntityUri::from_raw(id_str);
         if uri.is_block() || uri.is_sentinel() {
             return self.find_tree_id_by_stable_id(uri.id()).await;
@@ -2467,7 +2961,8 @@ impl LoroBackend {
         None
     }
 
-    /// Resolve a block ID string to TreeID, returning ApiError::BlockNotFound on failure.
+    /// Resolve a block ID string to TreeID, returning ApiError::BlockNotFound
+    /// on failure.
     async fn require_tree_id(&self, id: &str) -> Result<loro::TreeID, ApiError> {
         self.resolve_to_tree_id(id)
             .await
@@ -2508,8 +3003,9 @@ impl LoroBackend {
     }
 
     /// Create a root-level placeholder node without emitting events.
-    /// Used by reverse sync to represent document blocks that aren't in the EventBus.
-    /// The `stable_id` becomes the node's STABLE_ID and is returned as a `block:` URI.
+    /// Used by reverse sync to represent document blocks that aren't in the
+    /// EventBus. The `stable_id` becomes the node's STABLE_ID and is
+    /// returned as a `block:` URI.
     pub async fn create_placeholder_root(&self, stable_id: &str) -> anyhow::Result<String> {
         let sid = stable_id.to_string();
         let id_cache = self.id_cache.clone();
@@ -2815,7 +3311,8 @@ impl CoreOperations for LoroBackend {
             .with_read(|doc| {
                 let tree = doc.get_tree(TREE_NAME);
 
-                // ALLOW(entity_uri_from_raw): id/parent_id &str backend API param (accepts both id formats)
+                // ALLOW(entity_uri_from_raw): id/parent_id &str backend API param (accepts both
+                // id formats)
                 let parent_uri = EntityUri::from_raw(parent_id);
                 // Use the shared `resolve_parent_tree_id` (TreeID → id_cache → tree-walk,
                 // populating the cache on a hit) rather than a cache-only lookup: a backend
@@ -2864,6 +3361,7 @@ impl CoreOperations for LoroBackend {
             id,
             &HashMap::new(),
             &Tags::default(),
+            &[],
             &[],
         )
         .await
@@ -2938,7 +3436,8 @@ impl CoreOperations for LoroBackend {
             })?;
 
         if did_delete {
-            // ALLOW(entity_uri_from_raw): id/parent_id &str backend API param (accepts both id formats)
+            // ALLOW(entity_uri_from_raw): id/parent_id &str backend API param (accepts both
+            // id formats)
             let uri = EntityUri::from_raw(id);
             if uri.is_block() {
                 self.uncache_stable_id(uri.id());
@@ -2969,8 +3468,8 @@ impl CoreOperations for LoroBackend {
         if self.target_is_mount(&source_target)? {
             return Err(ApiError::InvalidOperation {
                 message: format!(
-                    "block {id} is a mount node; moving a mount is an unshare concern, \
-                     not a block move"
+                    "block {id} is a mount node; moving a mount is an unshare concern, not a \
+                     block move"
                 ),
             });
         }
@@ -2978,8 +3477,8 @@ impl CoreOperations for LoroBackend {
         if source_target.doc_key() != parent_target.doc_key() {
             return Err(ApiError::InvalidOperation {
                 message: format!(
-                    "cross-boundary move of a shared subtree is not supported yet: \
-                     block {id} lives in doc {:?} but new parent {new_parent} lives in doc {:?}",
+                    "cross-boundary move of a shared subtree is not supported yet: block {id} \
+                     lives in doc {:?} but new parent {new_parent} lives in doc {:?}",
                     source_target.doc_key(),
                     parent_target.doc_key()
                 ),
@@ -3098,8 +3597,8 @@ impl CoreOperations for LoroBackend {
                 Some(prev) => {
                     return Err(ApiError::InvalidOperation {
                         message: format!(
-                            "create_blocks: batch straddles two docs ({:?} vs {:?}); \
-                             cross-doc batch creation into a shared subtree is not supported",
+                            "create_blocks: batch straddles two docs ({:?} vs {:?}); cross-doc \
+                             batch creation into a shared subtree is not supported",
                             prev.doc_key(),
                             target.doc_key()
                         ),
@@ -3123,12 +3622,20 @@ impl CoreOperations for LoroBackend {
                 let mut id_cache_entries: Vec<(String, loro::TreeID)> = Vec::new();
 
                 for new_block in blocks {
-                    let parent_tree_id =
-                        resolve_parent_tree_id(&tree, &id_cache, &new_block.parent_id)?;
                     let stable_id = match &new_block.id {
                         Some(uri) => uri.id().to_string(),
                         None => uuid::Uuid::new_v4().to_string(),
                     };
+                    let child_uri = new_block
+                        .id
+                        .clone()
+                        .unwrap_or_else(|| EntityUri::block(&stable_id));
+                    let parent_tree_id = resolve_parent_tree_id_for_create(
+                        &tree,
+                        &id_cache,
+                        &new_block.parent_id,
+                        &child_uri,
+                    )?;
                     let node = tree.create(parent_tree_id)?;
                     let meta = tree.get_meta(node)?;
                     meta.insert(STABLE_ID, loro::LoroValue::from(stable_id.as_str()))?;
@@ -3217,7 +3724,8 @@ impl CoreOperations for LoroBackend {
             })?;
 
         for id in &unique_ids {
-            // ALLOW(entity_uri_from_raw): id/parent_id &str backend API param (accepts both id formats)
+            // ALLOW(entity_uri_from_raw): id/parent_id &str backend API param (accepts both
+            // id formats)
             let uri = EntityUri::from_raw(id);
             if uri.is_block() {
                 self.uncache_stable_id(uri.id());
@@ -3261,8 +3769,10 @@ impl P2POperations for LoroBackend {
 
 #[cfg(test)]
 mod h3_property_convergence_tests {
+    use loro::ExportMode;
+    use loro::LoroDoc;
+
     use super::*;
-    use loro::{ExportMode, LoroDoc};
 
     /// Bidirectional delta exchange — the deterministic equivalent of two peers
     /// reaching the same merged state.
@@ -3297,8 +3807,8 @@ mod h3_property_convergence_tests {
     }
 
     /// H3 core: two peers concurrently set *different* properties. Per-property
-    /// LoroMap keys merge so both survive. The pre-H3 single-JSON-blob would have
-    /// dropped one peer's whole change to blob-level LWW.
+    /// LoroMap keys merge so both survive. The pre-H3 single-JSON-blob would
+    /// have dropped one peer's whole change to blob-level LWW.
     #[test]
     fn concurrent_distinct_properties_both_survive() {
         let base = LoroDoc::new();
@@ -3328,8 +3838,8 @@ mod h3_property_convergence_tests {
     }
 
     /// A pre-H3 block carries the legacy single-blob string. It reads back
-    /// correctly, and the first write migrates it to the nested map and drops the
-    /// legacy key (self-healing — no lingering dual representation).
+    /// correctly, and the first write migrates it to the nested map and drops
+    /// the legacy key (self-healing — no lingering dual representation).
     #[test]
     fn legacy_blob_is_read_then_migrated_on_write() {
         let doc = LoroDoc::new();
@@ -3364,8 +3874,8 @@ mod h3_property_convergence_tests {
         assert_eq!(props.get("PRIORITY"), Some(&s("B")));
     }
 
-    /// `replace_properties_in_meta` is the EXACT-set writer: keys absent from the
-    /// new set are deleted, down to the empty set.
+    /// `replace_properties_in_meta` is the EXACT-set writer: keys absent from
+    /// the new set are deleted, down to the empty set.
     #[test]
     fn replace_deletes_absent_keys() {
         let doc = LoroDoc::new();
@@ -3386,6 +3896,165 @@ mod h3_property_convergence_tests {
         assert!(
             read_properties_from_meta(&meta).is_empty(),
             "empty set clears all"
+        );
+    }
+}
+
+#[cfg(test)]
+mod diff_checkout_race_tests {
+    //! RCA lock for the flaky keystone `SplitBlock … update_block_position:
+    //! Block not found`. `LoroDoc::diff(a,b)` is NOT a pure read: it checks out
+    //! the shared live doc to `a`, then `b`, then restores `old_frontiers`
+    //! (loro-internal 1.12.0 `loro.rs`). A concurrent reader of the SAME
+    //! `Arc<LoroDoc>` can therefore observe the doc at `a`, missing a node
+    //! created after `a`. The OLD incremental projection called `doc.diff` on
+    //! the global doc from a spawned worker while split/create ops read the
+    //! same doc → the just-created node was transiently absent → `Block not
+    //! found`.
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
+
+    use super::*;
+    use crate::LoroDocument;
+
+    async fn make_backend() -> (Arc<LoroDocument>, Arc<LoroBackend>) {
+        let doc = Arc::new(LoroDocument::new("diff-race".to_string()).unwrap());
+        let backend = Arc::new(LoroBackend::from_document(doc.clone()));
+        (doc, backend)
+    }
+
+    async fn seed_parent_and_child(backend: &LoroBackend) {
+        let props = HashMap::new();
+        let tags = Tags::default();
+        backend
+            .create_block_with_properties(
+                EntityUri::no_parent(),
+                BlockContent::text("parent"),
+                Some(EntityUri::block("parent")),
+                &props,
+                &tags,
+                &[],
+                &[],
+            )
+            .await
+            .unwrap();
+    }
+
+    /// MECHANISM PROOF (diagnostic, `#[ignore]`d in CI because it asserts a
+    /// race *occurs* and is therefore timing-dependent): hammering
+    /// `doc.diff` across an interval whose `from` predates the child checks
+    /// the shared live doc back to before the child on every iteration; a
+    /// concurrent resolve then intermittently fails with `Block not found`.
+    /// Run manually with `--ignored` to observe the keystone flake
+    /// mechanism deterministically.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "diagnostic: asserts a timing race occurs; run with --ignored"]
+    async fn diff_checkout_races_concurrent_resolve() {
+        let (doc, backend) = make_backend().await;
+        seed_parent_and_child(&backend).await;
+        let f_before_child = doc.doc().oplog_frontiers();
+        let props = HashMap::new();
+        let tags = Tags::default();
+        backend
+            .create_block_with_properties(
+                EntityUri::block("parent"),
+                BlockContent::text("child"),
+                Some(EntityUri::block("child")),
+                &props,
+                &tags,
+                &[],
+                &[],
+            )
+            .await
+            .unwrap();
+        let f_after_child = doc.doc().oplog_frontiers();
+
+        let raw = doc.doc();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop2 = stop.clone();
+        let hammer = std::thread::spawn(move || {
+            while !stop2.load(Ordering::Relaxed) {
+                let _ = raw.diff(&f_before_child, &f_after_child);
+            }
+        });
+
+        let mut spurious = 0usize;
+        for _ in 0..3000 {
+            if backend
+                .update_block_position("block:child", "block:parent", None)
+                .await
+                .is_err()
+            {
+                spurious += 1;
+            }
+            tokio::task::yield_now().await;
+        }
+        stop.store(true, Ordering::Relaxed);
+        hammer.join().unwrap();
+
+        assert!(
+            spurious > 0,
+            "expected doc.diff checkout to race the concurrent resolve at least once"
+        );
+    }
+
+    /// FIX-APPROACH GATE (stable): the event-driven projection reads the
+    /// CURRENT tree state (`snapshot_blocks_from_doc_settled` / per-node
+    /// reads) instead of `doc.diff`. A current-state read takes no
+    /// checkout, so hammering it concurrently with a resolve must NEVER
+    /// produce a spurious `Block not found`. Green on this proves the fix
+    /// approach eliminates the race; it would be RED if the projection
+    /// still checked out. Stable (asserts absence of a race, which holds
+    /// deterministically for a checkout-free reader).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn current_state_read_never_races_concurrent_resolve() {
+        let (doc, backend) = make_backend().await;
+        seed_parent_and_child(&backend).await;
+        let props = HashMap::new();
+        let tags = Tags::default();
+        backend
+            .create_block_with_properties(
+                EntityUri::block("parent"),
+                BlockContent::text("child"),
+                Some(EntityUri::block("child")),
+                &props,
+                &tags,
+                &[],
+                &[],
+            )
+            .await
+            .unwrap();
+
+        let raw = doc.doc();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop2 = stop.clone();
+        let hammer = std::thread::spawn(move || {
+            while !stop2.load(Ordering::Relaxed) {
+                // The projection's read shape under the fix: snapshot current
+                // state. No checkout, so no interval that hides the child.
+                let _ = snapshot_blocks_from_doc_settled(&raw);
+            }
+        });
+
+        let mut spurious = 0usize;
+        for _ in 0..3000 {
+            if backend
+                .update_block_position("block:child", "block:parent", None)
+                .await
+                .is_err()
+            {
+                spurious += 1;
+            }
+            tokio::task::yield_now().await;
+        }
+        stop.store(true, Ordering::Relaxed);
+        hammer.join().unwrap();
+
+        assert_eq!(
+            spurious, 0,
+            "current-state read must not race a concurrent resolve: {spurious}/3000 spurious \
+             Block-not-found — the projection read is checking out the shared doc"
         );
     }
 }

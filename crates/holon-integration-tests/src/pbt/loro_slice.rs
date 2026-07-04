@@ -7,18 +7,19 @@
 //!
 //! Beyond the block-tree caps it shares with the memory slice, the
 //! [`LoroBackendComponent`] also provides [`SutLoroLog`], unlocking the
-//! Loro-specific invariants (`inv-loro-no-errors`, `inv-loro-children-match-ref`)
-//! that cross-check the CRDT's fractional-index sibling order against the
-//! reference.
+//! Loro-specific invariants (`inv-loro-no-errors`,
+//! `inv-loro-children-match-ref`) that cross-check the CRDT's fractional-index
+//! sibling order against the reference.
 //!
 //! [`SutLoroLog`]: holon_pbt_core::capabilities::SutLoroLog
-//! [`LoroBackendComponent`]: components::LoroBackendComponent
+//! [`LoroBackendComponent`]: holon_loro_testing::LoroBackendComponent
 
 pub mod builders;
-pub mod components;
 
 #[cfg(test)]
 mod integration_tests;
 
 pub use builders::loro_wide;
-pub use components::LoroBackendComponent;
+// `LoroBackendComponent` co-located into the `holon-loro-testing` companion
+// crate (Phase 1); re-exported so the historical slice path stays valid.
+pub use holon_loro_testing::LoroBackendComponent;

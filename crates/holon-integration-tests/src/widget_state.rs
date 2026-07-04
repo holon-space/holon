@@ -1,15 +1,17 @@
 //! Widget state tracking for Cucumber integration tests
 //!
-//! Provides a model to track UI state by applying CDC events to initial data rows.
-//! Enables text-based assertions for realistic end-to-end testing.
+//! Provides a model to track UI state by applying CDC events to initial data
+//! rows. Enables text-based assertions for realistic end-to-end testing.
 
-use holon::api::{ChangeData, RowChange};
+use holon::api::ChangeData;
+use holon::api::RowChange;
 use indexmap::IndexMap;
 
 /// Apply a CDC event to a Vec-based row collection.
 ///
 /// This is the shared implementation used by both PBT tests (directly) and
-/// Cucumber tests (through WidgetStateModel). It handles all ChangeData variants:
+/// Cucumber tests (through WidgetStateModel). It handles all ChangeData
+/// variants:
 /// - Created: appends the new row
 /// - Updated: replaces all fields in the matching row
 /// - FieldsChanged: updates specific fields in the matching row
@@ -63,7 +65,8 @@ pub fn apply_cdc_event_to_vec(rows: &mut Vec<holon_api::StorageEntity>, event: &
 /// Widget locator for targeting specific widgets in assertions.
 ///
 /// Designed for extensibility - "column 1" is just one locator type.
-/// Future expansion could include path-based selectors like "main-view > list > item 3".
+/// Future expansion could include path-based selectors like "main-view > list >
+/// item 3".
 #[derive(Debug, Clone)]
 pub enum WidgetLocator {
     /// Match by column index (1-based): "column 1", "column 2"
@@ -181,16 +184,6 @@ impl WidgetStateModel {
         self.rows.len()
     }
 
-    // TODO: render spec was removed; column/view filtering is no longer available
-    // ALLOW(unused_param): locator argument kept so WidgetLocator dispatch stays shaped for the render-spec return
-    fn extract_column_text(&self, _column: usize) -> String {
-        self.rows_to_text(self.rows.values().collect())
-    }
-
-    // ALLOW(unused_param): locator argument kept so WidgetLocator dispatch stays shaped for the render-spec return
-    fn extract_view_text(&self, _view_id: &str) -> String {
-        self.rows_to_text(self.rows.values().collect())
-    }
     fn rows_to_text(&self, rows: Vec<&holon_api::StorageEntity>) -> String {
         rows.iter()
             .flat_map(|row| {
@@ -217,7 +210,6 @@ impl std::fmt::Debug for WidgetStateModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use holon_api::Value;
 
     fn make_row(id: &str, content: &str) -> holon_api::StorageEntity {
         use holon_api::Value;

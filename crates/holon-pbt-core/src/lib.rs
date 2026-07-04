@@ -3,7 +3,8 @@
 //! Pattern: Strategy
 //! @c4 uses holon-api "shared value & operation types" "Rust"
 //!
-//! Cross-PBT transition traits shared between `holon-layout-testing` and `holon-integration-tests`.
+//! Cross-PBT transition traits shared between `holon-layout-testing` and
+//! `holon-integration-tests`.
 //!
 //! Defines the two PBT transition traits — `TransitionFactory<Ref>` and
 //! `TransitionImpl<Ref, Sut>` — generic over reference-state and SUT,
@@ -28,33 +29,64 @@
 //! implementing crate).
 
 // Lets `#[holon_macros::capmap_adapter]`-generated impls use the absolute path
-// `::holon_pbt_core::composition::CapMap` even when expanded *inside* this crate —
-// so the same macro works for cap traits hosted in domain crates (the cap home-rule).
+// `::holon_pbt_core::composition::CapMap` even when expanded *inside* this
+// crate — so the same macro works for cap traits hosted in domain crates (the
+// cap home-rule).
 extern crate self as holon_pbt_core;
 
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
 pub mod bisect;
+pub mod budget;
 pub mod caching_proxy;
 pub mod capabilities;
 pub mod component_set;
 pub mod composition;
+pub mod contribution;
 pub mod fixture;
 pub mod interactions;
 pub mod invariant;
+pub mod retry;
+pub mod sibling_order;
+pub mod types;
+pub mod validation;
 pub mod wiring;
 
-pub use bisect::{bisect, bisect_downward, bisect_upward, Localization};
-pub use caching_proxy::{cached, CachingProxy};
-pub use component_set::{Component, ComponentSet, ComponentSetError, Projection};
-pub use invariant::{Invariant, InvariantId, InvariantResult, RunMode};
-pub use wiring::{
-    any_valid_wiring, wiring_axes, Actor, RequiredWiring, StorageAdapter, SyncAdapter, Wiring,
-    WiringError,
-};
-
-pub use interactions::{DeliverBlockContent, SwitchViewMode, ToggleCollapse, ToggleDrawer};
+pub use bisect::Localization;
+pub use bisect::bisect;
+pub use bisect::bisect_downward;
+pub use bisect::bisect_upward;
+pub use caching_proxy::CachingProxy;
+pub use caching_proxy::cached;
+pub use component_set::Component;
+pub use component_set::ComponentSet;
+pub use component_set::ComponentSetError;
+pub use component_set::Projection;
+pub use contribution::CapInstaller;
+pub use contribution::CrateId;
+pub use contribution::GeneratorFactory;
+pub use contribution::PbtContribution;
+pub use contribution::PbtFootprint;
+pub use contribution::fold_catalog;
+pub use interactions::DeliverBlockContent;
+pub use interactions::SwitchViewMode;
+pub use interactions::ToggleCollapse;
+pub use interactions::ToggleDrawer;
+pub use invariant::Invariant;
+pub use invariant::InvariantId;
+pub use invariant::InvariantResult;
+pub use invariant::RunMode;
+pub use sibling_order::compare_sibling_order;
+pub use wiring::Actor;
+pub use wiring::RequiredWiring;
+pub use wiring::StorageAdapter;
+pub use wiring::SyncAdapter;
+pub use wiring::Wiring;
+pub use wiring::WiringError;
+pub use wiring::any_valid_wiring;
+pub use wiring::wiring_axes;
+pub use wiring::wiring_from_exact_spec;
 
 /// Static contract for *creating* a transition. Each variant struct
 /// implements this once per PBT, parameterised by that PBT's
@@ -78,16 +110,19 @@ pub trait TransitionFactory<Ref>: Sized {
         crate::wiring::RequiredWiring::Any
     }
 
-    /// Capability requirement: the cap-analog of [`required_wiring`](Self::required_wiring).
-    /// Where `required_wiring` gates the alphabet on a manifest's *subsystem wiring*, this
-    /// gates it on the *providers a composed `CapMap` actually supplies* — a transition is
-    /// excluded from a composed SUT's alphabet unless every cap here is present in the
-    /// map's [`cap_set`](crate::composition::CapMap::cap_set). Each entry is the capability
-    /// this transition's [`TransitionImpl`] impl is bound on (e.g. `SplitBlock` →
-    /// `[CapId::of::<dyn SutBlockTreeWrite>()]`), so a partial config (e.g. Loro-only) drops
-    /// the transitions whose `apply_to_sut` caps it lacks rather than panicking on an absent
-    /// `expect`. **Necessary, not sufficient** — `weighted_generator` still gates
-    /// dynamically. Default: no requirement (always cap-feasible).
+    /// Capability requirement: the cap-analog of
+    /// [`required_wiring`](Self::required_wiring). Where `required_wiring`
+    /// gates the alphabet on a manifest's *subsystem wiring*, this gates it
+    /// on the *providers a composed `CapMap` actually supplies* — a transition
+    /// is excluded from a composed SUT's alphabet unless every cap here is
+    /// present in the
+    /// map's [`cap_set`](crate::composition::CapMap::cap_set). Each entry is
+    /// the capability this transition's [`TransitionImpl`] impl is bound on
+    /// (e.g. `SplitBlock` → `[CapId::of::<dyn SutBlockTreeWrite>()]`), so a
+    /// partial config (e.g. Loro-only) drops the transitions whose
+    /// `apply_to_sut` caps it lacks rather than panicking on an absent
+    /// `expect`. **Necessary, not sufficient** — `weighted_generator` still
+    /// gates dynamically. Default: no requirement (always cap-feasible).
     fn required_caps() -> Vec<crate::composition::CapId> {
         Vec::new()
     }
@@ -102,9 +137,9 @@ pub trait TransitionFactory<Ref>: Sized {
 /// Returns:
 /// - `Good(Some((weight, strategy)))` — the variant applies; push it.
 /// - `Good(None)` — applies but its effective weight is 0; skip it.
-/// - `Fail(reasons)` — the variant rejected; the caller decides whether
-///   to record the reasons (the wide PBT does via `record_rejection`,
-///   the layout/pure slices discard them).
+/// - `Fail(reasons)` — the variant rejected; the caller decides whether to
+///   record the reasons (the wide PBT does via `record_rejection`, the
+///   layout/pure slices discard them).
 ///
 /// Pass `weight_multiplier = 1` when no per-variant tuning applies.
 /// Returning `Validated` (rather than taking a rejection callback) keeps

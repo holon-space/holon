@@ -12,16 +12,24 @@
 //! consults the real fs and falls back to the input path — degrades to the
 //! same lexical identity everywhere.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Component, Path, PathBuf};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::path::Component;
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::Duration;
+use std::time::UNIX_EPOCH;
 
 use async_trait::async_trait;
 use tokio::sync::broadcast;
 
-use crate::change_source::{FileChange, FileChangeKind, FileChangeSource};
-use crate::fs_port::{FileMeta, FileSystem, ScannedEntries};
+use crate::change_source::FileChange;
+use crate::change_source::FileChangeKind;
+use crate::change_source::FileChangeSource;
+use crate::fs_port::FileMeta;
+use crate::fs_port::FileSystem;
+use crate::fs_port::ScannedEntries;
 
 struct FileEntry {
     bytes: Vec<u8>,
@@ -84,8 +92,8 @@ impl InMemoryFileSystem {
     }
 
     /// Remove a file, emitting a `Remove` change. Errors if absent.
-    /// (Not on the `FileSystem` trait — no production code path removes
-    /// org files; tests simulating external deletion use this directly.)
+    /// Synchronous core the trait's `remove` delegates to; pre-existing
+    /// callers simulating external deletion use it directly.
     pub fn remove_file(&self, path: &Path) -> std::io::Result<()> {
         let path = normalize(path);
         let seq = {
@@ -184,6 +192,13 @@ impl FileSystem for InMemoryFileSystem {
             seq: tick,
         });
         Ok(())
+    }
+
+    async fn remove(&self, path: &Path) -> std::io::Result<()> {
+        // Emits `FileChangeKind::Remove` on the same broadcast channel as
+        // `write` — the in-memory analog of the `notify` deletion event, so
+        // the org watcher's `on_file_changed` runs for the removed path.
+        self.remove_file(path)
     }
 
     async fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {

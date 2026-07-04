@@ -1,45 +1,50 @@
 //! The DEGRADED ("shows source") SUT component: a real **no-Turso** block-query
 //! frontend. It boots [`holon_app::from_block_query_source`] (via
-//! [`holon_app::register_block_query_frontend`]) over a Loro [`BlockQuerySource`]
-//! seeded with a query-source child block, so the production
-//! `loro_ui_watcher::derive_render_expr` takes its `source_editor` arm — the
-//! capability-driven degradation of ADR 0004 Phase 9 (no query engine ⇒ offer
-//! only the bare `source` view mode).
+//! [`holon_app::register_block_query_frontend`]) over a Loro
+//! [`BlockQuerySource`] seeded with a query-source child block, so the
+//! production `loro_ui_watcher::derive_render_expr` takes its `source_editor`
+//! arm — the capability-driven degradation of ADR 0004 Phase 9 (no query engine
+//! ⇒ offer only the bare `source` view mode).
 //!
 //! It provides [`SutRenderer`] (the root render kind is `source_editor`) but
-//! deliberately does NOT provide `SutQueryResults` — there is no query engine in
-//! this wiring. That absence is the negative-selection (`sut_absent`)
+//! deliberately does NOT provide `SutQueryResults` — there is no query engine
+//! in this wiring. That absence is the negative-selection (`sut_absent`)
 //! discriminator that selects the degraded
 //! `inv-viewmodel-shows-source-when-no-query` twin and deselects the full-mode
-//! `inv-viewmodel-decompiled-rows-match-query` twin. The component WRAPS the real
-//! production render path (no re-implementation): the same `LoroUiWatcher` →
-//! `ReactiveEngine::ensure_watching` → `ReactiveRenderedRows::snapshot` surface
-//! the full-mode [`super::components::HeadlessFrontendComponent`] reads, minus the
-//! Turso CDC query engine.
+//! `inv-viewmodel-decompiled-rows-match-query` twin. The component WRAPS the
+//! real production render path (no re-implementation): the same `LoroUiWatcher`
+//! → `ReactiveEngine::ensure_watching` → `ReactiveRenderedRows::snapshot`
+//! surface the full-mode [`super::components::HeadlessFrontendComponent`]
+//! reads, minus the Turso CDC query engine.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use holon::di::build_no_turso_container;
 use holon::sync::loro_block_query_source::register_loro_block_query_source;
-use holon_api::repository::{CoreOperations, Lifecycle};
-use holon_api::{BlockContent, EntityUri};
+use holon_api::BlockContent;
+use holon_api::EntityUri;
+use holon_api::repository::CoreOperations;
+use holon_api::repository::Lifecycle;
 use holon_app::register_block_query_frontend;
 use holon_frontend::FrontendSession;
-use holon_frontend::reactive::{
-    BuilderServices, BuilderServicesSlot, ReactiveEngine, ReactiveRenderedRows,
-};
+use holon_frontend::reactive::BuilderServices;
+use holon_frontend::reactive::BuilderServicesSlot;
+use holon_frontend::reactive::ReactiveEngine;
+use holon_frontend::reactive::ReactiveRenderedRows;
 use holon_loro::LoroBackend;
-use holon_pbt_core::capabilities::{SutRenderer, WidgetSnapshot};
-use holon_pbt_core::composition::{CapMap, CapProvider};
+use holon_pbt_core::capabilities::SutRenderer;
+use holon_pbt_core::capabilities::WidgetSnapshot;
+use holon_pbt_core::composition::CapMap;
+use holon_pbt_core::composition::CapProvider;
 
-use crate::pbt::sut_capabilities::view_model_to_snapshot;
+use crate::pbt::vm_snapshot::view_model_to_snapshot;
 
-/// A composition component wrapping a real no-Turso block-query frontend. Owns the
-/// DI injector, `FrontendSession`, `ReactiveEngine`, and the seeded `LoroBackend`
-/// so the render watch and its background tasks stay alive for the component's
-/// lifetime. `#[doc]` transient — scaffolding for the degraded twin, folded into
-/// the ONE PBT and deleted as the composition converges.
+/// A composition component wrapping a real no-Turso block-query frontend. Owns
+/// the DI injector, `FrontendSession`, `ReactiveEngine`, and the seeded
+/// `LoroBackend` so the render watch and its background tasks stay alive for
+/// the component's lifetime. `#[doc]` transient — scaffolding for the degraded
+/// twin, folded into the ONE PBT and deleted as the composition converges.
 #[doc(hidden)]
 pub struct BlockQueryFrontendComponent {
     reactive: Arc<ReactiveEngine>,
@@ -52,11 +57,12 @@ pub struct BlockQueryFrontendComponent {
 }
 
 impl BlockQueryFrontendComponent {
-    /// Boot a no-Turso block-query frontend over a Loro tree seeded with a single
-    /// query page (a parent block plus one query-source child). The child's
-    /// `source_language` is a query language, so `derive_render_expr` resolves the
-    /// degraded `source_editor` render for the parent — VERIFIED by the minimal
-    /// positive test (else the degraded twin would Skip forever with no teeth).
+    /// Boot a no-Turso block-query frontend over a Loro tree seeded with a
+    /// single query page (a parent block plus one query-source child). The
+    /// child's `source_language` is a query language, so
+    /// `derive_render_expr` resolves the degraded `source_editor` render
+    /// for the parent — VERIFIED by the minimal positive test (else the
+    /// degraded twin would Skip forever with no teeth).
     pub async fn new() -> Self {
         let backend = LoroBackend::create_new("block-query-degraded".to_string())
             .await
@@ -111,8 +117,8 @@ impl BlockQueryFrontendComponent {
         }
     }
 
-    /// Resolve a ready (non-loading) reactive watch for `uri`, polling the engine
-    /// until its first results load. Mirrors
+    /// Resolve a ready (non-loading) reactive watch for `uri`, polling the
+    /// engine until its first results load. Mirrors
     /// [`super::components::HeadlessFrontendComponent::resolve_watch`].
     async fn resolve_watch(&self, uri: &EntityUri) -> Option<Arc<ReactiveRenderedRows>> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(3);

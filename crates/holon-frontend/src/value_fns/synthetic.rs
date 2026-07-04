@@ -7,10 +7,12 @@
 use std::pin::Pin;
 use std::sync::Arc;
 
-use futures_signals::signal_vec::{MutableVec, SignalVec, SignalVecExt};
-
+use futures_signals::signal_vec::MutableVec;
+use futures_signals::signal_vec::SignalVec;
+use futures_signals::signal_vec::SignalVecExt;
+use holon_api::ReactiveRowProvider;
+use holon_api::ptr_identity;
 use holon_api::widget_spec::DataRow;
-use holon_api::{ptr_identity, ReactiveRowProvider};
 
 /// A `ReactiveRowProvider` backed by a `MutableVec`. Callers push rows
 /// at construction time (or later via `push`) and the provider exposes
@@ -42,11 +44,11 @@ impl ReactiveRowProvider for SyntheticRows {
 
     fn keyed_rows_signal_vec(
         &self,
-    ) -> Pin<Box<dyn SignalVec<Item = (holon_api::EntityUri, Arc<DataRow>)> + Send>> {
+    ) -> Pin<Box<dyn SignalVec<Item = (holon_api::RowKey, Arc<DataRow>)> + Send>> {
         Box::pin(self.rows.signal_vec_cloned().map(|row| {
             let id = holon_api::data_row_entity_uri(&row)
                 .unwrap_or_else(|| holon_api::EntityUri::block(""));
-            (id, row)
+            ((id, holon_api::Occurrence::Canonical), row)
         }))
     }
 

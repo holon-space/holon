@@ -1,20 +1,21 @@
 //! Transition: create a stale/corrupted .loro file before app startup.
 //!
-//! Mirrors the legacy logic split across `state_machine.rs:371-392` (generator),
-//! `state_machine.rs:3105-3108` (precondition),
+//! Mirrors the legacy logic split across `state_machine.rs:371-392`
+//! (generator), `state_machine.rs:3105-3108` (precondition),
 //! `state_machine.rs:1942-1946` (ref-state apply),
 //! `sut.rs:702-714` (SUT apply), and
 //! `transition_budgets.rs:116-125` (expected SQL).
 
-use crate::pbt::validation::{Reason, check};
+use holon_pbt_core::TransitionFactory;
+use holon_pbt_core::TransitionRef;
+use holon_pbt_core::capabilities::RefDocuments;
+use holon_pbt_core::capabilities::RefLifecycle;
+use holon_pbt_core::types::LoroCorruptionType;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::check;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
-
-use crate::LoroCorruptionType;
-use crate::pbt::local_caps::SutFixtureFs;
-use crate::pbt::reference_state::ReferenceState;
-use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
@@ -28,11 +29,9 @@ pub struct CreateStaleLoro {
     pub corruption_type: LoroCorruptionType,
 }
 
-impl TransitionFactory<ReferenceState> for CreateStaleLoro {
+impl<R: RefLifecycle + RefDocuments> TransitionFactory<R> for CreateStaleLoro {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        vec![::holon_pbt_core::composition::CapId::of::<
-            dyn crate::pbt::local_caps::SutFixtureFs,
-        >()]
+        Self::declared_caps()
     }
 
     type Reason = Reason;
@@ -40,9 +39,9 @@ impl TransitionFactory<ReferenceState> for CreateStaleLoro {
         ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Loro)
     }
 
-    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let early_checks: Vec<Validated<(), Reason>> = vec![
-            check(!state.action.app_started, Reason::AppAlreadyStarted),
+            check(!state.app_started(), Reason::AppAlreadyStarted),
             check(state.enable_loro(), Reason::LoroDisabledForCorruption),
         ];
         let checks_result = early_checks.into_iter().collect::<Validated<Vec<()>, _>>();
@@ -50,7 +49,7 @@ impl TransitionFactory<ReferenceState> for CreateStaleLoro {
             return checks_result.map(|_| unreachable!());
         }
 
-        let org_filenames: Vec<String> = state.files.documents.values().cloned().collect();
+        let org_filenames: Vec<String> = state.document_names();
         if org_filenames.is_empty() {
             return Validated::fail(Reason::NoDocumentsAvailable);
         }
@@ -90,19 +89,15 @@ impl TransitionFactory<ReferenceState> for CreateStaleLoro {
     }
 }
 
-impl TransitionRef<ReferenceState> for CreateStaleLoro {
+impl<R: RefLifecycle + RefDocuments> TransitionRef<R> for CreateStaleLoro {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(!state.action.app_started, Reason::AppAlreadyStarted),
+            check(!state.app_started(), Reason::AppAlreadyStarted),
             check(state.enable_loro(), Reason::LoroDisabledForCorruption),
             check(
-                state
-                    .files
-                    .documents
-                    .values()
-                    .any(|f| f == &self.org_filename),
+                state.has_document(&self.org_filename),
                 Reason::NoDocumentsAvailable,
             ),
         ];
@@ -112,24 +107,22 @@ impl TransitionRef<ReferenceState> for CreateStaleLoro {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, _: &mut ReferenceState) {
+    fn apply_to_ref(&self, _: &mut R) {
         // CreateStaleLoro doesn't change reference state - the blocks from the
         // corresponding org file should still exist after startup. The system
-        // should detect the corrupted .loro file and recover from the .org file.
+        // should detect the corrupted .loro file and recover from the .org
+        // file.
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutFixtureFs> TransitionImpl<ReferenceState, S> for CreateStaleLoro {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.create_stale_loro(&self.org_filename, self.corruption_type)
+crate::cap_transition! {
+    CreateStaleLoro: holon_pbt_core::capabilities::SutFixtureFs,
+    where R: [ RefLifecycle + RefDocuments ],
+    |me, _state, sut| {
+        sut.create_stale_loro(&me.org_filename, me.corruption_type)
             .await;
     }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for CreateStaleLoro {
-    fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
+    sql_budget: |_me, _state| {
         ExpectedSql {
             reads: 0,
             writes: 0,

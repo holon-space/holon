@@ -1,10 +1,15 @@
-use anyhow::{Context, Result};
 use std::collections::HashMap;
 
-use super::backend_engine::BackendEngine;
+use anyhow::Context;
+use anyhow::Result;
+use holon_api::EntityUri;
 use holon_api::QueryContext;
-use holon_api::{EntityUri, QueryLanguage, RenderExpr, Value, uri_from_row};
+use holon_api::QueryLanguage;
+use holon_api::RenderExpr;
+use holon_api::Value;
+use holon_api::uri_from_row;
 
+use super::backend_engine::BackendEngine;
 use crate::storage::turso::RowChangeStream;
 
 const BLOCK_PATH_LOOKUP_SQL: &str = include_str!("../../sql/queries/block_path_lookup.sql");
@@ -14,51 +19,15 @@ const BLOCK_WITH_QUERY_SOURCE_SQL: &str =
 
 pub use holon_api::ROOT_LAYOUT_BLOCK_ID;
 
-/// Walk a `RenderExpr` and substitute `virtual_parent: Bool(true)` (the DSL
-/// sentinel) with `virtual_parent: String(<parent_id>)` so the tree builder's
-/// trailing-slot construction sees the resolved id.
-///
-/// Mirrors `holon_frontend::render_interpreter::resolve_virtual_parent` but
-/// lives in the `holon` crate so the live_block path
-/// (`collection_render_from_profile`) can use it without violating the crate
-/// dependency direction (`holon-frontend → holon → holon-api`). One level
-/// deep — the only place `virtual_parent` legitimately appears today.
-fn resolve_virtual_parent(expr: RenderExpr, parent_id: &str) -> RenderExpr {
-    use holon_api::render_types::Arg;
-    match expr {
-        RenderExpr::FunctionCall { name, args } => {
-            let mut substituted = false;
-            let args = args
-                .into_iter()
-                .map(|arg| {
-                    if arg.name.as_deref() == Some("virtual_parent")
-                        && matches!(
-                            &arg.value,
-                            RenderExpr::Literal {
-                                value: Value::Boolean(true)
-                            }
-                        )
-                    {
-                        substituted = true;
-                        Arg {
-                            name: arg.name,
-                            value: RenderExpr::Literal {
-                                value: Value::String(parent_id.to_string()),
-                            },
-                        }
-                    } else {
-                        arg
-                    }
-                })
-                .collect();
-            tracing::info!(
-                "[resolve_virtual_parent] name={name} parent_id={parent_id} substituted={substituted}"
-            );
-            RenderExpr::FunctionCall { name, args }
-        }
-        other => other,
-    }
-}
+// NOTE (bug 2A): `virtual_parent: true` on a collection render is a SENTINEL
+// meaning "parent new blocks under the query's focus root". This is a
+// query-source block path (`render_entity` → `collection_render_from_profile`),
+// so the focus root is a RUNTIME value (the `focus_roots` matview) that only
+// materialises in the query result — it is NOT the container `entity_uri`.
+// Resolving the sentinel to `entity_uri` here silently mis-parented every
+// top-level create under the panel container. We now leave the sentinel
+// unresolved; the frontend resolves it from the rendered rowset's focus-root
+// row (`holon_frontend::row_origin::resolve_creation_parent`).
 
 /// Domain layer for block-specific operations.
 ///
@@ -92,16 +61,18 @@ impl<'a> BlockDomain<'a> {
             return Ok(path.clone());
         }
 
-        // ALLOW(fallback): pre-existing comment-only — block_id used as path when block_with_path lookup races
-        // Block not in block_with_path yet - use block_id as fallback path
+        // ALLOW(fallback): pre-existing comment-only — block_id used as path when
+        // block_with_path lookup races Block not in block_with_path yet - use
+        // block_id as fallback path
         Ok(format!("/{}", block_id))
     }
 
     /// Render a block by its ID.
     ///
-    /// Given a block ID, finds its query source child, compiles and executes the query,
-    /// parses any render sibling into a RenderExpr, and returns the render expression
-    /// plus a CDC stream (whose first batch contains the initial query results).
+    /// Given a block ID, finds its query source child, compiles and executes
+    /// the query, parses any render sibling into a RenderExpr, and returns
+    /// the render expression plus a CDC stream (whose first batch contains
+    /// the initial query results).
     #[tracing::instrument(skip(self), fields(block_id = %block_id, is_root))]
     pub async fn render_entity(
         &self,
@@ -170,7 +141,8 @@ impl<'a> BlockDomain<'a> {
     ///
     /// When no explicit `#+BEGIN_SRC render` block exists, the entity profile's
     /// `collection` section provides the default + variant render expressions.
-    /// Wraps them in a `view_mode_switcher` widget so frontends can switch layouts.
+    /// Wraps them in a `view_mode_switcher` widget so frontends can switch
+    /// layouts.
     pub(crate) fn collection_render_from_profile(
         resolver: &dyn crate::entity_profile::ProfileResolving,
         entity_uri: &holon_api::EntityUri,
@@ -178,14 +150,16 @@ impl<'a> BlockDomain<'a> {
         let variants = resolver.resolve_collection_variants();
 
         tracing::info!(
-            "[collection_render_from_profile] entity_uri={entity_uri}, variants_count={}, variant_names={:?}",
+            "[collection_render_from_profile] entity_uri={entity_uri}, variants_count={}, \
+             variant_names={:?}",
             variants.len(),
             variants.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
         );
 
         if variants.is_empty() {
             tracing::warn!(
-                "[collection_render_from_profile] No collection variants found, falling back to table()"
+                "[collection_render_from_profile] No collection variants found, falling back to \
+                 table()"
             );
             return RenderExpr::FunctionCall {
                 name: "table".to_string(),
@@ -204,13 +178,15 @@ impl<'a> BlockDomain<'a> {
     /// single per-block view-mode state. Otherwise (single-variant collection,
     /// or explicit render source), a 2-mode (result + source) switcher wraps
     /// the expression.
-    /// Build the `source_editor(language, content)` render expression that backs
-    /// the `source` view mode — the raw query text, rendered read-only.
+    /// Build the `source_editor(language, content)` render expression that
+    /// backs the `source` view mode — the raw query text, rendered
+    /// read-only.
     ///
-    /// This is the one view mode that needs **no query engine** (it just displays
-    /// the stored source), so it doubles as the no-Turso degradation: a query
-    /// block in a session without a query engine renders this bare, with no
-    /// switcher chrome (ADR 0004 Phase 9 — capabilities contribute view modes).
+    /// This is the one view mode that needs **no query engine** (it just
+    /// displays the stored source), so it doubles as the no-Turso
+    /// degradation: a query block in a session without a query engine
+    /// renders this bare, with no switcher chrome (ADR 0004 Phase 9 —
+    /// capabilities contribute view modes).
     pub(crate) fn source_editor_expr(
         query_source: &str,
         query_language: QueryLanguage,
@@ -279,7 +255,8 @@ impl<'a> BlockDomain<'a> {
         Self::wrap_with_outer_switcher(block_id, result_expr, mode_source_expr)
     }
 
-    // ALLOW(fallback): pre-existing comment-only — outer-wrap path when inner expr isn't a VMS
+    // ALLOW(fallback): pre-existing comment-only — outer-wrap path when inner expr
+    // isn't a VMS
     /// Fallback for when the inner expression isn't a `view_mode_switcher`:
     /// wrap with a 2-mode (result, source) switcher. The `#qsrc` URI fragment
     /// keeps the wrap's state separate from any inner per-entity state.
@@ -321,7 +298,8 @@ impl<'a> BlockDomain<'a> {
         }
     }
 
-    /// Render a leaf block (no query source child) via the `render_entity()` widget.
+    /// Render a leaf block (no query source child) via the `render_entity()`
+    /// widget.
     ///
     /// Uses `query_and_watch` — the same live CDC path as non-leaf blocks — so
     /// property-only changes (e.g. `task_state` cycling) are picked up by the
@@ -348,7 +326,8 @@ impl<'a> BlockDomain<'a> {
         Ok((render_expr, change_stream))
     }
 
-    /// Load a block by ID and find its query source child + optional render sibling.
+    /// Load a block by ID and find its query source child + optional render
+    /// sibling.
     #[tracing::instrument(skip(self))]
     async fn load_block_with_query_source(
         &self,
@@ -382,10 +361,10 @@ impl<'a> BlockDomain<'a> {
         }
     }
 
-    /// Parse a render-source block's `content` into a `RenderExpr`, falling back
-    /// to `table()` on a parse error. Shared by the Turso path (which reads the
-    /// content from a SQL row) and the Loro path (which reads it straight from
-    /// the render-source child block).
+    /// Parse a render-source block's `content` into a `RenderExpr`, falling
+    /// back to `table()` on a parse error. Shared by the Turso path (which
+    /// reads the content from a SQL row) and the Loro path (which reads it
+    /// straight from the render-source child block).
     pub(crate) fn parse_render_source_content(source: &str) -> holon_api::render_types::RenderExpr {
         match holon_api::render_dsl::parse_render_dsl(source) {
             Ok(expr) => expr,
@@ -440,9 +419,11 @@ pub(crate) fn view_mode_switcher_from_variants(
         "view_mode_switcher_from_variants requires at least one variant"
     );
 
-    // Single variant → unwrap; no switcher needed.
+    // Single variant → unwrap; no switcher needed. `virtual_parent: true` is
+    // left UNRESOLVED (bug 2A) — the frontend resolves it from the query's
+    // focus-root row, not this container `entity_uri`.
     if variants.len() == 1 {
-        return resolve_virtual_parent(variants[0].render.clone(), &entity_uri.to_string());
+        return variants[0].render.clone();
     }
 
     let default_mode = variants
@@ -490,7 +471,8 @@ pub(crate) fn view_mode_switcher_from_variants(
     for variant in variants {
         args.push(Arg {
             name: Some(format!("mode_{}", variant.name)),
-            value: resolve_virtual_parent(variant.render.clone(), &entity_uri.to_string()),
+            // `virtual_parent: true` left UNRESOLVED (bug 2A) — see note above.
+            value: variant.render.clone(),
         });
     }
 
@@ -520,10 +502,11 @@ impl<'a> BlockDomain<'a> {
 
 #[cfg(test)]
 mod view_mode_switcher_from_variants_tests {
-    use super::*;
     use holon_api::EntityUri;
     use holon_api::predicate::Predicate;
     use holon_api::render_types::RenderVariant;
+
+    use super::*;
 
     fn variant(name: &str, condition: Predicate) -> RenderVariant {
         RenderVariant {
@@ -603,8 +586,8 @@ mod view_mode_switcher_from_variants_tests {
         assert_eq!(
             arg_str(&expr, "default_mode").as_deref(),
             Some("tree_view"),
-            "VMS must pick the unconditional `Always` variant as default, \
-             not whichever conditional variant happens to be at modes[0]"
+            "VMS must pick the unconditional `Always` variant as default, not whichever \
+             conditional variant happens to be at modes[0]"
         );
         // The modes JSON keeps priority-desc order so other consumers
         // (icon row layout) see a stable shape.
@@ -616,8 +599,8 @@ mod view_mode_switcher_from_variants_tests {
             .unwrap_or("");
         assert_eq!(
             first_name, "table_view",
-            "modes JSON order should be preserved as-supplied; the fix is \
-             a separate `default_mode` arg, not a reorder"
+            "modes JSON order should be preserved as-supplied; the fix is a separate \
+             `default_mode` arg, not a reorder"
         );
     }
 
@@ -656,8 +639,8 @@ mod view_mode_switcher_from_variants_tests {
         let expr = view_mode_switcher_from_variants(&uri, &variants);
         assert!(
             arg_str(&expr, "default_mode").is_none(),
-            "no Always variant → no default_mode arg; frontend falls back \
-             to modes[0] (existing behavior, no regression for this shape)"
+            "no Always variant → no default_mode arg; frontend falls back to modes[0] (existing \
+             behavior, no regression for this shape)"
         );
     }
 }

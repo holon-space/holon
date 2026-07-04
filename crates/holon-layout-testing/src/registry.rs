@@ -5,10 +5,11 @@
 //! per scenario. No `static`, no cross-case contamination.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::Mutex;
 
-use holon_frontend::reactive_view_model::ReactiveViewModel;
 use holon_frontend::LiveBlock;
+use holon_frontend::reactive_view_model::ReactiveViewModel;
 
 /// A thunk that materialises a fresh `ReactiveViewModel` on demand.
 pub type BlockTreeThunk = Arc<dyn Fn() -> ReactiveViewModel + Send + Sync>;
@@ -102,9 +103,8 @@ impl BlockTreeRegistry {
             let mut guard = self.inner.lock().unwrap();
             let entry = guard.get_mut(block_id).unwrap_or_else(|| {
                 panic!(
-                    "BlockTreeRegistry::watch_live called for unregistered block_id \
-                     `{block_id}`; register modes with BlockTreeRegistry::register \
-                     before rendering"
+                    "BlockTreeRegistry::watch_live called for unregistered block_id `{block_id}`; \
+                     register modes with BlockTreeRegistry::register before rendering"
                 )
             });
             let (_, thunk) = &entry.modes[entry.active_mode];
@@ -116,6 +116,7 @@ impl BlockTreeRegistry {
         LiveBlock {
             tree,
             structural_changes: Box::pin(stream),
+            watch_guard: None,
         }
     }
 

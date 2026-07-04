@@ -40,13 +40,53 @@ fn archlint_all_passes() {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         panic!(
-            "archlint --all reported architecture violations.\n\
-             Exit code: {:?}\n\n\
-             === stderr ===\n{}\n\
-             === stdout ===\n{}\n",
+            "archlint --all reported architecture violations.\nExit code: {:?}\n\n=== stderr \
+             ===\n{}\n=== stdout ===\n{}\n",
             output.status.code(),
             stderr,
             stdout,
+        );
+    }
+}
+
+/// Regression guard for the hakari `traversal-excludes` on `gpui`
+/// (see `.config/hakari.toml`).
+///
+/// `gpui` is a dev-only, `test-support`-flavoured dependency of
+/// `frontends/gpui`. Before the exclude, hakari feature-unification promoted it
+/// (plus the `proptest` git fork it drags) into `workspace-hack` as a *normal*
+/// dependency, pulling the whole GPUI framework and `proptest` into the
+/// production build graphs of `holon-tui`, `holon-mcp` and the storage
+/// adapters. This asserts `proptest` is absent from those prod (`-e normal`)
+/// graphs so a future `cargo hakari generate` can't silently re-introduce it.
+#[test]
+fn no_proptest_in_prod_graph() {
+    let root = repo_root();
+    for pkg in ["holon-tui", "holon-mcp"] {
+        let output = Command::new(env!("CARGO"))
+            .args(["tree", "-p", pkg, "-e", "normal", "-i", "proptest"])
+            .current_dir(&root)
+            .output()
+            .unwrap_or_else(|e| panic!("failed to spawn `cargo tree` for {pkg}: {e}"));
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // Presence signals:
+        //  * an inverted tree rooted at `proptest v…` on stdout, or
+        //  * cargo's "specification `proptest` is ambiguous" — emitted only when >1
+        //    `proptest` source is reachable in this graph.
+        // Absence signals (both fine): empty stdout with a "nothing to print"
+        // warning, or "did not match any packages".
+        let linked = stdout.contains("proptest v");
+        let ambiguous = stderr.contains("is ambiguous");
+        assert!(
+            !linked && !ambiguous,
+            "`proptest` is back in the {pkg} production (`-e normal`) build graph.\nThis means \
+             the hakari gpui `traversal-excludes` regressed (likely a \n`cargo hakari generate` \
+             that re-added gpui to workspace-hack).\nRe-apply the exclude in \
+             `.config/hakari.toml` and regenerate.\n\n=== cargo tree -p {pkg} -e normal -i \
+             proptest ===\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}\n",
         );
     }
 }

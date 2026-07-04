@@ -8,30 +8,35 @@
 //!
 //! Per the redesigned seam, the *reads* are synchronous against a captured
 //! [`BlockSnapshot`]; the only async concern is producing that snapshot. For
-//! Loro there is no CDC to settle, so `snapshot()` just performs one DFS capture
-//! of the tree. Sibling order is the Loro tree's own child order (the fractional
-//! index the SQL projection would otherwise materialize as `sort_key`), so the
-//! capture is in canonical sibling order (ADR 0005) without any SQL `ORDER BY`.
+//! Loro there is no CDC to settle, so `snapshot()` just performs one DFS
+//! capture of the tree. Sibling order is the Loro tree's own child order (the
+//! fractional index the SQL projection would otherwise materialize as
+//! `sort_key`), so the capture is in canonical sibling order (ADR 0005) without
+//! any SQL `ORDER BY`.
 
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use fluxdi::{Injector, Provider, Shared};
+use fluxdi::Injector;
+use fluxdi::Provider;
+use fluxdi::Shared;
 use holon_api::EntityUri;
 use holon_api::block::Block;
-use holon_core::storage::block_query::Result;
-use holon_core::storage::{BlockQuerySource, BlockSnapshot};
-use tokio::sync::RwLock;
-
-use crate::api::operation_dispatcher::OperationDispatcher;
-use crate::api::{DispatchingOperationEngine, OperationEngine};
-use crate::sync::loro_block_operations::LoroBlockOperations;
-use crate::sync::loro_document_store::LoroDocumentStore;
 use holon_api::repository::CoreOperations;
 use holon_core::OperationProvider;
+use holon_core::storage::BlockQuerySource;
+use holon_core::storage::BlockSnapshot;
+use holon_core::storage::block_query::Result;
 use holon_loro::LoroBackend;
+use tokio::sync::RwLock;
+
+use crate::api::DispatchingOperationEngine;
+use crate::api::OperationEngine;
+use crate::api::operation_dispatcher::OperationDispatcher;
+use crate::sync::loro_block_operations::LoroBlockOperations;
+use crate::sync::loro_document_store::LoroDocumentStore;
 
 /// Captures blocks straight from a [`LoroBackend`] tree, with no Turso
 /// connection, into a [`BlockSnapshot`].
@@ -70,7 +75,8 @@ impl LoroBlockQuerySource {
 impl BlockQuerySource for LoroBlockQuerySource {
     async fn snapshot(&self) -> Result<BlockSnapshot> {
         let mut ordered = Vec::new();
-        // `no_parent` resolves to the Loro tree roots (see `LoroBackend::list_children`).
+        // `no_parent` resolves to the Loro tree roots (see
+        // `LoroBackend::list_children`).
         self.collect_subtree(&EntityUri::no_parent(), &mut ordered)
             .await?;
 
@@ -94,18 +100,20 @@ pub fn register_loro_block_query_source(injector: &Injector, backend: Arc<LoroBa
 }
 
 /// Register the prod Turso-free Loro read stack over `storage_dir`: opens (or
-/// creates) the persistent `LoroDocumentStore`, then registers a `LoroDocumentStore`
-/// provider plus a **synchronous** `Arc<dyn BlockQuerySource>` provider over the
-/// store's global Loro doc. Returns the shared `Arc<RwLock<LoroDocumentStore>>` so
-/// the caller can hand the *same* store to [`register_loro_operation_engine`]
-/// (reads + writes then share one doc).
+/// creates) the persistent `LoroDocumentStore`, then registers a
+/// `LoroDocumentStore` provider plus a **synchronous** `Arc<dyn
+/// BlockQuerySource>` provider over the store's global Loro doc. Returns the
+/// shared `Arc<RwLock<LoroDocumentStore>>` so the caller can hand the *same*
+/// store to [`register_loro_operation_engine`] (reads + writes then share one
+/// doc).
 ///
 /// The async work (loading the doc from disk) happens **up front**, so the
 /// registered `BlockQuerySource` is a sync provider — `block_query_frontend`
-/// resolves it synchronously (its `FrontendSession`/`ReactiveEngine` assembly is
-/// sync), so don't push async into the frontend resolve. This mirrors the test
-/// arm [`register_loro_block_query_source`] (which takes a pre-built backend);
-/// here we build that backend from the store's freshly-loaded global doc.
+/// resolves it synchronously (its `FrontendSession`/`ReactiveEngine` assembly
+/// is sync), so don't push async into the frontend resolve. This mirrors the
+/// test arm [`register_loro_block_query_source`] (which takes a pre-built
+/// backend); here we build that backend from the store's freshly-loaded global
+/// doc.
 pub async fn register_loro_read_stack(
     injector: &Injector,
     storage_dir: std::path::PathBuf,
@@ -132,10 +140,10 @@ pub async fn register_loro_read_stack(
 }
 
 /// Register the Loro-native operation capability (`Arc<dyn OperationEngine>`)
-/// into a no-Turso container — the **write** counterpart of the read stack above
-/// (ADR 0004 Phase 9, Stage 4). `doc_store` must be the *same* store (sharing the
-/// global Loro doc `Arc`) the reads observe, so a mutation is immediately visible
-/// to the next read snapshot.
+/// into a no-Turso container — the **write** counterpart of the read stack
+/// above (ADR 0004 Phase 9, Stage 4). `doc_store` must be the *same* store
+/// (sharing the global Loro doc `Arc`) the reads observe, so a mutation is
+/// immediately visible to the next read snapshot.
 ///
 /// The engine wraps a [`DispatchingOperationEngine`] over an
 /// [`OperationDispatcher`] holding a cache-free [`LoroBlockOperations`] block
@@ -157,8 +165,9 @@ pub fn register_loro_operation_engine(
         not(all(target_arch = "wasm32", target_os = "unknown"))
     ))]
     let block_ops = {
-        use crate::sync::iroh_sync_adapter::SharedTreeSyncManager;
         use holon_loro::shared_tree::SharedTreeStore;
+
+        use crate::sync::iroh_sync_adapter::SharedTreeSyncManager;
         match injector.try_resolve::<Arc<SharedTreeSyncManager>>() {
             Ok(manager) => {
                 block_ops.with_shared_trees((*manager).clone() as Arc<dyn SharedTreeStore>)
@@ -174,6 +183,13 @@ pub fn register_loro_operation_engine(
         Arc::new(block_ops) as Arc<dyn OperationProvider>,
         Arc::new(nav_ops) as Arc<dyn OperationProvider>,
     ]);
+    // Same fail-loud assembly guard the Turso path runs via `OperationModule`:
+    // this is the ONE dispatcher construction outside DI, so a future edit that
+    // drops block CRUD here must crash at composition time, not silently drop
+    // content writes (the EventInfraModule-alone class of bug).
+    dispatcher
+        .assert_content_write_capability()
+        .expect("[loro_block_query_source] operation-registry assembly check failed");
     let engine: Arc<dyn OperationEngine> =
         Arc::new(DispatchingOperationEngine::new(Arc::new(dispatcher)));
     injector.provide::<dyn OperationEngine>(Provider::root(move |_| engine.clone()));
@@ -181,11 +197,12 @@ pub fn register_loro_operation_engine(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::di::lifecycle::build_no_turso_container;
     use holon_api::BlockContent;
     use holon_api::repository::Lifecycle;
     use holon_core::storage::BlockQuery;
+
+    use super::*;
+    use crate::di::lifecycle::build_no_turso_container;
 
     async fn seed_backend() -> (Arc<LoroBackend>, EntityUri, Vec<EntityUri>, EntityUri) {
         let backend = LoroBackend::create_new("loro-query-source-test".to_string())
@@ -290,7 +307,8 @@ mod tests {
 
     /// End-to-end Loro arm of Item 2: a `LoroMemory` container assembles with
     /// **zero Turso**, resolves `Arc<dyn BlockQuerySource>` wired to the real
-    /// `LoroBlockQuerySource`, and reads a snapshot straight from the Loro tree.
+    /// `LoroBlockQuerySource`, and reads a snapshot straight from the Loro
+    /// tree.
     #[tokio::test]
     async fn no_turso_container_resolves_loro_block_query_source() {
         let (backend, root, expected, _gc) = seed_backend().await;
@@ -352,9 +370,9 @@ mod tests {
     }
 
     /// Persistence: a mutation through `LoroBlockOperations` (which calls
-    /// `save_doc` → `LoroDocumentStore::save_all`) must survive reopening a fresh
-    /// store over the same `storage_dir` — the file-backed no-Turso durability
-    /// guarantee the prod wiring relies on.
+    /// `save_doc` → `LoroDocumentStore::save_all`) must survive reopening a
+    /// fresh store over the same `storage_dir` — the file-backed no-Turso
+    /// durability guarantee the prod wiring relies on.
     #[tokio::test]
     async fn loro_block_op_persists_across_store_reopen() {
         use holon_api::Value;
