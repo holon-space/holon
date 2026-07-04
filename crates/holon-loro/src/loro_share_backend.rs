@@ -318,7 +318,6 @@ fn spawn_projection_worker(
     use std::sync::Mutex as StdMutex;
 
     use crate::loro_backend::snapshot_blocks_from_doc;
-    use crate::loro_sync_controller::diff_snapshots_to_ops;
     use crate::loro_sync_controller::is_empty_frontiers;
 
     let watermark = Arc::new(StdMutex::new(doc.oplog_frontiers()));
@@ -357,9 +356,6 @@ fn spawn_projection_worker(
                     }
                 };
 
-                let mut after = snapshot_blocks_from_doc(&doc);
-                patch(&mut after);
-
                 let before = if is_empty_frontiers(&last) {
                     HashMap::new()
                 } else {
@@ -373,7 +369,7 @@ fn spawn_projection_worker(
                     snap
                 };
 
-                let ops = diff_snapshots_to_ops(&before, &after);
+                let (ops, after_settled) = share_diff_ops(&doc, &before, &patch, &stid);
                 if !ops.is_empty() {
                     // Integrity guard (see `first_local_collision`): a synced-in
                     // remote edit must never project a block whose id shadows a
@@ -423,12 +419,61 @@ fn spawn_projection_worker(
                     }
                 }
 
-                *watermark.lock().unwrap() = current;
+                if after_settled {
+                    *watermark.lock().unwrap() = current;
+                } else {
+                    // Freezing the watermark keeps the pre-mutation base:
+                    // withheld deletes (including LEGITIMATE ones that
+                    // happened to land in an unsettled pass) are re-diffed
+                    // and emitted on the next settled pass. Advancing it
+                    // here would drop them permanently.
+                    tracing::warn!(
+                        "shared doc {stid}: snapshot unsettled — watermark frozen; deletes \
+                         withheld until the next settled projection pass"
+                    );
+                }
                 Ok(())
             }
         },
     );
     ProjectionWorker { _handle: handle }
+}
+
+/// One share-projection diff step: snapshot `after` settled-aware, apply the
+/// share `patch`, diff against `before`, and WITHHOLD delete ops when the
+/// snapshot is unsettled — mirroring the main-doc gate in
+/// `LoroSyncController` (loro_sync_controller.rs delete-pass gate).
+///
+/// Why: an unsettled snapshot under-reports the live set (a node was
+/// transiently meta-incomplete or missing its fractional index). Diffing it
+/// naively makes that withheld node look "gone" and would emit a REAL SQL
+/// DELETE for a block that is alive in the shared Loro tree. Legitimate
+/// deletes (node parented to Deleted/Unexist) keep the snapshot settled and
+/// still flow.
+fn share_diff_ops(
+    doc: &loro::LoroDoc,
+    before: &HashMap<String, crate::loro_backend::SnapshotBlock>,
+    patch: &impl Fn(&mut HashMap<String, crate::loro_backend::SnapshotBlock>),
+    stid: &str,
+) -> (Vec<(String, StorageEntity)>, bool) {
+    use crate::loro_backend::snapshot_blocks_from_doc_settled;
+    use crate::loro_sync_controller::diff_snapshots_to_ops;
+    let (mut after, after_settled) = snapshot_blocks_from_doc_settled(doc);
+    patch(&mut after);
+    let mut ops = diff_snapshots_to_ops(before, &after);
+    if !after_settled {
+        let before_len = ops.len();
+        ops.retain(|(name, _)| name != "delete");
+        let withheld = before_len - ops.len();
+        if withheld > 0 {
+            tracing::warn!(
+                "shared doc {stid}: withholding {withheld} delete(s) — snapshot unsettled (a live \
+                 node was transiently unreadable or missing its fractional index); real deletes \
+                 flow on the next settled pass"
+            );
+        }
+    }
+    (ops, after_settled)
 }
 
 impl LoroShareBackend {
@@ -1964,6 +2009,87 @@ mod tests {
             LoroShareBackend::new(store, snapshot_store, manager, advertiser, bus, key),
             dir,
         )
+    }
+
+    /// F1.1 regression: a node WITHHELD from the settled snapshot (here:
+    /// `STABLE_ID` transiently unreadable, the same shape as an in-flight
+    /// create/move whose meta hasn't landed) must NOT diff as a real SQL
+    /// DELETE on the share-projection path. The ungated diff DOES see a
+    /// delete — the gate in `share_diff_ops` is what withholds it.
+    #[test]
+    fn withheld_node_emits_no_delete_on_share_path() {
+        use crate::loro_backend::TREE_NAME;
+        use crate::loro_backend::snapshot_blocks_from_doc;
+        use crate::loro_sync_controller::diff_snapshots_to_ops;
+
+        let doc = loro::LoroDoc::new();
+        let tree = doc.get_tree(TREE_NAME);
+        let node = tree.create(None).unwrap();
+        tree.get_meta(node)
+            .unwrap()
+            .insert(STABLE_ID, "11111111-1111-1111-1111-111111111111")
+            .unwrap();
+        doc.commit();
+        let watermark = doc.oplog_frontiers();
+
+        // Mid-mutation shape: node alive, meta momentarily incomplete.
+        tree.get_meta(node).unwrap().delete(STABLE_ID).unwrap();
+        doc.commit();
+
+        let fork = doc.fork_at(&watermark).unwrap();
+        let before = snapshot_blocks_from_doc(&fork);
+        assert_eq!(before.len(), 1, "node must be present in the base snapshot");
+
+        // Precondition: the ungated diff (the pre-fix worker behaviour)
+        // really does classify the withheld node as a delete.
+        let naive_after = snapshot_blocks_from_doc(&doc);
+        let naive = diff_snapshots_to_ops(&before, &naive_after);
+        assert!(
+            naive.iter().any(|(name, _)| name == "delete"),
+            "precondition: ungated diff must see a delete, got {naive:?}"
+        );
+
+        let (ops, settled) = share_diff_ops(&doc, &before, &|_| {}, "test-tree");
+        assert!(
+            !settled,
+            "snapshot with unreadable node meta must be unsettled"
+        );
+        assert!(
+            !ops.iter().any(|(name, _)| name == "delete"),
+            "withheld node must not become a SQL DELETE on the share path: {ops:?}"
+        );
+    }
+
+    /// Companion to the withhold test: a LEGITIMATE delete (node parented to
+    /// Deleted) keeps the snapshot settled and its DELETE op still flows.
+    #[test]
+    fn legitimate_delete_still_flows_on_share_path() {
+        use crate::loro_backend::TREE_NAME;
+        use crate::loro_backend::snapshot_blocks_from_doc;
+
+        let doc = loro::LoroDoc::new();
+        let tree = doc.get_tree(TREE_NAME);
+        let node = tree.create(None).unwrap();
+        tree.get_meta(node)
+            .unwrap()
+            .insert(STABLE_ID, "22222222-2222-2222-2222-222222222222")
+            .unwrap();
+        doc.commit();
+        let watermark = doc.oplog_frontiers();
+
+        tree.delete(node).unwrap();
+        doc.commit();
+
+        let fork = doc.fork_at(&watermark).unwrap();
+        let before = snapshot_blocks_from_doc(&fork);
+        assert_eq!(before.len(), 1);
+
+        let (ops, settled) = share_diff_ops(&doc, &before, &|_| {}, "test-tree");
+        assert!(settled, "a genuine delete must not unsettle the snapshot");
+        assert!(
+            ops.iter().any(|(name, _)| name == "delete"),
+            "a genuine delete must still project: {ops:?}"
+        );
     }
 
     #[test]

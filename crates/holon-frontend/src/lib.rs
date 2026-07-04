@@ -25,6 +25,7 @@
 //! ).await?;
 //! ```
 
+pub mod advice_weaver;
 pub mod cdc;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cli;
@@ -100,6 +101,7 @@ pub mod reactive_view_model;
 mod render_context;
 pub mod render_interpreter;
 pub mod rich_text_selection;
+pub mod row_origin;
 pub mod row_pipeline;
 pub mod shadow_builders;
 pub mod size_expectation;
@@ -153,6 +155,7 @@ pub use preferences::PrefType;
 pub use preferences::PreferenceDef;
 pub use reactive::LiveBlock;
 pub use reactive::StubBuilderServices;
+pub use reactive::WatchGuard;
 pub use reactive::interpret_pure;
 pub use reactive_view::CollectionConfig;
 pub use reactive_view::ReactiveView;
@@ -166,6 +169,9 @@ pub use reactive_view_model::variants_match;
 pub use render_context::AvailableSpace;
 pub use render_context::LayoutHint;
 pub use render_context::RenderContext;
+pub use row_origin::Occurrence;
+pub use row_origin::OccurrenceId;
+pub use row_origin::RowOrigin;
 pub use shadow_builders::DEFAULT_DRAWER_WIDTH;
 pub use user_driver::ReactiveEngineDriver;
 pub use user_driver::UserDriver;

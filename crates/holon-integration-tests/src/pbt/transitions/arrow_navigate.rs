@@ -9,16 +9,18 @@
 use holon_api::Region;
 use holon_frontend::navigation::NavDirection;
 use holon_pbt_core::TransitionFactory;
-use holon_pbt_core::TransitionImpl;
 use holon_pbt_core::TransitionRef;
 use holon_pbt_core::capabilities::CapRegion;
+use holon_pbt_core::capabilities::RefArrowNav;
+use holon_pbt_core::capabilities::RefLifecycle;
+use holon_pbt_core::capabilities::RefViewSelection;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::check;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use proptest::strategy::Union;
 use validated::Validated;
 
-use crate::pbt::reference_state::CursorPosition;
-use crate::pbt::reference_state::ReferenceState;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
 #[cfg(feature = "otel-testing")]
@@ -29,8 +31,6 @@ use crate::pbt::transition_budgets::NAV_DML_READS;
 use crate::pbt::transition_budgets::REACTIVE_BASE;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::docs_tolerance;
-use crate::pbt::validation::Reason;
-use crate::pbt::validation::check;
 
 /// Navigate via arrow keys from the currently focused block in a region.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -40,22 +40,28 @@ pub struct ArrowNavigate {
     pub steps: u8,
 }
 
-impl TransitionFactory<ReferenceState> for ArrowNavigate {
+impl<R: RefLifecycle + RefViewSelection + RefArrowNav<Direction = NavDirection>>
+    TransitionFactory<R> for ArrowNavigate
+{
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        vec![::holon_pbt_core::composition::CapId::of::<
-            dyn ::holon_frontend::pbt_caps::SutArrowNavigate,
-        >()]
+        Self::declared_caps()
     }
 
     type Reason = Reason;
-    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let regions = [Region::Main, Region::LeftSidebar, Region::RightSidebar];
         let mut arms: Vec<(u32, BoxedStrategy<ArrowNavigate>)> = Vec::new();
 
         for region in &regions {
-            if state.ui.tab.focused_entity_id.contains_key(region) {
-                // Determine available directions from navigator type
-                let render_name = state.active_render_expr_name(*region);
+            if state.region_has_focus(*region) {
+                // Determine available directions from navigator type. The render
+                // name is main-panel/sidebar granular (CapRegion collapses the
+                // two sidebars, which both list-navigate anyway).
+                let cap_region = match region {
+                    Region::Main => CapRegion::Main,
+                    _ => CapRegion::Sidebar,
+                };
+                let render_name = state.active_render_expr_name(cap_region);
                 let directions: Vec<NavDirection> = match render_name.as_deref() {
                     Some("tree") | Some("outline") => {
                         vec![
@@ -94,16 +100,13 @@ impl TransitionFactory<ReferenceState> for ArrowNavigate {
     }
 }
 
-impl TransitionRef<ReferenceState> for ArrowNavigate {
+impl<R: RefLifecycle + RefArrowNav<Direction = NavDirection>> TransitionRef<R> for ArrowNavigate {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(state.action.app_started, Reason::AppNotStarted),
-            check(
-                state.ui.tab.focused_entity_id.contains_key(&self.region),
-                Reason::MainFocusNotSet,
-            ),
+            check(state.app_started(), Reason::AppNotStarted),
+            check(state.region_has_focus(self.region), Reason::MainFocusNotSet),
         ];
         checks
             .into_iter()
@@ -111,171 +114,33 @@ impl TransitionRef<ReferenceState> for ArrowNavigate {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
-        use holon_frontend::navigation::Boundary;
-        use holon_frontend::navigation::CursorHint;
-
-        let mut current_id = state
-            .ui
-            .tab
-            .focused_entity_id
-            .get(&self.region)
-            .expect("ArrowNavigate requires focused entity")
-            .clone();
-        let mut cursor = state
-            .ui
-            .tab
-            .focused_cursor
-            .get(&self.region)
-            .copied()
-            .unwrap_or(CursorPosition::start());
-
-        let navigator = state.build_reference_navigator(self.region);
-
-        for _ in 0..self.steps {
-            // Get the content of the currently focused block
-            let content = state
-                .domain
-                .block_state
-                .blocks
-                .get(&current_id)
-                .map(|b| b.content.as_str())
-                .unwrap_or("");
-            let line_count = if content.is_empty() {
-                1
-            } else {
-                content.split('\n').count()
-            };
-            let last_line = line_count.saturating_sub(1);
-
-            // Predict whether this arrow causes cross-block navigation
-            let crosses_block = match self.direction {
-                NavDirection::Up => cursor.line == 0,
-                NavDirection::Down => cursor.line >= last_line,
-                NavDirection::Left => cursor.line == 0 && cursor.column == 0,
-                NavDirection::Right => {
-                    let line_len = content
-                        .split('\n')
-                        .nth(cursor.line)
-                        .map(|l| l.len())
-                        .unwrap_or(0);
-                    cursor.line >= last_line && cursor.column >= line_len
-                }
-            };
-
-            if crosses_block {
-                if let Some(ref nav) = navigator {
-                    let boundary = match self.direction {
-                        NavDirection::Up => Boundary::Top,
-                        NavDirection::Down => Boundary::Bottom,
-                        NavDirection::Left => Boundary::Left,
-                        NavDirection::Right => Boundary::Right,
-                    };
-                    let hint = CursorHint {
-                        column: cursor.column,
-                        boundary,
-                    };
-                    if let Some(target) = nav.navigate(&current_id, self.direction, &hint) {
-                        current_id = target.block_id.clone();
-                        // Update cursor from placement
-                        let target_content = state
-                            .domain
-                            .block_state
-                            .blocks
-                            .get(&current_id)
-                            .map(|b| b.content.as_str())
-                            .unwrap_or("");
-                        let offset = holon_frontend::navigation::placement_to_offset(
-                            target_content,
-                            target.placement,
-                        );
-                        let (line, col) =
-                            holon_frontend::navigation::offset_to_line_col(target_content, offset);
-                        cursor = CursorPosition { line, column: col };
-                    }
-                    // else: at boundary of collection, stay put
-                }
-            } else {
-                // Intra-block cursor movement
-                match self.direction {
-                    NavDirection::Up => {
-                        cursor.line = cursor.line.saturating_sub(1);
-                    }
-                    NavDirection::Down => {
-                        cursor.line = (cursor.line + 1).min(last_line);
-                    }
-                    NavDirection::Left => {
-                        if cursor.column > 0 {
-                            cursor.column -= 1;
-                        } else if cursor.line > 0 {
-                            cursor.line -= 1;
-                            let prev_line_len = content
-                                .split('\n')
-                                .nth(cursor.line)
-                                .map(|l| l.len())
-                                .unwrap_or(0);
-                            cursor.column = prev_line_len;
-                        }
-                    }
-                    NavDirection::Right => {
-                        let line_len = content
-                            .split('\n')
-                            .nth(cursor.line)
-                            .map(|l| l.len())
-                            .unwrap_or(0);
-                        if cursor.column < line_len {
-                            cursor.column += 1;
-                        } else if cursor.line < last_line {
-                            cursor.line += 1;
-                            cursor.column = 0;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Update focused entity and cursor. Arrow keys change editor
-        // focus but NOT navigation — navigation_history is untouched.
-        // The global `focused_block` mirror also moves: production
-        // GPUI's arrow handler calls `services.set_focus()` on the
-        // new target (mirroring what a click would do), so the
-        // engine's `UiState.focused_block` follows the per-region
-        // pointer.
-        state.ui.tab.focused_block = Some(current_id.clone());
-        state
-            .ui
-            .tab
-            .focused_entity_id
-            .insert(self.region, current_id);
-        state.ui.tab.focused_cursor.insert(self.region, cursor);
+    fn apply_to_ref(&self, state: &mut R) {
+        // The whole cross-block cursor/focus walk (driving holon-frontend's
+        // `CollectionNavigator`) lives in `RefArrowNav::apply_arrow_navigate`.
+        state.apply_arrow_navigate(self.region, self.direction, self.steps);
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: holon_frontend::pbt_caps::SutArrowNavigate> TransitionImpl<ReferenceState, S>
-    for ArrowNavigate
-{
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
+crate::cap_transition! {
+    ArrowNavigate: ::holon_frontend::pbt_caps::SutArrowNavigate,
+    where R: [ RefLifecycle ],
+    |me, _state, sut| {
         // The cap's `region` is informational only (the driver emits global
         // arrow keystrokes); the left/right sidebar distinction collapses to
         // `Sidebar`.
-        let region = match self.region {
+        let region = match me.region {
             Region::Main => CapRegion::Main,
             Region::LeftSidebar | Region::RightSidebar => CapRegion::Sidebar,
         };
-        sut.apply_arrow_navigate(region, self.direction, self.steps)
-            .await;
+        sut.apply_arrow_navigate(region, me.direction, me.steps).await;
     }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for ArrowNavigate {
-    fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
+    sql_budget: |me, state| {
+        let steps = me.steps as usize;
         ExpectedSql {
-            reads: REACTIVE_BASE + JOURNAL_READS + NAV_DML_READS + (self.steps as usize * 2),
+            reads: REACTIVE_BASE + JOURNAL_READS + NAV_DML_READS + (steps * 2),
             writes: 0,
             ddl: 0,
-            tolerance: docs_tolerance(state) + (self.steps as usize * 2),
+            tolerance: docs_tolerance(state) + (steps * 2),
         }
     }
 }

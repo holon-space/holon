@@ -8,6 +8,8 @@
 //! @c4 uses holon-frontend "frontend session abstraction" "Rust"
 //! @c4 uses holon-mcp-client "MCP client providers" "Rust"
 //! @c4 uses holon-orgmode "org-mode sync I/O" "Rust"
+//! @c4 uses holon-loro "Loro CRDT backend & P2P sync" "Rust"
+//! @c4 uses holon-profiles "entity profile resolution" "Rust"
 //!
 //! DI assembly crate (composition root) — owns every wiring that names concrete
 //! backends: Turso/Loro/OrgMode modules, MCP integrations, and

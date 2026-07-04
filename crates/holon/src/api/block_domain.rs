@@ -19,52 +19,15 @@ const BLOCK_WITH_QUERY_SOURCE_SQL: &str =
 
 pub use holon_api::ROOT_LAYOUT_BLOCK_ID;
 
-/// Walk a `RenderExpr` and substitute `virtual_parent: Bool(true)` (the DSL
-/// sentinel) with `virtual_parent: String(<parent_id>)` so the tree builder's
-/// trailing-slot construction sees the resolved id.
-///
-/// Mirrors `holon_frontend::render_interpreter::resolve_virtual_parent` but
-/// lives in the `holon` crate so the live_block path
-/// (`collection_render_from_profile`) can use it without violating the crate
-/// dependency direction (`holon-frontend → holon → holon-api`). One level
-/// deep — the only place `virtual_parent` legitimately appears today.
-fn resolve_virtual_parent(expr: RenderExpr, parent_id: &str) -> RenderExpr {
-    use holon_api::render_types::Arg;
-    match expr {
-        RenderExpr::FunctionCall { name, args } => {
-            let mut substituted = false;
-            let args = args
-                .into_iter()
-                .map(|arg| {
-                    if arg.name.as_deref() == Some("virtual_parent")
-                        && matches!(
-                            &arg.value,
-                            RenderExpr::Literal {
-                                value: Value::Boolean(true)
-                            }
-                        )
-                    {
-                        substituted = true;
-                        Arg {
-                            name: arg.name,
-                            value: RenderExpr::Literal {
-                                value: Value::String(parent_id.to_string()),
-                            },
-                        }
-                    } else {
-                        arg
-                    }
-                })
-                .collect();
-            tracing::info!(
-                "[resolve_virtual_parent] name={name} parent_id={parent_id} \
-                 substituted={substituted}"
-            );
-            RenderExpr::FunctionCall { name, args }
-        }
-        other => other,
-    }
-}
+// NOTE (bug 2A): `virtual_parent: true` on a collection render is a SENTINEL
+// meaning "parent new blocks under the query's focus root". This is a
+// query-source block path (`render_entity` → `collection_render_from_profile`),
+// so the focus root is a RUNTIME value (the `focus_roots` matview) that only
+// materialises in the query result — it is NOT the container `entity_uri`.
+// Resolving the sentinel to `entity_uri` here silently mis-parented every
+// top-level create under the panel container. We now leave the sentinel
+// unresolved; the frontend resolves it from the rendered rowset's focus-root
+// row (`holon_frontend::row_origin::resolve_creation_parent`).
 
 /// Domain layer for block-specific operations.
 ///
@@ -456,9 +419,11 @@ pub(crate) fn view_mode_switcher_from_variants(
         "view_mode_switcher_from_variants requires at least one variant"
     );
 
-    // Single variant → unwrap; no switcher needed.
+    // Single variant → unwrap; no switcher needed. `virtual_parent: true` is
+    // left UNRESOLVED (bug 2A) — the frontend resolves it from the query's
+    // focus-root row, not this container `entity_uri`.
     if variants.len() == 1 {
-        return resolve_virtual_parent(variants[0].render.clone(), &entity_uri.to_string());
+        return variants[0].render.clone();
     }
 
     let default_mode = variants
@@ -506,7 +471,8 @@ pub(crate) fn view_mode_switcher_from_variants(
     for variant in variants {
         args.push(Arg {
             name: Some(format!("mode_{}", variant.name)),
-            value: resolve_virtual_parent(variant.render.clone(), &entity_uri.to_string()),
+            // `virtual_parent: true` left UNRESOLVED (bug 2A) — see note above.
+            value: variant.render.clone(),
         });
     }
 

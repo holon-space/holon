@@ -1,3 +1,11 @@
+//! @c4 component
+//! @c4 layer Core
+//! Pattern: Strategy
+//! @c4 uses holon-api "shared value & operation types" "Rust"
+//! @c4 uses holon-core "core datasource traits" "Rust"
+//! @c4 uses holon-engine "Petri-net engine" "Rust"
+//! @c4 uses holon-macros "entity/operation derive macros" "Rust"
+//!
 //! EntityProfile system: per-entity, per-row render + operation resolution.
 //!
 //! Each entity (e.g., "block") can have a profile that defines:
@@ -44,6 +52,11 @@ const UI_STATE_VARIABLES: &[&str] = &[
     "is_focused",
     "is_expanded",
     "view_mode",
+    // Render-context flag set by tree-builder `rules:` overrides (e.g.
+    // `role: "page_title"`); merged into ui_state by `pick_active_variant`.
+    // Classifying it as data would drop the variant at resolve time (rows
+    // have no `role` column).
+    "role",
     // Container-query inputs: refined per subtree during render interpretation.
     "available_width_px",
     "available_height_px",
@@ -776,7 +789,17 @@ impl ProfileResolving for ProfileResolver {
     ) -> (Arc<RenderProfile>, HashMap<String, holon_api::Value>) {
         let cache = self.cache_signal.get_cloned();
 
-        let entity_uri = row_id(row).expect("No id found");
+        let entity_uri = row_id(row).unwrap_or_else(|e| {
+            // The enrichment boundary REQUIRES entity-shaped rows (a scheme'd
+            // `id`). A row without one is almost always a `watch_query` pointed at a
+            // junction/aggregate projection (e.g. the advice `advice_suppressed`
+            // watch, 2026-07-09): project `... AS id` or route it through a
+            // signal-only path instead of the enriched watch. Fail loud with the row.
+            panic!(
+                "profile resolver: row has no entity `id` — watch_query/enrichment requires \
+                 entity-shaped rows (project `... AS id`): {e}"
+            )
+        });
         let entity_name_str = entity_uri.scheme();
         let entity_name = EntityName::new(entity_name_str);
 
@@ -832,7 +855,17 @@ impl ProfileResolving for ProfileResolver {
         row: &HashMap<String, holon_api::Value>,
     ) -> (Arc<RenderProfile>, HashMap<String, holon_api::Value>) {
         let cache = self.cache_signal.get_cloned();
-        let entity_uri = row_id(row).expect("No id found");
+        let entity_uri = row_id(row).unwrap_or_else(|e| {
+            // The enrichment boundary REQUIRES entity-shaped rows (a scheme'd
+            // `id`). A row without one is almost always a `watch_query` pointed at a
+            // junction/aggregate projection (e.g. the advice `advice_suppressed`
+            // watch, 2026-07-09): project `... AS id` or route it through a
+            // signal-only path instead of the enriched watch. Fail loud with the row.
+            panic!(
+                "profile resolver: row has no entity `id` — watch_query/enrichment requires \
+                 entity-shaped rows (project `... AS id`): {e}"
+            )
+        });
         let entity_name_str = entity_uri.scheme();
         let entity_name = EntityName::new(entity_name_str);
 

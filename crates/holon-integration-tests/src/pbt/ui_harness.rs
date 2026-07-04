@@ -89,7 +89,7 @@ pub fn install_rejection_histogram_panic_hook() {
     INSTALL.call_once(|| {
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            crate::pbt::validation::print_rejection_histogram();
+            holon_pbt_core::validation::print_rejection_histogram();
             prev(info);
         }));
     });

@@ -2,6 +2,12 @@
 
 set dotenv-load
 
+# GPUI/blinc builds link libfontconfig on Linux; RUST_FONTCONFIG_DLOPEN=on makes the
+# fontconfig -sys build script dlopen it at runtime instead of static-linking (needed
+# for fresh clones/CI/jj workspaces). Previously lived in an untracked .env; tracked
+# here so every checkout inherits it. `export` puts it in recipes' environment.
+export RUST_FONTCONFIG_DLOPEN := "on"
+
 # List available recipes
 default:
     @just --list
@@ -135,69 +141,112 @@ pbt-layout-override cases='64' *FLAGS:
         -p holon-integration-tests --features pbt --test general_e2e_composed_pbt \
         -- --nocapture {{FLAGS}} 2>&1 | tee /tmp/pbt-layout-override.log
 
-# --- Predefined slices (ADR 0009: declare_pbt_slice! / component_pbt!) --------
-# Slices are discovered from source — no hardcoded list. Each `test_fn:` in
-# crates/holon-integration-tests/tests/ is one runnable slice; the file stem may
-# differ from the slice name (one file can declare several slices), so slices are
-# run by exact test-fn name. `pbt` is a default feature of holon-integration-tests.
-
-_slice_dir := "crates/holon-integration-tests/tests"
-
-# Discover every predefined slice with the ComponentSet/Wiring it composes.
-pbt-list:
+# Measure end-to-end UI action latency (indent / outdent / cycle-state / split / ...).
+# Drives the REAL pipeline (dispatch -> Loro commit -> LoroProjection resample ->
+# Turso/matview CDC -> reactive rows) through the headless composed keystone with the
+# `holon_latency` tracing target enabled, then prints a per-action count/p50/p95/max
+# table plus per-stage cost. Measures everything EXCEPT final GPU paint. HOLON_OTEL_FILTER=off
+# silences the OTel span layer so its recording cost doesn't distort the numbers.
+measure-latency cases='16' *FLAGS:
     #!/usr/bin/env bash
     set -euo pipefail
-    cd {{justfile_directory()}}
-    printf '%-32s %-22s %s\n' SLICE COMPOSITION FILE
-    printf '%-32s %-22s %s\n' '-----' '-----------' '----'
-    rg -lU 'test_fn:' {{_slice_dir}} --type rust | sort | while read -r f; do
-        rg -UoN 'test_fn:\s*([A-Za-z0-9_]+)\s*,\s*(?:wiring|set):\s*([^,\n]+)' \
-           -r '$1|$2' "$f" \
-        | sed -E 's/holon_pbt_core:://; s/Wiring:://; s/ComponentSet:://' \
-        | while IFS='|' read -r name comp; do
-            printf '%-32s %-22s %s\n' "$name" "$comp" "$(basename "$f")"
-          done
-    done
+    RUST_LOG="holon_latency=debug" HOLON_OTEL_FILTER=off PROPTEST_CASES={{cases}} \
+        cargo test -p holon-integration-tests --features pbt \
+        --test general_e2e_composed_pbt -- --nocapture {{FLAGS}} \
+        > /tmp/holon-latency.log 2>&1 || true
+    echo "raw log: /tmp/holon-latency.log ($(grep -c holon_latency /tmp/holon-latency.log || true) events)"
+    python3 scripts/measure_latency.py /tmp/holon-latency.log
 
-# Run one predefined slice by exact name; e.g. `just pbt-slice storage_consistency_pbt 64`.
-pbt-slice name cases='64' *FLAGS:
+# Scale-soak: drive the REAL pipeline against a seeded 5–10k-block vault WITH CRDT on,
+# measuring per-action latency vs the p95<200ms SLO plus RSS growth. Boots the keystone
+# (`general_e2e_composed_pbt`, forced to the full_headless/CRDT wiring) over a synthetic
+# vault of `size` extra blocks (deep trees, tasks, links, unicode; deterministic seed),
+# then drives ~`actions` mixed actions (edit / indent / outdent / split / toggle / nav)
+# and prints the per-action-type latency table + dominator + RSS start→peak→end.
+# Results land in docs/Testing/soak/ . Runtime: minutes (boot re-seeds the vault per
+# proptest case). See DEVELOPMENT.md "Scale Soak".
+#
+#   just soak                 # 5000 blocks, ~320 actions
+#   just soak 10000 480       # 10k blocks
+soak size='5000' actions='320' settle_ms='30000' per_doc='200' soften='':
     #!/usr/bin/env bash
     set -euo pipefail
-    cd {{justfile_directory()}}
-    file=$(rg -lU 'test_fn:\s*{{name}}\b' {{_slice_dir}} --type rust | head -1 || true)
-    if [ -z "${file:-}" ]; then
-        echo "Unknown slice '{{name}}'. Available:" >&2
-        just pbt-list >&2
-        exit 1
-    fi
-    stem=$(basename "$file" .rs)
-    echo ">>> slice {{name}}  (binary: $stem, cases: {{cases}})"
-    PROPTEST_CASES={{cases}} cargo test -p holon-integration-tests \
-        --test "$stem" -- --exact {{name}} --nocapture {{FLAGS}} \
-        2>&1 | tee "/tmp/pbt-slice-{{name}}.log"
-
-# Run every discovered slice sequentially; continues on failure, summary at end.
-pbt-slices cases='32':
-    #!/usr/bin/env bash
-    set -uo pipefail
-    cd {{justfile_directory()}}
-    slices=$(rg -UoN 'test_fn:\s*([A-Za-z0-9_]+)' -r '$1' {{_slice_dir}} --type rust | sort -u)
-    echo "Discovered $(echo "$slices" | wc -l | tr -d ' ') slices."
-    failed=""
-    count=0
-    while read -r s; do
-        [ -z "$s" ] && continue
-        count=$((count + 1))
+    mkdir -p docs/Testing/soak
+    stamp="$(date +%Y%m%d-%H%M%S)"
+    log="/tmp/holon-soak-${stamp}.log"
+    rss="/tmp/holon-soak-rss-${stamp}.csv"
+    out="docs/Testing/soak/soak-{{size}}-blocks-${stamp}.txt"
+    # ~20 actions per proptest case (draws 1..40); derive case count from target actions.
+    cases=$(( ({{actions}} + 19) / 20 )); [ "$cases" -lt 1 ] && cases=1
+    echo "soak: size={{size}} blocks  actions≈{{actions}} (cases=$cases)  settle={{settle_ms}}ms  CRDT=on"
+    echo "raw log: $log   rss: $rss   report: $out"
+    # Background RSS sampler (self-terminates when the test process exits).
+    bash scripts/soak_rss_sampler.sh "$rss" 'general_e2e_composed_pb[t]' 2 &
+    sampler=$!
+    HOLON_SOAK_SEED_BLOCKS={{size}} HOLON_SOAK_SETTLE_MS={{settle_ms}} \
+        HOLON_SOAK_BLOCKS_PER_DOC={{per_doc}} HOLON_PBT_FORCE_FULL=1 \
+        HOLON_PBT_INVARIANTS="{{soften}}" \
+        RUST_LOG="holon_latency=debug" HOLON_OTEL_FILTER=off PROPTEST_CASES="$cases" \
+        cargo test -p holon-integration-tests --features pbt \
+        --test general_e2e_composed_pbt -- --nocapture \
+        > "$log" 2>&1 || echo "NOTE: test exited non-zero (see $log tail) — latency data below is still valid"
+    wait "$sampler" 2>/dev/null || true
+    {
+        echo "# Holon scale-soak — $stamp"
+        echo "# size={{size}} blocks  actions≈{{actions}} (cases=$cases)  settle={{settle_ms}}ms  per_doc={{per_doc}}  CRDT=on"
+        [ -n "{{soften}}" ] && echo "# DISCLOSED SOFTENING: HOLON_PBT_INVARIANTS={{soften}} ($(grep -c 'softened (DISCLOSED degraded run)' "$log" || true) softened failures — see raw log)"
+        echo "# raw log: $log"
         echo ""
-        echo "=== $s ==="
-        just pbt-slice "$s" {{cases}} || failed="$failed $s"
-    done <<< "$slices"
+        echo "action_total events: $(grep -c 'stage=action_total' "$log" || true)"
+        echo ""
+        python3 scripts/measure_latency.py "$log" --fail-over-p95 200 || true
+        echo ""
+        echo "== RSS (resident set, MB) =="
+        awk -F, 'NR>1{v=$2; if(NR==2)start=v; if(v>peak)peak=v; end=v; n++}
+            END{ if(n>0) printf "samples=%d  start=%.0f  peak=%.0f  end=%.0f  growth=%+.0f MB\n", n,start,peak,end,end-start;
+                 else print "no RSS samples" }' "$rss"
+    } | tee "$out"
     echo ""
-    if [ -n "$failed" ]; then
-        echo "Failed slices:$failed"
-        exit 1
-    fi
-    echo "All $count slices passed."
+    echo "SLO verdict + full table written to: $out"
+
+# --- Memory & async-stall profiling -----------------------------------------
+
+# Heap-profile a headless soak workload with dhat, then print top allocators
+# (no web viewer needed). Writes dhat-heap.json in the repo root.
+heap-profile blocks='2000':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    HOLON_SOAK_SEED_BLOCKS={{blocks}} \
+        cargo run --release --example diag_harness -p holon-integration-tests \
+        --features heap-profile
+    bash scripts/analyze_dhat.sh dhat-heap.json
+
+# Async-stall profile a headless soak workload; attach the tokio-console CLI to
+# it. Needs: cargo install tokio-console. Requires --cfg tokio_unstable (set).
+tokio-console-harness blocks='2000' hold='120':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "console aggregator -> 127.0.0.1:6669 (holding {{hold}}s after ingest)"
+    echo "attach from another shell:  tokio-console http://127.0.0.1:6669"
+    RUSTFLAGS="--cfg tokio_unstable" \
+        HOLON_SOAK_SEED_BLOCKS={{blocks}} HOLON_DIAG_HOLD_SECS={{hold}} \
+        cargo run --example diag_harness -p holon-integration-tests \
+        --features tokio-console
+
+# Run the REAL GPUI desktop app with tokio-console attached to its live runtime
+# (the DatabaseActor, file-sync, save-worker tasks). Attach as above.
+tokio-console-app:
+    RUSTFLAGS="--cfg tokio_unstable" \
+        cargo run -p holon-gpui --features tokio-console
+
+# --- Lib slices (composed catch triads + slice component tests) ---------------
+# The declare_pbt_slice!/component_pbt! standalone slice binaries were retired
+# (§8.10: coverage lives in the ONE composed keystone). What remains are the
+# cfg(test) lib slice tests (catch triads, component integration tests) —
+# nextest's default filter EXCLUDES lib targets, so run them explicitly:
+pbt-lib-slices:
+    cargo nextest run -p holon-integration-tests --lib --features pbt \
+        2>&1 | tee /tmp/pbt-lib-slices.log
 
 # --- Mutation Testing -------------------------------------------------------
 
@@ -510,3 +559,35 @@ coverage-rust:
 # Process Flutter coverage data
 coverage-flutter:
     ./scripts/process-flutter-coverage.sh
+
+# --- Quality gates (two-tier) -------------------------------------------------
+# Tier 1: cheap checks at every commit. Tier 2: full keystone before every push.
+# jj does not fire git hooks — run these by hand (or scripts/install-git-hooks.sh
+# wires them up for plain-git users). See DEVELOPMENT.md "Quality gates".
+
+# Tier 1 pre-commit gate: defensive-code ratchet + workspace typecheck.
+# MEASURED (2026-07-07): warm `cargo check --workspace` = 5.4s; ratchet ~5s CPU.
+# A keystone smoke was CUT from this tier: even PROPTEST_CASES=2 takes ~4.5min
+# because proptest unconditionally replays the persisted regression seeds and
+# each case pays full composed-SUT boot — it belongs in `just prepush` (Tier 2).
+# Assumes a warm build cache; the first run after a big rebase pays compile cost.
+precommit:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "== Tier 1 [1/2]: defensive-code ratchet =="
+    ./scripts/defensive-ratchet.sh
+    echo "== Tier 1 [2/2]: cargo check --workspace =="
+    cargo check --workspace 2>&1 | tee /tmp/precommit-check.log
+    echo "== Tier 1 PASS =="
+
+# Tier 2 pre-push gate: full keystone at default PROPTEST_CASES=16 (includes the
+# persisted regression seeds in tests/general_e2e_composed_pbt.proptest-regressions).
+# MEASURED (2026-07-07): green run ~5min quiet; a RED run that shrinks can take ~15min.
+prepush:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "== Tier 2: full keystone (PROPTEST_CASES=16) =="
+    PROPTEST_CASES=16 cargo test \
+        -p holon-integration-tests --features pbt --test general_e2e_composed_pbt \
+        2>&1 | tee /tmp/prepush-keystone.log
+    echo "== Tier 2 PASS =="

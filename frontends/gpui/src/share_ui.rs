@@ -490,12 +490,19 @@ fn overlay_backdrop(id: &str) -> Stateful<gpui::Div> {
         .flex()
         .items_center()
         .justify_center()
+        // Inset so the capped-width panel keeps a margin on narrow (phone)
+        // viewports instead of running off both screen edges.
+        .p(px(16.0))
 }
 
 fn modal_panel(id: &str, width: f32, theme: OverlayTheme) -> Stateful<gpui::Div> {
     div()
         .id(SharedString::from(format!("{id}-panel")))
-        .w(px(width))
+        // `width` is a MAX, not a demand: on a phone (~402pt) the panel becomes
+        // a full-width card; on desktop it caps at `width`. Fixes the accept/
+        // share/quarantine/error dialogs overflowing the mobile viewport.
+        .w_full()
+        .max_w(px(width))
         .max_h(px(720.0))
         .overflow_y_scroll()
         .bg(theme.bg)

@@ -1,6 +1,6 @@
 # ADR 0005: Children-as-ordered-list (`sort_key` is an adapter detail)
 
-**Status:** Proposed (2026-05-27)
+**Status:** Accepted (2026-05-27; shipped. Note: the windowed-read `children_of_window` MUST was never implemented.)
 **Deciders:** Martin
 **Context:** Domain modelling for block sibling order
 

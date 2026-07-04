@@ -1,0 +1,15 @@
+# Bundled advice rule (ADR 0022 v1 cut): surface lessons under tasks.
+#
+# Ships as a bundled-but-user-editable rule block
+# (source_language = holon_advice_rule_yaml). Anchors are task blocks; candidates
+# are lesson blocks sharing ≥1 tag with the anchor, ranked by shared-tag count
+# then recency. Runtime-definable day one — edit the block to change it.
+name: lessons_for_tasks
+active: true
+anchor:
+  has_tag: task
+candidates:
+  tag_overlap_recency:
+    source:
+      has_tag: lesson
+k: 5

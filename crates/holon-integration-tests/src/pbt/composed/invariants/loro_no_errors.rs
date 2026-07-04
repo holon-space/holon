@@ -1,31 +1,8 @@
-//! `inv-loro-no-errors` — `SutLoroLog` only, ignores the reference, so it runs
-//! whenever a Loro store is wired. Asserts the LoroSyncController logged no
-//! error since startup. Inert-but-honest in the pure-Loro slice (a standalone
-//! CRDT has no sync controller, so `loro_had_errors` is structurally `false`);
-//! its real teeth run in the ONE PBT (full mode), where `compose_sut` backs
-//! `SutLoroLog` with the live `LoroSyncControllerHandle` error counter, plus
-//! the fixture-driven catch test below.
-
-use holon_pbt_core::RunMode;
-use holon_pbt_core::capabilities::SutLoroLog;
-use holon_pbt_core::composition::BridgedInvariant;
-use holon_pbt_core::composition::CapId;
-use holon_pbt_core::composition::CapInvariant;
-use holon_pbt_core::composition::Needs;
-
-use crate::pbt::invariants::bodies::loro_no_errors::InvLoroNoErrors;
-
-pub fn wire() -> Box<dyn CapInvariant> {
-    Box::new(BridgedInvariant::new(
-        InvLoroNoErrors,
-        RunMode::Strict,
-        Needs {
-            sut_present: vec![CapId::of::<dyn SutLoroLog>()],
-            sut_absent: Vec::new(),
-            ref_present: Vec::new(),
-        },
-    ))
-}
+//! Selection tests for `inv-loro-no-errors` — the invariant BODY + `wire()` now
+//! live in the `holon-loro-testing` companion crate (co-location Phase 1) and
+//! reach the composed catalog via the central fold. These fixture-driven
+//! selection/catch tests stay here because they exercise the central
+//! `composed_invariant_catalog()` + shared fixtures.
 
 #[cfg(test)]
 mod tests {

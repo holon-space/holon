@@ -20,11 +20,11 @@ use holon_pbt_core::capabilities::SutLoro;
 use holon_pbt_core::capabilities::TextOp;
 use holon_pbt_core::composition::CapMap;
 use holon_pbt_core::composition::CapProvider;
+use holon_pbt_core::retry::retry_until_ok;
+use holon_pbt_core::types::DocUriMap;
 use tokio::sync::RwLock;
 
 use crate::assertions::normalize_block;
-use crate::pbt::retry::retry_until_ok;
-use crate::pbt::types::DocUriMap;
 use crate::test_environment::wait_for_loro_quiescence_on;
 
 /// Encapsulates Loro-specific PBT validation **and** ownership of the
@@ -36,6 +36,8 @@ use crate::test_environment::wait_for_loro_quiescence_on;
 /// `doc_uri_map` (for resolving reference stable-ids to real Loro UUIDs).
 /// `E2ESut` keeps a one-line-per-method forwarding `impl SutLoro` that simply
 /// delegates here.
+// BLOCKED on Phase 1a: binds concrete ReferenceState/SutHandle — cannot
+// co-locate to holon-loro-testing until those are lifted to a shared crate.
 pub struct LoroSut {
     doc_store: Arc<RwLock<LoroDocumentStore>>,
     /// Loro-only peer instances for multi-instance sync testing.
@@ -341,9 +343,9 @@ impl SutLoro for LoroSut {
         &self,
         peer_idx: usize,
         block_id: &str,
-        op: &crate::pbt::transitions::TextOp,
+        op: &holon_pbt_core::capabilities::TextOp,
     ) {
-        use super::transitions::TextOp;
+        use holon_pbt_core::capabilities::TextOp;
         let peers = self.peers.borrow();
         let peer = &peers[peer_idx];
         let resolved_id = self.resolve_stable_id(block_id);

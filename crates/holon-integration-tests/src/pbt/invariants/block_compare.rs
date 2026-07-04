@@ -26,6 +26,10 @@ use holon_api::EntityUri;
 use holon_api::block::Block;
 use holon_orgmode::models::OrgBlockExt;
 use holon_pbt_core::invariant::InvariantResult;
+/// Shared order comparator, lifted to `holon-pbt-core` (co-location Phase 1)
+/// and re-exported here so the historical
+/// `block_compare::compare_sibling_order` path stays valid for central callers.
+use holon_pbt_core::sibling_order::compare_sibling_order;
 
 use crate::assertions::normalize_block;
 
@@ -109,55 +113,14 @@ pub fn compare_block_order(
         {
             continue;
         }
-        // Render-artifact exemption via the shared rule. Predicate
-        // reconciled to Source|Image (was Source-only here, Source|Image
-        // in the children bodies): Image rows are render artifacts with
-        // the same reassigned-sort_key behaviour as Source.
-        let content_types: std::collections::HashMap<&str, ContentType> = actual_children
-            .iter()
-            .map(|b| (b.id.as_str(), b.content_type))
-            .collect();
-        compare_sibling_order(label, parent_id, &ref_order, &actual_order, |id| {
-            matches!(content_types[*id], ContentType::Source | ContentType::Image)
-        })?;
+        // Exact order comparison. Both sides are pre-sorted by the same
+        // canonical key (render group, then `sequence`, then id); the ref's
+        // `sequence` now reproduces the parser's `Source < Image < Text`
+        // order, so no render-artifact exemption is needed.
+        compare_sibling_order(label, parent_id, &ref_order, &actual_order)?;
     }
     Ok(())
 }
-
-/// Shared per-parent sibling-order comparison with the render-artifact
-/// order exemption. The single home for the exemption rule previously
-/// duplicated (with drifted predicates: Source-only here, Source|Image in
-/// the children bodies) across `compare_block_order`,
-/// `inv-live-children-match-ref` and `inv-loro-children-match-ref`.
-///
-/// Order is exempt iff the membership (set) is identical AND every child
-/// satisfies `exempt` — render artifacts (`::src::`, `::render::`,
-/// Source|Image) whose relative order legitimately differs because the
-/// stores sort by different keys and a file-sync round trip reassigns
-/// sort_keys. Missing / extra / ghost children still fail (set
-/// inequality is never exempt).
-pub fn compare_sibling_order<T: Ord + std::fmt::Debug>(
-    label: &str,
-    parent: &dyn std::fmt::Display,
-    ref_children: &[T],
-    sut_children: &[T],
-    exempt: impl Fn(&T) -> bool,
-) -> Result<(), String> {
-    if ref_children == sut_children {
-        return Ok(());
-    }
-    let ref_set: std::collections::BTreeSet<&T> = ref_children.iter().collect();
-    let sut_set: std::collections::BTreeSet<&T> = sut_children.iter().collect();
-    if ref_set == sut_set && ref_children.iter().all(exempt) {
-        return Ok(());
-    }
-    Err(format!(
-        "[{label}] sibling order diverges under parent {parent}.\n  \
-         ref order: {ref_children:?}\n  \
-         sut order: {sut_children:?}"
-    ))
-}
-
 /// Run the field facet (always) and, when `check_order`, the ordering facet.
 /// Returns `Fail` on the first divergence, else `Ok`. Stores with a CDC-lag /
 /// readiness gate convert their own "not ready" into `Skipped` *before*

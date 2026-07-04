@@ -48,13 +48,19 @@ fn build_trailing_slot(ba: &BA<'_>) -> Option<crate::reactive_view::TrailingSlot
         tracing::debug!("[VIRTUAL_CHILD] -> None (no item_template)");
         return None;
     };
-    let row = virtual_child_row(&slot);
+    // Bug 2A: parent the creation slot at the query's focus root (resolved from
+    // the rendered rows), not the static container `slot.parent_id`. `None`
+    // (empty / not-yet-resolvable) → no slot rather than a silent mis-parent.
+    let Some(parent) =
+        crate::row_origin::resolve_creation_parent(&ba.ctx.data_rows, &slot.parent_id)
+    else {
+        tracing::debug!("[VIRTUAL_CHILD] -> None (no resolvable focus root)");
+        return None;
+    };
+    let row = virtual_child_row(&parent, &slot.defaults);
     let row_ctx = ba.ctx.with_row(row);
     let vm = (ba.interpret)(template, &row_ctx);
-    tracing::debug!(
-        "[VIRTUAL_CHILD] -> Some slot for parent_id={}",
-        slot.parent_id
-    );
+    tracing::debug!("[VIRTUAL_CHILD] -> Some slot for parent_id={parent}");
     Some(crate::reactive_view::TrailingSlot {
         view_model: Arc::new(vm),
     })
@@ -76,7 +82,7 @@ holon_macros::widget_builder! {
         match (__template, ba.ctx.data_source.clone()) {
             (Some(tmpl), Some(ds)) => {
                 // Inject the creation placeholder as a REACTIVE virtual row
-                // (VirtualChildRowProvider) rather than a static `TrailingSlot`
+                // (AppendedRowsProvider creation-slot) rather than a static `TrailingSlot`
                 // snapshot. A snapshot is interpreted once (unfocused →
                 // read-only `rendered_text`) and never re-resolves on focus, so
                 // clicking the trailing placeholder set focus but it never
@@ -111,7 +117,8 @@ holon_macros::widget_builder! {
                 if flat.is_empty() {
                     return ViewModel::leaf("text", Value::String("[tree: no item_template]".into()));
                 }
-                ViewModel::static_collection("tree", flat_tree_items(flat), 4.0)
+                let items = weave_advice_into_items(&ba, flat_tree_items(flat));
+                ViewModel::static_collection("tree", items, 4.0)
             }
         }
     }

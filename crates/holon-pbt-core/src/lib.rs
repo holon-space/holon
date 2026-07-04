@@ -38,13 +38,19 @@ use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
 pub mod bisect;
+pub mod budget;
 pub mod caching_proxy;
 pub mod capabilities;
 pub mod component_set;
 pub mod composition;
+pub mod contribution;
 pub mod fixture;
 pub mod interactions;
 pub mod invariant;
+pub mod retry;
+pub mod sibling_order;
+pub mod types;
+pub mod validation;
 pub mod wiring;
 
 pub use bisect::Localization;
@@ -57,6 +63,12 @@ pub use component_set::Component;
 pub use component_set::ComponentSet;
 pub use component_set::ComponentSetError;
 pub use component_set::Projection;
+pub use contribution::CapInstaller;
+pub use contribution::CrateId;
+pub use contribution::GeneratorFactory;
+pub use contribution::PbtContribution;
+pub use contribution::PbtFootprint;
+pub use contribution::fold_catalog;
 pub use interactions::DeliverBlockContent;
 pub use interactions::SwitchViewMode;
 pub use interactions::ToggleCollapse;
@@ -65,6 +77,7 @@ pub use invariant::Invariant;
 pub use invariant::InvariantId;
 pub use invariant::InvariantResult;
 pub use invariant::RunMode;
+pub use sibling_order::compare_sibling_order;
 pub use wiring::Actor;
 pub use wiring::RequiredWiring;
 pub use wiring::StorageAdapter;
@@ -73,6 +86,7 @@ pub use wiring::Wiring;
 pub use wiring::WiringError;
 pub use wiring::any_valid_wiring;
 pub use wiring::wiring_axes;
+pub use wiring::wiring_from_exact_spec;
 
 /// Static contract for *creating* a transition. Each variant struct
 /// implements this once per PBT, parameterised by that PBT's

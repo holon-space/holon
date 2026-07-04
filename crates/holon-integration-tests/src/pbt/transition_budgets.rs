@@ -13,8 +13,16 @@ use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+// Budget formulas + inputs live in holon-pbt-core (Phase 1a Step 1); re-exported
+// so existing `crate::pbt::transition_budgets::…` import sites keep resolving.
+pub use holon_pbt_core::budget::{
+    CACHE_EVENT_READS, ExpectedSql, FIRST_VISIT_VIEW_DDL, FIRST_VISIT_VIEW_READS, JOURNAL_READS,
+    MutationKind, NAV_DML_READS, REACTIVE_BASE, READS_PER_WATCH, SqlBudget, cdc_tolerance,
+    docs_tolerance, expected_sql_for_kind,
+};
+use holon_pbt_core::types::Mutation;
+
 use super::reference_state::ReferenceState;
-use super::types::Mutation;
 use crate::test_tracing::TransitionMetrics;
 
 // ── SQL count model ───────────────────────────────────────────────
@@ -60,55 +68,6 @@ use crate::test_tracing::TransitionMetrics;
 // "query" spans during post-startup transitions. Only user watches from
 // SetupWatch contribute.
 
-pub(crate) const REACTIVE_BASE: usize = 5;
-pub(crate) const JOURNAL_READS: usize = 2;
-pub(crate) const NAV_DML_READS: usize = 5;
-pub(crate) const CACHE_EVENT_READS: usize = 3;
-pub(crate) const READS_PER_WATCH: usize = 2;
-
-// First navigation to a root renders it for the first time: each watch
-// matview takes `ensure_view`'s create path (2 sqlite_master existence
-// checks, one before and one under the DDL mutex, + the initial view
-// SELECT). Measured on the minimal WriteOrgFile×2 → StartApp →
-// NavigateFocus capture: 6 new views ⇒ ~18 reads + 6 CREATEs. Revisits hit
-// the known-views cache and get no allowance. The duplicate render-pass
-// reads (watch_ui trigger storm re-rendering 2-3× per focus change) ride
-// on the tolerance until the trigger coalescing lands.
-pub(crate) const FIRST_VISIT_VIEW_READS: usize = 18;
-pub(crate) const FIRST_VISIT_VIEW_DDL: usize = 6;
-
-/// Per-variant budget files share this tolerance helper. Mirrors the
-/// inline computation at the top of `expected_sql` — base jitter (4)
-/// plus extra matview checks (~2 reads per extra doc) for restarts
-/// reusing matviews via `ensure_view`.
-pub(crate) fn docs_tolerance(state: &ReferenceState) -> usize {
-    let docs = state.files.documents.len();
-    4 + if docs > 1 { (docs - 1) * 2 } else { 0 }
-}
-
-/// Expected SQL counts for a transition, computed from current state.
-#[derive(Debug)]
-pub struct ExpectedSql {
-    /// Expected number of SQL reads (via turso query())
-    pub reads: usize,
-    /// Expected number of SQL writes (via turso execute())
-    pub writes: usize,
-    /// Expected number of DDL statements
-    pub ddl: usize,
-    /// Tolerance: actual may exceed expected by this many (for async race
-    /// margins)
-    pub tolerance: usize,
-}
-
-/// Per-transition SQL budget. Separated from the behaviour trait
-/// (`holon_pbt_core::TransitionImpl`) because the budget is an
-/// integration-test concern that has no meaning for the layout /
-/// editor-pure PBTs — those slices never touch SQL. Each transition
-/// variant implements this; the `E2ETransition` enum dispatches it.
-pub trait SqlBudget {
-    fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql;
-}
-
 /// Compute expected SQL counts for a transition given the current reference
 /// state.
 ///
@@ -128,133 +87,6 @@ pub fn expected_sql(
     transition.expected_sql(ref_state)
 }
 
-/// Mutation kind discriminant — avoids constructing dummy Mutation values.
-pub(crate) enum MutationKind {
-    Create,
-    Update,
-    Delete,
-    Move,
-    RestartApp,
-}
-
-impl MutationKind {
-    fn from_mutation(m: &Mutation) -> Self {
-        match m {
-            Mutation::Create { .. } => Self::Create,
-            Mutation::Update { .. } => Self::Update,
-            Mutation::Delete { .. } => Self::Delete,
-            Mutation::Move { .. } => Self::Move,
-            Mutation::RestartApp => Self::RestartApp,
-        }
-    }
-}
-
-/// Expected SQL for a specific mutation type.
-///
-/// ## Read breakdown (from HOLON_PERF_DETAIL=1 analysis, 2026-04-05):
-///
-/// **Create** (external, via org file write — no operation journal):
-///   reactive base (5) + cache events (3) = 8 reads
-///   + per-watch: matview existence + data read (READS_PER_WATCH)
-///   + per-watch: block_with_path + render source load (2)
-///   Observed: 8 (0 watches), 14 (1 watch)
-///
-/// **Update** (UI dispatch — has operation journal):
-///   reactive base (5) + journal (4) + parent chain walk (4)
-///   + block content fetch (1) + name IS NULL (1) + properties IS NOT NULL (1)
-///   = 16 reads
-///   + per-watch: matview existence + data read (READS_PER_WATCH)
-///   + per-watch: block_with_path + render source load (2)
-///   Observed: 16 (0 watches), 18 (1 watch)
-///
-/// **Delete**: like Update + doc_uri lookup (1)
-///   = 17 + watches × (READS_PER_WATCH + 2)
-///
-/// ## CDC cascade tolerance
-///
-/// When a mutation triggers org sync, the org file gets re-written, which
-/// triggers file watcher → re-parse → CDC events. Each cascade cycle adds:
-///   - name IS NULL checks (1-2 per event)
-///   - property lookups (1-2 per affected block)
-///
-/// After the recursive CTE fix for find_document_uri, parent chain walks no
-/// longer scale with block count (O(1) instead of O(depth)). The remaining CDC
-/// overhead is mostly constant per mutation.
-pub(crate) fn cdc_tolerance(blocks: usize, docs: usize) -> usize {
-    // Empirical after CTE fix: CDC overhead is much flatter for single-doc.
-    // Multi-doc amplifies heavily: org sync re-writes ALL documents, each
-    // triggering CDC events with name IS NULL polls + property lookups.
-    // The cross-doc cost scales with blocks × (docs-1).
-    if docs > 1 {
-        4 + blocks / 2 + (docs - 1) * blocks / 3
-    } else {
-        4 + blocks / 3
-    }
-}
-
-pub(crate) fn expected_sql_for_kind(
-    kind: MutationKind,
-    watches: usize,
-    blocks: usize,
-    docs: usize,
-) -> ExpectedSql {
-    let tol = cdc_tolerance(blocks, docs);
-    match kind {
-        // Create goes through external mutation (org file write), no operation journal.
-        // reactive base (5) + cache events (3) + find_document_uri CTE (2) + properties (2)
-        // = 12 reads observed.
-        // Loro outbound reconcile adds: post-update row read (1) + find_document_uri (2)
-        //   + cache event reads (3) + properties merge (1) = 7.
-        // Per-watch: matview existence + data read + block_with_path + render source load = 4.
-        MutationKind::Create => ExpectedSql {
-            reads: REACTIVE_BASE
-                + CACHE_EVENT_READS
-                + 2
-                + 2
-                + 1
-                + 2
-                + CACHE_EVENT_READS
-                + 1
-                + watches * (READS_PER_WATCH + 2),
-            writes: 2 + watches.min(2),
-            ddl: 0,
-            tolerance: tol,
-        },
-        // Update (external path): reactive base (5) + find_document_uri CTE (2)
-        //   + name IS NULL (1) + properties IS NOT NULL (1) + per-block properties (2)
-        //   = 11 reads observed.
-        // Update (UI path): adds journal (4) + block content fetch (1) = 16 reads.
-        // Per-watch: matview existence + data read = 2.
-        MutationKind::Update => ExpectedSql {
-            reads: REACTIVE_BASE + JOURNAL_READS + 2 + 1 + 1 + 1 + 2 + watches * READS_PER_WATCH,
-            writes: 3,
-            ddl: 0,
-            tolerance: tol,
-        },
-        // Delete: like Update + doc_uri extra CTE (1).
-        MutationKind::Delete => ExpectedSql {
-            reads: REACTIVE_BASE + JOURNAL_READS + 3 + 1 + 1 + 1 + 2 + watches * READS_PER_WATCH,
-            writes: 3,
-            ddl: 0,
-            tolerance: tol,
-        },
-        // Move: 2× find_document_uri CTE (2) + content fetch (1) + name IS NULL (1)
-        //   + properties IS NOT NULL (1) + per-block properties (2).
-        MutationKind::Move => ExpectedSql {
-            reads: REACTIVE_BASE + JOURNAL_READS + 2 + 1 + 1 + 1 + 2 + watches * READS_PER_WATCH,
-            writes: 3,
-            ddl: 0,
-            tolerance: tol,
-        },
-        MutationKind::RestartApp => ExpectedSql {
-            reads: REACTIVE_BASE + 4,
-            writes: 2,
-            ddl: 0,
-            tolerance: 3,
-        },
-    }
-}
-
 /// Expected SQL for a mutation via its `Mutation` value.
 pub(crate) fn expected_mutation_sql(
     mutation: &Mutation,
@@ -262,7 +94,14 @@ pub(crate) fn expected_mutation_sql(
     blocks: usize,
     docs: usize,
 ) -> ExpectedSql {
-    expected_sql_for_kind(MutationKind::from_mutation(mutation), watches, blocks, docs)
+    let kind = match mutation {
+        Mutation::Create { .. } => MutationKind::Create,
+        Mutation::Update { .. } => MutationKind::Update,
+        Mutation::Delete { .. } => MutationKind::Delete,
+        Mutation::Move { .. } => MutationKind::Move,
+        Mutation::RestartApp => MutationKind::RestartApp,
+    };
+    expected_sql_for_kind(kind, watches, blocks, docs)
 }
 
 // ── Transition key ────────────────────────────────────────────────
@@ -726,7 +565,7 @@ pub fn max_rss_delta_bytes(transition: &crate::pbt::transitions::E2ETransition) 
         // wiring guard rejects the flipped consolidator (no matviews/CDC/spans of a
         // full boot, but a fresh backend + DI allocations); budget alongside StartApp.
         "EpochFlipRejected" => 1500 * MB,
-        "BulkExternalAdd" | "CreateDocument" => 200 * MB,
+        "BulkExternalAdd" | "CreateDocument" | "DeleteDocument" => 200 * MB,
         "SimulateRestart" => 80 * MB,
         "ApplyMutation" => 50 * MB,
         "SetupWatch" => 15 * MB,

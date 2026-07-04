@@ -89,6 +89,7 @@ pub trait EntityCellRegistry: Send + Sync {
         _: &std::collections::HashMap<String, holon_api::Value>,
         _: &Tags,
         _: &[EntityUri],
+        _: &[EntityUri],
     ) -> Result<bool> {
         Ok(false)
     }
@@ -398,6 +399,7 @@ mod tests {
                     holon_api::BlockContent::text("x"),
                     &std::collections::HashMap::new(),
                     &holon_api::Tags::default(),
+                    &[],
                     &[],
                 )
                 .await

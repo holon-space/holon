@@ -333,11 +333,10 @@ impl BlockCellRegistry {
             }
             "sort_key" => {
                 // Sibling order is owned by `place()`/`tree.mov_after` and
-                // projected to SQL from the Loro fractional index — a block's
-                // `sort_key` is never written through `set_field`. The org sync
-                // path explicitly omits it (`build_block_params`), and
-                // `project_sort_keys` writes the projected key straight to SQL
-                // (bypassing this registry). A `set_field("sort_key")` reaching
+                // projected to SQL from the Loro fractional index by the outbound
+                // snapshot projection — a block's `sort_key` is never written
+                // through `set_field`. The org sync path explicitly omits it
+                // (`build_block_params`). A `set_field("sort_key")` reaching
                 // here is a bug, not a positional intent — fail loud rather than
                 // silently mis-route it to the meta `properties` map (which
                 // `read_block_from_tree` ignores in favour of the fractional
@@ -347,6 +346,36 @@ impl BlockCellRegistry {
                      and projected from the fractional index; a set_field(\"sort_key\") reached \
                      the cell registry for {id} — bug"
                 ))
+            }
+            "task_state" => {
+                // `task_state` travels with its `task_state_category` sidecar:
+                // the org parse boundary (`Block::set_task_state`) writes BOTH
+                // keys and `Block::task_state()` reads the pair back into a
+                // `TaskState`. The widget click intent (`state_toggle` →
+                // `set_field("task_state", next)`) carries only the keyword, so
+                // this boundary derives and writes the sidecar alongside —
+                // otherwise every UI cycle dropped/staled the category (a DONE
+                // keyword could read back as Active). Both keys land in ONE
+                // `update_block_properties` commit (per-key LWW merge, H3).
+                let category = match &value {
+                    Value::Null => Value::Null,
+                    Value::String(kw) => Value::String(
+                        holon_api::TaskState::category_str_for_keyword(kw).to_string(),
+                    ),
+                    other => {
+                        return Err(anyhow!(
+                            "write_field(task_state): expected String or Null, got {other:?}"
+                        ));
+                    }
+                };
+                let mut props = std::collections::HashMap::new();
+                props.insert("task_state".to_string(), value);
+                props.insert("task_state_category".to_string(), category);
+                backend
+                    .update_block_properties(&id, &props)
+                    .await
+                    .map_err(|e| anyhow!("update_block_properties(task_state) for {id}: {e:#}"))?;
+                Ok(true)
             }
             "marks" => {
                 // Phase 3.2: marks go through the Peritext write path
@@ -691,6 +720,7 @@ impl EntityCellRegistry for BlockCellRegistry {
         properties: &std::collections::HashMap<String, holon_api::Value>,
         tags: &Tags,
         requires: &[EntityUri],
+        advice_suppressed: &[EntityUri],
     ) -> Result<bool> {
         let backend = match &self.backing_source {
             BackingSource::Loro { backend, .. } => backend.clone(),
@@ -748,6 +778,13 @@ impl EntityCellRegistry for BlockCellRegistry {
                     .await
                     .map_err(|e| anyhow!("set_block_requires({new_id}): {e:#}"))?;
             }
+            // Reconcile the advice-suppression set too (mirrors requires).
+            if !advice_suppressed.is_empty() {
+                backend
+                    .set_block_advice_suppressed(new_id.id(), advice_suppressed)
+                    .await
+                    .map_err(|e| anyhow!("set_block_advice_suppressed({new_id}): {e:#}"))?;
+            }
             return Ok(true);
         }
         // Resolve the parent in the tree; if it's a real block not yet
@@ -777,6 +814,7 @@ impl EntityCellRegistry for BlockCellRegistry {
                 properties,
                 tags,
                 requires,
+                advice_suppressed,
             )
             .await
             .map_err(|e| anyhow!("create_block({new_id}): {e:#}"))?;
@@ -828,12 +866,11 @@ impl BlockCellRegistry {
         matches!(self.backing_source, BackingSource::Loro { .. })
     }
     /// Read a block's authoritative Loro fractional index — the value the
-    /// outbound projector writes to SQL `sort_key`. Returns `None` in SqlOnly
-    /// mode, where SQL itself owns `sort_key`. Used by the org-scan order
-    /// writeback (`BlockOrdering::project_sort_keys`) to project blocks that
-    /// were created but never repositioned: those emit no Loro mov delta, so
-    /// the projector never writes their fi and they would keep the default
-    /// `"A0"` and mis-sort against moved siblings.
+    /// outbound snapshot projection writes to SQL `sort_key`. Returns `None` in
+    /// SqlOnly mode, where SQL itself owns `sort_key`. A read accessor for
+    /// diagnostics / order-verification (e.g. comparing the live fi against the
+    /// projected `block_raw.sort_key`); the projection itself writes every
+    /// sibling's key each pass, so no separate writeback pass is needed.
     pub async fn live_sort_key(&self, id: &str) -> Result<Option<String>> {
         let backend = match &self.backing_source {
             BackingSource::Loro { backend, .. } => backend.clone(),
@@ -1054,6 +1091,7 @@ mod tests {
             holon_api::BlockContent::text("x"),
             &std::collections::HashMap::new(),
             &Tags::default(),
+            &[],
             &[],
         ))?;
         assert!(

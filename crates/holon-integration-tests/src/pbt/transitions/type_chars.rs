@@ -7,7 +7,6 @@
 //! `transition_budgets.rs:368-377` (expected SQL).
 
 use holon_pbt_core::TransitionFactory;
-use holon_pbt_core::TransitionImpl;
 use holon_pbt_core::TransitionRef;
 use holon_pbt_core::capabilities::CapRegion;
 use holon_pbt_core::capabilities::RefBlockTreeMut;
@@ -17,17 +16,16 @@ use holon_pbt_core::capabilities::RefFocus;
 use holon_pbt_core::capabilities::RefLifecycle;
 use holon_pbt_core::capabilities::SutEditorMirrorWrite;
 use holon_pbt_core::capabilities::commit_active_editor_if_changed;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::check;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::reference_state::ReferenceState;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::REACTIVE_BASE;
-use crate::pbt::validation::Reason;
-use crate::pbt::validation::check;
 
 /// Type a short ASCII string into the active editor.
 /// Gated to `PBT_ATOMIC_EDITOR=1` runs.
@@ -83,7 +81,7 @@ pub fn type_chars_weighted_generator<R: RefEditorMirror + RefFocus + RefLifecycl
 }
 
 /// Ref-state apply for `TypeChars`, capability-bound. Mirrors the
-/// original ReferenceState-specific apply exactly: type into the active
+/// original reference-state-specific apply exactly: type into the active
 /// editor, then commit through to block content.
 pub fn type_chars_apply_to_ref<R>(text: &str, state: &mut R)
 where
@@ -103,9 +101,7 @@ where
 
 impl<R: RefEditorMirror + RefFocus + RefLifecycle> TransitionFactory<R> for TypeChars {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        vec![::holon_pbt_core::composition::CapId::of::<
-            dyn ::holon_pbt_core::capabilities::SutEditorMirrorWrite,
-        >()]
+        Self::declared_caps()
     }
 
     type Reason = Reason;
@@ -140,16 +136,13 @@ impl<R: RefEditorMirror + RefEditorMirrorMut + RefBlockTreeMut + RefFocus + RefL
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutEditorMirrorWrite> TransitionImpl<ReferenceState, S> for TypeChars {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.apply_type_chars(&self.text).await;
+crate::cap_transition! {
+    TypeChars: SutEditorMirrorWrite,
+    where R: [ RefEditorMirror + RefFocus + RefLifecycle ],
+    |me, _state, sut| {
+        sut.apply_type_chars(&me.text).await;
     }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for TypeChars {
-    fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
+    sql_budget: |_me, _state| {
         ExpectedSql {
             reads: REACTIVE_BASE,
             writes: 0,

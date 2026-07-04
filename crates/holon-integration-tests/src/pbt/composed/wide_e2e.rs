@@ -74,6 +74,17 @@ pub fn page_root() -> EntityUri {
 /// it never over-waits vs the old flat `sleep(SETTLE)`.
 pub const SETTLE: Duration = Duration::from_millis(150);
 
+/// Convergence CAP for [`converge_projections`]. Unlike [`SETTLE`] (a
+/// flat-sleep replacement sized for a quiet SUT), this bounds the
+/// LOOP-to-fixed-point wait: a settled SUT returns in ~one quiet-floor poll,
+/// but a heavy transition whose Loro->SQL projection is the latency dominator
+/// (~1.84s at vault scale) needs far more than 150ms to actually land its
+/// `sort_key` writes. `SETTLE` was too small, so the settle gave up
+/// mid-projection and the invariant read half- projected SQL (the org-render
+/// sibling-order flake). This is a real hang backstop, not a per-transition
+/// budget — only genuine non-convergence hits it.
+pub const CONVERGE_BUDGET: Duration = Duration::from_secs(30);
+
 /// The slice handle for [`WideE2E`] — the store handles the post-write settle
 /// needs to prove all three projections (Turso CDC + Loro + org) have drained,
 /// instead of a flat `sleep(SETTLE)`. Absent handles (a Loro-only draw has no
@@ -94,6 +105,14 @@ pub struct WideHandle {
 }
 
 impl WideHandle {
+    /// The booted Turso engine (`None` for a Loro-only draw). Deterministic
+    /// tests use it to dispatch production operations headlessly via
+    /// `BackendEngine::execute_operation` — the same dispatch the frontend's
+    /// op_buttons reach.
+    pub fn engine(&self) -> Option<&Arc<BackendEngine>> {
+        self.engine.as_ref()
+    }
+
     /// Build the settle handle from a booted builder bundle — the windowed
     /// harness ([`windowed_composed_sut`]) reuses the base session's
     /// engine/frontend so its per-apply settle converges the same three
@@ -133,14 +152,36 @@ async fn converge_projections(handle: &WideHandle, budget: Duration) {
         ),
         None => (None, None, None),
     };
-    crate::pbt::convergence::converge_signals(
+    // Loop to a combined fixed point with a generous cap (a settled SUT still
+    // returns in ~one quiet floor). Honour a larger caller budget if given, but
+    // never wait less than CONVERGE_BUDGET — 150ms is below the heavy projection
+    // pass and was the flake's root cause.
+    let cap = budget.max(CONVERGE_BUDGET);
+    let converged = crate::pbt::convergence::converge_signals(
         handle.engine.as_ref(),
         sync,
         store,
         org_idle,
-        budget,
+        cap,
     )
     .await;
+    assert!(
+        converged,
+        "[converge_projections] projections did not reach a combined fixed point within {cap:?}: \
+         the Loro->SQL sort_key projection / Turso CDC / org re-render are still churning. \
+         Reading invariants now would race a half-projected sink (the org-render sibling-order \
+         class). This is a real non-convergence, not a flaky timeout to swallow."
+    );
+
+    // Advice weave (ADR 0022): now that CDC has converged (the `advice_rule_{slug}`
+    // matview + `advice_suppressed` reflect the settled SQL state), recompute the
+    // frontend's session-level advice sidecar so the pure snapshot the keystone's
+    // `inv-advice-rows-woven` reads sees the woven rows. Deterministic (one-shot
+    // canonical read), fail-loud through the same read path — no invariant
+    // softened.
+    if let Some(comp) = &handle.frontend {
+        comp.reactive().refresh_advice_sidecar().await;
+    }
 }
 
 /// The working tree AS the boot org (page-rooted leaf siblings, pinned bare
@@ -326,19 +367,54 @@ pub async fn boot_and_seed_wide(
     resolver: &IdResolver,
     ref_state: &ReferenceState,
 ) -> (CapMap, WideHandle, BTreeSet<EntityUri>) {
-    // SUT-side parameterization seam: the booted set follows the oracle's drawn
-    // wiring (today fixed to `full_headless` by `wide_e2e_ref`; `init_state`
-    // draws `any_valid_wiring()` once the ref-side wiring + required-invariants
-    // sub-steps land).
+    // SUT-side parameterization seam: the booted set follows the oracle's DRAWN
+    // wiring (`init_state` draws `any_valid_wiring()`; `HOLON_PBT_FORCE_FULL=1`
+    // pins `full_headless`). Disclose the draw per case so a run log yields
+    // per-wiring case counts (grep "wide-e2e wiring") -- the drawn grid is
+    // auditable, not assumed.
     let set = set_for_wiring(&ref_state.wiring);
+    eprintln!(
+        "[wide-e2e wiring] drawn: storage={:?} sync={:?} actors={:?} -> booted storage={:?} \
+         projections={:?}",
+        ref_state.wiring.storage_adapters,
+        ref_state.wiring.sync_adapters,
+        ref_state.wiring.actors,
+        set.wiring.storage_adapters,
+        set.projections,
+    );
     let has_frontend = set.has_projection(Projection::ViewModel);
-    let bundle = compose_sut_seeded(
-        &set,
-        resolver,
-        &[("structural-page.org", WIDE_TREE_ORG)],
-        &wide_seed_tree(),
-    )
-    .await;
+    // Scale-soak inflation: extra synthetic doc files (deep trees, tasks, links,
+    // unicode) appended to the SUT boot ONLY. Empty unless `HOLON_SOAK_SEED_BLOCKS`
+    // is set, so the keystone is untouched by default. Their ids fold into the
+    // oracle via the scaffold math below (booted-but-not-tree ⇒ seed-classified),
+    // so the invariant catalog stays green while every action pays the whole-vault
+    // projection/CDC/consolidator cost.
+    let soak_files = crate::pbt::composed::soak_seed::soak_org_files();
+    // `block:journals` is a first-boot page that is disk-backed in prod (the
+    // packaged `assets/default/Journals.org`, fixed id `block:journals`). Seed a
+    // bare page SHELL (`#+ID: journals`, no query/render/action body) so the
+    // journals page is a genuine on-disk file AND is TRACKED for the `/org`
+    // comparison. Prod-faithful for the keystone's non-empty vault: on a vault
+    // that already has `.org` files, `seed_default_org_assets` does NOT re-seed
+    // the packaged body, but `seed_default_layout` still creates the page shell
+    // idempotently — exactly the shell modeled here. Body blocks are omitted on
+    // purpose: ingesting the packaged query/render/action source blocks would add
+    // rows the oracle's first-boot layout model does not carry (→ a `block_raw`
+    // false-divergence). With the shell tracked, a non-page block created under
+    // journals via `CreateBlockUnderFocus` lands INLINE in `Journals.org` (the
+    // page-file-placement rule: `doc_id_to_path` → `name_chain(block:journals)` =
+    // `["Journals"]` → `<root>/Journals.org`, because the child's nearest ancestor
+    // page IS journals), so the `/org` snapshot observes it and matches the
+    // reference's `org_blocks` (non-seed, non-page journals child). Mirrors the
+    // `live_mcp` sibling harness's `Journals.org` seed, extended to also track it.
+    let mut seed_files: Vec<(&str, &str)> = vec![
+        ("structural-page.org", WIDE_TREE_ORG),
+        ("Journals.org", "#+ID: journals\n"),
+    ];
+    for (name, body) in &soak_files {
+        seed_files.push((name.as_str(), body.as_str()));
+    }
+    let bundle = compose_sut_seeded(&set, resolver, &seed_files, &wide_seed_tree()).await;
     // The settle handles — the Turso engine (CDC watermark) and the frontend
     // component (Loro sync + org idle). Cloned out before `bundle.caps` is
     // moved so the post-write [`converge_projections`] settle can prove all
@@ -348,6 +424,17 @@ pub async fn boot_and_seed_wide(
         frontend: bundle.frontend.clone(),
     };
     let mut caps = bundle.caps;
+
+    // Scale-soak: drain the WHOLE seeded vault into `block_raw` BEFORE the scaffold
+    // id-set is snapshotted below. The frontend boot settle is a flat 300ms — far
+    // too short to project 5–10k blocks — so an un-drained soak block would be
+    // absent from `booted`, escape seed-classification in the oracle, and later
+    // surface in the SUT store with no matching oracle seed entry → a false
+    // `inv-blocks-match-ref` divergence. Off (count 0) this is skipped
+    // entirely; the keystone is untouched.
+    if crate::pbt::composed::soak_seed::soak_block_count() > 0 {
+        converge_projections(&handle, crate::pbt::composed::soak_seed::soak_settle()).await;
+    }
 
     // `inv-sql-budget` coverage: a span-metrics provider hosting the SAME
     // `MetricsSut` the native E2ESut uses, exposed through `ComposedBudget`
@@ -361,6 +448,11 @@ pub async fn boot_and_seed_wide(
         let m = std::sync::Arc::new(ComposedSpanMetrics::new());
         caps.insert(m.clone() as std::sync::Arc<dyn ComposedBudget>);
         caps.insert(m as std::sync::Arc<dyn SutMetricsLifecycle>);
+
+        use crate::pbt::composed::observed_errors::ComposedObservedErrors;
+        use crate::pbt::composed::observed_errors::ObservedProblems;
+        caps.insert(std::sync::Arc::new(ComposedObservedErrors::new())
+            as std::sync::Arc<dyn ObservedProblems>);
     }
 
     // Scaffold = everything the SUT booted OR the oracle models, EXCEPT the
@@ -416,7 +508,7 @@ pub async fn boot_and_seed_wide(
             &mut caps,
         )
         .await;
-        converge_projections(&handle, SETTLE).await;
+        converge_projections(&handle, crate::pbt::composed::soak_seed::soak_settle()).await;
     }
 
     (caps, handle, scaffold)
@@ -542,11 +634,11 @@ pub fn windowed_composed_sut(
 }
 
 /// Normalize a (possibly drawn) `Wiring` into the composed **headless**
-/// `ComponentSet` the `general_e2e_composed_pbt` swap boots — the SUT-side seam
-/// env-parameterization flips (drawing `any_valid_wiring()` instead of fixing
-/// `full_headless`). Mirrors the native `storage_selector_for_wiring` backend
-/// choice so a Loro-only draw maps to the cheap `LoroMemory` SUT and a Turso
-/// draw to the full `BackendEngine`:
+/// `ComponentSet` the `general_e2e_composed_pbt` swap boots — the SUT half of
+/// the wiring draw (`init_state` draws `any_valid_wiring()`; this maps each
+/// draw to a bootable set). Mirrors the native `storage_selector_for_wiring`
+/// backend choice so a Loro-only draw maps to the cheap `LoroMemory` SUT and a
+/// Turso draw to the full `BackendEngine`:
 ///
 /// - **strip `Actor::UI`** — the composed `CapMap` is headless by construction
 ///   (`compose_sut` fail-louds on a UI actor; a window is the sibling
@@ -606,8 +698,9 @@ pub fn cap_set_for_wiring(wiring: &Wiring) -> CapSet {
     cs
 }
 
-/// The `full_headless` cap set — the swap's current fixed wiring. Thin alias
-/// over [`cap_set_for_wiring`] (the parameterized seam).
+/// The `full_headless` cap set — the WIDEST wiring's cap set (used by the
+/// cap-presence guard and the FORCE_FULL pin). Thin alias over
+/// [`cap_set_for_wiring`].
 pub fn full_headless_cap_set() -> CapSet {
     cap_set_for_wiring(&ComponentSet::full_headless().wiring)
 }
@@ -634,8 +727,9 @@ pub fn wide_e2e_ref_for(wiring: &Wiring) -> ReferenceState {
     state.with_cap_set(cap_set_for_wiring(wiring))
 }
 
-/// The swap oracle for the current fixed wiring (`full_headless`). Thin alias
-/// over [`wide_e2e_ref_for`] (the parameterized seam).
+/// The swap oracle for the WIDEST wiring (`full_headless`) — the
+/// `HOLON_PBT_FORCE_FULL` pin and the teeth's fixed target. Thin alias over
+/// [`wide_e2e_ref_for`].
 pub fn wide_e2e_ref() -> ReferenceState {
     wide_e2e_ref_for(&ComponentSet::full_headless().wiring)
 }
@@ -694,8 +788,25 @@ impl ReferenceStateMachine for WideE2EMachine {
         // false-REDing on the SQL/ViewModel ids it has no caps for.
         // `HOLON_PBT_FORCE_FULL=1` pins every draw to `full_headless` — the
         // deterministic exerciser for the frontend-only composed arms
-        // (`ApplyMutation` External / `BulkExternalAdd`), which
-        // `any_valid_wiring` only reaches on a rare Turso draw.
+        // (`ApplyMutation` External / `BulkExternalAdd`). NOT actually rare by
+        // default: the validity filter (`Wiring::validate` rejects
+        // empty-storage and ActionEngine-without-Turso draws) reweights the raw
+        // 0.15 Turso inclusion to ≈35% of VALID draws, so a 16-case run misses
+        // Turso entirely with probability ≈0.1%. `HOLON_PBT_PIN_WIRING="
+        // storage;sync;actors"` pins every draw to ONE exact
+        // manifest (fail-loud on a typo or invalid manifest) — the external-supply seam
+        // for bottom-up ladder runs and subset-wiring repros. Mutually exclusive with
+        // FORCE_FULL to keep a run's provenance unambiguous.
+        if let Ok(spec) = std::env::var("HOLON_PBT_PIN_WIRING") {
+            assert!(
+                std::env::var("HOLON_PBT_FORCE_FULL").is_err(),
+                "HOLON_PBT_PIN_WIRING and HOLON_PBT_FORCE_FULL are mutually exclusive"
+            );
+            let wiring = holon_pbt_core::wiring_from_exact_spec(&spec);
+            return ::proptest::strategy::Strategy::boxed(::proptest::prelude::Just(
+                wide_e2e_ref_for(&wiring),
+            ));
+        }
         if std::env::var("HOLON_PBT_FORCE_FULL").is_ok() {
             return ::proptest::strategy::Strategy::boxed(
                 ::proptest::prelude::Just(wide_e2e_ref()),
@@ -722,8 +833,9 @@ impl ReferenceStateMachine for WideE2EMachine {
 }
 
 /// The swap slice: production `E2ETransition` enum, production
-/// `aggregate_transitions` generator, composed `compose_sut(full_headless)` SUT
-/// (via [`boot_and_seed_wide`]).
+/// `aggregate_transitions` generator, composed
+/// `compose_sut(set_for_wiring(drawn wiring))` SUT (via [`boot_and_seed_wide`])
+/// -- one SUT per drawn point of the wiring grid.
 pub struct WideE2E;
 
 impl ComposedSlice for WideE2E {
@@ -753,7 +865,7 @@ impl ComposedSlice for WideE2E {
     /// lagged and the block/org invariants diverged). Capped at `SETTLE`,
     /// so it never over-waits vs the old sleep.
     async fn settle_after_apply(handle: &WideHandle, _: &CapMap) {
-        converge_projections(handle, SETTLE).await;
+        converge_projections(handle, crate::pbt::composed::soak_seed::soak_settle()).await;
     }
 
     async fn apply_transition(
@@ -930,11 +1042,12 @@ impl ReferenceStateMachine for WideE2EWindowedMachine {
 
 #[cfg(test)]
 mod tests {
+    use holon_pbt_core::capabilities::PeerEditOp;
+
     use super::*;
     use crate::pbt::transitions::AddPeer;
     use crate::pbt::transitions::MergeFromPeer;
     use crate::pbt::transitions::PeerEdit;
-    use crate::pbt::transitions::PeerEditOp;
     use crate::pbt::transitions::SyncWithPeer;
 
     /// Seed-generalization validation (the §8.10 next-step gate): a
@@ -1131,6 +1244,83 @@ mod tests {
              out of the widest CapMap (fix the wiring) or it is a genuinely headless-absent cap \
              (add it to WIDE_HEADLESS_ABSENT_CAPS with a reason). missing cap → invariant ids \
              that need it: {unexpected:?}"
+        );
+    }
+
+    /// iOS-PARITY SUBSTRATE PIN (2026-07-06). The iOS GPUI app boots through
+    /// `GpuiModule` → `HolonFrontendModule::configure` → `add_frontend`
+    /// (frontends/gpui/src/di.rs, mobile.rs). Its ONLY material config delta vs
+    /// a desktop boot is `holon_config.crdt.enabled = Some(true)`
+    /// (frontends/gpui/src/mobile.rs ~L35), which makes `add_frontend`
+    /// (holon-app/src/wiring.rs L148-184) register `LoroModule` AND the Loro
+    /// `CrudAuthority(LoroBlockOperations)` — Loro owns block CRUD, SQL mirrors
+    /// it.
+    ///
+    /// The composed keystone (`compose_sut(full_headless)`) boots the SAME
+    /// substrate: `full_headless()` carries `Projection::EditorState`, so
+    /// the builder's frontend
+    /// arm calls `HeadlessFrontendComponent::new_with_loro(..,
+    /// loro_enabled=true)` (builder.rs L279), which sets `crdt.enabled =
+    /// Some(true)` and boots through `holon_app::new_from_config_with_di` →
+    /// `add_frontend` — the exact same DI seam and `crdt_enabled()` branch
+    /// the iOS app hits. So both register the Loro `CrudAuthority`.
+    ///
+    /// Audited parity table (knob | iOS app | keystone | match):
+    ///   crdt.enabled           | Some(true)          | Some(true) via
+    /// EditorState | YES   CrudAuthority          | Loro (add_frontend) |
+    /// Loro (add_frontend)        | YES   storage backend        | Turso +
+    /// Loro        | Turso + Loro               | YES   config seam
+    /// | add_frontend        | add_frontend               | YES (same fn)
+    ///   locked_keys            | empty               | empty
+    /// | YES   Actor::UI / MCP actor  | present (window/MCP)| absent
+    /// (headless)          | by-design (full_headless drops UI)   db_path /
+    /// vault root   | app sandbox         | tempdir                    |
+    /// immaterial (path only)
+    ///
+    /// This pin fails loud if a future edit drops `EditorState` from
+    /// `full_headless` (silently disabling the Loro authority substrate →
+    /// the keystone would stop exercising what iOS runs) OR if the builder
+    /// stops registering the Loro peer-mesh authority surface (`SutLoro`),
+    /// which is present ONLY when the frontend booted its live Loro
+    /// authority doc (builder.rs L328/L367/L489). Its presence is
+    /// the observable proof that the CRDT/Loro-authority substrate is LIVE.
+    #[test]
+    fn keystone_boots_ios_crdt_loro_authority_substrate() {
+        use holon_pbt_core::capabilities::SutLoro;
+
+        // The config the keystone boots MUST carry EditorState — that projection is
+        // exactly what drives `crdt.enabled = Some(true)` in the frontend arm, the iOS
+        // material knob. (ViewModel + Turso pin the frontend/Turso half.)
+        let set = ComponentSet::full_headless();
+        assert!(
+            set.has_projection(Projection::EditorState),
+            "full_headless dropped EditorState — the keystone would boot the frontend arm with \
+             crdt.enabled=Some(false), losing the Loro CrudAuthority substrate the iOS app forces \
+             via crdt.enabled=Some(true). iOS parity broken."
+        );
+        assert!(
+            set.has_projection(Projection::ViewModel) && set.has_storage(StorageAdapter::Turso),
+            "full_headless must keep the Turso-backed frontend (ViewModel) arm — the iOS app \
+             boots a real FrontendSession over Turso with Loro on."
+        );
+
+        // Boot the real SUT and prove the Loro authority surface is live.
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("build multi-thread runtime");
+        let has_loro_authority = rt.block_on(async {
+            let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
+            let sut = compose_sut(&set, &resolver).await;
+            sut.caps.get::<dyn SutLoro>().is_some()
+        });
+        drop(rt);
+        assert!(
+            has_loro_authority,
+            "compose_sut(full_headless) did NOT register the Loro peer-mesh authority cap \
+             (SutLoro) — the frontend arm booted WITHOUT a live Loro authority doc, so the \
+             keystone is NOT exercising the CRDT/Loro-authority substrate the iOS app runs \
+             (crdt.enabled=Some(true) → CrudAuthority(Loro)). iOS parity broken."
         );
     }
 
