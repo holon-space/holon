@@ -199,6 +199,7 @@ async fn exercise_entity(
         None,
         tokio::runtime::Handle::current(),
         Some(prefix),
+        &std::collections::HashMap::new(),
     );
 
     // ----- 1. Drain the FDW cursor (pagination + fan-out happen for real) -----

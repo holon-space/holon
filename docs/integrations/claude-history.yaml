@@ -99,6 +99,38 @@ entities:
       write_through: true
 
   message:
+    # OPT-IN (commented out below, inside the vtable block): unpinned fan-out
+    # over locally cached sessions. Today cc_message_fdw requires a pinned
+    # session_id (uri_params: session_id: ""), so `SELECT ... WHERE
+    # session_id = X` costs exactly one resource read. Swapping the empty
+    # value for the enumerate_from block makes unpinned queries work by
+    # fanning out one resource read per matching cached session.
+    #
+    # Trade-off: every unpinned query pays fan-out cost at the MCP server.
+    # The knobs below keep it bounded and incremental:
+    #   - `where` watermark (pure local SQL, correlated subquery): only
+    #     sessions whose `modified` is newer than the newest message already
+    #     cached for them are re-fetched. substr(cc_session.id, 12) strips
+    #     the 'cc-session:' scheme prefix to match cc_message.session_id,
+    #     which stores raw ids.
+    #   - `order_by`/`limit`: most-recently-modified sessions first, capped.
+    #   - `max_fan_out`: FAILS LOUD (no silent truncation) if the enumeration
+    #     still produces more parents than the bound.
+    #
+    # vtable:
+    #   list_resource: "claude-history://sessions/{session_id}/messages"
+    #   uri_params:
+    #     session_id:
+    #       enumerate_from:
+    #         entity: session
+    #         field: id
+    #         where: >-
+    #           modified > COALESCE((SELECT MAX(m.timestamp) FROM cc_message m
+    #                                WHERE m.session_id = substr(cc_session.id, 12)), '')
+    #         order_by: modified DESC
+    #         limit: 20
+    #   write_through: true
+    #   max_fan_out: 50
     profile_variants:
       - name: default
         render: 'row(text(col("content")))'

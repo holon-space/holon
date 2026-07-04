@@ -7,6 +7,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use futures::stream::{StreamExt, TryStreamExt};
 use rmcp::model::CallToolRequestParam;
 use serde::{Deserialize, Serialize};
 
@@ -66,6 +67,11 @@ pub struct VtableConfig {
     /// Pagination strategy. When unset, only one call is made per fetch.
     #[serde(default)]
     pub pagination: Option<PaginationConfig>,
+    /// Hard bound on `enumerate_from` fan-out. When the enumeration produces
+    /// more parent rows than this, the query FAILS LOUD (no silent
+    /// truncation) naming the limit and the actual count. `None` = unbounded.
+    #[serde(default)]
+    pub max_fan_out: Option<u64>,
 }
 
 /// Pagination strategy declared by the YAML.
@@ -201,13 +207,25 @@ pub struct EnumerateFrom {
     /// Paired multi-field — `tool_param_name → parent_column_name`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fields: Option<HashMap<String, String>>,
+    /// Optional SQL predicate appended as `WHERE {where}` to the enumeration
+    /// query. Runs as pure local SQL against the parent cache table, so
+    /// correlated-subquery watermarks (incremental refresh) are expressible.
+    /// YAML key: `where`.
+    #[serde(default, rename = "where", skip_serializing_if = "Option::is_none")]
+    pub where_sql: Option<String>,
+    /// Optional `ORDER BY` clause body for the enumeration query.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_by: Option<String>,
+    /// Optional `LIMIT` for the enumeration query.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
 }
 
 impl EnumerateFrom {
     /// Bindings as `(parent_column, tool_param)` pairs. `owning_param` is the
     /// param name owning this `EnumerateFrom` (used only for the legacy
     /// single-field shape).
-    fn bindings(&self, owning_param: &str) -> Vec<(String, String)> {
+    fn raw_bindings(&self, owning_param: &str) -> Vec<(String, String)> {
         match (&self.fields, &self.field) {
             (Some(map), _) => map
                 .iter()
@@ -222,22 +240,68 @@ impl EnumerateFrom {
     }
 }
 
+/// One enumerated parent column bound to one tool/URI param.
+#[derive(Debug, Clone)]
+struct EnumerationBinding {
+    parent_col: String,
+    tool_param: String,
+    /// `Some(scheme)` when `parent_col` is the parent entity's id column:
+    /// cached ids are stored scheme-prefixed (`{scheme}:{raw}`, matching the
+    /// McpSyncEngine / id_scheme convention) but the MCP server expects the
+    /// raw id. The value is unprefixed at the enumeration boundary
+    /// ([`run_enumeration`]) and it is a LOUD error for a cached value to
+    /// lack the expected prefix.
+    strip_scheme: Option<String>,
+}
+
 /// Resolved enumeration source — pre-computed SQL + binding map.
 #[derive(Debug, Clone)]
 struct ResolvedEnumeration {
     /// SQL selecting the parent columns referenced by `bindings`, in order.
     /// e.g. `SELECT id FROM cc_session`, `SELECT owner, name FROM gh_repository`.
     enumerate_sql: String,
-    /// `(parent_column, tool_param)` pairs, aligned with the SQL's SELECT order.
-    bindings: Vec<(String, String)>,
+    /// Bindings aligned with the SQL's SELECT order.
+    bindings: Vec<EnumerationBinding>,
+}
+
+/// URI scheme used to prefix cached ids of `{prefix}{entity}` — same
+/// normalization as `holon_api::EntityName` (underscores → hyphens).
+fn id_scheme_for_entity(prefix: &str, entity: &str) -> String {
+    format!("{prefix}{entity}").replace('_', "-")
 }
 
 impl ResolvedEnumeration {
-    fn from_enumerate_from(ef: &EnumerateFrom, owning_param: &str, prefix: &str) -> Self {
-        let bindings = ef.bindings(owning_param);
-        let cols: Vec<&str> = bindings.iter().map(|(c, _)| c.as_str()).collect();
+    fn from_enumerate_from(
+        ef: &EnumerateFrom,
+        owning_param: &str,
+        prefix: &str,
+        parent_id_column: &str,
+    ) -> Self {
+        let bindings: Vec<EnumerationBinding> = ef
+            .raw_bindings(owning_param)
+            .into_iter()
+            .map(|(parent_col, tool_param)| {
+                let strip_scheme = (parent_col == parent_id_column)
+                    .then(|| id_scheme_for_entity(prefix, &ef.entity));
+                EnumerationBinding {
+                    parent_col,
+                    tool_param,
+                    strip_scheme,
+                }
+            })
+            .collect();
+        let cols: Vec<&str> = bindings.iter().map(|b| b.parent_col.as_str()).collect();
         let table = format!("{}{}", prefix, ef.entity);
-        let enumerate_sql = format!("SELECT {} FROM {}", cols.join(", "), table);
+        let mut enumerate_sql = format!("SELECT {} FROM {}", cols.join(", "), table);
+        if let Some(w) = &ef.where_sql {
+            enumerate_sql.push_str(&format!(" WHERE {w}"));
+        }
+        if let Some(o) = &ef.order_by {
+            enumerate_sql.push_str(&format!(" ORDER BY {o}"));
+        }
+        if let Some(n) = ef.limit {
+            enumerate_sql.push_str(&format!(" LIMIT {n}"));
+        }
         Self {
             enumerate_sql,
             bindings,
@@ -323,6 +387,8 @@ pub struct McpForeignDataWrapper {
     cache_table: Option<String>,
     /// Per-column extraction config (dotted source_path, encoding).
     column_configs: HashMap<String, ColumnConfig>,
+    /// Hard bound on enumeration fan-out (see [`VtableConfig::max_fan_out`]).
+    max_fan_out: Option<u64>,
     /// Tokio runtime handle for async→sync bridge in filter().
     runtime: tokio::runtime::Handle,
 }
@@ -356,7 +422,7 @@ fn build_fdw_metadata(
     for fc in vtable_config.filter_mapping.values() {
         if let Some(ef) = &fc.enumerate_from {
             enumeration_bound_params.insert(fc.param.clone());
-            for (_parent_col, tool_param) in ef.bindings(&fc.param) {
+            for (_parent_col, tool_param) in ef.raw_bindings(&fc.param) {
                 enumeration_bound_params.insert(tool_param);
             }
         }
@@ -417,6 +483,9 @@ impl McpForeignDataWrapper {
     /// `cache_table` is the name of the local BTree table to write through to.
     /// `entity_prefix` is needed to resolve `enumerate_from` entity references
     /// to actual SQL table names (e.g. `"cc_"` + `"session"` → `"cc_session"`).
+    /// `enumeration_id_columns` maps raw entity names to their id column
+    /// (entities absent from the map default to `"id"`); it drives the
+    /// scheme-strip boundary for enumerated parent ids.
     #[allow(clippy::too_many_arguments)] // constructor wires the vtable's full surface
     pub fn new(
         table_name: &str,
@@ -427,11 +496,18 @@ impl McpForeignDataWrapper {
         cache_table: Option<String>,
         runtime: tokio::runtime::Handle,
         entity_prefix: Option<&str>,
+        enumeration_id_columns: &HashMap<String, String>,
     ) -> Self {
         let (key_columns, column_to_param, schema_sql, column_names) =
             build_fdw_metadata(table_name, columns, vtable_config);
 
         let prefix = entity_prefix.unwrap_or("");
+        let id_col_of = |entity: &str| -> String {
+            enumeration_id_columns
+                .get(entity)
+                .cloned()
+                .unwrap_or_else(|| "id".to_string())
+        };
         let fetch_mode = if let Some(ref tool) = vtable_config.search_tool {
             // Tool-mode FK enumerations: one entry per filter_mapping column
             // that declares `enumerate_from`. The map is keyed by the owning
@@ -443,7 +519,12 @@ impl McpForeignDataWrapper {
                     fc.enumerate_from.as_ref().map(|ef| {
                         (
                             fc.param.clone(),
-                            ResolvedEnumeration::from_enumerate_from(ef, &fc.param, prefix),
+                            ResolvedEnumeration::from_enumerate_from(
+                                ef,
+                                &fc.param,
+                                prefix,
+                                &id_col_of(&ef.entity),
+                            ),
                         )
                     })
                 })
@@ -474,7 +555,12 @@ impl McpForeignDataWrapper {
                     .filter_map(|(k, v)| match v {
                         UriParamValue::Dynamic(d) => Some((
                             k.clone(),
-                            ResolvedEnumeration::from_enumerate_from(&d.enumerate_from, k, prefix),
+                            ResolvedEnumeration::from_enumerate_from(
+                                &d.enumerate_from,
+                                k,
+                                prefix,
+                                &id_col_of(&d.enumerate_from.entity),
+                            ),
                         )),
                         _ => None,
                     })
@@ -514,6 +600,7 @@ impl McpForeignDataWrapper {
             id_scheme,
             cache_table,
             column_configs: vtable_config.columns.clone(),
+            max_fan_out: vtable_config.max_fan_out,
             runtime,
         }
     }
@@ -542,6 +629,7 @@ impl ForeignDataWrapper for McpForeignDataWrapper {
             column_names: self.column_names.clone(),
             column_configs: self.column_configs.clone(),
             id_scheme: self.id_scheme.clone(),
+            max_fan_out: self.max_fan_out,
             runtime: self.runtime.clone(),
             conn,
             writeback,
@@ -564,8 +652,19 @@ struct WritebackTarget {
     column_names: Vec<String>,
 }
 
+/// Rows per INSERT OR REPLACE statement during writeback. Bounds statement
+/// size so a large fan-out doesn't build one megabyte-scale SQL string.
+const WRITEBACK_CHUNK_ROWS: usize = 500;
+
 impl WritebackTarget {
-    /// Write rows to the cache table via INSERT OR REPLACE.
+    /// Write rows to the cache table via chunked INSERT OR REPLACE.
+    ///
+    /// DISCLOSED LIMITATION: Turso's `Connection::execute()` here exposes
+    /// neither bind parameters nor an explicit-transaction seam usable from
+    /// inside FDW cursor execution, so chunks run as sequential autocommit
+    /// statements rather than one wrapping transaction. Each chunk is
+    /// atomic; an interruption between chunks leaves a partially refreshed
+    /// cache that the next refresh repairs (INSERT OR REPLACE is idempotent).
     fn write_rows(&self, rows: &[Vec<Value>]) -> Result<(), LimboError> {
         if rows.is_empty() {
             return Ok(());
@@ -573,34 +672,35 @@ impl WritebackTarget {
 
         let cols = self.column_names.join(", ");
 
-        // Build a single INSERT OR REPLACE with multiple value tuples.
-        // Turso's Connection::execute() doesn't support bind parameters,
-        // so we inline the values as SQL literals.
-        let value_rows: Vec<String> = rows
-            .iter()
-            .map(|row| {
-                let vals: Vec<String> = row.iter().map(value_to_sql_literal).collect();
-                format!("({})", vals.join(", "))
-            })
-            .collect();
+        for chunk in rows.chunks(WRITEBACK_CHUNK_ROWS) {
+            let value_rows: Vec<String> = chunk
+                .iter()
+                .map(|row| {
+                    let vals: Vec<String> = row.iter().map(value_to_sql_literal).collect();
+                    format!("({})", vals.join(", "))
+                })
+                .collect();
 
-        let sql = format!(
-            "INSERT OR REPLACE INTO {} ({}) VALUES {}",
-            self.cache_table,
-            cols,
-            value_rows.join(", ")
-        );
+            let sql = format!(
+                "INSERT OR REPLACE INTO {} ({}) VALUES {}",
+                self.cache_table,
+                cols,
+                value_rows.join(", ")
+            );
 
-        self.conn.execute(&sql).map_err(|e| {
-            LimboError::ExtensionError(format!(
-                "[WritebackTarget] Failed to write to '{}': {e}",
-                self.cache_table
-            ))
-        })?;
+            self.conn.execute(&sql).map_err(|e| {
+                LimboError::ExtensionError(format!(
+                    "[WritebackTarget] Failed to write chunk of {} rows to '{}': {e}",
+                    chunk.len(),
+                    self.cache_table
+                ))
+            })?;
+        }
         info!(
-            "[WritebackTarget] Wrote {} rows to '{}'",
+            "[WritebackTarget] Wrote {} rows to '{}' in {} chunk(s)",
             rows.len(),
-            self.cache_table
+            self.cache_table,
+            rows.len().div_ceil(WRITEBACK_CHUNK_ROWS)
         );
         Ok(())
     }
@@ -613,6 +713,7 @@ struct McpCursor {
     column_names: Vec<String>,
     column_configs: HashMap<String, ColumnConfig>,
     id_scheme: Option<(String, String)>,
+    max_fan_out: Option<u64>,
     runtime: tokio::runtime::Handle,
     /// Database connection for enumeration enumeration queries.
     conn: Arc<CoreConnection>,
@@ -670,7 +771,7 @@ impl McpCursor {
 
     /// One round trip to the MCP server. Returns `(records, full_response)`
     /// so callers (pagination loop) can inspect cursor / total fields.
-    fn call_tool_once(
+    async fn call_tool_once_async(
         &self,
         search_tool: &str,
         extract_path: Option<&str>,
@@ -688,19 +789,14 @@ impl McpCursor {
             params.len()
         );
 
-        let peer = self.peer.clone();
-        let tool_name = search_tool.to_string();
-
-        let result = tokio::task::block_in_place(|| {
-            self.runtime.block_on(async {
-                peer.call_tool(CallToolRequestParam {
-                    name: Cow::Owned(tool_name),
-                    arguments: Some(params),
-                })
-                .await
+        let result = self
+            .peer
+            .call_tool(CallToolRequestParam {
+                name: Cow::Owned(search_tool.to_string()),
+                arguments: Some(params),
             })
-        })
-        .map_err(|e| LimboError::ExtensionError(format!("MCP tool call failed: {e}")))?;
+            .await
+            .map_err(|e| LimboError::ExtensionError(format!("MCP tool call failed: {e}")))?;
 
         if result.is_error == Some(true) {
             let error_text: String = result
@@ -736,8 +832,7 @@ impl McpCursor {
         Ok((rows, response))
     }
 
-    /// Fetch the records for one fan-out target, looping per `PaginationConfig`
-    /// when set. When `pagination` is `None`, a single call is issued.
+    /// Sync bridge for the non-fan-out path.
     fn call_tool_paginated(
         &self,
         search_tool: &str,
@@ -745,8 +840,29 @@ impl McpCursor {
         base_params: serde_json::Map<String, serde_json::Value>,
         pagination: Option<&PaginationConfig>,
     ) -> Result<Vec<serde_json::Map<String, serde_json::Value>>, LimboError> {
+        tokio::task::block_in_place(|| {
+            self.runtime.block_on(self.call_tool_paginated_async(
+                search_tool,
+                extract_path,
+                base_params,
+                pagination,
+            ))
+        })
+    }
+
+    /// Fetch the records for one fan-out target, looping per `PaginationConfig`
+    /// when set. When `pagination` is `None`, a single call is issued.
+    async fn call_tool_paginated_async(
+        &self,
+        search_tool: &str,
+        extract_path: Option<&str>,
+        base_params: serde_json::Map<String, serde_json::Value>,
+        pagination: Option<&PaginationConfig>,
+    ) -> Result<Vec<serde_json::Map<String, serde_json::Value>>, LimboError> {
         let Some(pagination) = pagination else {
-            let (rows, _) = self.call_tool_once(search_tool, extract_path, base_params)?;
+            let (rows, _) = self
+                .call_tool_once_async(search_tool, extract_path, base_params)
+                .await?;
             return Ok(rows);
         };
 
@@ -768,7 +884,9 @@ impl McpCursor {
                     if let Some(c) = cursor.as_ref() {
                         p.insert(cursor_param.clone(), serde_json::Value::String(c.clone()));
                     }
-                    let (rows, response) = self.call_tool_once(search_tool, extract_path, p)?;
+                    let (rows, response) = self
+                        .call_tool_once_async(search_tool, extract_path, p)
+                        .await?;
                     let got = rows.len();
                     all.extend(rows);
                     if got == 0 {
@@ -804,7 +922,9 @@ impl McpCursor {
                     let mut p = base_params.clone();
                     p.insert(page_param.clone(), serde_json::json!(page));
                     p.insert(size_param.clone(), serde_json::json!(*page_size));
-                    let (rows, response) = self.call_tool_once(search_tool, extract_path, p)?;
+                    let (rows, response) = self
+                        .call_tool_once_async(search_tool, extract_path, p)
+                        .await?;
                     let got = rows.len();
                     all.extend(rows);
                     if got == 0 || (got as u32) < *page_size {
@@ -834,7 +954,9 @@ impl McpCursor {
                     let mut p = base_params.clone();
                     p.insert(page_param.clone(), serde_json::json!(page));
                     p.insert(size_param.clone(), serde_json::json!(*page_size));
-                    let (rows, _) = self.call_tool_once(search_tool, extract_path, p)?;
+                    let (rows, _) = self
+                        .call_tool_once_async(search_tool, extract_path, p)
+                        .await?;
                     let got = rows.len();
                     all.extend(rows);
                     if got == 0 || (got as u32) < *page_size {
@@ -847,7 +969,15 @@ impl McpCursor {
         Ok(all)
     }
 
+    /// Sync bridge for the non-fan-out path.
     fn fetch_via_resource(
+        &self,
+        uri: &str,
+    ) -> Result<Vec<serde_json::Map<String, serde_json::Value>>, LimboError> {
+        tokio::task::block_in_place(|| self.runtime.block_on(self.fetch_via_resource_async(uri)))
+    }
+
+    async fn fetch_via_resource_async(
         &self,
         uri: &str,
     ) -> Result<Vec<serde_json::Map<String, serde_json::Value>>, LimboError> {
@@ -855,16 +985,13 @@ impl McpCursor {
 
         info!("[McpCursor] Reading resource '{}'", uri);
 
-        let peer = self.peer.clone();
-        let uri_owned = uri.to_string();
-
-        let result = tokio::task::block_in_place(|| {
-            self.runtime.block_on(async {
-                peer.read_resource(ReadResourceRequestParam { uri: uri_owned })
-                    .await
+        let result = self
+            .peer
+            .read_resource(ReadResourceRequestParam {
+                uri: uri.to_string(),
             })
-        })
-        .map_err(|e| LimboError::ExtensionError(format!("MCP read_resource failed: {e}")))?;
+            .await
+            .map_err(|e| LimboError::ExtensionError(format!("MCP read_resource failed: {e}")))?;
 
         let text: String = result
             .contents
@@ -888,8 +1015,16 @@ impl McpCursor {
     }
 }
 
+/// Concurrent in-flight per-parent fetches during enumeration fan-out.
+/// Small constant: bounds pressure on the MCP server while hiding latency.
+const FAN_OUT_CONCURRENCY: usize = 4;
+
 impl ForeignCursor for McpCursor {
     fn filter(&mut self, constraints: &[PushedConstraint]) -> Result<bool, LimboError> {
+        // Per-parent record counts from enumeration fan-out, in writeback row
+        // order: (enumeration param map, record count). Drives per-parent
+        // stale-row deletion after writeback.
+        let mut fan_out_groups: Vec<(HashMap<String, String>, usize)> = Vec::new();
         let records = match &self.fetch_mode {
             FetchMode::Tool {
                 search_tool,
@@ -915,32 +1050,55 @@ impl ForeignCursor for McpCursor {
                         records
                     }
                     Some(enumeration) => {
-                        let rows = run_enumeration(&self.conn, enumeration)?;
-                        if rows.is_empty() {
+                        let parent_rows = run_enumeration(&self.conn, enumeration)?;
+                        enforce_max_fan_out(self.max_fan_out, parent_rows.len(), search_tool)?;
+                        if parent_rows.is_empty() {
                             return Ok(false);
                         }
-                        let mut all = Vec::new();
-                        for row in rows {
-                            let mut p = params.clone();
-                            for (tool_param, value) in &row {
-                                p.insert(
-                                    tool_param.clone(),
-                                    serde_json::Value::String(value.clone()),
-                                );
-                            }
-                            let mut records = self
-                                .call_tool_paginated(
-                                    search_tool,
-                                    extract_path.as_deref(),
-                                    p.clone(),
-                                    pagination.as_ref(),
-                                )
-                                .map_err(|e| {
-                                    LimboError::ExtensionError(format!(
-                                        "[McpCursor] tool '{search_tool}' fan-out failed for bindings {row:?}: {e}"
+                        // Bounded-concurrency fan-out; results are collected
+                        // then re-sorted by parent index so writeback ordering
+                        // stays deterministic.
+                        let this = &*self;
+                        let mut fetched: Vec<(usize, HashMap<String, String>, Vec<serde_json::Map<String, serde_json::Value>>)> =
+                            tokio::task::block_in_place(|| {
+                                this.runtime.block_on(async {
+                                    futures::stream::iter(parent_rows.into_iter().enumerate().map(
+                                        |(idx, row)| {
+                                            let mut p = params.clone();
+                                            for (tool_param, value) in &row {
+                                                p.insert(
+                                                    tool_param.clone(),
+                                                    serde_json::Value::String(value.clone()),
+                                                );
+                                            }
+                                            async move {
+                                                let mut records = this
+                                                    .call_tool_paginated_async(
+                                                        search_tool,
+                                                        extract_path.as_deref(),
+                                                        p.clone(),
+                                                        pagination.as_ref(),
+                                                    )
+                                                    .await
+                                                    .map_err(|e| {
+                                                        LimboError::ExtensionError(format!(
+                                                            "[McpCursor] tool '{search_tool}' fan-out failed for bindings {row:?}: {e}"
+                                                        ))
+                                                    })?;
+                                                stamp_call_params(&mut records, &p);
+                                                Ok::<_, LimboError>((idx, row, records))
+                                            }
+                                        },
                                     ))
-                                })?;
-                            stamp_call_params(&mut records, &p);
+                                    .buffer_unordered(FAN_OUT_CONCURRENCY)
+                                    .try_collect::<Vec<_>>()
+                                    .await
+                                })
+                            })?;
+                        fetched.sort_by_key(|(idx, _, _)| *idx);
+                        let mut all = Vec::new();
+                        for (_, row, records) in fetched {
+                            fan_out_groups.push((row, records.len()));
                             all.extend(records);
                         }
                         all
@@ -966,27 +1124,52 @@ impl ForeignCursor for McpCursor {
                         self.fetch_via_resource(&uri)?
                     }
                     Some(enumeration) => {
-                        let rows = run_enumeration(&self.conn, enumeration)?;
-                        if rows.is_empty() {
+                        let parent_rows = run_enumeration(&self.conn, enumeration)?;
+                        enforce_max_fan_out(self.max_fan_out, parent_rows.len(), template)?;
+                        if parent_rows.is_empty() {
                             return Ok(false);
                         }
+                        let this = &*self;
+                        let mut fetched: Vec<(usize, HashMap<String, String>, Vec<serde_json::Map<String, serde_json::Value>>)> =
+                            tokio::task::block_in_place(|| {
+                                this.runtime.block_on(async {
+                                    futures::stream::iter(parent_rows.into_iter().enumerate().map(
+                                        |(idx, row)| {
+                                            let mut p = params.clone();
+                                            for (param_name, value) in &row {
+                                                p.insert(param_name.clone(), value.clone());
+                                            }
+                                            async move {
+                                                let uri =
+                                                    crate::mcp_sync_strategy::expand_uri_template(
+                                                        template, &p,
+                                                    )
+                                                    .map_err(|e| {
+                                                        LimboError::ExtensionError(format!(
+                                                            "URI template param missing: {e}"
+                                                        ))
+                                                    })?;
+                                                let records = this
+                                                    .fetch_via_resource_async(&uri)
+                                                    .await
+                                                    .map_err(|e| {
+                                                        LimboError::ExtensionError(format!(
+                                                            "[McpCursor] fetch_via_resource failed for bindings {row:?}: {e}"
+                                                        ))
+                                                    })?;
+                                                Ok::<_, LimboError>((idx, row, records))
+                                            }
+                                        },
+                                    ))
+                                    .buffer_unordered(FAN_OUT_CONCURRENCY)
+                                    .try_collect::<Vec<_>>()
+                                    .await
+                                })
+                            })?;
+                        fetched.sort_by_key(|(idx, _, _)| *idx);
                         let mut all = Vec::new();
-                        for row in rows {
-                            let mut p = params.clone();
-                            for (param_name, value) in &row {
-                                p.insert(param_name.clone(), value.clone());
-                            }
-                            let uri = crate::mcp_sync_strategy::expand_uri_template(template, &p)
-                                .map_err(|e| {
-                                LimboError::ExtensionError(format!(
-                                    "URI template param missing: {e}"
-                                ))
-                            })?;
-                            let records = self.fetch_via_resource(&uri).map_err(|e| {
-                                LimboError::ExtensionError(format!(
-                                    "[McpCursor] fetch_via_resource failed for bindings {row:?}: {e}"
-                                ))
-                            })?;
+                        for (_, row, records) in fetched {
+                            fan_out_groups.push((row, records.len()));
                             all.extend(records);
                         }
                         all
@@ -1045,6 +1228,9 @@ impl ForeignCursor for McpCursor {
 
         if let Some(ref wb) = self.writeback {
             wb.write_rows(&self.rows)?;
+            if !fan_out_groups.is_empty() {
+                self.delete_stale_children(wb, &fan_out_groups)?;
+            }
         }
 
         Ok(!self.rows.is_empty())
@@ -1147,9 +1333,7 @@ fn run_enumeration(
             turso_core::StepResult::Row => {
                 if let Some(row) = stmt.row() {
                     let mut binding_map = HashMap::with_capacity(n_cols);
-                    for (col_idx, (_parent_col, tool_param)) in
-                        enumeration.bindings.iter().enumerate()
-                    {
+                    for (col_idx, binding) in enumeration.bindings.iter().enumerate() {
                         let s = match row.get_value(col_idx) {
                             Value::Text(t) => t.as_str().to_owned(),
                             Value::Numeric(turso_core::Numeric::Integer(i)) => i.to_string(),
@@ -1161,18 +1345,42 @@ fn run_enumeration(
                                 return Err(LimboError::ExtensionError(format!(
                                     "Enumeration '{}' produced NULL for column '{}' \
                                      (tool param '{}') — refusing to fan out with missing param",
-                                    enumeration.enumerate_sql, _parent_col, tool_param
+                                    enumeration.enumerate_sql,
+                                    binding.parent_col,
+                                    binding.tool_param
                                 )));
                             }
                             Value::Blob(_) => {
                                 return Err(LimboError::ExtensionError(format!(
                                     "Enumeration '{}' produced BLOB for column '{}' — \
                                      not coercible to a tool param",
-                                    enumeration.enumerate_sql, _parent_col
+                                    enumeration.enumerate_sql, binding.parent_col
                                 )));
                             }
                         };
-                        binding_map.insert(tool_param.clone(), s);
+                        // Boundary conversion (single place): cached ids are
+                        // scheme-prefixed; MCP tool/URI params expect raw ids.
+                        let s = match &binding.strip_scheme {
+                            None => s,
+                            Some(scheme) => {
+                                let expected = format!("{scheme}:");
+                                match s.strip_prefix(expected.as_str()) {
+                                    Some(raw) => raw.to_owned(),
+                                    None => {
+                                        return Err(LimboError::ExtensionError(format!(
+                                            "Enumeration '{}' produced id '{}' for column '{}' \
+                                             without the expected '{}' scheme prefix — cached \
+                                             ids must be scheme-prefixed",
+                                            enumeration.enumerate_sql,
+                                            s,
+                                            binding.parent_col,
+                                            expected
+                                        )));
+                                    }
+                                }
+                            }
+                        };
+                        binding_map.insert(binding.tool_param.clone(), s);
                     }
                     rows.push(binding_map);
                 }
@@ -1185,6 +1393,115 @@ fn run_enumeration(
 
     info!("[McpCursor] Enumeration produced {} rows", rows.len());
     Ok(rows)
+}
+
+/// Fail loud when an enumeration exceeds the declared fan-out bound.
+/// No silent truncation — the config either raises `max_fan_out`, narrows the
+/// enumeration with `where`/`limit`, or accepts the full fan-out.
+fn enforce_max_fan_out(
+    max_fan_out: Option<u64>,
+    count: usize,
+    target: &str,
+) -> Result<(), LimboError> {
+    if let Some(max) = max_fan_out
+        && count as u64 > max
+    {
+        return Err(LimboError::ExtensionError(format!(
+            "[McpCursor] enumeration for '{target}' produced {count} fan-out targets, \
+             exceeding max_fan_out={max} — refusing to fan out (no silent truncation); \
+             raise max_fan_out or narrow the enumeration with where/limit"
+        )));
+    }
+    Ok(())
+}
+
+impl McpCursor {
+    /// Per-parent stale-row deletion after a fan-out refresh.
+    ///
+    /// SCOPING RULE: for each refreshed parent P (and ONLY refreshed
+    /// parents — never global), delete cache rows whose parent-key columns
+    /// equal P's enumeration values and whose id is not among the freshly
+    /// fetched ids. Applicable only when every enumeration param maps to a
+    /// declared schema column (the vtable's parent-key columns) and the id
+    /// column is declared via `id_scheme`; otherwise deletion is skipped —
+    /// disclosed at debug level — because the cache rows can't be scoped.
+    fn delete_stale_children(
+        &self,
+        wb: &WritebackTarget,
+        fan_out_groups: &[(HashMap<String, String>, usize)],
+    ) -> Result<(), LimboError> {
+        let Some((id_col, _)) = self.id_scheme.as_ref() else {
+            tracing::debug!(
+                "[McpCursor] no id_scheme declared for '{}' — skipping stale-row deletion",
+                wb.cache_table
+            );
+            return Ok(());
+        };
+        let Some(id_idx) = self.column_names.iter().position(|c| c == id_col) else {
+            return Err(LimboError::ExtensionError(format!(
+                "[McpCursor] id column '{id_col}' not in schema columns {:?}",
+                self.column_names
+            )));
+        };
+        let param_to_column: HashMap<&str, &str> = self
+            .column_to_param
+            .iter()
+            .map(|(idx, param)| (param.as_str(), self.column_names[*idx as usize].as_str()))
+            .collect();
+
+        let mut offset = 0usize;
+        for (param_map, len) in fan_out_groups {
+            let range = offset..offset + len;
+            offset += len;
+
+            let mut predicates = Vec::with_capacity(param_map.len());
+            for (param, value) in param_map {
+                let Some(col) = param_to_column.get(param.as_str()) else {
+                    tracing::debug!(
+                        "[McpCursor] enumeration param '{param}' has no schema column in '{}' \
+                         — parent-key not declared, skipping stale-row deletion",
+                        wb.cache_table
+                    );
+                    return Ok(());
+                };
+                predicates.push(format!(
+                    "{col} = {}",
+                    value_to_sql_literal(&Value::build_text(value.clone()))
+                ));
+            }
+
+            let fresh_ids: Vec<String> = self.rows[range]
+                .iter()
+                .map(|row| {
+                    let id = &row[id_idx];
+                    if matches!(id, Value::Null) {
+                        return Err(LimboError::ExtensionError(format!(
+                            "[McpCursor] fetched row has NULL id column '{id_col}' — \
+                             cannot scope stale-row deletion in '{}'",
+                            wb.cache_table
+                        )));
+                    }
+                    Ok(value_to_sql_literal(id))
+                })
+                .collect::<Result<_, _>>()?;
+
+            let mut sql = format!(
+                "DELETE FROM {} WHERE {}",
+                wb.cache_table,
+                predicates.join(" AND ")
+            );
+            if !fresh_ids.is_empty() {
+                sql.push_str(&format!(" AND {id_col} NOT IN ({})", fresh_ids.join(", ")));
+            }
+            wb.conn.execute(&sql).map_err(|e| {
+                LimboError::ExtensionError(format!(
+                    "[McpCursor] stale-row deletion failed in '{}': {e} (sql: {sql})",
+                    wb.cache_table
+                ))
+            })?;
+        }
+        Ok(())
+    }
 }
 
 /// Convert a Turso Value to a SQL literal string for INSERT statements.
@@ -1488,7 +1805,7 @@ field: id
         assert_eq!(ef.field.as_deref(), Some("id"));
         assert!(ef.fields.is_none());
         // Owning param is used as the binding target for legacy shape.
-        let bindings = ef.bindings("session_id");
+        let bindings = ef.raw_bindings("session_id");
         assert_eq!(bindings, vec![("id".to_string(), "session_id".to_string())]);
     }
 
@@ -1506,7 +1823,7 @@ fields:
         let map = ef.fields.as_ref().unwrap();
         assert_eq!(map.get("owner"), Some(&"owner".to_string()));
         assert_eq!(map.get("repo"), Some(&"name".to_string()));
-        let mut bindings = ef.bindings("ignored");
+        let mut bindings = ef.raw_bindings("ignored");
         bindings.sort();
         let mut expected = vec![
             ("name".to_string(), "repo".to_string()),
@@ -1527,8 +1844,11 @@ fields:
                 m.insert("repo".to_string(), "name".to_string());
                 m
             }),
+            where_sql: None,
+            order_by: None,
+            limit: None,
         };
-        let r = ResolvedEnumeration::from_enumerate_from(&ef, "ignored", "gh_");
+        let r = ResolvedEnumeration::from_enumerate_from(&ef, "ignored", "gh_", "id");
         // HashMap iteration order is nondeterministic, so check both possibilities.
         assert!(
             r.enumerate_sql == "SELECT owner, name FROM gh_repository"
@@ -1645,7 +1965,7 @@ filter_mapping:
                 fc.enumerate_from.as_ref().map(|ef| {
                     (
                         fc.param.clone(),
-                        ResolvedEnumeration::from_enumerate_from(ef, &fc.param, prefix),
+                        ResolvedEnumeration::from_enumerate_from(ef, &fc.param, prefix, "id"),
                     )
                 })
             })
@@ -1677,10 +1997,13 @@ filter_mapping:
                 m.insert("repo".to_string(), "name".to_string());
                 m
             }),
+            where_sql: None,
+            order_by: None,
+            limit: None,
         };
         enumerations.insert(
             "owner".to_string(),
-            ResolvedEnumeration::from_enumerate_from(&ef, "owner", "gh_"),
+            ResolvedEnumeration::from_enumerate_from(&ef, "owner", "gh_", "id"),
         );
 
         // Empty params → unresolved
@@ -1705,18 +2028,76 @@ filter_mapping:
             entity: entity.to_string(),
             field: Some(field.to_string()),
             fields: None,
+            where_sql: None,
+            order_by: None,
+            limit: None,
         };
         let mut enumerations = HashMap::new();
         enumerations.insert(
             "a".to_string(),
-            ResolvedEnumeration::from_enumerate_from(&make("ent_a", "id"), "a", ""),
+            ResolvedEnumeration::from_enumerate_from(&make("ent_a", "id"), "a", "", "id"),
         );
         enumerations.insert(
             "b".to_string(),
-            ResolvedEnumeration::from_enumerate_from(&make("ent_b", "id"), "b", ""),
+            ResolvedEnumeration::from_enumerate_from(&make("ent_b", "id"), "b", "", "id"),
         );
         let empty = serde_json::Map::new();
         let _ = pick_unresolved_enumerations_tool(&empty, &enumerations);
+    }
+
+    #[test]
+    fn enumeration_sql_with_where_order_limit() {
+        let yaml = r#"
+entity: session
+field: id
+where: "modified > '2026-01-01'"
+order_by: modified DESC
+limit: 20
+"#;
+        let ef: EnumerateFrom = serde_yaml::from_str(yaml).unwrap();
+        let r = ResolvedEnumeration::from_enumerate_from(&ef, "session_id", "cc_", "id");
+        assert_eq!(
+            r.enumerate_sql,
+            "SELECT id FROM cc_session WHERE modified > '2026-01-01' ORDER BY modified DESC LIMIT 20"
+        );
+    }
+
+    #[test]
+    fn enumeration_id_binding_carries_strip_scheme() {
+        let ef = EnumerateFrom {
+            entity: "session".to_string(),
+            field: Some("id".to_string()),
+            fields: None,
+            where_sql: None,
+            order_by: None,
+            limit: None,
+        };
+        let r = ResolvedEnumeration::from_enumerate_from(&ef, "session_id", "cc_", "id");
+        assert_eq!(r.bindings.len(), 1);
+        // Scheme uses EntityName normalization: underscores → hyphens.
+        assert_eq!(r.bindings[0].strip_scheme.as_deref(), Some("cc-session"));
+
+        // Non-id parent columns carry no scheme.
+        let ef2 = EnumerateFrom {
+            entity: "repository".to_string(),
+            field: Some("owner".to_string()),
+            fields: None,
+            where_sql: None,
+            order_by: None,
+            limit: None,
+        };
+        let r2 = ResolvedEnumeration::from_enumerate_from(&ef2, "owner", "gh_", "id");
+        assert_eq!(r2.bindings[0].strip_scheme, None);
+    }
+
+    #[test]
+    fn max_fan_out_exceeded_is_loud() {
+        let err = enforce_max_fan_out(Some(2), 3, "list_messages").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("max_fan_out=2"), "names the limit: {msg}");
+        assert!(msg.contains("3 fan-out targets"), "names the count: {msg}");
+        enforce_max_fan_out(Some(3), 3, "list_messages").expect("at the limit is fine");
+        enforce_max_fan_out(None, 10_000, "list_messages").expect("unbounded");
     }
 
     #[test]

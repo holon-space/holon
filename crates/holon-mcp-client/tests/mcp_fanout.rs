@@ -189,6 +189,7 @@ fn build_fdw(
         None,
         tokio::runtime::Handle::current(),
         entity_prefix,
+        &std::collections::HashMap::new(),
     )
 }
 
@@ -222,9 +223,11 @@ fn collect_rows(
 async fn legacy_single_field_enumeration_fans_out() {
     let conn = open_memory_conn();
     execute_sql(&conn, "CREATE TABLE cc_session (id TEXT PRIMARY KEY)");
+    // Cached ids are scheme-prefixed (id_scheme convention); the enumeration
+    // boundary must strip the prefix before substituting into tool params.
     execute_sql(
         &conn,
-        "INSERT INTO cc_session(id) VALUES ('s1'), ('s2'), ('s3')",
+        "INSERT INTO cc_session(id) VALUES ('cc-session:s1'), ('cc-session:s2'), ('cc-session:s3')",
     );
 
     let peer = Arc::new(MockPeer::new());
@@ -359,7 +362,10 @@ async fn where_provided_param_skips_enumeration() {
     let conn = open_memory_conn();
     execute_sql(&conn, "CREATE TABLE cc_session (id TEXT PRIMARY KEY)");
     // Seed parent rows that would have triggered fan-out — they must be ignored.
-    execute_sql(&conn, "INSERT INTO cc_session(id) VALUES ('s1'), ('s2')");
+    execute_sql(
+        &conn,
+        "INSERT INTO cc_session(id) VALUES ('cc-session:s1'), ('cc-session:s2')",
+    );
 
     let peer = Arc::new(MockPeer::new());
     peer.enqueue_tool_response(
@@ -892,4 +898,361 @@ fn github_yaml_parses_as_integration_file_config() {
             .unwrap_or_else(|| panic!("missing entity '{ent}'"));
         assert!(entry.vtable.is_some(), "entity '{ent}' must declare vtable");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3: bounded, filterable, incrementally-refreshable fan-out
+// ---------------------------------------------------------------------------
+
+/// Like `build_fdw` but with id_scheme + cache table (write-through) wired,
+/// as `finish_integration` does in prod.
+#[allow(clippy::too_many_arguments)]
+fn build_fdw_writeback(
+    table_name: &str,
+    columns: &[(&str, &str)],
+    yaml: &str,
+    peer: Arc<dyn McpCallSurface>,
+    entity_prefix: Option<&str>,
+    id_scheme: Option<(String, String)>,
+    cache_table: Option<String>,
+) -> McpForeignDataWrapper {
+    let config: VtableConfig = serde_yaml::from_str(yaml).expect("vtable yaml parses");
+    let columns: Vec<(String, String)> = columns
+        .iter()
+        .map(|(n, t)| (n.to_string(), t.to_string()))
+        .collect();
+    McpForeignDataWrapper::new(
+        table_name,
+        &columns,
+        &config,
+        peer,
+        id_scheme,
+        cache_table,
+        tokio::runtime::Handle::current(),
+        entity_prefix,
+        &std::collections::HashMap::new(),
+    )
+}
+
+fn query_texts(conn: &Arc<CoreConnection>, sql: &str) -> Vec<Vec<String>> {
+    let mut stmt = conn
+        .query(sql)
+        .unwrap_or_else(|e| panic!("query failed for `{sql}`: {e}"))
+        .unwrap_or_else(|| panic!("no statement for `{sql}`"));
+    let mut out = Vec::new();
+    loop {
+        match stmt.step().expect("step") {
+            StepResult::Row => {
+                let row = stmt.row().expect("row");
+                let n = row.len();
+                out.push(
+                    (0..n)
+                        .map(|i| match row.get_value(i) {
+                            Value::Text(t) => t.as_str().to_owned(),
+                            Value::Null => "NULL".to_string(),
+                            Value::Numeric(turso_core::Numeric::Integer(n)) => n.to_string(),
+                            other => format!("{other:?}"),
+                        })
+                        .collect(),
+                );
+            }
+            StepResult::IO => continue,
+            StepResult::Done => break,
+            other => panic!("unexpected StepResult: {other:?}"),
+        }
+    }
+    out
+}
+
+/// `where` + `order_by` + `limit` on enumerate_from narrow the fan-out to the
+/// matching parents only — the watermark pattern as pure local SQL.
+#[tokio::test(flavor = "multi_thread")]
+async fn enumeration_where_order_limit_narrows_fan_out() {
+    let conn = open_memory_conn();
+    execute_sql(
+        &conn,
+        "CREATE TABLE cc_session (id TEXT PRIMARY KEY, modified TEXT)",
+    );
+    execute_sql(
+        &conn,
+        "INSERT INTO cc_session(id, modified) VALUES \
+         ('cc-session:s1', '2026-01-05'), \
+         ('cc-session:s2', '2026-01-10'), \
+         ('cc-session:s3', '2026-01-01')",
+    );
+
+    let peer = Arc::new(MockPeer::new());
+    peer.enqueue_tool_response(
+        "list_messages",
+        serde_json::json!({"messages": [{"id": "m_s2", "session_id": "s2"}]}),
+    );
+
+    let yaml = r#"
+search_tool: list_messages
+extract_path: messages
+filter_mapping:
+  session_id:
+    param: session_id
+    ops: ["="]
+    enumerate_from:
+      entity: session
+      field: id
+      where: "modified > '2026-01-02'"
+      order_by: modified DESC
+      limit: 1
+"#;
+    let fdw = build_fdw(
+        "cc_message",
+        &[("id", "TEXT"), ("session_id", "TEXT")],
+        yaml,
+        peer.clone(),
+        Some("cc_"),
+    );
+
+    let rows = collect_rows(&fdw, conn, &[], 2);
+    assert_eq!(rows.len(), 1);
+
+    let calls = peer.tool_calls();
+    assert_eq!(calls.len(), 1, "where+limit narrowed fan-out to one parent");
+    assert_eq!(
+        calls[0].params.get("session_id").and_then(|v| v.as_str()),
+        Some("s2"),
+        "highest `modified` above the watermark wins (order_by DESC, limit 1)"
+    );
+}
+
+/// max_fan_out exceeded → LOUD error naming limit and count; zero tool calls.
+#[tokio::test(flavor = "multi_thread")]
+async fn max_fan_out_exceeded_fails_loud() {
+    let conn = open_memory_conn();
+    execute_sql(&conn, "CREATE TABLE cc_session (id TEXT PRIMARY KEY)");
+    execute_sql(
+        &conn,
+        "INSERT INTO cc_session(id) VALUES ('cc-session:s1'), ('cc-session:s2'), ('cc-session:s3')",
+    );
+
+    let peer = Arc::new(MockPeer::new());
+    let yaml = r#"
+search_tool: list_messages
+extract_path: messages
+max_fan_out: 2
+filter_mapping:
+  session_id:
+    param: session_id
+    ops: ["="]
+    enumerate_from:
+      entity: session
+      field: id
+"#;
+    let fdw = build_fdw(
+        "cc_message",
+        &[("id", "TEXT"), ("session_id", "TEXT")],
+        yaml,
+        peer.clone(),
+        Some("cc_"),
+    );
+
+    let mut cursor = fdw.open_cursor(conn).expect("open_cursor");
+    let err = cursor.filter(&[]).expect_err("must fail loud");
+    let msg = format!("{err}");
+    assert!(msg.contains("max_fan_out=2"), "names the limit: {msg}");
+    assert!(msg.contains("3 fan-out targets"), "names the count: {msg}");
+    assert!(peer.tool_calls().is_empty(), "no calls after refusal");
+}
+
+/// A cached parent id WITHOUT the expected scheme prefix is a loud error at
+/// the enumeration boundary — never silently passed through to the server.
+#[tokio::test(flavor = "multi_thread")]
+async fn unprefixed_cached_id_fails_loud() {
+    let conn = open_memory_conn();
+    execute_sql(&conn, "CREATE TABLE cc_session (id TEXT PRIMARY KEY)");
+    execute_sql(&conn, "INSERT INTO cc_session(id) VALUES ('raw-no-prefix')");
+
+    let peer = Arc::new(MockPeer::new());
+    let yaml = r#"
+search_tool: list_messages
+extract_path: messages
+filter_mapping:
+  session_id:
+    param: session_id
+    ops: ["="]
+    enumerate_from:
+      entity: session
+      field: id
+"#;
+    let fdw = build_fdw(
+        "cc_message",
+        &[("id", "TEXT"), ("session_id", "TEXT")],
+        yaml,
+        peer.clone(),
+        Some("cc_"),
+    );
+
+    let mut cursor = fdw.open_cursor(conn).expect("open_cursor");
+    let err = cursor.filter(&[]).expect_err("must fail loud");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("cc-session:") && msg.contains("raw-no-prefix"),
+        "names the expected scheme and the offending value: {msg}"
+    );
+    assert!(peer.tool_calls().is_empty());
+}
+
+/// Chunked writeback: more rows than one chunk (500) land intact in the cache.
+#[tokio::test(flavor = "multi_thread")]
+async fn chunked_writeback_writes_all_rows() {
+    let conn = open_memory_conn();
+    execute_sql(
+        &conn,
+        "CREATE TABLE cc_message (id TEXT PRIMARY KEY, session_id TEXT)",
+    );
+
+    let n = 1010usize;
+    let records: Vec<serde_json::Value> = (0..n)
+        .map(|i| serde_json::json!({"id": format!("m{i:04}"), "session_id": "s1"}))
+        .collect();
+    let peer = Arc::new(MockPeer::new());
+    peer.set_resource_response("mcp://messages", serde_json::Value::Array(records));
+
+    let yaml = r#"
+list_resource: "mcp://messages"
+write_through: true
+"#;
+    let fdw = build_fdw_writeback(
+        "cc_message",
+        &[("id", "TEXT"), ("session_id", "TEXT")],
+        yaml,
+        peer.clone(),
+        Some("cc_"),
+        Some(("id".to_string(), "cc-message".to_string())),
+        Some("cc_message".to_string()),
+    );
+
+    let rows = collect_rows(&fdw, conn.clone(), &[], 2);
+    assert_eq!(rows.len(), n);
+
+    let cached = query_texts(&conn, "SELECT COUNT(*) FROM cc_message");
+    assert_eq!(cached[0][0], format!("{n}"), "all rows written across chunks");
+    let first = query_texts(&conn, "SELECT id FROM cc_message ORDER BY id LIMIT 1");
+    assert_eq!(first[0][0], "cc-message:m0000", "id scheme applied in cache");
+}
+
+/// Per-parent stale-row deletion: refreshing parent s1 deletes s1's vanished
+/// rows but NEVER touches rows of parents outside this refresh (scoped, not
+/// global), and the refreshed rows replace the stale set.
+#[tokio::test(flavor = "multi_thread")]
+async fn stale_rows_deleted_per_refreshed_parent_only() {
+    let conn = open_memory_conn();
+    execute_sql(&conn, "CREATE TABLE cc_session (id TEXT PRIMARY KEY)");
+    execute_sql(&conn, "INSERT INTO cc_session(id) VALUES ('cc-session:s1')");
+    execute_sql(
+        &conn,
+        "CREATE TABLE cc_message (id TEXT PRIMARY KEY, session_id TEXT)",
+    );
+    // Stale child of s1 (server no longer returns it) + a child of an
+    // un-enumerated parent sX that must survive.
+    execute_sql(
+        &conn,
+        "INSERT INTO cc_message(id, session_id) VALUES \
+         ('cc-message:stale1', 's1'), ('cc-message:keep_other', 'sX')",
+    );
+
+    let peer = Arc::new(MockPeer::new());
+    // Response does NOT echo session_id — the stamped call param carries it,
+    // which is also what scopes the deletion.
+    peer.enqueue_tool_response(
+        "list_messages",
+        serde_json::json!({"messages": [{"id": "fresh1"}]}),
+    );
+
+    let yaml = r#"
+search_tool: list_messages
+extract_path: messages
+write_through: true
+filter_mapping:
+  session_id:
+    param: session_id
+    ops: ["="]
+    enumerate_from:
+      entity: session
+      field: id
+"#;
+    let fdw = build_fdw_writeback(
+        "cc_message",
+        &[("id", "TEXT"), ("session_id", "TEXT")],
+        yaml,
+        peer.clone(),
+        Some("cc_"),
+        Some(("id".to_string(), "cc-message".to_string())),
+        Some("cc_message".to_string()),
+    );
+
+    let rows = collect_rows(&fdw, conn.clone(), &[], 2);
+    assert_eq!(rows.len(), 1);
+
+    let mut cached = query_texts(&conn, "SELECT id, session_id FROM cc_message ORDER BY id");
+    cached.sort();
+    assert_eq!(
+        cached,
+        vec![
+            vec!["cc-message:fresh1".to_string(), "s1".to_string()],
+            vec!["cc-message:keep_other".to_string(), "sX".to_string()],
+        ],
+        "stale1 deleted (s1 refreshed); keep_other untouched (sX not refreshed)"
+    );
+}
+
+/// Bounded-concurrency fan-out keeps deterministic writeback ordering: rows
+/// come back grouped by parent in enumeration order.
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_fan_out_preserves_parent_order() {
+    let conn = open_memory_conn();
+    execute_sql(&conn, "CREATE TABLE cc_session (id TEXT PRIMARY KEY)");
+    execute_sql(
+        &conn,
+        "INSERT INTO cc_session(id) VALUES \
+         ('cc-session:s1'), ('cc-session:s2'), ('cc-session:s3'), \
+         ('cc-session:s4'), ('cc-session:s5'), ('cc-session:s6')",
+    );
+
+    let peer = Arc::new(MockPeer::new());
+    for i in 1..=6 {
+        peer.enqueue_tool_response(
+            "list_messages",
+            serde_json::json!({"messages": [{"id": format!("m{i}")}]}),
+        );
+    }
+
+    let yaml = r#"
+search_tool: list_messages
+extract_path: messages
+filter_mapping:
+  session_id:
+    param: session_id
+    ops: ["="]
+    enumerate_from:
+      entity: session
+      field: id
+      order_by: id
+"#;
+    let fdw = build_fdw(
+        "cc_message",
+        &[("id", "TEXT"), ("session_id", "TEXT")],
+        yaml,
+        peer.clone(),
+        Some("cc_"),
+    );
+
+    let rows = collect_rows(&fdw, conn, &[], 2);
+    assert_eq!(rows.len(), 6);
+    // session_id column (stamped from call params) must follow enumeration
+    // order s1..s6 regardless of completion interleaving.
+    let session_col: Vec<String> = rows
+        .iter()
+        .map(|r| match &r[1] {
+            Value::Text(t) => t.as_str().to_owned(),
+            other => panic!("expected text, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(session_col, vec!["s1", "s2", "s3", "s4", "s5", "s6"]);
 }

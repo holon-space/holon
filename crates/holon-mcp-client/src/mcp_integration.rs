@@ -499,6 +499,13 @@ async fn finish_integration(
     }
 
     // Register foreign tables for entities with vtable config.
+    // Entity → id column map so enumerate_from fan-out knows which parent
+    // columns carry scheme-prefixed ids (strip boundary in mcp_vtable).
+    let enumeration_id_columns: std::collections::HashMap<String, String> = sidecar
+        .entities
+        .iter()
+        .map(|(name, cfg)| (name.clone(), cfg.id_column_or_default()))
+        .collect();
     let mut fdw_backed_tables = Vec::new();
     for (entity_name, entity_config) in &sidecar.entities {
         if let Some(ref vtable_config) = entity_config.vtable {
@@ -541,6 +548,7 @@ async fn finish_integration(
                 cache_table,
                 tokio::runtime::Handle::current(),
                 sidecar.entity_prefix.as_deref(),
+                &enumeration_id_columns,
             ));
 
             // Suffix with _fdw to distinguish from the cache table
