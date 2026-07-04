@@ -23,12 +23,14 @@
 //! provably cannot cover; each use states why in the table. A lag tolerance
 //! firing is first a settle GAP to fix, not something to tolerate.
 //!
-//! CAVEAT (2026-07-04): on THIS branch the quiescence is a flat
-//! `wide_e2e::SETTLE` (150 ms) slept per transition — not yet the deterministic
-//! `converge_projections` settle being built on the boot-parallelism branch.
-//! The flat sleep is itself an undisclosed lag tolerance that happens to cover;
-//! every `Converge::None` store's strictness must be RE-CONFIRMED once the
-//! deterministic settle merges and the flat sleep is removed.
+//! The quiescence is the DETERMINISTIC 3-projection convergence settle
+//! (`WideE2E::settle_after_apply` → `wide_e2e::converge_projections` →
+//! `convergence::converge_signals`, covering CDC + Loro + org): it waits until
+//! the projections actually converge, capped at `wide_e2e::SETTLE` (150 ms) so
+//! it never over-waits vs the flat post-apply sleep it replaced. Because it
+//! waits on real convergence rather than a fixed delay, `Converge::None` is
+//! soundly backed — a store that still diverges after the settle is a real bug,
+//! not a race.
 //!
 //! # Growth path (do not add speculatively)
 //!
