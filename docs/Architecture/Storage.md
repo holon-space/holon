@@ -121,35 +121,35 @@ where
 // Implements: DataSource<T>, Queryable<T>, EntityCache<T>, ChangeNotifications<StorageEntity>
 ```
 
-#### Stream Ingestion
+#### Change Ingestion
 
-QueryableCache subscribes to changes from sync providers via broadcast channels.
+Batches of `Change<T>` enter the cache through `apply_batch(changes, sync_token)`,
+which synchronously applies a batch in a single transaction (with retry logic for
+lock contention) and saves the sync token atomically with the data.
 
-**Stream Ingestion Methods:**
+**Live entry points for `apply_batch`:**
 
-| Method | Purpose |
-|--------|---------|
-| `ingest_stream(rx)` | Subscribe to `broadcast::Receiver<Vec<Change<T>>>` and apply changes to cache |
-| `ingest_stream_with_metadata(rx)` | Subscribe with metadata (sync tokens) for atomic data+token saves |
-| `apply_batch(changes, sync_token)` | Synchronously apply a batch of changes (for ordered ingestion) |
+| Caller | File |
+|--------|------|
+| MCP sync engine | `crates/holon-mcp-client/src/mcp_sync_engine.rs` |
+| Directory/file cache feeds | `crates/holon-app/src/turso_seams.rs` |
+
+**Implemented, unwired**: `ingest_stream(rx)` and `ingest_stream_with_metadata(rx)`
+(subscribe to a `broadcast::Receiver<Vec<Change<T>>>` and apply in a background
+task) have **zero call sites** today — they are reserved for future external sync
+providers that push via broadcast channels.
 
 **Event Flow (Current Architecture):**
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                            Event Flow Pipeline                               │
-└─────────────────────────────────────────────────────────────────────────────┘
-
-SyncProvider                    QueryableCache                    UI
-(e.g., Todoist)
+Sync engine                     QueryableCache                    UI
+(mcp_sync_engine /
+ turso_seams feeds)
      │                               │                             │
-     │  broadcast::Sender<Change>    │                             │
+     │        apply_batch()          │                             │
      ├──────────────────────────────>│                             │
      │                               │                             │
-     │                    ingest_stream() spawns                   │
-     │                    background task                          │
-     │                               │                             │
-     │                    apply_batch_to_cache()                   │
+     │                    single atomic transaction                │
      │                               │                             │
      │                               ▼                             │
      │                        TursoBackend                         │
@@ -167,35 +167,9 @@ SyncProvider                    QueryableCache                    UI
      └───────────────────────────────┴─────────────────────────────┘
 ```
 
-**Key Behaviors:**
-
-1. **Background Task**: `ingest_stream()` spawns a tokio task that runs for the cache's lifetime
-2. **Atomic Transactions**: Batches are applied in a single transaction with retry logic for lock contention
-3. **Sync Token Atomicity**: `ingest_stream_with_metadata()` saves sync tokens atomically with data changes
-4. **Lag Handling**: If the stream lags, a warning is logged (TODO: trigger full resync)
-
-**Usage Example:**
-
-```rust
-// SyncProvider publishes changes via broadcast channel
-let (tx, rx) = broadcast::channel(1024);
-
-// QueryableCache subscribes to changes
-let cache: QueryableCache<TodoistTask> = /* ... */;
-cache.ingest_stream(rx);
-
-// Later, SyncProvider sends changes
-let changes = vec![Change::Created { data: task, origin }];
-tx.send(changes)?;
-
-// Changes automatically flow through:
-// 1. Cache's background task receives from broadcast
-// 2. Writes to TursoBackend in atomic transaction
-// 3. CDC callback fires
-// 4. UI receives via watch_changes_since()
-```
-
-> **Note**: These broadcast channels are consumed directly — each `QueryableCache` ingests its provider's stream via `ingest_stream_with_metadata`. An earlier design layered a unified pub/sub `EventBus` on top; it was removed. See [Sync Wiring (no EventBus)](Sync.md#sync-wiring-no-eventbus).
+> **Note**: An earlier design layered a unified pub/sub `EventBus` on top of
+> broadcast channels; it was removed. See
+> [Sync Wiring (no EventBus)](Sync.md#sync-wiring-no-eventbus).
 
 ### TursoBackend
 
@@ -279,7 +253,8 @@ The `row_changes()` method subscribes to the CDC broadcast channel:
 pub fn row_changes(&self) -> RowChangeStream {
     let mut broadcast_rx = self.cdc_broadcast.subscribe();
     let (tx, rx) = mpsc::channel(1024);
-    tokio::spawn(async move {
+    // spawn_actor routes to the right executor per target (tokio natively, wasm-bindgen-futures on wasm32)
+    crate::util::spawn_actor(async move {
         loop {
             match broadcast_rx.recv().await {
                 Ok(batch) => {

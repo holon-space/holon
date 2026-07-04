@@ -46,7 +46,7 @@ Block ordering uses fractional indexing:
 ### WASM Compatibility
 
 - `MaybeSendSync` is `Send + Sync` on **all** targets (`crates/holon-core/src/traits.rs`) — the historical wasm relaxation was removed because the wasm32 browser demo uses Arc/Mutex-backed types; do not reintroduce the cfg split
-- `#[async_trait(?Send)]` survives only at a few specific sites (e.g. `crates/holon-macros`)
+- `#[async_trait(?Send)]` survives in two forms: (a) unconditionally in the capmap macro output (`crates/holon-macros/src/capmap.rs:105`) and the cap-trait impls it patterns in test crates (`holon-integration-tests` / `holon-pbt-core` — ~109 occurrences across ~23 files); (b) wasm32-gated via `#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait(?Send))]` in `crates/holon-core` (`entity_cache.rs:21,49`, `operation_wrapper.rs:128,152`)
 - Conditional compilation for platform-specific features
 
 ### Supported Frontends

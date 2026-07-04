@@ -76,7 +76,7 @@ For each row:
 ```
 
 **Reactive layer** (`holon-frontend`):
-Query results flow into `ReactiveView` (a self-managing reactive collection backed by futures-signals `MutableVec`). Each row is wrapped in a `ReactiveViewModel` — a persistent node that owns its `RenderExpr` and `DataRow` as `Mutable<_>` fields. When either changes the node re-interprets itself and pushes updates to child nodes without rebuilding the tree. `DataRowAccumulator` (`holon-api/src/widget_spec.rs`) is the single source of truth for `Change<DataRow>` → keyed collection conversion.
+Query results flow into `ReactiveView` (a self-managing reactive collection backed by futures-signals `MutableVec`). Each row is wrapped in a `ReactiveViewModel` — a persistent node that owns its `RenderExpr` as a `Mutable<_>` and its `DataRow` as a `ReadOnlyMutable<_>` (sole writer: `ReactiveRowSet::apply_change`). When either changes the node re-interprets itself and pushes updates to child nodes without rebuilding the tree. `DataRowAccumulator` (`holon-api/src/widget_spec.rs`) is the single source of truth for `Change<DataRow>` → keyed collection conversion.
 
 #### Core Types
 
@@ -152,7 +152,7 @@ pub trait ProfileResolving: Send + Sync {
 }
 ```
 
-`ProfileResolver` (`crates/holon/src/entity_profile.rs`) loads profiles from
+`ProfileResolver` (`crates/holon-profiles/src/lib.rs`, re-exported as `holon::entity_profile`) loads profiles from
 org blocks with the `entity_profile_for` property, layered over type-defined
 profiles from the `TypeRegistry`. Profiles are backed by CDC-driven
 `LiveData<EntityProfile>` — edits to profile blocks rebuild the cache in a
@@ -173,17 +173,26 @@ The render pipeline follows Model-View-ViewModel (MVVM). The three layers are:
 
 ```rust
 pub struct ReactiveViewModel {
-    pub expr: Mutable<RenderExpr>,       // Render expression this node was built from
-    pub data: Mutable<Arc<DataRow>>,     // The data row this node is interpreting (sourced from cells)
+    pub expr: Mutable<RenderExpr>,           // Render expression this node was built from
+    pub data: ReadOnlyMutable<Arc<DataRow>>, // The data row this node is interpreting (sourced from cells)
     pub children: Vec<Arc<ReactiveViewModel>>,  // Static layout children
     pub collection: Option<Arc<ReactiveView>>,  // Reactive collection (MutableVec)
-    pub slot: Option<ReactiveSlot>,      // Deferred content (live_block, live_query)
-    pub expanded: Option<Mutable<bool>>, // Per-instance expand/collapse state (NOT a cell — see UI.md FU-1)
+    pub slot: Option<ReactiveSlot>,          // Deferred content (live_block, live_query)
+    pub lazy_slot: Option<LazyReactiveSlot>, // Gated lazy content (expand_toggle), interpreted on first open
+    pub expanded: Option<Mutable<bool>>,     // Per-instance expand/collapse state (NOT a cell — see UI.md FU-1)
     pub operations: Vec<OperationWiring>,
     pub triggers: Vec<InputTrigger>,
     pub layout_hint: LayoutHint,
+    pub props: Mutable<HashMap<String, Value>>, // Typed props extracted during interpretation
+    pub render_ctx: Option<RenderContext>,   // Captured context for deferred re-interpretation
+    pub interpret_fn: Option<InterpretFn>,   // Self-interpretation closure — set_data() recomputes props
+    pub subscriptions: Vec<DropTask>,        // Node-owned tasks, aborted on drop
 }
 ```
+
+`data` is `ReadOnlyMutable` by design: the only writable handle to a row lives inside `ReactiveRowSet` and `apply_change` is the sole writer, so a leaf `.set()`-ing row data is a compile error — the type-system enforcement of the one-writer rule (FU-1 lineage).
+
+Two of the extra fields matter for anyone writing shadow builders: `interpret_fn` lets `set_data()` recompute `props` in place, so data-only updates refresh a row without replacing its `Arc<ReactiveViewModel>` in the `MutableVec`; and `subscriptions` holds `DropTask`s (abort-on-drop task handles) so signal-watching tasks spawned by leaf builders are tied to node lifetime — when the collection driver removes a row, its background work is aborted, not leaked.
 
 See [UI](UI.md) for the cells-vs-`Mutable<T>` cut.
 
@@ -216,24 +225,26 @@ The ReactiveViewModel also declares what input events it cares about via `InputT
 
 **Tier 2 — Trigger (local check, round-trip on match):** The ViewModel declares triggers on nodes. The View checks incoming input against triggers locally — O(number of triggers on that node), typically 1–3. Only when a trigger matches does the View send a semantic event to the ViewModel layer, which processes it and updates the reactive tree.
 
-**Tier 3 — Sync (debounced, async):** Text content syncs to the backend on blur or after a debounce interval.
+**Tier 3 — Sync (debounced, async):** Text content syncs to the backend on blur or after a debounce interval, as a `ViewEvent::TextSync { value }`.
 
 ```rust
 pub enum InputTrigger {
-    PrefixAtCursor { prefix: String, cursor_pos: usize, action: String },
-    KeyChord { chord: String, action: String },
-    TextChanged { debounce_ms: u32, action: String },
+    // The only variant. `at_line_start: true` restricts the match to column 0
+    // (e.g. a line-start `/`); `false` matches anywhere (e.g. `[[`, `@`).
+    TextPrefix { prefix: String, action: String, at_line_start: bool },
 }
 ```
 
+There are no `KeyChord` / `TextChanged` variants: key chords route through `UserDriver::send_key_chord` + platform keymaps (not text triggers), and Tier-3 debounced sync is a `ViewEvent::TextSync`, not a trigger. `check_triggers` matches a `TextPrefix` against the current line and emits `ViewEvent::TriggerFired { action, filter_text, prefix_start }`.
+
 **Example: `/` command menu flow:**
 
-1. User types `/` at position 0 in an `EditableText` node
-2. View checks triggers locally — `PrefixAtCursor{"/", 0, "command_menu"}` matches
-3. View sends `ViewEvent { node_id, action: "command_menu", context: { text: "/", cursor: 1 } }`
+1. User types `/` in an editable-text node. The default `/` trigger is `TextPrefix { prefix: "/", action: "command_menu", at_line_start: false }` — mid-line, matching LogSeq — and is only present when the node has operations (`default_triggers_for_operations`).
+2. View calls `check_triggers` on the current line; the `/` prefix before the cursor matches.
+3. View sends `ViewEvent::TriggerFired { action: "command_menu", filter_text, prefix_start }` (the text between the last `/` and the cursor is `filter_text`).
 4. ReactiveEngine produces a CommandMenu subtree and updates the reactive slot
 5. View re-renders from the updated `Mutable` — no round-trip for subsequent keystrokes
-6. On selection, ReactiveEngine replaces `/` with the command result
+6. On selection, ReactiveEngine replaces the `/…` filter with the command result
 
 **Performance characteristics:**
 
@@ -256,9 +267,9 @@ pub enum InputTrigger {
 | `crates/holon-frontend/src/reactive_view.rs` | `ReactiveView` — self-managing reactive collection (MutableVec + driver) |
 | `crates/holon-frontend/src/reactive.rs` | `ReactiveEngine`, shadow builders, render interpretation |
 | `crates/holon-api/src/entity_profile.rs` | `EntityProfile`, `ProfileCache`, `StoredProfile`/`StoredVariant`, `ProfileResolving` trait |
-| `crates/holon/src/entity_profile.rs` | `ProfileResolver` (LiveData-backed), profile parsing |
+| `crates/holon-profiles/src/lib.rs` | `ProfileResolver` (LiveData-backed, `:530`), `parse_entity_profile` (`:122`); re-exported as `holon::entity_profile` |
 | `crates/holon-api/src/widget_spec.rs` | `DataRow` type alias, `DataRowAccumulator` |
 | `crates/holon-api/src/render_types.rs` | `RenderExpr`, `OperationDescriptor`, `OperationWiring` |
-| `crates/holon/src/api/backend_engine.rs` | `get_root_block_id()`, `render_entity()`, `attach_row_profiles()` |
+| `crates/holon/src/api/backend_engine.rs` | `compile_to_sql()` / `compile_gql()`, `graph_schema_cache`, `profile_resolver()` accessor |
 | `crates/holon/src/api/ui_watcher.rs` | `watch_ui()` — `Stream<UiEvent>` with `merge_triggers` + `switch_map` |
 

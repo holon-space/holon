@@ -13,7 +13,8 @@ a `block_type`, properties live in a nested JSON column. The only
 non-`block:` scheme that appears in `parent_id` is the root sentinel,
 `sentinel:no_parent` — root detection is `parent_id LIKE 'sentinel:%'`, full
 stop (the legacy `doc:%`-prefix branch was dropped from
-`blocks_with_paths.sql`; see the `schema/blocks_with_paths.sql` history).
+`blocks_with_paths.sql`; see the
+`crates/holon-turso/sql/schema/blocks_with_paths.sql` history).
 
 Turso is a **projection**, not an authority (Model §Five layers, row 3):
 exactly one writer, verbatim, never re-merged, ephemeral by contract. Base
@@ -26,12 +27,20 @@ joins the `block` matview, not `block_raw`).
 ## Module registry
 
 Every table/view is owned by exactly one `SchemaModule` (trait in
-`crates/holon-turso/src/schema_module.rs`) or, for `graph_eav`, wired
-directly as DI SQL. `provides()`/`requires()` resources are FluxDI
-`DbReady<R>` markers (`crates/holon/src/di/schema_providers.rs`); dependency
-ordering — e.g. `block_with_path` after the `block` matview — is resolved by
-FluxDI's `resolve_all_eager()`, not by a hand-rolled topological sort.
-Modules are enumerated in `crates/holon/src/storage/schema_modules.rs`:
+`crates/holon-turso/src/schema_module.rs`) — including `graph_eav`, whose
+former "wired directly as DI SQL" exception no longer exists
+(`GraphEavSchemaModule` is a regular module). `provides()`/`requires()`
+resources are FluxDI `DbReady<R>` markers; the concrete module impls live in
+`crates/holon-turso/src/schema_modules.rs` and are run via
+`run_schema_module` by the `DbReady<R>` providers in
+`crates/holon/src/di/schema_providers.rs`. Dependency ordering — e.g.
+`block_with_path` after the `block` matview — is resolved by FluxDI's
+`resolve_all_eager()`, not by a hand-rolled topological sort. Note the
+import path: consumers import `holon_turso::schema_modules` directly (as
+`schema_providers.rs` does) — `crates/holon/src/storage/mod.rs` re-exports
+the `schema_module` trait module, `dynamic_schema_module`, `turso`,
+`resource`, etc., but **not** `schema_modules`, so there is no
+`crate::storage::schema_modules` path.
 
 | Module | Provides | Requires | Kind |
 |--------|----------|----------|------|
@@ -40,18 +49,24 @@ Modules are enumerated in `crates/holon/src/storage/schema_modules.rs`:
 | `BlockMatviewSchemaModule` | `block` | `block_raw`, `block_requires`, `block_tags` | matview |
 | `BlockRequirementEdgesSchemaModule` | `block_requirement_edges` | `block`, `block_requires` | chained matview |
 | `BlockHierarchySchemaModule` | `block_with_path` | `block` | matview (recursive CTE) |
-| `NavigationSchemaModule` | `navigation_history`, `navigation_cursor`, `current_focus`, `focus_roots` | (none) | tables + 2 matviews |
+| `NavigationSchemaModule` | `navigation_history`, `navigation_cursor`, `current_focus`, `focus_roots` | `block` | tables + 2 matviews |
 | `SyncStateSchemaModule` | `sync_states` | (none) | base table |
 | `OperationsSchemaModule` | `operation` | (none) | base table |
 | `LinkSchemaModule` | `block_link` | `block` | base table (populated by `LinkEventSubscriber`, not SQL) |
 | `IdentitySchemaModule` | `canonical_entity`, `entity_alias`, `proposal_queue` | (none) | base tables (unpopulated seam) |
-| `GraphEavSchema` (DI-only, `di/schema_providers.rs`) | `graph_eav` (`nodes`, `edges`, `node_labels`, `property_keys`, `*_props_*`) | `block_raw` | base tables |
+| `GraphEavSchemaModule` | `graph_eav` (`nodes`, `edges`, `node_labels`, `property_keys`, `*_props_*`) | (none) | base tables |
 
 **Runtime-defined types**: `DynamicSchemaModule`
 (`crates/holon-turso/src/dynamic_schema_module.rs`) builds a `SchemaModule`
-at startup from a `TypeDefinition`, creating one extension table per
-user-defined type that foreign-keys to `block(id)`. It plugs into the same
-FluxDI provider graph as the built-in modules above.
+from a `TypeDefinition`, creating one extension table per user-defined type
+that foreign-keys to `block(id)`. Its live invocation is the MCP
+`create_entity_type` tool (`frontends/mcp/src/tools.rs`): at tool-call time
+— outside the startup provider graph — it constructs the module, runs
+`ensure_schema`, and calls `mark_available(provides())` so the resource
+marker still lands. There is also a lower seam,
+`StorageBackend::create_entity` (`crates/holon-turso/src/turso.rs`), which
+runs `to_create_table_sql` DDL directly with no module ownership and no
+resource marker.
 
 ## Block: base table, junctions, and hydration matview
 
@@ -100,7 +115,8 @@ serialization) — internal code passes `Block`, never a raw row, past the
 
 ## Hierarchy: `block_with_path`
 
-`block_with_path` (`schema/blocks_with_paths.sql`, owned by
+`block_with_path` (`crates/holon-turso/sql/schema/blocks_with_paths.sql`,
+owned by
 `BlockHierarchySchemaModule`) is a recursive-CTE matview over the `block`
 matview (not `block_raw`) — another chained matview. Root detection is
 `parent_id LIKE 'sentinel:%'`; the recursive case joins a block to its
@@ -120,7 +136,10 @@ or query `block_with_path` where `root_id == id`.
 
 ## Navigation
 
-Owned by `NavigationSchemaModule`. `navigation_history` is an append-only log
+Owned by `NavigationSchemaModule` (requires `block`, because the
+`focus_roots` matview JOINs the `block` matview; the DI provider accordingly
+depends on `DbReady<BlockMatviewView>` — `schema_providers.rs`).
+`navigation_history` is an append-only log
 of navigation events per region; `closed_at IS NULL` marks the still-open
 entries (soft-close, not delete, so back/forward history survives closing a
 tab). `navigation_cursor` holds, per region, which history row is "current".
@@ -155,9 +174,12 @@ plug into rather than growing ad-hoc identity columns elsewhere.
 
 ## Generic graph: `graph_eav`
 
-`graph_eav` (`sql/schema/graph_eav.sql`, wired directly via
-`GraphEavSchema`/`register_schema_providers`, not a `SchemaModule` impl) is a
-generic entity-attribute-value graph store, independent of the block schema:
+`graph_eav` (`crates/holon-turso/sql/schema/graph_eav.sql`) is owned by
+`GraphEavSchemaModule` — a regular `SchemaModule` impl
+(`schema_modules.rs`), empty `requires()`, run via `run_schema_module`; only
+the `DbReady<GraphEavSchema>` marker remains DI-side
+(`di/schema_providers.rs`). It is a generic entity-attribute-value graph
+store, independent of the block schema:
 
 | Table | Role |
 |---|---|
@@ -187,10 +209,10 @@ track the on-disk vault layout independent of block content:
 |------|-------------|
 | `crates/holon-turso/src/schema_module.rs` | `SchemaModule` trait, `EdgeFieldDescriptor` |
 | `crates/holon-turso/src/dynamic_schema_module.rs` | `DynamicSchemaModule` (runtime-defined types) |
-| `crates/holon/src/storage/schema_modules.rs` | Concrete built-in module implementations |
+| `crates/holon-turso/src/schema_modules.rs` | Concrete built-in module implementations (imported as `holon_turso::schema_modules` directly — not re-exported via `crates/holon/src/storage/mod.rs`) |
 | `crates/holon/src/storage/resource.rs` | Re-export of `Resource` (now in `holon-core`) |
 | `crates/holon/src/di/schema_providers.rs` | FluxDI `DbReady<R>` wiring, dependency ordering, `graph_eav` DI registration |
-| `crates/holon/sql/schema/*.sql` | DDL for every table/matview above |
+| `crates/holon-turso/sql/schema/*.sql` | DDL for every table/matview above |
 | `crates/holon/sql/prql_stdlib.prql` | `children`/`siblings`/`descendants`/context-aware PRQL helpers over `block`/`block_with_path` |
 | `crates/holon-api/src/block.rs` | `Block`, `BlockWire`, `TryFrom<StorageEntity> for Block` |
 

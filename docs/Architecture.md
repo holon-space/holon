@@ -166,21 +166,33 @@ These compile-time traits define built-in entity types. User-defined types are d
 ### Domain Operations
 
 ```rust
+// crates/holon-core/src/traits.rs (abbreviated)
 pub trait BlockOperations<T>: BlockDataSourceHelpers<T> {
-    async fn indent(&self, id: &str, parent_id: &str) -> Result<OperationResult>;
-    async fn outdent(&self, id: &str) -> Result<OperationResult>;
-    async fn move_block(&self, id: &str, parent_id: &str, after_block_id: Option<&str>) -> Result<OperationResult>;
-    async fn split_block(&self, id: &str, position: i64) -> Result<OperationResult>;
-    async fn move_up(&self, id: &str) -> Result<OperationResult>;
-    async fn move_down(&self, id: &str) -> Result<OperationResult>;
+    // spec-0008 seams — default None; production impls override
+    fn cells(&self) -> Option<&dyn EntityCellRegistry>;
+    fn ordering(&self) -> Option<&dyn BlockOrdering>;
+    fn order_key_minter(&self) -> Option<&dyn OrderKeyMinting>;
+
+    async fn indent(&self, id: &EntityUri) -> Result<OperationResult>; // derives the previous sibling itself
+    async fn outdent(&self, id: &EntityUri) -> Result<OperationResult>;
+    async fn move_block(&self, id: &EntityUri, parent_id: &EntityUri, after_block_id: Option<&EntityUri>) -> Result<OperationResult>;
+    async fn move_to_position(&self, id: &EntityUri, parent_id: &EntityUri, after_block_id: Option<&EntityUri>) -> Result<Vec<FieldDelta>>;
+    async fn split_block(&self, id: &EntityUri, position: i64) -> Result<OperationResult>;
+    async fn move_up(&self, id: &EntityUri) -> Result<OperationResult>;
+    async fn move_down(&self, id: &EntityUri) -> Result<OperationResult>;
 }
 
-pub trait TaskOperations<T>: CrudOperations<T> {
+pub trait TaskOperations<T>: MaybeSendSync {
+    async fn set_title(&self, id: &str, title: &str) -> Result<OperationResult>;
+    fn completion_states_with_progress(&self) -> Vec<CompletionStateInfo>;
     async fn set_state(&self, id: &str, task_state: String) -> Result<OperationResult>;
+    async fn cycle_task_state(&self, id: &str) -> Result<OperationResult>;
     async fn set_priority(&self, id: &str, priority: i64) -> Result<OperationResult>;
     async fn set_due_date(&self, id: &str, due_date: Option<DateTime<Utc>>) -> Result<OperationResult>;
 }
 ```
+
+The ordering seam: `BlockOrdering` is the positional authority (it encapsulates the Loro `tree.mov` vs SqlOnly `gen_key_between` split), `children_ordered` on `BlockQueryHelpers` is the single ordered-read primitive (sibling order is a property of the parent→children relation, never of a per-block encoding), and `order_key_minter()` returns `Some` only when the store is the SqlOnly consolidator that mints order keys — in Loro mode the tree owns the fractional index and no key is minted on that path.
 
 ### Operation Discovery
 
@@ -191,13 +203,24 @@ pub trait OperationRegistry: MaybeSendSync {
     fn short_name() -> Option<&'static str> { None }
 }
 
+// crates/holon-api/src/render_types.rs (abbreviated)
 pub struct OperationDescriptor {
+    pub entity_name: EntityName,
+    pub entity_short_name: String,
+    pub id_column: String,
     pub name: String,
+    pub display_name: String,
     pub description: String,
-    pub params: Vec<ParamDescriptor>,
+    pub required_params: Vec<OperationParam>,
     pub affected_fields: Vec<String>,
+    pub param_mappings: Vec<ParamMapping>,
+    pub trigger: Option<Trigger>,
+    pub bound_params: HashMap<String, Value>,
+    pub precondition: Option<Arc<Box<PreconditionChecker>>>,
 }
 ```
+
+The `OperationRegistry` trait lives in `crates/holon-core/src/traits.rs`; the descriptor types (`OperationDescriptor`, `OperationParam`, `ParamMapping`, `Trigger`) live in `crates/holon-api/src/render_types.rs`.
 
 Operations return `OperationResult` which includes `Vec<FieldDelta>` for CDC-level change tracking and an `UndoAction` for reversible operations. `FieldDelta` captures individual field changes at the operation level, while CDC captures row-level changes at the database level — both exist because operations may affect multiple rows (e.g., `indent` updates depth on descendants).
 
@@ -219,7 +242,7 @@ Detailed documentation lives in `docs/Architecture/`:
 | [replication.md](Architecture/Replication.md) | Target replication model: capability profiles, per-component base + 3-way merge, single-owner ordering, consolidator/sink roles, two transports |
 | [archlint.md](Architecture/Archlint.md) | Architecture linter (ast-grep YAML + ripgrep smells + dylint cdylib), Claude Code PostToolUse hook, ALLOW protocol, cargo arch-test wrapper |
 
-See also [wiki/overview.md](wiki/overview.md) for the navigational layer and [wiki/index.md](wiki/index.md) for per-crate / per-concept pages.
+See also [wiki/overview.md](../wiki/overview.md) for the navigational layer and [wiki/index.md](../wiki/index.md) for per-crate / per-concept pages.
 
 ## Key Files
 
@@ -232,20 +255,19 @@ See also [wiki/overview.md](wiki/overview.md) for the navigational layer and [wi
 | `crates/holon-macros/src/lib.rs` | Procedural macros (#[derive(Entity)], #[operations_trait]) |
 | `crates/holon-api/src/entity.rs` | Entity types (DynamicEntity, TypeDefinition, IntoEntity, TryFromEntity) |
 | `crates/holon-api/src/reactive.rs` | Reactive stream operators (scan_state, switch_map, combine_latest, coalesce), MapDiff, CdcAccumulator |
-| `crates/holon/src/sync/live_data.rs` | CDC-driven collection with watch-based version notification |
+| `crates/holon-api/src/live_data.rs` | `LiveData<T>` CDC-driven collection + `BlockFeed` (CDC mirror of the block matview) for reactive consumers |
 | `crates/holon/src/api/ui_watcher.rs` | watch_ui: merge_triggers → switch_map → UiEvent stream |
 | `crates/holon-turso/src/turso.rs` | Turso backend + CDC |
 | `crates/holon/src/sync/loro_module.rs` | Standalone Loro DI module (independent of OrgMode) |
-| `crates/holon/src/sync/iroh_sync_adapter.rs` | Iroh P2P sync adapter (transport only) |
-| `crates/holon/src/sync/loro_share_backend.rs` | Loro document sharing (P2P) |
-| `crates/holon/src/sync/multi_peer.rs` | Multi-peer sync coordination |
-| `crates/holon/src/sync/loro_block_operations.rs` | OperationProvider routing writes through Loro CRDT |
-| `crates/holon/src/sync/loro_sync_controller.rs` | LoroProjection: single writer projecting Loro → SQL block_raw |
-| `crates/holon/src/sync/live_data.rs` | LiveData<Block> (BlockFeed): CDC mirror of the block matview for reactive consumers |
+| `crates/holon-loro/src/iroh_sync_adapter.rs` | Iroh P2P sync adapter (transport only) |
+| `crates/holon-loro/src/loro_share_backend.rs` | Loro document sharing (P2P) |
+| `crates/holon-loro/src/multi_peer.rs` | Shared multi-peer Loro sync infrastructure for property-based testing (PeerState/GroupState/GroupTransition) |
+| `crates/holon-loro/src/loro_block_operations.rs` | OperationProvider routing writes through Loro CRDT |
+| `crates/holon-loro/src/loro_sync_controller.rs` | LoroProjection: single writer projecting Loro → SQL block_raw |
 | `crates/holon/src/core/sql_operation_provider.rs` | Direct SQL block operations (fallback when Loro disabled) |
-| `crates/holon/src/api/loro_backend.rs` | LoroBackend: CoreOperations implementation for block documents |
-| `crates/holon/src/api/repository.rs` | Repository trait definitions (CoreOperations, Lifecycle, P2POperations) |
-| `crates/holon/src/petri.rs` | Petri-net materialization from blocks for WSJF ranking |
+| `crates/holon-loro/src/loro_backend.rs` | LoroBackend: CoreOperations implementation for block documents |
+| `crates/holon-api/src/repository.rs` | Repository trait definitions (CoreOperations, Lifecycle, P2POperations) |
+| `crates/holon-petri/src/lib.rs` | Petri-net materialization from blocks for WSJF ranking |
 | `crates/holon-engine/src/` | Standalone Petri-net engine: `engine.rs` (firing/ranking), `guard.rs` (Rhai evaluation), `yaml/` (YAML net/state/history) |
 | `crates/holon-turso/src/dynamic_schema_module.rs` | Runtime-generated SchemaModule from TypeDefinition |
 | `crates/holon-mcp-client/src/mcp_provider.rs` | MCP connection + McpOperationProvider (OperationProvider impl) |
@@ -256,5 +278,4 @@ See also [wiki/overview.md](wiki/overview.md) for the navigational layer and [wi
 | `crates/holon-app/src/mcp_integrations.rs` | McpIntegrationsModule + McpIntegrationRegistry + RegistryOperationProxy |
 | `docs/integrations/todoist.yaml` | Todoist integration config (transport, auth, entities, tools, sync, undo) |
 | `frontends/gpui/src/` | GPUI frontend (primary) |
-| `frontends/flutter/rust/src/` | Flutter FFI bridge |
 | `frontends/mcp/src/tools.rs` | MCP tool implementations (unified `execute_query` for PRQL/GQL/SQL) |

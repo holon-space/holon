@@ -424,7 +424,7 @@ The "bidirectional sync" arrow is not a direct file↔Loro coupling: it runs thr
 - Enables interop with other tools
 - Provides human-readable backup and portability
 
-**Open questions**: Exact reconciliation strategy between file edits and backend state is TBD. Goal: you can always edit your notes in any text editor, and Holon will incorporate those changes.
+**Reconciliation strategy (shipped)**: every file replica keeps a per-replica **base** in `SyncBaseStore` (`crates/holon-filesystem/src/sync_base_store.rs`); an external file edit becomes inbound intent as `diff(base, current)` (conflict detection in `sync_conflict.rs`, ports in `sync_ports.rs`), driven by the format-agnostic `FileSyncController`. The consolidator resolves it as a 3-way merge against the base; per-field merge fidelity degrades down the ladder **op-CRDT ≻ base-limited 3-way ≻ LWW**, with text getting real op-level merges from states alone via `TransientTextMergeProvider` (`crates/holon-loro`). See [Replication.md](Replication.md) §3/§9 and [Model.md](Model.md) invariants 9–11. The goal holds: you can always edit your notes in any text editor, and Holon incorporates those changes.
 
 ### Sync Token Management
 
@@ -459,13 +459,20 @@ Both paths share the same underlying typed methods on the entity's `CrudOperatio
 Operations are defined via traits, not string-based dispatch:
 
 ```rust
-trait MutableTaskDataSource<T> {
-    async fn set_completion(&self, id: &str, completed: bool);
-    async fn set_priority(&self, id: &str, priority: i64);
+// crates/holon-core/src/traits.rs
+#[holon_macros::operations_trait]
+#[async_trait]
+pub trait RenameOperations<T>: MaybeSendSync
+where
+    T: MaybeSendSync + 'static,
+{
+    /// Rename an entity
+    #[holon_macros::affects("name")]
+    async fn rename(&self, id: &str, name: String) -> Result<OperationResult>;
 }
 ```
 
-Procedural macros generate `OperationDescriptor` metadata from these traits.
+The `#[operations_trait]` procedural macro generates `OperationDescriptor` metadata from these traits.
 
 ### Operation Descriptors
 
@@ -510,21 +517,27 @@ Cells dispatch through *typed* `CrudOperations` methods (`block_ops.set_field(id
 
 ### Frontend Agnosticism
 
-The backend exposes a minimal FFI surface that any frontend can implement:
+The backend exposes a small service surface that any frontend can drive; frontends resolve it via DI as `FrontendSession` (`crates/holon-frontend/src/lib.rs`). Abbreviated signatures:
 
 ```rust
-// Core FFI functions
-fn init_render_engine() -> RenderEngine;
-fn compile_query(prql: &str) -> CompiledQuery;
-fn execute_operation(entity: &str, op: &str, params: StorageEntity);
-fn watch_changes() -> Stream<Change<StorageEntity>>;
+// crates/holon/src/api/holon_service.rs — compile without executing
+pub fn compile_query(&self, query: &str, language: QueryLanguage) -> Result<String>;
+
+// crates/holon-core/src/traits.rs — OperationProvider
+async fn execute_operation(&self, entity_name: &EntityName, op_name: &str,
+    params: StorageEntity) -> Result<OperationResult>;
+
+// crates/holon-api/src/streaming.rs
+async fn watch_changes_since(&self, position: StreamPosition)
+    -> Pin<Box<dyn Stream<Item = Result<Vec<Change<T>>, ApiError>> + Send>>;
 ```
 
 This enables:
-- GPUI frontend (current primary — desktop; mobile via gpui-mobile)
-- TUI frontend (keyboard-driven + test harness)
-- Dioxus / dioxus-web frontend (prototype)
+- GPUI frontend (current primary — desktop; mobile via the optional `mobile` feature, which pulls the `gpui-mobile` dep)
+- TUI frontend (keyboard-driven)
+- Dioxus frontend (prototype); dioxus-web is out-of-workspace, wasm32-only, built via `trunk build`
 - MCP server frontend
+- Experimental prototypes: `ply`, `waterui`, `holon-worker` (out-of-workspace wasm worker)
 
 ### Reactive Updates
 
@@ -606,26 +619,23 @@ This enables:
 
 ### Async DI Pattern (Spec 0007 Phase 3.5)
 
-The converged pattern (June 2026):
+The converged pattern:
 
 1. **Async boundary at the top**: `open_and_register_core` acquires the `DbHandle`
    via async Turso initialization. Callers obtain handles before entering DI
    registration.
 2. **Sync factories capture clones**: `Provider::root` factories receive owned
    clones of `DbHandle`, `Arc<...>`, etc. — they never call `block_in_place`.
-3. **Async work uses `Provider::root_async`**: 44 factories use the async path
-   directly. fluxdi rejects sync resolution of an async provider loudly
-   (fail-loud, no silent deadlock).
-4. **The mcp_vtable `block_in_place`** (`holon-mcp-client/src/mcp_vtable.rs`)
-   is a deliberate Turso-FFI boundary on a dedicated runtime — it is NOT the
-   DI-deadlock class.
-5. **Test-side `block_in_place`** (~50 sites) bridges `multi_thread` tokio
-   (proptest) into async — untouched; this is test infrastructure, not DI.
+3. **Async work uses `Provider::root_async`**: fluxdi rejects sync resolution of
+   an async provider loudly (fail-loud, no silent deadlock).
+4. **The mcp_vtable `block_in_place`**
+   (`crates/holon-mcp-client/src/mcp_vtable.rs`) is a deliberate Turso-FFI
+   boundary on a dedicated runtime — it is NOT the DI-deadlock class.
+   (Test-side `block_in_place` bridging proptest's multi-thread tokio into
+   async is test infrastructure, not DI.)
 
-Deleted (June 2026): `register_core_services` (only production `block_in_place`),
-`run_async_in_sync`, and sync `create_queryable_cache` — all were dead code with
-zero callers. The 27 remaining pure-sync `Provider::root` factories capture
-clones only (no blocking) and are harmless to leave.
+The conversion/deletion history (which factories moved when) lives in
+spec 0007 and the devlog, not here.
 
 ---
 
@@ -634,10 +644,12 @@ clones only (no blocking) and are harmless to leave.
 ### Adding a New External System
 
 1. Implement `DataSource<T>` for read-only cache access
-2. Implement `CrudOperationProvider<T>` for write operations
-3. Implement domain-specific traits (e.g., `MutableTaskDataSource`)
-4. Create a `SyncProvider` for incremental sync
+2. Implement `CrudOperations<T>` for write operations
+3. Implement domain-specific traits (e.g., `TaskOperations<T>`, `RenameOperations<T>`)
+4. Create a `SyncableProvider` for incremental sync
 5. Register in DI container via a module
+
+All four traits live in `crates/holon-core/src/traits.rs`.
 
 ### Adding a New Operation
 
