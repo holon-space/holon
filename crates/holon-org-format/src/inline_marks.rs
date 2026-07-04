@@ -389,6 +389,15 @@ mod tests {
     }
 
     #[test]
+    fn sub_empty_braces_strip_to_empty_inner() {
+        // `_{}` is the minimal SUBSCRIPT node (len == prefix+suffix in
+        // strip_prefix_suffix); the braces must still be stripped.
+        let (out, marks) = extract("a_{} b");
+        assert_eq!(out, "a b");
+        assert_eq!(marks, vec![MarkSpan::new(1, 1, InlineMark::Sub)]);
+    }
+
+    #[test]
     fn sub_strips_braces() {
         let (out, marks) = extract("a_{sub}");
         // `a` literal + Sub("sub")

@@ -186,6 +186,30 @@ fn format_planning(scheduled: Option<&str>, deadline: Option<&str>) -> String {
     result
 }
 
+/// Format header arguments as Org Mode inline parameters.
+/// Input: `{ "connection": "main", "results": "table" }`
+/// Output: `:connection main :results table`
+#[allow(dead_code)]
+fn format_header_args(args: &HashMap<String, String>) -> String {
+    if args.is_empty() {
+        return String::new();
+    }
+
+    let mut parts: Vec<String> = args
+        .iter()
+        .map(|(k, v)| {
+            if v.is_empty() {
+                format!(":{}", k)
+            } else {
+                format!(":{} {}", k, v)
+            }
+        })
+        .collect();
+
+    parts.sort();
+    parts.join(" ")
+}
+
 /// Format header arguments with Value types as Org Mode inline parameters.
 /// Input: `{ "connection": String("main"), "results": String("table") }`
 /// Output: `:connection main :results table`
@@ -1216,71 +1240,5 @@ mod tests {
         let org = block.to_org();
         // Tags render in sorted order.
         assert!(org.starts_with("** TODO [#A] Test headline :urgent:work:"));
-    }
-
-    #[test]
-    fn to_org_renders_planning_lines() {
-        let mut block = Block::new_text(
-            EntityUri::block("id1"),
-            EntityUri::block("parent1"),
-            "Planned task",
-        );
-        block.set_level(1);
-        block.set_scheduled(Some(Timestamp::parse("<2026-01-15 Thu>").unwrap()));
-        block.set_deadline(Some(Timestamp::parse("<2026-02-01 Sun>").unwrap()));
-
-        let org = block.to_org();
-        assert!(org.contains("SCHEDULED: "), "planning dropped from to_org: {org:?}");
-        assert!(org.contains("2026-01-15"), "scheduled date missing: {org:?}");
-        assert!(org.contains("DEADLINE: "), "deadline dropped from to_org: {org:?}");
-        assert!(org.contains("2026-02-01"), "deadline date missing: {org:?}");
-    }
-
-    #[test]
-    fn to_org_properties_drawer_keeps_custom_keys_and_bare_id() {
-        let mut block = Block::new_text(
-            EntityUri::block("abc-123"),
-            EntityUri::block("parent1"),
-            "With drawer",
-        );
-        block.set_level(1);
-        block.set_org_properties(Some(
-            r#"{"ID":"abc-123","CUSTOM":"val"}"#.to_string(),
-        ));
-
-        let org = block.to_org();
-        // ID renders bare (not JSON-quoted) and exactly once.
-        assert!(org.contains(":ID: abc-123\n"), "ID not rendered bare: {org:?}");
-        assert_eq!(org.matches(":ID:").count(), 1, "ID rendered more than once: {org:?}");
-        // Non-ID drawer keys must survive the round-trip.
-        assert!(org.contains(":CUSTOM: val"), "custom drawer key dropped: {org:?}");
-        assert!(org.contains(":PROPERTIES:") && org.contains(":END:"), "{org:?}");
-    }
-
-    #[test]
-    fn source_block_to_org_renders_header_args() {
-        let mut block = Block {
-            id: EntityUri::block("src1"),
-            parent_id: EntityUri::block("parent1"),
-            content: "select 1".to_string(),
-            content_type: ContentType::Source,
-            ..Block::default()
-        };
-        let mut args = HashMap::new();
-        args.insert(
-            "connection".to_string(),
-            holon_api::Value::String("main".to_string()),
-        );
-        args.insert(
-            "results".to_string(),
-            holon_api::Value::String("table".to_string()),
-        );
-        block.set_source_header_args(args);
-
-        let org = block.to_org();
-        assert!(org.starts_with("#+BEGIN_SRC"), "{org:?}");
-        assert!(org.contains(":connection main"), "header arg dropped: {org:?}");
-        assert!(org.contains(":results table"), "header arg dropped: {org:?}");
-        assert!(org.contains(":id src1"), "{org:?}");
     }
 }
