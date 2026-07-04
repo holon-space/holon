@@ -72,8 +72,6 @@ impl RefBlock {
 
 #[derive(Clone, Debug)]
 struct RefSelfBlock {
-    energy: f64,
-    focus: f64,
     mental_slots_capacity: i64,
 }
 
@@ -174,8 +172,6 @@ impl PetriRefState {
     fn effective_self(&self) -> SelfDescriptor {
         match &self.self_block {
             Some(sb) => SelfDescriptor {
-                energy: sb.energy,
-                focus: sb.focus,
                 mental_slots_capacity: sb.mental_slots_capacity,
             },
             None => SelfDescriptor::defaults(),
@@ -330,14 +326,8 @@ impl PetriRefState {
     }
 
     fn gen_set_self_block() -> BoxedStrategy<PetriTransition> {
-        (
-            prop::sample::select(vec![0.3, 0.5, 0.7, 1.0]),
-            prop::sample::select(vec![0.2, 0.5, 0.8, 1.0]),
-            prop::sample::select(vec![3i64, 5, 7, 10]),
-        )
-            .prop_map(|(energy, focus, cap)| PetriTransition::SetSelfBlock {
-                energy,
-                focus,
+        prop::sample::select(vec![3i64, 5, 7, 10])
+            .prop_map(|cap| PetriTransition::SetSelfBlock {
                 mental_slots_capacity: cap,
             })
             .boxed()
@@ -364,7 +354,8 @@ impl PetriRefState {
         let blocks = PetriSUT::rebuild_blocks(self);
         let prototype_props = self.effective_prototype_props();
         let self_desc = self.effective_self();
-        let (net, marking) = materialize_at(&blocks, &self_desc, &prototype_props, Utc::now());
+        let (net, marking) = materialize_at(&blocks, &self_desc, &prototype_props, Utc::now())
+            .expect("materialize_at");
         let engine = Engine::new();
         let enabled = engine
             .enabled(&net, &marking)
@@ -418,8 +409,6 @@ enum PetriTransition {
         id: String,
     },
     SetSelfBlock {
-        energy: f64,
-        focus: f64,
         mental_slots_capacity: i64,
     },
     SetPrototype {
@@ -521,13 +510,9 @@ impl ReferenceStateMachine for PetriRefState {
                 state.blocks.remove(id);
             }
             PetriTransition::SetSelfBlock {
-                energy,
-                focus,
                 mental_slots_capacity,
             } => {
                 state.self_block = Some(RefSelfBlock {
-                    energy: *energy,
-                    focus: *focus,
                     mental_slots_capacity: *mental_slots_capacity,
                 });
             }
@@ -772,7 +757,11 @@ fn find_previous_sibling(ref_state: &PetriRefState, block: &RefBlock) -> Option<
 
 // --- Individual invariant functions ---
 
-fn check_self_token(ref_state: &PetriRefState, marking: &TaskMarking, self_desc: &SelfDescriptor) {
+fn check_self_token(
+    _ref_state: &PetriRefState,
+    marking: &TaskMarking,
+    _self_desc: &SelfDescriptor,
+) {
     let self_tok = marking.token("self").expect("self token must always exist");
     assert_eq!(self_tok.id(), "self", "self token id() must return 'self'");
     assert_eq!(
@@ -780,42 +769,28 @@ fn check_self_token(ref_state: &PetriRefState, marking: &TaskMarking, self_desc:
         "person",
         "self token must be type person"
     );
-
-    let cap = self_tok.get("mental_slots_capacity");
     assert_eq!(
-        cap,
-        Some(&holon_engine::value::Value::Int(
-            self_desc.mental_slots_capacity
-        )),
-        "mental_slots_capacity must match self descriptor"
+        self_tok.get("status"),
+        Some(&holon_engine::value::Value::String("active".to_string())),
+        "self token must carry status=active"
     );
 
-    let energy = self_tok.get("energy");
-    assert_eq!(
-        energy,
-        Some(&holon_engine::value::Value::Float(self_desc.energy)),
-        "energy must match self descriptor"
-    );
-
-    let focus = self_tok.get("focus");
-    assert_eq!(
-        focus,
-        Some(&holon_engine::value::Value::Float(self_desc.focus)),
-        "focus must match self descriptor"
-    );
-
-    // mental_slots_occupied must match DOING count
-    let doing_count = ref_state
-        .blocks
-        .values()
-        .filter(|b| b.task_state == "DOING")
-        .count() as i64;
-    let occupied = self_tok.get("mental_slots_occupied");
-    assert_eq!(
-        occupied,
-        Some(&holon_engine::value::Value::Int(doing_count)),
-        "mental_slots_occupied must match DOING task count"
-    );
+    // energy / focus / mental_slots_* were dead economic knobs (never read by
+    // any precond or objective) and were removed from the self token. Mental
+    // slots survive only as RankResult display info (checked separately). Pin
+    // that the dead attributes stay off the token.
+    for dead in [
+        "energy",
+        "focus",
+        "mental_slots_occupied",
+        "mental_slots_capacity",
+    ] {
+        assert_eq!(
+            self_tok.get(dead),
+            None,
+            "removed dead knob {dead:?} must not reappear on the self token"
+        );
+    }
 }
 
 fn check_no_duplicate_token_ids(marking: &TaskMarking) {
@@ -1387,8 +1362,6 @@ impl PetriSUT {
                 "Self",
             );
             self_block.set_property("is_self", HValue::Boolean(true));
-            self_block.set_property("energy", HValue::Float(sb.energy));
-            self_block.set_property("focus", HValue::Float(sb.focus));
             self_block.set_property(
                 "mental_slots_capacity",
                 HValue::Integer(sb.mental_slots_capacity),
@@ -1443,7 +1416,8 @@ impl StateMachineTest for PetriSUT {
         let self_desc = ref_state.effective_self();
         let test_clock = Utc::now();
         let (net, marking) =
-            materialize_at(&state.blocks, &self_desc, &prototype_props, test_clock);
+            materialize_at(&state.blocks, &self_desc, &prototype_props, test_clock)
+                .expect("materialize_at");
 
         // Check structural invariants after every operation
         check_all_invariants(ref_state, &net, &marking, &self_desc, &prototype_props);

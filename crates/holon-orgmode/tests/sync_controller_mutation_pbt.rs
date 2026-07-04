@@ -132,6 +132,15 @@ impl BlockReader for InMemoryBlockStore {
         Ok(self.get_all_blocks(doc_id.as_str()))
     }
 
+    async fn get_block_authoritative(&self, id: &EntityUri) -> Result<Option<Block>> {
+        let store = self.blocks.read().unwrap();
+        Ok(store
+            .values()
+            .flat_map(|v| v.iter())
+            .find(|b| b.id == *id)
+            .cloned())
+    }
+
     async fn iter_documents_with_blocks(&self) -> anyhow::Result<Vec<(EntityUri, Vec<Block>)>> {
         Ok(self
             .blocks
@@ -1312,9 +1321,10 @@ proptest! {
             fixture.seed_blocks(&mutated);
 
             // on_block_changed → file write
+            let delta = holon_filesystem::BlockDelta::Upsert(mutated[block_idx].clone());
             fixture
                 .controller
-                .on_block_changed(&fixture.doc_id)
+                .on_block_changed(&fixture.doc_id, &delta)
                 .await
                 .unwrap();
 
@@ -2029,6 +2039,306 @@ mod ordering_replay_tests {
             place_calls.len(),
             1,
             "exactly one place() call expected for the misaligned block; got {place_calls:?}"
+        );
+    }
+}
+
+// ============================================================================
+// Test 8: cold-boot fast-path must be Loro-aware (WP-D / I2)
+//
+// Regression guard for the 2026-07-06 reset hole: on cold boot the fast path
+// skipped org ingest whenever the on-disk hash equalled the SQL-persisted
+// `file.content_hash` — a SQL-ONLY check. After a reset (fresh empty `.loro`
+// but SQL kept the matching hash) it wrongly decided "already ingested" and
+// skipped, leaving the Loro tree empty and SQL/Loro silently diverged.
+//
+// The fix requires the content present in EVERY active store: skip only when
+// the SQL hash matches AND (when Loro is active) the doc's root block is in the
+// Loro tree. These tests inject the Loro-presence signal through
+// `BlockOrdering::in_tree` (the exact seam the fix consults) and assert the
+// skip decision flips on it.
+// ============================================================================
+#[cfg(test)]
+mod fast_path_loro_presence_tests {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering as AtomicOrdering;
+
+    use super::*;
+
+    /// BlockReader that round-trips `file.content_hash` across a simulated
+    /// reboot: `persist_file_hash` captures into a shared map,
+    /// `load_file_hashes` serves it back — so a second controller's
+    /// `initialize()` arms the fast path with the hash the first boot
+    /// stamped (no hand-computed hash, no coupling to the renderer version
+    /// or consolidator tag).
+    struct HashCapturingReader {
+        inner: Arc<InMemoryBlockStore>,
+        hashes: Arc<Mutex<HashMap<String, String>>>,
+    }
+
+    #[async_trait]
+    impl BlockReader for HashCapturingReader {
+        async fn get_blocks(&self, doc_id: &EntityUri) -> Result<Vec<Block>> {
+            self.inner.get_blocks(doc_id).await
+        }
+        async fn get_block_authoritative(&self, id: &EntityUri) -> Result<Option<Block>> {
+            self.inner.get_block_authoritative(id).await
+        }
+        async fn iter_documents_with_blocks(&self) -> Result<Vec<(EntityUri, Vec<Block>)>> {
+            self.inner.iter_documents_with_blocks().await
+        }
+        async fn load_file_hashes(&self) -> Result<Vec<(EntityUri, String)>> {
+            Ok(self
+                .hashes
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| (EntityUri::parse(k).expect("stored file uri"), v.clone()))
+                .collect())
+        }
+        async fn persist_file_hash(&self, uri: &EntityUri, hash: &str) -> Result<()> {
+            self.hashes
+                .lock()
+                .unwrap()
+                .insert(uri.as_str().to_string(), hash.to_string());
+            Ok(())
+        }
+    }
+
+    /// Ordering stub whose `in_tree` answer is injectable, and which counts
+    /// every mutating call. A non-zero count means `on_file_changed` did NOT
+    /// take the fast-path skip — it ran the ingest. `create_in_tree` keeps the
+    /// default (`Ok(false)` → SqlOnly) so content-block creates route through
+    /// `update_in_tree` (no downstream projection needed).
+    struct PresenceOrdering {
+        store: Arc<InMemoryBlockStore>,
+        root_in_tree: AtomicBool,
+        mutations: AtomicUsize,
+        /// parent uri → child ids in insertion order. Populated by
+        /// `update_in_tree` so the ingest's post-create `children()` wait loop
+        /// (which polls until every just-created block is visible to the
+        /// ordering layer) observes the blocks this ingest wrote.
+        child_order: Mutex<HashMap<String, Vec<String>>>,
+    }
+
+    impl PresenceOrdering {
+        fn new(store: Arc<InMemoryBlockStore>, root_in_tree: bool) -> Self {
+            Self {
+                store,
+                root_in_tree: AtomicBool::new(root_in_tree),
+                mutations: AtomicUsize::new(0),
+                child_order: Mutex::new(HashMap::new()),
+            }
+        }
+        fn bump(&self) {
+            self.mutations.fetch_add(1, AtomicOrdering::SeqCst);
+        }
+        fn mutation_count(&self) -> usize {
+            self.mutations.load(AtomicOrdering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl BlockOrdering for PresenceOrdering {
+        async fn place(
+            &self,
+            _: &EntityUri,
+            _: &EntityUri,
+            _: Option<&EntityUri>,
+        ) -> BlockOrderingResult<()> {
+            self.bump();
+            Ok(())
+        }
+        async fn prev_sibling(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
+            Ok(None)
+        }
+        async fn next_sibling(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
+            Ok(None)
+        }
+        async fn first_child(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
+            Ok(None)
+        }
+        async fn last_child(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
+            Ok(None)
+        }
+        async fn children(&self, parent_id: &EntityUri) -> BlockOrderingResult<Vec<EntityUri>> {
+            Ok(self
+                .child_order
+                .lock()
+                .unwrap()
+                .get(parent_id.as_str())
+                .map(|ids| ids.iter().map(|s| EntityUri::from_raw(s)).collect())
+                .unwrap_or_default())
+        }
+        async fn in_tree(&self, _: &EntityUri) -> BlockOrderingResult<Option<bool>> {
+            Ok(Some(self.root_in_tree.load(AtomicOrdering::SeqCst)))
+        }
+        async fn update_in_tree(
+            &self,
+            params: holon_api::StorageEntity,
+        ) -> BlockOrderingResult<()> {
+            self.bump();
+            let block = block_from_params(&params);
+            {
+                let mut order = self.child_order.lock().unwrap();
+                let siblings = order
+                    .entry(block.parent_id.as_str().to_string())
+                    .or_default();
+                let child = block.id.as_str().to_string();
+                if !siblings.contains(&child) {
+                    siblings.push(child);
+                }
+            }
+            self.store.apply_upsert(block);
+            Ok(())
+        }
+        async fn delete_in_tree(
+            &self,
+            params: holon_api::StorageEntity,
+        ) -> BlockOrderingResult<()> {
+            self.bump();
+            let id = params
+                .get("id")
+                .and_then(|v| v.as_string())
+                .expect("delete_in_tree: missing id");
+            self.store.apply_delete(id);
+            Ok(())
+        }
+    }
+
+    /// Boot 1: fresh vault, empty hash cache → full ingest, stamps the hash.
+    /// Returns the shared hash map, the shared doc manager, and the canonical
+    /// on-disk (now renderer-canonical) file path.
+    async fn boot_once_and_stamp_hash(
+        root_dir: &std::path::Path,
+    ) -> (
+        Arc<Mutex<HashMap<String, String>>>,
+        Arc<MockDocumentManager>,
+        PathBuf,
+        EntityUri,
+    ) {
+        let hashes = Arc::new(Mutex::new(HashMap::new()));
+        let store = Arc::new(InMemoryBlockStore::new());
+        let reader = Arc::new(HashCapturingReader {
+            inner: store.clone(),
+            hashes: hashes.clone(),
+        });
+        let doc_manager = Arc::new(MockDocumentManager::new());
+        let ordering = Arc::new(PresenceOrdering::new(store.clone(), true));
+
+        let doc_id = EntityUri::block_random();
+        let mut doc = Block::new_text(
+            doc_id.clone(),
+            EntityUri::no_parent(),
+            "reset-doc".to_string(),
+        );
+        doc.set_page(true);
+        doc_manager.add_document(doc);
+
+        let mut controller = new_org_sync_controller(
+            reader,
+            doc_manager.clone(),
+            root_dir.to_path_buf(),
+            ordering.clone(),
+            Arc::new(holon_filesystem::RealFileSystem),
+        );
+
+        let stable_block_uuid = uuid::Uuid::new_v4().to_string();
+        let file_path = root_dir.join("reset-doc.org");
+        let initial_org = format!("* only block\n:PROPERTIES:\n:ID: {stable_block_uuid}\n:END:\n");
+        tokio::fs::write(&file_path, &initial_org).await.unwrap();
+        let canonical = file_path.canonicalize().expect("canonicalize");
+
+        controller.initialize().await.expect("initialize boot 1");
+        controller
+            .on_file_changed(&canonical)
+            .await
+            .expect("boot 1 on_file_changed");
+
+        assert!(
+            !hashes.lock().unwrap().is_empty(),
+            "boot 1 must stamp file.content_hash so the fast path can arm on boot 2"
+        );
+        (hashes, doc_manager, canonical, doc_id)
+    }
+
+    /// Boot 2: reuse the stamped hash so the fast path is armed, then vary only
+    /// the Loro presence signal. Returns how many block mutations the ingest
+    /// performed (0 = fast path skipped).
+    async fn boot_again_with_loro_presence(
+        root_dir: &std::path::Path,
+        hashes: Arc<Mutex<HashMap<String, String>>>,
+        doc_manager: Arc<MockDocumentManager>,
+        canonical: &std::path::Path,
+        loro_has_root: bool,
+    ) -> usize {
+        let store = Arc::new(InMemoryBlockStore::new());
+        let reader = Arc::new(HashCapturingReader {
+            inner: store.clone(),
+            hashes,
+        });
+        let ordering = Arc::new(PresenceOrdering::new(store.clone(), loro_has_root));
+        let mut controller = new_org_sync_controller(
+            reader,
+            doc_manager,
+            root_dir.to_path_buf(),
+            ordering.clone(),
+            Arc::new(holon_filesystem::RealFileSystem),
+        );
+
+        controller.initialize().await.expect("initialize boot 2");
+        controller
+            .on_file_changed(canonical)
+            .await
+            .expect("boot 2 on_file_changed");
+        ordering.mutation_count()
+    }
+
+    /// The bug: SQL hash matches but the Loro tree is empty (reset) → the fast
+    /// path MUST NOT skip; ingest must run to repopulate Loro.
+    #[tokio::test]
+    async fn fast_path_reingests_when_loro_tree_empty() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (hashes, doc_manager, canonical, _doc_id) =
+            boot_once_and_stamp_hash(temp_dir.path()).await;
+
+        let mutations = boot_again_with_loro_presence(
+            temp_dir.path(),
+            hashes,
+            doc_manager,
+            &canonical,
+            /* loro_has_root = */ false,
+        )
+        .await;
+
+        assert!(
+            mutations > 0,
+            "fast path skipped ingest despite an empty Loro tree — SQL and Loro would stay \
+             silently diverged (the WP-D / I2 regression)"
+        );
+    }
+
+    /// Control: SQL hash matches AND the Loro tree holds the doc root → the
+    /// fast path is still allowed to skip (no cold-boot perf regression).
+    #[tokio::test]
+    async fn fast_path_still_skips_when_content_present_in_all_stores() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (hashes, doc_manager, canonical, _doc_id) =
+            boot_once_and_stamp_hash(temp_dir.path()).await;
+
+        let mutations = boot_again_with_loro_presence(
+            temp_dir.path(),
+            hashes,
+            doc_manager,
+            &canonical,
+            /* loro_has_root = */ true,
+        )
+        .await;
+
+        assert_eq!(
+            mutations, 0,
+            "fast path should skip when content is present in every active store"
         );
     }
 }

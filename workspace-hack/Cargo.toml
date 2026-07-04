@@ -26,34 +26,36 @@ publish = false
 # are managed by hakari.
 
 ### BEGIN HAKARI SECTION
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+[dependencies]
 aho-corasick = { version = "1" }
 arrayvec = { version = "0.7" }
 bitflags = { version = "2", default-features = false, features = ["std"] }
-bytemuck = { version = "1", default-features = false, features = ["aarch64_simd", "derive", "extern_crate_alloc"] }
+bytemuck = { version = "1", default-features = false, features = ["derive", "extern_crate_alloc"] }
 byteorder = { version = "1" }
+chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }
 clap_builder = { version = "4", default-features = false, features = ["color", "env", "std", "suggestions", "usage", "wrap_help"] }
-collections = { git = "https://github.com/holon-space/zed.git", branch = "holon", default-features = false, features = ["test-support"] }
 crossbeam-epoch = { version = "0.9" }
 crossbeam-utils = { version = "0.8" }
 crypto-common = { version = "0.1", default-features = false, features = ["getrandom", "std"] }
-derive_more = { version = "2", features = ["add", "add_assign", "deref", "deref_mut", "display", "from_str", "is_variant", "mul", "mul_assign", "not"] }
+derive_more = { version = "2", features = ["debug", "deref", "display", "from", "from_str", "into_iterator", "is_variant", "try_into"] }
 either = { version = "1", features = ["use_std"] }
+fastbloom = { version = "0.14" }
+fastrand = { version = "2" }
 futures-executor = { version = "0.3" }
 futures-io = { version = "0.3" }
-futures-lite = { version = "2" }
 getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
-getrandom-6f8ce4dd05d13bba = { package = "getrandom", version = "0.2", default-features = false, features = ["js", "rdrand", "std"] }
-gpui = { git = "https://github.com/holon-space/zed.git", branch = "holon", features = ["test-support"] }
-http_client = { git = "https://github.com/holon-space/zed.git", branch = "holon", default-features = false, features = ["test-support"] }
+getrandom-6f8ce4dd05d13bba = { package = "getrandom", version = "0.2", default-features = false, features = ["std"] }
+hashbrown = { version = "0.16" }
 hyper = { version = "1", features = ["client", "http1", "http2", "server"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "server-auto", "service"] }
-image = { version = "0.25" }
-indexmap = { version = "2", features = ["serde"] }
+icu_locale_core = { version = "2", default-features = false, features = ["alloc", "zerovec"] }
+icu_normalizer = { version = "2", default-features = false, features = ["compiled_data", "utf16_iter", "utf8_iter"] }
+icu_properties = { version = "2", default-features = false, features = ["compiled_data"] }
+icu_provider = { version = "2", default-features = false, features = ["alloc", "baked"] }
 instant = { version = "0.1", default-features = false, features = ["wasm-bindgen"] }
-itertools-5ef9efb8ec2df382 = { package = "itertools", version = "0.12" }
 libc = { version = "0.2", features = ["extra_traits"] }
+litemap = { version = "0.8", default-features = false, features = ["alloc"] }
 lock_api = { version = "0.4", features = ["arc_lock"] }
 log = { version = "0.4", default-features = false, features = ["kv_unstable_serde"] }
 loro_fractional_index = { version = "1", default-features = false, features = ["serde"] }
@@ -63,12 +65,14 @@ miette = { version = "7", features = ["fancy"] }
 mio = { version = "1", features = ["net", "os-ext"] }
 nom = { version = "7" }
 num-bigint = { version = "0.4" }
-num-rational = { version = "0.4", features = ["num-bigint-std"] }
 num-traits = { version = "0.2", features = ["i128", "libm"] }
 once_cell = { version = "1", features = ["portable-atomic"] }
 opentelemetry = { version = "0.31", features = ["spec_unstable_logs_enabled", "testing"] }
 opentelemetry_sdk = { version = "0.31", features = ["spec_unstable_logs_enabled", "testing"] }
 parking_lot = { version = "0.12", features = ["arc_lock", "send_guard"] }
+percent-encoding = { version = "2" }
+postcard = { version = "1", features = ["experimental-derive", "use-std"] }
+potential_utf = { version = "0.1", default-features = false, features = ["alloc", "zerovec"] }
 ppv-lite86 = { version = "0.2", default-features = false, features = ["simd", "std"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 rand-274715c4dabd11b0 = { package = "rand", version = "0.9" }
@@ -79,64 +83,69 @@ regex = { version = "1" }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa-build", "dfa-onepass", "hybrid", "meta", "nfa", "perf", "std", "unicode"] }
 reqwest-5ef9efb8ec2df382 = { package = "reqwest", version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "stream"] }
 rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", tag = "rmcp-v0.12.0", features = ["auth", "client", "transport-child-process", "transport-io", "transport-streamable-http-client-reqwest", "transport-streamable-http-server"] }
-schemars = { version = "1", features = ["chrono04", "indexmap2"] }
+schemars = { version = "1", features = ["chrono04"] }
 scopeguard = { version = "1" }
 semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["alloc", "derive", "rc"] }
 serde_core = { version = "1", features = ["alloc", "rc"] }
-serde_json = { version = "1", features = ["alloc", "preserve_order", "raw_value"] }
+serde_json = { version = "1", features = ["alloc", "raw_value"] }
 similar = { version = "2", features = ["inline", "unicode"] }
 slab = { version = "0.4" }
-slotmap = { version = "1", features = ["serde"] }
 smallvec = { version = "1", default-features = false, features = ["const_new", "serde", "union"] }
+stable_deref_trait = { version = "1", default-features = false, features = ["alloc"] }
+subtle = { version = "2", default-features = false, features = ["const-generics"] }
 textwrap = { version = "0.16" }
 thiserror = { version = "2" }
 time = { version = "0.3", features = ["formatting", "local-offset", "parsing"] }
+tinystr = { version = "0.8", default-features = false, features = ["alloc", "zerovec"] }
 tokio = { version = "1", features = ["full", "test-util", "tracing"] }
 tokio-stream = { version = "0.1", features = ["net", "sync"] }
-tokio-util = { version = "0.7", features = ["codec", "io"] }
-toml_parser = { version = "1" }
-toml_writer = { version = "1" }
+tokio-util = { version = "0.7", features = ["codec", "io-util", "rt"] }
 tracing = { version = "0.1", features = ["log"] }
 tracing-core = { version = "0.1" }
 tracing-log = { version = "0.2", default-features = false, features = ["log-tracer", "std"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-ttf-parser = { version = "0.25", features = ["gvar-alloc", "no-std-float"] }
 twox-hash = { version = "2" }
+typenum = { version = "1", default-features = false, features = ["const-generics"] }
 url = { version = "2", features = ["serde"] }
 uuid = { version = "1", features = ["serde", "v4", "v5", "v7"] }
-winnow = { version = "0.7" }
-zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
+writeable = { version = "0.6", default-features = false, features = ["alloc"] }
+yoke = { version = "0.8", default-features = false, features = ["alloc", "derive"] }
+zerofrom = { version = "0.1", default-features = false, features = ["alloc", "derive"] }
+zerotrie = { version = "0.2", default-features = false, features = ["alloc", "yoke", "zerofrom"] }
+zerovec = { version = "0.11", default-features = false, features = ["alloc", "derive", "yoke"] }
 
-[target.'cfg(not(target_arch = "wasm32"))'.build-dependencies]
+[build-dependencies]
 aho-corasick = { version = "1" }
 arrayvec = { version = "0.7" }
 bitflags = { version = "2", default-features = false, features = ["std"] }
-bytemuck = { version = "1", default-features = false, features = ["aarch64_simd", "derive", "extern_crate_alloc"] }
+bytemuck = { version = "1", default-features = false, features = ["derive", "extern_crate_alloc"] }
 byteorder = { version = "1" }
+chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }
 clap_builder = { version = "4", default-features = false, features = ["color", "env", "std", "suggestions", "usage", "wrap_help"] }
-collections = { git = "https://github.com/holon-space/zed.git", branch = "holon", default-features = false, features = ["test-support"] }
 crossbeam-epoch = { version = "0.9" }
 crossbeam-utils = { version = "0.8" }
 crypto-common = { version = "0.1", default-features = false, features = ["getrandom", "std"] }
-derive_more = { version = "2", features = ["add", "add_assign", "deref", "deref_mut", "display", "from_str", "is_variant", "mul", "mul_assign", "not"] }
-derive_more-impl = { version = "2", features = ["add", "add_assign", "deref", "deref_mut", "display", "from_str", "is_variant", "mul", "mul_assign", "not"] }
+derive_more = { version = "2", features = ["debug", "deref", "display", "from", "from_str", "into_iterator", "is_variant", "try_into"] }
+derive_more-impl = { version = "2", features = ["debug", "deref", "display", "from", "from_str", "into_iterator", "is_variant", "try_into"] }
 either = { version = "1", features = ["use_std"] }
+fastbloom = { version = "0.14" }
+fastrand = { version = "2" }
 futures-executor = { version = "0.3" }
 futures-io = { version = "0.3" }
-futures-lite = { version = "2" }
 getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
-getrandom-6f8ce4dd05d13bba = { package = "getrandom", version = "0.2", default-features = false, features = ["js", "rdrand", "std"] }
-gpui = { git = "https://github.com/holon-space/zed.git", branch = "holon", features = ["test-support"] }
-http_client = { git = "https://github.com/holon-space/zed.git", branch = "holon", default-features = false, features = ["test-support"] }
+getrandom-6f8ce4dd05d13bba = { package = "getrandom", version = "0.2", default-features = false, features = ["std"] }
+hashbrown = { version = "0.16" }
 hyper = { version = "1", features = ["client", "http1", "http2", "server"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "server-auto", "service"] }
-image = { version = "0.25" }
-indexmap = { version = "2", features = ["serde"] }
+icu_locale_core = { version = "2", default-features = false, features = ["alloc", "zerovec"] }
+icu_normalizer = { version = "2", default-features = false, features = ["compiled_data", "utf16_iter", "utf8_iter"] }
+icu_properties = { version = "2", default-features = false, features = ["compiled_data"] }
+icu_provider = { version = "2", default-features = false, features = ["alloc", "baked"] }
 instant = { version = "0.1", default-features = false, features = ["wasm-bindgen"] }
-itertools-5ef9efb8ec2df382 = { package = "itertools", version = "0.12" }
 libc = { version = "0.2", features = ["extra_traits"] }
+litemap = { version = "0.8", default-features = false, features = ["alloc"] }
 lock_api = { version = "0.4", features = ["arc_lock"] }
 log = { version = "0.4", default-features = false, features = ["kv_unstable_serde"] }
 loro_fractional_index = { version = "1", default-features = false, features = ["serde"] }
@@ -146,12 +155,14 @@ miette = { version = "7", features = ["fancy"] }
 mio = { version = "1", features = ["net", "os-ext"] }
 nom = { version = "7" }
 num-bigint = { version = "0.4" }
-num-rational = { version = "0.4", features = ["num-bigint-std"] }
 num-traits = { version = "0.2", features = ["i128", "libm"] }
 once_cell = { version = "1", features = ["portable-atomic"] }
 opentelemetry = { version = "0.31", features = ["spec_unstable_logs_enabled", "testing"] }
 opentelemetry_sdk = { version = "0.31", features = ["spec_unstable_logs_enabled", "testing"] }
 parking_lot = { version = "0.12", features = ["arc_lock", "send_guard"] }
+percent-encoding = { version = "2" }
+postcard = { version = "1", features = ["experimental-derive", "use-std"] }
+potential_utf = { version = "0.1", default-features = false, features = ["alloc", "zerovec"] }
 ppv-lite86 = { version = "0.2", default-features = false, features = ["simd", "std"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 rand-274715c4dabd11b0 = { package = "rand", version = "0.9" }
@@ -162,117 +173,106 @@ regex = { version = "1" }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa-build", "dfa-onepass", "hybrid", "meta", "nfa", "perf", "std", "unicode"] }
 reqwest-5ef9efb8ec2df382 = { package = "reqwest", version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "stream"] }
 rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", tag = "rmcp-v0.12.0", features = ["auth", "client", "transport-child-process", "transport-io", "transport-streamable-http-client-reqwest", "transport-streamable-http-server"] }
-schemars = { version = "1", features = ["chrono04", "indexmap2"] }
+schemars = { version = "1", features = ["chrono04"] }
 scopeguard = { version = "1" }
 semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["alloc", "derive", "rc"] }
 serde_core = { version = "1", features = ["alloc", "rc"] }
-serde_json = { version = "1", features = ["alloc", "preserve_order", "raw_value"] }
+serde_json = { version = "1", features = ["alloc", "raw_value"] }
 similar = { version = "2", features = ["inline", "unicode"] }
 slab = { version = "0.4" }
-slotmap = { version = "1", features = ["serde"] }
 smallvec = { version = "1", default-features = false, features = ["const_new", "serde", "union"] }
+stable_deref_trait = { version = "1", default-features = false, features = ["alloc"] }
+subtle = { version = "2", default-features = false, features = ["const-generics"] }
 syn = { version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 textwrap = { version = "0.16" }
 thiserror = { version = "2" }
 time = { version = "0.3", features = ["formatting", "local-offset", "parsing"] }
+tinystr = { version = "0.8", default-features = false, features = ["alloc", "zerovec"] }
 tokio = { version = "1", features = ["full", "test-util", "tracing"] }
 tokio-stream = { version = "0.1", features = ["net", "sync"] }
-tokio-util = { version = "0.7", features = ["codec", "io"] }
-toml_parser = { version = "1" }
-toml_writer = { version = "1" }
+tokio-util = { version = "0.7", features = ["codec", "io-util", "rt"] }
 tracing = { version = "0.1", features = ["log"] }
 tracing-core = { version = "0.1" }
 tracing-log = { version = "0.2", default-features = false, features = ["log-tracer", "std"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-ttf-parser = { version = "0.25", features = ["gvar-alloc", "no-std-float"] }
 twox-hash = { version = "2" }
+typenum = { version = "1", default-features = false, features = ["const-generics"] }
 url = { version = "2", features = ["serde"] }
 uuid = { version = "1", features = ["serde", "v4", "v5", "v7"] }
-winnow = { version = "0.7" }
-zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
+vergen = { version = "9", default-features = false, features = ["build"] }
+vergen-gitcl = { version = "1", features = ["build"] }
+vergen-lib = { version = "9", features = ["build"] }
+writeable = { version = "0.6", default-features = false, features = ["alloc"] }
+yoke = { version = "0.8", default-features = false, features = ["alloc", "derive"] }
+zerofrom = { version = "0.1", default-features = false, features = ["alloc", "derive"] }
+zerotrie = { version = "0.2", default-features = false, features = ["alloc", "yoke", "zerofrom"] }
+zerovec = { version = "0.11", default-features = false, features = ["alloc", "derive", "yoke"] }
 
 [target.aarch64-apple-darwin.dependencies]
 ahash = { version = "0.8", features = ["compile-time-rng"] }
 anyhow = { version = "1", features = ["backtrace"] }
-derive_more = { version = "2", default-features = false, features = ["debug", "from", "into_iterator", "try_into"] }
+core-graphics = { version = "0.24" }
+derive_more = { version = "2", default-features = false, features = ["add", "add_assign", "deref_mut", "mul", "mul_assign", "not"] }
 dispatch2 = { version = "0.3" }
 errno = { version = "0.3" }
-fastbloom = { version = "0.14" }
 form_urlencoded = { version = "1" }
-futures-channel = { version = "0.3", features = ["sink"] }
-futures-sink = { version = "0.3" }
-futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
 h2 = { version = "0.4", default-features = false, features = ["stream"] }
-half = { version = "2", features = ["num-traits"] }
-hashbrown = { version = "0.16" }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "ring", "tls12", "webpki-tokio"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-proxy"] }
-io-surface = { version = "0.16" }
-itertools-594e8ee84c453af0 = { package = "itertools", version = "0.13" }
+image = { version = "0.25" }
+itertools = { version = "0.13" }
 miniz_oxide = { version = "0.8", features = ["simd"] }
 nix = { version = "0.31", features = ["fs", "poll", "signal"] }
+num-rational = { version = "0.4", features = ["num-bigint-std"] }
 objc2 = { version = "0.6", features = ["relax-void-encoding"] }
 object = { version = "0.37", default-features = false, features = ["read", "std"] }
 once_cell = { version = "1", default-features = false, features = ["critical-section"] }
 portable-atomic = { version = "1" }
-postcard = { version = "1", features = ["experimental-derive", "use-std"] }
-regex-syntax = { version = "0.8" }
 reqwest-594e8ee84c453af0 = { package = "reqwest", version = "0.13", default-features = false, features = ["json", "rustls", "rustls-no-provider"] }
-rustc-hash = { version = "1" }
 rustix = { version = "1", features = ["io_uring", "pipe", "process", "stdio", "termios", "time"] }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "aws_lc_rs", "logging", "ring", "std", "tls12"] }
 rustls-webpki = { version = "0.103", features = ["aws-lc-rs", "ring"] }
-spin = { version = "0.10" }
-subtle = { version = "2", default-features = false, features = ["const-generics"] }
+schemars = { version = "1", default-features = false, features = ["indexmap2"] }
+serde_json = { version = "1", default-features = false, features = ["preserve_order"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "early-data", "logging", "ring", "tls12"] }
-tokio-util = { version = "0.7", default-features = false, features = ["io-util", "rt"] }
 tower = { version = "0.5", default-features = false, features = ["log", "make", "retry", "timeout"] }
 tower-http = { version = "0.6", features = ["cors", "follow-redirect"] }
-typenum = { version = "1", default-features = false, features = ["const-generics"] }
+zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 zeroize = { version = "1", features = ["derive"] }
 
 [target.aarch64-apple-darwin.build-dependencies]
 ahash = { version = "0.8", features = ["compile-time-rng"] }
 anyhow = { version = "1", features = ["backtrace"] }
 cc = { version = "1", default-features = false, features = ["parallel"] }
-derive_more = { version = "2", default-features = false, features = ["debug", "from", "into_iterator", "try_into"] }
-derive_more-impl = { version = "2", default-features = false, features = ["debug", "from", "into_iterator", "try_into"] }
+core-graphics = { version = "0.24" }
+derive_more = { version = "2", default-features = false, features = ["add", "add_assign", "deref_mut", "mul", "mul_assign", "not"] }
+derive_more-impl = { version = "2", default-features = false, features = ["add", "add_assign", "deref_mut", "mul", "mul_assign", "not"] }
 dispatch2 = { version = "0.3" }
 errno = { version = "0.3" }
-fastbloom = { version = "0.14" }
 form_urlencoded = { version = "1" }
-futures-channel = { version = "0.3", features = ["sink"] }
-futures-sink = { version = "0.3" }
-futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
 h2 = { version = "0.4", default-features = false, features = ["stream"] }
-half = { version = "2", features = ["num-traits"] }
-hashbrown = { version = "0.16" }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "ring", "tls12", "webpki-tokio"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-proxy"] }
-io-surface = { version = "0.16" }
-itertools-594e8ee84c453af0 = { package = "itertools", version = "0.13" }
+image = { version = "0.25" }
+itertools = { version = "0.13" }
 miniz_oxide = { version = "0.8", features = ["simd"] }
 nix = { version = "0.31", features = ["fs", "poll", "signal"] }
+num-rational = { version = "0.4", features = ["num-bigint-std"] }
 objc2 = { version = "0.6", features = ["relax-void-encoding"] }
 object = { version = "0.37", default-features = false, features = ["read", "std"] }
 once_cell = { version = "1", default-features = false, features = ["critical-section"] }
 portable-atomic = { version = "1" }
-postcard = { version = "1", features = ["experimental-derive", "use-std"] }
-regex-syntax = { version = "0.8" }
 reqwest-594e8ee84c453af0 = { package = "reqwest", version = "0.13", default-features = false, features = ["json", "rustls", "rustls-no-provider"] }
-rustc-hash = { version = "1" }
 rustix = { version = "1", features = ["io_uring", "pipe", "process", "stdio", "termios", "time"] }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "aws_lc_rs", "logging", "ring", "std", "tls12"] }
 rustls-webpki = { version = "0.103", features = ["aws-lc-rs", "ring"] }
-spin = { version = "0.10" }
-subtle = { version = "2", default-features = false, features = ["const-generics"] }
+schemars = { version = "1", default-features = false, features = ["indexmap2"] }
+serde_json = { version = "1", default-features = false, features = ["preserve_order"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "early-data", "logging", "ring", "tls12"] }
-tokio-util = { version = "0.7", default-features = false, features = ["io-util", "rt"] }
-toml_datetime = { version = "1", features = ["serde"] }
 tower = { version = "0.5", default-features = false, features = ["log", "make", "retry", "timeout"] }
 tower-http = { version = "0.6", features = ["cors", "follow-redirect"] }
-typenum = { version = "1", default-features = false, features = ["const-generics"] }
+zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 zeroize = { version = "1", features = ["derive"] }
 
 ### END HAKARI SECTION

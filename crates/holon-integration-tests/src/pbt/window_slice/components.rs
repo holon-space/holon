@@ -32,7 +32,7 @@ use holon_pbt_core::capabilities::WidgetSnapshot;
 use holon_pbt_core::composition::CapMap;
 use holon_pbt_core::composition::CapProvider;
 
-use crate::pbt::sut_capabilities::view_model_to_snapshot;
+use crate::pbt::vm_snapshot::view_model_to_snapshot;
 
 /// A composed-slice component providing windowed [`SutLayout`] geometry over a
 /// live window's `BoundsRegistry` (via the abstract [`GeometryProvider`] port).

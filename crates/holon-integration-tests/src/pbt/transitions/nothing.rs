@@ -6,14 +6,13 @@
 
 use holon_pbt_core::TransitionFactory;
 use holon_pbt_core::TransitionRef;
+use holon_pbt_core::validation::Reason;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::reference_state::ReferenceState;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
-use crate::pbt::validation::Reason;
 
 /// No-op transition: does nothing to either the reference model or SUT.
 /// Enables the PBT to explore the search space without making progress,
@@ -21,9 +20,9 @@ use crate::pbt::validation::Reason;
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Nothing;
 
-impl TransitionFactory<ReferenceState> for Nothing {
+impl<R> TransitionFactory<R> for Nothing {
     type Reason = Reason;
-    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         Nothing.preconditions(state).map(|_| {
             let strat = Just(Nothing).boxed();
             (1, strat)
@@ -31,14 +30,14 @@ impl TransitionFactory<ReferenceState> for Nothing {
     }
 }
 
-impl TransitionRef<ReferenceState> for Nothing {
+impl<R> TransitionRef<R> for Nothing {
     type Reason = Reason;
 
-    fn preconditions(&self, _: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, _: &R) -> Validated<(), Reason> {
         Validated::Good(())
     }
 
-    fn apply_to_ref(&self, _: &mut ReferenceState) {
+    fn apply_to_ref(&self, _: &mut R) {
         // No-op: reference state is unchanged
     }
 }
@@ -51,8 +50,10 @@ crate::cap_transition! {
 }
 
 #[cfg(feature = "otel-testing")]
+use holon_pbt_core::capabilities::RefSqlCardinality;
+#[cfg(feature = "otel-testing")]
 impl crate::pbt::transition_budgets::SqlBudget for Nothing {
-    fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
+    fn expected_sql<R: RefSqlCardinality>(&self, _: &R) -> ExpectedSql {
         ExpectedSql {
             reads: 0,
             writes: 0,

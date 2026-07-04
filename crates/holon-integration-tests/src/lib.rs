@@ -12,6 +12,8 @@
 //! @c4 uses holon-mcp-client "MCP client providers" "Rust"
 //! @c4 uses holon-orgmode "org-mode sync I/O" "Rust"
 //! @c4 uses holon-pbt-core "PBT transition traits" "Rust"
+//! @c4 uses holon-loro "Loro CRDT backend & P2P sync" "Rust"
+//! @c4 uses holon-profiles "entity profile resolution" "Rust"
 //!
 //! Shared test infrastructure for Holon integration tests
 //!
@@ -28,6 +30,8 @@ pub mod fake_mcp_module;
 /// dep tree.
 #[cfg(feature = "pbt")]
 pub use holon_layout_testing::display_assertions;
+#[cfg(feature = "pbt")]
+pub mod mcp_user_driver;
 pub mod mutation_driver;
 pub mod org_utils;
 #[cfg(feature = "pbt")]
@@ -56,6 +60,12 @@ pub use holon_layout_testing::display_assertions::assert_display_trees_match;
 pub use holon_layout_testing::display_assertions::is_ordered_subset;
 #[cfg(feature = "pbt")]
 pub use holon_layout_testing::display_assertions::tree_diff;
+#[cfg(feature = "pbt")]
+pub use mcp_user_driver::DEFAULT_MCP_PORT;
+#[cfg(feature = "pbt")]
+pub use mcp_user_driver::McpUserDriver;
+#[cfg(feature = "pbt")]
+pub use mcp_user_driver::mcp_base_url_from_env;
 pub use mutation_driver::DirectUserDriver;
 pub use mutation_driver::ReactiveEngineDriver;
 pub use mutation_driver::UserDriver;
@@ -76,7 +86,6 @@ pub use screenshot_overlay::DEFAULT_OVERLAY_ALPHA;
 pub use screenshot_overlay::Overlay;
 pub use screenshot_overlay::Phase;
 pub use screenshot_overlay::Verdict;
-pub use test_environment::LoroCorruptionType;
 pub use test_environment::TestContext;
 pub use test_environment::TestContextBuilder;
 pub use test_environment::TestEnvironment;

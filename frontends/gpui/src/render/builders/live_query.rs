@@ -48,9 +48,10 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
                 let render_ctx = holon_frontend::RenderContext::default();
                 ctx.with_gpui(|_window, cx| {
                     cx.new(|cx| {
-                        // The shell's `block_id` is the engine's query-watcher
-                        // key, so its Drop releases the query watcher via
-                        // `unwatch` — the same lifecycle live blocks get.
+                        // The `LiveBlock` carries a `WatchGuard` for the
+                        // engine's query-watcher key; the shell holds it, so
+                        // dropping the shell releases the query watcher —
+                        // the same RAII lifecycle live blocks get.
                         ReactiveShell::new_for_block(
                             watch_key.to_string(),
                             render_ctx,

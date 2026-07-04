@@ -23,10 +23,6 @@ Container_Boundary(holon_frontend_code, "holon-frontend") {
     Component(holon_frontend__ReactiveViewModel, "ReactiveViewModel", "struct", "The ViewModel of Holon's MVVM UI — a persistent reactive node.")
 }
 
-Container_Boundary(holon_markdown_code, "holon-markdown") {
-    Component(holon_markdown__MarkdownFormatAdapter, "MarkdownFormatAdapter", "struct", "Markdown implementation of `holon_core::FileFormatAdapter`.")
-}
-
 Container_Boundary(holon_turso_code, "holon-turso") {
     Component(holon_turso__MatviewManager, "MatviewManager", "struct", "Manages the full lifecycle of Turso materialized views.")
     Component(holon_turso__DbHandle, "DbHandle", "struct", "Handle for sending commands to the database actor")
@@ -37,6 +33,5 @@ Container_Boundary(holon_turso_code, "holon-turso") {
 Rel(holon_api__Operation, holon_api__OperationDescriptor, "describes the op", "call")
 Rel(holon_core__OperationProvider, holon_core__OperationResult, "operation outcome", "returns")
 Rel(holon_turso__TursoBackend, holon_turso__DbHandle, "actor handle", "call")
-Rel(holon_markdown__MarkdownFormatAdapter, holon_core__FileFormatAdapter, "implements", "trait")
 
 @enduml

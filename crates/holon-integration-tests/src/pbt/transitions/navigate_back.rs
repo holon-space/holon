@@ -9,14 +9,16 @@
 
 use holon_api::Region;
 use holon_pbt_core::TransitionFactory;
-use holon_pbt_core::TransitionImpl;
 use holon_pbt_core::TransitionRef;
+use holon_pbt_core::capabilities::RefLifecycle;
+use holon_pbt_core::capabilities::RefNavHistoryMut;
 use holon_pbt_core::capabilities::SutNavHistoryDrive;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::check;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::reference_state::ReferenceState;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
 #[cfg(feature = "otel-testing")]
@@ -27,8 +29,6 @@ use crate::pbt::transition_budgets::NAV_DML_READS;
 use crate::pbt::transition_budgets::REACTIVE_BASE;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::docs_tolerance;
-use crate::pbt::validation::Reason;
-use crate::pbt::validation::check;
 
 /// Pop one entry off the active navigation history for `region`.
 /// Mirrors what production's history `Back` button does. The reference
@@ -39,15 +39,13 @@ pub struct NavigateBack {
     pub region: Region,
 }
 
-impl TransitionFactory<ReferenceState> for NavigateBack {
+impl<R: RefLifecycle + RefNavHistoryMut> TransitionFactory<R> for NavigateBack {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        vec![::holon_pbt_core::composition::CapId::of::<
-            dyn ::holon_pbt_core::capabilities::SutNavHistoryDrive,
-        >()]
+        Self::declared_caps()
     }
 
     type Reason = Reason;
-    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let instance = NavigateBack {
             region: Region::Main,
         };
@@ -58,12 +56,12 @@ impl TransitionFactory<ReferenceState> for NavigateBack {
     }
 }
 
-impl TransitionRef<ReferenceState> for NavigateBack {
+impl<R: RefLifecycle + RefNavHistoryMut> TransitionRef<R> for NavigateBack {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(state.action.app_started, Reason::AppNotStarted),
+            check(state.app_started(), Reason::AppNotStarted),
             check(state.can_go_back(self.region), Reason::NoNavigationHistory),
         ];
         checks
@@ -72,30 +70,18 @@ impl TransitionRef<ReferenceState> for NavigateBack {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
-        if let Some(history) = state.ui.tab.navigation_history.get_mut(&self.region)
-            && history.cursor > 0
-        {
-            history.cursor -= 1;
-        }
-        state.ui.tab.focused_entity_id.remove(&self.region);
-        state.ui.tab.focused_cursor.remove(&self.region);
-
-        // Blur on nav: see `navigate_focus.rs` for verification.
-        state.blur_active_editor();
+    fn apply_to_ref(&self, state: &mut R) {
+        state.nav_step_back(self.region);
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutNavHistoryDrive> TransitionImpl<ReferenceState, S> for NavigateBack {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.navigate_back(self.region).await;
+crate::cap_transition! {
+    NavigateBack: SutNavHistoryDrive,
+    where R: [ RefLifecycle + RefNavHistoryMut ],
+    |me, _state, sut| {
+        sut.navigate_back(me.region).await;
     }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for NavigateBack {
-    fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
+    sql_budget: |_me, state| {
         ExpectedSql {
             reads: REACTIVE_BASE + JOURNAL_READS + NAV_DML_READS - 2,
             writes: 0,

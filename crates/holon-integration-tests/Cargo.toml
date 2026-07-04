@@ -44,11 +44,19 @@ chrome-trace = ["dep:tracing-chrome", "otel-testing"]
 # `tokio/tracing` enables task instrumentation; otel-testing brings the
 # tracing-subscriber registry the ConsoleLayer attaches to.
 tokio-console = ["dep:console-subscriber", "otel-testing", "tokio/tracing"]
+# dhat heap profiler for the diag_harness example. Enabling this turns on
+# holon-frontend's dhat #[global_allocator], so the whole example binary is
+# profiled. Run: cargo run --release --example diag_harness \
+#   --no-default-features --features test-infra,heap-profile
+heap-profile = ["holon-frontend/heap-profile"]
 pbt = [
     "test-infra",
     "otel-testing",
     "holon-frontend/pbt",
     "dep:holon-layout-testing",
+    "dep:holon-loro-testing",
+    "dep:holon-orgmode-testing",
+    "dep:holon-oracles",
     "dep:holon-pbt-core",
     "dep:holon-macros",
     "dep:holon-mcp",
@@ -66,6 +74,7 @@ pbt = [
     "dep:validated",
     "dep:nonempty-collections",
     "dep:holon-block-roundtrip-testing",
+    "dep:holon-advice",
 ]
 
 [dependencies]
@@ -97,10 +106,14 @@ ab_glyph = "0.2"
 xcap = { git = "https://github.com/nightscape/xcap", branch = "feat/macos-offscreen-windows" }
 signal-hook = "0.3"
 holon-layout-testing = { path = "../holon-layout-testing", optional = true }
+holon-loro-testing = { path = "../holon-loro-testing", optional = true }
+holon-orgmode-testing = { path = "../holon-orgmode-testing", optional = true }
+holon-oracles = { workspace = true, optional = true }
 holon-pbt-core = { path = "../holon-pbt-core", optional = true }
 holon-macros = { workspace = true, optional = true }
 holon-block-roundtrip-testing = { workspace = true, optional = true }
 holon-mcp = { path = "../../frontends/mcp", optional = true }
+holon-advice = { workspace = true, optional = true }
 proptest = { workspace = true, optional = true }
 proptest-state-machine = { workspace = true, optional = true }
 loro = { workspace = true, optional = true }

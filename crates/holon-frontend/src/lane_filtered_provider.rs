@@ -75,7 +75,7 @@ impl ReactiveRowProvider for LaneFilteredProvider {
 
     fn keyed_rows_signal_vec(
         &self,
-    ) -> Pin<Box<dyn SignalVec<Item = (holon_api::EntityUri, Arc<DataRow>)> + Send>> {
+    ) -> Pin<Box<dyn SignalVec<Item = (holon_api::RowKey, Arc<DataRow>)> + Send>> {
         let lane_field = self.lane_field.clone();
         let lane_value = self.lane_value.clone();
         Box::pin(self.upstream.keyed_rows_signal_vec().filter(move |entry| {

@@ -16,10 +16,12 @@ pub mod yaml;
 
 use std::collections::BTreeMap;
 
+pub use arc::AttrInit;
 pub use arc::CmpOp;
 pub use arc::CreateArc;
 pub use arc::InputArc;
 pub use arc::OutputArc;
+pub use arc::PostcondExpr;
 pub use arc::PrecondSpec;
 use chrono::DateTime;
 use chrono::Utc;

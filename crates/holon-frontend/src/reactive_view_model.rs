@@ -374,6 +374,13 @@ pub struct ReactiveViewModel {
     /// `props` on `data` changes). Aborted when the node is dropped so
     /// removed rows don't leak background work.
     pub subscriptions: Vec<DropTask>,
+
+    /// Which display occurrence of the row this node renders (ADR 0015 rule 4:
+    /// node metadata, NEVER an id-infix). `Canonical` for every real row; the
+    /// collection drivers stamp `Placed` onto the display-placed occurrence a
+    /// row's key carries so GPUI can suffix its per-row identity keys without
+    /// the occurrence ever touching the `EntityUri`.
+    pub occurrence: holon_api::Occurrence,
 }
 
 /// A `tokio::task::JoinHandle<()>` that aborts the task on drop.
@@ -543,6 +550,8 @@ impl ReactiveViewModel {
             render_ctx: fresh.render_ctx.clone(),
             interpret_fn: self.interpret_fn.clone(),
             subscriptions: Vec::new(),
+            // Occurrence is stable node identity — preserve across data updates.
+            occurrence: self.occurrence.clone(),
         }
     }
 
@@ -590,6 +599,7 @@ impl ReactiveViewModel {
                             render_ctx: fresh_child.render_ctx.clone(),
                             interpret_fn: old_child.interpret_fn.clone(),
                             subscriptions: Vec::new(),
+                            occurrence: old_child.occurrence.clone(),
                             ..ReactiveViewModel::empty()
                         }));
                     } else {
@@ -783,6 +793,7 @@ impl ReactiveViewModel {
             operations: self.operations.clone(),
             triggers: self.triggers.clone(),
             layout_hint: self.layout_hint,
+            occurrence: self.occurrence.clone(),
         }
     }
 
@@ -798,6 +809,7 @@ impl ReactiveViewModel {
             operations: self.operations.clone(),
             triggers: self.triggers.clone(),
             layout_hint: self.layout_hint,
+            occurrence: self.occurrence.clone(),
         }
     }
 
@@ -1166,6 +1178,7 @@ impl Default for ReactiveViewModel {
             render_ctx: None,
             interpret_fn: None,
             subscriptions: Vec::new(),
+            occurrence: holon_api::Occurrence::Canonical,
         }
     }
 }
@@ -1196,6 +1209,19 @@ impl ReactiveViewModel {
     pub fn with_children(mut self, children: Vec<ReactiveViewModel>) -> Self {
         self.children = children.into_iter().map(Arc::new).collect();
         self
+    }
+
+    /// Stamp the display-occurrence coordinate this node renders (ADR 0015
+    /// rule 4). Canonical nodes leave this at its default.
+    pub fn with_occurrence(mut self, occurrence: holon_api::Occurrence) -> Self {
+        self.occurrence = occurrence;
+        self
+    }
+
+    /// The display occurrence this node renders. `Canonical` unless a driver
+    /// stamped a display placement.
+    pub fn occurrence(&self) -> &holon_api::Occurrence {
+        &self.occurrence
     }
 
     pub fn with_layout_hint(mut self, hint: LayoutHint) -> Self {

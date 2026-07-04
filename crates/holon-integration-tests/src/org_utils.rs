@@ -5,18 +5,8 @@ use holon_api::EntityUri;
 use holon_api::Value;
 use holon_api::block::Block;
 use holon_orgmode::models::OrgBlockExt;
-
 /// Internal properties that Loro/Org adds but reference model doesn't track
-pub const INTERNAL_PROPS: &[&str] = &[
-    "sequence",
-    "level",
-    "ID",
-    "id",
-    "created_at",
-    "updated_at",
-    "document_id",
-    "todo_keywords",
-];
+pub use holon_orgmode_testing::INTERNAL_PROPS;
 
 /// Extract the first :ID: property value from org content.
 ///
@@ -295,16 +285,20 @@ pub fn assign_reference_sequences_canonical(blocks: &mut [Block]) {
             .map(|b| {
                 (
                     b.id.to_string(),
-                    b.content_type.sibling_order_group(),
+                    b.content_type.parse_order_rank(),
                     b.sequence(),
                 )
             })
             .collect();
-        // Match production OrgRenderer sorting: section content (Source/Image)
-        // first, then sequence, then ID — via the one domain rule (ADR 0005).
-        children.sort_by(|(a_id, a_grp, a_seq), (b_id, b_grp, b_seq)| {
-            a_grp
-                .cmp(b_grp)
+        // Reproduce the store's post-round-trip sibling order: the renderer
+        // hoists section content (Source/Image) ahead of headings (Text), and
+        // the org parser additionally re-emits all Source blocks before all
+        // Image blocks (source loop precedes image loop in `process_headlines`).
+        // So the finer `parse_order_rank` (Source < Image < Text) is the primary
+        // key — NOT the coarse `sibling_order_group` — then sequence, then ID.
+        children.sort_by(|(a_id, a_rank, a_seq), (b_id, b_rank, b_seq)| {
+            a_rank
+                .cmp(b_rank)
                 .then_with(|| a_seq.cmp(b_seq))
                 .then_with(|| a_id.cmp(b_id))
         });

@@ -292,15 +292,30 @@ pub async fn run_http_server(
         return Ok(());
     }
 
+    // ONE shared, swappable backend cell across every streamable-http session:
+    // a per-case `reset_vault` rebind swaps its contents so all sessions — even
+    // ones opened before the reset — read the fresh engine (plan C2). Each
+    // session's server holds a CLONE of this same `Arc<RwLock<..>>`, so a swap
+    // through any server's `self.backend` is visible everywhere.
+    let backend_cell: crate::server::LiveMcpBackend =
+        Arc::new(std::sync::RwLock::new(crate::server::McpBackendCell {
+            engine,
+            builder_services,
+        }));
+
     // Create streamable HTTP service
     let mcp_service: StreamableHttpService<HolonMcpServer, LocalSessionManager> =
         StreamableHttpService::new(
-            move || {
-                Ok(HolonMcpServer::new(
-                    engine.clone(),
-                    debug.clone(),
-                    builder_services.clone(),
-                ))
+            {
+                let backend_cell = backend_cell.clone();
+                let debug = debug.clone();
+                move || {
+                    Ok(HolonMcpServer::with_backend_cell(
+                        backend_cell.clone(),
+                        None,
+                        debug.clone(),
+                    ))
+                }
             },
             LocalSessionManager::default().into(),
             StreamableHttpServerConfig {

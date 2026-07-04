@@ -1,6 +1,6 @@
 # ADR 0010: Editor focus is pure in-memory UI state (not persisted to Turso)
 
-**Status:** Proposed (2026-06-09)
+**Status:** Accepted (2026-06-09; shipped. The `editor_cursor` table + `current_editor_focus` matview were removed; authority is `UiState.focused_block: Mutable<Option<EntityUri>>`.)
 **Deciders:** Martin
 **Context:** gpui click-to-focus steal-back bug (seed 1780986415, Step 16); a
 dual-authority race between in-memory focus and the SQL `current_editor_focus`

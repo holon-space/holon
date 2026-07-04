@@ -1,9 +1,9 @@
 //! Type-level proof that the shared `holon_layout_testing` impls work
-//! against `ReferenceState` + `dyn SutHandle` via the orphan-rule
+//! against `ReferenceState` + a `SutBlockInteract` handle via the orphan-rule
 //! wrappers and the `layout_bridge` module.
 //!
 //! Constructing a `ReferenceState` requires the full test wiring
-//! (`TestVariant` + `ShadowInterpreter`) and a real `SutHandle` impl
+//! (`TestVariant` + `ShadowInterpreter`) and a real full-cap SUT impl
 //! has ~30 methods — outside the scope of a smoke test. So this file
 //! is intentionally compile-only: it asserts that *the types line up*
 //! and the trait obligations are satisfied. Run-time exercise lands
@@ -16,12 +16,12 @@ use std::sync::Arc;
 
 use holon_integration_tests::pbt::layout_bridge::SutClickAdapter;
 use holon_integration_tests::pbt::reference_state::ReferenceState;
-use holon_integration_tests::pbt::transition_dispatch::SutHandle;
 use holon_layout_testing::LayoutRef;
 use holon_layout_testing::LayoutRefState;
 use holon_layout_testing::LayoutSut;
 use holon_pbt_core::SwitchViewMode;
 use holon_pbt_core::TransitionImpl;
+use holon_pbt_core::capabilities::SutBlockInteract;
 
 /// Compile-time assertion: `ReferenceState` implements `LayoutRefState`.
 fn _ref_state_impls_layout_ref_state(state: &ReferenceState) {
@@ -40,8 +40,8 @@ fn _ref_state_impls_layout_ref_state(state: &ReferenceState) {
 /// `holon_layout_testing::transitions::switch_view_mode` works for the
 /// GPUI layout PBT (`S = GpuiInteractionSession`) and the
 /// integration-tests PBT (`S = SutClickAdapter` wrapping
-/// `&mut dyn SutHandle`).
-async fn _shared_apply_drives_sut_handle<H: SutHandle>(
+/// `&mut dyn SutBlockInteract`).
+async fn _shared_apply_drives_sut_handle<H: SutBlockInteract>(
     state: &ReferenceState,
     handle: &mut H,
     action: &SwitchViewMode,

@@ -97,13 +97,14 @@ const LORO_WATCH_POLL: std::time::Duration = std::time::Duration::from_millis(25
 pub async fn loro_watch_ui(
     source: Arc<dyn BlockQuerySource>,
     block_id: EntityUri,
+    advice_status: holon_advice::AdviceRuleStatusHandle,
 ) -> Result<WatchHandle> {
     let (output_tx, output_rx) = mpsc::channel(64);
     let (command_tx, _command_rx) = mpsc::channel(16);
     let mut aborts = ActorAbortGuard::new();
 
     let task = tokio::spawn(async move {
-        run_watch_loop(source, block_id, output_tx).await;
+        run_watch_loop(source, block_id, advice_status, output_tx).await;
     });
     aborts.push(task.abort_handle());
 
@@ -117,18 +118,38 @@ pub async fn loro_watch_ui(
 /// dispatches through the capability with no backend branch.
 pub struct LoroUiWatcher {
     source: Arc<dyn BlockQuerySource>,
+    /// Advice-rule status surface (ADR 0022). Empty in a no-Turso session (no
+    /// advice reconciler synthesizes matviews there), but wired for parity
+    /// with the Turso watcher so a rule block's error would render in place
+    /// if one is ever recorded.
+    advice_status: holon_advice::AdviceRuleStatusHandle,
 }
 
 impl LoroUiWatcher {
     pub fn new(source: Arc<dyn BlockQuerySource>) -> Self {
-        Self { source }
+        Self {
+            source,
+            advice_status: holon_advice::AdviceRuleStatusHandle::new(),
+        }
+    }
+
+    /// Wire a shared advice-rule status handle (the reader side of ADR 0022's
+    /// surface).
+    pub fn with_advice_status(mut self, status: holon_advice::AdviceRuleStatusHandle) -> Self {
+        self.advice_status = status;
+        self
     }
 }
 
 #[async_trait::async_trait]
 impl crate::api::ui_watcher::UiWatcher for LoroUiWatcher {
     async fn watch_ui(self: Arc<Self>, block_id: EntityUri) -> Result<WatchHandle> {
-        loro_watch_ui(Arc::clone(&self.source), block_id).await
+        loro_watch_ui(
+            Arc::clone(&self.source),
+            block_id,
+            self.advice_status.clone(),
+        )
+        .await
     }
 }
 
@@ -144,6 +165,7 @@ fn local_origin() -> ChangeOrigin {
 async fn run_watch_loop(
     source: Arc<dyn BlockQuerySource>,
     block_id: EntityUri,
+    advice_status: holon_advice::AdviceRuleStatusHandle,
     output_tx: mpsc::Sender<UiEvent>,
 ) {
     let mut generation: u64 = 0;
@@ -157,12 +179,20 @@ async fn run_watch_loop(
         // through the same diff path, so the watcher recovers automatically
         // when the underlying block is fixed (matches the Turso watcher's
         // error-recovery semantics) — it never silently stalls.
-        let (expr, ordered) = match render_state(&source, &block_id).await {
-            Ok(state) => state,
-            Err(e) => {
-                tracing::warn!("[LoroWatcher] render of '{block_id}' failed: {e}");
-                (error_render_expr(&format!("{e}")), Vec::new())
-            }
+        // Advice-rule status surface (ADR 0022): a NON-Active rule block renders its
+        // error in place. Inert in a no-Turso session (the map is empty there).
+        let (expr, ordered) = match advice_status.get(block_id.as_str()) {
+            Some(status) if !status.is_active() => (
+                error_render_expr(&format!("advice rule: {status}")),
+                Vec::new(),
+            ),
+            _ => match render_state(&source, &block_id).await {
+                Ok(state) => state,
+                Err(e) => {
+                    tracing::warn!("[LoroWatcher] render of '{block_id}' failed: {e}");
+                    (error_render_expr(&format!("{e:#}")), Vec::new())
+                }
+            },
         };
 
         let structure_changed = prev_expr.as_ref() != Some(&expr);
@@ -407,7 +437,13 @@ mod tests {
         let source: Arc<dyn BlockQuerySource> =
             Arc::new(LoroBlockQuerySource::new(Arc::new(backend)));
 
-        let mut handle = loro_watch_ui(source, root.id.clone()).await.unwrap();
+        let mut handle = loro_watch_ui(
+            source,
+            root.id.clone(),
+            holon_advice::AdviceRuleStatusHandle::new(),
+        )
+        .await
+        .unwrap();
 
         // First event: the source-only degradation — a bare `source_editor`
         // showing the query text, not a tree/table/board switcher.
@@ -511,7 +547,13 @@ mod tests {
 
         let source: Arc<dyn BlockQuerySource> =
             Arc::new(LoroBlockQuerySource::new(backend.clone()));
-        let mut handle = loro_watch_ui(source, root.id.clone()).await.unwrap();
+        let mut handle = loro_watch_ui(
+            source,
+            root.id.clone(),
+            holon_advice::AdviceRuleStatusHandle::new(),
+        )
+        .await
+        .unwrap();
 
         // Fold the watcher's generation-gated Structure/Data deltas into a live
         // id set, exactly as `ReactiveRowSet` does, until `want` holds.

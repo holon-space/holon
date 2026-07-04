@@ -11,10 +11,8 @@
 //! the convergent write-side truth (`block_raw_snapshot`) after the shared
 //! settle, so there is no CDC-lag window to tolerate.
 
-use std::collections::HashMap;
-use std::collections::HashSet;
-
-use holon_pbt_core::capabilities::EntityUri;
+use holon_oracles::checks::ParentRow;
+use holon_oracles::checks::find_parent_cycles;
 use holon_pbt_core::capabilities::SutBackend;
 use holon_pbt_core::invariant::Invariant;
 use holon_pbt_core::invariant::InvariantId;
@@ -36,27 +34,20 @@ where
     }
 
     async fn check(&self, _: &R, sut: &S) -> InvariantResult {
-        let snapshot = sut.block_raw_snapshot().await;
-        let parents: HashMap<EntityUri, EntityUri> = snapshot
-            .iter()
-            .filter(|b| !b.parent_id.is_no_parent() && !b.parent_id.is_sentinel())
-            .map(|b| (b.id.clone(), b.parent_id.clone()))
+        // Check body lives in `holon_oracles::checks` — shared with the live
+        // debug-build oracle, one implementation, no drift.
+        let rows: Vec<ParentRow> = sut
+            .block_raw_snapshot()
+            .await
+            .into_iter()
+            .map(|b| ParentRow {
+                id: b.id,
+                parent_id: b.parent_id,
+            })
             .collect();
-
-        for start in parents.keys() {
-            let mut seen: HashSet<&EntityUri> = HashSet::new();
-            let mut current = start;
-            while let Some(parent) = parents.get(current) {
-                if !seen.insert(current) {
-                    return InvariantResult::Fail(format!(
-                        "[inv-no-parent-cycles] parent cycle detected walking up from {start}: \
-                         revisited {current} (chain re-enters a node instead of terminating at a \
-                         root)",
-                    ));
-                }
-                current = parent;
-            }
+        match find_parent_cycles(&rows).into_iter().next() {
+            Some(message) => InvariantResult::Fail(message),
+            None => InvariantResult::Ok,
         }
-        InvariantResult::Ok
     }
 }

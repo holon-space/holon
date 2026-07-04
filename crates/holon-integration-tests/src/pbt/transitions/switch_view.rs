@@ -7,22 +7,22 @@
 //! `transition_budgets.rs:137-143` (expected SQL).
 
 use holon_pbt_core::TransitionFactory;
-use holon_pbt_core::TransitionImpl;
 use holon_pbt_core::TransitionRef;
+use holon_pbt_core::capabilities::RefLifecycle;
+use holon_pbt_core::capabilities::RefViewSelectionMut;
 use holon_pbt_core::capabilities::SutViewControl;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::check;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::reference_state::ReferenceState;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::REACTIVE_BASE;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::docs_tolerance;
-use crate::pbt::validation::Reason;
-use crate::pbt::validation::check;
 
 /// Switch the current view (e.g. "all", "sidebar", "main").
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -30,15 +30,13 @@ pub struct SwitchView {
     pub view_name: String,
 }
 
-impl TransitionFactory<ReferenceState> for SwitchView {
+impl<R: RefLifecycle + RefViewSelectionMut> TransitionFactory<R> for SwitchView {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        vec![::holon_pbt_core::composition::CapId::of::<
-            dyn ::holon_pbt_core::capabilities::SutViewControl,
-        >()]
+        Self::declared_caps()
     }
 
     type Reason = Reason;
-    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // Enumerate parameter space (fixed view names) and let `preconditions`
         // be the single source of truth for which ones are actually switchable.
         let candidates: Vec<String> =
@@ -61,33 +59,30 @@ impl TransitionFactory<ReferenceState> for SwitchView {
     }
 }
 
-impl TransitionRef<ReferenceState> for SwitchView {
+impl<R: RefLifecycle + RefViewSelectionMut> TransitionRef<R> for SwitchView {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> =
-            vec![check(state.action.app_started, Reason::AppNotStarted)];
+            vec![check(state.app_started(), Reason::AppNotStarted)];
         checks
             .into_iter()
             .collect::<Validated<Vec<()>, _>>()
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
-        state.ui.user.current_view = self.view_name.clone();
+    fn apply_to_ref(&self, state: &mut R) {
+        state.set_current_view(&self.view_name);
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutViewControl> TransitionImpl<ReferenceState, S> for SwitchView {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.switch_view(&self.view_name).await;
+crate::cap_transition! {
+    SwitchView: SutViewControl,
+    where R: [ RefLifecycle + RefViewSelectionMut ],
+    |me, _state, sut| {
+        sut.switch_view(&me.view_name).await;
     }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for SwitchView {
-    fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
+    sql_budget: |_me, state| {
         ExpectedSql {
             reads: REACTIVE_BASE,
             writes: 0,

@@ -11,6 +11,8 @@
 //! CDC-lag window to tolerate. No ref-side comparison needed.
 
 use holon_api::ContentType;
+use holon_oracles::checks::SourceLanguageRow;
+use holon_oracles::checks::find_source_language_violations;
 use holon_pbt_core::capabilities::SutBackend;
 use holon_pbt_core::invariant::Invariant;
 use holon_pbt_core::invariant::InvariantId;
@@ -32,18 +34,21 @@ where
     }
 
     async fn check(&self, _: &R, sut: &S) -> InvariantResult {
-        for block in sut.block_raw_snapshot().await {
-            let is_source = block.content_type == ContentType::Source;
-            let has_lang = block.source_language.is_some();
-            if is_source != has_lang {
-                return InvariantResult::Fail(format!(
-                    "[inv-source-language-iff-source] block {} violates the domain rule: \
-                     content_type={:?} but source_language={:?} (source_language must be Some iff \
-                     content_type == Source)",
-                    block.id, block.content_type, block.source_language,
-                ));
-            }
+        // Check body lives in `holon_oracles::checks` — shared with the live
+        // debug-build oracle, one implementation, no drift.
+        let rows: Vec<SourceLanguageRow> = sut
+            .block_raw_snapshot()
+            .await
+            .into_iter()
+            .map(|b| SourceLanguageRow {
+                id: b.id,
+                is_source: b.content_type == ContentType::Source,
+                source_language: b.source_language.map(|l| l.to_string()),
+            })
+            .collect();
+        match find_source_language_violations(&rows).into_iter().next() {
+            Some(message) => InvariantResult::Fail(message),
+            None => InvariantResult::Ok,
         }
-        InvariantResult::Ok
     }
 }

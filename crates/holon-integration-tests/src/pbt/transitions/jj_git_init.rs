@@ -7,46 +7,44 @@
 //! `transition_budgets.rs:116-125` (expected SQL).
 
 use holon_pbt_core::TransitionFactory;
-use holon_pbt_core::TransitionImpl;
 use holon_pbt_core::TransitionRef;
+use holon_pbt_core::capabilities::RefBootMut;
+use holon_pbt_core::capabilities::RefLifecycle;
+use holon_pbt_core::capabilities::SutFixtureFs;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::check;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::local_caps::SutFixtureFs;
-use crate::pbt::reference_state::ReferenceState;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
-use crate::pbt::validation::Reason;
-use crate::pbt::validation::check;
 
 /// Initialize jj repository (runs `jj git init`).
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct JjGitInit;
 
-impl TransitionFactory<ReferenceState> for JjGitInit {
+impl<R: RefLifecycle + RefBootMut> TransitionFactory<R> for JjGitInit {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        vec![::holon_pbt_core::composition::CapId::of::<
-            dyn crate::pbt::local_caps::SutFixtureFs,
-        >()]
+        Self::declared_caps()
     }
 
     type Reason = Reason;
-    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         JjGitInit
             .preconditions(state)
             .map(|_| (1, Just(JjGitInit).boxed()))
     }
 }
 
-impl TransitionRef<ReferenceState> for JjGitInit {
+impl<R: RefLifecycle + RefBootMut> TransitionRef<R> for JjGitInit {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(!state.action.app_started, Reason::AppAlreadyStarted),
-            check(!state.git_initialized, Reason::VcsAlreadyInitialized),
-            check(!state.jj_initialized, Reason::VcsAlreadyInitialized),
+            check(!state.app_started(), Reason::AppAlreadyStarted),
+            check(!state.git_initialized(), Reason::VcsAlreadyInitialized),
+            check(!state.jj_initialized(), Reason::VcsAlreadyInitialized),
         ];
         checks
             .into_iter()
@@ -54,22 +52,18 @@ impl TransitionRef<ReferenceState> for JjGitInit {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
-        state.jj_initialized = true;
-        state.git_initialized = true; // jj git init also creates .git
+    fn apply_to_ref(&self, state: &mut R) {
+        state.mark_jj_initialized();
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutFixtureFs> TransitionImpl<ReferenceState, S> for JjGitInit {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
+crate::cap_transition! {
+    JjGitInit: SutFixtureFs,
+    where R: [ RefLifecycle + RefBootMut ],
+    |_me, _state, sut| {
         sut.jj_git_init().await;
     }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for JjGitInit {
-    fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
+    sql_budget: |_me, _state| {
         ExpectedSql {
             reads: 0,
             writes: 0,

@@ -10,81 +10,25 @@
 use std::time::Duration;
 
 use holon_pbt_core::TransitionFactory;
-use holon_pbt_core::TransitionImpl;
 use holon_pbt_core::TransitionRef;
+use holon_pbt_core::capabilities::CapRegion;
+use holon_pbt_core::capabilities::RefBlockTree;
+use holon_pbt_core::capabilities::RefFocus;
+use holon_pbt_core::capabilities::RefFocusRoots;
+use holon_pbt_core::capabilities::RefLayout;
+use holon_pbt_core::capabilities::RefLifecycle;
+use holon_pbt_core::capabilities::RefTaskState;
+use holon_pbt_core::capabilities::RefTaskStateToggle;
 use holon_pbt_core::capabilities::SutDriver;
 use holon_pbt_core::capabilities::SutLayout;
+use holon_pbt_core::capabilities::SutMutate;
+use holon_pbt_core::types::CycleTarget;
+use holon_pbt_core::types::TASK_STATE_CYCLE;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::check;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
-
-use crate::pbt::local_caps::SutMutate;
-use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::validation::Reason;
-use crate::pbt::validation::check;
-
-/// Production task-state cycle order, hardcoded in
-/// `sql_operation_provider.rs:1525-1526` (the `cycle_task_state` op
-/// implementation). Each click of the state_toggle widget advances by
-/// one position; full cycle wraps back to `""`.
-///
-/// Kept in sync with the upstream constant — this lookup table is the
-/// click-count semantics, not a separate model of behaviour.
-pub const TASK_STATE_CYCLE: &[&str] = &["", "TODO", "DOING", "DONE"];
-
-/// Parse-don't-validate target state for `ToggleState`: clicking the
-/// state_toggle widget can only ever land on a production-cycle member,
-/// so the type makes off-cycle targets unrepresentable. Serialized as
-/// the keyword string (`""`/`"TODO"`/…) so old capture JSONs (which
-/// stored `new_state` as a plain string) still load.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(into = "String", try_from = "String")]
-pub enum CycleTarget {
-    Clear,
-    Todo,
-    Doing,
-    Done,
-}
-
-impl CycleTarget {
-    pub const ALL: [CycleTarget; 4] = [Self::Clear, Self::Todo, Self::Doing, Self::Done];
-
-    pub fn keyword(self) -> &'static str {
-        match self {
-            Self::Clear => "",
-            Self::Todo => "TODO",
-            Self::Doing => "DOING",
-            Self::Done => "DONE",
-        }
-    }
-
-    fn idx(self) -> usize {
-        match self {
-            Self::Clear => 0,
-            Self::Todo => 1,
-            Self::Doing => 2,
-            Self::Done => 3,
-        }
-    }
-}
-
-impl From<CycleTarget> for String {
-    fn from(t: CycleTarget) -> String {
-        t.keyword().to_string()
-    }
-}
-
-impl TryFrom<String> for CycleTarget {
-    type Error = String;
-    fn try_from(s: String) -> Result<Self, String> {
-        Self::ALL
-            .into_iter()
-            .find(|t| t.keyword() == s)
-            .ok_or_else(|| {
-                format!("not a production-cycle keyword: {s:?} (cycle {TASK_STATE_CYCLE:?})")
-            })
-    }
-}
 
 /// Compute how many state_toggle clicks advance the cycle from
 /// `current` to `target`. Total over any `current` keyword: custom
@@ -139,10 +83,7 @@ pub async fn apply_toggle_state_to_sut<S: SutLayout + SutDriver>(
 }
 
 use holon_api::EntityUri;
-use holon_orgmode::OrgBlockExt;
 
-#[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::ExpectedSql;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::MutationKind;
 #[cfg(feature = "otel-testing")]
@@ -155,77 +96,38 @@ pub struct ToggleState {
     pub new_state: CycleTarget,
 }
 
-impl TransitionFactory<ReferenceState> for ToggleState {
+impl<
+    R: RefLifecycle
+        + RefFocus
+        + RefFocusRoots
+        + RefBlockTree
+        + RefLayout
+        + RefTaskState
+        + RefTaskStateToggle,
+> TransitionFactory<R> for ToggleState
+{
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        vec![::holon_pbt_core::composition::CapId::of::<
-            dyn crate::pbt::local_caps::SutMutate,
-        >()]
+        Self::declared_caps()
     }
 
     type Reason = Reason;
-    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
-        let owned_render_expr = state
-            .main_panel_render_expr()
-            .or_else(|| state.root_render_expr())
-            .cloned()
-            .unwrap_or_else(super::super::reference_state::default_root_render_expr);
-
-        let main_focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
-        let visible_text_block_ids: Vec<EntityUri> = state
-            .domain
-            .block_state
-            .blocks
-            .values()
-            .filter(|b| {
-                b.content_type == holon_api::ContentType::Text
-                    && !b.is_page()
-                    && !state.domain.layout_blocks.contains(&b.id)
-                    // Visible in Main == focus root OR descendant of one (mirrors
-                    // the widened precondition below), not only the focus root
-                    // itself — otherwise the generator never proposes the child
-                    // task rows a user actually toggles.
-                    && state.is_descendant_of_any(&b.id, &main_focus_roots)
-            })
-            .map(|b| b.id.clone())
-            .collect();
-
-        let rows: Vec<holon_api::widget_spec::DataRow> = visible_text_block_ids
-            .iter()
-            .filter_map(|id| state.domain.block_state.blocks.get(id))
-            .map(super::super::reference_state::block_to_data_row)
-            .collect();
-        let arc_rows: Vec<std::sync::Arc<_>> = rows.into_iter().map(std::sync::Arc::new).collect();
-        // Generator-side use: computes which blocks render a state_toggle so the
-        // generator only proposes valid candidates. Not in the SUT application path
-        // (which goes through SutDriver clicks).
-        // ALLOW(pbt-sut-handle-frontend-simulation): generator-side render lookup
-        let vm = holon_frontend::interpret_pure(&owned_render_expr, &arc_rows, state);
-        let toggle_block_ids: Vec<EntityUri> = vm
-            .snapshot()
-            .state_toggle_block_ids()
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+        // The candidate set — blocks rendering an interactive `state_toggle`
+        // widget in Main — is computed by interpreting the render expr, which
+        // lives in `RefTaskStateToggle::rendered_state_toggle_ids`.
+        let pairs: Vec<(EntityUri, CycleTarget)> = state
+            .rendered_state_toggle_ids()
             .into_iter()
-            .filter_map(|id| holon_api::EntityUri::parse(&id).ok())
-            .collect();
-
-        let pairs: Vec<(EntityUri, CycleTarget)> = toggle_block_ids
-            .iter()
             .filter(|id| {
                 ToggleState {
-                    block_id: (*id).clone(),
+                    block_id: id.clone(),
                     new_state: CycleTarget::Clear, // dummy for preconditions check
                 }
                 .preconditions(state)
                 .is_good()
             })
             .flat_map(|id| {
-                let current_state = state
-                    .domain
-                    .block_state
-                    .blocks
-                    .get(id)
-                    .and_then(|b| b.task_state())
-                    .map(|ts| ts.keyword.to_string())
-                    .unwrap_or_default();
+                let current_state = state.task_state_of(&id).unwrap_or_default();
                 let bid = id.clone();
                 // A custom doc keyword (off-cycle, axis 5) never equals a
                 // cycle member, so all four targets remain candidates.
@@ -248,25 +150,24 @@ impl TransitionFactory<ReferenceState> for ToggleState {
     }
 }
 
-impl TransitionRef<ReferenceState> for ToggleState {
+impl<R: RefLifecycle + RefFocus + RefFocusRoots + RefBlockTree + RefLayout + RefTaskStateToggle>
+    TransitionRef<R> for ToggleState
+{
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
-        let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
+        let focus_roots = state.expected_focus_root_ids(CapRegion::Main);
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(state.action.app_started, Reason::AppNotStarted),
+            check(state.app_started(), Reason::AppNotStarted),
             // `state_toggle` only exists when the block renders interactively
             // (default layout); a custom `index.org` layout can omit it. See
             // RefLifecycle::renders_block_interactively.
             check(
-                holon_pbt_core::capabilities::RefLifecycle::renders_block_interactively(
-                    state,
-                    &self.block_id,
-                ),
+                state.renders_block_interactively(&self.block_id),
                 Reason::BlocksNotInteractiveUnderLayout,
             ),
             check(
-                state.current_focus(holon_api::Region::Main).is_some(),
+                state.current_focus(CapRegion::Main).is_some(),
                 Reason::NoFocusInMain,
             ),
             // The toggled row must be VISIBLE in Main — i.e. the block is a
@@ -291,7 +192,7 @@ impl TransitionRef<ReferenceState> for ToggleState {
             // EditViaViewModel/Indent/MoveUp etc. already exclude
             // layout blocks for the same reason.
             check(
-                !state.domain.layout_blocks.contains(&self.block_id),
+                !state.is_layout_block(&self.block_id),
                 Reason::FocusedInLayoutBlocks,
             ),
             // A custom entity profile for `block` can replace the
@@ -312,36 +213,22 @@ impl TransitionRef<ReferenceState> for ToggleState {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
-        state.push_undo_snapshot();
-        state.apply_mutation(&crate::pbt::types::MutationEvent {
-            source: crate::pbt::types::MutationSource::UI,
-            mutation: crate::pbt::types::Mutation::Update {
-                entity: "block".to_string(),
-                id: self.block_id.clone(),
-                fields: [(
-                    "task_state".to_string(),
-                    holon_api::Value::String(self.new_state.keyword().to_string()),
-                )]
-                .into(),
-            },
-        });
+    fn apply_to_ref(&self, state: &mut R) {
+        // Undo snapshot + `Update { task_state }` mutation live in the ref cap.
+        state.apply_toggle_state(&self.block_id, self.new_state);
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutMutate> TransitionImpl<ReferenceState, S> for ToggleState {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.toggle_state(&self.block_id, self.new_state).await;
+crate::cap_transition! {
+    ToggleState: SutMutate,
+    where R: [ RefLifecycle ],
+    |me, _state, sut| {
+        sut.toggle_state(&me.block_id, me.new_state).await;
     }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for ToggleState {
-    fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
-        let watches = state.mcp.active_watches.len();
-        let blocks = state.domain.block_state.blocks.len();
-        let docs = state.files.documents.len();
+    sql_budget: |_me, state| {
+        let watches = state.active_watch_count();
+        let blocks = state.block_count();
+        let docs = state.document_count();
         expected_sql_for_kind(MutationKind::Update, watches, blocks, docs)
     }
 }

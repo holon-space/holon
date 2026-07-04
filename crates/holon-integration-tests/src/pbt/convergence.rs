@@ -27,63 +27,94 @@ use crate::test_environment::pbt_quiet_floor;
 ///    (the org re-render `inv-blocks-match-ref/org` reads has drained).
 ///
 /// A CDC-only signal (the reverted lever 2) under-settled — Loro/org lagged
-/// and the block/org invariants diverged; this covers all three. Each stage is
-/// bounded by the shared `deadline`, so the whole wait never exceeds `budget`.
+/// and the block/org invariants diverged; this covers all three.
+///
+/// Unlike the earlier SEQUENTIAL version (drain CDC, THEN wait for Loro, THEN
+/// org), this polls all three to a single COMBINED fixed point in Loro -> CDC
+/// -> org order: a not-yet-caught-up Loro (whose projection still owes
+/// `block_raw` its reordered `sort_key`) counts as activity and resets the
+/// quiet window, so CDC/org only read "quiet" once that write has landed and
+/// re-drained. The old order let stage-1 CDC drain before stage-2 ever wrote
+/// the sort_key, and every stage broke on `deadline` returning silently — an
+/// unconverged SUT looked settled, the direct cause of the org-render
+/// sibling-order flake. Returns `true` iff the fixed point was reached within
+/// `budget`; `false` = gave up, and the caller MUST decide (the composed settle
+/// fails loud on `false`).
 pub(crate) async fn converge_signals(
     engine: Option<&Arc<BackendEngine>>,
     sync: Option<Arc<LoroSyncControllerHandle>>,
     store: Option<LoroDocumentStore>,
     org_idle: Option<Arc<OrgSyncIdleSignal>>,
     budget: Duration,
-) {
+) -> bool {
     let deadline = tokio::time::Instant::now() + budget;
     let quiet = pbt_quiet_floor();
+    let poll = Duration::from_millis(2);
 
-    // 1. Turso CDC drain: watermark stable for `quiet`, bounded by `deadline`.
-    if let Some(engine) = engine {
-        let db = engine.db_handle();
-        let mut last = db.cdc_emitted_watermark();
-        let mut stable_since = tokio::time::Instant::now();
-        loop {
-            if tokio::time::Instant::now() >= deadline {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(2)).await;
-            let now = db.cdc_emitted_watermark();
-            if now == last {
-                if stable_since.elapsed() >= quiet {
-                    break;
-                }
-            } else {
-                last = now;
-                stable_since = tokio::time::Instant::now();
-            }
-        }
-    }
+    // Baselines for the change-detected signals (CDC watermark, org tick).
+    let mut last_cdc = engine.map(|e| e.db_handle().cdc_emitted_watermark());
+    let mut last_tick = org_idle.as_ref().map(|s| s.current_tick());
+    // The last instant ANY signal showed activity OR Loro was not yet caught up.
+    // Convergence = all three quiet AND Loro caught up, held for one `quiet` floor.
+    let mut last_activity = tokio::time::Instant::now();
 
-    // 2. Loro sync controller catches up to the authority doc's frontiers.
-    if let (Some(sync), Some(store)) = (sync, store) {
-        loop {
+    loop {
+        tokio::time::sleep(poll).await;
+        let mut active = false;
+
+        // Loro FIRST. This is the projection that writes the reordered `sort_key`
+        // into `block_raw` (which then fires CDC). Until `last_synced` has caught
+        // the authority `oplog_frontiers`, the CDC/org checks below are premature,
+        // so treat not-caught-up as activity: it resets the quiet window. That is
+        // what turns the three independent signals into one COMBINED fixed point
+        // in Loro -> CDC -> org order, instead of the old sequential race where
+        // stage-1 CDC drained before stage-2 ever wrote the sort_key. (An absent
+        // sync/store = a Loro-off draw = nothing to wait for.)
+        if let (Some(sync), Some(store)) = (&sync, &store) {
             let current = store
                 .get_global_doc()
                 .await
                 .expect("converge_signals: get_global_doc failed")
                 .doc()
                 .oplog_frontiers();
-            if sync.last_synced_frontiers() == current {
-                break;
+            if sync.last_synced_frontiers() != current {
+                active = true;
             }
-            if tokio::time::Instant::now() >= deadline {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
         }
-    }
 
-    // 3. org re-render drain: the file-sync loop idle for `quiet`, bounded by
-    //    remaining.
-    if let Some(idle) = org_idle {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        idle.wait_quiescent(quiet, remaining).await;
+        // Turso CDC watermark. The projection's SQL write bumps this, so it only
+        // reads stable AFTER Loro caught up and that write actually landed.
+        if let Some(engine) = engine {
+            let now_cdc = engine.db_handle().cdc_emitted_watermark();
+            if last_cdc != Some(now_cdc) {
+                last_cdc = Some(now_cdc);
+                active = true;
+            }
+        }
+
+        // org re-render loop: `current_tick` bumps after every processed change.
+        if let Some(idle) = &org_idle {
+            let now_tick = idle.current_tick();
+            if last_tick != Some(now_tick) {
+                last_tick = Some(now_tick);
+                active = true;
+            }
+        }
+
+        let now = tokio::time::Instant::now();
+        if active {
+            last_activity = now;
+        } else if now.duration_since(last_activity) >= quiet {
+            // All three signals quiet AND Loro caught up for a full quiet floor.
+            return true;
+        }
+
+        if now >= deadline {
+            // FAIL to converge. The caller decides whether that is fatal — the
+            // per-transition composed settle fails loud (reading invariants on an
+            // unconverged SUT is a race, not a flake to swallow); the one-time
+            // boot settle tolerates it (signals resolve on a spawned task).
+            return false;
+        }
     }
 }

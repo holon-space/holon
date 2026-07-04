@@ -190,12 +190,19 @@ impl ViewEventHandler {
             .expect("ViewEventHandler context_params missing 'id'")
             .to_string();
 
-        if let Some((entity_type, parent_id)) = parse_virtual_id(&id) {
+        if let crate::row_origin::RowOrigin::CreationPlaceholder {
+            entity_type,
+            parent,
+        } = crate::row_origin::RowOrigin::from_id(&id)
+        {
             if new_value.is_empty() {
                 return PopupResult::NotActive;
             }
             let mut params = HashMap::new();
-            params.insert("parent_id".into(), Value::String(parent_id));
+            params.insert(
+                "parent_id".into(),
+                Value::String(parent.as_str().to_string()),
+            );
             params.insert("content".into(), Value::String(new_value));
             return PopupResult::Execute {
                 entity_name: EntityName::Named(entity_type),
@@ -240,25 +247,6 @@ impl ViewEventHandler {
     pub fn is_overlay_active(&self) -> bool {
         self.popup.is_active()
     }
-}
-
-/// Parse a virtual entity ID of the form `<entity>:__virtual:<parent_local>`.
-///
-/// The marker lives in the **local** part of the URI (not the scheme), so
-/// `EntityUri::scheme()` returns the real entity type and the profile resolver
-/// finds the right profile. We detect "this is a creation slot" by looking
-/// for the `:__virtual:` infix.
-///
-/// Example: `block:__virtual:default-main-panel`
-/// → entity_type = `"block"`, parent_id = `"block:default-main-panel"`.
-///
-/// Returns `(entity_type, parent_id)` or `None` if the ID isn't virtual.
-fn parse_virtual_id(id: &str) -> Option<(String, String)> {
-    let (scheme, parent_local) = id.split_once(":__virtual:")?;
-    if scheme.is_empty() || parent_local.is_empty() {
-        return None;
-    }
-    Some((scheme.to_string(), format!("{scheme}:{parent_local}")))
 }
 
 /// Result of handling a ViewEvent.

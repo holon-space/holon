@@ -147,6 +147,184 @@ The summary shows coverage by file with columns:
 cargo llvm-cov clean --workspace
 ```
 
+## UI Action Latency
+
+Measure end-to-end latency of a UI action (indent / outdent / cycle task state /
+split / ...) — from the moment the action is dispatched until its result becomes
+VISIBLE (the reactive row batch is applied). Instrumentation lives under the
+`holon_latency` tracing target and is zero-cost unless that target is enabled.
+
+```bash
+just measure-latency            # 16 random cases (default)
+just measure-latency 40         # more cases -> tighter p95/max
+```
+
+This drives the REAL pipeline through the headless composed keystone
+(`general_e2e_composed_pbt`): `dispatch -> Loro commit -> LoroProjection resample
+-> Turso/matview CDC -> reactive rows`. It measures everything EXCEPT final GPU
+paint (headless — no window). Output is a per-action `count / p50 / p95 / max /
+mean` table plus per-stage cost (dispatch, projection, CDC rows) and a dominator
+line. Raw log: `/tmp/holon-latency.log`.
+
+Each stage emits one greppable line under `target="holon_latency"`:
+
+| stage          | emitted at                              | key fields                    |
+|----------------|-----------------------------------------|-------------------------------|
+| `dispatch`     | `ReactiveEngine::dispatch_intent_sync`  | `action`, `block`, `ms`       |
+| `projection`   | `LoroProjection::project` (per commit)  | `ops`, `blocks`, `snapshot_ms`, `ms` |
+| `rows`         | `LiveData::subscribe` (CDC batch apply) | `source`, `rows`, `seq`, `ms` |
+| `action_total` | composed harness `apply` (per action)   | `action`, `total_ms`          |
+
+To run against a custom log (e.g. the live app with `RUST_LOG=holon_latency=debug`):
+
+```bash
+python3 scripts/measure_latency.py /path/to/log
+some-command | python3 scripts/measure_latency.py -
+```
+
+## Scale Soak
+
+`just measure-latency` runs the keystone against a 3-block focus doc, so vault-scale
+behaviour never manifests — the projection/CDC/consolidator latency cliff
+(`pass_ms ≈ 11.3 + 0.221×blocks`) and RSS growth at 5–10k blocks are found by hand. The
+soak reproduces that regime automatically: it boots the SAME headless composed keystone
+(the real `dispatch → Loro commit → projection → Turso/matview CDC → reactive rows`
+pipeline, **CRDT on** — `full_headless` forces `crdt.enabled = Some(true)`) against a
+seeded synthetic vault, then drives a few hundred mixed actions and grades each action
+type against the **p95 < 200ms SLO**.
+
+```bash
+just soak                 # 5000 blocks, ~320 mixed actions, 30s settle budget
+just soak 10000 480       # 10k blocks, ~480 actions
+just soak 5000 320 30000 200   # size, actions, settle_ms, blocks-per-doc
+```
+
+What it does:
+
+- **Seeds** a deterministic synthetic vault of `size` extra blocks (`scripts` →
+  `crates/holon-integration-tests/src/pbt/composed/soak_seed.rs`): many pages, deep
+  trees, `TODO`/`DONE`/`DOING` tasks, intra-vault links, and unicode (CJK / RTL / emoji /
+  math). Same bytes every run. The extra blocks are seeded as separate org **docs** the
+  SUT boots but the oracle folds into its scaffold seed-set, so the invariant catalog
+  stays green while every action still pays the whole-vault projection/CDC cost.
+- **Raises the settle budget** to `settle_ms` (default 30000). The keystone's 150ms
+  `converge_projections` cap is far below a multi-second vault-scale drain; too small a
+  budget would silently cap `action_total` below the true latency and hide the cliff.
+- **Drives** ~`actions` mixed actions (edit / indent / outdent / split / toggle task
+  state / navigate) via the production `E2ETransition` alphabet.
+- **Measures** per-action-type p50/p95/max + per-stage cost + dominator
+  (`measure_latency.py --fail-over-p95 200`) and samples process RSS over time
+  (`scripts/soak_rss_sampler.sh` — the OS RSS, since the headless run emits no
+  `MemoryMonitor` lines).
+
+Results (per-action latency table, SLO gate verdict, RSS start→peak→end) are written to
+`docs/Testing/soak/soak-<size>-blocks-<stamp>.txt` and echoed to the console. Runtime is
+minutes: the vault is re-seeded once per proptest case (~20 actions each), so boot
+overhead dominates wall time — but boot is not counted in `action_total`.
+
+**Nightly:** run `just soak` (5k) or `just soak 10000 480` and commit the result file
+under `docs/Testing/soak/`. No CI/cron wiring — it is a single reliable command; diff
+the newest result against the prior committed one to spot regressions.
+
+**Not covered** (disclosed casualties): final GPU paint (headless — no window), real
+file-watcher churn (the vault is seeded once, not edited on disk mid-run), multi-peer
+CRDT sync/merge latency (single in-process peer), and platform differences (measured on
+the dev host only). The soak stresses **block count**; it does not vary editor buffer
+size or query complexity.
+## Memory & Async-Stall Profiling
+
+Two profilers sit alongside the latency tooling above. Together the four tools
+answer four different "why is it slow / heavy?" questions:
+
+| tool                | question it answers                          | how to run              |
+|---------------------|----------------------------------------------|-------------------------|
+| **latency** (above) | which *stage* of a UI action is slow?        | `just measure-latency`  |
+| **chrome-trace**    | wall-clock timeline of spans (flamechart)    | `--features chrome-trace` (see `memory_monitor::chrome_trace`) |
+| **heap (dhat)**     | *what allocates* the memory / where it grows | `just heap-profile`     |
+| **stall (tokio-console)** | which async *task* stalls / never yields | `just tokio-console-*`   |
+
+Both are feature-gated and zero-cost in normal builds.
+
+### Heap profiling — dhat
+
+Answers "where did the 4 GB go?". dhat installs a `#[global_allocator]` that
+records every allocation's size and call stack, and writes `dhat-heap.json` on
+a clean exit or Ctrl+C.
+
+The allocator + profiler live in `holon-frontend`
+(`memory_monitor::heap_profile`) behind the `heap-profile` feature, and are
+already wired into the **real GPUI app** (`frontends/gpui/src/main.rs` calls
+`heap_profile::start()`). For a scriptable, headless run there is a dedicated
+harness that boots the same engine (org parse -> Loro -> CDC -> Turso, incl. the
+async `DatabaseActor`) and ingests a synthetic vault:
+
+```bash
+just heap-profile            # seeds 2000 blocks, writes + summarizes dhat-heap.json
+just heap-profile 8000       # bigger workload
+
+# equivalent raw invocation:
+HOLON_SOAK_SEED_BLOCKS=2000 \
+  cargo run --release --example diag_harness -p holon-integration-tests \
+  --features heap-profile
+```
+
+To profile the **live desktop app** instead, build it with the feature and use
+the UI, then Ctrl+C:
+
+```bash
+cargo run -p holon-gpui --features heap-profile   # exercise the UI, then Ctrl+C
+```
+
+`HOLON_RSS_ABORT_MB` (default 1024) makes the `MemoryMonitor` self-abort — and
+flush dhat — if RSS blows past the threshold, so a runaway leak still produces a
+profile.
+
+**Reading the output** — the web viewer at
+<https://nnethercote.github.io/dh_view/dh_view.html> is the richest view, but
+offline you can summarize with:
+
+```bash
+bash scripts/analyze_dhat.sh dhat-heap.json      # total bytes + top 15 sites
+bash scripts/analyze_dhat.sh dhat-heap.json 40   # top 40
+```
+
+It prints lifetime total bytes/allocations and the top allocation sites by total
+bytes at their leaf frame. A *true negative* (flat total, allocations dominated
+by expected sites) is a useful result — it rules memory out.
+
+### Async-stall profiling — tokio-console
+
+Answers "which task starved the runtime?" (e.g. the `DatabaseActor` starvation
+deadlock). `console_subscriber` exposes per-task poll/idle/busy times over a gRPC
+port; the `tokio-console` TUI attaches to a live process. It only records real
+data when built with `--cfg tokio_unstable`.
+
+It is wired into `holon-frontend::logging::init()` behind the `tokio-console`
+feature, so it attaches to the **live GPUI app**:
+
+```bash
+cargo install tokio-console                       # one-time (the CLI)
+
+# 1) run the real app with the console runtime enabled:
+just tokio-console-app
+#    (= RUSTFLAGS="--cfg tokio_unstable" cargo run -p holon-gpui --features tokio-console)
+
+# 2) in another shell, attach:
+tokio-console http://127.0.0.1:6669
+```
+
+For a headless, scriptable run against the same engine boot (no window), use the
+harness — it holds the process open so you can attach:
+
+```bash
+just tokio-console-harness 2000 120               # 2000 blocks, hold 120s
+tokio-console http://127.0.0.1:6669               # attach from another shell
+```
+
+The task list shows total polls, busy time, and last-poll — a task that is
+`RUNNING` with a large busy time and few polls is monopolizing a worker thread
+(the starvation signature). Bind address overridable via `TOKIO_CONSOLE_BIND`.
+
 ## Log Analysis
 
 The application logs to `/tmp/holon.log` using the `tracing` crate (format: `timestamp LEVEL module: [Component] message`).
@@ -214,3 +392,31 @@ The MCP sync pipeline carries span context through the full cycle:
 - `sync_entity{entity, provider}` — per-entity sync with diff stats
 - `resource_fetch{uri}` — individual MCP resource read
 - `subscription_resync{uri}` — notification-triggered resync
+
+## Quality gates (two-tier)
+
+This is a colocated jj+git repo: **git hooks do not fire for jj commits**, so the
+gates are `just` recipes you run yourself. Plain-git contributors can wire them
+into hooks with `scripts/install-git-hooks.sh` (bypass a run with `--no-verify`).
+
+| Tier | Command | When | What runs |
+|------|---------|------|-----------|
+| 1 | `just precommit` | every commit | defensive-code ratchet + `cargo check --workspace` |
+| 2 | `just prepush` | every push | full keystone (`PROPTEST_CASES=16`, incl. persisted regression seeds) |
+
+Notes:
+
+- **Defensive-code ratchet** (`scripts/defensive-ratchet.sh`): runs
+  `scripts/check-defensive-code.sh` and compares against the committed baseline
+  `scripts/defensive-baseline.txt` (the pre-existing stock of violations).
+  Only NEW violations fail the gate. Fix them or annotate with
+  `// ALLOW(<reason>)`; after a reviewed intentional change run
+  `scripts/defensive-ratchet.sh --update` and commit the baseline.
+- **Why no keystone smoke in Tier 1**: measured 2026-07-07, even
+  `PROPTEST_CASES=2` on the keystone takes ~4.5 min — proptest unconditionally
+  replays the persisted regression seeds
+  (`tests/general_e2e_composed_pbt.proptest-regressions`, 11 seeds) and every
+  case pays full composed-SUT boot. A "smoke" is barely cheaper than the full
+  16-case run, so the keystone lives entirely in Tier 2.
+- Timings assume a **warm build cache**; the first run after a rebase that
+  touches many crates pays the compile cost once.

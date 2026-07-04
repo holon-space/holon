@@ -1,6 +1,7 @@
 # RULES
 - Whenever there's a bug in the UI, always check if the E2E test in crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs (the ONE composed keystone PBT) can reproduce it.
 - If the E2E test doesn't reproduce the issue think about how prod and E2E test can be made more similar, so that the E2E test can reproduce it.
+- Every bug discovered OUTSIDE an automated test (dogfooding, agent exploration, user report) MUST be triaged with the `bug-gap-triage` skill (.claude/skills/bug-gap-triage/SKILL.md) and appended to docs/Testing/BugFunnel.md before/alongside the fix. Latency above the SLO (p95 interaction→projection-visible < 200ms) counts as such a bug.
 - **NEVER** swallow errors!! Use `Result` and enrich the error message with information.
 - **ALWAYS** `tee` before filtering output
 
@@ -44,6 +45,21 @@ See [docs/Reference/ORG_SYNTAX.md](docs/Reference/ORG_SYNTAX.md) — org files s
 # Architecture
 Mental model (load first): [docs/Architecture/Model.md](docs/Architecture/Model.md) — five layers, mode axes, invariants 1–12.
 See [docs/Architecture.md](docs/Architecture.md) (details in docs/Architecture/)
+
+# Project tracking (10,000 & 50,000-foot view)
+The **birds-eye view** — strategy, roadmap, gates, and the parking lot of
+deferred / cross-session open topics — lives in the Holon PKM vault, NOT in this
+repo:
+`/Users/martin/Workspaces/pkm/holon-pkm/Projects/Holon/` (org files, one per
+topic; `README.org` indexes them; `Now.org` is the G1 critical path).
+This repo's `docs/` holds the **ground-level detail** (ADRs, architecture,
+plans); the vault holds the altitude view and points back to those docs.
+When you defer a decision or surface a cross-session open topic, record it in
+the vault as a topic-doc headline with a slug `:ID:` (see
+`Display Placement & Resurfacing.org` for the pattern) — not only in-repo.
+Note: the vault's org round-trip currently mangles underscored identifiers
+(a known lossy-render bug), so keep exact type/file names in the repo docs and
+phrase the vault entries around them.
 
 # Development
 See [DEVELOPMENT.md](DEVELOPMENT.md) — testing (nextest, coverage) and log analysis scripts.

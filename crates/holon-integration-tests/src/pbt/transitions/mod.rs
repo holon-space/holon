@@ -85,10 +85,12 @@ mod arrow_navigate;
 pub mod bulk_external_add;
 pub mod click_block;
 mod concurrent_schema_init;
+mod create_block_under_focus;
 mod create_directory;
 mod create_document;
 mod create_stale_loro;
 pub mod delete_backward;
+mod delete_document;
 mod drag_drop_block;
 mod emit_mcp_data;
 mod epoch_flip_rejected;
@@ -127,7 +129,7 @@ pub mod trigger_slash_command;
 pub mod type_chars;
 mod undo_last_mutation;
 mod unpin_block;
-mod write_org_file;
+pub(crate) mod write_org_file;
 
 // Shared layout-PBT variants (delegate to holon-pbt-core +
 // holon-layout-testing).
@@ -149,10 +151,12 @@ pub use arrow_navigate::ArrowNavigate;
 pub use bulk_external_add::BulkExternalAdd;
 pub use click_block::ClickBlock;
 pub use concurrent_schema_init::ConcurrentSchemaInit;
+pub use create_block_under_focus::CreateBlockUnderFocus;
 pub use create_directory::CreateDirectory;
 pub use create_document::CreateDocument;
 pub use create_stale_loro::CreateStaleLoro;
 pub use delete_backward::DeleteBackward;
+pub use delete_document::DeleteDocument;
 pub use deliver_block_content::DeliverBlockContent;
 pub use drag_drop_block::DragDropBlock;
 pub use emit_mcp_data::EmitMcpData;
@@ -218,8 +222,6 @@ pub fn deterministic_peer_block_id(
 
 // Peer edit operations live in `holon-pbt-core` so the `SutLoro` capability
 // trait there can name them. Re-exported here for the transition call sites.
-pub use holon_pbt_core::capabilities::PeerEditOp;
-pub use holon_pbt_core::capabilities::TextOp;
 
 crate::declare_e2e_transitions! {
     pub enum E2ETransition {
@@ -232,10 +234,12 @@ crate::declare_e2e_transitions! {
         NavigateBack(NavigateBack),
         BulkExternalAdd(BulkExternalAdd),
         ClickBlock(ClickBlock),
+        CreateBlockUnderFocus(CreateBlockUnderFocus),
         CreateDocument(CreateDocument),
         WriteOrgFile(WriteOrgFile),
         CreateDirectory(CreateDirectory),
         DeleteBackward(DeleteBackward),
+        DeleteDocument(DeleteDocument),
         DragDropBlock(DragDropBlock),
         EmitMcpData(EmitMcpData),
         EpochFlipRejected(EpochFlipRejected),
@@ -460,9 +464,8 @@ mod required_caps_guard {
     #[test]
     fn required_caps_match_transition_impl_bounds() {
         use holon_frontend::pbt_caps as fe;
+        use holon_pbt_core::capabilities as lc;
         use holon_pbt_core::capabilities as c;
-
-        use crate::pbt::local_caps as lc;
 
         macro_rules! one {
             ($t:ty, $cap:path) => {
@@ -549,6 +552,7 @@ mod required_caps_guard {
         // AppLifecycle (test-local)
         one!(ConcurrentSchemaInit, lc::SutAppLifecycle);
         one!(CreateDocument, lc::SutAppLifecycle);
+        one!(DeleteDocument, lc::SutAppLifecycle);
         one!(EpochFlipRejected, lc::SutAppLifecycle);
         one!(SimulateRestart, lc::SutAppLifecycle);
         one!(StartApp, lc::SutAppLifecycle);

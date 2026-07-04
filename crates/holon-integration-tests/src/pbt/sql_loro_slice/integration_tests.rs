@@ -14,9 +14,9 @@ use holon_api::Value;
 use holon_api::repository::CoreOperations;
 use holon_api::repository::Lifecycle;
 use holon_loro::LoroBackend;
+use holon_loro_testing::LoroBackendComponent;
 
 use crate::pbt::composed::fixtures::*;
-use crate::pbt::loro_slice::components::LoroBackendComponent;
 use crate::pbt::sql_loro_slice::builders::sql_loro_wide;
 use crate::pbt::sql_slice::builders::new_sql_engine;
 use crate::pbt::sql_slice::components::SqlProjectionComponent;

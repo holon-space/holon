@@ -104,7 +104,7 @@ Invariants picked up: `inv-viewmodel-no-error-widgets`, `inv-viewmodel-snapshot`
 Coverage: 5/25 = 20%.
 
 ### Wide PBTs (reference)
-- `general_e2e_pbt` (no frontend-bounds): all except `inv-displayed-text/widget`, `inv-editable-text-has-draggable`, `inv-frontend-engine`, `inv-frontend-no-error-widgets`, `inv-frontend-bounds-rendered`. (The `inv-displayed-text/viewmodel` arm has no frontend-bounds dep and *does* run headless.) **20/25 = 80%.**
+- `general_e2e_composed_pbt` (no frontend-bounds): all except `inv-displayed-text/widget`, `inv-editable-text-has-draggable`, `inv-frontend-engine`, `inv-frontend-no-error-widgets`, `inv-frontend-bounds-rendered`. (The `inv-displayed-text/viewmodel` arm has no frontend-bounds dep and *does* run headless.) **20/25 = 80%.**
 - `gpui_ui_pbt` (with frontend-bounds): **25/25 = 100%.**
 
 ## Findings
