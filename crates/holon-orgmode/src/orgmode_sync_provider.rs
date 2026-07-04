@@ -5,6 +5,14 @@
 //! - ONE sync() call → multiple typed streams (directories, files, blocks)
 //! - Uses file content hashes for change detection
 //! - Fire-and-forget operations - updates arrive via streams
+//!
+//! Every sync is a FULL walk of the local tree (listing is cheap; there is no
+//! remote resume cursor). The provider keeps its own durable base -- the
+//! `SyncState` JSON persisted in the `SyncTokenStore` -- solely to compute the
+//! delta against the previous walk: which entries are `Created` vs `Updated`,
+//! and which vanished and must be emitted as `Deleted`. The `position`
+//! argument of `sync()` is therefore ignored; the base is always loaded from
+//! the token store and saved back by the provider itself after emitting.
 
 use anyhow::Context;
 use async_trait::async_trait;
@@ -13,7 +21,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
-use holon_api::{BatchMetadata, EntityName, SyncTokenUpdate, Value, WithMetadata};
+use holon_api::{BatchMetadata, EntityName, Value, WithMetadata};
 use holon_api::{Change, ChangeOrigin, OperationDescriptor, StreamPosition};
 use holon_core::storage::types::StorageEntity;
 use holon_core::{
@@ -45,6 +53,9 @@ pub struct OrgModeSyncProvider {
     directory_tx: broadcast::Sender<ChangesWithMetadata<Directory>>,
     file_tx: broadcast::Sender<ChangesWithMetadata<File>>,
     fs: Arc<dyn FileSystem>,
+    /// Serializes the load-base -> scan -> save-base read-modify-write of
+    /// `sync` / `sync_changes` so concurrent calls cannot lose deletions.
+    sync_lock: tokio::sync::Mutex<()>,
 }
 
 impl OrgModeSyncProvider {
@@ -59,6 +70,7 @@ impl OrgModeSyncProvider {
             directory_tx: broadcast::channel(1000).0,
             file_tx: broadcast::channel(1000).0,
             fs,
+            sync_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -285,8 +297,8 @@ impl SyncableProvider for OrgModeSyncProvider {
         "orgmode"
     }
 
-    #[tracing::instrument(name = "provider.orgmode.sync", skip(self, position))]
-    async fn sync(&self, position: StreamPosition) -> Result<StreamPosition> {
+    #[tracing::instrument(name = "provider.orgmode.sync", skip(self, _position))]
+    async fn sync(&self, _position: StreamPosition) -> Result<StreamPosition> {
         use tracing::info;
 
         info!(
@@ -302,15 +314,13 @@ impl SyncableProvider for OrgModeSyncProvider {
             );
         }
 
-        // Load current state based on position
-        // StreamPosition::Beginning means start fresh (ignore stored state)
-        let old_state = match position {
-            StreamPosition::Beginning => {
-                info!("[OrgModeSyncProvider] Starting fresh sync (Beginning position)");
-                SyncState::default()
-            }
-            StreamPosition::Version(_) => self.load_state().await?,
-        };
+        // The position argument is ignored: a local filesystem walk is always
+        // complete, so there is nothing to resume. The base for delta
+        // computation (deletions, Created-vs-Updated) is the provider's own
+        // persisted state -- loading it unconditionally is what makes external
+        // deletions produce `Change::Deleted` instead of leaving stale rows.
+        let _guard = self.sync_lock.lock().await;
+        let old_state = self.load_state().await?;
 
         // Scan directory and compute changes
         let (new_state, dir_changes, file_changes) =
@@ -321,25 +331,22 @@ impl SyncableProvider for OrgModeSyncProvider {
             .map_err(|e| format!("Failed to serialize sync state: {}", e))?;
         let new_position = StreamPosition::Version(state_bytes);
 
-        // Create sync token update
-        let sync_token_update = SyncTokenUpdate {
-            provider_name: self.provider_name().to_string(),
-            position: new_position.clone(),
-        };
-
         let trace_context = holon_api::BatchTraceContext::from_current_span();
 
+        // sync_token is None: the provider persists its own base directly
+        // below instead of piggybacking it on the batch (the piggyback path
+        // was never wired -- cache feeds apply batches with sync_token None).
         let dir_metadata = BatchMetadata {
             relation_name: "directory".to_string(),
             trace_context: trace_context.clone(),
-            sync_token: Some(sync_token_update.clone()),
+            sync_token: None,
             seq: 0,
         };
 
         let file_metadata = BatchMetadata {
             relation_name: "file".to_string(),
             trace_context,
-            sync_token: Some(sync_token_update),
+            sync_token: None,
             seq: 0,
         };
 
@@ -358,6 +365,12 @@ impl SyncableProvider for OrgModeSyncProvider {
             inner: file_changes,
             metadata: file_metadata,
         });
+
+        // Persist the base AFTER broadcasting, so a crash in between re-emits
+        // (idempotent upserts / deletes downstream) rather than losing a delta.
+        self.token_store
+            .save_token(self.provider_name(), new_position.clone())
+            .await?;
 
         Ok(new_position)
     }
@@ -411,6 +424,7 @@ impl SyncableProvider for OrgModeSyncProvider {
             file_paths.len()
         );
 
+        let _guard = self.sync_lock.lock().await;
         let old_state = self.load_state().await?;
         let mut new_state = old_state.clone();
 
@@ -551,5 +565,121 @@ mod tests {
 
         // Blocks are no longer emitted by OrgModeSyncProvider — they go through
         // FileSyncController → command_bus → EventBus instead.
+    }
+
+    fn provider_for(dir: &std::path::Path) -> OrgModeSyncProvider {
+        OrgModeSyncProvider::new(
+            dir.to_path_buf(),
+            Arc::new(MockSyncTokenStore::new()),
+            Arc::new(holon_filesystem::RealFileSystem),
+        )
+    }
+
+    /// Externally deleting a file must produce `Change::Deleted` on the next
+    /// sync — regardless of the position the caller passes (all production
+    /// callers pass `StreamPosition::Beginning`).
+    #[tokio::test]
+    async fn test_external_file_deletion_emits_deleted() {
+        let dir = tempdir().unwrap();
+        let org_file = dir.path().join("doomed.org");
+        std::fs::write(&org_file, "* Headline\n").unwrap();
+
+        let provider = provider_for(dir.path());
+        let mut file_rx = provider.subscribe_files();
+
+        provider.sync(StreamPosition::Beginning).await.unwrap();
+        let first = file_rx.try_recv().unwrap();
+        assert_eq!(first.inner.len(), 1);
+        let deleted_id = match &first.inner[0] {
+            Change::Created { data, .. } => data.id.clone(),
+            other => panic!("expected Created on first sync, got {:?}", other),
+        };
+
+        std::fs::remove_file(&org_file).unwrap();
+
+        provider.sync(StreamPosition::Beginning).await.unwrap();
+        let second = file_rx.try_recv().unwrap();
+        assert_eq!(second.inner.len(), 1, "expected exactly the deletion");
+        match &second.inner[0] {
+            Change::Deleted { id, .. } => assert_eq!(id, &deleted_id),
+            other => panic!("expected Deleted, got {:?}", other),
+        }
+    }
+
+    /// Externally deleting a subdirectory must produce a directory
+    /// `Change::Deleted` on the next sync.
+    #[tokio::test]
+    async fn test_external_directory_deletion_emits_deleted() {
+        let dir = tempdir().unwrap();
+        let sub = dir.path().join("notes");
+        std::fs::create_dir(&sub).unwrap();
+
+        let provider = provider_for(dir.path());
+        let mut dir_rx = provider.subscribe_directories();
+
+        provider.sync(StreamPosition::Beginning).await.unwrap();
+        let first = dir_rx.try_recv().unwrap();
+        assert_eq!(first.inner.len(), 1);
+
+        std::fs::remove_dir(&sub).unwrap();
+
+        provider.sync(StreamPosition::Beginning).await.unwrap();
+        let second = dir_rx.try_recv().unwrap();
+        assert_eq!(second.inner.len(), 1, "expected exactly the deletion");
+        assert!(
+            matches!(&second.inner[0], Change::Deleted { .. }),
+            "expected Deleted, got {:?}",
+            second.inner[0]
+        );
+    }
+
+    /// Re-syncing an unchanged tree must emit NO changes — no spurious
+    /// `Created` churn masked by cache upsert semantics.
+    #[tokio::test]
+    async fn test_resync_unchanged_tree_emits_nothing() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("a.org"), "* A\n").unwrap();
+        std::fs::write(dir.path().join("sub").join("b.org"), "* B\n").unwrap();
+
+        let provider = provider_for(dir.path());
+        let mut dir_rx = provider.subscribe_directories();
+        let mut file_rx = provider.subscribe_files();
+
+        provider.sync(StreamPosition::Beginning).await.unwrap();
+        assert_eq!(dir_rx.try_recv().unwrap().inner.len(), 1);
+        assert_eq!(file_rx.try_recv().unwrap().inner.len(), 2);
+
+        provider.sync(StreamPosition::Beginning).await.unwrap();
+        assert!(dir_rx.try_recv().unwrap().inner.is_empty());
+        assert!(file_rx.try_recv().unwrap().inner.is_empty());
+    }
+
+    /// Modifying an already-known file must emit `Updated`, not `Created`.
+    #[tokio::test]
+    async fn test_modified_file_emits_updated() {
+        let dir = tempdir().unwrap();
+        let org_file = dir.path().join("live.org");
+        std::fs::write(&org_file, "* v1\n").unwrap();
+
+        let provider = provider_for(dir.path());
+        let mut file_rx = provider.subscribe_files();
+
+        provider.sync(StreamPosition::Beginning).await.unwrap();
+        assert!(matches!(
+            &file_rx.try_recv().unwrap().inner[0],
+            Change::Created { .. }
+        ));
+
+        std::fs::write(&org_file, "* v2\n").unwrap();
+
+        provider.sync(StreamPosition::Beginning).await.unwrap();
+        let batch = file_rx.try_recv().unwrap();
+        assert_eq!(batch.inner.len(), 1);
+        assert!(
+            matches!(&batch.inner[0], Change::Updated { .. }),
+            "expected Updated, got {:?}",
+            batch.inner[0]
+        );
     }
 }
