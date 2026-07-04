@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+# `workspace-hack` is the cargo-hakari feature-unification crate: every
+# member depends on it and no member references it in source, by design.
+[package.metadata.cargo-machete]
+# `opentelemetry-stdout` is switched on by the `otel` feature, not named in source.
+ignored = ["opentelemetry-stdout", "workspace-hack"]
+
 [features]
 default = []
 # PBT SUT capability traits hosted here per the cap home-rule (a cap lives in the
@@ -12,6 +18,9 @@ default = []
 pbt = ["dep:holon-pbt-core"]
 heap-profile = ["dep:dhat", "dep:ctrlc", "dep:libc"]
 chrome-trace = ["dep:tracing-chrome", "dep:chrono"]
+# tokio-console async-stall profiler. Adds a console_subscriber gRPC layer
+# to logging::init(). Requires building with RUSTFLAGS="--cfg tokio_unstable".
+tokio-console = ["dep:console-subscriber", "tokio/tracing"]
 otel = ["dep:tracing-opentelemetry", "dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:opentelemetry-stdout"]
 blinc = ["dep:blinc_core", "dep:blinc_theme"]
 
@@ -28,6 +37,13 @@ tracing.workspace = true
 holon-core.workspace = true
 holon-macros.workspace = true
 holon-api.workspace = true
+# default-features = false drops holon-advice's `engine` feature (→ holon-turso →
+# turso, native-only) so this shared renderer stays wasm-clean for the
+# dioxus-web page. holon-frontend only uses the pure rule surface
+# (GET_ADVICE_RULES_SQL, parse_discovered_rule). Native/wasi builds that also
+# pull the `holon` engine re-enable `engine` via feature unification.
+holon-advice = { path = "../holon-advice", default-features = false }
+holon-oracles.workspace = true
 holon-pbt-core = { path = "../holon-pbt-core", optional = true }
 async-trait.workspace = true
 futures.workspace = true
@@ -36,6 +52,7 @@ fluxdi.workspace = true
 dhat = { workspace = true, optional = true }
 libc = { version = "0.2", optional = true }
 ctrlc = { workspace = true, optional = true }
+console-subscriber = { workspace = true, optional = true }
 tracing-chrome = { workspace = true, optional = true }
 tracing-appender.workspace = true
 tracing-subscriber = { workspace = true }
@@ -65,3 +82,5 @@ clap = { version = "4", features = ["derive"] }
 [dev-dependencies]
 tempfile.workspace = true
 proptest.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tokio-stream.workspace = true

@@ -31,6 +31,7 @@
 pub mod builder;
 pub mod catalog;
 pub mod correspondences;
+pub mod first_divergent;
 pub mod invariants;
 
 /// The composed-slice host for the `inv-sql-budget` span-metrics cap
@@ -39,7 +40,17 @@ pub mod invariants;
 /// consumed by the `wide_e2e` slice (registers it) and the `harness` (drives
 /// its lifecycle).
 #[cfg(all(feature = "otel-testing", any(test, feature = "pbt")))]
+pub mod settle_latency;
 pub mod span_metrics;
+
+/// Process-global ERROR-event + panic capture surface for
+/// `inv-no-observed-errors`.
+pub mod observed_errors;
+
+/// Process-global LoroProjection full-reseed attribution surface for
+/// `inv-no-steady-reseed-leak` (Inc 0 of the reseed-latency workstream). The
+/// tracing layer that feeds it is wired in [`crate::test_tracing`].
+pub mod reseed_observer;
 
 /// The generic composed-SUT `StateMachineTest` harness (E3 increment 3).
 /// Available under the `pbt` feature (not just `cfg(test)`) so the **macro
@@ -48,6 +59,13 @@ pub mod span_metrics;
 /// swap slice in [`wide_e2e`].
 #[cfg(any(test, feature = "pbt"))]
 pub mod harness;
+
+/// Per-case structured telemetry for the ONE composed keystone (weights-spike
+/// step 0): env-gated (`HOLON_PBT_TELEMETRY=1`) machine-parseable per-case
+/// lines measuring transition-kind/bigram diversity, wiring, invariant
+/// engagement, and wall time. Off by default (byte-identical runs).
+#[cfg(any(test, feature = "pbt"))]
+pub mod telemetry;
 
 #[cfg(test)]
 pub mod fixtures;
@@ -72,7 +90,23 @@ pub mod seed_primitives;
 /// `general_e2e_composed_pbt` can drive `ComposedSut<WideE2E>`. Single source
 /// of truth (the lib slices `use` these).
 #[cfg(any(test, feature = "pbt"))]
+pub mod two_instance;
 pub mod wide_e2e;
+
+/// The out-of-process LIVE-MCP rung of the composed keystone:
+/// [`live_mcp::LiveMcpE2E`] drives the SAME `WideE2EMachine` transitions +
+/// invariant catalog against a REAL Holon app over its embedded MCP server
+/// (per-case `reset_vault`). `pbt`-gated like its `wide_e2e` sibling so the
+/// `tests/` integration test can drive `ComposedSut<LiveMcpE2E>`.
+#[cfg(any(test, feature = "pbt"))]
+pub mod live_mcp;
+/// Scale-soak vault seeder (env-gated). Inflates the `WideE2E` SUT boot with
+/// extra synthetic org doc files so the keystone can be driven against a
+/// 5–10k-block vault, quantifying the projection/CDC/consolidator latency
+/// cliff. Zero-cost (empty seed, keystone `SETTLE`) when
+/// `HOLON_SOAK_SEED_BLOCKS` is unset.
+#[cfg(any(test, feature = "pbt"))]
+pub mod soak_seed;
 
 /// The single-sourced E4 windowed composition-path check
 /// ([`windowed::run_windowed_composed_check`]). `pbt`-gated like the windowed

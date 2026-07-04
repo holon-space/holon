@@ -18,12 +18,25 @@ To suppress: // ALLOW(direct_focus_mutation): <reason>
 
 [[smell]]
 id = "navigation_execute_op"
-pattern = 'execute_op\("navigation"'
+# The removed shortcut appears in BOTH historical forms: the bare
+# `execute_op("navigation"` string AND the current typed API
+# `execute_operation(&EntityName::new("navigation")`. The rule matched only the
+# former, so it silently never fired against production code using the latter
+# (F6a — dead rule). One alternation covers both.
+pattern = 'execute_op(eration)?\((&EntityName::new\()?"navigation"'
 files = "**/*.rs"
-exclude = ["crates/holon/src/navigation/**"]
+# Exempt: the provider source that legitimately RECEIVES the dispatched intent,
+# and the PBT harness slice, which deliberately drives the direct nav op path
+# pending prod nav keybindings (F6b fork — once bindings land the five nav
+# transitions move onto `send_block_chord`).
+exclude = [
+    "crates/holon/src/navigation/**",
+    "crates/holon-integration-tests/**",
+]
 case_sensitive = true
 message = """
-`execute_op("navigation", ...)` was the API shortcut removed in TUI cleanup A2–A4. \
+`execute_op("navigation", ...)` / `execute_operation(&EntityName::new("navigation"), ...)` \
+was the API shortcut removed in TUI cleanup A2–A4. \
 Drive navigation through the keyboard pipeline instead \
 (`driver.click_entity(doc, "left_sidebar")` for sidebar focus, leader chord for \
 go_home / go_back / go_forward). The provider source under \

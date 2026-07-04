@@ -311,6 +311,95 @@ impl LazyReactiveSlot {
 /// This replaces the old snapshot-based `ReactiveViewModel` +
 /// `ReactiveViewKind` enum. Widget type is determined by the `expr` function
 /// name, not an enum tag.
+/// Where a node's wired operation stands. `Failed` keeps the reason so the
+/// view can surface the provider's own words rather than a generic "failed".
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum SendState {
+    #[default]
+    Idle,
+    InFlight,
+    /// Dispatched, delivery NOT proven. Distinct from both neighbours on
+    /// purpose: calling it success fabricates a message that may never have
+    /// arrived, and calling it failure invites the resend a `retry_safe:false`
+    /// transport cannot make safe.
+    Unconfirmed {
+        /// When the send happened, so a strip that stays on screen says how
+        /// stale it is.
+        at: String,
+        /// What was sent — the strip's own record, independent of the draft
+        /// the user may keep editing.
+        message: String,
+        /// The provider's wording for why delivery is unproven.
+        detail: String,
+    },
+    Failed {
+        message: String,
+    },
+}
+
+/// Which of the three send outcomes a strip reports. The view must render
+/// these differently — a user who cannot tell them apart cannot tell a
+/// delivered message from one that may not exist.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SendStripKind {
+    Sending,
+    Unconfirmed,
+    Refused,
+}
+
+impl SendStripKind {
+    /// The tag the platform layer records for this strip, so a test can prove
+    /// WHICH state reached the screen rather than that something did.
+    pub fn widget_type(self) -> &'static str {
+        match self {
+            SendStripKind::Sending => "send_status_sending",
+            SendStripKind::Unconfirmed => "send_status_unconfirmed",
+            SendStripKind::Refused => "send_status_refused",
+        }
+    }
+}
+
+/// The pending-send strip: what a compose box shows above itself about its
+/// last submit. Deliberately not a chat bubble — an unproven message rendered
+/// as one is a fabricated record of a conversation that may not have happened.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SendStrip {
+    pub kind: SendStripKind,
+    /// Names the state in the user's words.
+    pub headline: String,
+    /// The provider's own text, or the message whose delivery is unproven.
+    /// Never paraphrased.
+    pub detail: String,
+}
+
+impl SendState {
+    /// What to show for this state; `Idle` shows nothing.
+    pub fn strip(&self) -> Option<SendStrip> {
+        match self {
+            SendState::Idle => None,
+            SendState::InFlight => Some(SendStrip {
+                kind: SendStripKind::Sending,
+                headline: "sending…".to_string(),
+                detail: String::new(),
+            }),
+            SendState::Unconfirmed {
+                at,
+                message,
+                detail,
+            } => Some(SendStrip {
+                kind: SendStripKind::Unconfirmed,
+                headline: format!("sent, not acknowledged — {at}"),
+                detail: format!("{message}\n{detail}"),
+            }),
+            SendState::Failed { message } => Some(SendStrip {
+                kind: SendStripKind::Refused,
+                headline: "not sent".to_string(),
+                detail: message.clone(),
+            }),
+        }
+    }
+}
+
 pub struct ReactiveViewModel {
     /// The render expression this node was built from.
     /// For leaf nodes: `text(...)`, `badge(...)`, etc.
@@ -347,6 +436,37 @@ pub struct ReactiveViewModel {
     /// Expand/collapse state — shared handle from the engine's cache.
     pub expanded: Option<Mutable<bool>>,
 
+    /// Per-render-slot hover state for the `on_hover` widget. A live
+    /// `Mutable<bool>` owned by this node (never a `Cell`, never keyed by
+    /// `(uri, field)`), so two same-id rows in different panes hover
+    /// independently (Model.md "Cell vs Mutable", FU-1 lesson). The GPUI
+    /// builder's `.on_hover` handler flips it; the builder reveals the
+    /// content children only while it is `true`.
+    pub hovered: Option<Mutable<bool>>,
+
+    /// Ephemeral compose buffer owned by this node (`input_box`). Unlike
+    /// `editable_text`, which re-derives its content from a row column on
+    /// every CDC write, a draft tracks no row: it survives the churn of the
+    /// list beneath it and is cleared only when its wired operation
+    /// dispatches successfully.
+    pub draft: Option<Mutable<String>>,
+
+    /// Whether this node's wired operation is in flight (`input_box`). Carried
+    /// across structural rebuilds exactly like `draft`, because a guard that
+    /// resets when the tree is rebuilt does not guard: the operation behind a
+    /// compose box is an irreversible external effect, and a second dispatch
+    /// of it cannot be taken back.
+    pub send_state: Option<Mutable<SendState>>,
+
+    /// Which SUBMISSION this node's compose buffer currently holds
+    /// (`input_box`). It rides into the wired operation's params, where it
+    /// becomes part of the connector's intent key, so "send `yes` again" is a
+    /// different intent from "re-send that `yes`". Re-minted exactly when the
+    /// draft is cleared by a proven delivery — and carried across structural
+    /// rebuilds like `draft` and `send_state`, because a submission identity
+    /// that resets with the tree would let one message be sent twice.
+    pub compose_id: Option<Mutable<holon_api::effect_id::ComposeId>>,
+
     /// Operations available at this node.
     pub operations: Vec<OperationWiring>,
 
@@ -374,6 +494,13 @@ pub struct ReactiveViewModel {
     /// `props` on `data` changes). Aborted when the node is dropped so
     /// removed rows don't leak background work.
     pub subscriptions: Vec<DropTask>,
+
+    /// Which display occurrence of the row this node renders (ADR 0015 rule 4:
+    /// node metadata, NEVER an id-infix). `Canonical` for every real row; the
+    /// collection drivers stamp `Placed` onto the display-placed occurrence a
+    /// row's key carries so GPUI can suffix its per-row identity keys without
+    /// the occurrence ever touching the `EntityUri`.
+    pub occurrence: holon_api::Occurrence,
 }
 
 /// A `tokio::task::JoinHandle<()>` that aborts the task on drop.
@@ -536,6 +663,10 @@ impl ReactiveViewModel {
             slot: Self::push_down_slot(&self.slot, &fresh.slot),
             lazy_slot: Self::push_down_lazy_slot(&self.lazy_slot, &fresh.lazy_slot),
             expanded: self.expanded.clone(),
+            hovered: self.hovered.clone(),
+            draft: self.draft.clone(),
+            send_state: self.send_state.clone(),
+            compose_id: self.compose_id.clone(),
             operations: fresh.operations.clone(),
             triggers: fresh.triggers.clone(),
             layout_hint: fresh.layout_hint,
@@ -543,6 +674,8 @@ impl ReactiveViewModel {
             render_ctx: fresh.render_ctx.clone(),
             interpret_fn: self.interpret_fn.clone(),
             subscriptions: Vec::new(),
+            // Occurrence is stable node identity — preserve across data updates.
+            occurrence: self.occurrence.clone(),
         }
     }
 
@@ -583,6 +716,10 @@ impl ReactiveViewModel {
                                 &fresh_child.lazy_slot,
                             ),
                             expanded: old_child.expanded.clone(),
+                            hovered: old_child.hovered.clone(),
+                            draft: old_child.draft.clone(),
+                            send_state: old_child.send_state.clone(),
+                            compose_id: old_child.compose_id.clone(),
                             operations: fresh_child.operations.clone(),
                             triggers: fresh_child.triggers.clone(),
                             layout_hint: fresh_child.layout_hint,
@@ -590,7 +727,7 @@ impl ReactiveViewModel {
                             render_ctx: fresh_child.render_ctx.clone(),
                             interpret_fn: old_child.interpret_fn.clone(),
                             subscriptions: Vec::new(),
-                            ..ReactiveViewModel::empty()
+                            occurrence: old_child.occurrence.clone(),
                         }));
                     } else {
                         // Children unchanged structurally — keep original Arc.
@@ -783,6 +920,7 @@ impl ReactiveViewModel {
             operations: self.operations.clone(),
             triggers: self.triggers.clone(),
             layout_hint: self.layout_hint,
+            occurrence: self.occurrence.clone(),
         }
     }
 
@@ -798,6 +936,7 @@ impl ReactiveViewModel {
             operations: self.operations.clone(),
             triggers: self.triggers.clone(),
             layout_hint: self.layout_hint,
+            occurrence: self.occurrence.clone(),
         }
     }
 
@@ -844,6 +983,7 @@ impl ReactiveViewModel {
             "checkbox" => ViewKind::Checkbox {
                 checked: self.prop_bool("checked").unwrap_or(false),
             },
+            "divider" => ViewKind::Divider,
             "spacer" => ViewKind::Spacer {
                 width: self.prop_f64("width").unwrap_or(0.0) as f32,
                 height: self.prop_f64("height").unwrap_or(0.0) as f32,
@@ -884,11 +1024,19 @@ impl ReactiveViewModel {
             "query_result" => ViewKind::QueryResult {
                 children: snap_children(),
             },
-            "tree_item" => ViewKind::TreeItem {
-                depth: self.prop_f64("depth").unwrap_or(0.0) as usize,
-                has_children: self.prop_bool("has_children").unwrap_or(false),
-                children: snap_children(),
-            },
+            "tree_item" => {
+                let has_children = self.prop_bool("has_children").unwrap_or(false);
+                // Same reading as the platform builders' `collapse_state`: a
+                // missing `expanded` handle means the row was built outside
+                // `wrap_tree_item` and renders expanded.
+                let expanded = self.expanded.as_ref().is_none_or(|m| m.get());
+                ViewKind::TreeItem {
+                    depth: self.prop_f64("depth").unwrap_or(0.0) as usize,
+                    has_children,
+                    collapsed: has_children && !expanded,
+                    children: snap_children(),
+                }
+            }
 
             // Collections — the registered layout name selects which
             // `ViewKind` variant we serialize to. Layouts whose name doesn't
@@ -968,14 +1116,14 @@ impl ReactiveViewModel {
             },
             "expand_toggle" => {
                 let target_id = self.prop_str("target_id").unwrap_or_default();
-                let is_expanded = self.expanded.as_ref().map_or(false, |m| m.get());
+                let is_expanded = self.expanded.as_ref().is_some_and(|m| m.get());
                 let header_children = snap_children();
                 // Gated lazy content. `materialize_if_gated()` fires the thunk
                 // exactly once (cache lives on the lazy_slot for the VM
                 // lifetime). Collapsed and not-yet-materialised → None →
                 // header-only render. Expanded → cache hit → snapshot the
                 // materialised VM and append after the header.
-                let all_children = match self
+                let (all_children, content_deferred) = match self
                     .lazy_slot
                     .as_ref()
                     .and_then(|s| s.materialize_if_gated())
@@ -987,13 +1135,14 @@ impl ReactiveViewModel {
                         };
                         let mut items = header_children.items;
                         items.push(snapshot);
-                        LazyChildren::fully_materialized(items)
+                        (LazyChildren::fully_materialized(items), false)
                     }
-                    None => header_children,
+                    None => (header_children, self.lazy_slot.is_some()),
                 };
                 ViewKind::ExpandToggle {
                     target_id,
                     expanded: is_expanded,
+                    content_deferred,
                     children: all_children,
                 }
             }
@@ -1036,8 +1185,7 @@ impl ReactiveViewModel {
             "view_mode_switcher" => {
                 let entity_uri = self
                     .prop_str("entity_uri")
-                    // ALLOW(entity_uri_from_raw): prop_str('entity_uri') render-spec node prop
-                    // value
+                    // ALLOW(entity_uri_from_raw): render-spec 'entity_uri' node prop value
                     .map(|s| EntityUri::from_raw(&s))
                     // ALLOW(entity_uri_from_raw): hardcoded 'unknown' sentinel default literal
                     .unwrap_or_else(|| EntityUri::from_raw("unknown"));
@@ -1074,6 +1222,13 @@ impl ReactiveViewModel {
             "collapsible" => ViewKind::Collapsible {
                 header: self.prop_str("header").unwrap_or_default(),
                 icon: self.prop_str("icon").unwrap_or_default(),
+                children: snap_children(),
+            },
+            // `children[0]` is the always-visible trigger; `children[1..]`
+            // is the content revealed only while hovered. The snapshot
+            // carries both — hover is a per-frontend view concern, so the
+            // static ViewModel holds the full tree.
+            "on_hover" => ViewKind::OnHover {
                 children: snap_children(),
             },
             "bottom_dock" => ViewKind::BottomDock {
@@ -1159,6 +1314,10 @@ impl Default for ReactiveViewModel {
             slot: None,
             lazy_slot: None,
             expanded: None,
+            hovered: None,
+            draft: None,
+            send_state: None,
+            compose_id: None,
             operations: vec![],
             triggers: vec![],
             layout_hint: LayoutHint::default(),
@@ -1166,6 +1325,7 @@ impl Default for ReactiveViewModel {
             render_ctx: None,
             interpret_fn: None,
             subscriptions: Vec::new(),
+            occurrence: holon_api::Occurrence::Canonical,
         }
     }
 }
@@ -1198,6 +1358,19 @@ impl ReactiveViewModel {
         self
     }
 
+    /// Stamp the display-occurrence coordinate this node renders (ADR 0015
+    /// rule 4). Canonical nodes leave this at its default.
+    pub fn with_occurrence(mut self, occurrence: holon_api::Occurrence) -> Self {
+        self.occurrence = occurrence;
+        self
+    }
+
+    /// The display occurrence this node renders. `Canonical` unless a driver
+    /// stamped a display placement.
+    pub fn occurrence(&self) -> &holon_api::Occurrence {
+        &self.occurrence
+    }
+
     pub fn with_layout_hint(mut self, hint: LayoutHint) -> Self {
         self.layout_hint = hint;
         self
@@ -1220,8 +1393,7 @@ impl ReactiveViewModel {
         }
     }
 
-    // ALLOW(unused_param): _widget kept in signature for caller readability and
-    // future use
+    // ALLOW(unused_param): _widget kept in signature for caller readability
     pub fn error(_widget: impl Into<String>, message: impl Into<String>) -> Self {
         let mut props = HashMap::new();
         props.insert("message".to_string(), Value::String(message.into()));
@@ -1445,14 +1617,13 @@ impl ReactiveViewModel {
         parent_space: Option<crate::render_context::AvailableSpace>,
         child_space_fn: Option<std::sync::Arc<crate::reactive_view::ChildSpaceFn>>,
         virtual_child: Option<crate::reactive_view::VirtualChildSlot>,
-        trailing_slot: Option<crate::reactive_view::TrailingSlot>,
         rules: Vec<holon_api::render_types::RuleSpec>,
     ) -> Self {
         if widget == "query_result" {
             return Self::from_widget("query_result", HashMap::new());
         }
         let layout = Self::widget_layout(widget, gap);
-        let mut view = crate::reactive_view::ReactiveView::new_collection(
+        let view = crate::reactive_view::ReactiveView::new_collection(
             crate::reactive_view::CollectionConfig {
                 layout,
                 item_template,
@@ -1464,9 +1635,6 @@ impl ReactiveViewModel {
             parent_space,
             child_space_fn,
         );
-        if let Some(slot) = trailing_slot {
-            view.set_trailing_slot(slot);
-        }
         Self {
             collection: Some(std::sync::Arc::new(view)),
             ..Self::from_widget(widget, HashMap::new())
@@ -1733,7 +1901,19 @@ mod tests {
                     modifiers: ClickModifiers::none(),
                 }),
                 bound_params: bound.clone(),
-                ..Default::default()
+                entity_short_name: String::new(),
+                id_column: "id".to_string(),
+                display_name: String::new(),
+                description: String::new(),
+                required_params: vec![],
+                affected_fields: vec![],
+                param_mappings: vec![],
+                target_scope: holon_api::TargetScope::Block,
+                boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::Test,
+                },
+                precondition: None,
             },
         });
 
@@ -1761,7 +1941,20 @@ mod tests {
                 trigger: Some(Trigger::Click {
                     modifiers: ClickModifiers::none(),
                 }),
-                ..Default::default()
+                entity_short_name: String::new(),
+                id_column: "id".to_string(),
+                display_name: String::new(),
+                description: String::new(),
+                required_params: vec![],
+                affected_fields: vec![],
+                param_mappings: vec![],
+                bound_params: Default::default(),
+                target_scope: holon_api::TargetScope::Block,
+                boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::Test,
+                },
+                precondition: None,
             },
         });
         node.operations.push(OperationWiring {
@@ -1772,7 +1965,20 @@ mod tests {
                 trigger: Some(Trigger::Click {
                     modifiers: ClickModifiers::shift(),
                 }),
-                ..Default::default()
+                entity_short_name: String::new(),
+                id_column: "id".to_string(),
+                display_name: String::new(),
+                description: String::new(),
+                required_params: vec![],
+                affected_fields: vec![],
+                param_mappings: vec![],
+                bound_params: Default::default(),
+                target_scope: holon_api::TargetScope::Block,
+                boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::Test,
+                },
+                precondition: None,
             },
         });
 
@@ -1805,7 +2011,23 @@ mod tests {
                 trigger: Some(Trigger::KeyChord {
                     chord: holon_api::KeyChord::new(&[holon_api::Key::Cmd, holon_api::Key::Enter]),
                 }),
-                ..Default::default()
+                entity_short_name: String::new(),
+                id_column: "id".to_string(),
+                display_name: String::new(),
+                description: String::new(),
+                required_params: vec![],
+                affected_fields: vec![],
+                param_mappings: vec![],
+                bound_params: Default::default(),
+                target_scope: holon_api::TargetScope::Block,
+                boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
+                menu_exposure: holon_api::MenuExposure::Listed {
+                    surfaces: holon_api::SurfaceSet {
+                        slash_menu: true,
+                        action_bar: false,
+                    },
+                },
+                precondition: None,
             },
         });
 

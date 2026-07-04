@@ -1,5 +1,10 @@
 //! Transition: press a structural key chord in the active editor.
 //!
+//! @pbt rung input-pipeline
+//!   `press_key` drives `send_raw_keystroke` for each chord key through the
+//!   production UserDriver.
+//! @pbt covers structural-chord — raw key chord -> bubble_input resolution
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:1682-1717`
 //! (generator), `state_machine.rs:3558-3560` (precondition),
 //! `state_machine.rs:2975-3051` (ref-state apply),
@@ -8,14 +13,23 @@
 
 use holon_api::KeyChord;
 use holon_pbt_core::TransitionFactory;
-use holon_pbt_core::TransitionImpl;
 use holon_pbt_core::TransitionRef;
+use holon_pbt_core::capabilities::CapRegion;
+use holon_pbt_core::capabilities::RefBlockTree;
+use holon_pbt_core::capabilities::RefBlockTreeMut;
+use holon_pbt_core::capabilities::RefEditorMirror;
+use holon_pbt_core::capabilities::RefEditorMirrorMut;
+use holon_pbt_core::capabilities::RefFocus;
+use holon_pbt_core::capabilities::RefFocusMut;
+use holon_pbt_core::capabilities::RefLifecycle;
 use holon_pbt_core::capabilities::SutBlockInteract;
+use holon_pbt_core::capabilities::commit_active_editor_if_changed;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::check;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::reference_state::ReferenceState;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
 #[cfg(feature = "otel-testing")]
@@ -24,8 +38,6 @@ use crate::pbt::transition_budgets::MutationKind;
 use crate::pbt::transition_budgets::REACTIVE_BASE;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::expected_sql_for_kind;
-use crate::pbt::validation::Reason;
-use crate::pbt::validation::check;
 
 /// Press a structural key chord (Enter, Backspace, Escape) in the active
 /// editor. Gated to `PBT_ATOMIC_EDITOR=1` runs.
@@ -34,11 +46,18 @@ pub struct PressKey {
     pub chord: KeyChord,
 }
 
-impl TransitionFactory<ReferenceState> for PressKey {
+impl<
+    R: RefLifecycle
+        + RefEditorMirror
+        + RefEditorMirrorMut
+        + RefBlockTree
+        + RefBlockTreeMut
+        + RefFocus
+        + RefFocusMut,
+> TransitionFactory<R> for PressKey
+{
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        vec![::holon_pbt_core::composition::CapId::of::<
-            dyn ::holon_pbt_core::capabilities::SutBlockInteract,
-        >()]
+        Self::declared_caps()
     }
 
     type Reason = Reason;
@@ -56,7 +75,7 @@ impl TransitionFactory<ReferenceState> for PressKey {
         ])
     }
 
-    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // Verify preconditions hold. All structural gates are delegated to
         // preconditions().
         let sample_chord = holon_api::KeyChord(std::iter::once(holon_api::Key::Enter).collect());
@@ -69,21 +88,11 @@ impl TransitionFactory<ReferenceState> for PressKey {
             Validated::Good(_) => {}
         }
 
-        let last = state.action.last_transition_kind;
-        let pending_edit = state
-            .ui
-            .tab
-            .active_editor
-            .as_ref()
-            .map(|e| {
-                state
-                    .domain
-                    .block_state
-                    .blocks
-                    .get(&e.block_id)
-                    .is_some_and(|b| b.content != e.in_memory_content)
-            })
-            .unwrap_or(false);
+        let last = state.last_transition_kind();
+        let pending_edit = match (state.active_editor_block(), state.active_editor_text()) {
+            (Some(id), Some(mem)) => state.block_content(&id).is_some_and(|c| c != mem),
+            _ => false,
+        };
 
         let pk_weight = if pending_edit {
             10 // pending in-memory edit + chord = the bug class
@@ -114,19 +123,31 @@ impl TransitionFactory<ReferenceState> for PressKey {
     }
 }
 
-impl TransitionRef<ReferenceState> for PressKey {
+impl<
+    R: RefLifecycle
+        + RefFocus
+        + RefFocusMut
+        + RefEditorMirror
+        + RefEditorMirrorMut
+        + RefBlockTree
+        + RefBlockTreeMut,
+> TransitionRef<R> for PressKey
+{
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
             check(state.has_editor_buffer(), Reason::NoEditorBuffer),
-            check(state.action.app_started, Reason::AppNotStarted),
+            check(state.app_started(), Reason::AppNotStarted),
             check(state.is_properly_setup(), Reason::NotProperlySetup),
             check(
-                state.current_focus(holon_api::Region::Main).is_some(),
+                state.current_focus(CapRegion::Main).is_some(),
                 Reason::NoFocusInMain,
             ),
-            check(state.ui.tab.active_editor.is_some(), Reason::NoActiveEditor),
+            check(
+                state.active_editor_block().is_some(),
+                Reason::NoActiveEditor,
+            ),
         ];
 
         checks
@@ -135,21 +156,18 @@ impl TransitionRef<ReferenceState> for PressKey {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
+    fn apply_to_ref(&self, state: &mut R) {
         use holon_api::Key;
-        use holon_pbt_core::capabilities::RefFocusMut;
 
         // Preconditions guarantee an active editor; replay/minimization can
         // apply transitions outside generation-time preconditions, and a
         // silent no-op there desyncs ref vs SUT invisibly.
-        let editor = state
-            .ui
-            .tab
-            .active_editor
-            .clone()
+        let block_id = state
+            .active_editor_block()
             .expect("PressKey::apply_to_ref: no active editor (preconditions violated)");
-        let block_id = editor.block_id.clone();
-        let cursor_byte = editor.cursor_byte;
+        let cursor_byte = state
+            .active_editor_cursor()
+            .expect("PressKey::apply_to_ref: active editor has no cursor");
 
         let has_modifier = self
             .chord
@@ -175,7 +193,7 @@ impl TransitionRef<ReferenceState> for PressKey {
         // shared cap fn — one implementation for SplitBlock AND PressKey, so
         // the two can't drift (the drift hosted the SplitBlock Heisenbug).
         if matches!(single, Some(Key::Enter)) && !has_modifier {
-            state.commit_active_editor_if_changed();
+            commit_active_editor_if_changed(state);
             crate::pbt::transitions::split_block::split_block_apply_to_ref(
                 &block_id,
                 cursor_byte,
@@ -189,25 +207,15 @@ impl TransitionRef<ReferenceState> for PressKey {
         // the ref no-ops too. When a target exists, join semantics are the
         // shared cap fn's.
         else if matches!(single, Some(Key::Backspace)) && !has_modifier && cursor_byte == 0 {
-            state.commit_active_editor_if_changed();
+            commit_active_editor_if_changed(state);
             let prev = state.previous_sibling(&block_id);
-            let parent = state
-                .domain
-                .block_state
-                .blocks
-                .get(&block_id)
-                .map(|b| b.parent_id.clone());
+            let parent = state.parent_of(&block_id);
             let joinable = match (&prev, &parent) {
                 (Some(_), _) => true,
                 (None, Some(p)) => {
                     // Only join into parent if parent is a non-layout text block.
-                    state
-                        .domain
-                        .block_state
-                        .blocks
-                        .get(p)
-                        .is_some_and(|b| b.content_type == holon_api::ContentType::Text)
-                        && !state.domain.layout_blocks.contains(p)
+                    state.is_text_block(p)
+                        && !state.is_layout_block(p)
                         && !p.is_no_parent()
                         && !p.is_sentinel()
                 }
@@ -223,34 +231,27 @@ impl TransitionRef<ReferenceState> for PressKey {
         }
         // Backspace at cursor > 0: production's `InputState` removes one
         // character before the cursor. No structural change. Mirror that
-        // on `active_editor.in_memory_content` so `inv-displayed-text`'s
+        // on the active editor's in-memory content so `inv-displayed-text`'s
         // expected (= in_memory_content while editor is active) tracks
         // what's actually on screen.
-        else if matches!(single, Some(Key::Backspace))
-            && !has_modifier
-            && cursor_byte > 0
-            && let Some(editor) = state.ui.tab.active_editor.as_mut()
-        {
-            editor.delete_backward(1);
+        else if matches!(single, Some(Key::Backspace)) && !has_modifier && cursor_byte > 0 {
+            state.delete_backward(1);
         }
         // Other chords (Tab, etc.): no structural change modeled in v1.
         // Pending edits remain in InputState.
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutBlockInteract> TransitionImpl<ReferenceState, S> for PressKey {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.press_key(&self.chord).await;
+crate::cap_transition! {
+    PressKey: SutBlockInteract,
+    where R: [ RefLifecycle ],
+    |me, _state, sut| {
+        sut.press_key(&me.chord).await;
     }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for PressKey {
-    fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
-        let watches = state.mcp.active_watches.len();
-        let blocks = state.domain.block_state.blocks.len();
-        let docs = state.files.documents.len();
+    sql_budget: |_me, state| {
+        let watches = state.active_watch_count();
+        let blocks = state.block_count();
+        let docs = state.document_count();
         let update = expected_sql_for_kind(MutationKind::Update, watches, blocks, docs);
         let create = expected_sql_for_kind(MutationKind::Create, watches, blocks, docs);
         ExpectedSql {

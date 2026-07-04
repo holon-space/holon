@@ -377,6 +377,14 @@ fn parse_constraint_op(s: &str) -> Option<ConstraintOp> {
 // McpForeignDataWrapper
 // ============================================================================
 
+/// One parent's fan-out result: its index in the parent batch, the key
+/// bindings used, and the child rows fetched for it.
+type FetchedChildRows = (
+    usize,
+    HashMap<String, String>,
+    Vec<serde_json::Map<String, serde_json::Value>>,
+);
+
 /// A [`ForeignDataWrapper`] that queries an MCP server via tool calls.
 ///
 /// Constructed from the YAML sidecar `vtable:` config and the live MCP peer.
@@ -1079,23 +1087,20 @@ impl ForeignCursor for McpCursor {
                         // then re-sorted by parent index so writeback ordering
                         // stays deterministic.
                         let this = &*self;
-                        let mut fetched: Vec<(
-                            usize,
-                            HashMap<String, String>,
-                            Vec<serde_json::Map<String, serde_json::Value>>,
-                        )> = tokio::task::block_in_place(|| {
-                            this.runtime.block_on(async {
-                                futures::stream::iter(parent_rows.into_iter().enumerate().map(
-                                    |(idx, row)| {
-                                        let mut p = params.clone();
-                                        for (tool_param, value) in &row {
-                                            p.insert(
-                                                tool_param.clone(),
-                                                serde_json::Value::String(value.clone()),
-                                            );
-                                        }
-                                        async move {
-                                            let mut records = this
+                        let mut fetched: Vec<FetchedChildRows> =
+                            tokio::task::block_in_place(|| {
+                                this.runtime.block_on(async {
+                                    futures::stream::iter(parent_rows.into_iter().enumerate().map(
+                                        |(idx, row)| {
+                                            let mut p = params.clone();
+                                            for (tool_param, value) in &row {
+                                                p.insert(
+                                                    tool_param.clone(),
+                                                    serde_json::Value::String(value.clone()),
+                                                );
+                                            }
+                                            async move {
+                                                let mut records = this
                                                 .call_tool_paginated_async(
                                                     search_tool,
                                                     extract_path.as_deref(),
@@ -1109,16 +1114,16 @@ impl ForeignCursor for McpCursor {
                                                          failed for bindings {row:?}: {e}"
                                                     ))
                                                 })?;
-                                            stamp_call_params(&mut records, &p);
-                                            Ok::<_, LimboError>((idx, row, records))
-                                        }
-                                    },
-                                ))
-                                .buffer_unordered(FAN_OUT_CONCURRENCY)
-                                .try_collect::<Vec<_>>()
-                                .await
-                            })
-                        })?;
+                                                stamp_call_params(&mut records, &p);
+                                                Ok::<_, LimboError>((idx, row, records))
+                                            }
+                                        },
+                                    ))
+                                    .buffer_unordered(FAN_OUT_CONCURRENCY)
+                                    .try_collect::<Vec<_>>()
+                                    .await
+                                })
+                            })?;
                         fetched.sort_by_key(|(idx, _, _)| *idx);
                         let mut all = Vec::new();
                         for (_, row, records) in fetched {
@@ -1154,46 +1159,43 @@ impl ForeignCursor for McpCursor {
                             return Ok(false);
                         }
                         let this = &*self;
-                        let mut fetched: Vec<(
-                            usize,
-                            HashMap<String, String>,
-                            Vec<serde_json::Map<String, serde_json::Value>>,
-                        )> = tokio::task::block_in_place(|| {
-                            this.runtime.block_on(async {
-                                futures::stream::iter(parent_rows.into_iter().enumerate().map(
-                                    |(idx, row)| {
-                                        let mut p = params.clone();
-                                        for (param_name, value) in &row {
-                                            p.insert(param_name.clone(), value.clone());
-                                        }
-                                        async move {
-                                            let uri =
-                                                crate::mcp_sync_strategy::expand_uri_template(
-                                                    template, &p,
-                                                )
-                                                .map_err(|e| {
-                                                    LimboError::ExtensionError(format!(
-                                                        "URI template param missing: {e}"
-                                                    ))
-                                                })?;
-                                            let records = this
-                                                .fetch_via_resource_async(&uri)
-                                                .await
-                                                .map_err(|e| {
-                                                    LimboError::ExtensionError(format!(
-                                                        "[McpCursor] fetch_via_resource failed \
+                        let mut fetched: Vec<FetchedChildRows> =
+                            tokio::task::block_in_place(|| {
+                                this.runtime.block_on(async {
+                                    futures::stream::iter(parent_rows.into_iter().enumerate().map(
+                                        |(idx, row)| {
+                                            let mut p = params.clone();
+                                            for (param_name, value) in &row {
+                                                p.insert(param_name.clone(), value.clone());
+                                            }
+                                            async move {
+                                                let uri =
+                                                    crate::mcp_sync_strategy::expand_uri_template(
+                                                        template, &p,
+                                                    )
+                                                    .map_err(|e| {
+                                                        LimboError::ExtensionError(format!(
+                                                            "URI template param missing: {e}"
+                                                        ))
+                                                    })?;
+                                                let records = this
+                                                    .fetch_via_resource_async(&uri)
+                                                    .await
+                                                    .map_err(|e| {
+                                                        LimboError::ExtensionError(format!(
+                                                            "[McpCursor] fetch_via_resource failed \
                                                          for bindings {row:?}: {e}"
-                                                    ))
-                                                })?;
-                                            Ok::<_, LimboError>((idx, row, records))
-                                        }
-                                    },
-                                ))
-                                .buffer_unordered(FAN_OUT_CONCURRENCY)
-                                .try_collect::<Vec<_>>()
-                                .await
-                            })
-                        })?;
+                                                        ))
+                                                    })?;
+                                                Ok::<_, LimboError>((idx, row, records))
+                                            }
+                                        },
+                                    ))
+                                    .buffer_unordered(FAN_OUT_CONCURRENCY)
+                                    .try_collect::<Vec<_>>()
+                                    .await
+                                })
+                            })?;
                         fetched.sort_by_key(|(idx, _, _)| *idx);
                         let mut all = Vec::new();
                         for (_, row, records) in fetched {

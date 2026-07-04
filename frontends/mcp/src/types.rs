@@ -35,6 +35,47 @@ pub struct InsertDataParams {
     pub rows: Vec<HashMap<String, serde_json::Value>>,
 }
 
+/// Parameters for `dense_query` — a token-compressed org projection of a
+/// query's block result, returned in one call with an opaque handle for a later
+/// `dense_patch`. Mirrors `execute_query`: the CALLER writes the filter as an
+/// ordinary GQL/PRQL/SQL query (exclude DONE, scope to a subtree, limit depth —
+/// all in the query language), and the tool renders the resulting blocks
+/// densely. There are no Rust-side filter parameters.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct DenseQueryParams {
+    /// The query. It MUST return block rows (`SELECT * FROM block ...` in
+    /// holon_sql, or a GQL/PRQL query over blocks) — every column is parsed
+    /// into a Block for rendering.
+    pub query: String,
+    /// Query language: "holon_prql", "holon_gql", or "holon_sql".
+    pub language: String,
+    #[serde(default)]
+    pub params: HashMap<String, serde_json::Value>,
+    /// Block ID for `from children` / `from descendants` context resolution.
+    pub context_id: Option<String>,
+    /// Parent block ID for `from siblings` context resolution.
+    pub context_parent_id: Option<String>,
+}
+
+/// Parameters for `dense_patch` — apply an edited dense projection back as a
+/// batch of block operations, matched by `{#alias}` handle.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct DensePatchParams {
+    /// The `projection_handle` returned by `dense_query`.
+    pub handle: String,
+    /// The edited dense org text. Rows keep their `{#alias}` token to match an
+    /// existing block; a row with NO token is created as a NEW block at its
+    /// tree position. Blocks omitted from the text are NOT deleted.
+    pub text: String,
+    /// Aliases to delete explicitly (deletion is never inferred from omission).
+    #[serde(default)]
+    pub delete: Vec<String>,
+    /// When true, only report the planned operations and any conflicts without
+    /// applying them.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ExecuteQueryParams {
     /// The query string to execute
@@ -56,6 +97,12 @@ pub struct ExecuteQueryParams {
     /// info (profile name, render expression, available operations).
     #[serde(default)]
     pub include_profile: Option<bool>,
+    /// Output encoding: `"toon"` (default) or `"json"`. TOON is a dense tabular
+    /// text (`name[N]{cols}: rows…`) that drops the repeated per-row key names
+    /// — biggest savings on wide, uniform result sets. Pass `"json"` if you
+    /// need plain JSON rows (e.g. rows dominated by nested JSON blobs).
+    #[serde(default)]
+    pub format: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -79,6 +126,10 @@ pub struct ExecuteSourceBlockParams {
     /// info.
     #[serde(default)]
     pub include_profile: Option<bool>,
+    /// Output encoding: `"toon"` (default, dense tabular) or `"json"` (mirrors
+    /// `execute_query`).
+    #[serde(default)]
+    pub format: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -189,6 +240,71 @@ pub struct ExecuteRawSqlParams {
     pub sql: String,
     #[serde(default)]
     pub params: HashMap<String, serde_json::Value>,
+    /// Output encoding: `"toon"` (default, dense tabular) or `"json"` (mirrors
+    /// `execute_query`).
+    #[serde(default)]
+    pub format: Option<String>,
+}
+
+/// Filter for the `query_history` tool (C2b op/effect history, ADR 0024 P8).
+/// Every field mirrors `holon_api::HistoryQuery`; `count` returns the match
+/// count instead of the rows. `deny_unknown_fields` makes an unknown/misspelled
+/// filter key a LOUD error at the boundary (parse-don't-validate) rather than a
+/// silently-ignored filter that would return the wrong rows.
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QueryHistoryParams {
+    /// Entity type the op ran on (e.g. `block`).
+    #[serde(default)]
+    pub entity_name: Option<String>,
+    /// The affected block id.
+    #[serde(default)]
+    pub block_id: Option<String>,
+    /// Provenance origin tag (`user` / `agent` / `rule` / `sync` / ...).
+    #[serde(default)]
+    pub origin: Option<String>,
+    /// Driving agent session id.
+    #[serde(default)]
+    pub session_id: Option<String>,
+    /// The field that changed.
+    #[serde(default)]
+    pub field: Option<String>,
+    /// The new field value (the "moved to X" predicate).
+    #[serde(default)]
+    pub new_value: Option<String>,
+    /// UTC calendar day (`YYYY-MM-DD`).
+    #[serde(default)]
+    pub day: Option<String>,
+    /// All events of one op group.
+    #[serde(default)]
+    pub op_group: Option<i64>,
+    /// Inclusive lower bound on `at_millis`.
+    #[serde(default)]
+    pub since_millis: Option<i64>,
+    /// Exclusive upper bound on `at_millis`.
+    #[serde(default)]
+    pub until_millis: Option<i64>,
+    /// Return the match count instead of the event rows.
+    #[serde(default)]
+    pub count: bool,
+}
+
+impl From<QueryHistoryParams> for holon_api::HistoryQueryArgs {
+    fn from(p: QueryHistoryParams) -> Self {
+        holon_api::HistoryQueryArgs {
+            entity_name: p.entity_name,
+            block_id: p.block_id,
+            origin: p.origin,
+            session_id: p.session_id,
+            field: p.field,
+            new_value: p.new_value,
+            day: p.day,
+            op_group: p.op_group,
+            since_millis: p.since_millis,
+            until_millis: p.until_millis,
+            count: p.count,
+        }
+    }
 }
 
 // --- Debug tool types ---
@@ -228,10 +344,36 @@ pub struct ReadOrgFileParams {
     pub doc_id: String,
 }
 
+/// Which store the blocks are read from.
+#[derive(Serialize, Deserialize, JsonSchema, Default, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum RenderSource {
+    /// The SQL write authority — the state write-back projects to disk.
+    #[default]
+    Sql,
+    /// The Loro CRDT tree.
+    Loro,
+}
+
+/// How much of the file the render covers.
+#[derive(Serialize, Deserialize, JsonSchema, Default, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum RenderScope {
+    /// The whole file: document header (`#+TITLE:`, `#+ID:`) plus body.
+    #[default]
+    Document,
+    /// The body alone, no header.
+    Blocks,
+}
+
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RenderOrgParams {
     /// Document ID — can be a UUID or a file path
     pub doc_id: String,
+    #[serde(default)]
+    pub source: RenderSource,
+    #[serde(default)]
+    pub scope: RenderScope,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -242,10 +384,63 @@ pub struct DescribeUiParams {
     /// JSON
     #[serde(default = "default_text_format")]
     pub format: String,
+    /// Resolve subtrees the render interpreter defers to the platform layer —
+    /// currently a `live_query`'s rows, which are executed once (a snapshot, no
+    /// watcher is left running). Default true. Disabling keeps the call purely
+    /// structural and cheap; every unresolved subtree is then reported as an
+    /// explicit `unevaluated` node, never as empty content.
+    #[serde(default = "default_true")]
+    pub expand_deferred: bool,
+    /// Annotate each entity-bound node with the rect the frontend actually
+    /// painted for it (x/y/width/height/has_visible_area). Defaults to true.
+    /// Nodes with no measurement carry an explicit absence marker — never a
+    /// zero rect.
+    #[serde(default = "default_true")]
+    pub include_geometry: bool,
 }
 
 fn default_text_format() -> String {
     "text".to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ResetVaultFile {
+    /// File name (e.g. `"structural-page.org"`). Its stem becomes a Page in the
+    /// left sidebar.
+    pub name: String,
+    /// Org file body.
+    pub content: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ResetVaultParams {
+    /// Seed `.org` files to materialize into a FRESH temp vault. The running
+    /// window is rebound onto the freshly-booted engine in place — no second
+    /// MCP server, no window relaunch. Client supplies the seed so the server
+    /// embeds no seed copy (single source of truth).
+    pub files: Vec<ResetVaultFile>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct RowDropLedgersParams {
+    /// Clear all three ledgers AFTER reading them, so the next read reflects
+    /// only what happened since. Defaults to false.
+    #[serde(default)]
+    pub reset: bool,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct AwaitQuiescenceParams {
+    /// Upper bound on the combined-fixed-point wait, in milliseconds. When the
+    /// budget is exhausted before every reachable signal is simultaneously
+    /// stable, the tool returns an error naming the still-moving signal(s) —
+    /// it never reports a non-converged wait as success. Defaults to 30000.
+    #[serde(default)]
+    pub budget_ms: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -366,6 +561,14 @@ pub struct TypeTextParams {
     /// Modifier keys held during typing, e.g. ["cmd", "shift"].
     #[serde(default)]
     pub modifiers: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct InsertTextParams {
+    /// Text to insert via the soft-keyboard `insertText:` path (bypasses the
+    /// GPUI keymap and commits straight into the focused editor). A soft
+    /// Return is `"\n"` and is translated to an `enter` action.
+    pub text: String,
 }
 
 /// Parameters for the `now_for_agent` agent-coordination tool.

@@ -106,14 +106,27 @@ pub struct WidgetStateModel {
     rows: IndexMap<String, holon_api::StorageEntity>,
 }
 
+/// Twin of prod's `RowIdentity` store key
+/// (crates/holon-frontend/src/reactive.rs).
+///
+/// Mirrors prod exactly: an entity-shaped row keys on its `id`; a VALUE-shaped
+/// row (no entity `id` — aggregate / rule-trigger result) keys on its
+/// deterministic content hash under the `value:` scheme. The old twin dropped
+/// id-less rows (`if let Some(id)`), diverging from prod which now represents
+/// them; matching the key here makes the ref/SUT comparison cover value rows.
+fn row_identity_key(row: &holon_api::StorageEntity) -> String {
+    holon_api::RowIdentity::of_row(row)
+        .to_store_key()
+        .as_str()
+        .to_string()
+}
+
 impl WidgetStateModel {
     /// Create a new WidgetStateModel from initial data rows.
     pub fn from_data(data: &[holon_api::StorageEntity]) -> Self {
         let mut rows = IndexMap::new();
         for row in data {
-            if let Some(id) = row.get("id").and_then(|v| v.as_string()) {
-                rows.insert(id.to_string(), row.clone());
-            }
+            rows.insert(row_identity_key(row), row.clone());
         }
         Self { rows }
     }
@@ -122,22 +135,26 @@ impl WidgetStateModel {
     pub fn apply_change(&mut self, change: &RowChange) {
         match &change.change {
             ChangeData::Created { data, .. } => {
-                if let Some(id) = data.get("id").and_then(|v| v.as_string()) {
-                    self.rows.insert(id.to_string(), data.clone());
-                }
+                self.rows.insert(row_identity_key(data), data.clone());
             }
             ChangeData::Updated { data, .. } => {
-                if let Some(id) = data.get("id").and_then(|v| v.as_string()) {
-                    self.rows.insert(id.to_string(), data.clone());
+                // Value rows never arrive as `Updated` (no id to key CDC by);
+                // an entity row updates the entry under its id.
+                if data.get("id").and_then(|v| v.as_string()).is_some() {
+                    self.rows.insert(row_identity_key(data), data.clone());
                 }
             }
             ChangeData::Deleted { id, .. } => {
-                self.rows.shift_remove(id);
+                // Keys are normalized store keys; normalize the CDC id string
+                // the same way prod's Deleted arm does (`entity_uri_from_id_str`).
+                self.rows
+                    .shift_remove(holon_api::entity_uri_from_id_str(id).as_str());
             }
             ChangeData::FieldsChanged {
                 entity_id, fields, ..
             } => {
-                if let Some(row) = self.rows.get_mut(entity_id) {
+                let key = holon_api::entity_uri_from_id_str(entity_id);
+                if let Some(row) = self.rows.get_mut(key.as_str()) {
                     for (field, _old, new) in fields {
                         row.insert(field.as_str().into(), new.clone());
                     }
@@ -184,18 +201,6 @@ impl WidgetStateModel {
         self.rows.len()
     }
 
-    // TODO: render spec was removed; column/view filtering is no longer available
-    // ALLOW(unused_param): locator argument kept so WidgetLocator dispatch stays
-    // shaped for the render-spec return
-    fn extract_column_text(&self, _column: usize) -> String {
-        self.rows_to_text(self.rows.values().collect())
-    }
-
-    // ALLOW(unused_param): locator argument kept so WidgetLocator dispatch stays
-    // shaped for the render-spec return
-    fn extract_view_text(&self, _view_id: &str) -> String {
-        self.rows_to_text(self.rows.values().collect())
-    }
     fn rows_to_text(&self, rows: Vec<&holon_api::StorageEntity>) -> String {
         rows.iter()
             .flat_map(|row| {
@@ -221,8 +226,6 @@ impl std::fmt::Debug for WidgetStateModel {
 
 #[cfg(test)]
 mod tests {
-    use holon_api::Value;
-
     use super::*;
 
     fn make_row(id: &str, content: &str) -> holon_api::StorageEntity {

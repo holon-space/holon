@@ -52,6 +52,7 @@ use holon_integration_tests::pbt::composed::wide_e2e::windowed_composed_sut;
 use holon_integration_tests::pbt::op_write_cap::IdResolver;
 use holon_integration_tests::pbt::ui_harness::try_start_embedded_mcp;
 use holon_integration_tests::pbt::ui_harness::wait_for_geometry_ready;
+use holon_integration_tests::pbt::window_slice::builders::WindowMountConvention;
 use holon_integration_tests::pbt::window_slice::builders::overlay_windowed_caps;
 use holon_mcp::server::DebugServices;
 use holon_tui::app_main::AppSignal;
@@ -133,10 +134,12 @@ pub fn run(label: &'static str) {
     let render_notify: Arc<tokio::sync::Notify> = Arc::new(tokio::sync::Notify::new());
     let (input_tx, input_rx) = tokio::sync::mpsc::channel::<InputEvent>(64);
 
+    let type_registry = runtime.block_on(frontend.type_registry());
     try_start_embedded_mcp(
         runtime.handle(),
         &backend_engine,
         &reactive,
+        type_registry,
         debug.clone(),
         "PBT_MCP_PORT",
         label,
@@ -216,7 +219,15 @@ pub fn run(label: &'static str) {
     // Settle handle (engine + frontend) captured before `bundle.caps` is moved, so
     // the per-apply settle converges CDC + Loro + org like the headless path.
     let handle = WideHandle::from_bundle(&bundle);
-    let overlaid = overlay_windowed_caps(bundle.caps, frontend, geometry_box, reactive, tui_driver);
+    let overlaid = overlay_windowed_caps(
+        bundle.caps,
+        frontend,
+        geometry_box,
+        reactive,
+        tui_driver,
+        resolver.clone(),
+        WindowMountConvention::InlineRow,
+    );
 
     // Settle hook: the renderer self-drives on the backend runtime, so settling is
     // pure polling — wait until the element count is stable and no "loading"

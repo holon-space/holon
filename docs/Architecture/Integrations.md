@@ -353,6 +353,69 @@ After the registry is built, `wiring.rs` additionally:
 Todoist, Claude History, and any future MCP server — just add a YAML file.  See
 [Adding a New External System](#adding-a-new-external-system) above.
 
+### Linking to Integration Entities
+
+Blocks link to integration entities through the ordinary `[[…]]` link surface.
+The link target is the entity's URI — the integration's entity name (with its
+prefix) as the scheme, the foreign id as the path:
+
+```org
+See [[cc-session:0f3a1c88-…][refactor the matview lease]] for the trail.
+```
+
+**Classification is three-state.** A link target whose text has URI scheme
+shape (RFC 3986: a letter followed by letters/digits/`+`/`-`/`.`, then a
+colon with no space after it) is always an entity link, never a page name:
+
+1. Scheme registered (a declared integration entity, or a built-in such as
+   `block:`/`tag:`) → a resolved entity link.
+2. Scheme not registered → an *unknown-scheme* link, rendered muted with the
+   raw URI. It is never turned into a page.
+3. Anything else — no colon, or a colon followed by a space (`[[Ketosis: How
+   to lose weight]]`) — is a page link.
+
+The scheme shape is reserved: page names may not look like URI schemes
+(page creation rejects them and suggests `/` for hierarchy, e.g.
+`Areas/Work`), and registering an integration fails loudly if an existing
+page name collides with its scheme. Two reasons: this mirrors org-mode's own
+typed-link semantics, so files stay portable to Emacs; and it makes
+classification stable under configuration change — enabling or disabling an
+integration only moves its links between *resolved* and *unknown-scheme*,
+never across the page/entity boundary, and never rewrites bytes on disk.
+
+**Resolution is total; presence is a display concern.** An entity link
+resolves at parse time to its URI — it is never dangling and never waits for
+a fetch. Whether the entity's data is *present* is disclosed at render:
+
+| State | Condition | Rendering |
+|---|---|---|
+| Present | cache row exists for the URI | link label, or the profile's title column |
+| Pending | scheme registered, row not yet fetched | the URI, muted, marked "not yet fetched" |
+
+A pending link never shows a fabricated title. Rendering a link does not
+trigger a fetch — priming stays with the entity page, so scrolling past a
+link cannot fan out MCP calls.
+
+**Backlinks and the entity page need no special machinery.** The backlinks
+view keys on the resolved target id, whatever its scheme, so focusing an
+entity lists every block that links to it. The entity's page is its single
+cache row rendered through the entity's profile, followed by that backlinks
+section — a parameterized query, not a page template.
+
+**Entities stay out of block storage.** A foreign entity never gets a row in
+the block tables: block rows imply an org-file home, CRDT replication, and
+user-editable lifecycle — all owned by the user, while the entity is owned by
+its provider. The dividing rule is *state lives in the store whose owner
+authors it* (see Principles, "State Ownership"): the entity's own data lives
+in its integration cache table; everything the user says *about* the entity —
+notes, tags, extra properties — lives in ordinary blocks that link to it, and
+the backlinks section aggregates them on the entity's page. A user who wants
+an entity in their outline creates a block referencing it (an `entity::
+<uri>` property plus an embedded view); every block operation then applies to
+that block — moving, tagging, or deleting the *reference*, which is the only
+coherent meaning, since the entity itself is not the user's to move or
+delete.
+
 ## Frontend Architecture
 
 Holon's primary frontend is **GPUI** — a native Rust desktop application. The Dioxus frontend (see below) is a **prototype**: the core works, but it is not actively tested. See [Engine.md §Supported Frontends](Engine.md) for the full status table.

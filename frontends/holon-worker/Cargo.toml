@@ -31,13 +31,15 @@ napi-derive = "3.5.2"
 # and ~/.claude/plans/nifty-bouncing-ladybug.md H4 for the implications.
 tokio = { version = "1", default-features = false, features = ["rt", "time", "macros", "sync"] }
 
-# Turso database — same fork/branch as holon's root workspace. Only needed
-# when the `browser` feature is on, but we pull it in unconditionally so
-# `cargo check` (native) covers the shim as well.
+# Turso database — same fork AND same rev as the root workspace's `[patch]`
+# pin (this package is its own workspace, so it cannot inherit it). The rev is
+# asserted equal to the root's by the `web-worker-smoke` CI job; bump both
+# together. Only needed when the `browser` feature is on, but we pull it in
+# unconditionally so `cargo check` (native) covers the shim as well.
 # NOTE: `encryption` is intentionally omitted — it pulls rustls→ring, whose C
 # crypto can't compile for wasm32-wasi without a wasi-sdk clang sysroot. The
 # worker runs an in-memory DB (`:memory:`), so at-rest encryption is moot.
-turso_core = { git = "https://github.com/nightscape/turso.git", branch = "holon", default-features = false, features = ["fs", "json", "uuid", "time", "series"] }
+turso_core = { git = "https://github.com/nightscape/turso.git", rev = "9d7394fb379d680473aa4acec8519078c1d46d39", default-features = false, features = ["fs", "json", "uuid", "time", "series"] }
 anyhow = "1"
 # fluxdi::Module trait, needed to register EventInfraModule (the block
 # OperationProvider) during engine_init. Same git source as the root
@@ -45,6 +47,11 @@ anyhow = "1"
 fluxdi = { git = "https://github.com/holon-space/fluxdi", branch = "dev", features = ["thread-safe", "async-factory", "lifecycle", "dynamic", "eager-resolution"] }
 parking_lot = "0.12"
 tracing = "0.1"
+# Worker-side log sink: without a subscriber every tracing event —
+# including dispatch_intent_chain ERRORs — was silently dropped, making
+# failed ops look like successes from the page. fmt→stderr surfaces them
+# in the worker console (visible via /web/index.html or DevTools).
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "ansi"] }
 serde_json = "1"
 futures = { version = "0.3", default-features = false, features = ["alloc"] }
 
@@ -69,22 +76,12 @@ holon-frontend = { path = "../../crates/holon-frontend", default-features = fals
 [patch.crates-io]
 symlink = { path = "patches/symlink" }
 
-# Point the turso git dependency at the local checkout (git source, branch
-# holon-wasm-load-extension) so the wasm fix in sdk-kit/src/rsapi.rs (gate
-# `load_extension` off wasm) takes effect. Using a git (not path) source keeps
-# turso's own workspace-hack git-sourced so it doesn't collide with holon's
-# path-sourced workspace-hack. All turso crates are redirected together so the
-# graph stays coherent. Drop this block once the fix lands upstream.
-[patch."https://github.com/nightscape/turso.git"]
-turso = { git = "file:///Users/martin/Workspaces/bigdata/turso", branch = "holon-wasm-fix2" }
-turso_core = { git = "file:///Users/martin/Workspaces/bigdata/turso", branch = "holon-wasm-fix2" }
-turso_ext = { git = "file:///Users/martin/Workspaces/bigdata/turso", branch = "holon-wasm-fix2" }
-turso_macros = { git = "file:///Users/martin/Workspaces/bigdata/turso", branch = "holon-wasm-fix2" }
-turso_parser = { git = "file:///Users/martin/Workspaces/bigdata/turso", branch = "holon-wasm-fix2" }
-turso_sdk_kit = { git = "file:///Users/martin/Workspaces/bigdata/turso", branch = "holon-wasm-fix2" }
-turso_sdk_kit_macros = { git = "file:///Users/martin/Workspaces/bigdata/turso", branch = "holon-wasm-fix2" }
-turso_sync_engine = { git = "file:///Users/martin/Workspaces/bigdata/turso", branch = "holon-wasm-fix2" }
-turso_sync_sdk_kit = { git = "file:///Users/martin/Workspaces/bigdata/turso", branch = "holon-wasm-fix2" }
+# Mirror of the root workspace's loro fork patch. `[patch]` is only read from the
+# workspace root of the build in progress, and this worker is its own workspace,
+# so without this line it resolves registry `loro` — whose loro-internal wants
+# loro_fractional_index ^1.13.0 and collides with the deliberate `= 1.6.0` pin
+# that crates/holon carries. Keep the rev equal to the root's.
+loro = { git = "https://github.com/nightscape/loro.git", rev = "855da28b" }
 
 [build-dependencies]
 napi-build = "2.3.1"

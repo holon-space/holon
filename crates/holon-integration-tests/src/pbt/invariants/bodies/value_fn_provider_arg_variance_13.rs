@@ -1,5 +1,14 @@
 //! `inv-value-fn-provider-arg-variance-13`.
 //!
+//! @pbt oracle internal-consistency — structural well-formedness of the SUT
+//!   ProviderStabilityReport (bottom_dock presence, provider rows, cache
+//!   identity); vfn13 is metamorphic (pass-1 identities reappear in pass-2)
+//! @pbt covers provider-cache-wiring — the ReactiveEngine / interpret_pure /
+//!   ProviderCache coupling drops rows, churns Arc identity, or flickers
+//! @pbt slips-if-removed a provider-cache regression re-allocates identities
+//!   each interpret pass (or yields no focus rows under a focus_chain expr);
+//!   the UI re-mounts / flickers streamed widgets with no other signal
+//!
 //! The value-fn provider checks, asserting on the SUT-computed
 //! [`ProviderStabilityReport`]
 //! ([`SutViewSelection::provider_stability_report`]) so the `ReactiveEngine`/

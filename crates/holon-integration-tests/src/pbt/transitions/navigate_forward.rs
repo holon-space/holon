@@ -1,5 +1,11 @@
 //! Transition: navigate forward in the per-region navigation history.
 //!
+//! @pbt rung dispatch
+//!   UNFAITHFUL SHORTCUT (audit TR-NAV): dispatches `navigation.go_forward`
+//!   directly, bypassing the leader-chord path.
+//! @pbt covers nav-forward — per-region navigation history forward (op-level
+//! only)
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:612-619`
 //! (generator), `state_machine.rs:3171-3173` (precondition),
 //! `state_machine.rs:2251-2259` (ref-state apply),
@@ -8,14 +14,16 @@
 
 use holon_api::Region;
 use holon_pbt_core::TransitionFactory;
-use holon_pbt_core::TransitionImpl;
 use holon_pbt_core::TransitionRef;
+use holon_pbt_core::capabilities::RefLifecycle;
+use holon_pbt_core::capabilities::RefNavHistoryMut;
 use holon_pbt_core::capabilities::SutNavHistoryDrive;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::check;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::reference_state::ReferenceState;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
 #[cfg(feature = "otel-testing")]
@@ -26,8 +34,6 @@ use crate::pbt::transition_budgets::NAV_DML_READS;
 use crate::pbt::transition_budgets::REACTIVE_BASE;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::docs_tolerance;
-use crate::pbt::validation::Reason;
-use crate::pbt::validation::check;
 
 /// Pop one entry forward in the active navigation history for `region`.
 /// Mirrors the forward-button in production's per-region history stack.
@@ -36,15 +42,13 @@ pub struct NavigateForward {
     pub region: Region,
 }
 
-impl TransitionFactory<ReferenceState> for NavigateForward {
+impl<R: RefLifecycle + RefNavHistoryMut> TransitionFactory<R> for NavigateForward {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        vec![::holon_pbt_core::composition::CapId::of::<
-            dyn ::holon_pbt_core::capabilities::SutNavHistoryDrive,
-        >()]
+        Self::declared_caps()
     }
 
     type Reason = Reason;
-    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // Restricted to Main — only TUI binding (leader+'f') targets
         // `region: "main"`. See `assets/default/keybindings.yaml`.
         let instance = NavigateForward {
@@ -57,12 +61,12 @@ impl TransitionFactory<ReferenceState> for NavigateForward {
     }
 }
 
-impl TransitionRef<ReferenceState> for NavigateForward {
+impl<R: RefLifecycle + RefNavHistoryMut> TransitionRef<R> for NavigateForward {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(state.action.app_started, Reason::AppNotStarted),
+            check(state.app_started(), Reason::AppNotStarted),
             check(
                 state.can_go_forward(self.region),
                 Reason::NoNavigationHistory,
@@ -74,30 +78,18 @@ impl TransitionRef<ReferenceState> for NavigateForward {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
-        if let Some(history) = state.ui.tab.navigation_history.get_mut(&self.region)
-            && history.cursor < history.entries.len() - 1
-        {
-            history.cursor += 1;
-        }
-        state.ui.tab.focused_entity_id.remove(&self.region);
-        state.ui.tab.focused_cursor.remove(&self.region);
-
-        // Blur on nav: see `navigate_focus.rs` for verification.
-        state.blur_active_editor();
+    fn apply_to_ref(&self, state: &mut R) {
+        state.nav_step_forward(self.region);
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutNavHistoryDrive> TransitionImpl<ReferenceState, S> for NavigateForward {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.navigate_forward(self.region).await;
+crate::cap_transition! {
+    NavigateForward: SutNavHistoryDrive,
+    where R: [ RefLifecycle + RefNavHistoryMut ],
+    |me, _state, sut| {
+        sut.navigate_forward(me.region).await;
     }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for NavigateForward {
-    fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
+    sql_budget: |_me, state| {
         ExpectedSql {
             reads: REACTIVE_BASE + JOURNAL_READS + NAV_DML_READS - 2,
             writes: 0,

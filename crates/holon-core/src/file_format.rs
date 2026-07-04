@@ -10,6 +10,7 @@
 //! lives here (in `holon-core`) so future format crates can implement it
 //! without taking a dependency on `holon-orgmode`.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::Result;
@@ -31,6 +32,22 @@ pub struct FileFormatParseResult {
     /// the next write — the controller uses this hint to decide whether
     /// re-rendering after parse is required to persist freshly assigned IDs.
     pub blocks_needing_ids: Vec<String>,
+}
+
+/// The ungrounded-drop verdict a write-back guard produces — DATA, distinct
+/// from a real parse/IO failure (which is `Err`). `dropped` is one `id:
+/// excerpt` per source block grounded by neither the surviving union nor a
+/// sanctioned removal; `source_block_count` is the total non-empty block count
+/// of `source`, reported alongside so a veto can say how much of the file the
+/// drop covers.
+#[derive(Debug, Clone, Default)]
+pub struct WritebackDropVerdict {
+    /// One `id: excerpt` per ungrounded (dropped) source block; empty =
+    /// lossless.
+    pub dropped: Vec<String>,
+    /// Non-empty block count parsed from `source` (the file about to be
+    /// overwritten) — context for how much of the file a drop covers.
+    pub source_block_count: usize,
 }
 
 /// Pluggable parse + render adapter for a single vault file format.
@@ -110,4 +127,53 @@ pub trait FileFormatAdapter: Send + Sync {
     /// and returns whether it changed; the controller persists via
     /// `update_metadata` only when `true`.
     fn sync_document_metadata(&self, parsed: &Block, persisted: &mut Block) -> bool;
+
+    /// Refuse a write-back that would SILENTLY drop blocks present on disk
+    /// (BugFunnel row 28, P0 data-loss class; ADR 0025 op-grounding).
+    ///
+    /// `source` is the on-disk file about to be overwritten, `rendered` is the
+    /// projection about to be written over it. A block present in `source` but
+    /// absent from `rendered` is GROUNDED — and therefore not loss — when it is
+    /// present in any `sibling_renders` entry (the sibling file a child page
+    /// de-inlined into, folded into the surviving union) OR its id is in
+    /// `sanctioned_removals` (the triggering delta's `Remove` set; a genuine
+    /// user deletion). A block grounded by none is loss: returns `Err`
+    /// (loud, naming the file + dropped blocks) and the controller
+    /// quarantines the file so no write-back path rewrites the truncated
+    /// state.
+    ///
+    /// The ingest boundary and the recovery path pass empty `sibling_renders` /
+    /// `sanctioned_removals` as appropriate (they hold no op). A LEGAL
+    /// canonical reformat and a 3-way text merge both return `Ok(())` — the
+    /// anchor is block preservation, not byte equality. `root` is the vault
+    /// root used for stable file-id derivation while parsing.
+    fn check_writeback_lossless(
+        &self,
+        path: &Path,
+        source: &str,
+        rendered: &str,
+        sibling_renders: &[(&Path, &str)],
+        sanctioned_removals: &HashSet<String>,
+        root: &Path,
+    ) -> Result<()>;
+
+    /// Same grounding as [`check_writeback_lossless`], but returns the
+    /// ungrounded drops as DATA (a [`WritebackDropVerdict`]) instead of an
+    /// error. Real parse/IO defects are still `Err` (never folded into the
+    /// verdict).
+    ///
+    /// The block-driven write-back paths need the drops as data because they
+    /// widen the grounding first (the sibling-file union is resolved per absent
+    /// block, and an unresolvable own-file path is its own hard veto) before
+    /// deciding. Their verdict is the same as the ingest boundary's: any
+    /// remaining ungrounded drop refuses the write and quarantines the file.
+    fn writeback_drops(
+        &self,
+        path: &Path,
+        source: &str,
+        rendered: &str,
+        sibling_renders: &[(&Path, &str)],
+        sanctioned_removals: &HashSet<String>,
+        root: &Path,
+    ) -> Result<WritebackDropVerdict>;
 }

@@ -150,6 +150,14 @@ pub fn cmd_fingerprint(cmd: &DbCommand) -> (&'static str, Option<&str>) {
         DbCommand::TransitionToReady { .. } => ("TransitionToReady", None),
         DbCommand::GetPhase { .. } => ("GetPhase", None),
         DbCommand::RegisterForeignTable { .. } => ("RegisterForeignTable", None),
+        DbCommand::AcquireViewLease { select_sql, .. } => {
+            ("AcquireViewLease", Some(select_sql.as_str()))
+        }
+        DbCommand::ReleaseViewLease { .. } => ("ReleaseViewLease", None),
+        DbCommand::EnsurePinnedView { select_sql, .. } => {
+            ("EnsurePinnedView", Some(select_sql.as_str()))
+        }
+        DbCommand::ResetWatchViews { .. } => ("ResetWatchViews", None),
         DbCommand::Shutdown { .. } => ("Shutdown", None),
     }
 }

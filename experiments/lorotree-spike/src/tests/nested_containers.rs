@@ -174,19 +174,15 @@ fn content_survives_move() {
 }
 
 #[test]
-fn get_or_create_container_for_reuse() {
+fn ensure_mergeable_text_for_reuse() {
     let (_doc, tree) = setup();
     let node = tree.create(None).unwrap();
     let meta = tree.get_meta(node).unwrap();
 
-    let text1: LoroText = meta
-        .get_or_create_container("content_raw", LoroText::new())
-        .unwrap();
+    let text1: LoroText = meta.ensure_mergeable_text("content_raw").unwrap();
     text1.insert(0, "Hello").unwrap();
 
-    let text2: LoroText = meta
-        .get_or_create_container("content_raw", LoroText::new())
-        .unwrap();
+    let text2: LoroText = meta.ensure_mergeable_text("content_raw").unwrap();
     assert_eq!(text2.to_string(), "Hello");
 
     text2.insert(5, " World").unwrap();

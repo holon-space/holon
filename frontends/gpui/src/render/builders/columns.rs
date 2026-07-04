@@ -70,6 +70,25 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
             .size_full()
             .gap(px(gap));
         for item in &items {
+            let entity = item.entity();
+            let scroll_id = entity
+                .get("id")
+                .and_then(|v| v.as_string())
+                .unwrap_or("panel");
+            let id = hashed_id(scroll_id);
+            // Main-panel flow-panel split: a Flex flow column carrying an
+            // accordion child OR a scrollable collection (the outline) becomes a
+            // VIRTUALIZED main region (gpui::list) + pinned footer. Every other
+            // item takes the byte-identical original path below (sidebar
+            // firewall — sidebars are Fixed/shrink-drawer, never Flex flow).
+            if matches!(item.layout_hint, LayoutHint::Flex { .. })
+                && super::column::is_main_panel_flow_column(item)
+            {
+                container = container.child(panel_wrap(move |inner| {
+                    super::column::render_accordion_split(inner, item, id, None, ctx)
+                }));
+                continue;
+            }
             let rendered = super::render(item, ctx);
             match item.layout_hint {
                 LayoutHint::Fixed { px: fixed_px } => {
@@ -82,8 +101,17 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
                     );
                 }
                 LayoutHint::Flex { .. } => {
-                    container = container
-                        .child(panel_wrap(|inner| inner.child(rendered).into_any_element()));
+                    // Same content-height scroll viewport as the drawer flow
+                    // panel below (see the `overflow_y_scroll` note there):
+                    // the flow child may render an eager content-height
+                    // collection that must scroll within a definite viewport.
+                    container = container.child(panel_wrap(move |inner| {
+                        inner
+                            .id(id)
+                            .overflow_y_scroll()
+                            .child(rendered)
+                            .into_any_element()
+                    }));
                 }
             }
         }
@@ -109,7 +137,9 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
             overlay_elements.push((is_right, super::render(item, ctx)));
         } else if is_shrink_drawer(item) {
             let block_id = item.prop_str("block_id").unwrap_or_else(|| "".to_string());
-            let width = item.prop_f64("width").unwrap_or(300.0) as f32;
+            let prop_width = item.prop_f64("width").unwrap_or(300.0) as f32;
+            let width =
+                super::drawer::effective_drawer_width(&*ctx.services, &block_id, prop_width);
             let child = item.children.first();
 
             let is_first_shrink = Some(i) == first_shrink;
@@ -147,8 +177,18 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
                 // (typically left sidebar) the toggle sits on the
                 // right of the panel; for the `last_shrink` (right
                 // sidebar) it sits on the left.
-                let tracked_toggle =
-                    super::drawer::drawer_toggle_widget(&block_id, "col", DrawerMode::Shrink, ctx);
+                let resize_anchor = if is_first_shrink {
+                    super::drawer::ResizeAnchor::Left
+                } else {
+                    super::drawer::ResizeAnchor::Right
+                };
+                let tracked_toggle = super::drawer::drawer_toggle_widget(
+                    &block_id,
+                    "col",
+                    DrawerMode::Shrink,
+                    resize_anchor,
+                    ctx,
+                );
                 let toggle_w = super::drawer::DRAWER_TOGGLE_WIDTH;
 
                 // Container layout differs by open/closed: when open,
@@ -204,10 +244,26 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
                 .get("id")
                 .and_then(|v| v.as_string())
                 .unwrap_or("panel");
-            let rendered = super::render(item, ctx);
             let id = hashed_id(scroll_id);
             let pad_x = ctx.style().content_padding_x;
             let pad_y = ctx.style().content_padding_y;
+            // Main-panel flow-panel split, drawer branch: same as the plain
+            // flow branch (accordion OR collection outline) but padded.
+            if matches!(item.layout_hint, LayoutHint::Flex { .. })
+                && super::column::is_main_panel_flow_column(item)
+            {
+                container = container.child(panel_wrap(move |inner| {
+                    super::column::render_accordion_split(
+                        inner,
+                        item,
+                        id,
+                        Some((pad_x, pad_y)),
+                        ctx,
+                    )
+                }));
+                continue;
+            }
+            let rendered = super::render(item, ctx);
             match item.layout_hint {
                 LayoutHint::Fixed { px: fixed_px } => {
                     container = container.child(
@@ -222,6 +278,21 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
                     container = container.child(panel_wrap(move |inner| {
                         inner
                             .id(id)
+                            // The flow panel (main panel) content is now a
+                            // CONTENT-height eager column (`column.rs`
+                            // `eager_collection_div` / `view_mode_switcher::
+                            // render_content_height`), not a self-scrolling
+                            // `gpui::list`. Without an `overflow_y_scroll`
+                            // viewport here the overflowing outline is simply
+                            // clipped by the root `overflow_hidden` and wheel /
+                            // trackpad events no-op — the main panel stopped
+                            // scrolling (BugFunnel 2026-07-22). The shrink-drawer
+                            // sidebar branch above already scrolls for the same
+                            // reason; this is the matching viewport for the main
+                            // panel. Harmless in the virtualized case: a
+                            // `size_full` `gpui::list` never overflows this
+                            // wrapper, so the scroll is a no-op there.
+                            .overflow_y_scroll()
                             .flex_col()
                             .px(px(pad_x))
                             .py(px(pad_y))

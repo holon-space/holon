@@ -1,5 +1,13 @@
 //! Transition: pin a block to the right sidebar (LogSeq-style shift+click).
 //!
+//! @pbt rung gesture
+//!   The SUT body drives a real shift+click on the block's bullet: the
+//!   modifier-keyed intent lookup resolves the bullet's `shift_action`
+//!   wiring and dispatches it. Nothing about `focus_pin` is hardcoded
+//!   test-side — op name, destination region and block id all come from
+//!   `block_profile.yaml`.
+//! @pbt covers pin-sidebar — shift+click a bullet to pin it to the sidebar
+//!
 //! Mirrors the `navigation.focus_pin(region, block_id)` op invoked by the
 //! GPUI bullet's shift-click action (see
 //! `frontends/gpui/src/views/render_entity_view.rs`). Production behavior:
@@ -13,19 +21,22 @@
 //! are `focusable_rendered_block_ids(Region::Main)` (visible blocks in the
 //! main panel — the user can only shift-click on a rendered bullet).
 
-use holon_api::ContentType;
 use holon_api::EntityUri;
 use holon_api::Region;
 use holon_pbt_core::TransitionFactory;
-use holon_pbt_core::TransitionImpl;
 use holon_pbt_core::TransitionRef;
+use holon_pbt_core::capabilities::RefBlockTree;
+use holon_pbt_core::capabilities::RefLifecycle;
+use holon_pbt_core::capabilities::RefPinsMut;
 use holon_pbt_core::capabilities::SutNavHistoryDrive;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::check;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::reference_state::OpenPinEntry;
-use crate::pbt::reference_state::ReferenceState;
+#[cfg(feature = "otel-testing")]
+use crate::pbt::transition_budgets::CLICK_JITTER_TOLERANCE;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
 #[cfg(feature = "otel-testing")]
@@ -33,11 +44,9 @@ use crate::pbt::transition_budgets::JOURNAL_READS;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::NAV_DML_READS;
 #[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::REACTIVE_BASE;
+use crate::pbt::transition_budgets::PIN_BLOCK_CLICK_RESOLVE_READS;
 #[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::docs_tolerance;
-use crate::pbt::validation::Reason;
-use crate::pbt::validation::check;
+use crate::pbt::transition_budgets::REACTIVE_BASE;
 
 /// Pin a block to the right sidebar via shift+click semantics.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -46,11 +55,11 @@ pub struct PinBlock {
     pub block_id: EntityUri,
 }
 
-impl TransitionFactory<ReferenceState> for PinBlock {
+impl<R: RefLifecycle + RefBlockTree + RefPinsMut> TransitionFactory<R> for PinBlock {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        vec![::holon_pbt_core::composition::CapId::of::<
-            dyn ::holon_pbt_core::capabilities::SutNavHistoryDrive,
-        >()]
+        // Single-sourced from the `cap_transition!` below — cannot drift with the
+        // `S: SutNavHistoryDrive` dispatch bound (both come from the one cap token).
+        Self::declared_caps()
     }
 
     type Reason = Reason;
@@ -61,7 +70,7 @@ impl TransitionFactory<ReferenceState> for PinBlock {
         // Gate it out of {Loro} slices.
         ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Turso)
     }
-    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // Candidate set: Main's editable descendants. Per-precondition
         // filter narrows to pinnable subset.
         let candidates: Vec<EntityUri> = state
@@ -85,34 +94,42 @@ impl TransitionFactory<ReferenceState> for PinBlock {
                 .boxed();
             // Weight 2 — pin/unpin should fire often enough to expand the
             // open-pins set, but not drown out the more common navigation +
-            // edit transitions (NavigateFocus is weight 3).
-            (2, strat)
+            // edit transitions (NavigateFocus is weight 3). Biased up under
+            // `HOLON_PBT_UNDO_REDO_DENSITY=high`: an open pin is the only
+            // reference site in the keystone alphabet that SURVIVES an undo
+            // (pins push no undo snapshot), so it is the only way a sweep can
+            // observe whether a redo heals references — see
+            // `crate::pbt::undo_redo_density`.
+            (crate::pbt::undo_redo_density::weight(2), strat)
         })
     }
 }
 
-impl TransitionRef<ReferenceState> for PinBlock {
+impl<R: RefLifecycle + RefBlockTree + RefPinsMut> TransitionRef<R> for PinBlock {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
-        let block = state.domain.block_state.blocks.get(&self.block_id);
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
+        let block_exists = state.block_content(&self.block_id).is_some();
         let mut checks: Vec<Validated<(), Reason>> = vec![
-            check(state.action.app_started, Reason::AppNotStarted),
-            check(block.is_some(), Reason::FocusedBlockMissing),
+            check(state.app_started(), Reason::AppNotStarted),
+            check(block_exists, Reason::FocusedBlockMissing),
         ];
-        if let Some(b) = block {
+        if block_exists {
             checks.push(check(
-                b.content_type == ContentType::Text,
+                state.is_text_block(&self.block_id),
                 Reason::FocusedNotText,
             ));
-            checks.push(check(!b.is_page(), Reason::PreconditionFailed));
+            checks.push(check(
+                !state.is_page_block(&self.block_id),
+                Reason::PreconditionFailed,
+            ));
         }
         checks.push(check(
-            !state.domain.layout_blocks.contains(&self.block_id),
+            !state.is_layout_block(&self.block_id),
             Reason::FocusedInLayoutBlocks,
         ));
         checks.push(check(
-            state.domain.layout_blocks.is_focusable(&self.block_id),
+            state.is_focusable(&self.block_id),
             Reason::FocusedNotFocusable,
         ));
 
@@ -122,56 +139,36 @@ impl TransitionRef<ReferenceState> for PinBlock {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
-        // Move-to-top dedup, mirroring `provider.rs::focus_pin`:
-        // SELECT existing open `(region, block_id)`; UPDATE timestamp if
-        // found, else INSERT. Bumping `next_pin_ts` (not `next_history_id`)
-        // matches the no-INSERT path of `update_pin_timestamp.sql`.
-        let added_ts_logical = state.ui.user.next_pin_ts;
-        state.ui.user.next_pin_ts += 1;
-
-        let pins = state.ui.user.open_pins.entry(self.region).or_default();
-        if let Some(existing) = pins
-            .iter_mut()
-            .find(|p| p.block_id.as_ref() == Some(&self.block_id))
-        {
-            existing.added_ts_logical = added_ts_logical;
-        } else {
-            let history_id = state.ui.tab.next_history_id;
-            state.ui.tab.next_history_id += 1;
-            state
-                .ui
-                .user
-                .open_pins
-                .entry(self.region)
-                .or_default()
-                .push(OpenPinEntry {
-                    history_id,
-                    block_id: Some(self.block_id.clone()),
-                    added_ts_logical,
-                });
-        }
+    fn apply_to_ref(&self, state: &mut R) {
+        // Move-to-top dedup + counter bookkeeping is encapsulated in the ref cap
+        // (mirrors `provider.rs::focus_pin`); the transition just declares intent.
+        state.upsert_open_pin(self.region, &self.block_id);
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutNavHistoryDrive> TransitionImpl<ReferenceState, S> for PinBlock {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.pin_block(self.region, &self.block_id).await;
+crate::cap_transition! {
+    PinBlock: SutNavHistoryDrive,
+    where R: [ RefLifecycle + RefBlockTree + RefPinsMut ],
+    |me, _state, sut| {
+        sut.pin_block(me.region, &me.block_id).await;
     }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for PinBlock {
-    fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
-        // focus_pin = SELECT (existence check) + INSERT or UPDATE.
-        // Two round-trips total — one read and one write. The reactive base
-        // captures the watcher activity; NAV_DML_READS covers the SELECT.
+    sql_budget: |_me, _state| {
+        // focus_pin = SELECT (existence check) + INSERT or UPDATE, on top of the
+        // reactive base. Shift+click enters through the rendered bullet, so the
+        // click-resolve snapshot is on the path too — hence the PINNED
+        // `PIN_BLOCK_CLICK_RESOLVE_READS` ceiling (17 reads), enforced
+        // regardless of `HOLON_PERF_BUDGET` (see `sql_reads_pinned`).
+        //
+        // NO per-watch term, unlike the document-mutating siblings: a pin
+        // mutates no block, so no CDC fires and no user watch re-evaluates.
+        // Measured 17 reads at watches=0, 1 and 2 alike — see the
+        // `watch-bearing-click-nav-sql-budget` hand-authored case, which keeps
+        // that regime sampled.
         ExpectedSql {
-            reads: REACTIVE_BASE + JOURNAL_READS + NAV_DML_READS,
+            reads: REACTIVE_BASE + JOURNAL_READS + NAV_DML_READS + PIN_BLOCK_CLICK_RESOLVE_READS,
             writes: 0,
             ddl: 0,
-            tolerance: docs_tolerance(state),
+            tolerance: CLICK_JITTER_TOLERANCE,
         }
     }
 }

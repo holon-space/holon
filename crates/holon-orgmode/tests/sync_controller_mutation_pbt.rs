@@ -52,13 +52,22 @@ use uuid::Uuid;
 
 struct InMemoryBlockStore {
     blocks: RwLock<HashMap<String, Vec<Block>>>,
+    /// Count of `delete_in_tree`/`apply_delete` removals — lets a test assert a
+    /// cascade-delete did (or did NOT) run, independent of any later re-ingest
+    /// that could restore a block's id from the org file bytes.
+    delete_count: std::sync::atomic::AtomicUsize,
 }
 
 impl InMemoryBlockStore {
     fn new() -> Self {
         Self {
             blocks: RwLock::new(HashMap::new()),
+            delete_count: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    fn delete_count(&self) -> usize {
+        self.delete_count.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn seed_blocks(&self, doc_id: &str, blocks: Vec<Block>) {
@@ -75,6 +84,22 @@ impl InMemoryBlockStore {
             .get(doc_id)
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// Direct children of `parent_id` — like the real
+    /// `SqlBlockOperations::children`, which filters the authority by
+    /// `parent_id` regardless of which document the block belongs to.
+    /// `on_file_changed`'s post-create wait loop polls this for NESTED
+    /// parents too, so a doc-bucket read is not enough.
+    fn children_of(&self, parent_id: &EntityUri) -> Vec<EntityUri> {
+        self.blocks
+            .read()
+            .unwrap()
+            .values()
+            .flat_map(|v| v.iter())
+            .filter(|b| b.parent_id == *parent_id)
+            .map(|b| b.id.clone())
+            .collect()
     }
 
     fn apply_create(&self, block: Block) {
@@ -94,19 +119,52 @@ impl InMemoryBlockStore {
 
     fn apply_update(&self, block: Block) {
         let mut store = self.blocks.write().unwrap();
-        for blocks in store.values_mut() {
-            if let Some(existing) = blocks.iter_mut().find(|b| b.id == block.id) {
-                *existing = block;
-                return;
-            }
+        let Some(cur_key) = store
+            .iter()
+            .find(|(_, v)| v.iter().any(|b| b.id == block.id))
+            .map(|(k, _)| k.clone())
+        else {
+            return;
+        };
+        // Prod SQL derives doc membership from the parent chain (recursive
+        // CTE), so an update whose parent now lives under a different doc key
+        // must follow it — an in-place replace would strand the block under a
+        // stale doc bucket. Same target-key derivation as `apply_create`.
+        let target_key = store
+            .keys()
+            .find(|k| {
+                k.as_str() == block.parent_id.as_str()
+                    || store[*k].iter().any(|b| b.id == block.parent_id)
+            })
+            .cloned()
+            .unwrap_or_else(|| block.parent_id.to_string());
+        if cur_key == target_key {
+            // Same bucket: replace in place, preserving sibling order.
+            let blocks = store.get_mut(&cur_key).expect("cur_key just found");
+            let existing = blocks
+                .iter_mut()
+                .find(|b| b.id == block.id)
+                .expect("block just found under cur_key");
+            *existing = block;
+        } else {
+            store
+                .get_mut(&cur_key)
+                .expect("cur_key just found")
+                .retain(|b| b.id != block.id);
+            store.entry(target_key).or_default().push(block);
         }
     }
 
     fn apply_delete(&self, block_id: &str) {
         let mut store = self.blocks.write().unwrap();
+        let mut removed = 0usize;
         for blocks in store.values_mut() {
+            let before = blocks.len();
             blocks.retain(|b| b.id.as_str() != block_id);
+            removed += before - blocks.len();
         }
+        self.delete_count
+            .fetch_add(removed, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Create-or-update: replace the block in place if it already exists under
@@ -124,12 +182,49 @@ impl InMemoryBlockStore {
             self.apply_create(block);
         }
     }
+
+    /// Upsert from an org write-seam params map, mirroring SQL UPDATE
+    /// semantics: an edge-field param the controller stripped as unchanged
+    /// (`strip_unchanged_edge_fields`) leaves the existing junction values
+    /// untouched — a wholesale struct replace would silently clear them.
+    fn upsert_from_params(&self, params: &holon_api::StorageEntity) {
+        let mut block = block_from_params(params);
+        let existing = {
+            let store = self.blocks.read().unwrap();
+            store
+                .values()
+                .flat_map(|v| v.iter())
+                .find(|b| b.id == block.id)
+                .cloned()
+        };
+        if let Some(existing) = existing {
+            if params.get("tags").is_none() {
+                block.set_tags(existing.tags.clone());
+            }
+            if params.get("requires").is_none() {
+                block.requires = existing.requires.clone();
+            }
+            if params.get("advice_suppressed").is_none() {
+                block.advice_suppressed = existing.advice_suppressed.clone();
+            }
+        }
+        self.apply_upsert(block);
+    }
 }
 
 #[async_trait]
 impl BlockReader for InMemoryBlockStore {
     async fn get_blocks(&self, doc_id: &EntityUri) -> Result<Vec<Block>> {
         Ok(self.get_all_blocks(doc_id.as_str()))
+    }
+
+    async fn get_block_authoritative(&self, id: &EntityUri) -> Result<Option<Block>> {
+        let store = self.blocks.read().unwrap();
+        Ok(store
+            .values()
+            .flat_map(|v| v.iter())
+            .find(|b| b.id == *id)
+            .cloned())
     }
 
     async fn iter_documents_with_blocks(&self) -> anyhow::Result<Vec<(EntityUri, Vec<Block>)>> {
@@ -205,8 +300,44 @@ fn block_from_params(params: &holon_api::StorageEntity) -> Block {
             block.set_priority(Some(priority));
         }
     }
-    if let Some(t) = params.get("tags").and_then(|v| v.as_string()) {
-        block.set_tags(Tags::from_csv(t));
+    // `build_block_params` emits edge fields as typed `Value::Array` params
+    // (routed to junctions by the SQL provider; the legacy CSV shape is gone).
+    match params.get("tags") {
+        Some(Value::Array(arr)) => {
+            let tags: Vec<String> = arr
+                .iter()
+                .map(|v| {
+                    v.as_string()
+                        .map(str::to_string)
+                        .expect("tags array element must be a string")
+                })
+                .collect();
+            block.set_tags(Tags::from(tags));
+        }
+        Some(other) => panic!("tags param must be an Array, got {other:?}"),
+        None => {}
+    }
+    let uri_array = |key: &str| -> Option<Vec<EntityUri>> {
+        match params.get(key) {
+            Some(Value::Array(arr)) => Some(
+                arr.iter()
+                    .map(|v| {
+                        // ALLOW(entity_uri_from_raw): edge params carry full URIs
+                        EntityUri::from_raw(
+                            v.as_string().expect("edge array element must be a string"),
+                        )
+                    })
+                    .collect(),
+            ),
+            Some(other) => panic!("{key} param must be an Array, got {other:?}"),
+            None => None,
+        }
+    };
+    if let Some(r) = uri_array("requires") {
+        block.requires = r;
+    }
+    if let Some(a) = uri_array("advice_suppressed") {
+        block.advice_suppressed = a;
     }
     if let Some(s) = params.get("scheduled").and_then(|v| v.as_string()) {
         if let Ok(ts) = Timestamp::parse(s) {
@@ -241,12 +372,18 @@ fn block_from_params(params: &holon_api::StorageEntity) -> Block {
         "task_state",
         "priority",
         "tags",
+        "requires",
+        "advice_suppressed",
         "scheduled",
         "deadline",
         "ID",
+        // Positional intent, not a field: prod strips it before the row write
+        // (`update_in_tree` removes POSITION_AFTER_BLOCK_ID_PARAM); it must
+        // never land in `block.properties`.
+        "after_block_id",
     ];
     for (k, v) in params {
-        if !STANDARD_KEYS.contains(&k.as_ref()) {
+        if !STANDARD_KEYS.contains(&k.as_ref()) && !k.starts_with("_routing_") {
             if let Some(s) = v.as_string() {
                 block.set_property(k.as_ref(), Value::String(s.to_string()));
             }
@@ -347,13 +484,17 @@ fn simulate_sql_round_trip(
         "properties",
         "marks",
         "collapsed",
+        "widget_only",
         "completed",
         "block_type",
         "created_at",
         "updated_at",
         "_change_origin",
     ];
-    const EDGE_FIELDS: &[&str] = &["tags", "requires"];
+    // Matches BlockSchemaModule::edge_fields (holon-turso/src/schema_modules.rs):
+    // tags, requires, advice_suppressed. The `block` matview hydrates all three
+    // as JSON arrays, and `Block::try_from` requires all three columns.
+    const EDGE_FIELDS: &[&str] = &["tags", "requires", "advice_suppressed"];
 
     let mut row = holon_api::StorageEntity::new();
     let mut extras: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
@@ -412,7 +553,10 @@ fn value_to_serde_json(v: &Value) -> serde_json::Value {
     }
 }
 
-const POSITION_AFTER_BLOCK_ID_PARAM: &str = "_after_block_id";
+// Mirror of the prod constant (holon-api/src/entity.rs) — a stale
+// "_after_block_id" copy here let the positional param leak into simulated rows
+// undetected.
+const POSITION_AFTER_BLOCK_ID_PARAM: &str = holon_api::entity::POSITION_AFTER_BLOCK_ID_PARAM;
 
 // ============================================================================
 // Stub BlockOrdering for tests
@@ -470,15 +614,15 @@ impl BlockOrdering for StubBlockOrdering {
         unimplemented!("stub BlockOrdering: only place() is exercised by this test")
     }
 
-    async fn children(&self, _: &EntityUri) -> BlockOrderingResult<Vec<EntityUri>> {
-        // Return empty so the misalignment check treats all blocks as misaligned
-        // (they'll call place() once each). Tests that assert place() call count
-        // should reflect this.
-        Ok(vec![])
+    async fn children(&self, parent_id: &EntityUri) -> BlockOrderingResult<Vec<EntityUri>> {
+        // Authority-backed like the real `SqlBlockOperations::children`:
+        // `on_file_changed`'s post-create wait loop polls this until every
+        // created block is visible, then hands the total order to `place_all`.
+        Ok(self.store.children_of(parent_id))
     }
 
     async fn update_in_tree(&self, params: holon_api::StorageEntity) -> BlockOrderingResult<()> {
-        self.store.apply_upsert(block_from_params(&params));
+        self.store.upsert_from_params(&params);
         Ok(())
     }
 
@@ -689,10 +833,6 @@ impl TestFixture {
         self.store
             .seed_blocks(self.doc_id.as_str(), blocks.to_vec());
     }
-
-    fn get_stored_blocks(&self) -> Vec<Block> {
-        self.store.get_all_blocks(self.doc_id.as_str())
-    }
 }
 
 // ============================================================================
@@ -723,11 +863,21 @@ fn valid_timestamp() -> impl Strategy<Value = String> {
     ]
 }
 
-/// Filename- and Page-title-safe path segment: ASCII alphanumerics only, no
-/// spaces or path separators. Used as both the directory name and the
-/// matching Page title (which `path_to_name_chain` derives from the path).
+/// Filename- and Page-title-safe path segment. Used as both the directory name
+/// and the matching Page title (which `path_to_name_chain` derives from the
+/// path).
+///
+/// Spaces and non-ASCII letters are generated deliberately: real vaults have
+/// folders like `Agentic DPL`, and a space is what turned a path-shaped id into
+/// an invalid RFC 3986 URI (the boot panic that motivated deleting the
+/// `Directory` entity). The alphabet excludes `/` and guarantees a
+/// non-whitespace first and last char, so segments stay filename-safe and
+/// round-trip through `path_to_name_chain` as Page titles unchanged.
 fn path_segment() -> impl Strategy<Value = String> {
-    "[a-zA-Z][a-zA-Z0-9]{0,15}"
+    prop_oneof![
+        "[a-zA-Z][a-zA-Z0-9 ]{0,14}[a-zA-Z0-9]",
+        "[a-zA-Zäöüéñ][a-zA-Z0-9äöüéñ ]{0,14}[a-zA-Z0-9äöüéñ]",
+    ]
 }
 
 /// 1..=3 segment directory chain ending at the `.org` file stem. Segments
@@ -1248,6 +1398,14 @@ fn generate_baseline_blocks(doc_id: &EntityUri, variant: u8) -> Vec<Block> {
 }
 
 /// Render blocks → parse to get a stable round-tripped baseline.
+///
+/// The parse carries an injected `#+ID: <doc_id>` directive: without it the
+/// parser derives a path-based `file:test.org` document identity and parents
+/// every top-level headline to THAT, so the returned baseline would no longer
+/// be renderable against `doc_id` (the WP-F dangling-parent projection
+/// assertion in `OrgRenderer::render_entitys` fails loud on the mismatch).
+/// Prod vault files carry `#+ID:` — the writeback path even force-persists it
+/// (`needs_id_writeback`) — so the directive is the faithful fixture shape.
 fn stabilize_blocks(
     blocks: &[Block],
     doc_id: &EntityUri,
@@ -1255,6 +1413,7 @@ fn stabilize_blocks(
 ) -> Vec<Block> {
     let file_path = root_dir.join("test.org");
     let org_text = OrgRenderer::render_entitys(blocks, &file_path, doc_id);
+    let org_text = format!("#+ID: {}\n{}", doc_id.id(), org_text);
     let parse_result = parse_org_file(&file_path, &org_text, &EntityUri::no_parent(), root_dir)
         .expect("stabilize: parse must succeed");
     parse_result.blocks
@@ -1267,6 +1426,7 @@ fn stabilize_blocks(
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 100,
+        failure_persistence: None,
         ..ProptestConfig::default()
     })]
 
@@ -1312,9 +1472,10 @@ proptest! {
             fixture.seed_blocks(&mutated);
 
             // on_block_changed → file write
+            let delta = holon_filesystem::BlockDelta::Upsert(mutated[block_idx].clone());
             fixture
                 .controller
-                .on_block_changed(&fixture.doc_id)
+                .on_block_changed(&fixture.doc_id, &delta)
                 .await
                 .unwrap();
 
@@ -1344,6 +1505,7 @@ proptest! {
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 100,
+        failure_persistence: None,
         ..ProptestConfig::default()
     })]
 
@@ -1463,8 +1625,12 @@ proptest! {
             )
             .unwrap();
 
-            // The store should match what the final file on disk parses to
-            let stored = fixture.get_stored_blocks();
+            // The store should match what the final file on disk parses to.
+            // Read under the RESOLVED leaf doc id (the page-chain walk above
+            // ends with `expected_parent` = leaf): when `pre_seed_doc == false`
+            // and the file carries no `#+ID:`, the controller mints its own
+            // document id — `fixture.doc_id` never appears in the store.
+            let stored = fixture.store.get_all_blocks(expected_parent.as_str());
             assert_blocks_equivalent(&expected_parse.blocks, &stored, "file_change_to_blocks");
 
             Ok::<(), TestCaseError>(())
@@ -1551,6 +1717,7 @@ fn format_todo_line(states: &[TaskState]) -> String {
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 50,
+        failure_persistence: None,
         ..ProptestConfig::default()
     })]
 
@@ -1756,44 +1923,49 @@ mod find_foreign_blocks_tests {
 mod ordering_replay_tests {
     use super::*;
 
-    /// A configurable stub that returns specific live children for given
-    /// parents, and records every `place()` call for assertion.
-    struct ConfigurableOrderingStub {
-        /// Maps parent_id → ordered list of child ids representing the LIVE
-        /// order.
-        live_order: std::collections::HashMap<String, Vec<String>>,
-        pub calls: Mutex<Vec<(EntityUri, String, Option<String>)>>,
+    /// Ordering stub whose `children()` reads the shared block store — like the
+    /// real `SqlBlockOperations::children`, which reads the authority directly
+    /// so `on_file_changed`'s post-create wait loop sees freshly-created blocks
+    /// (a static children list makes that loop time out and bail loud). Records
+    /// every `place_all()` call for assertion. SqlOnly (no upstream
+    /// consolidator) → the controller routes order intent through `place_all`.
+    struct RecordingOrderingStub {
+        /// (parent, ordered_ids) per `place_all` call.
+        pub place_all_calls: Mutex<Vec<(EntityUri, Vec<EntityUri>)>>,
         /// Block sink — the controller's only write target now the command bus
         /// is gone; tests assert against this same store.
         store: Arc<InMemoryBlockStore>,
     }
 
-    impl ConfigurableOrderingStub {
-        fn new(
-            live_order: std::collections::HashMap<String, Vec<String>>,
-            store: Arc<InMemoryBlockStore>,
-        ) -> Self {
+    impl RecordingOrderingStub {
+        fn new(store: Arc<InMemoryBlockStore>) -> Self {
             Self {
-                live_order,
-                calls: Mutex::new(Vec::new()),
+                place_all_calls: Mutex::new(Vec::new()),
                 store,
             }
         }
     }
 
     #[async_trait]
-    impl BlockOrdering for ConfigurableOrderingStub {
+    impl BlockOrdering for RecordingOrderingStub {
         async fn place(
             &self,
-            uri: &EntityUri,
-            parent_id: &EntityUri,
-            after_id: Option<&EntityUri>,
+            _: &EntityUri,
+            _: &EntityUri,
+            _: Option<&EntityUri>,
         ) -> BlockOrderingResult<()> {
-            self.calls.lock().unwrap().push((
-                uri.clone(),
-                parent_id.as_str().to_string(),
-                after_id.map(|u| u.as_str().to_string()),
-            ));
+            unimplemented!("RecordingOrderingStub: SqlOnly ingest routes order through place_all")
+        }
+
+        async fn place_all(
+            &self,
+            parent_id: &EntityUri,
+            ordered_ids: &[EntityUri],
+        ) -> BlockOrderingResult<()> {
+            self.place_all_calls
+                .lock()
+                .unwrap()
+                .push((parent_id.clone(), ordered_ids.to_vec()));
             Ok(())
         }
 
@@ -1802,30 +1974,26 @@ mod ordering_replay_tests {
         }
 
         async fn next_sibling(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
-            unimplemented!("ConfigurableOrderingStub: only place() and children() are used")
+            unimplemented!("RecordingOrderingStub: only place_all() and children() are used")
         }
 
         async fn first_child(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
-            unimplemented!("ConfigurableOrderingStub: only place() and children() are used")
+            unimplemented!("RecordingOrderingStub: only place_all() and children() are used")
         }
 
         async fn last_child(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
-            unimplemented!("ConfigurableOrderingStub: only place() and children() are used")
+            unimplemented!("RecordingOrderingStub: only place_all() and children() are used")
         }
 
         async fn children(&self, parent_id: &EntityUri) -> BlockOrderingResult<Vec<EntityUri>> {
-            Ok(self
-                .live_order
-                .get(parent_id.as_str())
-                .map(|ids| ids.iter().map(|s| EntityUri::from_raw(s)).collect())
-                .unwrap_or_default())
+            Ok(self.store.children_of(parent_id))
         }
 
         async fn update_in_tree(
             &self,
             params: holon_api::StorageEntity,
         ) -> BlockOrderingResult<()> {
-            self.store.apply_upsert(block_from_params(&params));
+            self.store.upsert_from_params(&params);
             Ok(())
         }
 
@@ -1842,30 +2010,13 @@ mod ordering_replay_tests {
         }
     }
 
-    fn build_controller_with_live_order(
+    fn build_recording_controller(
         temp_dir: &std::path::Path,
-        live_order: std::collections::HashMap<String, Vec<String>>,
-    ) -> (
-        Arc<InMemoryBlockStore>,
-        Arc<MockDocumentManager>,
-        FileSyncController,
-        Arc<ConfigurableOrderingStub>,
-        EntityUri,
-        PathBuf,
-    ) {
-        build_controller_with_live_order_and_doc_id(temp_dir, live_order, EntityUri::block_random())
-    }
-
-    fn build_controller_with_live_order_and_doc_id(
-        temp_dir: &std::path::Path,
-        live_order: std::collections::HashMap<String, Vec<String>>,
         doc_id: EntityUri,
     ) -> (
         Arc<InMemoryBlockStore>,
-        Arc<MockDocumentManager>,
         FileSyncController,
-        Arc<ConfigurableOrderingStub>,
-        EntityUri,
+        Arc<RecordingOrderingStub>,
         PathBuf,
     ) {
         let store = Arc::new(InMemoryBlockStore::new());
@@ -1874,7 +2025,7 @@ mod ordering_replay_tests {
         // The ordering stub is the controller's only block sink (no command
         // bus). Share the store so the dispatched create/update/delete intents
         // land where the test asserts.
-        let ordering = Arc::new(ConfigurableOrderingStub::new(live_order, store.clone()));
+        let ordering = Arc::new(RecordingOrderingStub::new(store.clone()));
 
         let root_dir = temp_dir.to_path_buf();
         let controller = new_org_sync_controller(
@@ -1892,37 +2043,34 @@ mod ordering_replay_tests {
         doc_manager.add_document(doc);
 
         let file_path = root_dir.join(format!("{doc_name}.org"));
-        (store, doc_manager, controller, ordering, doc_id, file_path)
+        (store, controller, ordering, file_path)
     }
 
-    /// Test 7a: file order matches live order → place() is never called.
+    /// Test 7a: SqlOnly ingest hands the order owner the file's TOTAL sibling
+    /// order via `place_all` on EVERY `on_file_changed` — including an
+    /// update-only pass whose disk order already matches the live order.
+    ///
+    /// This replaced the old per-block skip-if-aligned replay: incremental
+    /// `place` can't converge a full reorder against a mutating store (the
+    /// `inv-live-children-match-ref` divergence), so the SQL order owner now
+    /// mints one fresh, gap-free key sequence per parent over its text
+    /// children in document order (total by construction, idempotent when
+    /// already aligned). See the `Consolidator::Store` branch of
+    /// `on_file_changed` and `BlockOrdering::place_all`.
     #[tokio::test]
-    async fn ordering_replay_skips_place_when_order_matches() {
+    async fn ordering_replay_hands_owner_total_order_even_when_aligned() {
         let temp_dir = tempfile::tempdir().unwrap();
 
-        // Disk org file has two children: alpha then beta.
-        let _org_content = "\
-* alpha
-* beta
-";
-
-        // Live order also has alpha before beta.
-        // The controller uses the block's bare id (UUID) for the children list.
-        // Use a single-block org file with a stable :ID: property so the parser
+        // Single-block org file with a stable :ID: property so the parser
         // reuses the same block UUID across both on_file_changed calls.
-        // Both controllers use the same doc_id so the live_order key matches.
         let stable_block_uuid = uuid::Uuid::new_v4().to_string();
         let single_block_org =
             format!("* only block\n:PROPERTIES:\n:ID: {stable_block_uuid}\n:END:\n");
         let doc_id = EntityUri::block_random();
 
-        // First pass: empty live_order → place() will be called (one block).
-        let (store, _doc_mgr, mut controller, _ordering_first, _, file_path) =
-            build_controller_with_live_order_and_doc_id(
-                temp_dir.path(),
-                std::collections::HashMap::new(),
-                doc_id.clone(),
-            );
+        // First pass: CREATE path.
+        let (store, mut controller, ordering_first, file_path) =
+            build_recording_controller(temp_dir.path(), doc_id.clone());
 
         controller.initialize().await.expect("initialize");
         tokio::fs::write(&file_path, &single_block_org)
@@ -1941,19 +2089,19 @@ mod ordering_replay_tests {
             1,
             "should have one block after first parse"
         );
-        let block_id = stored_blocks[0].id.id().to_string();
+        let block_uri = stored_blocks[0].id.clone();
+        let first_calls = ordering_first.place_all_calls.lock().unwrap().clone();
+        assert_eq!(
+            first_calls,
+            vec![(doc_id.clone(), vec![block_uri.clone()])],
+            "create pass: order owner must receive the file's total order"
+        );
 
-        // Second pass: live_order already contains the parsed block → disk order
-        // matches live order → place() must NOT be called.
-        let mut live_order = std::collections::HashMap::new();
-        live_order.insert(doc_id.id().to_string(), vec![block_id.clone()]);
-        let (store2, _doc_mgr2, mut controller2, ordering_second, _, file_path2) =
-            build_controller_with_live_order_and_doc_id(
-                temp_dir.path(),
-                live_order,
-                doc_id.clone(),
-            );
-        // Pre-seed the store so the parse sees an existing block → UPDATE path.
+        // Second pass: UPDATE path (store pre-seeded, no creates), disk order
+        // trivially matches live order — place_all is STILL called with the
+        // total order (idempotent re-key), by design.
+        let (store2, mut controller2, ordering_second, file_path2) =
+            build_recording_controller(temp_dir.path(), doc_id.clone());
         store2.seed_blocks(doc_id.as_str(), vec![stored_blocks[0].clone()]);
 
         controller2.initialize().await.expect("initialize2");
@@ -1966,69 +2114,1057 @@ mod ordering_replay_tests {
             .await
             .expect("second on_file_changed");
 
-        let place_calls = ordering_second.calls.lock().unwrap().clone();
-        assert!(
-            place_calls.is_empty(),
-            "place() must not be called when disk order matches live order; got {place_calls:?}"
+        let second_calls = ordering_second.place_all_calls.lock().unwrap().clone();
+        assert_eq!(
+            second_calls,
+            vec![(doc_id.clone(), vec![block_uri])],
+            "update pass: total-order re-key must run even when already aligned"
         );
     }
 
-    /// Test 7b: file reorders one block → exactly one place() call.
+    /// Test 7b: a freshly-created block reaches the order owner in document
+    /// order — one `place_all` for its parent containing it.
     #[tokio::test]
     async fn ordering_replay_calls_place_for_misaligned_block() {
         let temp_dir = tempfile::tempdir().unwrap();
 
-        // Org file has block B then block A (B is first on disk).
-        // Live order has A then B (A is first in live DB).
-        // The replay should call place() exactly once — for B (first on disk but
-        // second in live) — to move it before A.
-        //
-        // Since we don't control what IDs the parser assigns, we use a
-        // single-block file where the live order lists a DIFFERENT block as the
-        // only child. From the parser's perspective the block is NOT in the live
-        // children list → current_idx = None → misaligned → place() called.
-
         let single_block_org = "\
 * the block
 ";
-
-        let dummy_other_id = "some-other-block-id".to_string();
-        let mut live_order = std::collections::HashMap::new();
-        // Live order for the doc: a different block is listed → our parsed block
-        // is not in the list → current_idx = None → misaligned.
-        live_order.insert(
-            EntityUri::no_parent().id().to_string(),
-            vec![dummy_other_id],
-        );
-
-        // We need the doc_id for the live_order key. Build a controller first
-        // to learn the doc_id, then rebuild with the right live_order.
-        let (_store, _doc_mgr, _ctrl, _ordering_probe, doc_id, _file_path) =
-            build_controller_with_live_order(temp_dir.path(), std::collections::HashMap::new());
-
-        // Build the real controller with a live_order that doesn't include our block.
-        let dummy_other_id2 = "some-other-block-id".to_string();
-        let mut live_order2 = std::collections::HashMap::new();
-        live_order2.insert(doc_id.id().to_string(), vec![dummy_other_id2]);
-        let (_store2, _doc_mgr2, mut controller, ordering, _doc_id2, file_path2) =
-            build_controller_with_live_order(temp_dir.path(), live_order2);
+        let doc_id = EntityUri::block_random();
+        let (store, mut controller, ordering, file_path) =
+            build_recording_controller(temp_dir.path(), doc_id.clone());
 
         controller.initialize().await.expect("initialize");
-        tokio::fs::write(&file_path2, single_block_org)
+        tokio::fs::write(&file_path, single_block_org)
             .await
             .unwrap();
         // Canonicalize after writing (macOS: /var → /private/var symlink).
-        let canonical_path2 = file_path2.canonicalize().expect("canonicalize file_path2");
+        let canonical_path = file_path.canonicalize().expect("canonicalize file_path");
         controller
-            .on_file_changed(&canonical_path2)
+            .on_file_changed(&canonical_path)
             .await
             .expect("on_file_changed");
 
-        let place_calls = ordering.calls.lock().unwrap().clone();
+        let stored_blocks = store.get_all_blocks(doc_id.as_str());
+        assert_eq!(stored_blocks.len(), 1, "one block ingested");
+        let place_all_calls = ordering.place_all_calls.lock().unwrap().clone();
         assert_eq!(
-            place_calls.len(),
-            1,
-            "exactly one place() call expected for the misaligned block; got {place_calls:?}"
+            place_all_calls,
+            vec![(doc_id, vec![stored_blocks[0].id.clone()])],
+            "exactly one total-order hand-off expected for the new block"
         );
+    }
+}
+
+// ============================================================================
+// Test 8: cold-boot fast-path must be Loro-aware (WP-D / I2)
+//
+// Regression guard for the 2026-07-06 reset hole: on cold boot the fast path
+// skipped org ingest whenever the on-disk hash equalled the SQL-persisted
+// `file.content_hash` — a SQL-ONLY check. After a reset (fresh empty `.loro`
+// but SQL kept the matching hash) it wrongly decided "already ingested" and
+// skipped, leaving the Loro tree empty and SQL/Loro silently diverged.
+//
+// The fix requires the content present in EVERY active store: skip only when
+// the SQL hash matches AND (when Loro is active) the doc's root block is in the
+// Loro tree. These tests inject the Loro-presence signal through
+// `BlockOrdering::in_tree` (the exact seam the fix consults) and assert the
+// skip decision flips on it.
+// ============================================================================
+#[cfg(test)]
+mod fast_path_loro_presence_tests {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering as AtomicOrdering;
+
+    use super::*;
+
+    /// BlockReader that round-trips `file.content_hash` across a simulated
+    /// reboot: `persist_file_hash` captures into a shared map,
+    /// `load_file_hashes` serves it back — so a second controller's
+    /// `initialize()` arms the fast path with the hash the first boot
+    /// stamped (no hand-computed hash, no coupling to the renderer version
+    /// or consolidator tag).
+    struct HashCapturingReader {
+        inner: Arc<InMemoryBlockStore>,
+        hashes: Arc<Mutex<HashMap<String, String>>>,
+    }
+
+    #[async_trait]
+    impl BlockReader for HashCapturingReader {
+        async fn get_blocks(&self, doc_id: &EntityUri) -> Result<Vec<Block>> {
+            self.inner.get_blocks(doc_id).await
+        }
+        async fn get_block_authoritative(&self, id: &EntityUri) -> Result<Option<Block>> {
+            self.inner.get_block_authoritative(id).await
+        }
+        async fn iter_documents_with_blocks(&self) -> Result<Vec<(EntityUri, Vec<Block>)>> {
+            self.inner.iter_documents_with_blocks().await
+        }
+        async fn load_file_hashes(&self) -> Result<Vec<(EntityUri, String)>> {
+            Ok(self
+                .hashes
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| (EntityUri::parse(k).expect("stored file uri"), v.clone()))
+                .collect())
+        }
+        async fn persist_file_hash(&self, uri: &EntityUri, hash: &str) -> Result<()> {
+            self.hashes
+                .lock()
+                .unwrap()
+                .insert(uri.as_str().to_string(), hash.to_string());
+            Ok(())
+        }
+    }
+
+    /// Ordering stub whose `in_tree` answer is injectable, and which counts
+    /// every mutating call. A non-zero count means `on_file_changed` did NOT
+    /// take the fast-path skip — it ran the ingest. `create_in_tree` keeps the
+    /// default (`Ok(false)` → SqlOnly) so content-block creates route through
+    /// `update_in_tree` (no downstream projection needed).
+    struct PresenceOrdering {
+        store: Arc<InMemoryBlockStore>,
+        root_in_tree: AtomicBool,
+        mutations: AtomicUsize,
+        /// parent uri → child ids in insertion order. Populated by
+        /// `update_in_tree` so the ingest's post-create `children()` wait loop
+        /// (which polls until every just-created block is visible to the
+        /// ordering layer) observes the blocks this ingest wrote.
+        child_order: Mutex<HashMap<String, Vec<String>>>,
+    }
+
+    impl PresenceOrdering {
+        fn new(store: Arc<InMemoryBlockStore>, root_in_tree: bool) -> Self {
+            Self {
+                store,
+                root_in_tree: AtomicBool::new(root_in_tree),
+                mutations: AtomicUsize::new(0),
+                child_order: Mutex::new(HashMap::new()),
+            }
+        }
+        fn bump(&self) {
+            self.mutations.fetch_add(1, AtomicOrdering::SeqCst);
+        }
+        fn mutation_count(&self) -> usize {
+            self.mutations.load(AtomicOrdering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl BlockOrdering for PresenceOrdering {
+        async fn place(
+            &self,
+            _: &EntityUri,
+            _: &EntityUri,
+            _: Option<&EntityUri>,
+        ) -> BlockOrderingResult<()> {
+            self.bump();
+            Ok(())
+        }
+        async fn prev_sibling(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
+            Ok(None)
+        }
+        async fn next_sibling(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
+            Ok(None)
+        }
+        async fn first_child(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
+            Ok(None)
+        }
+        async fn last_child(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
+            Ok(None)
+        }
+        async fn children(&self, parent_id: &EntityUri) -> BlockOrderingResult<Vec<EntityUri>> {
+            Ok(self
+                .child_order
+                .lock()
+                .unwrap()
+                .get(parent_id.as_str())
+                .map(|ids| ids.iter().map(|s| EntityUri::from_raw(s)).collect())
+                .unwrap_or_default())
+        }
+        async fn in_tree(&self, _: &EntityUri) -> BlockOrderingResult<Option<bool>> {
+            Ok(Some(self.root_in_tree.load(AtomicOrdering::SeqCst)))
+        }
+        async fn update_in_tree(
+            &self,
+            params: holon_api::StorageEntity,
+        ) -> BlockOrderingResult<()> {
+            self.bump();
+            let block = block_from_params(&params);
+            {
+                let mut order = self.child_order.lock().unwrap();
+                let siblings = order
+                    .entry(block.parent_id.as_str().to_string())
+                    .or_default();
+                let child = block.id.as_str().to_string();
+                if !siblings.contains(&child) {
+                    siblings.push(child);
+                }
+            }
+            self.store.apply_upsert(block);
+            Ok(())
+        }
+        async fn delete_in_tree(
+            &self,
+            params: holon_api::StorageEntity,
+        ) -> BlockOrderingResult<()> {
+            self.bump();
+            let id = params
+                .get("id")
+                .and_then(|v| v.as_string())
+                .expect("delete_in_tree: missing id");
+            self.store.apply_delete(id);
+            Ok(())
+        }
+    }
+
+    /// Boot 1: fresh vault, empty hash cache → full ingest, stamps the hash.
+    /// Returns the shared hash map, the shared doc manager, and the canonical
+    /// on-disk (now renderer-canonical) file path.
+    async fn boot_once_and_stamp_hash(
+        root_dir: &std::path::Path,
+    ) -> (
+        Arc<Mutex<HashMap<String, String>>>,
+        Arc<MockDocumentManager>,
+        PathBuf,
+        EntityUri,
+    ) {
+        let hashes = Arc::new(Mutex::new(HashMap::new()));
+        let store = Arc::new(InMemoryBlockStore::new());
+        let reader = Arc::new(HashCapturingReader {
+            inner: store.clone(),
+            hashes: hashes.clone(),
+        });
+        let doc_manager = Arc::new(MockDocumentManager::new());
+        let ordering = Arc::new(PresenceOrdering::new(store.clone(), true));
+
+        let doc_id = EntityUri::block_random();
+        let mut doc = Block::new_text(
+            doc_id.clone(),
+            EntityUri::no_parent(),
+            "reset-doc".to_string(),
+        );
+        doc.set_page(true);
+        doc_manager.add_document(doc);
+
+        let mut controller = new_org_sync_controller(
+            reader,
+            doc_manager.clone(),
+            root_dir.to_path_buf(),
+            ordering.clone(),
+            Arc::new(holon_filesystem::RealFileSystem),
+        );
+
+        let stable_block_uuid = uuid::Uuid::new_v4().to_string();
+        let file_path = root_dir.join("reset-doc.org");
+        let initial_org = format!("* only block\n:PROPERTIES:\n:ID: {stable_block_uuid}\n:END:\n");
+        tokio::fs::write(&file_path, &initial_org).await.unwrap();
+        let canonical = file_path.canonicalize().expect("canonicalize");
+
+        controller.initialize().await.expect("initialize boot 1");
+        controller
+            .on_file_changed(&canonical)
+            .await
+            .expect("boot 1 on_file_changed");
+
+        assert!(
+            !hashes.lock().unwrap().is_empty(),
+            "boot 1 must stamp file.content_hash so the fast path can arm on boot 2"
+        );
+        (hashes, doc_manager, canonical, doc_id)
+    }
+
+    /// Boot 2: reuse the stamped hash so the fast path is armed, then vary only
+    /// the Loro presence signal. Returns how many block mutations the ingest
+    /// performed (0 = fast path skipped).
+    async fn boot_again_with_loro_presence(
+        root_dir: &std::path::Path,
+        hashes: Arc<Mutex<HashMap<String, String>>>,
+        doc_manager: Arc<MockDocumentManager>,
+        canonical: &std::path::Path,
+        loro_has_root: bool,
+    ) -> usize {
+        let store = Arc::new(InMemoryBlockStore::new());
+        let reader = Arc::new(HashCapturingReader {
+            inner: store.clone(),
+            hashes,
+        });
+        let ordering = Arc::new(PresenceOrdering::new(store.clone(), loro_has_root));
+        let mut controller = new_org_sync_controller(
+            reader,
+            doc_manager,
+            root_dir.to_path_buf(),
+            ordering.clone(),
+            Arc::new(holon_filesystem::RealFileSystem),
+        );
+
+        controller.initialize().await.expect("initialize boot 2");
+        controller
+            .on_file_changed(canonical)
+            .await
+            .expect("boot 2 on_file_changed");
+        ordering.mutation_count()
+    }
+
+    /// The bug: SQL hash matches but the Loro tree is empty (reset) → the fast
+    /// path MUST NOT skip; ingest must run to repopulate Loro.
+    #[tokio::test]
+    async fn fast_path_reingests_when_loro_tree_empty() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (hashes, doc_manager, canonical, _doc_id) =
+            boot_once_and_stamp_hash(temp_dir.path()).await;
+
+        let mutations = boot_again_with_loro_presence(
+            temp_dir.path(),
+            hashes,
+            doc_manager,
+            &canonical,
+            /* loro_has_root = */ false,
+        )
+        .await;
+
+        assert!(
+            mutations > 0,
+            "fast path skipped ingest despite an empty Loro tree — SQL and Loro would stay \
+             silently diverged (the WP-D / I2 regression)"
+        );
+    }
+
+    /// Control: SQL hash matches AND the Loro tree holds the doc root → the
+    /// fast path is still allowed to skip (no cold-boot perf regression).
+    #[tokio::test]
+    async fn fast_path_still_skips_when_content_present_in_all_stores() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (hashes, doc_manager, canonical, _doc_id) =
+            boot_once_and_stamp_hash(temp_dir.path()).await;
+
+        let mutations = boot_again_with_loro_presence(
+            temp_dir.path(),
+            hashes,
+            doc_manager,
+            &canonical,
+            /* loro_has_root = */ true,
+        )
+        .await;
+
+        assert_eq!(
+            mutations, 0,
+            "fast path should skip when content is present in every active store"
+        );
+    }
+}
+
+// ============================================================================
+// Test 8: initial-scan batched feed barrier (boot ingest latency, Options 0+1)
+// ============================================================================
+
+#[cfg(test)]
+mod initial_scan_batched_barrier_tests {
+    use std::path::Path;
+
+    use super::*;
+
+    /// Ordering stub whose `children()` reads the shared block store (like the
+    /// real `SqlBlockOperations::children`, which reads the authority directly
+    /// so the scan's `place` loop sees freshly-created blocks) — so wait B
+    /// resolves immediately instead of hanging. SqlOnly by default (no
+    /// upstream consolidator), so creates flow through `update_in_tree`
+    /// into the store.
+    struct ScanOrderingStub {
+        store: Arc<InMemoryBlockStore>,
+    }
+
+    #[async_trait]
+    impl BlockOrdering for ScanOrderingStub {
+        async fn place(
+            &self,
+            _: &EntityUri,
+            _: &EntityUri,
+            _: Option<&EntityUri>,
+        ) -> BlockOrderingResult<()> {
+            Ok(())
+        }
+
+        async fn place_all(&self, _: &EntityUri, _: &[EntityUri]) -> BlockOrderingResult<()> {
+            Ok(())
+        }
+
+        async fn prev_sibling(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
+            Ok(None)
+        }
+        async fn next_sibling(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
+            Ok(None)
+        }
+        async fn first_child(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
+            Ok(None)
+        }
+        async fn last_child(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
+            Ok(None)
+        }
+
+        async fn children(&self, parent_id: &EntityUri) -> BlockOrderingResult<Vec<EntityUri>> {
+            Ok(self.store.children_of(parent_id))
+        }
+
+        async fn update_in_tree(
+            &self,
+            params: holon_api::StorageEntity,
+        ) -> BlockOrderingResult<()> {
+            self.store.upsert_from_params(&params);
+            Ok(())
+        }
+
+        async fn delete_in_tree(
+            &self,
+            params: holon_api::StorageEntity,
+        ) -> BlockOrderingResult<()> {
+            let id = params
+                .get("id")
+                .and_then(|v| v.as_string())
+                .expect("delete_in_tree: missing id");
+            self.store.apply_delete(id);
+            Ok(())
+        }
+    }
+
+    /// A BlockReader that delegates reads to the shared store but whose feed
+    /// NEVER converges — models a stalled projection/CDC. Drives the
+    /// `finish_initial_scan` fail-loud path. `blocks_in_feed_count` reports 0
+    /// (no progress ever) so the progress-grounded barrier declares a stall
+    /// after ONE no-progress window.
+    struct StallingReader {
+        store: Arc<InMemoryBlockStore>,
+    }
+
+    #[async_trait]
+    impl BlockReader for StallingReader {
+        async fn get_blocks(&self, doc_id: &EntityUri) -> Result<Vec<Block>> {
+            self.store.get_blocks(doc_id).await
+        }
+        async fn get_block_authoritative(&self, id: &EntityUri) -> Result<Option<Block>> {
+            self.store.get_block_authoritative(id).await
+        }
+        async fn iter_documents_with_blocks(&self) -> Result<Vec<(EntityUri, Vec<Block>)>> {
+            self.store.iter_documents_with_blocks().await
+        }
+        async fn wait_for_blocks_in_feed(&self, _: &[String], _: u64) -> bool {
+            false // feed never converges
+        }
+        async fn blocks_in_feed_count(&self, _: &[String]) -> usize {
+            0 // and never makes progress
+        }
+    }
+
+    /// A BlockReader whose feed converges SLOWLY: every
+    /// `wait_for_blocks_in_feed` slice "times out" (returns false) but
+    /// releases another chunk of ids, so `blocks_in_feed_count` keeps
+    /// rising. Models a healthy projection under cold-boot load — exactly
+    /// the condition where the old fixed wall-clock budget expired early
+    /// (real vault 2026-07-12). The progress-grounded barrier must keep
+    /// waiting to completion; the pre-fix single fixed-budget wait fails on
+    /// the first slice. Deterministic: progress is per-CALL, not
+    /// per-elapsed-time, so the test is not tuned to timing.
+    struct SlowFeedReader {
+        store: Arc<InMemoryBlockStore>,
+        released: std::sync::atomic::AtomicUsize,
+        chunk: usize,
+    }
+
+    #[async_trait]
+    impl BlockReader for SlowFeedReader {
+        async fn get_blocks(&self, doc_id: &EntityUri) -> Result<Vec<Block>> {
+            self.store.get_blocks(doc_id).await
+        }
+        async fn get_block_authoritative(&self, id: &EntityUri) -> Result<Option<Block>> {
+            self.store.get_block_authoritative(id).await
+        }
+        async fn iter_documents_with_blocks(&self) -> Result<Vec<(EntityUri, Vec<Block>)>> {
+            self.store.iter_documents_with_blocks().await
+        }
+        async fn wait_for_blocks_in_feed(&self, ids: &[String], _: u64) -> bool {
+            let now = self
+                .released
+                .fetch_add(self.chunk, std::sync::atomic::Ordering::SeqCst)
+                + self.chunk;
+            now >= ids.len()
+        }
+        async fn blocks_in_feed_count(&self, ids: &[String]) -> usize {
+            self.released
+                .load(std::sync::atomic::Ordering::SeqCst)
+                .min(ids.len())
+        }
+    }
+
+    fn build_scan_controller(
+        root: &Path,
+        reader: Arc<dyn BlockReader>,
+        store: Arc<InMemoryBlockStore>,
+    ) -> FileSyncController {
+        build_scan_controller_with_docs(root, reader, store, Arc::new(MockDocumentManager::new()))
+    }
+
+    fn build_scan_controller_with_docs(
+        root: &Path,
+        reader: Arc<dyn BlockReader>,
+        store: Arc<InMemoryBlockStore>,
+        doc_manager: Arc<MockDocumentManager>,
+    ) -> FileSyncController {
+        let ordering = Arc::new(ScanOrderingStub { store });
+        new_org_sync_controller(
+            reader,
+            doc_manager,
+            root.to_path_buf(),
+            ordering,
+            Arc::new(holon_filesystem::RealFileSystem),
+        )
+    }
+
+    fn org_file(idx: usize, blocks: usize) -> String {
+        let mut s = format!("#+ID: file-{idx}\n\n");
+        for j in 0..blocks {
+            s.push_str(&format!(
+                "* Block {idx}-{j}\n:PROPERTIES:\n:ID: p{idx}_{j}\n:END:\nBody {idx}-{j}.\n\n"
+            ));
+        }
+        s
+    }
+
+    /// Batched barrier ingests every file's blocks correctly and `place_all`
+    /// order is preserved — the end-of-scan convergence wait succeeds and the
+    /// scan flag is cleared. Proves the batched path does not drop blocks.
+    #[tokio::test]
+    async fn initial_scan_batched_barrier_ingests_all_files() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(InMemoryBlockStore::new());
+        let mut controller = build_scan_controller(temp_dir.path(), store.clone(), store.clone());
+        controller.initialize().await.expect("initialize");
+
+        const FILES: usize = 12;
+        const BLOCKS: usize = 5;
+        let mut paths = Vec::new();
+        for i in 0..FILES {
+            let p = temp_dir.path().join(format!("page-{i}.org"));
+            tokio::fs::write(&p, org_file(i, BLOCKS)).await.unwrap();
+            paths.push(p.canonicalize().expect("canonicalize"));
+        }
+
+        // Drive the initial scan exactly as `run_file_sync_controller` does.
+        controller.begin_initial_scan();
+        assert!(controller.in_initial_scan(), "flag on during scan");
+        for p in &paths {
+            controller
+                .on_file_changed(p)
+                .await
+                .unwrap_or_else(|e| panic!("on_file_changed {}: {e:#}", p.display()));
+        }
+        controller
+            .finish_initial_scan(30_000)
+            .await
+            .expect("finish_initial_scan should converge (in-memory feed = true)");
+
+        // Steady-state guard: flag cleared after finish.
+        assert!(
+            !controller.in_initial_scan(),
+            "scan flag must be off after finish_initial_scan"
+        );
+
+        // Every file's every block landed in block_raw (the store).
+        for i in 0..FILES {
+            let doc_blocks = store.get_all_blocks(&format!("block:file-{i}"));
+            let ids: BTreeSet<String> = doc_blocks.iter().map(|b| b.id.id().to_string()).collect();
+            for j in 0..BLOCKS {
+                assert!(
+                    ids.contains(&format!("p{i}_{j}")),
+                    "file {i}: block p{i}_{j} missing after batched scan; got {ids:?}"
+                );
+            }
+        }
+    }
+
+    /// A stalled feed makes the SINGLE end-of-scan convergence wait fail loud —
+    /// never a silent continue. The per-file ingest still succeeds (block_raw
+    /// is synchronous; the count-check passes), so the failure surfaces
+    /// only at `finish_initial_scan`, which is where
+    /// `run_file_sync_controller` routes it into `signal_error`.
+    #[tokio::test]
+    async fn initial_scan_feed_stall_fails_loud() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(InMemoryBlockStore::new());
+        let reader = Arc::new(StallingReader {
+            store: store.clone(),
+        });
+        let mut controller = build_scan_controller(temp_dir.path(), reader, store.clone());
+        controller.initialize().await.expect("initialize");
+
+        let p = temp_dir.path().join("page-0.org");
+        tokio::fs::write(&p, org_file(0, 3)).await.unwrap();
+        let p = p.canonicalize().expect("canonicalize");
+
+        controller.begin_initial_scan();
+        controller
+            .on_file_changed(&p)
+            .await
+            .expect("per-file ingest succeeds (block_raw synchronous)");
+
+        let err = controller
+            .finish_initial_scan(200)
+            .await
+            .expect_err("finish_initial_scan must bail loud when the feed never converges");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("did not converge"),
+            "expected a fail-loud convergence error, got: {msg}"
+        );
+        // Even on failure the flag is cleared (take()), so no leak into runtime.
+        assert!(!controller.in_initial_scan());
+    }
+
+    /// The scan flag never leaks into steady-state: it is on between begin and
+    /// finish and off afterwards, even with an empty vault.
+    #[tokio::test]
+    async fn scan_flag_off_after_finish() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(InMemoryBlockStore::new());
+        let mut controller = build_scan_controller(temp_dir.path(), store.clone(), store.clone());
+        controller.initialize().await.expect("initialize");
+
+        assert!(!controller.in_initial_scan(), "off before begin");
+        controller.begin_initial_scan();
+        assert!(controller.in_initial_scan(), "on after begin");
+        controller
+            .finish_initial_scan(30_000)
+            .await
+            .expect("empty scan converges trivially");
+        assert!(!controller.in_initial_scan(), "off after finish");
+    }
+
+    /// Real-vault cold-boot escape (2026-07-12, Martin's vault): a
+    /// folder-companion file (`Journals.org`, `#+ID: journals`) inlines OTHER
+    /// page-files' doc-roots as headings TOGETHER WITH their child blocks. The
+    /// pre-fix ingest (a) re-parented/updated those children into the
+    /// companion's document — stealing them from the owning page-file — and
+    /// (b) counted the whole inlined subtree in the post-ingest `get_blocks`
+    /// gate, which the Page-boundary doc walk can structurally NEVER return
+    /// ("expected 22 blocks, cache has 5"), so the file failed ingest forever,
+    /// was quarantined from write-back, and every retry flooded the log.
+    ///
+    /// With file-authority extended to the whole inlined subtree: ingest
+    /// succeeds, the owner's blocks are untouched (stale companion copies do
+    /// NOT clobber them), the companion doc holds exactly its own blocks, and
+    /// the file on disk is left byte-identical (write-back deferred, no
+    /// de-inline from this path).
+    #[tokio::test]
+    async fn companion_inlining_foreign_page_subtree_ingests_clean() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(InMemoryBlockStore::new());
+        let doc_manager = Arc::new(MockDocumentManager::new());
+
+        // Pre-existing page-file document `block:d1` (as the scan would have
+        // created from `Journals/2026-07-10.org`) with two children.
+        let d1 = EntityUri::from_raw("block:d1");
+        let mut page = Block::new_text(d1.clone(), EntityUri::no_parent(), "2026-07-10");
+        page.set_page(true);
+        doc_manager.add_document(page);
+        let c1 = Block::new_text(EntityUri::from_raw("block:c1"), d1.clone(), "entry one");
+        let c2 = Block::new_text(EntityUri::from_raw("block:c2"), d1.clone(), "entry two");
+        store.seed_blocks("block:d1", vec![c1, c2]);
+
+        let mut controller = build_scan_controller_with_docs(
+            temp_dir.path(),
+            store.clone(),
+            store.clone(),
+            doc_manager,
+        );
+        controller.initialize().await.expect("initialize");
+
+        // Companion file: two own blocks + the foreign page root inlined as a
+        // heading with STALE copies of its children.
+        let companion = "#+ID: journals\n\n* Own block A\n:PROPERTIES:\n:ID: own-a\n:END:\n\n* \
+                         2026-07-10\n:PROPERTIES:\n:ID: d1\n:END:\n\n** entry one \
+                         STALE\n:PROPERTIES:\n:ID: c1\n:END:\n\n** entry two \
+                         STALE\n:PROPERTIES:\n:ID: c2\n:END:\n\n* Own block B\n:PROPERTIES:\n:ID: \
+                         own-b\n:END:\n";
+        let p = temp_dir.path().join("Journals.org");
+        tokio::fs::write(&p, companion).await.unwrap();
+        let p = p.canonicalize().expect("canonicalize");
+
+        controller.begin_initial_scan();
+        controller
+            .on_file_changed(&p)
+            .await
+            .expect("companion ingest must succeed — the inlined foreign subtree is skipped");
+        controller
+            .finish_initial_scan(30_000)
+            .await
+            .expect("scan converges");
+
+        // Owner authoritative: the page-file's blocks are untouched — the
+        // companion's stale copies did not clobber content or re-parent.
+        let owner_blocks = store.get_all_blocks("block:d1");
+        let contents: BTreeSet<String> = owner_blocks.iter().map(|b| b.content.clone()).collect();
+        assert!(
+            contents.contains("entry one") && contents.contains("entry two"),
+            "owner page-file blocks must survive un-clobbered, got {contents:?}"
+        );
+
+        // Companion doc holds exactly its own blocks.
+        let journal_blocks = store.get_all_blocks("block:journals");
+        let ids: BTreeSet<String> = journal_blocks
+            .iter()
+            .map(|b| b.id.id().to_string())
+            .collect();
+        assert!(
+            ids.contains("own-a") && ids.contains("own-b"),
+            "companion's own blocks must land, got {ids:?}"
+        );
+        assert!(
+            !ids.contains("c1") && !ids.contains("c2") && !ids.contains("d1"),
+            "foreign page subtree must NOT be stolen into the companion doc, got {ids:?}"
+        );
+
+        // Disk byte-identical: this ingest never de-inlines the user's file.
+        let disk_after = tokio::fs::read_to_string(&p).await.unwrap();
+        assert_eq!(disk_after, companion, "companion file must be left as-is");
+
+        // No quarantine: a subsequent external change ingests fine too.
+        controller
+            .on_file_changed(&p)
+            .await
+            .expect("re-ingest of the unchanged companion stays clean");
+    }
+
+    /// Scaled cold boot: hundreds of files (thousands of blocks) over a feed
+    /// that is HEALTHY but SLOW — every wait slice "times out" while ids keep
+    /// landing. The old fixed wall-clock budget (`wait_for_blocks_in_feed(ids,
+    /// budget)` once) fails on the first slice; the progress-grounded barrier
+    /// must ride the progress to completion. Progress is per-call, not
+    /// per-elapsed-time, so the test is deterministic and the fix cannot be
+    /// "tuned" to its timing.
+    #[tokio::test]
+    async fn scaled_cold_boot_slow_feed_converges_via_progress() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(InMemoryBlockStore::new());
+        let reader = Arc::new(SlowFeedReader {
+            store: store.clone(),
+            released: std::sync::atomic::AtomicUsize::new(0),
+            chunk: 37, // ids released per wait slice; many slices needed
+        });
+        let mut controller = build_scan_controller(temp_dir.path(), reader, store.clone());
+        controller.initialize().await.expect("initialize");
+
+        const FILES: usize = 250;
+        const BLOCKS: usize = 5;
+        let mut paths = Vec::new();
+        for i in 0..FILES {
+            let p = temp_dir.path().join(format!("page-{i}.org"));
+            tokio::fs::write(&p, org_file(i, BLOCKS)).await.unwrap();
+            paths.push(p.canonicalize().expect("canonicalize"));
+        }
+
+        controller.begin_initial_scan();
+        for p in &paths {
+            controller
+                .on_file_changed(p)
+                .await
+                .unwrap_or_else(|e| panic!("on_file_changed {}: {e:#}", p.display()));
+        }
+        // Small stall window: irrelevant to a feed that keeps progressing.
+        controller
+            .finish_initial_scan(50)
+            .await
+            .expect("a slow-but-progressing feed must converge, not time out");
+
+        for i in 0..FILES {
+            let doc_blocks = store.get_all_blocks(&format!("block:file-{i}"));
+            assert_eq!(
+                doc_blocks.len(),
+                BLOCKS,
+                "file {i}: all blocks must land at scale"
+            );
+        }
+    }
+}
+
+// ============================================================================
+// Atomic file-rename port (Rename lane, 2026-07-27)
+// ============================================================================
+//
+// A user `mv A.org B.org` inside the vault. The pre-atomic pipeline saw this as
+// Remove(A) + Create(B): the Remove half (or a poll tick that finds A gone)
+// routes to `on_file_deleted`, whose D3 guard CANNOT tell a rename from a
+// delete when the page title has not yet followed the file (its authoritative
+// title-chain still points at A), so it cascade-deletes the very doc the move
+// re-homed. The atomic `on_file_renamed(from, to)` carries BOTH paths in one
+// call and re-homes the doc WITHOUT any delete window.
+//
+// Driven at the `FileSyncController` boundary (real controller, in-memory store
+// + doc manager, real on-disk files) — the level the parked keystone.jsonl case
+// could not reach without the atomic port. The doc-root Page lives in the mock
+// `DocumentManager` (as it lives in `block_raw` in prod); child blocks land in
+// the store. The cascade's observable here is the CHILD deletion; the atomic
+// path's observables are child survival + the doc-root retitled in the store.
+mod atomic_rename_tests {
+    use super::*;
+
+    /// Write `test.org` (`#+ID:` + one child) and ingest it so the store +
+    /// `last_projection` are established.
+    async fn seed_and_ingest(fx: &mut TestFixture, child: &Block) {
+        fx.ensure_parent_dirs().await;
+        let baseline = vec![child.clone()];
+        fx.seed_blocks(&baseline);
+        let org_children = OrgRenderer::render_entitys(&baseline, &fx.file_path(), &fx.doc_id);
+        let org = format!("#+ID: {}\n{}", fx.doc_id.id(), org_children);
+        tokio::fs::write(&fx.file_path(), org.as_bytes())
+            .await
+            .expect("write test.org");
+        fx.controller
+            .on_file_changed(&fx.file_path())
+            .await
+            .expect("initial ingest of test.org");
+    }
+
+    /// The POLL-backstop path is safety-netted too. When the destination is
+    /// ingested (Create half) and the source's disappearance is discovered by
+    /// `poll_tracked_files` (rather than an explicit Remove event), the
+    /// resulting `on_file_deleted` for the source must NOT cascade-delete the
+    /// re-homed doc — the id-based reunification finds the doc alive at the new
+    /// path and re-homes instead. (Before the refutation fix this poll path
+    /// cascade-deleted the live doc.)
+    #[tokio::test]
+    async fn nonatomic_rename_via_poll_is_rescued_by_reunification() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut fx = TestFixture::new(temp.path());
+        let child = Block::new_text(
+            EntityUri::block_random(),
+            fx.doc_id.clone(),
+            "child body".to_string(),
+        );
+        seed_and_ingest(&mut fx, &child).await;
+
+        assert!(
+            BlockReader::get_block_authoritative(&*fx.store, &child.id)
+                .await
+                .unwrap()
+                .is_some(),
+            "precondition: child block ingested into the store"
+        );
+
+        let old = fx.file_path();
+        let moved = fx.root_dir.join("moved.org");
+        tokio::fs::rename(&old, &moved).await.unwrap();
+
+        // Create(B) half, then a poll tick discovers A gone → on_file_deleted(A).
+        fx.controller.on_file_changed(&moved).await.unwrap();
+        fx.controller.poll_tracked_files().await.unwrap();
+
+        assert_eq!(
+            fx.store.delete_count(),
+            0,
+            "the poll-discovered disappearance of the renamed-away source must be rescued by \
+             id-based reunification — NOT cascade-deleted"
+        );
+        assert!(
+            BlockReader::get_block_authoritative(&*fx.store, &child.id)
+                .await
+                .unwrap()
+                .is_some(),
+            "child block survives a poll-discovered rename"
+        );
+    }
+
+    /// The atomic port: the SAME `mv`, one `on_file_renamed` call, keeps the
+    /// child intact (NO cascade), and retitles the doc-root to the new file
+    /// stem (file-move spec D2). A poll tick after the rename must NOT
+    /// cascade-delete.
+    #[tokio::test]
+    async fn atomic_rename_keeps_blocks_alive_and_retitles() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut fx = TestFixture::new(temp.path());
+        let child = Block::new_text(
+            EntityUri::block_random(),
+            fx.doc_id.clone(),
+            "child body".to_string(),
+        );
+        seed_and_ingest(&mut fx, &child).await;
+        let doc_id = fx.doc_id.clone();
+
+        let old = fx.file_path();
+        let moved = fx.root_dir.join("moved.org");
+        tokio::fs::rename(&old, &moved).await.unwrap();
+
+        // Atomic path — one call carrying both sides, no delete window.
+        fx.controller.on_file_renamed(&old, &moved).await.unwrap();
+        // A poll tick must be a no-op: the old path was re-homed, not left
+        // dangling in the tracked set.
+        fx.controller.poll_tracked_files().await.unwrap();
+
+        // Child survives — the anti-cascade property, the core fix.
+        assert!(
+            BlockReader::get_block_authoritative(&*fx.store, &child.id)
+                .await
+                .unwrap()
+                .is_some(),
+            "child block must survive an atomic rename (no cascade window)"
+        );
+
+        // Doc-root retitled to the new file stem — the file-move spec (D2). The
+        // retitle went through the same org->block write seam prod uses; the
+        // Page-tag preservation is prod's `update_in_tree` (minimal params)
+        // contract, exercised by `idonly_title_heal.rs` — not re-asserted here
+        // where the doc-root lives in the mock DocumentManager, not the store.
+        let doc_after = BlockReader::get_block_authoritative(&*fx.store, &doc_id)
+            .await
+            .unwrap()
+            .expect("atomic rename must materialize the retitled doc-root (id stable, no re-mint)");
+        assert_eq!(
+            doc_after.content, "moved",
+            "page title must follow the new file name (file-move spec D2)"
+        );
+    }
+
+    /// REFUTATION RED (verifier 2026-07-27): the atomic port's fallback. When
+    /// the watcher's pairing degrades to a bare `Remove` + `Create` (a
+    /// byte-syncer / lock-file interposed between the two rename halves, or the
+    /// pair timed out), the stray `Remove` reaches `on_file_deleted` for a path
+    /// whose `#+ID` NOW LIVES at the moved file. The title-based D3 guard
+    /// cannot fire (the title has not followed the rename), so today the
+    /// live doc is cascade-deleted. The id-based reunification safety net
+    /// must re-home instead: NO cascade (delete_count == 0), child + doc
+    /// survive, retitled.
+    #[tokio::test]
+    async fn rename_fallback_remove_does_not_cascade_a_live_doc() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut fx = TestFixture::new(temp.path());
+        let child = Block::new_text(
+            EntityUri::block_random(),
+            fx.doc_id.clone(),
+            "child body".to_string(),
+        );
+        seed_and_ingest(&mut fx, &child).await;
+        let doc_id = fx.doc_id.clone();
+
+        let old = fx.file_path();
+        let moved = fx.root_dir.join("moved.org");
+        tokio::fs::rename(&old, &moved).await.unwrap();
+
+        // Fallback ordering: the moved file's `Create` is processed first (so
+        // its `#+ID` is now tracked at `moved`), THEN the stray `Remove` of the
+        // old path arrives — the exact sequence a flush-then-create fallback
+        // hands the controller.
+        fx.controller.on_file_changed(&moved).await.unwrap();
+        fx.controller.on_file_changed(&old).await.unwrap();
+
+        assert_eq!(
+            fx.store.delete_count(),
+            0,
+            "a stray Remove of a renamed-away file must NOT cascade-delete a doc whose #+ID now              lives at another tracked path — the id-based reunification safety net must re-home"
+        );
+        assert!(
+            BlockReader::get_block_authoritative(&*fx.store, &child.id)
+                .await
+                .unwrap()
+                .is_some(),
+            "child block must survive the rename fallback"
+        );
+        let doc_after = BlockReader::get_block_authoritative(&*fx.store, &doc_id)
+            .await
+            .unwrap()
+            .expect("doc-root must stay alive through the rename fallback");
+        assert_eq!(
+            doc_after.content, "moved",
+            "reunification re-homes AND retitles to the new file stem"
+        );
+    }
+
+    /// ENVIRONMENT-PARITY RUNG (BugFunnel 2026-07-27). The composed keystone
+    /// enters BELOW `NotifyWatcher` (on `InMemoryFileSystem`), so
+    /// `RenamePairing` and the bridge's kind->`FileEvent` routing are
+    /// structurally UNTRAVERSED — the prod-only layer where the adversarial
+    /// verifier found the cascade-delete-on-interposition defect. This rung
+    /// closes that parity gap: it drives SYNTHETIC notify-shaped signals
+    /// through the REAL `RenamePairing::classify` -> the REAL bridge
+    /// routing (`classify_change_to_event`, the same fn the production
+    /// `OrgFileWatcher` uses) -> `FileEvent` -> the controller. Sequence:
+    /// From -> interposing byte-syncer write -> To. With the relevance-gate
+    /// + timeout-only flush the interposer does not disturb the pending, so
+    /// the pair collapses to a SINGLE atomic `Rename` — no `Remove`, no
+    /// cascade. (Full composed-keystone integration of a notify-shaped
+    /// source remains open parity work.)
+    #[tokio::test]
+    async fn notify_shaped_interposed_rename_traverses_pairing_and_routing_no_cascade() {
+        use std::path::Path;
+        use std::time::Instant;
+
+        use holon_filesystem::FileChange;
+        use holon_filesystem::RawFsSignal;
+        use holon_filesystem::RenamePairing;
+        use holon_orgmode::FileEvent;
+        use holon_orgmode::classify_change_to_event;
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut fx = TestFixture::new(temp.path());
+        let child = Block::new_text(
+            EntityUri::block_random(),
+            fx.doc_id.clone(),
+            "child body".to_string(),
+        );
+        seed_and_ingest(&mut fx, &child).await;
+        let doc_id = fx.doc_id.clone();
+
+        let old = fx.file_path();
+        let moved = fx.root_dir.join("moved.org");
+        tokio::fs::rename(&old, &moved).await.unwrap();
+
+        // (1) REAL pairing state machine over synthetic notify-shaped signals.
+        let mut pairing = RenamePairing::new();
+        let now = Instant::now();
+        let rel = |p: &Path| p.extension().is_some_and(|e| e == "org");
+        let mut emissions = Vec::new();
+        emissions.extend(pairing.classify(&RawFsSignal::RenameFrom(old.clone()), now, &rel));
+        emissions.extend(pairing.classify(
+            &RawFsSignal::Create(fx.root_dir.join(".syncthing.tmp")),
+            now,
+            &rel,
+        ));
+        emissions.extend(pairing.classify(&RawFsSignal::RenameTo(moved.clone()), now, &rel));
+
+        // (2) REAL bridge routing (classify_change_to_event) -> FileEvent, then
+        // (3) the sync-loop dispatch onto the controller.
+        for (seq, (path, kind)) in emissions.into_iter().enumerate() {
+            let change = FileChange {
+                path,
+                kind,
+                seq: seq as u64,
+            };
+            match classify_change_to_event(change, &rel) {
+                Some(FileEvent::Renamed { from, to }) => {
+                    fx.controller.on_file_renamed(&from, &to).await.unwrap()
+                }
+                Some(FileEvent::Changed(p)) => fx.controller.on_file_changed(&p).await.unwrap(),
+                None => {}
+            }
+        }
+
+        assert_eq!(
+            fx.store.delete_count(),
+            0,
+            "an interposed rename must pair into a single atomic Rename through the REAL pairing \
+             + routing — no cascade reaches the controller"
+        );
+        assert!(
+            BlockReader::get_block_authoritative(&*fx.store, &child.id)
+                .await
+                .unwrap()
+                .is_some(),
+            "child survives the interposed rename"
+        );
+        let doc_after = BlockReader::get_block_authoritative(&*fx.store, &doc_id)
+            .await
+            .unwrap()
+            .expect("doc-root alive");
+        assert_eq!(doc_after.content, "moved", "retitled to the new file stem");
     }
 }

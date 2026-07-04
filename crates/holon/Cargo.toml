@@ -4,6 +4,14 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+# `workspace-hack` is the cargo-hakari feature-unification crate: every
+# member depends on it and no member references it in source, by design.
+[package.metadata.cargo-machete]
+# Holon crates deliberately stay on the registry `loro_fractional_index = "= 1.6.0"`
+# while the loro fork pulls its own 1.13.0 as a path package (see root Cargo.toml).
+# Dropping the dep would change that resolution. TODO verify with Martin.
+ignored = ["loro_fractional_index", "workspace-hack"]
+
 [lib]
 name = "holon"
 path = "src/lib.rs"
@@ -25,32 +33,24 @@ tokio-stream.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-opentelemetry.workspace = true
-opentelemetry_sdk.workspace = true
-tracing-opentelemetry.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
-ulid.workspace = true
 async-trait.workspace = true
 turso.workspace = true
 turso_core.workspace = true
 turso_sdk_kit.workspace = true
-thiserror.workspace = true
 holon-macros.workspace = true
 holon-api.workspace = true
 holon-core.workspace = true
+holon-org-format.workspace = true
 holon-turso.workspace = true
-similar.workspace = true
+holon-advice.workspace = true
 prqlc.workspace = true
-prqlc-parser.workspace = true
 gql-parser.workspace = true
 gql-transform.workspace = true
 rand.workspace = true
 rhai.workspace = true
-sqlparser.workspace = true
-once_cell.workspace = true
-serde_yaml.workspace = true
 holon-engine = { path = "../holon-engine" }
 holon-petri.workspace = true
 holon-profiles.workspace = true
@@ -58,6 +58,10 @@ holon-profiles.workspace = true
 # (it pulls iroh → QUIC/TLS/ring, native-only and fatal on wasm). holon's own
 # `iroh-sync` feature re-enables `holon-loro/iroh-sync`, so native is unchanged.
 holon-loro.workspace = true
+# ADR 0028 C3: the policy-overlay `BoundaryEnforcer` the operation dispatcher
+# installs. holon-sharing depends only on holon-api/holon-core/holon-loro, so
+# this edge introduces no cycle.
+holon-sharing.workspace = true
 fluxdi.workspace = true
 futures.workspace = true
 futures-signals.workspace = true
@@ -119,6 +123,14 @@ name = "json_aggregation_e2e_test"
 required-features = ["test-helpers"]
 
 [[test]]
+name = "convert_block_to_page_e2e"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "link_candidate_dedup_e2e"
+required-features = ["test-helpers"]
+
+[[test]]
 name = "turso_block_query_source_round_trip_pbt"
 required-features = ["test-helpers"]
 
@@ -131,5 +143,26 @@ name = "turso_storage_repros"
 required-features = ["test-helpers"]
 
 [[test]]
+name = "fts_e2e"
+required-features = ["test-helpers"]
+
+[[test]]
 name = "api_pbt"
 required-features = ["test-helpers"]
+
+[[test]]
+name = "undo_move_block_e2e"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "undo_inverse_wave1"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "undo_inverse_wave2"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "query_history_mcp"
+required-features = ["test-helpers"]
+

@@ -74,8 +74,6 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
     // OperationResult is re-exported from holon_core for external crates
     let operation_result_path = if pkg_name == "holon-core" {
         quote! { crate::OperationResult }
-    } else if pkg_name == "holon" {
-        quote! { holon_core::OperationResult }
     } else {
         quote! { holon_core::OperationResult }
     };
@@ -83,8 +81,6 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
     // UndoAction is still needed for extracting undo from OperationResult
     let undo_action_path = if pkg_name == "holon-core" {
         quote! { crate::UndoAction }
-    } else if pkg_name == "holon" {
-        quote! { holon_core::UndoAction }
     } else {
         quote! { holon_core::UndoAction }
     };
@@ -236,6 +232,18 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                 quote! { vec![#(#mapping_exprs),*] }
             };
 
+            // Extract UI menu exposure from #[menu_exposure(...)]. Absent ⇒
+            // fail-closed `NotListed { ProviderDefault }` — a macro-generated
+            // provider op stays invisible to the slash menu until it opts in.
+            let menu_exposure_expr = menu_exposure_tokens(extract_menu_exposure(&method.attrs));
+
+            // Extract sharing/audience boundary behavior from
+            // #[boundary_behavior(...)]. Absent ⇒ fail-closed `Unclassified`
+            // (ADR 0028 C3) — the boundary correspondence-lock rejects that for
+            // structural ops.
+            let boundary_behavior_expr =
+                boundary_behavior_tokens(extract_boundary_behavior(&method.attrs));
+
             // Construct entity_name: if provider_name is set, use
             // "{provider_name}.{operation_name}", otherwise use passed entity_name
             let entity_name_expr = if let Some(ref provider) = provider_name {
@@ -277,6 +285,9 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                         ],
                         affected_fields: #affected_fields_expr,
                         param_mappings: #param_mappings_expr,
+                        menu_exposure: #menu_exposure_expr,
+                        boundary_behavior: #boundary_behavior_expr,
+                        target_scope: holon_api::TargetScope::Block,
                         trigger: None,
                         bound_params: ::std::collections::HashMap::new(),
                         #precondition_field
@@ -922,6 +933,9 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
 
         // Generated operations module
         #[doc(hidden)]
+        // Descriptor/dispatch fns mirror the widest trait method, so their arity
+        // is the trait's — not something a caller can restructure here.
+        #[allow(clippy::too_many_arguments)]
         pub mod #operations_module_name {
             use super::*;
             use holon_api::StorageEntity;
@@ -1427,4 +1441,88 @@ fn infer_type_hint_from_rust_type(rust_type_str: &str) -> proc_macro2::TokenStre
 
 fn extract_affected_fields(attrs: &[syn::Attribute]) -> Vec<String> {
     attr_parser::extract_affected_fields(attrs)
+}
+
+fn extract_menu_exposure(attrs: &[syn::Attribute]) -> Option<String> {
+    attr_parser::extract_menu_exposure(attrs)
+}
+
+fn extract_boundary_behavior(attrs: &[syn::Attribute]) -> Option<String> {
+    attr_parser::extract_boundary_behavior(attrs)
+}
+
+/// Map a `#[boundary_behavior(<variant>)]` marker (or its absence) to the
+/// `holon_api::BoundaryBehavior` construction tokens. Absent / unknown ⇒ the
+/// fail-closed `Unclassified` behaviour (any boundary interaction rejected
+/// loudly until an op deliberately classifies itself). ADR 0028 C3.
+fn boundary_behavior_tokens(variant: Option<String>) -> proc_macro2::TokenStream {
+    match variant.as_deref() {
+        Some("private_only") => quote! { holon_api::BoundaryBehavior::PrivateOnly },
+        Some("crossing_widens") => quote! {
+            holon_api::BoundaryBehavior::Crossing { widens_audience: true }
+        },
+        Some("crossing_same_audience") => quote! {
+            holon_api::BoundaryBehavior::Crossing { widens_audience: false }
+        },
+        Some("forbidden_at_page_boundary") => {
+            quote! { holon_api::BoundaryBehavior::ForbiddenAtPageBoundary }
+        }
+        Some("policy_edit") => quote! { holon_api::BoundaryBehavior::PolicyEdit },
+        Some("identity_op") => quote! { holon_api::BoundaryBehavior::IdentityOp },
+        // A PRESENT attr with an unknown variant is a typo, not an omission —
+        // erroring here keeps fail-closed from silently absorbing misspellings.
+        Some(unknown) => {
+            let msg = format!(
+                "unknown boundary_behavior variant `{unknown}` (expected one of: \
+                 private_only, crossing_widens, crossing_same_audience, \
+                 forbidden_at_page_boundary, policy_edit, identity_op)"
+            );
+            quote! { compile_error!(#msg) }
+        }
+        None => quote! { holon_api::BoundaryBehavior::Unclassified },
+    }
+}
+
+/// Map a `#[menu_exposure(<variant>)]` marker (or its absence) to the
+/// `holon_api::MenuExposure` construction tokens. Absent / unknown ⇒ the
+/// fail-closed `ProviderDefault` surface (invisible to the menu until an op
+/// deliberately declares `listed`).
+fn menu_exposure_tokens(variant: Option<String>) -> proc_macro2::TokenStream {
+    match variant.as_deref() {
+        Some("listed") => quote! {
+            holon_api::MenuExposure::Listed {
+                surfaces: holon_api::SurfaceSet { slash_menu: true, action_bar: false },
+            }
+        },
+        Some("keyboard_gesture") => quote! {
+            holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::KeyboardGesture,
+            }
+        },
+        Some("pointer_gesture") => quote! {
+            holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::PointerGesture,
+            }
+        },
+        Some("navigation") => quote! {
+            holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::Navigation,
+            }
+        },
+        Some("external") => quote! {
+            holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::External,
+            }
+        },
+        Some("internal") => quote! {
+            holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::Internal,
+            }
+        },
+        _ => quote! {
+            holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::ProviderDefault,
+            }
+        },
+    }
 }

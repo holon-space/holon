@@ -1,5 +1,11 @@
 //! Transition: split a block at a byte position.
 //!
+//! @pbt rung input-pipeline
+//! @pbt covers editor-split — Enter-at-cursor split via the live InputState
+//!   capture_action path (editor_view.rs), not the chord resolver
+//! @pbt gen position weighted toward content byte boundaries of the focused
+//!   block; shrinks toward position 0 via proptest default
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:1171-1191`
 //! (generator), `state_machine.rs:3426-3436` (precondition),
 //! `state_machine.rs:2687-2691` (ref-state apply),
@@ -137,8 +143,9 @@ pub async fn apply_split_block_input_pipeline_to_sut<S: SutLayout + SutDriver>(
 
 use holon_pbt_core::TransitionFactory;
 use holon_pbt_core::TransitionRef;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::check;
 
-use crate::pbt::reference_state::ReferenceState;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
 #[cfg(feature = "otel-testing")]
@@ -147,8 +154,6 @@ use crate::pbt::transition_budgets::MutationKind;
 use crate::pbt::transition_budgets::REACTIVE_BASE;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::expected_sql_for_kind;
-use crate::pbt::validation::Reason;
-use crate::pbt::validation::check;
 
 /// Split an editable text block at a byte position.
 /// Only the currently focused (editable) block is a candidate.
@@ -228,7 +233,7 @@ pub fn split_block_weighted_generator<R: RefBlockTree + RefLifecycle>(
         }
     }
     check(!candidates.is_empty(), Reason::PreconditionFailed).map(|_| {
-        let strat = prop::sample::select(candidates)
+        let strat = super::select_bias::select_with_edge_bias(candidates)
             .prop_map(|(block_id, position)| SplitBlock { block_id, position })
             .boxed();
         // High weight: editing transitions are starved unless Main is
@@ -314,11 +319,13 @@ crate::cap_transition! {
 }
 
 #[cfg(feature = "otel-testing")]
+use holon_pbt_core::capabilities::RefSqlCardinality;
+#[cfg(feature = "otel-testing")]
 impl crate::pbt::transition_budgets::SqlBudget for SplitBlock {
-    fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
-        let watches = state.mcp.active_watches.len();
-        let blocks = state.domain.block_state.blocks.len();
-        let docs = state.files.documents.len();
+    fn expected_sql<R: RefSqlCardinality>(&self, state: &R) -> ExpectedSql {
+        let watches = state.active_watch_count();
+        let blocks = state.block_count();
+        let docs = state.document_count();
         let update = expected_sql_for_kind(MutationKind::Update, watches, blocks, docs);
         let create = expected_sql_for_kind(MutationKind::Create, watches, blocks, docs);
         ExpectedSql {

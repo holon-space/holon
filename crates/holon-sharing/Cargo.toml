@@ -1,0 +1,37 @@
+[package]
+name = "holon-sharing"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# `workspace-hack` is the cargo-hakari feature-unification crate: every
+# member depends on it and no member references it in source, by design.
+[package.metadata.cargo-machete]
+ignored = ["workspace-hack"]
+
+[dependencies]
+anyhow.workspace = true
+holon-api.workspace = true
+# The `BoundaryEnforcer` port the engine's operation dispatch consults
+# (ADR 0028 C3). The edge points this way: holon-core knows nothing of sharing.
+holon-core.workspace = true
+# holon-loro inherited default-features = false (workspace root): gives the
+# unconditional `loro_backend::doc_lamport_height` without pulling iroh into the
+# library build. The device-key path (`share_peer_id::stable_peer_id`) is only
+# exercised by the PBT harness, which re-enables `iroh-sync` in dev-dependencies.
+holon-loro.workspace = true
+loro.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+blake3.workspace = true
+thiserror.workspace = true
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+
+[dev-dependencies]
+proptest.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
+# Re-enable iroh-sync for tests so `share_peer_id::stable_peer_id` (the REAL
+# ordering-tuple peer component) is reachable from the two-peer PBT harness.
+holon-loro = { workspace = true, features = ["iroh-sync"] }
+iroh = { workspace = true, features = ["default"] }
+rand.workspace = true

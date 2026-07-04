@@ -59,7 +59,14 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             ],
             affected_fields: vec!["block_id".to_string()],
             param_mappings: vec![],
-            ..Default::default()
+            target_scope: holon_api::TargetScope::Global,
+            boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
+            menu_exposure: holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::Navigation,
+            },
+            trigger: None,
+            bound_params: Default::default(),
+            precondition: None,
         },
         OperationDescriptor {
             entity_name: ENTITY_NAME.into(),
@@ -79,7 +86,14 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             ],
             affected_fields: vec!["block_id".to_string()],
             param_mappings: vec![],
-            ..Default::default()
+            target_scope: holon_api::TargetScope::Global,
+            boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
+            menu_exposure: holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::Navigation,
+            },
+            trigger: None,
+            bound_params: Default::default(),
+            precondition: None,
         },
         OperationDescriptor {
             entity_name: ENTITY_NAME.into(),
@@ -95,7 +109,14 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             }],
             affected_fields: vec!["closed_at".to_string()],
             param_mappings: vec![],
-            ..Default::default()
+            target_scope: holon_api::TargetScope::Global,
+            boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
+            menu_exposure: holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::Navigation,
+            },
+            trigger: None,
+            bound_params: Default::default(),
+            precondition: None,
         },
         OperationDescriptor {
             entity_name: ENTITY_NAME.into(),
@@ -107,7 +128,14 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             required_params: vec![region_param()],
             affected_fields: vec!["block_id".to_string()],
             param_mappings: vec![],
-            ..Default::default()
+            target_scope: holon_api::TargetScope::Global,
+            boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
+            menu_exposure: holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::Navigation,
+            },
+            trigger: None,
+            bound_params: Default::default(),
+            precondition: None,
         },
         OperationDescriptor {
             entity_name: ENTITY_NAME.into(),
@@ -119,7 +147,14 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             required_params: vec![region_param()],
             affected_fields: vec!["block_id".to_string()],
             param_mappings: vec![],
-            ..Default::default()
+            target_scope: holon_api::TargetScope::Global,
+            boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
+            menu_exposure: holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::Navigation,
+            },
+            trigger: None,
+            bound_params: Default::default(),
+            precondition: None,
         },
         OperationDescriptor {
             entity_name: ENTITY_NAME.into(),
@@ -131,7 +166,74 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             required_params: vec![region_param()],
             affected_fields: vec!["block_id".to_string()],
             param_mappings: vec![],
-            ..Default::default()
+            target_scope: holon_api::TargetScope::Global,
+            boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
+            menu_exposure: holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::Navigation,
+            },
+            trigger: None,
+            bound_params: Default::default(),
+            precondition: None,
+        },
+        OperationDescriptor {
+            entity_name: ENTITY_NAME.into(),
+            entity_short_name: SHORT_NAME.to_string(),
+            id_column: "region".to_string(),
+            name: NavigationOp::Activate.as_str().to_string(),
+            display_name: "Activate Tab".to_string(),
+            description: "Move a region's cursor to an already-open history row (tab switch; no \
+                          reorder, no scroll reset)"
+                .to_string(),
+            required_params: vec![
+                region_param(),
+                OperationParam {
+                    name: "history_id".to_string(),
+                    type_hint: TypeHint::Number,
+                    description: "navigation_history.id of the open tab to activate".to_string(),
+                },
+            ],
+            affected_fields: vec!["history_id".to_string()],
+            param_mappings: vec![],
+            target_scope: holon_api::TargetScope::Global,
+            // Navigation moves only the reader's own view cursor; it never
+            // touches a shared container or widens an audience (ADR 0028 A2).
+            boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
+            menu_exposure: holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::Navigation,
+            },
+            trigger: None,
+            bound_params: Default::default(),
+            precondition: None,
+        },
+        OperationDescriptor {
+            entity_name: ENTITY_NAME.into(),
+            entity_short_name: SHORT_NAME.to_string(),
+            id_column: "region".to_string(),
+            name: NavigationOp::OpenTab.as_str().to_string(),
+            display_name: "Open in New Tab".to_string(),
+            description: "Open a block as an additional tab without closing the region's other \
+                          open tabs (modifier-click)"
+                .to_string(),
+            required_params: vec![
+                region_param(),
+                OperationParam {
+                    name: "block_id".to_string(),
+                    type_hint: TypeHint::String,
+                    description: "Block ID to open in a new tab".to_string(),
+                },
+            ],
+            affected_fields: vec!["block_id".to_string()],
+            param_mappings: vec![],
+            target_scope: holon_api::TargetScope::Global,
+            // Opens a page in the reader's own view; no sharing boundary
+            // crossing (ADR 0028 A2).
+            boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
+            menu_exposure: holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::Navigation,
+            },
+            trigger: None,
+            bound_params: Default::default(),
+            precondition: None,
         },
     ];
     manual_ops
@@ -361,21 +463,227 @@ impl NavigationProvider {
         Ok(OperationResult::irreversible(vec![]))
     }
 
-    /// Soft-close a specific navigation_history row by id.
-    /// Used by sidebar X button.
+    /// Soft-close a specific navigation_history row by id, then follow the
+    /// cursor if that row was a region's active tab.
+    ///
+    /// Used by the sidebar / tab-strip X button. `close` carries only the row
+    /// handle (no region), so it looks the region up and, when the closed row
+    /// IS that region's `navigation_cursor` target, moves the cursor to a
+    /// still-open neighbor — LEFT preferred (the tab before it in stable
+    /// insertion order), then RIGHT. With no open tab left, the cursor row is
+    /// dropped so the cursor-joined main panel falls through to its default
+    /// render instead of pinning a closed row (a blank panel). Closing a
+    /// NON-active tab leaves the cursor untouched.
     async fn close(&self, history_id: i64) -> Result<OperationResult> {
         tracing::debug!("[NavigationProvider] close: history_id={}", history_id);
 
+        let mut id_params = HashMap::new();
+        id_params.insert("history_id".to_string(), Value::Integer(history_id));
+
+        // One read: the region owning this row + that region's current cursor
+        // target. A missing row means it is already gone — nothing to close or
+        // follow.
+        let row = self
+            .db_handle
+            .query(
+                include_str!("../../sql/navigation/get_row_region_and_cursor.sql"),
+                id_params.clone(),
+            )
+            .await
+            .map_err(|e| {
+                format!("Failed to look up region/cursor for history row {history_id}: {e}")
+            })?;
+        let region: Option<String> = row
+            .first()
+            .and_then(|r| r.get("region"))
+            .and_then(|v| v.as_string_owned());
+        let active: Option<i64> = row
+            .first()
+            .and_then(|r| r.get("cursor_id"))
+            .and_then(|v| v.as_i64());
+
+        // Soft-close the row (drops it from focus_roots via CDC).
+        self.db_handle
+            .query(
+                include_str!("../../sql/navigation/close_history_id.sql"),
+                id_params,
+            )
+            .await
+            .map_err(|e| format!("Failed to close history row: {}", e))?;
+
+        let Some(region) = region else {
+            return Ok(OperationResult::irreversible(vec![]));
+        };
+        let region_val = Value::String(region.clone());
+
+        // Cursor-follow only when the closed row WAS this region's active tab.
+        if active != Some(history_id) {
+            return Ok(OperationResult::irreversible(vec![]));
+        }
+
+        // Cursor-follow: LEFT neighbor first, then RIGHT.
+        let mut neighbor_params = HashMap::new();
+        neighbor_params.insert("region".to_string(), region_val.clone());
+        neighbor_params.insert("history_id".to_string(), Value::Integer(history_id));
+        let mut neighbor = self
+            .db_handle
+            .query(
+                include_str!("../../sql/navigation/left_neighbor_open_tab.sql"),
+                neighbor_params.clone(),
+            )
+            .await
+            .map_err(|e| format!("Failed to find left neighbor tab: {e}"))?
+            .first()
+            .and_then(|row| row.get("id"))
+            .and_then(|v| v.as_i64());
+        if neighbor.is_none() {
+            neighbor = self
+                .db_handle
+                .query(
+                    include_str!("../../sql/navigation/right_neighbor_open_tab.sql"),
+                    neighbor_params,
+                )
+                .await
+                .map_err(|e| format!("Failed to find right neighbor tab: {e}"))?
+                .first()
+                .and_then(|row| row.get("id"))
+                .and_then(|v| v.as_i64());
+        }
+
+        match neighbor {
+            Some(neighbor_id) => {
+                let mut set_params = HashMap::new();
+                set_params.insert("region".to_string(), region_val);
+                set_params.insert("history_id".to_string(), Value::Integer(neighbor_id));
+                self.db_handle
+                    .query(
+                        include_str!("../../sql/navigation/set_cursor_to_history.sql"),
+                        set_params,
+                    )
+                    .await
+                    .map_err(|e| format!("Failed to move cursor to neighbor tab: {e}"))?;
+            }
+            None => {
+                let mut delete_params = HashMap::new();
+                delete_params.insert("region".to_string(), region_val);
+                self.db_handle
+                    .query(
+                        include_str!("../../sql/navigation/delete_cursor.sql"),
+                        delete_params,
+                    )
+                    .await
+                    .map_err(|e| format!("Failed to clear cursor after last tab: {e}"))?;
+            }
+        }
+
+        Ok(OperationResult::irreversible(vec![]))
+    }
+
+    /// Set the region's cursor to an already-open history row (tab switch).
+    ///
+    /// Moves ONLY the cursor — no insert, no close, no reorder — so the open
+    /// set keeps its stable insertion order and `main_nav_generation` is not
+    /// bumped (per-tab scroll survives). The main panel query filters
+    /// `focus_roots` by this cursor, so activating flips which open tab
+    /// renders. See ADR-0026 tab model (Q3 stable order, risk register #1/#3).
+    async fn activate(&self, region: Region, history_id: i64) -> Result<OperationResult> {
+        tracing::debug!(
+            "[NavigationProvider] activate: region={}, history_id={}",
+            region,
+            history_id
+        );
+
         let mut params = HashMap::new();
+        params.insert("region".to_string(), Value::from(region));
         params.insert("history_id".to_string(), Value::Integer(history_id));
 
         self.db_handle
             .query(
-                include_str!("../../sql/navigation/close_history_id.sql"),
+                include_str!("../../sql/navigation/set_cursor_to_history.sql"),
                 params,
             )
             .await
-            .map_err(|e| format!("Failed to close history row: {}", e))?;
+            .map_err(|e| format!("Failed to activate history row {history_id}: {e}"))?;
+
+        // The cursor-on-open-row invariant otherwise rests on activate intents
+        // being minted only from open focus_roots rows; a stale/racy intent for
+        // a just-closed tab would blank the panel through the same join-break
+        // go_back had — guard it like go_back/go_forward.
+        self.assert_cursor_on_open_row(region).await?;
+
+        Ok(OperationResult::irreversible(vec![]))
+    }
+
+    /// Open a block as an ADDITIONAL open tab in a region (multi-open).
+    ///
+    /// Idempotent by open row: if `(region, block_id)` is already open, point
+    /// the cursor at that existing tab (no duplicate row). Otherwise insert a
+    /// new open `navigation_history` row and point the cursor at it — WITHOUT
+    /// closing the region's other open rows (that is `focus`'s replace
+    /// semantics). The sole multi-open producer (ADR-0026 tab model, Q2).
+    async fn open_tab(&self, region: Region, block_id: &str) -> Result<OperationResult> {
+        tracing::debug!(
+            "[NavigationProvider] open_tab: region={}, block_id={}",
+            region,
+            block_id
+        );
+
+        let mut params = HashMap::new();
+        params.insert("region".to_string(), Value::from(region));
+        params.insert("block_id".to_string(), Value::String(block_id.to_string()));
+
+        // Already open? → activate that tab rather than inserting a duplicate.
+        let existing = self
+            .db_handle
+            .query(
+                include_str!("../../sql/navigation/get_open_history_id.sql"),
+                params.clone(),
+            )
+            .await
+            .map_err(|e| format!("Failed to look up open tab: {e}"))?;
+        if let Some(id) = existing
+            .first()
+            .and_then(|row| row.get("id"))
+            .and_then(|v| v.as_i64())
+        {
+            tracing::debug!(
+                "[NavigationProvider] open_tab: {block_id} already open (id={id}) — activating"
+            );
+            return self.activate(region, id).await;
+        }
+
+        // Insert a new open row (closed_at defaults NULL → open) WITHOUT
+        // closing the region's other open rows.
+        self.db_handle
+            .query(
+                include_str!("../../sql/navigation/insert_history.sql"),
+                params.clone(),
+            )
+            .await
+            .map_err(|e| format!("Failed to insert open tab: {e}"))?;
+
+        let max_result = self
+            .db_handle
+            .query(
+                include_str!("../../sql/navigation/get_max_history_id.sql"),
+                params.clone(),
+            )
+            .await
+            .map_err(|e| format!("Failed to get max history id: {e}"))?;
+        let new_history_id: i64 = max_result
+            .first()
+            .and_then(|row| row.get("max_id"))
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| "Failed to get new history_id after open_tab".to_string())?;
+
+        params.insert("new_id".to_string(), Value::Integer(new_history_id));
+        self.db_handle
+            .query(
+                include_str!("../../sql/navigation/upsert_cursor.sql"),
+                params,
+            )
+            .await
+            .map_err(|e| format!("Failed to update cursor after open_tab: {e}"))?;
 
         Ok(OperationResult::irreversible(vec![]))
     }
@@ -387,9 +695,9 @@ impl NavigationProvider {
         let mut params = HashMap::new();
         params.insert("region".to_string(), Value::from(region));
 
-        self.get_current_history_id(&mut params).await?;
+        let current_id = self.get_current_history_id(&mut params).await?;
 
-        // Find the previous history entry
+        // Find the previous history entry (traversal ordered by id — unchanged).
         let prev_result = self
             .db_handle
             .query(
@@ -399,24 +707,27 @@ impl NavigationProvider {
             .await
             .map_err(|e| format!("Failed to find previous entry: {}", e))?;
 
-        // Step 3: Update cursor - either to previous entry or to NULL (home)
-        if let Some(prev_row) = prev_result.first() {
-            if let Some(prev_id) = prev_row.get("id").and_then(|v| v.as_i64()) {
-                params.insert("new_id".to_string(), Value::Integer(prev_id));
-                self.db_handle
-                    .query(
-                        include_str!("../../sql/navigation/update_cursor.sql"),
-                        params,
-                    )
-                    .await
-                    .map_err(|e| format!("Failed to go back: {}", e))?;
-                tracing::debug!(
-                    "[NavigationProvider] go_back: moved to history_id={}",
-                    prev_id
-                );
-            }
+        if let Some(prev_id) = prev_result
+            .first()
+            .and_then(|row| row.get("id"))
+            .and_then(|v| v.as_i64())
+        {
+            // Write-side invariant (ruled option (a)): the main-panel focus query
+            // joins `focus_roots` (which is `navigation_history WHERE closed_at IS
+            // NULL` — open rows only) to `navigation_cursor` on `history_id`, so
+            // the cursor MUST land on an OPEN row. The back target was soft-closed
+            // by the forward `focus_replace` that superseded it; re-open it and
+            // close the departed row so the panel stays populated across back-nav
+            // (before this, the cursor pointed at a closed row → 0-row focus query
+            // → blank panel → creation-slot `0 live rows` panic).
+            self.reopen_target_close_departed(region, current_id, prev_id)
+                .await?;
+            tracing::debug!(
+                "[NavigationProvider] go_back: moved to history_id={prev_id} (target re-opened)"
+            );
         } else {
-            // No previous entry - go to home (NULL cursor)
+            // No previous entry — go to home (NULL cursor is a LEGAL invariant
+            // state: the panel intentionally falls through to default render).
             self.db_handle
                 .query(
                     include_str!("../../sql/navigation/nullify_cursor.sql"),
@@ -427,6 +738,7 @@ impl NavigationProvider {
             tracing::debug!("[NavigationProvider] go_back: went to home (no previous entry)");
         }
 
+        self.assert_cursor_on_open_row(region).await?;
         Ok(OperationResult::irreversible(vec![]))
     }
 
@@ -437,7 +749,7 @@ impl NavigationProvider {
         let mut params = HashMap::new();
         params.insert("region".to_string(), Value::from(region));
 
-        self.get_current_history_id(&mut params).await?;
+        let current_id = self.get_current_history_id(&mut params).await?;
 
         // Find the next history entry
         let next_result = self
@@ -449,28 +761,27 @@ impl NavigationProvider {
             .await
             .map_err(|e| format!("Failed to find next entry: {}", e))?;
 
-        // Step 3: Update cursor if next entry exists
-        if let Some(next_row) = next_result.first() {
-            if let Some(next_id) = next_row.get("id").and_then(|v| v.as_i64()) {
-                params.insert("new_id".to_string(), Value::Integer(next_id));
-                self.db_handle
-                    .query(
-                        include_str!("../../sql/navigation/update_cursor.sql"),
-                        params,
-                    )
-                    .await
-                    .map_err(|e| format!("Failed to go forward: {}", e))?;
-                tracing::debug!(
-                    "[NavigationProvider] go_forward: moved to history_id={}",
-                    next_id
-                );
-            }
+        // Step 3: Re-open + re-point the cursor if a next entry exists.
+        if let Some(next_id) = next_result
+            .first()
+            .and_then(|row| row.get("id"))
+            .and_then(|v| v.as_i64())
+        {
+            // Same write-side invariant as go_back: the forward target was
+            // soft-closed when we navigated back past it, so re-open it and close
+            // the departed row so the cursor lands on an OPEN focus_roots row.
+            self.reopen_target_close_departed(region, current_id, next_id)
+                .await?;
+            tracing::debug!(
+                "[NavigationProvider] go_forward: moved to history_id={next_id} (target re-opened)"
+            );
         } else {
             tracing::debug!(
                 "[NavigationProvider] go_forward: no next entry, staying at current position"
             );
         }
 
+        self.assert_cursor_on_open_row(region).await?;
         Ok(OperationResult::irreversible(vec![]))
     }
 
@@ -499,6 +810,120 @@ impl NavigationProvider {
 
         params.insert("current_id".to_string(), Value::Integer(current_history_id));
         Ok(current_history_id)
+    }
+
+    /// Move the region's cursor to a back/forward `target_id`, re-opening it
+    /// and soft-closing the `departed_id` in ONE transaction (write-side
+    /// invariant, ruled option (a)).
+    ///
+    /// The back/forward targets are soft-CLOSED rows (`focus_replace` closes
+    /// the prior open focus on every forward navigation), but the
+    /// main-panel focus query joins `focus_roots` — `navigation_history
+    /// WHERE closed_at IS NULL` — to `navigation_cursor` on `history_id`,
+    /// so pointing the cursor at a closed row yields a 0-row focus query
+    /// and a blank panel. Re-opening the target keeps the cursor on an OPEN
+    /// row; closing the departed row keeps the main region at "exactly one
+    /// open focus row". `closed_at` is a DISPLAY flag (in-vs-out of
+    /// `focus_roots`), not a departure timestamp — reopening only
+    /// flips it and never renumbers ids, so back/forward traversal (ordered by
+    /// `id`) is undisturbed.
+    ///
+    /// Atomicity is mandatory: the fork's deferred-FK/autocommit wart means a
+    /// multi-statement write MUST go through `transaction()` (a mid-sequence
+    /// autocommit would expose the empty-join intermediate the panel must never
+    /// observe).
+    async fn reopen_target_close_departed(
+        &self,
+        region: Region,
+        departed_id: i64,
+        target_id: i64,
+    ) -> Result<()> {
+        let region_str = region.as_str().to_string();
+        self.db_handle
+            .transaction(vec![
+                // Close the departed focus row (guarded on still-open; a no-op at
+                // home, where `departed_id` resolves to no row).
+                (
+                    "UPDATE navigation_history SET closed_at = datetime('now') \
+                     WHERE id = ? AND closed_at IS NULL"
+                        .to_string(),
+                    vec![turso::Value::Integer(departed_id)],
+                ),
+                // Re-open the back/forward target so `focus_roots` tracks it.
+                (
+                    "UPDATE navigation_history SET closed_at = NULL WHERE id = ?".to_string(),
+                    vec![turso::Value::Integer(target_id)],
+                ),
+                // Point the cursor at the (now open) target.
+                (
+                    "UPDATE navigation_cursor SET history_id = ? WHERE region = ?".to_string(),
+                    vec![
+                        turso::Value::Integer(target_id),
+                        turso::Value::Text(region_str),
+                    ],
+                ),
+            ])
+            .await
+            .map_err(|e| {
+                format!(
+                    "Failed to move nav cursor (region={region}, from={departed_id}, \
+                     to={target_id}): {e}"
+                )
+                .into()
+            })
+    }
+
+    /// Fail-loud per-region invariant (ruled option (a)): `navigation_cursor`
+    /// must point at an OPEN `navigation_history` row (`closed_at IS NULL`) —
+    /// or have NO row for the region, or a NULL (home) cursor. A cursor on
+    /// an open `NavigateHome` row (`block_id NULL`) is LEGAL
+    /// (open-but-not-focused; the panel falls through to default render),
+    /// so the check is "cursor row is OPEN", never "cursor row is in
+    /// focus_roots".
+    ///
+    /// A violation means the main panel would silently blank (the `focus_roots`
+    /// matview excludes closed rows, so the panel query's
+    /// `nc.history_id = fr.history_id` join yields nothing). Called after every
+    /// cursor move in this provider's back/forward ops. `focus` / `activate` /
+    /// `open_tab` / `close` maintain the invariant by construction (they only
+    /// ever point the cursor at a freshly-inserted or already-open row, or
+    /// delete the cursor row).
+    async fn assert_cursor_on_open_row(&self, region: Region) -> Result<()> {
+        let mut params = HashMap::new();
+        params.insert("region".to_string(), Value::from(region));
+        let rows = self
+            .db_handle
+            .query(
+                "SELECT nc.history_id AS history_id, nh.closed_at AS closed_at \
+                 FROM navigation_cursor nc \
+                 LEFT JOIN navigation_history nh ON nh.id = nc.history_id \
+                 WHERE nc.region = $region",
+                params,
+            )
+            .await
+            .map_err(|e| format!("cursor-invariant check failed (region={region}): {e}"))?;
+        let Some(row) = rows.first() else {
+            return Ok(()); // no cursor row for the region — legal (never navigated).
+        };
+        // NULL cursor = home — legal.
+        if !matches!(row.get("history_id"), Some(Value::Integer(_))) {
+            return Ok(());
+        }
+        // `closed_at` is a TEXT display flag: non-NULL (String/DateTime) = CLOSED.
+        if matches!(
+            row.get("closed_at"),
+            Some(Value::String(_)) | Some(Value::DateTime(_))
+        ) {
+            let hid = row.get("history_id").and_then(|v| v.as_i64()).unwrap_or(-1);
+            return Err(format!(
+                "[NavigationProvider] cursor invariant violated: region={region} \
+                 navigation_cursor points at CLOSED navigation_history row id={hid}. Closed rows \
+                 are excluded from the focus_roots matview, so the main panel would blank. Every \
+                 cursor move must land on an OPEN row (or a NULL/home cursor, or no row)."
+            )
+            .into());
+        }
+        Ok(())
     }
 }
 
@@ -560,6 +985,23 @@ impl OperationProvider for NavigationProvider {
             Ok(NavigationOp::GoBack) => self.go_back(region).await,
             Ok(NavigationOp::GoForward) => self.go_forward(region).await,
             Ok(NavigationOp::GoHome) => self.go_home(region).await,
+            Ok(NavigationOp::Activate) => {
+                let history_id = params
+                    .get("history_id")
+                    .and_then(|v| v.as_i64())
+                    .ok_or_else(|| "Missing required parameter 'history_id'".to_string())?;
+                self.activate(region, history_id).await
+            }
+            Ok(NavigationOp::OpenTab) => {
+                let block_id = params
+                    .get("block_id")
+                    .and_then(|v| match v {
+                        Value::String(s) => Some(s.as_str()),
+                        _ => None,
+                    })
+                    .ok_or_else(|| "Missing required parameter 'block_id'".to_string())?;
+                self.open_tab(region, block_id).await
+            }
             // `close` is dispatched before region extraction above.
             Ok(NavigationOp::Close) => {
                 unreachable!("close is handled before region extraction")

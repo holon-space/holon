@@ -6,12 +6,17 @@ use fluxdi::Injector;
 use fluxdi::Module;
 use fluxdi::Provider;
 use fluxdi::Shared;
+use holon::sync::DegradedSignalBus;
+use holon::sync::ShareDegraded;
+use holon::sync::ShareDegradedReason;
 use holon_api::EntityName;
 use holon_core::OperationProvider;
+use holon_core::SyncGate;
 use holon_core::SyncTokenStore;
 use holon_mcp_client::IntegrationFileConfig;
 use holon_mcp_client::McpIntegration;
 use holon_mcp_client::PendingOAuthFlows;
+use holon_mcp_client::PendingWriteStore;
 use holon_mcp_client::build_mcp_integration;
 use holon_mcp_client::integration_config::UnresolvedVar;
 use holon_mcp_client::load_integration_configs;
@@ -24,6 +29,31 @@ use tracing::warn;
 /// the setting key `todoist.api_key` both normalize to `todoist_api_key`.
 fn normalize_var_name(s: &str) -> String {
     s.to_ascii_lowercase().replace('.', "_")
+}
+
+/// Disclose that `name` could not be connected at boot. Without this the
+/// failure is log-only and every page backed by the integration's `cc_*`
+/// tables renders blank as if the remote had no data.
+fn disclose_connect_failure(name: &str, error: &anyhow::Error, bus: &DegradedSignalBus) {
+    bus.emit(ShareDegraded {
+        shared_tree_id: name.to_string(),
+        reason: ShareDegradedReason::IntegrationConnectFailed {
+            integration: name.to_string(),
+            error: format!("{error:#}"),
+        },
+    });
+}
+
+/// Disclose that `name` is connectable but waiting on an OAuth grant — same
+/// blank-page consequence as a failed connect, different remedy.
+fn disclose_needs_auth(name: &str, auth_url: &str, bus: &DegradedSignalBus) {
+    bus.emit(ShareDegraded {
+        shared_tree_id: name.to_string(),
+        reason: ShareDegradedReason::IntegrationNeedsAuth {
+            integration: name.to_string(),
+            auth_url: auth_url.to_string(),
+        },
+    });
 }
 
 /// Holds all running MCP integrations so their services stay alive.
@@ -105,6 +135,20 @@ impl Module for McpIntegrationsModule {
         let pending_flows_clone = pending_flows.clone();
         injector.provide::<PendingOAuthFlows>(Provider::root(move |_| pending_flows_clone.clone()));
 
+        // ONE shared pending-write store for all MCP providers (leases/read-
+        // write ruling, increment 4c). Installed on every integration below so
+        // all once_only chokepoints and the frontend approve panel coordinate
+        // through the same at-most-once state machine. Registered as a DI
+        // singleton so the GPUI layer resolves the same handle to render/approve.
+        let pending_writes = Arc::new(PendingWriteStore::new());
+        let pending_writes_di = pending_writes.clone();
+        // fluxdi treats an `Arc<T>`-returning root closure as the shared
+        // instance of `T`, so `provide::<PendingWriteStore>` + a closure cloning
+        // this Arc registers ONE shared store; `resolve::<PendingWriteStore>`
+        // returns that same `Arc<PendingWriteStore>` (mirrors PendingOAuthFlows).
+        injector.provide::<PendingWriteStore>(Provider::root(move |_| pending_writes_di.clone()));
+        let pending_writes_for_registry = pending_writes.clone();
+
         let configs_for_registry = configs.clone();
 
         // Register the registry as an async singleton — resolved in parallel with other
@@ -112,6 +156,7 @@ impl Module for McpIntegrationsModule {
         injector.provide::<McpIntegrationRegistry>(Provider::root_async(move |resolver| {
             let configs_for_registry = configs_for_registry.clone();
             let pending_flows = pending_flows.clone();
+            let pending_writes = pending_writes_for_registry.clone();
             async move {
                 let db_handle = resolver
                     .resolve_async::<dyn holon::di::DbHandleProvider>()
@@ -123,6 +168,28 @@ impl Module for McpIntegrationsModule {
                 let token_store: Arc<dyn SyncTokenStore> =
                     resolver.resolve_async::<dyn SyncTokenStore>().await;
                 let type_registry = resolver.resolve::<TypeRegistry>();
+                // Boot-ordering gate: provider syncs (initial + notification-
+                // driven) wait for the org initial scan to finish before
+                // touching the serialized DatabaseActor. Registered in
+                // `add_frontend`, opened by the `post_ready` scan barrier.
+                let sync_gate: SyncGate = (*resolver.resolve::<SyncGate>()).clone();
+
+                // Every non-connected integration is disclosed on this bus so
+                // the resulting blank pages are attributable. The bus is only
+                // registered by `LoroModule`, so a SqlOnly container has none —
+                // say so loudly instead of degrading invisibly.
+                let degraded_bus =
+                    match resolver.try_resolve_async::<Arc<DegradedSignalBus>>().await {
+                        Ok(bus) => Some((*bus).clone()),
+                        Err(e) => {
+                            tracing::error!(
+                                "[McpIntegrationsModule] No DegradedSignalBus in this container \
+                             ({e}) — integration connect failures will be LOG-ONLY and their \
+                             pages will render blank with no banner"
+                            );
+                            None
+                        }
+                    };
 
                 // Layered `${VAR}` resolver: environment variable wins, then a
                 // settings value whose key matches case-insensitively with `.`/`_`
@@ -166,6 +233,9 @@ impl Module for McpIntegrationsModule {
                                  skipping: {e}",
                                 name
                             );
+                            if let Some(bus) = &degraded_bus {
+                                disclose_connect_failure(name, &e, bus);
+                            }
                             continue;
                         }
                         Err(e) => {
@@ -182,16 +252,22 @@ impl Module for McpIntegrationsModule {
                         cache_factory.clone(),
                         token_store.clone(),
                         &pending_flows,
+                        sync_gate.clone(),
                     )
                     .await;
 
                     match result {
-                        Ok(holon_mcp_client::McpConnectionResult::Connected(integration)) => {
+                        Ok(holon_mcp_client::McpConnectionResult::Connected(mut integration)) => {
                             info!(
                                 "[McpIntegrationsModule] Provider '{}' connected ({} operations)",
                                 name,
                                 integration.operation_provider.operations().len()
                             );
+
+                            // Install the shared pending-write store so once_only
+                            // writes on this connector coordinate with the frontend
+                            // approve panel (leases/read-write ruling, increment 4c).
+                            integration.set_pending_store(pending_writes.clone());
 
                             // Register MCP entity types in TypeRegistry for GQL graph
                             integration.register_entity_types(&type_registry);
@@ -219,12 +295,18 @@ impl Module for McpIntegrationsModule {
                                 "[McpIntegrationsModule] Provider '{}' needs OAuth — auth_url: {}",
                                 provider_name, auth_url
                             );
+                            if let Some(bus) = &degraded_bus {
+                                disclose_needs_auth(&provider_name, &auth_url, bus);
+                            }
                         }
                         Err(e) => {
                             warn!(
                                 "[McpIntegrationsModule] Failed to connect provider '{}': {e}",
                                 name
                             );
+                            if let Some(bus) = &degraded_bus {
+                                disclose_connect_failure(name, &e, bus);
+                            }
                         }
                     }
                 }
@@ -265,9 +347,15 @@ impl Module for McpIntegrationsModule {
                                 name,
                             }) as Arc<dyn OperationProvider>
                         } else {
+                            // No emit here: every route by which a configured
+                            // integration can be missing from the registry
+                            // (unresolved `${VAR}`, NeedsAuth, connect error)
+                            // already disclosed itself on the degraded bus with
+                            // the actual cause, which this site does not know.
                             warn!(
                                 "[McpIntegrationsModule] Integration '{name}' unavailable (not \
-                                 configured or failed to connect) — registering inert provider"
+                                 configured or failed to connect) — registering inert provider; \
+                                 cause was disclosed on the degraded bus at boot"
                             );
                             Arc::new(EmptyOperationProvider { name }) as Arc<dyn OperationProvider>
                         }
@@ -277,6 +365,68 @@ impl Module for McpIntegrationsModule {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use holon::sync::DegradedSignalBus;
+    use holon::sync::ShareDegradedReason;
+
+    use super::*;
+
+    /// Drives the REAL sidecar-spawn failure (a `command` that is not on disk)
+    /// through the same disclosure the registry factory uses, and asserts the
+    /// degraded bus carries the integration name and the connect error.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dead_sidecar_command_is_disclosed_on_the_degraded_bus() {
+        let Err(err) = holon_mcp_client::connect_mcp_child(
+            "/nonexistent/holon-test-sidecar",
+            &[],
+            &HashMap::new(),
+        )
+        .await
+        else {
+            panic!("spawning a nonexistent sidecar binary must fail");
+        };
+
+        // Disclose BEFORE subscribing — the registry factory runs in boot DI,
+        // the only consumer subscribes at window launch.
+        let bus = DegradedSignalBus::new();
+        disclose_connect_failure("todoist", &err, &bus);
+
+        let mut current = bus.subscribe().current;
+        assert_eq!(current.len(), 1);
+        let ev = current.remove(0);
+        assert_eq!(ev.shared_tree_id, "todoist");
+        let ShareDegradedReason::IntegrationConnectFailed { integration, error } = ev.reason else {
+            panic!("expected IntegrationConnectFailed, got {:?}", ev.reason);
+        };
+        assert_eq!(integration, "todoist");
+        assert!(
+            error.contains("No such file") || error.contains("os error 2"),
+            "error must carry the spawn failure: {error}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pending_oauth_is_disclosed_on_the_degraded_bus() {
+        let bus = DegradedSignalBus::new();
+        disclose_needs_auth("linear", "https://linear.app/oauth/authorize", &bus);
+
+        let mut current = bus.subscribe().current;
+        assert_eq!(current.len(), 1);
+        let ev = current.remove(0);
+        assert_eq!(ev.shared_tree_id, "linear");
+        let ShareDegradedReason::IntegrationNeedsAuth {
+            integration,
+            auth_url,
+        } = ev.reason
+        else {
+            panic!("expected IntegrationNeedsAuth, got {:?}", ev.reason);
+        };
+        assert_eq!(integration, "linear");
+        assert_eq!(auth_url, "https://linear.app/oauth/authorize");
     }
 }
 

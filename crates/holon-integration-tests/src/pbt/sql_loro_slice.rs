@@ -16,10 +16,15 @@
 //! correctness is already covered by `loro_slice`); Loro is purely the second
 //! task_state oracle the coherence invariant compares against.
 //!
+//! @pbt kind slice-mod
+//! @pbt covers sql+loro-slice — the ONLY consumer of `inv-task-state-storage-
+//!   coherence`. NOTE that invariant is SUT↔SUT (SQL vs Loro projection), not
+//!   SUT↔Ref — see audit SUT-3.
+//!
 //! [`SutLoroTaskState`]: holon_pbt_core::capabilities::SutLoroTaskState
 //! [`CapMap`]: holon_pbt_core::composition::CapMap
 //! [`SqlProjectionComponent`]: crate::pbt::sql_slice::components::SqlProjectionComponent
-//! [`LoroBackendComponent`]: crate::pbt::loro_slice::components::LoroBackendComponent
+//! [`LoroBackendComponent`]: holon_loro_testing::LoroBackendComponent
 
 pub mod builders;
 

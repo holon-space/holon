@@ -46,6 +46,7 @@ impl StateMachineTest for ItemsTest {
     type Reference = ItemsRef;
 
     fn init_test(
+        // ALLOW(unused_param): trait signature requires ref_state, unused here
         _ref_state: &<Self::Reference as ReferenceStateMachine>::State,
     ) -> Self::SystemUnderTest {
         Sut::default()
@@ -53,6 +54,7 @@ impl StateMachineTest for ItemsTest {
 
     fn apply(
         mut sut: Self::SystemUnderTest,
+        // ALLOW(unused_param): trait signature requires ref_state, unused here
         _ref_state: &<Self::Reference as ReferenceStateMachine>::State,
         transition: <Self::Reference as ReferenceStateMachine>::Transition,
     ) -> Self::SystemUnderTest {
@@ -74,6 +76,7 @@ impl StateMachineTest for ItemsTest {
 prop_state_machine! {
     #![proptest_config(ProptestConfig {
         cases: 64,
+        failure_persistence: None,
         .. ProptestConfig::default()
     })]
 

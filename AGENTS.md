@@ -56,7 +56,7 @@ The project uses [`just`](https://github.com/casey/just) as a task runner. Run `
 | `just watch <ui>` | Hot-reloads a frontend (`gpui`, `tui`, `ply`) |
 | `just coverage` | Collects runtime code coverage |
 
-For faster test runs, prefer `cargo nextest` (configured in `Nextest.toml`):
+For faster test runs, prefer `cargo nextest` (configured in `.config/nextest.toml`):
 
 ```sh
 cargo nextest run                   # all tests

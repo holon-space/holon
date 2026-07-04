@@ -222,7 +222,7 @@ mod tests {
             let doc = doc.clone();
             Arc::new(move |block_id: &str| {
                 let map = doc.get_map("text_by_block");
-                let text = map.get_or_create_container(block_id, LoroText::new())?;
+                let text = crate::mergeable_child::ensure_text(&map, block_id)?;
                 Ok(text)
             })
         };

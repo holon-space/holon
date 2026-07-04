@@ -22,6 +22,8 @@
 //! are unsupported by this driver.
 
 use std::collections::HashMap;
+use std::hash::Hash;
+use std::hash::Hasher;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -42,6 +44,25 @@ use holon_mcp::server::InteractionCommand;
 use holon_mcp::server::InteractionEvent;
 use holon_mcp::server::InteractionResponse;
 
+/// How long `click_entity` waits for a just-rendered element's bounds to be
+/// promoted staged → committed before failing loud. `BoundsRegistry` commits
+/// a frame's bounds at the *next* `begin_pass` (or an on-read `flush`), so an
+/// element that first appears in the frame a preceding state change triggered
+/// (e.g. a `:__virtual:` creation slot that materialises when its container
+/// empties) has no committed bounds for a frame or two. Generous enough to
+/// cover idle/occluded windows that only paint when driven; a real
+/// never-rendered element still fails at the deadline.
+const CLICK_BOUNDS_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long a wheel-driven scroll polls the `BoundsRegistry` for a committed
+/// change before concluding nothing moved. A real wheel scroll re-lays-out and
+/// commits new bounds on the next paint (the interaction pump `refresh()`es the
+/// window after each event); an occluded/idle window only paints when driven,
+/// so this must cover a couple of forced frames. When the deadline passes with
+/// no movement, the scroll is treated as a no-op and fails loud (never a fake
+/// success — dogfood #3).
+const SCROLL_SETTLE_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Channel-based `UserDriver` for GPUI. Sends `InteractionCommand`s on
 /// the shared `interaction_tx` channel; the GPUI interaction pump drains
 /// them on the main thread and dispatches real `PlatformInput` events
@@ -51,6 +72,15 @@ pub struct GpuiUserDriver {
     geometry: Arc<dyn GeometryProvider>,
     engine: Arc<ReactiveEngine>,
 }
+
+/// The three default layout panels, each a `live_block` whose block-mode
+/// shell hosts a virtualized list. Used to resolve a scroll point/entity to a
+/// scrollable target.
+const DEFAULT_PANEL_IDS: [&str; 3] = [
+    "block:default-left-sidebar",
+    "block:default-main-panel",
+    "block:default-right-sidebar",
+];
 
 impl GpuiUserDriver {
     pub fn new(
@@ -251,6 +281,90 @@ impl GpuiUserDriver {
     /// error with enough context for test authors to understand whether
     /// the element was never rendered or simply hasn't been promoted from
     /// the staged buffer yet.
+    /// Dispatch a [`ScrollList`](InteractionEvent::ScrollList) and fail loud
+    /// when nothing scrolled. The GPUI handler drives the target's
+    /// `ListState::scroll_by` directly and reports `handled=false` when no
+    /// scrollable list matches; we surface that as an error rather than the
+    /// old silent-success no-op (dogfood #3).
+    async fn scroll_list(&self, entity_id: &str, dx: f32, dy: f32) -> Result<()> {
+        let response = self
+            .dispatch_event(InteractionEvent::ScrollList {
+                entity_id: entity_id.to_string(),
+                dx,
+                dy,
+            })
+            .await?;
+        if !response.handled {
+            anyhow::bail!(
+                "scroll: nothing scrolled for {entity_id:?}{detail}",
+                detail = match &response.detail {
+                    Some(d) => format!(" — {d}"),
+                    None => String::new(),
+                }
+            );
+        }
+        Ok(())
+    }
+
+    /// Order-independent fingerprint of every committed element's vertical
+    /// placement (rounded `y` + visible `height`). A scroll shifts rows and
+    /// changes which are clipped, so the fingerprint changes iff something
+    /// actually moved on screen — the observable the wheel path verifies
+    /// against instead of trusting the dispatch to have "worked".
+    fn geometry_fingerprint(&self) -> u64 {
+        let mut rows: Vec<(String, i32, i32)> = self
+            .geometry
+            .all_elements()
+            .into_iter()
+            .map(|(id, info)| {
+                (
+                    id,
+                    (info.y * 10.0).round() as i32,
+                    (info.height * 10.0).round() as i32,
+                )
+            })
+            .collect();
+        rows.sort();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        rows.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Dispatch a real wheel scroll at `(x, y)`: a `MouseMove` to the point
+    /// (so the window's tracked mouse position — which gpui recomputes the
+    /// scroll hit-test from — sits over the target), then a `ScrollWheel`.
+    /// Unlike the ListState-only `ScrollList` path, this drives ANY scroll
+    /// viewport (eager `overflow_y_scroll` panels included), because it is the
+    /// exact input a trackpad/wheel produces. Returns `Ok(true)` when the
+    /// committed geometry moved, `Ok(false)` when the dispatch left the screen
+    /// unchanged (caller decides whether that is a fallback case or fails
+    /// loud). `dx`/`dy` are line-based deltas (positive `dy` = down).
+    async fn dispatch_wheel_and_settle(&self, x: f32, y: f32, dx: f32, dy: f32) -> Result<bool> {
+        let before = self.geometry_fingerprint();
+        self.dispatch_event(InteractionEvent::MouseMove {
+            position: (x, y),
+            pressed_button: None,
+            modifiers: Vec::new(),
+        })
+        .await?;
+        self.dispatch_event(InteractionEvent::ScrollWheel {
+            position: (x, y),
+            delta: (dx, dy),
+            modifiers: Vec::new(),
+        })
+        .await?;
+        let deadline = tokio::time::Instant::now() + SCROLL_SETTLE_TIMEOUT;
+        loop {
+            if self.geometry_fingerprint() != before {
+                return Ok(true);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(false);
+            }
+            let _ = tokio::time::timeout(Duration::from_millis(100), self.geometry.changed()).await;
+        }
+    }
+
     fn require_element_center(&self, entity_id: &str, verb: &str) -> Result<(f32, f32)> {
         self.element_center(entity_id).with_context(|| {
             format!(
@@ -336,6 +450,43 @@ impl GpuiUserDriver {
         }
         best.map(|info| info.center())
     }
+
+    /// Resolve the click-target center, waiting up to `timeout` for a
+    /// just-rendered element's bounds to be promoted staged → committed.
+    ///
+    /// `BoundsRegistry` commits a frame's bounds at the *next* `begin_pass`
+    /// (or an on-read `flush`), so an element that first appears in the frame
+    /// a preceding state change triggered — e.g. a `:__virtual:<parent>`
+    /// creation slot that materialises when its container empties — has no
+    /// committed bounds for a frame or two after the caller learns its id.
+    /// A single-shot lookup fails on that race. Wake on each committed frame
+    /// (with a short poll fallback for idle windows, whose `changed()` may not
+    /// fire until something drives a paint) and re-resolve; then surface the
+    /// rich fail-loud error.
+    ///
+    /// This is the driver-level equivalent of the test-only
+    /// `wait_for_element_bounds`, so real MCP callers get the same
+    /// retry-until-committed the PBT harness has always wrapped clicks in.
+    async fn resolve_click_center_until(
+        &self,
+        entity_id: &str,
+        region: &str,
+        verb: &str,
+        timeout: Duration,
+    ) -> Result<(f32, f32)> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            // `require_click_center` reads via `FlushOnReadGeometry`, which
+            // promotes the last completed render's staged buffer before every
+            // lookup — so this succeeds as soon as the producing frame paints.
+            match self.require_click_center(entity_id, region, verb) {
+                Ok(center) => return Ok(center),
+                Err(e) if tokio::time::Instant::now() >= deadline => return Err(e),
+                Err(_) => {}
+            }
+            let _ = tokio::time::timeout(Duration::from_millis(50), self.geometry.changed()).await;
+        }
+    }
 }
 
 #[async_trait]
@@ -371,7 +522,38 @@ impl UserDriver for GpuiUserDriver {
         // The geometry/bounds registry is string-keyed (element ids, not
         // routing): render one stable string at the seam.
         let entity_id = entity_id.as_str();
-        let (cx, cy) = self.require_click_center(entity_id, region, "click_entity")?;
+        // Wait for a freshly-rendered element's bounds to commit rather than
+        // failing on the first miss (dogfood #3: clicking a just-rendered
+        // `:__virtual:` creation slot raced the staged → committed promotion).
+        let (cx, cy) = match self
+            .resolve_click_center_until(entity_id, region, "click_entity", CLICK_BOUNDS_TIMEOUT)
+            .await
+        {
+            Ok(center) => center,
+            Err(e) => {
+                // Fail loud AND defuse the stale-focus trap. The click never
+                // dispatched, so window + engine focus still sit on whatever
+                // the user last edited. Returning `Err` while leaving that
+                // focus intact is the dogfood #3 hazard: a following `type` /
+                // key MCP call lands its text in the OLD block and silently
+                // splits it — no error surfaced anywhere user-visible. Clear
+                // `focused_block` so the stale editor blurs and later
+                // keystrokes go unhandled (fail loud in `key_down_until_handled`)
+                // instead of corrupting content invisibly.
+                self.engine.ui_state().focused_block_mutable().set(None);
+                eprintln!(
+                    "[ui-event] click_entity({entity_id:?}) FAILED to resolve bounds within \
+                     {CLICK_BOUNDS_TIMEOUT:?}; cleared stale focus so subsequent typing cannot \
+                     silently mutate the previously-focused block"
+                );
+                return Err(e).with_context(|| {
+                    format!(
+                        "click_entity({entity_id:?}): element bounds never committed; stale focus \
+                         cleared to prevent silent mis-targeted typing"
+                    )
+                });
+            }
+        };
         // Hit-test BEFORE dispatching so the log captures the layout the
         // synthetic MouseDown will see. The topmost (smallest containing)
         // element is logged first; up to 4 candidates total. If the topmost
@@ -626,25 +808,64 @@ impl UserDriver for GpuiUserDriver {
         Ok(true)
     }
 
-    /// Turn the scroll wheel at a window coordinate via the interaction
-    /// channel. `dx` / `dy` are line-based deltas (positive `dy` = down).
+    /// Scroll at a window coordinate with a real wheel event. `dx`/`dy` are
+    /// line-based deltas (positive `dy` = down / toward the end).
+    ///
+    /// Primary path: dispatch `MouseMove(x, y)` + `ScrollWheel(x, y)` — the
+    /// input a trackpad/wheel produces, which scrolls EVERY viewport including
+    /// eager `overflow_y_scroll` panels that have no `ListState` (the seeded
+    /// main panel). Verified by observation: the committed geometry must move,
+    /// else it is not reported as success.
+    ///
+    /// Fallback (virtualized lists): if the wheel produced no visible movement
+    /// AND `(x, y)` is over a `block:default-*` panel, drive that panel's
+    /// `ListState::scroll_by` directly. Fails loud when neither path moved
+    /// anything — never a fake success (dogfood #3).
     async fn scroll_at(&self, x: f32, y: f32, dx: f32, dy: f32) -> Result<()> {
-        self.dispatch_event(InteractionEvent::ScrollWheel {
-            position: (x, y),
-            delta: (dx, dy),
-            modifiers: Vec::new(),
-        })
-        .await?;
-        Ok(())
+        if self.dispatch_wheel_and_settle(x, y, dx, dy).await? {
+            return Ok(());
+        }
+        let mut panel: Option<&str> = None;
+        for p in DEFAULT_PANEL_IDS {
+            if let Some(info) = self.geometry.find_by_entity_id(p) {
+                if x >= info.x
+                    && x <= info.x + info.width
+                    && y >= info.y
+                    && y <= info.y + info.height
+                {
+                    panel = Some(p);
+                    break;
+                }
+            }
+        }
+        let panel = panel.ok_or_else(|| {
+            anyhow::anyhow!(
+                "scroll_at({x}, {y}): wheel produced no visible movement and no default panel's \
+                 bounds contain the point — the target may be at its scroll limit, or the \
+                 coordinates are outside the window"
+            )
+        })?;
+        self.scroll_list(panel, dx, dy).await
     }
 
-    /// Scroll over an entity — looks up its window-space center via the
-    /// `GeometryProvider` and delegates to `scroll_at`. Fails loud when
-    /// bounds aren't available; MCP clients now receive an error
-    /// instead of a silent no-op (observable behavior change).
+    /// Scroll the viewport associated with `entity_id` by line-based `dx`/`dy`
+    /// (positive `dy` = down). `entity_id` is a `block:default-*` panel or any
+    /// block inside one. Resolves the target's on-screen centre and dispatches
+    /// a real `MouseMove` + `ScrollWheel` there (the wheel path in
+    /// [`scroll_at`]), so eager `overflow_y_scroll` panels scroll too — not
+    /// only virtualized `gpui::list`s. Falls back to the direct
+    /// `ListState::scroll_by` path when the wheel does not move the target, and
+    /// fails loud when neither moves anything (dogfood #3).
     async fn scroll_entity(&self, entity_id: &EntityUri, dx: f32, dy: f32) -> Result<()> {
-        let (cx, cy) = self.require_element_center(entity_id.as_str(), "scroll_entity")?;
-        self.scroll_at(cx, cy, dx, dy).await
+        if let Some((cx, cy)) = self.element_center(entity_id.as_str()) {
+            if self.dispatch_wheel_and_settle(cx, cy, dx, dy).await? {
+                return Ok(());
+            }
+        }
+        // Wheel did not move it (or the entity has no committed bounds — an
+        // off-viewport row of a virtualized list): drive the ListState path,
+        // which resolves the row by index and fails loud if unreachable.
+        self.scroll_list(entity_id.as_str(), dx, dy).await
     }
 
     /// Drag the source block onto the target via real pointer events:
@@ -765,6 +986,31 @@ impl UserDriver for GpuiUserDriver {
         // that hunts the dropped-character editor-echo race as a prod bug
         // instead of pacing around it (expect inv-displayed-text failures
         // until that race is fixed; not part of the green gate).
+        if !superhuman_input() {
+            let _ = tokio::time::timeout(Duration::from_millis(50), self.geometry.changed()).await;
+        }
+        Ok(())
+    }
+
+    /// Deliver `text` through the soft-keyboard `insertText:` path
+    /// (`InteractionEvent::InsertText`), bypassing the keymap and committing
+    /// into the focused editor's input handler. See `dispatch_insert_text` in
+    /// `frontends/gpui/src/lib.rs` for the mobile-fidelity note.
+    async fn insert_text(&self, text: &str) -> Result<()> {
+        let response = self
+            .dispatch_event(InteractionEvent::InsertText {
+                text: text.to_string(),
+            })
+            .await?;
+        if !response.handled {
+            anyhow::bail!(
+                "GPUI insert_text not consumed: text={text:?}{detail}",
+                detail = match &response.detail {
+                    Some(d) => format!(" (detail: {d})"),
+                    None => String::new(),
+                },
+            );
+        }
         if !superhuman_input() {
             let _ = tokio::time::timeout(Duration::from_millis(50), self.geometry.changed()).await;
         }
@@ -915,7 +1161,11 @@ impl UserDriver for GpuiUserDriver {
     fn click_intent_of(&self, entity_id: &EntityUri) -> Option<OperationIntent> {
         let root_uri = holon_api::root_layout_block_uri();
         let resolved = self.engine.snapshot_resolved(&root_uri);
-        holon_frontend::focus_path::find_click_intent_in_view_model(&resolved, entity_id)
+        holon_frontend::focus_path::find_click_intent_in_view_model(
+            &resolved,
+            entity_id,
+            holon_api::ClickModifiers::none(),
+        )
     }
 
     /// The text actually rendered for `entity_id` on screen — read from

@@ -1,6 +1,10 @@
 //! PBT capability traits — the reference-side (`Ref*`) and SUT-side (`Sut*`)
 //! read/write surfaces the composed PBT catalog and `wide_e2e` runner bind on.
 //!
+//! @pbt kind cap-surface
+//! @pbt covers all-slices — the component-oriented capability trait vocabulary
+//!   every SUT arm and reference implements; selection is by presence of these.
+//!
 //! Each cap is a narrow trait hosted on `CapMap` (via `#[capmap_adapter]`, or
 //! emitted in pairs by `capability_pair!`). Reference impls live in
 //! `reference_capabilities.rs`; SUT impls in the composed components.
@@ -57,6 +61,78 @@ pub enum CapRegion {
 pub struct CapCursor {
     pub line: usize,
     pub column: usize,
+}
+
+// ─── Reference-side: Advice ───────────────────────────────────────────
+
+/// Expected advice rows for one anchor (read-time contract of ADR 0022's
+/// advice matview: suppression anti-join + top-K happen at read time).
+/// Total: `scored` is empty and `k == 0` when no active rule targets the
+/// anchor.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AdviceExpectation {
+    /// Eligible candidates AFTER the suppression anti-join, as
+    /// (candidate id, shared-tag count), sorted by count DESC (tie order
+    /// unspecified).
+    pub scored: Vec<(String, u32)>,
+    /// The rule's read-time top-K. 0 iff no active rule matches the anchor.
+    pub k: u8,
+}
+
+/// Reference-side advice-weave contract for the `advice rows woven` keystone
+/// invariant. `#[capmap_adapter]` hosts it on `CapMap` exactly like
+/// [`RefBlockTree`] (sync, owned returns → no `#[async_trait]`); ids are
+/// rendered as `EntityUri::as_str()` strings, the same form `block_raw.id`
+/// carries in the SUT so the anchor/candidate strings compare directly against
+/// the advice matview.
+#[holon_macros::capmap_adapter]
+pub trait RefAdvice {
+    /// Total over all anchors: empty expectation when no rule matches.
+    fn advice_expectation(&self, anchor: &str) -> AdviceExpectation;
+    /// The matview-level contract: ALL (anchor, candidate, shared_tag_count)
+    /// pairs of the single active rule, WITHOUT suppression and WITHOUT top-K
+    /// (those are read-time). Empty when no active rule exists.
+    fn advice_matview_rows(&self) -> Vec<(String, String, u32)>;
+    /// Name of the matview the single active rule synthesizes
+    /// (`advice_rule_{slug}`), or `None` when no active rule exists. The
+    /// SQL-level twin `inv-advice-matview-matches-ref` compares this against
+    /// the `advice_rule_%` matviews actually present in the SUT's
+    /// `sqlite_master`.
+    fn advice_matview_name(&self) -> Option<String>;
+}
+
+/// SUT-side observation of the synthesized advice matviews (ADR 0022 step-6).
+/// One materialized view per active rule, named `advice_rule_{slug}`,
+/// projecting `(anchor_id, lesson_id, shared_tag_count)` — the pre-suppression,
+/// un-capped matview contract. The `inv-advice-matview-matches-ref` twin reads
+/// this and compares it against [`RefAdvice::advice_matview_name`] +
+/// [`RefAdvice::advice_matview_rows`]. Until synthesis lands (step 6) the SUT
+/// has no such matview, so this observes an empty set — that IS the
+/// observed-absent state the twin flips out of once synthesis wires the DDL.
+#[holon_macros::capmap_adapter]
+pub trait SutAdviceMatview {
+    /// Every materialized view named `advice_rule_%` present in the SUT's
+    /// `sqlite_master`, paired with its full row set as
+    /// `(anchor_id, lesson_id, shared_tag_count)`. Empty when synthesis has
+    /// created none. Read AFTER CDC quiescence.
+    async fn advice_matviews(&self) -> Vec<(String, Vec<(String, String, u32)>)>;
+}
+
+/// SUT-side differential observation for
+/// `inv-matview-consistent-with-recompute`. For every `CREATE MATERIALIZED
+/// VIEW` in the SUT's `sqlite_master`, reads the IVM-maintained matview
+/// contents AND re-executes the view's own defining SELECT now, returning both
+/// as canonically-sorted multisets so the body is a pure comparison. A
+/// persistent per-view divergence is an IVM-vs-recompute bug (the "22-vs-20
+/// matview DUP" class); transient CDC lag self-heals inside the
+/// body's bounded-wait window. Placeholder / context-param views are skipped
+/// inside the impl (disclosed, not faked).
+#[holon_macros::capmap_adapter]
+pub trait SutMatviews {
+    /// Per MATERIALIZED view: (name, matview_rows, recompute_rows).
+    /// Both row sets canonically sorted; multiset semantics (dups kept).
+    async fn matview_recompute_snapshot(&self)
+    -> Vec<(String, Vec<Vec<String>>, Vec<Vec<String>>)>;
 }
 
 // ─── Reference-side: BlockTree ────────────────────────────────────────
@@ -123,6 +199,14 @@ pub trait RefBlockTree {
     /// `Block::is_page()`. Pure slice has no pages → returns `false`.
     fn is_page_block(&self, id: &EntityUri) -> bool;
 
+    /// True if `id` exists and is a Source-typed block (rhai/query source).
+    /// `ApplyMutation`'s Move/Create preconditions gate targets on
+    /// `content_type != Source`. Pure slice has no source blocks → default
+    /// `false` (so a defaulted impl on `EditorPureRef`/toy refs stays correct).
+    fn is_source_block(&self, _: &EntityUri) -> bool {
+        false
+    }
+
     /// All block ids tracked by the reference model, EXCLUDING seed
     /// blocks (those with sentinel/no_parent docs — they're inserted
     /// via direct SQL, never reverse-synced to Loro, and don't appear
@@ -132,19 +216,6 @@ pub trait RefBlockTree {
     /// `SutSqlProjection::all_block_ids()` for set-equality drift
     /// detection at the storage layer.
     fn all_non_seed_block_ids(&self) -> BTreeSet<EntityUri>;
-
-    /// True if `id`'s content type makes its *sibling order* non-canonical:
-    /// `Source` / `Image` render artifacts (`::src::`, `::render::`) whose
-    /// relative order legitimately differs between the SQL projection (ordered
-    /// by `sort_key`) and the ref model (ordered by `(sequence, id)`) after a
-    /// file-sync round trip reassigns sort_keys. `inv-live-children-match-ref`
-    /// uses this to exempt intra-source-group *reordering* — membership is
-    /// still enforced, only order is relaxed.
-    ///
-    /// Default `false` (pure slices have no source/image render artifacts).
-    fn is_order_exempt_sibling(&self, _: &EntityUri) -> bool {
-        false
-    }
 }
 
 /// Block-tree mutations. Concrete impls maintain whatever bookkeeping
@@ -183,6 +254,27 @@ pub trait RefBlockTreeMut: RefBlockTree {
 
     /// Swap two siblings (used by MoveUp / MoveDown).
     fn swap_siblings(&mut self, a: &EntityUri, b: &EntityUri);
+
+    /// Undo the last mutation (pop undo→redo) and reset every region cursor to
+    /// start — the whole `UndoLastMutation` reference effect. Defaults to a
+    /// no-op for slices that don't model an undo stack.
+    fn undo_last_and_reset_cursors(&mut self) {}
+
+    /// Redo the last undone mutation (pop redo→undo) and reset every region
+    /// cursor to start — the whole `Redo` reference effect. Defaults to a
+    /// no-op for slices that don't model a redo stack.
+    fn redo_last_and_reset_cursors(&mut self) {}
+
+    /// Re-mint a block: swap its identity for a FRESH synthetic id (keeping
+    /// content, parent, and position) and re-parent its children onto the new
+    /// id. Returns the new synthetic id. Models the reference side of the R2
+    /// id-less-reconcile CHURN: when `StaleExternalRewrite` replays a doc with
+    /// non-unique / empty content, `tiered_match` cannot uniquely remap those
+    /// blocks, so the SUT re-mints them; the oracle must predict the same so
+    /// the per-tick synthetic→real reconcile pairs 1:1 instead of
+    /// panicking. Only `StaleExternalRewrite` (composed environment)
+    /// reaches this.
+    fn remint_block(&mut self, old_id: &EntityUri) -> EntityUri;
 }
 
 // ─── Reference-side: EditorMirror ────────────────────────────────────
@@ -332,6 +424,7 @@ holon_macros::capability_pair! {
             sut = current_focus_rows,
             ref = navigation_focus_rows,
             id = "inv-navigation-focus",
+            layer = ViewModel,
             with = crate::capabilities::compare_navigation_focus
         )]
         fn current_focus_rows(&self) -> Vec<(String, Option<String>)>;
@@ -394,6 +487,129 @@ pub trait RefFocusMut: RefFocus {
     fn close_active_editor(&mut self) {}
 }
 
+// ─── Reference-side: calendar clock (ADR 0024 §6 AdvanceDay) ─────────
+
+/// Reference-side view of the ambient calendar day and the journal-rule
+/// output it predicts. The `AdvanceDay` transition advances the injected fake
+/// clock; the model advances `today` in lockstep and predicts exactly one
+/// journal block per distinct day the clock has visited (the boot day plus
+/// every advanced-to day), idempotent under same-day re-ticks.
+/// `#[capmap_adapter]` hosts the read side on the ref `CapMap` so a
+/// journal-count invariant can read it; the mutation is a plain `RefClockMut`
+/// (mutations are not capmap-hosted — `apply_to_ref` drives the concrete
+/// `ReferenceState`).
+#[holon_macros::capmap_adapter]
+pub trait RefClock {
+    /// The model's current local calendar day, `YYYY-MM-DD`.
+    fn today(&self) -> String;
+
+    /// How many distinct journal day-blocks the rule should have produced so
+    /// far: the boot day plus every distinct day the clock has advanced to.
+    fn expected_journal_day_count(&self) -> usize;
+
+    /// Every distinct calendar day (`YYYY-MM-DD`) the clock has visited — the
+    /// boot day plus each advanced-to day. Its cardinality equals
+    /// [`Self::expected_journal_day_count`]; the set itself lets
+    /// `inv-journal-one-per-day` assert the SUT's journal date-pages match the
+    /// visited days exactly (title equality, not just count).
+    fn visited_days(&self) -> std::collections::BTreeSet<String>;
+}
+
+/// Mutating half of [`RefClock`] — advancing the model's calendar day. Not
+/// capmap-hosted (like `RefBlockTreeMut`): `apply_to_ref` mutates the concrete
+/// `ReferenceState`.
+pub trait RefClockMut: RefClock {
+    /// Advance the model day by `days` (`0` = same-day re-tick, which the
+    /// deterministic-id rule makes a no-op) and record the new distinct day.
+    fn advance_day(&mut self, days: i64);
+}
+
+// ─── Reference-side: Sharing audience (ADR 0028 C2/H3) ───────────────
+
+/// A sharing **audience**: the set of NON-OWNER members a container or a
+/// block's policy extends visibility to. The owner is implicit and always a
+/// member (never stored). `Audience::default()` = local-only (owner-only).
+///
+/// Members are opaque labels (device / recipient ids). The C2/H3 directional
+/// alignment oracle compares these member sets: a block's *effective* audience
+/// (the audience of the container it is observably in) must never
+/// OVER-approximate its *policy* audience (owner intent) — i.e. effective ⊆
+/// policy at every observable point (ADR 0028 §H3; the directional restatement
+/// of the unsatisfiable-as-literal C2).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Audience(pub BTreeSet<String>);
+
+impl Audience {
+    /// The owner-only audience (no extra members).
+    pub fn local_only() -> Self {
+        Self(BTreeSet::new())
+    }
+
+    /// Build from an iterator of member labels.
+    pub fn from_members<I, S>(members: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self(members.into_iter().map(Into::into).collect())
+    }
+
+    /// The non-owner members.
+    pub fn members(&self) -> &BTreeSet<String> {
+        &self.0
+    }
+
+    /// True when only the owner is in the audience.
+    pub fn is_local_only(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Members present in `self` but ABSENT from `policy` — the
+    /// over-approximation (leak) set. Empty ⇔ `self ⊆ policy` (aligned).
+    pub fn over_approximation_of(&self, policy: &Audience) -> BTreeSet<String> {
+        self.0.difference(&policy.0).cloned().collect()
+    }
+}
+
+/// C2/H3 directional-alignment oracle surface (ADR 0028). Exposes, per block,
+/// the POLICY audience (owner intent) and the EFFECTIVE audience (the audience
+/// of the container the block is observably in). The keystone oracle
+/// (`inv-audience-never-over-approximates`) asserts effective never
+/// OVER-approximates policy — the correctness spine every future share
+/// migration must keep green (widening = create-in-shared FIRST; narrowing =
+/// delete-from-shared FIRST; quiescent form at an epoch barrier: membership =
+/// policy extension).
+///
+/// Ref-only (no SUT twin yet): there is no share machinery in prod, so the
+/// EFFECTIVE audience is derived from the reference model's
+/// container-membership map, not from a SUT observation. When real crossings
+/// land (Inc 4) the SUT side can observe effective audience via
+/// `list_loro_documents` / `inspect_loro_blocks` (which peers replicate a doc)
+/// and this becomes a SUT⇄ref differential; today it is the migration model's
+/// own tripwire (same shape as `inv-no-page-under-non-page`).
+///
+/// `#[capmap_adapter]` hosts this on `CapMap` (sync trait → no async-trait) so
+/// the bridged invariant can read it from the ref `CapMap`.
+#[holon_macros::capmap_adapter]
+pub trait RefAudience {
+    /// The current sharing epoch. Crossings are ordered; at an epoch barrier
+    /// the quiescent invariant is membership = policy extension.
+    fn audience_epoch(&self) -> u64;
+
+    /// Blocks with a non-local effective OR policy audience — the only blocks
+    /// the over-approximation check is meaningful for (a local-only block is
+    /// vacuously aligned: ∅ ⊆ ∅). Empty on a ref modeling no crossings (the
+    /// default keystone), so the oracle is vacuously green there.
+    fn shared_block_ids(&self) -> BTreeSet<EntityUri>;
+
+    /// The owner-intended audience for this block. Absent ⇒ local-only.
+    fn block_policy_audience(&self, block: &EntityUri) -> Audience;
+
+    /// The effective audience = the audience of the container (doc) the block
+    /// is observably in. Absent container / local-only doc ⇒ local-only.
+    fn block_effective_audience(&self, block: &EntityUri) -> Audience;
+}
+
 // ─── Reference-side: Lifecycle (admin gates) ─────────────────────────
 
 /// Setup/lifecycle predicates that wide-PBT transitions gate on.
@@ -416,6 +632,15 @@ pub trait RefLifecycle {
     /// never generates editor transitions.
     fn has_editor_buffer(&self) -> bool {
         false
+    }
+
+    /// The bounds-registry id of the ACTIVE sticky-accordion footer currently
+    /// on screen, if any — the target the `WheelScroll` sticky-footer source
+    /// scrolls over. `None` by default: a reference that models no sticky
+    /// footer never generates the footer wheel source (the source activates
+    /// when a Journals-shaped section stack is modelled — Inc E boundary).
+    fn sticky_footer_element_id(&self) -> Option<String> {
+        None
     }
 
     /// Whether a block-interaction transition (indent / drag / chord / …) can
@@ -441,6 +666,44 @@ pub trait RefLifecycle {
     /// The previous-transition kind, for Markov weighting. Returns
     /// `None` on the first step or when the impl doesn't track history.
     fn last_transition_kind(&self) -> Option<&'static str>;
+
+    /// The next synthetic-document id counter (`action.next_doc_id`). Read by
+    /// `CreateDocument`'s generator to mint the `doc_<n>.org` filename.
+    /// Defaults to `0`: a slice that never mints synthetic documents (the
+    /// pure editor slice) has no counter to advance.
+    fn next_doc_id(&self) -> usize {
+        0
+    }
+
+    /// The next synthetic-block id counter (`domain.block_state.next_id`). Read
+    /// by `BulkExternalAdd` (and `ApplyMutation`) to mint `bulk-<n>-<i>`
+    /// block ids. Defaults to `0` for slices with no block-minting counter.
+    fn next_block_id(&self) -> usize {
+        0
+    }
+
+    /// Whether codepoint-level peer text edits are enabled (`PBT_MUTABLE_TEXT`
+    /// process env gate). Read by `PeerCharEdit`'s precondition. This is a
+    /// process-global gate, not per-ref state; the default reads the env var so
+    /// every reference agrees without pinning a concrete state type.
+    fn mutable_text_enabled(&self) -> bool {
+        std::env::var("PBT_MUTABLE_TEXT")
+            .ok()
+            .map(|v| v != "0" && !v.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Whether the undo stack is non-empty (`UndoLastMutation` precondition).
+    /// Defaults to `false`: a slice with no undo stack never generates undo.
+    fn has_undo_history(&self) -> bool {
+        false
+    }
+
+    /// Whether the redo stack is non-empty (`Redo` precondition). Defaults to
+    /// `false` for slices that don't model a redo stack.
+    fn has_redo_history(&self) -> bool {
+        false
+    }
 }
 
 // ─── SUT-side traits (mirror of reference-side write traits) ─────────
@@ -581,6 +844,37 @@ pub trait SutMcpEmit {
     async fn emit_mcp_data(&self);
 }
 
+/// SUT capability: the agent-facing MCP **data tools** are drivable —
+/// `dense_query` → edit → `dense_patch` round trips against a served MCP
+/// surface. Drives the `DenseProjectionEdit` PBT transition (`Dense*` weight
+/// family).
+///
+/// This is the explicit MCP-tool gate (mirrors the Loro idiom: `SutLoro` cap +
+/// wiring): only compositions that actually serve MCP tools insert it — today
+/// the live-MCP composition (`LiveMcpE2E`) — so every headless composition
+/// deselects `Dense*` transitions naturally via cap-set narrowing. A future
+/// product mode with the MCP server disabled maps onto the same axis: a
+/// composition without this cap IS that mode. Deliberately NOT implied by
+/// `SutMcpEmit` (which is a frontend-side emission hook, drivable headless).
+#[holon_macros::capmap_adapter]
+pub trait SutDenseTools {
+    /// Project the children of `parent` via `dense_query`, append a new
+    /// top-level headline `content` to the dense text, and apply it back via
+    /// `dense_patch` — the canonical agent round trip. The patch is the SUT
+    /// action; any tool error is a loud panic (never swallowed into a no-op:
+    /// the ref state HAS applied the create, so a swallowed failure would
+    /// surface as an unrelated block-set divergence).
+    async fn dense_append_child(&self, parent: &EntityUri, content: &str);
+
+    /// Project the children of `parent` via `dense_query`, move the FIRST
+    /// top-level row to the END of the dense text (keeping its `{#alias}`
+    /// token), and apply it back via `dense_patch` — the planner emits a
+    /// positional `Move { after: last }` op. The patch reporting success while
+    /// the row lands anywhere but last is exactly the silent-anchor-drop
+    /// defect the order invariants then catch.
+    async fn dense_move_first_child_to_end(&self, parent: &EntityUri);
+}
+
 /// SUT capability: undo/redo the last committed mutation. Drives the
 /// `UndoLastMutation` / `Redo` PBT transitions. The block-convergence settle is
 /// `ref_state`-dependent and lives in the harness seam
@@ -605,6 +899,12 @@ pub trait SutNavHistoryDrive {
     async fn navigate_forward(&self, region: holon_api::Region);
     async fn pin_block(&self, region: holon_api::Region, block_id: &holon_api::EntityUri);
     async fn unpin_block(&self, history_id: i64);
+    /// `OpenTabViaModifierClick`: cmd- or ctrl-click a LEFT SIDEBAR row. The
+    /// sidebar `item_template` declares BOTH `cmd_action` and `ctrl_action` as
+    /// `navigation_open_tab(...)` (`assets/default/index.org`), so — like
+    /// `pin_block`s shift+click — the op, its region and its block id all come
+    /// from the rendered template; the driver only supplies the gesture.
+    async fn open_tab_via_modifier_click(&self, block_id: &holon_api::EntityUri, use_ctrl: bool);
 }
 
 /// SUT capability: block-level UI interactions driven through the UI driver —
@@ -629,6 +929,12 @@ pub trait SutBlockInteract {
     /// (`ToggleCollapse`/`ToggleDrawer`/ `SwitchViewMode`) via
     /// `SutClickAdapter`.
     async fn click_at_element(&self, element_id: &str);
+    /// Scroll a wheel of `delta_y` pixels over the rendered element tracked
+    /// under `element_id` (positive `delta_y` = scroll down). Windowed-only
+    /// gesture (the `WheelScroll` transition). Native drivers synthesize a real
+    /// scroll-wheel event at the element's centre; there is no headless path —
+    /// `WheelScroll` is cap-gated out of every headless composition.
+    async fn scroll_over(&self, element_id: &str, delta_y: f32);
 }
 
 /// Uniform quiescence abstraction. Pure slice: no-op. Wide PBT: drains
@@ -665,6 +971,13 @@ pub trait RefPeers {
 
     /// Stable IDs (peer-internal, NOT EntityUri) the peer currently holds.
     fn peer_block_stable_ids(&self, peer_idx: usize) -> Vec<String>;
+
+    /// Stable IDs a peer has locally modified (pending, un-merged edits). The
+    /// `ApplyMutation` generator excludes these from the primary's
+    /// mutable-block candidate set (a block a peer is mid-editing is not a
+    /// safe primary target). Wide PBT reads `peer.modified_stable_ids`; a
+    /// peer-less slice returns empty.
+    fn peer_modified_stable_ids(&self, peer_idx: usize) -> Vec<String>;
 
     /// Content of a peer's block by its stable id.
     fn peer_block_content(&self, peer_idx: usize, stable_id: &str) -> Option<String>;
@@ -745,6 +1058,32 @@ pub enum PeerEditOp {
     Delete {
         stable_id: String,
     },
+}
+
+/// Generate a deterministic, UUID-like stable ID from inputs.
+/// Both the reference model and SUT use this to produce identical
+/// block IDs for peer-created blocks (see [`PeerEditOp::Create`]).
+///
+/// Lives here (shared floor) rather than in the integration-test crate so the
+/// co-located Loro transitions (`holon-loro-testing`) and the still-central
+/// `apply_mutation` transition both reach the same implementation.
+pub fn deterministic_peer_block_id(
+    peer_idx: usize,
+    parent_stable_id: Option<&str>,
+    content: &str,
+    seq: usize,
+) -> String {
+    use std::hash::Hash;
+    use std::hash::Hasher;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    peer_idx.hash(&mut hasher);
+    parent_stable_id.hash(&mut hasher);
+    content.hash(&mut hasher);
+    seq.hash(&mut hasher);
+    let h = hasher.finish();
+    let hi = (h >> 32) as u32;
+    let lo = h as u32;
+    format!("peer-{hi:08x}-{lo:08x}-{peer_idx:04x}-{seq:04x}")
 }
 
 /// SUT-side peer-Loro write surface. Methods are `async` because the
@@ -1045,7 +1384,7 @@ holon_macros::capability_pair! {
         /// The currently selected view mode (e.g. `"all"`, `"today"`) — UI
         /// view-selection state. Auto-compared SUT-vs-reference by
         /// `inv-pair-view-selection-current-view`.
-        #[compare]
+        #[compare(layer = ViewModel)]
         fn current_view(&self) -> String;
 
         /// Drain pending ViewModel emissions. Drain-once semantics —
@@ -1241,6 +1580,27 @@ impl WidgetSnapshot {
         self.walk().filter_map(|n| n.entity_id.clone()).collect()
     }
 
+    /// Whether this node is a display-placed occurrence (ADR 0015 P2). The
+    /// production `view_model_to_snapshot` stamps `Occurrence::Placed` rows
+    /// with `props["occurrence"]`; non-placed rows carry no such prop. This
+    /// is typed detection, never an id-infix sniff.
+    pub fn is_display_placed(&self) -> bool {
+        self.props.contains_key("occurrence")
+    }
+
+    /// All non-None `entity_id` values reachable in the tree, deduped,
+    /// EXCLUDING nodes whose `is_display_placed()` returns true.
+    /// Display-placed rows carry a canonical entity id but are
+    /// display-only; invariants that judge entity-id membership (e.g.
+    /// `inv-main-panel-rows-match-focus`) must skip them to avoid flagging
+    /// a display-only occurrence as a "stale row."
+    pub fn collect_canonical_entity_ids(&self) -> BTreeSet<String> {
+        self.walk()
+            .filter(|n| !n.is_display_placed())
+            .filter_map(|n| n.entity_id.clone())
+            .collect()
+    }
+
     /// All nodes whose `kind` equals `kind`.
     pub fn collect_by_kind<'a>(&'a self, kind: &str) -> Vec<&'a WidgetSnapshot> {
         self.walk().filter(|n| n.kind == kind).collect()
@@ -1284,6 +1644,24 @@ pub trait SutRenderer {
     ///
     /// Returns the root widget; descendants reachable via `.children`.
     async fn widget_tree_snapshot(&self) -> WidgetSnapshot;
+
+    /// Non-cached companion to [`Self::widget_tree_snapshot`] for
+    /// bounded-wait / poll-style invariants that must RE-SAMPLE a
+    /// self-healing transient frame within one check tick — e.g.
+    /// `inv-embedded-page-collapsed-lazy` waiting out the
+    /// `focus_descendants` recursive-CTE prune delta that lands a frame
+    /// after the STRICT one-shot BlockToPage snapshot.
+    ///
+    /// The cached `widget_tree_snapshot` freezes ONE recompute per tick
+    /// (the `CachingProxy` per-tick memo AND the composed
+    /// `HeadlessFrontendComponent` armed `render_snapshot_cache`), so a
+    /// wait loop calling it can never observe the heal. This method
+    /// bypasses those memos, recomputes, and refreshes the memo so a
+    /// later same-tick consumer sees the newest frame — the exact
+    /// discipline `SutLayout::rendered_elements_fresh` uses for the
+    /// geometry poll invariants. SUTs with no caching forward to
+    /// `widget_tree_snapshot`.
+    async fn widget_tree_snapshot_fresh(&self) -> WidgetSnapshot;
 
     /// Block ids in the data_rows that feed the current root layout's
     /// widget tree — i.e. what the renderer is reading from query
@@ -1413,6 +1791,37 @@ pub struct RenderedElement {
     /// spawned binding — the divergence window is exactly the
     /// steal-back/zombie-editor bug family.
     pub focused: Option<bool>,
+    /// The read-mode styled-run fingerprint this element actually painted for
+    /// its block (byte-range runs, theme-independent), or `None` when it
+    /// painted plain text / carries no marks. `inv-paint-text-styling`
+    /// compares this against the fingerprint the block's `(content, marks)`
+    /// demand — a marked block that painted plain shows up here as
+    /// `None`/empty.
+    pub styled_runs: Option<Vec<holon_api::StyledRun>>,
+}
+
+/// Windowed frontends whose production mount path wraps each PANEL block
+/// (`block:default-*`) in its own `ReactiveShell` entity and tracks that
+/// wrapper in the geometry registry. GPUI does this
+/// (`render/builders/live_block.rs`); the TUI deliberately does not, so it
+/// registers [`SutInlineRowMount`] instead and the shell-wrapper invariant
+/// honestly deselects there rather than failing on an observable that
+/// frontend never emits.
+#[holon_macros::capmap_adapter]
+pub trait SutPerBlockShellMount {
+    /// The `widget_type` the shell wrapper is tagged with in the registry.
+    fn panel_shell_widget_type(&self) -> String;
+}
+
+/// Windowed frontends whose production mount path resolves each doc-block row
+/// inline, leaving no per-block shell wrapper in the geometry registry — rows
+/// are tracked directly as the rendering of their entity. The TUI does this
+/// (`render/mod.rs`, the `tree`/`table`/`outline` collection boundary); it is
+/// the mount-faithfulness counterpart to [`SutPerBlockShellMount`].
+#[holon_macros::capmap_adapter]
+pub trait SutInlineRowMount {
+    /// The `widget_type` an inline-resolved doc-block row is tagged with.
+    fn inline_row_widget_type(&self) -> String;
 }
 
 #[holon_macros::capmap_adapter]
@@ -1514,7 +1923,8 @@ pub enum EngineFocus {
     Focused(EntityUri),
 }
 
-#[holon_macros::capmap_adapter] // mixed trait (7 async + 1 sync) → async-trait(?Send); emits CapName + `impl … for CapMap`
+#[holon_macros::capmap_adapter] // mixed trait (7 async + 1 sync) → async-trait(?Send); emits CapName + `impl …
+// for CapMap`
 pub trait SutDriver {
     async fn driver_send_key_chord(&self, chord: &str);
     async fn driver_click(&self, id: &EntityUri);
@@ -1586,6 +1996,19 @@ pub trait SutOrgRead {
     async fn org_block_snapshot(&self) -> Vec<holon_api::Block>;
 }
 
+// ─── Phase 6f'' — FsWrites cluster ───────────────────────────────────
+//
+// Binds: `inv-no-write-outside-vault-root`.
+
+#[holon_macros::capmap_adapter]
+pub trait SutFsWrites {
+    /// `(vault root, every path the filesystem was ASKED to write or create)`,
+    /// both normalized. The write log — not a directory listing — because a
+    /// target that escaped the root is a defect even if the write then failed
+    /// or the file was removed again.
+    async fn vault_write_targets(&self) -> (String, Vec<String>);
+}
+
 // ─── Reference-side: extended read-only projections ──────────────────
 //
 // Each surfaces `ReferenceState` fields that invariant bodies need. Thin
@@ -1595,9 +2018,11 @@ pub trait SutOrgRead {
 /// Focus-roots expected by the reference model — per-region set of
 /// block ids that the reactive engine should use as pin roots.
 pub trait RefFocusRoots {
-    /// Expected focus-root block ids for `region`. Wide PBT reads from
-    /// `ReferenceState::expected_focus_root_ids`; pure slice: empty set.
-    fn expected_focus_root_ids(&self, region: CapRegion) -> BTreeSet<EntityUri>;
+    /// The RENDERED focus root for `region` — the cursor's open row, i.e.
+    /// what the main panel projects. NOT the region's open SET (background
+    /// tabs are open but unrendered): that is `expected_focus_root_rows`.
+    /// Wide PBT reads `ReferenceState::rendered_focus_root`; pure slice: empty.
+    fn rendered_focus_root_ids(&self, region: CapRegion) -> BTreeSet<EntityUri>;
 }
 
 /// Layout-block metadata needed by matview + ViewModel invariants.
@@ -1615,6 +2040,11 @@ pub trait RefLayout {
     /// Wide PBT: `ReferenceState::has_blocks_profile()`; pure slice: `false`.
     fn has_blocks_profile(&self) -> bool;
 
+    /// True when a user-provided `index.org` custom layout is active — the
+    /// `CreateBlockUnderFocus` slot-parenting guarantee only holds under the
+    /// default layout. Wide PBT: `ReferenceState::has_user_index_org()`.
+    fn has_user_index_org(&self) -> bool;
+
     /// Every block id the reference model tracks, **including** seed and
     /// source blocks. Unlike `RefBlockTree::all_non_seed_block_ids`, this
     /// keeps seed blocks so the matview-consistency invariant can build
@@ -1623,13 +2053,15 @@ pub trait RefLayout {
     fn all_block_ids(&self) -> BTreeSet<EntityUri>;
 
     /// The blocks the reactive root layout is *expected* to surface for
-    /// `region`: non-source blocks that are descendants of the region's
-    /// expected focus roots. Used by
-    /// `inv-matview-consistent-with-ref/root_layout` to detect rows the
-    /// matview is missing. Wide PBT filters `block_state.blocks` by
-    /// `content_type != Source` and
-    /// `is_descendant_of_any(expected_focus_root_ids(region))`; pure
-    /// slice: empty.
+    /// `region`: every block that descends from the region's expected focus
+    /// roots. Source blocks are included — per the fork-A program-rendering
+    /// ruling they render as visible rows (rule cards / query results), not
+    /// hidden; staleness is a cross-root property, so the descendant gate alone
+    /// defines the allowed set. Used by `inv-main-panel-rows-match-focus` to
+    /// detect rows from a *previous* focus root lingering after navigation.
+    /// Wide PBT filters `block_state.blocks` by
+    /// `is_descendant_of_any(expected_focus_root_ids(region))`; pure slice:
+    /// empty.
     fn expected_visible_content_ids(&self, region: CapRegion) -> BTreeSet<EntityUri>;
 
     /// True when the reference model has at least one user document. Gates the
@@ -1645,6 +2077,452 @@ pub trait RefLayout {
     /// `ReferenceState::focused_entity_id.contains_key(region)`; pure slice:
     /// `false`.
     fn region_entity_focused(&self, region: CapRegion) -> bool;
+}
+
+/// Reference-side open-pin READ surface (`UnpinBlock`'s generator +
+/// precondition). Returns plain ids / bools — never the integration-test-only
+/// open-pin row type (`OpenPinEntry`) — so `holon-pbt-core` stays decoupled
+/// from the harness row layout. Region-precise focus lookups stay inside the
+/// impl.
+pub trait RefPins {
+    /// `history_id` of every open pin across all regions — the `UnpinBlock`
+    /// candidate set (both closeable and not; `is_closeable_pin` narrows it).
+    fn open_pin_history_ids(&self) -> Vec<i64>;
+    /// True iff an open pin with `history_id` exists whose `block_id` is
+    /// non-null AND is not its region's current cursor focus — the
+    /// X-button-closeable predicate. The active cursor focus is closed by
+    /// navigating away, never by the X button, so closing it via
+    /// `navigation.close` is a no-op the ref must not predict.
+    fn is_closeable_pin(&self, history_id: i64) -> bool;
+}
+
+/// Reference-side open-pin mutation surface — the LogSeq shift-click
+/// (`navigation.focus_pin`) / X-button (`navigation.close`) semantics the
+/// `PinBlock` / `UnpinBlock` transitions model.
+///
+/// Each mutation encapsulates its whole update/insert/delete bookkeeping so the
+/// integration-test-only open-pin row type (`OpenPinEntry`) never has to cross
+/// into `holon-pbt-core`.
+pub trait RefPinsMut: RefPins {
+    /// Pin `block_id` in `region` with move-to-top semantics, mirroring
+    /// `provider.rs::focus_pin`: if an open pin already exists for
+    /// `(region, block_id)`, bump its logical timestamp in place (UPDATE — no
+    /// new row); otherwise mint a fresh open-pin row (INSERT), advancing both
+    /// the pin-timestamp and the history-id counters. Wide PBT mutates
+    /// `ui.user.open_pins` / `ui.user.next_pin_ts` / `ui.tab.next_history_id`;
+    /// a pin-less pure slice no-ops.
+    fn upsert_open_pin(&mut self, region: holon_api::Region, block_id: &EntityUri);
+    /// `UnpinBlock`: close (remove) the open pin with `history_id` from every
+    /// region's open-pin set. Mirrors `navigation.close`'s `closed_at` UPDATE.
+    fn close_pin(&mut self, history_id: i64);
+}
+
+/// Reference-side navigation-history read surface — the per-region back/forward
+/// stack plus the sidebar-navigation prediction gates the `Navigate*`
+/// transitions read. Region-precise (`holon_api::Region`, not the lossy
+/// `CapRegion`) because the nav history is keyed per exact region.
+pub trait RefNavHistory {
+    /// True iff the region's history cursor can move back (has a prior entry).
+    fn can_go_back(&self, region: holon_api::Region) -> bool;
+    /// True iff the region's history cursor can move forward.
+    fn can_go_forward(&self, region: holon_api::Region) -> bool;
+    /// True iff production would bind `navigation.focus(region)` on `block_id`
+    /// (the default sidebar's rendered doc list). Pure predicate over ref
+    /// state.
+    fn predicts_navigation_focus(&self, block_id: &EntityUri, region: holon_api::Region) -> bool;
+    /// The page blocks the default sidebar renders as nav-focus targets.
+    fn predicted_sidebar_navigation_targets(&self) -> Vec<EntityUri>;
+    /// True iff the drawer panel `panel_id` is open — sidebar clicks only reach
+    /// their targets while the panel is expanded. Defaults open when untracked.
+    fn drawer_is_open(&self, panel_id: &str) -> bool;
+}
+
+/// Reference-side navigation-history + focus mutation surface for the
+/// `Navigate*` transitions. Each method is the WHOLE per-transition reference
+/// effect (cursor move / history push / open-pin reset / region-focus clear /
+/// editor blur / global-focus update), encapsulated so the
+/// integration-test-only `OpenPinEntry` / `NavigationHistory` row types never
+/// cross into `holon-pbt-core`.
+pub trait RefNavHistoryMut: RefNavHistory {
+    /// `NavigateBack`: step the region cursor back one entry (if possible),
+    /// clear the region's per-block focus, and blur the active editor.
+    fn nav_step_back(&mut self, region: holon_api::Region);
+    /// `NavigateForward`: symmetric forward cursor step + focus clear + blur.
+    fn nav_step_forward(&mut self, region: holon_api::Region);
+    /// `NavigateHome`: `focus(region, None)` — push a home (NULL) history row
+    /// and reset the region's open pins to that single home row (idempotent
+    /// when already home), clear region + global focus, blur.
+    fn nav_go_home(&mut self, region: holon_api::Region);
+    /// `NavigateFocus`: `focus(region, block_id)` — push a focus history row
+    /// and reset the region's open pins to that single focus row
+    /// (idempotent when already focused there), record the first-visit
+    /// budget flag, set the block as global focus, clear region focus,
+    /// blur.
+    fn nav_focus(&mut self, region: holon_api::Region, block_id: &EntityUri);
+    /// `OpenTabViaModifierClick`: `open_tab(region, block_id)` — APPEND an open row
+    /// for `block_id` if the region has none (never closing or reordering the
+    /// others, unlike `nav_focus`), then move the cursor onto it. When a row is
+    /// already open for that block, prod's `open_tab` delegates to `activate`:
+    /// cursor-only, no new row. The appended row is a BACKGROUND tab until the
+    /// cursor lands on it — open in `focus_roots`, unrendered by the panel.
+    fn nav_open_tab(&mut self, region: holon_api::Region, block_id: &EntityUri);
+}
+
+/// Reference-side document read surface — the `files.documents` map (uri →
+/// filename) that the document + boot transitions query. Returns names / uris /
+/// counts / bools; never the integration-test-only map type.
+pub trait RefDocuments {
+    /// Every tracked document filename (values of `files.documents`).
+    fn document_names(&self) -> Vec<String>;
+    /// True iff a document with this exact filename is tracked.
+    fn has_document(&self, file_name: &str) -> bool;
+    /// Number of tracked documents (`files.documents.len()`).
+    fn document_count(&self) -> usize;
+    /// Resolve a document's uri from its NAME (file stem), if tracked.
+    fn doc_uri_by_name(&self, name: &str) -> Option<EntityUri>;
+    /// The document uri a block currently belongs to (`block_documents[id]`),
+    /// if any.
+    fn block_document_of(&self, block_id: &EntityUri) -> Option<EntityUri>;
+    /// True iff the reference holds a NON-SEED advice-rule block — the
+    /// ≤1-active-rule gate `WriteOrgFile` consults before seeding another
+    /// rule.
+    fn has_non_seed_advice_rule(&self) -> bool;
+    /// Every tracked document uri (keys of `files.documents`) —
+    /// `BulkExternalAdd`'s candidate-doc set.
+    fn document_uris(&self) -> Vec<EntityUri>;
+    /// True iff `uri` is a tracked document.
+    fn has_document_uri(&self, uri: &EntityUri) -> bool;
+}
+
+/// Reference-side document mutation surface. Each method encapsulates the whole
+/// per-transition reference effect (page-block creation, block-tree surgery,
+/// canonical re-sequencing, profile rebuild) so integration-test-only
+/// block/layout internals never cross into `holon-pbt-core`.
+pub trait RefDocumentsMut: RefDocuments {
+    /// `CreateDocument`: mint a synthetic doc uri, register the filename, and
+    /// insert the empty page block. Advances the synthetic-doc counter.
+    fn insert_document(&mut self, file_name: &str);
+    /// `DeleteDocument`: remove the document and cascade-delete its page block
+    /// and all descendants, re-canonicalizing sibling order and clearing
+    /// dangling focus.
+    fn remove_document(&mut self, file_name: &str);
+    /// `RenameDocument`: retitle the document tracked as `old_file_name` to
+    /// the stem of `new_file_name` and re-point its filename. The file-move
+    /// spec: a page's title FOLLOWS its file name, so the reference title
+    /// tracks the new stem — which production now matches via the atomic Rename
+    /// port (`FileSyncController::on_file_renamed` re-homes + retitles).
+    fn rename_document(&mut self, old_file_name: &str, new_file_name: &str);
+    /// `WriteOrgFile`: (re)seed a document's blocks from generator-produced
+    /// `Block`s before startup — remap placeholder parents, normalize the
+    /// org round-trip, classify index-layout source blocks,
+    /// re-canonicalize, and advance the pre-startup file counter.
+    /// `todo_keywords` is the file's `#+TODO:` set (adopted by the document
+    /// block).
+    fn seed_org_file(
+        &mut self,
+        filename: &str,
+        blocks: &[holon_api::block::Block],
+        todo_keywords: Option<Vec<holon_api::TaskState>>,
+    );
+}
+
+/// Reference-side pre-startup boot read surface — the fixture counters and
+/// VCS-init flags the boot / fixture transitions gate on.
+pub trait RefBoot {
+    /// Number of directories staged pre-startup
+    /// (`pre_startup_directories.len()`).
+    fn pre_startup_directory_count(&self) -> usize;
+    /// Number of org files written pre-startup (`pre_startup_file_count`).
+    fn pre_startup_file_count(&self) -> usize;
+    /// Whether a git repo has been initialized in the fixture.
+    fn git_initialized(&self) -> bool;
+    /// Whether a jj repo has been initialized in the fixture.
+    fn jj_initialized(&self) -> bool;
+    /// The resolved root-layout block id post-boot, if present — `StartApp`'s
+    /// SUT arg.
+    fn root_layout_block_id(&self) -> Option<EntityUri>;
+}
+
+/// Reference-side pre-startup boot mutations.
+pub trait RefBootMut: RefBoot {
+    /// `CreateDirectory`: stage a directory to be created before startup.
+    fn push_pre_startup_directory(&mut self, path: &str);
+    /// `GitInit`: mark the fixture git-initialized.
+    fn mark_git_initialized(&mut self);
+    /// `JjGitInit`: mark the fixture jj-initialized (also creates `.git`).
+    fn mark_jj_initialized(&mut self);
+    /// `StartApp`: the whole boot reference effect — flip `app_started`, seed
+    /// the bundled default layout / seed profile / sidebar watch, and
+    /// (fresh boot only) open the default drawers + focus `block:journals`.
+    fn boot_app(&mut self);
+}
+
+/// Reference-side active-watch mutation surface for `SetupWatch` /
+/// `RemoveWatch`.
+///
+/// The watch-spec value (query + language) is an integration-test-only type, so
+/// it is abstracted as an associated type — the concrete `WatchSpec` /
+/// `TestQuery` never appears in a `holon-pbt-core` signature; the wide
+/// `ReferenceState` binds it. Watch READS go through the existing [`RefWatch`]
+/// surface (`active_watch_ids`), so no read base is added here.
+pub trait RefWatchesMut {
+    /// The watch specification value (query + language). `ReferenceState` sets
+    /// this to its `pbt::query::WatchSpec`; a watch-less pure slice would bind
+    /// its own (or `()`).
+    type WatchSpec;
+    /// `SetupWatch`: register `spec` under `query_id` in the reference's active
+    /// watches (last-writer-wins on a repeated id, mirroring the SUT's
+    /// `register_watch`).
+    fn insert_watch(&mut self, query_id: &str, spec: Self::WatchSpec);
+    /// `RemoveWatch`: drop the active watch `query_id` (no-op if absent).
+    fn remove_watch(&mut self, query_id: &str);
+}
+
+/// Reference-side expand-toggle read surface (`ExpandToggle`'s generator +
+/// precondition). Backing: `ui.tab.expanded_toggles`.
+///
+/// `#[capmap_adapter]` hosts the read side on `CapMap` (sync, owned return) so
+/// composed-slice invariants can gate on it via `Needs`, exactly like sibling
+/// read caps (`RefClock`, `RefLayout`). The mutation half stays on
+/// [`RefToggleMut`] without the adapter — mutations drive the concrete
+/// `ReferenceState` through `apply_to_ref`, not the shared `CapMap`.
+#[holon_macros::capmap_adapter]
+pub trait RefToggle {
+    /// True iff `id`'s `expand_toggle` widget is currently expanded.
+    fn is_expanded(&self, id: &EntityUri) -> bool;
+}
+
+/// Reference-side toggle-widget mutations (`ExpandToggle` / `ToggleCollapse` /
+/// `ToggleDrawer`). Each flip is single-sourced here so the generic transitions
+/// and the concrete `LayoutRef` adapters share one implementation.
+pub trait RefToggleMut: RefToggle {
+    /// Set `id`'s expand-toggle expanded state (`ExpandToggle` → `true`,
+    /// `ToggleCollapse` → `false`), including any document `collapsed` field
+    /// mutation the production chevron handler dispatches. Use
+    /// [`set_expanded_view_local`] for profile-driven toggles whose collapse is
+    /// purely view-local.
+    fn set_expanded(&mut self, id: &EntityUri, expanded: bool);
+    /// Set `id`'s expand-toggle expanded state WITHOUT modelling any document
+    /// `collapsed` field mutation. For profile-driven toggles (e.g.
+    /// `embedded_page`) where the toggle's lazy-gate semantics are entirely
+    /// view-local — no `collapsed` column exists on the target block. Default
+    /// delegates to [`set_expanded`] so existing explicit-render-expr toggle
+    /// impls keep the two-field semantics.
+    fn set_expanded_view_local(&mut self, id: &EntityUri, expanded: bool) {
+        self.set_expanded(id, expanded);
+    }
+    /// `ToggleDrawer`: flip the drawer panel `id`'s open/closed bit
+    /// (default-open, so an untracked drawer flips to closed).
+    fn toggle_drawer(&mut self, id: &str);
+}
+
+/// Reference-side render-expression read surface (`ExpandToggle`'s candidate
+/// enumeration). The render-expr AST (`holon_api::render_types::RenderExpr`)
+/// stays inside the impl — callers get ids / bools / a "mentions this builtin"
+/// predicate, never the AST itself.
+pub trait RefRenderExpr {
+    /// Block ids that currently carry a render expression
+    /// (`domain.render_expressions` keys).
+    fn render_expr_ids(&self) -> Vec<EntityUri>;
+    /// True iff `id` has a render expression.
+    fn has_render_expr(&self, id: &EntityUri) -> bool;
+    /// True iff `id`'s render expression mentions the value-fn builtin `needle`
+    /// (e.g. `"expand_toggle"`). False when `id` has no render expression.
+    fn render_expr_mentions(&self, id: &EntityUri, needle: &str) -> bool;
+}
+
+/// Reference-side view-selection mutation (`SwitchView`). The read side is the
+/// existing [`RefViewSelection`] (`current_view`); a standalone mut trait
+/// suffices because `SwitchView` writes without reading view state.
+pub trait RefViewSelectionMut {
+    /// Set the current view filter (`"all"` / `"main"` / `"sidebar"`).
+    fn set_current_view(&mut self, view: &str);
+}
+
+/// Reference-side wiring/config reads the mutation transitions gate on.
+/// Backing: `cap_set` (the composed CapMap discriminator). `enable_loro` stays
+/// on [`RefLifecycle`]; this trait carries only what isn't already exposed.
+pub trait RefWiring {
+    /// True iff this reference carries a composed `cap_set` (i.e. it is a
+    /// composed config, not the monolithic `E2ESut`). `SetEdgeField` /
+    /// `ApplyMutation` gate their Loro-authority-dependent arms on this.
+    fn has_cap_set(&self) -> bool;
+
+    /// True iff every cap in `caps` is present in this reference's composed cap
+    /// set. `ApplyMutation` gates its External/seam arm on `SutSeamMutate`
+    /// presence (native always; composed only when a frontend seam is wired).
+    fn caps_available(&self, caps: &[crate::composition::CapId]) -> bool;
+}
+
+/// Reference-side wide-PBT layout / render / focus read surface for the
+/// block-interaction transitions (`ClickBlock`, `TriggerSlashCommand`,
+/// `DragDropBlock`, `SetEdgeField`, `BulkExternalAdd`). A ref-only surface
+/// (never hosted on the CapMap) whose reads only the wide `ReferenceState` can
+/// answer — a pure slice has no layout/render model, so it simply doesn't
+/// implement it.
+pub trait RefLayoutInteract {
+    /// Ids of render-source blocks (`layout_blocks.render_source_ids`).
+    fn render_source_ids(&self) -> BTreeSet<EntityUri>;
+    /// Ids of query-source blocks (`layout_blocks.query_source_ids`).
+    fn query_source_ids(&self) -> BTreeSet<EntityUri>;
+    /// True iff `id` is an immutable layout block
+    /// (`layout_blocks.is_immutable`).
+    fn is_immutable(&self, id: &EntityUri) -> bool;
+    /// True iff the active layout renders `id` as a `draggable(...)` in the
+    /// main panel (shadow-interpreted) — `DragDropBlock`'s source gate.
+    fn block_renders_draggable(&self, id: &EntityUri) -> bool;
+    /// Block ids in the main panel's active-layout rendered set.
+    fn main_rendered_block_ids(&self) -> BTreeSet<EntityUri>;
+    /// The click-focused entity in `region` (`focused_entity_id[region]`).
+    fn region_focused_entity(&self, region: CapRegion) -> Option<EntityUri>;
+    /// The currently-focused editable block in Main (`DragDropBlock`'s source).
+    fn focused_main_editable(&self) -> Option<EntityUri>;
+    /// True iff `id`'s block carries `tag` in its `tags`.
+    fn block_has_tag(&self, id: &EntityUri, tag: &str) -> bool;
+    /// True iff `doc_uri` has at least one editable (Text, non-page,
+    /// non-layout) child block — `BulkExternalAdd`'s empty-doc weighting.
+    fn doc_has_editable_text(&self, doc_uri: &EntityUri) -> bool;
+
+    /// Layout headline block ids (`layout_blocks.headline_ids`) — the candidate
+    /// set for `ApplyMutation`'s layout-headline mutation arm.
+    fn headline_ids(&self) -> Vec<EntityUri>;
+}
+
+/// Reference-side high-level content-mutation apply for `ApplyMutation`'s
+/// non-peer arm. The single method performs ALL the internal reference
+/// bookkeeping — block-tree apply + canonical re-sequencing, document routing
+/// for `Create`, profile-tracking rebuild, render-expr cache refresh, next-id
+/// bump, and cursor reset on content updates — so the generic `apply_to_ref`
+/// never touches reference internals. Wide-only (only `ReferenceState`
+/// implements it); the pure editor slice models no generic mutations. The
+/// payload is the pbt-core-native [`crate::types::Mutation`], so no associated
+/// type is needed.
+pub trait RefApplyMutationMut {
+    /// Apply a non-peer (`UI`/`External`) content `mutation` and perform all
+    /// the encapsulated reference bookkeeping described on the trait.
+    /// Undo-snapshot (UI only) and focus-clear-on-delete stay OUTSIDE this
+    /// method — the generic `apply_to_ref` drives them through
+    /// [`RefBlockTreeMut::push_undo_snapshot`]
+    /// and [`RefFocusMut::clear_focus_if_deleted`].
+    ///
+    /// `crosses_org_boundary` is true for an `External` (org-file) mutation:
+    /// the block is written to disk and RE-INGESTED, so the ref must model
+    /// the org FILE-parse reinterpretation (a trailing `:tag:` group on the
+    /// headline — e.g. `:PROPERTIES:` — re-parses into `block.tags`, not
+    /// content). A `UI` mutation stays in-store (its writeback echo is
+    /// suppressed), so the raw content is kept and this is false.
+    fn apply_content_mutation(
+        &mut self,
+        mutation: &crate::types::Mutation,
+        crosses_org_boundary: bool,
+    );
+}
+
+/// Reference-side wide-PBT block-interaction mutation surface. Each method is
+/// the whole per-transition reference effect, encapsulated so
+/// integration-test-only row/AST internals never cross into `holon-pbt-core`.
+/// Wide-only (no pure-slice impl); the payload types (`Region`,
+/// `EdgeFieldUpdate`, `Block`) are all `holon_api` and thus pbt-core-nameable.
+pub trait RefLayoutMutate {
+    /// `ClickBlock`: focus `block_id` via a click in `region` — blur any other
+    /// active editor, then either push a navigation-history entry (sidebar
+    /// nav-focus) or set editor focus, mirroring `provider.rs`.
+    fn apply_click_focus(&mut self, region: holon_api::Region, block_id: &EntityUri);
+    /// `TriggerSlashCommand`: snapshot undo, delete `block_id` via the shared
+    /// mutation machinery, and clear focus if it pointed at the deleted block.
+    fn apply_slash_delete(&mut self, block_id: &EntityUri);
+    /// `SetEdgeField`: assign the edge field
+    /// (`tags`/`requires`/`advice_suppressed`) carried by `update` on the
+    /// existing block `id`.
+    fn set_edge_field_value(&mut self, id: &EntityUri, update: &EdgeFieldUpdate);
+    /// `BulkExternalAdd`: insert `blocks` under `doc_uri` (org round-trip
+    /// normalized), register doc ownership, re-canonicalize, and advance the
+    /// block-id counter.
+    fn bulk_add_blocks(&mut self, doc_uri: &EntityUri, blocks: &[holon_api::block::Block]);
+
+    /// `CreateBlockUnderFocus`: append a new text block carrying `content` as
+    /// the last child of `parent` (the focused page's creation-slot parent).
+    /// Mints a synthetic `block::create-N` id the harness reconcile pairs 1:1
+    /// with the SUT's minted uuid.
+    fn create_block_under(&mut self, parent: &EntityUri, content: &str);
+
+    /// `CreateBlockUnderFocus` with an explicit, born-equal id: append a new
+    /// text block carrying `content` as the last child of `parent`, using
+    /// exactly `id` (a fresh normal id, NOT a synthetic `create-N`). The
+    /// SUT dispatches the same id, so both sides born-equal — no
+    /// synthetic→real reconcile.
+    fn create_block_under_with_id(&mut self, parent: &EntityUri, content: &str, id: EntityUri);
+
+    /// `InstantiateTemplate`: mint the instance subtree (root + child) under
+    /// `target_parent` as ONE undoable unit, so a single `UndoLastMutation`
+    /// removes the whole instantiation. The ids are caller-computed and must
+    /// be born-equal with the SUT's; the instance root carries `instance_of`.
+    fn apply_instantiate_template(
+        &mut self,
+        target_parent: &EntityUri,
+        inst_root_id: EntityUri,
+        inst_child_id: EntityUri,
+        root_content: &str,
+        child_content: &str,
+        template_id: &str,
+    );
+
+    /// `BlockToPage` (Option B): mint a NEW page block `page_id` (Page-tagged,
+    /// its own document) as the last child of `destination_parent`, re-home
+    /// `origin`'s direct children (and their non-page subtrees) under it, and
+    /// leave `origin` in place as a non-page carrying a full-span `[[page_id]]`
+    /// Link mark. Mirrors the engine-level `convert_block_to_page` compound so
+    /// the born-equal page id / reparented children / origin marks all match
+    /// the SUT for the block-comparison invariants.
+    fn apply_block_to_page(
+        &mut self,
+        origin: &EntityUri,
+        page_id: EntityUri,
+        destination_parent: &EntityUri,
+    );
+}
+
+/// Reference-side arrow-key navigation surface (`ArrowNavigate`). The
+/// direction type is **associated** so `holon-pbt-core` needn't depend on
+/// `holon-frontend` (mirrors [`RefWatchesMut::WatchSpec`]); the
+/// integration-test `ReferenceState` binds `Direction =
+/// holon_frontend::navigation::NavDirection`. The whole cross-block
+/// cursor/focus walk is encapsulated because it drives `holon_frontend`'s
+/// `CollectionNavigator`, which is not nameable here.
+pub trait RefArrowNav {
+    /// Arrow-key direction (`holon_frontend::navigation::NavDirection` in the
+    /// wide PBT).
+    type Direction;
+
+    /// Whether `region` currently has a focused entity — the arrow-nav
+    /// precondition. Region-granular (Left/RightSidebar distinct), so it does
+    /// not collapse through `CapRegion`.
+    fn region_has_focus(&self, region: holon_api::Region) -> bool;
+
+    /// Apply `steps` arrow presses in `direction` from the focused block of
+    /// `region`: moves editor focus + cursor (navigation history untouched),
+    /// mirroring production's GPUI arrow handler.
+    fn apply_arrow_navigate(
+        &mut self,
+        region: holon_api::Region,
+        direction: Self::Direction,
+        steps: u8,
+    );
+}
+
+/// Reference-side task-state toggling surface (`ToggleState`). The candidate
+/// computation interprets the render expr (via
+/// `holon_frontend::interpret_pure`), so its body lives in the integration-test
+/// `ReferenceState` impl; pbt-core declares only the surface over
+/// pbt-core-native [`CycleTarget`].
+pub trait RefTaskStateToggle {
+    /// Block ids that render an interactive `state_toggle` widget in Main —
+    /// the `ToggleState` generator's candidate set before target pairing.
+    fn rendered_state_toggle_ids(&self) -> Vec<EntityUri>;
+
+    /// Apply a task-state toggle to the reference model: push an undo snapshot,
+    /// then an `Update { task_state }` mutation for `block_id`.
+    fn apply_toggle_state(&mut self, block_id: &EntityUri, new_state: CycleTarget);
 }
 
 /// A single watch-result row, field name → stringified value. `None`
@@ -1678,6 +2556,7 @@ holon_macros::capability_pair! {
         #[compare(
             ref = active_watch_ids,
             id = "inv-active-watches-match-ref",
+            layer = ViewModel,
             with = crate::capabilities::compare_watch_ids
         )]
         fn watch_query_ids(&self) -> Vec<String>;
@@ -1754,6 +2633,19 @@ pub trait RefTaskState {
     /// Task state string for `id` (`"TODO"`, `"DONE"`, etc.), or `None`
     /// if the block has no task_state property.
     fn task_state_of(&self, id: &EntityUri) -> Option<String>;
+}
+
+/// SQL-budget cardinality inputs: the handful of reference-state counts the
+/// per-transition `SqlBudget` formulas read. Lets a transition's
+/// `SqlBudget::expected_sql` be generic over `R` instead of binding the
+/// concrete `ReferenceState` (Phase 1a Step 1). `last_navigate_first_visit`
+/// rides along because `NavigateFocus`'s budget switches on it (first visit
+/// creates watch matviews); it is a per-step budget input, not a nav mutation.
+pub trait RefSqlCardinality {
+    fn block_count(&self) -> usize;
+    fn document_count(&self) -> usize;
+    fn active_watch_count(&self) -> usize;
+    fn last_navigate_first_visit(&self) -> bool;
 }
 
 /// Reference-side typed block surface for `inv-backend-blocks-match-ref`.
@@ -1834,4 +2726,476 @@ where
         return false;
     }
     commit_active_editor_if_changed(state)
+}
+
+// ── Formerly integration-test-local SUT caps (Phase 1a Step 2 / B1) ─────────
+// Relocated from `holon-integration-tests::pbt::local_caps` (and the
+// apply_mutation / start_app transition modules) once the types they name
+// (`CycleTarget`, `MutationEvent`, `LoroCorruptionType`) moved to
+// `crate::types`. This unblocks the mutation/fixture-driven transitions +
+// SUT adapters co-locating into companion `*-testing` crates.
+use crate::types::CycleTarget;
+use crate::types::LoroCorruptionType;
+use crate::types::MutationEvent;
+
+/// SUT capability: task-state cycling (`ToggleState`). A genuinely composable
+/// `&self` mutation realized headlessly via the production `set_field
+/// task_state` op.
+#[holon_macros::capmap_adapter]
+pub trait SutMutate {
+    async fn toggle_state(&self, block_id: &holon_api::EntityUri, new_state: CycleTarget);
+}
+
+/// SUT capability: the SEAM-relocated mutations — generic UI/external mutations
+/// (`ApplyMutation`) and bulk external block adds (`BulkExternalAdd`). Their
+/// real, `ref_state`-dependent dispatch lives in the `E2ESut` harness seam;
+/// the composed frontend does NOT provide it, so those transitions auto-narrow
+/// out of the composed alphabet rather than faking a no-op.
+#[holon_macros::capmap_adapter]
+pub trait SutSeamMutate {
+    async fn apply_mutation(&self, event: MutationEvent);
+    async fn bulk_external_add(
+        &self,
+        doc_uri: &holon_api::EntityUri,
+        blocks: &[holon_api::block::Block],
+    );
+    /// Replay a STALE external snapshot over the doc's file: re-render the
+    /// doc's CURRENT content but with every block `:ID:` drawer stripped, as
+    /// an editor/agent writing from a pre-writeback copy (before Holon minted
+    /// the ids) would. Re-ingest must reconcile the id-less blocks against the
+    /// store's current children -- NOT duplicate them (the PR #81 bug class).
+    async fn stale_external_rewrite(&self, doc_uri: &holon_api::EntityUri);
+}
+
+/// SUT capability: create a block through the focused panel's creation slot
+/// (`CreateBlockUnderFocus`). The composed `HeadlessFrontendComponent` realizes
+/// it through the PRODUCTION creation-slot commit seam
+/// (`ReactiveEngineDriver::commit_creation_slot` →
+/// `ViewEventHandler::handle_text_sync` → `block.create`), so the headless
+/// keystone drives WP-E's focus-root parenting exactly as a real user's "type
+/// here to create" gesture does — the parent comes from the live
+/// `:__virtual:<parent>` slot id, never re-derived. A genuinely composable
+/// `&self` gesture: any composed config whose frontend renders the default
+/// `creation_slot: true` layout can drive it, so the transition auto-narrows to
+/// exactly those configs.
+#[holon_macros::capmap_adapter]
+pub trait SutBlockCreate {
+    /// Create a block under `parent` with `content`. When `id` is `Some`, the
+    /// backend uses that exact (born-equal) id; when `None`, the backend MINTS
+    /// a fresh id (the `block.create` mint-when-absent path). The `parent`
+    /// is the ref-resolved creation-slot focus root; the headless UI driver
+    /// honors the production slot gesture for the `None` case (resolving
+    /// the parent from its own live rowset), while the op-floor driver
+    /// dispatches `block.create` directly with the passed parent.
+    async fn apply_create_under_focus(
+        &self,
+        parent: &EntityUri,
+        content: &str,
+        id: Option<&EntityUri>,
+    );
+}
+
+/// SUT capability: advance the injected fake wall clock and let the production
+/// `ClockScheduler` propagate the new day through its own reconcile path — the
+/// keystone `AdvanceDay` transition's driver (ADR 0024 §6). NEVER a raw
+/// `clock`-relation UPDATE behind the scheduler's back (WP1's clock-injection
+/// race): the impl advances a `TestClock` the scheduler already reads via DI,
+/// then invokes the scheduler's own `reconcile_clock`, so the day-rollover CDC
+/// re-fires the journal rule exactly as a real day rollover would. Hosted only
+/// where a controllable clock was injected (the frontend arm), so `AdvanceDay`
+/// auto-narrows to those configs. Returns the new local `YYYY-MM-DD` date.
+#[holon_macros::capmap_adapter]
+pub trait SutClockAdvance {
+    async fn advance_clock_days(&self, days: i64) -> String;
+}
+
+/// SUT capability: read the C2 op/effect history relation (`block_history`)
+/// for the keystone provenance correspondences. Hosted only where a real
+/// `TursoHistoryStore` is wired (Turso present); an org-only draw omits it, so
+/// the history invariants deselect cleanly — no phantom/missed-history claim
+/// without a recording substrate.
+#[holon_macros::capmap_adapter]
+pub trait SutHistory {
+    /// The distinct `block_id`s that appear in `block_history` op-group rows —
+    /// every block the recorded op/effect stream has touched so far.
+    async fn history_block_ids(&self) -> BTreeSet<EntityUri>;
+    /// The number of distinct `op_group`s recorded so far (one per
+    /// history-recording `execute_operation` call with ≥1 field delta).
+    async fn history_op_group_count(&self) -> usize;
+}
+
+/// Reference-side expectation for the C2 history relation, derived by the
+/// harness from the per-tick id-reconcile map (the authoritative record of
+/// which blocks the oracle drove into existence). Feeds the two keystone
+/// provenance correspondences: `ever_created_ids` bounds PHANTOM history
+/// (every recorded id must be one the oracle knows/knew),
+/// `min_recorded_op_groups` bounds MISSED history (each oracle-driven create
+/// records ≥1 op_group).
+#[holon_macros::capmap_adapter]
+pub trait RefHistoryExpectation {
+    /// Every real block id the oracle minted via the reconcile — a SUPERSET
+    /// anchor for the phantom-history subset check (bigger only weakens the
+    /// check, never false-fails it).
+    fn ever_created_ids(&self) -> BTreeSet<EntityUri>;
+    /// A conservative lower bound on the distinct `op_group`s the SUT must have
+    /// recorded: the count of UI-driven (synthetic→real reconciled) creates,
+    /// each routed through `execute_operation` recording ≥1 delta. Excludes
+    /// born-equal external/peer creates (org-ingest / Loro path — no engine
+    /// history), so the bound never over-counts.
+    fn min_recorded_op_groups(&self) -> usize;
+}
+
+/// Reference-side record of block ids the SUT BURNED across a COMPLETED
+/// undo→redo round trip, derived by the harness from the id-reconcile map.
+///
+/// A pair enters this set only when both halves hold: the SUT no longer has the
+/// real id, AND the oracle holds its synthetic label again. That conjunction is
+/// exactly "the block came back under a new identity" — it cannot be satisfied
+/// by a bare undo (there the oracle has dropped the label too), so a reference
+/// left dangling by an undo alone is never reported here. Feeds
+/// `inv-undo-redo-reference-heal`.
+#[holon_macros::capmap_adapter]
+pub trait RefUndoRedoBurned {
+    /// The real block ids retired by the reconcile because a redo re-minted
+    /// their block under a fresh id. Empty on any run without a completed
+    /// undo→redo round trip over a minted block.
+    fn burned_block_ids(&self) -> BTreeSet<EntityUri>;
+}
+
+/// SUT capability: app lifecycle for the wide PBT — boot, restart, document
+/// creation, and the concurrent-schema-init regression probe. `&self`,
+/// `ref_state`-free; `ref_state`-derived values are precomputed at the
+/// transition boundary and passed as typed args.
+#[holon_macros::capmap_adapter]
+pub trait SutAppLifecycle {
+    #[allow(clippy::too_many_arguments)]
+    async fn start_app(
+        &self,
+        root_id: holon_api::EntityUri,
+        expects_valid_index: bool,
+        wait_for_ready: bool,
+        enable_fake_mcp: bool,
+        enable_loro: bool,
+    );
+    async fn simulate_restart(&self);
+    async fn create_document(&self, file_name: &str);
+    async fn delete_document(&self, file_name: &str);
+    /// `RenameDocument`: move the org file `old_file_name` -> `new_file_name`
+    /// on disk (a user-side `mv` in the vault) via `FileSystem::rename`, which
+    /// emits ONE atomic `Rename { from }` change. Production's
+    /// `FileSyncController::on_file_renamed` re-homes the SAME existing
+    /// document (identity kept via its `#+ID:`) with NO delete window and
+    /// retitles the page to the new stem — the file-move spec.
+    async fn rename_document(&self, old_file_name: &str, new_file_name: &str);
+    async fn concurrent_schema_init(&self);
+    async fn assert_epoch_flip_rejected(&self);
+}
+
+/// SUT capability: pre-startup org-filesystem fixture setup — writing org
+/// files, creating directories, `git`/`jj` init, and planting a stale/corrupt
+/// Loro snapshot. `E2ESut`-only (no headless filesystem).
+#[holon_macros::capmap_adapter]
+pub trait SutFixtureFs {
+    async fn write_org_file(&self, filename: &str, content: &str);
+    async fn create_directory(&self, path: &str);
+    async fn git_init(&self);
+    async fn jj_git_init(&self);
+    async fn create_stale_loro(&self, org_filename: &str, corruption_type: LoroCorruptionType);
+}
+
+/// SUT capability: instantiate a block template through the production
+/// `block.instantiate_template` operation. The template is canned inline
+/// (a `{{date}}` root with one `{{mood}}` child carrying a `Link` mark).
+/// Dispatched through the op-floor `DirectUserDriver` which first seeds
+/// the template blocks (idempotent `block.create`) then calls
+/// `instantiate_template` via the production engine.
+#[holon_macros::capmap_adapter]
+pub trait SutTemplateInstantiate {
+    async fn instantiate_template(
+        &self,
+        template_id: &EntityUri,
+        target_parent: &EntityUri,
+        context_key: &str,
+        bindings: &[(String, String)],
+    );
+}
+
+/// SUT capability: register a NEW entity type at runtime through the
+/// agent-facing MCP `create_entity_type` tool — the rung an MCP sidecar
+/// provider actually connects on. Drives the `RegisterEntityScheme` transition.
+///
+/// The tool, not `TypeRegistry::register`: the tool also creates the extension
+/// table and registers the GQL node, so poking the registry directly would be a
+/// lower driver rung than production ever takes and would bake the difference
+/// into the harness. Only compositions that can serve MCP tools over the SAME
+/// container the link classifier reads insert this cap, so every other slice
+/// deselects the transition by cap narrowing.
+#[holon_macros::capmap_adapter]
+pub trait SutEntityTypeRegister {
+    /// Register `entity_name` (the SQL table spelling, e.g. `t_widget`). A tool
+    /// error is a loud panic: the reference has already recorded the
+    /// registration, so a swallowed failure would resurface as an unrelated
+    /// divergence.
+    async fn register_entity_type(&self, entity_name: &str);
+}
+
+/// Reference-side view of which entity schemes have been registered at runtime.
+/// Read ONLY to keep `RegisterEntityScheme` from minting the same entity twice;
+/// deliberately NOT read by any link oracle — `block_links` is registration
+/// independent, so an expectation that changed with this set would contradict
+/// the property.
+pub trait RefEntitySchemes {
+    fn entity_scheme_registered(&self, entity_name: &str) -> bool;
+}
+
+/// Write side of [`RefEntitySchemes`]. Plain trait (no `capmap_adapter`): a
+/// `&mut self` cap cannot live behind the `Arc` a `CapMap` stores.
+pub trait RefEntitySchemesMut: RefEntitySchemes {
+    fn note_entity_scheme_registered(&mut self, entity_name: &str);
+}
+
+/// SUT capability: turn an existing non-page block into a page via the
+/// production `block.convert_block_to_page` compound (BlockToPageTransform,
+/// Option B). Mints a NEW page under the destination, re-homes the origin's
+/// children under it, and leaves the origin in place as a `[[page]]` link
+/// (the origin itself stays a NON-page). `target` is the origin block id;
+/// an EMPTY `destination_path` means "use the backend default" (the origin's
+/// nearest page ancestor — the op's `destination_path`-absent branch), so the
+/// new page lands under a page and `inv-no-page-under-non-page` stays
+/// satisfied. Dispatched through the op-floor `DirectUserDriver`.
+#[holon_macros::capmap_adapter]
+pub trait SutBlockToPage {
+    async fn convert_block_to_page(&self, target: &EntityUri, destination_path: &str);
+}
+
+/// SUT capability: the two halves of the **page-identity lifecycle** — retitle
+/// an existing page, and lazily create a page from a wiki-link target.
+///
+/// Both are production op dispatches through the op-floor `DirectUserDriver`:
+///
+/// * `rename_page` → `block.set_field("content")` on the page block. Per
+///   `docs/Plans/PageIdentityDeterminism.md` §5.3 a rename is "an ordinary edit
+///   to the existing entity" — the id does NOT re-mint.
+/// * `create_page_from_link` → `block.create_page_from_link(target)`, the path
+///   a click on a newly typed `[[Target]]` takes when the page doesn't exist
+///   yet. It mints each missing segment's id as
+///   `PageId::for_path(accumulated_path)`.
+///
+/// They ship as ONE cap because the property that needs them is temporal and
+/// needs BOTH: a page name has to be *freed* by a rename before a later
+/// creation can re-mint it. A config that hosts only one half could never reach
+/// the state the `inv-blocks-match-ref` oracle judges, so splitting the cap
+/// would only buy a vacuous narrowing.
+#[holon_macros::capmap_adapter]
+pub trait SutPageIdentity {
+    /// Retitle the existing page `page` to `new_title` (ordinary content edit,
+    /// same entity, same id).
+    async fn rename_page(&self, page: &EntityUri, new_title: &str);
+    /// Lazily create the page chain named by the `/`-joined `target`.
+    async fn create_page_from_link(&self, target: &str);
+}
+
+/// Reference-side page-identity surface (`RenamePage` /
+/// `CreatePageAtFreedPath`).
+///
+/// Wide-only, like [`RefLayoutMutate`]: pages are a wide-PBT concept and the
+/// pure slice has none. The freed-path ledger is the **temporal** half of the
+/// generator — a page name can only be re-created after a rename has freed it,
+/// and nothing else in the reference records that a name once belonged to a
+/// page that no longer carries it.
+pub trait RefPageIdentity {
+    /// Page paths (`/`-joined, root→leaf) that a `RenamePage` has vacated and
+    /// that no page currently occupies. The `CreatePageAtFreedPath` generator
+    /// draws from this pool; empty until a rename happens.
+    fn freed_page_paths(&self) -> Vec<String>;
+
+    /// The `/`-joined page path (root→leaf) of an existing page block, or
+    /// `None` when `id` is not a page or any page in its chain has empty
+    /// content. Mirrors the backend planner's `page_path_of`.
+    fn page_path_of_ref(&self, id: &EntityUri) -> Option<String>;
+
+    /// Reference mirror of the backend's `resolve_page_name` — the title-only
+    /// lookup `create_page_from_link` uses per segment. Needed by the
+    /// `CreatePageAtFreedPath` generator so it only offers a path whose
+    /// ancestor chain already resolves and whose LEAF does not, i.e. a path the
+    /// op must mint exactly one page for.
+    fn ref_resolve_page_name(&self, hint: &str) -> Option<EntityUri>;
+
+    /// Trimmed titles of EVERY page in the reference, seed pages included. The
+    /// `RenamePage` generator refuses a new title already in use: the backend's
+    /// `resolve_page_name` matches on title alone, so a duplicate title makes
+    /// which page a later link resolves to depend on id order rather than on
+    /// the model.
+    fn page_titles(&self) -> Vec<String>;
+
+    /// `RenamePage`: retitle the existing page `page_id` to `new_title`. The id
+    /// is untouched (§5.3) and the page's OLD path enters the freed-path pool.
+    fn apply_page_rename(&mut self, page_id: &EntityUri, new_title: &str);
+
+    /// `CreatePageAtFreedPath`: mirror `create_page_from_link(path)` — walk the
+    /// `/`-joined `path` segment by segment, reusing a page whose title already
+    /// resolves and minting the missing ones.
+    ///
+    /// §5.3: "A *new* page created later under the new name gets a new id; that
+    /// is correct (it is a different logical page)." So a minted segment whose
+    /// deterministic `PageId::for_path` id is ALREADY occupied — the exact
+    /// state a rename leaves behind — must still become a **distinct entity**,
+    /// never an overwrite of the occupant.
+    fn apply_create_page_at_path(&mut self, path: &str);
+}
+
+// ─── Two-instance true sharing (SyncTransport plan Inc0/Inc1) ─────────
+
+/// What ONE bounded sync round did, as the PBT observes it. The counters are
+/// the executed-witness: a "nothing was transported" assertion is only
+/// meaningful beside proof that the round RAN and consulted the transport.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SyncRoundWitness {
+    /// Rounds driven so far on this SUT (monotonic).
+    pub rounds_run: u64,
+    /// Containers the last round walked. `0` means the orchestrator did
+    /// nothing.
+    pub containers_visited: usize,
+    pub pushed: usize,
+    pub imported: usize,
+    /// Rendered acceptor refusals — typed decisions, never silent drops.
+    pub refusals: Vec<String>,
+    /// Logs on the transport this side has no container mounted for.
+    pub unmounted: Vec<String>,
+    /// Containers the publisher declined to publish for want of a membership
+    /// proof — the "nothing left the device" witness on an unshared vault.
+    pub unauthorized: Vec<String>,
+    /// Cumulative transport consultations (push + pull + list) across all
+    /// rounds, read off the relay itself.
+    pub transport_consultations: u64,
+    /// Total envelopes the transport holds — the "was anything transported at
+    /// all" observable.
+    pub transport_envelopes: usize,
+}
+
+/// SUT-side control of a TWO-INSTANCE (owner + receiver) composed slice: share
+/// a container and drive one bounded sync round. Absent on every
+/// single-instance slice, so the sharing transitions and invariants deselect
+/// there by cap selection — disclosed, not faked.
+#[holon_macros::capmap_adapter]
+pub trait SutTwoInstance {
+    /// `(owner, receiver)` Loro peer ids the slice INTENDED to inject. Distinct
+    /// by construction — the whole point of the peer-id injection seam.
+    async fn instance_peer_ids(&self) -> (u64, u64);
+
+    /// `(owner, receiver)` peer ids the LIVE documents actually carry. Separate
+    /// from [`Self::instance_peer_ids`] so a test can catch an injection seam
+    /// that reports an intention it never applied.
+    async fn live_doc_peer_ids(&self) -> (u64, u64);
+
+    /// Grant `principal` membership over `selector` and put the container into
+    /// the replication set. Idempotent.
+    async fn share_container(&self, selector: &str, principal: &str);
+
+    /// One bounded sync round. `owner_to_receiver` picks which side publishes.
+    async fn sync_now(&self, owner_to_receiver: bool) -> SyncRoundWitness;
+
+    /// The round witness WITHOUT driving a round — for an invariant that must
+    /// read counters it did not produce.
+    async fn sync_witness(&self) -> SyncRoundWitness;
+}
+
+/// SUT-side observation of the RECEIVER instance's projections. Separate from
+/// [`SutBackend`] (which is always the owner) so an invariant naming this cap
+/// cannot accidentally read the owner and pass vacuously.
+#[holon_macros::capmap_adapter]
+pub trait SutReceiverBackend {
+    /// Block ids in the receiver's store, after settle.
+    async fn receiver_block_ids(&self) -> BTreeSet<EntityUri>;
+
+    /// Block ids the receiver's ORG files carry — the receiver-side writeback
+    /// round-trip half of convergence.
+    async fn receiver_org_block_ids(&self) -> BTreeSet<EntityUri>;
+
+    /// Block ids in the OWNER's store RIGHT NOW.
+    async fn owner_block_ids(&self) -> BTreeSet<EntityUri>;
+
+    /// Block ids the owner held when the last owner→receiver round ran — i.e.
+    /// exactly what that round could have carried. Empty before any round.
+    ///
+    /// Convergence must be judged against THIS, not against the owner's live
+    /// set: a block created after the last round has not been offered to the
+    /// receiver yet, so demanding it would fail a correct system. The set is
+    /// still fully load-bearing — anything that existed at push time and did
+    /// not arrive is a real loss.
+    async fn owner_block_ids_at_last_round(&self) -> BTreeSet<EntityUri>;
+
+    /// Ids the receiver already held at boot (its own disjoint seed + the
+    /// programmatic default layout, which both instances mint under the same
+    /// fixed ids). `owner_block_ids − receiver_boot_block_ids` is the
+    /// OWNER-EXCLUSIVE set: the only ids whose presence on the receiver proves
+    /// transport actually happened.
+    async fn receiver_boot_block_ids(&self) -> BTreeSet<EntityUri>;
+
+    /// The owner's ORG-carried block ids — the identity landing-zone reference
+    /// for the receiver's org half (whole-vault self-device sync maps paths
+    /// 1:1).
+    async fn owner_org_block_ids(&self) -> BTreeSet<EntityUri>;
+
+    /// CRDT-level convergence: do the two instances' documents reach the same
+    /// state under a pairwise fork-and-sync fixed point? `None` when either
+    /// document is unavailable (the invariant then skips that layer, honestly).
+    async fn crdt_converged(&self) -> Option<bool>;
+}
+
+/// Reference-side view of what the receiver is ENTITLED to hold, and how many
+/// sync rounds the model believes have run. Ref-only; the SUT twin is
+/// [`SutReceiverBackend`].
+#[holon_macros::capmap_adapter]
+pub trait RefSharedView {
+    /// Is the vault (root container) shared with the receiver right now?
+    fn is_shared(&self) -> bool;
+
+    /// The principal the receiver acts as.
+    fn receiver_principal(&self) -> String;
+
+    /// Owner→receiver sync rounds the model has applied. `0` = nothing may have
+    /// crossed yet, whatever the SUT did.
+    fn owner_to_receiver_rounds(&self) -> u64;
+
+    /// The audience the container is shared with. Empty ⇒ local-only.
+    fn shared_audience(&self) -> Audience;
+}
+
+/// Write side of [`RefSharedView`] — the two model mutations the sharing
+/// transitions perform. Plain trait (no `capmap_adapter`): a `&mut self` cap
+/// cannot live behind the `Arc` a `CapMap` stores, exactly like
+/// [`RefBlockTreeMut`].
+pub trait RefSharedViewMut: RefSharedView {
+    /// Widen the WHOLE-VAULT policy audience to include `principal` and bump
+    /// the sharing epoch. Policy widens FIRST (H3): after this, every block —
+    /// including ones created later — is policy-covered, so the effective
+    /// audience can never over-approximate it.
+    fn apply_share_vault(&mut self, principal: &str);
+
+    /// Record one applied owner→receiver sync round.
+    fn note_owner_to_receiver_round(&mut self);
+}
+
+#[cfg(test)]
+mod attribution_tests {
+    /// `capability_pair!` emits `file!()` INTO the generated constructor, so a
+    /// derived invariant's wiring names the file that declared the pair rather
+    /// than `holon-macros`. Without it all three pair-derived invariants would
+    /// point triage at the macro crate.
+    #[test]
+    fn derived_pair_invariants_are_wired_to_their_declaring_file() {
+        for inv in [
+            super::inv_pair_focus_current_focus_rows(),
+            super::inv_pair_watch_watch_query_ids(),
+            super::inv_pair_view_selection_current_view(),
+        ] {
+            let wiring = inv.attribution().wiring();
+            assert!(
+                wiring.ends_with("capabilities.rs"),
+                "{} wired to {wiring}, expected the declaring file",
+                inv.id().0,
+            );
+        }
+    }
 }

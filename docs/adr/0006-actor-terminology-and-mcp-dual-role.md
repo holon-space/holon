@@ -1,6 +1,6 @@
 # ADR 0006: Actor terminology and MCP dual role
 
-**Status:** Proposed (2026-05-27)
+**Status:** Accepted (2026-05-27; shipped. Note: sync adapters were materialized as manifest variants + generic YAML sidecars, not per-integration structs.)
 **Deciders:** Martin
 **Context:** Naming + role assignment for the third tier of ADR 0004
 

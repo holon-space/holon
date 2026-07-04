@@ -1,5 +1,12 @@
 //! `inv-viewmodel-no-error-widgets`.
 //!
+//! @pbt oracle internal-consistency
+//! @pbt covers error-widget-in-tree — render-pipeline fault (matview fault,
+//!   CDC delivery bug, shadow-interp panic) leaves Error nodes in the tree
+//! @pbt slips-if-removed a CDC/interpret failure renders Error placeholders
+//!   in the user-visible tree; the app looks structurally fine but shows
+//!   error boxes and no oracle flags it
+//!
 //! Walks the headless `ReactiveEngine`'s rendered ViewModel tree and
 //! asserts no `Error` widget nodes exist. Catches render-pipeline
 //! failures (matview fault, CDC delivery bug, shadow-interpretation

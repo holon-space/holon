@@ -1,5 +1,10 @@
 //! Transition: attempt a consolidator epoch flip and assert it is rejected.
 //!
+//! @pbt rung dispatch
+//!   `assert_epoch_flip_rejected` is a consolidator-level assertion probe.
+//! @pbt covers consolidator-epoch-flip-reject — stale epoch flip must be
+//! rejected
+//!
 //! Spec 0008 §4.2(b): with the app already running, a SECOND in-process boot
 //! over the SAME vault/db/config paths but with the consolidator flipped (Loro
 //! ⇄ SQL) must fail with Model.md invariant 10's hard error, fired through the
@@ -14,29 +19,26 @@
 //! genuinely exists (the SUT method fails loud if it selected without one).
 
 use holon_pbt_core::TransitionFactory;
-use holon_pbt_core::TransitionImpl;
 use holon_pbt_core::TransitionRef;
+use holon_pbt_core::capabilities::RefLifecycle;
+use holon_pbt_core::capabilities::SutAppLifecycle;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::check;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::local_caps::SutAppLifecycle;
-use crate::pbt::reference_state::ReferenceState;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
-use crate::pbt::validation::Reason;
-use crate::pbt::validation::check;
 
 /// Attempt to boot a second consolidator over the running app's durable state
 /// and assert the invariant-10 epoch guard rejects it.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct EpochFlipRejected;
 
-impl TransitionFactory<ReferenceState> for EpochFlipRejected {
+impl<R: RefLifecycle> TransitionFactory<R> for EpochFlipRejected {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        vec![::holon_pbt_core::composition::CapId::of::<
-            dyn crate::pbt::local_caps::SutAppLifecycle,
-        >()]
+        Self::declared_caps()
     }
 
     type Reason = Reason;
@@ -46,7 +48,7 @@ impl TransitionFactory<ReferenceState> for EpochFlipRejected {
         ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Turso)
     }
 
-    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         EpochFlipRejected
             .preconditions(state)
             // Low weight (like `SimulateRestart`): a rare mid-run epoch-flip probe.
@@ -54,30 +56,27 @@ impl TransitionFactory<ReferenceState> for EpochFlipRejected {
     }
 }
 
-impl TransitionRef<ReferenceState> for EpochFlipRejected {
+impl<R: RefLifecycle> TransitionRef<R> for EpochFlipRejected {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         // App must be running: the flip re-boots over the live app's own paths.
-        check(state.action.app_started, Reason::AppNotStarted)
+        check(state.app_started(), Reason::AppNotStarted)
     }
 
-    fn apply_to_ref(&self, _: &mut ReferenceState) {
+    fn apply_to_ref(&self, _: &mut R) {
         // A REJECTED boot changes nothing: the live app and its durable state
         // are untouched, so the reference state is unchanged.
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutAppLifecycle> TransitionImpl<ReferenceState, S> for EpochFlipRejected {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
+crate::cap_transition! {
+    EpochFlipRejected: SutAppLifecycle,
+    where R: [ RefLifecycle ],
+    |_me, _state, sut| {
         sut.assert_epoch_flip_rejected().await;
     }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for EpochFlipRejected {
-    fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
+    sql_budget: |_me, _state| {
         // The flip dies at the wiring guard BEFORE `BackendEngine`/matview/CDC
         // resolution, so no SQL flows through the LIVE (traced) engine. The
         // transient second Turso connection `open_and_register_core` opens ahead of

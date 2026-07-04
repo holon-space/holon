@@ -1,5 +1,12 @@
 //! `inv-frontend-engine`.
 //!
+//! @pbt oracle internal-consistency
+//! @pbt covers render-liveness — the gpui window's ReactiveEngine resolves
+//!   the root layout to a settled (non-loading) ViewModel
+//! @pbt slips-if-removed a matview/CDC/waker stall that leaves the root
+//!   perpetually `loading` ships a permanently blank window that the
+//!   headless engine, having no live window, never exercises
+//!
 //! Liveness gate on the gpui window's own `ReactiveEngine`: the frontend
 //! must resolve the root layout to a settled (non-loading) ViewModel. This
 //! catches issues invisible to the headless engine — matview failures, CDC

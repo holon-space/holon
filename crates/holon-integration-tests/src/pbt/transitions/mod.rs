@@ -79,26 +79,32 @@ pub fn model_chord_click_focus<
     state.open_active_editor(block_id.clone(), content, caret);
 }
 
-pub mod add_peer;
+mod advance_day;
 pub mod apply_mutation;
 mod arrow_navigate;
+pub(crate) mod block_to_page;
 pub mod bulk_external_add;
 pub mod click_block;
 mod concurrent_schema_init;
+mod create_block_under_focus;
 mod create_directory;
 mod create_document;
-mod create_stale_loro;
+pub(crate) mod create_page_at_freed_path;
 pub mod delete_backward;
+mod delete_document;
+mod dense_projection_edit;
 mod drag_drop_block;
 mod emit_mcp_data;
 mod epoch_flip_rejected;
 mod expand_toggle;
+pub mod external_write_same_block_focused;
+pub mod external_write_while_focused;
 pub mod focus_editable_text;
 mod git_init;
 pub mod indent;
+mod instantiate_template;
 mod jj_git_init;
 pub mod join_block;
-mod merge_from_peer;
 pub mod move_cursor;
 pub mod move_down;
 pub mod move_up;
@@ -108,26 +114,32 @@ mod navigate_forward;
 mod navigate_home;
 mod nothing;
 pub mod outdent;
-mod peer_char_edit;
-mod peer_edit;
+mod open_tab_via_modifier_click;
 mod pin_block;
 mod press_key;
 mod redo;
+pub mod register_entity_scheme;
 mod remove_watch;
+mod rename_document;
+pub(crate) mod rename_page;
+mod select_bias;
 pub mod set_edge_field;
 mod setup_watch;
+pub mod share_container;
 mod simulate_restart;
 pub mod split_block;
+pub mod stale_external_rewrite;
 pub(crate) mod start_app;
 mod switch_view;
-mod sync_with_peer;
+pub mod sync_now;
 mod toggle_collapse;
 pub mod toggle_state;
 pub mod trigger_slash_command;
 pub mod type_chars;
 mod undo_last_mutation;
 mod unpin_block;
-mod write_org_file;
+mod wheel_scroll;
+pub(crate) mod write_org_file;
 
 // Shared layout-PBT variants (delegate to holon-pbt-core +
 // holon-layout-testing).
@@ -135,35 +147,43 @@ mod deliver_block_content;
 mod switch_view_mode;
 mod toggle_drawer;
 
-// ── Shared helper types for peer-sync transitions ──────────────────
-// These would naturally live in `peer_edit.rs` / `peer_char_edit.rs`
-// but they're referenced as field types from BOTH the variant
-// definitions and outside callers (sut.rs SutHandle impls), so they
-// stay at the module root for ergonomic imports.
-use std::hash::Hash;
-use std::hash::Hasher;
-
-pub use add_peer::AddPeer;
+pub use advance_day::AdvanceDay;
 pub use apply_mutation::ApplyMutation;
 pub use arrow_navigate::ArrowNavigate;
+pub use block_to_page::BlockToPage;
 pub use bulk_external_add::BulkExternalAdd;
 pub use click_block::ClickBlock;
 pub use concurrent_schema_init::ConcurrentSchemaInit;
+pub use create_block_under_focus::CreateBlockUnderFocus;
 pub use create_directory::CreateDirectory;
 pub use create_document::CreateDocument;
-pub use create_stale_loro::CreateStaleLoro;
+pub use create_page_at_freed_path::CreatePageAtFreedPath;
 pub use delete_backward::DeleteBackward;
+pub use delete_document::DeleteDocument;
 pub use deliver_block_content::DeliverBlockContent;
+pub use dense_projection_edit::DenseProjectionEdit;
 pub use drag_drop_block::DragDropBlock;
 pub use emit_mcp_data::EmitMcpData;
 pub use epoch_flip_rejected::EpochFlipRejected;
 pub use expand_toggle::ExpandToggle;
+pub use external_write_same_block_focused::ExternalWriteSameBlockFocused;
+pub use external_write_while_focused::ExternalWriteWhileFocused;
 pub use focus_editable_text::FocusEditableText;
 pub use git_init::GitInit;
+// The peer-sync transitions (`AddPeer`, `PeerEdit`, `PeerCharEdit`,
+// `MergeFromPeer`, `SyncWithPeer`, `CreateStaleLoro`) and their shared helper
+// `deterministic_peer_block_id` are co-located in `holon-loro-testing` /
+// `holon-pbt-core` (Phase-1a Step 4). Re-exported here so the
+// `declare_e2e_transitions!` enum below (the central assembler) names them
+// unchanged; `deterministic_peer_block_id` now lives in
+// `holon_pbt_core::capabilities`.
+pub use holon_loro_testing::transitions::{
+    AddPeer, CreateStaleLoro, MergeFromPeer, PeerCharEdit, PeerEdit, SyncWithPeer,
+};
 pub use indent::Indent;
+pub use instantiate_template::InstantiateTemplate;
 pub use jj_git_init::JjGitInit;
 pub use join_block::JoinBlock;
-pub use merge_from_peer::MergeFromPeer;
 pub use move_cursor::MoveCursor;
 pub use move_down::MoveDown;
 pub use move_up::MoveUp;
@@ -173,20 +193,24 @@ pub use navigate_forward::NavigateForward;
 pub use navigate_home::NavigateHome;
 pub use nothing::Nothing;
 pub use outdent::Outdent;
-pub use peer_char_edit::PeerCharEdit;
-pub use peer_edit::PeerEdit;
+pub use open_tab_via_modifier_click::OpenTabViaModifierClick;
 pub use pin_block::PinBlock;
 pub use press_key::PressKey;
 pub use redo::Redo;
+pub use register_entity_scheme::RegisterEntityScheme;
 pub use remove_watch::RemoveWatch;
+pub use rename_document::RenameDocument;
+pub use rename_page::RenamePage;
 pub use set_edge_field::SetEdgeField;
 pub use setup_watch::SetupWatch;
+pub use share_container::ShareContainer;
 pub use simulate_restart::SimulateRestart;
 pub use split_block::SplitBlock;
+pub use stale_external_rewrite::StaleExternalRewrite;
 pub use start_app::StartApp;
 pub use switch_view::SwitchView;
 pub use switch_view_mode::SwitchViewMode;
-pub use sync_with_peer::SyncWithPeer;
+pub use sync_now::SyncNow;
 pub use toggle_collapse::ToggleCollapse;
 pub use toggle_drawer::ToggleDrawer;
 pub use toggle_state::ToggleState;
@@ -194,32 +218,8 @@ pub use trigger_slash_command::TriggerSlashCommand;
 pub use type_chars::TypeChars;
 pub use undo_last_mutation::UndoLastMutation;
 pub use unpin_block::UnpinBlock;
+pub use wheel_scroll::WheelScroll;
 pub use write_org_file::WriteOrgFile;
-
-/// Generate a deterministic, UUID-like stable ID from inputs.
-/// Both the reference model and SUT use this to produce identical
-/// block IDs for peer-created blocks.
-pub fn deterministic_peer_block_id(
-    peer_idx: usize,
-    parent_stable_id: Option<&str>,
-    content: &str,
-    seq: usize,
-) -> String {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    peer_idx.hash(&mut hasher);
-    parent_stable_id.hash(&mut hasher);
-    content.hash(&mut hasher);
-    seq.hash(&mut hasher);
-    let h = hasher.finish();
-    let hi = (h >> 32) as u32;
-    let lo = h as u32;
-    format!("peer-{hi:08x}-{lo:08x}-{peer_idx:04x}-{seq:04x}")
-}
-
-// Peer edit operations live in `holon-pbt-core` so the `SutLoro` capability
-// trait there can name them. Re-exported here for the transition call sites.
-pub use holon_pbt_core::capabilities::PeerEditOp;
-pub use holon_pbt_core::capabilities::TextOp;
 
 crate::declare_e2e_transitions! {
     pub enum E2ETransition {
@@ -227,15 +227,26 @@ crate::declare_e2e_transitions! {
         // Every variant below MUST have a sibling
         // `transitions/<snake_case_name>.rs` file. Enforced by the
         // unit tests in `arch_tests` below the macro invocation.
+        AdvanceDay(AdvanceDay),
         ApplyMutation(ApplyMutation),
         ArrowNavigate(ArrowNavigate),
+        BlockToPage(BlockToPage),
+        RenamePage(RenamePage),
+        CreatePageAtFreedPath(CreatePageAtFreedPath),
         NavigateBack(NavigateBack),
         BulkExternalAdd(BulkExternalAdd),
+        StaleExternalRewrite(StaleExternalRewrite),
+        ExternalWriteWhileFocused(ExternalWriteWhileFocused),
+        ExternalWriteSameBlockFocused(ExternalWriteSameBlockFocused),
         ClickBlock(ClickBlock),
+        CreateBlockUnderFocus(CreateBlockUnderFocus),
         CreateDocument(CreateDocument),
+        RenameDocument(RenameDocument),
         WriteOrgFile(WriteOrgFile),
         CreateDirectory(CreateDirectory),
         DeleteBackward(DeleteBackward),
+        DeleteDocument(DeleteDocument),
+        DenseProjectionEdit(DenseProjectionEdit),
         DragDropBlock(DragDropBlock),
         EmitMcpData(EmitMcpData),
         EpochFlipRejected(EpochFlipRejected),
@@ -243,6 +254,7 @@ crate::declare_e2e_transitions! {
         FocusEditableText(FocusEditableText),
         GitInit(GitInit),
         Indent(Indent),
+        InstantiateTemplate(InstantiateTemplate),
         JjGitInit(JjGitInit),
         JoinBlock(JoinBlock),
         MoveCursor(MoveCursor),
@@ -256,9 +268,11 @@ crate::declare_e2e_transitions! {
         NavigateForward(NavigateForward),
         NavigateHome(NavigateHome),
         Outdent(Outdent),
+        OpenTabViaModifierClick(OpenTabViaModifierClick),
         PinBlock(PinBlock),
         PressKey(PressKey),
         Redo(Redo),
+        RegisterEntityScheme(RegisterEntityScheme),
         SimulateRestart(SimulateRestart),
         RemoveWatch(RemoveWatch),
         SetEdgeField(SetEdgeField),
@@ -270,6 +284,7 @@ crate::declare_e2e_transitions! {
         TypeChars(TypeChars),
         UndoLastMutation(UndoLastMutation),
         UnpinBlock(UnpinBlock),
+        WheelScroll(WheelScroll),
         AddPeer(AddPeer),
         PeerEdit(PeerEdit),
         SyncWithPeer(SyncWithPeer),
@@ -279,6 +294,10 @@ crate::declare_e2e_transitions! {
         ToggleDrawer(ToggleDrawer),
         ToggleCollapse(ToggleCollapse),
         DeliverBlockContent(DeliverBlockContent),
+        // True sharing (two-instance slice only — cap-gated on `SutTwoInstance`,
+        // which no single-instance slice provides).
+        ShareContainer(ShareContainer),
+        SyncNow(SyncNow),
     }
 }
 
@@ -356,6 +375,22 @@ mod arch_tests {
         );
 
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/pbt/transitions");
+        // The peer-sync transitions were co-located into `holon-loro-testing`
+        // (Phase-1a Step 4 — see the `pub use holon_loro_testing::transitions::…`
+        // re-export above). Their dedicated files live in that crate's
+        // `src/transitions/` dir, not here. The file-per-transition invariant
+        // still holds — it just spans the crate seam, so these variants are
+        // searched for in the co-located crate instead.
+        let loro_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../holon-loro-testing/src/transitions");
+        let relocated_to_loro: &[&str] = &[
+            "AddPeer",
+            "CreateStaleLoro",
+            "MergeFromPeer",
+            "PeerCharEdit",
+            "PeerEdit",
+            "SyncWithPeer",
+        ];
         let mut missing: Vec<String> = Vec::new();
         for name in &variant_names {
             let mut snake = String::new();
@@ -365,7 +400,12 @@ mod arch_tests {
                 }
                 snake.push(c.to_ascii_lowercase());
             }
-            let path = dir.join(format!("{snake}.rs"));
+            let search_dir = if relocated_to_loro.contains(&name.as_str()) {
+                &loro_dir
+            } else {
+                &dir
+            };
+            let path = search_dir.join(format!("{snake}.rs"));
             if !path.exists() {
                 missing.push(format!("{name} → expected {}", path.display()));
             }
@@ -460,9 +500,8 @@ mod required_caps_guard {
     #[test]
     fn required_caps_match_transition_impl_bounds() {
         use holon_frontend::pbt_caps as fe;
+        use holon_pbt_core::capabilities as lc;
         use holon_pbt_core::capabilities as c;
-
-        use crate::pbt::local_caps as lc;
 
         macro_rules! one {
             ($t:ty, $cap:path) => {
@@ -509,6 +548,7 @@ mod required_caps_guard {
         one!(NavigateBack, c::SutNavHistoryDrive);
         one!(NavigateForward, c::SutNavHistoryDrive);
         one!(PinBlock, c::SutNavHistoryDrive);
+        one!(OpenTabViaModifierClick, c::SutNavHistoryDrive);
         one!(UnpinBlock, c::SutNavHistoryDrive);
         // WatchRegister
         one!(SetupWatch, c::SutWatchRegister);
@@ -549,6 +589,8 @@ mod required_caps_guard {
         // AppLifecycle (test-local)
         one!(ConcurrentSchemaInit, lc::SutAppLifecycle);
         one!(CreateDocument, lc::SutAppLifecycle);
+        one!(DeleteDocument, lc::SutAppLifecycle);
+        one!(RenameDocument, lc::SutAppLifecycle);
         one!(EpochFlipRejected, lc::SutAppLifecycle);
         one!(SimulateRestart, lc::SutAppLifecycle);
         one!(StartApp, lc::SutAppLifecycle);
@@ -564,5 +606,158 @@ mod required_caps_guard {
         // Nothing omitted: migrated to `cap_transition!` (no-cap form) —
         // single-sourced.
         none!(DeliverBlockContent);
+    }
+}
+
+/// Systemic non-vacuity guard: every variant REGISTERED in the `E2ETransition`
+/// alphabet must be DRAWABLE — its `required_wiring` + `required_caps`
+/// satisfiable — in at least one SHIPPED (blessed) composition. A transition
+/// that no composition can satisfy auto-narrows out of every wiring's alphabet
+/// and runs ZERO times while looking wired: it certifies nothing. This guard
+/// turns that into a loud failure naming the dead variant.
+///
+/// The variant list is macro-generated (`all_transition_gates`), so a NEW
+/// transition is covered automatically — the guard cannot drift out of date.
+/// "Shipped composition" spans TWO homes:
+///   1. each `Wiring::blessed_manifests()` entry mapped through the SAME
+///      `set_for_wiring` normalization + `compose_sut` the keystone boots
+///      (`required_wiring` checked against the RAW blessed manifest exactly as
+///      `aggregate_transitions` checks it against `state.harness.wiring`); and
+///   2. the live-MCP slice (`LiveMcpE2E`), whose compose path boots a real MCP
+///      server so it is NOT in `blessed_manifests` — represented statically by
+///      its `register_live_caps` cap surface over the `full_headless` wiring it
+///      mirrors. This keeps a live-MCP-only transition (`DenseProjectionEdit` /
+///      `SutDenseTools`) counted as ALIVE by its CAP, not by a name allowlist.
+/// A transition alive in NEITHER home (and not env-gated) fails the guard.
+#[cfg(test)]
+mod non_vacuity_guard {
+    use holon_pbt_core::composition::CapId;
+    use holon_pbt_core::composition::CapSet;
+    use holon_pbt_core::wiring::RequiredWiring;
+    use holon_pbt_core::wiring::Wiring;
+
+    use crate::pbt::composed::live_mcp::live_mcp_cap_ids;
+    use crate::pbt::composed::wide_e2e::cap_set_for_wiring;
+
+    /// Transitions intentionally undrawable in the DEFAULT shipped compositions
+    /// because an ENV flag (not `required_wiring`, which the guard can see)
+    /// gates their cap OFF by default. Each entry MUST cite the flag and
+    /// why it is deliberately dormant — this is the ONLY sanctioned reason
+    /// a registered transition may be undrawable by default; anything else
+    /// is the silent-vacuity bug the guard exists to catch. Keep this list
+    /// MINIMAL. (Distinct from the LIVE-MCP class below: this is a bare-name
+    /// env-gate allowlist; that one is CAP-checked against a real compose
+    /// path.)
+    const ENV_GATED_ALLOWLIST: &[&str] = &[
+        // AdvanceDay: `SutClockAdvance` registers ONLY under
+        // `HOLON_PBT_ADVANCE_DAY` (composed/builder.rs) — deliberately off by
+        // default until the co-landed ref model + `inv-journal-one-per-day`
+        // prove green under the full catalog. Flip the env on to draw it.
+        "AdvanceDay",
+    ];
+
+    /// The blessed compositions as `(raw manifest, composed cap set)`.
+    fn blessed_compositions() -> Vec<(Wiring, CapSet)> {
+        Wiring::blessed_manifests()
+            .into_iter()
+            .map(|w| {
+                let cs = cap_set_for_wiring(&w);
+                (w, cs)
+            })
+            .collect()
+    }
+
+    /// Is `(req_wiring, req_caps)` satisfiable by at least one shipped
+    /// composition — a blessed manifest's `compose_sut`, the live-MCP slice's
+    /// compose path, or the two-instance slice? Every home checks `req_caps`
+    /// as cap EVIDENCE, never a name. The two-instance slice boots a blessed
+    /// owner map through the same builder and then inserts its sharing caps, so
+    /// it is a blessed composition widened by `two_instance_caps`. Pure
+    /// predicate so the teeth of the guard are unit-testable directly.
+    fn gate_covered(
+        blessed: &[(Wiring, CapSet)],
+        live_mcp_wiring: &Wiring,
+        live_mcp_caps: &[CapId],
+        two_instance_caps: &[CapId],
+        req_wiring: &RequiredWiring,
+        req_caps: &[CapId],
+    ) -> bool {
+        let in_blessed = blessed
+            .iter()
+            .any(|(w, cs)| req_wiring.satisfied_by(w) && req_caps.iter().all(|c| cs.contains(c)));
+        let in_live_mcp = req_wiring.satisfied_by(live_mcp_wiring)
+            && req_caps.iter().all(|c| live_mcp_caps.contains(c));
+        let in_two_instance = blessed.iter().any(|(w, cs)| {
+            req_wiring.satisfied_by(w)
+                && req_caps
+                    .iter()
+                    .all(|c| cs.contains(c) || two_instance_caps.contains(c))
+        });
+        in_blessed || in_live_mcp || in_two_instance
+    }
+
+    #[test]
+    fn every_transition_is_drawable_in_a_shipped_composition() {
+        let blessed = blessed_compositions();
+        assert!(
+            !blessed.is_empty(),
+            "no blessed compositions to check — Wiring::blessed_manifests() is empty"
+        );
+        let live_mcp_wiring = holon_pbt_core::component_set::ComponentSet::full_headless().wiring;
+        let live_mcp_caps = live_mcp_cap_ids();
+        let two_instance_caps = crate::pbt::composed::two_instance::two_instance_cap_ids();
+
+        let dead: Vec<&'static str> = super::all_transition_gates()
+            .into_iter()
+            .filter(|(name, _, _)| !ENV_GATED_ALLOWLIST.contains(name))
+            .filter(|(_name, req_wiring, req_caps)| {
+                !gate_covered(
+                    &blessed,
+                    &live_mcp_wiring,
+                    &live_mcp_caps,
+                    &two_instance_caps,
+                    req_wiring,
+                    req_caps,
+                )
+            })
+            .map(|(name, _, _)| name)
+            .collect();
+
+        assert!(
+            dead.is_empty(),
+            "DEAD E2ETransition(s): registered in the alphabet but NO shipped composition \
+             (blessed manifest, the live-MCP slice, or the two-instance slice) satisfies both \
+             required_wiring AND \
+             required_caps, so they can never be drawn — silent vacuity (the \
+             InstantiateTemplate class, BugFunnel 2026-07-27): {dead:?}.\nEither register \
+             the missing cap in a shipped composition \
+             (crates/holon-integration-tests/src/pbt/composed/builder.rs — mirror how e.g. \
+             SutBlockToPage / SutTemplateInstantiate register on the frontend arm; or \
+             register_live_caps for a live-MCP-only cap) or gate the transition out \
+             explicitly. A transition present only on the unreachable storage-only \
+             `else if has_turso` branch is exactly this bug.",
+        );
+    }
+
+    /// Teeth check: a cap NO shipped composition provides must read as DEAD, so
+    /// the guard cannot vacuously pass everything. Uses a real cap
+    /// (`SutTemplateInstantiate`) but hands `gate_covered` EMPTY compositions —
+    /// modelling a transition registered nowhere — and asserts it is uncovered.
+    #[test]
+    fn gate_covered_reds_for_a_cap_no_composition_provides() {
+        let orphan = CapId::of::<dyn holon_pbt_core::capabilities::SutTemplateInstantiate>();
+        let covered = gate_covered(
+            &[], // no blessed homes
+            &holon_pbt_core::component_set::ComponentSet::full_headless().wiring,
+            &[],                  // live-MCP provides nothing
+            &[],                  // the two-instance slice provides nothing
+            &RequiredWiring::Any, // wiring trivially met
+            &[orphan],
+        );
+        assert!(
+            !covered,
+            "a transition whose required cap is provided by NO composition must read as \
+             DEAD — the guard's teeth are gone otherwise"
+        );
     }
 }

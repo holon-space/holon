@@ -38,12 +38,24 @@ use crate::sync::LoroSyncControllerHandle;
 pub struct LoroConfig {
     /// Root directory for Loro document storage
     pub storage_dir: PathBuf,
+    /// Peer id this session's global doc is minted under. `None` = the
+    /// env/random fallback. Injected by `SessionConfig::loro_peer_id` so two
+    /// sessions in one process (the two-instance sharing PBT) never collide.
+    pub peer_id: Option<u64>,
 }
 
 impl LoroConfig {
     pub fn new(storage_dir: PathBuf) -> Self {
         let storage_dir = std::fs::canonicalize(&storage_dir).unwrap_or(storage_dir);
-        Self { storage_dir }
+        Self {
+            storage_dir,
+            peer_id: None,
+        }
+    }
+
+    pub fn with_peer_id(mut self, peer_id: Option<u64>) -> Self {
+        self.peer_id = peer_id;
+        self
     }
 }
 
@@ -62,7 +74,9 @@ impl Module for LoroModule {
         // Register LoroDocumentStore
         injector.provide::<LoroDocumentStore>(Provider::root(|resolver| {
             let config = resolver.resolve::<LoroConfig>();
-            Shared::new(LoroDocumentStore::new(config.storage_dir.clone()))
+            Shared::new(
+                LoroDocumentStore::new(config.storage_dir.clone()).with_peer_id(config.peer_id),
+            )
         }));
 
         // Register LoroBlocksDataSource
@@ -287,7 +301,16 @@ impl Module for LoroModule {
                 .0
                 .clone();
 
-            match controller.start(block_live).await {
+            // Boot ordering: hold the reconcile loop until the org initial
+            // scan has released the write path. `SyncGate` is opened by
+            // `post_ready` on EVERY scan-completion path (success, per-file
+            // degradation, fail-loud stall), so the loop always eventually
+            // runs. Required, not optional: the only wiring that registers
+            // LoroModule registers the gate alongside it, so a missing gate is
+            // a wiring bug and must not degrade into an ungated projector.
+            let gate = resolver.resolve::<holon_core::SyncGate>();
+
+            match controller.start_gated(block_live, &gate).await {
                 Ok(handle) => Shared::new(handle),
                 Err(e) => {
                     error!("[LoroModule] Failed to start LoroSyncController: {}", e);

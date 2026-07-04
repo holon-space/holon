@@ -5,11 +5,13 @@
 //! @c4 uses holon-api "shared value & operation types" "Rust"
 //! @c4 uses holon-core "core datasource traits" "Rust"
 //! @c4 uses holon-macros "entity/operation derive macros" "Rust"
+//! @c4 uses holon-profiles "entity profile resolution" "Rust"
 //!
 //! Reusable MCP client: connects to MCP servers and exposes their tools as
 //! `OperationProvider`s.
 
 pub mod credential_store;
+pub mod entity_mirror;
 pub mod integration_config;
 pub mod mcp_call_surface;
 pub mod mcp_integration;
@@ -21,8 +23,12 @@ pub mod mcp_sidecar;
 pub mod mcp_sync_engine;
 pub mod mcp_sync_strategy;
 pub mod mcp_vtable;
+pub mod rest_oauth2;
+pub mod rest_transport;
 pub mod sync_freshness;
+pub mod write_authorization;
 
+pub use holon_core::SyncGate;
 pub use integration_config::IntegrationFileConfig;
 pub use integration_config::load_integration_configs;
 pub use mcp_integration::AuthMode;
@@ -32,6 +38,7 @@ pub use mcp_integration::McpIntegrationConfig;
 pub use mcp_integration::McpTransport;
 pub use mcp_integration::PendingOAuthFlows;
 pub use mcp_integration::SyncEvent;
+pub use mcp_integration::SyncLoopTuning;
 pub use mcp_integration::build_mcp_integration;
 pub use mcp_integration::spawn_sync_event_loop;
 pub use mcp_notification_handler::NotifyingClientHandler;
@@ -48,16 +55,35 @@ pub use mcp_provider::connect_mcp_with_handler;
 pub use mcp_resource_discovery::ResourceEntityMeta;
 pub use mcp_resource_discovery::parse_resource_template_meta;
 pub use mcp_sidecar::McpSidecar;
+pub use mcp_sidecar::OnceOnlyAuthorization;
 pub use mcp_sidecar::SyncInterval;
 pub use mcp_sidecar::ViewConfig;
 pub use mcp_sync_engine::McpSyncEngine;
 pub use mcp_sync_engine::VtableSubscription;
 pub use mcp_sync_strategy::FetchResult;
+pub use mcp_sync_strategy::Projection;
 pub use mcp_sync_strategy::ResourceSync;
 pub use mcp_sync_strategy::SyncStrategy;
 pub use mcp_sync_strategy::ToolSync;
 pub use mcp_vtable::McpForeignDataWrapper;
 pub use mcp_vtable::VtableConfig;
+pub use rest_oauth2::OAuth2TokenProvider;
+pub use rest_oauth2::RestOAuth2Config;
+pub use rest_transport::Pagination;
+pub use rest_transport::ResponseFormat;
+pub use rest_transport::RestAuth;
+pub use rest_transport::RestCall;
+pub use rest_transport::RestCallSurface;
+pub use rest_transport::RestManual;
 pub use sync_freshness::FreshnessPlan;
 pub use sync_freshness::ProbedResourceCapabilities;
 pub use sync_freshness::freshness_plan;
+pub use write_authorization::PendingState;
+pub use write_authorization::PendingWriteEvent;
+pub use write_authorization::PendingWriteEventKind;
+pub use write_authorization::PendingWriteStore;
+pub use write_authorization::PendingWriteView;
+pub use write_authorization::SharedPendingWrites;
+pub use write_authorization::WriteAuthorizationPolicy;
+pub use write_authorization::WriteDecision;
+pub use write_authorization::WriteIntent;

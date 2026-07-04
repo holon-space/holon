@@ -11,17 +11,31 @@ use crate::mcp_integration::McpTransport;
 use crate::mcp_sidecar::EntityConfig;
 use crate::mcp_sidecar::McpSidecar;
 use crate::mcp_sidecar::ToolConfig;
+use crate::rest_oauth2::RestOAuth2Config;
+use crate::rest_transport::RestAuth;
 
 /// Transport configuration as declared in the YAML file.
 ///
-/// Exactly one of `child_process` or `http` must be set.
+/// Exactly one of the variants must be set. Two of them reach a server that
+/// *speaks MCP* (`child_process` = stdio, `http` = MCP-over-Streamable-HTTP);
+/// the third, `rest`, reaches a plain HTTP/JSON API *directly* via a
+/// UTCP-manual-style description (see [`RestTransport`]). All three plug into
+/// the same connector engine behind the
+/// [`crate::mcp_call_surface::McpCallSurface`] seam — one engine, plural
+/// transports.
+///
+/// Note on naming: `http` here is historical and means *MCP over HTTP*, not a
+/// generic REST call. The direct-API transport is `rest`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct TransportConfig {
     pub child_process: Option<ChildProcessTransport>,
     pub http: Option<HttpTransport>,
+    pub rest: Option<RestTransport>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChildProcessTransport {
     pub command: String,
     #[serde(default)]
@@ -31,8 +45,122 @@ pub struct ChildProcessTransport {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct HttpTransport {
     pub uri: String,
+}
+
+/// Direct HTTP-API transport (UTCP-manual style). Describes a plain JSON API by
+/// its base URL and a set of named `calls`, each a GET endpoint. A
+/// [`crate::rest_transport::RestCallSurface`] serves these calls behind the
+/// same [`McpCallSurface`](crate::mcp_call_surface::McpCallSurface) seam the
+/// MCP transports use, so the rest of the connector engine is unchanged.
+///
+/// Read-only for now: only `GET` methods are accepted (write/mutation and lease
+/// semantics are out of scope).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestTransport {
+    /// Base URL; may be `${VAR}`-expanded. No trailing slash required.
+    pub base_url: String,
+    /// Optional auth header sent on every request. NEVER inline a secret —
+    /// reference an env/keychain name via `${VAR}` in `value`.
+    #[serde(default)]
+    pub auth: Option<RestAuthConfig>,
+    /// Named endpoints, keyed by the tool name referenced from
+    /// `sync.list_tool`.
+    pub calls: HashMap<String, RestCallConfig>,
+    /// Default poll cadence for sync entities that declare no per-entity
+    /// `sync.interval`. REST has no subscription freshness, so every sync
+    /// entity polls; this sets the transport-wide default (per-entity
+    /// `sync.interval` still overrides it, and an unset value falls to the
+    /// 300s built-in). Accepts an integer (seconds) or a humantime-style
+    /// string (`"5m"`).
+    #[serde(default)]
+    pub poll_interval: Option<crate::mcp_sidecar::SyncInterval>,
+}
+
+/// Auth for the `rest` transport. Exactly one arm must be set:
+///
+/// - a **static header** — `{ header: Authorization, value: "Bearer ${TOKEN}"
+///   }` (back-compatible), or
+/// - **OAuth2** — `{ oauth2: { token_url, client_id_env, …, refresh_token_file
+///   } }` (refresh-token grant; see [`RestOAuth2Config`]).
+///
+/// Modeled as optional fields (rather than a serde-tagged enum) so both shapes
+/// parse cleanly under `deny_unknown_fields` and a mistake yields a precise
+/// error at [`RestAuthConfig::resolve`] rather than a "did not match any
+/// variant".
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestAuthConfig {
+    /// Static-header arm: the header name (e.g. `Authorization`).
+    #[serde(default)]
+    pub header: Option<String>,
+    /// Static-header arm: the header value; `${VAR}`-expanded at startup. Keep
+    /// the secret out of YAML.
+    #[serde(default)]
+    pub value: Option<String>,
+    /// OAuth2 arm: refresh-token-grant configuration.
+    #[serde(default)]
+    pub oauth2: Option<RestOAuth2Config>,
+}
+
+impl RestAuthConfig {
+    /// Resolve into the runtime [`RestAuth`], expanding `${VAR}` in a static
+    /// value and building the OAuth2 provider (reading credential files,
+    /// running the 0600 checks) for the OAuth2 arm. Fails loud on an
+    /// ambiguous or empty arm; surfaces [`UnresolvedVar`] when an OAuth2
+    /// integration is simply not configured yet (disclosed skip).
+    fn resolve(self, lookup: &VarLookup<'_>) -> anyhow::Result<RestAuth> {
+        match (self.header, self.value, self.oauth2) {
+            (Some(header), Some(value), None) => Ok(RestAuth::Static {
+                header,
+                value: expand_vars(&value, lookup)?,
+            }),
+            (None, None, Some(oauth2)) => {
+                let provider = crate::rest_oauth2::build_provider(&oauth2, lookup)?;
+                Ok(RestAuth::OAuth2(provider))
+            }
+            (None, None, None) => anyhow::bail!(
+                "transport.rest.auth is empty — set either a static `{{ header, value }}` or an \
+                 `oauth2` block"
+            ),
+            _ => anyhow::bail!(
+                "transport.rest.auth must set EXACTLY ONE of a static `{{ header, value }}` pair \
+                 or an `oauth2` block (not a mix)"
+            ),
+        }
+    }
+}
+
+/// A single GET endpoint. `path` and `query` values may contain `{arg}`
+/// placeholders filled from the tool-call arguments at request time.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestCallConfig {
+    /// HTTP method. Only `GET` is supported today (fails loud otherwise).
+    pub method: String,
+    /// Path appended to `base_url`, e.g. `/posts` or `/users/{id}/posts`.
+    pub path: String,
+    /// Query parameters; values may be literals or `{arg}` placeholders.
+    #[serde(default)]
+    pub query: HashMap<String, String>,
+    /// Response body codec: `json` (default), `atom`, or `rss`. `atom`/`rss`
+    /// decode a syndication feed into the same record shape as JSON.
+    #[serde(default)]
+    pub format: crate::rest_transport::ResponseFormat,
+    /// If set, a non-object JSON body is wrapped as `{ result_key: <body> }` so
+    /// a `sync.extract_path` can select it (bare-array responses → object). For
+    /// `atom`/`rss` the decoded entry array is wrapped under this key (default
+    /// `entries`).
+    #[serde(default)]
+    pub result_key: Option<String>,
+    /// Optional response-token pagination (`json` only): follow a continuation
+    /// token (e.g. `nextPageToken`) across pages, bounded fail-loud by
+    /// `max_pages`.
+    #[serde(default)]
+    pub pagination: Option<crate::rest_transport::Pagination>,
 }
 
 /// Authentication configuration (only meaningful for HTTP transport).
@@ -60,6 +188,16 @@ pub struct IntegrationFileConfig {
     pub entity_prefix: Option<String>,
     #[serde(default)]
     pub entities: HashMap<String, EntityConfig>,
+    /// Master write switch (leases/read-write ruling). Absent = disabled. Flows
+    /// through into the [`McpSidecar`] so the dispatch chokepoint can enforce
+    /// it.
+    #[serde(default)]
+    pub writes: crate::mcp_sidecar::WritesPolicy,
+    /// Writer designation for `once_only` effects (leases/read-write ruling,
+    /// increment 4). Absent = confirm_manually. Flows through into the
+    /// [`McpSidecar`] so the dispatch chokepoint can select the policy.
+    #[serde(default)]
+    pub once_only: crate::mcp_sidecar::OnceOnlyAuthorization,
     #[serde(default)]
     pub tools: HashMap<String, ToolConfig>,
     /// Sidecar-declared derived views (see
@@ -146,8 +284,35 @@ impl IntegrationFileConfig {
             McpTransport::Http {
                 uri: expand_vars(&http.uri, lookup)?,
             }
+        } else if let Some(rest) = self.transport.rest {
+            let auth = match rest.auth {
+                Some(a) => a.resolve(lookup)?,
+                None => RestAuth::None,
+            };
+            let mut calls = HashMap::with_capacity(rest.calls.len());
+            for (name, c) in rest.calls {
+                calls.insert(
+                    name,
+                    crate::rest_transport::RestCall {
+                        method: c.method,
+                        path: c.path,
+                        query: c.query,
+                        format: c.format,
+                        result_key: c.result_key,
+                        pagination: c.pagination,
+                    },
+                );
+            }
+            McpTransport::Rest {
+                manual: crate::rest_transport::RestManual {
+                    base_url: expand_vars(&rest.base_url, lookup)?,
+                    auth,
+                    calls,
+                },
+                poll_interval: rest.poll_interval,
+            }
         } else {
-            anyhow::bail!("TransportConfig must have either child_process or http set");
+            anyhow::bail!("TransportConfig must set exactly one of child_process, http, or rest");
         };
 
         let auth_mode = match self.auth {
@@ -162,6 +327,8 @@ impl IntegrationFileConfig {
         let sidecar = McpSidecar {
             entity_prefix: self.entity_prefix,
             entities: self.entities,
+            writes: self.writes,
+            once_only: self.once_only,
             tools: self.tools,
             views: self.views,
         };

@@ -4,7 +4,7 @@ use super::prelude::*;
 use crate::reactive_view_model::DropTask;
 
 holon_macros::widget_builder! {
-    fn text(content: String, #[default = false] bold: bool, #[default = 14.0] size: f32, color: Option<String>) {
+    fn text(content: String, #[default = false] bold: bool, #[default = 14.0] size: f32, color: Option<String>, style: Option<String>) {
         // When positional 0 is a `col("foo")` ref, capture the field name so we
         // can re-derive `content` on every CDC write to the row. The macro's
         // auto-extracted `content: String` is just the snapshot at build time;
@@ -14,10 +14,31 @@ holon_macros::widget_builder! {
         // subscription — nothing to track.
         let field = ba.args.get_positional_column_name(0).map(|s| s.to_string());
 
+        // A semantic `style` keyword (e.g. `#{style: "h1"}`, used by the
+        // page-title variant `text(col("content"), #{style: "h1"})`) is carried
+        // through as a prop and resolved into the heading type scale at render
+        // time (see the gpui `text` builder). Before `style` was a declared
+        // param the kwarg was silently dropped and the title rendered at body
+        // size. Validate the keyword loudly here at the build boundary — an
+        // unrecognized style is a config error, not a silent body-size default.
+        // Resolution itself lives at render (not here) so the fast-path
+        // `resolve_props_from_args` recompute and this full build agree.
+        if let Some(kw) = style.as_deref() {
+            if holon_api::render_eval::text_style_font_size(kw).is_none() {
+                tracing::warn!(
+                    "text(): unknown style keyword {kw:?} — will render at body size; add it to \
+                     holon_api::render_eval::text_style_font_size"
+                );
+            }
+        }
+
         let mut __props = std::collections::HashMap::new();
         __props.insert("content".to_string(), Value::String(content));
         __props.insert("bold".to_string(), Value::Boolean(bold));
         __props.insert("size".to_string(), Value::Float(size as f64));
+        if let Some(ref s) = style {
+            __props.insert("style".to_string(), Value::String(s.clone()));
+        }
         if let Some(c) = color {
             __props.insert("color".to_string(), Value::String(c));
         }
@@ -48,14 +69,11 @@ holon_macros::widget_builder! {
         if let Some(runtime) = ba.services.try_runtime_handle() {
             let props_handle = vm.props.clone();
             let task = runtime.spawn(data.signal_cloned().for_each(move |row| {
-                let new_content = row
-                    .get(&field)
-                    .and_then(|v| v.as_string())
-                    .unwrap_or("")
-                    .to_string();
-                props_handle
-                    .lock_mut()
-                    .insert("content".to_string(), Value::String(new_content));
+                if let Some(new_content) = super::prelude::content_from_row(&row, &field) {
+                    props_handle
+                        .lock_mut()
+                        .insert("content".to_string(), Value::String(new_content));
+                }
                 async {}
             }));
             vm.subscriptions.push(DropTask::new(task));

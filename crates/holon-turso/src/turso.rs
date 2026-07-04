@@ -9,20 +9,6 @@ use std::sync::atomic::AtomicU64;
 
 use async_trait::async_trait;
 use futures::future::FutureExt;
-use holon_api::Batch;
-use holon_api::BatchMetadata;
-use holon_api::BatchTraceContext;
-use holon_api::BatchWithMetadata;
-use holon_api::CHANGE_ORIGIN_COLUMN;
-use holon_api::Change;
-use holon_api::ChangeOrigin;
-use holon_api::Value;
-use holon_core::storage::Filter;
-use holon_core::storage::Resource;
-use holon_core::storage::Result;
-use holon_core::storage::StorageBackend;
-use holon_core::storage::StorageEntity;
-use holon_core::storage::StorageError;
 use serde_json;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
@@ -39,6 +25,56 @@ use turso_sdk_kit::rsapi::DatabaseChangeType;
 use turso_sdk_kit::rsapi::TursoConnection;
 use turso_sdk_kit::rsapi::TursoDatabaseConfig;
 
+/// Host-IO seam for wasm32: browser workers register their `turso_core::IO`
+/// implementation (e.g. an OPFS shim) here before opening a file-backed
+/// database. Insert-only — a second registration is a wiring bug.
+#[cfg(all(not(target_family = "unix"), target_family = "wasm"))]
+pub mod wasm_io {
+    use std::cell::RefCell;
+    use std::sync::Arc;
+
+    // thread_local because host IO shims (e.g. the browser worker's OPFS
+    // shim) are deliberately not Send/Sync; the engine and its Turso actor
+    // all run on the worker's single napi thread.
+    thread_local! {
+        static IO: RefCell<Option<Arc<dyn turso_core::IO>>> = const { RefCell::new(None) };
+    }
+
+    pub fn register(io: Arc<dyn turso_core::IO>) {
+        IO.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            assert!(
+                slot.is_none(),
+                "wasm IO already registered — register must be called exactly once per thread"
+            );
+            *slot = Some(io);
+        });
+    }
+
+    pub fn registered() -> Option<Arc<dyn turso_core::IO>> {
+        IO.with(|slot| slot.borrow().clone())
+    }
+}
+
+use holon_api::Batch;
+use holon_api::BatchMetadata;
+use holon_api::BatchTraceContext;
+use holon_api::BatchWithMetadata;
+use holon_api::CHANGE_ORIGIN_COLUMN;
+use holon_api::Change;
+use holon_api::ChangeOrigin;
+use holon_api::Value;
+use holon_core::storage::Filter;
+use holon_core::storage::Resource;
+use holon_core::storage::Result;
+use holon_core::storage::StorageBackend;
+use holon_core::storage::StorageEntity;
+use holon_core::storage::StorageError;
+
+use crate::matview_lease::LeaseGrant;
+use crate::matview_lease::MatviewStats;
+use crate::matview_lease::ViewState;
+use crate::matview_lease::ViewWaiter;
 use crate::sql_parser::extract_created_tables;
 use crate::sql_parser::extract_table_refs;
 use crate::sql_parser::parse_sql;
@@ -85,7 +121,16 @@ struct PendingDdl {
     provides: Vec<Resource>,
     requires: Vec<Resource>,
     priority: u32,
-    response: oneshot::Sender<Result<()>>,
+    completion: DdlCompletion,
+}
+
+/// Who is waiting on a DDL operation's result.
+enum DdlCompletion {
+    /// The caller that submitted the DDL.
+    Caller(oneshot::Sender<Result<()>>),
+    /// A `CREATE MATERIALIZED VIEW` issued to satisfy a view lease: on success
+    /// the view flips to `Live` and every parked waiter is granted.
+    ViewCreate { view_name: String },
 }
 
 /// Commands that can be sent to the database actor
@@ -172,8 +217,96 @@ pub enum DbCommand {
         response: oneshot::Sender<Result<()>>,
     },
 
+    /// Take a lease on a `watch_view_*` materialized view, creating it if the
+    /// actor does not already own it. `requires` is parsed by the caller so a
+    /// malformed SELECT fails there instead of stalling the DDL queue.
+    AcquireViewLease {
+        view_name: String,
+        select_sql: String,
+        requires: Vec<Resource>,
+        response: oneshot::Sender<Result<LeaseGrant>>,
+    },
+
+    /// Give back a lease. One-way: the reap it may trigger runs inline in this
+    /// command, so there is nothing for the releaser to wait on.
+    ReleaseViewLease {
+        view_name: String,
+        lease_id: u64,
+        generation: u64,
+    },
+
+    /// Create a view if absent and hold it open for the life of the process,
+    /// through any number of later lease cycles.
+    EnsurePinnedView {
+        view_name: String,
+        select_sql: String,
+        requires: Vec<Resource>,
+        response: oneshot::Sender<Result<()>>,
+    },
+
+    /// Drop every `watch_view_%` in the database, forget all view state, and
+    /// start a new lease generation. Answers with the number of views dropped.
+    ResetWatchViews {
+        response: oneshot::Sender<Result<usize>>,
+    },
+
     /// Graceful shutdown
     Shutdown { response: oneshot::Sender<()> },
+}
+
+/// State the actor owns for the whole of its life, mutated only while a
+/// command is being processed.
+struct ActorState {
+    phase: DatabasePhase,
+    pending_ddl: VecDeque<PendingDdl>,
+    available_resources: HashSet<Resource>,
+    next_op_id: OperationId,
+    /// Lifetime of every `watch_view_*` the actor owns.
+    views: HashMap<String, ViewState>,
+    /// Bumped by `ResetWatchViews`; grants from earlier generations are inert.
+    generation: u64,
+    next_lease_id: u64,
+    matview_stats: Arc<MatviewStats>,
+}
+
+impl ActorState {
+    fn new(matview_stats: Arc<MatviewStats>) -> Self {
+        Self {
+            phase: DatabasePhase::SchemaInit,
+            pending_ddl: VecDeque::new(),
+            available_resources: HashSet::new(),
+            next_op_id: 1,
+            views: HashMap::new(),
+            generation: 0,
+            next_lease_id: 1,
+            matview_stats,
+        }
+    }
+
+    fn next_op_id(&mut self) -> OperationId {
+        let id = self.next_op_id;
+        self.next_op_id += 1;
+        id
+    }
+
+    fn next_lease_id(&mut self) -> u64 {
+        let id = self.next_lease_id;
+        self.next_lease_id += 1;
+        id
+    }
+
+    fn publish_matview_stats(&self) {
+        self.matview_stats.publish(&self.views);
+    }
+
+    /// True while `view_name` is owned AND still has a reason to stay alive.
+    fn is_held(&self, view_name: &str) -> bool {
+        match self.views.get(view_name) {
+            Some(ViewState::Creating { .. }) => true,
+            Some(ViewState::Live { leases, pinned }) => *leases > 0 || *pinned,
+            None => false,
+        }
+    }
 }
 
 /// Stable short fingerprint of named bound parameters, recorded on `query`
@@ -226,6 +359,9 @@ pub struct DbHandle {
     /// before broadcast. Cloned `DbHandle`s share the same `Arc<AtomicU64>`,
     /// so any handle reads the same global emission watermark.
     cdc_seq: Arc<std::sync::atomic::AtomicU64>,
+    /// Matview lease counters, republished by the actor after every lease
+    /// mutation so a reader never has to queue behind the command stream.
+    matview_stats: Arc<MatviewStats>,
 }
 
 impl DbHandle {
@@ -478,10 +614,9 @@ impl DbHandle {
                         .collect();
 
                     Err(StorageError::DatabaseError(format!(
-                        "DDL timed out after {:?} waiting for dependencies.\n\
-                         SQL: {}...\n\
-                         Required: {:?}\n\n\
-                         Call mark_available() for resources created outside the actor.",
+                        "DDL timed out after {:?} waiting for dependencies.\nSQL: \
+                         {}...\nRequired: {:?}\n\nCall mark_available() for resources created \
+                         outside the actor.",
                         DEPENDENCY_TIMEOUT, sql_preview, missing_resources
                     )))
                 }
@@ -533,10 +668,9 @@ impl DbHandle {
                         inferred_deps.iter().map(|r| r.name().to_string()).collect();
 
                     Err(StorageError::DatabaseError(format!(
-                        "DDL timed out after {:?} waiting for dependencies.\n\
-                         SQL: {}...\n\
-                         Inferred required: {:?}\n\n\
-                         Call mark_available() for resources created outside the actor.",
+                        "DDL timed out after {:?} waiting for dependencies.\nSQL: {}...\nInferred \
+                         required: {:?}\n\nCall mark_available() for resources created outside \
+                         the actor.",
                         DEPENDENCY_TIMEOUT, sql_preview, missing_resources
                     )))
                 }
@@ -581,6 +715,151 @@ impl DbHandle {
         response_rx
             .await
             .map_err(|_| StorageError::DatabaseError("Actor response channel closed".to_string()))
+    }
+
+    // --- Matview leases ---
+
+    /// Take a lease on the `watch_view_*` matview built from `select_sql`,
+    /// creating it if the actor does not already own it. The view lives until
+    /// the returned grant (and every other outstanding one) is released.
+    pub async fn acquire_view_lease(
+        &self,
+        view_name: &str,
+        select_sql: &str,
+    ) -> Result<LeaseGrant> {
+        let requires = Self::view_dependencies(view_name, select_sql)?;
+        let (response_tx, response_rx) = oneshot::channel();
+        self.tx
+            .send(DbCommand::AcquireViewLease {
+                view_name: view_name.to_string(),
+                select_sql: select_sql.to_string(),
+                requires,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| StorageError::DatabaseError("Actor channel closed".to_string()))?;
+        Self::await_view_response(response_rx, "acquire_view_lease", view_name).await
+    }
+
+    /// Create the view if absent and hold it open for the life of the process.
+    /// A pin is never released, so later lease cycles cannot reap the view.
+    pub async fn ensure_pinned_view(&self, view_name: &str, select_sql: &str) -> Result<()> {
+        let requires = Self::view_dependencies(view_name, select_sql)?;
+        let (response_tx, response_rx) = oneshot::channel();
+        self.tx
+            .send(DbCommand::EnsurePinnedView {
+                view_name: view_name.to_string(),
+                select_sql: select_sql.to_string(),
+                requires,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| StorageError::DatabaseError("Actor channel closed".to_string()))?;
+        Self::await_view_response(response_rx, "ensure_pinned_view", view_name).await
+    }
+
+    /// Give back a lease. Fire-and-forget by design: the reap it may trigger
+    /// happens inside the actor, so a releasing `Drop` never blocks and never
+    /// needs a runtime.
+    pub fn release_view_lease(&self, view_name: &str, grant: LeaseGrant) {
+        let cmd = DbCommand::ReleaseViewLease {
+            view_name: view_name.to_string(),
+            lease_id: grant.lease_id,
+            generation: grant.generation,
+        };
+        match self.tx.try_send(cmd) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(cmd)) => {
+                // Dropping the release would pin the view forever. Hand it to a
+                // task that can wait for queue space instead.
+                tracing::warn!(
+                    view = %view_name,
+                    "[DbHandle] actor queue full on matview lease release; deferring the release \
+                     to a spawned sender"
+                );
+                let tx = self.tx.clone();
+                crate::util::spawn_actor(async move {
+                    let _ = tx.send(cmd).await;
+                });
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                tracing::debug!(
+                    view = %view_name,
+                    "[DbHandle] actor gone before matview lease release; the database it owned is \
+                     gone with it"
+                );
+            }
+        }
+    }
+
+    /// Drop every `watch_view_%` in the database and start a new lease
+    /// generation. Returns how many views were dropped.
+    pub async fn reset_watch_views(&self) -> Result<usize> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.tx
+            .send(DbCommand::ResetWatchViews {
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| StorageError::DatabaseError("Actor channel closed".to_string()))?;
+        response_rx
+            .await
+            .map_err(|_| StorageError::DatabaseError("Actor response channel closed".to_string()))?
+    }
+
+    /// Current matview lease counters.
+    pub fn matview_stats(&self) -> crate::matview_lease::MatviewStatsSnapshot {
+        self.matview_stats.snapshot()
+    }
+
+    /// Table dependencies of a view's SELECT, parsed caller-side.
+    ///
+    /// Fail loud: a swallowed parse error becomes "no dependencies", which
+    /// mis-orders the CREATE and shows up as a boot hang ("waiting for
+    /// dependencies") rather than an error.
+    fn view_dependencies(view_name: &str, select_sql: &str) -> Result<Vec<Resource>> {
+        parse_sql(select_sql)
+            .map(|stmts| extract_table_refs(&stmts))
+            .map_err(|e| {
+                StorageError::DatabaseError(format!(
+                    "matview '{view_name}': failed to parse its SELECT while extracting table \
+                     dependencies; a mis-ordered CREATE would hang waiting for dependencies \
+                     instead of failing. SQL: {select_sql}. Parse error: {e}"
+                ))
+            })
+    }
+
+    /// Await an actor reply that may be parked behind a `CREATE MATERIALIZED
+    /// VIEW` waiting for its base tables — same bound as `execute_ddl_*`.
+    async fn await_view_response<T>(
+        response_rx: oneshot::Receiver<Result<T>>,
+        op: &str,
+        view_name: &str,
+    ) -> Result<T> {
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        {
+            const DEPENDENCY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+            match tokio::time::timeout(DEPENDENCY_TIMEOUT, response_rx).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => Err(StorageError::DatabaseError(format!(
+                    "{op}('{view_name}'): actor response channel closed"
+                ))),
+                Err(_elapsed) => Err(StorageError::DatabaseError(format!(
+                    "{op}('{view_name}') timed out after {DEPENDENCY_TIMEOUT:?} — its CREATE is \
+                     still waiting for base tables. Call mark_available() for resources created \
+                     outside the actor."
+                ))),
+            }
+        }
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        {
+            match response_rx.await {
+                Ok(result) => result,
+                Err(_) => Err(StorageError::DatabaseError(format!(
+                    "{op}('{view_name}'): actor response channel closed"
+                ))),
+            }
+        }
     }
 
     /// Get a reference to the CDC broadcast sender.
@@ -812,7 +1091,7 @@ pub(crate) fn default_turso_config() -> TursoDatabaseConfig {
         // resolution devlog 2026-05-08-mcp-first-query-empty-matview.
         async_io: false,
         encryption: None,
-        vfs: None,
+        vfs: turso_sdk_kit::IoBackend::Default,
         io: None,
         db_file: None,
     }
@@ -979,6 +1258,30 @@ fn full_sql_tracing() -> bool {
     *FULL.get_or_init(|| std::env::var("HOLON_TRACE_SQL").is_ok())
 }
 
+/// The object name a DDL statement targets (the matview/table/index name),
+/// for the `holon_latency` `matview_ddl` stage. Best-effort token scan: the
+/// name follows the `VIEW`/`TABLE`/`INDEX` keyword, past any `IF NOT EXISTS`.
+fn ddl_target_name(sql: &str) -> &str {
+    let mut tokens = sql.split_whitespace();
+    while let Some(tok) = tokens.next() {
+        if tok.eq_ignore_ascii_case("view")
+            || tok.eq_ignore_ascii_case("table")
+            || tok.eq_ignore_ascii_case("index")
+        {
+            for name in tokens.by_ref() {
+                if name.eq_ignore_ascii_case("if")
+                    || name.eq_ignore_ascii_case("not")
+                    || name.eq_ignore_ascii_case("exists")
+                {
+                    continue;
+                }
+                return name.trim_matches(|c: char| c == '"' || c == '`' || c == '(');
+            }
+        }
+    }
+    "ddl"
+}
+
 fn trace_sql(tag: &str, sql: &str) {
     if full_sql_tracing() {
         // In release builds, workspace-hack's `release_max_level_info` compiles
@@ -1008,7 +1311,8 @@ fn trace_sql_positional(tag: &str, sql: &str, params: &[turso::Value]) {
                 .expect("now within range")
                 .format("%Y-%m-%dT%H:%M:%S%.6f");
             eprintln!(
-                "{ts}Z TRACE holon::storage::turso: [TursoBackend] {tag}: {sql} -- params: {params:?}"
+                "{ts}Z TRACE holon::storage::turso: [TursoBackend] {tag}: {sql} -- params: \
+                 {params:?}"
             );
         }
         tracing::trace!("[TursoBackend] {tag}: {sql} -- params: {params:?}");
@@ -1037,7 +1341,8 @@ fn trace_sql_named(tag: &str, sql: &str, params: &HashMap<String, Value>) {
             .expect("now within range")
             .format("%Y-%m-%dT%H:%M:%S%.6f");
         eprintln!(
-            "{ts}Z TRACE holon::storage::turso: [TursoBackend] {tag}: {sql} -- params: {params_str}"
+            "{ts}Z TRACE holon::storage::turso: [TursoBackend] {tag}: {sql} -- params: \
+             {params_str}"
         );
     }
     tracing::trace!("[TursoBackend] {tag}: {sql} -- params: {params_str}");
@@ -1059,6 +1364,8 @@ pub struct TursoBackend {
     /// broadcast. Cloned `DbHandle`s share this `Arc<AtomicU64>` so any
     /// reader observes the same emission watermark.
     cdc_seq: Arc<std::sync::atomic::AtomicU64>,
+    /// Matview lease counters, written by the actor and read via `DbHandle`.
+    matview_stats: Arc<MatviewStats>,
 }
 
 impl std::fmt::Debug for TursoBackend {
@@ -1105,15 +1412,36 @@ impl TursoBackend {
             .to_str()
             .ok_or_else(|| StorageError::DatabaseError("Invalid path".to_string()))?;
 
-        let opts = DatabaseOpts::default().with_views(true);
+        // `with_index_method(true)` unlocks the experimental `CREATE INDEX ..
+        // USING <method>` surface (the Tantivy-backed `fts` method and the
+        // sparse-vector method). Native-only: this block is `cfg(unix)`; the
+        // wasm `open_database` below leaves it off (fts is cfg'd out of
+        // turso_core on wasm anyway).
+        let opts = DatabaseOpts::default()
+            .with_views(true)
+            .with_index_method(true);
 
         let db = if db_path_str.starts_with(":memory:") {
             let io = Arc::new(MemoryIO::new());
-            Database::open_file_with_flags(io, db_path_str, OpenFlags::default(), opts, None)
+            Database::open_file_with_flags(
+                io,
+                db_path_str,
+                OpenFlags::default(),
+                opts,
+                None,
+                Arc::new(turso_core::SqliteDialect),
+            )
         } else {
             let io =
                 Arc::new(UnixIO::new().map_err(|e| StorageError::DatabaseError(e.to_string()))?);
-            Database::open_file_with_flags(io, db_path_str, OpenFlags::default(), opts, None)
+            Database::open_file_with_flags(
+                io,
+                db_path_str,
+                OpenFlags::default(),
+                opts,
+                None,
+                Arc::new(turso_core::SqliteDialect),
+            )
         }
         .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
@@ -1122,13 +1450,46 @@ impl TursoBackend {
     }
 
     #[cfg(all(not(target_family = "unix"), target_family = "wasm"))]
-    pub fn open_database<P: AsRef<Path>>(_: P) -> Result<Arc<Database>> {
-        // wasm32: always in-memory. No OPFS yet (see handoff §Out of scope).
+    pub fn open_database<P: AsRef<Path>>(db_path: P) -> Result<Arc<Database>> {
+        // wasm32: `:memory:` uses MemoryIO; any other path requires a host IO
+        // registered via `register_wasm_io` (the browser worker registers its
+        // OPFS shim before engine init). Fail loud if a file path is requested
+        // without one — silently falling back to memory would fake persistence.
+        let db_path_str = db_path
+            .as_ref()
+            .to_str()
+            .ok_or_else(|| StorageError::DatabaseError("Invalid path".to_string()))?;
         let opts = DatabaseOpts::default().with_views(true);
-        let io = Arc::new(MemoryIO::new());
-        let db = Database::open_file_with_flags(io, ":memory:", OpenFlags::default(), opts, None)
-            .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
-        tracing::info!("Turso in-memory database opened (wasm32)");
+        let db = if db_path_str.starts_with(":memory:") {
+            let io = Arc::new(MemoryIO::new());
+            Database::open_file_with_flags(
+                io,
+                db_path_str,
+                OpenFlags::default(),
+                opts,
+                None,
+                Arc::new(turso_core::SqliteDialect),
+            )
+            .map_err(|e| StorageError::DatabaseError(e.to_string()))?
+        } else {
+            let io = wasm_io::registered().ok_or_else(|| {
+                StorageError::DatabaseError(format!(
+                    "open_database('{db_path_str}'): no wasm IO registered — call \
+                     holon_turso::register_wasm_io (e.g. with the OPFS shim) before opening a \
+                     file-backed database on wasm32"
+                ))
+            })?;
+            Database::open_file_with_flags(
+                io,
+                db_path_str,
+                OpenFlags::Create,
+                opts,
+                None,
+                Arc::new(turso_core::SqliteDialect),
+            )
+            .map_err(|e| StorageError::DatabaseError(e.to_string()))?
+        };
+        tracing::info!("Turso database opened (wasm32) at: {}", db_path_str);
         Ok(db)
     }
 
@@ -1167,7 +1528,8 @@ impl TursoBackend {
                 .expect("now within range")
                 .format("%Y-%m-%dT%H:%M:%S%.6f");
             eprintln!(
-                "{ts}Z TRACE holon::storage::turso: [TursoBackend] set_change_callback: registering CDC callback"
+                "{ts}Z TRACE holon::storage::turso: [TursoBackend] set_change_callback: \
+                 registering CDC callback"
             );
         }
         tracing::trace!("[TursoBackend] set_change_callback: registering CDC callback");
@@ -1214,6 +1576,8 @@ impl TursoBackend {
         // wasm_bindgen_futures::spawn_local instead.
         let cdc_broadcast_for_actor = cdc_broadcast.clone();
         let actor_stats_for_actor = actor_stats.clone();
+        let matview_stats = Arc::new(MatviewStats::default());
+        let matview_stats_for_actor = matview_stats.clone();
         if let (Some(stats), Some(interval)) = (
             actor_stats.clone(),
             crate::turso_actor_stats::enabled_interval(),
@@ -1230,6 +1594,7 @@ impl TursoBackend {
             conn,
             cdc_broadcast_for_actor,
             actor_stats_for_actor,
+            matview_stats_for_actor,
         ));
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         wasm_bindgen_futures::spawn_local(Self::run_actor(
@@ -1237,10 +1602,12 @@ impl TursoBackend {
             conn,
             cdc_broadcast_for_actor,
             actor_stats_for_actor,
+            matview_stats_for_actor,
         ));
 
         tracing::info!(
-            "[TursoBackend] Created - all database operations will be serialized through internal actor"
+            "[TursoBackend] Created - all database operations will be serialized through internal \
+             actor"
         );
 
         let backend = Self {
@@ -1248,11 +1615,13 @@ impl TursoBackend {
             cdc_broadcast: cdc_broadcast.clone(),
             tx: tx.clone(),
             cdc_seq: cdc_seq.clone(),
+            matview_stats: matview_stats.clone(),
         };
         let handle = DbHandle {
             tx,
             cdc_broadcast,
             cdc_seq,
+            matview_stats,
         };
 
         Ok((backend, handle))
@@ -1273,6 +1642,7 @@ impl TursoBackend {
             tx: self.tx.clone(),
             cdc_broadcast: self.cdc_broadcast.clone(),
             cdc_seq: self.cdc_seq.clone(),
+            matview_stats: self.matview_stats.clone(),
         }
     }
 
@@ -1293,6 +1663,12 @@ impl TursoBackend {
             tracing::error!("[CONN-{}] Failed to create connection: {}", conn_id, e);
             StorageError::DatabaseError(e.to_string())
         })?;
+
+        // Enforce foreign keys DB-wide: FK checking is per-connection in the
+        // fork, so every connection minted here opts in. This is the single
+        // place that makes the block_raw parent FK (roots → sentinel:no_parent)
+        // actually enforced on writes.
+        conn_core.set_foreign_keys_enabled(true);
 
         let turso_conn = TursoConnection::new(&default_turso_config(), conn_core);
         let conn = turso::Connection::create(turso_conn, None);
@@ -1529,14 +1905,11 @@ impl TursoBackend {
         conn: turso::Connection,
         cdc_broadcast: broadcast::Sender<BatchWithMetadata<RowChange>>,
         actor_stats: Option<Arc<crate::turso_actor_stats::ActorStats>>,
+        matview_stats: Arc<MatviewStats>,
     ) {
         tracing::info!("[TursoBackend::Actor] Starting actor loop");
 
-        // Actor state
-        let mut phase = DatabasePhase::SchemaInit;
-        let mut pending_ddl: VecDeque<PendingDdl> = VecDeque::new();
-        let mut available_resources: HashSet<Resource> = HashSet::new();
-        let next_op_id = AtomicU64::new(1);
+        let mut state = ActorState::new(matview_stats);
 
         while let Some(cmd) = rx.recv().await {
             let stats_meta = actor_stats.as_ref().map(|_| {
@@ -1554,10 +1927,7 @@ impl TursoBackend {
                 AssertUnwindSafe(Self::process_actor_command(
                     cmd,
                     &conn,
-                    &next_op_id,
-                    &mut phase,
-                    &mut pending_ddl,
-                    &mut available_resources,
+                    &mut state,
                     &cdc_broadcast,
                 ))
                 .catch_unwind()
@@ -1579,14 +1949,16 @@ impl TursoBackend {
                         "unknown panic".to_string()
                     };
                     tracing::error!(
-                        "[TursoBackend::Actor] Caught panic during command processing: {}. Actor continues.",
+                        "[TursoBackend::Actor] Caught panic during command processing: {}. Actor \
+                         continues.",
                         msg
                     );
                     // If a panic left a transaction open, roll it back to prevent
                     // the connection from being stuck (which silences CDC callbacks).
                     if !conn.is_autocommit().unwrap_or(true) {
                         tracing::error!(
-                            "[TursoBackend::Actor] Connection stuck in transaction after panic, rolling back"
+                            "[TursoBackend::Actor] Connection stuck in transaction after panic, \
+                             rolling back"
                         );
                         if let Err(e) = conn.execute("ROLLBACK", ()).await {
                             tracing::error!(
@@ -1607,10 +1979,7 @@ impl TursoBackend {
     async fn process_actor_command(
         cmd: DbCommand,
         conn: &turso::Connection,
-        next_op_id: &AtomicU64,
-        phase: &mut DatabasePhase,
-        pending_ddl: &mut VecDeque<PendingDdl>,
-        available_resources: &mut HashSet<Resource>,
+        state: &mut ActorState,
         cdc_broadcast: &broadcast::Sender<BatchWithMetadata<RowChange>>,
     ) -> bool {
         match cmd {
@@ -1650,9 +2019,9 @@ impl TursoBackend {
                     && let Ok(stmts) = parse_sql(&sql)
                 {
                     let provides = extract_created_tables(&stmts);
-                    Self::mark_resources_available(available_resources, &provides);
+                    Self::mark_resources_available(&mut state.available_resources, &provides);
                     if !provides.is_empty() {
-                        Self::process_pending_ddl(conn, pending_ddl, available_resources).await;
+                        Self::process_pending_ddl(conn, state).await;
                     }
                 }
                 let _ = response.send(result);
@@ -1667,14 +2036,12 @@ impl TursoBackend {
             } => {
                 Self::handle_ddl_with_deps_internal(
                     conn,
-                    next_op_id,
-                    pending_ddl,
-                    available_resources,
+                    state,
                     sql,
                     provides,
                     requires,
                     priority,
-                    response,
+                    DdlCompletion::Caller(response),
                 )
                 .await;
             }
@@ -1692,25 +2059,23 @@ impl TursoBackend {
                 }
                 Self::handle_ddl_with_deps_internal(
                     conn,
-                    next_op_id,
-                    pending_ddl,
-                    available_resources,
+                    state,
                     sql,
                     provides,
                     requires,
                     priority,
-                    response,
+                    DdlCompletion::Caller(response),
                 )
                 .await;
             }
 
             DbCommand::MarkAvailable { resources } => {
-                Self::mark_resources_available(available_resources, &resources);
-                Self::process_pending_ddl(conn, pending_ddl, available_resources).await;
+                Self::mark_resources_available(&mut state.available_resources, &resources);
+                Self::process_pending_ddl(conn, state).await;
             }
 
             DbCommand::ResourceExists { resource, response } => {
-                let exists = available_resources.contains(&resource);
+                let exists = state.available_resources.contains(&resource);
                 let _ = response.send(exists);
             }
 
@@ -1732,13 +2097,16 @@ impl TursoBackend {
             }
 
             DbCommand::TransitionToReady { response } => {
-                *phase = DatabasePhase::Ready;
+                // Ready first: parking is legitimate while SchemaInit is open,
+                // so the sweep is a no-op until the phase has flipped.
+                state.phase = DatabasePhase::Ready;
+                Self::sweep_unpromised_pending_ddl(state);
                 tracing::info!("[TursoBackend::Actor] Transitioned to Ready phase");
                 let _ = response.send(Ok(()));
             }
 
             DbCommand::GetPhase { response } => {
-                let _ = response.send(*phase);
+                let _ = response.send(state.phase);
             }
 
             DbCommand::RegisterForeignTable {
@@ -1753,12 +2121,68 @@ impl TursoBackend {
                 });
                 if result.is_ok() {
                     tracing::info!("[TursoBackend::Actor] Registered foreign table '{name}'");
+                    // A foreign table is a real dependency target: without this
+                    // the availability registry would call it unregistered and
+                    // fail every watch over it.
+                    Self::mark_resources_available(
+                        &mut state.available_resources,
+                        &[Resource::schema(name)],
+                    );
+                    Self::process_pending_ddl(conn, state).await;
                 }
                 let _ = response.send(result);
             }
 
+            DbCommand::AcquireViewLease {
+                view_name,
+                select_sql,
+                requires,
+                response,
+            } => {
+                Self::handle_view_waiter(
+                    conn,
+                    state,
+                    view_name,
+                    select_sql,
+                    requires,
+                    ViewWaiter::Lease(response),
+                )
+                .await;
+            }
+
+            DbCommand::EnsurePinnedView {
+                view_name,
+                select_sql,
+                requires,
+                response,
+            } => {
+                Self::handle_view_waiter(
+                    conn,
+                    state,
+                    view_name,
+                    select_sql,
+                    requires,
+                    ViewWaiter::Pin(response),
+                )
+                .await;
+            }
+
+            DbCommand::ReleaseViewLease {
+                view_name,
+                lease_id,
+                generation,
+            } => {
+                Self::handle_release_view_lease(conn, state, &view_name, lease_id, generation)
+                    .await;
+            }
+
+            DbCommand::ResetWatchViews { response } => {
+                let result = Self::handle_reset_watch_views(conn, state).await;
+                let _ = response.send(result);
+            }
+
             DbCommand::Shutdown { response } => {
-                *phase = DatabasePhase::ShuttingDown;
+                state.phase = DatabasePhase::ShuttingDown;
                 tracing::info!("[TursoBackend::Actor] Shutting down");
                 let _ = response.send(());
                 return true;
@@ -1768,7 +2192,7 @@ impl TursoBackend {
     }
 
     /// Handle a query command
-    async fn handle_query(
+    pub(crate) async fn handle_query(
         conn: &turso::Connection,
         sql: &str,
         params: HashMap<String, Value>,
@@ -1876,15 +2300,83 @@ impl TursoBackend {
     }
 
     /// Handle a DDL command
-    async fn handle_ddl(conn: &turso::Connection, sql: &str) -> Result<()> {
+    pub(crate) async fn handle_ddl(conn: &turso::Connection, sql: &str) -> Result<()> {
         trace_sql("actor_ddl", sql);
+        // Latency stage (matview/read-path maintenance): a `CREATE MATERIALIZED
+        // VIEW watch_view_*` cold-materializes here on page navigation and can
+        // take seconds (recursive IVM warm-up). This is the choke point every
+        // watch-view maintenance passes through — one greppable line per DDL,
+        // so a 12s cold materialization is visible in a log. Greppable via
+        // target="holon_latency".
+        let t_ddl = std::time::Instant::now();
 
-        conn.execute(sql, ())
-            .await
-            .map_err(|e| StorageError::DatabaseError(format!("Failed to execute DDL: {}", e)))?;
+        // The actor processes commands sequentially, so an unbounded DDL await
+        // parks the *entire* DB actor: every later query/exec queues behind it
+        // and never gets a response — the app freezes with no error. A
+        // `CREATE MATERIALIZED VIEW` that selects FROM another matview can hang
+        // forever in Turso IVM (matview-on-matview is unsupported — see
+        // .claude/skills/turso-chained-matview-hang/SKILL.md). Bounding the
+        // execution here lets the actor recover and surface a loud error
+        // instead. The caller-side DEPENDENCY_TIMEOUT (120s) does NOT help:
+        // it only abandons the caller's wait; the actor stays parked forever.
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        {
+            let timeout = Self::ddl_execution_timeout();
+            match tokio::time::timeout(timeout, conn.execute(sql, ())).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    return Err(StorageError::DatabaseError(format!(
+                        "Failed to execute DDL: {}",
+                        e
+                    )));
+                }
+                Err(_elapsed) => {
+                    let sql_preview: String = sql.chars().take(160).collect();
+                    return Err(StorageError::DatabaseError(format!(
+                        "DDL execution timed out after {:?} — actor would have hung. Suspected \
+                         Turso chained-matview (matview-on-matview) limitation: CREATE \
+                         MATERIALIZED VIEW selecting FROM another matview hangs indefinitely in \
+                         Turso IVM. See .claude/skills/turso-chained-matview-hang/SKILL.md. SQL: \
+                         {}...",
+                        timeout, sql_preview
+                    )));
+                }
+            }
+        }
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        {
+            conn.execute(sql, ()).await.map_err(|e| {
+                StorageError::DatabaseError(format!("Failed to execute DDL: {}", e))
+            })?;
+        }
 
+        tracing::info!(
+            target: "holon_latency",
+            stage = "matview_ddl",
+            view = ddl_target_name(sql),
+            ms = t_ddl.elapsed().as_millis() as u64,
+            "holon_latency",
+        );
         tracing::debug!("[TursoBackend::Actor] DDL completed successfully");
         Ok(())
+    }
+
+    /// Upper bound on a single DDL statement's execution inside the actor.
+    ///
+    /// Kept well under the caller-side `DEPENDENCY_TIMEOUT` (120s) so a genuine
+    /// hang is caught here first (freeing the actor) rather than only
+    /// abandoning one caller's wait. Overridable via `HOLON_DDL_TIMEOUT_MS`
+    /// so tests can exercise the hang guard without a 30s wall.
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    fn ddl_execution_timeout() -> std::time::Duration {
+        const DDL_EXECUTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+        match std::env::var("HOLON_DDL_TIMEOUT_MS") {
+            Ok(ms) => std::time::Duration::from_millis(
+                ms.parse()
+                    .expect("HOLON_DDL_TIMEOUT_MS must be a u64 millisecond count"),
+            ),
+            Err(_) => DDL_EXECUTION_TIMEOUT,
+        }
     }
 
     /// Handle a transaction command
@@ -1901,7 +2393,8 @@ impl TursoBackend {
         if let Err(e) = conn.execute("BEGIN TRANSACTION", ()).await {
             if !conn.is_autocommit().unwrap_or(true) {
                 tracing::warn!(
-                    "[TursoBackend::Actor] BEGIN failed with stale transaction, rolling back and retrying: {}",
+                    "[TursoBackend::Actor] BEGIN failed with stale transaction, rolling back and \
+                     retrying: {}",
                     e
                 );
                 if let Err(rollback_err) = conn.execute("ROLLBACK", ()).await {
@@ -2000,20 +2493,84 @@ impl TursoBackend {
         op.requires.iter().all(|r| available_resources.contains(r))
     }
 
+    /// Requirements of a not-yet-runnable `op` that nobody will ever satisfy,
+    /// or `None` when parking is legitimate.
+    ///
+    /// Parking is legitimate while `SchemaInit` is open — DI resolves schema
+    /// providers in parallel, so a base table can arrive after the matview that
+    /// selects from it was submitted. Once `Ready`, registration is closed: the
+    /// only outstanding promises are the `provides` of DDL already queued.
+    fn unpromised_requirements(state: &ActorState, op: &PendingDdl) -> Option<Vec<String>> {
+        if state.phase == DatabasePhase::SchemaInit {
+            return None;
+        }
+        let unpromised: Vec<String> = op
+            .requires
+            .iter()
+            .filter(|r| !state.available_resources.contains(r))
+            .filter(|r| {
+                !state
+                    .pending_ddl
+                    .iter()
+                    .any(|queued| queued.provides.contains(r))
+            })
+            .map(|r| r.name().to_string())
+            .collect();
+        (!unpromised.is_empty()).then_some(unpromised)
+    }
+
+    /// Answer `op`'s waiter with `MissingDependencies` instead of letting it
+    /// wait out the dependency timeout.
+    fn fail_unpromised_ddl(state: &mut ActorState, op: PendingDdl, unpromised: Vec<String>) {
+        let sql_preview: String = op.sql.chars().take(120).collect();
+        tracing::warn!(
+            missing = ?unpromised,
+            sql = %sql_preview,
+            "[TursoBackend::Actor] DDL requires resources no schema provider registers — failing \
+             it instead of waiting"
+        );
+        let err = StorageError::MissingDependencies {
+            sql_preview,
+            missing: unpromised,
+        };
+        match op.completion {
+            DdlCompletion::Caller(response) => {
+                let _ = response.send(Err(err));
+            }
+            DdlCompletion::ViewCreate { view_name } => {
+                Self::finish_view_creation(state, &view_name, Err(err));
+            }
+        }
+    }
+
+    /// Fail every parked op whose requirements nobody will ever satisfy.
+    ///
+    /// Called once registration has closed. Failing one op can strip the last
+    /// promise from another, so this runs to a fixpoint.
+    fn sweep_unpromised_pending_ddl(state: &mut ActorState) {
+        while let Some(index) = state
+            .pending_ddl
+            .iter()
+            .position(|op| Self::unpromised_requirements(state, op).is_some())
+        {
+            let op = state.pending_ddl.remove(index).expect("index just found");
+            let unpromised =
+                Self::unpromised_requirements(state, &op).expect("op selected as unpromised");
+            Self::fail_unpromised_ddl(state, op, unpromised);
+        }
+    }
+
     /// Handle DDL with dependency tracking
-    #[allow(clippy::too_many_arguments)] // internal helper threading DDL pipeline state — params are all distinct
     async fn handle_ddl_with_deps_internal(
         conn: &turso::Connection,
-        next_op_id: &AtomicU64,
-        pending_ddl: &mut VecDeque<PendingDdl>,
-        available_resources: &mut HashSet<Resource>,
+        state: &mut ActorState,
         sql: String,
         provides: Vec<Resource>,
         requires: Vec<Resource>,
         priority: u32,
-        response: oneshot::Sender<Result<()>>,
+        completion: DdlCompletion,
     ) {
-        let op_id = next_op_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let op_id = state.next_op_id();
 
         let op = PendingDdl {
             id: op_id,
@@ -2021,97 +2578,423 @@ impl TursoBackend {
             provides,
             requires,
             priority,
-            response,
+            completion,
         };
 
         // Check if we can execute immediately
-        if Self::can_execute_ddl(available_resources, &op) {
+        if Self::can_execute_ddl(&state.available_resources, &op) {
             let had_provides = !op.provides.is_empty();
-            Self::execute_pending_ddl(conn, available_resources, op).await;
+            Self::execute_pending_ddl(conn, state, op).await;
             // Resources this DDL provided may unblock already-queued ops.
             if had_provides {
-                Self::process_pending_ddl(conn, pending_ddl, available_resources).await;
+                Self::process_pending_ddl(conn, state).await;
             }
+        } else if let Some(unpromised) = Self::unpromised_requirements(state, &op) {
+            Self::fail_unpromised_ddl(state, op, unpromised);
         } else {
             tracing::debug!(
                 "[TursoBackend::Actor] DDL op {} queued, waiting for: {:?}",
                 op_id,
                 op.requires
                     .iter()
-                    .filter(|r| !available_resources.contains(r))
+                    .filter(|r| !state.available_resources.contains(r))
                     .map(|r| r.name())
                     .collect::<Vec<_>>()
             );
-            pending_ddl.push_back(op);
+            state.pending_ddl.push_back(op);
         }
     }
 
     /// Execute a pending DDL operation
-    async fn execute_pending_ddl(
-        conn: &turso::Connection,
-        available_resources: &mut HashSet<Resource>,
-        op: PendingDdl,
-    ) {
+    async fn execute_pending_ddl(conn: &turso::Connection, state: &mut ActorState, op: PendingDdl) {
         tracing::debug!("[TursoBackend::Actor] Executing DDL op {}", op.id);
 
-        let result = Self::handle_ddl(conn, &op.sql).await;
+        let PendingDdl {
+            sql,
+            provides,
+            completion,
+            ..
+        } = op;
+        let result = Self::handle_ddl(conn, &sql).await;
 
         if result.is_ok() {
             // Mark provided resources as available
-            Self::mark_resources_available(available_resources, &op.provides);
+            Self::mark_resources_available(&mut state.available_resources, &provides);
         }
 
-        let _ = op.response.send(result);
+        match completion {
+            DdlCompletion::Caller(response) => {
+                let _ = response.send(result);
+            }
+            DdlCompletion::ViewCreate { view_name } => {
+                Self::finish_view_creation(state, &view_name, result);
+            }
+        }
     }
 
     /// Process pending DDL operations that may now be ready
-    async fn process_pending_ddl(
-        conn: &turso::Connection,
-        pending_ddl: &mut VecDeque<PendingDdl>,
-        available_resources: &mut HashSet<Resource>,
-    ) {
+    async fn process_pending_ddl(conn: &turso::Connection, state: &mut ActorState) {
         // Collect ready operations
         let mut ready = Vec::new();
         let mut still_pending = VecDeque::new();
 
-        while let Some(op) = pending_ddl.pop_front() {
-            if Self::can_execute_ddl(available_resources, &op) {
+        while let Some(op) = state.pending_ddl.pop_front() {
+            if Self::can_execute_ddl(&state.available_resources, &op) {
                 ready.push(op);
             } else {
                 still_pending.push_back(op);
             }
         }
 
-        *pending_ddl = still_pending;
+        state.pending_ddl = still_pending;
 
         // Sort by priority (highest first)
         ready.sort_by_key(|op| std::cmp::Reverse(op.priority));
 
         // Execute ready operations
         for op in ready {
-            Self::execute_pending_ddl(conn, available_resources, op).await;
+            Self::execute_pending_ddl(conn, state, op).await;
             // After each execution, more ops may become ready
             // Recursively process (this is safe since we drain the queue)
         }
 
         // Recursively check if new ops are now ready
-        if !pending_ddl.is_empty() {
-            let still_waiting: Vec<_> = pending_ddl
-                .iter()
-                .filter(|op| Self::can_execute_ddl(available_resources, op))
-                .map(|op| op.id)
-                .collect();
+        if state
+            .pending_ddl
+            .iter()
+            .any(|op| Self::can_execute_ddl(&state.available_resources, op))
+        {
+            Box::pin(Self::process_pending_ddl(conn, state)).await;
+        }
+    }
 
-            if !still_waiting.is_empty() {
-                // Some ops became ready during execution, recurse
-                Box::pin(Self::process_pending_ddl(
-                    conn,
-                    pending_ddl,
-                    available_resources,
-                ))
-                .await;
+    // ========================================================================
+    // Matview lease lifecycle
+    // ========================================================================
+
+    /// Serve one `AcquireViewLease`/`EnsurePinnedView`: grant against a `Live`
+    /// view, park behind an in-flight `CREATE`, or start the `CREATE`.
+    async fn handle_view_waiter(
+        conn: &turso::Connection,
+        state: &mut ActorState,
+        view_name: String,
+        select_sql: String,
+        requires: Vec<Resource>,
+        waiter: ViewWaiter,
+    ) {
+        let generation = state.generation;
+        let lease_id = state.next_lease_id();
+
+        // Taken by whichever branch below serves the waiter; what is left over
+        // is what the create path must park.
+        let mut unserved = Some(waiter);
+        match state.views.get_mut(&view_name) {
+            Some(ViewState::Creating {
+                waiters,
+                pin_requested,
+            }) => {
+                let waiter = unserved.take().expect("waiter is served exactly once");
+                *pin_requested |= waiter.is_pin();
+                waiters.push(waiter);
+            }
+            Some(ViewState::Live { leases, pinned }) => {
+                match unserved.take().expect("waiter is served exactly once") {
+                    ViewWaiter::Lease(response) => {
+                        *leases += 1;
+                        let _ = response.send(Ok(LeaseGrant {
+                            lease_id,
+                            generation,
+                        }));
+                    }
+                    ViewWaiter::Pin(response) => {
+                        *pinned = true;
+                        let _ = response.send(Ok(()));
+                    }
+                }
+            }
+            None => {}
+        }
+
+        let Some(waiter) = unserved else {
+            state.publish_matview_stats();
+            return;
+        };
+
+        let pin_requested = waiter.is_pin();
+        state.views.insert(
+            view_name.clone(),
+            ViewState::Creating {
+                waiters: vec![waiter],
+                pin_requested,
+            },
+        );
+        state.publish_matview_stats();
+
+        if let Err(e) =
+            crate::matview_manager::cleanup_orphaned_dbsp_state_on_conn(conn, &view_name).await
+        {
+            Self::finish_view_creation(
+                state,
+                &view_name,
+                Err(StorageError::DatabaseError(format!(
+                    "matview '{view_name}': could not inspect residual DBSP state before its \
+                     CREATE: {e}"
+                ))),
+            );
+            return;
+        }
+
+        let create_sql =
+            format!("CREATE MATERIALIZED VIEW IF NOT EXISTS {view_name} AS {select_sql}");
+        let provides = vec![Resource::schema(view_name.clone())];
+        Self::handle_ddl_with_deps_internal(
+            conn,
+            state,
+            create_sql,
+            provides,
+            requires,
+            priority::DDL_MATVIEW,
+            DdlCompletion::ViewCreate { view_name },
+        )
+        .await;
+    }
+
+    /// Answer everyone parked on a view whose `CREATE` just finished.
+    fn finish_view_creation(state: &mut ActorState, view_name: &str, result: Result<()>) {
+        let Some(ViewState::Creating {
+            waiters,
+            pin_requested,
+        }) = state.views.remove(view_name)
+        else {
+            tracing::error!(
+                view = %view_name,
+                "[TursoBackend::Actor] matview CREATE completed for a view that is not in the \
+                 Creating state — lease bookkeeping bug; its waiters will never be answered"
+            );
+            return;
+        };
+
+        let error = match result {
+            Ok(()) => None,
+            Err(e) => Some(format!("matview '{view_name}' could not be created: {e}")),
+        };
+        if let Some(message) = error {
+            tracing::error!("[TursoBackend::Actor] {message}");
+            for waiter in waiters {
+                waiter.fail(message.clone());
+            }
+            state.publish_matview_stats();
+            return;
+        }
+
+        let generation = state.generation;
+        let mut leases = 0u32;
+        for waiter in waiters {
+            match waiter {
+                ViewWaiter::Lease(response) => {
+                    leases += 1;
+                    let lease_id = state.next_lease_id();
+                    let _ = response.send(Ok(LeaseGrant {
+                        lease_id,
+                        generation,
+                    }));
+                }
+                ViewWaiter::Pin(response) => {
+                    let _ = response.send(Ok(()));
+                }
             }
         }
+        state.views.insert(
+            view_name.to_string(),
+            ViewState::Live {
+                leases,
+                pinned: pin_requested,
+            },
+        );
+        state.publish_matview_stats();
+    }
+
+    /// Give back one lease and, if it was the last reason to keep the view,
+    /// reap it here and now — the release and the drop are one command.
+    async fn handle_release_view_lease(
+        conn: &turso::Connection,
+        state: &mut ActorState,
+        view_name: &str,
+        lease_id: u64,
+        generation: u64,
+    ) {
+        if generation != state.generation {
+            tracing::debug!(
+                view = %view_name,
+                lease_id,
+                grant_generation = generation,
+                current_generation = state.generation,
+                "[TursoBackend::Actor] discarding a matview lease release from a bygone \
+                 generation — its view was already dropped by a reset"
+            );
+            return;
+        }
+
+        let reap = match state.views.get_mut(view_name) {
+            Some(ViewState::Live { leases, pinned }) => {
+                if *leases == 0 {
+                    tracing::error!(
+                        view = %view_name,
+                        lease_id,
+                        "[TursoBackend::Actor] matview lease released twice — lease bookkeeping \
+                         bug; ignoring so the count cannot underflow"
+                    );
+                    return;
+                }
+                *leases -= 1;
+                *leases == 0 && !*pinned
+            }
+            Some(ViewState::Creating { .. }) => {
+                tracing::error!(
+                    view = %view_name,
+                    lease_id,
+                    "[TursoBackend::Actor] matview lease released while its view is still being \
+                     created — no grant can exist yet, so this is a lease bookkeeping bug"
+                );
+                return;
+            }
+            None => {
+                tracing::error!(
+                    view = %view_name,
+                    lease_id,
+                    "[TursoBackend::Actor] matview lease released for a view the actor does not \
+                     own — lease bookkeeping bug"
+                );
+                return;
+            }
+        };
+
+        if !reap {
+            state.publish_matview_stats();
+            return;
+        }
+        Self::reap_view(conn, state, view_name).await;
+    }
+
+    /// Drop an unleased, unpinned view together with its dependents.
+    async fn reap_view(conn: &turso::Connection, state: &mut ActorState, view_name: &str) {
+        let dependents =
+            match crate::matview_manager::dependent_views_on_conn(conn, view_name).await {
+                Ok(dependents) => dependents,
+                Err(e) => {
+                    tracing::error!(
+                        view = %view_name,
+                        "[TursoBackend::Actor] cannot enumerate dependents of an unleased \
+                         matview, so it stays materialized (its DBSP circuit keeps costing every \
+                         commit): {e}"
+                    );
+                    return;
+                }
+            };
+
+        let blocked: Vec<&String> = dependents.iter().filter(|d| state.is_held(d)).collect();
+        if !blocked.is_empty() {
+            tracing::error!(
+                view = %view_name,
+                ?blocked,
+                "[TursoBackend::Actor] refusing to reap an unleased matview: dependent matviews \
+                 still hold live leases and dropping their base would leave them reading a view \
+                 that no longer exists"
+            );
+            return;
+        }
+
+        let mut doomed = dependents;
+        doomed.push(view_name.to_string());
+        for name in &doomed {
+            if let Err(e) = Self::handle_ddl(conn, &format!("DROP VIEW IF EXISTS {name}")).await {
+                tracing::error!(
+                    view = %name,
+                    "[TursoBackend::Actor] failed to drop an unleased matview; it stays \
+                     materialized: {e}"
+                );
+                return;
+            }
+            if let Err(e) =
+                crate::matview_manager::cleanup_orphaned_dbsp_state_on_conn(conn, name).await
+            {
+                tracing::warn!(
+                    view = %name,
+                    "[TursoBackend::Actor] could not inspect DBSP residue after dropping a \
+                     matview: {e}"
+                );
+            }
+            state.views.remove(name);
+            state
+                .available_resources
+                .remove(&Resource::schema(name.clone()));
+        }
+        state.publish_matview_stats();
+        tracing::debug!(view = %view_name, "[TursoBackend::Actor] reaped unleased matview");
+    }
+
+    /// Drop every `watch_view_%` and start a new lease generation.
+    async fn handle_reset_watch_views(
+        conn: &turso::Connection,
+        state: &mut ActorState,
+    ) -> Result<usize> {
+        let rows = Self::handle_query(
+            conn,
+            &format!(
+                "SELECT name FROM sqlite_master WHERE type='view' AND name LIKE '{}%'",
+                crate::matview_manager::WATCH_VIEW_PREFIX
+            ),
+            HashMap::new(),
+        )
+        .await?;
+
+        let mut dropped = 0usize;
+        for row in &rows {
+            let Some(Value::String(name)) = row.get("name") else {
+                continue;
+            };
+            Self::handle_ddl(conn, &format!("DROP VIEW IF EXISTS {name}")).await?;
+            crate::matview_manager::cleanup_orphaned_dbsp_state_on_conn(conn, name)
+                .await
+                .map_err(|e| {
+                    StorageError::DatabaseError(format!(
+                        "reset_watch_views: DBSP residue check for '{name}' failed: {e}"
+                    ))
+                })?;
+            state
+                .available_resources
+                .remove(&Resource::schema(name.clone()));
+            dropped += 1;
+        }
+
+        // A queued `CREATE` for this epoch would materialize a view nobody can
+        // ever be told about, so drop those ops with their views.
+        state
+            .pending_ddl
+            .retain(|op| !matches!(op.completion, DdlCompletion::ViewCreate { .. }));
+
+        // Everything parked belongs to the epoch we are ending; a waiter left
+        // hanging would block its caller for the full dependency timeout.
+        for (name, view_state) in state.views.drain() {
+            if let ViewState::Creating { waiters, .. } = view_state {
+                for waiter in waiters {
+                    waiter.fail(format!(
+                        "matview '{name}': its CREATE was abandoned by a watch-view reset"
+                    ));
+                }
+            }
+        }
+        state.generation += 1;
+        state.publish_matview_stats();
+
+        if dropped > 0 {
+            tracing::info!(
+                "[TursoBackend::Actor] reset dropped {dropped} watch views; lease generation is \
+                 now {}",
+                state.generation
+            );
+        }
+        Ok(dropped)
     }
 }
 
@@ -2283,6 +3166,61 @@ mod tests {
     fn test_database_phase_default() {
         let phase = DatabasePhase::default();
         assert_eq!(phase, DatabasePhase::SchemaInit);
+    }
+
+    #[test]
+    fn named_params_fingerprint_empty_is_dash_and_discriminates() {
+        assert_eq!(named_params_fingerprint(&HashMap::new()), "-");
+        let mut a = HashMap::new();
+        a.insert("k".to_string(), Value::Integer(1));
+        let mut b = HashMap::new();
+        b.insert("k".to_string(), Value::Integer(2));
+        assert_ne!(named_params_fingerprint(&a), "-");
+        assert_ne!(named_params_fingerprint(&a), named_params_fingerprint(&b));
+        assert_eq!(
+            named_params_fingerprint(&a),
+            named_params_fingerprint(&a.clone())
+        );
+    }
+
+    #[test]
+    fn positional_params_fingerprint_empty_is_dash_and_discriminates() {
+        assert_eq!(positional_params_fingerprint(&[]), "-");
+        let a = [value_to_turso_param(&Value::Integer(1))];
+        let b = [value_to_turso_param(&Value::Integer(2))];
+        assert_ne!(positional_params_fingerprint(&a), "-");
+        assert_ne!(
+            positional_params_fingerprint(&a),
+            positional_params_fingerprint(&b)
+        );
+    }
+
+    // `$name` binding is injection-adjacent: the name-char predicate decides
+    // where a placeholder ends. Underscore must be part of the name (kills the
+    // `|| next == '_'` -> `&&` / `== '_'` -> `!= '_'` mutants on both the peek
+    // and the inner scan), and a `$` not followed by a name char stays literal.
+    #[test]
+    fn bind_parameters_treats_underscore_as_name_char() {
+        let mut params = HashMap::new();
+        params.insert("foo_bar".to_string(), Value::Integer(7));
+        let (sql, vals) = bind_parameters("SELECT $foo_bar", &params).expect("bind");
+        assert_eq!(sql, "SELECT ?");
+        assert_eq!(vals.len(), 1);
+    }
+
+    #[test]
+    fn bind_parameters_leading_underscore_name() {
+        let mut params = HashMap::new();
+        params.insert("_priv".to_string(), Value::Integer(1));
+        let (sql, _) = bind_parameters("SELECT $_priv", &params).expect("bind");
+        assert_eq!(sql, "SELECT ?");
+    }
+
+    #[test]
+    fn bind_parameters_bare_dollar_is_literal() {
+        let (sql, vals) = bind_parameters("cost $ 5", &HashMap::new()).expect("bind");
+        assert_eq!(sql, "cost $ 5");
+        assert!(vals.is_empty());
     }
 
     #[test]
@@ -2788,7 +3726,8 @@ mod integration_tests {
         // parse strictly at their own boundary) — same as the CDC path.
         let rows = handle
             .query(
-                "SELECT id, COALESCE(json_group_array(content) FILTER (WHERE content IS NOT NULL), '[]') AS tags FROM sniff_test GROUP BY id",
+                "SELECT id, COALESCE(json_group_array(content) FILTER (WHERE content IS NOT \
+                 NULL), '[]') AS tags FROM sniff_test GROUP BY id",
                 HashMap::new(),
             )
             .await
@@ -2852,7 +3791,8 @@ mod integration_tests {
             let h = handle.clone();
             ddl_handles.push(tokio::spawn(async move {
                 h.execute_ddl(&format!(
-                    "CREATE VIEW IF NOT EXISTS view_{} AS SELECT * FROM test_interleave WHERE id LIKE 'id_%'",
+                    "CREATE VIEW IF NOT EXISTS view_{} AS SELECT * FROM test_interleave WHERE id \
+                     LIKE 'id_%'",
                     i
                 ))
                 .await

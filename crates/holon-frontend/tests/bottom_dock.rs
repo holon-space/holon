@@ -138,10 +138,12 @@ fn op_button_falls_back_display_name_to_op_name() {
 
 // ── Viewport-switching: root_layout DSL at mobile vs desktop ───────────
 
-/// The root_layout render expression from `block_profile.yaml`. Kept in
-/// sync with the mobile-bar PR — breaking this test means the profile
-/// branches no longer produce a `bottom_dock` on narrow viewports, or
-/// the desktop branch accidentally picked one up.
+/// The root-slot layout expression for the bundled default panels — the
+/// shape `holon_api::perspective::PerspectiveSpec::layout_expr` synthesizes
+/// (pinned there by `layout_dsl_reproduces_bundled_default_shape`). Breaking
+/// this test means the synthesized branches no longer produce a
+/// `bottom_dock` on narrow viewports, or the desktop branch accidentally
+/// picked one up.
 const ROOT_LAYOUT_DSL: &str = r#"
 if_space(600,
   bottom_dock(
@@ -210,7 +212,7 @@ fn root_layout_mobile_viewport_has_bottom_dock() {
     // slot's streaming collection has 0 items — but it's still a collection
     // view with Columns layout (not, say, a snapshot fallback).
     let dock_slot = &dock.children[1];
-    let is_streaming_columns = dock_slot.collection.as_ref().map_or(false, |view| {
+    let is_streaming_columns = dock_slot.collection.as_ref().is_some_and(|view| {
         view.layout()
             .as_ref()
             .map(|l| l.name() == "columns")

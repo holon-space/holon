@@ -4,5 +4,11 @@
   "type": "module",
   "dependencies": {
     "ws": "^8"
+  },
+  "scripts": {
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0"
   }
 }

@@ -21,6 +21,18 @@ export declare function dbExecute(sql: string): number
 export declare function dbQuery(sql: string): string
 
 /**
+ * Dispatch an ordered chain of operation intents through the
+ * ReactiveEngine (the GPUI-parity seam: focus mirroring, structural
+ * focus from split/join results, preference routing). Fire-and-forget;
+ * the chain advances on subsequent `engine_tick` calls.
+ *
+ * `intents_json` is a JSON array:
+ * `[{"entity":"block","op":"split_block","params":{"id":"block:x","
+ * position":5}}, …]`
+ */
+export declare function engineDispatchIntents(intentsJson: string): void
+
+/**
  * Cancel a subscription created by `engine_watch_view`. No-op if the
  * stream already ended naturally.
  */
@@ -52,9 +64,9 @@ export declare function engineInit(dbPath: string): void
  * Dispatch an MCP tool call by name. `args_json` is a JSON object string
  * with the tool's arguments. Returns the result as a JSON string.
  *
- * Used by the Dioxus page relay bridge: it receives `{id, tool, arguments}`
- * over WebSocket from the native relay, serialises `arguments` to a JSON
- * string, and calls this function.
+ * Used by the Dioxus page relay bridge: it receives `{id, tool,
+ * arguments}` over WebSocket from the native relay, serialises
+ * `arguments` to a JSON string, and calls this function.
  */
 export declare function engineMcpTool(name: string, argsJson: string): string
 
@@ -65,11 +77,34 @@ export declare function engineMcpTool(name: string, argsJson: string): string
 export declare function engineReactiveCheck(): string
 
 /**
+ * Tear down the engine so Turso releases its OPFS file handles (B2). Call
+ * this from JS BEFORE closing the OPFS sync-access handles and deleting
+ * the db/wal files — deleting them while the worker holds sync handles
+ * fails with `NoModificationAllowedError`. The page should reload
+ * afterwards.
+ */
+export declare function engineResetStorage(): void
+
+/**
+ * Set the in-memory editor focus (ADR 0010). `block_id: None` clears
+ * focus; `caret_offset` arms the one-shot caret seed for the editor
+ * that mounts for the block.
+ */
+export declare function engineSetFocus(blockId?: string | undefined | null, caretOffset?: number | undefined | null): void
+
+/**
  * Switch the active render variant for a watched block. Errors if the
  * block is not currently being watched (see
  * `ReactiveEngine::set_variant`).
  */
 export declare function engineSetVariant(blockId: string, variant: string): void
+
+/**
+ * Push the page viewport (CSS px + devicePixelRatio) into the engine so
+ * `if_space(...)` container queries stop falling back to desktop-first.
+ * Call on mount and on every resize.
+ */
+export declare function engineSetViewport(widthPx: number, heightPx: number, scaleFactor: number): void
 
 /**
  * Await the block's reactive ViewModel becoming ready (up to 5 s), then
@@ -103,7 +138,8 @@ export declare function engineWatchView(blockId: string, callback: (arg: [string
 
 /**
  * turso-db in the the browser requires explicit thread pool initialization
- * so, we just put no-op task on the thread pool and force emnapi to allocate web worker
+ * so, we just put no-op task on the thread pool and force emnapi to allocate
+ * web worker
  */
 export declare function initThreadPool(): Promise<unknown>
 
@@ -138,9 +174,9 @@ export declare function ping(s: string): Promise<string>
  * (See `tokio/src/lib.rs` line 478 in the installed crate version.) That
  * means the worker MUST drive `BackendEngine` from a current-thread runtime.
  * This function builds one and asserts that `tokio::spawn` + `tokio::time`
- * still work on a current-thread driver — which is the entire fallback path
- * the plan called out under H4. If this also fails, the whole architecture
- * has to rethink async.
+ * still work on a current-thread driver — which is the entire contingency
+ * path the plan called out under H4. If this also fails, the whole
+ * architecture has to rethink async.
  *
  * Intentionally sync (`#[napi]` without `async`) so the runtime we
  * build here is the one under test, not napi's ambient one.

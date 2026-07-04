@@ -11,7 +11,11 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
         return static_fallback(&content, ctx);
     };
 
-    let el_id = format!("editable-text-{row_id}-{field}");
+    // Suffix the occurrence coordinate (ADR 0016 §3) so a display-placed second
+    // occurrence of a block gets its own editor identity. `Canonical` → empty
+    // suffix → byte-identical key to before for every real row.
+    let occ = node.occurrence().key_suffix();
+    let el_id = format!("editable-text-{row_id}-{field}{occ}");
     let has_content = !content.is_empty();
 
     // The EditorView entity is parent-owned via `LocalEntityScope`'s
@@ -75,6 +79,9 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
     // pushing the live content into a stale `InputState` is always safe — it
     // is the backstop that keeps the displayed/edited text converged with the
     // backend even after the event-driven subscription has been orphaned.
+    // Increment G: this backstop runs ONLY for no-cell (unwired / headless)
+    // editors — a cell-attached editor's `_remote_delta_subscription` over the
+    // un-orphaned entity `Cell` makes it unnecessary, so it is gated off below.
     let (displayed_text, is_window_focused): (std::sync::Arc<str>, bool) =
         ctx.with_gpui(|window, cx| {
             use gpui::Focusable;
@@ -85,8 +92,31 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
                 let view = entity.read(cx);
                 let input = view.input_entity().clone();
                 let is_focused = input.focus_handle(cx).is_focused(window);
-                // `just_focused` is the false→true window-focus edge (e.g. click-to-edit).
-                let just_focused = view.focus_arrived(is_focused);
+                // `just_focused` is the false→true window-focus edge (e.g. click-to-edit);
+                // `just_blurred` is the true→false edge.
+                let (just_focused, just_blurred) = view.focus_transition(is_focused);
+                // On iOS/Android the platform focus-change events never reach the
+                // editor's `InputEvent::Focus`/`Blur` subscription (confirmed via
+                // MCP-driven clicks: the field focuses — caret renders — but no
+                // `InputEvent` fires), so the soft keyboard was never raised on
+                // focus. Drive it from the render-path focus edge, which is the
+                // reliable mobile focus signal. `editor_focus_gained/lost` are
+                // no-ops off `feature = "mobile"`.
+                #[cfg(feature = "mobile")]
+                {
+                    // Re-borrow via short-lived `entity.read(cx)` temporaries rather
+                    // than the outer `view` binding: `editor_focus_lost` needs
+                    // `&mut cx`, which cannot coexist with a live `entity.read(cx)`
+                    // borrow (`view` is such a borrow).
+                    if just_focused {
+                        entity.read(cx).note_focus_gained_mobile();
+                    } else if just_blurred {
+                        let my_gen = entity.read(cx).focus_gen();
+                        crate::mobile::editor_focus_lost(cx, my_gen);
+                    }
+                }
+                #[cfg(not(feature = "mobile"))]
+                let _ = just_blurred;
                 (input, is_focused, just_focused)
             };
             // Reconcile a stale `InputState` to the authority when the user cannot
@@ -94,10 +124,38 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
             // arrived this frame (no keystroke yet). A continuously-focused editor
             // is left alone so in-flight typing is never yanked. `converge_input`
             // prefers the Loro cell authority over the SQL-lagged `content`
-            // (curing the projection lag) and keeps `previous_text` in lockstep.
-            if !is_focused || just_focused {
+            // (curing the projection lag) and keeps the VM buffer in lockstep.
+            // Increment G — in the steady state a cell-attached editor converges
+            // solely via its `_remote_delta_subscription` (the entity `Cell` is the
+            // single external content source), so the render backstop stays OFF
+            // there: `displayed_text` below reports the editor's actual live
+            // `InputState` with no render-path patch-up, giving `inv-displayed-text/
+            // widget` real teeth over the cell path. No-cell (unwired / headless)
+            // editors keep the full backstop that cures their orphaned
+            // `_data_subscription`.
+            //
+            // 2026-07-10 — but a cell-attached editor STILL re-reads the cell
+            // authority on the focus-GAIN edge. A cached editor reused across a
+            // split/join rowset rebuild can hold an `InputState` that never received
+            // the structural `set_field` delta (the entity `Cell`'s broadcast
+            // subscription can be starved / miss the write across the rebuild).
+            // Trusting that stale buffer silently corrupts data: the next keystroke
+            // commits the pre-join text — resurrecting merged-away content — and
+            // `Enter` at its end splits past the canonical length ("Split position 18
+            // exceeds content length 17"). Focus-gain is a safe convergence point
+            // (no keystroke has landed → nothing to yank), and `converge_input`
+            // reads ONLY the cell authority (`current_text()`) for a cell editor, so
+            // this does NOT reintroduce the retired SQL `content` backstop. It is
+            // idempotent — a no-op when the cell already delivered.
+            let cell_attached = entity.read(cx).has_cell();
+            if converge_on_render(cell_attached, is_focused, just_focused) {
+                let source = if cell_attached {
+                    "focus_reload"
+                } else {
+                    "render_backstop"
+                };
                 entity.update(cx, |this, cx| {
-                    this.converge_input(&content, window, cx);
+                    this.converge_input(source, &content, window, cx);
                 });
             }
             // Snapshot the post-convergence value for the PBT staleness invariants.
@@ -110,7 +168,16 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
     // typing into an empty block creates content. Rendered as an
     // absolutely-positioned BEHIND the real Input so it doesn't intercept
     // clicks or typing (GPUI hit-tests children in reverse paint order).
-    let element = if !has_content {
+    //
+    // Visibility keys off the LIVE editor text (`displayed_text`), NOT the
+    // committed `content` prop: the first keystroke into an empty block updates
+    // the `InputState` immediately but does not commit to the projection until
+    // later, so `has_content` (derived from `content`) would still be false and
+    // the grey "Type here" hint would draw UNDER the freshly-typed glyph until
+    // commit (dogfood 2026-07-19 PERCEPTION bug). `displayed_text` reflects the
+    // keystroke this same frame, so the hint disappears the instant text lands.
+    let show_placeholder = displayed_text.is_empty();
+    let element = if show_placeholder {
         div()
             .relative()
             .child(
@@ -126,7 +193,7 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
                     })
                     .text_size(px(15.0))
                     .line_height(px(22.0))
-                    .child("Type here to add a new block"),
+                    .child("Type here"),
             )
             .child(inner)
             .into_any_element()
@@ -147,6 +214,24 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
     .into_any_element()
 }
 
+/// Whether the render path should converge this editor's `InputState` to its
+/// content authority this frame. See the call site for the full rationale.
+///
+/// - No-cell editor: converge whenever the user cannot be mid-typing — either
+///   unfocused, or focus just arrived (no keystroke yet). Cures the orphaned
+///   `_data_subscription`.
+/// - Cell-attached editor: converge ONLY on the focus-gain edge (re-read the
+///   cell authority), never in the focused/unfocused steady state — the entity
+///   `Cell` remote-delta subscription owns the steady state, and gating the
+///   backstop off there keeps `inv-displayed-text` teeth.
+fn converge_on_render(cell_attached: bool, is_focused: bool, just_focused: bool) -> bool {
+    if cell_attached {
+        just_focused
+    } else {
+        !is_focused || just_focused
+    }
+}
+
 fn static_fallback(content: &str, ctx: &GpuiRenderContext) -> AnyElement {
     let text_color = tc(ctx, |t| t.foreground);
     let display_text = if content.is_empty() {
@@ -164,4 +249,33 @@ fn static_fallback(content: &str, ctx: &GpuiRenderContext) -> AnyElement {
         .line_height(px(22.0))
         .child(display_text)
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::converge_on_render;
+
+    #[test]
+    fn cell_editor_converges_only_on_focus_gain() {
+        // Focus-gain edge: re-read the cell authority. This is the fix for the
+        // stale-buffer data corruption after a split/join rowset rebuild
+        // (2026-07-10): the cached editor's `InputState` may have missed the
+        // structural `set_field` delta, so focus-gain must reload from the cell.
+        assert!(converge_on_render(true, true, true));
+        // Steady state (focused or unfocused, no edge): the entity `Cell`
+        // remote-delta path owns it — the backstop stays off to keep
+        // `inv-displayed-text` real teeth over the cell path.
+        assert!(!converge_on_render(true, true, false));
+        assert!(!converge_on_render(true, false, false));
+    }
+
+    #[test]
+    fn no_cell_editor_keeps_full_backstop() {
+        // Unfocused steady state and focus gain both converge (cure the orphaned
+        // `_data_subscription`); a continuously-focused editor is left alone so
+        // in-flight typing is never yanked.
+        assert!(converge_on_render(false, false, false));
+        assert!(converge_on_render(false, true, true));
+        assert!(!converge_on_render(false, true, false));
+    }
 }

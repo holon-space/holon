@@ -44,6 +44,13 @@ pub enum BlockContent {
 
     /// Source code block (language-agnostic)
     Source(SourceBlock),
+
+    /// Image block: `path` is the relative file path to the image asset
+    /// (e.g. `attachments/photo.png`). A distinct variant so image-ness
+    /// survives every `Block` ↔ `BlockContent` conversion — previously an
+    /// image collapsed to `Text` here, silently dropping `ContentType::Image`
+    /// on the Loro create/read round-trip (org `[[file:…]]` data loss).
+    Image { path: String },
 }
 
 impl Default for BlockContent {
@@ -61,6 +68,7 @@ impl std::fmt::Display for BlockContent {
                 let lang = sb.language.as_deref().unwrap_or("unknown");
                 write!(f, "[{}] {}", lang, sb.source)
             }
+            BlockContent::Image { path } => write!(f, "{}", path),
         }
     }
 }
@@ -74,6 +82,11 @@ impl BlockContent {
     /// Create a source block with minimal fields (Tier 1)
     pub fn source(language: impl Into<String>, source: impl Into<String>) -> Self {
         BlockContent::Source(SourceBlock::new(language, source))
+    }
+
+    /// Create an image block. `path` is the relative file path to the asset.
+    pub fn image(path: impl Into<String>) -> Self {
+        BlockContent::Image { path: path.into() }
     }
 
     /// Get the raw text if this is a Text variant
@@ -101,6 +114,7 @@ impl BlockContent {
             BlockContent::Text { raw } => raw,
             BlockContent::RichText { text, .. } => text,
             BlockContent::Source(sb) => &sb.source,
+            BlockContent::Image { path } => path,
         }
     }
 }
@@ -302,6 +316,14 @@ pub struct Block {
     #[edge_field]
     pub requires: Vec<EntityUri>,
 
+    /// Advice-suppression exclusion set: lesson block IDs this (anchor) block
+    /// has dismissed as advice. Stored in the `advice_suppressed` junction
+    /// table (edge field), serialized as the `:ADVICE_SUPPRESSED:` drawer, and
+    /// read from the `block` matview's hydrated `advice_suppressed` JSON array.
+    /// See ADR 0021.
+    #[edge_field]
+    pub advice_suppressed: Vec<EntityUri>,
+
     // --- Content fields (flattened from BlockContent) ---
     /// Text content (raw text or source code)
     pub content: String,
@@ -331,6 +353,18 @@ pub struct Block {
     #[jsonb]
     pub marks: Option<Vec<MarkSpan>>,
 
+    /// Outline fold state: children hidden when `true`. Document state (Martin
+    /// ruling 2026-07-11) — shared, synced, survives restart — NOT per-device
+    /// view state, so it lives on the domain `Block` like any other field and
+    /// round-trips through org/Loro/SQL like `completed`. Backed by the SQL
+    /// `collapsed` column (`BLOCK_RAW_COLUMNS`).
+    pub collapsed: bool,
+
+    /// Render the block's query widget WITHOUT its own headline text. Document
+    /// state like `collapsed` — shared, synced, survives restart — and backed
+    /// by the SQL `widget_only` column (`BLOCK_RAW_COLUMNS`).
+    pub widget_only: bool,
+
     // --- Timestamps (flattened from BlockMetadata) ---
     /// Unix timestamp (milliseconds) when block was created
     pub created_at: i64,
@@ -347,12 +381,15 @@ impl Default for Block {
             parent_id: EntityUri::no_parent(),
             tags: Tags::default(),
             requires: Vec::new(),
+            advice_suppressed: Vec::new(),
             content: String::new(),
             content_type: ContentType::Text,
             source_language: None,
             source_name: None,
             properties: HashMap::new(),
             marks: None,
+            collapsed: false,
+            widget_only: false,
             created_at: now,
             updated_at: now,
         }
@@ -376,6 +413,20 @@ impl Block {
         } else {
             self.tags.remove(PAGE_TAG);
         }
+    }
+
+    /// The `shared-tree-id` this block belongs to, if any. Present on a mount
+    /// row and on every projected descendant of a shared subtree.
+    pub fn shared_tree_id(&self) -> Option<String> {
+        self.get_property_str(crate::share_props::SHARED_TREE_ID_PROPERTY)
+    }
+
+    /// Whether this block is the local mount row for a shared subtree
+    /// (`share-role == "mount"`).
+    pub fn is_share_mount(&self) -> bool {
+        self.get_property_str(crate::share_props::SHARE_ROLE_PROPERTY)
+            .as_deref()
+            == Some(crate::share_props::SHARE_ROLE_MOUNT)
     }
 
     /// Create a new text block with sensible defaults.
@@ -478,6 +529,7 @@ impl Block {
                 sb.name,
                 None,
             ),
+            BlockContent::Image { path } => (path, ContentType::Image, None, None, None),
         };
 
         Self {
@@ -503,10 +555,13 @@ impl Block {
                 name: self.source_name.clone(),
                 header_args: HashMap::new(),
             }),
-            // Image blocks store a file path in `content` — return as Text
-            // since BlockContent has no Image variant. The caller should check
-            // `content_type` to distinguish.
-            ContentType::Text | ContentType::Image => match &self.marks {
+            // Image blocks store the file path in `content`; the dedicated
+            // variant carries `ContentType::Image` losslessly through the
+            // conversion (no `content_type` side-channel needed).
+            ContentType::Image => BlockContent::Image {
+                path: self.content.clone(),
+            },
+            ContentType::Text => match &self.marks {
                 Some(marks) => BlockContent::RichText {
                     text: self.content.clone(),
                     marks: marks.clone(),
@@ -541,6 +596,13 @@ impl Block {
                 self.content_type = ContentType::Source;
                 self.source_language = sb.language.map(|l| l.parse::<SourceLanguage>().unwrap());
                 self.source_name = sb.name;
+                self.marks = None;
+            }
+            BlockContent::Image { path } => {
+                self.content = path;
+                self.content_type = ContentType::Image;
+                self.source_language = None;
+                self.source_name = None;
                 self.marks = None;
             }
         }
@@ -618,7 +680,8 @@ impl Block {
             .get("_source_header_args")
             .and_then(|v| {
                 if let Value::String(s) = v {
-                    serde_json::from_str(s).ok() // ALLOW(ok): properties may not be JSON
+                    serde_json::from_str(s).ok() // ALLOW(ok): properties may
+                // not be JSON
                 } else {
                     None
                 }
@@ -731,6 +794,27 @@ fn require_i64(row: &crate::StorageEntity, col: &str, id: &EntityUri) -> anyhow:
         .ok_or_else(|| anyhow::anyhow!("block {id}: column '{col}' must be an integer, got {v:?}"))
 }
 
+/// Read a `NOT NULL DEFAULT 0` SQLite boolean column (`collapsed`,
+/// `widget_only`). Reads always come back as `Value::Integer` (0/1) —
+/// `turso_value_to_value` never
+/// produces `Value::Boolean` on the read path — but `Value::Boolean` is
+/// accepted too since some in-memory / test stores construct rows directly
+/// with it. Absent/Null defaults to `false` (matches the column's own SQL
+/// default) rather than failing loud like `tags`/`requires`: unlike those
+/// edge fields there is no cross-reader COALESCE contract for `collapsed`,
+/// and it is new enough that many synthetic row fixtures across the repo
+/// don't (and needn't) construct it explicitly.
+fn optional_bool(row: &crate::StorageEntity, col: &str, id: &EntityUri) -> anyhow::Result<bool> {
+    match row.get(col) {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Integer(i)) => Ok(*i != 0),
+        Some(Value::Boolean(b)) => Ok(*b),
+        Some(other) => anyhow::bail!(
+            "block {id}: column '{col}' must be an integer (0/1) or boolean, got {other:?}"
+        ),
+    }
+}
+
 /// Strict decode of a projection-guaranteed string-array column
 /// (`tags`/`requires`): every reader COALESCEs these to `'[]'` (matview) or
 /// synthesizes them from the junction tables (block_raw readers), so an
@@ -825,6 +909,8 @@ impl TryFrom<crate::StorageEntity> for Block {
                 "block {id}: column 'properties' must be a JSON object, got {other:?}"
             ),
         };
+        let collapsed = optional_bool(&row, "collapsed", &id)?;
+        let widget_only = optional_bool(&row, "widget_only", &id)?;
         let created_at = require_i64(&row, "created_at", &id)?;
         let updated_at = require_i64(&row, "updated_at", &id)?;
         let tags = Tags::from(require_string_array(&row, "tags", &id)?);
@@ -836,15 +922,44 @@ impl TryFrom<crate::StorageEntity> for Block {
                 })
             })
             .collect::<anyhow::Result<Vec<EntityUri>>>()?;
+        let advice_suppressed = require_string_array(&row, "advice_suppressed", &id)?
+            .into_iter()
+            .map(|s| {
+                EntityUri::parse_owned(s.clone()).map_err(|e| {
+                    anyhow::anyhow!(
+                        "block {id}: 'advice_suppressed' entry {s:?} is not a valid URI: {e}"
+                    )
+                })
+            })
+            .collect::<anyhow::Result<Vec<EntityUri>>>()?;
         let marks = match row.get("marks") {
             None | Some(Value::Null) => None,
             Some(Value::Json(s)) | Some(Value::String(s)) => {
                 if s.is_empty() {
                     None
                 } else {
-                    Some(crate::marks_from_json(s).map_err(|e| {
+                    let mut marks = crate::marks_from_json(s).map_err(|e| {
                         anyhow::anyhow!("block {id}: column 'marks' holds invalid JSON {s:?}: {e}")
-                    })?)
+                    })?;
+                    // Read-boundary choke point: clamp any mark span that
+                    // outlives `content` (a decoupled marks-only write, or a
+                    // content-only trim that shortened the text). Without this,
+                    // a corrupt persisted row aborts EVERY render of the block
+                    // in `scalar_range_to_bytes`. Fail-loud: name the block id
+                    // here for row attribution (the clamp itself also warns).
+                    let content_chars = content.chars().count();
+                    if marks
+                        .iter()
+                        .any(|m| m.start > content_chars || m.end > content_chars)
+                    {
+                        tracing::warn!(
+                            block_id = %id,
+                            content_chars,
+                            "block deserialization: out-of-bounds mark span clamped to content"
+                        );
+                    }
+                    crate::canonicalize_marks_against(&content, &mut marks);
+                    Some(marks)
                 }
             }
             Some(other) => {
@@ -856,12 +971,15 @@ impl TryFrom<crate::StorageEntity> for Block {
             parent_id,
             tags,
             requires,
+            advice_suppressed,
             content,
             content_type,
             source_language,
             source_name,
             properties,
             marks,
+            collapsed,
+            widget_only,
             created_at,
             updated_at,
         })
@@ -870,8 +988,10 @@ impl TryFrom<crate::StorageEntity> for Block {
 
 /// Metadata associated with a block.
 ///
-/// Note: UI state like `collapsed` is NOT stored here - it's kept locally
-/// in the frontend to avoid cross-user UI churn in collaborative sessions.
+/// Note: `collapsed` is document state (Martin ruling 2026-07-11 — shared,
+/// synced, survives restart, NOT per-device view state) and lives as a real
+/// field on [`Block`] itself, not here — `BlockMetadata` only carries the
+/// timestamps that don't have their own dedicated Block field.
 /// flutter_rust_bridge:non_opaque
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct BlockMetadata {
@@ -977,6 +1097,14 @@ pub struct BlockWire {
     pub properties: HashMap<String, Value>,
     #[serde(default)]
     pub marks: Option<Vec<MarkSpan>>,
+    /// Outline fold state. `#[serde(default)]` so pre-milestone fixtures
+    /// (written before collapse became document state) parse as expanded.
+    #[serde(default)]
+    pub collapsed: bool,
+    /// Widget-only render mode. `#[serde(default)]` so fixtures written
+    /// without the field parse as "render the headline too".
+    #[serde(default)]
+    pub widget_only: bool,
     pub created_at: i64,
     pub updated_at: i64,
     /// Junction-derived edge field, carried explicitly (disclosed legacy
@@ -986,6 +1114,9 @@ pub struct BlockWire {
     /// Junction-derived edge field, carried explicitly. See `tags`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requires: Vec<EntityUri>,
+    /// Junction-derived edge field (advice-suppression set). See `tags`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub advice_suppressed: Vec<EntityUri>,
 }
 
 impl From<&Block> for BlockWire {
@@ -994,15 +1125,18 @@ impl From<&Block> for BlockWire {
             id: b.id.clone(),
             parent_id: b.parent_id.clone(),
             content: b.content.clone(),
-            content_type: b.content_type.clone(),
+            content_type: b.content_type,
             source_language: b.source_language.clone(),
             source_name: b.source_name.clone(),
             properties: b.properties.clone(),
             marks: b.marks.clone(),
+            collapsed: b.collapsed,
+            widget_only: b.widget_only,
             created_at: b.created_at,
             updated_at: b.updated_at,
             tags: b.tags.to_vec(),
             requires: b.requires.clone(),
+            advice_suppressed: b.advice_suppressed.clone(),
         }
     }
 }
@@ -1014,12 +1148,15 @@ impl From<BlockWire> for Block {
             parent_id: w.parent_id,
             tags: w.tags.into(),
             requires: w.requires,
+            advice_suppressed: w.advice_suppressed,
             content: w.content,
             content_type: w.content_type,
             source_language: w.source_language,
             source_name: w.source_name,
             properties: w.properties,
             marks: w.marks,
+            collapsed: w.collapsed,
+            widget_only: w.widget_only,
             created_at: w.created_at,
             updated_at: w.updated_at,
         }
@@ -1167,7 +1304,6 @@ mod tests {
 #[cfg(test)]
 mod mutation_gap_tests {
     use super::*;
-    use crate::types::Tags;
 
     fn uri(s: &str) -> EntityUri {
         EntityUri::parse_owned(s.to_string()).unwrap()
@@ -1203,6 +1339,21 @@ mod mutation_gap_tests {
     }
 
     #[test]
+    fn new_rich_carries_parent_id() {
+        let rich = Block::new_rich(
+            uri("block:r1"),
+            uri("block:parent"),
+            "rich text",
+            Vec::<MarkSpan>::new(),
+        );
+        assert_eq!(rich.id, uri("block:r1"));
+        // Constructor must carry the passed parent_id (not drop it to default).
+        assert_eq!(rich.parent_id, uri("block:parent"));
+        assert_ne!(rich.parent_id, EntityUri::no_parent());
+        assert_eq!(rich.content, "rich text");
+    }
+
+    #[test]
     fn block_predicates_titles_and_mime() {
         let mut b = Block::new_text(uri("block:b1"), EntityUri::no_parent(), "line1\nline2");
         assert_eq!(b.title(), "line1");
@@ -1215,6 +1366,9 @@ mod mutation_gap_tests {
         assert!(!b.is_page());
 
         let src = Block::new_source(uri("block:s1"), uri("block:b1"), "holon_prql", "from x");
+        // Constructor must carry the passed parent_id (not drop it to default).
+        assert_eq!(src.parent_id, uri("block:b1"));
+        assert_ne!(src.parent_id, EntityUri::no_parent());
         assert!(src.is_source_block());
         assert!(src.is_prql_block());
         assert!(!b.is_source_block());
@@ -1223,6 +1377,9 @@ mod mutation_gap_tests {
         assert!(!py.is_prql_block());
 
         let img = Block::new_image(uri("block:i1"), uri("block:b1"), "attachments/pic.png");
+        // Constructor must carry the passed id (not drop it to a random default).
+        assert_eq!(img.id, uri("block:i1"));
+        assert_eq!(img.parent_id, uri("block:b1"));
         assert!(img.is_image_block());
         assert_eq!(img.image_mime(), Some("image/png"));
         let jpg = Block::new_image(uri("block:i2"), uri("block:b1"), "a/b.JPG");
@@ -1314,6 +1471,9 @@ mod mutation_gap_tests {
                 ("updated_at", Value::Integer(2)),
                 ("tags", Value::Array(vec![Value::String("a".to_string())])),
                 ("requires", Value::Array(vec![])),
+                ("advice_suppressed", Value::Array(vec![])),
+                ("collapsed", Value::Integer(0)),
+                ("widget_only", Value::Integer(0)),
             ]
             .into_iter()
             .map(|(k, v)| (std::sync::Arc::<str>::from(k), v))
@@ -1326,7 +1486,58 @@ mod mutation_gap_tests {
         assert_eq!(ok.updated_at, 2);
         assert!(ok.tags.contains("a"));
         assert!(ok.requires.is_empty());
+        assert!(ok.advice_suppressed.is_empty());
+        assert!(!ok.collapsed);
+        assert!(!ok.widget_only);
         assert!(ok.parent_id.as_block_id().is_none());
+
+        // `collapsed` is stored as SQLite INTEGER 0/1 (turso_value_to_value
+        // never produces Value::Boolean on read) — a folded row must parse true.
+        let mut folded = base_row();
+        folded.insert(std::sync::Arc::<str>::from("collapsed"), Value::Integer(1));
+        assert!(
+            Block::try_from(folded)
+                .expect("folded row parses")
+                .collapsed
+        );
+
+        // Absent collapsed column defaults to expanded (unlike tags/requires,
+        // there's no cross-reader COALESCE contract for this new scalar
+        // column — see `optional_bool`).
+        let mut no_collapsed = base_row();
+        no_collapsed.remove("collapsed");
+        assert!(
+            !Block::try_from(no_collapsed)
+                .expect("parses without collapsed")
+                .collapsed
+        );
+
+        // `widget_only` mirrors `collapsed`: INTEGER 0/1 on read, absent
+        // column defaults to false (see `optional_bool`).
+        let mut widget = base_row();
+        widget.insert(
+            std::sync::Arc::<str>::from("widget_only"),
+            Value::Integer(1),
+        );
+        assert!(
+            Block::try_from(widget)
+                .expect("widget_only row parses")
+                .widget_only
+        );
+
+        let mut no_widget = base_row();
+        no_widget.remove("widget_only");
+        assert!(
+            !Block::try_from(no_widget)
+                .expect("parses without widget_only")
+                .widget_only
+        );
+
+        // Absent advice_suppressed column = broken projection, must error.
+        let mut no_advice = base_row();
+        no_advice.remove("advice_suppressed");
+        let err = Block::try_from(no_advice).unwrap_err().to_string();
+        assert!(err.contains("advice_suppressed"), "got: {err}");
 
         // Absent tags column = broken projection, must error mentioning the column.
         let mut no_tags = base_row();

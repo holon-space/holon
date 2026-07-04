@@ -19,6 +19,21 @@ use holon_api::capability::Consolidator;
 
 use crate::traits::Result;
 
+/// One block-create intent for [`BlockOrdering::create_in_tree_batch`] — the
+/// same payload [`BlockOrdering::create_in_tree`] takes, minus the positional
+/// anchor: a batch creates its blocks in request order and the caller's place
+/// pass owns their final positions.
+#[derive(Debug, Clone)]
+pub struct BlockCreateRequest {
+    pub parent_id: EntityUri,
+    pub id: EntityUri,
+    pub content: BlockContent,
+    pub properties: std::collections::HashMap<String, holon_api::Value>,
+    pub tags: Tags,
+    pub requires: Vec<EntityUri>,
+    pub advice_suppressed: Vec<EntityUri>,
+}
+
 /// Provider of positional-intent writes for block aggregates.
 ///
 /// Implementations:
@@ -106,6 +121,9 @@ pub trait BlockOrdering: Send + Sync {
     /// tree as `BlockContent::Source`, else the outbound projector writes
     /// `content_type = text` back over the parser's `source` and every source
     /// block silently degrades to text.
+    // Grouping these into a params struct is a public trait-API change across
+    // every implementor and call site — out of proportion to the lint.
+    #[allow(clippy::too_many_arguments)]
     async fn create_in_tree(
         &self,
         _: &EntityUri,
@@ -115,8 +133,38 @@ pub trait BlockOrdering: Send + Sync {
         _: &std::collections::HashMap<String, holon_api::Value>,
         _: &Tags,
         _: &[EntityUri],
+        _: &[EntityUri],
     ) -> Result<bool> {
         Ok(false)
+    }
+
+    /// [`create_in_tree`](Self::create_in_tree) for a CHUNK of creates, in
+    /// request (document) order — one flag per request, same meaning.
+    ///
+    /// The org ingest calls this instead of one create per block because a
+    /// tree-backed authority can then answer "does this id exist yet" once for
+    /// the chunk and commit it once, turning per-block O(nodes) existence
+    /// walks + per-block commits into one of each. Default: the per-block
+    /// seam, so an implementation without a batched authority behaves
+    /// identically (positional anchor `None`, exactly as the ingest passes it).
+    async fn create_in_tree_batch(&self, requests: &[BlockCreateRequest]) -> Result<Vec<bool>> {
+        let mut out = Vec::with_capacity(requests.len());
+        for r in requests {
+            out.push(
+                self.create_in_tree(
+                    &r.parent_id,
+                    None,
+                    &r.id,
+                    r.content.clone(),
+                    &r.properties,
+                    &r.tags,
+                    &r.requires,
+                    &r.advice_suppressed,
+                )
+                .await?,
+            );
+        }
+        Ok(out)
     }
 
     /// Whether `id` has a node in the separate authoritative tree.
@@ -183,6 +231,46 @@ pub trait BlockOrdering: Send + Sync {
     /// SqlOnly impls delete the SQL row directly.
     async fn delete_in_tree(&self, params: holon_api::StorageEntity) -> Result<()>;
 
+    /// Copy-on-write seed refresh: for each `(id, content)` whose block exists
+    /// in the authority with DIFFERENT content, rewrite it to the current
+    /// shipped-asset value (compares first, so an unchanged block emits no op).
+    /// Used by `seed_default_layout` to auto-update the VIRTUAL default layout
+    /// (`block:__default__`) from the bundled asset while the persisted Loro
+    /// snapshot would otherwise pin a stale copy. Returns how many were
+    /// refreshed. Default: `Ok(0)` — no separate authority to reconcile
+    /// (SqlOnly / test stubs).
+    async fn reseed_content(&self, _blocks: &[(EntityUri, String)]) -> Result<usize> {
+        Ok(0)
+    }
+
+    /// Apply a whole file's worth of ordered ingest ops in one shot.
+    ///
+    /// `ops` is the org reconciler's `(op, params)` vector in **document
+    /// order**: `create`/`update` (both routed through the update seam) then
+    /// `delete`. The default implementation applies them one at a time via
+    /// [`update_in_tree`](Self::update_in_tree) /
+    /// [`delete_in_tree`](Self::delete_in_tree) — byte-identical to the
+    /// historic boot loop, so Loro-backed and test impls need no override.
+    ///
+    /// The SqlOnly store overrides this to collapse the whole file's writes
+    /// into ONE `db_handle.transaction()` so the live-watch matview IVM
+    /// maintenance runs once per file instead of once per block. That is
+    /// the fix for the O(N²) cold-boot ingest (BugFunnel row 32):
+    /// per-single-row-write matview maintenance whose cost scales with the
+    /// accumulated block table.
+    async fn apply_ingest_batch(&self, ops: Vec<(String, holon_api::StorageEntity)>) -> Result<()> {
+        for (op, params) in ops {
+            match op.as_str() {
+                "create" | "update" => self.update_in_tree(params).await?,
+                "delete" => self.delete_in_tree(params).await?,
+                other => {
+                    return Err(format!("apply_ingest_batch: unknown op {other:?}").into());
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// All children of `parent_id` in positional order (low → high
     /// sort_key in SqlOnly mode; Loro tree order in Loro mode).
     /// Returns an empty Vec when there are no children.
@@ -192,17 +280,6 @@ pub trait BlockOrdering: Send + Sync {
     /// assertions instead of computing order from a `Block`'s
     /// `sort_key` / `sequence` field — those are encoding-specific.
     async fn children(&self, parent_id: &EntityUri) -> Result<Vec<EntityUri>>;
-
-    /// Project the authoritative order key (Loro fractional index) to the
-    /// SQL `sort_key` sink for `ids`. A block created but never repositioned
-    /// emits no Loro mov delta, so the outbound projector never writes its fi
-    /// to SQL and it keeps the default `"A0"`, mis-sorting against moved
-    /// siblings (real fi). The org-scan reconciler calls this after its place
-    /// loop so freshly-created-but-unmoved blocks get a real `sort_key`.
-    /// Default + SqlOnly: no-op (SQL itself owns `sort_key` there).
-    async fn project_sort_keys(&self, _: &[EntityUri]) -> Result<()> {
-        Ok(())
-    }
 }
 
 /// Order-key minting — the store-owner's exclusive right to synthesize a
@@ -225,6 +302,9 @@ pub trait OrderKeyMinting: Send + Sync {
     /// `parent_id`, immediately after `after_id`, to persist verbatim in
     /// `block.sort_key`. Implemented only by the `Store` consolidator's order
     /// owner (the sole minter of fractional indices for its sibling sets).
+    // Defining-module trait declaration (excluded at repo root; the exclude
+    // glob misses the `.claude/worktrees/...` prefix, so annotate inline).
+    // ALLOW(order_minting): trait-method declaration, not a mint call site.
     async fn new_child_anchor(
         &self,
         parent_id: &EntityUri,
@@ -339,6 +419,7 @@ mod default_contract_tests {
                     BlockContent::text("x"),
                     &std::collections::HashMap::new(),
                     &Tags::default(),
+                    &[],
                     &[],
                 )
                 .await

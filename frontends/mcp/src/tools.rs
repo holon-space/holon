@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use holon::api::holon_service::HolonService;
@@ -9,11 +10,11 @@ use holon_api::Block;
 use holon_api::Change;
 use holon_api::EntityName;
 use holon_api::EntityUri;
+use holon_api::POSITION_AFTER_BLOCK_ID_PARAM;
 use holon_api::QueryLanguage;
 use holon_api::Value;
 use holon_core::storage::types::StorageEntity;
 use holon_loro::LoroBackend;
-use holon_orgmode::org_renderer::OrgRenderer;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
 use rmcp::tool;
@@ -41,6 +42,39 @@ fn json_to_holon_value(v: serde_json::Value) -> Value {
     Value::from_json_value(v)
 }
 
+/// A SUT retired by `reset_vault` (Phase 1 Option A, plan F). Holds its Arcs +
+/// temp dirs so nothing Drops: the retired engine's watchers/consolidator idle
+/// against still-existing but abandoned fresh paths. `_`-prefixed because the
+/// point is to KEEP them alive, not read them.
+#[cfg(debug_assertions)]
+struct RetiredSut {
+    _session: Arc<holon_frontend::FrontendSession>,
+    _engine: Arc<holon_frontend::reactive::ReactiveEngine>,
+    _backend: Arc<holon::api::backend_engine::BackendEngine>,
+    _tempdirs: Box<dyn std::any::Any + Send>,
+}
+
+/// Process-wide retirement list. Grows by exactly one per `reset_vault`; a hard
+/// cap (checked in the tool) refuses further resets rather than leaking
+/// unboundedly.
+#[cfg(debug_assertions)]
+static RETIRED: std::sync::Mutex<Vec<RetiredSut>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(debug_assertions)]
+fn retired_len() -> usize {
+    RETIRED.lock().expect("RETIRED poisoned").len()
+}
+
+#[cfg(debug_assertions)]
+fn push_retired(sut: RetiredSut) {
+    let mut r = RETIRED.lock().expect("RETIRED poisoned");
+    r.push(sut);
+    tracing::warn!(
+        "reset_vault: {} retired engine(s) held (leaked-but-inert on abandoned temp paths)",
+        r.len()
+    );
+}
+
 // Helper function to convert holon_api::Value to serde_json::Value
 fn holon_to_json_value(v: &Value) -> serde_json::Value {
     match v {
@@ -64,6 +98,56 @@ fn holon_to_json_value(v: &Value) -> serde_json::Value {
         }
         Value::Null => serde_json::Value::Null,
     }
+}
+
+/// Output encoding for query-result tools. TOON — a dense tabular encoding
+/// (see `holon_toon::table`) that drops the repeated per-row key names — is
+/// the default; JSON is the explicit opt-out for callers that need it (e.g.
+/// nested-blob-heavy rows, where TOON's advantage disappears).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OutputFormat {
+    Json,
+    Toon,
+}
+
+/// Parse the optional `format` tool param. TOON is the default; `"json"` is
+/// the explicit opt-out. Fails loud on an unknown value rather than silently
+/// defaulting (parse-don't-validate at the boundary).
+fn parse_output_format(param: Option<&str>) -> Result<OutputFormat, rmcp::ErrorData> {
+    match param {
+        None | Some("toon") => Ok(OutputFormat::Toon),
+        Some("json") => Ok(OutputFormat::Json),
+        Some(other) => Err(rmcp::ErrorData::invalid_params(
+            format!("unknown format {other:?}: expected \"json\" or \"toon\""),
+            None,
+        )),
+    }
+}
+
+/// Encode already-JSON-ified rows as a TOON tabular document. Column set is the
+/// sorted union of keys across rows; a missing key is an absent cell (distinct
+/// from JSON `null`). Nested JSON objects/arrays become JSON-string cells.
+fn rows_to_toon(rows: &[HashMap<String, serde_json::Value>]) -> Result<String, rmcp::ErrorData> {
+    let mut toon_rows: Vec<holon_toon::Row> = Vec::with_capacity(rows.len());
+    for row in rows {
+        let mut r = holon_toon::Row::new();
+        for (k, v) in row {
+            let tv = holon_toon::ToonValue::from_json(v).map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!("TOON encode failed for key {k:?}: {e}"),
+                    None,
+                )
+            })?;
+            r.insert(k.clone(), tv);
+        }
+        toon_rows.push(r);
+    }
+    let table = holon_toon::Table::from_rows("rows", toon_rows).map_err(|e| {
+        rmcp::ErrorData::internal_error(format!("TOON table build failed: {e}"), None)
+    })?;
+    table
+        .render()
+        .map_err(|e| rmcp::ErrorData::internal_error(format!("TOON render failed: {e}"), None))
 }
 
 // Helper function to convert HashMap<String, serde_json::Value> to
@@ -137,9 +221,96 @@ async fn set_field(
         .execute_operation(&EntityName::new("block"), "set_field", storage)
         .await
         .map_err(|e| {
-            rmcp::ErrorData::internal_error(format!("set_field({field}) on {id} failed: {e}"), None)
+            rmcp::ErrorData::internal_error(
+                format!("set_field({field}) on {id} failed: {e:#}"),
+                None,
+            )
         })?;
     Ok(())
+}
+
+/// Move a block under `parent_id`, positioned after `after_id` (`None` =
+/// first child). Used by the dense_patch applier.
+///
+/// `parent_id` is REQUIRED (the `move_block` op's param bridge rejects its
+/// absence) and the anchor key MUST be `after_block_id` — the op's macro
+/// bridge maps params by exact arg name, so the former
+/// `position_after_block_id` key was SILENTLY dropped and every "positioned"
+/// move landed first-child (BugFunnel 2026-07-27, both dense_patch defects).
+async fn move_block_after(
+    service: &HolonService,
+    id: &str,
+    parent_id: &str,
+    after_id: Option<&str>,
+) -> Result<(), rmcp::ErrorData> {
+    let mut storage: StorageEntity = HashMap::new();
+    storage.insert("id".into(), Value::String(id.to_string()));
+    storage.insert("parent_id".into(), Value::String(parent_id.to_string()));
+    match after_id {
+        Some(a) => storage.insert("after_block_id".into(), Value::String(a.to_string())),
+        None => storage.insert("after_block_id".into(), Value::Null),
+    };
+    service
+        .execute_operation(&EntityName::new("block"), "move_block", storage)
+        .await
+        .map_err(|e| {
+            rmcp::ErrorData::internal_error(format!("move_block on {id} failed: {e:#}"), None)
+        })?;
+    Ok(())
+}
+
+/// One-line JSON description of a planned patch op (for dense_patch dry_run).
+fn describe_patch_op(op: &crate::dense_patch::PatchOp) -> serde_json::Value {
+    use crate::dense_patch::PatchOp;
+    use crate::dense_patch::Ref as PRef;
+    fn describe_ref(r: &PRef) -> serde_json::Value {
+        match r {
+            PRef::Root => serde_json::json!("root"),
+            PRef::Existing(id) => serde_json::json!(id.as_str()),
+            PRef::New(t) => serde_json::json!(format!("new#{t}")),
+        }
+    }
+    match op {
+        // `parent`/`after` are disclosed so a dry_run mirrors the EXECUTED op
+        // stream. A positioned create is a SINGLE create op carrying
+        // `after_block_id` — no follow-up `move_block` (the create-then-move
+        // seam was retired 2026-07-27; positioning is atomic in the create).
+        PatchOp::Create {
+            title,
+            parent,
+            after,
+            ..
+        } => serde_json::json!({
+            "op": "create",
+            "title": title,
+            "parent": describe_ref(parent),
+            "after": after.as_ref().map(describe_ref),
+        }),
+        PatchOp::UpdateTitle { block_id, title } => {
+            serde_json::json!({"op": "update_title", "block": block_id.as_str(), "title": title})
+        }
+        PatchOp::SetState {
+            block_id,
+            task_state,
+        } => serde_json::json!({
+            "op": "set_state",
+            "block": block_id.as_str(),
+            "state": task_state.as_ref().map(|s| s.keyword.clone()),
+        }),
+        PatchOp::Move {
+            block_id,
+            parent,
+            after,
+        } => serde_json::json!({
+            "op": "move",
+            "block": block_id.as_str(),
+            "parent": describe_ref(parent),
+            "after": after.as_ref().map(describe_ref),
+        }),
+        PatchOp::Delete { block_id } => {
+            serde_json::json!({"op": "delete", "block": block_id.as_str()})
+        }
+    }
 }
 
 /// Read the canonical `assigned-to` value for a block straight from
@@ -182,6 +353,38 @@ fn format_display_tree(
             )
         }),
         _ => Ok(tree.pretty_print(0)),
+    }
+}
+
+/// Same rendering, plus the rects the frontend actually painted for each
+/// entity-bound node. A `None` provider is disclosed in the output — the
+/// caller never has to guess whether "no geometry" means "not painted" or
+/// "nobody was measuring".
+fn format_display_tree_with_geometry(
+    tree: &holon_frontend::view_model::ViewModel,
+    format: &str,
+    geometry: Option<&dyn holon_frontend::geometry::GeometryProvider>,
+) -> Result<String, rmcp::ErrorData> {
+    let value = serde_json::to_value(tree).map_err(|e| {
+        rmcp::ErrorData::internal_error(
+            "serialization_failed",
+            Some(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
+    match format {
+        "json" => {
+            let annotated = crate::describe_ui_geometry::annotate_json(&value, geometry);
+            serde_json::to_string_pretty(&annotated).map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    "serialization_failed",
+                    Some(serde_json::json!({"error": e.to_string()})),
+                )
+            })
+        }
+        _ => {
+            let report = crate::describe_ui_geometry::geometry_text_report(&value, geometry);
+            Ok(format!("{}\n{report}", tree.pretty_print(0)))
+        }
     }
 }
 
@@ -270,22 +473,30 @@ impl HolonMcpServer {
 
         let name = type_def.name.clone();
 
-        // Register in TypeRegistry (validates computed field expressions)
-        if let Some(ref registry) = self.type_registry {
-            registry.register(type_def.clone()).map_err(|e| {
-                rmcp::ErrorData::internal_error(
-                    format!("Failed to register type '{}': {e}", name),
-                    None,
-                )
-            })?;
-        }
+        // Register in TypeRegistry (validates computed field expressions).
+        // A missing registry is a WIRING error, not a reason to skip: silently
+        // creating the extension table without registering the type leaves an
+        // entity SQL can see but no link, query or profile can resolve.
+        let registry = self.type_registry.as_ref().ok_or_else(|| {
+            rmcp::ErrorData::internal_error(
+                format!(
+                    "cannot register type '{name}': this MCP server was built without a \
+                     TypeRegistry — the entity would exist in SQL but resolve nowhere"
+                ),
+                None,
+            )
+        })?;
+        registry.register(type_def.clone()).map_err(|e| {
+            rmcp::ErrorData::internal_error(format!("Failed to register type '{name}': {e}"), None)
+        })?;
 
         // Create extension table via DynamicSchemaModule
         if !type_def.fields.is_empty() {
             use holon::storage::SchemaModule;
             let module =
                 holon::storage::dynamic_schema_module::DynamicSchemaModule::new(type_def.clone());
-            let db_handle = self.engine().db_handle();
+            let engine = self.engine();
+            let db_handle = engine.db_handle();
             module.ensure_schema(db_handle).await.map_err(|e| {
                 rmcp::ErrorData::internal_error(
                     format!("Failed to create table for '{}': {e}", name),
@@ -337,7 +548,11 @@ impl HolonMcpServer {
         description = "Execute a query in PRQL, GQL, or SQL and return results. Set language to \
                        'prql', 'gql', or 'sql'. This uses a very similar mechanism as the UI does \
                        and adds information about widget specs, operations and profiles. Use this \
-                       if you need to debug backend -> UI interaction."
+                       if you need to debug backend -> UI interaction. Results default to TOON, a \
+                       dense tabular encoding that emits each column name once in a header \
+                       (`rows[N]{cols}:` then one comma-separated line per row) instead of \
+                       repeating it per row. Set format='json' for plain JSON rows, e.g. for \
+                       highly heterogeneous shapes or rows dominated by nested JSON blobs."
     )]
     async fn execute_query(
         &self,
@@ -367,14 +582,20 @@ impl HolonMcpServer {
             .await
             .map_err(|e| {
                 rmcp::ErrorData::internal_error(
-                    format!("Query failed: {}", e),
+                    format!("Query failed: {e:#}"),
                     Some(serde_json::json!({"query": params.query, "language": params.language})),
                 )
             })?;
 
         let duration_ms = query_result.duration.as_secs_f64() * 1000.0;
         let include_profile = params.include_profile.unwrap_or(false);
-        self.finalize_query_response(&query_result.rows, Some(duration_ms), include_profile)
+        let format = parse_output_format(params.format.as_deref())?;
+        self.finalize_query_response(
+            &query_result.rows,
+            Some(duration_ms),
+            include_profile,
+            format,
+        )
     }
 
     #[tool(
@@ -458,14 +679,20 @@ impl HolonMcpServer {
             .await
             .map_err(|e| {
                 rmcp::ErrorData::internal_error(
-                    format!("Query failed: {}", e),
+                    format!("Query failed: {e:#}"),
                     Some(serde_json::json!({"block_id": block_id, "language": language_str})),
                 )
             })?;
 
         let duration_ms = query_result.duration.as_secs_f64() * 1000.0;
         let include_profile = params.include_profile.unwrap_or(false);
-        self.finalize_query_response(&query_result.rows, Some(duration_ms), include_profile)
+        let format = parse_output_format(params.format.as_deref())?;
+        self.finalize_query_response(
+            &query_result.rows,
+            Some(duration_ms),
+            include_profile,
+            format,
+        )
     }
 
     #[tool(
@@ -476,7 +703,7 @@ impl HolonMcpServer {
         &self,
         Parameters(params): Parameters<WatchQueryParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let context = extract_context_from_params(self.service(), &params.params).await;
+        let context = extract_context_from_params(&self.service(), &params.params).await;
 
         let mut holon_params = HashMap::new();
         for (k, v) in &params.params {
@@ -494,7 +721,7 @@ impl HolonMcpServer {
             .await
             .map_err(|e| {
                 rmcp::ErrorData::internal_error(
-                    format!("Watch query failed: {}", e),
+                    format!("Watch query failed: {e:#}"),
                     Some(serde_json::json!({"query": params.query, "language": params.language})),
                 )
             })?;
@@ -667,15 +894,18 @@ impl HolonMcpServer {
             .await
             .map_err(|e| {
                 rmcp::ErrorData::internal_error(
+                    // `{:#}` renders the FULL anyhow chain (every `.context`
+                    // layer down to the typed source, e.g. `ParentNotFound`),
+                    // not just the outermost message.
                     format!(
-                        "Operation '{}' on '{}' failed: {}",
+                        "Operation '{}' on '{}' failed: {:#}",
                         params.operation, params.entity_name, e
                     ),
                     None,
                 )
             })?;
 
-        let content = match response {
+        let content = match response.response {
             Some(value) => Content::text(value.to_json_string()),
             None => Content::text(format!(
                 "Operation '{}' on entity '{}' executed successfully",
@@ -688,8 +918,7 @@ impl HolonMcpServer {
 
     #[tool(
         description = "List available operations for an entity. Returns operation names, required \
-                       parameters, and descriptions. Common entities: blocks, directories, \
-                       documents"
+                       parameters, and descriptions. Common entities: blocks, documents"
     )]
     async fn list_operations(
         &self,
@@ -736,15 +965,21 @@ impl HolonMcpServer {
         let result = self.service().undo().await;
 
         match result {
-            Ok(success) => {
-                let undo_result = UndoRedoResult {
-                    success,
-                    message: if success {
-                        "Operation undone successfully".to_string()
-                    } else {
-                        "Nothing to undo".to_string()
-                    },
+            Ok(outcome) => {
+                let (success, message) = match outcome {
+                    holon_api::UndoOutcome::Applied => {
+                        (true, "Operation undone successfully".to_string())
+                    }
+                    holon_api::UndoOutcome::Empty => (false, "Nothing to undo".to_string()),
+                    holon_api::UndoOutcome::StaleDropped { reason } => {
+                        (false, format!("Undo skipped (stale): {reason}"))
+                    }
+                    holon_api::UndoOutcome::NoChange => (
+                        false,
+                        "Undo made no change (the entry's inverse was a no-op)".to_string(),
+                    ),
                 };
+                let undo_result = UndoRedoResult { success, message };
                 Ok(CallToolResult::success(vec![Content::text(
                     serde_json::to_string(&undo_result).map_err(|e| {
                         rmcp::ErrorData::internal_error(
@@ -766,15 +1001,21 @@ impl HolonMcpServer {
         let result = self.service().redo().await;
 
         match result {
-            Ok(success) => {
-                let redo_result = UndoRedoResult {
-                    success,
-                    message: if success {
-                        "Operation redone successfully".to_string()
-                    } else {
-                        "Nothing to redo".to_string()
-                    },
+            Ok(outcome) => {
+                let (success, message) = match outcome {
+                    holon_api::UndoOutcome::Applied => {
+                        (true, "Operation redone successfully".to_string())
+                    }
+                    holon_api::UndoOutcome::Empty => (false, "Nothing to redo".to_string()),
+                    holon_api::UndoOutcome::StaleDropped { reason } => {
+                        (false, format!("Redo skipped (stale): {reason}"))
+                    }
+                    holon_api::UndoOutcome::NoChange => (
+                        false,
+                        "Redo made no change (the entry's forward op was a no-op)".to_string(),
+                    ),
                 };
+                let redo_result = UndoRedoResult { success, message };
                 Ok(CallToolResult::success(vec![Content::text(
                     serde_json::to_string(&redo_result).map_err(|e| {
                         rmcp::ErrorData::internal_error(
@@ -870,7 +1111,9 @@ impl HolonMcpServer {
     #[tool(
         description = "Execute raw SQL directly against Turso, bypassing all query compilation \
                        (PRQL/GQL) and SQL transforms. Use this for Turso-specific queries, \
-                       pragmas, or when you need to avoid the holon query pipeline."
+                       pragmas, or when you need to avoid the holon query pipeline. Results \
+                       default to TOON, a dense tabular encoding (column names emitted once in a \
+                       header, not per row); set format='json' for plain JSON rows."
     )]
     async fn execute_raw_sql(
         &self,
@@ -887,13 +1130,51 @@ impl HolonMcpServer {
             .await
             .map_err(|e| {
                 rmcp::ErrorData::internal_error(
-                    format!("Raw SQL execution failed: {}", e),
+                    format!("Raw SQL execution failed: {e:#}"),
                     Some(serde_json::json!({"sql": params.sql})),
                 )
             })?;
 
         let duration_ms = query_result.duration.as_secs_f64() * 1000.0;
-        self.finalize_query_response(&query_result.rows, Some(duration_ms), false)
+        let format = parse_output_format(params.format.as_deref())?;
+        self.finalize_query_response(&query_result.rows, Some(duration_ms), false, format)
+    }
+
+    #[tool(
+        description = "Query the C2b op/effect history relation (block_history, ADR 0024 P8): \
+                       every op the engine ran, in order, with provenance (origin, firing \
+                       transition, driving agent session/tool-call). Filter fields mirror \
+                       HistoryQuery (block_id, session_id, origin, field, new_value, day, \
+                       op_group, since_millis, until_millis); set count=true for the match count \
+                       instead of rows. Unknown filter keys are a loud error. Raw SQL over \
+                       block_history via execute_raw_sql / execute_query is equally sanctioned."
+    )]
+    async fn query_history(
+        &self,
+        Parameters(params): Parameters<QueryHistoryParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let args: holon_api::HistoryQueryArgs = params.into();
+        let filter = args.into_query();
+        let service = self.service();
+        let payload = if args.count {
+            let n = service.count_history(&filter).await.map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("count_history failed: {e}"), None)
+            })?;
+            serde_json::json!({ "count": n })
+        } else {
+            let events = service.query_history(&filter).await.map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("query_history failed: {e}"), None)
+            })?;
+            serde_json::json!({ "events": events, "row_count": events.len() })
+        };
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string(&payload).map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    "serialization_failed",
+                    Some(serde_json::json!({ "error": e.to_string() })),
+                )
+            })?,
+        )]))
     }
 
     // --- Debug / inspection tools ---
@@ -916,7 +1197,7 @@ impl HolonMcpServer {
             .compile_query(&params.query, language)
             .map_err(|e| {
                 rmcp::ErrorData::internal_error(
-                    format!("Query compilation failed: {}", e),
+                    format!("Query compilation failed: {e:#}"),
                     Some(serde_json::json!({"query": params.query, "language": params.language})),
                 )
             })?;
@@ -1101,7 +1382,7 @@ impl HolonMcpServer {
                 )
             })?;
 
-        let content = match response {
+        let content = match response.response {
             Some(value) => Content::text(value.to_json_string()),
             None => Content::text(format!(
                 "Command '{}' executed successfully on block '{}'",
@@ -1153,7 +1434,7 @@ impl HolonMcpServer {
                 )
             })?;
 
-        self.finalize_query_response(&rows, None, false)
+        self.finalize_query_response(&rows, None, false, OutputFormat::Json)
     }
 
     #[tool(
@@ -1171,7 +1452,7 @@ impl HolonMcpServer {
         let agent_id = resolve_agent_id(params.agent_id)?;
         let task_id = ensure_block_prefix(&params.task_id);
 
-        let current = read_assigned_to(self.engine(), &task_id).await?;
+        let current = read_assigned_to(&self.engine(), &task_id).await?;
         if let Some(other) = &current {
             if other != &agent_id {
                 return Ok(CallToolResult::success(vec![Content::text(
@@ -1195,14 +1476,14 @@ impl HolonMcpServer {
             .map(|p| p.display().to_string());
 
         set_field(
-            self.service(),
+            &self.service(),
             &task_id,
             "assigned-to",
             Value::String(agent_id.clone()),
         )
         .await?;
         set_field(
-            self.service(),
+            &self.service(),
             &task_id,
             "claimed-at",
             Value::String(now_iso.clone()),
@@ -1210,7 +1491,7 @@ impl HolonMcpServer {
         .await?;
         if let Some(wt) = &worktree {
             set_field(
-                self.service(),
+                &self.service(),
                 &task_id,
                 "claimed-from",
                 Value::String(wt.clone()),
@@ -1218,7 +1499,7 @@ impl HolonMcpServer {
             .await?;
         }
         set_field(
-            self.service(),
+            &self.service(),
             &task_id,
             "task_state",
             Value::String("DOING".to_string()),
@@ -1226,7 +1507,7 @@ impl HolonMcpServer {
         .await?;
 
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        let final_assignee = read_assigned_to(self.engine(), &task_id).await?;
+        let final_assignee = read_assigned_to(&self.engine(), &task_id).await?;
         let claimed = final_assignee.as_deref() == Some(&agent_id);
 
         Ok(CallToolResult::success(vec![Content::text(
@@ -1314,7 +1595,7 @@ impl HolonMcpServer {
             .map_err(|e| {
                 rmcp::ErrorData::internal_error(format!("block.create failed: {e}"), None)
             })?;
-        if let Some(existing) = response {
+        if let Some(existing) = response.response {
             return Err(rmcp::ErrorData::invalid_params(
                 format!(
                     "id collision: a block with id {new_id:?} already exists ({existing:?}) — \
@@ -1386,14 +1667,14 @@ impl HolonMcpServer {
             .expect("now within range")
             .to_rfc3339();
         set_field(
-            self.service(),
+            &self.service(),
             &task_id,
             "task_state",
             Value::String("DONE".to_string()),
         )
         .await?;
         set_field(
-            self.service(),
+            &self.service(),
             &task_id,
             "completed-at",
             Value::String(completed_iso.clone()),
@@ -1441,6 +1722,520 @@ impl HolonMcpServer {
     }
 }
 
+/// Debug-only per-case reset tool, isolated in its own `#[tool_router]` impl
+/// so the whole router (method + macro-generated registration) compiles out
+/// together in release — rmcp's `#[tool_router]` does not honour a per-method
+/// `#[cfg]`, so a gated tool inside a shared router leaves a dangling
+/// `reset_vault_tool_attr` reference and breaks the release build.
+#[cfg(debug_assertions)]
+#[tool_router(router = tool_router_reset, vis = "pub(crate)")]
+impl HolonMcpServer {
+    /// Per-case, in-process reset (Phase 1 Option A). Builds a FRESH seeded
+    /// engine+session on fresh temp paths, swaps the live MCP backend cell so
+    /// every subsequent tool call reads the new engine, then rebinds the live
+    /// window onto it — keeping ONE window and ONE MCP server. Returns the new
+    /// `block_raw` id-set (a fail-loud self-check that the reset actually
+    /// re-seeded).
+    ///
+    /// GATED: compiled only in debug builds AND requires
+    /// `HOLON_MCP_ALLOW_RESET` to be set, so a shipped release can never
+    /// swap a user's vault over MCP.
+    #[tool(
+        description = "TEST-ONLY per-case reset: boot a fresh seeded vault and rebind the running \
+                       window onto it in place (no relaunch, no 2nd MCP server). Requires \
+                       HOLON_MCP_ALLOW_RESET. Returns the new block_raw id-set."
+    )]
+    async fn reset_vault(
+        &self,
+        Parameters(params): Parameters<ResetVaultParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if std::env::var("HOLON_MCP_ALLOW_RESET").is_err() {
+            return Err(rmcp::ErrorData::internal_error(
+                "reset_vault is disabled — set HOLON_MCP_ALLOW_RESET=1 to enable the in-process \
+                 vault reset (test harness only)",
+                None,
+            ));
+        }
+
+        // Retirement-list cap (plan F): refuse rather than leak unboundedly;
+        // the caller falls back to the Option B' cold relaunch past this.
+        const RESET_CAP: usize = 20;
+        if retired_len() >= RESET_CAP {
+            return Err(rmcp::ErrorData::internal_error(
+                format!(
+                    "reset_vault retirement cap reached ({RESET_CAP} retired engines); fall back \
+                     to a cold `ios_reset_sut.sh` relaunch"
+                ),
+                None,
+            ));
+        }
+
+        let builder = self.debug.reset_builder.get().cloned().ok_or_else(|| {
+            rmcp::ErrorData::internal_error(
+                "reset_vault requires a frontend reset builder (no window/pump wired)",
+                None,
+            )
+        })?;
+        let reset_tx = self.debug.reset_tx.get().cloned().ok_or_else(|| {
+            rmcp::ErrorData::internal_error(
+                "reset_vault requires a frontend reset pump (reset_tx not installed)",
+                None,
+            )
+        })?;
+
+        // 1. Build the fresh SUT on the tokio side (NOT the GPUI main thread).
+        let files: Vec<(String, String)> = params
+            .files
+            .into_iter()
+            .map(|f| (f.name, f.content))
+            .collect();
+        let out = builder(files).await.map_err(|e| {
+            rmcp::ErrorData::internal_error(format!("reset_vault build failed: {e}"), None)
+        })?;
+
+        // 2. Swap the live MCP backend cell BEFORE rebinding, so any concurrent read
+        //    already sees the fresh engine (plan C2).
+        {
+            let mut cell = self.backend.write().expect("backend cell poisoned");
+            cell.engine = Some(out.backend.clone());
+            let bs: Arc<dyn holon_frontend::reactive::BuilderServices> = out.engine.clone();
+            cell.builder_services = Some(bs);
+        }
+
+        // Swap the debug convergence/mirror handles in the SAME breath, so
+        // `await_quiescence` / `debug_pbt_snapshot` read the fresh session's
+        // Loro sync controller / org idle signal / CDC mirror rather than the
+        // retired engine's (a stale read would silently answer wrong — fail
+        // that failure mode by swapping alongside the backend cell).
+        {
+            let mut cell = self
+                .debug
+                .live_debug
+                .write()
+                .expect("live_debug cell poisoned");
+            *cell = out.live_debug.clone();
+        }
+
+        // 3. Rebind the live window (main thread) and await the ack.
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        reset_tx
+            .clone()
+            .try_send(crate::server::ResetRequest {
+                session: out.session.clone(),
+                engine: out.engine.clone(),
+                ack: ack_tx,
+            })
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!("reset_vault could not reach the reset pump: {e}"),
+                    None,
+                )
+            })?;
+        // Fail loud rather than hang forever if the main-thread pump stalls.
+        tokio::time::timeout(std::time::Duration::from_secs(30), ack_rx)
+            .await
+            .map_err(|_| {
+                rmcp::ErrorData::internal_error(
+                    "reset_vault timed out (30s) waiting for the main-thread rebind pump",
+                    None,
+                )
+            })?
+            .map_err(|_| {
+                rmcp::ErrorData::internal_error(
+                    "reset_vault pump dropped the ack (window gone?)",
+                    None,
+                )
+            })?
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("reset_vault rebind failed: {e}"), None)
+            })?;
+
+        // 4. Retire the SUT: keep its Arcs + temp dirs alive-but-inert so no Drop runs
+        //    (plan F). Growth is observable via `RETIRED.len()`.
+        push_retired(RetiredSut {
+            _session: out.session,
+            _engine: out.engine,
+            _backend: out.backend.clone(),
+            _tempdirs: out.retire,
+        });
+
+        // 5. Fail-loud self-check: read the fresh engine's block_raw id-set.
+        let probe = self
+            .service()
+            .execute_raw_sql("SELECT id FROM block_raw ORDER BY id", HashMap::new())
+            .await
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!("reset_vault self-check query failed: {e}"),
+                    None,
+                )
+            })?;
+        let ids: Vec<String> = probe
+            .rows
+            .iter()
+            .filter_map(|row| row.get("id").map(|v| format!("{v:?}")))
+            .collect();
+
+        let result = serde_json::json!({
+            "reset": true,
+            "block_raw_count": ids.len(),
+            "block_raw_ids": ids,
+            "retired_engines": retired_len(),
+        });
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
+    }
+}
+
+/// Debug-only live-inspection tools, isolated in their own `#[tool_router]`
+/// impl so the whole router (methods + macro-generated registration) compiles
+/// out together in release — rmcp's `#[tool_router]` does not honour a
+/// per-method `#[cfg]`, so a gated tool inside a shared router leaves dangling
+/// `*_tool_attr` references and breaks the release build (same pattern as
+/// `tool_router_reset` above).
+#[cfg(debug_assertions)]
+#[tool_router(router = tool_router_debug, vis = "pub(crate)")]
+impl HolonMcpServer {
+    /// Block-until-quiescent: the MCP-facing twin of the composed PBT's
+    /// `converge_projections` combined-fixed-point settle. Waits — capped at
+    /// `budget_ms` (default 30000) — until the CDC watermark, the Loro
+    /// sync-controller frontier (vs the authority doc's oplog frontier), and
+    /// the org idle tick are ALL simultaneously stable for one quiet floor,
+    /// then reports the signals it actually watched. Budget exhaustion is
+    /// an error naming the still-moving signal(s) — a non-converged wait is
+    /// NEVER reported as success. Reads the swappable `live_debug` handles,
+    /// so it follows a `reset_vault` onto the fresh session.
+    #[tool(
+        description = "TEST-ONLY: block until the live session reaches a combined fixed point \
+                       (Turso CDC + Loro frontier + org idle tick all quiet for one floor), \
+                       capped at budget_ms (default 30000). Errors naming the still-moving \
+                       signal(s) if the budget is exhausted."
+    )]
+    async fn await_quiescence(
+        &self,
+        Parameters(params): Parameters<AwaitQuiescenceParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let budget = std::time::Duration::from_millis(params.budget_ms.unwrap_or(30_000));
+
+        // Snapshot the swappable handles once: a concurrent `reset_vault` swaps
+        // the cell, but a single quiescence wait converges the session that was
+        // live when it began.
+        let (loro_sync, loro_store, org_idle) = {
+            let cell = self
+                .debug
+                .live_debug
+                .read()
+                .expect("live_debug cell poisoned");
+            (
+                cell.loro_sync_handle.clone(),
+                cell.loro_doc_store.clone(),
+                cell.org_idle_signal.clone(),
+            )
+        };
+
+        // Wired-but-unreachable is a bug, not a skip: a Loro doc-store with no
+        // sync controller can never be observed for convergence — fail loud
+        // rather than silently dropping the Loro signal.
+        if loro_store.is_some() && loro_sync.is_none() {
+            return Err(rmcp::ErrorData::internal_error(
+                "await_quiescence: a Loro doc-store is wired but its sync-controller handle is \
+                 unreachable — cannot observe Loro convergence (half-wired/stale session)",
+                None,
+            ));
+        }
+
+        let engine = self.engine();
+        let check_loro = loro_sync.is_some() && loro_store.is_some();
+
+        let mut signals: Vec<&str> = vec!["cdc"];
+        if check_loro {
+            signals.push("loro");
+        }
+        if org_idle.is_some() {
+            signals.push("org");
+        }
+
+        let start = tokio::time::Instant::now();
+        let deadline = start + budget;
+        let quiet = std::time::Duration::from_millis(50);
+        let poll = std::time::Duration::from_millis(2);
+
+        let mut last_cdc = engine.db_handle().cdc_emitted_watermark();
+        let mut last_tick = org_idle.as_ref().map(|s| s.current_tick());
+        let mut last_activity = tokio::time::Instant::now();
+        let mut still_moving: Vec<&str> = Vec::new();
+
+        loop {
+            tokio::time::sleep(poll).await;
+            let mut moving: Vec<&str> = Vec::new();
+
+            // Loro FIRST (the projection that writes the reordered sort_key CDC
+            // then fires): a frontier not yet caught up counts as activity.
+            if let (Some(sync), Some(store)) = (&loro_sync, &loro_store) {
+                let current = {
+                    let guard = store.read().await;
+                    guard.get_global_doc().await.map_err(|e| {
+                        rmcp::ErrorData::internal_error(
+                            format!("await_quiescence: live Loro global doc unreachable: {e}"),
+                            None,
+                        )
+                    })?
+                }
+                .doc()
+                .oplog_frontiers();
+                if sync.last_synced_frontiers() != current {
+                    moving.push("loro");
+                }
+            }
+
+            let now_cdc = engine.db_handle().cdc_emitted_watermark();
+            if now_cdc != last_cdc {
+                last_cdc = now_cdc;
+                moving.push("cdc");
+            }
+
+            if let Some(idle) = &org_idle {
+                let now_tick = idle.current_tick();
+                if last_tick != Some(now_tick) {
+                    last_tick = Some(now_tick);
+                    moving.push("org");
+                }
+            }
+
+            let now = tokio::time::Instant::now();
+            if moving.is_empty() {
+                if now.duration_since(last_activity) >= quiet {
+                    let lamport_height = self.live_lamport_height().await?;
+                    let result = serde_json::json!({
+                        "converged": true,
+                        "waited_ms": start.elapsed().as_millis() as u64,
+                        "lamport_height": lamport_height,
+                        "signals": signals,
+                    });
+                    return Ok(CallToolResult::success(vec![Content::text(
+                        result.to_string(),
+                    )]));
+                }
+            } else {
+                last_activity = now;
+                still_moving = moving;
+            }
+
+            if now >= deadline {
+                return Err(rmcp::ErrorData::internal_error(
+                    format!(
+                        "await_quiescence: budget {}ms exhausted before a combined fixed point; \
+                         still-moving signal(s): {:?}",
+                        budget.as_millis(),
+                        still_moving
+                    ),
+                    None,
+                ));
+            }
+        }
+    }
+
+    /// Capture the live PBT-facing snapshot: the CDC-driven `LiveData` block
+    /// mirror (NOT a matview SQL read) + focus-roots, plus the Loro tree's
+    /// error flag, lamport height, and per-parent child lists. The block
+    /// source is the swappable `block_query_source` — fail loud (no silent
+    /// SQL substitute) if it is unwired. Follows a `reset_vault` onto the
+    /// fresh session.
+    #[tool(
+        description = "TEST-ONLY: snapshot the live CDC-mirrored blocks (LiveData, not matview \
+                       SQL), focus-roots, and Loro tree state (had_errors, lamport_height, \
+                       per-parent children). Errors if no block_query_source is wired."
+    )]
+    async fn debug_pbt_snapshot(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+        let (block_query_source, loro_sync, reactive_engine) = {
+            let cell = self
+                .debug
+                .live_debug
+                .read()
+                .expect("live_debug cell poisoned");
+            (
+                cell.block_query_source.clone(),
+                cell.loro_sync_handle.clone(),
+                cell.reactive_engine.clone(),
+            )
+        };
+        let block_query_source = block_query_source.ok_or_else(|| {
+            rmcp::ErrorData::internal_error(
+                "debug_pbt_snapshot requires a wired block_query_source (the live CDC mirror); \
+                 there is no silent SQL substitute",
+                None,
+            )
+        })?;
+        // The cell is populated (block_query_source resolved), so the reactive
+        // engine slot MUST be present too — a missing one is a boot/reset wiring
+        // bug, not an honest "not wired". Fail loud rather than emit null.
+        let reactive_engine = reactive_engine.ok_or_else(|| {
+            rmcp::ErrorData::internal_error(
+                "debug_pbt_snapshot: live_debug cell is populated but reactive_engine is unset \
+                 (boot/reset failed to wire the engine)",
+                None,
+            )
+        })?;
+        let focused_block =
+            holon_frontend::reactive::BuilderServices::focused_block(&*reactive_engine)
+                .map(|b| b.to_string());
+
+        let snapshot = block_query_source.snapshot().await.map_err(|e| {
+            rmcp::ErrorData::internal_error(
+                format!("debug_pbt_snapshot: live block snapshot failed: {e}"),
+                None,
+            )
+        })?;
+
+        let live_blocks: Vec<serde_json::Value> = snapshot
+            .iter_blocks()
+            .map(|b| serde_json::to_value(holon_api::block::BlockWire::from(b)))
+            .collect::<Result<_, _>>()
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!("debug_pbt_snapshot: BlockWire serialization failed: {e}"),
+                    None,
+                )
+            })?;
+
+        let focus_roots: Vec<serde_json::Value> =
+            holon_core::storage::BlockQuery::focus_roots(&snapshot)
+                .into_iter()
+                .map(|fr| serde_json::json!({"region": fr.region, "root_id": fr.root_id}))
+                .collect();
+
+        let loro_had_errors = loro_sync.map(|h| h.error_count() > 0).unwrap_or(false);
+
+        let (lamport_height, loro_tree_children) = match self.live_loro_backend().await? {
+            Some(backend) => {
+                let height = backend.lamport_height().await.map_err(|e| {
+                    rmcp::ErrorData::internal_error(
+                        format!("debug_pbt_snapshot: live Loro lamport_height failed: {e}"),
+                        None,
+                    )
+                })?;
+                let children = self.live_loro_tree_children(&backend).await?;
+                (Some(height), children)
+            }
+            None => (None, std::collections::BTreeMap::new()),
+        };
+
+        let result = serde_json::json!({
+            "live_blocks": live_blocks,
+            "focus_roots": focus_roots,
+            "loro_had_errors": loro_had_errors,
+            "lamport_height": lamport_height,
+            "loro_tree_children": loro_tree_children,
+            "focused_block": focused_block,
+        });
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
+    }
+}
+
+/// Fail-loud decision for `type_text` (dogfood #5 row 147): given `total`
+/// keystrokes of which `handled` were consumed by a focused editor (or a bound
+/// action), return the number `dropped`, or `Err(total)` when EVERY keystroke
+/// was dropped — no focus consumed any of them, so the input silently vanished
+/// and the caller must fail loud instead of reporting a fake `keystrokes_sent`.
+/// An empty keystroke set is a vacuous success (`Ok(0)`), never a drop.
+/// `doc_uri`'s descendants within a whole-tree block set, in the set's order.
+///
+/// Mirrors the doc-scoped walk the SQL side does (`BlockReader::get_blocks`):
+/// breadth-first from the document's direct children, stopping at any nested
+/// page — a sub-document owns its own file. The document block itself is not a
+/// descendant and is excluded.
+fn document_subtree(doc_uri: &EntityUri, tree: &[Block]) -> Vec<Block> {
+    let mut included: HashSet<String> = HashSet::from([doc_uri.to_string()]);
+    let mut out = Vec::new();
+    // One pass per depth level: `tree` order is the CRDT's, not necessarily
+    // parent-before-child.
+    loop {
+        let grown: Vec<&Block> = tree
+            .iter()
+            .filter(|b| {
+                !b.is_page()
+                    && !included.contains(b.id.as_str())
+                    && included.contains(b.parent_id.as_str())
+            })
+            .collect();
+        if grown.is_empty() {
+            return out;
+        }
+        for block in grown {
+            included.insert(block.id.to_string());
+            out.push(block.clone());
+        }
+    }
+}
+
+fn type_text_drop_outcome(total: usize, handled: usize) -> Result<usize, usize> {
+    if total > 0 && handled == 0 {
+        Err(total)
+    } else {
+        Ok(total - handled)
+    }
+}
+
+#[tool_router(router = tool_router_debug_ledgers, vis = "pub(crate)")]
+impl HolonMcpServer {
+    /// The three process-global ledgers that answer "a row reached the
+    /// frontend but never rendered — where did it go?".
+    ///
+    /// Each records at the site of the loss, which a later snapshot cannot
+    /// reconstruct: `generation_drops` = a CDC batch discarded by the
+    /// generation guard, `tree_desync` = rows a panel was given that render no
+    /// node, `row_lifecycle` = every row that left a row set, with the reason.
+    /// All-zero exonerates the frontend row path and points upstream.
+    #[tool(
+        description = "TEST-ONLY: report the three frontend row-drop ledgers (generation-guard \
+                       drops, tree/row_map divergences, row evictions). Use when a query returns \
+                       rows but the UI renders none. Pass reset=true to clear after reading. Note \
+                       tree_desync only probes in debug builds or under HOLON_PROBE_TREE_DESYNC."
+    )]
+    async fn debug_row_drop_ledgers(
+        &self,
+        Parameters(params): Parameters<RowDropLedgersParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        use holon_frontend::reactive::generation_drops;
+        use holon_frontend::reactive::row_lifecycle;
+        use holon_frontend::reactive::tree_desync;
+
+        let report = serde_json::json!({
+            "generation_drops": {
+                "count": generation_drops::count(),
+                "report": generation_drops::report(),
+            },
+            "tree_desync": {
+                "count": tree_desync::count(),
+                "probe_enabled": tree_desync::enabled(),
+                "report": tree_desync::report(),
+            },
+            "row_lifecycle": {
+                "count": row_lifecycle::count(),
+                "report": row_lifecycle::report(),
+            },
+        });
+
+        if params.reset {
+            generation_drops::reset();
+            tree_desync::reset();
+            row_lifecycle::reset();
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&report).map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    "serialization_failed",
+                    Some(serde_json::json!({"error": e.to_string()})),
+                )
+            })?,
+        )]))
+    }
+}
+
 #[tool_router(router = tool_router_ui, vis = "pub(crate)")]
 impl HolonMcpServer {
     #[tool(
@@ -1448,7 +2243,7 @@ impl HolonMcpServer {
                        mappings. Requires Loro to be enabled."
     )]
     async fn list_loro_documents(&self) -> Result<CallToolResult, rmcp::ErrorData> {
-        let store = self.debug.loro_doc_store.get().ok_or_else(|| {
+        let store = self.current_loro_doc_store().ok_or_else(|| {
             rmcp::ErrorData::internal_error("Loro is not enabled in this session", None)
         })?;
 
@@ -1716,31 +2511,86 @@ impl HolonMcpServer {
     }
 
     #[tool(
-        description = "Render org text from current Loro block state (what OrgRenderer would \
-                       write to disk). Compare with read_org_file to spot sync mismatches."
+        description = "Render a document's org text, from either store, at either scope. `source`: \
+                       `sql` (default) is the write authority — what org write-back projects to \
+                       disk; `loro` is the CRDT tree. `scope`: `document` (default) includes the \
+                       `#+TITLE:`/`#+ID:` header, `blocks` is the body alone. Diff \
+                       `source=sql` against read_org_file to see pending or lost write-back, and \
+                       `sql` against `loro` at the SAME scope to spot Loro↔SQL divergence."
     )]
-    async fn render_org_from_blocks(
+    async fn render_org(
         &self,
         Parameters(params): Parameters<RenderOrgParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let blocks = self.get_loro_blocks(&params.doc_id).await?;
-        let file_path = self
-            .resolve_to_file_path(&params.doc_id)
-            .await
-            .unwrap_or_else(|_| std::path::PathBuf::from("unknown.org"));
+        let renderer = self
+            .debug
+            .live_debug
+            .read()
+            .expect("live_debug cell poisoned")
+            .writeback_renderer
+            .clone()
+            .ok_or_else(|| {
+                rmcp::ErrorData::internal_error(
+                    "render_org needs org file sync, which this session does not wire",
+                    None,
+                )
+            })?;
 
-        let doc_uri = EntityUri::parse(&params.doc_id).map_err(|e| {
-            rmcp::ErrorData::invalid_params(
-                format!("invalid doc_id `{}`: {e}", params.doc_id),
-                None,
-            )
-        })?;
-        let rendered = OrgRenderer::render_entitys(&blocks, &file_path, &doc_uri);
+        let file_path = self.resolve_to_file_path(&params.doc_id).await?;
+        // ALLOW(entity_uri_from_raw): MCP doc_id param, schemed or bare
+        let doc_uri = EntityUri::from_raw(&params.doc_id);
+
+        // The Loro store is ONE global tree, so its blocks are scoped to the
+        // document here; the SQL reader is already doc-scoped.
+        let loro_tree = match params.source {
+            RenderSource::Sql => Vec::new(),
+            RenderSource::Loro => self.get_loro_blocks(&params.doc_id).await?,
+        };
+        let blocks = match params.source {
+            RenderSource::Sql => renderer.read_blocks(&doc_uri).await.map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!("reading `{doc_uri}` from the write authority failed: {e:#}"),
+                    None,
+                )
+            })?,
+            RenderSource::Loro => document_subtree(&doc_uri, &loro_tree),
+        };
+
+        let rendered = match (params.source, params.scope) {
+            (_, RenderScope::Blocks) => renderer.render_body(&doc_uri, &file_path, &blocks),
+            // The write-back path proper: the header comes from the document
+            // store, exactly as the FileSyncController takes it.
+            (RenderSource::Sql, RenderScope::Document) => renderer
+                .render_blocks(&doc_uri, &file_path, &blocks)
+                .await
+                .map_err(|e| {
+                    rmcp::ErrorData::internal_error(
+                        format!("write-back render of `{doc_uri}` failed: {e:#}"),
+                        None,
+                    )
+                })?,
+            // Loro must supply its OWN header block, or the render would mix
+            // stores and stop being a divergence probe.
+            (RenderSource::Loro, RenderScope::Document) => {
+                let doc_block = loro_tree.iter().find(|b| b.id == doc_uri).ok_or_else(|| {
+                    rmcp::ErrorData::invalid_params(
+                        format!(
+                            "source=loro scope=document: the Loro tree holds no block `{doc_uri}` \
+                             to render a header from; retry with scope=blocks"
+                        ),
+                        None,
+                    )
+                })?;
+                renderer.render_with_document_block(doc_block, &blocks, &file_path)
+            }
+        };
 
         let result = serde_json::json!({
             "doc_id": params.doc_id,
             "file_path": file_path.display().to_string(),
-            "rendered_org": rendered,
+            "source": params.source,
+            "scope": params.scope,
+            "rendered": rendered,
             "block_count": blocks.len(),
         });
 
@@ -1755,9 +2605,349 @@ impl HolonMcpServer {
     }
 
     #[tool(
+        description = "Run a GQL/PRQL/SQL query and return its block result as DENSE org text in \
+                       one call — the token-efficient way to load a filtered task list for \
+                       planning/editing. The query is the FILTER: you write it exactly like \
+                       `execute_query` (same `language`, `params`, `context_id`). It MUST return \
+                       block rows. Canonical example — active (non-DONE) tasks of a page, in \
+                       holon_sql: `SELECT * FROM block WHERE parent_id = :pid AND \
+                       task_state_category != 'done'` with params {\"pid\": \"<page-uuid>\"}; scope \
+                       a subtree with a `from descendants` context query. \n\n\
+                       Output `dense_org`: each headline's :PROPERTIES:/:ID:/:END: drawer is \
+                       compressed to a trailing `{#alias}` token (a short per-query handle) — far \
+                       fewer tokens than read_org_file. A `{#alias^}` token (trailing caret) means \
+                       one or more UNSELECTED ancestors were elided above this block, so its shown \
+                       parent is not its real parent — display-only, safe to ignore. \n\n\
+                       Returns a `projection_handle`. EDIT `dense_org` (retitle, change TODO/DONE \
+                       state, add/move/nest rows; keep each row's `{#alias}` to preserve identity; \
+                       a row with NO token becomes a NEW block; the `^` marker is noise you may \
+                       drop) and pass it plus the handle to `dense_patch` to apply as one batch. \
+                       Omitting a block does NOT delete it (use dense_patch's `delete`)."
+    )]
+    async fn dense_query(
+        &self,
+        Parameters(params): Parameters<DenseQueryParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        use holon_api::block::Block;
+
+        use crate::dense_projection::Projection;
+        use crate::dense_projection::build_projection;
+
+        let context = self
+            .service()
+            .build_context(
+                params.context_id.as_deref(),
+                params.context_parent_id.as_deref(),
+            )
+            .await;
+
+        let mut holon_params = HashMap::new();
+        for (k, v) in &params.params {
+            holon_params.insert(k.clone(), json_to_holon_value(v.clone()));
+        }
+
+        let language = params
+            .language
+            .parse::<QueryLanguage>()
+            .map_err(|e| rmcp::ErrorData::invalid_params(format!("Invalid language: {e}"), None))?;
+
+        let query_result = self
+            .service()
+            .execute_query(&params.query, language, holon_params, context)
+            .await
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!("Query failed: {e:#}"),
+                    Some(serde_json::json!({"query": params.query, "language": params.language})),
+                )
+            })?;
+
+        // Parse each result row into a Block via the canonical row parser. A row
+        // that is not a block row is a caller error (the query must select block
+        // columns) — fail loud rather than silently drop it.
+        let mut blocks = Vec::with_capacity(query_result.rows.len());
+        for row in &query_result.rows {
+            let block = Block::try_from(row.clone()).map_err(|e| {
+                rmcp::ErrorData::invalid_params(
+                    format!(
+                        "dense_query result row is not a block (the query must return block rows, \
+                         e.g. `SELECT * FROM block ...`): {e}"
+                    ),
+                    None,
+                )
+            })?;
+            blocks.push(block);
+        }
+
+        let built = build_projection(blocks).map_err(|e| {
+            rmcp::ErrorData::internal_error(format!("building dense projection failed: {e}"), None)
+        })?;
+
+        let handle = self.dense_projections.insert(Projection::new(
+            params.query.clone(),
+            built.file_id.clone(),
+            built.alias_table.clone(),
+            built.records.clone(),
+        ));
+
+        let result = serde_json::json!({
+            "projection_handle": handle,
+            "block_count": built.ordered_blocks.len(),
+            "dense_org": built.dense_text,
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    "serialization_failed",
+                    Some(serde_json::json!({"error": e.to_string()})),
+                )
+            })?,
+        )]))
+    }
+
+    #[tool(
+        description = "Apply an edited dense projection (from dense_query) back to the store as one \
+                       batch. Pass the `projection_handle` and the edited `dense_org` text. \
+                       Matching is by `{#alias}` token: a row keeping its token updates that block \
+                       (retitle, change TODO/DONE state, move/nest); a row with NO token is CREATED \
+                       as a new block at its tree position; the `{#alias^}` gap marker is ignored. \
+                       Blocks you omit are NOT deleted — list their aliases in `delete` to remove \
+                       them (with their subtrees). Optimistic concurrency: if any block you touch \
+                       changed since dense_query, the whole patch is REJECTED with a conflict list \
+                       (re-run dense_query and retry). Set `dry_run: true` to preview the planned \
+                       operations without applying. A stale/unknown handle is a loud error."
+    )]
+    async fn dense_patch(
+        &self,
+        Parameters(params): Parameters<DensePatchParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        use holon_org_format::Alias;
+        use holon_org_format::parse_dense_with;
+
+        use crate::dense_patch::PatchOp;
+        use crate::dense_patch::Ref as PRef;
+        use crate::dense_patch::plan_patch;
+
+        let projection = self
+            .dense_projections
+            .get(&params.handle)
+            .map_err(|e| rmcp::ErrorData::invalid_params(format!("{e}"), None))?;
+
+        let classifier = self.link_classifier();
+        let parsed = parse_dense_with(&params.text, &classifier).map_err(|e| {
+            rmcp::ErrorData::invalid_params(format!("edited dense text did not parse: {e}"), None)
+        })?;
+
+        let mut delete_aliases = Vec::with_capacity(params.delete.len());
+        for a in &params.delete {
+            delete_aliases.push(Alias::parse(a).map_err(|e| {
+                rmcp::ErrorData::invalid_params(format!("invalid delete alias {a:?}: {e}"), None)
+            })?);
+        }
+
+        let plan = plan_patch(&projection, &parsed, &delete_aliases).map_err(|e| {
+            rmcp::ErrorData::invalid_params(format!("could not plan patch: {e}"), None)
+        })?;
+
+        // Optimistic concurrency: re-read updated_at for every touched block from
+        // the same `block` matview the projection was taken from; reject the
+        // whole batch if any changed.
+        let mut conflicts: Vec<String> = Vec::new();
+        if !plan.verify.is_empty() {
+            let id_list = plan
+                .verify
+                .iter()
+                .map(|(id, _)| format!("'{}'", id.as_str().replace('\'', "''")))
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!("SELECT id, updated_at FROM block WHERE id IN ({id_list})");
+            let current = self
+                .service()
+                .execute_raw_sql(&sql, HashMap::new())
+                .await
+                .map_err(|e| {
+                    rmcp::ErrorData::internal_error(
+                        format!("concurrency re-read failed: {e}"),
+                        None,
+                    )
+                })?;
+            let mut now: HashMap<String, i64> = HashMap::new();
+            for row in &current.rows {
+                if let (Some(id), Some(ts)) = (
+                    row.get("id").and_then(|v| v.as_string()),
+                    row.get("updated_at").and_then(|v| v.as_i64()),
+                ) {
+                    now.insert(id.to_string(), ts);
+                }
+            }
+            for (id, expected) in &plan.verify {
+                match now.get(id.as_str()) {
+                    Some(cur) if *cur == expected.updated_at => {}
+                    _ => conflicts.push(id.as_str().to_string()),
+                }
+            }
+        }
+        if !conflicts.is_empty() {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!(
+                    "conflict: {} block(s) changed since dense_query — patch rejected. Re-run \
+                     dense_query and retry.",
+                    conflicts.len()
+                ),
+                Some(serde_json::json!({ "conflicting_blocks": conflicts })),
+            ));
+        }
+
+        if params.dry_run {
+            let result = serde_json::json!({
+                "dry_run": true,
+                "op_count": plan.ops.len(),
+                "move_count": plan.move_count(),
+                "ops": plan.ops.iter().map(describe_patch_op).collect::<Vec<_>>(),
+            });
+            return Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&result).unwrap_or_default(),
+            )]));
+        }
+
+        // Apply. New-block temp ids resolve to freshly minted uuids as they are
+        // created; pre-order guarantees a parent/predecessor is created first.
+        let svc = self.service();
+        let mut new_ids: HashMap<usize, String> = HashMap::new();
+        let resolve = |r: &PRef, new_ids: &HashMap<usize, String>| -> String {
+            match r {
+                PRef::Root => projection.file_id.as_str().to_string(),
+                PRef::Existing(id) => id.as_str().to_string(),
+                PRef::New(t) => new_ids.get(t).cloned().unwrap_or_default(),
+            }
+        };
+        let mut created = 0usize;
+        let mut updated = 0usize;
+        let mut moved = 0usize;
+        let mut deleted = 0usize;
+        for op in &plan.ops {
+            match op {
+                PatchOp::Create {
+                    temp,
+                    parent,
+                    after,
+                    title,
+                    task_state,
+                } => {
+                    let new_bare = Uuid::new_v4().to_string();
+                    let new_id = ensure_block_prefix(&new_bare);
+                    let parent_id = resolve(parent, &new_ids);
+                    let mut storage: StorageEntity = HashMap::new();
+                    storage.insert("id".into(), Value::String(new_id.clone()));
+                    storage.insert("parent_id".into(), Value::String(parent_id));
+                    storage.insert("content".into(), Value::String(title.clone()));
+                    storage.insert("content_type".into(), Value::String("text".to_string()));
+                    storage.insert("ID".into(), Value::String(new_bare.clone()));
+                    if let Some(st) = task_state {
+                        storage.insert("task_state".into(), Value::String(st.keyword.clone()));
+                        storage.insert(
+                            "task_state_category".into(),
+                            Value::String(st.category.as_str().to_string()),
+                        );
+                    }
+                    // Create AND position in one op via the canonical positional
+                    // key: `after_block_id` places the new block immediately
+                    // after its predecessor sibling atomically across both
+                    // providers. Pre-order guarantees the predecessor is already
+                    // created, so `resolve` yields a real id. This retired the
+                    // create-then-`move_block` seam (and its
+                    // orphan-compensation block + projection-lag race).
+                    if let Some(a) = after {
+                        let after_id = resolve(a, &new_ids);
+                        storage.insert(
+                            POSITION_AFTER_BLOCK_ID_PARAM.into(),
+                            Value::String(after_id),
+                        );
+                    }
+                    svc.execute_operation(&EntityName::new("block"), "create", storage)
+                        .await
+                        .map_err(|e| {
+                            rmcp::ErrorData::internal_error(format!("create failed: {e:#}"), None)
+                        })?;
+                    new_ids.insert(*temp, new_id);
+                    created += 1;
+                }
+                PatchOp::UpdateTitle { block_id, title } => {
+                    set_field(
+                        &svc,
+                        block_id.as_str(),
+                        "content",
+                        Value::String(title.clone()),
+                    )
+                    .await?;
+                    updated += 1;
+                }
+                PatchOp::SetState {
+                    block_id,
+                    task_state,
+                } => {
+                    let (kw, cat) = match task_state {
+                        Some(st) => (st.keyword.clone(), st.category.as_str().to_string()),
+                        None => (String::new(), String::new()),
+                    };
+                    set_field(&svc, block_id.as_str(), "task_state", Value::String(kw)).await?;
+                    set_field(
+                        &svc,
+                        block_id.as_str(),
+                        "task_state_category",
+                        Value::String(cat),
+                    )
+                    .await?;
+                    updated += 1;
+                }
+                PatchOp::Move {
+                    block_id,
+                    parent,
+                    after,
+                } => {
+                    let parent_id = resolve(parent, &new_ids);
+                    let after_id = after.as_ref().map(|a| resolve(a, &new_ids));
+                    move_block_after(&svc, block_id.as_str(), &parent_id, after_id.as_deref())
+                        .await?;
+                    moved += 1;
+                }
+                PatchOp::Delete { block_id } => {
+                    let mut storage: StorageEntity = HashMap::new();
+                    storage.insert("id".into(), Value::String(block_id.as_str().to_string()));
+                    svc.execute_operation(&EntityName::new("block"), "delete", storage)
+                        .await
+                        .map_err(|e| {
+                            rmcp::ErrorData::internal_error(format!("delete failed: {e}"), None)
+                        })?;
+                    deleted += 1;
+                }
+            }
+        }
+
+        let result = serde_json::json!({
+            "applied": true,
+            "created": created,
+            "updated": updated,
+            "moved": moved,
+            "deleted": deleted,
+        });
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).unwrap_or_default(),
+        )]))
+    }
+
+    #[tool(
         description = "Render a block's UI as a structural tree. Returns what an LLM agent would \
                        'see': widget hierarchy, entity IDs, labels, and nesting. Use format \
-                       'text' for readable output or 'json' for structured data."
+                       'text' for readable output or 'json' for structured data. Subtrees the \
+                       render interpreter defers to the platform layer (a live_query's rows) are \
+                       resolved by running the query once, unless expand_deferred is false; any \
+                       subtree left unresolved is reported as an explicit 'unevaluated' node, so \
+                       an empty result always means empty and never 'not evaluated'. By default \
+                       each entity-bound node also carries the rect the window actually painted \
+                       for it (x/y/width/height/has_visible_area); pass include_geometry=false \
+                       to omit it."
     )]
     async fn describe_ui(
         &self,
@@ -1770,16 +2960,17 @@ impl HolonMcpServer {
             )
         })?;
 
-        let svc = self.builder_services.clone().ok_or_else(|| {
+        let svc = self.builder_services().ok_or_else(|| {
             rmcp::ErrorData::internal_error(
                 "describe_ui requires a running frontend (builder_services not registered)",
                 None,
             )
         })?;
 
-        // Ensure the watcher is running and wait for the first Structure event.
-        // get_block_data starts a watcher if needed; await_ready returns
-        // immediately if already loaded.
+        // Ensure the watcher is running, then wait for BOTH readiness barriers
+        // (first Structure event, and for a data-driven block the first Data
+        // batch). Stopping at Structure made a cold probe snapshot a list that
+        // had no rows yet and report it as genuinely empty.
         let block_id = block_uri.clone();
         let svc_ready = svc.clone();
         tokio::time::timeout(
@@ -1789,16 +2980,34 @@ impl HolonMcpServer {
         .await
         .ok(); // ALLOW(ok): timeout non-fatal — render whatever we have
 
-        let display_tree = tokio::task::spawn_blocking(move || svc.snapshot_resolved(&block_id))
-            .await
-            .map_err(|e| {
-                rmcp::ErrorData::internal_error(
-                    format!("Shadow interpretation panicked: {e}"),
-                    None,
-                )
-            })?;
+        let svc_resolve = svc.clone();
+        let mut display_tree =
+            tokio::task::spawn_blocking(move || svc_resolve.snapshot_resolved(&block_id))
+                .await
+                .map_err(|e| {
+                    rmcp::ErrorData::internal_error(
+                        format!("Shadow interpretation panicked: {e}"),
+                        None,
+                    )
+                })?;
 
-        let output = format_display_tree(&display_tree, &params.format)?;
+        // The interpreter is pure and synchronous, so it hands back structural
+        // prototypes for the subtrees it defers to the platform layer. Resolve
+        // them here, or mark them — never report a prototype as content.
+        let resolver = crate::describe_ui_expand::EngineResolver { services: svc };
+        let policy = if params.expand_deferred {
+            crate::describe_ui_expand::DeferredPolicy::Expand(&resolver)
+        } else {
+            crate::describe_ui_expand::DeferredPolicy::MarkOnly
+        };
+        crate::describe_ui_expand::resolve_deferred(&mut display_tree, policy).await;
+
+        let output = if params.include_geometry {
+            let geometry = self.debug.geometry.get().cloned();
+            format_display_tree_with_geometry(&display_tree, &params.format, geometry.as_deref())?
+        } else {
+            format_display_tree(&display_tree, &params.format)?
+        };
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
@@ -1813,12 +3022,7 @@ impl HolonMcpServer {
         &self,
         Parameters(params): Parameters<ScreenshotParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        #[cfg(not(target_os = "macos"))]
-        return Err(rmcp::ErrorData::internal_error(
-            "Screenshot capture is only available on macOS",
-            None,
-        ));
-
+        // macOS: capture the app's own OS window via xcap (out-of-process).
         #[cfg(target_os = "macos")]
         {
             // xcap window enumeration is blocking — run on a blocking thread
@@ -1837,11 +3041,66 @@ impl HolonMcpServer {
             let b64 =
                 base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &png_bytes);
 
-            Ok(CallToolResult::success(vec![Content::image(
+            return Ok(CallToolResult::success(vec![Content::image(
                 b64,
                 "image/png",
-            )]))
-        } // cfg(target_os = "macos")
+            )]));
+        }
+
+        // Android: no OS-level window capture — capture in-process via the GPUI
+        // window's `render_to_image` (offscreen wgpu readback), reached through
+        // the same interaction pump as click/type_text.
+        #[cfg(target_os = "android")]
+        {
+            let tx = self.debug.interaction_tx.get().ok_or_else(|| {
+                rmcp::ErrorData::internal_error(
+                    "No GPUI window connected (interaction channel not set up)",
+                    None,
+                )
+            })?;
+
+            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            tx.clone()
+                .try_send(crate::server::InteractionCommand {
+                    event: crate::server::InteractionEvent::CaptureScreenshot,
+                    response_tx: resp_tx,
+                })
+                .map_err(|_| {
+                    rmcp::ErrorData::internal_error("GPUI interaction channel disconnected", None)
+                })?;
+
+            let resp = resp_rx.await.map_err(|_| {
+                rmcp::ErrorData::internal_error("GPUI did not respond to screenshot request", None)
+            })?;
+
+            let captured = resp.screenshot.ok_or_else(|| {
+                rmcp::ErrorData::internal_error(
+                    format!(
+                        "screenshot capture failed: {}",
+                        resp.detail.as_deref().unwrap_or("no detail from renderer")
+                    ),
+                    None,
+                )
+            })?;
+
+            let png_bytes = encode_rgba_to_png(captured.width, captured.height, captured.rgba)
+                .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
+
+            let b64 =
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &png_bytes);
+
+            return Ok(CallToolResult::success(vec![Content::image(
+                b64,
+                "image/png",
+            )]));
+        }
+
+        // Genuinely unsupported platforms fail loud rather than faking output.
+        #[cfg(not(any(target_os = "macos", target_os = "android")))]
+        return Err(rmcp::ErrorData::internal_error(
+            "Screenshot capture is not supported on this platform",
+            None,
+        ));
     }
 
     #[tool(
@@ -1940,9 +3199,47 @@ impl HolonMcpServer {
     }
 
     #[tool(
+        description = "List the live keybinding registry as action → key chord (e.g. `move_up` → \
+                       [\"alt\",\"up\"]). The chord's key names are exactly what send_key_chord's \
+                       `keys` accepts, so a binding read here can be sent back verbatim — never \
+                       hardcode a shortcut."
+    )]
+    async fn list_keybindings(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+        let services = self.builder_services().ok_or_else(|| {
+            rmcp::ErrorData::internal_error(
+                "list_keybindings needs a frontend, which this session does not wire",
+                None,
+            )
+        })?;
+
+        let bindings: Vec<serde_json::Value> = services
+            .key_bindings_snapshot()
+            .into_iter()
+            .map(|(action, chord)| {
+                let keys: Vec<String> = chord.0.iter().map(|k| k.to_string()).collect();
+                serde_json::json!({ "action": action, "chord": keys })
+            })
+            .collect();
+
+        let result = serde_json::json!({
+            "bindings": bindings,
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    "serialization_failed",
+                    Some(serde_json::json!({"error": e.to_string()})),
+                )
+            })?,
+        )]))
+    }
+
+    #[tool(
         description = "Simulate a keyboard shortcut (key chord) at a specific entity. The chord \
                        bubbles up through the reactive tree via focus-path, matching against \
-                       bound operations. If a match is found, the operation is executed."
+                       bound operations. If a match is found, the operation is executed. Read the \
+                       chord from list_keybindings rather than hardcoding it."
     )]
     async fn send_key_chord(
         &self,
@@ -1971,13 +3268,55 @@ impl HolonMcpServer {
                 operation,
                 entity_id,
             }) => {
+                // send_key_chord can only supply the entity id (plus any params
+                // the descriptor pre-bound from its DSL args). Structural editor
+                // ops (e.g. split_block) additionally need UI-context params —
+                // a live caret `position`, a selection range — that live in the
+                // editor's InputState, not in this tool. Dispatching without
+                // them fails deep inside the op with an opaque
+                // "Missing or invalid parameter 'position'". Detect it here and
+                // fail loud with an actionable message instead.
                 let mut op_params: holon_api::StorageEntity = HashMap::new();
                 op_params.insert("id".into(), holon_api::Value::String(entity_id.to_string()));
+                for (k, v) in &operation.bound_params {
+                    op_params.insert(k.as_str().into(), v.clone());
+                }
+
+                let missing: Vec<&str> = operation
+                    .required_params
+                    .iter()
+                    .map(|p| p.name.as_str())
+                    .filter(|name| {
+                        *name != "id"
+                            && *name != operation.id_column.as_str()
+                            && !op_params.contains_key(*name)
+                    })
+                    .collect();
+                if !missing.is_empty() {
+                    return Err(rmcp::ErrorData::invalid_params(
+                        format!(
+                            "Key chord matched operation '{}.{}', but it requires UI-context \
+                             parameter(s) {:?} that send_key_chord cannot supply — it dispatches \
+                             with only the entity id (and DSL-bound params). These come from the \
+                             live caret/selection in the editor's InputState. Drive this through \
+                             the real input pipeline instead: use `type_text` / \
+                             `send_raw_keystroke` to send the keystroke, which lets the focused \
+                             editor supply {:?}.",
+                            entity_name, operation.name, missing, missing
+                        ),
+                        None,
+                    ));
+                }
 
                 let entity_name_typed = EntityName::new(&entity_name);
                 let response = self
                     .engine()
-                    .execute_operation(&entity_name_typed, &operation.name, op_params)
+                    .execute_operation(
+                        &entity_name_typed,
+                        &operation.name,
+                        op_params,
+                        holon_api::OpOrigin::User,
+                    )
                     .await
                     .map_err(|e| {
                         rmcp::ErrorData::internal_error(
@@ -1993,7 +3332,7 @@ impl HolonMcpServer {
                     serde_json::json!({
                         "matched_operation": format!("{}.{}", entity_name, operation.name),
                         "entity_id": entity_id,
-                        "result": response.map(|v| v.to_json_string()),
+                        "result": response.response.map(|v| v.to_json_string()),
                     })
                     .to_string(),
                 )]))
@@ -2182,6 +3521,13 @@ impl HolonMcpServer {
             params.text.chars().map(|c| c.to_string()).collect()
         };
 
+        // Track how many keystrokes were actually CONSUMED. GPUI's
+        // `dispatch_keystroke` returns `false` for a plain character when no
+        // input handler is installed — i.e. no editor is focused — so the
+        // keystroke is dropped on the floor (dogfood #5 row 147: 22 keystrokes
+        // vanished after a failed click cleared focus, yet the tool reported
+        // success). We must fail loud on that instead of faking `keystrokes_sent`.
+        let mut handled_count = 0usize;
         for key in &keystrokes {
             let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
             tx.clone()
@@ -2196,14 +3542,82 @@ impl HolonMcpServer {
                     rmcp::ErrorData::internal_error("GPUI interaction channel disconnected", None)
                 })?;
 
-            resp_rx.await.map_err(|_| {
+            let response = resp_rx.await.map_err(|_| {
                 rmcp::ErrorData::internal_error("GPUI did not respond to key event", None)
             })?;
+            if response.handled {
+                handled_count += 1;
+            }
         }
+
+        // No keystroke was consumed by anything (no focused editor, no matching
+        // action) — the input silently vanished. Fail loud like `click` does,
+        // rather than returning a success payload the caller will trust.
+        let dropped = match type_text_drop_outcome(keystrokes.len(), handled_count) {
+            Ok(dropped) => dropped,
+            Err(total) => {
+                return Err(rmcp::ErrorData::internal_error(
+                    format!(
+                        "type_text dropped all {total} keystroke(s): no focused editor (or bound \
+                         action) consumed them. Focus an editor first (e.g. click a block), then \
+                         retry."
+                    ),
+                    None,
+                ));
+            }
+        };
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::json!({
                 "keystrokes_sent": keystrokes.len(),
+                "keystrokes_handled": handled_count,
+                "dropped": dropped,
+            })
+            .to_string(),
+        )]))
+    }
+
+    #[tool(
+        description = "Insert text through the soft-keyboard `insertText:` path instead of \
+                       hardware KeyDown events. Unlike `type_text` (which sends per-character \
+                       KeyDown keystrokes through the GPUI keymap), this commits the whole string \
+                       straight into the focused editor's input handler — the same path iOS UIKit \
+                       uses for the on-screen keyboard. A soft Return is sent as \"\\n\" and \
+                       becomes an `enter` action (split_block), not a literal newline. Use this \
+                       to exercise soft-keyboard-only behavior that a KeyDown-driven test cannot \
+                       reach."
+    )]
+    async fn insert_text(
+        &self,
+        Parameters(params): Parameters<InsertTextParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let tx = self.debug.interaction_tx.get().ok_or_else(|| {
+            rmcp::ErrorData::internal_error(
+                "No GPUI window connected (interaction channel not set up)",
+                None,
+            )
+        })?;
+
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        tx.clone()
+            .try_send(crate::server::InteractionCommand {
+                event: crate::server::InteractionEvent::InsertText {
+                    text: params.text.clone(),
+                },
+                response_tx: resp_tx,
+            })
+            .map_err(|_| {
+                rmcp::ErrorData::internal_error("GPUI interaction channel disconnected", None)
+            })?;
+
+        let response = resp_rx.await.map_err(|_| {
+            rmcp::ErrorData::internal_error("GPUI did not respond to insert_text event", None)
+        })?;
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::json!({
+                "inserted_text": params.text,
+                "handled": response.handled,
             })
             .to_string(),
         )]))
@@ -2212,34 +3626,10 @@ impl HolonMcpServer {
 
 // --- Key parsing helpers ---
 
-/// Parse a string key name into a holon_frontend Key enum.
+/// Parse a string key name into a `Key`, in the same vocabulary
+/// `list_keybindings` reports.
 fn parse_key(s: &str) -> Result<holon_frontend::input::Key, String> {
-    use holon_frontend::input::Key;
-    match s.to_lowercase().as_str() {
-        "cmd" | "command" | "platform" => Ok(Key::Cmd),
-        "ctrl" | "control" => Ok(Key::Ctrl),
-        "alt" | "option" => Ok(Key::Alt),
-        "shift" => Ok(Key::Shift),
-        "up" => Ok(Key::Up),
-        "down" => Ok(Key::Down),
-        "left" => Ok(Key::Left),
-        "right" => Ok(Key::Right),
-        "home" => Ok(Key::Home),
-        "end" => Ok(Key::End),
-        "pageup" => Ok(Key::PageUp),
-        "pagedown" => Ok(Key::PageDown),
-        "tab" => Ok(Key::Tab),
-        "enter" | "return" => Ok(Key::Enter),
-        "backspace" => Ok(Key::Backspace),
-        "delete" => Ok(Key::Delete),
-        "escape" | "esc" => Ok(Key::Escape),
-        "space" => Ok(Key::Space),
-        s if s.len() == 1 => Ok(Key::Char(s.chars().next().unwrap())),
-        s if s.starts_with('f') && s[1..].parse::<u8>().is_ok() => {
-            Ok(Key::F(s[1..].parse::<u8>().unwrap()))
-        }
-        other => Err(format!("Unknown key: '{other}'")),
-    }
+    s.parse()
 }
 
 /// Check if a string is a special key name (not regular text).
@@ -2271,47 +3661,134 @@ fn is_special_key(s: &str) -> bool {
 // uses `OptionAll` instead of `OptionOnScreenOnly`, so windows on other
 // macOS desktops/spaces are visible.
 
+/// PNG-encode a tightly-packed RGBA8 buffer captured from the GPUI window.
+/// Fails loud if the buffer length disagrees with `width * height * 4`.
+#[cfg(target_os = "android")]
+fn encode_rgba_to_png(width: u32, height: u32, rgba: Vec<u8>) -> Result<Vec<u8>, String> {
+    let img = image::RgbaImage::from_raw(width, height, rgba).ok_or_else(|| {
+        format!("captured RGBA buffer does not match dimensions {width}x{height}")
+    })?;
+    let mut png_buf = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut png_buf, image::ImageFormat::Png)
+        .map_err(|e| format!("PNG encoding failed: {e}"))?;
+    Ok(png_buf.into_inner())
+}
+
+/// Minimal window descriptor, decoupled from `xcap::Window` so the selection
+/// predicate can be unit-tested over a mocked window list.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, PartialEq)]
+struct WindowCandidate {
+    title: String,
+    app_name: String,
+    pid: u32,
+    width: u32,
+    height: u32,
+    minimized: bool,
+}
+
+/// Pick which window to capture, returning its index into `windows`.
+///
+/// GPUI spawns several windows on our pid: a full-size main window titled
+/// "Holon" PLUS tiny auxiliary/phantom windows (an untitled 500x500, an
+/// offscreen ~32px strip). The old predicate matched pid + `title == "Holon"`
+/// with `.find()`, which returned whichever such window enumerated FIRST —
+/// often a phantom — then `capture_image` failed with `minimized=true`.
+///
+/// Robust rule (both branches): keep every CAPTURABLE candidate (non-zero
+/// area) and pick the LARGEST by pixel area. `minimized` is NOT a filter: the
+/// xcap fork enumerates windows on other Spaces / behind other windows and
+/// reports many of them as `minimized` on macOS, yet they capture fine (the
+/// whole point of the offscreen-window fork). Filtering them out made
+/// `screenshot` fail with "No window matched" whenever Holon was occluded or on
+/// another desktop. Stable whether a phantom reports an empty title or
+/// duplicates "Holon". Fail loud listing every candidate when none qualifies —
+/// never silently grab a zero-area phantom.
+///
+/// - `explicit_title`: match any candidate whose title OR app-name contains the
+///   needle (case-insensitive), then largest among them.
+/// - no title: our own process's largest non-empty-titled window.
+#[cfg(target_os = "macos")]
+fn select_window_index(
+    windows: &[WindowCandidate],
+    our_pid: u32,
+    explicit_title: Option<&str>,
+) -> Result<usize, String> {
+    // Capturable = has on-screen extent. Occluded / other-Space windows that
+    // xcap flags `minimized` are still captured by the offscreen fork, so they
+    // must stay in the running.
+    let capturable = |w: &WindowCandidate| w.width > 0 && w.height > 0;
+    let area = |w: &WindowCandidate| u64::from(w.width) * u64::from(w.height);
+
+    let (predicate_desc, matches): (String, Vec<usize>) = match explicit_title {
+        Some(title) => {
+            let needle = title.to_lowercase();
+            let idxs = windows
+                .iter()
+                .enumerate()
+                .filter(|(_, w)| {
+                    capturable(w)
+                        && (w.title.to_lowercase().contains(&needle)
+                            || w.app_name.to_lowercase().contains(&needle))
+                })
+                .map(|(i, _)| i)
+                .collect();
+            (format!("capturable, title/app contains {title:?}"), idxs)
+        }
+        None => {
+            let idxs = windows
+                .iter()
+                .enumerate()
+                .filter(|(_, w)| capturable(w) && w.pid == our_pid && !w.title.is_empty())
+                .map(|(i, _)| i)
+                .collect();
+            (
+                format!("capturable, own pid {our_pid}, non-empty title"),
+                idxs,
+            )
+        }
+    };
+
+    matches
+        .into_iter()
+        .max_by_key(|&i| area(&windows[i]))
+        .ok_or_else(|| {
+            let available: Vec<String> = windows
+                .iter()
+                .map(|w| {
+                    format!(
+                        "{:?} (app={:?}, pid={}, {}x{}, minimized={})",
+                        w.title, w.app_name, w.pid, w.width, w.height, w.minimized
+                    )
+                })
+                .collect();
+            format!("No window matched ({predicate_desc}). Candidates: {available:?}")
+        })
+}
+
 #[cfg(target_os = "macos")]
 fn capture_window_as_png(window_title: Option<&str>) -> Result<Vec<u8>, String> {
     let windows = xcap::Window::all().map_err(|e| format!("Failed to enumerate windows: {e}"))?;
 
     let our_pid = std::process::id();
 
-    let window = if let Some(title) = window_title {
-        let needle = title.to_lowercase();
-        windows.iter().find(|w| {
-            let t = w.title().unwrap_or_default().to_lowercase();
-            let a = w.app_name().unwrap_or_default().to_lowercase();
-            t.contains(&needle) || a.contains(&needle)
+    // Snapshot each xcap window into a plain descriptor (same order as
+    // `windows`) so the pure predicate's chosen index maps back 1:1.
+    // ALLOW(ok): OS window queries — a missing field defaults, never fatal.
+    let candidates: Vec<WindowCandidate> = windows
+        .iter()
+        .map(|w| WindowCandidate {
+            title: w.title().unwrap_or_default(),
+            app_name: w.app_name().unwrap_or_default(),
+            pid: w.pid().unwrap_or(0),
+            width: w.width().unwrap_or(0),
+            height: w.height().unwrap_or(0),
+            minimized: w.is_minimized().unwrap_or(false),
         })
-    } else {
-        // Match by PID + title "Holon" to skip GPUI's invisible auxiliary windows.
-        windows
-            .iter()
-            // ALLOW(ok): window queries — non-fatal
-            .find(|w| w.pid().ok() == Some(our_pid) && w.title().unwrap_or_default() == "Holon")
-    };
+        .collect();
 
-    let window = window.ok_or_else(|| {
-        // ALLOW(filter_map_ok): OS window queries — errors are not actionable
-        let available: Vec<String> = windows
-            .iter()
-            .filter_map(|w| {
-                let title = w.title().ok()?; // ALLOW(ok): window query
-                let app = w.app_name().ok().unwrap_or_default(); // ALLOW(ok): window query
-                let pid = w.pid().ok().unwrap_or(0); // ALLOW(ok): window query
-                let width = w.width().unwrap_or(0);
-                let height = w.height().unwrap_or(0);
-                Some(format!(
-                    "{title:?} (app={app:?}, pid={pid}, {width}x{height})"
-                ))
-            })
-            .collect();
-        format!(
-            "No window found (our pid={our_pid}, searched for {:?}). Available: {available:?}",
-            window_title.unwrap_or("(own process, largest window)")
-        )
-    })?;
+    let idx = select_window_index(&candidates, our_pid, window_title)?;
+    let window = &windows[idx];
 
     let win_title = window.title().unwrap_or_default();
     let win_app = window.app_name().unwrap_or_default();
@@ -2343,6 +3820,7 @@ impl HolonMcpServer {
         rows: &[holon_api::StorageEntity],
         duration_ms: Option<f64>,
         include_profile: bool,
+        format: OutputFormat,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let json_rows: Vec<HashMap<String, serde_json::Value>> = rows
             .iter()
@@ -2374,6 +3852,14 @@ impl HolonMcpServer {
             })
             .collect();
 
+        if format == OutputFormat::Toon {
+            // TOON carries the rows only (no row_count/duration envelope — the
+            // header's `[N]` already states the count). Callers that need the
+            // envelope stay on JSON.
+            let toon = rows_to_toon(&json_rows)?;
+            return Ok(CallToolResult::success(vec![Content::text(toon)]));
+        }
+
         let result = QueryResult {
             rows: json_rows.clone(),
             row_count: json_rows.len(),
@@ -2390,9 +3876,101 @@ impl HolonMcpServer {
         )]))
     }
 
+    /// The current Loro doc store: the swappable `live_debug` cell when
+    /// populated (mobile boot + every `reset_vault` swap), else the boot-time
+    /// `OnceLock` (desktop paths that never reset). Tools MUST read through
+    /// this, not `debug.loro_doc_store` directly — the `OnceLock` goes stale
+    /// after a reset and would silently answer against the retired session.
+    fn current_loro_doc_store(
+        &self,
+    ) -> Option<Arc<tokio::sync::RwLock<holon::sync::LoroDocumentStore>>> {
+        let from_cell = self
+            .debug
+            .live_debug
+            .read()
+            .expect("live_debug cell poisoned")
+            .loro_doc_store
+            .clone();
+        from_cell.or_else(|| self.debug.loro_doc_store.get().cloned())
+    }
+
+    /// Build a `LoroBackend` over the live, swappable global doc from the
+    /// `live_debug` cell. `None` when Loro is not wired in this config; a wired
+    /// store whose global doc is unreachable is an error, not `None`.
+    #[cfg(debug_assertions)]
+    async fn live_loro_backend(&self) -> Result<Option<LoroBackend>, rmcp::ErrorData> {
+        let store = {
+            let cell = self
+                .debug
+                .live_debug
+                .read()
+                .expect("live_debug cell poisoned");
+            cell.loro_doc_store.clone()
+        };
+        match store {
+            None => Ok(None),
+            Some(store) => {
+                let doc = {
+                    let guard = store.read().await;
+                    guard.get_global_doc().await.map_err(|e| {
+                        rmcp::ErrorData::internal_error(
+                            format!("live Loro global doc unreachable: {e}"),
+                            None,
+                        )
+                    })?
+                };
+                Ok(Some(LoroBackend::from_document(doc)))
+            }
+        }
+    }
+
+    /// The live Loro doc's lamport height, or `None` when Loro is not wired.
+    #[cfg(debug_assertions)]
+    async fn live_lamport_height(&self) -> Result<Option<u32>, rmcp::ErrorData> {
+        match self.live_loro_backend().await? {
+            None => Ok(None),
+            Some(backend) => {
+                let height = backend.lamport_height().await.map_err(|e| {
+                    rmcp::ErrorData::internal_error(
+                        format!("live Loro lamport_height failed: {e}"),
+                        None,
+                    )
+                })?;
+                Ok(Some(height))
+            }
+        }
+    }
+
+    /// Per-parent child-id lists from the live Loro tree (only parents that
+    /// have children are keyed), for cross-checking against the
+    /// CDC-mirrored snapshot.
+    #[cfg(debug_assertions)]
+    async fn live_loro_tree_children(
+        &self,
+        backend: &LoroBackend,
+    ) -> Result<std::collections::BTreeMap<String, Vec<String>>, rmcp::ErrorData> {
+        let blocks = backend.get_all_blocks(Traversal::ALL).await.map_err(|e| {
+            rmcp::ErrorData::internal_error(format!("live Loro get_all_blocks failed: {e}"), None)
+        })?;
+        let mut out = std::collections::BTreeMap::new();
+        for block in &blocks {
+            let parent = block.id.to_string();
+            let children = backend.list_children(&parent).await.map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!("live Loro list_children({parent}) failed: {e}"),
+                    None,
+                )
+            })?;
+            if !children.is_empty() {
+                out.insert(parent, children);
+            }
+        }
+        Ok(out)
+    }
+
     /// Resolve a doc_id (UUID or file path) to blocks from Loro.
     async fn get_loro_blocks(&self, doc_id: &str) -> Result<Vec<Block>, rmcp::ErrorData> {
-        let store = self.debug.loro_doc_store.get().ok_or_else(|| {
+        let store = self.current_loro_doc_store().ok_or_else(|| {
             rmcp::ErrorData::internal_error("Loro is not enabled in this session", None)
         })?;
 
@@ -2447,7 +4025,7 @@ impl HolonMcpServer {
         }
 
         // Try to resolve via Loro aliases
-        if let Some(store) = self.debug.loro_doc_store.get() {
+        if let Some(store) = self.current_loro_doc_store() {
             let store_read = store.read().await;
             if let Some(path) = store_read.resolve_alias_to_path(doc_id).await {
                 return Ok(path);
@@ -2465,6 +4043,89 @@ impl HolonMcpServer {
     }
 }
 
+#[cfg(all(test, target_os = "macos"))]
+mod window_select_tests {
+    use super::WindowCandidate;
+    use super::select_window_index;
+
+    fn win(title: &str, app: &str, pid: u32, w: u32, h: u32, minimized: bool) -> WindowCandidate {
+        WindowCandidate {
+            title: title.to_string(),
+            app_name: app.to_string(),
+            pid,
+            width: w,
+            height: h,
+            minimized,
+        }
+    }
+
+    /// The GPUI phantom cluster: an untitled 500x500, an offscreen strip, and
+    /// the real 3440x1440 "Holon". No title given ⇒ pick our own largest
+    /// onscreen non-empty-titled window (the real one), not the phantom that
+    /// enumerates first.
+    #[test]
+    fn own_process_picks_largest_onscreen_over_phantoms() {
+        let ours = 4242;
+        let wins = vec![
+            win("", "holon-gpui", ours, 500, 500, false), // phantom, first
+            win("Holon", "holon-gpui", ours, 3440, 32, false), // offscreen strip
+            win("Holon", "holon-gpui", ours, 3440, 1440, false), // the real one
+            win("Some Other App", "Other", 99, 4000, 4000, false), // not ours
+        ];
+        assert_eq!(select_window_index(&wins, ours, None), Ok(2));
+    }
+
+    /// An occluded / other-Space main window is reported `minimized` by the
+    /// xcap fork yet still captures fine — so it must be SELECTED (largest,
+    /// non-empty title), not filtered out. Filtering it made `screenshot` fail
+    /// with "No window matched" whenever Holon was not frontmost.
+    #[test]
+    fn own_process_occluded_main_is_captured_over_phantom() {
+        let ours = 7;
+        let wins = vec![
+            win("", "holon-gpui", ours, 500, 500, false), // untitled phantom
+            win("Holon", "holon-gpui", ours, 3440, 1440, true), // real, xcap-minimized
+        ];
+        // idx 0 is dropped (empty title); the occluded main window wins.
+        assert_eq!(select_window_index(&wins, ours, None), Ok(1));
+    }
+
+    /// Zero-area phantoms are still rejected: a window with no on-screen extent
+    /// is not capturable, so an all-phantom list fails loud.
+    #[test]
+    fn zero_area_windows_are_not_capturable() {
+        let ours = 7;
+        let wins = vec![
+            win("", "holon-gpui", ours, 0, 0, false),
+            win("Holon", "holon-gpui", ours, 0, 0, false),
+        ];
+        let err = select_window_index(&wins, ours, None).unwrap_err();
+        assert!(err.contains("No window matched"), "got: {err}");
+        assert!(err.contains("Candidates"), "must list candidates: {err}");
+    }
+
+    /// Explicit title search matches title OR app-name (case-insensitive) and
+    /// prefers the largest onscreen match.
+    #[test]
+    fn explicit_title_matches_and_prefers_largest() {
+        let wins = vec![
+            win("holon — small", "x", 1, 200, 100, false),
+            win("HOLON — big", "x", 1, 1200, 800, false),
+            win("Unrelated", "Other", 2, 5000, 5000, false),
+        ];
+        assert_eq!(select_window_index(&wins, 999, Some("holon")), Ok(1));
+    }
+
+    /// No candidate at all ⇒ loud error listing every candidate window.
+    #[test]
+    fn no_match_lists_all_candidates() {
+        let wins = vec![win("Editor", "Zed", 1, 800, 600, false)];
+        let err = select_window_index(&wins, 4242, None).unwrap_err();
+        assert!(err.contains("No window matched"), "got: {err}");
+        assert!(err.contains("Editor"), "must name the candidate: {err}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2473,6 +4134,42 @@ mod tests {
     fn json_to_holon_string() {
         let v = json_to_holon_value(serde_json::json!("hello"));
         assert_eq!(v, Value::String("hello".into()));
+    }
+
+    #[test]
+    fn output_format_defaults_to_toon() {
+        assert!(parse_output_format(None).unwrap() == OutputFormat::Toon);
+        assert!(parse_output_format(Some("toon")).unwrap() == OutputFormat::Toon);
+        assert!(parse_output_format(Some("json")).unwrap() == OutputFormat::Json);
+        assert!(parse_output_format(Some("yaml")).is_err());
+    }
+
+    // ── type_text fail-loud contract (dogfood #5 row 147) ────────────────────
+
+    #[test]
+    fn type_text_all_keystrokes_dropped_fails_loud() {
+        // No focused editor → GPUI reports handled=false for every keystroke.
+        // The tool must fail loud (Err) rather than report a fake success.
+        assert_eq!(type_text_drop_outcome(22, 0), Err(22));
+        assert_eq!(type_text_drop_outcome(1, 0), Err(1));
+    }
+
+    #[test]
+    fn type_text_all_handled_reports_zero_dropped() {
+        assert_eq!(type_text_drop_outcome(5, 5), Ok(0));
+    }
+
+    #[test]
+    fn type_text_partial_handling_reports_dropped_count() {
+        // At least one keystroke landed, so this is not the "no focus" case;
+        // report the shortfall instead of failing the whole call.
+        assert_eq!(type_text_drop_outcome(5, 3), Ok(2));
+    }
+
+    #[test]
+    fn type_text_empty_input_is_vacuous_success() {
+        // A special-key expansion that produced nothing must not be a "drop".
+        assert_eq!(type_text_drop_outcome(0, 0), Ok(0));
     }
 
     #[test]

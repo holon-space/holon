@@ -34,8 +34,15 @@ use turso_sdk_kit::rsapi::TursoDatabaseConfig;
 fn open_db(path: &str) -> turso::Connection {
     let io = Arc::new(UnixIO::new().expect("UnixIO"));
     let opts = DatabaseOpts::default().with_views(true);
-    let db = Database::open_file_with_flags(io, path, OpenFlags::default(), opts, None)
-        .expect("open database");
+    let db = Database::open_file_with_flags(
+        io,
+        path,
+        OpenFlags::default(),
+        opts,
+        None,
+        Arc::new(turso_core::SqliteDialect),
+    )
+    .expect("open database");
     let db = Arc::new(db);
     let conn_core = db.connect().expect("connect");
     let config = TursoDatabaseConfig {
@@ -43,7 +50,7 @@ fn open_db(path: &str) -> turso::Connection {
         experimental_features: None,
         async_io: false,
         encryption: None,
-        vfs: None,
+        vfs: turso_sdk_kit::IoBackend::Default,
         io: None,
         db_file: None,
     };
@@ -150,9 +157,9 @@ async fn main() -> anyhow::Result<()> {
     println!("  events_view_block created");
 
     conn.execute(
-        r#"CREATE MATERIALIZED VIEW events_view_directory AS
+        r#"CREATE MATERIALIZED VIEW events_view_operation AS
            SELECT * FROM events
-           WHERE status = 'confirmed' AND aggregate_type = 'directory'"#,
+           WHERE status = 'confirmed' AND aggregate_type = 'operation'"#,
         (),
     )
     .await?;
@@ -164,7 +171,7 @@ async fn main() -> anyhow::Result<()> {
         (),
     )
     .await?;
-    println!("  events_view_directory + events_view_file created");
+    println!("  events_view_operation + events_view_file created");
 
     // Navigation matviews
     conn.execute(

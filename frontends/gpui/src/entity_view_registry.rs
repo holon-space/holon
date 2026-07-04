@@ -165,6 +165,62 @@ impl LocalEntityScope {
     }
 }
 
+/// Entry counts of one cache level, split by [`CacheKey`] variant.
+///
+/// Only the level it is handed — nested per-shell caches live behind opaque
+/// `AnyEntity` values and are not walkable from here. Read on the root cache
+/// this is "how many page shells / live blocks / query results is the app
+/// still holding", the retention half of a memory sample.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CacheCounts {
+    pub reactive_shell: u64,
+    pub live_block: u64,
+    pub live_query: u64,
+    pub render_entity: u64,
+    pub ephemeral: u64,
+}
+
+impl CacheCounts {
+    pub fn total(&self) -> u64 {
+        self.reactive_shell
+            + self.live_block
+            + self.live_query
+            + self.render_entity
+            + self.ephemeral
+    }
+
+    /// `(name, value)` pairs for `holon_core::memstats`.
+    pub fn as_stats(&self) -> Vec<(&'static str, u64)> {
+        vec![
+            ("entities_total", self.total()),
+            ("reactive_shells", self.reactive_shell),
+            ("live_blocks", self.live_block),
+            ("live_queries", self.live_query),
+            ("render_entities", self.render_entity),
+            ("ephemeral", self.ephemeral),
+        ]
+    }
+}
+
+/// Count one cache level's entries by [`CacheKey`] variant.
+pub fn cache_counts(cache: &EntityCache) -> CacheCounts {
+    count_keys(cache.read().unwrap().keys())
+}
+
+fn count_keys<'a>(keys: impl Iterator<Item = &'a CacheKey>) -> CacheCounts {
+    let mut counts = CacheCounts::default();
+    for key in keys {
+        match key {
+            CacheKey::ReactiveShell(_) => counts.reactive_shell += 1,
+            CacheKey::LiveBlock(_) => counts.live_block += 1,
+            CacheKey::LiveQuery(_) => counts.live_query += 1,
+            CacheKey::RenderEntity(_) => counts.render_entity += 1,
+            CacheKey::Ephemeral(_) => counts.ephemeral += 1,
+        }
+    }
+    counts
+}
+
 /// Wipe ephemeral builder entries from the cache, preserving state-bearing
 /// keys (see [`CacheKey::is_state_bearing`]). Called on every structural
 /// rebuild of a `ReactiveShell` so scroll position, expand state, and
@@ -256,6 +312,39 @@ mod tests {
         assert!(CacheKey::LiveQuery("lq-1234".into()).is_state_bearing());
         assert!(CacheKey::RenderEntity("block:xyz".into()).is_state_bearing());
         assert!(!CacheKey::Ephemeral("toggle-foo".into()).is_state_bearing());
+    }
+
+    #[test]
+    fn cache_counts_split_entries_by_variant() {
+        let keys = vec![
+            CacheKey::ReactiveShell(1),
+            CacheKey::ReactiveShell(2),
+            CacheKey::LiveBlock("block:a".into()),
+            CacheKey::LiveQuery("lq-1".into()),
+            CacheKey::RenderEntity("block:b".into()),
+            CacheKey::Ephemeral("toggle-1".into()),
+            CacheKey::Ephemeral("toggle-2".into()),
+            CacheKey::Ephemeral("toggle-3".into()),
+        ];
+        let counts = count_keys(keys.iter());
+
+        assert_eq!(counts.reactive_shell, 2);
+        assert_eq!(counts.live_block, 1);
+        assert_eq!(counts.live_query, 1);
+        assert_eq!(counts.render_entity, 1);
+        assert_eq!(counts.ephemeral, 3);
+        assert_eq!(counts.total(), keys.len() as u64);
+
+        assert_eq!(count_keys([].iter()), CacheCounts::default());
+        assert_eq!(
+            cache_counts(&EntityCache::default()),
+            CacheCounts::default(),
+            "an empty cache reports zeroes, not a missing reading"
+        );
+
+        let stats = counts.as_stats();
+        assert!(stats.contains(&("entities_total", 8)), "{stats:?}");
+        assert!(stats.contains(&("reactive_shells", 2)), "{stats:?}");
     }
 
     #[test]

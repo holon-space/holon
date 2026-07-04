@@ -17,7 +17,6 @@ use async_trait::async_trait;
 /// filters (`.org`, `.md`) belong to the caller.
 #[derive(Debug, Default, Clone)]
 pub struct ScannedEntries {
-    pub directories: Vec<PathBuf>,
     pub files: Vec<PathBuf>,
 }
 
@@ -38,6 +37,22 @@ pub trait FileSystem: Send + Sync {
     async fn read_to_string(&self, path: &Path) -> std::io::Result<String>;
     async fn read(&self, path: &Path) -> std::io::Result<Vec<u8>>;
     async fn write(&self, path: &Path, contents: &[u8]) -> std::io::Result<()>;
+    /// Remove a file. Errors if absent (like `std::fs::remove_file`). Adapters
+    /// with a change-notification surface emit a `Remove` event, mirroring what
+    /// the real `notify` watcher delivers for an on-disk deletion.
+    async fn remove(&self, path: &Path) -> std::io::Result<()>;
+    /// Atomically move `from` to `to`. Adapters with a change-notification
+    /// surface emit ONE `Rename { from }` event on `to` — the atomic port that
+    /// lets a consumer re-home a document without a delete-then-create window.
+    ///
+    /// The default is the non-atomic read→write→remove fallback (kept so
+    /// minimal test doubles need not implement it); the real and in-memory
+    /// adapters override it with a genuine atomic move + paired event.
+    async fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        let bytes = self.read(from).await?;
+        self.write(to, &bytes).await?;
+        self.remove(from).await
+    }
     async fn create_dir_all(&self, path: &Path) -> std::io::Result<()>;
     /// Recursive walk respecting `.gitignore`, skipping hidden entries
     /// (`.git`, `.jj`, …). A missing `root` yields empty entries, not an
@@ -66,6 +81,21 @@ impl FileSystem for RealFileSystem {
 
     async fn write(&self, path: &Path, contents: &[u8]) -> std::io::Result<()> {
         tokio::fs::write(path, contents).await
+    }
+
+    async fn remove(&self, path: &Path) -> std::io::Result<()> {
+        tokio::fs::remove_file(path)
+            .await
+            .map_err(|e| std::io::Error::new(e.kind(), format!("remove {}: {e}", path.display())))
+    }
+
+    async fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        tokio::fs::rename(from, to).await.map_err(|e| {
+            std::io::Error::new(
+                e.kind(),
+                format!("rename {} -> {}: {e}", from.display(), to.display()),
+            )
+        })
     }
 
     async fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
@@ -101,11 +131,10 @@ impl FileSystem for RealFileSystem {
 /// for directory walking (moved here from `holon-orgmode::file_watcher`).
 #[tracing::instrument(name = "scan_directory", fields(root = %root.display()))]
 pub fn walk_directory(root: &Path) -> ScannedEntries {
-    let mut directories = Vec::new();
     let mut files = Vec::new();
 
     if !root.exists() {
-        return ScannedEntries { directories, files };
+        return ScannedEntries { files };
     }
 
     for entry in ignore::WalkBuilder::new(root)
@@ -119,14 +148,12 @@ pub fn walk_directory(root: &Path) -> ScannedEntries {
         if path == root {
             continue;
         }
-        if path.is_dir() {
-            directories.push(path);
-        } else {
+        if !path.is_dir() {
             files.push(path);
         }
     }
 
-    ScannedEntries { directories, files }
+    ScannedEntries { files }
 }
 
 #[cfg(test)]
@@ -149,6 +176,6 @@ mod tests {
         assert_eq!(scanned.files.len(), 2);
 
         let missing = fs.scan_directory(&dir.path().join("nope")).await.unwrap();
-        assert!(missing.files.is_empty() && missing.directories.is_empty());
+        assert!(missing.files.is_empty());
     }
 }

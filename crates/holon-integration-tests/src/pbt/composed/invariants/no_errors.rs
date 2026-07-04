@@ -8,6 +8,7 @@
 
 use holon_pbt_core::RunMode;
 use holon_pbt_core::capabilities::SutErrorLog;
+use holon_pbt_core::composition::Attribution;
 use holon_pbt_core::composition::BridgedInvariant;
 use holon_pbt_core::composition::CapId;
 use holon_pbt_core::composition::CapInvariant;
@@ -24,6 +25,7 @@ pub fn wire() -> Box<dyn CapInvariant> {
             sut_absent: Vec::new(),
             ref_present: Vec::new(),
         },
+        Attribution::cross_cutting(file!()),
     ))
 }
 

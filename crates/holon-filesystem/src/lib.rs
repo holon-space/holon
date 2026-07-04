@@ -16,8 +16,6 @@
 // surface is the port traits + sync base store consumed by holon-loro.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod change_source;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod directory;
 pub mod error;
 pub mod file;
 #[cfg(not(target_arch = "wasm32"))]
@@ -26,9 +24,14 @@ pub mod file_sync_controller;
 pub mod fs_port;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod in_memory;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod ingest_progress;
 pub mod sync_base_store;
 pub mod sync_conflict;
 pub mod sync_ports;
+pub mod vault_path;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod writeback_render;
 
 use std::path::Path;
 
@@ -41,19 +44,20 @@ pub use change_source::FileChangeSource;
 #[cfg(not(target_arch = "wasm32"))]
 pub use change_source::NotifyWatcher;
 #[cfg(not(target_arch = "wasm32"))]
-pub use directory::ChangesWithMetadata;
+pub use change_source::RawFsSignal;
 #[cfg(not(target_arch = "wasm32"))]
-pub use directory::Directory;
-#[cfg(not(target_arch = "wasm32"))]
-pub use directory::DirectoryChangeProvider;
-#[cfg(not(target_arch = "wasm32"))]
-pub use directory::ROOT_ID;
+pub use change_source::RenamePairing;
 pub use error::FilesystemError;
+pub use file::ChangesWithMetadata;
 pub use file::File;
+#[cfg(not(target_arch = "wasm32"))]
+pub use file_sync_controller::BlockDelta;
 #[cfg(not(target_arch = "wasm32"))]
 pub use file_sync_controller::FileSyncController;
 #[cfg(not(target_arch = "wasm32"))]
 pub use file_sync_controller::RENDERER_VERSION;
+#[cfg(not(target_arch = "wasm32"))]
+pub use file_sync_controller::tiered_match;
 #[cfg(not(target_arch = "wasm32"))]
 pub use fs_port::FileMeta;
 #[cfg(not(target_arch = "wasm32"))]
@@ -73,8 +77,17 @@ pub use sync_conflict::is_sync_conflict_artifact;
 pub use sync_ports::AliasRegistrar;
 pub use sync_ports::BlockReader;
 pub use sync_ports::DocumentManager;
+pub use sync_ports::ExistingChild;
 pub use sync_ports::ImageDataProvider;
+pub use sync_ports::IncomingIdentity;
+pub use sync_ports::MatchBasis;
+pub use sync_ports::MatchVerdict;
+pub use sync_ports::MountRegistry;
+pub use sync_ports::ShareWritebackDisclosure;
 pub use sync_ports::ThreeWayTextMerge;
+pub use vault_path::VaultPath;
+#[cfg(not(target_arch = "wasm32"))]
+pub use writeback_render::WritebackRenderer;
 
 /// Filesystem utilities
 pub struct Filesystem;

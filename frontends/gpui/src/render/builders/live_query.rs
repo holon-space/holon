@@ -14,6 +14,35 @@ use crate::views::ReactiveShell;
 /// during a transitional structural rebuild before the engine has filled
 /// in `query` / `render_expr`).
 pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
+    render_placed(node, ctx, ctx.placement)
+}
+
+/// The same shell, forced CONTENT-HEIGHT — for a parent that is content-sized
+/// and therefore has no definite height for a percentage to resolve against
+/// (`column::render`'s `flex_col`, the shipped left sidebar). Under the `Panel`
+/// shape the shell claims `size_full` plus `height: relative(1.0)`, which in
+/// such a parent resolves to 0 px and takes every row with it. `Nested` sizes
+/// the shell to its content and leaves the scroll to the enclosing panel.
+///
+/// The counterpart of [`accordion::render_bounded`](super::accordion), which
+/// solves the same hazard the other way round: it HAS a definite height to give
+/// its region, so it pins one and keeps the greedy shell.
+pub(crate) fn render_content_height(
+    node: &ReactiveViewModel,
+    ctx: &GpuiRenderContext,
+) -> AnyElement {
+    render_placed(
+        node,
+        ctx,
+        crate::views::reactive_shell::ShellPlacement::Nested,
+    )
+}
+
+fn render_placed(
+    node: &ReactiveViewModel,
+    ctx: &GpuiRenderContext,
+    placement: crate::views::reactive_shell::ShellPlacement,
+) -> AnyElement {
     let slot = node.slot.as_ref().expect("live_query requires a slot");
     let query = node.prop_str("query");
     let query_lang = node.prop_str("query_lang");
@@ -48,9 +77,10 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
                 let render_ctx = holon_frontend::RenderContext::default();
                 ctx.with_gpui(|_window, cx| {
                     cx.new(|cx| {
-                        // The shell's `block_id` is the engine's query-watcher
-                        // key, so its Drop releases the query watcher via
-                        // `unwatch` — the same lifecycle live blocks get.
+                        // The `LiveBlock` carries a `WatchGuard` for the
+                        // engine's query-watcher key; the shell holds it, so
+                        // dropping the shell releases the query watcher —
+                        // the same RAII lifecycle live blocks get.
                         ReactiveShell::new_for_block(
                             watch_key.to_string(),
                             render_ctx,
@@ -59,17 +89,31 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
                             nav,
                             bounds,
                             ancestors,
+                            placement,
                             cx,
                         )
                     })
                 })
             });
 
-            let mut s = StyleRefinement::default();
-            s.flex_grow = Some(1.0);
-            s.size.width = Some(gpui::relative(1.0).into());
-            s.size.height = Some(gpui::relative(1.0).into());
-            return AnyView::from(entity).cached(s).into_any_element();
+            // `cached` needs an explicit size — it lays the view out in its own
+            // pass, so an `auto` height reports 0 to the parent no matter what
+            // the shell renders. So caching is only available where there IS a
+            // definite panel height to fill; a content-sized parent gets the
+            // uncached view, whose own content decides its height.
+            return match placement {
+                crate::views::reactive_shell::ShellPlacement::Panel => {
+                    let mut s = StyleRefinement::default();
+                    s.flex_grow = Some(1.0);
+                    s.size.width = Some(gpui::relative(1.0).into());
+                    s.size.height = Some(gpui::relative(1.0).into());
+                    AnyView::from(entity).cached(s).into_any_element()
+                }
+                crate::views::reactive_shell::ShellPlacement::Nested => div()
+                    .w_full()
+                    .child(AnyView::from(entity))
+                    .into_any_element(),
+            };
         }
     }
 

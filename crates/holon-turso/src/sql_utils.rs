@@ -21,6 +21,43 @@ pub fn value_to_sql_literal(value: &Value) -> String {
     }
 }
 
+/// Split a semicolon-delimited SQL file into individual statements.
+///
+/// Skips `;` inside `--` line comments — otherwise comments like
+/// `-- closed (omitted); retained for back/forward` truncate the
+/// surrounding CREATE TABLE statement and the parser sees "incomplete input".
+pub fn sql_statements(content: &str) -> impl Iterator<Item = &str> {
+    let bytes = content.as_bytes();
+    let mut splits: Vec<(usize, usize)> = Vec::new();
+    let mut start = 0usize;
+    let mut in_line_comment = false;
+    let mut prev_dash = false;
+    for (i, &b) in bytes.iter().enumerate() {
+        if in_line_comment {
+            if b == b'\n' {
+                in_line_comment = false;
+            }
+            prev_dash = false;
+            continue;
+        }
+        if b == b'-' && prev_dash {
+            in_line_comment = true;
+            prev_dash = false;
+            continue;
+        }
+        prev_dash = b == b'-';
+        if b == b';' {
+            splits.push((start, i));
+            start = i + 1;
+        }
+    }
+    splits.push((start, bytes.len()));
+    splits
+        .into_iter()
+        .map(move |(a, b)| content[a..b].trim())
+        .filter(|s| !s.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -66,41 +103,25 @@ mod tests {
         let val = Value::Object(HashMap::from([("key".into(), Value::String("val".into()))]));
         assert_eq!(value_to_sql_literal(&val), "'{\"key\":\"val\"}'");
     }
-}
 
-/// Split a semicolon-delimited SQL file into individual statements.
-///
-/// Skips `;` inside `--` line comments — otherwise comments like
-/// `-- closed (omitted); retained for back/forward` truncate the
-/// surrounding CREATE TABLE statement and the parser sees "incomplete input".
-pub fn sql_statements(content: &str) -> impl Iterator<Item = &str> {
-    let bytes = content.as_bytes();
-    let mut splits: Vec<(usize, usize)> = Vec::new();
-    let mut start = 0usize;
-    let mut in_line_comment = false;
-    let mut prev_dash = false;
-    for (i, &b) in bytes.iter().enumerate() {
-        if in_line_comment {
-            if b == b'\n' {
-                in_line_comment = false;
-            }
-            prev_dash = false;
-            continue;
-        }
-        if b == b'-' && prev_dash {
-            in_line_comment = true;
-            prev_dash = false;
-            continue;
-        }
-        prev_dash = b == b'-';
-        if b == b';' {
-            splits.push((start, i));
-            start = i + 1;
-        }
+    // A `-` that is NOT part of a `--` comment must not swallow the following
+    // `;`. Kills both `== b'-'`→`!= b'-'` and `&&`→`||` in the comment guard:
+    // either mutation treats the arithmetic minus as a comment start and folds
+    // the two statements into one.
+    #[test]
+    fn minus_operator_is_not_a_comment() {
+        let stmts: Vec<&str> = sql_statements("SELECT a-1; SELECT 2").collect();
+        assert_eq!(stmts, vec!["SELECT a-1", "SELECT 2"]);
     }
-    splits.push((start, bytes.len()));
-    splits
-        .into_iter()
-        .map(move |(a, b)| content[a..b].trim())
-        .filter(|s| !s.is_empty())
+
+    // A `;` inside a `--` line comment must not split the statement — the
+    // regression the function exists to prevent.
+    #[test]
+    fn semicolon_inside_line_comment_does_not_split() {
+        let sql = "CREATE TABLE t (a INT -- note; keep\n);\nSELECT 1";
+        let stmts: Vec<&str> = sql_statements(sql).collect();
+        assert_eq!(stmts.len(), 2);
+        assert!(stmts[0].contains("note; keep"));
+        assert_eq!(stmts[1], "SELECT 1");
+    }
 }

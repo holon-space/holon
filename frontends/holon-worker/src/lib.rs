@@ -40,6 +40,35 @@ use holon::storage::BLOCK_READ_TABLE;
 use napi_derive::napi;
 use parking_lot::Mutex;
 
+/// Initialize the main thread's WASI thread-pointer / pthread state.
+///
+/// When this crate is built as a wasm **library** (napi cdylib) for
+/// `wasm32-wasip1-threads`, `crt1-reactor.o`'s `_initialize` — which would
+/// call `__wasi_init_tp()` to set up the main thread's pthread subsystem — is
+/// never exported nor invoked (rust-lang/rust#146843). Without it the main
+/// thread's pthread key/TSD subsystem is uninitialized, so the first
+/// thread-local-**destructor** registration (`pthread_key_create` →
+/// `pthread_rwlock_wrlock`) deadlocks. That deadlock manifests deep inside
+/// napi's module registration (`REGISTERED_CLASSES` thread-local) and again in
+/// tokio's runtime thread-locals, so the worker never emits `ready`.
+///
+/// The JS glue must call this export **once**, on the main worker thread,
+/// before any napi registration / thread-local-destructor registration runs
+/// (see `web/worker-entry.mjs` `beforeInit`). Ctors (`__wasm_call_ctors`) are
+/// already run by napi-rs's per-export `.command_export` wrappers, so we only
+/// need the missing thread-pointer init here.
+#[cfg(all(target_arch = "wasm32", feature = "browser"))]
+#[no_mangle]
+pub extern "C" fn holon_init_main_thread() {
+    unsafe extern "C" {
+        fn __wasi_init_tp();
+    }
+    // SAFETY: called once on the main worker thread before any pthread/TLS-dtor
+    // use, matching the reactor `_initialize` contract that the library build
+    // omits.
+    unsafe { __wasi_init_tp() };
+}
+
 /// H4 step 1 — tokio timers work inside a `#[napi] async fn`.
 ///
 /// Sleeps 50ms on whatever runtime napi's `tokio_rt` feature installs, then
@@ -67,9 +96,9 @@ pub async fn ping(s: String) -> String {
 /// This function builds one and asserts that `tokio::spawn` + `tokio::time`
 // ALLOW(fallback): historical doc-comment quoting an architectural plan that uses the word; not a
 // runtime fallback
-/// still work on a current-thread driver — which is the entire fallback path
-/// the plan called out under H4. If this also fails, the whole architecture
-/// has to rethink async.
+/// still work on a current-thread driver — which is the entire contingency
+/// path the plan called out under H4. If this also fails, the whole
+/// architecture has to rethink async.
 ///
 /// Intentionally sync (`#[napi]` without `async`) so the runtime we
 /// build here is the one under test, not napi's ambient one.
@@ -117,6 +146,7 @@ pub fn spawn_check() -> napi::Result<String> {
 mod backend {
     use std::collections::HashMap;
     use std::path::PathBuf;
+    use std::sync::atomic::AtomicBool;
     use std::sync::atomic::AtomicU32;
     use std::sync::atomic::Ordering;
 
@@ -129,6 +159,9 @@ mod backend {
     use holon_api::QueryContext;
     use holon_api::QueryLanguage;
     use holon_api::Value;
+    // `.snapshot()` is a `BlockQuerySource` trait method — in scope so we can
+    // call it on the concrete `TursoBlockQuerySource` for debug_pbt_snapshot.
+    use holon_core::storage::block_query::BlockQuerySource;
     use holon_core::storage::types::StorageEntity;
     use holon_frontend::FrontendSession;
     use holon_frontend::ReactiveViewModel;
@@ -138,8 +171,14 @@ mod backend {
     use holon_frontend::reactive::BuilderServices;
     use holon_frontend::reactive::ReactiveEngine;
     use holon_frontend::shadow_builders::build_shadow_interpreter;
+    use holon_frontend::user_driver::ReactiveEngineDriver;
+    // `UserDriver` in scope so the gesture verbs (click_entity / send_raw_keystroke
+    // / insert_text / send_key_chord / synthetic_dispatch) resolve on the driver.
+    use holon_frontend::user_driver::UserDriver;
 
     use super::*;
+
+    type TursoBlockQuerySource = holon::sync::turso_block_query_source::TursoBlockQuerySource;
 
     pub(super) struct EngineState {
         pub engine: Arc<BackendEngine>,
@@ -148,9 +187,39 @@ mod backend {
         pub runtime: Arc<tokio::runtime::Runtime>,
         pub session: Arc<FrontendSession>,
         pub reactive: Arc<ReactiveEngine>,
+        /// Headless user-gesture driver (click / keystroke / chord) over the
+        /// reactive engine — the enabler for the live-MCP twin's gesture tools.
+        pub driver: Arc<ReactiveEngineDriver>,
+        /// Concrete block read source, cloned from the session's capabilities
+        /// so debug_pbt_snapshot can capture a `BlockSnapshot`
+        /// (live_blocks / focus_roots) the same way the native MCP
+        /// server does.
+        pub block_query: Arc<TursoBlockQuerySource>,
     }
 
     static ENGINE: OnceLock<Mutex<Option<EngineState>>> = OnceLock::new();
+
+    /// Set while an MCP tool dispatch is driving the current-thread runtime via
+    /// `block_on`. A `block_on` that suspends in OPFS IO yields back to JS, so
+    /// the page's rAF `engine_tick` pump would otherwise start a NESTED
+    /// `block_on` on the same runtime ("Cannot start a runtime from within a
+    /// runtime" → panic-abort). `tick` consults this and skips while a dispatch
+    /// is in flight (the dispatch drives the reactor itself).
+    static ENGINE_BUSY: AtomicBool = AtomicBool::new(false);
+
+    /// RAII guard that clears [`ENGINE_BUSY`] on scope exit.
+    struct BusyGuard;
+    impl BusyGuard {
+        fn acquire() -> Self {
+            ENGINE_BUSY.store(true, Ordering::Release);
+            BusyGuard
+        }
+    }
+    impl Drop for BusyGuard {
+        fn drop(&mut self) {
+            ENGINE_BUSY.store(false, Ordering::Release);
+        }
+    }
 
     // ── MCP watch registry ────────────────────────────────────────────────────
     // Stores per-watch pending changes buffers and background drain tasks.
@@ -177,6 +246,27 @@ mod backend {
     /// `ReactiveEngine` against the OPFS-backed DB at `db_path`.
     /// Idempotent: a second call replaces the state.
     pub(super) fn init(db_path: String) -> napi::Result<()> {
+        // Install the worker's log sink exactly once (init may be re-entered).
+        static TRACING: OnceLock<()> = OnceLock::new();
+        TRACING.get_or_init(|| {
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::INFO)
+                .with_ansi(false)
+                .with_writer(std::io::stderr)
+                .init();
+        });
+
+        *slot().lock() = Some(build_engine_state(db_path)?);
+        Ok(())
+    }
+
+    /// Build a fresh `EngineState` (engine + runtime + session + reactive +
+    /// driver + block_query) against the DB at `db_path`. Extracted from `init`
+    /// so `reset_vault` can rebuild against a clean `:memory:` DB without
+    /// re-installing the global tracing sink. Each call owns its own
+    /// current-thread runtime — the seam the reset arm drives the fresh-DB seed
+    /// on (the OLD state's runtime is torn down before this runs).
+    pub(super) fn build_engine_state(db_path: String) -> napi::Result<EngineState> {
         let runtime = Arc::new(
             tokio::runtime::Builder::new_current_thread()
                 .enable_time()
@@ -184,6 +274,13 @@ mod backend {
                 .map_err(|e| super::nerr("runtime build", e))?,
         );
 
+        // File-backed DBs on wasm32 need a host IO: register the OPFS shim
+        // before the engine opens the database. The page must have
+        // `registerFile`d the db + wal paths first (OPFS sync handles are
+        // created ahead of time — see web/opfs-bridge.mjs).
+        if db_path != ":memory:" && holon::storage::turso::wasm_io::registered().is_none() {
+            holon::storage::turso::wasm_io::register(super::turso_browser_shim::opfs());
+        }
         let path = PathBuf::from(db_path);
         // EventInfraModule registers `SqlBlockOperations` as the "block"
         // OperationProvider (update / set_field / split_block / join_block /
@@ -196,7 +293,36 @@ mod backend {
                     use fluxdi::Module as _;
                     holon::sync::EventInfraModule
                         .configure(injector)
-                        .map_err(|e| anyhow::anyhow!("EventInfraModule: {e}"))
+                        .map_err(|e| anyhow::anyhow!("EventInfraModule: {e}"))?;
+
+                    // EventInfraModule's `SqlBlockOperations` only advertises
+                    // structural block ops (indent / split / move_*). CRUD ops
+                    // (set_field / create / delete) are advertised by a second
+                    // provider — native holon-app registers it in
+                    // `turso_seams.rs`, but the worker doesn't load that module,
+                    // so editor content writes and state_toggle dispatches died
+                    // as "No provider registered for entity: block". The worker
+                    // is always SqlOnly (no Loro), so a bare
+                    // `SqlOperationProvider` is the correct CRUD authority (in
+                    // Loro mode native routes CRUD through Loro instead — see the
+                    // drift note in turso_seams.rs). Structural ops still win on
+                    // `SqlBlockOperations` by registration order.
+                    injector.provide_into_set::<dyn holon_core::OperationProvider>(
+                        fluxdi::Provider::root(|resolver| {
+                            let db = resolver
+                                .resolve::<dyn holon::di::DbHandleProvider>()
+                                .handle();
+                            let provider = holon::core::SqlOperationProvider::new(
+                                db,
+                                holon::storage::BLOCK_WRITE_TABLE.to_string(),
+                                "block".to_string(),
+                                "block".to_string(),
+                            );
+                            std::sync::Arc::new(provider)
+                                as std::sync::Arc<dyn holon_core::OperationProvider>
+                        }),
+                    );
+                    Ok(())
                 })
                 .await
             })
@@ -211,12 +337,16 @@ mod backend {
         // the production Turso wiring (holon-app `wiring.rs`): the BackendEngine
         // provides the query/operation/ui-watcher capabilities, and the block
         // read seam comes from `TursoBlockQuerySource::watch_default`.
-        let block_query = runtime
-            .block_on(async {
-                holon::sync::turso_block_query_source::TursoBlockQuerySource::watch_default(&engine)
+        let block_query = Arc::new(
+            runtime
+                .block_on(async {
+                    holon::sync::turso_block_query_source::TursoBlockQuerySource::watch_default(
+                        &engine,
+                    )
                     .await
-            })
-            .map_err(|e| super::nerr("block_query watch_default", e))?;
+                })
+                .map_err(|e| super::nerr("block_query watch_default", e))?,
+        );
         let profiles = engine.profile_resolver().clone();
         let query_engine = Some(engine.clone() as Arc<dyn holon::api::QueryEngine>);
         let operation_engine = Some(engine.clone() as Arc<dyn holon::api::OperationEngine>);
@@ -224,10 +354,15 @@ mod backend {
         let session = Arc::new(FrontendSession::from_parts(
             SessionParts::with_capabilities(
                 query_engine,
-                Arc::new(block_query),
+                // Clones the same `TursoBlockQuerySource` the EngineState keeps
+                // (coerces to `Arc<dyn BlockQuerySource>` for the session).
+                block_query.clone(),
                 operation_engine,
                 ui_watcher,
                 profiles,
+                // The worker assembles the engine without a DI container, so no
+                // registry-backed classifier is reachable: built-in schemes only.
+                holon_api::link_parser::LinkTargetClassifier::default(),
             ),
         ));
 
@@ -250,13 +385,19 @@ mod backend {
         // Ignore the error — if already set, a previous init wired things up.
         let _ = services_slot.set(services);
 
-        *slot().lock() = Some(EngineState {
+        // Headless gesture driver over the reactive engine — the enabler that
+        // lets the live-MCP twin's click / type_text / send_key_chord tools
+        // drive this worker the same way GPUI handlers do.
+        let driver = Arc::new(ReactiveEngineDriver::new(reactive.clone()));
+
+        Ok(EngineState {
             engine,
             runtime,
             session,
             reactive,
-        });
-        Ok(())
+            driver,
+            block_query,
+        })
     }
 
     /// Extract `(Arc<BackendEngine>, Arc<Runtime>)` without holding the lock
@@ -324,11 +465,36 @@ mod backend {
     /// `budget_ms` bounds the sleep inside `block_on`; the reactor will
     /// still drain any tasks that become ready and then return.
     pub(super) fn tick(budget_ms: u32) -> napi::Result<()> {
+        // Skip if an MCP dispatch is mid-`block_on` (it drives the reactor
+        // itself); a nested `block_on` here would panic-abort the instance.
+        if ENGINE_BUSY.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let (_, runtime) = engine_and_rt("tick")?;
         let budget = std::time::Duration::from_millis(u64::from(budget_ms));
         runtime.block_on(async move {
             tokio::time::sleep(budget).await;
         });
+        Ok(())
+    }
+
+    /// Reset local storage (B2): drop the entire engine so Turso closes its
+    /// connection and releases every OPFS file reference. The JS caller then
+    /// closes the sync-access handles (`unregisterFile`) and `removeEntry`s the
+    /// db + wal files — a step that fails with `NoModificationAllowedError`
+    /// while the worker still holds sync handles, which is exactly why this
+    /// must run worker-side before the page deletes the files. This does NOT
+    /// touch OPFS itself (that is the JS side's job); it only tears down the
+    /// in-memory engine so the handles are free.
+    pub(super) fn reset_storage() -> napi::Result<()> {
+        // Take() drops EngineState (reactive → session → engine → runtime),
+        // which drops the Turso Database/Connection and its OPFS File Arcs.
+        let taken = slot().lock().take();
+        drop(taken);
+        // MCP watch tasks hold clones of engine capabilities; clear them too so
+        // nothing keeps a live handle into the torn-down engine.
+        mcp_watches().lock().clear();
+        tracing::info!("[engine_reset_storage] engine torn down; OPFS handles released");
         Ok(())
     }
 
@@ -621,12 +787,26 @@ mod backend {
         let engine = state.engine.clone();
         let runtime = state.runtime.clone();
         let reactive = state.reactive.clone();
+        let driver = state.driver.clone();
+        let block_query = state.block_query.clone();
         drop(guard);
 
         let service = HolonService::new(engine.clone());
 
-        let result = dispatch_mcp_tool(&name, args, &engine, &service, &reactive, &runtime)
-            .map_err(|e| napi::Error::from_reason(format!("mcp_tool::{name}: {e}")))?;
+        // Suppress the page's rAF tick pump for the duration of this dispatch
+        // (prevents a nested `block_on`; see `ENGINE_BUSY`).
+        let _busy = BusyGuard::acquire();
+        let result = dispatch_mcp_tool(
+            &name,
+            args,
+            &engine,
+            &service,
+            &reactive,
+            &runtime,
+            &driver,
+            &block_query,
+        )
+        .map_err(|e| napi::Error::from_reason(format!("mcp_tool::{name}: {e}")))?;
 
         serde_json::to_string(&result).map_err(|e| super::nerr("serialize result", e))
     }
@@ -639,6 +819,8 @@ mod backend {
         service: &HolonService,
         reactive: &Arc<ReactiveEngine>,
         runtime: &Arc<tokio::runtime::Runtime>,
+        driver: &Arc<ReactiveEngineDriver>,
+        block_query: &Arc<TursoBlockQuerySource>,
     ) -> anyhow::Result<serde_json::Value> {
         match name {
             "execute_query" => {
@@ -698,6 +880,21 @@ mod backend {
                 let lang = language.parse::<QueryLanguage>()?;
                 let compiled = service.compile_query(&query, lang)?;
                 Ok(serde_json::json!({"compiled_sql": compiled, "render_spec": null}))
+            }
+
+            "query_history" => {
+                // Parse-don't-validate: deny_unknown_fields makes a misspelled
+                // filter key a loud error, never a silently-ignored filter.
+                let query_args: holon_api::HistoryQueryArgs = serde_json::from_value(args)?;
+                let filter = query_args.into_query();
+                if query_args.count {
+                    let n = runtime.block_on(service.count_history(&filter))?;
+                    Ok(serde_json::json!({ "count": n }))
+                } else {
+                    let events = runtime.block_on(service.query_history(&filter))?;
+                    let row_count = events.len();
+                    Ok(serde_json::json!({ "events": events, "row_count": row_count }))
+                }
             }
 
             "list_tables" => {
@@ -883,7 +1080,7 @@ mod backend {
             "poll_changes" => {
                 let watch_id = req_str(&args, "watch_id")?;
                 // Yield to the reactor so drain tasks can process any ready CDC events.
-                runtime.block_on(tokio::time::sleep(std::time::Duration::ZERO));
+                runtime.block_on(async { tokio::time::sleep(std::time::Duration::ZERO).await });
                 let guard = mcp_watches().lock();
                 let entry = guard
                     .get(&watch_id)
@@ -914,13 +1111,29 @@ mod backend {
                     )
                     .await;
                 });
-                let snapshot = reactive.snapshot(&block_uri);
-                let text = if format == "json" {
-                    serde_json::to_string_pretty(&snapshot)?
+                // `snapshot_resolved`, not raw `snapshot`: the RESOLVED tree
+                // round-trips as a `ViewModel` for the live-MCP twin's
+                // `refresh_ui`, whereas `snapshot` leaves unresolved
+                // `live_block` placeholders that do not deserialize.
+                //
+                // DIVERGES from the native `describe_ui` (frontends/mcp): that
+                // one then runs `describe_ui_expand::resolve_deferred`, so it
+                // resolves a `live_query`'s rows and marks whatever it could
+                // not resolve. This handler does neither, so a `live_query`
+                // here still yields the interpreter's empty prototype — the
+                // BugFunnel 2026-08-02 PERCEPTION defect, unfixed on this path.
+                let snapshot = reactive.snapshot_resolved(&block_uri);
+                if format == "json" {
+                    // Return the ViewModel as a JSON VALUE (object), NOT a
+                    // `Value::String(json_text)`: the outer `mcp_tool` re-runs
+                    // `serde_json::to_string` on this result, so a string would
+                    // arrive DOUBLE-encoded as "{...}" and the twin's
+                    // `refresh_ui` (`from_str::<ViewModel>`) fails with
+                    // "invalid type: string". A bare object round-trips.
+                    Ok(serde_json::to_value(&snapshot)?)
                 } else {
-                    snapshot.pretty_print(0)
-                };
-                Ok(serde_json::Value::String(text))
+                    Ok(serde_json::Value::String(snapshot.pretty_print(0)))
+                }
             }
 
             "rank_tasks" => {
@@ -950,18 +1163,34 @@ mod backend {
             }
 
             "undo" => {
-                let success = runtime.block_on(service.undo())?;
-                Ok(serde_json::json!({
-                    "success": success,
-                    "message": if success { "Undo successful" } else { "Nothing to undo" },
-                }))
+                let outcome = runtime.block_on(service.undo())?;
+                let success = outcome.applied();
+                let message = match outcome {
+                    holon_api::UndoOutcome::Applied => "Undo successful".to_string(),
+                    holon_api::UndoOutcome::Empty => "Nothing to undo".to_string(),
+                    holon_api::UndoOutcome::StaleDropped { reason } => {
+                        format!("Undo skipped (stale): {reason}")
+                    }
+                    holon_api::UndoOutcome::NoChange => {
+                        "Undo made no change (the entry's inverse was a no-op)".to_string()
+                    }
+                };
+                Ok(serde_json::json!({ "success": success, "message": message }))
             }
             "redo" => {
-                let success = runtime.block_on(service.redo())?;
-                Ok(serde_json::json!({
-                    "success": success,
-                    "message": if success { "Redo successful" } else { "Nothing to redo" },
-                }))
+                let outcome = runtime.block_on(service.redo())?;
+                let success = outcome.applied();
+                let message = match outcome {
+                    holon_api::UndoOutcome::Applied => "Redo successful".to_string(),
+                    holon_api::UndoOutcome::Empty => "Nothing to redo".to_string(),
+                    holon_api::UndoOutcome::StaleDropped { reason } => {
+                        format!("Redo skipped (stale): {reason}")
+                    }
+                    holon_api::UndoOutcome::NoChange => {
+                        "Redo made no change (the entry's forward op was a no-op)".to_string()
+                    }
+                };
+                Ok(serde_json::json!({ "success": success, "message": message }))
             }
             "can_undo" => {
                 let available = runtime.block_on(async { service.can_undo().await });
@@ -979,15 +1208,20 @@ mod backend {
             }
 
             "execute_operation" => {
+                // HAZARD FIX (frontends/dioxus-web/README.md:313-318): the raw
+                // `service.execute_operation` path `block_on`s the very runtime
+                // the intent chains advance on, giving unspecified cross-lane
+                // ordering. Route the write through the ORDERED reactive seam —
+                // `ReactiveEngineDriver::synthetic_dispatch` →
+                // `ReactiveEngine::dispatch_intent_sync`. This is NOT the
+                // fire-and-forget `engine_dispatch_intents` chain lane (that
+                // reroute is explicitly forbidden by ruling). The only twin
+                // caller is the navigate-focus write, which ignores the result.
                 let entity_name = req_str(&args, "entity_name")?;
                 let operation = req_str(&args, "operation")?;
-                let storage_entity = parse_storage_entity(&args)?;
-                let result = runtime.block_on(service.execute_operation(
-                    &EntityName::from(entity_name.as_str()),
-                    &operation,
-                    storage_entity,
-                ))?;
-                Ok(serde_json::to_value(&result)?)
+                let params = parse_params(&args)?;
+                runtime.block_on(driver.synthetic_dispatch(&entity_name, &operation, params))?;
+                Ok(serde_json::Value::Null)
             }
 
             "list_commands" => {
@@ -1057,18 +1291,227 @@ mod backend {
                 Ok(serde_json::to_value(&result)?)
             }
 
+            "click" => {
+                let entity_id = req_str(&args, "entity_id")?;
+                let region = args
+                    .get("region")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("main");
+                runtime.block_on(driver.click_entity(&EntityUri::parse(&entity_id)?, region))?;
+                Ok(serde_json::json!({"clicked_entity": entity_id, "region": region}))
+            }
+
+            "type_text" => {
+                let text = req_str(&args, "text")?;
+                let mods: Vec<String> = args
+                    .get("modifiers")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|m| m.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mod_refs: Vec<&str> = mods.iter().map(String::as_str).collect();
+                runtime.block_on(driver.send_raw_keystroke(&text, &mod_refs))?;
+                Ok(serde_json::json!({"keystrokes_sent": 1}))
+            }
+
+            "insert_text" => {
+                let text = req_str(&args, "text")?;
+                runtime.block_on(driver.insert_text(&text))?;
+                Ok(serde_json::json!({"inserted_text": text}))
+            }
+
+            "list_keybindings" => {
+                let bindings: Vec<serde_json::Value> = reactive
+                    .key_bindings_snapshot()
+                    .into_iter()
+                    .map(|(action, chord)| {
+                        let keys: Vec<String> = chord.0.iter().map(|k| k.to_string()).collect();
+                        serde_json::json!({ "action": action, "chord": keys })
+                    })
+                    .collect();
+                Ok(serde_json::json!({ "bindings": bindings }))
+            }
+
+            "send_key_chord" => {
+                let entity_id = req_str(&args, "entity_id")?;
+                let keys = args
+                    .get("keys")
+                    .and_then(|v| v.as_array())
+                    .ok_or_else(|| anyhow::anyhow!("missing required field 'keys'"))?;
+                let mut key_set = std::collections::BTreeSet::new();
+                for k in keys {
+                    let s = k.as_str().ok_or_else(|| {
+                        anyhow::anyhow!("'keys' entries must be strings, got {k}")
+                    })?;
+                    key_set.insert(parse_wire_key(s)?);
+                }
+                let chord = holon_api::KeyChord(key_set);
+                let root = holon_api::root_layout_block_uri();
+                // The headless driver ignores the passed tree (re-derives it from
+                // `root` via `snapshot_reactive`), so a default tree is correct.
+                let tree = ReactiveViewModel::default();
+                let ok = runtime.block_on(driver.send_key_chord(
+                    &root,
+                    &tree,
+                    &EntityUri::parse(&entity_id)?,
+                    &chord,
+                    HashMap::new(),
+                ))?;
+                Ok(if ok {
+                    serde_json::json!({"action": "handled"})
+                } else {
+                    serde_json::json!({"action": "none"})
+                })
+            }
+
+            "await_quiescence" => {
+                let budget_ms = args
+                    .get("budget_ms")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(30000);
+                // SqlOnly worker: the only convergence signal is the CDC
+                // watermark (no Loro, no org writeback). The current-thread
+                // runtime has no background driver, so drive the reactor with a
+                // short `block_on` sleep each iteration, then sample the
+                // watermark. Converged = watermark unchanged for a continuous
+                // 50ms window; fail loud on budget exhaustion.
+                let start = std::time::Instant::now();
+                let mut last = engine.db_handle().cdc_emitted_watermark();
+                let mut stable_since = std::time::Instant::now();
+                loop {
+                    // The sleep future MUST be constructed INSIDE the runtime
+                    // context (block_on's async block), else `tokio::time::sleep`
+                    // panics "no reactor running" — see the working `describe_ui`
+                    // `timeout` pattern.
+                    runtime.block_on(async {
+                        tokio::time::sleep(std::time::Duration::from_millis(2)).await
+                    });
+                    let now_wm = engine.db_handle().cdc_emitted_watermark();
+                    if now_wm != last {
+                        last = now_wm;
+                        stable_since = std::time::Instant::now();
+                    }
+                    if stable_since.elapsed() >= std::time::Duration::from_millis(50) {
+                        return Ok(serde_json::json!({
+                            "converged": true,
+                            "waited_ms": start.elapsed().as_millis() as u64,
+                            "signals": ["cdc"],
+                        }));
+                    }
+                    if start.elapsed().as_millis() as u64 >= budget_ms {
+                        return Err(anyhow::anyhow!(
+                            "await_quiescence: CDC watermark still moving after {budget_ms}ms"
+                        ));
+                    }
+                }
+            }
+
+            "debug_pbt_snapshot" => {
+                let focused_block =
+                    holon_frontend::reactive::BuilderServices::focused_block(&**reactive)
+                        .map(|b| b.to_string());
+                let snapshot = runtime
+                    .block_on(block_query.snapshot())
+                    .map_err(|e| anyhow::anyhow!("debug_pbt_snapshot: block snapshot: {e}"))?;
+                let live_blocks: Vec<serde_json::Value> = snapshot
+                    .iter_blocks()
+                    .map(|b| serde_json::to_value(holon_api::block::BlockWire::from(b)))
+                    .collect::<Result<_, _>>()?;
+                let focus_roots: Vec<serde_json::Value> =
+                    holon_core::storage::BlockQuery::focus_roots(&snapshot)
+                        .into_iter()
+                        .map(|fr| serde_json::json!({"region": fr.region, "root_id": fr.root_id}))
+                        .collect();
+                Ok(serde_json::json!({
+                    "live_blocks": live_blocks,
+                    "focus_roots": focus_roots,
+                    "focused_block": focused_block,
+                    "loro_had_errors": false,
+                    "lamport_height": null,
+                    "loro_tree_children": {},
+                }))
+            }
+
+            "reset_vault" => {
+                // Accept the `files` array (name/content) the twin sends but
+                // IGNORE `content`: the wasm worker has no org parser
+                // (holon-orgmode won't build on wasm). Interim per orchestrator
+                // ruling 2026-07-19 — pending a wasm org parser, the seed is
+                // hardcoded raw-SQL mirroring scripts/seed_wide/*.org, kept from
+                // drifting by the native drift-guard test in
+                // holon-integration-tests (seed_wide_matches_worker_seed).
+                let _files = args.get("files");
+                // Tear down the OLD state (releases Turso/OPFS handles) and
+                // rebuild against a fresh in-memory DB for guaranteed per-case
+                // isolation — avoids OPFS-delete gymnastics. Operate on `slot`
+                // directly: the `engine`/`runtime` passed into this fn are the
+                // STALE torn-down handles and must not be reused past here.
+                {
+                    let _ = slot().lock().take();
+                }
+                mcp_watches().lock().clear();
+                let st = build_engine_state(":memory:".to_string())
+                    .map_err(|e| anyhow::anyhow!("reset_vault: build_engine_state: {e}"))?;
+                // Seed the structural working page + journals on the NEW state's
+                // runtime (build_engine_state already ran seed_default_layout).
+                st.runtime
+                    .block_on(async {
+                        seed::seed_structural(&st.engine).await?;
+                        seed::seed_journals(&st.engine).await
+                    })
+                    .map_err(|e| anyhow::anyhow!("reset_vault: seed: {e}"))?;
+                // Self-check against the fresh DB: collect every block_raw id and
+                // fail loud unless the structural working blocks landed.
+                let ids: Vec<String> = st.runtime.block_on(async {
+                    let svc = HolonService::new(st.engine.clone());
+                    let res = svc
+                        .execute_raw_sql(
+                            &format!(
+                                "SELECT id FROM {} ORDER BY id",
+                                holon::storage::BLOCK_WRITE_TABLE
+                            ),
+                            HashMap::new(),
+                        )
+                        .await?;
+                    let ids: Vec<String> = res
+                        .rows
+                        .iter()
+                        .filter_map(|row| {
+                            row.get("id")
+                                .and_then(|v| v.as_string())
+                                .map(str::to_string)
+                        })
+                        .collect();
+                    Ok::<_, anyhow::Error>(ids)
+                })?;
+                for expected in ["block:parent", "block:c1", "block:c2"] {
+                    anyhow::ensure!(
+                        ids.iter().any(|id| id == expected),
+                        "reset_vault self-check: rebuilt vault missing working block {expected:?} \
+                         (block_raw_ids = {ids:?}) — the seed did not land deterministically"
+                    );
+                }
+                let n = ids.len();
+                *slot().lock() = Some(st);
+                Ok(serde_json::json!({
+                    "reset": true,
+                    "block_raw_count": n,
+                    "block_raw_ids": ids,
+                }))
+            }
+
             // Loro/org tools and GPUI-specific tools are not available in the browser worker.
             "inspect_loro_blocks"
             | "diff_loro_sql"
             | "list_loro_documents"
             | "read_org_file"
-            | "render_org_from_blocks"
+            | "render_org"
             | "create_entity_type"
             | "screenshot"
-            | "click"
             | "scroll"
-            | "type_text"
-            | "send_key_chord"
             | "send_navigation"
             | "describe_navigation" => Err(anyhow::anyhow!(
                 "tool '{}' is not available in browser worker mode",
@@ -1077,6 +1520,12 @@ mod backend {
 
             _ => Err(anyhow::anyhow!("unknown tool '{}'", name)),
         }
+    }
+
+    /// Parse a wire key name into a `holon_api::Key`, through the same name
+    /// table `list_keybindings` emits and the native `frontends/mcp` parses.
+    fn parse_wire_key(s: &str) -> anyhow::Result<holon_api::Key> {
+        s.parse::<holon_api::Key>().map_err(|e| anyhow::anyhow!(e))
     }
 
     fn req_str(args: &serde_json::Value, field: &str) -> anyhow::Result<String> {
@@ -1168,6 +1617,16 @@ mod engine_exports {
     #[napi_derive::napi]
     pub fn engine_init(db_path: String) -> napi::Result<()> {
         backend::init(db_path)
+    }
+
+    /// Tear down the engine so Turso releases its OPFS file handles (B2). Call
+    /// this from JS BEFORE closing the OPFS sync-access handles and deleting
+    /// the db/wal files — deleting them while the worker holds sync handles
+    /// fails with `NoModificationAllowedError`. The page should reload
+    /// afterwards.
+    #[napi_derive::napi]
+    pub fn engine_reset_storage() -> napi::Result<()> {
+        backend::reset_storage()
     }
 
     #[napi_derive::napi]
@@ -1342,8 +1801,15 @@ pub fn open_db(path: String) -> napi::Result<()> {
     let core_opts = turso_core::DatabaseOpts::new();
     let flags = turso_core::OpenFlags::Create;
 
-    let db = turso_core::Database::open_file_with_flags(io.clone(), &path, flags, core_opts, None)
-        .map_err(|e| nerr("open_file_with_flags", e))?;
+    let db = turso_core::Database::open_file_with_flags(
+        io.clone(),
+        &path,
+        flags,
+        core_opts,
+        None,
+        Arc::new(turso_core::SqliteDialect),
+    )
+    .map_err(|e| nerr("open_file_with_flags", e))?;
 
     let conn = db.connect().map_err(|e| nerr("connect", e))?;
 

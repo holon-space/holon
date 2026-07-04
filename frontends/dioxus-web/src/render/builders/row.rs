@@ -9,7 +9,8 @@ pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
     let gap = *gap;
     rsx! {
         div {
-            style: "display: flex; flex-direction: row; gap: {gap}px; align-items: flex-start; flex-wrap: wrap;",
+            class: "holon-row",
+            style: "display: flex; flex-direction: row; gap: {gap}px; align-items: baseline; flex-wrap: wrap; padding: 1px 4px;",
             for (key, child) in keyed_children(&children.items) {
                 RenderNode { key: "{key}", node: child.clone() }
             }

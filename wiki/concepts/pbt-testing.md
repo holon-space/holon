@@ -113,7 +113,7 @@ cargo nextest run -p holon-integration-tests general_e2e_pbt 2>&1 | tee /tmp/pbt
 cargo llvm-cov --test general_e2e_pbt -p holon-integration-tests --html --output-dir target/coverage-report
 ```
 
-Test runner config: `Nextest.toml`. Notable: `test-threads = 1` for all integration tests (real database).
+Test runner config: `.config/nextest.toml` (the only file nextest reads; a root `Nextest.toml` is inert and was removed). Notable: per-binary `slow-timeout` overrides give the long E2E / PBT suites (`general_e2e_composed_pbt`, `turso_storage_pbt`, …) a larger hard cap. No `retries` anywhere — a PBT that only passes on retry is hiding non-determinism; never add retries to paper over a flaky PBT.
 
 ## Related Pages
 

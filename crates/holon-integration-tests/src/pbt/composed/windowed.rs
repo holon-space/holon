@@ -15,6 +15,10 @@
 //! *invariants* (the block/storage families deselect — no `SutBackend` here);
 //! the extra input caps add no new selected invariant (no invariant body binds
 //! them), so the check stays green while the alphabet widens.
+//!
+//! @pbt kind infra
+//! @pbt covers windowed-composed-check — single-sourced E4 windowed composition
+//! check
 
 use std::sync::Arc;
 
@@ -75,10 +79,18 @@ pub async fn run_windowed_composed_check(
         report.deselected.iter().map(|d| d.0).collect::<Vec<_>>(),
     );
     let failures = report.failures();
-    assert!(
-        failures.is_empty(),
-        "[windowed composed check @ {context}] run_selected over the windowed CapMap diverged — \
-         the windowed invariants fail on the COMPOSITION path:\n{failures:#?}",
-    );
+    // No softening knob on this path — but the windowed `CapMap` carries no
+    // store/SQL/org caps, so those layers DESELECT wholesale. The coverage the
+    // verdict receives is what keeps it from calling them green. Built ONLY on
+    // the failure path so a green tick pays nothing.
+    if !failures.is_empty() {
+        let coverage = super::first_divergent::RunCoverage::from_report(&report, Vec::new());
+        let verdict = super::first_divergent::first_divergent_verdict(&failures, &coverage);
+        panic!(
+            "[windowed composed check @ {context}] run_selected over the windowed CapMap \
+             diverged — the windowed invariants fail on the COMPOSITION path:\n{failures:#?}\n\
+             {verdict}",
+        );
+    }
     report
 }

@@ -213,7 +213,16 @@ impl BlockQueryHelpers<Block> for SqlBlockOperations {
     }
 }
 impl BlockMaintenanceHelpers<Block> for SqlBlockOperations {}
-impl BlockDataSourceHelpers<Block> for SqlBlockOperations {}
+#[async_trait]
+impl BlockDataSourceHelpers<Block> for SqlBlockOperations {
+    /// Read the `Page` tag from the write authority (`block_tags`) instead of
+    /// the `block`-matview-projected `Block::tags`, which trails the edge write
+    /// via CDC. Closes the read-snapshot window that let a day-page's child
+    /// escape into `journals` during tag-propagation lag (journals-phantom).
+    async fn is_page_authoritative(&self, id: &holon_api::EntityUri) -> Result<bool> {
+        self.sql_ops.block_is_page(id.as_str()).await
+    }
+}
 impl BlockOperations<Block> for SqlBlockOperations {
     fn cells(&self) -> Option<&dyn EntityCellRegistry> {
         Some(&*self.cell_registry as &dyn EntityCellRegistry)
@@ -553,11 +562,32 @@ impl BlockOrdering for SqlBlockOperations {
         properties: &HashMap<String, Value>,
         tags: &Tags,
         requires: &[EntityUri],
+        advice_suppressed: &[EntityUri],
     ) -> Result<bool> {
         self.cell_registry
             .create_entity(
-                parent_id, after_id, new_id, content, properties, tags, requires,
+                parent_id,
+                after_id,
+                new_id,
+                content,
+                properties,
+                tags,
+                requires,
+                advice_suppressed,
             )
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })
+    }
+
+    /// One warm + one commit for the whole chunk (see
+    /// `BlockCellRegistry::create_entities`) instead of the default's
+    /// per-block create — the cold-boot ingest's dominant term.
+    async fn create_in_tree_batch(
+        &self,
+        requests: &[holon_core::block_ordering::BlockCreateRequest],
+    ) -> Result<Vec<bool>> {
+        self.cell_registry
+            .create_entities(requests)
             .await
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })
     }
@@ -721,48 +751,119 @@ impl BlockOrdering for SqlBlockOperations {
         Ok(())
     }
 
+    async fn reseed_content(&self, blocks: &[(EntityUri, String)]) -> Result<usize> {
+        self.cell_registry
+            .reseed_content(blocks)
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })
+    }
+
+    /// Apply a whole file's ingest ops in ONE transaction (BugFunnel row 32).
+    ///
+    /// The historic boot loop applied each block through
+    /// [`update_in_tree`](Self::update_in_tree) / `delete_in_tree`, so every
+    /// single-row write drove a matview IVM maintenance pass over the live
+    /// watch-views — cost scaling with the accumulated block table (O(N²) cold
+    /// boot). SqlOnly is the SQL store's own keyspace, so the whole file's ops
+    /// route through `SqlOperationProvider::execute_batch_with_origin` — ONE
+    /// `db_handle.transaction()`, hence ONE maintenance pass per file.
+    ///
+    /// Creates are born carrying a strictly-increasing per-parent
+    /// document-order `sort_key`, minted in-memory (seeded once per parent from
+    /// the current sibling set — empty on cold boot). That matches what the
+    /// downstream SqlOnly `place_all` totalizer expects, so it finds every new
+    /// child already ordered and issues ZERO single-row `set_field("sort_key")`
+    /// rewrites — otherwise the per-block cost merely migrates into
+    /// `place_all`.
+    ///
+    /// In Upstream (Loro) mode field writes route through the cell registry
+    /// (Loro owns order), NOT this SQL batch sink, so the per-op default is
+    /// kept verbatim — the O(N²) this fixes was measured SqlOnly only.
+    async fn apply_ingest_batch(&self, ops: Vec<(String, StorageEntity)>) -> Result<()> {
+        if matches!(self.consolidator(), Consolidator::Upstream) {
+            for (op, params) in ops {
+                match op.as_str() {
+                    "create" | "update" => self.update_in_tree(params).await?,
+                    "delete" => self.delete_in_tree(params).await?,
+                    other => {
+                        return Err(format!("apply_ingest_batch: unknown op {other:?}").into());
+                    }
+                }
+            }
+            return Ok(());
+        }
+
+        let entity = EntityName::new(Block::entity_name());
+        let mut batch: Vec<(String, StorageEntity)> = Vec::with_capacity(ops.len());
+        // Per-parent last-assigned sort_key cursor, seeded lazily from the DB
+        // sibling set the first time a parent is touched.
+        let mut parent_cursor: HashMap<String, Option<String>> = HashMap::new();
+        for (op, mut params) in ops {
+            let id = params
+                .get("id")
+                .and_then(|v| v.as_string())
+                .map(str::to_string)
+                .ok_or_else(|| -> Box<dyn std::error::Error + Send + Sync> {
+                    "apply_ingest_batch: op missing 'id' param".into()
+                })?;
+            match op.as_str() {
+                "create" | "update" => {
+                    // Re-derive create vs update from the SQL cache — the same
+                    // classification `update_in_tree` makes, so the CDC op kind
+                    // matches the row's prior presence.
+                    let real_op = if self.cache.get_by_id(&id).await?.is_some() {
+                        "update"
+                    } else {
+                        "create"
+                    };
+                    if real_op == "create"
+                        && let Some(parent) = params
+                            .get("parent_id")
+                            .and_then(|v| v.as_string())
+                            .map(str::to_string)
+                    {
+                        let cursor = match parent_cursor.entry(parent.clone()) {
+                            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                            std::collections::hash_map::Entry::Vacant(e) => {
+                                let existing = self.sibling_keys(&parent).await?;
+                                e.insert(existing.last().map(|(_, k)| k.clone()))
+                            }
+                        };
+                        // SqlOnly `Store` order owner — the sanctioned mint site
+                        // (Replication.md §5): batched form of `new_child_anchor`'s
+                        // append path with an in-memory per-parent cursor.
+                        // ALLOW(order_minting): SqlOnly order owner, batched mint.
+                        let key = gen_key_between(cursor.as_deref(), None).map_err(
+                            |e| -> Box<dyn std::error::Error + Send + Sync> {
+                                format!("apply_ingest_batch mint for {id}: {e:#}").into()
+                            },
+                        )?;
+                        *cursor = Some(key.clone());
+                        params.insert("sort_key".into(), Value::String(key));
+                    }
+                    batch.push((real_op.to_string(), params));
+                }
+                "delete" => batch.push(("delete".to_string(), params)),
+                other => {
+                    return Err(format!("apply_ingest_batch: unknown op {other:?}").into());
+                }
+            }
+        }
+        self.sql_ops
+            .execute_batch_with_origin(&entity, batch, EventOrigin::Org)
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                format!("apply_ingest_batch execute_batch_with_origin: {e:#}").into()
+            })?;
+        Ok(())
+    }
+
     fn has_upstream_consolidator(&self) -> bool {
         self.caps.profile().has_downstream_projection()
     }
 
     fn consolidator(&self) -> Consolidator {
         self.caps.consolidator()
-    }
-
-    /// Loro mode → read each block's live fractional index from the Loro tree
-    /// and write it to SQL `sort_key` via the standard `set_field` path. This
-    /// closes the projection-totality gap: a block created but never
-    /// repositioned emits no Loro mov delta, so the outbound projector
-    /// never writes its fi and it keeps the default `"A0"`. The write goes
-    /// through `SqlOperationProvider::set_field` (→ `prepare_update`)
-    /// rather than a raw `UPDATE block_raw`, so the `properties` column is
-    /// read-merged and re-canonicalised (`properties_to_canonical_json`) —
-    /// a bare single-column raw update desyncs the matview's `properties`
-    /// projection (the `props_check` invariant's "Value::Object
-    /// serialization bug"). SqlOnly mode → no-op (SQL owns `sort_key`;
-    /// `live_sort_key` returns `None`).
-    async fn project_sort_keys(&self, ids: &[EntityUri]) -> Result<()> {
-        let entity = EntityName::new(Block::entity_name());
-        for id in ids {
-            let fi = match self
-                .cell_registry
-                .live_sort_key(id.as_str())
-                .await
-                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                    format!("project_sort_keys: live_sort_key({id}): {e:#}").into()
-                })? {
-                Some(fi) => fi,
-                None => return Ok(()), // SqlOnly — SQL already owns sort_key
-            };
-            let mut params: StorageEntity = HashMap::new();
-            params.insert("id".into(), Value::String(id.as_str().to_string()));
-            params.insert("field".into(), Value::String("sort_key".to_string()));
-            params.insert("value".into(), Value::String(fi));
-            self.sql_ops
-                .execute_operation(&entity, "set_field", params)
-                .await?;
-        }
-        Ok(())
     }
 
     async fn prev_sibling(&self, id: &EntityUri) -> Result<Option<EntityUri>> {
@@ -882,9 +983,12 @@ impl CrudOperations<Block> for SqlBlockOperations {
                 format!("BlockCellRegistry::write_field({field}): {e:#}").into()
             })?;
         if routed {
-            // The Loro outbound projector will emit the SQL UPDATE and the
-            // resulting CDC event will produce the FieldDelta. From this
-            // call site there are no SQL changes to surface synchronously.
+            // The Loro outbound projector emits the SQL UPDATE and the resulting
+            // CDC event produces the FieldDelta; there is no synchronous change
+            // to surface here. This is the org-reingest / structural seam — user
+            // CRUD `set_field` (which needs an undo inverse) is served by the
+            // Loro CRUD authority (`LoroBlockOperations`) under Loro authority,
+            // and by `SqlOperationProvider` in SqlOnly mode.
             return Ok(OperationResult::irreversible(Vec::new()));
         }
 
@@ -905,6 +1009,44 @@ impl CrudOperations<Block> for SqlBlockOperations {
             .and_then(|v| v.as_string())
             .map(String::from)
             .ok_or_else(|| "SqlBlockOperations::create: missing 'id'".to_string())?;
+
+        // This path writes `block_raw` directly — it never goes through
+        // `BlockOrdering::place`/`OrderKeyMinting`, so a caller that omits
+        // `sort_key` (creation-slot commit, a bare `block.create` Rhai/MCP
+        // action, page create) would otherwise fall through to the SQL
+        // column's literal default `"A0"` for EVERY such create. Two
+        // consecutive id-less creates under the same parent then collide on
+        // the identical key, leaving sibling order ambiguous until some
+        // later op (e.g. `split_block`'s tie-detected rebalance) re-mints
+        // distinct keys. Mint a real key here — strictly after the current
+        // last sibling — using the same `gen_key_between` fractional-index
+        // generator `new_child_anchor` uses, so a caller-supplied `sort_key`
+        // still wins.
+        //
+        // Gated on consolidator exactly like `new_child_anchor`: only the
+        // SqlOnly order owner mints. In Upstream (Loro) mode the tree is
+        // authoritative and its outbound projector is the sole `sort_key`
+        // writer (see the UPSERT comment in `prepare_create`), so minting
+        // here too would mix `gen_key_between` values with Loro-fi values in
+        // the same column — the exact keyspace-mixing bug class invariant 10
+        // warns about.
+        let mut fields = fields;
+        if !fields.contains_key("sort_key")
+            && matches!(self.consolidator(), Consolidator::Store)
+            && let Some(parent_id) = fields.get("parent_id").and_then(|v| v.as_string())
+        {
+            let siblings = self.sibling_keys(parent_id).await?;
+            let last_key = siblings.last().map(|(_, sk)| sk.clone());
+            // ALLOW(order_minting): sanctioned SqlOnly order-owner mint site
+            // (Replication.md §5), same file/gate as `new_child_anchor`.
+            let minted = gen_key_between(last_key.as_deref(), None).map_err(
+                |e| -> Box<dyn std::error::Error + Send + Sync> {
+                    format!("SqlBlockOperations::create: mint sort_key: {e:#}").into()
+                },
+            )?;
+            fields.insert("sort_key".into(), Value::String(minted));
+        }
+
         let result = self
             .sql_ops
             .execute_operation(&entity, "create", fields)
@@ -913,6 +1055,23 @@ impl CrudOperations<Block> for SqlBlockOperations {
     }
 
     async fn delete(&self, id: &str) -> Result<OperationResult> {
+        // Fail-closed on NON-LEAF (destructive-delete ruling 2026-07-21): a bare
+        // `delete` NEVER cascades a subtree. The caller must opt in explicitly
+        // via `delete_subtree` or `delete_keep_children`. Mirrors the Loro
+        // authority's guard so both providers refuse identically.
+        // ALLOW(entity_uri_from_raw): op-dispatch id string → EntityUri at the edge
+        let uri = EntityUri::from_raw(id);
+        let children = self.children_ordered(&uri).await?;
+        if !children.is_empty() {
+            return Err(format!(
+                "delete: block {id} has {} child(ren); refusing to cascade. Use \
+                 `delete_subtree` to delete the whole subtree, or \
+                 `delete_keep_children` to reparent the children first.",
+                children.len()
+            )
+            .into());
+        }
+
         let mut params: StorageEntity = HashMap::new();
         params.insert("id".into(), Value::String(id.to_string()));
         let entity = EntityName::new(Block::entity_name());
@@ -978,6 +1137,7 @@ mod tests {
     use holon_core::__operations_block_operations;
     use holon_core::OperationRegistry;
     use holon_core::block_ordering::BlockOrdering;
+    use holon_core::storage::types::StorageEntity;
     use holon_turso::schema_modules::BlockMatviewSchemaModule;
     use holon_turso::schema_modules::BlockSchemaModule;
 
@@ -1145,6 +1305,245 @@ mod tests {
             sort_key_after_first, sort_key_after_second,
             "place() called twice with identical args must not change sort_key (idempotency guard \
              regression)"
+        );
+    }
+
+    /// Bug (dogfood 2026-07-10): `block.create` without an explicit `sort_key`
+    /// always minted the SQL column default `"A0"`, so two consecutive
+    /// id-less creates under the same parent collided on the identical key —
+    /// sibling order stayed ambiguous until some later op (e.g.
+    /// `split_block`'s tie-detected rebalance) re-minted distinct keys.
+    /// `SqlBlockOperations::create` must instead mint a real, strictly
+    /// increasing key for each create when the caller omits `sort_key`.
+    #[tokio::test]
+    async fn create_without_sort_key_mints_strictly_increasing_keys() {
+        use std::collections::HashMap;
+
+        use holon_core::CrudOperations;
+        use holon_core::storage::types::StorageEntity;
+
+        let (_backend, ops, handle) = setup_sql_block_ops().await;
+
+        // ALLOW(entity_uri_from_raw): test-fixture literal (#[cfg(test)])
+        let parent = EntityUri::from_raw("block:test-parent");
+        handle
+            .execute(
+                &format!(
+                    "INSERT INTO block_raw (id, parent_id, sort_key, content, content_type, \
+                     created_at, updated_at) VALUES ('{}', 'sentinel:no_parent', 'V', 'parent', \
+                     'text', 0, 0)",
+                    parent.as_str()
+                ),
+                vec![],
+            )
+            .await
+            .expect("insert parent");
+
+        let mut fields1: StorageEntity = HashMap::new();
+        fields1.insert(
+            "id".into(),
+            holon_api::Value::String("block:child-1".to_string()),
+        );
+        fields1.insert(
+            "parent_id".into(),
+            holon_api::Value::String(parent.as_str().to_string()),
+        );
+        fields1.insert(
+            "content".into(),
+            holon_api::Value::String("first".to_string()),
+        );
+        fields1.insert(
+            "content_type".into(),
+            holon_api::Value::String("text".to_string()),
+        );
+        ops.create(fields1).await.expect("create child 1");
+
+        let mut fields2: StorageEntity = HashMap::new();
+        fields2.insert(
+            "id".into(),
+            holon_api::Value::String("block:child-2".to_string()),
+        );
+        fields2.insert(
+            "parent_id".into(),
+            holon_api::Value::String(parent.as_str().to_string()),
+        );
+        fields2.insert(
+            "content".into(),
+            holon_api::Value::String("second".to_string()),
+        );
+        fields2.insert(
+            "content_type".into(),
+            holon_api::Value::String("text".to_string()),
+        );
+        ops.create(fields2).await.expect("create child 2");
+
+        let key1 = read_sort_key(&handle, "block:child-1").await;
+        let key2 = read_sort_key(&handle, "block:child-2").await;
+
+        assert_ne!(
+            key1, "A0",
+            "id-less create must not fall back to the literal SQL default"
+        );
+        assert_ne!(
+            key2, "A0",
+            "id-less create must not fall back to the literal SQL default"
+        );
+        assert_ne!(
+            key1, key2,
+            "two consecutive id-less creates must not collide"
+        );
+        assert!(
+            key1 < key2,
+            "second create must sort strictly after the first: {key1:?} vs {key2:?}"
+        );
+    }
+
+    /// Insert a parent row directly and return its full URI.
+    async fn seed_parent(handle: &crate::storage::turso::DbHandle, bare: &str) -> String {
+        let id = format!("block:{bare}");
+        handle
+            .execute(
+                &format!(
+                    "INSERT INTO block_raw (id, parent_id, sort_key, content, content_type, \
+                     created_at, updated_at) VALUES ('{id}', 'sentinel:no_parent', 'V', 'parent', \
+                     'text', 0, 0)"
+                ),
+                vec![],
+            )
+            .await
+            .expect("insert parent");
+        id
+    }
+
+    fn child_create_op(parent: &str, i: usize, after: Option<&str>) -> (String, StorageEntity) {
+        use holon_api::Value;
+        let mut p: StorageEntity = std::collections::HashMap::new();
+        p.insert("id".into(), Value::String(format!("block:c{i}")));
+        p.insert("parent_id".into(), Value::String(parent.to_string()));
+        p.insert("content".into(), Value::String(format!("child {i}")));
+        p.insert("content_type".into(), Value::String("text".to_string()));
+        if let Some(a) = after {
+            p.insert(
+                crate::sync::event_bus::POSITION_AFTER_BLOCK_ID_PARAM.into(),
+                Value::String(a.to_string()),
+            );
+        }
+        ("create".to_string(), p)
+    }
+
+    /// Count matview-maintenance passes = broadcast batches on the `block`
+    /// matview CDC channel. Turso emits CDC per matview per transaction commit
+    /// (base tables emit none — see `cdc_base_vs_matview_repro`), so one batch
+    /// == one IVM maintenance pass. Waits up to `first` for the first pass,
+    /// then drains until the channel stays quiet for `quiet`.
+    async fn count_matview_passes(
+        cdc: &mut tokio::sync::broadcast::Receiver<
+            holon_api::streaming::WithMetadata<
+                holon_api::streaming::Batch<crate::storage::turso::RowChange>,
+                holon_api::streaming::BatchMetadata,
+            >,
+        >,
+        first: std::time::Duration,
+        quiet: std::time::Duration,
+    ) -> usize {
+        let mut n = 0usize;
+        if tokio::time::timeout(first, cdc.recv()).await.is_ok() {
+            n += 1;
+        } else {
+            return n;
+        }
+        while tokio::time::timeout(quiet, cdc.recv()).await.is_ok() {
+            n += 1;
+        }
+        n
+    }
+
+    const FIRST_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+    const QUIET: std::time::Duration = std::time::Duration::from_millis(300);
+
+    /// BugFunnel row 32 fix. Applying a whole file's ingest through
+    /// `apply_ingest_batch` drives the live watch-view matview IVM maintenance
+    /// exactly ONCE — one transaction commit per file — regardless of the block
+    /// count, instead of once per block (the O(N²) cold-boot cost whose
+    /// per-block price scaled with the accumulated table). The born-correct
+    /// per-parent sort_keys are strictly increasing, so the downstream
+    /// `place_all` totalizer would rewrite nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn batched_ingest_runs_matview_maintenance_once_per_file() {
+        let (_backend, ops, handle) = setup_sql_block_ops().await;
+        let parent = seed_parent(&handle, "p").await;
+
+        let mut cdc = handle
+            .subscribe_cdc("block")
+            .await
+            .expect("subscribe block matview cdc");
+        // Clear the parent-insert pass so the count reflects only the ingest.
+        let _ = count_matview_passes(&mut cdc, FIRST_WAIT, QUIET).await;
+
+        let n = 16usize;
+        let mut prev: Option<String> = None;
+        let ops_vec: Vec<(String, StorageEntity)> = (0..n)
+            .map(|i| {
+                let op = child_create_op(&parent, i, prev.as_deref());
+                prev = Some(format!("block:c{i}"));
+                op
+            })
+            .collect();
+
+        ops.apply_ingest_batch(ops_vec)
+            .await
+            .expect("batched ingest");
+
+        let passes = count_matview_passes(&mut cdc, FIRST_WAIT, QUIET).await;
+        assert_eq!(
+            passes, 1,
+            "one matview IVM maintenance pass per FILE (row 32 O(N²) fix); got {passes} passes for \
+             {n} blocks in one batch"
+        );
+
+        // Born-correct order: strictly increasing per-parent keys ⇒ place_all
+        // no-op (never re-mints a single row).
+        let mut keys = Vec::new();
+        for i in 0..n {
+            keys.push(read_sort_key(&handle, &format!("block:c{i}")).await);
+        }
+        for w in keys.windows(2) {
+            assert!(
+                w[0] < w[1],
+                "batched creates must be born strictly increasing so place_all rewrites nothing: \
+                 {keys:?}"
+            );
+        }
+    }
+
+    /// Baseline that the fix removes: the historic per-op apply drove ONE
+    /// matview maintenance pass per block (N passes for N blocks).
+    /// Documents that the batch count above is a real collapse, not an
+    /// artifact of the metric.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn per_op_ingest_runs_one_matview_pass_per_block() {
+        let (_backend, ops, handle) = setup_sql_block_ops().await;
+        let parent = seed_parent(&handle, "p").await;
+
+        let mut cdc = handle
+            .subscribe_cdc("block")
+            .await
+            .expect("subscribe block matview cdc");
+        let _ = count_matview_passes(&mut cdc, FIRST_WAIT, QUIET).await;
+
+        let n = 8usize;
+        let mut prev: Option<String> = None;
+        for i in 0..n {
+            let (_op, params) = child_create_op(&parent, i, prev.as_deref());
+            ops.update_in_tree(params).await.expect("per-op create");
+            prev = Some(format!("block:c{i}"));
+        }
+
+        let passes = count_matview_passes(&mut cdc, FIRST_WAIT, QUIET).await;
+        assert_eq!(
+            passes, n,
+            "the per-op path runs one matview maintenance pass per block ({n} expected); this is \
+             the O(N²) cost the batch path collapses to 1"
         );
     }
 }

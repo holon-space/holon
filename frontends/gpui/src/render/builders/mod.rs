@@ -3,13 +3,27 @@ pub(crate) mod prelude;
 pub mod style;
 
 // Re-export tree_item collapse helper for use by ReactiveShell.
+// Re-export the sidebar drag-resize machinery so the root view (`lib.rs`) can
+// mount the full-window capture overlay while a drag is in progress.
+// Accordion flow-panel split — ONE implementation, TWO call sites: columns.rs
+// (shell-less compositions) and the per-block ReactiveShell arm (production,
+// where the main panel is wrapped in a live_block so columns.rs sees no
+// column).
+pub(crate) use column::has_accordion_child;
+pub(crate) use column::render_accordion_split;
+pub(crate) use drawer::SidebarResizeState;
+pub(crate) use drawer::drag_sidebar_to;
+pub(crate) use drawer::finalize_sidebar_resize;
 pub(crate) use tree_item::collapse_state as tree_item_collapse_state;
+// Scan-weight contract between a parent's disclosure and a leaf's bullet —
+// asserted by the sidebar disclosure affordance test.
+pub use tree_item::{DISCLOSURE_WEIGHT, LEAF_BULLET_WEIGHT};
 
 holon_macros::builder_registry!("src/render/builders",
     skip: [prelude, columns, style],
     node_dispatch: AnyElement,
     context: GpuiRenderContext,
-    transform: crate::render::builders::tag(ctx, __name, __inner),
+    transform: crate::render::builders::tag_node(ctx, __name, node, __inner),
 );
 
 /// Wrapper applied to every builder's output via the `transform:` template in
@@ -26,6 +40,29 @@ pub(crate) fn tag<E: gpui::IntoElement>(
     el: E,
 ) -> AnyElement {
     tag_with_entity_id(ctx, name, None, el)
+}
+
+/// The `transform:` template above — `tag()` plus the identity of the node
+/// whose builder is being wrapped. That identity is what lets `describe_ui`
+/// report a node's OWN rect: every node of a row's chain (`tree_item` >
+/// `column` > `selectable` > `rendered_text`) renders the same entity, so an
+/// entity-wide join can only hand them all one sibling's box.
+pub(crate) fn tag_node<E: gpui::IntoElement>(
+    ctx: &GpuiRenderContext,
+    name: &'static str,
+    node: &holon_frontend::reactive_view_model::ReactiveViewModel,
+    el: E,
+) -> AnyElement {
+    let seq = ctx.bounds_registry.next_seq();
+    let id = format!("{name}#{seq}");
+    crate::geometry::TransparentTracker::new(
+        id,
+        name,
+        ctx.bounds_registry.clone(),
+        el.into_any_element(),
+    )
+    .with_vm_node(node.row_id().as_deref())
+    .into_any_element()
 }
 
 /// Like `tag()`, but binds an `entity_id` on the tracker so PBT generators
@@ -126,6 +163,16 @@ pub struct GpuiRenderContext {
     /// each lazy `live_block` create-closure captures the current chain so
     /// the new shell's own renders see the right ancestor set.
     pub live_block_ancestors: crate::entity_view_registry::LiveBlockAncestors,
+    /// The layout slot the element being built will land in. A `live_block` /
+    /// `live_query` builder hands this to the `ReactiveShell` it creates, which
+    /// then knows whether it may claim `size_full` and own a scroll viewport.
+    ///
+    /// Defaults to `Panel` — the definite-height slot a window root, a panel
+    /// wrapper, or a layout fixture provides. Only the contexts that build ONE
+    /// ROW of a collection (`RenderEntityView`, the virtualized list's per-row
+    /// context) declare `Nested`, because only there is the parent height
+    /// indefinite.
+    pub placement: crate::views::reactive_shell::ShellPlacement,
     layout_style: futures_signals::signal::Mutable<style::LayoutStyle>,
     gpui: GpuiHandle,
 }
@@ -147,6 +194,7 @@ impl GpuiRenderContext {
             local,
             nav,
             live_block_ancestors: crate::entity_view_registry::LiveBlockAncestors::new(),
+            placement: crate::views::reactive_shell::ShellPlacement::Panel,
             layout_style: futures_signals::signal::Mutable::new(style::LayoutStyle::default()),
             gpui: GpuiHandle {
                 window: window as *mut _,
@@ -163,6 +211,17 @@ impl GpuiRenderContext {
         ancestors: crate::entity_view_registry::LiveBlockAncestors,
     ) -> Self {
         self.live_block_ancestors = ancestors;
+        self
+    }
+
+    /// Declare the layout slot this context's elements land in. Re-emitted by
+    /// every block-mode `ReactiveShell` from its own placement, and set to
+    /// `Nested` by the two contexts that build one ROW of a collection.
+    pub fn with_shell_placement(
+        mut self,
+        placement: crate::views::reactive_shell::ShellPlacement,
+    ) -> Self {
+        self.placement = placement;
         self
     }
 
@@ -224,6 +283,19 @@ pub fn render(
             if let Some(renderer) = crate::render::layout_renderer::lookup_renderer(layout.name()) {
                 return renderer.render(node, ctx);
             }
+        }
+
+        // Under a `Nested` placement there is no definite height for the
+        // virtualized `gpui::list` to measure against — `scrollable_list_wrapper`'s
+        // `size_full` chain resolves to 0 and the list paints nothing. Render
+        // eagerly at content height instead, the same firewall
+        // `column::eager_collection_div` provides for content-sized columns.
+        if ctx.placement == crate::views::ShellPlacement::Nested {
+            return tag(
+                ctx,
+                "reactive_shell",
+                column::eager_collection_div(view, ctx),
+            );
         }
 
         let entity = get_or_create_reactive_shell(view, ctx);

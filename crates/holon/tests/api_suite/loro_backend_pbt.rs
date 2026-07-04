@@ -792,7 +792,7 @@ mod stateful_tests {
     proptest_state_machine::prop_state_machine! {
         #![proptest_config(ProptestConfig {
             cases: 20,
-            failure_persistence: Some(Box::new(proptest::test_runner::FileFailurePersistence::WithSource("pbt-regressions"))),
+            failure_persistence: None,
             timeout: 10000,
             verbose: 2,
             .. ProptestConfig::default()

@@ -10,7 +10,7 @@ The core architectural pattern is **Authority + Projection**: each entity type h
 
 Reads flow `authority → event log → Turso projection → Cell → UI`. Writes flow `chord op / UI → Cell → typed CrudOperations method → authority → event emission → LoroProjection/BlockConsolidator → Turso`. The UI never queries an authority directly; it reads cells, which read the projection.
 
-When Loro is disabled (SqlOnly mode), `LwwTextCellBacking` (implemented, `crates/holon-core/src/cell.rs`) substitutes the Loro-backed text cell with last-write-wins semantics — same cell interface, different protocol. `LwwScalarBacking` (scalar fields) is planned but not yet implemented; SqlOnly scalar writes go through `BlockCellRegistry::write_field`'s non-cell dispatch.
+When Loro is disabled (SqlOnly mode), `LwwTextCellBacking` (implemented, `crates/holon-core/src/cell.rs`) substitutes the Loro-backed text cell with last-write-wins semantics — same cell interface, different protocol. `LwwScalarBacking` (scalar fields, `crates/holon-core/src/cell.rs:301`) is implemented and wired: the registry resolves scalar SqlOnly cells to a live `LwwScalarBacking` (`crates/holon-loro/src/block_cell_registry.rs:547`).
 
 ### Loro CRDT Integration Overview
 
@@ -142,7 +142,7 @@ Each block contains:
 | `LoroBlockOperations` | `crates/holon-loro/src/loro_block_operations.rs` | `OperationProvider` for `entity_name="block"` — primary writer; translates set_field/create/delete to Loro mutations |
 | `BlockCellRegistry` | `crates/holon-loro/src/block_cell_registry.rs` | Per-entity cell registry; picks `LoroTextCellBacking` (Full mode, `content` field) or `LwwTextCellBacking` (SqlOnly) per field |
 | `LoroTextCellBacking` | `crates/holon-loro/src/loro_text_cell_backing.rs` | Wraps `LoroText` for `content`; produces TextOps + commit |
-| `LoroSyncController` / `LoroProjection` | `crates/holon-loro/src/loro_sync_controller.rs` | Observes Loro doc commits; diffs vs a persisted base and projects the delta into SQL |
+| `LoroSyncController` / `LoroProjection` | `crates/holon-loro/src/loro_sync_controller.rs` | Observes Loro doc commits (`subscribe_root`), drains the commit's dirty facts and re-reads only the changed nodes (event-driven, `O(changed)`), diffing against the in-memory `live` snapshot and projecting the delta into SQL. A full-document walk runs only to (re)seed `live`: cold boot, reseed-on-unsettled, and unarmed/oversized-batch bootstrap. `live`/watermark advance only after the sink write succeeds (atomic base advance) |
 | `BlockConsolidator` | `crates/holon-loro/src/consolidator.rs` | The single writer that applies projected ops to Turso `block_raw` (raw INSERT/UPDATE/DELETE) |
 | `LoroDocumentStore` | `crates/holon-loro/src/loro_document_store.rs` | Manages Loro CRDT documents on disk |
 | `SqlOperationProvider` | `crates/holon/src/core/sql_operation_provider.rs` | Used for non-block entities; SqlOnly mode fallback for blocks |
@@ -176,8 +176,8 @@ Each block contains:
 
 ```
   Chord op / UI ──→ Cell<String>.set (content: LwwTextCellBacking)
-                    scalar fields: BlockCellRegistry::write_field (non-cell dispatch;
-                                   LwwScalarBacking planned)
+                    scalar fields: BlockCellRegistry resolves LwwScalarBacking
+                                   (wired SqlOnly; block_cell_registry.rs:547)
                         ↓
                    CrudOperations::set_field
                         ↓
@@ -466,9 +466,9 @@ pub trait FileFormatAdapter: Send + Sync {
 }
 ```
 
-`OrgFormatAdapter` (`crates/holon-orgmode/src/file_format.rs`) is the first impl; `MarkdownFormatAdapter` (`crates/holon-markdown/src/file_format.rs`) is the second, targeting Obsidian-style vaults (CommonMark + GFM task lists + YAML frontmatter + `[[wikilinks]]` + `^block-id` markers, plus callouts, highlights, comments, inline tags, aliases, and self-links). The markdown dialect is **configurable**: `MarkdownFormatAdapter` holds a `MarkdownDialect` of atomic, orthogonal feature switches (one per feature, no hidden coupling) so a single adapter can match a given vault's settings or degrade all the way to CommonMark — `MarkdownFormatAdapter::obsidian()` (the `Default`, everything on), `::commonmark()` (everything off), or `::with_dialect(MarkdownDialect { .. })` for an exact mix. `FileSyncController` holds `format: Arc<dyn FileFormatAdapter>` and routes parse + render through the trait — for a vault, swap in a `MarkdownFormatAdapter` via `FileSyncController::with_format(...)`. New formats land as new `*FormatAdapter` impls; the watcher, the change-origin filter, and `_change_origin`-based echo suppression stay generic. No new sync controller is needed per format. **(Status: `MarkdownFormatAdapter` is complete but not yet wired into `FileSyncController` — it has zero prod dependents today; the live disk path is org-only. The trait is the seam it will drop into.)**
+`OrgFormatAdapter` (`crates/holon-orgmode/src/file_format.rs`) is the **sole** impl today. `FileSyncController` holds `format: Arc<dyn FileFormatAdapter>` and routes parse + render through the trait. New formats land as new `*FormatAdapter` impls; the watcher, the change-origin filter, and `_change_origin`-based echo suppression stay generic — no new sync controller is needed per format. **(A configurable `MarkdownFormatAdapter` for Obsidian-style vaults — a `MarkdownDialect` of atomic feature switches, `::obsidian()`/`::commonmark()`/`::with_dialect(..)` — was implemented and then REMOVED 2026-07-06 as unwired dead code: it had zero prod dependents and the live disk path was always org-only. It is recoverable from git history; the `FileFormatAdapter` trait is the seam it dropped into and would drop into again.)**
 
-**Markdown block-id charset (round-trip rule).** The renderer emits a block's stable id as a trailing `^id` marker (`# Heading ^id`), and the parser re-anchors the block by reading it back. The marker only survives a reparse for ids in the charset `[A-Za-z0-9_-]` (alphanumerics + `-` + `_`) — exactly the charset UUIDs use, so machine-minted ids always round-trip. An id containing any other character (spaces, `.`, `:`, `/`, punctuation, non-ASCII — i.e. hand-authored ids) has no round-trip-safe encoding: there is **no scheme in user-visible markdown**. Rather than silently drop such an id (which would make the reparse mint a fresh UUID and lose the block's identity), the renderer **fails loudly** with `MarkdownRenderError::{OutOfCharsetBlockId, EmptyBlockId}`, propagated through the whole render path. The parser's `is_block_id_byte` and the renderer's `is_block_id_char` are the two halves of this charset and must stay identical. Pinned by `holon-markdown/tests/markdown_block_round_trip_pbt.rs`.
+**Markdown block-id charset (round-trip rule).** *(Documents the removed `holon-markdown` adapter — retained as the design reference for any future re-add.)* The renderer emits a block's stable id as a trailing `^id` marker (`# Heading ^id`), and the parser re-anchors the block by reading it back. The marker only survives a reparse for ids in the charset `[A-Za-z0-9_-]` (alphanumerics + `-` + `_`) — exactly the charset UUIDs use, so machine-minted ids always round-trip. An id containing any other character (spaces, `.`, `:`, `/`, punctuation, non-ASCII — i.e. hand-authored ids) has no round-trip-safe encoding: there is **no scheme in user-visible markdown**. Rather than silently drop such an id (which would make the reparse mint a fresh UUID and lose the block's identity), the renderer **fails loudly** with `MarkdownRenderError::{OutOfCharsetBlockId, EmptyBlockId}`, propagated through the whole render path. The parser's `is_block_id_byte` and the renderer's `is_block_id_char` are the two halves of this charset and must stay identical. Pinned by `holon-markdown/tests/markdown_block_round_trip_pbt.rs`.
 
 #### Deferred adapter responsibilities (informed by the second impl)
 
@@ -484,6 +484,13 @@ There is **no EventBus**. An earlier design routed every change through a
 once each source was wired to its sink directly. The authority (Loro for blocks)
 projects into Turso through a single writer, and reactive consumers read the
 projection back through a CDC-driven mirror.
+
+The reactive read side downstream of CDC (matviews, `LiveData` and its
+combinators, render caches, UI snapshots) is governed by the **derived-data
+contract** — every derived holder equals a live recomputation at quiescence;
+see [Reactivity.md](Reactivity.md) for the contract, its corollaries
+(stateful re-grouping via `LiveData::group_by`, retraction-before-assertion,
+atomic re-snapshot, combinator error policy) and its enforcement invariants.
 
 **Location**: `crates/holon-loro/src/{loro_sync_controller,consolidator}.rs`,
 `crates/holon-api/src/live_data.rs`. The residual `crates/holon-loro/src/event_bus.rs`
@@ -594,7 +601,7 @@ Operations track their status through the following states:
 #### OperationLogEntry Schema
 
 ```sql
-CREATE TABLE operations (
+CREATE TABLE operation (
     id INTEGER PRIMARY KEY,
     operation TEXT NOT NULL,      -- JSON-serialized Operation
     inverse TEXT,                 -- JSON-serialized inverse Operation (NULL if irreversible)
@@ -607,8 +614,8 @@ CREATE TABLE operations (
 ```
 
 **Indexes:**
-- `idx_operations_created_at` - For ordering and trimming old entries
-- `idx_operations_entity_name` - For entity-specific queries
+- `idx_operation_created_at` - For ordering and trimming old entries
+- `idx_operation_entity_name` - For entity-specific queries
 
 #### Undo/Redo Logic
 
@@ -679,14 +686,14 @@ async fn split_block(&self, ...) -> Result<OperationResult> {
 The operation log enables reactive UI updates via PRQL queries:
 
 ```prql
-from operations
+from operation
 filter status != 'cancelled'
 sort {-created_at}
 take 10
 select {id, display_name, status, created_at}
 ```
 
-CDC fires automatically when the `operations` table changes, allowing the UI to reactively update undo/redo button states.
+CDC fires automatically when the `operation` table changes, allowing the UI to reactively update undo/redo button states.
 
 #### Future: Offline Sync
 

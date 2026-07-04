@@ -90,6 +90,19 @@ pub fn parse_resource_template_meta(template: &ResourceTemplate) -> Option<Resou
     })
 }
 
+/// True when a resource URI template has no unexpanded `{param}` placeholders,
+/// i.e. it is a concrete resource that can be read directly.
+///
+/// A parameterized template (e.g.
+/// `claude-history://projects/{project_id}/plan`) needs a parent key value that
+/// auto-discovery does not have, so it cannot back a standalone list sync —
+/// attempting to expand it would fail loudly at `SyncConfig::into_strategy`.
+/// Callers use this to decide whether an auto-discovered entity gets a
+/// `list_resource` sync at all.
+pub fn is_concrete_uri(uri_template: &str) -> bool {
+    !uri_template.contains('{')
+}
+
 /// Extract the YAML block after `\n---\n` in a description string.
 fn extract_yaml_block(description: &str) -> Option<String> {
     let separator = "\n---\n";

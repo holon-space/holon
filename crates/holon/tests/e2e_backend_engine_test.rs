@@ -84,7 +84,17 @@ impl OperationProvider for SqlOperationProvider {
                         description: "Field value".to_string(),
                     },
                 ],
-                ..Default::default()
+                id_column: "id".to_string(),
+                affected_fields: vec![],
+                param_mappings: vec![],
+                target_scope: holon_api::TargetScope::Block,
+                boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::Test,
+                },
+                trigger: None,
+                bound_params: Default::default(),
+                precondition: None,
             },
             OperationDescriptor {
                 entity_name: self.entity_name.clone(),
@@ -92,7 +102,18 @@ impl OperationProvider for SqlOperationProvider {
                 name: "create".to_string(),
                 display_name: "Create".to_string(),
                 description: format!("Create a new {}", self.entity_short_name),
-                ..Default::default()
+                id_column: "id".to_string(),
+                required_params: vec![],
+                affected_fields: vec![],
+                param_mappings: vec![],
+                target_scope: holon_api::TargetScope::Block,
+                boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::Test,
+                },
+                trigger: None,
+                bound_params: Default::default(),
+                precondition: None,
             },
             OperationDescriptor {
                 entity_name: self.entity_name.clone(),
@@ -105,7 +126,20 @@ impl OperationProvider for SqlOperationProvider {
                     type_hint: holon_api::TypeHint::String,
                     description: "Entity ID".to_string(),
                 }],
-                ..Default::default()
+                id_column: "id".to_string(),
+                affected_fields: vec![],
+                param_mappings: vec![],
+                target_scope: holon_api::TargetScope::Block,
+                boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
+                menu_exposure: holon_api::MenuExposure::Listed {
+                    surfaces: holon_api::SurfaceSet {
+                        slash_menu: true,
+                        action_bar: false,
+                    },
+                },
+                trigger: None,
+                bound_params: Default::default(),
+                precondition: None,
             },
         ]
     }
@@ -237,6 +271,36 @@ async fn test_basic_query_execution() -> Result<()> {
     assert!(!rows.is_empty(), "Should have at least one result");
     assert_eq!(rows[0].get("id").unwrap().as_string(), Some("block-1"));
 
+    Ok(())
+}
+
+/// The storage-agnostic `QueryEngine::execute_query` one-shot seam (the advice
+/// weave's canonical read, ADR 0022): the Turso `BackendEngine` must override
+/// the fail-loud default and return real rows without a matview/CDC setup.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_query_engine_trait_one_shot_execute_query() -> Result<()> {
+    use holon_api::query_engine::QueryEngine;
+
+    let ctx = E2ETestContext::new().await?;
+    // Own table: `block` is a materialized view in this booted schema, so the
+    // shared `setup_test_table(ctx, "block")` insert is rejected.
+    setup_test_table(&ctx, "one_shot_probe").await?;
+
+    let engine: &dyn QueryEngine = ctx.engine().as_ref();
+    let rows = engine
+        .execute_query(
+            "SELECT id, content FROM one_shot_probe ORDER BY id",
+            QueryLanguage::HolonSql,
+            HashMap::new(),
+            None,
+        )
+        .await?;
+    assert!(!rows.is_empty(), "one-shot read must return the seeded row");
+    assert_eq!(rows[0].get("id").unwrap().as_string(), Some("block-1"));
+    assert_eq!(
+        rows[0].get("content").unwrap().as_string(),
+        Some("Initial content")
+    );
     Ok(())
 }
 

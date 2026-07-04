@@ -24,10 +24,16 @@ use std::sync::Arc;
 use anyhow::Context;
 use anyhow::Result;
 use holon_api::EntityName;
+use holon_api::InterpValue;
+use holon_api::SourceLanguage;
 use holon_api::Value;
 use holon_api::action_dsl::parse_action_dsl;
+use holon_api::effect_id::FiringKey;
+use holon_api::effect_id::OutputSlot;
+use holon_api::effect_id::RuleId;
+use holon_api::effect_id::deterministic_block_id;
 use holon_api::render_eval::CORE_VALUE_FN_LOOKUP;
-use holon_api::render_eval::resolve_args_with;
+use holon_api::render_eval::eval_to_interp;
 use holon_api::streaming::Change;
 use holon_core::storage::types::StorageEntity;
 use tokio::task::JoinHandle;
@@ -35,6 +41,8 @@ use tokio_stream::StreamExt;
 use tracing::info;
 
 use crate::api::backend_engine::BackendEngine;
+use crate::api::rule_status::RuleStatus;
+use crate::api::rule_status::RuleStatusHandle;
 
 const DISCOVERY_SQL: &str = include_str!("../../../../assets/queries/action_discovery.sql");
 
@@ -45,12 +53,22 @@ pub async fn start_action_watchers(engine: Arc<BackendEngine>) -> Result<()> {
         .await
         .context("Failed to subscribe to action discovery matview")?;
 
-    crate::util::spawn_actor(run_discovery_loop(engine, discovery_stream));
+    let status = engine.rule_status().clone();
+    crate::util::spawn_actor(run_discovery_loop(engine.clone(), status, discovery_stream));
+
+    // Single-block `holon_rule` rules (ADR 0024 §7.2): the unified surface where
+    // one YAML block carries both guard and effect. Spawned alongside the legacy
+    // query+action pair watcher; the two never fire the same block (a single-block
+    // rule has no sibling trigger, which the pair discovery requires).
+    crate::api::holon_rule_watcher::start_holon_rule_watchers(engine)
+        .await
+        .context("Failed to start holon_rule watchers")?;
     Ok(())
 }
 
 async fn run_discovery_loop(
     engine: Arc<BackendEngine>,
+    status: RuleStatusHandle,
     mut discovery_stream: crate::storage::turso::RowChangeStream,
 ) {
     let mut active: HashMap<String, JoinHandle<()>> = HashMap::new();
@@ -59,76 +77,17 @@ async fn run_discovery_loop(
         for item in batch.inner.items {
             match item.change {
                 Change::Created { data, .. } => {
-                    let action_id = match extract_string(&data, "action_id") {
-                        Some(id) => id,
-                        None => {
-                            tracing::warn!("[action_watcher] discovery row missing action_id");
-                            continue;
-                        }
-                    };
-                    let query_source = match extract_string(&data, "query_source") {
-                        Some(s) => s,
-                        None => {
-                            tracing::warn!("[action_watcher] {action_id} missing query_source");
-                            continue;
-                        }
-                    };
-                    let query_language = match extract_string(&data, "query_language") {
-                        Some(s) => s,
-                        None => {
-                            tracing::warn!("[action_watcher] {action_id} missing query_language");
-                            continue;
-                        }
-                    };
-                    let action_source = match extract_string(&data, "action_source") {
-                        Some(s) => s,
-                        None => {
-                            tracing::warn!("[action_watcher] {action_id} missing action_source");
-                            continue;
-                        }
-                    };
-
-                    info!("[action_watcher] starting watcher for {action_id}");
-                    let handle = tokio::spawn(run_pair_watcher(
-                        engine.clone(),
-                        action_id.clone(),
-                        query_source,
-                        query_language,
-                        action_source,
-                    ));
-                    active.insert(action_id, handle);
+                    start_pair(&engine, &status, &mut active, &data);
                 }
                 Change::Deleted { id, .. } => {
                     if let Some(handle) = active.remove(&id) {
                         handle.abort();
                         info!("[action_watcher] aborted watcher for {id}");
                     }
+                    status.clear(&id);
                 }
-                Change::Updated { id, data, .. } => {
-                    if let Some(handle) = active.remove(&id) {
-                        handle.abort();
-                    }
-                    let query_source = match extract_string(&data, "query_source") {
-                        Some(s) => s,
-                        None => continue,
-                    };
-                    let query_language = match extract_string(&data, "query_language") {
-                        Some(s) => s,
-                        None => continue,
-                    };
-                    let action_source = match extract_string(&data, "action_source") {
-                        Some(s) => s,
-                        None => continue,
-                    };
-                    info!("[action_watcher] restarting watcher for {id}");
-                    let handle = tokio::spawn(run_pair_watcher(
-                        engine.clone(),
-                        id.clone(),
-                        query_source,
-                        query_language,
-                        action_source,
-                    ));
-                    active.insert(id, handle);
+                Change::Updated { data, .. } => {
+                    start_pair(&engine, &status, &mut active, &data);
                 }
                 _ => {}
             }
@@ -136,8 +95,69 @@ async fn run_discovery_loop(
     }
 }
 
+/// Spawn (or respawn) the pair watcher for one discovered rule head. Aborts any
+/// prior watcher for the same id first. A legacy `action`-language head is NOT
+/// executed — it only records a loud [`RuleStatus::DeprecatedLanguage`] so it
+/// surfaces on the rule card instead of going silently inert (ADR 0024 WP3).
+fn start_pair(
+    engine: &Arc<BackendEngine>,
+    status: &RuleStatusHandle,
+    active: &mut HashMap<String, JoinHandle<()>>,
+    data: &StorageEntity,
+) {
+    let action_id = match extract_string(data, "action_id") {
+        Some(id) => id,
+        None => {
+            tracing::warn!("[action_watcher] discovery row missing action_id");
+            return;
+        }
+    };
+    if let Some(handle) = active.remove(&action_id) {
+        handle.abort();
+    }
+
+    // Legacy `action` language: refuse to execute; surface the deprecation loud.
+    let action_language = extract_string(data, "action_language").map(|s| {
+        s.parse::<SourceLanguage>()
+            .expect("SourceLanguage::from_str is infallible")
+    });
+    if matches!(action_language, Some(SourceLanguage::LegacyAction)) {
+        tracing::warn!(
+            "[action_watcher] {action_id} uses the retired 'action' language — not executing; \
+             rename the source block to holon_rule"
+        );
+        status.set(&action_id, RuleStatus::DeprecatedLanguage);
+        return;
+    }
+
+    let (query_source, query_language, action_source) = match (
+        extract_string(data, "query_source"),
+        extract_string(data, "query_language"),
+        extract_string(data, "action_source"),
+    ) {
+        (Some(qs), Some(ql), Some(a)) => (qs, ql, a),
+        _ => {
+            tracing::warn!("[action_watcher] {action_id} missing query/action source");
+            return;
+        }
+    };
+
+    info!("[action_watcher] starting watcher for {action_id}");
+    status.set(&action_id, RuleStatus::Active);
+    let handle = tokio::spawn(run_pair_watcher(
+        engine.clone(),
+        status.clone(),
+        action_id.clone(),
+        query_source,
+        query_language,
+        action_source,
+    ));
+    active.insert(action_id, handle);
+}
+
 async fn run_pair_watcher(
     engine: Arc<BackendEngine>,
+    status: RuleStatusHandle,
     action_id: String,
     query_source: String,
     query_language: String,
@@ -145,6 +165,7 @@ async fn run_pair_watcher(
 ) {
     if let Err(e) = run_pair_watcher_inner(
         engine,
+        &status,
         action_id.clone(),
         query_source,
         query_language,
@@ -158,6 +179,7 @@ async fn run_pair_watcher(
 
 async fn run_pair_watcher_inner(
     engine: Arc<BackendEngine>,
+    status: &RuleStatusHandle,
     action_id: String,
     query_source: String,
     query_language: String,
@@ -167,17 +189,37 @@ async fn run_pair_watcher_inner(
         format!("Unknown query language '{query_language}' for action {action_id}")
     })?;
 
-    let sql = engine
-        .compile_to_sql(&query_source, language)
-        .with_context(|| {
-            format!("Failed to compile query for action {action_id}: {query_source}")
-        })?;
+    let sql = match engine.compile_to_sql(&query_source, language) {
+        Ok(sql) => sql,
+        Err(e) => {
+            status.set(&action_id, RuleStatus::CompileError(format!("{e:#}")));
+            return Err(e).with_context(|| {
+                format!("Failed to compile query for action {action_id}: {query_source}")
+            });
+        }
+    };
 
-    let parsed_action = parse_action_dsl(&action_source)
-        .with_context(|| format!("Failed to parse action DSL for {action_id}: {action_source}"))?;
+    let parsed_action = match parse_action_dsl(&action_source) {
+        Ok(a) => a,
+        Err(e) => {
+            status.set(&action_id, RuleStatus::ParseError(format!("{e:#}")));
+            return Err(e).with_context(|| {
+                format!("Failed to parse action DSL for {action_id}: {action_source}")
+            });
+        }
+    };
 
     let entity_name = EntityName::new(&parsed_action.entity);
+    // Parse the discovery id into a typed rule identity once, at the watcher
+    // boundary; every firing derives its deterministic effect id from it.
+    let rule = RuleId::new(action_id.clone());
 
+    // Every trigger is a data-reactive matview watch. Temporal triggers (the
+    // journal auto-create) read the `clock` relation's materialized `today`
+    // value instead of `date('now')`, so they too back a CDC matview: the
+    // scheduler's day-rollover UPDATE re-fires the watch (ADR 0024 P5). The old
+    // boot-one-shot `is_tableless` branch is gone — it never re-fired and was
+    // the "temporal triggers never re-fire" defect (BugFunnel F4).
     let mut row_stream = engine
         .query_and_watch(sql, HashMap::new(), None)
         .await
@@ -185,34 +227,106 @@ async fn run_pair_watcher_inner(
 
     while let Some(batch) = row_stream.next().await {
         for item in batch.inner.items {
-            if let Change::Created { data, .. } = item.change {
-                let resolved =
-                    resolve_args_with(&parsed_action.params, &data, &CORE_VALUE_FN_LOOKUP);
-
-                let params: StorageEntity = resolved
-                    .named
-                    .into_iter()
-                    .map(|(k, v)| (k.into(), v))
-                    .collect();
-
-                info!(
-                    "[action_watcher] executing {}.{} with params={params:?}",
-                    parsed_action.entity, parsed_action.operation
-                );
-
-                if let Err(e) = engine
-                    .execute_operation(&entity_name, &parsed_action.operation, params)
-                    .await
-                {
-                    tracing::error!(
-                        "[action_watcher] execute_operation failed for action {action_id}: {e:#}"
-                    );
+            match item.change {
+                Change::Created { data, .. } => {
+                    fire_action(&engine, status, &entity_name, &parsed_action, &rule, &data).await;
                 }
+                // Re-fire on Updated ONLY for create-effect rules. A rowid-stable
+                // UPDATE (the clock relation's day-rollover write, WP1) re-fires
+                // the journal create; the deterministic effect id (WP2) makes the
+                // re-create converge to a no-op upsert. Non-create effects
+                // (set_field/update/delete) must NOT re-fire on Updated — they
+                // would re-execute a side effect with no dedup (a pre-existing
+                // re-fire hazard deferred to Phase-2 inhibitor guards). Gate
+                // strictly on the operation kind. `instantiate_template` is also
+                // safe — it derives deterministic instance ids from context_key,
+                // so re-fire converges.
+                Change::Updated { data, .. }
+                    if parsed_action.operation == "create"
+                        || parsed_action.operation == "instantiate_template" =>
+                {
+                    fire_action(&engine, status, &entity_name, &parsed_action, &rule, &data).await;
+                }
+                _ => {}
             }
         }
     }
 
     Ok(())
+}
+
+/// Resolve an action's params against a produced row and dispatch the
+/// operation. Fired for each `Created` row the reactive `query_and_watch`
+/// matview delivers. Execution failures are logged loudly (fail-loud) but do
+/// not abort the watcher — one bad row must not tear down the whole action.
+async fn fire_action(
+    engine: &BackendEngine,
+    status: &RuleStatusHandle,
+    entity_name: &EntityName,
+    parsed_action: &holon_api::action_dsl::ParsedAction,
+    rule: &RuleId,
+    data: &StorageEntity,
+) {
+    // Action params are all named, plain values (never render templates or
+    // row-producing collections), so evaluate each directly. Routing through the
+    // render-oriented `resolve_args_with` would divert any param whose name
+    // collides with a render-template key (`parent_id`, `sortkey`, `action`, …
+    // see `is_template_arg`) into an unevaluated `templates` bucket the op never
+    // sees — which silently dropped `block.create`'s `parent_id` and broke
+    // journal auto-create ("parent_id is required for block creation").
+    let mut params: StorageEntity = parsed_action
+        .params
+        .iter()
+        .filter_map(|arg| {
+            let name = arg.name.as_ref()?;
+            match eval_to_interp(&arg.value, data, &CORE_VALUE_FN_LOOKUP) {
+                InterpValue::Value(v) => Some((name.clone().into(), v)),
+                InterpValue::Rows(_) => None,
+            }
+        })
+        .collect();
+
+    // Deterministic effect id (ADR 0024 P4): a rule-fired create mints a
+    // name-based UUIDv5 of (rule-id, firing-key, slot) so every replica firing
+    // this rule for this row produces the SAME block id; the CRDT merge then
+    // collapses concurrent creates into one node, and a re-fire (boot re-reg,
+    // day rollover) upserts the same id (Ok in both providers — SqlOnly ON
+    // CONFLICT DO UPDATE, Loro get-then-update). We supply it explicitly so the
+    // provider's random-v4 id-less path never runs for rules. An author-supplied
+    // literal id is already replica-stable, so it wins.
+    if parsed_action.operation == "create" && !params.contains_key("id") {
+        let key = FiringKey::from_row(data);
+        let id = deterministic_block_id(rule, &key, &OutputSlot::first());
+        params.insert("id".into(), Value::String(id.as_str().to_string()));
+    }
+
+    info!(
+        "[action_watcher] executing {}.{} with params={params:?}",
+        parsed_action.entity, parsed_action.operation
+    );
+
+    // Duplicate-id create is a convergent upsert (Ok) in both providers, so a
+    // re-fire is idempotent, not an error. Any *other* execute failure is a real
+    // fault — logged loudly (fail-loud); it must not tear down the watcher.
+    // Rule-fired effects carry `fired-by` provenance (ADR 0024) and must NEVER
+    // enter the user undo stack.
+    if let Err(e) = engine
+        .execute_operation(
+            entity_name,
+            &parsed_action.operation,
+            params,
+            holon_api::OpOrigin::Rule {
+                transition_id: rule.as_str().to_string(),
+            },
+        )
+        .await
+    {
+        status.set(rule.as_str(), RuleStatus::ExecError(format!("{e:#}")));
+        tracing::error!(
+            "[action_watcher] execute_operation failed for action {}: {e:#}",
+            rule.as_str()
+        );
+    }
 }
 
 fn extract_string(row: &StorageEntity, key: &str) -> Option<String> {
@@ -221,5 +335,387 @@ fn extract_string(row: &StorageEntity, key: &str) -> Option<String> {
         Value::Integer(i) => Some(i.to_string()),
         Value::Float(f) => Some(f.to_string()),
         other => Some(format!("{other:?}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::core::sql_operation_provider::SqlOperationProvider;
+    use crate::di::test_helpers::create_test_engine_with_providers;
+    use crate::storage::BLOCK_WRITE_TABLE;
+
+    const JOURNAL_ACTION: &str =
+        "block.create(#{parent_id: \"block:journals\", content: col(\"name\")})";
+
+    const TEMPLATE_ACTION: &str = "block.instantiate_template(#{template_id: \"block:day-tpl\", \
+                                   target_parent: \"block:journals\", context_key: col(\"name\"), \
+                                   bindings: #{date: col(\"name\")}})";
+
+    /// A test engine with the `block` SQL operation provider registered (writes
+    /// to `block_raw`), mirroring the production wiring in `loro_module.rs`.
+    async fn block_engine() -> Arc<BackendEngine> {
+        create_test_engine_with_providers(":memory:".into(), |module| {
+            module.with_operation_provider_factory(|backend| {
+                let db_handle =
+                    tokio::task::block_in_place(|| backend.blocking_read().handle().clone());
+                Arc::new(SqlOperationProvider::new(
+                    db_handle,
+                    BLOCK_WRITE_TABLE.to_string(),
+                    "block".to_string(),
+                    "block".to_string(),
+                ))
+            })
+        })
+        .await
+        .unwrap()
+    }
+
+    async fn seed_journals_parent(engine: &BackendEngine) {
+        // Route through the sanctioned block writer (SqlBlockOperations), not a
+        // raw INSERT, so the FK parent exists for the rule-fired children.
+        let mut parent = StorageEntity::new();
+        parent.insert("id".into(), Value::String("block:journals".to_string()));
+        parent.insert("content".into(), Value::String("Journals".to_string()));
+        engine
+            .execute_operation(
+                &EntityName::new("block"),
+                "create",
+                parent,
+                holon_api::OpOrigin::User,
+            )
+            .await
+            .unwrap();
+    }
+
+    async fn count_journal_children(engine: &BackendEngine) -> usize {
+        engine
+            .db_handle()
+            .query(
+                "SELECT id FROM block_raw WHERE parent_id = 'block:journals'",
+                HashMap::new(),
+            )
+            .await
+            .unwrap()
+            .len()
+    }
+
+    fn name_row(day: &str) -> StorageEntity {
+        let mut row = StorageEntity::new();
+        row.insert("name".into(), Value::String(day.to_string()));
+        row
+    }
+
+    /// WP2 core: firing the same create rule for the same day twice yields the
+    /// same deterministic id, so the second create upserts the same row — no
+    /// duplicate. A different day is a different firing key, so a new block.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fire_action_dedups_same_day_and_distinguishes_days() {
+        let engine = block_engine().await;
+        seed_journals_parent(&engine).await;
+
+        let parsed = parse_action_dsl(JOURNAL_ACTION).unwrap();
+        let entity = EntityName::new(&parsed.entity);
+        let rule = RuleId::new("journals::action::0");
+
+        fire_action(
+            &engine,
+            engine.rule_status(),
+            &entity,
+            &parsed,
+            &rule,
+            &name_row("2026-07-10"),
+        )
+        .await;
+        fire_action(
+            &engine,
+            engine.rule_status(),
+            &entity,
+            &parsed,
+            &rule,
+            &name_row("2026-07-10"),
+        )
+        .await;
+        assert_eq!(
+            count_journal_children(&engine).await,
+            1,
+            "same-day re-fire must converge to one journal block"
+        );
+
+        fire_action(
+            &engine,
+            engine.rule_status(),
+            &entity,
+            &parsed,
+            &rule,
+            &name_row("2026-07-11"),
+        )
+        .await;
+        assert_eq!(
+            count_journal_children(&engine).await,
+            2,
+            "a new day must mint a distinct journal block"
+        );
+    }
+
+    async fn wait_for_children(engine: &BackendEngine, expected: usize, timeout: Duration) {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let n = count_journal_children(engine).await;
+            if n == expected {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "expected {expected} journal children, still {n} after timeout"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Rule-driven template instantiation through the EXISTING watcher
+    /// machinery (docs/Proposals/Templating-2026-07-12.md §6): the clock
+    /// trigger fires `block.instantiate_template`, the operation derives
+    /// deterministic instance ids from `(template_id, context_key)`, so the
+    /// same-day re-fire converges and the rollover day mints a second
+    /// instance. (The ratified ADR 0024 YAML rule grammar is the yaml-rule
+    /// stream's integration point; this proves the effect seam it will call.)
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rule_fired_template_instantiation_converges_per_day() {
+        let engine = block_engine().await;
+        seed_journals_parent(&engine).await;
+
+        // Seed a one-child template.
+        for (id, parent, content, props) in [
+            ("block:day-tpl", None, "{{date}}", Some(("daily", "date"))),
+            (
+                "block:day-tpl-c1",
+                Some("block:day-tpl"),
+                "Agenda for {{date}}",
+                None,
+            ),
+        ] {
+            let mut params = StorageEntity::new();
+            params.insert("id".into(), Value::String(id.to_string()));
+            params.insert("content".into(), Value::String(content.to_string()));
+            if let Some(p) = parent {
+                params.insert("parent_id".into(), Value::String(p.to_string()));
+            }
+            if let Some((name, vars)) = props {
+                params.insert("template".into(), Value::String(name.to_string()));
+                params.insert("template_vars".into(), Value::String(vars.to_string()));
+            }
+            engine
+                .execute_operation(
+                    &EntityName::new("block"),
+                    "create",
+                    params,
+                    holon_api::OpOrigin::User,
+                )
+                .await
+                .unwrap();
+        }
+
+        let parsed = parse_action_dsl(TEMPLATE_ACTION).unwrap();
+        let entity = EntityName::new(&parsed.entity);
+        let rule = RuleId::new("journals::template::0");
+
+        for _ in 0..2 {
+            fire_action(
+                &engine,
+                engine.rule_status(),
+                &entity,
+                &parsed,
+                &rule,
+                &name_row("2026-07-12"),
+            )
+            .await;
+        }
+        assert_eq!(
+            count_journal_children(&engine).await,
+            1,
+            "same-day re-fire must converge to one instance root"
+        );
+
+        fire_action(
+            &engine,
+            engine.rule_status(),
+            &entity,
+            &parsed,
+            &rule,
+            &name_row("2026-07-13"),
+        )
+        .await;
+        assert_eq!(
+            count_journal_children(&engine).await,
+            2,
+            "day rollover mints the next day's instance"
+        );
+
+        // The instance carries the substituted child.
+        let rows = engine
+            .db_handle()
+            .query(
+                "SELECT content FROM block_raw WHERE content = 'Agenda for 2026-07-12'",
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "child substituted exactly once per day");
+    }
+
+    /// The rollover extension end-to-end: the clock-backed journal rule fires
+    /// on the initial `Created` row, then re-fires on the day-rollover
+    /// `Updated` (rowid-stable UPDATE of the `clock` row) to create the
+    /// next day's journal. The deterministic id keeps each day at exactly
+    /// one block.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rollover_update_refires_journal_create() {
+        let engine = block_engine().await;
+        seed_journals_parent(&engine).await;
+        // Pin the clock `day` row to a known date (a boot-seeded row may already
+        // exist), so the watcher's initial `Created` fires for a deterministic
+        // day.
+        engine
+            .db_handle()
+            .execute(
+                "INSERT INTO clock (grain, today, epoch_day, updated_at) VALUES ('day', \
+                 '2026-07-10', 20679, '2026-07-10T00:00:00Z') ON CONFLICT(grain) DO UPDATE SET \
+                 today = excluded.today, epoch_day = excluded.epoch_day, updated_at = \
+                 excluded.updated_at",
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        let watcher = tokio::spawn(run_pair_watcher(
+            engine.clone(),
+            engine.rule_status().clone(),
+            "journals::action::0".to_string(),
+            "SELECT today as name FROM clock WHERE grain = 'day'".to_string(),
+            "holon_sql".to_string(),
+            JOURNAL_ACTION.to_string(),
+        ));
+
+        // Initial Created row → day-1 journal.
+        wait_for_children(&engine, 1, Duration::from_secs(15)).await;
+
+        // Simulate day-rollover: a rowid-stable UPDATE emits CDC `Updated`, which
+        // the create-effect rule now re-fires on.
+        engine
+            .db_handle()
+            .execute(
+                "UPDATE clock SET today = '2026-07-11', epoch_day = 20680, updated_at = \
+                 '2026-07-11T00:00:00Z' WHERE grain = 'day'",
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        wait_for_children(&engine, 2, Duration::from_secs(15)).await;
+
+        watcher.abort();
+    }
+
+    /// The clock-backed template instantiation fires on initial row Created
+    /// and re-fires on day-rollover Updated to create the next day's instance.
+    /// Deterministic ids keep each day at exactly one block; a duplicate same-
+    /// day UPDATE converges (still exactly one per day).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn clock_rollover_refires_template_instantiation() {
+        let engine = block_engine().await;
+        seed_journals_parent(&engine).await;
+
+        // Seed a one-child template (same as the rule-fired test).
+        for (id, parent, content, props) in [
+            ("block:day-tpl", None, "{{date}}", Some(("daily", "date"))),
+            (
+                "block:day-tpl-c1",
+                Some("block:day-tpl"),
+                "Agenda for {{date}}",
+                None,
+            ),
+        ] {
+            let mut params = StorageEntity::new();
+            params.insert("id".into(), Value::String(id.to_string()));
+            params.insert("content".into(), Value::String(content.to_string()));
+            if let Some(p) = parent {
+                params.insert("parent_id".into(), Value::String(p.to_string()));
+            }
+            if let Some((name, vars)) = props {
+                params.insert("template".into(), Value::String(name.to_string()));
+                params.insert("template_vars".into(), Value::String(vars.to_string()));
+            }
+            engine
+                .execute_operation(
+                    &EntityName::new("block"),
+                    "create",
+                    params,
+                    holon_api::OpOrigin::User,
+                )
+                .await
+                .unwrap();
+        }
+
+        // Pin the clock day row.
+        engine
+            .db_handle()
+            .execute(
+                "INSERT INTO clock (grain, today, epoch_day, updated_at) VALUES ('day', \
+                 '2026-07-10', 20679, '2026-07-10T00:00:00Z') ON CONFLICT(grain) DO UPDATE SET \
+                 today = excluded.today, epoch_day = excluded.epoch_day, updated_at = \
+                 excluded.updated_at",
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        let watcher = tokio::spawn(run_pair_watcher(
+            engine.clone(),
+            engine.rule_status().clone(),
+            "journals::template::0".to_string(),
+            "SELECT today as name FROM clock WHERE grain = 'day'".to_string(),
+            "holon_sql".to_string(),
+            TEMPLATE_ACTION.to_string(),
+        ));
+
+        // Initial Created → day-1 instance.
+        wait_for_children(&engine, 1, Duration::from_secs(15)).await;
+
+        // Day rollover: rowid-stable UPDATE → day-2 instance.
+        engine
+            .db_handle()
+            .execute(
+                "UPDATE clock SET today = '2026-07-11', epoch_day = 20680, updated_at = \
+                 '2026-07-11T00:00:00Z' WHERE grain = 'day'",
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        wait_for_children(&engine, 2, Duration::from_secs(15)).await;
+
+        // Duplicate same-day fire converges: still exactly two instances.
+        engine
+            .db_handle()
+            .execute(
+                "UPDATE clock SET today = '2026-07-11', epoch_day = 20680, updated_at = \
+                 '2026-07-11T00:00:01Z' WHERE grain = 'day'",
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        // Small sleep to let the re-fire land, then assert convergence.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            count_journal_children(&engine).await,
+            2,
+            "duplicate same-day re-fire must converge (deterministic instance id)"
+        );
+
+        watcher.abort();
     }
 }

@@ -6,455 +6,44 @@
 //! nothing else. Extraction/comparison strategies are named `fn`s in this
 //! module (greppable wiring; see the registry module doc's integrity rule).
 
-use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
 
 use holon_api::Block;
+use holon_pbt_core::block_compare::compare_blocks;
 use holon_pbt_core::capabilities::EntityUri;
 use holon_pbt_core::capabilities::RefBackend;
-use holon_pbt_core::capabilities::RefBlockTree;
 use holon_pbt_core::capabilities::RefEditorMirror;
+use holon_pbt_core::capabilities::RefHistoryExpectation;
 use holon_pbt_core::capabilities::RefLayout;
-use holon_pbt_core::capabilities::SutBackend;
 use holon_pbt_core::capabilities::SutEditorMirrorRead;
-use holon_pbt_core::capabilities::SutLoroLog;
+use holon_pbt_core::capabilities::SutHistory;
 use holon_pbt_core::capabilities::SutOrgRead;
 use holon_pbt_core::capabilities::SutRenderer;
-use holon_pbt_core::capabilities::SutSqlProjection;
+use holon_pbt_core::composition::Attribution;
 use holon_pbt_core::composition::CapId;
 use holon_pbt_core::composition::CapMap;
+use holon_pbt_core::composition::Layer;
 use holon_pbt_core::composition::Needs;
+use holon_pbt_core::correspondence::Converge;
+use holon_pbt_core::correspondence::Correspondence;
+use holon_pbt_core::correspondence::Extraction;
+use holon_pbt_core::correspondence::NamedCompare;
+use holon_pbt_core::correspondence::Observable;
+use holon_pbt_core::correspondence::StoreProjection;
 use holon_pbt_core::invariant::InvariantResult;
 
-use crate::pbt::correspondence::Converge;
-use crate::pbt::correspondence::Correspondence;
-use crate::pbt::correspondence::Extraction;
-use crate::pbt::correspondence::NamedCompare;
-use crate::pbt::correspondence::Observable;
-use crate::pbt::correspondence::StoreProjection;
-use crate::pbt::invariants::block_compare::BlockFacet;
-use crate::pbt::invariants::block_compare::compare_block_fields;
-use crate::pbt::invariants::block_compare::compare_block_subset;
-use crate::pbt::invariants::block_compare::compare_blocks;
-
-// ─── Observable: non-seed blocks (the `inv-blocks-match-ref/*` family) ──────
-
-/// The set of non-seed blocks, as each storage-pipeline store sees it. The
-/// reference projection is [`RefBackend::non_seed_blocks`]; each store
-/// snapshot filters seed rows via [`RefBackend::seed_block_ids`] (context
-/// read: it shapes comparability, it never supplies the expected value). The
-/// `/org` view stays a hand-written invariant for now — distinct observable
-/// facet (renderer-canonical sibling order), Phase 3.
-pub struct NonSeedBlocks;
-
-impl Observable for NonSeedBlocks {
-    type Value = Vec<Block>;
-    const NAME: &'static str = "blocks-match-ref";
-}
-
-pub fn non_seed_blocks() -> Correspondence<NonSeedBlocks> {
-    Correspondence {
-        ref_project: ref_non_seed_blocks,
-        stores: vec![
-            // Write-side `block_raw` table — the convergent source of truth.
-            // Field SUBSET: `block_raw` lacks the junction `tags`/`requires`
-            // columns the matview joins, so a full compare would false-fail.
-            StoreProjection {
-                id: "inv-blocks-match-ref/block_raw",
-                store: "block_raw",
-                needs: Needs {
-                    sut_present: vec![CapId::of::<dyn SutBackend>()],
-                    sut_absent: Vec::new(),
-                    ref_present: vec![CapId::of::<dyn RefBackend>()],
-                },
-                extract: extract_block_raw,
-                compare: NamedCompare {
-                    name: "compare_block_subset{content,properties}",
-                    f: compare_block_raw_subset,
-                },
-                converge: Converge::None,
-            },
-            // CDC-driven `block` matview mirror. Settle-first: the harness's
-            // 3-projection convergence settle covers CDC, so this store runs
-            // strict `Converge::None` (the pre-registry body's 5s retry idiom
-            // predates the settle hook). If the keystone surfaces a residual
-            // in-transition race, downgrade to a DISCLOSED `Converge::Retry`
-            // with the observed lag as the reason — never silently.
-            StoreProjection {
-                id: "inv-blocks-match-ref/matview",
-                store: "matview",
-                needs: Needs {
-                    sut_present: vec![
-                        CapId::of::<dyn SutBackend>(),
-                        CapId::of::<dyn SutSqlProjection>(),
-                    ],
-                    sut_absent: Vec::new(),
-                    ref_present: vec![CapId::of::<dyn RefBackend>()],
-                },
-                extract: extract_matview,
-                compare: NamedCompare {
-                    name: "compare_block_fields",
-                    f: compare_matview_fields,
-                },
-                converge: Converge::None,
-            },
-            // Live Loro tree. Unobservable (disclosed Skip) when Loro isn't
-            // enabled on the variant; strict otherwise — seeds materialize
-            // into the Loro store, so a non-seed divergence is a real bug.
-            StoreProjection {
-                id: "inv-blocks-match-ref/loro",
-                store: "loro",
-                needs: Needs {
-                    sut_present: vec![CapId::of::<dyn SutLoroLog>()],
-                    sut_absent: Vec::new(),
-                    ref_present: vec![CapId::of::<dyn RefBackend>()],
-                },
-                extract: extract_loro,
-                compare: NamedCompare {
-                    name: "compare_block_fields",
-                    f: compare_loro_fields,
-                },
-                converge: Converge::None,
-            },
-        ],
-    }
-}
-
-fn ref_non_seed_blocks(refs: &CapMap) -> Extraction<Vec<Block>> {
-    Extraction::Value(refs.non_seed_blocks())
-}
-
-fn extract_block_raw<'a>(
-    sut: &'a CapMap,
-    refs: &'a CapMap,
-) -> Pin<Box<dyn Future<Output = Extraction<Vec<Block>>> + 'a>> {
-    Box::pin(async move {
-        let seed_block_ids = refs.seed_block_ids();
-        Extraction::Value(
-            sut.block_raw_snapshot()
-                .await
-                .into_iter()
-                .filter(|b| !seed_block_ids.contains(&b.id))
-                .collect(),
-        )
-    })
-}
-
-fn extract_matview<'a>(
-    sut: &'a CapMap,
-    refs: &'a CapMap,
-) -> Pin<Box<dyn Future<Output = Extraction<Vec<Block>>> + 'a>> {
-    Box::pin(async move {
-        let seed_block_ids = refs.seed_block_ids();
-        Extraction::Value(
-            sut.live_block_snapshot()
-                .await
-                .into_iter()
-                .filter(|b| !seed_block_ids.contains(&b.id))
-                .collect(),
-        )
-    })
-}
-
-fn extract_loro<'a>(
-    sut: &'a CapMap,
-    refs: &'a CapMap,
-) -> Pin<Box<dyn Future<Output = Extraction<Vec<Block>>> + 'a>> {
-    Box::pin(async move {
-        let Some(loro_blocks) = sut.loro_block_snapshot().await else {
-            return Extraction::Unobservable("Loro not enabled on this variant".to_string());
-        };
-        let seed_block_ids = refs.seed_block_ids();
-        Extraction::Value(
-            loro_blocks
-                .into_iter()
-                .filter(|b| !seed_block_ids.contains(&b.id))
-                .collect(),
-        )
-    })
-}
-
-fn compare_matview_fields(sut: &Vec<Block>, ref_: &Vec<Block>) -> Result<(), String> {
-    compare_block_fields("inv-blocks-match-ref/matview", sut, ref_)
-}
-
-fn compare_loro_fields(sut: &Vec<Block>, ref_: &Vec<Block>) -> Result<(), String> {
-    compare_block_fields("inv-blocks-match-ref/loro", sut, ref_)
-}
-
-fn compare_block_raw_subset(sut: &Vec<Block>, ref_: &Vec<Block>) -> Result<(), String> {
-    match compare_block_subset(
-        "inv-blocks-match-ref/block_raw",
-        sut,
-        ref_,
-        &[BlockFacet::Content, BlockFacet::Properties],
-    ) {
-        InvariantResult::Ok => Ok(()),
-        InvariantResult::Fail(msg) => Err(msg),
-        // `compare_block_subset` never skips; a Skip here would be a harness
-        // bug hidden inside a comparator — surface it as a failure.
-        InvariantResult::Skipped(reason) => Err(format!(
-            "[inv-blocks-match-ref/block_raw] unexpected Skip from compare_block_subset: {reason}"
-        )),
-    }
-}
-
-// ─── Observable: per-block content (the `inv-block-content/*` family) ────────
-
-/// Per-block `content`, keyed by non-seed block id, as each store sees it. The
-/// reference projection enumerates the reference's non-synthetic non-seed block
-/// ids ([`RefBlockTree::all_non_seed_block_ids`]) and answers content per id
-/// via the borrow-returning [`RefBlockTree::block_content`]; ids the reference
-/// has no content for are dropped (they cannot be compared — the old body's
-/// `None => continue`). Consolidates the two hand-written per-block-content
-/// bodies (the `SutSqlProjection` SQL-column read → `/sql`; the `SutBackend`
-/// snapshot → `/block_raw`). Synthetic ref ids (`block::split-N`,
-/// `block::bulk-N-M`) are remapped to UUIDs production-side, so the SUT has no
-/// row at the synthetic id — skipped on both projection paths (content equality
-/// on stable ids only; the wider PBT reconciles synthetic-id mapping).
-pub struct BlockContent;
-
-impl Observable for BlockContent {
-    type Value = BTreeMap<EntityUri, String>;
-    const NAME: &'static str = "block-content";
-}
-
-pub fn block_content() -> Correspondence<BlockContent> {
-    Correspondence {
-        ref_project: ref_block_content,
-        stores: vec![
-            // Write-side `block_raw` snapshot via `SutBackend` — the pure-memory
-            // path (no Turso, no matview): the same capability portability that
-            // moved `inv-no-orphan-blocks` off `SutSqlProjection`.
-            StoreProjection {
-                id: "inv-block-content/block_raw",
-                store: "block_raw",
-                needs: Needs {
-                    sut_present: vec![CapId::of::<dyn SutBackend>()],
-                    sut_absent: Vec::new(),
-                    ref_present: vec![CapId::of::<dyn RefBlockTree>()],
-                },
-                extract: extract_block_content_backend,
-                compare: NamedCompare {
-                    name: "compare_block_content{block_raw}",
-                    f: compare_block_content_block_raw,
-                },
-                converge: Converge::None,
-            },
-            // Direct-column SQL read (`SutSqlProjection::block_content`, a
-            // `block_raw.content` probe) — the surface `E2ESut` realizes over
-            // Turso. Selected only where a slice supplies `SutSqlProjection`.
-            StoreProjection {
-                id: "inv-block-content/sql",
-                store: "sql",
-                needs: Needs {
-                    sut_present: vec![CapId::of::<dyn SutSqlProjection>()],
-                    sut_absent: Vec::new(),
-                    ref_present: vec![CapId::of::<dyn RefBlockTree>()],
-                },
-                extract: extract_block_content_sql,
-                compare: NamedCompare {
-                    name: "compare_block_content{sql}",
-                    f: compare_block_content_sql,
-                },
-                converge: Converge::None,
-            },
-        ],
-    }
-}
-
-fn ref_block_content(refs: &CapMap) -> Extraction<BTreeMap<EntityUri, String>> {
-    let mut out = BTreeMap::new();
-    for id in RefBlockTree::all_non_seed_block_ids(refs) {
-        if crate::pbt::is_synthetic_ref_id(&id) {
-            continue;
-        }
-        // The borrowing read through `RefBlockTree` — forwarded through
-        // `CapMap::expect_ref`. `None` = no ref content to compare.
-        if let Some(c) = RefBlockTree::block_content(refs, &id) {
-            let content = c.to_string();
-            out.insert(id, content);
-        }
-    }
-    Extraction::Value(out)
-}
-
-fn extract_block_content_backend<'a>(
-    sut: &'a CapMap,
-    _: &'a CapMap,
-) -> Pin<Box<dyn Future<Output = Extraction<BTreeMap<EntityUri, String>>> + 'a>> {
-    Box::pin(async move {
-        Extraction::Value(
-            sut.block_raw_snapshot()
-                .await
-                .into_iter()
-                .map(|b| (b.id, b.content))
-                .collect(),
-        )
-    })
-}
-
-fn extract_block_content_sql<'a>(
-    sut: &'a CapMap,
-    refs: &'a CapMap,
-) -> Pin<Box<dyn Future<Output = Extraction<BTreeMap<EntityUri, String>>> + 'a>> {
-    // `SutSqlProjection` has no bulk content snapshot; probe per id over the
-    // reference's non-synthetic non-seed id space (comparability context only —
-    // the expected value comes from `ref_block_content`). A `None` probe drops
-    // the id, so the comparator reports it "missing from SQL projection".
-    Box::pin(async move {
-        let mut out = BTreeMap::new();
-        for id in RefBlockTree::all_non_seed_block_ids(refs) {
-            if crate::pbt::is_synthetic_ref_id(&id) {
-                continue;
-            }
-            if let Some(c) = SutSqlProjection::block_content(sut, &id).await {
-                out.insert(id, c);
-            }
-        }
-        Extraction::Value(out)
-    })
-}
-
-fn compare_block_content_block_raw(
-    sut: &BTreeMap<EntityUri, String>,
-    ref_: &BTreeMap<EntityUri, String>,
-) -> Result<(), String> {
-    for (id, ref_content) in ref_ {
-        match sut.get(id) {
-            Some(sut_c) if sut_c == ref_content => {}
-            Some(sut_c) => {
-                return Err(format!(
-                    "[inv-block-content/block_raw] block {id} content diverges:\n  ref:       \
-                     {ref_content:?}\n  block_raw: {sut_c:?}"
-                ));
-            }
-            None => {
-                return Err(format!(
-                    "[inv-block-content/block_raw] block {id} present in ref (content \
-                     {ref_content:?}) but missing from the SUT's block_raw snapshot"
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn compare_block_content_sql(
-    sut: &BTreeMap<EntityUri, String>,
-    ref_: &BTreeMap<EntityUri, String>,
-) -> Result<(), String> {
-    for (id, ref_content) in ref_ {
-        match sut.get(id) {
-            Some(sql_content) if sql_content == ref_content => {}
-            Some(sql_content) => {
-                return Err(format!(
-                    "[inv-block-content/sql] block {id} content diverges:\n  ref: \
-                     {ref_content:?}\n  sql: {sql_content:?}"
-                ));
-            }
-            None => {
-                return Err(format!(
-                    "[inv-block-content/sql] block {id} present in ref but missing from SQL \
-                     projection (ref content = {ref_content:?})"
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-// ─── Observable: per-block parent (the `inv-block-parent/*` family) ──────────
-
-/// Per-block `parent_id`, keyed by non-seed block id, normalized so a root /
-/// sentinel parent reads as `None` (mirroring [`RefBlockTree::parent_of`]).
-/// Closes the re-parent-divergence gap the other block-tree invariants leave
-/// open (`blocks-match` skips the `Parent` facet; `no_orphan` /
-/// `no_parent_cycles` only check existence / termination). Sound on the memory
-/// slice, which has no doc-id remapping across `file:`/`block:` doc identity.
-/// Consolidates the hand-written `SutBackend` block-parent body.
-pub struct BlockParent;
-
-impl Observable for BlockParent {
-    type Value = BTreeMap<EntityUri, Option<EntityUri>>;
-    const NAME: &'static str = "block-parent";
-}
-
-pub fn block_parent() -> Correspondence<BlockParent> {
-    Correspondence {
-        ref_project: ref_block_parent,
-        stores: vec![StoreProjection {
-            id: "inv-block-parent/block_raw",
-            store: "block_raw",
-            needs: Needs {
-                sut_present: vec![CapId::of::<dyn SutBackend>()],
-                sut_absent: Vec::new(),
-                ref_present: vec![CapId::of::<dyn RefBlockTree>()],
-            },
-            extract: extract_block_parent_backend,
-            compare: NamedCompare {
-                name: "compare_block_parent{block_raw}",
-                f: compare_block_parent_block_raw,
-            },
-            converge: Converge::None,
-        }],
-    }
-}
-
-fn ref_block_parent(refs: &CapMap) -> Extraction<BTreeMap<EntityUri, Option<EntityUri>>> {
-    let mut out = BTreeMap::new();
-    for id in RefBlockTree::all_non_seed_block_ids(refs) {
-        if crate::pbt::is_synthetic_ref_id(&id) {
-            continue;
-        }
-        let parent = RefBlockTree::parent_of(refs, &id);
-        out.insert(id, parent);
-    }
-    Extraction::Value(out)
-}
-
-fn extract_block_parent_backend<'a>(
-    sut: &'a CapMap,
-    _: &'a CapMap,
-) -> Pin<Box<dyn Future<Output = Extraction<BTreeMap<EntityUri, Option<EntityUri>>>> + 'a>> {
-    // SUT parent per id, normalized: a root / sentinel parent reads as `None`,
-    // mirroring `RefBlockTree::parent_of`'s contract.
-    Box::pin(async move {
-        Extraction::Value(
-            sut.block_raw_snapshot()
-                .await
-                .into_iter()
-                .map(|b| {
-                    let parent = (!b.parent_id.is_no_parent() && !b.parent_id.is_sentinel())
-                        .then_some(b.parent_id);
-                    (b.id, parent)
-                })
-                .collect(),
-        )
-    })
-}
-
-fn compare_block_parent_block_raw(
-    sut: &BTreeMap<EntityUri, Option<EntityUri>>,
-    ref_: &BTreeMap<EntityUri, Option<EntityUri>>,
-) -> Result<(), String> {
-    for (id, ref_parent) in ref_ {
-        // Id-set divergence is `inv-blocks-match-ref/block_raw`'s job; this
-        // invariant only speaks to parent equality on shared ids.
-        let Some(sut_parent_opt) = sut.get(id) else {
-            continue;
-        };
-        if ref_parent != sut_parent_opt {
-            return Err(format!(
-                "[inv-block-parent/block_raw] block {id} parent diverges:\n  ref:       \
-                 {ref_parent:?}\n  block_raw: {sut_parent_opt:?}"
-            ));
-        }
-    }
-    Ok(())
-}
+// ─── Turso storage-pipeline arms co-located to `holon-turso-testing` (Phase 2)
+// ─
+//
+// The `inv-blocks-match-ref/{block_raw,matview}` arms of the shared
+// `NonSeedBlocks` observable, plus the whole `block_content` / `block_parent` /
+// `advice_matviews` observables (every arm Turso-owned), now live in
+// `holon_turso_testing::correspondences` and are folded into the composed
+// catalog via `holon_turso_testing::pbt_contribution()`. What remains central
+// below: the editor-mirror families, the `/org` block store, and the
+// root-layout ghost-row check (renderer-observed).
 
 // ─── Observable: active-editor text (the `inv-editor-text/*` family) ─────────
 
@@ -481,6 +70,7 @@ pub fn active_editor_text() -> Correspondence<ActiveEditorText> {
         ref_project: ref_active_editor_text,
         stores: vec![StoreProjection {
             id: "inv-editor-text/mirror",
+            attribution: Attribution::at(Layer::ViewModel, file!()),
             store: "mirror",
             needs: Needs {
                 sut_present: vec![CapId::of::<dyn SutEditorMirrorRead>()],
@@ -563,6 +153,7 @@ pub fn active_editor_caret() -> Correspondence<ActiveEditorCaret> {
         ref_project: ref_active_editor_caret,
         stores: vec![StoreProjection {
             id: "inv-editor-caret/mirror",
+            attribution: Attribution::at(Layer::ViewModel, file!()),
             store: "mirror",
             needs: Needs {
                 sut_present: vec![CapId::of::<dyn SutEditorMirrorRead>()],
@@ -642,6 +233,7 @@ pub fn org_blocks() -> Correspondence<OrgBlocks> {
         ref_project: ref_org_blocks,
         stores: vec![StoreProjection {
             id: "inv-blocks-match-ref/org",
+            attribution: Attribution::at(Layer::OrgRoundTrip, file!()),
             store: "org",
             needs: Needs {
                 sut_present: vec![CapId::of::<dyn SutOrgRead>()],
@@ -664,9 +256,30 @@ fn ref_org_blocks(refs: &CapMap) -> Extraction<Vec<Block>> {
 
 fn extract_org_snapshot<'a>(
     sut: &'a CapMap,
-    _: &'a CapMap,
+    refs: &'a CapMap,
 ) -> Pin<Box<dyn Future<Output = Extraction<Vec<Block>>> + 'a>> {
-    Box::pin(async move { Extraction::Value(sut.org_block_snapshot().await) })
+    // Filter the on-disk-parsed SUT blocks by the SAME `seed_block_ids` the ref's
+    // `org_blocks` projection excludes (scaffold-injected boot layout: the
+    // `block:journals` page + its `src::0`/`render::0` display sources). This is
+    // the symmetric twin of `extract_block_raw` in holon-turso-testing — the
+    // block_raw arm has always filtered seed on the SUT side; the org arm only
+    // "matched" by accident while the parser silently dropped top-level
+    // `#+BEGIN_SRC` blocks (the seed sources render at the page's top level). Once
+    // the parser correctly round-trips top-level sources (row-28 data-loss fix),
+    // those seed sources surface here and MUST be filtered to stay symmetric —
+    // otherwise they read as spurious `only_in_actual` blocks. Non-seed content
+    // (the `journals::auto-create` heading + its `holon_rule` action, and all
+    // user blocks) is NOT in `seed_block_ids`, so it is still compared.
+    Box::pin(async move {
+        let seed_block_ids = RefBackend::seed_block_ids(refs);
+        Extraction::Value(
+            sut.org_block_snapshot()
+                .await
+                .into_iter()
+                .filter(|b| !seed_block_ids.contains(&b.id))
+                .collect(),
+        )
+    })
 }
 
 fn compare_org_blocks(sut: &Vec<Block>, ref_: &Vec<Block>) -> Result<(), String> {
@@ -702,6 +315,7 @@ pub fn matview_ghost_rows() -> Correspondence<MatviewGhostRows> {
         ref_project: ref_block_universe,
         stores: vec![StoreProjection {
             id: "inv-matview-consistent-with-ref/root_layout",
+            attribution: Attribution::at(Layer::Projection, file!()),
             store: "root_layout",
             needs: Needs {
                 sut_present: vec![CapId::of::<dyn SutRenderer>()],
@@ -765,8 +379,161 @@ fn compare_no_ghost_rows(
     ))
 }
 
+// NOTE: the advice-matview SQL twin (`inv-advice-matview-matches-ref/matview`)
+// co-located to `holon-turso-testing` (Phase 2) — its observable + comparator
+// (and their unit tests) now live in `holon_turso_testing::correspondences`.
+
+// ─── Observable: C2 provenance — no PHANTOM history (subset) ─────────────────
+
+/// Every `block_id` recorded in the SUT's `block_history` op/effect stream must
+/// be a block the reference model created or knew (G9, phantom guard). The
+/// reference anchor is the union of the live block universe and every id the
+/// oracle minted (`RefHistoryExpectation::ever_created_ids`, which retains
+/// create-then-deleted ids from the reconcile map). Asymmetric SUBSET check:
+/// history ⊆ known-universe. A recorded id outside it is a phantom/ghost
+/// history row (a mis-keyed or leaked recording). Cap-gated on `SutHistory`, so
+/// an org-only draw (no recording substrate) deselects cleanly.
+pub struct HistoryNoPhantomRows;
+
+impl Observable for HistoryNoPhantomRows {
+    type Value = BTreeSet<EntityUri>;
+    const NAME: &'static str = "history-no-phantom-rows";
+}
+
+pub fn history_no_phantom_rows() -> Correspondence<HistoryNoPhantomRows> {
+    Correspondence {
+        ref_project: ref_history_universe,
+        stores: vec![StoreProjection {
+            id: "inv-history-no-phantom-rows/block_history",
+            attribution: Attribution::at(Layer::Projection, file!()),
+            store: "block_history",
+            needs: Needs {
+                sut_present: vec![CapId::of::<dyn SutHistory>()],
+                sut_absent: Vec::new(),
+                ref_present: vec![
+                    CapId::of::<dyn RefHistoryExpectation>(),
+                    CapId::of::<dyn RefLayout>(),
+                ],
+            },
+            extract: extract_history_block_ids,
+            compare: NamedCompare {
+                name: "compare_history_subset{no_phantom}",
+                f: compare_history_no_phantom,
+            },
+            converge: Converge::None,
+        }],
+    }
+}
+
+fn ref_history_universe(refs: &CapMap) -> Extraction<BTreeSet<EntityUri>> {
+    let universe: BTreeSet<EntityUri> = RefLayout::all_block_ids(refs)
+        .into_iter()
+        .chain(RefLayout::layout_block_ids(refs))
+        .chain(RefLayout::profile_block_ids(refs))
+        .chain(RefHistoryExpectation::ever_created_ids(refs))
+        .collect();
+    Extraction::Value(universe)
+}
+
+fn extract_history_block_ids<'a>(
+    sut: &'a CapMap,
+    _: &'a CapMap,
+) -> Pin<Box<dyn Future<Output = Extraction<BTreeSet<EntityUri>>> + 'a>> {
+    Box::pin(async move { Extraction::Value(SutHistory::history_block_ids(sut).await) })
+}
+
+fn compare_history_no_phantom(
+    history_ids: &BTreeSet<EntityUri>,
+    universe: &BTreeSet<EntityUri>,
+) -> Result<(), String> {
+    let phantom: Vec<&EntityUri> = history_ids
+        .iter()
+        .filter(|id| !universe.contains(*id))
+        .collect();
+    if phantom.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "[inv-history-no-phantom-rows/block_history] PHANTOM HISTORY: {} block id(s) recorded in \
+         block_history are unknown to the reference (never created/known): {phantom:?}\n  history \
+         ids: {} recorded\n  ref universe (live ∪ ever-created): {} known",
+        phantom.len(),
+        history_ids.len(),
+        universe.len(),
+    ))
+}
+
+// ─── Observable: C2 provenance — no MISSED history (op-group floor) ──────────
+
+/// The SUT's `block_history` must record at least as many distinct `op_group`s
+/// as the oracle drove UI creates (G9, missed-history guard). Each UI-driven
+/// create routes through `execute_operation` and records ≥1 field delta = one
+/// `op_group`; the reference floor is the count of synthetic→real reconciled
+/// mints (`RefHistoryExpectation::min_recorded_op_groups`), which excludes
+/// born-equal external/peer creates that record no engine history. A
+/// conservative LOWER BOUND (`sut ≥ ref`): extra SUT recordings (edits,
+/// boot-rule firings) only help. A shortfall means a create silently failed to
+/// record — the missed-history prod bug this guards. Cap-gated on `SutHistory`.
+pub struct HistoryOpGroupFloor;
+
+impl Observable for HistoryOpGroupFloor {
+    type Value = usize;
+    const NAME: &'static str = "history-records-all-creates";
+}
+
+pub fn history_records_all_creates() -> Correspondence<HistoryOpGroupFloor> {
+    Correspondence {
+        ref_project: ref_min_op_groups,
+        stores: vec![StoreProjection {
+            id: "inv-history-records-all-creates/block_history",
+            attribution: Attribution::at(Layer::Projection, file!()),
+            store: "block_history",
+            needs: Needs {
+                sut_present: vec![CapId::of::<dyn SutHistory>()],
+                sut_absent: Vec::new(),
+                ref_present: vec![CapId::of::<dyn RefHistoryExpectation>()],
+            },
+            extract: extract_history_op_group_count,
+            compare: NamedCompare {
+                name: "compare_op_group_floor{>=}",
+                f: compare_op_group_floor,
+            },
+            converge: Converge::None,
+        }],
+    }
+}
+
+fn ref_min_op_groups(refs: &CapMap) -> Extraction<usize> {
+    Extraction::Value(RefHistoryExpectation::min_recorded_op_groups(refs))
+}
+
+fn extract_history_op_group_count<'a>(
+    sut: &'a CapMap,
+    _: &'a CapMap,
+) -> Pin<Box<dyn Future<Output = Extraction<usize>> + 'a>> {
+    Box::pin(async move { Extraction::Value(SutHistory::history_op_group_count(sut).await) })
+}
+
+fn compare_op_group_floor(sut_count: &usize, ref_floor: &usize) -> Result<(), String> {
+    if sut_count >= ref_floor {
+        return Ok(());
+    }
+    Err(format!(
+        "[inv-history-records-all-creates/block_history] MISSED HISTORY: block_history has \
+         {sut_count} distinct op_group(s) but the oracle drove {ref_floor} UI create(s) that each \
+         must record ≥1 — {} create(s) went unrecorded",
+        ref_floor - sut_count,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
+    use holon_pbt_core::capabilities::EntityUri;
+    use holon_pbt_core::capabilities::SutHistory;
+    use holon_pbt_core::composition::CapMap;
+
     use crate::pbt::composed::fixtures::*;
     use crate::pbt::composed::subsystem_seed::run_with_seeded_ref;
     use crate::pbt::composed::subsystem_seed::seed_ref;
@@ -984,6 +751,142 @@ mod tests {
                 .iter()
                 .any(|(id, _)| *id == "inv-editor-text/mirror"),
             "text agrees, so only the caret invariant fires; failures={failures:?}",
+        );
+    }
+
+    // NOTE: the pure comparator tests for the advice-matview twin co-located to
+    // `holon-turso-testing` (Phase 2) alongside `compare_advice_matviews`.
+
+    /// A controllable `SutHistory` double: returns the exact `block_history`
+    /// block-id set + op-group count the test wants, so the two C2 provenance
+    /// correspondences can be driven to catch / pass without a real recording
+    /// engine (the journals ingest-loss RED blocks full keystone sequences).
+    struct StubHistory {
+        block_ids: BTreeSet<EntityUri>,
+        op_group_count: usize,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl SutHistory for StubHistory {
+        async fn history_block_ids(&self) -> BTreeSet<EntityUri> {
+            self.block_ids.clone()
+        }
+        async fn history_op_group_count(&self) -> usize {
+            self.op_group_count
+        }
+    }
+
+    impl holon_pbt_core::composition::CapProvider for StubHistory {
+        fn register(self: std::sync::Arc<Self>, caps: &mut holon_pbt_core::composition::CapMap) {
+            caps.insert(self as std::sync::Arc<dyn SutHistory>);
+        }
+    }
+
+    fn stub_history_sut(block_ids: Vec<EntityUri>, op_group_count: usize) -> CapMap {
+        holon_pbt_core::composition::Config::new()
+            .with(StubHistory {
+                block_ids: block_ids.into_iter().collect(),
+                op_group_count,
+            })
+            .build()
+    }
+
+    /// Catch (doc §6 gate): a `block_history` row whose `block_id` the
+    /// reference never created/knew (a phantom/ghost recording) is caught
+    /// by `inv-history-no-phantom-rows/block_history`.
+    #[tokio::test]
+    async fn history_phantom_row_is_caught() {
+        let sut = stub_history_sut(vec![uri("block:ghost")], 1);
+        let ref_state = seed_ref(vec![Block::new_text(
+            uri("block:c1"),
+            EntityUri::no_parent(),
+            "c1",
+        )]);
+        let report = run_with_seeded_ref(
+            &composed_invariant_catalog(),
+            &sut,
+            crate::pbt::reference_state::Resolved::identity(ref_state),
+        )
+        .await;
+        let failures = report.failures();
+        assert!(
+            failures
+                .iter()
+                .any(|(id, _)| *id == "inv-history-no-phantom-rows/block_history"),
+            "a phantom history block_id must be caught; failures={failures:?}",
+        );
+    }
+
+    /// Pass: every recorded `block_id` is a block the reference created/knew,
+    /// so the phantom-history subset check is green (id-space +
+    /// ever-created anchor wired correctly).
+    #[tokio::test]
+    async fn history_known_rows_pass_phantom_check() {
+        let sut = stub_history_sut(vec![uri("block:c1")], 1);
+        let ref_state = seed_ref(vec![Block::new_text(
+            uri("block:c1"),
+            EntityUri::no_parent(),
+            "c1",
+        )]);
+        let report = run_with_seeded_ref(
+            &composed_invariant_catalog(),
+            &sut,
+            crate::pbt::reference_state::Resolved::identity(ref_state),
+        )
+        .await;
+        assert!(
+            !report
+                .failures()
+                .iter()
+                .any(|(id, _)| *id == "inv-history-no-phantom-rows/block_history"),
+            "recorded ids are all known; the subset check must pass; failures={:?}",
+            report.failures(),
+        );
+    }
+
+    /// Catch (doc §6 gate): the oracle drove more UI creates than
+    /// `block_history` recorded op_groups (a missed-history recording) —
+    /// caught by `inv-history-records-all-creates/block_history`.
+    #[tokio::test]
+    async fn history_missed_create_is_caught() {
+        let sut = stub_history_sut(vec![], 1);
+        let mut ref_state = seed_ref(vec![]);
+        ref_state.history_min_op_groups = 3;
+        let report = run_with_seeded_ref(
+            &composed_invariant_catalog(),
+            &sut,
+            crate::pbt::reference_state::Resolved::identity(ref_state),
+        )
+        .await;
+        let failures = report.failures();
+        assert!(
+            failures
+                .iter()
+                .any(|(id, _)| *id == "inv-history-records-all-creates/block_history"),
+            "a create recorded fewer op_groups than driven must be caught; failures={failures:?}",
+        );
+    }
+
+    /// Pass: `block_history` recorded at least as many op_groups as UI creates
+    /// driven (the lower bound holds; extra recordings are fine).
+    #[tokio::test]
+    async fn history_op_group_floor_is_met() {
+        let sut = stub_history_sut(vec![], 5);
+        let mut ref_state = seed_ref(vec![]);
+        ref_state.history_min_op_groups = 3;
+        let report = run_with_seeded_ref(
+            &composed_invariant_catalog(),
+            &sut,
+            crate::pbt::reference_state::Resolved::identity(ref_state),
+        )
+        .await;
+        assert!(
+            !report
+                .failures()
+                .iter()
+                .any(|(id, _)| *id == "inv-history-records-all-creates/block_history"),
+            "the op-group floor is met; the check must pass; failures={:?}",
+            report.failures(),
         );
     }
 }

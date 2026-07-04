@@ -1,4 +1,23 @@
 //! Proptest strategy generators for PBT transitions.
+//!
+//! @pbt kind generator
+//! @pbt gen content strategies (content/edit/typing/bulk) mix the multi-byte /
+//!   empty / whitespace / org-special `extended_content_arm` UNCONDITIONALLY at
+//!   ~40-50% — it is NOT behind HOLON_PBT_EXTENDED_GEN. Only three arms are
+//!   env-gated: file-tree nesting (parent-selector), GQL query language
+//!   (generate_query_language), and the profile-in-no-override file arm. (Prior
+//!   header claim that byte-offset classes are ASCII-hidden by default was
+//!   stale — those classes ARE in the default gate.)
+//! @pbt covers content-vocabulary — shared ADVICE_TAG_POOL keeps advice
+//!   invariants non-vacuous (anchor/candidate tag collisions)
+//! @pbt gen file-tree is FLAT by default (every heading parents to doc root);
+//!   the parent-selector arm (heading i → sel % (i+1)) only fires under
+//!   HOLON_PBT_EXTENDED_GEN, so headline-depth / nested-page bug classes are
+//!   NOT reached by the default gate (runtime nesting only via Create/mutation)
+//! @pbt gen ADVICE_TAG_POOL couples two floors: rule-block presence IS floored
+//!   (advice_rule_arm_reachable_in_default_mix ~20/200) but the tag COLLISION
+//!   that makes advice_expectation nonempty is NOT — a SetEdgeField weight/pool
+//!   change can silently drop advice invariants to the exp-empty vacuous path
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -11,7 +30,12 @@ use holon_api::TaskState;
 use holon_api::Value;
 use holon_api::block::Block;
 use holon_api::predicate::Predicate;
+use holon_api::vault_shape::VAULT_SHAPE_SCHEMA_VERSION;
+use holon_api::vault_shape::VaultShapeProfile;
 use holon_orgmode::models::OrgBlockExt;
+use holon_pbt_core::content_generators::extended_char;
+use holon_pbt_core::content_generators::extended_content_arm;
+use holon_pbt_core::types::Mutation;
 use proptest::prelude::*;
 
 use super::query::QuerySource;
@@ -19,7 +43,15 @@ use super::query::QueryTable;
 use super::query::TestQuery;
 use super::reference_state::VALID_PROFILE_YAMLS;
 use super::reference_state::valid_render_expression_strings;
-use super::types::Mutation;
+
+/// Shared tag vocabulary. Drawn from by BOTH the advice-rule-minting arm
+/// (`file_with_advice_rule`) and `SetEdgeField`'s pool tag sub-arm, so that a
+/// rule's anchor/candidate tags and the tags landed on blocks collide with
+/// non-trivial probability — that collision is what makes advice expectations
+/// nonempty. Non-vacuity of the advice invariants depends on this shared pool.
+/// All lowercase (`PAGE_TAG` is `"Page"`), so a pool tag can never flip
+/// `is_page`.
+pub const ADVICE_TAG_POOL: &[&str] = &["task", "lesson", "proj", "urgent", "ctx"];
 
 /// A set of TODO keywords generated per test case.
 /// Drives both the `#+TODO:` org header and the task_state mutation generator.
@@ -93,43 +125,82 @@ pub fn extended_gen_enabled() -> bool {
     })
 }
 
-/// Characters spanning all UTF-8 widths plus ASCII filler. The 2/3/4-byte
-/// codepoints are the payload: any path that converts byte offsets to
-/// keystroke counts (or slices content at a char boundary it computed in
-/// the other unit) breaks on these.
-fn extended_char() -> BoxedStrategy<char> {
-    prop_oneof![
-        2 => proptest::char::range('a', 'z'),
-        1 => Just(' '),
-        2 => prop_oneof![Just('é'), Just('ß'), Just('ñ')],   // 2-byte
-        2 => prop_oneof![Just('€'), Just('中'), Just('日')], // 3-byte
-        2 => prop_oneof![Just('😀'), Just('🎉')],            // 4-byte emoji
-    ]
-    .boxed()
+/// Profile-driven shape widening (`HOLON_PBT_SHAPE_PROFILE=<path-to-json>`).
+///
+/// When set, the generated vault's per-file block count, headline content
+/// length and (via block count feeding the parent-selector) tree depth widen
+/// toward the shape of a REAL vault — the environment-parity lever
+/// (ENV dominates the escape funnel). Unset ⇒ the historical hardcoded bounds,
+/// so the blessed default gates stay byte-identical. The profile is read at
+/// strategy BUILD time and cached; the bounds only ever RAISE range upper
+/// bounds, so proptest still shrinks every range toward its small end and
+/// shrink quality is preserved regardless of the active profile.
+pub fn active_shape_profile() -> Option<&'static VaultShapeProfile> {
+    static PROFILE: std::sync::OnceLock<Option<VaultShapeProfile>> = std::sync::OnceLock::new();
+    PROFILE
+        .get_or_init(|| {
+            let path = std::env::var("HOLON_PBT_SHAPE_PROFILE").ok()?;
+            let json = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("HOLON_PBT_SHAPE_PROFILE={path}: {e}"));
+            let profile: VaultShapeProfile = serde_json::from_str(&json)
+                .unwrap_or_else(|e| panic!("HOLON_PBT_SHAPE_PROFILE={path} parse error: {e}"));
+            assert_eq!(
+                profile.schema_version, VAULT_SHAPE_SCHEMA_VERSION,
+                "shape profile schema mismatch (regenerate with the current extractor)"
+            );
+            eprintln!(
+                "[HOLON_PBT_SHAPE_PROFILE] ACTIVE ({path}): blocks/file<={} content<={} \
+                 depth-reach<={}",
+                blocks_per_file_gen_bound_for(&profile),
+                content_len_gen_bound_for(&profile),
+                profile.depth_bound(),
+            );
+            Some(profile)
+        })
+        .as_ref()
 }
 
-/// Single-line extended content: multi-byte runs, empty, whitespace-only,
-/// and org-special prefixes (`*`, `[[…]]`, `:PROPERTIES:`, `#+`) that a user
-/// can legitimately type but the org renderer must round-trip.
-fn extended_content_arm() -> BoxedStrategy<String> {
-    prop_oneof![
-        4 => prop::collection::vec(extended_char(), 1..=12)
-            .prop_map(|cs| cs.into_iter().collect::<String>()),
-        1 => Just(String::new()),
-        1 => prop_oneof![Just("   ".to_string()), Just("\t".to_string())],
-        // Org-special spellings. `:PROPERTIES:{tail}` (incl. the bare
-        // trailing-tag-group form) is BY-DESIGN org tag syntax — the ref
-        // model mirrors it via `split_headline_tags` in
-        // `normalize_content_for_org_roundtrip`; pinned in
-        // holon-org-format/tests/properties_prefix_headline_repro.rs.
-        2 => ("[A-Za-z0-9 ]{0,12}", 0..4u8).prop_map(|(tail, kind)| match kind {
-            0 => format!("* {tail}"),
-            1 => format!("[[{tail}]]"),
-            2 => format!("#+ {tail}"),
-            _ => format!(":PROPERTIES:{tail}"),
-        }),
-    ]
-    .boxed()
+/// Runtime ceiling on the per-file block count, so one profile-driven case
+/// stays tractable inside the 600s smoke gate even when the real vault's p95 is
+/// far larger. Disclosed cap, not a silent clamp.
+const MAX_BLOCKS_PER_FILE_GEN: u32 = 24;
+/// Runtime ceiling on generated headline content length (chars).
+const MAX_CONTENT_LEN_GEN: u32 = 128;
+
+fn blocks_per_file_gen_bound_for(p: &VaultShapeProfile) -> u32 {
+    p.blocks_per_file_bound().clamp(1, MAX_BLOCKS_PER_FILE_GEN)
+}
+
+fn content_len_gen_bound_for(p: &VaultShapeProfile) -> u32 {
+    p.content_length_bound().clamp(1, MAX_CONTENT_LEN_GEN)
+}
+
+/// Per-file block-count range upper bound: historical `5`, or the (capped)
+/// profile p95 when a shape profile is active.
+pub fn blocks_per_file_gen_bound() -> usize {
+    match active_shape_profile() {
+        Some(p) => blocks_per_file_gen_bound_for(p) as usize,
+        None => 5,
+    }
+}
+
+/// Max total headline-content chars: historical `21` (`[A-Z]` + `{0,20}`), or
+/// the (capped) profile p95 when a shape profile is active.
+pub fn content_len_gen_bound() -> u32 {
+    match active_shape_profile() {
+        Some(p) => content_len_gen_bound_for(p),
+        None => 21,
+    }
+}
+
+/// The base headline-content strategy, width driven by
+/// [`content_len_gen_bound`]. Same character class as before (single-line, no
+/// newline), just a wider length ceiling under a profile.
+fn content_base_regex() -> BoxedStrategy<String> {
+    let tail = content_len_gen_bound().saturating_sub(1);
+    proptest::string::string_regex(&format!("[A-Z][a-zA-Z0-9 ]{{0,{tail}}}"))
+        .expect("content base regex is valid")
+        .boxed()
 }
 
 /// Generate single-line block content for headlines.
@@ -137,7 +208,7 @@ fn extended_content_arm() -> BoxedStrategy<String> {
 /// headline text as content boundaries — multi-line headlines cause
 /// `:PROPERTIES:` drawers to be embedded in the content.
 pub fn content_strategy() -> BoxedStrategy<String> {
-    let base = "[A-Z][a-zA-Z0-9 ]{0,20}".prop_map(|s| s).boxed();
+    let base = content_base_regex();
     prop_oneof![6 => base, 4 => extended_content_arm()].boxed()
 }
 
@@ -169,15 +240,25 @@ pub fn typing_text_strategy() -> BoxedStrategy<String> {
         5 => base,
         5 => prop::collection::vec(extended_char(), 1..=4)
             .prop_map(|cs| cs.into_iter().collect::<String>()),
+        // Wiki-name link markup typed straight into the editor. This is the
+        // ONLY editor-driven path (TypeChars → set_field("content") → the
+        // dispatcher's `extract_inline_marks`) that mints a `Link` mark, so it
+        // is what exercises the (content, marks) pair through the mark-aware
+        // write + undo inverse. Without it the mark column stays empty on every
+        // draw and `inv-blocks-match-ref/block_raw` (which DOES compare marks)
+        // can never observe a link-mark divergence — the undo-drops-marks bug
+        // (Mac dogfood 2026-07-19) was structurally unreachable for this reason.
+        //
+        // The second arm types a SCHEME-shaped target (`t-widget:` — the entity
+        // `RegisterEntityScheme` mints) rather than a wiki name, because the
+        // `block_links` junction must be derived registry-INDEPENDENTLY and only
+        // a link typed while its scheme is still unregistered witnesses that.
+        2 => "[a-z]{2,5}".prop_map(|w| format!("[[{w}]]")),
+        2 => "[a-z]{2,5}".prop_map(|w| {
+            format!("[[{}:{w}]]", crate::pbt::transitions::register_entity_scheme::LINKED_SCHEME)
+        }),
     ]
     .boxed()
-}
-
-/// Peer-edit content (`PeerEdit::{Create,Update}`). Extended mode adds
-/// multi-byte and org-special content arriving from a remote peer.
-pub fn peer_content_strategy() -> BoxedStrategy<String> {
-    let base = "[a-z]{4,8}".prop_map(|s| s).boxed();
-    prop_oneof![6 => base, 4 => extended_content_arm()].boxed()
 }
 
 /// Externally-added block content (`BulkExternalAdd`). Extended mode adds
@@ -258,6 +339,7 @@ fn uniquify_ids(ids: impl IntoIterator<Item = String>) -> Vec<String> {
 pub fn generate_org_file_content_with_keywords(
     keyword_set: Option<TodoKeywordSet>,
     allow_index_override: bool,
+    allow_advice_rule: bool,
 ) -> BoxedStrategy<(String, Vec<Block>)> {
     use proptest::collection::vec as prop_vec;
 
@@ -292,10 +374,12 @@ pub fn generate_org_file_content_with_keywords(
                 // `sel % (i + 1)` — 0 = doc root, k = heading `k-1`. Same
                 // predecessor trick as `make_requires`: only already-built
                 // headings are eligible, so the tree is well-founded by
-                // construction. Default gen ignores this (flat files).
+                // construction. Nesting is always active; widening the
+                // per-file block count (via a shape profile) widens the
+                // reachable tree depth toward real-vault shape.
                 prop::num::u8::ANY,
             ),
-            1..=5,
+            1..=blocks_per_file_gen_bound(),
         ),
     )
         .prop_map(move |(filename, headings)| {
@@ -436,10 +520,10 @@ pub fn generate_org_file_content_with_keywords(
         ("index.org".to_string(), blocks)
     });
 
-    // Tree view with virtual child — exercises the trailing-slot creation
-    // path. `creation_slot: true` triggers `build_trailing_slot`;
-    // `virtual_parent` is deliberately omitted — the builder falls back to
-    // `ba.ctx.row().get("id")` (the focused block's id).
+    // Tree view with virtual child — exercises the creation-slot path.
+    // `creation_slot: true` triggers `interpret_virtual_child` (static /
+    // snapshot path); `virtual_parent` is deliberately omitted — the builder
+    // falls back to `ba.ctx.row().get("id")` (the focused block's id).
     let index_file_tree = "[A-Z][a-zA-Z0-9 ]{0,15}".prop_map(|headline| {
         let id = root_layout_bare_id();
         let (src, lang) = TestQuery::layout(QuerySource::DirectChildren {
@@ -481,6 +565,186 @@ pub fn generate_org_file_content_with_keywords(
             let blocks = vec![heading, profile_block];
             (filename, blocks)
         });
+
+    // Render-artifact file: a heading carrying BOTH a `Source` and an `Image`
+    // child PLUS a `Text` sub-heading — the only shape that puts a mixed
+    // `Source`/`Image`/`Text` sibling group under one parent. Image blocks are
+    // NOT reachable via the interactive create path (`BlockContent` has no
+    // Image variant — a `block create` always yields Text or Source); they only
+    // arise from the parser's `[[file:…]]` links, so the org-file path is the
+    // one faithful producer.
+    //
+    // The renderer emits section content (Source/Image, group 0) ahead of the
+    // sub-heading and preserves this vec's order WITHIN group 0, but the parser
+    // re-emits all Sources before all Images regardless — so the stored order is
+    // always `Source < Image < Text` (world (b)). `image_first` deliberately
+    // varies the on-disk order of the two artifacts so the reference model's
+    // sibling-order prediction is exercised in both directions; the presence of
+    // the non-exempt Text sub-heading is what makes the ordering actually
+    // checked (a pure Source/Image group is order-exempt).
+    // An image block's path is CONTENT — authored in the org file or delivered
+    // by a synced peer — so the alphabet must include the shapes an attacker or
+    // a malformed peer document produces, not only the well-behaved one. The
+    // contained shapes are the controls: whatever rejects the traversals must
+    // still materialize these.
+    let image_path = prop_oneof![
+        6 => (
+            "[a-z][a-z0-9_]{2,12}",
+            prop::sample::select(vec!["png", "jpg", "gif", "webp", "svg"]),
+        )
+            .prop_map(|(stem, ext)| format!("attachments/{stem}.{ext}")),
+        1 => Just("attachments/sub/img.png".to_string()),
+        2 => prop::sample::select(vec![
+            "../escape.png",
+            "a/../../escape.png",
+            "attachments/../../escape.png",
+            "/tmp/escape.png",
+        ])
+        .prop_map(str::to_string),
+    ];
+
+    let file_with_render_artifacts = (
+        "[a-z_]+_[0-9]+\\.org",
+        "[A-Z][a-zA-Z0-9 ]{0,15}", // heading
+        "[a-z0-9-]+",              // heading id
+        "[A-Z][a-zA-Z0-9 ]{0,15}", // sub-heading
+        "[a-z0-9-]+",              // sub-heading id
+        prop::sample::select(vec!["python", "rust", "shell"]),
+        "[a-zA-Z_][a-zA-Z0-9_ ]{3,20}", // source body
+        image_path,
+        prop::bool::ANY, // image_first
+    )
+        .prop_map(
+            |(
+                filename,
+                headline,
+                id,
+                sub_headline,
+                sub_id_raw,
+                lang,
+                body,
+                image_path,
+                image_first,
+            )| {
+                let doc_uri = EntityUri::block("gen-placeholder");
+                let heading_uri = EntityUri::block(&id);
+                // Sub-heading id must differ from the heading id (org `:ID:`
+                // uniqueness); suffix on collision.
+                let sub_id = if sub_id_raw == id {
+                    format!("{sub_id_raw}-sub")
+                } else {
+                    sub_id_raw
+                };
+
+                let mut heading = Block::new_text(heading_uri.clone(), doc_uri.clone(), &headline);
+                heading.set_property("ID", Value::String(id.clone()));
+
+                // Parser-faithful ids: `{parent}::src::0` / `{parent}::img::0`.
+                let source = Block::new_source(
+                    EntityUri::block(&format!("{id}::src::0")),
+                    heading_uri.clone(),
+                    lang,
+                    &body,
+                );
+                let image = Block::new_image(
+                    EntityUri::block(&format!("{id}::img::0")),
+                    heading_uri.clone(),
+                    image_path,
+                );
+
+                let mut sub =
+                    Block::new_text(EntityUri::block(&sub_id), heading_uri, &sub_headline);
+                sub.set_property("ID", Value::String(sub_id.clone()));
+
+                // Vec order == on-disk document order. `image_first` flips the
+                // Source/Image order the renderer writes; the sub-heading trails
+                // (the renderer hoists section content ahead of it regardless).
+                let mut blocks = vec![heading];
+                if image_first {
+                    blocks.push(image);
+                    blocks.push(source);
+                } else {
+                    blocks.push(source);
+                    blocks.push(image);
+                }
+                blocks.push(sub);
+                (filename, blocks)
+            },
+        )
+        .boxed();
+
+    // Advice-rule file: a headline plus ONE `holon_advice_rule_yaml` source
+    // block (ADR 0022). Structurally mirrors `file_with_profile` — a source
+    // block under a heading — but the source language marks it a runtime rule
+    // definition that the engine synthesizes into a matview. The slug is fixed
+    // (`pbt_lessons`): at most one minted rule exists per run, so one slug is
+    // enough — but it must NOT be `lessons_for_tasks`: the bundled INACTIVE
+    // seed rule owns that slug, and the reconciler's first-owner-wins arbiter
+    // refuses a same-slug newcomer (SlugCollision) even while the owner is
+    // inactive — the minted ACTIVE rule would never synthesize a matview and
+    // the advice invariants would sit in a permanent false RED.
+    // Anchor/candidate tags are drawn DISTINCT from `ADVICE_TAG_POOL`
+    // (the same pool `SetEdgeField` tags blocks from) so overlaps — hence
+    // nonempty advice — are reachable. `k` is kept small (1..=3) so top-K
+    // truncation cases are reachable; `active` is weighted ~4:1 true.
+    let file_with_advice_rule = (
+        "[a-z_]+_[0-9]+\\.org",
+        "[A-Z][a-zA-Z0-9 ]{0,15}",
+        "[a-z0-9-]+",
+        prop::sample::select(ADVICE_TAG_POOL.to_vec()),
+        prop::sample::select(ADVICE_TAG_POOL.to_vec()),
+        1..=3u8,
+        prop::sample::select(vec![true, true, true, true, false]),
+    )
+        .prop_filter(
+            "advice anchor and candidate source tags must differ",
+            |(_, _, _, anchor_tag, source_tag, _, _)| anchor_tag != source_tag,
+        )
+        .prop_map(
+            |(filename, headline, id, anchor_tag, source_tag, k, active)| {
+                let doc_uri = EntityUri::block("gen-placeholder");
+                let heading_uri = EntityUri::block(&id);
+
+                let mut heading = Block::new_text(heading_uri.clone(), doc_uri.clone(), &headline);
+                heading.set_property("ID", Value::String(id.clone()));
+
+                // Shaped like `crates/holon-advice/assets/lessons_for_tasks.yaml`.
+                let yaml = format!(
+                    "name: pbt_lessons\nactive: {active}\nanchor:\n  has_tag: \
+                     {anchor_tag}\ncandidates:\n  tag_overlap_recency:\n    source:\n      \
+                     has_tag: {source_tag}\nk: {k}\n"
+                );
+
+                // Round-trip guard (fail loud): the oracle reuses this exact prod
+                // parser, so a mismatch here would be parser-circular. Assert the
+                // parsed rule equals the typed intent before it leaves the arm.
+                let parsed = holon_advice::parse_advice_rule(&yaml)
+                    .expect("generator-minted advice rule must parse");
+                assert_eq!(
+                    parsed.anchor,
+                    holon_advice::AnchorSelector::HasTag(anchor_tag.to_string()),
+                );
+                let holon_advice::ScoringTemplate::TagOverlapRecency(spec) = &parsed.candidates;
+                assert_eq!(
+                    spec.source,
+                    holon_advice::AnchorSelector::HasTag(source_tag.to_string()),
+                );
+                assert_eq!(parsed.k.get(), k);
+                assert_eq!(parsed.active, active);
+
+                let mut rule_block = Block::new_source(
+                    EntityUri::block(&format!("{id}::src::0")),
+                    heading_uri,
+                    "holon_advice_rule_yaml",
+                    &yaml,
+                );
+                rule_block.set_sequence(1);
+
+                let blocks = vec![heading, rule_block];
+                (filename, blocks)
+            },
+        )
+        .boxed();
 
     // Shared-tree mount: a headline with `:share-role: mount` and
     // `:shared-tree-id: <uuid>` in its property drawer, plus 1–3 children
@@ -543,8 +807,24 @@ pub fn generate_org_file_content_with_keywords(
     // keep CI green.
     let mount_enabled = std::env::var("HOLON_PBT_SHARED_TREE_MOUNT").ok().as_deref() == Some("1");
 
+    // Mix the advice-rule arm into a profile-bearing base at a weight
+    // comparable to `file_with_profile`'s (roughly 1 part in ~10). The arm is
+    // only present when `allow_advice_rule` holds — i.e. no advice-rule block
+    // exists in the reference yet — so at most one rule is ever minted per run
+    // (the `active_rule` ≤1 invariant). The gate is re-checked under shrinking
+    // in `WriteOrgFile::preconditions`.
+    let mix_advice = |base: BoxedStrategy<(String, Vec<Block>)>,
+                      advice: BoxedStrategy<(String, Vec<Block>)>| {
+        if allow_advice_rule {
+            prop_oneof![9 => base, 1 => advice].boxed()
+        } else {
+            let _ = advice; // hold onto the strategy without firing
+            base
+        }
+    };
+
     if allow_index_override {
-        if mount_enabled {
+        let base = if mount_enabled {
             prop_oneof![
                 3 => regular_file,
                 2 => index_file_prql,
@@ -553,6 +833,7 @@ pub fn generate_org_file_content_with_keywords(
                 1 => index_file_sql,
                 1 => index_file_tree,
                 1 => file_with_profile,
+                1 => file_with_render_artifacts,
                 2 => shared_tree_mount_file,
             ]
             .boxed()
@@ -566,27 +847,41 @@ pub fn generate_org_file_content_with_keywords(
                 1 => index_file_sql,
                 1 => index_file_tree,
                 1 => file_with_profile,
+                1 => file_with_render_artifacts,
             ]
             .boxed()
-        }
+        };
+        mix_advice(base, file_with_advice_rule)
     } else if extended_gen_enabled() {
         // Extended-gen axis 4: profile-bearing files in the no-overrides
         // configuration. The test profile YAMLs render just
         // `row(editable_text(...))` — no state_toggle — so the ref model
         // must track the active profile per rendered block. Triaged on the
         // extended slice before promotion.
-        prop_oneof![
+        let base = prop_oneof![
             8 => regular_file,
             1 => file_with_profile,
+            1 => file_with_render_artifacts,
         ]
-        .boxed()
+        .boxed();
+        mix_advice(base, file_with_advice_rule)
     } else {
         // Profile-bearing files override the default block entity profile,
         // and the test's profile YAMLs render just `row(editable_text(...))`
         // — no state_toggle. We keep them out of the no-overrides
         // configuration so the default `assets/default/types/block_profile.yaml`
         // (which has the state_toggle variant) stays in effect.
-        regular_file.boxed()
+        // Advice-rule blocks do NOT override profiles (inert data until the
+        // weave lands, then the feature under test) — so unlike profiles they
+        // stay in the default mix; excluding them made advice unreachable.
+        // The render-artifact arm rides along here too so the mixed
+        // Source/Image/Text sibling group is reachable in the default config.
+        let base = prop_oneof![
+            8 => regular_file,
+            1 => file_with_render_artifacts,
+        ]
+        .boxed();
+        mix_advice(base, file_with_advice_rule)
     }
 }
 
@@ -638,7 +933,6 @@ pub fn generate_mutation(
                 fields.insert(prop_name.to_string(), Value::String(prop_value));
             }
             Mutation::Create {
-                entity: "block".to_string(),
                 id: EntityUri::block(&format!("block-{}", next_id)),
                 parent_id,
                 fields,
@@ -656,7 +950,6 @@ pub fn generate_mutation(
     )
         .prop_map(
             move |(language, source_content, parent_id)| Mutation::Create {
-                entity: "block".to_string(),
                 id: EntityUri::block(&format!("block-{}", next_id)),
                 parent_id,
                 fields: [
@@ -684,7 +977,6 @@ pub fn generate_mutation(
 
     let update_content = if updatable_content_ids.is_empty() {
         Just(Mutation::Update {
-            entity: "block".to_string(),
             id: ids[0].clone(),
             fields: [("content".to_string(), Value::String("fallback".to_string()))]
                 .into_iter()
@@ -697,7 +989,6 @@ pub fn generate_mutation(
             edit_content_strategy(),
         )
             .prop_map(|(id, new_content)| Mutation::Update {
-                entity: "block".to_string(),
                 id,
                 fields: [("content".to_string(), Value::String(new_content))]
                     .into_iter()
@@ -730,7 +1021,6 @@ pub fn generate_mutation(
             "[a-zA-Z0-9]{1,10}",
         )
             .prop_map(|(id, prop_name, prop_value)| Mutation::Update {
-                entity: "block".to_string(),
                 id,
                 fields: [(prop_name.to_string(), Value::String(prop_value))]
                     .into_iter()
@@ -740,10 +1030,7 @@ pub fn generate_mutation(
         prop_oneof![2 => update_content, 1 => update_custom_prop].boxed()
     };
 
-    let delete = prop::sample::select(ids).prop_map(|id| Mutation::Delete {
-        entity: "block".to_string(),
-        id,
-    });
+    let delete = prop::sample::select(ids).prop_map(|id| Mutation::Delete { id });
 
     prop_oneof![3 => create, 2 => update, 1 => delete].boxed()
 }
@@ -812,7 +1099,6 @@ pub fn generate_layout_headline_mutation(
     let content_mutation =
         (prop::sample::select(ids.clone()), content_strategy()).prop_map(|(id, content)| {
             Mutation::Update {
-                entity: "block".to_string(),
                 id,
                 fields: [("content".to_string(), Value::String(content))]
                     .into_iter()
@@ -835,7 +1121,6 @@ pub fn generate_layout_headline_mutation(
                     None => Value::Null,
                 };
                 Mutation::Update {
-                    entity: "block".to_string(),
                     id,
                     fields: [("task_state".to_string(), value)].into_iter().collect(),
                 }
@@ -868,7 +1153,6 @@ pub fn generate_render_source_mutation(ids: Vec<EntityUri>) -> impl Strategy<Val
 
     (prop::sample::select(ids), prop::sample::select(weighted)).prop_map(|(id, expr)| {
         Mutation::Update {
-            entity: "block".to_string(),
             id,
             fields: [("content".to_string(), Value::String(expr))]
                 .into_iter()
@@ -882,11 +1166,295 @@ pub fn generate_profile_content_mutation(ids: Vec<EntityUri>) -> impl Strategy<V
     let yamls: Vec<String> = VALID_PROFILE_YAMLS.iter().map(|s| s.to_string()).collect();
     (prop::sample::select(ids), prop::sample::select(yamls)).prop_map(|(id, yaml)| {
         Mutation::Update {
-            entity: "block".to_string(),
             id,
             fields: [("content".to_string(), Value::String(yaml))]
                 .into_iter()
                 .collect(),
         }
     })
+}
+
+#[cfg(test)]
+mod advice_rule_tests {
+    use holon_advice::AnchorSelector;
+    use holon_advice::ScoringTemplate;
+    use holon_advice::parse_advice_rule;
+
+    use super::*;
+
+    /// Reachability floor for the advice-rule arm: with `allow_advice_rule`
+    /// the default (no-overrides) file mix must actually draw
+    /// `holon_advice_rule_yaml` source blocks at roughly its 1-in-10 weight —
+    /// a silent gate-out here makes both advice keystone invariants vacuous.
+    #[test]
+    fn advice_rule_arm_reachable_in_default_mix() {
+        use proptest::strategy::ValueTree;
+        use proptest::test_runner::TestRunner;
+        let mut runner = TestRunner::deterministic();
+        let strat = generate_org_file_content_with_keywords(None, false, true);
+        let hits = (0..200)
+            .filter(|_| {
+                let (_, blocks) = strat
+                    .new_tree(&mut runner)
+                    .expect("file strategy must draw")
+                    .current();
+                blocks.iter().any(|b| {
+                    b.source_language
+                        .as_ref()
+                        .map(|sl| sl.to_string())
+                        .as_deref()
+                        == Some(holon_advice::ADVICE_RULE_SOURCE_LANGUAGE)
+                })
+            })
+            .count();
+        assert!(
+            hits > 5,
+            "advice-rule arm near-vacuous in the default file mix: {hits}/200 draws carried a \
+             holon_advice_rule_yaml block (expected ~20)"
+        );
+    }
+
+    /// Stage-2 reachability floor for the advice weave (F3). Stage 1
+    /// (`advice_rule_arm_reachable_in_default_mix`) only proves a RULE BLOCK is
+    /// drawn. What makes BOTH advice keystone invariants non-vacuous is a
+    /// non-empty `AdviceExpectation.scored` — a tag COLLISION between the
+    /// rule's anchor/source tags and the tags `SetEdgeField` lands on
+    /// blocks. Nothing floored that collision, so a `SetEdgeField` weight
+    /// change or an `ADVICE_TAG_POOL` retune could silently make `scored`
+    /// always empty (the empty-empty anchor is skipped, so
+    /// `check_advice_relation` is never exercised) while the stage-1
+    /// rule-presence floor stays green.
+    ///
+    /// This floors the collision over the SAME generator space both sides draw
+    /// from: rule anchor/source tags (distinct, from `ADVICE_TAG_POOL`, as
+    /// `file_with_advice_rule` draws) + per-block tag sets
+    /// (`subsequence(ADVICE_TAG_POOL, 1..=3)`, as the `SetEdgeField` pool
+    /// sub-arm draws). A non-empty `scored` — computed by the SAME
+    /// `expectation_for` the oracle uses — must be reachable at non-trivial
+    /// frequency.
+    #[test]
+    fn advice_scored_nonempty_reachable_in_default_mix() {
+        use proptest::strategy::Strategy;
+        use proptest::strategy::ValueTree;
+        use proptest::test_runner::TestRunner;
+
+        use crate::pbt::advice_expectation::expectation_for;
+
+        let mut runner = TestRunner::deterministic();
+        let scenario = (
+            // Rule tags: distinct pool tags + small k (the `file_with_advice_rule` draw).
+            (
+                prop::sample::select(ADVICE_TAG_POOL.to_vec()),
+                prop::sample::select(ADVICE_TAG_POOL.to_vec()),
+                1..=3u8,
+            )
+                .prop_filter("anchor and source tags must differ", |(a, s, _)| a != s),
+            // Per-block tag sets: the `SetEdgeField` pool sub-arm draw. Four
+            // blocks (one anchor + three candidates) is enough for a collision.
+            proptest::collection::vec(
+                proptest::sample::subsequence(ADVICE_TAG_POOL.to_vec(), 1..=3),
+                4,
+            ),
+        );
+
+        let root = EntityUri::parse("block:root").expect("root uri");
+        let hits = (0..400)
+            .filter(|_| {
+                let ((anchor_tag, source_tag, k), tag_sets) = scenario
+                    .new_tree(&mut runner)
+                    .expect("advice scenario strategy must draw")
+                    .current();
+                let yaml = format!(
+                    "name: pbt_lessons\nactive: true\nanchor:\n  has_tag: {anchor_tag}\n\
+                     candidates:\n  tag_overlap_recency:\n    source:\n      has_tag: \
+                     {source_tag}\nk: {k}\n"
+                );
+                let rule =
+                    holon_advice::parse_advice_rule(&yaml).expect("generated advice rule parses");
+                let blocks: std::collections::BTreeMap<EntityUri, Block> = tag_sets
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, tags)| {
+                        let id = EntityUri::parse(&format!("block:b{i}")).expect("block uri");
+                        let mut b = Block::new_text(id.clone(), root.clone(), String::new());
+                        b.tags = holon_api::Tags::from_tag_iter(tags.into_iter().map(String::from));
+                        (id, b)
+                    })
+                    .collect();
+                blocks
+                    .keys()
+                    .any(|aid| !expectation_for(&blocks, &rule, aid).scored.is_empty())
+            })
+            .count();
+
+        assert!(
+            hits > 20,
+            "advice tag-collision near-vacuous: only {hits}/400 draws produced a non-empty \
+             `scored` — the rule tags and the SetEdgeField pool tags no longer overlap, so both \
+             advice invariants would run vacuously (a pool/weight retune vacated the weave)"
+        );
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        })]
+
+        /// Pins the advice-rule YAML template shut: any draw over the same input
+        /// space the `file_with_advice_rule` arm uses (distinct pool tags, small
+        /// k, weighted-active flag) must parse back to the typed intent. This is
+        /// the same round-trip the arm asserts inline — surfaced as a standalone
+        /// test so a template regression fails here, not only mid-generation.
+        #[test]
+        fn advice_rule_yaml_round_trips(
+            (anchor_tag, source_tag, k, active) in (
+                prop::sample::select(ADVICE_TAG_POOL.to_vec()),
+                prop::sample::select(ADVICE_TAG_POOL.to_vec()),
+                1..=3u8,
+                prop::sample::select(vec![true, true, true, true, false]),
+            )
+                .prop_filter("anchor and source tags must differ", |(a, s, _, _)| a != s)
+        ) {
+            let yaml = format!(
+                "name: pbt_lessons\n\
+                 active: {active}\n\
+                 anchor:\n  has_tag: {anchor_tag}\n\
+                 candidates:\n  tag_overlap_recency:\n    source:\n      has_tag: {source_tag}\n\
+                 k: {k}\n"
+            );
+            let parsed = parse_advice_rule(&yaml).expect("advice rule must parse");
+            prop_assert_eq!(&parsed.anchor, &AnchorSelector::HasTag(anchor_tag.to_string()));
+            let ScoringTemplate::TagOverlapRecency(spec) = &parsed.candidates;
+            prop_assert_eq!(&spec.source, &AnchorSelector::HasTag(source_tag.to_string()));
+            prop_assert_eq!(parsed.k.get(), k);
+            prop_assert_eq!(parsed.active, active);
+        }
+    }
+}
+
+#[cfg(test)]
+mod scheme_link_arm_tests {
+    use std::time::Duration;
+
+    use proptest::strategy::ValueTree;
+    use proptest::test_runner::TestRunner;
+
+    use super::*;
+    use crate::pbt::frontend_slice::components::HeadlessFrontendComponent;
+    use crate::pbt::transitions::register_entity_scheme::LINKED_SCHEME;
+
+    /// Draw keystroke literals until the scheme-shaped arm fires. Panics rather
+    /// than returning `None`: a strategy that cannot reach the arm makes every
+    /// assertion downstream of it vacuous.
+    fn sample_scheme_link_literal() -> String {
+        let mut runner = TestRunner::deterministic();
+        let strat = typing_text_strategy();
+        let prefix = format!("[[{LINKED_SCHEME}:");
+        for _ in 0..500 {
+            let drawn = strat
+                .new_tree(&mut runner)
+                .expect("typing strategy draws")
+                .current();
+            if drawn.starts_with(&prefix) {
+                return drawn;
+            }
+        }
+        panic!(
+            "reachability floor: 500 draws of typing_text_strategy produced no {prefix}…]] \
+             literal — the scheme-shaped link arm is unreachable and the generative arm of bug \
+             #98 certifies nothing"
+        );
+    }
+
+    /// The scheme-shaped arm is drawable AND its literal lands in `block_links`
+    /// with NO entity registered — the registration-independence the junction
+    /// is supposed to have (bug #98). The expectation is the shared oracle
+    /// `derive_block_links` over the marks the production extractor produces,
+    /// so the row SET is judged, not merely counted.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scheme_link_arm_reaches_block_links_unregistered() {
+        let literal = sample_scheme_link_literal();
+
+        let comp = HeadlessFrontendComponent::new(
+            &[("doc0.org", "#+ID: ref-doc-0\n* Doc zero\n")],
+            Duration::from_millis(300),
+        )
+        .await;
+        assert!(
+            !comp.type_registry().await.contains(LINKED_SCHEME),
+            "the arm must be proven WITHOUT the scheme registered — that is the whole property"
+        );
+        // `set_field("content")` is the op an editor commit sends and the ONLY
+        // one that extracts inline marks — the same rung `TypeChars` reaches
+        // through the driver. A `block.create` carrying the literal would store
+        // it as raw text with NULL marks and prove nothing about typing.
+        comp.create_block("block:scheme-link", "block:ref-doc-0", "")
+            .await;
+        let mut params: holon_api::StorageEntity = std::collections::HashMap::new();
+        params.insert(
+            "id".into(),
+            holon_api::Value::String("block:scheme-link".into()),
+        );
+        params.insert("field".into(), holon_api::Value::String("content".into()));
+        params.insert("value".into(), holon_api::Value::String(literal.clone()));
+        comp.engine()
+            .execute_operation(
+                &holon_api::EntityName::new("block"),
+                "set_field",
+                params,
+                holon_api::OpOrigin::User,
+            )
+            .await
+            .expect("set_field(content) with the typed literal");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let (_, marks) = holon_orgmode::inline_marks::extract_inline_marks(&literal);
+        let expected: Vec<(String, String)> = holon_api::derive_block_links(&marks)
+            .into_iter()
+            .map(|l| (l.target, l.kind.as_str().to_string()))
+            .collect();
+        assert_eq!(
+            expected,
+            vec![(
+                literal
+                    .trim_start_matches("[[")
+                    .trim_end_matches("]]")
+                    .to_string(),
+                "entity".to_string()
+            )],
+            "non-vacuity: the generated literal {literal:?} must derive exactly one entity link"
+        );
+
+        let rows = comp
+            .engine()
+            .db_handle()
+            .query(
+                "SELECT target, kind FROM block_links WHERE source_block_id = \
+                 'block:scheme-link' ORDER BY target, kind",
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("block_links query");
+        let actual: Vec<(String, String)> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r.get("target")
+                        .and_then(|v| v.as_string())
+                        .expect("target")
+                        .to_string(),
+                    r.get("kind")
+                        .and_then(|v| v.as_string())
+                        .expect("kind")
+                        .to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            actual, expected,
+            "a scheme-shaped link typed while its entity is UNREGISTERED must still write its \
+             junction row"
+        );
+    }
 }

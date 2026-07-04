@@ -33,6 +33,7 @@ use holon_integration_tests::pbt::composed::wide_e2e::windowed_composed_sut;
 use holon_integration_tests::pbt::fixtures::NamedFixture;
 use holon_integration_tests::pbt::fixtures::replay_steps;
 use holon_integration_tests::pbt::op_write_cap::IdResolver;
+use holon_integration_tests::pbt::window_slice::builders::WindowMountConvention;
 use holon_integration_tests::pbt::window_slice::builders::overlay_windowed_caps;
 
 use super::sim_windowed_replay::SimUserDriver;
@@ -182,7 +183,15 @@ pub fn with_windowed_wide_sut(
     // so the windowed per-apply settle converges CDC + Loro + org like the
     // headless path.
     let handle = WideHandle::from_bundle(&bundle);
-    let overlaid = overlay_windowed_caps(bundle.caps, frontend, geometry, engine.clone(), driver);
+    let overlaid = overlay_windowed_caps(
+        bundle.caps,
+        frontend,
+        geometry,
+        engine.clone(),
+        driver,
+        resolver.clone(),
+        WindowMountConvention::PerBlockShell,
+    );
 
     // The window-settle hook the ComposedSut pumps before each check (mirror sim
     // `pump_cycle`: real wall-clock time for backend watchers on their own worker
@@ -285,10 +294,10 @@ pub fn replay_fixture_windowed(
         // fake.
         if let Some(recorded) = &fixture.wiring {
             assert_eq!(
-                *recorded, oracle.wiring,
+                *recorded, oracle.harness.wiring,
                 "[{label}] fixture {:?} was recorded under wiring {recorded:?}, but the windowed \
                  composed base is fixed to {:?} — re-record or replay headless",
-                fixture.name, oracle.wiring
+                fixture.name, oracle.harness.wiring
             );
         }
         match catch_unwind(AssertUnwindSafe(|| {

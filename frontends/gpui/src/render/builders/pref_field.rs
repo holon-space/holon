@@ -19,6 +19,29 @@ fn dispatch_set_preference(services: &Arc<dyn BuilderServices>, key: &str, value
     });
 }
 
+/// Persist a preference and, on failure, surface a visible degraded-mode toast
+/// instead of aborting. A settings write that hits a read-only config dir
+/// (Android's relative `.holon` regression) must keep the app alive and tell
+/// the user it did not stick — never SIGABRT the process.
+fn set_preference_or_toast(
+    services: &Arc<dyn BuilderServices>,
+    key: &str,
+    value: Value,
+    cx: &mut gpui::App,
+) {
+    if let Err(e) = services.set_preference(key, value) {
+        crate::share_ui::DegradedToastSink::push(
+            crate::share_ui::DegradedToast {
+                kind: crate::share_ui::DegradedKind::PreferenceSaveFailed,
+                shared_tree_id: format!("preference:{key}"),
+                detail: format!("Couldn't save '{key}': {e:#}"),
+                condition: None,
+            },
+            cx,
+        );
+    }
+}
+
 pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
     let key = node.prop_str("key").unwrap_or_default();
     let pref_type = node.prop_str("pref_type").unwrap_or_default();
@@ -183,11 +206,12 @@ fn build_choice(
                     menu = menu.item(
                         PopupMenuItem::new(label.clone())
                             .checked(is_current)
-                            .on_click(move |_, window, _cx| {
-                                dispatch_set_preference(
+                            .on_click(move |_, window, cx| {
+                                set_preference_or_toast(
                                     &services,
                                     &key,
                                     Value::String(value.clone()),
+                                    cx,
                                 );
                                 // Theme may have changed — re-sync
                                 window.refresh();
@@ -265,11 +289,24 @@ fn prompt_text_input(key: &str, default: &str, hidden: bool) -> Option<String> {
         default = if hidden { "" } else { default }.replace('"', r#"\""#),
         hidden_str = hidden_str,
     );
-    let output = std::process::Command::new("osascript")
+    let output = match std::process::Command::new("osascript")
         .arg("-e")
         .arg(&script)
         .output()
-        .ok()?; // ALLOW(ok): osascript best-effort
+    {
+        Ok(o) => o,
+        Err(e) => {
+            // Disclosed degradation (fail-loud rule): on iOS/Android (and
+            // Linux/Windows) there is no osascript — preference text entry
+            // needs a native dialog seam there. Log instead of silently
+            // treating the failure as user-cancelled.
+            tracing::warn!(
+                "pref_field: cannot prompt for '{key}' — osascript unavailable                  \
+                 on this platform ({e}); preference left unchanged"
+            );
+            return None;
+        }
+    };
     if !output.status.success() {
         return None; // user cancelled
     }
@@ -317,8 +354,8 @@ fn build_toggle(ctx: &GpuiRenderContext, value: &Value, key: &str) -> Div {
             .id(hashed_id(&el_id))
             .cursor_pointer()
             .child(track)
-            .on_mouse_down(gpui::MouseButton::Left, move |_, window, _| {
-                dispatch_set_preference(&services, &key_owned, Value::Boolean(new_value));
+            .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+                set_preference_or_toast(&services, &key_owned, Value::Boolean(new_value), cx);
                 window.refresh();
             }),
     )

@@ -33,9 +33,15 @@ pub fn create_interpreter() -> RenderInterpreter<AnyView> {
             Err(msg) => AnyView::new(text(msg).size(12.0).foreground(Color::srgb_hex("#FF0000"))),
         }
     });
-    interp.register("live_query", |ba: BA| match shared_live_query_build(&ba) {
-        Ok(result) => result.content,
-        Err(msg) => AnyView::new(text(msg).size(12.0).foreground(Color::srgb_hex("#FF0000"))),
+    interp.register("live_query", |ba: BA| {
+        let item_template = ba
+            .args
+            .get_template("item_template")
+            .or(ba.args.get_template("item"));
+        match shared_live_query_build(&ba, item_template) {
+            Ok(result) => result.content,
+            Err(msg) => AnyView::new(text(msg).size(12.0).foreground(Color::srgb_hex("#FF0000"))),
+        }
     });
     interp.register("render_entity", |ba: BA| {
         match shared_render_entity_build(&ba) {

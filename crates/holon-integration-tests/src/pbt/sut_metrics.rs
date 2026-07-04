@@ -1,23 +1,23 @@
 //! OTel / performance-metrics component for the PBT SUT.
 //!
-//! Owns the per-transition span collector, RSS sampling, and the
-//! whole-case query-origin accumulator that used to live as loose fields
-//! on `E2ESut`. `E2ESut` holds one `MetricsSut` and forwards the three
-//! lifecycle hooks to it — `on_transition_start` (reset before each
-//! transition), `print_drop_report` (whole-case cache/query-origin dump on
-//! `Drop`), and `sql_budget_report` (the `inv-sql-budget` body) — so no
-//! other module reads the raw span/RSS state directly.
+//! @pbt kind sut-arm
+//! @pbt covers all-slices (span-metrics) — non-functional SUT arm:
+//! per-transition   span/RSS/wall metrics feeding `inv-sql-budget` (latency SLO
+//! teeth).
+//!
+//! Owns the per-transition span collector and RSS sampling. Hosted by the
+//! composed `span_metrics` component (`composed/span_metrics.rs`), which
+//! forwards the lifecycle hooks — `on_transition_start` (reset before each
+//! transition) and `sql_budget_report` (the `inv-sql-budget` body) — so no
+//! other module reads the raw span/RSS state directly. (The whole-case
+//! `PBT_MATVIEW_METRICS` drop report died with the `E2ESut` monolith; re-host
+//! it on the span_metrics component if case-level dumps are wanted again.)
 //!
 //! Most state and behaviour is gated on `otel-testing`; without that feature
-//! the component degrades to just the query-origin accumulator and the
-//! lifecycle hooks become no-ops.
+//! the lifecycle hooks become no-ops.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::time::Duration;
-
-#[cfg(feature = "otel-testing")]
-use holon::api::BackendEngine;
 
 #[cfg(feature = "otel-testing")]
 use super::reference_state::ReferenceState;
@@ -26,7 +26,7 @@ use crate::pbt::invariants::bodies::sql_budget::SqlBudgetReport;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transitions::E2ETransition;
 
-/// Per-transition and whole-case performance metrics owned by the SUT.
+/// Per-transition performance metrics owned by the SUT.
 pub(super) struct MetricsSut {
     /// In-memory OTel span collector for non-functional invariants.
     #[cfg(feature = "otel-testing")]
@@ -40,12 +40,6 @@ pub(super) struct MetricsSut {
     /// RSS (bytes) at the very start of the PBT run, for cumulative growth.
     #[cfg(feature = "otel-testing")]
     rss_baseline: usize,
-    /// Case-level accumulator of `query` span ancestor chains (count, total
-    /// duration). The `SpanCollector` resets at the start of every
-    /// transition, so to get whole-case totals we snapshot
-    /// `queries_by_origin()` before each reset and merge here. Used only when
-    /// `PBT_MATVIEW_METRICS=1`.
-    query_origin_acc: RefCell<HashMap<Vec<String>, (usize, Duration)>>,
     /// Span metrics + wall/RSS frozen at invariant-check start
     /// ([`Self::freeze_at_check_start`]), so the budget measures the
     /// transition itself (apply + settle) — NOT the invariant bodies' own
@@ -66,6 +60,12 @@ struct FrozenCheckMetrics {
 
 impl MetricsSut {
     pub(super) fn new() -> Self {
+        // A case's observability window opens here for harnesses that do not go
+        // through `ComposedSut::init_test` (slice tests, the `teeth` lockstep
+        // harness): without a scope, `on_transition_start`'s `reset` and the
+        // observed-errors read would have no window to address.
+        #[cfg(feature = "otel-testing")]
+        crate::test_tracing::ensure_test_scope();
         Self {
             #[cfg(feature = "otel-testing")]
             span_collector: crate::test_tracing::SpanCollector::global().clone(),
@@ -75,7 +75,6 @@ impl MetricsSut {
             rss_before: 0,
             #[cfg(feature = "otel-testing")]
             rss_baseline: 0,
-            query_origin_acc: RefCell::new(HashMap::new()),
             #[cfg(feature = "otel-testing")]
             frozen_at_check: RefCell::new(None),
         }
@@ -110,15 +109,6 @@ impl MetricsSut {
     /// metric isolation. No-op without `otel-testing`.
     #[cfg(feature = "otel-testing")]
     pub(super) fn on_transition_start(&mut self) {
-        if std::env::var("PBT_MATVIEW_METRICS").as_deref() == Ok("1") {
-            let prev = self.span_collector.queries_by_origin();
-            let mut acc = self.query_origin_acc.borrow_mut();
-            for row in prev.rows {
-                let entry = acc.entry(row.chain).or_insert((0, Duration::ZERO));
-                entry.0 += row.count;
-                entry.1 += row.total_duration;
-            }
-        }
         self.span_collector.reset();
         *self.frozen_at_check.borrow_mut() = None;
         self.last_transition_start = Some(std::time::Instant::now());
@@ -132,72 +122,16 @@ impl MetricsSut {
     #[cfg(not(feature = "otel-testing"))]
     pub(super) fn on_transition_start(&mut self) {}
 
-    /// Whole-case one-shot metrics dump printed from `E2ESut::drop` when
-    /// `PBT_MATVIEW_METRICS=1`. Prints matview cache effectiveness (read from
-    /// `engine`) and the merged per-origin SQL query breakdown. The caller
-    /// gates on the env var and `is_running`.
-    #[cfg(feature = "otel-testing")]
-    pub(super) fn print_drop_report(&self, engine: &BackendEngine) {
-        let (hits, exists, creates) = engine.matview_cache_metrics();
-        let total = hits + exists;
-        let hit_pct = if total == 0 {
-            0.0
-        } else {
-            (hits as f64 / total as f64) * 100.0
-        };
-        eprintln!(
-            "[matview-cache] cache_hits={hits} exists_calls={exists} ddl_creates={creates} \
-             hit_rate={hit_pct:.1}%"
-        );
-
-        // Per-origin SQL query breakdown — merged across the whole case.
-        // The collector resets per transition, so `query_origin_acc`
-        // accumulates each pre-reset snapshot; here we fold in the final
-        // transition's spans (no reset has fired since) and print the
-        // total. Rows under "<no-parent>" / "<unknown-parent>" are the
-        // prime suspects for the "1600 mystery queries" — they're SQL
-        // fired from a tokio task whose parent span didn't propagate.
-        let mut acc = self.query_origin_acc.borrow_mut();
-        let final_breakdown = self.span_collector.queries_by_origin();
-        for row in final_breakdown.rows {
-            let entry = acc
-                .entry(row.chain)
-                .or_insert((0, std::time::Duration::ZERO));
-            entry.0 += row.count;
-            entry.1 += row.total_duration;
-        }
-        let mut rows: Vec<crate::test_tracing::QueryOriginRow> = acc
-            .iter()
-            .map(
-                |(chain, (count, total_duration))| crate::test_tracing::QueryOriginRow {
-                    chain: chain.clone(),
-                    count: *count,
-                    total_duration: *total_duration,
-                },
-            )
-            .collect();
-        rows.sort_by(|a, b| {
-            b.total_duration
-                .cmp(&a.total_duration)
-                .then(b.count.cmp(&a.count))
-        });
-        let total_queries: usize = rows.iter().map(|r| r.count).sum();
-        let total_duration: std::time::Duration = rows.iter().map(|r| r.total_duration).sum();
-        let breakdown = crate::test_tracing::QueryOriginBreakdown {
-            rows,
-            total_queries,
-            total_duration,
-        };
-        eprintln!("[query-origin]\n{breakdown}");
-    }
-
     /// Port of the inline `inv-sql-budget` block: snapshot span metrics for
     /// the last transition, emit all telemetry side-effects (summary line,
     /// N+1 list, flamegraph, detail, memory diagnosis), and return the budget
     /// pass/fail decision. Error violations are returned only when
     /// `HOLON_PERF_BUDGET` enforcement is on; otherwise they're logged as
-    /// `BUDGET OFF`. `last_transition` is owned by `E2ESut` (it's not a
-    /// metric) and passed in.
+    /// `BUDGET OFF`. Breaches of a PINNED ceiling
+    /// (`transition_budgets::Violation::PinnedError`) are returned
+    /// unconditionally and flip the report to enforced.
+    /// `last_transition` is owned by `E2ESut` (it's not a metric) and passed
+    /// in.
     #[cfg(feature = "otel-testing")]
     pub(super) fn sql_budget_report(
         &self,
@@ -301,7 +235,11 @@ impl MetricsSut {
             transition_budgets::diagnose_memory(&key);
         }
 
+        // A pinned breach fails the run on its own, so the report must declare
+        // itself enforced even when `HOLON_PERF_BUDGET` is off — otherwise
+        // `InvSqlBudget` would downgrade it to `Skipped`.
         let mut errors = Vec::new();
+        let mut pinned_breach = false;
         for v in &violations {
             match v {
                 transition_budgets::Violation::Warning(msg) => {
@@ -314,8 +252,14 @@ impl MetricsSut {
                         eprintln!("[inv-sql-budget BUDGET OFF] {msg}");
                     }
                 }
+                transition_budgets::Violation::PinnedError(msg) => {
+                    eprintln!("[inv-sql-budget PINNED] {msg}");
+                    pinned_breach = true;
+                    errors.push(msg.clone());
+                }
             }
         }
+        let enforce = enforce || pinned_breach;
 
         if !metrics.duplicate_sql.is_empty() {
             eprintln!(

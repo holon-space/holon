@@ -399,6 +399,36 @@ impl UserDriver for SimUserDriver {
         Ok(())
     }
 
+    /// The trait default clicks the block ROW (which only focuses), never
+    /// reaching the `state_toggle` glyph's `on_mouse_down`, so `task_state`
+    /// never cycles — the windowed `toggle_state never landed` defect. The
+    /// window's `state_toggle` elements register with NO `entity_id` and 0x0
+    /// bounds, so they cannot be geometry-hit-tested by block. Resolve +
+    /// dispatch the SAME `set_field` cycle intent the widget's `on_mouse_down`
+    /// builds — off the resolved view tree, exactly as headless
+    /// `ReactiveEngineDriver::cycle_state_toggle` does (the `StateToggle` NODE
+    /// carries the block `entity_id`). Then pump so the projection the caller's
+    /// landing-poll reads reflects the write.
+    async fn cycle_state_toggle(
+        &self,
+        entity_id: &EntityUri,
+        region: &str,
+    ) -> Result<(), anyhow::Error> {
+        let root = holon_api::root_layout_block_uri();
+        let resolved = self.engine.snapshot_resolved(&root);
+        let intent =
+            holon_frontend::focus_path::state_toggle_cycle_intent(&resolved, entity_id, region)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "cycle_state_toggle: no state_toggle node for {entity_id} in region \
+                         {region} (target rendered no task toggle — not a visible task row?)"
+                    )
+                })?;
+        self.engine.dispatch_intent_sync(intent).await?;
+        self.pump();
+        Ok(())
+    }
+
     async fn click_entity_with_tree(
         &self,
         _: &EntityUri,
@@ -492,6 +522,19 @@ impl UserDriver for SimUserDriver {
         self.update_and_settle(|cx| {
             self.window
                 .update(cx, |_, window, cx| {
+                    // Move the pointer to the target first, mirroring
+                    // `GpuiUserDriver::scroll_at`: gpui recomputes the scroll
+                    // hit-test from the window's tracked mouse position, so the
+                    // move keeps the wheel landing on the intended viewport.
+                    window.dispatch_event(
+                        gpui::MouseMoveEvent {
+                            position: point,
+                            pressed_button: None,
+                            modifiers: Default::default(),
+                        }
+                        .to_platform_input(),
+                        cx,
+                    );
                     window.dispatch_event(
                         gpui::ScrollWheelEvent {
                             position: point,

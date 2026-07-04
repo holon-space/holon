@@ -1,8 +1,6 @@
 //! Core PBT types: mutations, test variants, and marker traits.
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::Mutex;
 
 use holon_api::ContentType;
 use holon_api::SourceLanguage;
@@ -10,58 +8,14 @@ use holon_api::Value;
 use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
 use holon_orgmode::models::OrgBlockExt;
+use holon_pbt_core::types::Mutation;
 
-/// Shared, `Send`-safe handle to the reference-stable-id → resolved-UUID map.
-///
-/// Lives in this neutral module (not `sut`) so component SUTs like
-/// [`crate::pbt::sut_loro::LoroSut`] can hold a clone without depending on the
-/// `E2ESut` facade. `std::sync::Mutex` (not `RefCell`) because the SUT is moved
-/// across threads at teardown.
-pub type DocUriMap = Arc<Mutex<HashMap<EntityUri, EntityUri>>>;
-
-/// Source of a mutation
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum MutationSource {
-    /// User action via BackendEngine operations (through ctx.execute_op)
-    UI,
-    /// External change to an Org file (simulates file edit)
-    External,
-    /// Block created by an action watcher (trigger query → action execution)
-    Action,
-    /// Mutation applied through a Loro CRDT *peer* (not the primary instance).
-    /// Diverges from the primary until a separate
-    /// `SyncWithPeer`/`MergeFromPeer` transition converges it. `peer_idx`
-    /// selects which peer (from prior `AddPeer`s) the mutation targets.
-    LoroPeer { peer_idx: usize },
-}
-
-/// A mutation to the data model
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum Mutation {
-    Create {
-        entity: String,
-        id: EntityUri,
-        parent_id: EntityUri,
-        fields: HashMap<String, Value>,
-    },
-    Update {
-        entity: String,
-        id: EntityUri,
-        fields: HashMap<String, Value>,
-    },
-    Delete {
-        entity: String,
-        id: EntityUri,
-    },
-    Move {
-        entity: String,
-        id: EntityUri,
-        new_parent_id: EntityUri,
-    },
-    /// Simulate app restart: clears FileSyncController's last_projection.
-    /// This tests that re-parsing org files doesn't create orphan blocks in
-    /// Loro.
-    RestartApp,
+/// Org-dependent reference-model applier for [`Mutation`]. Lives here (not in
+/// holon-pbt-core) because it needs `holon_orgmode::OrgBlockExt` via the org
+/// round-trip helpers below. Callers `use crate::pbt::types::MutationApply`.
+pub trait MutationApply {
+    /// Apply this mutation to a vector of blocks (for the reference model).
+    fn apply_to(&self, blocks: &mut Vec<Block>);
 }
 
 // TODO: Move to some sut_org.rs or similar
@@ -156,44 +110,83 @@ fn apply_org_properties(block: &mut Block, fields: &HashMap<String, Value>, is_c
 }
 
 // TODO: Move to sut_org.rb
-/// Normalize content to match what an org round-trip will produce.
+/// Normalize `(content, marks)` to the org round-trip FIXED POINT — the state
+/// the SUT converges to after writeback (`render_inline_marks`) and re-ingest
+/// (headline trim + `extract_inline_marks`) stop changing the block.
 ///
 /// For Text blocks the first line becomes the org headline, which the parser
 /// `.trim()`s (both ends) on re-parse, so leading *and* trailing whitespace
 /// on the first line is stripped. Trailing whitespace on the entire string
-/// is also stripped. Source blocks preserve content verbatim and are returned
-/// unchanged (aside from overall trailing-whitespace trim, which the
-/// renderer's `push_str(content); push('\n')` path doesn't reintroduce
-/// differently).
-pub fn normalize_content_for_org_roundtrip(content: &str, content_type: ContentType) -> String {
+/// is also stripped. The parser extracts inline org markup (`[[…]]` links,
+/// `*bold*`, …) into `block.marks` and stores only the RENDERED LABEL as
+/// content (parse-don't-validate at the boundary); the reference must carry
+/// those marks — modeling only the stripped content is exactly the oracle gap
+/// that let the 2026-07-10 on-disk link-destruction escape (both sides
+/// compared `marks = None`). Identity for plain text, so the default ASCII
+/// generators are unaffected.
+///
+/// One pass is NOT idempotent (e.g. `[[x]]` resolves its bare wiki-target to a
+/// deterministic entity id on the first parse, so the second writeback emits
+/// the resolved `[[block:<hash>][x]]` form), hence the loop. Terminates in
+/// practice within a few iterations (render∘extract is idempotent — pinned by
+/// holon-org-format's inline_marks_proptest); the cap fails loud.
+///
+/// Source blocks preserve content verbatim (no headline, no inline markup) and
+/// never carry marks.
+///
+/// Marks are returned canonicalized (`canonicalize_marks`) mirroring every
+/// prod read boundary (`marks_from_json`, Loro Peritext reader).
+pub fn normalize_content_for_org_roundtrip(
+    content: &str,
+    content_type: ContentType,
+) -> (String, Option<Vec<holon_api::MarkSpan>>) {
+    normalize_content_for_org_roundtrip_with(
+        content,
+        content_type,
+        &holon_api::link_parser::LinkTargetClassifier::default(),
+    )
+}
+
+/// [`normalize_content_for_org_roundtrip`] against a specific classifier.
+///
+/// The default knows only the built-in schemes, which is what keeps the
+/// reference model IO-free — but it therefore cannot see a sidecar-declared
+/// entity. A probe covering one passes a `with_schemes` classifier, which adds
+/// the scheme without adding a registry or any IO.
+pub fn normalize_content_for_org_roundtrip_with(
+    content: &str,
+    content_type: ContentType,
+    classifier: &holon_api::link_parser::LinkTargetClassifier,
+) -> (String, Option<Vec<holon_api::MarkSpan>>) {
     if content_type == ContentType::Source {
-        return content.trim_end().to_string();
+        return (content.trim_end().to_string(), None);
     }
-    // One trim+mark-extraction pass is NOT idempotent (e.g. `[[ x]]` →
-    // label ` x` → next round-trip trims to `x`), and the SUT keeps
-    // round-tripping the file until it converges — so the reference must
-    // normalize to the FIXED POINT, not the first iterate. Terminates: every
-    // pass either shrinks the string or leaves it unchanged. Surfaced by
-    // extended-gen axis 1 (`[[ Hbplihw7UF]]` after promotion).
-    let mut current = content.to_string();
-    loop {
-        let trimmed_end = current.trim_end();
+    let mut text = content.to_string();
+    let mut marks: Vec<holon_api::MarkSpan> = Vec::new();
+    for _ in 0..32 {
+        // Writeback: what the block looks like on disk (identity while no
+        // marks have been extracted yet — the raw input IS the org text).
+        let on_disk = holon_orgmode::inline_marks::render_inline_marks(&text, &marks);
+        // Re-ingest: headline-title trim, then mark extraction.
+        let trimmed_end = on_disk.trim_end();
         let trimmed = match trimmed_end.split_once('\n') {
             Some((first, rest)) => format!("{}\n{}", first.trim(), rest),
             None => trimmed_end.trim_start().to_string(),
         };
-        // The parser also extracts inline org markup (`[[…]]` links, `*bold*`,
-        // …) into `block.marks` and stores only the RENDERED LABEL as content
-        // (parse-don't-validate at the boundary). Content that happens to spell
-        // org markup therefore normalizes to its label after a file round-trip
-        // — identity for plain text, so the default ASCII generators are
-        // unaffected. Surfaced by extended-gen axis 1 (`[[x]]` → `x`).
-        let (rendered, _marks) = holon_orgmode::inline_marks::extract_inline_marks(&trimmed);
-        if rendered == current {
-            return rendered;
+        let (rendered, spans) =
+            holon_orgmode::inline_marks::extract_inline_marks_with(&trimmed, classifier);
+        if rendered == text && spans == marks {
+            holon_api::canonicalize_marks(&mut marks);
+            let marks = if marks.is_empty() { None } else { Some(marks) };
+            return (text, marks);
         }
-        current = rendered;
+        text = rendered;
+        marks = spans;
     }
+    panic!(
+        "normalize_content_for_org_roundtrip: org render/parse did not reach a fixed point after \
+         32 iterations for input {content:?} (last iterate: text={text:?}, marks={marks:?})"
+    );
 }
 
 /// Apply the org HEADLINE-TAG lens to a block: the first content line is the
@@ -229,99 +222,9 @@ pub fn apply_org_headline_tag_split(block: &mut Block) {
     }
 }
 
-impl Mutation {
-    /// Returns the block ID targeted by this mutation, if any.
-    pub fn target_block_id(&self) -> Option<EntityUri> {
-        match self {
-            Mutation::Create { id, .. }
-            | Mutation::Update { id, .. }
-            | Mutation::Delete { id, .. }
-            | Mutation::Move { id, .. } => Some(id.clone()),
-            Mutation::RestartApp => None,
-        }
-    }
-
-    /// Convert mutation to BackendEngine operation parameters
-    pub fn to_operation(&self) -> (String, String, HashMap<String, Value>) {
-        match self {
-            Mutation::Create {
-                entity,
-                id,
-                parent_id,
-                fields,
-            } => {
-                let mut params = fields.clone();
-                params.insert("id".to_string(), id.clone().into());
-                params.insert("parent_id".to_string(), parent_id.clone().into());
-                (entity.clone(), "create".to_string(), params)
-            }
-            Mutation::Update { entity, id, fields } => {
-                let mut params = HashMap::new();
-                params.insert("id".to_string(), id.clone().into());
-
-                // Check if update targets a known SQL column or a custom property.
-                // Known columns use set_field (single-field update); custom properties
-                // use the "update" operation which packs unknown keys into the
-                // `properties` JSON column via partition_params.
-                const KNOWN_COLUMNS: &[&str] = &[
-                    "content",
-                    "parent_id",
-                    "content_type",
-                    "source_language",
-                    "source_name",
-                    "collapsed",
-                    "completed",
-                    "block_type",
-                ];
-
-                let has_custom_props = fields.keys().any(|k| !KNOWN_COLUMNS.contains(&k.as_str()));
-
-                if has_custom_props {
-                    // Use "update" operation — partition_params will pack custom
-                    // keys into the properties JSON column.
-                    for (k, v) in fields.iter() {
-                        params.insert(k.clone(), v.clone());
-                    }
-                    (entity.clone(), "update".to_string(), params)
-                } else if let Some((field_name, field_value)) = fields
-                    .iter()
-                    .find(|(k, _)| *k != "id" && *k != "parent_id")
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                {
-                    params.insert("field".to_string(), Value::String(field_name));
-                    params.insert("value".to_string(), field_value);
-                    (entity.clone(), "set_field".to_string(), params)
-                } else {
-                    params.insert("field".to_string(), Value::String("content".to_string()));
-                    params.insert("value".to_string(), Value::String(String::new()));
-                    (entity.clone(), "set_field".to_string(), params)
-                }
-            }
-            Mutation::Delete { entity, id } => {
-                let mut params = HashMap::new();
-                params.insert("id".to_string(), id.clone().into());
-                (entity.clone(), "delete".to_string(), params)
-            }
-            Mutation::Move {
-                entity,
-                id,
-                new_parent_id,
-            } => {
-                let mut params = HashMap::new();
-                params.insert("id".to_string(), id.clone().into());
-                params.insert("parent_id".to_string(), new_parent_id.clone().into());
-                (entity.clone(), "set_field".to_string(), params)
-            }
-            Mutation::RestartApp => (
-                "_restart".to_string(),
-                "restart".to_string(),
-                HashMap::new(),
-            ),
-        }
-    }
-
+impl MutationApply for Mutation {
     /// Apply mutation to a vector of blocks (for reference model)
-    pub fn apply_to(&self, blocks: &mut Vec<Block>) {
+    fn apply_to(&self, blocks: &mut Vec<Block>) {
         match self {
             Mutation::Create {
                 id,
@@ -346,7 +249,7 @@ impl Mutation {
                     .get("content")
                     .and_then(|v| v.as_string())
                     .unwrap_or_default();
-                let content = normalize_content_for_org_roundtrip(raw, content_type);
+                let (content, marks) = normalize_content_for_org_roundtrip(raw, content_type);
 
                 let source_language: Option<SourceLanguage> = fields
                     .get("source_language")
@@ -361,6 +264,7 @@ impl Mutation {
                 } else {
                     Block::new_text(id.clone(), parent_id.clone(), content)
                 };
+                block.marks = marks;
 
                 apply_org_properties(&mut block, fields, true);
 
@@ -386,8 +290,10 @@ impl Mutation {
             Mutation::Update { id, fields, .. } => {
                 if let Some(block) = blocks.iter_mut().find(|b| b.id == *id) {
                     if let Some(content) = fields.get("content").and_then(|v| v.as_string()) {
-                        block.content =
+                        let (text, marks) =
                             normalize_content_for_org_roundtrip(content, block.content_type);
+                        block.content = text;
+                        block.marks = marks;
                     }
 
                     if fields.contains_key("task_state") || fields.contains_key("TODO") {
@@ -432,9 +338,30 @@ impl Mutation {
     }
 }
 
-/// A mutation event with source information
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct MutationEvent {
-    pub source: MutationSource,
-    pub mutation: Mutation,
+#[cfg(test)]
+mod org_roundtrip_tests {
+    use holon_api::ContentType;
+
+    use super::normalize_content_for_org_roundtrip;
+
+    #[test]
+    fn empty_link_normalizes_to_clean_fixed_point_no_reversed_brackets() {
+        // Ref-model oracle STRENGTHENING (dogfood #4): before the fix the ref
+        // delegated to a renderer that emitted `]][[` for an empty link and so
+        // CODIFIED the corruption — the SUT and ref agreed on the broken form,
+        // hiding the bug. The renderer/extractor now drop the zero-width link,
+        // so the ref's expected on-disk form is clean; a SUT that reintroduces
+        // `]][[` would now DIVERGE and fail the keystone.
+        for input in ["[[]]", "[[][]]", "a[[]]b"] {
+            let (content, marks) = normalize_content_for_org_roundtrip(input, ContentType::Text);
+            assert!(
+                !content.contains("]]["),
+                "ref model still codifies reversed brackets for {input:?}: {content:?}"
+            );
+            assert!(
+                marks.is_none(),
+                "empty link must carry no marks for {input:?}, got {marks:?}"
+            );
+        }
+    }
 }

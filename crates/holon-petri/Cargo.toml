@@ -9,4 +9,7 @@ chrono.workspace = true
 holon-api.workspace = true
 holon-core.workspace = true
 holon-engine.workspace = true
+holon-expr.workspace = true
 rhai.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

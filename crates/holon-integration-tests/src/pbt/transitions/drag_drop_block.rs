@@ -1,32 +1,39 @@
 //! Transition: drag the focused block onto a target, making it a child of the
 //! target.
 //!
+//! @pbt rung input-pipeline
+//!   `drag_drop_block` drives a real pointer drag (geometry) through the
+//!   production UserDriver.
+//! @pbt covers drag-reorder — pointer drag -> reparent under target
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:1248-1319`
 //! (generator), `state_machine.rs:3374-3425` (precondition),
 //! `state_machine.rs:2679-2685` (ref-state apply),
 //! `sut.rs:3569-3598` (SUT apply), and
 //! `transition_budgets.rs:298-302` (expected SQL).
 
-use holon_api::ContentType;
 use holon_api::EntityUri;
 use holon_pbt_core::TransitionFactory;
-use holon_pbt_core::TransitionImpl;
 use holon_pbt_core::TransitionRef;
+use holon_pbt_core::capabilities::CapRegion;
+use holon_pbt_core::capabilities::RefBlockTree;
+use holon_pbt_core::capabilities::RefBlockTreeMut;
+use holon_pbt_core::capabilities::RefFocusRoots;
+use holon_pbt_core::capabilities::RefLayout;
+use holon_pbt_core::capabilities::RefLayoutInteract;
+use holon_pbt_core::capabilities::RefLifecycle;
 use holon_pbt_core::capabilities::SutBlockInteract;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::check;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::state_machine::DRAG_DROP_ENABLED;
-#[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::ExpectedSql;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::MutationKind;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::expected_sql_for_kind;
-use crate::pbt::validation::Reason;
-use crate::pbt::validation::check;
 
 /// Drag the currently-focused block onto a target block, re-parenting the
 /// source as a child of the target at the beginning (after=None).
@@ -36,35 +43,33 @@ pub struct DragDropBlock {
     pub target: EntityUri,
 }
 
-impl TransitionFactory<ReferenceState> for DragDropBlock {
+impl<
+    R: RefLifecycle + RefBlockTree + RefBlockTreeMut + RefFocusRoots + RefLayout + RefLayoutInteract,
+> TransitionFactory<R> for DragDropBlock
+{
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        vec![::holon_pbt_core::composition::CapId::of::<
-            dyn ::holon_pbt_core::capabilities::SutBlockInteract,
-        >()]
+        Self::declared_caps()
     }
 
     type Reason = Reason;
-    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let drag_source: Option<EntityUri> = state.focused_main_editable();
         if drag_source.is_none() {
             return check(false, Reason::NoFocusInMain).map(|_| unreachable!());
         }
 
         let source = drag_source.unwrap();
-        let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
+        let focus_roots = state.rendered_focus_root_ids(CapRegion::Main);
         let candidates: Vec<EntityUri> = state
-            .domain
-            .block_state
-            .blocks
-            .values()
-            .filter(|b| {
-                b.content_type == ContentType::Text
-                    && !b.is_page()
-                    && b.id != source
-                    && !state.domain.layout_blocks.contains(&b.id)
-                    && state.is_descendant_of_any(&b.id, &focus_roots)
+            .all_block_ids()
+            .into_iter()
+            .filter(|id| {
+                state.is_text_block(id)
+                    && !state.is_page_block(id)
+                    && *id != source
+                    && !state.is_layout_block(id)
+                    && state.is_descendant_of_any(id, &focus_roots)
             })
-            .map(|b| b.id.clone())
             .filter(|target| {
                 DragDropBlock {
                     source: source.clone(),
@@ -88,13 +93,16 @@ impl TransitionFactory<ReferenceState> for DragDropBlock {
     }
 }
 
-impl TransitionRef<ReferenceState> for DragDropBlock {
+impl<
+    R: RefLifecycle + RefBlockTree + RefBlockTreeMut + RefFocusRoots + RefLayout + RefLayoutInteract,
+> TransitionRef<R> for DragDropBlock
+{
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
-        let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
+        let focus_roots = state.rendered_focus_root_ids(CapRegion::Main);
         let mut checks: Vec<Validated<(), Reason>> = vec![
-            check(state.action.app_started, Reason::AppNotStarted),
+            check(state.app_started(), Reason::AppNotStarted),
             check(state.is_properly_setup(), Reason::NotProperlySetup),
             check(DRAG_DROP_ENABLED, Reason::DragDropDisabled),
             // Drag needs the source to be a rendered `draggable(...)` in the
@@ -122,37 +130,26 @@ impl TransitionRef<ReferenceState> for DragDropBlock {
             ),
         ];
 
-        let focused_in_main = state.focused_entity(holon_api::Region::Main);
         checks.push(check(
-            focused_in_main == Some(&self.source),
+            state.region_focused_entity(CapRegion::Main).as_ref() == Some(&self.source),
             Reason::FocusedIsNotSelf,
         ));
         checks.push(check(self.source != self.target, Reason::NoOpParentMove));
 
         checks.push(check(
-            state
-                .domain
-                .block_state
-                .blocks
-                .get(&self.source)
-                .is_some_and(|b| b.content_type == ContentType::Text),
+            state.is_text_block(&self.source),
             Reason::FocusedNotText,
         ));
         checks.push(check(
-            state
-                .domain
-                .block_state
-                .blocks
-                .get(&self.target)
-                .is_some_and(|b| b.content_type == ContentType::Text),
+            state.is_text_block(&self.target),
             Reason::FocusedNotText,
         ));
         checks.push(check(
-            !state.domain.layout_blocks.contains(&self.source),
+            !state.is_layout_block(&self.source),
             Reason::FocusedInLayoutBlocks,
         ));
         checks.push(check(
-            !state.domain.layout_blocks.contains(&self.target),
+            !state.is_layout_block(&self.target),
             Reason::FocusedInLayoutBlocks,
         ));
         checks.push(check(
@@ -164,32 +161,26 @@ impl TransitionRef<ReferenceState> for DragDropBlock {
             Reason::FocusedNotDescendantOfFocusRoot,
         ));
 
-        // No-op: target is already source's parent.
+        // No-op: target is already source's parent. `parent_of` returns `None`
+        // for a root/sentinel parent (never equal to `target`).
         checks.push(check(
-            state
-                .domain
-                .block_state
-                .blocks
-                .get(&self.source)
-                .is_some_and(|b| b.parent_id != self.target),
+            state.parent_of(&self.source).as_ref() != Some(&self.target),
             Reason::NoOpParentMove,
         ));
 
-        // Cycle: target is a descendant of source.
+        // Cycle: target is a descendant of source. `parent_of` yields `None` at
+        // the root/sentinel boundary, ending the walk.
         let mut current = self.target.clone();
         let mut is_cycle = false;
         for _ in 0..50 {
-            let Some(b) = state.domain.block_state.blocks.get(&current) else {
+            let Some(parent) = state.parent_of(&current) else {
                 break;
             };
-            if b.parent_id == self.source {
+            if parent == self.source {
                 is_cycle = true;
                 break;
             }
-            if b.parent_id.is_no_parent() || b.parent_id.is_sentinel() {
-                break;
-            }
-            current = b.parent_id.clone();
+            current = parent;
         }
         checks.push(check(!is_cycle, Reason::CyclicParentMove));
 
@@ -199,7 +190,7 @@ impl TransitionRef<ReferenceState> for DragDropBlock {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
+    fn apply_to_ref(&self, state: &mut R) {
         state.push_undo_snapshot();
         // Production's drop_zone dispatches `move_block(id=source,
         // parent_id=target, after_block_id=None)` which inserts at
@@ -208,21 +199,20 @@ impl TransitionRef<ReferenceState> for DragDropBlock {
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutBlockInteract> TransitionImpl<ReferenceState, S> for DragDropBlock {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.drag_drop_block(&self.source, &self.target).await;
+crate::cap_transition! {
+    DragDropBlock: SutBlockInteract,
+    where R: [
+        RefLifecycle + RefBlockTree + RefBlockTreeMut + RefFocusRoots + RefLayout + RefLayoutInteract
+    ],
+    |me, _state, sut| {
+        sut.drag_drop_block(&me.source, &me.target).await;
     }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for DragDropBlock {
-    fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
+    sql_budget: |_me, state| {
         let mut sql = expected_sql_for_kind(
             MutationKind::Update,
-            state.mcp.active_watches.len(),
-            state.domain.block_state.blocks.len(),
-            state.files.documents.len(),
+            state.active_watch_count(),
+            state.block_count(),
+            state.document_count(),
         );
         sql.tolerance += 5; // extra margin for ordering operations
         sql

@@ -135,6 +135,11 @@ mod value_conversion_tests {
     }
 
     proptest! {
+        #![proptest_config(ProptestConfig {
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        })]
+
         #[test]
         fn prop_integer_roundtrip(i in any::<i64>()) {
             let rt = tokio::runtime::Runtime::new().unwrap();

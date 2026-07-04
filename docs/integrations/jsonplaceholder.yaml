@@ -1,0 +1,44 @@
+# JSONPlaceholder integration — a read-only `rest`-transport example.
+#
+# JSONPlaceholder (https://jsonplaceholder.typicode.com) is a free public fake
+# REST API that needs no auth. This sidecar demonstrates the direct HTTP-API
+# transport (`transport: rest`): no MCP server, no child process — the connector
+# engine calls the JSON API directly via the UTCP-style manual below.
+#
+# `GET /posts` returns a bare JSON array of
+#   { "userId": <int>, "id": <int>, "title": <str>, "body": <str> }
+# A bare array has no field for `sync.extract_path` to select, so the call
+# declares `result_key: posts`, which wraps the body as `{ "posts": [ ... ] }`.
+#
+# This file is exercised by the integration test
+# crates/holon-mcp-client/tests/rest_transport_mock.rs, which points `base_url`
+# at a LOCAL mock server serving the same shape (no network in tests).
+
+transport:
+  rest:
+    base_url: https://jsonplaceholder.typicode.com
+    # rest has no push notifications, so entities are refreshed by polling. This
+    # sidecar sets no cadence, so its sync entities fall to the built-in 300s
+    # default. To override, uncomment `poll_interval` (transport-wide) and/or set
+    # a per-entity `sync.interval` (which wins). Accepts seconds or "30s"/"5m"/"1h".
+    # poll_interval: 5m
+    calls:
+      list-posts:
+        method: GET
+        path: /posts
+        result_key: posts
+
+entities:
+  jp_posts:
+    short_name: post
+    id_column: id
+    schema:
+      - { name: id,     sql_type: INTEGER, primary_key: true }
+      - { name: userId, sql_type: INTEGER, indexed: true }
+      - { name: title,  sql_type: TEXT }
+      - { name: body,   sql_type: TEXT }
+    sync:
+      list_tool: list-posts
+      extract_path: posts
+
+tools: {}

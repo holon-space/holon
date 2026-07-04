@@ -7,6 +7,7 @@
 //! the only coupling is the JSON wire format.
 
 mod bridge;
+mod dnd;
 mod editor;
 mod render;
 
@@ -29,7 +30,15 @@ const BLOCK_READ_TABLE: &str = "block";
 
 /// URL of the worker entry module, relative to the serving root.
 const WORKER_URL: &str = "/web/worker-entry.mjs";
-const DB_PATH: &str = ":memory:";
+/// OPFS-backed database file. The worker's OPFS bridge requires every file
+/// Turso will open to be `registerFile`d ahead of `engineInit` (sync access
+/// handles must be created in advance) — see the boot sequence below.
+const DB_PATH: &str = "holon.db";
+
+/// How long to wait for the first root-layout projection envelope before
+/// declaring the boot failed (B3). Cold start incl. WASM instantiation + seed
+/// is a few seconds; this is a generous ceiling, not a latency target.
+const WATCH_READY_TIMEOUT_MS: u32 = 10_000;
 
 // WorkerBridge wraps Rc<_> so it is !Send. We keep it alive in a thread-local
 // so Dioxus signals (which require Send) never need to hold it directly.
@@ -41,16 +50,59 @@ thread_local! {
 
 fn main() {
     console_error_panic_hook::set_once();
-    tracing_wasm::set_as_global_default();
+    init_tracing();
     tracing::info!("[holon-dioxus-web] booting");
     dioxus::launch(App);
+}
+
+/// Install the wasm tracing layer at INFO by default (B4). dioxus-core emits a
+/// `tracing::trace!("Marking task … as dirty")` on every scheduler tick — at
+/// the 60Hz tick-pump cadence that floods the console and drowns real errors.
+/// Gate the layer at INFO so those never reach the console; opt into verbose
+/// with `?log=trace` (or `?log=debug`) in the page URL.
+fn init_tracing() {
+    let level = url_log_level().unwrap_or(tracing::Level::INFO);
+    let config = tracing_wasm::WASMLayerConfigBuilder::new()
+        .set_max_level(level)
+        .build();
+    tracing_wasm::set_as_global_default_with_config(config);
+}
+
+/// Read a `log=<level>` query parameter from the page URL, if present.
+fn url_log_level() -> Option<tracing::Level> {
+    let search = web_sys::window()?.location().search().ok()?; // ALLOW(ok): JsValue error has no Display; None = no override
+    // `search` looks like "?log=trace&foo=bar"; scan for the log= pair.
+    let raw = search.trim_start_matches('?');
+    for pair in raw.split('&') {
+        if let Some(val) = pair.strip_prefix("log=") {
+            return match val.to_ascii_lowercase().as_str() {
+                "trace" => Some(tracing::Level::TRACE),
+                "debug" => Some(tracing::Level::DEBUG),
+                "info" => Some(tracing::Level::INFO),
+                "warn" => Some(tracing::Level::WARN),
+                "error" => Some(tracing::Level::ERROR),
+                _ => None,
+            };
+        }
+    }
+    None
 }
 
 #[derive(Clone, PartialEq)]
 enum BootState {
     Booting,
-    Ready { cold_start_ms: u64 },
+    /// The root-layout projection actually rendered at least once (B3): "ready"
+    /// is only ever shown once a real ViewModel envelope arrived, never over a
+    /// failed/empty projection.
+    Ready {
+        cold_start_ms: u64,
+    },
     Failed(String),
+    /// Engine came up but `block:root-layout` is absent from the projection.
+    /// With the IVM-reopen fix this should be unreachable, but if the local DB
+    /// is genuinely corrupt we say so loudly and offer a recoverable reset (B2)
+    /// rather than sitting on a green lie.
+    NoRootLayout,
 }
 
 #[component]
@@ -68,6 +120,41 @@ fn App() -> Element {
                 return;
             }
         };
+
+        // Publish the bridge to the thread-local immediately (B2): the
+        // "Reset local data" action calls `engineResetStorage` through it, and
+        // it must be reachable from EVERY subsequent failure state — not only
+        // the ready path. Booting renders no interactive surface, so an
+        // early-set bridge cannot be misused before the projection mounts.
+        BRIDGE.with(|b| *b.borrow_mut() = Some(bridge.clone()));
+
+        // Pre-register the OPFS files (db + WAL) so the worker's OPFS shim
+        // can hand Turso sync access handles for them. On a page reload the
+        // PREVIOUS worker's sync handles may not have been released yet
+        // (worker teardown is async), which surfaces as
+        // NoModificationAllowedError — retry with backoff instead of failing
+        // the boot on a race the browser resolves itself moments later.
+        'files: for file in [DB_PATH.to_string(), format!("{DB_PATH}-wal")] {
+            const ATTEMPTS: u32 = 10;
+            let mut last_err = String::new();
+            for attempt in 0..ATTEMPTS {
+                match bridge.call("registerFile", [file.clone().into()]).await {
+                    Ok(_) => continue 'files,
+                    Err(e) => {
+                        last_err = format!("{e}");
+                        tracing::warn!(
+                            "[boot] registerFile {file} attempt {}/{ATTEMPTS} failed: {last_err}",
+                            attempt + 1
+                        );
+                        gloo_timers::future::TimeoutFuture::new(300).await;
+                    }
+                }
+            }
+            boot_state.set(BootState::Failed(format!(
+                "registerFile {file} after {ATTEMPTS} attempts: {last_err}"
+            )));
+            return;
+        }
 
         if let Err(e) = bridge.call("engineInit", [DB_PATH.into()]).await {
             boot_state.set(BootState::Failed(format!("engineInit: {e}")));
@@ -106,12 +193,12 @@ fn App() -> Element {
         let root_id = match extract_first_id(&root_val) {
             Some(id) => id,
             None => {
-                // No root block — show degraded ready UI. Set BRIDGE
-                // before flipping boot state so a synchronous re-render
-                // sees it populated.
-                BRIDGE.with(|b| *b.borrow_mut() = Some(bridge));
-                let cold_start_ms = now_ms().saturating_sub(t0);
-                boot_state.set(BootState::Ready { cold_start_ms });
+                // Engine came up but the root-layout row is absent from the
+                // projection. Do NOT show green "ready" over an empty page
+                // (B3) — surface a loud, recoverable NoRootLayout state that
+                // offers "Reset local data" (B2). BRIDGE was already published
+                // right after spawn, so the reset action can reach the worker.
+                boot_state.set(BootState::NoRootLayout);
                 return;
             }
         };
@@ -140,6 +227,12 @@ fn App() -> Element {
             }
         };
 
+        // B3: "ready" is only truthful once a real projection actually
+        // rendered. Flip BootState::Ready on the FIRST watch envelope, not
+        // eagerly after subscribing — a subscription that never delivers
+        // (failed projection) must not read as green.
+        let ready_marked = std::rc::Rc::new(std::cell::Cell::new(false));
+        let ready_on_snapshot = ready_marked.clone();
         bridge.on_snapshot(handle, move |json| {
             match serde_json::from_str::<WatchEnvelope>(&json) {
                 Ok(env) => {
@@ -156,17 +249,28 @@ fn App() -> Element {
                     }
                     view_model.set(Some(env.view_model));
                     editor::worker_focus::apply(env.focused_block, env.caret_offset);
+                    if !ready_on_snapshot.replace(true) {
+                        let cold_start_ms = now_ms().saturating_sub(t0);
+                        boot_state.set(BootState::Ready { cold_start_ms });
+                    }
                 }
                 Err(e) => tracing::error!("[snapshot] deserialize failed: {e}"),
             }
         });
 
-        // Store bridge in thread-local BEFORE marking ready, so any render
-        // path triggered by BootState::Ready sees a live BRIDGE.
-        BRIDGE.with(|b| *b.borrow_mut() = Some(bridge));
-
-        let cold_start_ms = now_ms().saturating_sub(t0);
-        boot_state.set(BootState::Ready { cold_start_ms });
+        // B3 watchdog: if no projection arrives, don't sit forever on
+        // "booting…" (an equally dishonest not-ready). Fail loud with a
+        // recoverable error after a generous grace period.
+        let ready_watchdog = ready_marked.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            gloo_timers::future::TimeoutFuture::new(WATCH_READY_TIMEOUT_MS).await;
+            if !ready_watchdog.get() {
+                boot_state.set(BootState::Failed(format!(
+                    "root-layout watch produced no projection within {WATCH_READY_TIMEOUT_MS}ms — \
+                     the projection failed to render"
+                )));
+            }
+        });
     });
 
     // Continuous runtime pump. Without this, the worker's current-thread
@@ -212,6 +316,9 @@ fn App() -> Element {
                     BootState::Failed(err) => rsx! {
                         span { style: "color: #ff5252; font-size: 0.8em;", "⚠ {err}" }
                     },
+                    BootState::NoRootLayout => rsx! {
+                        span { style: "color: #ffb020; font-size: 0.8em;", "⚠ local data corrupt" }
+                    },
                 }
             }
 
@@ -226,12 +333,25 @@ fn App() -> Element {
                         }
                     },
                     (BootState::Failed(err), _) => rsx! {
-                        div { style: "color: #ff5252; padding: 32px;",
-                            h2 { "Boot failed" }
-                            pre {
-                                style: "white-space: pre-wrap; font-size: 0.85em;",
-                                "{err}"
-                            }
+                        RecoveryCard {
+                            accent: "#ff5252",
+                            title: "Boot failed",
+                            message: "The backend could not start. The error detail is below. \
+                                      Resetting local data clears this browser's stored vault (OPFS) \
+                                      and re-seeds a fresh one — try that if the failure looks like \
+                                      corrupt local state.",
+                            detail: Some(err.clone()),
+                        }
+                    },
+                    (BootState::NoRootLayout, _) => rsx! {
+                        RecoveryCard {
+                            accent: "#ffb020",
+                            title: "Local data unavailable",
+                            message: "The engine started but the root layout is missing from the \
+                                      projection — the database stored in this browser is corrupt or \
+                                      incomplete. Reset local data to rebuild a fresh vault. This only \
+                                      clears data stored in THIS browser (OPFS).",
+                            detail: None,
                         }
                     },
                     (BootState::Ready { .. }, Some(vm)) => rsx! {
@@ -240,13 +360,90 @@ fn App() -> Element {
                     (BootState::Ready { .. }, None) => rsx! {
                         div {
                             style: "color: #888; font-style: italic; padding: 32px; text-align: center;",
-                            "No root layout found. Expected block with id='block:root-layout'."
+                            "Rendering…"
                         }
                     },
                 }
             }
         }
     }
+}
+
+/// Centered recovery card for the unrecoverable boot states (B2/B3): a muted
+/// danger-palette card on the app's dark background, with a clear message, an
+/// optional raw-error detail block, and the Reset action. Kept to simple inline
+/// CSS; final palette harmonization happens at merge with the styling stream.
+#[component]
+fn RecoveryCard(accent: String, title: String, message: String, detail: Option<String>) -> Element {
+    rsx! {
+        div {
+            style: "height: 100%; display: flex; align-items: center; justify-content: center; padding: 24px;",
+            div {
+                style: format!(
+                    "max-width: 460px; width: 100%; background: #1a1a2e; border: 1px solid {accent}; \
+                     border-top: 3px solid {accent}; border-radius: 10px; padding: 28px 32px; \
+                     box-shadow: 0 8px 32px rgba(0,0,0,0.45);"
+                ),
+                h2 {
+                    style: format!("margin: 0 0 12px; color: {accent}; font-size: 1.15em;"),
+                    "{title}"
+                }
+                p {
+                    style: "margin: 0; color: #c0c0cc; line-height: 1.55; font-size: 0.92em;",
+                    "{message}"
+                }
+                if let Some(detail) = detail {
+                    pre {
+                        style: "margin: 16px 0 0; padding: 10px 12px; background: #12121e; \
+                                border-radius: 6px; color: #ff8a8a; font-size: 0.8em; \
+                                white-space: pre-wrap; word-break: break-word; max-height: 180px; \
+                                overflow: auto;",
+                        "{detail}"
+                    }
+                }
+                ResetDataButton {}
+            }
+        }
+    }
+}
+
+/// "Reset local data" button (B2): clears this browser's OPFS vault and
+/// reloads. Available in every unrecoverable boot state.
+#[component]
+fn ResetDataButton() -> Element {
+    rsx! {
+        button {
+            style: "margin-top: 20px; padding: 9px 18px; background: #2a2a3a; color: #ff8a8a; \
+                    border: 1px solid #ff5252; border-radius: 6px; cursor: pointer; font-size: 0.9em;",
+            onclick: move |_| reset_local_data(),
+            "Reset local data"
+        }
+    }
+}
+
+/// Clear all local (OPFS) data and reload (B2). The delete runs WORKER-side via
+/// `engineResetStorage`: the worker tears the engine down, closes its Turso
+/// OPFS sync-access handles, and removes the db/wal files — steps the page
+/// cannot do while the worker holds those handles (they fail with
+/// `NoModificationAllowedError`). Then reload for a clean re-seed.
+fn reset_local_data() {
+    wasm_bindgen_futures::spawn_local(async move {
+        match BRIDGE.with(|b| b.borrow().clone()) {
+            Some(bridge) => {
+                if let Err(e) = bridge.call("engineResetStorage", [DB_PATH.into()]).await {
+                    // Don't hide the failure, but still reload — the user asked
+                    // to reset and a fresh boot is the recovery path.
+                    tracing::error!("[reset] engineResetStorage failed: {e}");
+                }
+            }
+            None => tracing::error!("[reset] no worker bridge available — reloading only"),
+        }
+        if let Some(win) = web_sys::window() {
+            if let Err(e) = win.location().reload() {
+                tracing::error!("[reset] page reload failed: {e:?}");
+            }
+        }
+    });
 }
 
 /// Push the current window viewport (CSS px + devicePixelRatio) into the

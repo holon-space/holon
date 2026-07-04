@@ -1,14 +1,30 @@
 //! Geometry provider trait for cross-frontend UI testing.
 //!
 //! Each frontend implements `GeometryProvider` to expose element metadata
-//! by element ID. The `GeometryDriver` (in holon-integration-tests) uses
-//! these bounds to simulate mouse clicks via `enigo`.
+//! by element ID. The `GeometryDriver` (in holon-integration-tests) resolves
+//! interactions to these bounds; the interaction itself is dispatched as a
+//! frontend-internal event, never as OS-level input.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;
 
 use crate::size_expectation::SizeBounds;
+
+/// The view-model node an element was created to render.
+///
+/// `ElementInfo::widget_type` names the *tracker* (`selectable`,
+/// `rendered_text`, …); this names the *node* whose builder the tracker wraps.
+/// One entity is usually rendered by a whole chain of nodes, so without this
+/// the only available join is entity-wide and every node of the chain reports
+/// the same sibling's rect.
+#[derive(Debug, Clone)]
+pub struct VmNode {
+    /// The node's serde widget tag — `column`, `tree_item`, `card`.
+    pub tag: Arc<str>,
+    /// The entity URI the node renders. `None` for nodes bound to no row.
+    pub entity: Option<Arc<str>>,
+}
 
 /// Metadata about a rendered UI element: bounds, widget type, entity binding.
 #[derive(Debug, Clone)]
@@ -42,12 +58,32 @@ pub struct ElementInfo {
     /// follows via a spawned binding — drivers gate keystrokes on THIS field
     /// so a key can't be consumed by the previously-focused editor.
     pub focused: Option<bool>,
+    /// The read-mode styled-run fingerprint the widget actually painted for
+    /// this block, if any (only `rendered_text` / `text` builders that took the
+    /// mark-styling path set it). `None` means the widget painted plain text —
+    /// which for a block that HAS marks is the read-mode styling-drop bug the
+    /// `inv-paint-text-styling` PBT catches. Byte-range runs,
+    /// theme-independent.
+    pub styled_runs: Option<std::sync::Arc<[holon_api::StyledRun]>>,
+    /// The paint alpha the widget declared for itself at record time, when it
+    /// declares one. Geometry alone cannot distinguish a fully-painted control
+    /// from one that is present in layout but invisible (`opacity(0.0)`), so
+    /// affordance invariants — "the disclosure chevron is VISIBLE, not merely
+    /// laid out" — read this. `None` means the widget declared no alpha, i.e.
+    /// it paints at the inherited one.
+    pub opacity: Option<f32>,
     /// Algebraic declaration of the widget's expected min/max size. The
     /// PBT layout invariant evaluates this against `(width, height)` and
     /// fails on out-of-bounds renders. Defaults to "unconstrained" (all
     /// `Free`) so widgets opt in incrementally; see
     /// [`crate::size_expectation`] for the AST and ergonomics.
     pub expected_size: SizeBounds,
+    /// The view-model node this element was created to render, when the
+    /// registration site knows it — see [`VmNode`]. `None` at sites that
+    /// genuinely cannot tell (hand-rolled trackers inside a builder, frontends
+    /// whose renderer does not thread the node), and absence stays absence:
+    /// consumers fall back to a coarser, disclosed join rather than guessing.
+    pub vm_node: Option<VmNode>,
 }
 
 impl ElementInfo {
@@ -364,5 +400,28 @@ pub fn drawer_toggle_id_for(block_id: &str) -> String {
 /// `expanded` `Mutable<bool>`, exercising the same path a real user's
 /// chevron tap would.
 pub fn expand_toggle_id_for(target_id: &str) -> String {
-    format!("expand_toggle::{target_id}")
+    format!("expand_toggle::{}", bare_target(target_id))
+}
+
+/// Registry keys are built from the BARE row id. Renderers hold schemed ids
+/// (`block:foo`, straight off the row) while drivers hold whatever the
+/// ref-state gave them, so without one normalisation point the two sides key
+/// the same chevron differently and the lookup silently misses.
+fn bare_target(target_id: &str) -> &str {
+    target_id.strip_prefix("block:").unwrap_or(target_id)
+}
+
+/// Canonical element-id for the "collapsed halo" behind a collapsed parent
+/// row's chevron. Registered ONLY while the halo is painted, so an invariant
+/// reads its presence as the halo's presence.
+pub fn disclosure_halo_id_for(target_id: &str) -> String {
+    format!("disclosure_halo::{}", bare_target(target_id))
+}
+
+/// Canonical element-id for a leaf row's decorative tree bullet. Registered
+/// only while the bullet is drawn, and — like the chevron — carries its own
+/// box so an alignment invariant can compare the two markers' vertical centers
+/// against the row's first text line.
+pub fn tree_bullet_id_for(target_id: &str) -> String {
+    format!("tree_bullet::{}", bare_target(target_id))
 }

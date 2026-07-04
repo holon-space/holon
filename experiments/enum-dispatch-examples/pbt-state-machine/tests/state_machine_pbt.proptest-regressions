@@ -1,7 +1,0 @@
-# Seeds for failure cases proptest has generated in the past. It is
-# automatically read and these particular cases re-run before any
-# novel cases are generated.
-#
-# It is recommended to check this file in to source control so that
-# everyone who runs the test benefits from these saved cases.
-cc 13c067210a9e6bd0ddc76e56867ef603238a03a5e39f0b825694793f61cd228b # shrinks to (initial_state, transitions, seen_counter) = (RefState { items: {}, next_id: 0 }, [AddItem(AddItem { name: "a", expected_id: 0 }), AddItem(AddItem { name: "a", expected_id: 1 }), AddItem(AddItem { name: "a", expected_id: 2 }), RenameItem(RenameItem { id: 2, new_name: "a" })], None)

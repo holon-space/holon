@@ -9,9 +9,11 @@ use holon_pbt_core::RunMode;
 use holon_pbt_core::capabilities::RefGlobalFocus;
 use holon_pbt_core::capabilities::RefLayout;
 use holon_pbt_core::capabilities::SutFrontendEmissions;
+use holon_pbt_core::composition::Attribution;
 use holon_pbt_core::composition::BridgedInvariant;
 use holon_pbt_core::composition::CapId;
 use holon_pbt_core::composition::CapInvariant;
+use holon_pbt_core::composition::Layer;
 use holon_pbt_core::composition::Needs;
 
 use crate::pbt::invariants::bodies::value_fn_provider_arg_variance_13::InvValueFnProviderArgVariance13;
@@ -28,5 +30,6 @@ pub fn wire() -> Box<dyn CapInvariant> {
                 CapId::of::<dyn RefGlobalFocus>(),
             ],
         },
+        Attribution::at(Layer::ViewModel, file!()),
     ))
 }

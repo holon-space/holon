@@ -252,6 +252,39 @@ pub fn enum_from(_: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
+/// Pass-through attribute for `#[menu_exposure(...)]` — declares where a
+/// macro-generated operation surfaces in the UI. Parsed by
+/// `extract_menu_exposure()` in the operations_trait macro to fill the
+/// non-defaultable `OperationDescriptor::menu_exposure` field.
+///
+/// Accepted forms (absent ⇒ `NotListed { ProviderDefault }`, fail-closed):
+/// `#[menu_exposure(listed)]`, `#[menu_exposure(keyboard_gesture)]`,
+/// `#[menu_exposure(pointer_gesture)]`, `#[menu_exposure(navigation)]`,
+/// `#[menu_exposure(external)]`, `#[menu_exposure(internal)]`.
+#[proc_macro_attribute]
+pub fn menu_exposure(_: TokenStream, item: TokenStream) -> TokenStream {
+    // Pass through unchanged - this just allows Rust to accept the attribute
+    item
+}
+
+/// Pass-through attribute for `#[boundary_behavior(...)]` — declares how a
+/// macro-generated structural operation interacts with sharing/audience
+/// boundaries (ADR 0028). Parsed by `extract_boundary_behavior()` in the
+/// operations_trait macro to fill the non-defaultable
+/// `OperationDescriptor::boundary_behavior` field.
+///
+/// Accepted forms (absent ⇒ fail-closed `Unclassified` — any boundary
+/// interaction rejected loudly): `#[boundary_behavior(private_only)]`,
+/// `#[boundary_behavior(crossing_widens)]`,
+/// `#[boundary_behavior(crossing_same_audience)]`,
+/// `#[boundary_behavior(forbidden_at_page_boundary)]`,
+/// `#[boundary_behavior(policy_edit)]`, `#[boundary_behavior(identity_op)]`.
+#[proc_macro_attribute]
+pub fn boundary_behavior(_: TokenStream, item: TokenStream) -> TokenStream {
+    // Pass through unchanged - this just allows Rust to accept the attribute
+    item
+}
+
 /// Generate an OperationDescriptor for a standalone async function
 ///
 /// This macro generates a const `OPERATION_NAME_OP: OperationDescriptor` for a

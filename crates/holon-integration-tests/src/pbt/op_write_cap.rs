@@ -30,7 +30,6 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use holon::api::BackendEngine;
-use holon::sync::LoroDocumentStore;
 use holon_api::EdgeFieldUpdate;
 use holon_api::EntityUri;
 use holon_api::StorageEntity;
@@ -38,15 +37,14 @@ use holon_api::Value;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive::ReactiveEngine;
 use holon_frontend::user_driver::UserDriver;
-use holon_loro::LoroBackend;
 use holon_pbt_core::capabilities::SutBlockTreeWrite;
 use holon_pbt_core::capabilities::SutEdgeFieldWrite;
 
-/// Shared oracle-synthetic → SUT-real id map (the `doc_uri_map` analog). The
-/// composed runner accumulates split reconciliations into it; the writer
-/// resolves every incoming id through it before dispatching — exactly
-/// `E2ESut::resolve_uri`.
-pub type IdResolver = Arc<Mutex<BTreeMap<EntityUri, EntityUri>>>;
+/// Shared oracle-synthetic → SUT-real id map. The composed runner accumulates
+/// split reconciliations into it; the writer resolves every incoming id through
+/// it before dispatching — exactly `E2ESut::resolve_uri`. A re-export, not a
+/// parallel alias: a SUT adapter's `doc_uri_map` IS this map.
+pub type IdResolver = holon_pbt_core::types::DocUriMap;
 
 /// A `SutBlockTreeWrite` realization that dispatches the production `block`
 /// structural operations through a real [`BackendEngine`]. `&self` (the engine
@@ -79,20 +77,15 @@ impl OpDispatchWriter {
         Self { engine, resolver }
     }
 
-    /// Resolve an oracle-space id to its SUT-space id (identity if unmapped).
+    /// Resolve an oracle-space id to its SUT-space id.
     fn resolve(&self, id: &EntityUri) -> EntityUri {
-        self.resolver
-            .lock()
-            .expect("resolver lock")
-            .get(id)
-            .cloned()
-            .unwrap_or_else(|| id.clone())
+        holon_pbt_core::types::resolve_sut_id(&self.resolver, id)
     }
 
     async fn execute(&self, op: &str, params: StorageEntity) {
         let entity = "block".to_string().into();
         self.engine
-            .execute_operation(&entity, op, params)
+            .execute_operation(&entity, op, params, holon_api::OpOrigin::User)
             .await
             .unwrap_or_else(|e| panic!("block/{op} operation failed: {e}"));
     }
@@ -322,7 +315,20 @@ impl SutBlockTreeWrite for KeystrokeBlockTreeWriter {
         // Shift+Tab → `outdent` (BackTab) in the `HeadlessEditorMirror`.
         let resolved = self.resolve(id);
         self.focus_editor(&resolved, "Outdent").await;
-        self.key("tab", &["shift"], "Outdent").await;
+        // ADR 0028 D1: outdenting a DIRECT CHILD OF A PAGE is REJECTED by the op
+        // engine — it would escape the page container into the enclosing page
+        // (the journals-phantom corruption). Prod surfaces a CommandFailed toast
+        // and leaves the tree unchanged; `outdent_apply_to_ref` models the SAME
+        // no-op. So a page-boundary rejection here is the CORRECT outcome, not a
+        // driver failure — swallow it as a no-op (matching the reference). Any
+        // OTHER dispatch error stays fail-loud.
+        if let Err(e) = self.driver.send_raw_keystroke("tab", &["shift"]).await {
+            let msg = format!("{e:#}");
+            if msg.contains("escape its page container") {
+                return;
+            }
+            panic!("[Outdent/keystroke] tab [\"shift\"] failed: {msg}");
+        }
     }
 
     // `move_up`/`move_down` are block-reorder ops with NO editor-mirror keystroke
@@ -349,72 +355,67 @@ impl SutBlockTreeWrite for KeystrokeBlockTreeWriter {
 }
 
 /// `SutEdgeFieldWrite` realization for a Loro-authority composed config (the
-/// `full_headless` frontend). Writes a block edge field (`tags` / `requires`)
-/// through the production `LoroBackend` setters (`set_block_tags` /
-/// `set_block_requires`) over the frontend's authority doc — the SAME functions
-/// the org re-scan reconciliation calls, so the write flows Loro → `project()`
-/// → SQL exactly as production does. That is what lets the composed `/matview`
-/// invariant observe whether an edge-field change re-projects (H12 =
-/// `blocks_differ` dropping `requires` from its change gate).
+/// `full_headless` frontend). Dispatches the edge-field write as a production
+/// `block` `set_field` op through the real [`BackendEngine`] — the SAME path
+/// content/structural writes take (and the same `OpDispatchWriter` uses) — so
+/// the write is journaled on the engine's undo stack and `UndoLastMutation` can
+/// retract it. In Loro-authority mode `set_field` routes the edge value to the
+/// production `set_block_{tags,requires,advice_suppressed}` setters over the
+/// authority doc → `project()` → SQL, exactly as before, PLUS the undo entry
+/// (whole-set-restore inverse) the raw-`LoroBackend` path could never record.
 ///
 /// Resolves oracle ids through the shared [`IdResolver`] (like
-/// [`OpDispatchWriter`]) so a write — and each `requires` dependency target —
+/// [`OpDispatchWriter`]) so the write — and each `requires` dependency target —
 /// hits the real (split-reconciled) block, not a synthetic oracle id.
 pub struct EdgeFieldWriter {
-    doc_store: LoroDocumentStore,
+    engine: Arc<BackendEngine>,
     resolver: IdResolver,
 }
 
 impl EdgeFieldWriter {
-    pub fn new(doc_store: LoroDocumentStore, resolver: IdResolver) -> Self {
-        Self {
-            doc_store,
-            resolver,
-        }
+    pub fn new(engine: Arc<BackendEngine>, resolver: IdResolver) -> Self {
+        Self { engine, resolver }
     }
 
     fn resolve(&self, id: &EntityUri) -> EntityUri {
-        self.resolver
-            .lock()
-            .expect("resolver lock")
-            .get(id)
-            .cloned()
-            .unwrap_or_else(|| id.clone())
+        holon_pbt_core::types::resolve_sut_id(&self.resolver, id)
     }
 
-    /// A `LoroBackend` over the frontend's authority doc — the same
-    /// construction the production `LoroBlockOperations::get_backend` uses
-    /// (`from_document` over the global doc), so the write targets the doc
-    /// the op pipeline and the outbound projector share.
-    async fn backend(&self) -> LoroBackend {
-        let collab_doc = self
-            .doc_store
-            .get_global_doc()
-            .await
-            .unwrap_or_else(|e| panic!("EdgeFieldWriter: get_global_doc failed: {e:#}"));
-        LoroBackend::from_document(collab_doc)
+    /// Edge targets travel as a `Value::Array` of id strings — the shape the
+    /// `set_field` edge-field partition (SQL provider) and the Loro cell
+    /// registry both consume.
+    fn resolved_targets(&self, targets: &[EntityUri]) -> Value {
+        Value::Array(
+            targets
+                .iter()
+                .map(|t| Value::String(self.resolve(t).to_string()))
+                .collect(),
+        )
     }
 }
 
 #[async_trait::async_trait(?Send)]
 impl SutEdgeFieldWrite for EdgeFieldWriter {
     async fn apply_set_edge_field(&self, id: &EntityUri, update: &EdgeFieldUpdate) {
-        let backend = self.backend().await;
         let rid = self.resolve(id);
-        match update {
-            EdgeFieldUpdate::Tags(tags) => {
-                backend
-                    .set_block_tags(rid.as_str(), &tags.to_vec())
-                    .await
-                    .unwrap_or_else(|e| panic!("set_block_tags({rid}) failed: {e:#}"));
+        let (field, value) = match update {
+            EdgeFieldUpdate::Tags(tags) => (
+                "tags",
+                Value::Array(tags.to_vec().into_iter().map(Value::String).collect()),
+            ),
+            EdgeFieldUpdate::Requires(reqs) => ("requires", self.resolved_targets(reqs)),
+            EdgeFieldUpdate::AdviceSuppressed(reqs) => {
+                ("advice_suppressed", self.resolved_targets(reqs))
             }
-            EdgeFieldUpdate::Requires(reqs) => {
-                let resolved: Vec<EntityUri> = reqs.iter().map(|t| self.resolve(t)).collect();
-                backend
-                    .set_block_requires(rid.as_str(), &resolved)
-                    .await
-                    .unwrap_or_else(|e| panic!("set_block_requires({rid}) failed: {e:#}"));
-            }
-        }
+        };
+        let mut params: StorageEntity = HashMap::new();
+        params.insert("id".into(), Value::String(rid.to_string()));
+        params.insert("field".into(), Value::String(field.to_string()));
+        params.insert("value".into(), value);
+        let entity = "block".to_string().into();
+        self.engine
+            .execute_operation(&entity, "set_field", params, holon_api::OpOrigin::User)
+            .await
+            .unwrap_or_else(|e| panic!("block/set_field({field}) on {rid} failed: {e:#}"));
     }
 }

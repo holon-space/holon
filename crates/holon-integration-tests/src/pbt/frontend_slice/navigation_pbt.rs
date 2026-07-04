@@ -453,6 +453,8 @@ impl ComposedSlice for FrontendNavigation {
     async fn run_report(
         caps: &CapMap,
         _: &IdResolver,
+        _: &crate::pbt::composed::harness::BurnedPairs,
+        _: &BTreeSet<EntityUri>,
         _: &BTreeSet<EntityUri>,
         ref_state: &ReferenceState,
     ) -> RunReport {
@@ -466,6 +468,7 @@ prop_state_machine! {
         // case/step counts modest — this proves the rebind mechanic, not breadth.
         cases: 12,
         max_shrink_iters: 64,
+        failure_persistence: None,
         .. proptest::test_runner::Config::default()
     })]
     #[test]

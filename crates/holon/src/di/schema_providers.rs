@@ -18,16 +18,22 @@ use std::marker::PhantomData;
 use fluxdi::Injector;
 use fluxdi::Provider;
 use fluxdi::Shared;
+use holon_turso::schema_modules::AutomationsJournalSchemaModule;
+use holon_turso::schema_modules::BlockDerivedSchemaModule;
 use holon_turso::schema_modules::BlockHierarchySchemaModule;
 use holon_turso::schema_modules::BlockMatviewSchemaModule;
 use holon_turso::schema_modules::BlockRequirementEdgesSchemaModule;
 use holon_turso::schema_modules::BlockSchemaModule;
 use holon_turso::schema_modules::CoreSchemaModule;
+use holon_turso::schema_modules::HistorySchemaModule;
 use holon_turso::schema_modules::IdentitySchemaModule;
+use holon_turso::schema_modules::JournalDayPagesSchemaModule;
+use holon_turso::schema_modules::JournalFeedSchemaModule;
 use holon_turso::schema_modules::LinkSchemaModule;
 use holon_turso::schema_modules::NavigationSchemaModule;
 use holon_turso::schema_modules::OperationsSchemaModule;
 use holon_turso::schema_modules::SyncStateSchemaModule;
+use holon_turso::schema_modules::TrustProposalsSchemaModule;
 
 use super::DbHandleProvider;
 use crate::storage::turso::DbHandle;
@@ -86,9 +92,29 @@ impl DbResource for SyncStateTables {}
 pub struct OperationTables;
 impl DbResource for OperationTables {}
 
+/// `block_history` — the C2b op/effect history relation (disclosed ephemeral
+/// cache; ADR 0024 P8).
+pub struct HistoryTables;
+impl DbResource for HistoryTables {}
+
+/// `automations_journal` matview — effects grouped by
+/// `(origin, transition_id, day)` over `block_history` (ADR 0024 P8).
+pub struct AutomationsJournalView;
+impl DbResource for AutomationsJournalView {}
+
 /// `block_requires`, `block_tags` junction tables (FK to `block_raw`).
 pub struct BlockTables;
 impl DbResource for BlockTables {}
+
+/// `journal_day_pages` matview — journal day-page detection, chained on the
+/// `block` matview + `block_tags` junction (journal-feed chain, stage 1).
+pub struct JournalDayPagesView;
+impl DbResource for JournalDayPagesView {}
+
+/// `journal_feed` matview — the journal feed, chained on `journal_day_pages`
+/// (journal-feed chain, stage 2).
+pub struct JournalFeedView;
+impl DbResource for JournalFeedView {}
 
 /// `block_link` table (depends on `block`).
 pub struct LinkTables;
@@ -102,6 +128,16 @@ impl DbResource for IdentityTables {}
 /// `graph_eav` schema.
 pub struct GraphEavSchema;
 impl DbResource for GraphEavSchema {}
+
+/// `trust_proposals` supervision matview (C5 trust gate; FROM `block_raw`).
+pub struct TrustProposalsView;
+impl DbResource for TrustProposalsView {}
+
+/// `block_derived` — the C4 derived-field SIDECAR table (narrow
+/// `(block_id, field_name)` cache; maintained reactively by the derived-field
+/// CDC watcher, not by boot DDL beyond table creation).
+pub struct BlockDerivedTable;
+impl DbResource for BlockDerivedTable {}
 
 // ---------------------------------------------------------------------------
 // Helper: run a SchemaModule's DDL via DbHandle
@@ -226,6 +262,87 @@ pub fn register_schema_providers(injector: &Injector) {
         Shared::new(DbReady::<OperationTables>::new())
     }));
 
+    // -- BlockDerivedTable (no DDL deps): the C4 derived-field sidecar table.
+    // Table creation is dependency-free; the CDC watcher that populates it
+    // binds to the block matview at runtime, not at DDL time. --
+    injector.provide::<DbReady<BlockDerivedTable>>(Provider::root_async(|inj| async move {
+        let db = inj.resolve::<dyn DbHandleProvider>();
+        run_schema_module(&BlockDerivedSchemaModule, &db.handle())
+            .await
+            .expect("BlockDerivedTable schema init failed");
+        Shared::new(DbReady::<BlockDerivedTable>::new())
+    }));
+
+    // -- HistoryTables (no deps): the C2b block_history relation, boot-owned
+    // here so it is queryable (PRQL/raw SQL/list_tables) from session start —
+    // never lazily created by its accessor --
+    injector.provide::<DbReady<HistoryTables>>(Provider::root_async(|inj| async move {
+        let db = inj.resolve::<dyn DbHandleProvider>();
+        run_schema_module(&HistorySchemaModule, &db.handle())
+            .await
+            .expect("HistoryTables schema init failed");
+        Shared::new(DbReady::<HistoryTables>::new())
+    }));
+
+    // -- HistoryStore (C2b): the typed `dyn HistoryStore` port over the boot-
+    // owned `block_history` table, so non-engine writers (the org-ingest
+    // doc-page create in `FileSyncController`) can record provenance through the
+    // same store the engine uses. Depends on HistoryTables so the relation
+    // exists before any record. --
+    injector.provide::<dyn holon_api::HistoryStore>(
+        Provider::root_async(|inj| async move {
+            let _hist = inj.resolve_async::<DbReady<HistoryTables>>().await;
+            let db = inj.resolve::<dyn DbHandleProvider>();
+            std::sync::Arc::new(crate::api::TursoHistoryStore::new(db.handle()))
+                as std::sync::Arc<dyn holon_api::HistoryStore>
+        })
+        .with_dependency::<DbReady<HistoryTables>>(),
+    );
+
+    // -- AutomationsJournalView (matview grouped over block_history — depends on
+    // HistoryTables only) --
+    injector.provide::<DbReady<AutomationsJournalView>>(
+        Provider::root_async(|inj| async move {
+            let _hist = inj.resolve_async::<DbReady<HistoryTables>>().await;
+            let db = inj.resolve::<dyn DbHandleProvider>();
+            run_schema_module(&AutomationsJournalSchemaModule, &db.handle())
+                .await
+                .expect("AutomationsJournalView schema init failed");
+            Shared::new(DbReady::<AutomationsJournalView>::new())
+        })
+        .with_dependency::<DbReady<HistoryTables>>(),
+    );
+
+    // -- JournalDayPagesView (journal-feed chain stage 1: `block` matview JOIN
+    // `block_tags` — depends on BlockMatviewView + BlockTables) --
+    injector.provide::<DbReady<JournalDayPagesView>>(
+        Provider::root_async(|inj| async move {
+            let _bm = inj.resolve_async::<DbReady<BlockMatviewView>>().await;
+            let _bt = inj.resolve_async::<DbReady<BlockTables>>().await;
+            let db = inj.resolve::<dyn DbHandleProvider>();
+            run_schema_module(&JournalDayPagesSchemaModule, &db.handle())
+                .await
+                .expect("JournalDayPagesView schema init failed");
+            Shared::new(DbReady::<JournalDayPagesView>::new())
+        })
+        .with_dependency::<DbReady<BlockMatviewView>>()
+        .with_dependency::<DbReady<BlockTables>>(),
+    );
+
+    // -- JournalFeedView (journal-feed chain stage 2: matview chained on
+    // `journal_day_pages` — depends on JournalDayPagesView) --
+    injector.provide::<DbReady<JournalFeedView>>(
+        Provider::root_async(|inj| async move {
+            let _jdp = inj.resolve_async::<DbReady<JournalDayPagesView>>().await;
+            let db = inj.resolve::<dyn DbHandleProvider>();
+            run_schema_module(&JournalFeedSchemaModule, &db.handle())
+                .await
+                .expect("JournalFeedView schema init failed");
+            Shared::new(DbReady::<JournalFeedView>::new())
+        })
+        .with_dependency::<DbReady<JournalDayPagesView>>(),
+    );
+
     // -- BlockTables (depends on CoreTables: junction FKs reference block_raw.id)
     // --
     injector.provide::<DbReady<BlockTables>>(
@@ -262,6 +379,19 @@ pub fn register_schema_providers(injector: &Injector) {
         Shared::new(DbReady::<IdentityTables>::new())
     }));
 
+    // -- TrustProposalsView (FROM block_raw — depends on CoreTables only) --
+    injector.provide::<DbReady<TrustProposalsView>>(
+        Provider::root_async(|inj| async move {
+            let _core = inj.resolve_async::<DbReady<CoreTables>>().await;
+            let db = inj.resolve::<dyn DbHandleProvider>();
+            run_schema_module(&TrustProposalsSchemaModule, &db.handle())
+                .await
+                .expect("TrustProposalsView schema init failed");
+            Shared::new(DbReady::<TrustProposalsView>::new())
+        })
+        .with_dependency::<DbReady<CoreTables>>(),
+    );
+
     // -- GraphEavSchema (depends on CoreTables) --
     injector.provide::<DbReady<GraphEavSchema>>(
         Provider::root_async(|inj| async move {
@@ -294,5 +424,10 @@ pub fn all_schema_roots() -> Vec<std::any::TypeId> {
         TypeId::of::<DbReady<OperationTables>>(),
         TypeId::of::<DbReady<LinkTables>>(),
         TypeId::of::<DbReady<GraphEavSchema>>(),
+        TypeId::of::<DbReady<TrustProposalsView>>(),
+        TypeId::of::<DbReady<AutomationsJournalView>>(),
+        TypeId::of::<DbReady<JournalDayPagesView>>(),
+        TypeId::of::<DbReady<JournalFeedView>>(),
+        TypeId::of::<DbReady<BlockDerivedTable>>(),
     ]
 }

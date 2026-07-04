@@ -96,7 +96,11 @@ async fn main() -> Result<()> {
 
         // ----- Page 1 (no cursor yet) -----
         let page1 = strategy
-            .fetch_records(&peer, &store, &key)
+            .fetch_records(
+                &peer as &dyn holon_mcp_client::mcp_call_surface::McpCallSurface,
+                &store,
+                &key,
+            )
             .await
             .with_context(|| format!("fetch page 1 for {entity_name}"))?;
         let first_ids = sample_ids(&page1.records, entity.id_column.as_deref().unwrap_or("id"));
@@ -121,7 +125,11 @@ async fn main() -> Result<()> {
                 .await
                 .ok();
             let page2 = strategy
-                .fetch_records(&peer, &store, &key)
+                .fetch_records(
+                    &peer as &dyn holon_mcp_client::mcp_call_surface::McpCallSurface,
+                    &store,
+                    &key,
+                )
                 .await
                 .with_context(|| format!("fetch page 2 for {entity_name}"))?;
             let second_ids =

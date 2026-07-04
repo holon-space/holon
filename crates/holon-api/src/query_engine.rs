@@ -46,10 +46,52 @@ pub trait QueryEngine: Send + Sync {
         context: Option<QueryContext>,
     ) -> Result<EnrichedChangeStream>;
 
+    /// Sort-key spec (`col` for ascending, `-col` for descending) implied by
+    /// the query's trailing `ORDER BY`, for the collection that renders its
+    /// rows to sort by.
+    ///
+    /// Lives on the engine because compilation does: the frontend only ever
+    /// holds the source query, and the clause is stripped from the matview
+    /// body before it reaches storage.
+    ///
+    /// Default `None` — an engine with no SQL compiler declares no order, and
+    /// its collections keep their own row order.
+    // ALLOW(unused_param): trait default; overriding impls bind both
+    fn ordering_spec(&self, _: &str, _: QueryLanguage) -> Result<Option<String>> {
+        Ok(None)
+    }
+
     /// Search blocks/pages matching `filter` for the `[[` link-autocomplete
     /// popup. Replaces the raw-SQL `popup_query` capability: the search SQL
     /// lives behind the impl, the frontend only sees typed candidates.
     async fn search_link_candidates(&self, filter: &str) -> Result<Vec<LinkCandidate>>;
+
+    /// User-facing quick-open / content search (`cmd-K` modal). Returns two
+    /// sections — `pages` (jump-to-page targets, `Page`-tagged) first, then
+    /// `content` (full-text block matches) — so the modal renders them
+    /// separately without re-deriving which rows are pages. The `Page`-tag
+    /// join and the `LIKE` search live behind this capability, mirroring
+    /// [`Self::search_link_candidates`].
+    ///
+    /// Default impl fails loud (returns `Err`) rather than faking an empty
+    /// result — a `QueryEngine` without quick-open wiring must surface that.
+    async fn quick_open_search(&self, filter: &str) -> Result<crate::QuickOpenResults> {
+        let _ = filter;
+        anyhow::bail!("QueryEngine::quick_open_search not implemented by this impl")
+    }
+
+    /// Resolve the page-ancestor breadcrumb trail for `block_id`: the chain of
+    /// `Page`-tagged ancestors from root to (and including) the block's nearest
+    /// page, in root→current order. Each entry is `(id, title)` where the title
+    /// is the page's first content line. Reuses the same ancestor path the
+    /// `block_with_path` matview maintains — no separate tree walk.
+    ///
+    /// Fails loud (default impl bails) rather than returning an empty trail: a
+    /// breadcrumb that can't be resolved must surface, not silently vanish.
+    async fn breadcrumb_trail(&self, block_id: &EntityUri) -> Result<Vec<LinkCandidate>> {
+        let _ = block_id;
+        anyhow::bail!("QueryEngine::breadcrumb_trail not implemented by this impl")
+    }
 
     /// Non-settling read of a single block's `content` straight from the
     /// write table (`block_raw`). Used by the headless editor mirror, which
@@ -58,4 +100,34 @@ pub trait QueryEngine: Send + Sync {
     /// settles, which would mask the projection races the PBTs hunt).
     /// `None` when the row hasn't materialised yet.
     async fn block_content_by_id(&self, id: &EntityUri) -> Result<Option<String>>;
+
+    /// ONE-SHOT, non-watching read: compile + execute `query` exactly once and
+    /// return its current rows. Unlike [`Self::watch_query`], this sets up
+    /// **no** materialized view and **no** CDC stream.
+    ///
+    /// This is the ONLY sanctioned execution path for the advice weave's
+    /// canonical read (anchor anti-join + `ORDER BY` + `LIMIT`, ADR 0022): that
+    /// shape MUST NOT be handed to `watch_query`, which matview-izes any SQL
+    /// and whose Turso IVM cannot maintain an anti-join FUSED WITH an
+    /// aggregate/GROUP BY (see holon-advice `probe_ivm_shape_findings`).
+    /// NOTE: a PLAIN anti-join in a non-aggregating outer view IS
+    /// incrementally maintained (proven by
+    /// `probe_outer_antijoin_is_incrementally_maintained`), so watching such a
+    /// read is fine — the advice weaver does exactly that.
+    /// See `holon_frontend::advice_weaver`.
+    ///
+    /// Default impl fails loud (returns `Err`) rather than silently returning
+    /// an empty set — a `QueryEngine` that has not wired one-shot execution
+    /// should surface that, not fake success. The Turso `BackendEngine`
+    /// overrides it.
+    async fn execute_query(
+        &self,
+        query: &str,
+        language: QueryLanguage,
+        params: HashMap<String, Value>,
+        context: Option<QueryContext>,
+    ) -> Result<Vec<crate::widget_spec::DataRow>> {
+        let _ = (query, language, params, context);
+        anyhow::bail!("QueryEngine::execute_query (one-shot) not implemented by this impl")
+    }
 }

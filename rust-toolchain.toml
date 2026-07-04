@@ -1,2 +1,8 @@
+# Pinned (not a floating "nightly") so rustfmt/clippy output stays
+# reproducible across CI runs and machines — an unpinned nightly channel
+# silently picks up a new rustfmt/clippy build every day, and rustfmt's
+# output isn't stable across versions (this is what caused the Rust Checks
+# CI job's "Check formatting" step to drift out from under the repo).
+# Bump deliberately, not via a stray CI re-run picking up a new date.
 [toolchain]
-channel = "nightly"
+channel = "nightly-2026-07-17"

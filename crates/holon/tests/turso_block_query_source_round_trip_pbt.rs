@@ -32,6 +32,7 @@ use holon_api::EntityName;
 use holon_api::EntityUri;
 use holon_api::SourceBlock;
 use holon_api::Tags;
+use holon_api::Value;
 use holon_api::block::Block;
 use holon_api::repository::Lifecycle;
 use holon_block_roundtrip_testing::NormalizedDocument;
@@ -41,6 +42,7 @@ use holon_block_roundtrip_testing::build_blocks;
 use holon_block_roundtrip_testing::root_headlines_strategy;
 use holon_core::OperationProvider;
 use holon_core::storage::BlockQuerySource;
+use holon_core::storage::types::StorageEntity;
 use holon_loro::LoroBackend;
 use holon_turso::schema_modules::BlockSchemaModule;
 use proptest::prelude::*;
@@ -63,7 +65,11 @@ fn unique_db_path() -> std::path::PathBuf {
 /// document-order `sort_key` so canonical sibling order round-trips. `blocks`
 /// arrives in pre-order from `build_blocks`, so the enumeration index is a
 /// monotonic per-parent order key.
-async fn write_blocks(engine: &BackendEngine, blocks: &[Block]) -> Result<(), TestCaseError> {
+async fn write_blocks(
+    engine: &BackendEngine,
+    doc_id: &EntityUri,
+    blocks: &[Block],
+) -> Result<(), TestCaseError> {
     // Write through the production block provider directly on the engine's
     // handle (the core test engine doesn't auto-register a "block" provider);
     // the matview projects incrementally, so the engine's `watch_view` sees the
@@ -76,6 +82,22 @@ async fn write_blocks(engine: &BackendEngine, blocks: &[Block]) -> Result<(), Te
         BlockSchemaModule.edge_fields(),
     );
     let entity: EntityName = "block".to_string().into();
+    // Seed the document root the generated roots hang under (their `parent_id`
+    // is `doc_id`), mirroring `seed_loro_backend`. Its own parent is the
+    // `sentinel:no_parent` root anchor. Without it the generated roots would
+    // reference a nonexistent parent and the block_raw parent FK rejects them.
+    let mut root_params = StorageEntity::new();
+    root_params.insert("id".into(), Value::String(doc_id.as_str().to_string()));
+    root_params.insert(
+        "parent_id".into(),
+        Value::String(EntityUri::no_parent().as_str().to_string()),
+    );
+    root_params.insert("content".into(), Value::String("doc".to_string()));
+    root_params.insert("sort_key".into(), Value::String("0000000000".to_string()));
+    provider
+        .execute_operation(&entity, "create", root_params)
+        .await
+        .map_err(|e| TestCaseError::fail(format!("create doc root {doc_id}: {e}")))?;
     for (i, b) in blocks.iter().enumerate() {
         let params = block_to_params(&holon::api::SnapshotBlock {
             block: b.clone(),
@@ -90,7 +112,11 @@ async fn write_blocks(engine: &BackendEngine, blocks: &[Block]) -> Result<(), Te
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 20, ..ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig {
+        cases: 20,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
 
     /// Blocks round-trip through `TursoBlockQuerySource::snapshot()` —
     /// fields (id-keyed) and per-parent sibling order.
@@ -105,7 +131,7 @@ proptest! {
             let doc_id = EntityUri::block(&Uuid::new_v4().to_string());
             let blocks = build_blocks(&doc_id, &headlines);
 
-            write_blocks(&engine, &blocks).await?;
+            write_blocks(&engine, &doc_id, &blocks).await?;
 
             let source = TursoBlockQuerySource::watch_default(&engine)
                 .await
@@ -115,8 +141,14 @@ proptest! {
                 .await
                 .map_err(|e| TestCaseError::fail(format!("snapshot: {e}")))?;
 
+            // Drop the physical doc root; the reference store has no doc block.
+            let actual_blocks: Vec<Block> = snapshot
+                .iter_blocks()
+                .filter(|b| b.id != doc_id)
+                .cloned()
+                .collect();
             let expected = NormalizedDocument::from_blocks(None, &blocks);
-            let actual = NormalizedDocument::from_block_snapshot(None, &snapshot);
+            let actual = NormalizedDocument::from_blocks(None, &actual_blocks);
             assert_normalized_docs_equal(&expected, &actual, "turso_block_query_round_trip")?;
             assert_sibling_order_matches(&blocks, &snapshot, "turso_block_query_round_trip")?;
 
@@ -148,6 +180,7 @@ async fn seed_loro_backend(
             &HashMap::new(),
             &Tags::default(),
             &[],
+            &[],
         )
         .await
         .map_err(|e| TestCaseError::fail(format!("loro seed doc root: {e}")))?;
@@ -172,6 +205,7 @@ async fn seed_loro_backend(
                 &b.properties_map(),
                 &b.tags,
                 &b.requires,
+                &b.advice_suppressed,
             )
             .await
             .map_err(|e| TestCaseError::fail(format!("loro seed {}: {e}", b.id)))?;
@@ -180,7 +214,11 @@ async fn seed_loro_backend(
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 20, ..ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig {
+        cases: 20,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
 
     /// H10 (BlockEventStorm) — query-source equivalence: for the same generated
     /// store, the Turso and Loro `BlockQuerySource` arms return equal blocks.
@@ -202,7 +240,7 @@ proptest! {
             let blocks = build_blocks(&doc_id, &headlines);
 
             // Turso arm: production create path → matview → CDC mirror read.
-            write_blocks(&engine, &blocks).await?;
+            write_blocks(&engine, &doc_id, &blocks).await?;
             let turso_source = TursoBlockQuerySource::watch_default(&engine)
                 .await
                 .map_err(|e| TestCaseError::fail(format!("turso watch: {e}")))?;
@@ -210,7 +248,13 @@ proptest! {
                 .snapshot()
                 .await
                 .map_err(|e| TestCaseError::fail(format!("turso snapshot: {e}")))?;
-            let turso_doc = NormalizedDocument::from_block_snapshot(None, &turso_snapshot);
+            // Drop the physical doc root; the reference store has no doc block.
+            let turso_blocks: Vec<Block> = turso_snapshot
+                .iter_blocks()
+                .filter(|b| b.id != doc_id)
+                .cloned()
+                .collect();
+            let turso_doc = NormalizedDocument::from_blocks(None, &turso_blocks);
 
             // Loro arm: Turso-free tree walk over the same generated store.
             let backend = seed_loro_backend(&doc_id, &blocks).await?;

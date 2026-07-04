@@ -28,6 +28,8 @@ use holon_core::cell::CursorBias;
 use holon_core::cell::TextDelta;
 use holon_core::cell::TextOp;
 
+use crate::echo::EchoDecision;
+use crate::echo::evaluate_data_sync_echo;
 use crate::input_trigger::InputTrigger;
 use crate::input_trigger::ViewEvent;
 use crate::input_trigger::{self};
@@ -87,6 +89,16 @@ pub enum EditorAction {
     /// Let the parent handle this key (popup is not active).
     /// E.g., MoveUp/MoveDown should propagate to cross-block navigation.
     Propagate,
+
+    /// A popup selection was handled but FAILED. The frontend must surface
+    /// `message` visibly (toast/banner), strip the typed command text if
+    /// `strip_prefix_start` is `Some`, and consume the key WITHOUT falling
+    /// through to a structural op (split_block). Fail-loud: a failed command
+    /// must never read as a silent no-op or a stray split.
+    CommandFailed {
+        message: String,
+        strip_prefix_start: Option<usize>,
+    },
 }
 
 impl std::fmt::Debug for EditorAction {
@@ -116,8 +128,32 @@ impl std::fmt::Debug for EditorAction {
                 )
             }
             Self::Propagate => write!(f, "Propagate"),
+            Self::CommandFailed {
+                message,
+                strip_prefix_start,
+            } => write!(
+                f,
+                "CommandFailed {{ message: {:?}, strip_prefix_start: {:?} }}",
+                message, strip_prefix_start
+            ),
         }
     }
+}
+
+/// Instruction the convergence decision hands back to the adapter: set the
+/// visible editor buffer (`InputState`) to the backend authority.
+///
+/// `target` is the SqlOnly authority text and doubles as the fallback the
+/// adapter's `converge_input` uses when no Loro cell is attached; a
+/// cell-attached editor re-reads the *live* cell authority at apply time, so a
+/// composition committed during an IME deferral is merged, never reverted.
+/// `seq` is the write-ordering high-water this convergence accepted — it lets a
+/// directive deferred past an IME composition be discarded when a newer local
+/// write (the committed composition) superseded it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConvergeDirective {
+    pub target: String,
+    pub seq: i64,
 }
 
 /// Framework-agnostic controller for an editable text field.
@@ -125,10 +161,38 @@ impl std::fmt::Debug for EditorAction {
 /// Each editable text node in the ViewModel gets one controller.
 /// The frontend creates it during reconciliation and calls its methods
 /// from platform event handlers.
+///
+/// # Buffer ownership (buffer-ownership inversion, Increment 1)
+///
+/// The view model owns the authoritative editable-text buffer (`buffer`) and
+/// the write-ordering high-water mark (`last_local_seq`). RAW-text coordinates:
+/// `buffer` holds raw Unicode scalars so the RAW `[[…]]` edit-mode feature can
+/// seed/commit through this same seam without a second migration.
+///
+/// ONE-DIRECTIONAL SHADOW INVARIANT (Increment 1 only): while GPUI's
+/// `InputState` is still the visible authority, this buffer is a shadow kept in
+/// lockstep by the adapter — `InputState` writes flow INTO the buffer
+/// (`apply_local_edit`), never yet the reverse. Increment 2 flips the buffer to
+/// the write authority; Increment 3 makes it the convergence authority via
+/// `set_buffer_from_authority`.
 pub struct EditorViewModel {
     handler: ViewEventHandler,
     triggers: Vec<InputTrigger>,
     cell: Option<Cell<String>>,
+    /// Authoritative editable-text buffer in RAW-text coordinates. See the
+    /// struct-level "Buffer ownership" note for the shadow invariant.
+    buffer: String,
+    /// Highest [`holon_api::write_seq::WriteSeq`] this editor has authored (via
+    /// a content keystroke) or accepted (from a converged external write). The
+    /// data-sync convergence guard drops any echo whose `write_seq` is strictly
+    /// less than this. Starts at `WriteSeq::ZERO`: before the user types, every
+    /// echo converges (correct seeding).
+    last_local_seq: i64,
+    /// A convergence directive deferred because an IME composition was in
+    /// progress at converge time. Stashed by `set_pending_directive`,
+    /// superseded by any newer directive, and replayed by the adapter on the
+    /// composition-end / focus edge via `take_pending_directive`.
+    pending_directive: Option<ConvergeDirective>,
 }
 
 impl EditorViewModel {
@@ -139,11 +203,15 @@ impl EditorViewModel {
         field: String,
         original_value: String,
     ) -> Self {
-        let handler = ViewEventHandler::new(operations, context_params, field, original_value);
+        let handler =
+            ViewEventHandler::new(operations, context_params, field, original_value.clone());
         Self {
             handler,
             triggers,
             cell: None,
+            buffer: original_value,
+            last_local_seq: holon_api::write_seq::WriteSeq::ZERO.get(),
+            pending_directive: None,
         }
     }
 
@@ -153,6 +221,11 @@ impl EditorViewModel {
     /// `BlockCellRegistry`). Tests and headless paths leave it unattached
     /// — CRDT pass-throughs return `None` / `Err` in that case.
     pub fn attach_cell(&mut self, cell: Cell<String>) {
+        // Seed the authoritative buffer from the cell's current text so it
+        // matches the visible InputState (the CRDT text is the mount seed in
+        // cell mode). Without this the first keystroke would diff against the
+        // stale construction-time content.
+        self.buffer = cell.current();
         self.cell = Some(cell);
         // A Loro `Cell` is now the per-keystroke content writer, so the
         // handler must drop the redundant on-blur `set_field("content")` to
@@ -167,6 +240,17 @@ impl EditorViewModel {
         self.cell.is_some()
     }
 
+    /// Re-baseline the blur-commit change tracking to an authority re-seed.
+    ///
+    /// Pass-through to [`ViewEventHandler::set_baseline`]. Called by the
+    /// frontend right after it absolutely re-seeds the visible buffer from the
+    /// backend authority (`converge_input`) so an unmodified, re-seeded editor
+    /// does not diff as dirty and fire a spurious identical-content
+    /// `set_field` on the next blur. Not a local write — advances no write-seq.
+    pub fn rebaseline(&mut self, text: &str) {
+        self.handler.set_baseline(text.to_string());
+    }
+
     /// Borrow the attached [`Cell<String>`]. Returns `None` if unattached.
     /// Most frontends should prefer the pass-through methods below; this
     /// is the escape hatch for spawning long-lived async consumers (e.g.
@@ -178,6 +262,197 @@ impl EditorViewModel {
     /// Current CRDT text snapshot. `None` when unattached.
     pub fn current_text(&self) -> Option<String> {
         self.cell.as_ref().map(|c| c.current())
+    }
+
+    /// Borrow the authoritative editable-text buffer (RAW-text coordinates).
+    /// See the struct-level "Buffer ownership" note.
+    pub fn buffer(&self) -> &str {
+        &self.buffer
+    }
+
+    /// Highest write-ordering sequence this editor has authored or accepted.
+    /// The convergence guard drops echoes strictly older than this.
+    pub fn last_local_seq(&self) -> i64 {
+        self.last_local_seq
+    }
+
+    /// Advance the write-ordering high-water mark to at least `seq` (never
+    /// regressing it). The convergence loop calls this when it accepts an
+    /// authority state (Converge) or confirms its own echo (InSync /
+    /// AdoptBaseline).
+    pub fn advance_local_seq(&mut self, seq: i64) {
+        self.last_local_seq = self.last_local_seq.max(seq);
+    }
+
+    /// Converge the authoritative buffer to a backend/authority `text` carrying
+    /// ordering token `seq` (the convergence sink). Advances the high-water
+    /// mark (never regressing it) and re-baselines the blur-commit change
+    /// tracking to the re-seeded text so an unmodified, re-seeded editor
+    /// does not diff as dirty and fire a spurious identical-content
+    /// `set_field` on the next blur. Folds in the former `rebaseline`
+    /// contract: not a local write — it does not stamp a new write-seq,
+    /// only adopts `seq` as the accepted high-water.
+    ///
+    /// RAW-seam hook: `text` MAY be a raw reconstruction
+    /// (`render_inline_marks`) once raw-edit mode lands; today callers pass
+    /// stored (stripped) content and the signature does not change when raw
+    /// seeding arrives.
+    pub fn set_buffer_from_authority(&mut self, text: &str, seq: i64) {
+        self.buffer = text.to_string();
+        self.last_local_seq = self.last_local_seq.max(seq);
+        self.handler.set_baseline(text.to_string());
+    }
+
+    /// Apply a local (user-typed) edit to the authoritative buffer — the single
+    /// keystroke sink. Mutates `buffer` to `new_text` and returns the
+    /// persistence intent the frontend must dispatch (its sole commit funnel):
+    ///
+    /// - **Cell mode** (Loro attached): computes the delta from the previous
+    ///   buffer and applies it through the CRDT (`apply_local`); returns
+    ///   `Ok(None)` — the Loro projection is the content writer.
+    /// - **No-cell mode** (SqlOnly), real block: stamps a monotonic
+    ///   `write_seq`, records it as `last_local_seq`, and returns
+    ///   `Ok(Some(set_field intent))` so the typed text lands in the backend
+    ///   before the next transition.
+    /// - **Creation placeholder** (`block:__virtual:<parent>`) or unchanged
+    ///   text: returns `Ok(None)` — a placeholder has no real block to write
+    ///   against (its text commits via `create` on Enter).
+    ///
+    /// RAW-seam hook: the `set_field` intent path is the single point where the
+    /// dispatcher re-extracts inline marks on commit; keep it the sole commit
+    /// funnel so raw→stripped extraction has exactly one home.
+    pub fn apply_local_edit(&mut self, new_text: &str) -> Result<Option<OperationIntent>> {
+        if new_text == self.buffer {
+            return Ok(None);
+        }
+        if self.cell.is_some() {
+            // Cell mode: apply the delta through the CRDT unless the cell
+            // already holds this text (our own echo).
+            if self.current_text().as_deref() != Some(new_text) {
+                for op in crate::cell::compute_text_delta(&self.buffer, new_text) {
+                    self.apply_local(op)?;
+                }
+            }
+            self.buffer = new_text.to_string();
+            return Ok(None);
+        }
+        // No cell (SqlOnly / no-Loro mode).
+        let is_placeholder = self
+            .handler
+            .context_id()
+            .is_some_and(|id| crate::row_origin::RowOrigin::from_id(id).is_creation_placeholder());
+        let id = self.handler.context_id().map(str::to_string);
+        self.buffer = new_text.to_string();
+        let Some(id) = id else {
+            return Ok(None);
+        };
+        if is_placeholder {
+            return Ok(None);
+        }
+        // Stamp a monotonic ordering token on this content write and record it
+        // as our last local sequence BEFORE the caller dispatches, so a fast
+        // CDC echo cannot race a not-yet-recorded seq.
+        let seq = holon_api::write_seq::next();
+        self.last_local_seq = seq.get();
+        let mut params = HashMap::new();
+        params.insert("id".into(), Value::String(id));
+        params.insert("field".into(), Value::String("content".to_string()));
+        params.insert("value".into(), Value::String(new_text.to_string()));
+        params.insert("write_seq".into(), Value::Integer(seq.get()));
+        Ok(Some(OperationIntent::new(
+            "block".into(),
+            "set_field".into(),
+            params,
+        )))
+    }
+
+    /// Decide how to react to a SqlOnly data-sync echo (`new_value` carrying
+    /// ordering token `echo_seq`), running the op-versioned echo-suppression
+    /// rule against the VM's own authoritative `buffer`. Performs every
+    /// VM-state mutation that is safe mid-IME-composition inline (high-water
+    /// advance for InSync/Converge, baseline adopt for AdoptBaseline) and
+    /// returns `Some(directive)` ONLY for the Converge case — the adapter must
+    /// then set the visible InputState to the authority (immediately, or
+    /// deferred past an IME composition). Returns `None` for InSync / DropStale
+    /// / DropNoSeq / AdoptBaseline: the visible buffer is left untouched.
+    pub fn converge_from_data_sync(
+        &mut self,
+        new_value: &str,
+        echo_seq: Option<i64>,
+    ) -> Option<ConvergeDirective> {
+        match evaluate_data_sync_echo(&self.buffer, new_value, echo_seq, self.last_local_seq) {
+            EchoDecision::InSync { advance_to } => {
+                if let Some(seq) = advance_to {
+                    self.advance_local_seq(seq);
+                }
+                None
+            }
+            EchoDecision::DropStale => None,
+            EchoDecision::DropNoSeq => {
+                // Content changed but the row carries no `write_seq` token — a
+                // schema/projection regression. Fail LOUD and DROP: converging
+                // blindly here is exactly the stale-echo data loss we prevent.
+                tracing::error!(
+                    target: "editor.data_sync",
+                    row_id = ?self.handler.context_id(),
+                    new = %new_value,
+                    "data-sync echo has no write_seq column; dropping \
+                     (schema/projection regression)"
+                );
+                None
+            }
+            EchoDecision::AdoptBaseline { seq } => {
+                // The echo is the SQL-canonicalized form of our OWN in-flight
+                // write (trailing whitespace trimmed on store). Keep the typed
+                // buffer; re-baseline change tracking to the canonical authority
+                // so a later blur diffs against SQL truth, not a stale baseline.
+                self.advance_local_seq(seq);
+                self.rebaseline(new_value);
+                None
+            }
+            EchoDecision::Converge { seq } => {
+                self.advance_local_seq(seq);
+                Some(ConvergeDirective {
+                    target: new_value.to_string(),
+                    seq: self.last_local_seq,
+                })
+            }
+        }
+    }
+
+    /// Build the convergence directive for a cell-mode remote-delta wakeup:
+    /// converge the visible InputState to the live Loro authority
+    /// (`current_text`). `None` when no cell is attached (the remote-delta loop
+    /// only runs cell-attached). `seq` is the current high-water; cell-mode
+    /// local edits do not stamp a write-seq, so a deferred remote directive
+    /// always replays and the adapter re-reads the live (merged) cell.
+    pub fn remote_converge_directive(&self) -> Option<ConvergeDirective> {
+        let target = self.current_text()?;
+        Some(ConvergeDirective {
+            target,
+            seq: self.last_local_seq,
+        })
+    }
+
+    /// Stash a convergence directive the adapter deferred because an IME
+    /// composition is in progress (`ime_marked_range().is_some()`). A newer
+    /// directive supersedes an older pending one. The buffer is NOT committed
+    /// while deferred, so a mid-composition converge never overwrites the
+    /// in-flight composed text.
+    pub fn set_pending_directive(&mut self, directive: ConvergeDirective) {
+        self.pending_directive = Some(directive);
+    }
+
+    /// Take the deferred directive for replay on a composition-end / focus
+    /// edge, clearing the pending slot. Returns `None` — discarding it — when a
+    /// newer local write (a committed composition, which stamped a higher
+    /// `write_seq`) superseded it since it was deferred.
+    pub fn take_pending_directive(&mut self) -> Option<ConvergeDirective> {
+        let directive = self.pending_directive.take()?;
+        if self.last_local_seq > directive.seq {
+            return None;
+        }
+        Some(directive)
     }
 
     /// Apply a local edit to the CRDT (origin-tagged so the remote-delta
@@ -205,7 +480,11 @@ impl EditorViewModel {
     pub fn anchor_cursor(&self, char_offset: usize, bias: CursorBias) -> Option<CursorAnchor> {
         self.cell
             .as_ref()
-            .and_then(|c| c.anchor_cursor(char_offset, bias).ok()) // ALLOW(ok): backings without text-rich support degrade to None
+            .and_then(|c| c.anchor_cursor(char_offset, bias).ok()) // ALLOW(ok):
+        // backings without
+        // text-rich support
+        // degrade to
+        // None
     }
 
     /// Resolve a previously-anchored cursor against the current CRDT state.
@@ -214,7 +493,10 @@ impl EditorViewModel {
     pub fn resolve_cursor(&self, anchor: &CursorAnchor) -> Option<usize> {
         self.cell
             .as_ref()
-            .and_then(|c| c.resolve_cursor(anchor).ok()) // ALLOW(ok): backings without text-rich support degrade to None
+            .and_then(|c| c.resolve_cursor(anchor).ok()) // ALLOW(ok): backings
+        // without text-rich
+        // support degrade to
+        // None
     }
 
     /// Build an EditorViewModel from an EditableText ViewModel node.
@@ -306,6 +588,35 @@ impl EditorViewModel {
             }) => Some(OperationIntent::new(entity_name, op_name, params)),
             _ => None,
         }
+    }
+
+    /// Enter in a creation slot (`RowOrigin::CreationPlaceholder` id): commit
+    /// the typed text as the `{entity}.create` intent and re-baseline the slot
+    /// to EMPTY. Enter in a slot must ONLY create — the slot has no real block,
+    /// so no structural op may be chained after it (see
+    /// [`structural_block_action`]'s placeholder assert).
+    ///
+    /// The re-baseline matters: `pending_commit_intent` re-baselines change
+    /// tracking to the COMMITTED text (correct for a real block, whose editor
+    /// keeps showing it), but the slot's editor is cleared back to the
+    /// placeholder after the commit, so its baseline must return to `""` —
+    /// otherwise retyping the identical text would diff as "unchanged" and
+    /// silently create nothing.
+    pub fn commit_creation_slot(&mut self, live_text: &str) -> Option<OperationIntent> {
+        assert!(
+            self.handler.context_id().is_some_and(
+                |id| crate::row_origin::RowOrigin::from_id(id).is_creation_placeholder()
+            ),
+            "commit_creation_slot called on a non-placeholder editor (id {:?})",
+            self.handler.context_id()
+        );
+        let intent = self.pending_commit_intent(live_text)?;
+        let rebaseline = self.pending_commit_intent("");
+        assert!(
+            rebaseline.is_none(),
+            "re-baselining a creation slot to empty must not produce an intent"
+        );
+        Some(intent)
     }
 
     /// Called when a navigation key is pressed (Up/Down/Enter/Escape).
@@ -438,6 +749,13 @@ impl EditorViewModel {
                 replacement,
                 prefix_start,
             },
+            PopupResult::Failed {
+                message,
+                strip_prefix_start,
+            } => EditorAction::CommandFailed {
+                message,
+                strip_prefix_start,
+            },
         }
     }
 }
@@ -480,6 +798,16 @@ pub fn structural_block_action(
     target_id: &str,
     cursor_byte: usize,
 ) -> Option<OperationIntent> {
+    // A creation slot (`block:__virtual:<parent>`) has no real block —
+    // dispatching split/join/indent/outdent against it can only fail
+    // ("Block not found"). Enter there must route to
+    // `EditorViewModel::commit_creation_slot`; reaching this table with a
+    // placeholder id is a frontend routing bug, not user input.
+    assert!(
+        !crate::row_origin::RowOrigin::from_id(target_id).is_creation_placeholder(),
+        "structural {key:?} dispatched against creation-slot id {target_id:?} — virtual slots \
+         have no real block; route Enter to commit_creation_slot instead"
+    );
     let intent = |op: &str, position: Option<i64>| {
         let mut params = HashMap::new();
         params.insert("id".to_string(), Value::String(target_id.to_string()));
@@ -537,7 +865,17 @@ mod tests {
                 display_name: name.into(),
                 required_params: params,
                 affected_fields: fields.iter().map(|s| s.to_string()).collect(),
-                ..Default::default()
+                id_column: "id".to_string(),
+                description: String::new(),
+                param_mappings: vec![],
+                target_scope: holon_api::TargetScope::Block,
+                boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::Test,
+                },
+                trigger: None,
+                bound_params: Default::default(),
+                precondition: None,
             },
         }
     }
@@ -564,11 +902,13 @@ mod tests {
                 prefix: "/".to_string(),
                 action: "command_menu".to_string(),
                 at_line_start: true,
+                word_boundary: false,
             },
             InputTrigger::TextPrefix {
                 prefix: "[[".to_string(),
                 action: "doc_link".to_string(),
                 at_line_start: false,
+                word_boundary: false,
             },
         ];
         let context = HashMap::from([("id".into(), Value::String("block-1".into()))]);
@@ -588,6 +928,78 @@ mod tests {
         let action = ctrl.on_text_changed("/", 1);
         assert!(matches!(action, EditorAction::PopupActivated { .. }));
         assert!(ctrl.is_popup_active());
+    }
+
+    /// Controller wired with the PRODUCTION triggers a rendered editable block
+    /// gets (`default_triggers_for_operations`: mid-line `/` command_menu with
+    /// the word-boundary gate + always-on `[[`). `test_controller`'s slash
+    /// trigger is `at_line_start: true`, which does NOT exercise the mid-line
+    /// URL path — this one does.
+    fn prod_controller() -> EditorViewModel {
+        let ops = vec![
+            make_op(
+                "set_field",
+                &["content"],
+                vec![param("id"), param("field"), param("value")],
+            ),
+            make_op("delete", &["parent_id"], vec![param("id")]),
+        ];
+        let triggers = crate::input_trigger::default_triggers_for_operations(&ops);
+        let context = HashMap::from([("id".into(), Value::String("block-1".into()))]);
+        EditorViewModel::new(ops, triggers, context, "content".into(), "original".into())
+    }
+
+    /// Regression (BugFunnel): a block whose content is a URL must NOT open the
+    /// command menu. Before the word-boundary gate, the trailing `/path` fired
+    /// `command_menu`; the URL tail became a filter matching nothing → the
+    /// permanent "Type to search…" popup that never dismissed. This drives the
+    /// exact per-keystroke entry the GPUI editor view calls (`on_text_changed`)
+    /// and observes the real popup state (`is_popup_active`).
+    #[test]
+    fn url_content_does_not_activate_command_menu() {
+        let mut ctrl = prod_controller();
+        let url = "https://example.com/path";
+        let action = ctrl.on_text_changed(url, url.len());
+        assert!(
+            matches!(action, EditorAction::None),
+            "URL content must not activate any popup, got {action:?}"
+        );
+        assert!(
+            !ctrl.is_popup_active(),
+            "command menu must stay closed for URL content"
+        );
+    }
+
+    /// Logseq-style `text /cmd`: a `/` right after whitespace still opens the
+    /// menu (the boundary gate must not over-reject).
+    #[test]
+    fn slash_after_space_activates_command_menu() {
+        let mut ctrl = prod_controller();
+        let line = "foo /de";
+        let action = ctrl.on_text_changed(line, line.len());
+        assert!(
+            matches!(action, EditorAction::PopupActivated { .. }),
+            "slash after a space must open the command menu, got {action:?}"
+        );
+        assert!(ctrl.is_popup_active());
+    }
+
+    /// Dismissal-side consistency: once the menu is open, typing on into a URL
+    /// (so `check_triggers` now returns `None`) must DISMISS it — the fix keeps
+    /// the open/close sides symmetric, so a popup can never get stuck open on a
+    /// URL block.
+    #[test]
+    fn url_after_open_menu_dismisses_it() {
+        let mut ctrl = prod_controller();
+        ctrl.on_text_changed("/", 1);
+        assert!(ctrl.is_popup_active(), "precondition: menu opened on '/'");
+        let url = "https://example.com/path";
+        let action = ctrl.on_text_changed(url, url.len());
+        assert!(
+            matches!(action, EditorAction::PopupDismissed),
+            "typing into a URL must dismiss the menu, got {action:?}"
+        );
+        assert!(!ctrl.is_popup_active());
     }
 
     #[test]
@@ -636,6 +1048,12 @@ mod tests {
 
     #[test]
     fn enter_executes_selected_command() {
+        // Selecting a slash-command from the popup must strip the typed
+        // "/delete" text from the editor BEFORE dispatching the op — see
+        // `EditorAction::ExecuteAndStripCommand`'s doc comment — otherwise
+        // the trigger text remains in the block content and gets committed
+        // at the next commit point. Plain `Execute` (no strip) is only for
+        // non-popup paths (blur set_field etc.).
         let mut ctrl = test_controller();
         ctrl.on_text_changed("/", 1);
         ctrl.handler.popup.set_items(vec![PopupItem {
@@ -645,11 +1063,15 @@ mod tests {
         }]);
         let action = ctrl.on_key(EditorKey::Enter);
         match action {
-            EditorAction::Execute(intent) => {
+            EditorAction::ExecuteAndStripCommand {
+                intent,
+                strip_prefix_start,
+            } => {
                 assert_eq!(intent.op_name, "delete");
                 assert_eq!(intent.params["id"], Value::String("block-1".into()));
+                assert_eq!(strip_prefix_start, 0);
             }
-            other => panic!("Expected Execute, got {:?}", other),
+            other => panic!("Expected ExecuteAndStripCommand, got {:?}", other),
         }
     }
 
@@ -696,6 +1118,47 @@ mod tests {
         assert!(
             matches!(action, EditorAction::None),
             "content set_field must be dropped when a Loro cell is the writer, got {action:?}"
+        );
+    }
+
+    #[test]
+    fn cell_authority_reflects_merged_content_after_external_join() {
+        // Regression (2026-07-10): after a `join_block`, the surviving block's
+        // content is merged in the backend, and the editor's content authority
+        // — the attached `Cell` read via `current_text()` — MUST reflect that
+        // merged value. The GPUI editor's focus-gain reload converges its
+        // `InputState` to exactly this authority; if the authority itself were
+        // stale, the reload could not cure the stale buffer. This pins the
+        // authority contract the fix depends on: `current_text()` is a live
+        // read of the cell backing, never a snapshot taken at attach time.
+        use std::sync::Arc;
+        use std::sync::Mutex;
+
+        use holon_core::cell::CellBacking;
+        use holon_core::cell::LwwTextCellBacking;
+
+        // Shared backing store the "backend" (join_block's set_field) writes to.
+        let store = Arc::new(Mutex::new("First manual block".to_string())); // pre-split (18)
+        let read_store = store.clone();
+        let backing = Arc::new(LwwTextCellBacking::new(
+            Arc::new(move || read_store.lock().unwrap().clone()),
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            Arc::new(|| Box::pin(futures::stream::empty())),
+        ));
+        let mut ctrl = test_controller();
+        ctrl.attach_cell(Cell::from_backing(backing as Arc<dyn CellBacking<String>>));
+
+        assert_eq!(ctrl.current_text().as_deref(), Some("First manual block"));
+
+        // Backend join merges the two blocks into the survivor (17 chars),
+        // dropping the space, exactly as prod `join_block`'s `set_field` does.
+        *store.lock().unwrap() = "First manualblock".to_string();
+
+        assert_eq!(
+            ctrl.current_text().as_deref(),
+            Some("First manualblock"),
+            "content authority must be a live read of the cell — a focus reload converges \
+             InputState to this, curing the stale pre-join buffer"
         );
     }
 
@@ -749,9 +1212,7 @@ mod tests {
 
         let ctrl = test_controller();
         let mark = InlineMark::Link {
-            target: EntityRef::Internal {
-                id: EntityUri::block("abc-123"),
-            },
+            target: EntityRef::from_uri(&EntityUri::block("abc-123")),
             label: "see also".into(),
         };
         let action = ctrl.apply_mark(2..10, &mark);
@@ -810,5 +1271,196 @@ mod tests {
         let marks = vec![MarkSpan::new(0, 5, InlineMark::Bold)];
         let active = selection_marks(&marks, 5..5);
         assert!(active.contains(&InlineMark::Bold));
+    }
+
+    fn slot_vm(slot_id: &str) -> EditorViewModel {
+        let context_params =
+            HashMap::from([("id".to_string(), Value::String(slot_id.to_string()))]);
+        EditorViewModel::new(
+            Vec::new(),
+            Vec::new(),
+            context_params,
+            "content".to_string(),
+            String::new(),
+        )
+    }
+
+    /// Enter in the creation slot dispatches exactly ONE `block.create` — the
+    /// dogfood 2026-07-10 defect chained a `split_block` on the virtual id
+    /// after the create ("split_block failed: Block not found").
+    #[test]
+    fn creation_slot_commit_yields_single_create_intent() {
+        let slot_id = "block:__virtual:page-1";
+        let mut vm = slot_vm(slot_id);
+        let intent = vm
+            .commit_creation_slot("hello")
+            .expect("typed slot text must commit as a create");
+        assert_eq!(intent.op_name, "create");
+        assert_eq!(
+            intent.params["parent_id"],
+            Value::String("block:page-1".into())
+        );
+        assert_eq!(intent.params["content"], Value::String("hello".into()));
+    }
+
+    /// After the commit the slot editor is cleared back to the placeholder, so
+    /// its change-tracking baseline must be empty again: retyping the IDENTICAL
+    /// text must create a second block, and an empty slot must never create.
+    #[test]
+    fn creation_slot_commit_rebaselines_to_empty() {
+        let mut vm = slot_vm("block:__virtual:page-1");
+        vm.commit_creation_slot("hello").expect("first create");
+        assert!(
+            vm.commit_creation_slot("").is_none(),
+            "empty slot must not create"
+        );
+        let again = vm
+            .commit_creation_slot("hello")
+            .expect("identical retype after clear must create AGAIN");
+        assert_eq!(again.op_name, "create");
+    }
+
+    #[test]
+    #[should_panic(expected = "non-placeholder editor")]
+    fn creation_slot_commit_rejects_real_block_ids() {
+        slot_vm("block:real-1").commit_creation_slot("hello");
+    }
+
+    /// A structural op on the virtual slot id is a frontend routing bug — the
+    /// slot has no real block to split/join/indent. Fail loud, not
+    /// "split_block failed: Block not found" downstream.
+    #[test]
+    #[should_panic(expected = "creation-slot id")]
+    fn structural_action_panics_on_creation_slot_id() {
+        structural_block_action(EditorKey::Enter, "block:__virtual:page-1", 0);
+    }
+
+    /// BugFunnel 2026-07-13 defect (a) — spurious identical-content blur commit
+    /// after refocus. When `converge_input` absolutely re-seeds the visible
+    /// buffer from the STORED (stripped) content it re-baselines change
+    /// tracking via [`EditorViewModel::rebaseline`]; the next blur of that
+    /// unmodified, re-seeded editor must NOT commit. Before the fix the
+    /// baseline still held the raw typed markup (`[[Some Page]]`), so the
+    /// blur diffed the stripped buffer (`Some Page`) as "changed" and fired
+    /// a `set_field("content")` with text identical to storage — which
+    /// nulled live link marks and polluted the undo stack.
+    #[test]
+    fn reseed_rebaseline_suppresses_spurious_blur_commit() {
+        let mut vm = test_controller();
+        // User typed `[[Some Page]]`; the first blur commits it once and
+        // re-baselines the handler to the raw typed markup.
+        assert!(
+            matches!(vm.on_blur("[[Some Page]]"), EditorAction::Execute(_)),
+            "first blur after a genuine edit must commit once"
+        );
+
+        // Refocus: converge_input re-seeds the buffer to the stored STRIPPED
+        // content and re-baselines to it.
+        vm.rebaseline("Some Page");
+
+        // Blur of the re-seeded, unmodified editor: NO commit.
+        assert!(
+            matches!(vm.on_blur("Some Page"), EditorAction::None),
+            "blur of a re-seeded, unmodified editor must NOT commit (spurious identical-content \
+             set_field wipes marks / poisons undo)"
+        );
+    }
+
+    /// The reseed re-baseline must not swallow a GENUINE post-reseed edit:
+    /// typing after a reseed still commits exactly once, and a follow-up blur
+    /// with the same text is idempotent.
+    #[test]
+    fn typed_change_after_reseed_commits_once() {
+        let mut vm = test_controller();
+        vm.rebaseline("Some Page");
+        match vm.on_blur("Some Page edited") {
+            EditorAction::Execute(intent) => {
+                assert_eq!(intent.op_name, "set_field");
+                assert_eq!(
+                    intent.params["value"],
+                    Value::String("Some Page edited".into())
+                );
+            }
+            other => panic!("a real edit after reseed must commit once, got {:?}", other),
+        }
+        assert!(
+            matches!(vm.on_blur("Some Page edited"), EditorAction::None),
+            "second blur with unchanged text must not re-commit"
+        );
+    }
+
+    /// Inc 3: the convergence DECISION lives in the VM. A genuinely newer
+    /// external authority write yields a directive the adapter must apply; the
+    /// non-converging echo outcomes yield `None` and only mutate VM state.
+    #[test]
+    fn data_sync_decision_maps_echo_outcomes_to_directive() {
+        let mut vm = test_controller();
+        vm.advance_local_seq(10);
+
+        // Stale echo (seq < high-water) → dropped, no directive, no advance.
+        assert!(vm.converge_from_data_sync("older", Some(5)).is_none());
+        assert_eq!(vm.last_local_seq(), 10);
+
+        // In-sync echo of the current buffer → no directive, advances high-water.
+        assert!(vm.converge_from_data_sync("original", Some(12)).is_none());
+        assert_eq!(vm.last_local_seq(), 12);
+
+        // Genuinely newer external write → Converge directive for the adapter.
+        let directive = vm
+            .converge_from_data_sync("peer edit", Some(20))
+            .expect("newer external write must yield a converge directive");
+        assert_eq!(directive.target, "peer edit");
+        assert_eq!(directive.seq, 20);
+        assert_eq!(vm.last_local_seq(), 20);
+    }
+
+    /// The SQL-canonicalized echo of the editor's OWN in-flight write (same
+    /// seq, trailing whitespace trimmed) adopts the baseline WITHOUT a
+    /// directive — the typed buffer, trailing space and all, is kept.
+    #[test]
+    fn data_sync_own_canonicalized_echo_adopts_baseline_without_directive() {
+        let mut vm = test_controller();
+        // Type a trailing space through the buffer sink; records a fresh seq.
+        vm.apply_local_edit("foo ").unwrap();
+        let seq = vm.last_local_seq();
+        assert!(
+            vm.converge_from_data_sync("foo", Some(seq)).is_none(),
+            "own canonicalized echo must not converge (would delete the space)"
+        );
+        assert_eq!(vm.buffer(), "foo ", "typed buffer kept as-is");
+    }
+
+    /// Amendment 3: a directive deferred during an IME composition replays
+    /// until a newer local write supersedes it, and a newer deferred
+    /// directive supersedes an older pending one.
+    #[test]
+    fn pending_directive_supersede_and_stale_discard() {
+        let mut vm = test_controller();
+
+        // Newer pending directive supersedes an older one.
+        vm.set_pending_directive(ConvergeDirective {
+            target: "old".into(),
+            seq: 2,
+        });
+        vm.set_pending_directive(ConvergeDirective {
+            target: "new".into(),
+            seq: 7,
+        });
+        let taken = vm
+            .take_pending_directive()
+            .expect("newest directive replays");
+        assert_eq!(taken.target, "new");
+        assert!(vm.take_pending_directive().is_none(), "cleared after take");
+
+        // A directive whose seq is behind a newer local write is discarded.
+        vm.set_pending_directive(ConvergeDirective {
+            target: "stale".into(),
+            seq: 5,
+        });
+        vm.advance_local_seq(9);
+        assert!(
+            vm.take_pending_directive().is_none(),
+            "a directive superseded by a newer local write is discarded on replay"
+        );
     }
 }

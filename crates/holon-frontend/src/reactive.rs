@@ -1,8 +1,9 @@
 //! Reactive middle layer using futures-signals.
 //!
 //! Replaces CdcAccumulator + BlockWatchRegistry + AppState with a single
-//! reactive cache. Each watched block or live query gets a `ReactiveRenderedRows`
-//! that IS the cache, the accumulator, AND the signal source.
+//! reactive cache. Each watched block or live query gets a
+//! `ReactiveRenderedRows` that IS the cache, the accumulator, AND the signal
+//! source.
 //!
 //! ```text
 //! Turso IVM → UiEvent → ReactiveRenderedRows → Signal<ViewModel> → Stream → Frontend
@@ -12,25 +13,52 @@
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::Context;
+use anyhow::Result;
+use fluxdi::Injector;
+use fluxdi::Provider;
+use fluxdi::Shared;
 use futures_signals::map_ref;
-use futures_signals::signal::{Mutable, ReadOnlyMutable, Signal, SignalExt};
+use futures_signals::signal::Mutable;
+use futures_signals::signal::ReadOnlyMutable;
+use futures_signals::signal::Signal;
+use futures_signals::signal::SignalExt;
 use futures_signals::signal_map::MutableBTreeMap;
-use futures_signals::signal_vec::{SignalVec, SignalVecExt};
-
+use futures_signals::signal_vec::SignalVec;
+use futures_signals::signal_vec::SignalVecExt;
+use holon_api::EntityUri;
+use holon_api::NavigationOp;
+use holon_api::QueryLanguage;
+use holon_api::ReactiveRowProvider;
+use holon_api::ptr_identity;
 use holon_api::render_types::RenderExpr;
 use holon_api::streaming::UiEvent;
-use holon_api::widget_spec::{DataRow, EnrichedRow};
-use holon_api::{ptr_identity, EntityUri, NavigationOp, QueryLanguage, ReactiveRowProvider};
+use holon_api::widget_spec::DataRow;
+use holon_api::widget_spec::EnrichedRow;
 
+use crate::FrontendSession;
+use crate::WidgetState;
 use crate::reactive_view_model::ReactiveViewModel;
 use crate::render_context::RenderContext;
 use crate::render_interpreter::RenderInterpreter;
 use crate::view_model::ViewModel;
-use crate::{FrontendSession, WidgetState};
-use fluxdi::{Injector, Provider, Shared};
+
+/// Shared signature for `structural_signal`/`reactive_signal` interpret
+/// callbacks.
+type InterpretFn = Arc<dyn Fn(&RenderExpr, &[Arc<DataRow>]) -> ReactiveViewModel + Send + Sync>;
+
+/// Callback invoked when a dispatched operation fails, with the error message.
+type OpFailureSink = Arc<dyn Fn(String) + Send + Sync>;
+
+/// Cloned `Mutable` handles for the focus signal + pending caret seed.
+type FocusHandles = (
+    Mutable<Option<EntityUri>>,
+    Mutable<Option<(EntityUri, usize)>>,
+);
 
 // ── BuilderServices trait ───────────────────────────────────────────────
 
@@ -48,9 +76,9 @@ use fluxdi::{Injector, Provider, Shared};
 /// (see `test_environment.rs`), so PBT fidelity is intact. The
 /// stub-returning defaults exist only for the two genuinely
 /// non-interactive impls: holon-app's `HeadlessBuilderServices` (the MCP
-/// `describe_ui` path) and `StubBuilderServices` (gpui layout/gallery tests). "headless"
-/// in the per-method docs is a misnomer for "these two stub impls" — it
-/// does not mean the windowless PBT harness.
+/// `describe_ui` path) and `StubBuilderServices` (gpui layout/gallery tests).
+/// "headless" in the per-method docs is a misnomer for "these two stub impls" —
+/// it does not mean the windowless PBT harness.
 pub trait BuilderServices: Send + Sync {
     /// Interpret `expr` against `ctx` using this services' shadow interpreter.
     ///
@@ -63,23 +91,28 @@ pub trait BuilderServices: Send + Sync {
     /// Return an owned handle to this services instance.
     ///
     /// Needed by widgets that capture services for deferred interpretation
-    /// (lazy slots, suspendable subscriptions). Implementors that participate
-    /// in lazy-materialisation paths override this; the default panics so
-    /// non-participating stubs (test, headless) fail loud if accidentally
-    /// driven through such a path.
-    fn clone_arc(&self) -> Arc<dyn BuilderServices> {
-        unimplemented!(
-            "clone_arc not implemented for this BuilderServices impl; \
-             only services that drive lazy widgets (expand_toggle, tabs, \
-             view_mode_switcher) need to override this"
-        )
-    }
+    /// (lazy slots, suspendable subscriptions): `expand_toggle`, tabs,
+    /// `view_mode_switcher`.
+    ///
+    /// REQUIRED on purpose — it used to carry a panicking default, and every
+    /// impl that never thought about lazy widgets inherited that panic without
+    /// stating it. An impl that genuinely cannot hand out a handle (one whose
+    /// per-instance state a copy would silently drop) says so in its own body,
+    /// naming itself and the reason.
+    fn clone_arc(&self) -> Arc<dyn BuilderServices>;
 
-    /// Get the current (RenderExpr, Vec<Arc<DataRow>>) for a block, ensuring a watcher is running.
+    /// Get the current (RenderExpr, Vec<Arc<DataRow>>) for a block, ensuring a
+    /// watcher is running.
     fn get_block_data(&self, id: &EntityUri) -> (RenderExpr, Vec<Arc<DataRow>>);
 
-    /// Resolve the entity profile for a data row. Returns `None` when no entity type
-    /// could be inferred.
+    /// The live authority on whether a scheme-shaped link target names a
+    /// registered entity. Deliberately has NO default: a built-ins-only default
+    /// would silently make every impl report unregistered schemes as broken
+    /// forever, which is exactly the bug live classification removes.
+    fn link_classifier(&self) -> &holon_api::link_parser::LinkTargetClassifier;
+
+    /// Resolve the entity profile for a data row. Returns `None` when no entity
+    /// type could be inferred.
     fn resolve_profile(&self, row: &DataRow) -> Option<holon_api::RenderProfile>;
 
     /// Mutable holding the current profile registry snapshot.
@@ -96,12 +129,25 @@ pub trait BuilderServices: Send + Sync {
         Mutable::new(Arc::new(holon_api::entity_profile::ProfileCache::empty()))
     }
 
-    /// Get the virtual child config for an entity type, if declared in its profile.
+    /// Get the virtual child config for an entity type, if declared in its
+    /// profile.
     fn virtual_child_config(
         &self,
         _: &str,
     ) -> Option<holon_api::entity_profile::VirtualChildConfig> {
         None
+    }
+
+    /// Advice rows to weave as read-only children under `anchor` (ADR 0022),
+    /// already synthesized (rank-ordered `DataRow`s, `parent_id = anchor`,
+    /// occurrence-keyed columns). Empty when no active rule matches / not yet
+    /// computed. A SYNCHRONOUS pure read of the pre-populated session sidecar —
+    /// mirrors [`Self::virtual_child_config`]; every
+    /// stub/headless-without-advice service keeps the default (empty), so
+    /// snapshots stay byte-identical.
+    // ALLOW(unused_param): trait default; overriding impls bind `anchor`
+    fn advice_children(&self, _: &EntityUri) -> Vec<Arc<DataRow>> {
+        Vec::new()
     }
 
     /// Entity-level operations (keyed by id scheme, e.g. `"block"`) — the same
@@ -123,8 +169,29 @@ pub trait BuilderServices: Send + Sync {
         ctx: Option<crate::QueryContext>,
     ) -> Result<holon_api::EnrichedChangeStream>;
 
+    /// The one-shot query-execution capability, when a Turso query engine is
+    /// wired. `None` for a no-Turso (Loro-only) session. The advice weaver
+    /// reaches it via this accessor to run its canonical read as a single
+    /// [`holon_api::QueryEngine::execute_query`] — NEVER a watch (see
+    /// `crate::advice_weaver`). Default `None` (stub/headless services).
+    fn query_engine(&self) -> Option<Arc<dyn holon_api::QueryEngine>> {
+        None
+    }
+
     /// Look up widget state by block ID.
     fn widget_state(&self, id: &str) -> WidgetState;
+
+    /// View-local expansion seed for an `expand_toggle` whose `target_id` is
+    /// `target_id`: `Some(expanded)` when the user has driven this toggle,
+    /// `None` (default) to keep the collapsed-until-clicked default. The
+    /// engine-backed impl records the read for fail-loud driver checks. This is
+    /// the only mechanism that survives a fresh `snapshot()` for profile-driven
+    /// embedded pages (no `collapsed` field). Default `None` keeps every
+    /// non-engine `BuilderServices` behaviour-identical.
+    fn block_expanded_view(&self, target_id: &str) -> Option<bool> {
+        let _ = target_id;
+        None
+    }
 
     /// Look up the *explicitly stored* widget state, or `None` when the user
     /// never toggled it. The default treats every widget as explicit (i.e.
@@ -138,10 +205,10 @@ pub trait BuilderServices: Send + Sync {
     /// Effective open state for a drawer in the given mode.
     ///
     /// An explicit user setting always wins. With no stored state, the default
-    /// is mode-dependent: `Shrink` drawers (desktop sidebars that reserve width)
-    /// start open, while `Overlay` drawers (narrow/phone layouts that float over
-    /// the main panel) start closed — an open-by-default overlay would obscure
-    /// the content on first paint.
+    /// is mode-dependent: `Shrink` drawers (desktop sidebars that reserve
+    /// width) start open, while `Overlay` drawers (narrow/phone layouts
+    /// that float over the main panel) start closed — an open-by-default
+    /// overlay would obscure the content on first paint.
     fn drawer_open(&self, id: &str, mode: crate::view_model::DrawerMode) -> bool {
         self.widget_state_explicit(id)
             .map(|s| s.open)
@@ -158,12 +225,32 @@ pub trait BuilderServices: Send + Sync {
         unimplemented!("BuilderServices::set_widget_open");
     }
 
+    /// Set a widget's stored width. `persist == false` is an in-memory-only
+    /// update for live drag-resize; `persist == true` writes through to disk on
+    /// release. Default impl panics — every real `BuilderServices` overrides;
+    /// the stub providers override it as a no-op.
+    fn set_widget_width(&self, id: &str, width: f32, persist: bool) {
+        let _ = (id, width, persist);
+        unimplemented!("BuilderServices::set_widget_width");
+    }
+
     /// Fire-and-forget operation dispatch.
     ///
     /// Spawns the operation on the runtime and logs errors. This replaces the
     /// pattern of downcasting to `ReactiveEngine` just to get `session()` +
     /// `runtime_handle()` and calling `dispatch_operation()` manually.
     fn dispatch_intent(&self, intent: crate::operations::OperationIntent);
+
+    /// Persist a single preference synchronously, returning `Err` on a write
+    /// failure so the caller (e.g. a GPUI preference field) can surface a
+    /// visible degraded-mode toast instead of the process aborting. Preference
+    /// writes run inline (blocking file IO) rather than through the async
+    /// `dispatch_intent` op path. Default no-ops — stub/headless services do
+    /// not persist config.
+    fn set_preference(&self, key: &str, value: holon_api::Value) -> Result<()> {
+        let _ = (key, value);
+        Ok(())
+    }
 
     /// Synchronous operation dispatch — awaits completion and returns the
     /// operation's result.
@@ -183,6 +270,48 @@ pub trait BuilderServices: Send + Sync {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
         self.dispatch_intent(intent);
         Box::pin(std::future::ready(Ok(())))
+    }
+
+    /// Like [`Self::dispatch_intent`] but returns a `'static` future resolving
+    /// to the op's result, so a caller (e.g. the GPUI editor) can await it and
+    /// surface a BACKEND failure — template-not-found, missing bindings — as a
+    /// visible toast instead of only a log line.
+    ///
+    /// The `Ok` arm carries [`holon_core::Delivery`] rather than `()`: an
+    /// external connector can succeed while telling us it cannot prove the
+    /// effect landed, and a caller that collapses that into `Ok(())` reports a
+    /// delivery that may never have happened. Default fire-and-forget +
+    /// `Proven` (stub/headless has no backend result to await).
+    fn dispatch_intent_awaitable(
+        &self,
+        intent: crate::operations::OperationIntent,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<holon_core::Delivery>> + Send + 'static>,
+    > {
+        self.dispatch_intent(intent);
+        Box::pin(std::future::ready(Ok(holon_core::Delivery::Proven)))
+    }
+
+    /// Follow a click on a *dangling* wiki-link — a `[[Name]]` mark whose
+    /// target does not yet resolve to a block. Creates the page chain for
+    /// `target` (via the `create_page_from_link` op), then navigates `region`
+    /// to the freshly-created leaf page, so the click feels identical to
+    /// clicking an already-resolved link (which dispatches `navigation.focus`).
+    ///
+    /// The leaf page id is a fresh UUID known only from the create op's
+    /// response, so the create→navigate step must chain in-process — it cannot
+    /// be expressed as two independent fire-and-forget intents. This default
+    /// impl fires only the create (stub/headless services have no navigable
+    /// `main` region to focus); `ReactiveEngine` overrides it to also navigate.
+    fn follow_dangling_link(&self, target: String, region: String) {
+        let _ = region;
+        self.dispatch_intent(crate::operations::OperationIntent::new(
+            holon_api::EntityName::new("block"),
+            "create_page_from_link".into(),
+            [("target".to_string(), holon_api::Value::String(target))]
+                .into_iter()
+                .collect(),
+        ));
     }
 
     /// Present an operation at the op_button tap site.
@@ -226,7 +355,8 @@ pub trait BuilderServices: Send + Sync {
     }
 
     /// Snapshot of the current keybinding registry: operation_name → key chord.
-    /// Used by RenderContext::with_operations() to join keybindings into operations.
+    /// Used by RenderContext::with_operations() to join keybindings into
+    /// operations.
     fn key_bindings_snapshot(&self) -> std::collections::BTreeMap<String, holon_api::KeyChord> {
         std::collections::BTreeMap::new()
     }
@@ -246,10 +376,11 @@ pub trait BuilderServices: Send + Sync {
     /// `ReactiveEngine` returns `Some` — so the E2E PBTs (which use the real
     /// engine) have full focus tracking. The outer `Option` is NOT
     /// vestigial: it returns `None` for the two non-interactive stub impls
-    /// (holon-app's `HeadlessBuilderServices` for MCP, `StubBuilderServices` for gpui
-    /// gallery tests), where there is no UI focus to track. The three
-    /// callers (`focus_chain`, `chain_ops`, `reactive_view`) deliberately
-    /// degrade to empty/suspended on `None` rather than fabricate a focus.
+    /// (holon-app's `HeadlessBuilderServices` for MCP, `StubBuilderServices`
+    /// for gpui gallery tests), where there is no UI focus to track. The
+    /// three callers (`focus_chain`, `chain_ops`, `reactive_view`)
+    /// deliberately degrade to empty/suspended on `None` rather than
+    /// fabricate a focus.
     fn focused_block_mutable(&self) -> Option<Mutable<Option<EntityUri>>> {
         None
     }
@@ -283,6 +414,17 @@ pub trait BuilderServices: Send + Sync {
         None
     }
 
+    /// Consume (clear) the caret seed armed for `block`, once the mounting
+    /// editor has applied it. The seed is a one-shot op-follow-up placement
+    /// (split → 0, join → boundary, nav → offset); leaving it armed lets a
+    /// LATER user click on the same block re-apply the stale offset, yanking
+    /// the caret away from where the click landed (caret-0 → prepend
+    /// corruption after split+join, BugFunnel 2026-07-11 row 80). Consuming on
+    /// application makes it strictly single-use: a click always derives the
+    /// caret from the current buffer. No-op when the armed seed targets a
+    /// different block. Headless/stub services have no seed to consume.
+    fn consume_caret_seed(&self, _: &EntityUri) {}
+
     /// Get a [`Cell<String>`] handle for collaborative editing of a block
     /// field. Resolves through the `BlockCellRegistry` (Loro-backed when
     /// LoroModule is loaded). Returns `Err` for headless/stub services
@@ -297,13 +439,15 @@ pub trait BuilderServices: Send + Sync {
     /// Fully-resolved static snapshot of a block's UI tree.
     ///
     /// Interprets the block's render expression against its current data rows,
-    /// then recursively resolves every nested `LiveBlock` placeholder by calling
-    /// itself for each embedded block. Returns a `ViewModel` suitable for
-    /// serialization (MCP `describe_ui`, PBT assertions, TUI rendering).
+    /// then recursively resolves every nested `LiveBlock` placeholder by
+    /// calling itself for each embedded block. Returns a `ViewModel`
+    /// suitable for serialization (MCP `describe_ui`, PBT assertions, TUI
+    /// rendering).
     ///
-    /// Default implementation composes `get_block_data` + `interpret_with_source`
+    /// Default implementation composes `get_block_data` +
+    /// `interpret_with_source`
     /// + `snapshot_resolved`. Implementors with an optimized watcher path (e.g.
-    /// `ReactiveEngine::ensure_watching`) can override.
+    ///   `ReactiveEngine::ensure_watching`) can override.
     fn snapshot_resolved(&self, block_id: &EntityUri) -> crate::view_model::ViewModel {
         let (expr, rows) = self.get_block_data(block_id);
         let ctx = RenderContext {
@@ -317,7 +461,8 @@ pub trait BuilderServices: Send + Sync {
 
     /// Wait until the first Structure event has been received for a block.
     /// Returns immediately if the block's render expression is already loaded.
-    /// Default: returns a ready future (for headless/stub impls that don't stream).
+    /// Default: returns a ready future (for headless/stub impls that don't
+    /// stream).
     fn await_ready(
         &self,
         _: &EntityUri,
@@ -345,8 +490,8 @@ pub trait BuilderServices: Send + Sync {
         panic!("watch_live not supported by this BuilderServices implementation")
     }
 
-    /// Stop watching a block and release its reactive state (watchers, MutableVec items).
-    /// No-op by default. Implemented by ReactiveEngine.
+    /// Stop watching a block and release its reactive state (watchers,
+    /// MutableVec items). No-op by default. Implemented by ReactiveEngine.
     fn unwatch(&self, _: &EntityUri) {}
 
     /// Watch a live query with per-row collection reactivity.
@@ -386,6 +531,23 @@ pub trait BuilderServices: Send + Sync {
         Some(self.runtime_handle())
     }
 
+    /// Enumerate the vault's templates (blocks carrying the `template`
+    /// property) for the slash-command picker. Default empty — a stub/headless
+    /// service without a block projection offers no templates. The engine impl
+    /// reads the block snapshot; the result feeds `CommandProvider`'s
+    /// per-template entries.
+    fn list_templates(&self) -> Vec<crate::template_placement::TemplateChoice> {
+        Vec::new()
+    }
+
+    /// Resolve a single block's fields (content, parent) by id, out of the
+    /// block projection — the picker's placement decision needs the REAL block,
+    /// not the editor's id-only `context_params`. Default `None` (stub/headless
+    /// service without a projection). The engine impl reads the snapshot.
+    fn resolve_block(&self, _: &str) -> Option<holon_api::block::Block> {
+        None
+    }
+
     /// Search entities matching `filter` for the `[[` link-autocomplete
     /// popup. Minimal async capability that replaces the
     /// `Arc<FrontendSession>` plumb line through the editor. The search SQL
@@ -401,6 +563,199 @@ pub trait BuilderServices: Send + Sync {
                 + 'static,
         >,
     >;
+}
+
+// ── generation-guard drop ledger ─────────────────────────────────────────
+
+/// Process-global ledger of CDC events discarded by a generation guard.
+///
+/// A discarded event is a permanently lost delta: the delta-driven frontend
+/// mirror has no other way to learn about it. This ledger makes the loss
+/// observable so a test or a debugging session can correlate a stale-row
+/// violation with the exact events that were dropped.
+pub mod generation_drops {
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::Ordering;
+
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    static RECORDS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    const MAX_RECORDS: usize = 64;
+
+    pub fn record(site: &str, label: &str, event_gen: u64, current_gen: u64, detail: String) {
+        COUNT.fetch_add(1, Ordering::Relaxed);
+        let line = format!(
+            "{site} label={label} event_gen={event_gen} current_gen={current_gen} {detail}"
+        );
+        tracing::warn!("[gen-drop] {line}");
+        let mut records = RECORDS.lock().unwrap();
+        if records.len() < MAX_RECORDS {
+            records.push(line);
+        }
+    }
+
+    pub fn count() -> u64 {
+        COUNT.load(Ordering::Relaxed)
+    }
+
+    /// Human-readable report for embedding in a failure message.
+    pub fn report() -> String {
+        let records = RECORDS.lock().unwrap();
+        let n = COUNT.load(Ordering::Relaxed);
+        if n == 0 {
+            return "[gen-drop] no generation-guard drops recorded".to_string();
+        }
+        format!(
+            "[gen-drop] {n} event(s) discarded by a generation guard (first {} shown):\n  {}",
+            records.len(),
+            records.join("\n  ")
+        )
+    }
+
+    pub fn reset() {
+        COUNT.store(0, Ordering::Relaxed);
+        RECORDS.lock().unwrap().clear();
+    }
+}
+
+/// Divergences between a tree driver's `row_map` (the rows it was told to
+/// render) and the `MutableTree` it renders them into.
+///
+/// The two sets are maintained under one lock per `VecDiff`, so they must be
+/// equal at every diff boundary. A divergence means a row the panel was given
+/// renders no node — the dropped-row bug — and recording it AT the diff names
+/// the culprit diff, which a later snapshot no longer can.
+pub mod tree_desync {
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::Ordering;
+
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    static RECORDS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    const MAX_RECORDS: usize = 32;
+
+    /// Whether the per-diff consistency probe runs. It walks the whole tree on
+    /// every `VecDiff`, so a release build pays nothing unless asked; debug
+    /// builds (tests, dev) always probe.
+    pub fn enabled() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| {
+            cfg!(debug_assertions) || std::env::var_os("HOLON_PROBE_TREE_DESYNC").is_some()
+        })
+    }
+
+    pub fn record(
+        diff: &str,
+        upstream_name: &str,
+        downstream_name: &str,
+        upstream: &std::collections::HashSet<crate::EntityUri>,
+        downstream: &std::collections::HashSet<crate::EntityUri>,
+    ) {
+        COUNT.fetch_add(1, Ordering::Relaxed);
+        let fmt = |s: &std::collections::HashSet<crate::EntityUri>| {
+            let mut v: Vec<String> = s.iter().map(|u| u.as_str().to_string()).collect();
+            v.sort();
+            v
+        };
+        let dropped: std::collections::HashSet<crate::EntityUri> =
+            upstream.difference(downstream).cloned().collect();
+        let extra: std::collections::HashSet<crate::EntityUri> =
+            downstream.difference(upstream).cloned().collect();
+        let line = format!(
+            "after {diff}: in {upstream_name} but not {downstream_name} {:?}; in \
+             {downstream_name} but not {upstream_name} {:?}",
+            fmt(&dropped),
+            fmt(&extra)
+        );
+        tracing::error!("[tree-desync] {line}");
+        let mut records = RECORDS.lock().unwrap();
+        if records.len() < MAX_RECORDS {
+            records.push(line);
+        }
+    }
+
+    /// Number of events this ledger has recorded since the last reset.
+    pub fn count() -> u64 {
+        COUNT.load(Ordering::Relaxed)
+    }
+
+    /// Human-readable report for embedding in a failure message.
+    pub fn report() -> String {
+        let records = RECORDS.lock().unwrap();
+        let n = COUNT.load(Ordering::Relaxed);
+        if n == 0 {
+            return "[tree-desync] no tree/row_map divergence recorded".to_string();
+        }
+        format!(
+            "[tree-desync] {n} divergence(s) between a tree driver's rows and its rendered nodes \
+             (first {} shown):\n  {}",
+            records.len(),
+            records.join("\n  ")
+        )
+    }
+
+    pub fn reset() {
+        COUNT.store(0, Ordering::Relaxed);
+        RECORDS.lock().unwrap().clear();
+    }
+}
+
+/// Every row that LEAVES a `ReactiveRowSet`, with the reason.
+///
+/// A row that vanishes from a panel either never arrived or was evicted; the
+/// two have completely different culprits (upstream watch vs. the row set's
+/// own generation/retain bookkeeping) and no later snapshot can tell them
+/// apart. Recording every departure at its source does.
+pub mod row_lifecycle {
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::Ordering;
+
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    static RECORDS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    const MAX_RECORDS: usize = 2000;
+
+    pub fn record(reason: &str, label: &str, id: &crate::EntityUri) {
+        note(format!("{reason} label={label} id={id}"));
+    }
+
+    /// Append a free-form lifecycle line (generation snapshots, evictions).
+    pub fn note(text: String) {
+        let n = COUNT.fetch_add(1, Ordering::Relaxed);
+        let line = format!("#{n} {text}");
+        tracing::debug!("[row-evict] {line}");
+        // Keep the MOST RECENT evictions: a dropped row is diagnosed from what
+        // happened just before the check, and the run's early history is noise.
+        let mut records = RECORDS.lock().unwrap();
+        records.push(line);
+        if records.len() > MAX_RECORDS {
+            records.remove(0);
+        }
+    }
+
+    /// Number of events this ledger has recorded since the last reset.
+    pub fn count() -> u64 {
+        COUNT.load(Ordering::Relaxed)
+    }
+
+    /// Human-readable report for embedding in a failure message.
+    pub fn report() -> String {
+        let records = RECORDS.lock().unwrap();
+        let n = COUNT.load(Ordering::Relaxed);
+        if n == 0 {
+            return "[row-evict] no rows evicted from any reactive row set".to_string();
+        }
+        format!(
+            "[row-evict] {n} row(s) left a reactive row set (last {} shown):\n  {}",
+            records.len(),
+            records.join("\n  ")
+        )
+    }
+
+    pub fn reset() {
+        COUNT.store(0, Ordering::Relaxed);
+        RECORDS.lock().unwrap().clear();
+    }
 }
 
 // ── ReactiveRowSet ──────────────────────────────────────────────────────
@@ -426,23 +781,39 @@ pub trait BuilderServices: Send + Sync {
 ///
 /// Used by `ReactiveRenderedRows` (which adds a RenderExpr for interpretation)
 /// and directly by raw CDC watchers.
-/// TODO: Please check if `generation` is actually needed. The `MutableBTreeMap` should afaik only trigger if the data really changed. Run a small experiment if unsure.
+/// TODO: Please check if `generation` is actually needed. The `MutableBTreeMap`
+/// should afaik only trigger if the data really changed. Run a small experiment
+/// if unsure.
 pub struct ReactiveRowSet {
     data: MutableBTreeMap<EntityUri, Mutable<Arc<DataRow>>>,
     generation: Mutable<u64>,
+    /// Which watched block this row set mirrors. Diagnostic only — it makes a
+    /// generation-guard drop attributable to a specific panel.
+    label: String,
+}
+
+impl Default for ReactiveRowSet {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ReactiveRowSet {
     pub fn new() -> Self {
+        Self::labeled("<unlabeled>".to_string())
+    }
+
+    pub fn labeled(label: String) -> Self {
         Self {
             data: MutableBTreeMap::new(),
             generation: Mutable::new(0),
+            label,
         }
     }
 
     /// Set the generation (invalidation token). Stale changes are discarded.
-    pub fn set_generation(&self, gen: u64) {
-        self.generation.set(gen);
+    pub fn set_generation(&self, generation: u64) {
+        self.generation.set(generation);
     }
 
     /// Current generation.
@@ -454,16 +825,59 @@ impl ReactiveRowSet {
     ///
     /// Accepts `Change<EnrichedRow>` — the caller must have gone through
     /// `enrich_row()` / `enrich_stream()` to obtain enriched data.
-    /// This prevents accidentally feeding raw storage data into the reactive pipeline.
+    /// This prevents accidentally feeding raw storage data into the reactive
+    /// pipeline.
     pub fn apply_change(&self, change: holon_api::Change<EnrichedRow>, generation: u64) {
-        if generation != self.generation.get() {
+        if std::env::var_os("HOLON_TRACE_ROW_LIFECYCLE").is_some() {
+            let kind = match &change {
+                holon_api::Change::Created { data, .. } => format!(
+                    "Created {}",
+                    data.get("id")
+                        .and_then(|v| v.as_string())
+                        .unwrap_or("<none>")
+                ),
+                holon_api::Change::Updated { id, .. } => format!("Updated {id}"),
+                holon_api::Change::Deleted { id, .. } => format!("Deleted {id}"),
+                holon_api::Change::FieldsChanged { entity_id, .. } => {
+                    format!("FieldsChanged {entity_id}")
+                }
+            };
+            row_lifecycle::note(format!("CDC {kind} label={}", self.label));
+        }
+        let current = self.generation.get();
+        if generation != current {
+            let detail = match &change {
+                holon_api::Change::Created { data, .. } => format!(
+                    "Created id={}",
+                    data.get("id")
+                        .and_then(|v| v.as_string())
+                        .unwrap_or("<none>")
+                ),
+                holon_api::Change::Updated { id, .. } => format!("Updated id={id}"),
+                holon_api::Change::Deleted { id, .. } => format!("Deleted id={id}"),
+                holon_api::Change::FieldsChanged { entity_id, .. } => {
+                    format!("FieldsChanged id={entity_id}")
+                }
+            };
+            generation_drops::record(
+                "ReactiveRowSet::apply_change",
+                &self.label,
+                generation,
+                current,
+                detail,
+            );
             return;
         }
         match change {
             holon_api::Change::Created { data, .. } => {
                 let row = Arc::new(data.into_inner());
-                let key = holon_api::data_row_entity_uri(&row)
-                    .expect("Created event must have 'id' column");
+                // A Created row is either entity-shaped (real `id`) or
+                // value-shaped (aggregate / rule-trigger result / future table
+                // row — no `id`). Both are legal display cases: an id-less row
+                // is keyed on its deterministic content hash, NOT panicked on
+                // (a `.expect("... 'id' column")` here blanked the whole page
+                // by killing the render worker — dogfood 2026-07-10).
+                let key = holon_api::RowIdentity::of_row(&row).to_store_key();
                 let mut lock = self.data.lock_mut();
                 if let Some(existing) = lock.get(&key) {
                     // Defensive: a Created arriving for a row we already know
@@ -489,9 +903,10 @@ impl ReactiveRowSet {
                 }
             }
             holon_api::Change::Deleted { id, .. } => {
-                self.data
-                    .lock_mut()
-                    .remove(&holon_api::entity_uri_from_id_str(&id));
+                let key = holon_api::entity_uri_from_id_str(&id);
+                if self.data.lock_mut().remove(&key).is_some() {
+                    row_lifecycle::record("CDC Deleted", &self.label, &key);
+                }
             }
             holon_api::Change::FieldsChanged {
                 entity_id, fields, ..
@@ -521,6 +936,7 @@ impl ReactiveRowSet {
         if !stale.is_empty() {
             let mut lock = self.data.lock_mut();
             for key in stale {
+                row_lifecycle::record("generation-snapshot retain_keys", &self.label, &key);
                 lock.remove(&key);
             }
         }
@@ -539,8 +955,8 @@ impl ReactiveRowSet {
     pub fn snapshot_rows(&self) -> Vec<Arc<DataRow>> {
         self.data
             .lock_ref()
-            .iter()
-            .map(|(_, cell)| cell.get_cloned())
+            .values()
+            .map(|cell| cell.get_cloned())
             .collect()
     }
 
@@ -577,11 +993,16 @@ impl ReactiveRowSet {
     /// Per-row `SignalVec` with keys. Each item is `(entity_id, Arc<DataRow>)`.
     ///
     /// Used by `MutableTree` to translate keyed VecDiff into tree operations.
-    /// Unlike `row_signal_vec()`, preserves the entity ID for `RemoveAt` tracking.
-    pub fn keyed_signal_vec(&self) -> impl SignalVec<Item = (EntityUri, Arc<DataRow>)> {
-        self.data
-            .entries_cloned()
-            .map_signal(|(k, cell)| cell.signal_cloned().map(move |v| (k.clone(), v)))
+    /// Unlike `row_signal_vec()`, preserves the entity ID for `RemoveAt`
+    /// tracking.
+    pub fn keyed_signal_vec(&self) -> impl SignalVec<Item = (holon_api::RowKey, Arc<DataRow>)> {
+        // The store is `EntityUri`-keyed; every canonical row carries
+        // `Occurrence::Canonical`. Display-placed occurrences are injected by
+        // `AppendedRowsProvider`, never by the store.
+        self.data.entries_cloned().map_signal(|(k, cell)| {
+            cell.signal_cloned()
+                .map(move |v| ((k.clone(), holon_api::Occurrence::Canonical), v))
+        })
     }
 }
 
@@ -601,7 +1022,7 @@ impl ReactiveRowProvider for ReactiveRowSet {
     }
     fn keyed_rows_signal_vec(
         &self,
-    ) -> Pin<Box<dyn SignalVec<Item = (EntityUri, Arc<DataRow>)> + Send>> {
+    ) -> Pin<Box<dyn SignalVec<Item = (holon_api::RowKey, Arc<DataRow>)> + Send>> {
         Box::pin(self.keyed_signal_vec())
     }
     fn cache_identity(&self) -> u64 {
@@ -617,9 +1038,19 @@ impl ReactiveRowProvider for ReactiveRowSet {
 /// Reactive state for one query's result set + how to render it.
 ///
 /// Composes a `ReactiveRowSet` (data accumulation) with a `RenderExpr`
-/// (how to visualize it). Signals combine both into `Signal<ReactiveViewModel>`.
+/// (how to visualize it). Signals combine both into
+/// `Signal<ReactiveViewModel>`.
 pub struct ReactiveRenderedRows {
     render_expr: Mutable<RenderExpr>,
+    /// Set when the query watcher failed. The failure is ALSO published into
+    /// `render_expr` as an `error(message:)` sentinel so it is visible in the
+    /// UI instead of an eternal spinner.
+    error: Mutable<Option<String>>,
+    /// `Some` exactly while an error sentinel occupies `render_expr`: the
+    /// expression to display once the error clears. A query watcher never
+    /// re-delivers a Structure event, so without this the block would keep
+    /// rendering `error(...)` after its rows arrive.
+    expr_pending_restore: std::sync::Mutex<Option<RenderExpr>>,
     rows: ReactiveRowSet,
     structure_ready: tokio::sync::Notify,
     /// Generation whose data currently populates `rows`. Each re-render
@@ -630,26 +1061,103 @@ pub struct ReactiveRenderedRows {
     /// underlying query (e.g. an org-file swap replacing the layout) leaves
     /// ghost rows from the old query in the set forever.
     data_generation: std::sync::atomic::AtomicU64,
+    /// Second readiness barrier: the first `UiEvent::Data` batch of any
+    /// generation. `data_generation` cannot stand in for it — generation 0 is
+    /// a legal generation, so "still zero" does not mean "nothing arrived".
+    first_data_seen: std::sync::atomic::AtomicBool,
+    data_ready: tokio::sync::Notify,
+    /// Sort-key spec (`col` / `-col`) derived from the watched query's
+    /// `ORDER BY`. Set by [`ReactiveEngine::ensure_query_watching`] before the
+    /// watcher spawns; a block watcher (`watch_ui`) leaves it `None` so
+    /// outline children keep their fractional-index order.
+    ordering_spec: std::sync::RwLock<Option<String>>,
+}
+
+impl Default for ReactiveRenderedRows {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ReactiveRenderedRows {
     pub fn new() -> Self {
+        Self::labeled("<unlabeled>".to_string())
+    }
+
+    pub fn labeled(label: String) -> Self {
         Self {
             render_expr: Mutable::new(loading_expr()),
-            rows: ReactiveRowSet::new(),
+            error: Mutable::new(None),
+            expr_pending_restore: std::sync::Mutex::new(None),
+            rows: ReactiveRowSet::labeled(label),
             structure_ready: tokio::sync::Notify::new(),
             data_generation: std::sync::atomic::AtomicU64::new(0),
+            first_data_seen: std::sync::atomic::AtomicBool::new(false),
+            data_ready: tokio::sync::Notify::new(),
+            ordering_spec: std::sync::RwLock::new(None),
         }
     }
 
+    /// Declare the row order this query's `ORDER BY` asks for. Collections
+    /// rendering these rows adopt it unless the template names its own
+    /// `sortkey:`.
+    pub fn set_ordering_spec(&self, spec: Option<String>) {
+        *self.ordering_spec.write().unwrap() = spec;
+    }
+
     /// Set the render expression directly.
+    ///
+    /// While a failure is disclosed the error sentinel owns `render_expr` for
+    /// the whole degraded window, so a re-subscribe (a second block watching
+    /// the same query) becomes what recovery restores instead.
     pub fn set_render_expr(&self, expr: RenderExpr) {
+        let mut pending = self.expr_pending_restore.lock().unwrap();
+        if pending.is_some() {
+            *pending = Some(expr);
+            return;
+        }
+        drop(pending);
         self.render_expr.set(expr);
     }
 
     /// Get the current render expression.
     pub fn get_render_expr(&self) -> RenderExpr {
         self.render_expr.get_cloned()
+    }
+
+    /// Publish a watcher failure: the message becomes visible state AND
+    /// replaces the loading sentinel, so the block renders the error instead
+    /// of spinning forever.
+    pub fn set_error(&self, msg: impl Into<String>) {
+        let msg = msg.into();
+        let mut pending = self.expr_pending_restore.lock().unwrap();
+        if pending.is_none() {
+            *pending = Some(self.render_expr.get_cloned());
+        }
+        drop(pending);
+        self.render_expr.set(error_expr(&msg));
+        self.error.set(Some(msg));
+        self.structure_ready.notify_waiters();
+    }
+
+    /// Leave the disclosed error state: the watcher that failed has since
+    /// succeeded, so the block renders its real expression again. Only legal
+    /// after a [`Self::set_error`].
+    pub fn clear_error(&self) {
+        let expr = self
+            .expr_pending_restore
+            .lock()
+            .unwrap()
+            .take()
+            .expect("clear_error without a preceding set_error");
+        self.render_expr.set(expr);
+        self.error.set(None);
+        self.structure_ready.notify_waiters();
+    }
+
+    /// The watcher failure message, if this query's watcher failed.
+    pub fn error(&self) -> Option<String> {
+        self.error.get_cloned()
     }
 
     /// True if the first Structure event hasn't arrived yet.
@@ -660,24 +1168,59 @@ impl ReactiveRenderedRows {
         )
     }
 
-    /// Wait until the first Structure event delivers a real render expression.
+    /// True when the render expression reads at least one data column, i.e.
+    /// there is a data stream whose first batch decides what renders.
+    fn is_data_driven(&self) -> bool {
+        !self.render_expr.lock_ref().visible_columns().is_empty()
+    }
+
+    /// Wait until this block can be rendered without fabricating an empty
+    /// result.
+    ///
+    /// Two barriers, not one: the first Structure event delivers the render
+    /// expression, and — when that expression reads any column — the first
+    /// Data batch. A cold probe that stopped at Structure saw a data-driven
+    /// list render zero rows and reported it as genuinely empty, because the
+    /// first batch lands a few hundred microseconds later. The data barrier is
+    /// bounded: `prepend_initial_data` always emits a first batch, empty
+    /// result set included. An expression reading no column has no data stream
+    /// to wait for and returns after the structure barrier.
     pub async fn wait_until_ready(&self) {
-        if !self.is_loading() {
+        // `notified()` only registers a waiter once polled, so enable it
+        // BEFORE the state check — otherwise an event landing in between is
+        // missed and the wait runs to its caller's timeout.
+        {
+            let mut structure = std::pin::pin!(self.structure_ready.notified());
+            structure.as_mut().enable();
+            if self.is_loading() {
+                structure.await;
+            }
+        }
+        if !self.is_data_driven() {
             return;
         }
-        self.structure_ready.notified().await;
+        let mut data = std::pin::pin!(self.data_ready.notified());
+        data.as_mut().enable();
+        if self
+            .first_data_seen
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return;
+        }
+        data.await;
     }
 
     /// Set the generation (invalidation token) on the inner row set.
-    pub fn set_generation(&self, gen: u64) {
-        self.rows.set_generation(gen);
+    pub fn set_generation(&self, generation: u64) {
+        self.rows.set_generation(generation);
     }
 
     /// Apply a UiEvent directly. Single entry point for all CDC events.
     ///
     /// Structure → sets render_expr + generation. Does NOT clear data — the new
-    /// data stream will overwrite when it arrives, avoiding flash of empty content.
-    /// Data → row-level diffs into the row set. Stale generations discarded.
+    /// data stream will overwrite when it arrives, avoiding flash of empty
+    /// content. Data → row-level diffs into the row set. Stale generations
+    /// discarded.
     pub fn apply_event(&self, event: UiEvent) {
         match event {
             UiEvent::Structure {
@@ -692,7 +1235,19 @@ impl ReactiveRenderedRows {
                 self.structure_ready.notify_waiters();
             }
             UiEvent::Data { batch, generation } => {
-                if generation != self.rows.generation() {
+                let current = self.rows.generation();
+                if generation != current {
+                    generation_drops::record(
+                        "ReactiveRenderedRows::apply_event",
+                        &self.rows.label,
+                        generation,
+                        current,
+                        format!(
+                            "relation={} items={}",
+                            batch.metadata.relation_name,
+                            batch.inner.items.len()
+                        ),
+                    );
                     return;
                 }
                 // First batch of a new generation = the full authoritative
@@ -719,21 +1274,34 @@ impl ReactiveRenderedRows {
                     });
                     if is_first_batch_of_generation {
                         if let holon_api::Change::Created { data, .. } = &enriched {
-                            if let Some(key) = holon_api::data_row_entity_uri(data) {
-                                snapshot_keys.push(key);
-                            }
+                            // Retain BOTH entity- and value-shaped rows: the
+                            // snapshot key is the row's `RowIdentity` store key
+                            // (content hash for id-less value rows), so an
+                            // aggregate / rule-trigger row is not dropped by the
+                            // post-snapshot `retain_keys`.
+                            snapshot_keys.push(holon_api::RowIdentity::of_row(data).to_store_key());
                         }
                     }
                     self.rows.apply_change(enriched, generation);
                 }
                 if is_first_batch_of_generation {
+                    row_lifecycle::note(format!(
+                        "generation {generation} snapshot for {}: {} rows {:?}",
+                        self.rows.label,
+                        snapshot_keys.len(),
+                        snapshot_keys.iter().map(|k| k.as_str()).collect::<Vec<_>>()
+                    ));
                     self.rows.retain_keys(&snapshot_keys);
                 }
+                self.first_data_seen
+                    .store(true, std::sync::atomic::Ordering::Release);
+                self.data_ready.notify_waiters();
             }
         }
     }
 
-    /// Apply a single enriched row-level CDC change. Delegates to the inner row set.
+    /// Apply a single enriched row-level CDC change. Delegates to the inner row
+    /// set.
     pub fn apply_change(&self, change: holon_api::Change<EnrichedRow>, generation: u64) {
         self.rows.apply_change(change, generation);
     }
@@ -755,37 +1323,38 @@ impl ReactiveRenderedRows {
     }
 
     /// Per-row keyed `SignalVec`. Delegates to the inner row set.
-    pub fn keyed_signal_vec(&self) -> impl SignalVec<Item = (EntityUri, Arc<DataRow>)> {
+    pub fn keyed_signal_vec(&self) -> impl SignalVec<Item = (holon_api::RowKey, Arc<DataRow>)> {
         self.rows.keyed_signal_vec()
     }
 
-    /// Signal that emits a new `ReactiveViewModel` whenever render_expr or data changes.
+    /// Signal that emits a new `ReactiveViewModel` whenever render_expr or data
+    /// changes.
     ///
-    /// `interpret_fn` transforms `(&RenderExpr, &[Arc<DataRow>]) → ReactiveViewModel`.
+    /// `interpret_fn` transforms `(&RenderExpr, &[Arc<DataRow>]) →
+    /// ReactiveViewModel`.
     ///
-    /// **Note**: This re-interprets the ENTIRE tree on every change (structural OR data).
-    /// For per-row collection updates, use `structural_signal()` + `ReactiveCollection`.
-    pub fn reactive_signal<F: ?Sized>(
-        &self,
-        interpret_fn: Arc<F>,
-    ) -> impl Signal<Item = ReactiveViewModel>
+    /// **Note**: This re-interprets the ENTIRE tree on every change (structural
+    /// OR data). For per-row collection updates, use `structural_signal()`
+    /// + `ReactiveCollection`.
+    pub fn reactive_signal<F>(&self, interpret_fn: Arc<F>) -> impl Signal<Item = ReactiveViewModel>
     where
-        F: Fn(&RenderExpr, &[Arc<DataRow>]) -> ReactiveViewModel + Send + Sync + 'static,
+        F: ?Sized + Fn(&RenderExpr, &[Arc<DataRow>]) -> ReactiveViewModel + Send + Sync + 'static,
     {
         self.reactive_signal_with_ui_gen(interpret_fn, futures_signals::signal::always(0u64))
     }
 
-    /// Like `reactive_signal` but also re-interprets when `ui_gen_signal` fires.
+    /// Like `reactive_signal` but also re-interprets when `ui_gen_signal`
+    /// fires.
     ///
     /// Used by `ReactiveEngine` to include `UiState.ui_generation` in the
     /// signal graph so that focus/view-mode changes trigger re-interpretation.
-    pub fn reactive_signal_with_ui_gen<F: ?Sized>(
+    pub fn reactive_signal_with_ui_gen<F>(
         &self,
         interpret_fn: Arc<F>,
         ui_gen_signal: impl Signal<Item = u64> + Send + 'static,
     ) -> impl Signal<Item = ReactiveViewModel>
     where
-        F: Fn(&RenderExpr, &[Arc<DataRow>]) -> ReactiveViewModel + Send + Sync + 'static,
+        F: ?Sized + Fn(&RenderExpr, &[Arc<DataRow>]) -> ReactiveViewModel + Send + Sync + 'static,
     {
         let expr_signal = self.render_expr.signal_cloned();
         let data_signal = self.rows.data_signal();
@@ -809,36 +1378,38 @@ impl ReactiveRenderedRows {
     ///
     /// The current data snapshot is read at interpretation time, so the initial
     /// tree is correct. Subsequent data changes are handled by the collection.
-    pub fn structural_signal<F: ?Sized>(
+    pub fn structural_signal<F>(
         &self,
         interpret_fn: Arc<F>,
     ) -> impl Signal<Item = ReactiveViewModel>
     where
-        F: Fn(&RenderExpr, &[Arc<DataRow>]) -> ReactiveViewModel + Send + Sync + 'static,
+        F: ?Sized + Fn(&RenderExpr, &[Arc<DataRow>]) -> ReactiveViewModel + Send + Sync + 'static,
     {
         let rows = &self.rows;
         let data = rows.data.clone();
         self.render_expr.signal_cloned().map(move |expr| {
             let rows: Vec<Arc<DataRow>> = data
                 .lock_ref()
-                .iter()
-                .map(|(_, cell)| cell.get_cloned())
+                .values()
+                .map(|cell| cell.get_cloned())
                 .collect();
             interpret_fn(&expr, &rows)
         })
     }
 
-    /// Like `structural_signal` but also re-interprets when `ui_gen_signal` fires.
+    /// Like `structural_signal` but also re-interprets when `ui_gen_signal`
+    /// fires.
     ///
     /// Fires on render_expr change OR ui_state change (focus, view mode).
-    /// Data-only changes do NOT trigger — those are handled by ReactiveView drivers.
-    pub fn structural_signal_with_ui_gen<F: ?Sized>(
+    /// Data-only changes do NOT trigger — those are handled by ReactiveView
+    /// drivers.
+    pub fn structural_signal_with_ui_gen<F>(
         &self,
         interpret_fn: Arc<F>,
         ui_gen_signal: impl Signal<Item = u64> + Send + 'static,
     ) -> impl Signal<Item = ReactiveViewModel>
     where
-        F: Fn(&RenderExpr, &[Arc<DataRow>]) -> ReactiveViewModel + Send + Sync + 'static,
+        F: ?Sized + Fn(&RenderExpr, &[Arc<DataRow>]) -> ReactiveViewModel + Send + Sync + 'static,
     {
         let expr_signal = self.render_expr.signal_cloned();
         let data = self.rows.data.clone();
@@ -849,13 +1420,27 @@ impl ReactiveRenderedRows {
             => {
                 let rows: Vec<Arc<DataRow>> = data
                     .lock_ref()
-                    .iter()
-                    .map(|(_, cell)| cell.get_cloned())
+                    .values()
+                    .map(|cell| cell.get_cloned())
                     .collect();
+                INTERPRETATION_PASSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 interpret_fn(expr, &rows)
             }
         }
     }
+}
+
+/// Re-interpretation passes driven by a ui-state generation bump.
+///
+/// Every navigation bumps the generation, which re-interprets the render tree
+/// of EVERY cached page shell — not just the visible one. Sampling this
+/// separates "growth from re-interpretation garbage" from "growth from the
+/// watch layer" when reading a memory profile.
+static INTERPRETATION_PASSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Diagnostic: total [`INTERPRETATION_PASSES`] so far in this process.
+pub fn interpretation_passes() -> u64 {
+    INTERPRETATION_PASSES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 impl ReactiveRowProvider for ReactiveRenderedRows {
@@ -867,7 +1452,7 @@ impl ReactiveRowProvider for ReactiveRenderedRows {
     }
     fn keyed_rows_signal_vec(
         &self,
-    ) -> Pin<Box<dyn SignalVec<Item = (EntityUri, Arc<DataRow>)> + Send>> {
+    ) -> Pin<Box<dyn SignalVec<Item = (holon_api::RowKey, Arc<DataRow>)> + Send>> {
         Box::pin(self.rows.keyed_signal_vec())
     }
     fn row_mutable(&self, id: &EntityUri) -> Option<ReadOnlyMutable<Arc<DataRow>>> {
@@ -878,6 +1463,9 @@ impl ReactiveRowProvider for ReactiveRenderedRows {
         // the same rows would share identity, which is what the cache
         // wants.
         ptr_identity(&self.rows)
+    }
+    fn ordering_spec(&self) -> Option<String> {
+        self.ordering_spec.read().unwrap().clone()
     }
 }
 
@@ -903,7 +1491,7 @@ impl ReactiveRegistry {
             .lock()
             .unwrap()
             .entry(id.clone())
-            .or_insert_with(|| Arc::new(ReactiveRenderedRows::new()))
+            .or_insert_with(|| Arc::new(ReactiveRenderedRows::labeled(id.as_str().to_string())))
             .clone()
     }
 
@@ -917,9 +1505,52 @@ impl ReactiveRegistry {
 struct WatcherState {
     task: tokio::task::JoinHandle<()>,
     command_tx: tokio::sync::mpsc::Sender<holon_api::WatcherCommand>,
-    /// Number of active consumers (ReactiveShell instances) watching this block.
-    /// When refcount drops to 0, the watcher is eligible for cleanup.
+    /// Number of live [`WatchGuard`]s pinning this watcher. Read-only paths
+    /// ([`ReactiveEngine::ensure_watching`]) never touch this — a watcher
+    /// started by a read alone sits at 0 (warm cache) and is only reclaimed
+    /// once an acquired count drops back to 0.
     refcount: usize,
+}
+
+// ── WatchGuard ───────────────────────────────────────────────────────────
+
+/// RAII pin on a block/query watcher.
+///
+/// Acquired via [`ReactiveEngine::acquire_watch`], or carried inside the
+/// [`LiveBlock`] returned by [`ReactiveEngine::watch_live`] /
+/// [`ReactiveEngine::watch_query_live`]. Dropping the last guard for a key
+/// aborts the watcher task and releases its reactive state. Long-lived
+/// subscribers (shells, views) hold the guard for as long as they consume
+/// the watch; one-shot readers must NOT acquire one — they use the
+/// non-counting [`ReactiveEngine::ensure_watching`] read path instead.
+#[must_use = "dropping the guard releases the watcher; hold it for the lifetime of the subscription"]
+pub struct WatchGuard {
+    key: EntityUri,
+    services: Arc<dyn BuilderServices>,
+}
+
+impl WatchGuard {
+    fn new(key: EntityUri, services: Arc<dyn BuilderServices>) -> Self {
+        Self { key, services }
+    }
+
+    /// The watcher key this guard pins (a block URI, or a synthetic
+    /// `query:<hash>` key for query watchers).
+    pub fn key(&self) -> &EntityUri {
+        &self.key
+    }
+}
+
+impl std::fmt::Debug for WatchGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("WatchGuard").field(&self.key).finish()
+    }
+}
+
+impl Drop for WatchGuard {
+    fn drop(&mut self) {
+        self.services.unwatch(&self.key);
+    }
 }
 
 // ── UiState ──────────────────────────────────────────────────────────────
@@ -949,13 +1580,14 @@ pub struct ViewportInfo {
 }
 
 pub struct UiState {
-    /// Currently focused block (receives `is_focused = true` in predicate context).
+    /// Currently focused block (receives `is_focused = true` in predicate
+    /// context).
     focused_block: Mutable<Option<EntityUri>>,
     /// Monotonically increasing counter, bumped when the viewport changes.
     /// Included in `ReactiveRenderedRows::reactive_signal` so that viewport
-    /// changes trigger re-interpretation of affected blocks (breakpoint updates).
-    /// View mode and expand state are now handled by node-owned `Mutable`s
-    /// (no engine-level caches).
+    /// changes trigger re-interpretation of affected blocks (breakpoint
+    /// updates). View mode and expand state are now handled by node-owned
+    /// `Mutable`s (no engine-level caches).
     viewport_generation: Mutable<u64>,
     /// Root viewport allocation. The platform shell pushes updates here on
     /// resize / keyboard / rotation events; the root `ReactiveView`'s
@@ -970,6 +1602,46 @@ pub struct UiState {
     /// is how the initial caret reaches a backend-driven mount in-process,
     /// replacing the old `editor_cursor` round-trip.
     pending_caret_seed: Mutable<Option<(EntityUri, usize)>>,
+    /// SPIKE (Phase 1b — display-placement de-risk): which *occurrence* of
+    /// `focused_block` holds focus. `None` = the block's canonical occurrence
+    /// (every existing `set_focus` path leaves this `None`, so behaviour is
+    /// unchanged — this is deliberately ADDITIVE). `Some(n)` = a display-placed
+    /// occurrence. This proves the focus authority can carry `(id, occurrence)`
+    /// WITHOUT widening `focused_block`'s type (which would ripple through ~10
+    /// readers + all four frontends — ADR 0010's reserved graduation).
+    focused_occurrence: Mutable<Option<u32>>,
+    /// Monotonic counter bumped ONLY when navigation opens a *different page*
+    /// in the `main` region (`navigation.focus` region=main, or
+    /// `navigation.go_home`). Read by the GPUI frontend to reset the main
+    /// panel's scroll to the top on page change — distinct from
+    /// `focused_block`, which also moves on same-page block clicks (which
+    /// must NOT reset scroll). Not a render signal; polled during render.
+    main_nav_generation: Mutable<u64>,
+    /// View-local expansion state for `expand_toggle` widgets, keyed by the
+    /// widget's `target_id` (bare block id). Purely a VIEW concern (RATIFIED
+    /// 2026-07-16, Option B): never persisted, never written to the document,
+    /// no `collapsed` column involved. The `expand_toggle` shadow builder seeds
+    /// its `expanded` gate from this on (re)build when an entry exists,
+    /// otherwise keeps the collapsed-until-clicked default. This is the ONLY
+    /// mechanism that survives a fresh `snapshot()` for profile-driven embedded
+    /// pages (whose `expand_toggle` is synthesized during recursive resolve and
+    /// carries no `collapsed` field). NB this deliberately reintroduces a small
+    /// engine-level view cache for expand state, which an earlier note above
+    /// ("no engine-level caches") had removed — see the ruling.
+    expanded_view: Mutex<HashMap<String, bool>>,
+    /// Fail-loud companion to [`Self::expanded_view`]: every `target_id` an
+    /// `expand_toggle` builder has read a seed for since the last write. Lets a
+    /// driver detect a view-state write for a target that renders no
+    /// `expand_toggle` (the write would otherwise be silently absorbed).
+    expanded_view_observed: Mutex<std::collections::HashSet<String>>,
+    /// Sink for user-facing op-execution failure messages, installed by the
+    /// frontend shell (GPUI wires it to a `CommandFailed` toast bridge). Absent
+    /// in headless/test paths. Fire-and-forget `dispatch_intent` already
+    /// mutates the visible UI to reflect the user's gesture, so a dropped
+    /// op error reads as success — this is the fail-loud seam that turns it
+    /// into a visible toast. Additive to `error_tracker` +
+    /// `tracing::error!`, never a replacement.
+    op_failure_sink: Mutex<Option<OpFailureSink>>,
 }
 
 impl UiState {
@@ -979,7 +1651,92 @@ impl UiState {
             viewport_generation: Mutable::new(0),
             viewport: Mutable::new(None),
             pending_caret_seed: Mutable::new(None),
+            focused_occurrence: Mutable::new(None),
+            main_nav_generation: Mutable::new(0),
+            expanded_view: Mutex::new(HashMap::new()),
+            expanded_view_observed: Mutex::new(std::collections::HashSet::new()),
+            op_failure_sink: Mutex::new(None),
         }
+    }
+
+    /// Install the op-execution failure sink (frontend shell wiring). Each
+    /// failure message is routed VERBATIM so the caller sees, e.g., the
+    /// fail-closed delete's `delete_subtree` / `delete_keep_children` guidance.
+    pub fn set_op_failure_sink(&self, sink: Arc<dyn Fn(String) + Send + Sync>) {
+        *self.op_failure_sink.lock().unwrap() = Some(sink);
+    }
+
+    /// Cloned handle to the op-failure sink for use inside a spawned dispatch
+    /// task (which can't borrow `&UiState`). `None` when no shell installed
+    /// one.
+    fn op_failure_sink_handle(&self) -> Option<Arc<dyn Fn(String) + Send + Sync>> {
+        self.op_failure_sink.lock().unwrap().clone()
+    }
+
+    /// Seed value for an `expand_toggle` whose `target_id` is `target_id`, or
+    /// `None` when the user has never driven this toggle (builder then keeps
+    /// its collapsed-until-clicked default). Records the read so a driver
+    /// can tell the toggle actually rendered (fail-loud companion to
+    /// [`Self::set_block_expanded_view`]).
+    pub(crate) fn block_expanded_view(&self, target_id: &str) -> Option<bool> {
+        // Normalize the key: the driver strips the `block:` scheme while the
+        // `expand_toggle` builder reads the (schemed) row `id`. Keying on the
+        // bare id makes both sides agree.
+        let key = target_id.strip_prefix("block:").unwrap_or(target_id);
+        self.expanded_view_observed
+            .lock()
+            .unwrap()
+            .insert(key.to_string());
+        self.expanded_view.lock().unwrap().get(key).copied()
+    }
+
+    /// Record view-local expansion intent for `target_id` and bump
+    /// `viewport_generation` so mounted frontends re-render (the same
+    /// invalidation breakpoint/viewport changes use). Clears the observed flag
+    /// so a subsequent re-render can confirm the toggle actually re-rendered.
+    pub(crate) fn set_block_expanded_view(&self, target_id: &str, expanded: bool) {
+        let key = target_id.strip_prefix("block:").unwrap_or(target_id);
+        self.expanded_view
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), expanded);
+        self.expanded_view_observed.lock().unwrap().remove(key);
+        self.viewport_generation
+            .set(self.viewport_generation.get() + 1);
+    }
+
+    /// Whether an `expand_toggle` builder has read a seed for `target_id` since
+    /// the last [`Self::set_block_expanded_view`] — i.e. the target's toggle
+    /// actually (re)rendered.
+    pub(crate) fn expand_toggle_observed(&self, target_id: &str) -> bool {
+        let key = target_id.strip_prefix("block:").unwrap_or(target_id);
+        self.expanded_view_observed.lock().unwrap().contains(key)
+    }
+
+    /// Current main-region navigation generation. Bumped on each page change in
+    /// the `main` region; see [`Self::bump_main_nav`].
+    pub fn main_nav_generation(&self) -> u64 {
+        self.main_nav_generation.get()
+    }
+
+    /// Record that a *page navigation* landed in the `main` region. Bumps
+    /// [`Self::main_nav_generation`] so the frontend resets main-panel scroll.
+    fn bump_main_nav(&self) {
+        self.main_nav_generation
+            .set(self.main_nav_generation.get() + 1);
+    }
+
+    /// SPIKE: set the focused occurrence alongside the focused block. `None`
+    /// restores canonical focus. Additive — no effect on `focused_block`.
+    pub(crate) fn set_focus_occurrence(&self, occ: Option<u32>) {
+        if self.focused_occurrence.get_cloned() != occ {
+            self.focused_occurrence.set(occ);
+        }
+    }
+
+    /// SPIKE: read the currently focused occurrence (`None` = canonical).
+    pub(crate) fn focused_occurrence(&self) -> Option<u32> {
+        self.focused_occurrence.get_cloned()
     }
 
     /// Get a signal that fires when the viewport changes. Include in reactive
@@ -994,10 +1751,10 @@ impl UiState {
     /// Does NOT bump `ui_generation`. Focus is pure UI state that GPUI
     /// handles via `window.focus()` — the old editor's `on_blur` stops its
     /// blink cursor, the new editor's `on_focus` starts it. Bumping
-    /// `ui_generation` would cause live-query shells to replace their entire tree
-    /// (re-creating editors for all 269 rows), producing multiple cursors.
-    /// Mutate the focused-block signal directly. Crate-private: external
-    /// callers (test code, frontend impls) MUST go through the
+    /// `ui_generation` would cause live-query shells to replace their entire
+    /// tree (re-creating editors for all 269 rows), producing multiple
+    /// cursors. Mutate the focused-block signal directly. Crate-private:
+    /// external callers (test code, frontend impls) MUST go through the
     /// `navigation.focus` / `navigation.editor_focus` / `navigation.go_home`
     /// intent so that `maybe_mirror_navigation_focus` keeps the SQL
     /// nav-history table in sync. Test-side direct calls were removed
@@ -1035,13 +1792,17 @@ impl UiState {
     /// Cloned `Mutable` handles for the focus signal + pending caret seed.
     /// Used by the dispatch result-hook, which runs in a spawned task and
     /// can't borrow `&self`. `Mutable` clones share state.
-    fn focus_handles(
-        &self,
-    ) -> (
-        Mutable<Option<EntityUri>>,
-        Mutable<Option<(EntityUri, usize)>>,
-    ) {
+    fn focus_handles(&self) -> FocusHandles {
         (self.focused_block.clone(), self.pending_caret_seed.clone())
+    }
+
+    /// Cloned handles for the focus signal + main-region nav generation.
+    /// Used by [`ReactiveEngine::follow_dangling_link`], whose create→navigate
+    /// chain runs in a spawned task (so it can't borrow `&self`) and mirrors an
+    /// ordinary `navigation.focus` into these two `Mutable`s once the newly
+    /// created page's id is known from the create op's response.
+    fn nav_focus_handles(&self) -> (Mutable<Option<EntityUri>>, Mutable<u64>) {
+        (self.focused_block.clone(), self.main_nav_generation.clone())
     }
 
     /// Read the pending caret seed for `block` without consuming it. Returns
@@ -1053,6 +1814,24 @@ impl UiState {
         match self.pending_caret_seed.get_cloned() {
             Some((ref b, offset)) if b == block => Some(offset),
             _ => None,
+        }
+    }
+
+    /// Consume (clear) the caret seed if it targets `block`. Called by the
+    /// mounting editor the moment it applies the seed, making the seed strictly
+    /// single-use so a later click cannot re-apply the stale op-follow-up
+    /// offset (the caret-0/prepend corruption after split+join, BugFunnel
+    /// 2026-07-11 row 80). A no-op when the armed seed targets a different
+    /// block — that block's mount will consume its own seed. Unlike
+    /// [`set_focus`]'s aging (which only clears on a focus MOVE to a
+    /// different block), this clears even while focus stays put, closing
+    /// the window where a "failed click elsewhere" leaves the seed armed
+    /// for a re-click.
+    pub fn consume_caret_seed(&self, block: &EntityUri) {
+        if let Some((ref seed_block, _)) = self.pending_caret_seed.get_cloned() {
+            if seed_block == block {
+                self.pending_caret_seed.set(None);
+            }
         }
     }
 
@@ -1072,9 +1851,10 @@ impl UiState {
     /// Update the root viewport. Called by the platform shell on window
     /// resize, keyboard show/hide, orientation change, etc.
     ///
-    /// Bumps `viewport_generation` because breakpoint changes alter the selected
-    /// variant and therefore the render expression (structural change).
-    /// `Mutable::set_neq` dedups equal values — no-op updates never fire the signal graph.
+    /// Bumps `viewport_generation` because breakpoint changes alter the
+    /// selected variant and therefore the render expression (structural
+    /// change). `Mutable::set_neq` dedups equal values — no-op updates
+    /// never fire the signal graph.
     pub fn set_viewport(&self, info: ViewportInfo) {
         if self.viewport.get_cloned() == Some(info) {
             return;
@@ -1101,16 +1881,13 @@ impl UiState {
     /// - `is_focused`: true if this block is the focused block
     /// - viewport variables (viewport_width_px, etc.)
     ///
-    /// Note: `view_mode` and `is_expanded` are added by `ReactiveEngine::ui_state()`
-    /// from the engine's keyed caches, not here.
+    /// Note: `view_mode` and `is_expanded` are added by
+    /// `ReactiveEngine::ui_state()` from the engine's keyed caches, not
+    /// here.
     pub fn context_for(&self, block_id: &EntityUri) -> HashMap<String, holon_api::Value> {
         let mut ctx = HashMap::new();
 
-        let is_focused = self
-            .focused_block
-            .get_cloned()
-            .as_ref()
-            .map_or(false, |f| f == block_id);
+        let is_focused = self.focused_block.get_cloned().as_ref() == Some(block_id);
         ctx.insert(
             "is_focused".to_string(),
             holon_api::Value::Boolean(is_focused),
@@ -1160,20 +1937,22 @@ impl UiState {
 ///
 /// Manages per-block `ReactiveRenderedRows` instances. Each block's UiEvent
 /// stream feeds its ReactiveRenderedRows; the signal graph produces ViewModels
-/// on demand. Frontends consume via `watch()` (stream) or `snapshot()` (polling).
-/// TODO: This looks like a god-class heavily violating SRP
+/// on demand. Frontends consume via `watch()` (stream) or `snapshot()`
+/// (polling). TODO: This looks like a god-class heavily violating SRP
 pub struct ReactiveEngine {
-    registry: ReactiveRegistry,
+    registry: Arc<ReactiveRegistry>,
     session: Arc<FrontendSession>,
     pub runtime_handle: tokio::runtime::Handle,
-    interpret_fn: Arc<dyn Fn(&RenderExpr, &[Arc<DataRow>]) -> ReactiveViewModel + Send + Sync>,
-    /// The shared shadow interpreter, built once by `HolonFrontendModule::configure()`
-    /// and injected here via DI. Used by `BuilderServices::interpret`.
+    interpret_fn: InterpretFn,
+    /// The shared shadow interpreter, built once by
+    /// `HolonFrontendModule::configure()` and injected here via DI. Used by
+    /// `BuilderServices::interpret`.
     interpreter: Arc<RenderInterpreter<ReactiveViewModel>>,
-    watchers: Mutex<HashMap<EntityUri, WatcherState>>,
+    watchers: Arc<Mutex<HashMap<EntityUri, WatcherState>>>,
     ui_state: UiState,
     /// Reactive keybinding registry: operation_name → key chord.
-    /// Keybindings are joined into OperationDescriptors during ViewModel construction.
+    /// Keybindings are joined into OperationDescriptors during ViewModel
+    /// construction.
     key_bindings: MutableBTreeMap<String, holon_api::KeyChord>,
     /// Shared Weak-ref cache of `ReactiveRowProvider`s produced by
     /// value functions like `focus_chain()` / `ops_of(uri)`. Reused
@@ -1189,6 +1968,31 @@ pub struct ReactiveEngine {
     /// inside `&self` methods. Populated by the owning frontend right after
     /// the engine is wrapped in an Arc; `clone_arc()` reads it.
     pub services_slot: Arc<std::sync::OnceLock<Arc<dyn BuilderServices>>>,
+
+    /// The session-level advice weave sidecar (ADR 0022): anchor → synthesized
+    /// advice rows, read synchronously and purely by
+    /// [`BuilderServices::advice_children`] during interpretation. Populated by
+    /// [`Self::refresh_advice_sidecar`] (deterministic settle) and by the
+    /// lazily spawned reactive weaver
+    /// ([`crate::advice_weaver::spawn_session_weaver`]), both writing this
+    /// same map. Empty when no active rule matches — the snapshot then
+    /// stays byte-identical to a pre-advice render.
+    advice_sidecar: crate::advice_weaver::AdviceSidecar,
+    /// Guards the one-time lazy spawn of the reactive advice weaver (spawned on
+    /// first `advice_children` call, once a query engine is wired).
+    advice_weaver_started: std::sync::atomic::AtomicBool,
+
+    /// Monotonic count of CDC changes the watch CONSUMER tasks have applied
+    /// into their `ReactiveRenderedRows` (bumped once per `apply_change` in the
+    /// `ensure_query_watching` drain loop). The reactive pipeline is async: a
+    /// write emits CDC (tracked by Turso's `cdc_emitted_watermark`), the watch
+    /// stream delivers it, and only THEN does the consumer task apply it here.
+    /// A settle that waits only for CDC *emission* can therefore read a
+    /// `snapshot()` one delta stale (e.g. a `split_block` origin-content
+    /// truncation not yet applied). Test settles (`converge_signals`) wait for
+    /// this epoch to hold steady — alongside the CDC/Loro/org signals — so the
+    /// consumer is proven drained before invariants read the ViewModel.
+    apply_epoch: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl ReactiveEngine {
@@ -1231,19 +2035,103 @@ impl ReactiveEngine {
             );
         }
 
-        Self {
-            registry: ReactiveRegistry::new(),
+        let engine = Self {
+            registry: Arc::new(ReactiveRegistry::new()),
             session,
             runtime_handle,
             interpret_fn: Arc::new(interpret_fn),
             interpreter,
-            watchers: Mutex::new(HashMap::new()),
+            watchers: Arc::new(Mutex::new(HashMap::new())),
             ui_state: UiState::new(),
             key_bindings,
             provider_cache: Arc::new(crate::provider_cache::ProviderCache::new()),
             block_cell_registry: Mutex::new(None),
             services_slot,
+            advice_sidecar: Arc::new(Mutex::new(HashMap::new())),
+            advice_weaver_started: std::sync::atomic::AtomicBool::new(false),
+            apply_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        };
+        engine.register_memstats();
+        engine
+    }
+
+    /// Publish the frontend-side memory counters to the process sampler.
+    ///
+    /// Reads the live maps rather than mirroring them, so the numbers cannot
+    /// drift from the state they describe — but only through `Weak`, because a
+    /// reader parked in a process-global map must not keep watcher tasks and
+    /// reactive state alive past their engine.
+    fn register_memstats(&self) {
+        let watchers = Arc::downgrade(&self.watchers);
+        let registry = Arc::downgrade(&self.registry);
+        holon_core::memstats::register(
+            "reactive",
+            Arc::new(move || {
+                let (Some(watchers), Some(registry)) = (watchers.upgrade(), registry.upgrade())
+                else {
+                    return Vec::new();
+                };
+                let active_watchers =
+                    watchers.lock().expect("watchers mutex poisoned").len() as u64;
+                let registry_entries = registry
+                    .entries
+                    .lock()
+                    .expect("reactive registry mutex poisoned")
+                    .len() as u64;
+                vec![
+                    ("active_watchers", active_watchers),
+                    ("registry_entries", registry_entries),
+                    ("interpretation_passes", interpretation_passes()),
+                ]
+            }),
+        );
+    }
+
+    /// Monotonic count of CDC changes the watch consumer tasks have applied.
+    /// A settle waits for this to hold steady (alongside CDC emission / Loro /
+    /// org quiescence) to prove the async reactive drain has caught the last
+    /// emitted delta before invariants read `snapshot()`. See the `apply_epoch`
+    /// field docs.
+    pub fn apply_epoch(&self) -> u64 {
+        self.apply_epoch.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Recompute the advice weave sidecar from the current SQL state (one-shot
+    /// canonical read over every anchor the active rule produces). Called by
+    /// the composed settle to converge the weave deterministically before a
+    /// snapshot; also the recompute the reactive weaver runs on each
+    /// trigger. A no-Turso (Loro-only) session has no query engine → the
+    /// sidecar stays empty.
+    pub async fn refresh_advice_sidecar(&self) {
+        match self.session.query_engine() {
+            Some(query_engine) => {
+                crate::advice_weaver::recompute_sidecar(query_engine.as_ref(), &self.advice_sidecar)
+                    .await
+            }
+            None => self.advice_sidecar.lock().unwrap().clear(),
         }
+    }
+
+    /// Lazily start the reactive advice weaver exactly once, as soon as a query
+    /// engine is wired. Idempotent and cheap on the hot path (an
+    /// already-started atomic load). A session that never wires a query
+    /// engine never spawns it.
+    fn ensure_advice_weaver(&self) {
+        use std::sync::atomic::Ordering;
+        if self.advice_weaver_started.load(Ordering::Relaxed) {
+            return;
+        }
+        let Some(query_engine) = self.session.query_engine() else {
+            return;
+        };
+        if self.advice_weaver_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        crate::advice_weaver::spawn_session_weaver(
+            &self.runtime_handle,
+            query_engine,
+            self.advice_sidecar.clone(),
+        );
     }
 
     /// Access the shared `ReactiveRowProvider` cache. Value functions
@@ -1266,9 +2154,9 @@ impl ReactiveEngine {
 
     /// Start watching a block and return a `Signal<ReactiveViewModel>`.
     ///
-    /// The signal re-evaluates when the block's render expression or data changes.
-    /// Poll this directly from a GPUI `cx.spawn` — no intermediate channel needed.
-    /// CDC writes from tokio wake the signal cross-thread.
+    /// The signal re-evaluates when the block's render expression or data
+    /// changes. Poll this directly from a GPUI `cx.spawn` — no intermediate
+    /// channel needed. CDC writes from tokio wake the signal cross-thread.
     pub fn watch_signal(
         &self,
         block_id: &EntityUri,
@@ -1298,8 +2186,9 @@ impl ReactiveEngine {
 
     /// Start watching a block and return a `Stream<Item = ReactiveViewModel>`.
     ///
-    /// Convenience wrapper over `watch_signal()` for consumers that need a Stream
-    /// (non-GPUI frontends, tests). Prefer `watch_signal()` + `for_each` for GPUI.
+    /// Convenience wrapper over `watch_signal()` for consumers that need a
+    /// Stream (non-GPUI frontends, tests). Prefer `watch_signal()` +
+    /// `for_each` for GPUI.
     pub fn watch(
         &self,
         block_id: &EntityUri,
@@ -1348,14 +2237,15 @@ impl ReactiveEngine {
     /// `structural_changes` stream emits only when the render expression
     /// changes — data-only changes update the tree in-place via the MutableVec.
     ///
-    /// `services` must be `Arc<ReactiveEngine>` cast to `Arc<dyn BuilderServices>`.
-    /// (Passed explicitly to avoid self-referential `Arc<Self>` inside the engine.)
+    /// `services` must be `Arc<ReactiveEngine>` cast to `Arc<dyn
+    /// BuilderServices>`. (Passed explicitly to avoid self-referential
+    /// `Arc<Self>` inside the engine.)
     pub fn watch_live(
         &self,
         block_id: &EntityUri,
         services: Arc<dyn BuilderServices>,
     ) -> LiveBlock {
-        let results = self.ensure_watching(block_id);
+        let (results, watch_guard) = self.acquire_watch(block_id, services.clone());
 
         // Interpret the initial tree from current snapshot.
         // If render_expr is Loading (watcher hasn't delivered yet), return a
@@ -1403,6 +2293,7 @@ impl ReactiveEngine {
         LiveBlock {
             tree,
             structural_changes: structural_stream,
+            watch_guard: Some(watch_guard),
         }
     }
 
@@ -1423,7 +2314,7 @@ impl ReactiveEngine {
             // Ordered call-stack alongside VISITED so we can log the full
             // resolution chain on cycle detection.
             static STACK: std::cell::RefCell<Vec<EntityUri>> =
-                std::cell::RefCell::new(Vec::new());
+                const { std::cell::RefCell::new(Vec::new()) };
         }
 
         // Try to enter: fail if already visiting this block_id (cycle detected).
@@ -1495,18 +2386,80 @@ impl ReactiveEngine {
     }
 
     /// Get the ReactiveRenderedRows for a block, ensuring a watcher is running.
-    /// Used by the interpreter's live_block builder and by tests.
+    ///
+    /// **Non-counting read path**: starts the watcher if absent but does NOT
+    /// pin it. The refcount tracks live [`WatchGuard`]s only, so one-shot
+    /// readers (`snapshot_reactive`, `get_block_data`, `await_ready`, MCP /
+    /// PBT / TUI snapshots) can call this arbitrarily often without leaking
+    /// the watcher. A watcher started by a read alone stays warm at
+    /// refcount 0 until a guard cycle reclaims it. Long-lived subscribers
+    /// must pin the watcher via [`Self::acquire_watch`] (or hold the
+    /// [`LiveBlock`] from [`Self::watch_live`], which carries the guard).
     pub fn ensure_watching(&self, block_id: &EntityUri) -> Arc<ReactiveRenderedRows> {
         let results = self.registry.get_or_create(block_id);
-
         let mut watchers = self.watchers.lock().unwrap();
-        if let Some(state) = watchers.get_mut(block_id) {
-            state.refcount += 1;
-            return results;
+        if !watchers.contains_key(block_id) {
+            let state = self.spawn_block_watcher(block_id, results.clone(), 0);
+            watchers.insert(block_id.clone(), state);
         }
+        results
+    }
 
+    /// Counting acquisition: ensure the watcher is running AND pin it with an
+    /// RAII [`WatchGuard`]. Dropping the last guard aborts the watcher task
+    /// and releases the block's reactive state. `services` must resolve
+    /// [`BuilderServices::unwatch`] to this engine — it is what the guard's
+    /// `Drop` calls.
+    pub fn acquire_watch(
+        &self,
+        block_id: &EntityUri,
+        services: Arc<dyn BuilderServices>,
+    ) -> (Arc<ReactiveRenderedRows>, WatchGuard) {
+        let results = self.registry.get_or_create(block_id);
+        let mut watchers = self.watchers.lock().unwrap();
+        match watchers.get_mut(block_id) {
+            Some(state) => state.refcount += 1,
+            None => {
+                let state = self.spawn_block_watcher(block_id, results.clone(), 1);
+                watchers.insert(block_id.clone(), state);
+            }
+        }
+        drop(watchers);
+        (results, WatchGuard::new(block_id.clone(), services))
+    }
+
+    /// Test/diagnostic introspection: the number of live [`WatchGuard`]s
+    /// pinning `block_id`'s watcher (`Some(0)` = read-warmed, unpinned;
+    /// `None` = no watcher running).
+    pub fn watcher_refcount(&self, block_id: &EntityUri) -> Option<usize> {
+        self.watchers
+            .lock()
+            .unwrap()
+            .get(block_id)
+            .map(|s| s.refcount)
+    }
+
+    /// Test/diagnostic introspection: how many watcher tasks are running.
+    pub fn active_watcher_count(&self) -> usize {
+        self.watchers.lock().unwrap().len()
+    }
+
+    /// Test/diagnostic introspection: `ReactiveRenderedRows` entries held by
+    /// the registry. Diverges from [`Self::active_watcher_count`] when reactive
+    /// state outlives its watcher.
+    pub fn watcher_registry_len(&self) -> usize {
+        self.registry.entries.lock().unwrap().len()
+    }
+
+    /// Spawn the CDC watcher task for `block_id`, feeding `reactive`.
+    /// Callers hold the `watchers` lock and insert the returned state.
+    fn spawn_block_watcher(
+        &self,
+        block_id: &EntityUri,
+        reactive: Arc<ReactiveRenderedRows>,
+        refcount: usize,
+    ) -> WatcherState {
         let session = self.session.clone();
-        let reactive = results.clone();
         let bid = block_id.clone();
 
         let (proxy_cmd_tx, mut proxy_cmd_rx) =
@@ -1552,7 +2505,8 @@ impl ReactiveEngine {
                                     let n = batch.inner.items.len();
                                     let dropped = *generation != cur_gen;
                                     tracing::trace!(
-                                        "[mp_event] Data gen={generation} (current={cur_gen}) items={n}{}",
+                                        "[mp_event] Data gen={generation} (current={cur_gen}) \
+                                         items={n}{}",
                                         if dropped { " DROPPED-stale-gen" } else { "" }
                                     );
                                     // Per-change detail. Lets the next debugging session
@@ -1560,19 +2514,20 @@ impl ReactiveEngine {
                                     // `Updated` for the modified block after split_block /
                                     // set_field — see HANDOFF_TUI_RENDER.md "third pass".
                                     for (i, change) in batch.inner.items.iter().enumerate() {
-                                        let snippet = |row: &holon_api::widget_spec::DataRow| -> String {
-                                            row.get("content")
-                                                .and_then(|v| v.as_string())
-                                                .map(|s| {
-                                                    let s = s.replace('\n', "\\n");
-                                                    if s.len() > 40 {
-                                                        format!("{}…", &s[..40])
-                                                    } else {
-                                                        s
-                                                    }
-                                                })
-                                                .unwrap_or_else(|| "<no content>".into())
-                                        };
+                                        let snippet =
+                                            |row: &holon_api::widget_spec::DataRow| -> String {
+                                                row.get("content")
+                                                    .and_then(|v| v.as_string())
+                                                    .map(|s| {
+                                                        let s = s.replace('\n', "\\n");
+                                                        if s.len() > 40 {
+                                                            format!("{}…", &s[..40])
+                                                        } else {
+                                                            s
+                                                        }
+                                                    })
+                                                    .unwrap_or_else(|| "<no content>".into())
+                                            };
                                         match change {
                                             holon_api::Change::Created { data, .. } => {
                                                 let id = data
@@ -1580,13 +2535,15 @@ impl ReactiveEngine {
                                                     .and_then(|v| v.as_string())
                                                     .unwrap_or("<no id>");
                                                 tracing::trace!(
-                                                    "[mp_event]   change[{i}]: Created id={id} content={:?}",
+                                                    "[mp_event]   change[{i}]: Created id={id} \
+                                                     content={:?}",
                                                     snippet(data)
                                                 );
                                             }
                                             holon_api::Change::Updated { id, data, .. } => {
                                                 tracing::trace!(
-                                                    "[mp_event]   change[{i}]: Updated id={id} content={:?}",
+                                                    "[mp_event]   change[{i}]: Updated id={id} \
+                                                     content={:?}",
                                                     snippet(data)
                                                 );
                                             }
@@ -1600,10 +2557,13 @@ impl ReactiveEngine {
                                                 fields,
                                                 ..
                                             } => {
-                                                let names: Vec<&str> =
-                                                    fields.iter().map(|(n, _, _)| n.as_str()).collect();
+                                                let names: Vec<&str> = fields
+                                                    .iter()
+                                                    .map(|(n, _, _)| n.as_str())
+                                                    .collect();
                                                 tracing::trace!(
-                                                    "[mp_event]   change[{i}]: FieldsChanged id={entity_id} fields={:?}",
+                                                    "[mp_event]   change[{i}]: FieldsChanged \
+                                                     id={entity_id} fields={:?}",
                                                     names
                                                 );
                                             }
@@ -1633,7 +2593,9 @@ impl ReactiveEngine {
                                                 .get("id")
                                                 .and_then(|v| v.as_string())
                                                 .map(|s| s.to_string()),
-                                            holon_api::Change::Updated { id, .. } => Some(id.clone()),
+                                            holon_api::Change::Updated { id, .. } => {
+                                                Some(id.clone())
+                                            }
                                             holon_api::Change::Deleted { id, .. } => {
                                                 Some(format!("DEL:{id}"))
                                             }
@@ -1696,16 +2658,11 @@ impl ReactiveEngine {
             }
         });
 
-        watchers.insert(
-            block_id.clone(),
-            WatcherState {
-                task,
-                command_tx: proxy_cmd_tx,
-                refcount: 1,
-            },
-        );
-
-        results
+        WatcherState {
+            task,
+            command_tx: proxy_cmd_tx,
+            refcount,
+        }
     }
 
     /// Watch a live query with per-row collection reactivity.
@@ -1724,6 +2681,9 @@ impl ReactiveEngine {
         services: Arc<dyn BuilderServices>,
     ) -> (EntityUri, LiveBlock) {
         let (key, results) = self.ensure_query_watching(query, lang, render_expr, query_context);
+        // `ensure_query_watching` counted +1 for this call; the guard owns
+        // that count and releases it on drop.
+        let watch_guard = WatchGuard::new(key.clone(), services.clone());
 
         let (expr, rows) = results.snapshot();
         let ctx = RenderContext {
@@ -1754,13 +2714,15 @@ impl ReactiveEngine {
             LiveBlock {
                 tree,
                 structural_changes: structural_stream,
+                watch_guard: Some(watch_guard),
             },
         )
     }
 
     /// Ensure a query watcher is running and return its watcher key plus
-    /// ReactiveRenderedRows. Reuse bumps the watcher refcount — every caller
-    /// owes a matching [`Self::unwatch`] with the returned key.
+    /// ReactiveRenderedRows. Every call counts +1 on the watcher refcount;
+    /// [`Self::watch_query_live`] (the only caller) wraps that count in a
+    /// [`WatchGuard`] whose drop releases it.
     fn ensure_query_watching(
         &self,
         query: String,
@@ -1768,7 +2730,8 @@ impl ReactiveEngine {
         render_expr: RenderExpr,
         query_context: Option<crate::QueryContext>,
     ) -> (EntityUri, Arc<ReactiveRenderedRows>) {
-        // ALLOW(entity_uri_from_raw): synthetic 'query:<hash>' registry cache key (no upstream EntityUri)
+        // ALLOW(entity_uri_from_raw): synthetic 'query:<hash>' registry cache key (no
+        // upstream EntityUri)
         let key = EntityUri::from_raw(&format!(
             "query:{}",
             hash_query(&query, lang, &query_context)
@@ -1782,24 +2745,56 @@ impl ReactiveEngine {
             state.refcount += 1;
             return (key, results);
         }
+        // Derived only when this key gets its watcher, never on a refcount bump:
+        // it costs a full query compile, and `key` hashes (query, lang, context)
+        // so the spec is invariant for the lifetime of the entry. Must precede
+        // the return — the caller builds the collection synchronously after, and
+        // the flat driver latches `sort_key.is_some()` at construction.
+        results.set_ordering_spec(self.query_ordering_spec(&query, lang));
+        // The query prefix classifies a watcher offline (sidebar-shaped vs
+        // main-panel-shaped SQL) when reading a memory profile.
+        tracing::debug!(
+            watcher_key = %key,
+            query_prefix = query.chars().take(120).collect::<String>(),
+            "spawning query watcher"
+        );
         {
             let session = self.session.clone();
             let reactive = results.clone();
+            let apply_epoch = self.apply_epoch.clone();
             let task = self.runtime_handle.spawn(async move {
-                match session
-                    .watch_query(&query, lang, HashMap::new(), query_context)
-                    .await
-                {
-                    Ok(stream) => {
-                        let mut rx = stream.into_inner();
-                        while let Some(batch) = rx.recv().await {
-                            for enriched_change in batch.inner.items {
-                                reactive.apply_change(enriched_change, 1);
+                // A watch target can be missing merely because it has not been
+                // BUILT yet — an MCP integration creating its tables takes
+                // minutes — so a failure is disclosed and then retried forever,
+                // never given up on. `unwatch` aborts this task at either await.
+                let mut backoff = Duration::from_millis(250);
+                loop {
+                    match session
+                        .watch_query(&query, lang, HashMap::new(), query_context.clone())
+                        .await
+                    {
+                        Ok(stream) => {
+                            if reactive.error().is_some() {
+                                reactive.clear_error();
                             }
+                            let mut rx = stream.into_inner();
+                            while let Some(batch) = rx.recv().await {
+                                for enriched_change in batch.inner.items {
+                                    reactive.apply_change(enriched_change, 1);
+                                    // Publish consumer progress so a settle can
+                                    // wait for this async drain to catch the
+                                    // emitted CDC (see `apply_epoch` field docs).
+                                    apply_epoch.fetch_add(1, std::sync::atomic::Ordering::Release);
+                                }
+                            }
+                            return;
                         }
-                    }
-                    Err(e) => {
-                        tracing::warn!("watch_query failed: {e}");
+                        Err(e) => {
+                            tracing::warn!("watch_query failed, retrying in {backoff:?}: {e}");
+                            reactive.set_error(format!("query failed: {e}"));
+                            tokio::time::sleep(backoff).await;
+                            backoff = (backoff * 2).min(Duration::from_secs(5));
+                        }
                     }
                 }
             });
@@ -1818,29 +2813,68 @@ impl ReactiveEngine {
         (key, results)
     }
 
+    /// The row order this query declares, for the collection rendering it to
+    /// adopt. `None` in a no-Turso session (no compiler, hence no clause to
+    /// read) and on a query that names no `ORDER BY`.
+    ///
+    /// A compile failure is disclosed here and reported again — as the actual
+    /// error — by the watcher task, which fails on the same compile moments
+    /// later. Sinking it into a `Result` this method's callers cannot return
+    /// would only duplicate that report.
+    fn query_ordering_spec(&self, query: &str, lang: QueryLanguage) -> Option<String> {
+        let engine = self.session.query_engine()?;
+        match engine.ordering_spec(query, lang) {
+            Ok(spec) => spec,
+            Err(e) => {
+                tracing::error!(
+                    query_prefix = query.chars().take(120).collect::<String>(),
+                    "query does not compile, so its declared row order is unknown; the collection \
+                     renders in its default order: {e}"
+                );
+                None
+            }
+        }
+    }
+
     /// Send a variant switch command to a block's watcher.
     pub async fn set_variant(&self, block_id: &EntityUri, variant: String) -> anyhow::Result<()> {
-        let watchers = self.watchers.lock().unwrap();
-        let state = watchers
-            .get(block_id)
-            .ok_or_else(|| anyhow::anyhow!("No active watcher for {block_id}"))?;
-        state
-            .command_tx
+        let command_tx = {
+            let watchers = self.watchers.lock().unwrap();
+            let state = watchers
+                .get(block_id)
+                .ok_or_else(|| anyhow::anyhow!("No active watcher for {block_id}"))?;
+            state.command_tx.clone()
+        };
+        command_tx
             .send(holon_api::WatcherCommand::SetVariant(variant))
             .await
             .map_err(|_| anyhow::anyhow!("Watcher channel closed"))
     }
 
-    /// Decrement the refcount for a block's watcher. When the last consumer
-    /// drops, the watcher task is aborted and reactive state is released.
+    /// Release one [`WatchGuard`]'s pin on a block's watcher. When the last
+    /// guard drops, the watcher task is aborted and reactive state is
+    /// released. Called by `WatchGuard::drop` — do not call manually; pair
+    /// every count with a guard from [`Self::acquire_watch`] instead.
     pub fn unwatch(&self, block_id: &EntityUri) {
         let mut watchers = self.watchers.lock().unwrap();
         let should_remove = match watchers.get_mut(block_id) {
             Some(state) => {
+                debug_assert!(
+                    state.refcount > 0,
+                    "unwatch({block_id}) without a matching acquire_watch — guard bookkeeping bug"
+                );
                 state.refcount = state.refcount.saturating_sub(1);
                 state.refcount == 0
             }
-            None => false,
+            None => {
+                // A guard outliving its (already reclaimed) watcher is a
+                // bookkeeping bug — surface it, don't silently ignore.
+                tracing::error!(
+                    %block_id,
+                    "unwatch for a block with no active watcher (guard/acquire mismatch)"
+                );
+                false
+            }
         };
         if should_remove {
             if let Some(state) = watchers.remove(block_id) {
@@ -1855,11 +2889,26 @@ impl ReactiveEngine {
 
 // ── BuilderServices impl ────────────────────────────────────────────────
 
-/// Default render expression for blocks whose watcher hasn't delivered data yet.
+/// Default render expression for blocks whose watcher hasn't delivered data
+/// yet.
 pub fn loading_expr() -> RenderExpr {
     RenderExpr::FunctionCall {
         name: "loading".to_string(),
         args: vec![],
+    }
+}
+
+/// Render expression for a block whose query watcher failed.
+pub fn error_expr(message: &str) -> RenderExpr {
+    use holon_api::render_types::Arg;
+    RenderExpr::FunctionCall {
+        name: "error".to_string(),
+        args: vec![Arg {
+            name: Some("message".to_string()),
+            value: RenderExpr::Literal {
+                value: holon_api::Value::String(message.to_string()),
+            },
+        }],
     }
 }
 
@@ -1880,7 +2929,8 @@ pub fn table_expr() -> RenderExpr {
 }
 
 impl ReactiveEngine {
-    /// Access the FrontendSession (for operation dispatch in frontend-specific builders).
+    /// Access the FrontendSession (for operation dispatch in frontend-specific
+    /// builders).
     pub fn session(&self) -> &Arc<FrontendSession> {
         &self.session
     }
@@ -1888,6 +2938,21 @@ impl ReactiveEngine {
     /// Access the tokio runtime handle.
     pub fn runtime_handle(&self) -> &tokio::runtime::Handle {
         &self.runtime_handle
+    }
+
+    /// SPIKE (Phase 1b): which occurrence of the focused block holds focus
+    /// (`None` = canonical). The headless editor mirror keys its cursor map by
+    /// `(block_id, occurrence)` so two display occurrences of one block get
+    /// independent carets while edits still resolve to the canonical block.
+    pub fn focused_occurrence(&self) -> Option<u32> {
+        self.ui_state.focused_occurrence()
+    }
+
+    /// SPIKE (Phase 1b): set the focused occurrence (`None` = canonical).
+    /// Additive to `set_focus`; leaves `focused_block` untouched. `pub` so the
+    /// integration-tests crate's end-to-end occurrence test can drive it.
+    pub fn set_focus_occurrence(&self, occ: Option<u32>) {
+        self.ui_state.set_focus_occurrence(occ);
     }
 }
 
@@ -1899,7 +2964,10 @@ impl BuilderServices for ReactiveEngine {
     fn clone_arc(&self) -> Arc<dyn BuilderServices> {
         self.services_slot
             .get()
-            .expect("services_slot not yet populated — frontend bootstrap must call services_slot.set(engine.clone()) before any lazy-widget interpretation")
+            .expect(
+                "services_slot not yet populated — frontend bootstrap must call \
+                 services_slot.set(engine.clone()) before any lazy-widget interpretation",
+            )
             .clone()
     }
 
@@ -1907,6 +2975,10 @@ impl BuilderServices for ReactiveEngine {
     fn get_block_data(&self, id: &EntityUri) -> (RenderExpr, Vec<Arc<DataRow>>) {
         let results = self.ensure_watching(id);
         results.snapshot()
+    }
+
+    fn link_classifier(&self) -> &holon_api::link_parser::LinkTargetClassifier {
+        self.session.link_classifier()
     }
 
     /// Override the trait default to delegate to the inherent `snapshot`,
@@ -1931,6 +3003,18 @@ impl BuilderServices for ReactiveEngine {
         entity_name: &str,
     ) -> Option<holon_api::entity_profile::VirtualChildConfig> {
         self.session.profiles().virtual_child_config(entity_name)
+    }
+
+    fn advice_children(&self, anchor: &EntityUri) -> Vec<Arc<DataRow>> {
+        // Lazily bring the reactive weaver up on first read so a live session
+        // keeps the sidecar fresh; the composed settle refreshes it explicitly.
+        self.ensure_advice_weaver();
+        self.advice_sidecar
+            .lock()
+            .unwrap()
+            .get(anchor)
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn entity_operations(
@@ -1958,8 +3042,16 @@ impl BuilderServices for ReactiveEngine {
         })
     }
 
+    fn query_engine(&self) -> Option<Arc<dyn holon_api::QueryEngine>> {
+        self.session.query_engine()
+    }
+
     fn widget_state(&self, id: &str) -> WidgetState {
         self.session.widget_state(id)
+    }
+
+    fn block_expanded_view(&self, target_id: &str) -> Option<bool> {
+        self.ui_state.block_expanded_view(target_id)
     }
 
     fn widget_state_explicit(&self, id: &str) -> Option<WidgetState> {
@@ -1970,15 +3062,32 @@ impl BuilderServices for ReactiveEngine {
         self.session.set_widget_open(id, open);
     }
 
+    fn set_widget_width(&self, id: &str, width: f32, persist: bool) {
+        self.session.set_widget_width(id, width, persist);
+    }
+
+    fn set_preference(&self, key: &str, value: holon_api::Value) -> Result<()> {
+        let pref_key = crate::preferences::PrefKey::new(key);
+        let toml_value = crate::preferences::value_to_toml(&value);
+        self.session.set_preference(&pref_key, toml_value)
+    }
+
     fn dispatch_intent(&self, intent: crate::operations::OperationIntent) {
         if intent.entity_name == "preferences" && intent.op_name == "set" {
             if let (Some(key), Some(value)) = (
                 intent.params.get("key").and_then(|v| v.as_string()),
                 intent.params.get("value"),
             ) {
-                let pref_key = crate::preferences::PrefKey::new(&key);
+                let pref_key = crate::preferences::PrefKey::new(key);
                 let toml_value = crate::preferences::value_to_toml(value);
-                self.session.set_preference(&pref_key, toml_value);
+                // Fail-loud, not fatal: a failed preference persist (e.g. a
+                // read-only config dir on Android) must be disclosed, never
+                // abort the process. Callers with a UI seam (GPUI pref fields)
+                // use the fallible `set_preference` trait method to also toast.
+                if let Err(e) = self.session.set_preference(&pref_key, toml_value) {
+                    self.session.error_tracker().record_error();
+                    tracing::error!("Failed to persist preference {key}: {e:#}");
+                }
             }
             return;
         }
@@ -1989,7 +3098,13 @@ impl BuilderServices for ReactiveEngine {
         // The backend still writes the SQL tables; this just keeps the
         // frontend-side signal graph in sync.
         maybe_mirror_navigation_focus(&self.ui_state, &intent);
-        maybe_clear_focus_on_delete(&self.ui_state, &intent);
+        // Focus is cleared only AFTER a delete SUCCEEDS (see the Ok arm below):
+        // a bare `delete` is fail-closed on a non-leaf, so an optimistic pre-op
+        // clear would orphan the caret on a block that stays.
+        let clear_focus_target = focus_clear_on_delete_target(&self.ui_state, &intent);
+        // User-visible surface for a dropped op error (fail-loud). Captured
+        // before the spawn because the task can't borrow `&self`.
+        let op_failure_sink = self.ui_state.op_failure_sink_handle();
 
         // Fire-and-forget execute. The result-hook projects a structural
         // op's focus result (`split_block`/`join_block`) straight onto the
@@ -2000,20 +3115,46 @@ impl BuilderServices for ReactiveEngine {
         let entity_name = intent.entity_name.clone();
         let op_name = intent.op_name.clone();
         let params = intent.params;
+        // End-to-end latency: start the interaction clock at the dispatch
+        // entry point; `holon_api::latency_e2e` closes it when the target's
+        // row lands in a LiveData mirror (stage="e2e").
+        if let Some(target) = params.get("id").and_then(|v| v.as_string()) {
+            holon_api::latency_e2e::interaction_dispatched(
+                &op_name,
+                target,
+                holon_api::latency_e2e::write_seq_from_params(&params),
+            );
+        }
         self.runtime_handle.spawn(async move {
             match session
                 .execute_operation(&entity_name, &op_name, params)
                 .await
             {
                 Ok(response) => {
-                    apply_structural_focus(&focused_block, &caret_seed, &op_name, &response);
+                    apply_structural_focus(
+                        &focused_block,
+                        &caret_seed,
+                        &op_name,
+                        &response.response,
+                    );
+                    // The delete succeeded: now it is safe to drop focus from the
+                    // gone block (a refused delete never reaches this arm).
+                    if let Some(target) = &clear_focus_target {
+                        clear_focus_after_delete(&focused_block, target);
+                    }
                 }
                 Err(e) => {
                     // Disclose the failed write: the UI already reflects the
                     // user's gesture, so a dropped error would silently look
-                    // like success. The tracker is the PBT/monitoring seam.
-                    session.error_tracker().record_error();
-                    tracing::error!("Operation {entity_name}.{op_name} failed: {e}");
+                    // like success. Records + logs (PBT/monitoring seam) AND
+                    // routes the verbatim message to a CommandFailed toast.
+                    surface_op_failure(
+                        session.error_tracker(),
+                        &op_failure_sink,
+                        entity_name.as_str(),
+                        &op_name,
+                        &e,
+                    );
                 }
             }
         });
@@ -2038,15 +3179,16 @@ impl BuilderServices for ReactiveEngine {
         // machinery out of `ViewEventHandler` and anchoring it to the
         // op_button site. For now fail loudly so it's visible.
         panic!(
-            "present_op({}.{}): multi-param popup activation is not yet wired for op_button sites; \
-             {} param(s) missing (follow-up to mobile-bar PR)",
+            "present_op({}.{}): multi-param popup activation is not yet wired for op_button \
+             sites; {} param(s) missing (follow-up to mobile-bar PR)",
             op.entity_name,
             op.name,
             matched.missing_params.len()
         );
     }
 
-    // TODO: I've seen other `dispatch_intent...` methods. How do these relate to each other? Anything to DRY?
+    // TODO: I've seen other `dispatch_intent...` methods. How do these relate to
+    // each other? Anything to DRY?
     fn dispatch_intent_sync(
         &self,
         intent: crate::operations::OperationIntent,
@@ -2058,19 +3200,48 @@ impl BuilderServices for ReactiveEngine {
                 intent.params.get("key").and_then(|v| v.as_string()),
                 intent.params.get("value"),
             ) {
-                let pref_key = crate::preferences::PrefKey::new(&key);
+                let pref_key = crate::preferences::PrefKey::new(key);
                 let toml_value = crate::preferences::value_to_toml(value);
-                self.session.set_preference(&pref_key, toml_value);
+                // Surface a persist failure to the sync caller instead of
+                // aborting — this path awaits the result (MCP/tests/driver).
+                return Box::pin(std::future::ready(
+                    self.session.set_preference(&pref_key, toml_value),
+                ));
             }
             return Box::pin(std::future::ready(Ok(())));
         }
 
         maybe_mirror_navigation_focus(&self.ui_state, &intent);
-        maybe_clear_focus_on_delete(&self.ui_state, &intent);
+        // Deferred to op success (the `?` below returns early on failure, so a
+        // refused delete never clears focus).
+        let clear_focus_target = focus_clear_on_delete_target(&self.ui_state, &intent);
 
         let session = self.session.clone();
         let (focused_block, caret_seed) = self.ui_state.focus_handles();
         Box::pin(async move {
+            // Latency stage (dispatch->op-applied): a user action enters the
+            // pipeline here. `block` is the entity the op targets; `action` the
+            // op name (split_block, indent, outdent, cycle_state, ...). The push
+            // pipeline (Loro commit -> projection -> CDC rows) runs downstream and
+            // is measured by the `projection`/`rows` stages. Greppable via
+            // target="holon_latency".
+            let block = intent
+                .params
+                .get("id")
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| intent.entity_name.as_str().to_string());
+            // End-to-end latency: start the interaction clock here;
+            // `holon_api::latency_e2e` closes it when the target's row lands
+            // in a LiveData mirror (stage="e2e").
+            if let Some(target) = intent.params.get("id").and_then(|v| v.as_string()) {
+                holon_api::latency_e2e::interaction_dispatched(
+                    &intent.op_name,
+                    target,
+                    holon_api::latency_e2e::write_seq_from_params(&intent.params),
+                );
+            }
+            let t_dispatch = std::time::Instant::now();
             let response = session
                 .execute_operation(&intent.entity_name, &intent.op_name, intent.params)
                 .await
@@ -2080,10 +3251,116 @@ impl BuilderServices for ReactiveEngine {
                         intent.entity_name, intent.op_name
                     )
                 })?;
+            tracing::info!(
+                target: "holon_latency",
+                stage = "dispatch",
+                action = %intent.op_name,
+                block = %block,
+                ms = t_dispatch.elapsed().as_millis() as u64,
+                "holon_latency",
+            );
             // Same in-process structural-focus projection as `dispatch_intent`.
-            apply_structural_focus(&focused_block, &caret_seed, &intent.op_name, &response);
+            apply_structural_focus(
+                &focused_block,
+                &caret_seed,
+                &intent.op_name,
+                &response.response,
+            );
+            if let Some(target) = &clear_focus_target {
+                clear_focus_after_delete(&focused_block, target);
+            }
             Ok(())
         })
+    }
+
+    fn dispatch_intent_awaitable(
+        &self,
+        intent: crate::operations::OperationIntent,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<holon_core::Delivery>> + Send + 'static>,
+    > {
+        maybe_mirror_navigation_focus(&self.ui_state, &intent);
+        // Deferred to op success (the Err arm returns without clearing, so a
+        // refused delete keeps focus).
+        let clear_focus_target = focus_clear_on_delete_target(&self.ui_state, &intent);
+        let session = self.session.clone();
+        let (focused_block, caret_seed) = self.ui_state.focus_handles();
+        let entity_name = intent.entity_name.clone();
+        let op_name = intent.op_name.clone();
+        let params = intent.params;
+        if let Some(target) = params.get("id").and_then(|v| v.as_string()) {
+            holon_api::latency_e2e::interaction_dispatched(
+                &op_name,
+                target,
+                holon_api::latency_e2e::write_seq_from_params(&params),
+            );
+        }
+        Box::pin(async move {
+            match session
+                .execute_operation(&entity_name, &op_name, params)
+                .await
+            {
+                Ok(response) => {
+                    apply_structural_focus(
+                        &focused_block,
+                        &caret_seed,
+                        &op_name,
+                        &response.response,
+                    );
+                    if let Some(target) = &clear_focus_target {
+                        clear_focus_after_delete(&focused_block, target);
+                    }
+                    Ok(response.delivery)
+                }
+                Err(e) => {
+                    // Disclose the failed write (same seam as `dispatch_intent`);
+                    // the caller ALSO surfaces it as a visible toast.
+                    session.error_tracker().record_error();
+                    tracing::error!("dispatch_intent_awaitable: {entity_name}.{op_name}: {e:#}");
+                    Err(e)
+                }
+            }
+        })
+    }
+
+    fn follow_dangling_link(&self, target: String, region: String) {
+        let session = self.session.clone();
+        let (focused_block, main_nav) = self.ui_state.nav_focus_handles();
+        // Capture focus at CLICK time to guard the last-writer race: the create
+        // is async, so if the user navigates elsewhere during that window the
+        // stale task must NOT stomp the newer focus. (Resolved-link clicks
+        // mirror focus synchronously and have no such window.)
+        let focus_at_click = focused_block.get_cloned();
+        // User-visible surface for a refused create (fail-loud). Captured before
+        // the spawn because the task can't borrow `&self`. Without this a
+        // collision-refused create (interim identity policy §5) would only log,
+        // and the user clicking a dangling link whose page name is taken would
+        // see nothing open AND no error — indistinguishable from a dead link.
+        let op_failure_sink = self.ui_state.op_failure_sink_handle();
+        self.runtime_handle.spawn(async move {
+            if let Err(e) = create_page_and_navigate(
+                &session,
+                &focused_block,
+                &main_nav,
+                &target,
+                &region,
+                focus_at_click,
+            )
+            .await
+            {
+                // Disclose the failed follow: the user clicked a dangling link
+                // and nothing opened, so a dropped error would look like a dead
+                // link. The tracker is the PBT/monitoring seam; the sink routes
+                // the verbatim message to a CommandFailed toast.
+                surface_op_failure(
+                    session.error_tracker(),
+                    &op_failure_sink,
+                    "block",
+                    "create_page_from_link",
+                    &e,
+                );
+            }
+        });
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
@@ -2124,12 +3401,17 @@ impl BuilderServices for ReactiveEngine {
         self.ui_state.peek_caret_seed(block)
     }
 
+    fn consume_caret_seed(&self, block: &EntityUri) {
+        self.ui_state.consume_caret_seed(block);
+    }
+
     fn provider_cache(&self) -> Option<Arc<crate::provider_cache::ProviderCache>> {
         Some(self.provider_cache.clone())
     }
 
     fn set_focus(&self, block_id: Option<EntityUri>) {
-        // ALLOW(direct_focus_mutation): this IS the legitimate BuilderServices::set_focus setter.
+        // ALLOW(direct_focus_mutation): this IS the legitimate
+        // BuilderServices::set_focus setter.
         self.ui_state.set_focus(block_id);
     }
 
@@ -2177,6 +3459,57 @@ impl BuilderServices for ReactiveEngine {
         self.runtime_handle.clone()
     }
 
+    fn list_templates(&self) -> Vec<crate::template_placement::TemplateChoice> {
+        let session = self.session.clone();
+        let rt = self.runtime_handle.clone();
+        // Bridge the async snapshot from a fresh thread — same pattern as
+        // `watch_query` — so this stays callable from the GPUI main thread
+        // whether or not it is itself a tokio worker.
+        let snapshot = std::thread::scope(|s| {
+            s.spawn(|| rt.block_on(session.block_query().snapshot()))
+                .join()
+                .unwrap()
+        });
+        let snapshot = match snapshot {
+            Ok(snap) => snap,
+            Err(e) => {
+                // Fail loud in the log — an unreadable projection means the
+                // picker silently offers nothing, which we disclose rather
+                // than pretend is "no templates exist".
+                tracing::error!("list_templates: block snapshot failed: {e}");
+                return Vec::new();
+            }
+        };
+        // Enumeration logic is a pure, unit-tested function driven over the
+        // real block snapshot — its case-insensitive marker lookup is what
+        // makes org-authored templates (uppercase `:TEMPLATE:`) appear.
+        crate::template_placement::templates_from_blocks(snapshot.iter_blocks())
+    }
+
+    fn resolve_block(&self, id: &str) -> Option<holon_api::block::Block> {
+        let session = self.session.clone();
+        let rt = self.runtime_handle.clone();
+        // Same fresh-thread snapshot bridge as `list_templates`.
+        let snapshot = std::thread::scope(|s| {
+            s.spawn(|| rt.block_on(session.block_query().snapshot()))
+                .join()
+                .unwrap()
+        });
+        let snapshot = match snapshot {
+            Ok(snap) => snap,
+            Err(e) => {
+                tracing::error!("resolve_block('{id}'): block snapshot failed: {e}");
+                return None;
+            }
+        };
+        for block in snapshot.iter_blocks() {
+            if block.id.as_str() == id {
+                return Some(block.clone());
+            }
+        }
+        None
+    }
+
     fn search_link_candidates(
         &self,
         filter: &str,
@@ -2211,8 +3544,8 @@ impl BuilderServices for ReactiveEngine {
                 reg_dyn.live_field::<String>(block_id, field)
             }
             None => Err(anyhow::anyhow!(
-                "editable_text not configured for this ReactiveEngine \
-                 (BlockCellRegistry not wired)"
+                "editable_text not configured for this ReactiveEngine (BlockCellRegistry not \
+                 wired)"
             )),
         }
     }
@@ -2229,6 +3562,9 @@ impl BuilderServices for ReactiveEngine {
 pub struct StubBuilderServices {
     interpreter: Arc<RenderInterpreter<ReactiveViewModel>>,
     rt_handle: tokio::runtime::Handle,
+    /// No registry is wired into a stub, so it resolves the built-in schemes
+    /// only.
+    link_classifier: holon_api::link_parser::LinkTargetClassifier,
 }
 
 fn stub_runtime_handle() -> tokio::runtime::Handle {
@@ -2256,6 +3592,7 @@ impl StubBuilderServices {
         Self {
             interpreter: Arc::new(crate::shadow_builders::build_shadow_interpreter()),
             rt_handle,
+            link_classifier: holon_api::link_parser::LinkTargetClassifier::default(),
         }
     }
 
@@ -2263,6 +3600,7 @@ impl StubBuilderServices {
         Self {
             interpreter: Arc::new(crate::shadow_builders::build_shadow_interpreter()),
             rt_handle,
+            link_classifier: holon_api::link_parser::LinkTargetClassifier::default(),
         }
     }
 }
@@ -2278,8 +3616,23 @@ impl BuilderServices for StubBuilderServices {
         self.interpreter.interpret(expr, ctx, self)
     }
 
+    /// A stub carries no engine state, so a handle is just a second stub over
+    /// the same interpreter — enough for the lazy widgets (`expand_toggle`,
+    /// tabs, `view_mode_switcher`) that gpui layout and unit tests drive.
+    fn clone_arc(&self) -> Arc<dyn BuilderServices> {
+        Arc::new(Self {
+            interpreter: self.interpreter.clone(),
+            rt_handle: self.rt_handle.clone(),
+            link_classifier: holon_api::link_parser::LinkTargetClassifier::default(),
+        })
+    }
+
     fn get_block_data(&self, _: &EntityUri) -> (RenderExpr, Vec<Arc<DataRow>>) {
         (table_expr(), vec![])
+    }
+
+    fn link_classifier(&self) -> &holon_api::link_parser::LinkTargetClassifier {
+        &self.link_classifier
     }
 
     fn resolve_profile(&self, _: &DataRow) -> Option<holon_api::RenderProfile> {
@@ -2303,6 +3656,10 @@ impl BuilderServices for StubBuilderServices {
         // Stub services don't persist widget state.
     }
 
+    fn set_widget_width(&self, _: &str, _: f32, _: bool) {
+        // Stub services don't persist widget state.
+    }
+
     fn dispatch_intent(&self, intent: crate::operations::OperationIntent) {
         tracing::info!(
             "StubBuilderServices.dispatch_intent({}.{}) — no-op in stub mode",
@@ -2317,10 +3674,9 @@ impl BuilderServices for StubBuilderServices {
         _: HashMap<String, holon_api::Value>,
     ) {
         panic!(
-            "StubBuilderServices::present_op({}.{}) — op_button must not be \
-             reached under a stub services instance. If a gallery/example \
-             renders the mobile action bar it should swap in a real \
-             ReactiveEngine, not route through the stub.",
+            "StubBuilderServices::present_op({}.{}) — op_button must not be reached under a stub \
+             services instance. If a gallery/example renders the mobile action bar it should swap \
+             in a real ReactiveEngine, not route through the stub.",
             op.entity_name, op.name
         );
     }
@@ -2349,7 +3705,8 @@ impl BuilderServices for StubBuilderServices {
 /// context ids. Including the context fixes a latent collision where two
 /// nodes with the same query but different contexts shared one watcher.
 fn hash_query(query: &str, lang: QueryLanguage, ctx: &Option<crate::QueryContext>) -> u64 {
-    use std::hash::{Hash, Hasher};
+    use std::hash::Hash;
+    use std::hash::Hasher;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     query.hash(&mut hasher);
     format!("{lang:?}").hash(&mut hasher);
@@ -2372,10 +3729,9 @@ pub struct BuilderServicesSlot(pub Arc<std::sync::OnceLock<Arc<dyn BuilderServic
 
 /// Newtype wrapper for the render interpreter function, stored in DI.
 ///
-/// Registered via `set_render_interpreter()`. Resolved by the ReactiveEngine factory.
-pub struct RenderInterpreterFn(
-    pub Arc<dyn Fn(&RenderExpr, &[Arc<DataRow>]) -> ReactiveViewModel + Send + Sync>,
-);
+/// Registered via `set_render_interpreter()`. Resolved by the ReactiveEngine
+/// factory.
+pub struct RenderInterpreterFn(pub InterpretFn);
 
 /// Extension trait for registering the render interpreter in DI.
 ///
@@ -2396,8 +3752,7 @@ impl RenderInterpreterInjectorExt for Injector {
         &self,
         interpret_fn: impl Fn(&RenderExpr, &[Arc<DataRow>]) -> ReactiveViewModel + Send + Sync + 'static,
     ) {
-        let f: Arc<dyn Fn(&RenderExpr, &[Arc<DataRow>]) -> ReactiveViewModel + Send + Sync> =
-            Arc::new(interpret_fn);
+        let f: InterpretFn = Arc::new(interpret_fn);
         let shared = Shared::new(RenderInterpreterFn(f));
         self.provide::<RenderInterpreterFn>(Provider::root(move |_| shared.clone()));
     }
@@ -2407,9 +3762,9 @@ impl RenderInterpreterInjectorExt for Injector {
 ///
 /// The backend `NavigationProvider::focus` op writes `navigation_cursor`
 /// + `navigation_history` in SQL, but there is no CDC path back into the
-/// frontend's `UiState` — so value-fn providers like `focus_chain()`
-/// would stay empty even after navigation. This side-channel keeps them
-/// in sync. Called from both `dispatch_intent` and `dispatch_intent_sync`.
+///   frontend's `UiState` — so value-fn providers like `focus_chain()` would
+///   stay empty even after navigation. This side-channel keeps them in sync.
+///   Called from both `dispatch_intent` and `dispatch_intent_sync`.
 fn maybe_mirror_navigation_focus(ui_state: &UiState, intent: &crate::operations::OperationIntent) {
     if intent.entity_name != "navigation" {
         return;
@@ -2419,52 +3774,133 @@ fn maybe_mirror_navigation_focus(ui_state: &UiState, intent: &crate::operations:
         // into `UiState`, so mirror it here. (Editor focus is no longer a
         // dispatched op — clicks call `set_focus` directly and split/join set
         // it from their op result; see ADR 0010.)
-        Ok(NavigationOp::Focus) => {
-            let block_id = intent
-                .params
-                .get("block_id")
-                .and_then(|v| v.as_string())
-                // ALLOW(entity_uri_from_raw): block_id from intent.params Value map (operation-intent ingest)
-                .map(|s| EntityUri::from_raw(s));
-            // ALLOW(direct_focus_mutation): mirror of navigation.focus into UiState for value-fn graph; intentional, see surrounding comment.
+        // `open_tab` (modifier-click) is a page navigation like `focus` — it
+        // shows a new page (new content → scroll reset is correct) and carries
+        // the target `block_id` — so it mirrors identically. It differs from
+        // `focus` only in the SQL layer (it does NOT close the region's other
+        // open rows); the UiState value-fn mirror is the same.
+        Ok(NavigationOp::Focus | NavigationOp::OpenTab) => {
+            let block_id = intent.params.get("block_id").and_then(|v| v.as_string());
+            // End-to-end latency: navigation is a first-class interaction.
+            // Start the interaction clock keyed on the focused block; the
+            // `latency_e2e` correlator closes it (stage="e2e", action="navigate")
+            // when the page's rows land in a LiveData mirror — a child row
+            // carries `parent_id = block_id`. Tokenless (reads carry no
+            // `write_seq`).
+            if let Some(target) = block_id {
+                holon_api::latency_e2e::interaction_dispatched("navigate", target, None);
+            }
+            // ALLOW(entity_uri_from_raw): block_id from intent.params Value map
+            // (operation-intent ingest)
+            let block_id = block_id.map(EntityUri::from_raw);
+            // ALLOW(direct_focus_mutation): mirror of navigation.focus into UiState for
+            // value-fn graph; intentional, see surrounding comment.
             ui_state.set_focus(block_id);
+            // A page navigation into the main region resets main-panel scroll
+            // (LogSeq parity). Region-scoped so a right-sidebar pin (region=right)
+            // leaves the main scroll alone. An absent region defaults to main
+            // (the sidebar/journal nav actions all target region=main).
+            let region = intent
+                .params
+                .get("region")
+                .and_then(|v| v.as_string())
+                .unwrap_or("main");
+            if region == "main" {
+                ui_state.bump_main_nav();
+            }
         }
-        // ALLOW(direct_focus_mutation): mirror of navigation.go_home into UiState for value-fn graph.
-        Ok(NavigationOp::GoHome) => ui_state.set_focus(None),
-        // `focus_pin` / `close` / `go_back` / `go_forward` would require reading
-        // `navigation_history` to know the target — leave them alone until the
-        // backend grows a synchronous "current focus" accessor. `Err` is a
+        Ok(NavigationOp::GoHome) => {
+            // ALLOW(direct_focus_mutation): mirror of navigation.go_home into UiState for
+            // value-fn graph.
+            ui_state.set_focus(None);
+            ui_state.bump_main_nav();
+        }
+        // `focus_pin` / `close` / `go_back` / `go_forward` / `activate` would
+        // require reading `navigation_history` to know the target — leave them
+        // alone until the backend grows a synchronous "current focus" accessor.
+        // `activate` (tab switch) is the same class as `go_back`/`go_forward`:
+        // it moves the cursor within the existing open set (no `block_id` in
+        // the intent), so it deliberately does NOT bump `main_nav_generation`
+        // (the switched-to tab keeps its scroll); the main panel re-renders via
+        // the CDC path from the `navigation_cursor` change. `Err` is a
         // non-navigation op (the `entity_name` guard above keeps it out here).
         Ok(
             NavigationOp::FocusPin
             | NavigationOp::Close
             | NavigationOp::GoBack
-            | NavigationOp::GoForward,
+            | NavigationOp::GoForward
+            | NavigationOp::Activate,
         )
         | Err(_) => {}
     }
 }
 
-/// Clear focus when the focused block is being deleted.
+/// Whether `op_name` removes its target block from the tree, so a focus sitting
+/// on that block must be cleared once the op SUCCEEDS. `delete` removes the
+/// block; `delete_subtree` removes it plus its descendants;
+/// `delete_keep_children` reparents the children but still deletes the target.
+/// All three orphan a focus that sat on the target.
+fn op_deletes_target(op_name: &str) -> bool {
+    matches!(
+        op_name,
+        "delete" | "delete_subtree" | "delete_keep_children"
+    )
+}
+
+/// If `intent` deletes the currently-focused block, return that block so the
+/// caller can clear focus AFTER the op succeeds. `None` otherwise.
 ///
 /// Editor focus is in-memory UI state (ADR 0010), so the signal owner must keep
-/// it consistent with the store — the `current_editor_focus` matview used to do
-/// this implicitly via IVM recomputation. A dangling focus on a deleted block
-/// would mis-route chord ops and keep the render-variant switch pointed at a
-/// gone block. Mirrors the PBT reference model's `clear_focus_if_deleted`.
-/// Called from both `dispatch_intent` and `dispatch_intent_sync`.
-fn maybe_clear_focus_on_delete(ui_state: &UiState, intent: &crate::operations::OperationIntent) {
-    if intent.op_name != "delete" {
-        return;
+/// it consistent with the store — a dangling focus on a deleted block would
+/// mis-route chord ops and keep the render-variant switch pointed at a gone
+/// block. Mirrors the PBT reference model's `clear_focus_if_deleted`.
+///
+/// DECISION-ONLY — never mutates. A bare `delete` is fail-closed on a non-leaf
+/// (returns `Err`, block stays), so clearing focus before the op runs would
+/// orphan the caret on a block that still exists. The clear is applied by
+/// [`clear_focus_after_delete`] in each dispatch path's success arm.
+fn focus_clear_on_delete_target(
+    ui_state: &UiState,
+    intent: &crate::operations::OperationIntent,
+) -> Option<EntityUri> {
+    if !op_deletes_target(&intent.op_name) {
+        return None;
     }
-    let Some(id) = intent.params.get("id").and_then(|v| v.as_string()) else {
-        return;
-    };
-    // ALLOW(entity_uri_from_raw): id from intent.params Value map (operation-intent ingest)
+    let id = intent.params.get("id").and_then(|v| v.as_string())?;
+    // ALLOW(entity_uri_from_raw): id from op-intent params (ingest boundary)
     let deleted = EntityUri::from_raw(id);
-    if ui_state.focused_block().as_ref() == Some(&deleted) {
-        // ALLOW(direct_focus_mutation): clear focus of a deleted block, mirroring the reference model.
-        ui_state.set_focus(None);
+    (ui_state.focused_block().as_ref() == Some(&deleted)).then_some(deleted)
+}
+
+/// Apply the deferred focus clear after a delete op SUCCEEDS. No-op if focus
+/// has since moved off `target` (a concurrent navigation must win over a stale
+/// clear). Operates on the cloned focus `Mutable` so it runs inside a spawned
+/// dispatch task that can't borrow `&UiState`.
+fn clear_focus_after_delete(focused_block: &Mutable<Option<EntityUri>>, target: &EntityUri) {
+    if focused_block.get_cloned().as_ref() == Some(target) {
+        // ALLOW(direct_focus_mutation): clear focus of a deleted block (ref model)
+        focused_block.set(None);
+    }
+}
+
+/// Surface a fire-and-forget op-execution failure. Records it on the monitoring
+/// tracker and logs it (the PBT/monitoring seam), then — if the shell installed
+/// a sink — routes the op error's VERBATIM message to a user-visible
+/// `CommandFailed` toast. Additive fail-loud: a dropped `dispatch_intent` error
+/// would otherwise read as success because the UI already reflects the gesture
+/// (e.g. a refused non-leaf delete whose error names `delete_subtree` /
+/// `delete_keep_children` must reach the user, not just the log).
+fn surface_op_failure(
+    tracker: &holon_core::PublishErrorTracker,
+    sink: &Option<Arc<dyn Fn(String) + Send + Sync>>,
+    entity_name: &str,
+    op_name: &str,
+    err: &anyhow::Error,
+) {
+    tracker.record_error();
+    tracing::error!("Operation {entity_name}.{op_name} failed: {err:#}");
+    if let Some(sink) = sink {
+        sink(format!("{err:#}"));
     }
 }
 
@@ -2490,8 +3926,9 @@ fn structural_focus_target(
         .get("cursor_offset")
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
-    // ALLOW(entity_uri_from_raw): block_id from a structural op response (operation-result ingest boundary)
-    Some((EntityUri::from_raw(&block_id), offset.max(0) as usize))
+    // ALLOW(entity_uri_from_raw): block_id from a structural op response
+    // (operation-result ingest boundary)
+    Some((EntityUri::from_raw(block_id), offset.max(0) as usize))
 }
 
 /// Apply a structural op's focus result to the in-memory authority + caret
@@ -2509,6 +3946,122 @@ fn apply_structural_focus(
             focused_block.set(Some(block));
         }
     }
+}
+
+/// Create the page chain for a *dangling* wiki-link `target`, then navigate
+/// `region` to the freshly-created leaf page. Factored out of
+/// [`ReactiveEngine::follow_dangling_link`] so the create→navigate chain —
+/// which depends on the fresh leaf-page id carried in the create op's response
+/// — can run inside a spawned task over cloned `Mutable` handles, and so the
+/// response→nav-target decision is unit-testable via
+/// [`dangling_link_nav_target`].
+///
+/// Navigation is mirrored into `UiState` (so value-fn providers like
+/// `focus_chain` observe it) and then persisted through the backend
+/// `navigation.focus` op, exactly as `maybe_mirror_navigation_focus` +
+/// `NavigationProvider` do for an ordinary click on a resolved link.
+async fn create_page_and_navigate(
+    session: &Arc<FrontendSession>,
+    focused_block: &Mutable<Option<EntityUri>>,
+    main_nav: &Mutable<u64>,
+    target: &str,
+    region: &str,
+    focus_at_click: Option<EntityUri>,
+) -> Result<()> {
+    let create_params = [(
+        "target".to_string(),
+        holon_api::Value::String(target.to_string()),
+    )]
+    .into_iter()
+    .collect();
+    let response = session
+        .execute_operation(
+            &holon_api::EntityName::new("block"),
+            "create_page_from_link",
+            create_params,
+        )
+        .await
+        .with_context(|| format!("create_page_from_link({target})"))?;
+
+    let (leaf, reset_scroll) = dangling_link_nav_target(&response.response, region)
+        .with_context(|| format!("create_page_from_link({target}) response"))?;
+
+    // Last-writer guard: the page CREATE always happened (and the healed link
+    // makes the next click resolve), but only navigate if no newer navigation
+    // landed during the async create window — otherwise a stale task would
+    // stomp the user's newer focus in both UiState and persisted nav-history.
+    let focus_now = focused_block.get_cloned();
+    if dangling_nav_superseded(&focus_at_click, &focus_now) {
+        tracing::info!(
+            "dangling-link navigation superseded by newer navigation \
+             (target={target}); page created, skipping focus"
+        );
+        return Ok(());
+    }
+
+    // Mirror the navigation into UiState before persisting it, matching the
+    // synchronous click-time mirror of an ordinary `navigation.focus`.
+    if focus_now.as_ref() != Some(&leaf) {
+        focused_block.set(Some(leaf.clone()));
+    }
+    if reset_scroll {
+        main_nav.set(main_nav.get() + 1);
+    }
+
+    let nav_params = [
+        (
+            "region".to_string(),
+            holon_api::Value::String(region.to_string()),
+        ),
+        (
+            "block_id".to_string(),
+            holon_api::Value::String(leaf.to_string()),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    session
+        .execute_operation(
+            &holon_api::EntityName::new("navigation"),
+            "focus",
+            nav_params,
+        )
+        .await
+        .context("navigation.focus after create_page_from_link")?;
+    Ok(())
+}
+
+/// Decide the post-create navigation target from a `create_page_from_link`
+/// response. The op returns the fresh leaf-page id as `Value::String`;
+/// navigation focuses that page and, for `region == "main"`, resets the
+/// main-panel scroll. Any other response shape is a fail-loud contract
+/// violation (the op's response type changed out from under this caller).
+fn dangling_link_nav_target(
+    response: &Option<holon_api::Value>,
+    region: &str,
+) -> Result<(EntityUri, bool)> {
+    match response {
+        Some(holon_api::Value::String(leaf_id)) => {
+            // Operation-result ingest boundary (as in structural_focus_target).
+            // ALLOW(entity_uri_from_raw): leaf page id from create_page_from_link response
+            let leaf = EntityUri::from_raw(leaf_id);
+            Ok((leaf, region == "main"))
+        }
+        other => Err(anyhow::anyhow!(
+            "create_page_from_link must return the leaf page id as Value::String, got: {other:?}"
+        )),
+    }
+}
+
+/// Whether a pending dangling-link navigation has been superseded: `true` when
+/// focus moved between the click that started the async page-create and the
+/// moment the create completed. A stale task must not stomp the newer focus —
+/// the page create still stands, only the focus move is skipped.
+fn dangling_nav_superseded(
+    focus_at_click: &Option<EntityUri>,
+    focus_now: &Option<EntityUri>,
+) -> bool {
+    focus_at_click != focus_now
 }
 
 /// Dispatch `intents` as ONE ordered fire-and-forget chain: a single spawned
@@ -2540,11 +4093,13 @@ pub fn dispatch_intent_chain(
     });
 }
 
-/// Pure ViewModel construction: render expression + data rows + services → ViewModel tree.
+/// Pure ViewModel construction: render expression + data rows + services →
+/// ViewModel tree.
 ///
-/// Thin free-function wrapper that forwards to `services.interpret_with_source`.
-/// Retained so external callers (PBT reference model, widget gallery, tests) can
-/// keep their existing call-site shape.
+/// Thin free-function wrapper that forwards to
+/// `services.interpret_with_source`. Retained so external callers (PBT
+/// reference model, widget gallery, tests) can keep their existing call-site
+/// shape.
 #[tracing::instrument(level = "debug", skip_all)]
 pub fn interpret_pure(
     expr: &RenderExpr,
@@ -2561,9 +4116,9 @@ pub fn interpret_pure(
 
 /// Build the default interpret function for the ReactiveEngine.
 ///
-/// Uses a `OnceLock<Arc<dyn BuilderServices>>` to break the circular dependency:
-/// engine needs interpret_fn, interpret_fn needs services, services IS the engine.
-/// The services are set after engine construction.
+/// Uses a `OnceLock<Arc<dyn BuilderServices>>` to break the circular
+/// dependency: engine needs interpret_fn, interpret_fn needs services, services
+/// IS the engine. The services are set after engine construction.
 ///
 /// Shared by all frontends (GPUI, PBT, etc.) — the shadow interpreter is
 /// platform-agnostic and produces `ReactiveViewModel`, not UI widgets.
@@ -2586,20 +4141,28 @@ pub fn make_interpret_fn(
 /// `tree` is the current `ReactiveViewModel`. Collection children within
 /// it have `MutableVec`s that are updated in-place by background tasks
 /// when individual rows change. `structural_changes` emits only when the
-/// render expression changes — requiring a full rebuild (get a new `LiveBlock`).
+/// render expression changes — requiring a full rebuild (get a new
+/// `LiveBlock`).
 pub struct LiveBlock {
     pub tree: ReactiveViewModel,
-    /// Emits a new tree when the render expression changes (structural rebuild).
-    /// Data-only changes do NOT emit — they update the existing tree in-place.
+    /// Emits a new tree when the render expression changes (structural
+    /// rebuild). Data-only changes do NOT emit — they update the existing
+    /// tree in-place.
     pub structural_changes: Pin<Box<dyn futures::Stream<Item = ReactiveViewModel> + Send>>,
+    /// RAII pin on the underlying watcher — dropping it (with the LiveBlock,
+    /// or after `take()`ing it out) releases the engine's watcher when this
+    /// was the last consumer. `None` only for stub/test constructors that
+    /// don't own a real engine watcher (e.g. layout-testing fixtures).
+    pub watch_guard: Option<WatchGuard>,
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use holon_api::Value;
+
+    use super::*;
 
     fn focus_intent(op: &str, id: &str) -> crate::operations::OperationIntent {
         let mut params = HashMap::new();
@@ -2609,9 +4172,12 @@ mod tests {
 
     #[test]
     fn regeneration_initial_snapshot_drops_rows_the_new_query_no_longer_returns() {
-        use holon_api::streaming::{
-            Batch, BatchMetadata, Change, ChangeOrigin, UiEvent, WithMetadata,
-        };
+        use holon_api::streaming::Batch;
+        use holon_api::streaming::BatchMetadata;
+        use holon_api::streaming::Change;
+        use holon_api::streaming::ChangeOrigin;
+        use holon_api::streaming::UiEvent;
+        use holon_api::streaming::WithMetadata;
 
         fn row(id: &str, content: &str) -> HashMap<String, Value> {
             HashMap::from([
@@ -2619,7 +4185,7 @@ mod tests {
                 ("content".to_string(), Value::String(content.to_string())),
             ])
         }
-        fn data_event(gen: u64, rows: Vec<HashMap<String, Value>>) -> UiEvent {
+        fn data_event(generation: u64, rows: Vec<HashMap<String, Value>>) -> UiEvent {
             UiEvent::Data {
                 batch: WithMetadata {
                     inner: Batch {
@@ -2641,16 +4207,16 @@ mod tests {
                         seq: 0,
                     },
                 },
-                generation: gen,
+                generation,
             }
         }
-        fn structure_event(gen: u64) -> UiEvent {
+        fn structure_event(generation: u64) -> UiEvent {
             UiEvent::Structure {
                 render_expr: RenderExpr::Literal {
-                    value: holon_api::Value::String(format!("expr-{gen}")),
+                    value: holon_api::Value::String(format!("expr-{generation}")),
                 },
                 candidates: Vec::new(),
-                generation: gen,
+                generation,
             }
         }
         fn ids(rqr: &ReactiveRenderedRows) -> Vec<String> {
@@ -2691,6 +4257,70 @@ mod tests {
         assert_eq!(ids(&rqr), vec!["block:b", "block:c", "block:d"]);
     }
 
+    /// Regression (dogfood 2026-07-10, crash chain: focus `block:journals` →
+    /// render the journals day-list collection): a Created row that carries NO
+    /// entity-shaped `id` (the day-list `SELECT date('now') AS name` row
+    /// `{_rowid:1, name:2026-07-10}`) used to hit
+    /// `data_row_entity_uri(..).expect("Created event must have 'id' column")`
+    /// and PANIC the tokio render worker (`reactive.rs:485`), taking down the
+    /// page. It must now degrade: keyed on `_rowid` under a `degraded:` scheme,
+    /// stored and rendered (mirroring the profile resolver's visible degrade),
+    /// and it must survive the first-batch `retain_keys` sweep.
+    #[test]
+    fn id_less_created_row_degrades_instead_of_panicking_the_worker() {
+        use holon_api::streaming::Batch;
+        use holon_api::streaming::BatchMetadata;
+        use holon_api::streaming::Change;
+        use holon_api::streaming::ChangeOrigin;
+        use holon_api::streaming::UiEvent;
+        use holon_api::streaming::WithMetadata;
+
+        let rqr = ReactiveRenderedRows::new();
+        rqr.apply_event(UiEvent::Structure {
+            render_expr: RenderExpr::Literal {
+                value: Value::String("day-list".into()),
+            },
+            candidates: Vec::new(),
+            generation: 1,
+        });
+
+        // The exact id-less row from the crash log.
+        let id_less: DataRow = HashMap::from([
+            ("_rowid".to_string(), Value::Integer(1)),
+            ("name".to_string(), Value::String("2026-07-10".to_string())),
+        ]);
+        rqr.apply_event(UiEvent::Data {
+            batch: WithMetadata {
+                inner: Batch {
+                    items: vec![Change::Created {
+                        data: id_less,
+                        origin: ChangeOrigin::Local {
+                            operation_id: None,
+                            trace_id: None,
+                        },
+                    }],
+                },
+                metadata: BatchMetadata {
+                    relation_name: "journals".into(),
+                    trace_context: None,
+                    sync_token: None,
+                    seq: 0,
+                },
+            },
+            generation: 1,
+        });
+
+        // No panic, and the degraded row is retained (survives the first-batch
+        // retain sweep) and still carries its content for display.
+        let (_, rows) = rqr.snapshot();
+        assert_eq!(rows.len(), 1, "id-less row must be stored, not dropped");
+        assert_eq!(
+            rows[0].get("name").and_then(|v| v.as_string()),
+            Some("2026-07-10"),
+            "degraded row must keep its content for visible rendering",
+        );
+    }
+
     #[test]
     fn structural_focus_target_parses_split_join_response() {
         let resp = Some(Value::Object(HashMap::from([
@@ -2728,20 +4358,298 @@ mod tests {
         assert_eq!(ui.peek_caret_seed(&b), None);
     }
 
+    /// Regression (BugFunnel 2026-07-11 row 80): the click-places-caret
+    /// contract broke after a split→join sequence. The structural op armed a
+    /// one-shot caret seed (split → 0, join → boundary); the mounting editor
+    /// applied it, but the seed was NEVER consumed — it lingered in
+    /// `pending_caret_seed`, aged only by a focus MOVE to a *different* block.
+    /// After a "failed click elsewhere" (window blur without a focused-block
+    /// change) the seed stayed armed for the same block, and the next click on
+    /// it re-applied the stale offset (0 after an undone/redone split), yanking
+    /// the caret to 0 so typing PREPENDED.
+    ///
+    /// `consume_caret_seed` makes the seed strictly single-use: once the mount
+    /// applies it, `peek` returns `None` even while focus stays put, so a later
+    /// click derives its caret from the current buffer (click position / end),
+    /// never the stale op-follow-up offset. This models the exact sequence GPUI
+    /// `grab_focus_and_seed_caret` drives at the seed-lifecycle seam (the caret
+    /// APPLY itself needs a GPUI window; the lifecycle is the bug).
     #[test]
-    fn clear_focus_on_delete_only_clears_the_focused_block() {
+    fn caret_seed_is_single_use_so_a_later_click_is_not_yanked() {
+        let ui = UiState::new();
+        let a = EntityUri::block("a");
+        let b = EntityUri::block("b");
+
+        // split(a) → new block b focused, seed (b, 0).
+        ui.set_focus_with_caret(b.clone(), 0);
+        assert_eq!(ui.peek_caret_seed(&b), Some(0));
+
+        // join(b) → merges back into a at the join boundary; seed (a, 5).
+        ui.set_focus_with_caret(a.clone(), 5);
+        assert_eq!(ui.peek_caret_seed(&a), Some(5));
+        // The split's (b, 0) seed was overwritten by the join, not left behind.
+        assert_eq!(ui.peek_caret_seed(&b), None);
+
+        // The merged editor mounts / gains focus and APPLIES the seed once.
+        // The mount consumes it — this is the fix.
+        assert_eq!(ui.peek_caret_seed(&a), Some(5));
+        ui.consume_caret_seed(&a);
+
+        // "Failed click elsewhere": window focus leaves the editor but the
+        // focused-block signal stays on `a` (no `set_focus`), so the OLD aging
+        // path would NOT have cleared the seed. With single-use consumption it
+        // is already gone.
+        assert_eq!(ui.focused_block(), Some(a.clone()));
+        assert_eq!(
+            ui.peek_caret_seed(&a),
+            None,
+            "consumed seed must not survive to be re-applied on a re-click"
+        );
+
+        // Subsequent fresh click on `a`: the editor sees no seed and derives
+        // the caret from the click / buffer end — no yank to 0, no prepend.
+        ui.set_focus(Some(a.clone()));
+        assert_eq!(ui.peek_caret_seed(&a), None);
+    }
+
+    /// Consuming a seed armed for one block must not clear a seed armed for
+    /// another — each block's mount consumes only its own.
+    #[test]
+    fn consume_caret_seed_is_scoped_to_its_block() {
+        let ui = UiState::new();
+        let a = EntityUri::block("a");
+        let b = EntityUri::block("b");
+        ui.set_focus_with_caret(a.clone(), 3);
+        // A no-op for a block that doesn't own the seed.
+        ui.consume_caret_seed(&b);
+        assert_eq!(ui.peek_caret_seed(&a), Some(3));
+        // Consuming the owner clears it.
+        ui.consume_caret_seed(&a);
+        assert_eq!(ui.peek_caret_seed(&a), None);
+    }
+
+    #[test]
+    fn delete_decision_must_not_clear_focus_before_the_op_runs() {
+        // The pre-op decision must NOT mutate focus. A fail-closed (refused)
+        // non-leaf delete leaves the block in place, so clearing focus
+        // optimistically would orphan the caret on a block that still exists.
+        // (RED against base: the old `maybe_clear_focus_on_delete` cleared
+        // synchronously here — see red_delete_… run in the fix report.)
         let ui = UiState::new();
         let a = EntityUri::block("a");
         ui.set_focus(Some(a.clone()));
-        // Deleting a different block leaves focus intact.
-        maybe_clear_focus_on_delete(&ui, &focus_intent("delete", "block:b"));
+        let target = focus_clear_on_delete_target(&ui, &focus_intent("delete", "block:a"));
+        assert_eq!(
+            target,
+            Some(a.clone()),
+            "the decision must identify the focused block as the clear target",
+        );
+        assert_eq!(
+            ui.focused_block(),
+            Some(a.clone()),
+            "focus must survive the delete DECISION; cleared only on op success",
+        );
+    }
+
+    #[test]
+    fn focus_clear_on_delete_target_only_targets_the_focused_block() {
+        let ui = UiState::new();
+        let a = EntityUri::block("a");
+        ui.set_focus(Some(a.clone()));
+        // Deleting a different block is not a clear target.
+        assert_eq!(
+            focus_clear_on_delete_target(&ui, &focus_intent("delete", "block:b")),
+            None,
+        );
+        // A non-delete op is never a clear target.
+        assert_eq!(
+            focus_clear_on_delete_target(&ui, &focus_intent("set_field", "block:a")),
+            None,
+        );
+        // The explicit destructive-delete variants also target the focused block.
+        for op in ["delete", "delete_subtree", "delete_keep_children"] {
+            assert_eq!(
+                focus_clear_on_delete_target(&ui, &focus_intent(op, "block:a")),
+                Some(a.clone()),
+                "{op} deletes its target, so a focus on it must be cleared on success",
+            );
+        }
+        // Decision never mutates focus.
         assert_eq!(ui.focused_block(), Some(a.clone()));
-        // A non-delete op never clears.
-        maybe_clear_focus_on_delete(&ui, &focus_intent("set_field", "block:a"));
-        assert_eq!(ui.focused_block(), Some(a.clone()));
-        // Deleting the focused block clears it.
-        maybe_clear_focus_on_delete(&ui, &focus_intent("delete", "block:a"));
-        assert_eq!(ui.focused_block(), None);
+    }
+
+    #[test]
+    fn clear_focus_after_delete_clears_on_success_and_respects_a_moved_focus() {
+        let a = EntityUri::block("a");
+        let b = EntityUri::block("b");
+        // A successful delete of the focused block clears focus.
+        let handle = Mutable::new(Some(a.clone()));
+        clear_focus_after_delete(&handle, &a);
+        assert_eq!(handle.get_cloned(), None);
+        // A concurrent focus move off the target wins: the stale clear is a no-op.
+        let handle = Mutable::new(Some(b.clone()));
+        clear_focus_after_delete(&handle, &a);
+        assert_eq!(handle.get_cloned(), Some(b));
+    }
+
+    #[test]
+    fn op_failure_routes_verbatim_message_to_the_command_failed_sink() {
+        use holon_core::PublishErrorTracker;
+        // The fail-closed non-leaf delete's error names the alternative ops; it
+        // must reach the user verbatim, not just the log (a dropped error would
+        // read as success because the UI already reflects the gesture).
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink_captured = captured.clone();
+        let sink: Arc<dyn Fn(String) + Send + Sync> =
+            Arc::new(move |m| sink_captured.lock().unwrap().push(m));
+
+        let tracker = PublishErrorTracker::new();
+        let err = anyhow::anyhow!(
+            "delete: block block:a has 2 child(ren); refusing to cascade. Use \
+             `delete_subtree` to delete the whole subtree, or \
+             `delete_keep_children` to reparent the children first."
+        );
+        surface_op_failure(&tracker, &Some(sink), "block", "delete", &err);
+
+        // Additive monitoring seam preserved.
+        assert_eq!(tracker.errors(), 1);
+        let msgs = captured.lock().unwrap();
+        assert_eq!(msgs.len(), 1, "exactly one CommandFailed surface");
+        assert!(
+            msgs[0].contains("delete_subtree") && msgs[0].contains("delete_keep_children"),
+            "the verbatim alternative-op guidance must reach the user: {}",
+            msgs[0],
+        );
+    }
+
+    #[test]
+    fn op_failure_without_a_sink_still_records_but_surfaces_nothing() {
+        use holon_core::PublishErrorTracker;
+        // Headless/test paths install no sink: the monitoring seam still fires,
+        // and nothing panics on the absent surface.
+        let tracker = PublishErrorTracker::new();
+        let err = anyhow::anyhow!("boom");
+        surface_op_failure(&tracker, &None, "block", "indent", &err);
+        assert_eq!(tracker.errors(), 1);
+    }
+
+    #[test]
+    fn ui_state_op_failure_sink_round_trips() {
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink_captured = captured.clone();
+        let ui = UiState::new();
+        // No sink installed → handle is None.
+        assert!(ui.op_failure_sink_handle().is_none());
+        ui.set_op_failure_sink(Arc::new(move |m| sink_captured.lock().unwrap().push(m)));
+        let handle = ui.op_failure_sink_handle().expect("sink installed");
+        handle("surfaced".to_string());
+        assert_eq!(captured.lock().unwrap().as_slice(), ["surfaced"]);
+    }
+
+    /// Build a `navigation.focus` intent targeting `region` at page `block_id`.
+    fn nav_focus_intent(region: &str, block_id: &str) -> crate::operations::OperationIntent {
+        let mut params = HashMap::new();
+        params.insert("region".to_string(), Value::String(region.to_string()));
+        params.insert("block_id".to_string(), Value::String(block_id.to_string()));
+        crate::operations::OperationIntent::new("navigation".into(), "focus".to_string(), params)
+    }
+
+    /// The real navigation wiring must start the end-to-end latency clock:
+    /// driving a `navigation.focus` intent through
+    /// `maybe_mirror_navigation_focus` (the path both `dispatch_intent` and
+    /// `dispatch_intent_sync` take) must enroll a `navigate` interaction
+    /// for the focused `block_id` in the process-global `latency_e2e`
+    /// registry. A unique target keeps this hermetic under the parallel
+    /// runner. Guards against a regression where nav ops carry `block_id`
+    /// (not `id`) and so slip past the clock.
+    #[test]
+    fn navigation_focus_starts_latency_clock() {
+        let ui = UiState::new();
+        let target = "block:nav-latency-clock-probe";
+        maybe_mirror_navigation_focus(&ui, &nav_focus_intent("main", target));
+        assert!(
+            holon_api::latency_e2e::pending_targets()
+                .iter()
+                .any(|t| t == target),
+            "navigation.focus must enroll a latency interaction for its block_id"
+        );
+    }
+
+    /// The main-panel scroll-reset signal (dogfood #5 row 146): a page
+    /// navigation into the `main` region bumps `main_nav_generation`; a
+    /// right-sidebar pin (region=right) leaves it alone so the main scroll is
+    /// preserved. `go_home` bumps it (returns to the home page).
+    #[test]
+    fn main_nav_generation_bumps_only_on_main_region_navigation() {
+        let ui = UiState::new();
+        assert_eq!(ui.main_nav_generation(), 0);
+
+        // Navigating a page into the main region bumps the counter.
+        maybe_mirror_navigation_focus(&ui, &nav_focus_intent("main", "block:page-a"));
+        assert_eq!(ui.main_nav_generation(), 1);
+
+        // Every subsequent main navigation advances it.
+        maybe_mirror_navigation_focus(&ui, &nav_focus_intent("main", "block:page-b"));
+        assert_eq!(ui.main_nav_generation(), 2);
+
+        // A right-sidebar pin must NOT reset the main panel's scroll.
+        maybe_mirror_navigation_focus(&ui, &nav_focus_intent("right", "block:page-c"));
+        assert_eq!(ui.main_nav_generation(), 2);
+
+        // go_home returns to the main region's home page → bump.
+        let go_home = crate::operations::OperationIntent::new(
+            "navigation".into(),
+            "go_home".to_string(),
+            HashMap::new(),
+        );
+        maybe_mirror_navigation_focus(&ui, &go_home);
+        assert_eq!(ui.main_nav_generation(), 3);
+    }
+
+    /// Tab semantics (ADR-0026, risk register #1): `open_tab` shows a NEW page
+    /// in main, so it bumps `main_nav_generation` (scroll reset, like `focus`);
+    /// `activate` only switches which already-open tab renders, so it must NOT
+    /// bump it — the switched-to tab keeps its scroll position.
+    #[test]
+    fn open_tab_bumps_main_nav_but_activate_does_not() {
+        let ui = UiState::new();
+        assert_eq!(ui.main_nav_generation(), 0);
+
+        // open_tab into main = a new page → bump (mirrors `focus`).
+        let mut params = HashMap::new();
+        params.insert("region".to_string(), Value::String("main".to_string()));
+        params.insert(
+            "block_id".to_string(),
+            Value::String("block:page-a".to_string()),
+        );
+        let open_tab = crate::operations::OperationIntent::new(
+            "navigation".into(),
+            "open_tab".to_string(),
+            params,
+        );
+        maybe_mirror_navigation_focus(&ui, &open_tab);
+        assert_eq!(
+            ui.main_nav_generation(),
+            1,
+            "open_tab shows a new page → bump"
+        );
+
+        // activate (tab switch) carries only history_id and must NOT bump —
+        // preserving the switched-to tab's scroll.
+        let mut params = HashMap::new();
+        params.insert("region".to_string(), Value::String("main".to_string()));
+        params.insert("history_id".to_string(), Value::Integer(7));
+        let activate = crate::operations::OperationIntent::new(
+            "navigation".into(),
+            "activate".to_string(),
+            params,
+        );
+        maybe_mirror_navigation_focus(&ui, &activate);
+        assert_eq!(
+            ui.main_nav_generation(),
+            1,
+            "activate is a cursor-only tab switch → must NOT reset main scroll"
+        );
     }
 
     fn make_row(id: &str, content: &str) -> DataRow {
@@ -2767,6 +4675,48 @@ mod tests {
             Value::String(format!("{}:{}", name, rows.len())),
         );
         ReactiveViewModel::from_widget("empty", HashMap::new()).with_entity(Arc::new(m))
+    }
+
+    /// A ui-gen bump re-interprets EVERY cached page shell, not just the
+    /// visible one — the confound the interpretation-pass counter exists to
+    /// separate from watch-layer growth. Two cached shells, one bump, +2.
+    #[tokio::test]
+    async fn ui_gen_bump_counts_one_interpretation_pass_per_cached_shell() {
+        use futures::StreamExt;
+
+        let ui_gen = Mutable::new(0u64);
+        let interpret = Arc::new(test_interpret);
+        let shells = [ReactiveRenderedRows::new(), ReactiveRenderedRows::new()];
+        let mut streams: Vec<_> = shells
+            .iter()
+            .map(|shell| {
+                Box::pin(
+                    shell
+                        .structural_signal_with_ui_gen(interpret.clone(), ui_gen.signal())
+                        .to_stream(),
+                )
+            })
+            .collect();
+
+        // Drain each shell's initial emission so the baseline is quiescent.
+        for stream in &mut streams {
+            stream.next().await.expect("initial interpretation");
+        }
+        let baseline = interpretation_passes();
+
+        ui_gen.set(1);
+        for stream in &mut streams {
+            stream
+                .next()
+                .await
+                .expect("re-interpretation after ui bump");
+        }
+
+        assert_eq!(
+            interpretation_passes() - baseline,
+            2,
+            "one ui-gen bump must re-interpret both cached shells"
+        );
     }
 
     fn remote_origin() -> holon_api::ChangeOrigin {
@@ -2803,6 +4753,99 @@ mod tests {
         let vm = poll_signal!(rq.reactive_signal(interpret));
         let debug = debug_tag(&vm);
         assert_eq!(debug, "loading:0");
+    }
+
+    #[tokio::test]
+    async fn watch_failure_is_visible_and_not_loading() {
+        let rq = ReactiveRenderedRows::new();
+        assert_eq!(rq.error(), None);
+
+        rq.set_error("query failed: no such table: blocks_with_paths");
+
+        assert_eq!(
+            rq.error().as_deref(),
+            Some("query failed: no such table: blocks_with_paths")
+        );
+        assert!(
+            !rq.is_loading(),
+            "a block whose watch_query failed must stop reporting as loading"
+        );
+
+        let interpret = Arc::new(test_interpret);
+        let vm = poll_signal!(rq.reactive_signal(interpret));
+        assert_eq!(debug_tag(&vm), "error:0");
+
+        let RenderExpr::FunctionCall { name, args } = rq.get_render_expr() else {
+            panic!("error state must render through an `error(message:)` call");
+        };
+        assert_eq!(name, "error");
+        let message = args
+            .iter()
+            .find(|a| a.name.as_deref() == Some("message"))
+            .expect("error expr carries a `message` arg");
+        assert_eq!(
+            message.value,
+            RenderExpr::Literal {
+                value: Value::String("query failed: no such table: blocks_with_paths".to_string())
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn clearing_a_failure_restores_the_displaced_render_expression() {
+        let rq = ReactiveRenderedRows::new();
+        rq.set_render_expr(table_expr());
+
+        rq.set_error("query failed: no such table: cc_sessions");
+        rq.set_error("query failed: no such table: cc_sessions");
+
+        rq.clear_error();
+
+        assert_eq!(rq.error(), None);
+        assert_eq!(
+            rq.get_render_expr(),
+            table_expr(),
+            "recovery must restore the block's own expression, not a second error sentinel"
+        );
+    }
+
+    /// Two blocks watching the SAME query share one `ReactiveRenderedRows`, so
+    /// the second block's subscribe lands mid-failure on the first block's
+    /// disclosed error.
+    #[tokio::test]
+    async fn a_resubscribe_during_a_failure_keeps_the_error_and_wins_the_restore() {
+        let rq = ReactiveRenderedRows::new();
+        rq.set_render_expr(table_expr());
+        rq.set_error("query failed: no such table: cc_sessions");
+
+        let second_subscriber_expr = RenderExpr::FunctionCall {
+            name: "list".to_string(),
+            args: vec![],
+        };
+        rq.set_render_expr(second_subscriber_expr.clone());
+
+        assert_eq!(
+            rq.error().as_deref(),
+            Some("query failed: no such table: cc_sessions"),
+            "a re-subscribe must not un-disclose a live failure"
+        );
+        let RenderExpr::FunctionCall { name, .. } = rq.get_render_expr() else {
+            panic!("degraded window must keep rendering the error sentinel");
+        };
+        assert_eq!(
+            name, "error",
+            "a re-subscribe must not clobber the visible error sentinel"
+        );
+        assert!(!rq.is_loading());
+
+        rq.clear_error();
+
+        assert_eq!(rq.error(), None);
+        assert_eq!(
+            rq.get_render_expr(),
+            second_subscriber_expr,
+            "recovery must restore the LATEST requested expression, not the pre-error one"
+        );
     }
 
     #[tokio::test]
@@ -3005,11 +5048,63 @@ mod tests {
             1,
         );
 
-        // Verify rows are in the BTreeMap (row_signal_vec tested via ReactiveCollection)
+        // Verify rows are in the BTreeMap (row_signal_vec tested via
+        // ReactiveCollection)
         let (_, rows) = rq.snapshot();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].get("id").unwrap().as_string().unwrap(), "a");
         assert_eq!(rows[1].get("id").unwrap().as_string().unwrap(), "b");
+    }
+
+    /// Regression / A-B proof (dogfood 2026-07-10, Martin ruling 2026-07-11):
+    /// an id-less VALUE row (an aggregate / rule-trigger result — e.g. the
+    /// journals `SELECT today AS name FROM clock` machinery) flowing through
+    /// the reactive row set must NOT panic the render worker. Before the
+    /// fix, `apply_change`'s `Created` arm did
+    /// `data_row_entity_uri(&row).expect(...)` and killed the worker
+    /// (blanking the page with a silent -32603). Now the row is keyed on
+    /// its deterministic content hash and accumulated. Reverting
+    /// the `RowIdentity`-based keying in `apply_change` makes THIS test panic —
+    /// the same signal `inv-no-observed-errors` observes in the keystone.
+    #[test]
+    fn id_less_value_row_does_not_panic_apply_change() {
+        let rq = ReactiveRenderedRows::new();
+        rq.set_generation(1);
+
+        // A value row: only `name`, NO `id` column (journals trigger shape).
+        let mut value_row = DataRow::new();
+        value_row.insert("name".to_string(), Value::String("2026-07-10".to_string()));
+
+        rq.apply_change(
+            holon_api::Change::Created {
+                data: enriched(value_row.clone()),
+                origin: remote_origin(),
+            },
+            1,
+        );
+
+        let (_, rows) = rq.snapshot();
+        assert_eq!(rows.len(), 1, "value row must be accumulated, not dropped");
+        assert_eq!(
+            rows[0].get("name").unwrap().as_string().unwrap(),
+            "2026-07-10"
+        );
+
+        // Recompute re-emits the same content → same content-hash key → still
+        // one row (stable identity across incremental matview recompute).
+        rq.apply_change(
+            holon_api::Change::Created {
+                data: enriched(value_row),
+                origin: remote_origin(),
+            },
+            1,
+        );
+        let (_, rows) = rq.snapshot();
+        assert_eq!(
+            rows.len(),
+            1,
+            "identical value row on recompute must reuse identity, not duplicate"
+        );
     }
 
     /// Snapshot path regression test: a root-layout-shaped tree with a
@@ -3029,7 +5124,8 @@ mod tests {
     ///    → ReactiveView.items populated`.
     #[test]
     fn snapshot_path_populates_collection_items() {
-        use holon_api::render_types::{Arg, RenderExpr};
+        use holon_api::render_types::Arg;
+        use holon_api::render_types::RenderExpr;
 
         // columns(#{item_template: live_block()}) — same shape the root layout
         // uses. When data_source is None (snapshot path), the macro falls into
@@ -3083,5 +5179,77 @@ mod tests {
                 item.widget_name()
             );
         }
+    }
+
+    // ── follow_dangling_link: create-response → navigation target ────────────
+
+    #[test]
+    fn dangling_link_nav_target_focuses_leaf_page_and_resets_main_scroll() {
+        let response = Some(Value::String("block:leaf-123".to_string()));
+        let (leaf, reset_scroll) =
+            dangling_link_nav_target(&response, "main").expect("well-formed leaf id");
+        assert_eq!(leaf.to_string(), "block:leaf-123");
+        assert!(
+            reset_scroll,
+            "a main-region page open must reset the main-panel scroll"
+        );
+    }
+
+    #[test]
+    fn dangling_link_nav_target_non_main_region_leaves_scroll_alone() {
+        let response = Some(Value::String("block:leaf-9".to_string()));
+        let (_leaf, reset_scroll) =
+            dangling_link_nav_target(&response, "right").expect("well-formed leaf id");
+        assert!(
+            !reset_scroll,
+            "a non-main region (e.g. a right-sidebar pin) must not reset main scroll"
+        );
+    }
+
+    #[test]
+    fn dangling_link_nav_target_fails_loud_on_unexpected_response() {
+        // The op contract is a `Value::String` leaf id; anything else (a None,
+        // an Object, a number) is a fail-loud contract violation, not a
+        // silently-dropped navigation.
+        for bad in [
+            None,
+            Some(Value::Object(HashMap::new())),
+            Some(Value::Integer(7)),
+        ] {
+            let err = dangling_link_nav_target(&bad, "main")
+                .expect_err("unexpected response shape must fail loud");
+            assert!(
+                err.to_string().contains("create_page_from_link"),
+                "error must name the offending op, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn dangling_nav_applied_when_focus_unchanged_since_click() {
+        // ALLOW(entity_uri_from_raw): test literal.
+        let at_click = Some(EntityUri::from_raw("block:src"));
+        let now = at_click.clone();
+        assert!(
+            !dangling_nav_superseded(&at_click, &now),
+            "focus unchanged since click → navigation is still current, must apply"
+        );
+        // Also holds when nothing was focused at click and still isn't.
+        assert!(!dangling_nav_superseded(&None, &None));
+    }
+
+    #[test]
+    fn dangling_nav_skipped_when_focus_moved_during_create() {
+        // ALLOW(entity_uri_from_raw): test literal.
+        let at_click = Some(EntityUri::from_raw("block:src"));
+        // ALLOW(entity_uri_from_raw): test literal.
+        let now = Some(EntityUri::from_raw("block:elsewhere"));
+        assert!(
+            dangling_nav_superseded(&at_click, &now),
+            "user navigated during the async create → stale task must NOT stomp newer focus"
+        );
+        // A clear→focus or focus→clear move is likewise a supersession.
+        assert!(dangling_nav_superseded(&at_click, &None));
+        assert!(dangling_nav_superseded(&None, &at_click));
     }
 }

@@ -485,7 +485,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut rx = bus.subscribe();
+        let mut rx = bus.subscribe().changes;
         let err = store.load("bad").unwrap_err();
         assert!(format!("{err}").contains("corrupt"));
         // Original file gone.
@@ -505,7 +505,11 @@ mod tests {
             .collect();
         assert_eq!(quarantined.len(), 1, "expected exactly one quarantine file");
         // Bus got a SnapshotLoadFailed event.
-        let ev = rx.try_recv().expect("no event on bus");
+        let ev = rx
+            .try_recv()
+            .expect("no event on bus")
+            .raised()
+            .expect("expected Raised");
         assert_eq!(ev.shared_tree_id, "bad");
         assert!(matches!(
             ev.reason,

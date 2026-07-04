@@ -36,10 +36,17 @@ use gpui::Stateful;
 use gpui::div;
 use gpui::prelude::*;
 use gpui::px;
+use holon::sync::DegradedChange;
+use holon::sync::DegradedConditionKey;
 use holon::sync::ShareDegraded;
 use holon::sync::ShareDegradedReason;
 use holon_api::EntityName;
 use holon_api::Value;
+use holon_app::PendingState;
+use holon_app::PendingWriteEvent;
+use holon_app::PendingWriteEventKind;
+use holon_app::PendingWriteStore;
+use holon_app::PendingWriteView;
 use holon_frontend::FrontendSession;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive::ReactiveEngine;
@@ -98,6 +105,9 @@ pub struct DegradedToast {
     pub kind: DegradedKind,
     pub shared_tree_id: String,
     pub detail: String,
+    /// Set when this toast reflects an ongoing degraded CONDITION rather than a
+    /// transient failure — it is upserted on re-raise and removed on clear.
+    pub condition: Option<DegradedConditionKey>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,6 +122,47 @@ pub enum DegradedKind {
     /// Red — a shared doc tried to shadow a LOCAL block id; the projection was
     /// refused to protect the recipient's own content.
     ForeignIdCollision,
+    /// Red — OrgMode initial-scan failed to ingest one or more vault files.
+    /// Other files keep syncing; the failed file(s) need fixing. Surfaced so a
+    /// bad file is visible instead of silently killing file sync.
+    OrgIngestFailed,
+    /// Red — an undo/redo request reached the engine but failed (e.g. no
+    /// operation engine wired, or the underlying apply errored). Fail-loud:
+    /// undo/redo must never look like a silent no-op when it actually blew
+    /// up, so this is always surfaced instead of just logged.
+    UndoFailed,
+    /// Red — a slash-menu command was selected but failed (e.g. a template
+    /// insert whose target block couldn't be resolved, or an empty page-root
+    /// placement). Fail-loud: the selection consumed the key, so it must never
+    /// look like a silent no-op or a stray block-split.
+    CommandFailed,
+    /// Red — a preference write reached the config layer but could not be
+    /// persisted (e.g. the config dir is on a read-only filesystem). Fail-loud:
+    /// the in-memory value applied for this session, but it will NOT survive a
+    /// restart, and the process must stay alive — never SIGABRT on a failed
+    /// settings write.
+    PreferenceSaveFailed,
+    /// Yellow — a `once_only` connector write was queued and needs human
+    /// confirmation (leases/read-write ruling, increment 4). Disclosed on
+    /// enqueue; the write never fires unattended. Approve it in the
+    /// pending-writes panel.
+    ConnectorWritePending,
+    /// Red — a dispatched `once_only` connector write's outcome is unknown
+    /// (post-dispatch failure / lost ack). Fail-loud: it is NOT auto-retried;
+    /// the human must verify on the remote before resending.
+    ConnectorWriteOutcomeUnknown,
+    /// Yellow — a write inside a shared/mounted subtree reached Loro+SQL but
+    /// its org materialization is pending (mount not yet a page on disk).
+    /// Disclosed degrade per the share write-back track (inc 1): the edit is
+    /// NOT lost, only the file projection lags.
+    SharedSubtreeNotMaterialized,
+    /// Red — an MCP integration provider failed to connect at boot. Its cache
+    /// tables were never created, so dependent pages render blank; this names
+    /// the integration and the connect error so the blankness is attributable.
+    IntegrationConnectFailed,
+    /// Red — an MCP integration provider is waiting on an OAuth grant. Same
+    /// blank-page consequence, but the user can fix it via the carried URL.
+    IntegrationNeedsAuth,
     /// A plain info-style toast (used for "ticket copied").
     Info,
 }
@@ -180,12 +231,14 @@ impl ShareUiState {
 
     /// Route a broadcast event from the degraded bus into the right field.
     pub fn apply_degraded(&mut self, event: ShareDegraded) {
+        let condition = event.condition_key();
         match event.reason {
             ShareDegradedReason::SnapshotSaveFailed(detail) => {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::SnapshotSaveFailed,
                     shared_tree_id: event.shared_tree_id,
                     detail,
+                    condition: condition.clone(),
                 });
             }
             ShareDegradedReason::RehydrationFailed(detail) => {
@@ -193,6 +246,7 @@ impl ShareUiState {
                     kind: DegradedKind::RehydrationFailed,
                     shared_tree_id: event.shared_tree_id,
                     detail,
+                    condition: condition.clone(),
                 });
             }
             ShareDegradedReason::SqlProjectionFailed(detail) => {
@@ -200,6 +254,7 @@ impl ShareUiState {
                     kind: DegradedKind::SqlProjectionFailed,
                     shared_tree_id: event.shared_tree_id,
                     detail,
+                    condition: condition.clone(),
                 });
             }
             ShareDegradedReason::ForeignIdCollision(block_id) => {
@@ -207,6 +262,7 @@ impl ShareUiState {
                     kind: DegradedKind::ForeignIdCollision,
                     shared_tree_id: event.shared_tree_id,
                     detail: block_id,
+                    condition: condition.clone(),
                 });
             }
             ShareDegradedReason::SnapshotLoadFailed(path) => {
@@ -215,11 +271,65 @@ impl ShareUiState {
                     quarantine_path: path,
                 });
             }
+            ShareDegradedReason::OrgIngestFailed(summary) => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::OrgIngestFailed,
+                    shared_tree_id: event.shared_tree_id,
+                    detail: summary,
+                    condition: condition.clone(),
+                });
+            }
+            ShareDegradedReason::SharedSubtreeNotMaterialized(detail) => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::SharedSubtreeNotMaterialized,
+                    shared_tree_id: event.shared_tree_id,
+                    detail,
+                    condition: condition.clone(),
+                });
+            }
+            // The toast body truncates `detail` at 80 chars, so both of these
+            // lead with the integration name.
+            ShareDegradedReason::IntegrationConnectFailed { integration, error } => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::IntegrationConnectFailed,
+                    shared_tree_id: event.shared_tree_id,
+                    detail: format!("{integration}: {error}"),
+                    condition: condition.clone(),
+                });
+            }
+            ShareDegradedReason::IntegrationNeedsAuth {
+                integration,
+                auth_url,
+            } => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::IntegrationNeedsAuth,
+                    shared_tree_id: event.shared_tree_id,
+                    detail: format!("{integration}: authorize at {auth_url}"),
+                    condition: condition.clone(),
+                });
+            }
         }
+    }
+
+    /// Drop the toast for a condition the bus reports as no longer in effect.
+    pub fn apply_degraded_cleared(&mut self, key: &DegradedConditionKey) {
+        self.toasts.retain(|t| t.condition.as_ref() != Some(key));
     }
 
     pub fn push_toast(&mut self, toast: DegradedToast) {
         const MAX_TOASTS: usize = 5;
+        // A condition can arrive twice — once in a subscription's replayed
+        // `current`, once as a live `Raised` — so it upserts rather than stacks.
+        if let Some(key) = toast.condition.clone() {
+            if let Some(existing) = self
+                .toasts
+                .iter_mut()
+                .find(|t| t.condition.as_ref() == Some(&key))
+            {
+                *existing = toast;
+                return;
+            }
+        }
         if self.toasts.len() >= MAX_TOASTS {
             self.toasts.remove(0);
         }
@@ -264,6 +374,33 @@ impl ShareTrigger {
 
 impl gpui::Global for ShareTrigger {}
 
+/// GPUI global that lets any view surface a [`DegradedToast`] without plumbing
+/// the `ShareUiState` entity through every intermediate builder — mirrors
+/// [`ShareTrigger`]. Installed in `launch_holon_window_impl`.
+#[derive(Clone)]
+pub struct DegradedToastSink(Arc<dyn Fn(DegradedToast, &mut gpui::App) + Send + Sync>);
+
+impl DegradedToastSink {
+    pub fn new(f: impl Fn(DegradedToast, &mut gpui::App) + Send + Sync + 'static) -> Self {
+        Self(Arc::new(f))
+    }
+
+    /// Surface `toast`. If the sink global is missing (a wiring bug), fail loud
+    /// in the log rather than silently dropping the failure notice.
+    pub fn push(toast: DegradedToast, cx: &mut gpui::App) {
+        if let Some(sink) = cx.try_global::<DegradedToastSink>().cloned() {
+            (sink.0)(toast, cx);
+        } else {
+            tracing::error!(
+                "[degraded-toast] sink global missing; toast dropped: {}",
+                toast.detail
+            );
+        }
+    }
+}
+
+impl gpui::Global for DegradedToastSink {}
+
 // ─── Degraded bus bridge ────────────────────────────────────────────────────
 
 /// Spawn the tokio-broadcast → GPUI-entity bridge.
@@ -279,15 +416,23 @@ pub fn spawn_degraded_bus_bridge(
     window_handle: AnyWindowHandle,
     async_cx: &AsyncApp,
 ) {
-    let (tx, mut rx) = futures::channel::mpsc::unbounded::<ShareDegraded>();
+    let (tx, mut rx) = futures::channel::mpsc::unbounded::<DegradedChange>();
 
-    // Tokio side: recv from broadcast, forward to mpsc.
+    // Tokio side: replay the conditions already in effect (they may have been
+    // raised during boot DI, long before this window existed), then pump live
+    // changes.
     rt_handle.spawn(async move {
-        let mut bus_rx = backend.degraded_bus().subscribe();
+        let subscription = backend.degraded_bus().subscribe();
+        let mut bus_rx = subscription.changes;
+        for event in subscription.current {
+            if tx.unbounded_send(DegradedChange::Raised(event)).is_err() {
+                return;
+            }
+        }
         loop {
             match bus_rx.recv().await {
-                Ok(event) => {
-                    if tx.unbounded_send(event).is_err() {
+                Ok(change) => {
+                    if tx.unbounded_send(change).is_err() {
                         return; // pump gone, exit
                     }
                 }
@@ -306,15 +451,215 @@ pub fn spawn_degraded_bus_bridge(
     async_cx
         .spawn(async move |cx| {
             use futures::StreamExt;
-            while let Some(event) = rx.next().await {
+            while let Some(change) = rx.next().await {
                 let _ = cx.update_window(window_handle, |_, _window, cx| {
                     share_state.update(cx, |s, cx| {
-                        s.apply_degraded(event.clone());
+                        match change.clone() {
+                            DegradedChange::Raised(event) => s.apply_degraded(event),
+                            DegradedChange::Cleared(key) => s.apply_degraded_cleared(&key),
+                        }
                         cx.emit(NotifyShareUi);
                         cx.notify();
                     });
                 });
             }
+        })
+        .detach();
+}
+
+/// Bridge fire-and-forget op-execution failures (from `dispatch_intent`, which
+/// has no awaiting caller) to visible `CommandFailed` toasts. The
+/// frontend-agnostic engine holds the returned sink on its `UiState` and calls
+/// it — from a spawned tokio task, off the main thread — on every dropped op
+/// error; this drains the messages on GPUI's executor and renders a red toast
+/// carrying the op's VERBATIM error (e.g. the fail-closed delete's
+/// `delete_subtree` / `delete_keep_children` guidance). Mirrors
+/// [`spawn_degraded_bus_bridge`]; additive to the engine's `error_tracker` +
+/// `tracing::error!` monitoring seams.
+pub fn spawn_op_failure_toast_bridge(
+    toast_state: Entity<ShareUiState>,
+    window_handle: AnyWindowHandle,
+    async_cx: &AsyncApp,
+) -> Arc<dyn Fn(String) + Send + Sync> {
+    let (tx, mut rx) = futures::channel::mpsc::unbounded::<String>();
+
+    // GPUI side: drain mpsc on the main thread, push a CommandFailed toast.
+    async_cx
+        .spawn(async move |cx| {
+            use futures::StreamExt;
+            while let Some(detail) = rx.next().await {
+                let _ = cx.update_window(window_handle, |_, _window, cx| {
+                    toast_state.update(cx, |s, cx| {
+                        s.push_toast(DegradedToast {
+                            kind: DegradedKind::CommandFailed,
+                            shared_tree_id: "command".into(),
+                            detail,
+                            condition: None,
+                        });
+                        cx.emit(NotifyShareUi);
+                        cx.notify();
+                    });
+                });
+            }
+        })
+        .detach();
+
+    // The sink the engine calls off-thread: forward into the mpsc channel.
+    Arc::new(move |detail: String| {
+        let _ = tx.unbounded_send(detail);
+    })
+}
+
+// ─── Pending connector-write approval (leases/read-write ruling, inc 4c) ────
+
+/// GPUI global holding the shared [`PendingWriteStore`] so the render pass and
+/// the approve dispatcher can reach it without threading it through every
+/// window-launch signature — mirrors [`DegradedToastSink`]/[`ShareTrigger`].
+/// Installed in `main.rs` from the DI-resolved handle when MCP integrations are
+/// configured.
+#[derive(Clone)]
+pub struct PendingWritesGlobal(pub Arc<PendingWriteStore>);
+
+impl gpui::Global for PendingWritesGlobal {}
+
+/// Spawn the pending-write bus → GPUI bridge (mirror of
+/// [`spawn_degraded_bus_bridge`]). Each [`PendingWriteEvent`] pushes a
+/// disclosure toast and triggers a re-render; the panel itself reads live state
+/// via [`PendingWriteStore::list`], so the event only needs to nudge the UI.
+pub fn spawn_pending_writes_bridge(
+    store: Arc<PendingWriteStore>,
+    rt_handle: tokio::runtime::Handle,
+    share_state: Entity<ShareUiState>,
+    window_handle: AnyWindowHandle,
+    async_cx: &AsyncApp,
+) {
+    let (tx, mut rx) = futures::channel::mpsc::unbounded::<PendingWriteEvent>();
+
+    rt_handle.spawn(async move {
+        let mut bus_rx = store.subscribe();
+        loop {
+            match bus_rx.recv().await {
+                Ok(event) => {
+                    if tx.unbounded_send(event).is_err() {
+                        return;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!("[pending-writes] bus lagged by {n} events");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    tracing::info!("[pending-writes] bus closed; bridge exiting");
+                    return;
+                }
+            }
+        }
+    });
+
+    async_cx
+        .spawn(async move |cx| {
+            use futures::StreamExt;
+            while let Some(event) = rx.next().await {
+                let toast = pending_event_toast(&event);
+                let _ = cx.update_window(window_handle, |_, _window, cx| {
+                    share_state.update(cx, |s, cx| {
+                        s.push_toast(toast.clone());
+                        cx.emit(NotifyShareUi);
+                        cx.notify();
+                    });
+                });
+            }
+        })
+        .detach();
+}
+
+/// Build the disclosure toast for a pending-write event.
+fn pending_event_toast(event: &PendingWriteEvent) -> DegradedToast {
+    match event.kind {
+        PendingWriteEventKind::AwaitingConfirmation => DegradedToast {
+            kind: DegradedKind::ConnectorWritePending,
+            shared_tree_id: event.connector.clone(),
+            detail: format!(
+                "{} ({}) — approve in the pending panel",
+                event.display, event.tool
+            ),
+            condition: None,
+        },
+        PendingWriteEventKind::OutcomeUnknown => DegradedToast {
+            kind: DegradedKind::ConnectorWriteOutcomeUnknown,
+            shared_tree_id: event.connector.clone(),
+            detail: format!(
+                "{} ({}) — {}; verify on the remote",
+                event.display, event.tool, event.detail
+            ),
+            condition: None,
+        },
+    }
+}
+
+/// Dispatch approval of a queued `once_only` connector write (increment 4c).
+/// Compare-and-take on the shared store, then re-dispatch through
+/// `session.execute_operation` — the SAME chokepoint — with the stored call.
+/// Only the single winning approval re-dispatches (the store's `confirm` is a
+/// one-shot); a failed re-dispatch surfaces a loud toast.
+pub fn dispatch_approve(
+    session: Arc<FrontendSession>,
+    store: Arc<PendingWriteStore>,
+    rt_handle: tokio::runtime::Handle,
+    share_state: Entity<ShareUiState>,
+    window_handle: AnyWindowHandle,
+    async_cx: &AsyncApp,
+    intent_key: String,
+) {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<(), String>>();
+    rt_handle.spawn(async move {
+        let outcome = if !store.confirm(&intent_key) {
+            Err(format!(
+                "no once_only write awaiting confirmation for intent '{intent_key}' (already \
+                 approved, dispatched, or unknown-outcome)"
+            ))
+        } else {
+            match store.stored_call(&intent_key) {
+                Some((entity_name, op_name, params)) => {
+                    // StorageEntity keys are `Arc<str>`; the session API takes
+                    // `HashMap<String, Value>`. The key/value strings survive the
+                    // round-trip, so the chokepoint re-mints the SAME intent key.
+                    let params: std::collections::HashMap<String, Value> = params
+                        .into_iter()
+                        .map(|(k, v)| (k.to_string(), v))
+                        .collect();
+                    session
+                        .execute_operation(&entity_name, &op_name, params)
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| format!("{e:#}"))
+                }
+                None => Err(format!(
+                    "confirmed intent '{intent_key}' has no stored call — cannot re-dispatch"
+                )),
+            }
+        };
+        let _ = tx.send(outcome);
+    });
+
+    async_cx
+        .spawn(async move |cx| {
+            let outcome = rx.await;
+            let _ = cx.update_window(window_handle, |_, _window, cx| {
+                share_state.update(cx, |s, cx| {
+                    if let Ok(Err(e)) = outcome {
+                        s.push_toast(DegradedToast {
+                            kind: DegradedKind::ConnectorWriteOutcomeUnknown,
+                            shared_tree_id: "connector-write".into(),
+                            detail: format!("approve failed: {e}"),
+                            condition: None,
+                        });
+                    }
+                    // Success is silent here; the panel re-reads store state
+                    // (the row leaves AwaitingConfirmation) and disappears.
+                    cx.emit(NotifyShareUi);
+                    cx.notify();
+                });
+            });
         })
         .detach();
 }
@@ -341,7 +686,7 @@ pub fn dispatch_share(
         let result = session
             .execute_operation(&EntityName::new("tree"), "share_subtree", params)
             .await;
-        let outcome = match result {
+        let outcome = match result.map(|out| out.response) {
             Ok(Some(v)) => ShareTicket::from_value(&v).map_err(|e| format!("{e:#}")),
             Ok(None) => Err("share_subtree returned no response".to_string()),
             Err(e) => Err(format!("{e:#}")),
@@ -417,6 +762,158 @@ pub fn dispatch_accept(
         .detach();
 }
 
+/// Undo/redo dispatch, cmd-z / cmd-shift-z.
+///
+/// `FrontendSession::undo`/`redo` currently return `Result<bool>` (`true` =
+/// applied, `false` = stack empty) — there is no richer outcome type wired
+/// into this workspace yet (a `holon_api::UndoOutcome` with a
+/// `StaleDropped { reason }` case exists in a sibling, not-yet-integrated
+/// workstream; once it lands, replace the `Ok(bool)` match below with a
+/// match on the enum and route `StaleDropped` through its own toast kind
+/// instead of `UndoFailed`).
+///
+/// Same tokio-side-compute + oneshot + GPUI-side-toast shape as
+/// `dispatch_share`/`dispatch_accept` above: the engine call runs on the
+/// tokio runtime (`rt_handle`), the result crosses to the GPUI executor via
+/// a oneshot channel, and only a genuine `Err` produces a user-visible
+/// toast — `Applied` is silent (the projection update is the feedback) and
+/// `Empty` only logs at debug level.
+fn dispatch_undo_redo(
+    is_redo: bool,
+    session: Arc<FrontendSession>,
+    rt_handle: tokio::runtime::Handle,
+    share_state: Entity<ShareUiState>,
+    window_handle: AnyWindowHandle,
+    async_cx: &AsyncApp,
+) {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<holon_api::UndoOutcome, String>>();
+    rt_handle.spawn(async move {
+        let result = if is_redo {
+            session.redo().await
+        } else {
+            session.undo().await
+        };
+        let _ = tx.send(result.map_err(|e| format!("{e:#}")));
+    });
+
+    async_cx
+        .spawn(async move |cx| {
+            let outcome = rx.await;
+            let label = if is_redo { "redo" } else { "undo" };
+            match outcome {
+                Ok(Ok(holon_api::UndoOutcome::Applied)) => {
+                    tracing::debug!("[{label}] applied");
+                }
+                Ok(Ok(holon_api::UndoOutcome::Empty)) => {
+                    tracing::debug!("[{label}] stack empty — no-op");
+                }
+                Ok(Ok(holon_api::UndoOutcome::NoChange)) => {
+                    // Fail-loud: the entry was consumed but changed nothing
+                    // (its inverse/forward replay was a no-op). Surface it so
+                    // the press never reads as a silent success — otherwise a
+                    // poison no-op entry silently eats undo presses while the
+                    // real target underneath stays unreachable (BugFunnel
+                    // 2026-07-13 undo row).
+                    tracing::warn!("[{label}] entry made no observable change (no-op)");
+                    let _ = cx.update_window(window_handle, |_, _window, cx| {
+                        share_state.update(cx, |s, cx| {
+                            s.push_toast(DegradedToast {
+                                kind: DegradedKind::UndoFailed,
+                                shared_tree_id: "undo".into(),
+                                detail: format!("{label}: entry made no change (no-op)"),
+                                condition: None,
+                            });
+                            cx.emit(NotifyShareUi);
+                            cx.notify();
+                        });
+                    });
+                }
+                Ok(Ok(holon_api::UndoOutcome::StaleDropped { reason })) => {
+                    tracing::error!("[{label}] entry stale — dropped: {reason}");
+                    let _ = cx.update_window(window_handle, |_, _window, cx| {
+                        share_state.update(cx, |s, cx| {
+                            s.push_toast(DegradedToast {
+                                kind: DegradedKind::UndoFailed,
+                                shared_tree_id: "undo".into(),
+                                detail: format!(
+                                    "{label}: history entry stale — dropped ({reason})"
+                                ),
+                                condition: None,
+                            });
+                            cx.emit(NotifyShareUi);
+                            cx.notify();
+                        });
+                    });
+                }
+                Ok(Err(e)) => {
+                    tracing::error!("[{label}] failed: {e}");
+                    let _ = cx.update_window(window_handle, |_, _window, cx| {
+                        share_state.update(cx, |s, cx| {
+                            s.push_toast(DegradedToast {
+                                kind: DegradedKind::UndoFailed,
+                                shared_tree_id: "undo".into(),
+                                detail: format!("{label}: {e}"),
+                                condition: None,
+                            });
+                            cx.emit(NotifyShareUi);
+                            cx.notify();
+                        });
+                    });
+                }
+                Err(_cancelled) => {
+                    tracing::error!("[{label}] task dropped before responding");
+                    let _ = cx.update_window(window_handle, |_, _window, cx| {
+                        share_state.update(cx, |s, cx| {
+                            s.push_toast(DegradedToast {
+                                kind: DegradedKind::UndoFailed,
+                                shared_tree_id: "undo".into(),
+                                detail: format!("{label}: task dropped before responding"),
+                                condition: None,
+                            });
+                            cx.emit(NotifyShareUi);
+                            cx.notify();
+                        });
+                    });
+                }
+            }
+        })
+        .detach();
+}
+
+pub fn dispatch_undo(
+    session: Arc<FrontendSession>,
+    rt_handle: tokio::runtime::Handle,
+    share_state: Entity<ShareUiState>,
+    window_handle: AnyWindowHandle,
+    async_cx: &AsyncApp,
+) {
+    dispatch_undo_redo(
+        false,
+        session,
+        rt_handle,
+        share_state,
+        window_handle,
+        async_cx,
+    );
+}
+
+pub fn dispatch_redo(
+    session: Arc<FrontendSession>,
+    rt_handle: tokio::runtime::Handle,
+    share_state: Entity<ShareUiState>,
+    window_handle: AnyWindowHandle,
+    async_cx: &AsyncApp,
+) {
+    dispatch_undo_redo(
+        true,
+        session,
+        rt_handle,
+        share_state,
+        window_handle,
+        async_cx,
+    );
+}
+
 // ─── Rendering ──────────────────────────────────────────────────────────────
 
 /// Theme values needed by the overlays.
@@ -430,6 +927,7 @@ pub struct OverlayTheme {
 
 /// Render every overlay (share/accept/quarantine modals + toast stack) for
 /// the current state. Caller stacks these on top of the main content.
+#[allow(clippy::too_many_arguments)]
 pub fn render_overlays(
     state: &ShareUiState,
     share_state: Entity<ShareUiState>,
@@ -438,9 +936,42 @@ pub fn render_overlays(
     rt_handle: tokio::runtime::Handle,
     window_handle: AnyWindowHandle,
     async_cx: AsyncApp,
+    pending_store: Option<Arc<PendingWriteStore>>,
     theme: OverlayTheme,
 ) -> Vec<AnyElement> {
     let mut overlays: Vec<AnyElement> = Vec::new();
+
+    // Pending connector-write approval panel (leases/read-write ruling, inc 4c).
+    // Built first, from clones, so the modal branches below can still consume
+    // `session`/`async_cx`/`share_state` by value. Rendered last (pushed at the
+    // end) so it sits above content. Shows writes awaiting confirmation and
+    // disclosed outcome-unknown entries; both must be visible.
+    let pending_panel: Option<AnyElement> = pending_store.as_ref().and_then(|store| {
+        let rows: Vec<PendingWriteView> = store
+            .list()
+            .into_iter()
+            .filter(|r| {
+                matches!(
+                    r.state,
+                    PendingState::AwaitingConfirmation | PendingState::OutcomeUnknown { .. }
+                )
+            })
+            .collect();
+        if rows.is_empty() {
+            None
+        } else {
+            Some(render_pending_writes_panel(
+                rows,
+                session.clone(),
+                store.clone(),
+                rt_handle.clone(),
+                window_handle,
+                async_cx.clone(),
+                share_state.clone(),
+                theme,
+            ))
+        }
+    });
 
     if let Some(ticket) = &state.share_modal {
         overlays.push(render_share_modal(ticket, share_state.clone(), theme));
@@ -475,7 +1006,120 @@ pub fn render_overlays(
         overlays.push(render_toast_stack(&state.toasts, share_state, theme));
     }
 
+    if let Some(panel) = pending_panel {
+        overlays.push(panel);
+    }
+
     overlays
+}
+
+/// Render the pending connector-write approval panel (leases/read-write ruling,
+/// increment 4c). One card per `AwaitingConfirmation` intent (with an Approve
+/// button that re-dispatches through the chokepoint) and per `OutcomeUnknown`
+/// intent (disclosed, no auto-retry — the human verifies on the remote).
+#[allow(clippy::too_many_arguments)]
+fn render_pending_writes_panel(
+    rows: Vec<PendingWriteView>,
+    session: Arc<FrontendSession>,
+    store: Arc<PendingWriteStore>,
+    rt_handle: tokio::runtime::Handle,
+    window_handle: AnyWindowHandle,
+    async_cx: AsyncApp,
+    share_state: Entity<ShareUiState>,
+    theme: OverlayTheme,
+) -> AnyElement {
+    let mut panel = div()
+        .id("pending-writes-panel")
+        .absolute()
+        .top(px(16.0))
+        .right(px(16.0))
+        .flex()
+        .flex_col()
+        .gap_2()
+        .min_w(px(300.0))
+        .max_w(px(420.0));
+
+    panel = panel.child(
+        div()
+            .text_size(px(12.0))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(theme.fg)
+            .child(format!("Connector writes ({})", rows.len())),
+    );
+
+    for row in rows {
+        let awaiting = matches!(row.state, PendingState::AwaitingConfirmation);
+        let (bar, title) = if awaiting {
+            (gpui::rgba(0xfbbf24ff), "Awaiting approval")
+        } else {
+            (gpui::rgba(0xef4444ff), "Outcome unknown — verify on remote")
+        };
+        let detail = match &row.state {
+            PendingState::OutcomeUnknown { detail } => {
+                format!("{} · {} · {}", row.display, row.tool, detail)
+            }
+            _ => format!("{} · {} · {}", row.display, row.tool, row.connector),
+        };
+
+        let mut card = div()
+            .id(SharedString::from(format!("pending-{}", row.intent_key)))
+            .px_3()
+            .py_2()
+            .rounded(px(6.0))
+            .bg(theme.bg)
+            .border_l_4()
+            .border_1()
+            .border_color(bar)
+            .text_color(theme.fg)
+            .text_size(px(12.0))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(bar)
+                    .child(title),
+            )
+            .child(div().text_color(theme.muted_fg).child(detail));
+
+        if awaiting {
+            let session = session.clone();
+            let store = store.clone();
+            let rt_handle = rt_handle.clone();
+            let share_state = share_state.clone();
+            let async_cx = async_cx.clone();
+            let key = row.intent_key.clone();
+            card = card.child(
+                div()
+                    .id(SharedString::from(format!("approve-{}", row.intent_key)))
+                    .mt_1()
+                    .px_3()
+                    .py_1()
+                    .rounded(px(6.0))
+                    .bg(gpui::rgba(0x22c55eff))
+                    .text_color(gpui::rgba(0x000000cc))
+                    .cursor_pointer()
+                    .w(px(96.0))
+                    .child("Approve")
+                    .on_mouse_down(MouseButton::Left, move |_, _, _| {
+                        dispatch_approve(
+                            session.clone(),
+                            store.clone(),
+                            rt_handle.clone(),
+                            share_state.clone(),
+                            window_handle,
+                            &async_cx,
+                            key.clone(),
+                        );
+                    }),
+            );
+        }
+
+        panel = panel.child(card);
+    }
+
+    panel.into_any_element()
 }
 
 fn overlay_backdrop(id: &str) -> Stateful<gpui::Div> {
@@ -489,12 +1133,19 @@ fn overlay_backdrop(id: &str) -> Stateful<gpui::Div> {
         .flex()
         .items_center()
         .justify_center()
+        // Inset so the capped-width panel keeps a margin on narrow (phone)
+        // viewports instead of running off both screen edges.
+        .p(px(16.0))
 }
 
 fn modal_panel(id: &str, width: f32, theme: OverlayTheme) -> Stateful<gpui::Div> {
     div()
         .id(SharedString::from(format!("{id}-panel")))
-        .w(px(width))
+        // `width` is a MAX, not a demand: on a phone (~402pt) the panel becomes
+        // a full-width card; on desktop it caps at `width`. Fixes the accept/
+        // share/quarantine/error dialogs overflowing the mobile viewport.
+        .w_full()
+        .max_w(px(width))
         .max_h(px(720.0))
         .overflow_y_scroll()
         .bg(theme.bg)
@@ -618,6 +1269,7 @@ fn render_share_modal(
                                             kind: DegradedKind::Info,
                                             shared_tree_id: "ui".into(),
                                             detail: "Ticket copied to clipboard".into(),
+                                            condition: None,
                                         });
                                         cx.emit(NotifyShareUi);
                                         cx.notify();
@@ -911,8 +1563,51 @@ fn render_toast_stack(
             }
             DegradedKind::ForeignIdCollision => (
                 gpui::rgba(0xef4444ff),
-                "⛔",
+                crate::icon("⛔"),
                 "Blocked shared write (id collision)",
+            ),
+            DegradedKind::OrgIngestFailed => (
+                gpui::rgba(0xef4444ff),
+                "⚠",
+                "File sync degraded (bad org file)",
+            ),
+            DegradedKind::UndoFailed => (
+                gpui::rgba(0xef4444ff),
+                crate::icon("⛔"),
+                "Undo/redo failed",
+            ),
+            DegradedKind::CommandFailed => {
+                (gpui::rgba(0xef4444ff), crate::icon("⛔"), "Command failed")
+            }
+            DegradedKind::PreferenceSaveFailed => (
+                gpui::rgba(0xef4444ff),
+                crate::icon("⛔"),
+                "Preference not saved",
+            ),
+            DegradedKind::ConnectorWritePending => (
+                gpui::rgba(0xfbbf24ff),
+                "⚠",
+                "Connector write needs approval",
+            ),
+            DegradedKind::ConnectorWriteOutcomeUnknown => (
+                gpui::rgba(0xef4444ff),
+                crate::icon("⛔"),
+                "Connector write outcome unknown",
+            ),
+            DegradedKind::SharedSubtreeNotMaterialized => (
+                gpui::rgba(0xfbbf24ff),
+                "⚠",
+                "Shared edit saved — org file pending",
+            ),
+            DegradedKind::IntegrationConnectFailed => (
+                gpui::rgba(0xef4444ff),
+                crate::icon("⛔"),
+                "Integration unavailable",
+            ),
+            DegradedKind::IntegrationNeedsAuth => (
+                gpui::rgba(0xef4444ff),
+                crate::icon("⛔"),
+                "Integration needs authorization",
             ),
             DegradedKind::Info => (gpui::rgba(0x60a5faff), "i", "Info"),
         };
@@ -1057,6 +1752,148 @@ mod tests {
         });
         assert_eq!(s.toasts.len(), 1);
         assert_eq!(s.toasts[0].kind, DegradedKind::RehydrationFailed);
+    }
+
+    /// `dispatch_undo`/`dispatch_redo` (below) route a genuine engine `Err`
+    /// through exactly this `push_toast` call — this pins the toast-kind
+    /// plumbing on its own (undo/redo never gets a `ShareDegraded` broadcast
+    /// event, so it can't go through `apply_degraded` like the other kinds).
+    #[test]
+    fn undo_failed_toast_is_pushed_and_bounded_like_other_kinds() {
+        let mut s = ShareUiState::new();
+        s.push_toast(DegradedToast {
+            kind: DegradedKind::UndoFailed,
+            shared_tree_id: "undo".into(),
+            detail: "undo: this operation requires an operation engine, which is not wired in \
+                     this (no-Turso) session"
+                .into(),
+            condition: None,
+        });
+        assert_eq!(s.toasts.len(), 1);
+        assert_eq!(s.toasts[0].kind, DegradedKind::UndoFailed);
+        assert!(s.toasts[0].detail.contains("operation engine"));
+    }
+
+    #[test]
+    fn apply_degraded_routes_integration_connect_failed_to_toast() {
+        let mut s = ShareUiState::new();
+        s.apply_degraded(ShareDegraded {
+            shared_tree_id: "todoist".into(),
+            reason: ShareDegradedReason::IntegrationConnectFailed {
+                integration: "todoist".into(),
+                error: "No such file or directory (os error 2)".into(),
+            },
+        });
+        assert_eq!(s.toasts.len(), 1);
+        assert_eq!(s.toasts[0].kind, DegradedKind::IntegrationConnectFailed);
+        assert!(
+            s.toasts[0].detail.contains("todoist"),
+            "detail must name the integration: {}",
+            s.toasts[0].detail
+        );
+        assert!(
+            s.toasts[0].detail.contains("os error 2"),
+            "detail must carry the connect error: {}",
+            s.toasts[0].detail
+        );
+        assert!(s.quarantines.is_empty());
+    }
+
+    /// The boot seam: the bus raises integration conditions during boot DI, so
+    /// the window's bridge learns them from the subscription's replayed
+    /// `current` — that replay must render a toast just like a live event.
+    #[test]
+    fn replayed_boot_condition_renders_a_toast() {
+        let bus = holon::sync::DegradedSignalBus::new();
+        bus.emit(ShareDegraded {
+            shared_tree_id: "todoist".into(),
+            reason: ShareDegradedReason::IntegrationConnectFailed {
+                integration: "todoist".into(),
+                error: "No such file or directory (os error 2)".into(),
+            },
+        });
+
+        let mut s = ShareUiState::new();
+        for event in bus.subscribe().current {
+            s.apply_degraded(event);
+        }
+
+        assert_eq!(s.toasts.len(), 1);
+        assert_eq!(s.toasts[0].kind, DegradedKind::IntegrationConnectFailed);
+        assert!(s.toasts[0].detail.contains("todoist"));
+    }
+
+    /// `subscribe` may deliver a condition twice (replayed `current` + a live
+    /// `Raised` racing it). That must upsert, not stack two banners.
+    #[test]
+    fn replayed_then_live_duplicate_yields_one_toast() {
+        let event = ShareDegraded {
+            shared_tree_id: "todoist".into(),
+            reason: ShareDegradedReason::IntegrationConnectFailed {
+                integration: "todoist".into(),
+                error: "os error 2".into(),
+            },
+        };
+        let mut s = ShareUiState::new();
+        s.apply_degraded(event.clone());
+        s.apply_degraded(event);
+        assert_eq!(s.toasts.len(), 1);
+    }
+
+    #[test]
+    fn cleared_condition_removes_its_toast() {
+        let mut s = ShareUiState::new();
+        s.apply_degraded(ShareDegraded {
+            shared_tree_id: "todoist".into(),
+            reason: ShareDegradedReason::IntegrationConnectFailed {
+                integration: "todoist".into(),
+                error: "os error 2".into(),
+            },
+        });
+        // A transient toast alongside it must survive the clear.
+        s.apply_degraded(ShareDegraded {
+            shared_tree_id: "share".into(),
+            reason: ShareDegradedReason::SnapshotSaveFailed("disk full".into()),
+        });
+        assert_eq!(s.toasts.len(), 2);
+
+        s.apply_degraded_cleared(&DegradedConditionKey {
+            subject: "todoist".into(),
+            kind: "integration-connect-failed",
+        });
+        assert_eq!(s.toasts.len(), 1);
+        assert_eq!(s.toasts[0].kind, DegradedKind::SnapshotSaveFailed);
+    }
+
+    /// The toast body truncates `detail` at 80 chars, so the integration name
+    /// must come first or a long error hides it.
+    #[test]
+    fn integration_connect_failed_detail_leads_with_the_integration_name() {
+        let mut s = ShareUiState::new();
+        s.apply_degraded(ShareDegraded {
+            shared_tree_id: "todoist".into(),
+            reason: ShareDegradedReason::IntegrationConnectFailed {
+                integration: "todoist".into(),
+                error: "x".repeat(200),
+            },
+        });
+        assert!(s.toasts[0].detail[..80].contains("todoist"));
+    }
+
+    #[test]
+    fn apply_degraded_routes_integration_needs_auth_to_toast() {
+        let mut s = ShareUiState::new();
+        s.apply_degraded(ShareDegraded {
+            shared_tree_id: "linear".into(),
+            reason: ShareDegradedReason::IntegrationNeedsAuth {
+                integration: "linear".into(),
+                auth_url: "https://linear.app/oauth/authorize?x=1".into(),
+            },
+        });
+        assert_eq!(s.toasts.len(), 1);
+        assert_eq!(s.toasts[0].kind, DegradedKind::IntegrationNeedsAuth);
+        assert!(s.toasts[0].detail.contains("linear"));
+        assert!(s.toasts[0].detail.contains("https://linear.app/oauth"));
     }
 
     #[test]

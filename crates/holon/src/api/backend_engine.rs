@@ -67,6 +67,26 @@ pub struct BackendEngine {
         Arc<std::sync::RwLock<crate::storage::graph_schema::GraphSchemaRegistry>>,
     /// Cached GQL graph schema, rebuilt from registry on mutation.
     graph_schema_cache: Arc<std::sync::RwLock<gql_transform::resolver::GraphSchema>>,
+    /// Advice-rule compilation/runtime status (ADR 0022). Written by the advice
+    /// reconciler task, read by the UI watcher so a broken rule renders its
+    /// error in place. Empty until an advice reconciler is installed (see
+    /// `create_initialized_engine`).
+    advice_status: holon_advice::AdviceRuleStatusHandle,
+    /// Reactive-rule (ADR 0024 WP3) compilation/runtime status. Written by the
+    /// action watcher (deprecation / parse / compile / exec outcomes), read by
+    /// the render path and MCP so a broken or deprecated rule surfaces its
+    /// error in place. Empty until action watchers run.
+    rule_status: crate::api::rule_status::RuleStatusHandle,
+    /// Keeps the advice reconciler's background tasks alive (mirrors how the
+    /// profile watcher / `advice reconciler` stay alive by being held on
+    /// the engine). `None` in configs that never install one (tests,
+    /// no-advice sessions).
+    _advice_reconciler: Option<Arc<crate::sync::AdviceReconcilerHandle>>,
+    /// Keeps the clock scheduler's ticking task alive (ADR 0024 P5,
+    /// time-as-data). `None` until installed in
+    /// `create_initialized_engine`; the boot guard there fails loud if it
+    /// stays `None`.
+    _clock_scheduler: Option<Arc<crate::sync::clock_scheduler::ClockSchedulerHandle>>,
 }
 
 impl BackendEngine {
@@ -88,7 +108,19 @@ impl BackendEngine {
         let ddl_mutex = Arc::new(tokio::sync::Mutex::new(()));
         let matview_manager = crate::sync::MatviewManager::new(db_handle.clone(), ddl_mutex);
         let graph_schema = graph_schema_registry.clone().build();
-        let op_engine = DispatchingOperationEngine::new(dispatcher.clone());
+        // Wire the op/effect history relation (C2b): a Turso-backed, disclosed
+        // ephemeral cache over this engine's db handle. The store computes its
+        // own honest rebuild fidelity (`HistoryFidelity::Partial`) — no caller
+        // asserts it. Org-standalone (no-Turso) wirings get
+        // `DegradedHistoryStore` instead.
+        let history = Arc::new(crate::api::history_store::TursoHistoryStore::new(
+            db_handle.clone(),
+        ));
+        let op_engine = DispatchingOperationEngine::new(dispatcher.clone())
+            .with_history_store(history)
+            .with_template_source(Arc::new(
+                crate::api::template_source::TursoTemplateSource::new(db_handle.clone()),
+            ));
         Ok(Self {
             db_handle,
             dispatcher,
@@ -99,7 +131,45 @@ impl BackendEngine {
             sql_transformers,
             graph_schema_registry: Arc::new(std::sync::RwLock::new(graph_schema_registry)),
             graph_schema_cache: Arc::new(std::sync::RwLock::new(graph_schema)),
+            advice_status: holon_advice::AdviceRuleStatusHandle::new(),
+            rule_status: crate::api::rule_status::RuleStatusHandle::new(),
+            _advice_reconciler: None,
+            _clock_scheduler: None,
         })
+    }
+
+    /// The reactive-rule status map (ADR 0024 WP3) — the action watcher writes
+    /// deprecation / parse / compile / exec outcomes; the render path reads it.
+    pub fn rule_status(&self) -> &crate::api::rule_status::RuleStatusHandle {
+        &self.rule_status
+    }
+
+    /// The advice-rule status map (ADR 0022) — read by the UI watcher to
+    /// replace a broken rule block's render with its error.
+    pub fn advice_status(&self) -> &holon_advice::AdviceRuleStatusHandle {
+        &self.advice_status
+    }
+
+    /// Install the advice reconciler: share the status handle the reconciler
+    /// writes to and hold its keep-alive handle. Called once during engine
+    /// initialization.
+    pub fn install_advice_reconciler(
+        &mut self,
+        status: holon_advice::AdviceRuleStatusHandle,
+        handle: crate::sync::AdviceReconcilerHandle,
+    ) {
+        self.advice_status = status;
+        self._advice_reconciler = Some(Arc::new(handle));
+    }
+
+    /// Install the clock scheduler (ADR 0024 P5): hold its keep-alive handle so
+    /// the day-rollover ticking task survives. Called once during engine
+    /// initialization.
+    pub fn install_clock_scheduler(
+        &mut self,
+        handle: crate::sync::clock_scheduler::ClockSchedulerHandle,
+    ) {
+        self._clock_scheduler = Some(Arc::new(handle));
     }
 
     /// Apply all registered SQL-level transformers to a SQL string.
@@ -190,6 +260,19 @@ impl BackendEngine {
         BlockDomain::new(self)
     }
 
+    /// Local, non-syncing UI state (the `local_ui_state` table). Per-device
+    /// view choices live here, never on replicated block tables (ADR 0025);
+    /// slot queries COALESCE these overrides over the synced choice. Lost on
+    /// DB rebuild — disclosed (C2b ephemeral-cache doctrine).
+    pub fn local_state(&self) -> crate::storage::local_state::LocalStateStore {
+        crate::storage::local_state::LocalStateStore::new(self.db_handle.clone())
+    }
+
+    /// Ensure the local-UI-state table exists. Called once during DI init.
+    pub async fn ensure_local_state(&self) -> Result<()> {
+        crate::storage::local_state::ensure_local_ui_state(&self.db_handle).await
+    }
+
     /// Pre-create materialized views for the given SQL queries.
     ///
     /// This should be called during initialization, BEFORE any data loading or
@@ -228,6 +311,24 @@ impl BackendEngine {
         Ok(self.apply_sql_transforms(&raw_sql))
     }
 
+    /// The rendered sort-key spec (`col` / `-col`) implied by the query's
+    /// trailing `ORDER BY`, or `None` when it declares no order.
+    ///
+    /// Only derivable here: the matview body cannot carry the clause (Turso
+    /// IVM rejects a Sort node) and the frontend never sees compiled SQL.
+    /// Context/parameter binding is irrelevant — an `ORDER BY` term is a
+    /// column, never a placeholder.
+    pub fn query_ordering_spec(
+        &self,
+        query: &str,
+        language: QueryLanguage,
+    ) -> Result<Option<String>> {
+        let sql = self.compile_to_sql(query, language)?;
+        Ok(crate::sync::trailing_order_by(&sql)
+            .as_deref()
+            .and_then(crate::sync::order_by_sort_spec))
+    }
+
     /// Compile a PRQL query to raw SQL (no transforms applied).
     fn compile_prql_to_raw_sql(&self, prql: &str) -> Result<String> {
         let full_prql = format!("{}\n{}", PRQL_STDLIB, prql);
@@ -257,6 +358,8 @@ impl BackendEngine {
             .graph_schema_cache
             .read()
             .expect("graph_schema_cache poisoned");
+        crate::storage::graph_schema::validate_referenced_edges(&schema, &query)
+            .map_err(|e| anyhow::anyhow!("GQL edge validation error: {e}"))?;
         let sql = gql_transform::transform(&query, &schema)
             .map_err(|e| anyhow::anyhow!("GQL transform error: {:?}", e))?;
         Ok(Self::gql_params_to_dollar(&sql))
@@ -524,6 +627,14 @@ impl BackendEngine {
         let view_name = self.matview_manager.ensure_view(&sql_with_params).await?;
         let cdc_stream = self.matview_manager.subscribe_cdc(&view_name).await?;
 
+        // The snapshot read deliberately does NOT re-apply the ORDER BY that
+        // `ensure_view` stripped. Its row order becomes the order of the
+        // initial `Created` events on the CDC stream, and that arrival order is
+        // load-bearing downstream: re-applying the clause here breaks the left
+        // sidebar's nested live_block watch, which then never streams its
+        // selectable (keystone `inv` SutFocusWrite::apply_navigate_focus).
+        // Honouring a query's declared order is the render layer's job, over a
+        // flat collection, not the stream's.
         let mut data = None;
         for attempt in 0..10 {
             match self.matview_manager.query_view(&view_name).await {
@@ -534,7 +645,8 @@ impl BackendEngine {
                 Err(e) => {
                     let err_str = format!("{:?}", e);
                     let is_retryable = err_str.contains("no such table")
-                        || err_str.contains("Database schema changed");
+                        || err_str.contains("Database schema changed")
+                        || err_str.contains("database is locked");
                     if is_retryable && attempt < 9 {
                         tracing::debug!(
                             "[query_and_watch] Retryable error (attempt {}): {}",
@@ -656,7 +768,8 @@ impl BackendEngine {
         entity_name: &EntityName,
         op_name: &str,
         params: StorageEntity,
-    ) -> Result<Option<Value>> {
+        origin: holon_api::OpOrigin,
+    ) -> Result<holon_api::OpOutcome> {
         use tracing::Instrument;
         use tracing::info;
 
@@ -666,31 +779,133 @@ impl BackendEngine {
             tracing::Level::INFO,
             "backend.execute_operation",
             "operation.entity" = entity_name.to_string(),
-            "operation.name" = op_name
+            "operation.name" = op_name,
+            "operation.origin" = origin.tag()
         );
 
         async {
             info!(
-                "[BackendEngine] execute_operation: entity={}, op={}, params={:?}",
-                entity_name, op_name, params
+                "[BackendEngine] execute_operation: entity={}, op={}, origin={}, params={:?}",
+                entity_name,
+                op_name,
+                origin.tag(),
+                params
             );
 
             // Dispatch + undo-stack bookkeeping live in the shared op engine
             // (over the same dispatcher). Span context propagates via the
             // tracing-opentelemetry bridge.
             self.op_engine
-                .execute_operation(entity_name, op_name, params)
+                .execute_operation(entity_name, op_name, params, origin)
                 .await
         }
         .instrument(span)
         .await
     }
 
+    /// Replace the in-memory undo engine with a persistent one backed by the
+    /// replica DB: the `undo_log` snapshot table plus a live-state reader for
+    /// precondition (staleness) verification. Called once during DI init while
+    /// the engine is still owned (before it is shared behind `Arc`).
+    pub async fn enable_undo_persistence(&mut self) -> Result<()> {
+        use crate::api::undo_persistence::SqlUndoStateReader;
+        use crate::api::undo_persistence::SqlUndoStore;
+        use crate::api::undo_persistence::ensure_undo_log;
+        ensure_undo_log(&self.db_handle).await?;
+        let reader = Arc::new(SqlUndoStateReader::new(
+            self.db_handle.clone(),
+            crate::storage::BLOCK_WRITE_TABLE,
+        ));
+        let store = Arc::new(SqlUndoStore::new(self.db_handle.clone()));
+        let history = Arc::new(crate::api::history_store::TursoHistoryStore::new(
+            self.db_handle.clone(),
+        ));
+        self.op_engine = crate::api::operation_engine::DispatchingOperationEngine::new_persistent(
+            self.dispatcher.clone(),
+            reader,
+            store,
+        )
+        .await?
+        .with_history_store(history)
+        .with_template_source(Arc::new(
+            crate::api::template_source::TursoTemplateSource::new(self.db_handle.clone()),
+        ));
+        Ok(())
+    }
+
+    /// Follow `id` through the merge redirects to the identity that currently
+    /// holds it. An id nobody merged away resolves to itself, so every caller
+    /// can route through this unconditionally.
+    ///
+    /// This is the ONE resolution seam: a lookup that misses consults
+    /// `block_redirects` here rather than each reader re-implementing the
+    /// chain walk. Fails loud on a cycle instead of spinning — `merge_blocks`
+    /// refuses to create one, so reaching it means the table was corrupted.
+    pub async fn resolve_block_id(
+        &self,
+        id: &holon_api::EntityUri,
+    ) -> Result<holon_api::EntityUri> {
+        let mut current = id.to_string();
+        let mut chain = vec![current.clone()];
+        loop {
+            let mut params = std::collections::HashMap::new();
+            params.insert("from_id".to_string(), Value::String(current.clone()));
+            let rows = self
+                .db_handle
+                .query(
+                    "SELECT to_id FROM block_redirects WHERE from_id = $from_id",
+                    params,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("resolve_block_id({id}): {e}"))?;
+            let Some(next) = rows
+                .first()
+                .and_then(|r| r.get("to_id"))
+                .and_then(|v| v.as_string())
+                .map(str::to_string)
+            else {
+                break;
+            };
+            if chain.contains(&next) {
+                anyhow::bail!(
+                    "block_redirects holds a cycle reached from {id}: {} -> {next}",
+                    chain.join(" -> ")
+                );
+            }
+            chain.push(next.clone());
+            current = next;
+        }
+
+        // A redirect whose terminal no longer exists (the survivor was deleted
+        // after the merge) must NOT come back as if it named a live block —
+        // that is the silent-wrong-answer case. Disclose the whole chain so the
+        // stranding is obvious. Only checked when a redirect was actually
+        // followed; an unmerged id missing is the caller's own lookup to miss.
+        if chain.len() > 1 {
+            let mut params = std::collections::HashMap::new();
+            params.insert("id".to_string(), Value::String(current.clone()));
+            let rows = self
+                .db_handle
+                .query("SELECT id FROM block_raw WHERE id = $id", params)
+                .await
+                .map_err(|e| anyhow::anyhow!("resolve_block_id({id}) terminal check: {e}"))?;
+            if rows.is_empty() {
+                anyhow::bail!(
+                    "merge redirect {} ends at '{current}', which no longer exists — the merge \
+                     survivor was deleted, stranding every id merged into it",
+                    chain.join(" -> ")
+                );
+            }
+        }
+        // ALLOW(entity_uri_from_raw): id read back from a block_redirects row
+        Ok(holon_api::EntityUri::from_raw(&current))
+    }
+
     /// Undo the last operation.
     ///
     /// Delegates to the shared op engine. Returns true if an operation was
     /// undone, false if the undo stack is empty.
-    pub async fn undo(&self) -> Result<bool> {
+    pub async fn undo(&self) -> Result<holon_api::UndoOutcome> {
         self.op_engine.undo().await
     }
 
@@ -698,7 +913,7 @@ impl BackendEngine {
     ///
     /// Delegates to the shared op engine. Returns true if an operation was
     /// redone, false if the redo stack is empty.
-    pub async fn redo(&self) -> Result<bool> {
+    pub async fn redo(&self) -> Result<holon_api::UndoOutcome> {
         self.op_engine.redo().await
     }
 
@@ -710,6 +925,27 @@ impl BackendEngine {
     /// Check if redo is available
     pub async fn can_redo(&self) -> bool {
         self.op_engine.can_redo().await
+    }
+
+    /// Open a composite-undo group (Inc1): buffer subsequent User-origin ops
+    /// into ONE undo entry until [`end_undo_group`](Self::end_undo_group).
+    /// Delegates to the shared op engine. See
+    /// [`DispatchingOperationEngine::begin_undo_group`].
+    pub async fn begin_undo_group(&self) {
+        self.op_engine.begin_undo_group().await
+    }
+
+    /// Close the innermost composite-undo group, materializing the buffered
+    /// sub-ops into one composite entry. Delegates to the shared op engine.
+    pub async fn end_undo_group(&self) -> Result<()> {
+        self.op_engine.end_undo_group().await
+    }
+
+    /// Test-only: push a hand-crafted [`holon_core::UndoEntry`] onto the shared
+    /// engine's stack to exercise composite-inverse replay paths.
+    #[cfg(test)]
+    pub(crate) async fn push_undo_entry_for_test(&self, entry: holon_core::UndoEntry) {
+        self.op_engine.push_undo_entry_for_test(entry).await;
     }
 
     /// Register a custom OperationProvider
@@ -861,6 +1097,44 @@ mod tests {
         let sql = result.unwrap();
         assert!(sql.to_uppercase().contains("SELECT"));
         assert!(sql.to_uppercase().contains("FROM"));
+    }
+
+    /// The frontend never sees compiled SQL, so a `sort {-x}` sidecar's order
+    /// can only reach the rendered collection through this derivation.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ordering_spec_carries_a_prql_sort_to_the_render_layer() {
+        let engine = create_test_engine().await.unwrap();
+
+        assert_eq!(
+            engine
+                .query_ordering_spec(
+                    "from block | select {id, content} | sort {-content}",
+                    QueryLanguage::HolonPrql
+                )
+                .expect("PRQL compile")
+                .as_deref(),
+            Some("-content")
+        );
+        assert_eq!(
+            engine
+                .query_ordering_spec(
+                    "from block | select {id, content} | sort content",
+                    QueryLanguage::HolonPrql
+                )
+                .expect("PRQL compile")
+                .as_deref(),
+            Some("content")
+        );
+        assert_eq!(
+            engine
+                .query_ordering_spec(
+                    "from block | select {id, content}",
+                    QueryLanguage::HolonPrql
+                )
+                .expect("PRQL compile"),
+            None,
+            "a query that declares no order must not impose one"
+        );
     }
 
     /// Validates the H1 hypothesis from HANDOFF_DATA_CDC_SCOPE_LEAK.md:
@@ -1105,7 +1379,12 @@ mod tests {
         params.insert("value".into(), Value::Boolean(true));
 
         let result = engine
-            .execute_operation(&EntityName::new("test_item"), "set_field", params)
+            .execute_operation(
+                &EntityName::new("test_item"),
+                "set_field",
+                params,
+                holon_api::OpOrigin::User,
+            )
             .await;
         assert!(result.is_ok(), "Operation should succeed: {:?}", result);
 
@@ -1138,6 +1417,7 @@ mod tests {
                 &EntityName::Named("block".to_string()),
                 "nonexistent",
                 params,
+                holon_api::OpOrigin::User,
             )
             .await;
 

@@ -14,11 +14,20 @@ pub enum InputTrigger {
     /// `at_line_start: true` restricts to column 0 (e.g., `/` for slash
     /// commands). `at_line_start: false` matches anywhere (e.g., `[[` for
     /// doc links, `@` for mentions).
+    ///
+    /// `word_boundary: true` (only meaningful with `at_line_start: false`)
+    /// additionally requires the matched prefix to sit at a word boundary —
+    /// line start, or immediately after whitespace. This is what keeps `/` in
+    /// a URL (`https://example.com/path`) from firing the command menu, while
+    /// still allowing Logseq-style `text /cmd`. `[[` and `@` deliberately leave
+    /// this `false`: mid-word `[[foo` / `a@b` are legitimate triggers.
     TextPrefix {
         prefix: String,
         action: String,
         #[serde(default)]
         at_line_start: bool,
+        #[serde(default)]
+        word_boundary: bool,
     },
 }
 
@@ -67,6 +76,7 @@ pub(crate) fn check_triggers(
                 prefix,
                 action,
                 at_line_start,
+                word_boundary,
             } => {
                 if *at_line_start {
                     if current_line.starts_with(prefix.as_str()) && cursor_byte >= prefix.len() {
@@ -80,6 +90,16 @@ pub(crate) fn check_triggers(
                     let end = cursor_byte.min(current_line.len());
                     let text_before_cursor = &current_line[..end];
                     if let Some(pos) = text_before_cursor.rfind(prefix.as_str()) {
+                        // Word-boundary gate (e.g. `/`): the prefix only counts
+                        // at line start or right after whitespace. Kills the
+                        // whole URL class (`/` after `s`/`:`/`.`/`/`) while
+                        // preserving `text /cmd` and line-start `/cmd`.
+                        if *word_boundary && pos > 0 {
+                            let prev = current_line[..pos].chars().next_back().unwrap();
+                            if !prev.is_whitespace() {
+                                continue;
+                            }
+                        }
                         let after_prefix = pos + prefix.len();
                         let between = &current_line[after_prefix..end];
                         // If the link is already closed (]] between prefix and cursor), skip
@@ -119,6 +139,7 @@ pub(crate) fn default_triggers_for_operations(
             prefix: "/".to_string(),
             action: "command_menu".to_string(),
             at_line_start: false,
+            word_boundary: true,
         });
     }
     triggers
@@ -130,6 +151,7 @@ pub fn always_on_triggers() -> Vec<InputTrigger> {
         prefix: "[[".to_string(),
         action: "doc_link".to_string(),
         at_line_start: false,
+        word_boundary: false,
     }]
 }
 
@@ -142,6 +164,7 @@ mod tests {
             prefix: "/".to_string(),
             action: "command_menu".to_string(),
             at_line_start: true,
+            word_boundary: false,
         }
     }
 
@@ -150,6 +173,7 @@ mod tests {
             prefix: "[[".to_string(),
             action: "doc_link".to_string(),
             at_line_start: false,
+            word_boundary: false,
         }
     }
 
@@ -158,6 +182,7 @@ mod tests {
             prefix: "@".to_string(),
             action: "mention".to_string(),
             at_line_start: false,
+            word_boundary: false,
         }
     }
 
@@ -274,6 +299,65 @@ mod tests {
         }
     }
 
+    // A mid-line slash trigger, exactly as `default_triggers_for_operations`
+    // wires it (at_line_start: false, word-boundary gated for URL safety).
+    fn slash_midline_trigger() -> InputTrigger {
+        InputTrigger::TextPrefix {
+            prefix: "/".to_string(),
+            action: "command_menu".to_string(),
+            at_line_start: false,
+            word_boundary: true,
+        }
+    }
+
+    #[test]
+    fn url_slash_does_not_trigger() {
+        // `https://example.com/path` — every `/` is preceded by a non-space
+        // char (`:`, `/`, `m`), so no `/` is at a word boundary. The permanent
+        // "Type to search…" popup bug: without the guard the trailing
+        // `/path` fired command_menu and never dismissed.
+        let triggers = vec![slash_midline_trigger()];
+        assert!(check_triggers(&triggers, "https://example.com/path", 24).is_none());
+    }
+
+    #[test]
+    fn slash_after_space_triggers() {
+        // Logseq-style "text /cmd": slash after whitespace opens the menu.
+        let triggers = vec![slash_midline_trigger()];
+        let event = check_triggers(&triggers, "foo /de", 7).unwrap();
+        match event {
+            ViewEvent::TriggerFired {
+                action,
+                filter_text,
+                prefix_start,
+                ..
+            } => {
+                assert_eq!(action, "command_menu");
+                assert_eq!(filter_text, "de");
+                assert_eq!(prefix_start, 4);
+            }
+            _ => panic!("expected TriggerFired"),
+        }
+    }
+
+    #[test]
+    fn slash_at_line_start_midline_triggers() {
+        // `/cmd` at column 0 of the line still fires (pos == 0 is a boundary).
+        let triggers = vec![slash_midline_trigger()];
+        let event = check_triggers(&triggers, "/cmd", 4).unwrap();
+        match event {
+            ViewEvent::TriggerFired { filter_text, .. } => assert_eq!(filter_text, "cmd"),
+            _ => panic!("expected TriggerFired"),
+        }
+    }
+
+    #[test]
+    fn slash_no_space_before_does_not_trigger() {
+        // `foo/bar` — slash glued to a word, not a command trigger.
+        let triggers = vec![slash_midline_trigger()];
+        assert!(check_triggers(&triggers, "foo/bar", 7).is_none());
+    }
+
     #[test]
     fn default_triggers_include_link_always() {
         // Even with no operations, [[ trigger is present
@@ -298,7 +382,22 @@ mod tests {
                 entity_short_name: "block".into(),
                 name: "delete".into(),
                 display_name: "Delete".into(),
-                ..Default::default()
+                id_column: "id".to_string(),
+                description: String::new(),
+                required_params: vec![],
+                affected_fields: vec![],
+                param_mappings: vec![],
+                target_scope: holon_api::TargetScope::Block,
+                boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
+                menu_exposure: holon_api::MenuExposure::Listed {
+                    surfaces: holon_api::SurfaceSet {
+                        slash_menu: true,
+                        action_bar: false,
+                    },
+                },
+                trigger: None,
+                bound_params: Default::default(),
+                precondition: None,
             },
         }];
         let triggers = default_triggers_for_operations(&ops);

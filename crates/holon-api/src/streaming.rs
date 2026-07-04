@@ -237,7 +237,8 @@ impl ChangeOrigin {
     ///
     /// flutter_rust_bridge:ignore
     pub fn from_json(json: &str) -> Option<Self> {
-        serde_json::from_str(json).ok() // ALLOW(ok): trace context may be malformed
+        serde_json::from_str(json).ok() // ALLOW(ok): trace context may be
+        // malformed
     }
 }
 

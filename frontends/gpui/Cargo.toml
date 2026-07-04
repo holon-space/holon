@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+# `workspace-hack` is the cargo-hakari feature-unification crate: every
+# member depends on it and no member references it in source, by design.
+[package.metadata.cargo-machete]
+ignored = ["workspace-hack"]
+
 [lib]
 name = "holon_gpui"
 path = "src/lib.rs"
@@ -74,8 +79,11 @@ chrome-trace = [
     "holon-integration-tests?/chrome-trace",
 ]
 heap-profile = ["holon-frontend/heap-profile"]
+# tokio-console async-stall profiler for the live app. Build with
+# RUSTFLAGS="--cfg tokio_unstable" cargo run -p holon-gpui --features tokio-console
+tokio-console = ["holon-frontend/tokio-console", "tokio/tracing"]
 hot-reload = ["dep:subsecond", "dep:dioxus-devtools"]
-pbt = ["dep:holon-integration-tests", "dep:enigo"]
+pbt = ["dep:holon-integration-tests"]
 
 [dependencies]
 # GPUI framework — pinned to same rev as gpui-mobile to ensure single gpui version
@@ -97,27 +105,32 @@ holon-frontend = { workspace = true, features = ["otel"] }
 holon-app.workspace = true
 holon-api.workspace = true
 holon-core.workspace = true
+chrono.workspace = true
+holon-filesystem.workspace = true
+holon-orgmode.workspace = true
 holon-macros.workspace = true
 holon-mcp = { path = "../mcp" }
+holon-oracles.workspace = true
 holon-integration-tests = { path = "../../crates/holon-integration-tests", optional = true }
-enigo = { version = "0.6", optional = true }
 
 # DI
 fluxdi.workspace = true
 
 # Async
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
-tokio-util = "0.7"
 futures.workspace = true
 futures-signals.workspace = true
 async-trait.workspace = true
 
 # Serialization
+serde.workspace = true
 serde_json.workspace = true
-toml.workspace = true
 
 # Error handling
 anyhow.workspace = true
+
+# Per-case reset (Phase 1 Option A): fresh temp org/db/config paths per rebind.
+tempfile = "3"
 
 # Observability
 tracing.workspace = true
@@ -136,7 +149,24 @@ android_logger = "0.13"
 android-activity = { version = "0.6", features = ["native-activity"] }
 log = "0.4"
 
+# iOS-only: route `tracing` to Apple's unified logging (os_log) so that
+# `xcrun simctl log show --predicate 'process == "Holon"'` and Console.app
+# capture Rust `tracing` output. A sim app's stderr is NOT captured by the
+# unified logging system, so the stderr fmt layer alone left every `holon_*`
+# log invisible during on-device debugging. Lightweight: cc build script over a
+# tiny C shim + tracing-core/subscriber, no crypto/network deps.
+[target.'cfg(target_os = "ios")'.dependencies]
+tracing-oslog = "0.3"
+
 [dev-dependencies]
+tempfile = "3"
+# Construct an empty `EnrichedChangeStream` (a `ReceiverStream`) in
+# `tests/support/mod.rs`'s canned `watch_query`, so the seeded main panel's
+# `live_query(...)` builds a real node during interpret instead of an error.
+tokio-stream.workspace = true
+# Parses the embedded DejaVu Sans font in `icon_font_tests` to assert glyph
+# coverage host-side (already in the tree via cosmic-text/fontdb).
+ttf-parser = "0.25"
 holon-integration-tests = { path = "../../crates/holon-integration-tests" }
 holon-layout-testing = { path = "../../crates/holon-layout-testing" }
 holon-pbt-core = { path = "../../crates/holon-pbt-core" }

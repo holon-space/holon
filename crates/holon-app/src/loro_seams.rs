@@ -132,6 +132,17 @@ impl BlockReader for LoroBlockReader {
         Ok(out)
     }
 
+    async fn get_block_authoritative(&self, id: &EntityUri) -> AnyhowResult<Option<Block>> {
+        // The Loro tree is the write authority (no matview/`block_raw` split);
+        // a direct node read is the authoritative O(1) point lookup used by the
+        // org-writeback incremental cache's per-edit refresh.
+        match self.backend.get_block(id.as_str()).await {
+            Ok(block) => Ok(Some(block)),
+            Err(holon_api::ApiError::BlockNotFound { .. }) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     async fn iter_documents_with_blocks(&self) -> AnyhowResult<Vec<(EntityUri, Vec<Block>)>> {
         // The implicit root document: top-level blocks live directly under the
         // tree root (`no_parent`), excluding any Page roots which are returned
@@ -172,6 +183,17 @@ impl BlockReader for LoroBlockReader {
             }
         }
         true
+    }
+
+    /// Synchronous tree — presence-count via the same `get_block` probe.
+    async fn blocks_in_feed_count(&self, block_ids: &[String]) -> usize {
+        let mut present = 0;
+        for id in block_ids {
+            if self.backend.get_block(id).await.is_ok() {
+                present += 1;
+            }
+        }
+        present
     }
 
     // find_foreign_blocks: trait default over iter_documents_with_blocks is
@@ -252,6 +274,13 @@ impl DocumentManager for LoroDocumentManager {
             .await?;
         self.backend
             .set_block_tags(doc.id.as_str(), &doc.tags.to_vec())
+            .await?;
+        // The doc-root's own content carries its pre-first-headline body, which
+        // write-back renders above the first headline. Persisting only
+        // properties+tags here dropped it, so the Loro wiring deleted the root
+        // body from disk on every write-back while the Turso wiring kept it.
+        self.backend
+            .update_block_text(doc.id.as_str(), &doc.content)
             .await?;
         Ok(())
     }
@@ -382,6 +411,7 @@ impl BlockOrdering for LoroBlockOrdering {
         _: &HashMap<String, Value>,
         _: &Tags,
         _: &[EntityUri],
+        _: &[EntityUri],
     ) -> BlockOrderingResult<bool> {
         Ok(false)
     }
@@ -437,6 +467,12 @@ impl BlockOrdering for LoroBlockOrdering {
             Some(v) => Some(parse_string_list(&v).map_err(|e| boxed(format!("'requires': {e}")))?),
             None => None,
         };
+        let advice_suppressed = match params.remove("advice_suppressed") {
+            Some(v) => Some(
+                parse_string_list(&v).map_err(|e| boxed(format!("'advice_suppressed': {e}")))?,
+            ),
+            None => None,
+        };
         // Everything remaining is a property.
         let properties = params;
 
@@ -488,6 +524,22 @@ impl BlockOrdering for LoroBlockOrdering {
                 .collect::<Result<_, _>>()?;
             self.backend
                 .set_block_requires(&id, &requires)
+                .await
+                .map_err(boxed)?;
+        }
+        if let Some(advice_suppressed) = advice_suppressed {
+            let advice_suppressed: Vec<EntityUri> = advice_suppressed
+                .into_iter()
+                .map(|r| {
+                    EntityUri::parse_owned(r).map_err(|e| {
+                        boxed(format!(
+                            "update_in_tree: invalid 'advice_suppressed' URI: {e}"
+                        ))
+                    })
+                })
+                .collect::<Result<_, _>>()?;
+            self.backend
+                .set_block_advice_suppressed(&id, &advice_suppressed)
                 .await
                 .map_err(boxed)?;
         }
@@ -547,11 +599,6 @@ impl BlockOrdering for LoroBlockOrdering {
     fn consolidator(&self) -> Consolidator {
         Consolidator::Store
     }
-
-    /// Loro owns the order key; there is no SQL `sort_key` sink to project to.
-    async fn project_sort_keys(&self, _: &[EntityUri]) -> BlockOrderingResult<()> {
-        Ok(())
-    }
 }
 
 /// `AliasRegistrar` backed by `LoroDocumentStore` — registers and resolves the
@@ -572,6 +619,43 @@ impl AliasRegistrar for LoroAliasRegistrar {
     async fn resolve_alias_to_path(&self, doc_id: &EntityUri) -> Option<PathBuf> {
         let store = self.doc_store.read().await;
         store.resolve_alias_to_path(doc_id.as_str()).await
+    }
+}
+
+/// `ShareWritebackDisclosure` (Inc 1) that forwards a shared-subtree
+/// write-back gap to the `DegradedSignalBus`, so the frontend renders a
+/// degraded banner instead of the edit silently failing to reach disk. Lives
+/// in the wiring crate because it bridges the storage-agnostic port
+/// (holon-filesystem) to the concrete bus (holon-loro/holon).
+pub struct ShareDegradedDisclosure {
+    pub bus: Arc<holon::sync::DegradedSignalBus>,
+}
+
+impl holon_filesystem::ShareWritebackDisclosure for ShareDegradedDisclosure {
+    fn shared_subtree_not_materialized(&self, block_id: &EntityUri, shared_tree_id: &str) {
+        self.bus.emit(holon::sync::ShareDegraded {
+            shared_tree_id: shared_tree_id.to_string(),
+            reason: holon::sync::ShareDegradedReason::SharedSubtreeNotMaterialized(
+                block_id.to_string(),
+            ),
+        });
+    }
+}
+
+/// `MountRegistry` (Inc 3) backed by the global Loro tree's mount nodes — the
+/// authoritative, non-user-authorable signal for "is this id a real shared
+/// subtree mount?". Delegates to `LoroShareBackend::is_registered_mount`.
+pub struct LoroMountRegistry {
+    pub backend: Arc<holon_loro::loro_share_backend::LoroShareBackend>,
+}
+
+#[async_trait]
+impl holon_filesystem::MountRegistry for LoroMountRegistry {
+    async fn is_registered_mount(&self, block_id: &EntityUri) -> anyhow::Result<bool> {
+        self.backend
+            .is_registered_mount(block_id.as_str())
+            .await
+            .map_err(|e| anyhow::anyhow!("mount registry check for {block_id}: {e}"))
     }
 }
 

@@ -1,20 +1,20 @@
 use super::prelude::*;
 
-/// Tappable affordance for a single operation.
-///
-/// Typical caller: `op_button(col("name"))` inside
-/// `row(#{ collection: chain_ops(0), item_template: op_button(col("name")) })`.
-///
-/// Positional arg 0 is the op name; the remaining fields (`target_id`,
-/// `display_name`) are read from the current row produced by `chain_ops` /
-/// `ops_of` — both emit rows with columns `name`, `target_id`,
-/// `display_name`.
-///
-/// GPUI owns the `op_name → icon` mapping (hardcoded table in
-/// `frontends/gpui/src/render/builders/op_button.rs`). The shadow layer
-/// only carries the identity fields the platform tap handler needs to
-/// resolve the full `OperationDescriptor` and call
-/// `BuilderServices::present_op`.
+// Tappable affordance for a single operation.
+//
+// Typical caller: `op_button(col("name"))` inside
+// `row(#{ collection: chain_ops(0), item_template: op_button(col("name")) })`.
+//
+// Positional arg 0 is the op name; the remaining fields (`target_id`,
+// `display_name`) are read from the current row produced by `chain_ops` /
+// `ops_of` — both emit rows with columns `name`, `target_id`,
+// `display_name`.
+//
+// GPUI owns the `op_name → icon` mapping (hardcoded table in
+// `frontends/gpui/src/render/builders/op_button.rs`). The shadow layer
+// only carries the identity fields the platform tap handler needs to
+// resolve the full `OperationDescriptor` and call
+// `BuilderServices::present_op`.
 holon_macros::widget_builder! {
     raw fn op_button(ba: BA<'_>) -> ViewModel {
         let row = ba.ctx.row();

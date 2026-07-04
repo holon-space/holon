@@ -1,5 +1,9 @@
 //! The SUT components of the memory-wide slice. Each is a [`CapProvider`] that
 //! contributes one or more capabilities to a composed `CapMap`.
+//!
+//! @pbt kind sut-arm
+//! @pbt covers memory-slice — in-memory store arm: no projection, no CDC, no
+//!   async settle; exists purely for speed (microseconds/case)
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -318,8 +322,15 @@ struct EditorCell {
 /// Minimal interface = no faked methods.
 #[async_trait::async_trait(?Send)]
 pub trait EditorCommitTarget {
-    /// Write `content` as block `id`'s text content into the canonical store.
-    async fn commit_block_content(&self, id: &str, content: &str) -> Result<(), ApiError>;
+    /// Write `content` (and its org-lens-derived `marks`, replacing any
+    /// previous mark set — `None` clears) as block `id`'s text content into
+    /// the canonical store.
+    async fn commit_block_content(
+        &self,
+        id: &str,
+        content: &str,
+        marks: Option<&[holon_api::MarkSpan]>,
+    ) -> Result<(), ApiError>;
 }
 
 /// Adapts a [`CoreOperations`] store (Loro/memory) to [`EditorCommitTarget`]
@@ -328,8 +339,20 @@ pub struct CoreOpsCommit(pub Arc<dyn CoreOperations>);
 
 #[async_trait::async_trait(?Send)]
 impl EditorCommitTarget for CoreOpsCommit {
-    async fn commit_block_content(&self, id: &str, content: &str) -> Result<(), ApiError> {
-        self.0.update_block(id, BlockContent::text(content)).await
+    async fn commit_block_content(
+        &self,
+        id: &str,
+        content: &str,
+        marks: Option<&[holon_api::MarkSpan]>,
+    ) -> Result<(), ApiError> {
+        let block_content = match marks {
+            Some(m) => BlockContent::RichText {
+                text: content.to_string(),
+                marks: m.to_vec(),
+            },
+            None => BlockContent::text(content),
+        };
+        self.0.update_block(id, block_content).await
     }
 }
 
@@ -339,17 +362,39 @@ impl EditorCommitTarget for CoreOpsCommit {
 /// in `block_raw` where the block invariants read.
 #[async_trait::async_trait(?Send)]
 impl EditorCommitTarget for BackendEngine {
-    async fn commit_block_content(&self, id: &str, content: &str) -> Result<(), ApiError> {
+    async fn commit_block_content(
+        &self,
+        id: &str,
+        content: &str,
+        marks: Option<&[holon_api::MarkSpan]>,
+    ) -> Result<(), ApiError> {
+        let entity: holon_api::types::EntityName = "block".to_string().into();
         let mut params: StorageEntity = HashMap::new();
         params.insert("id".into(), Value::String(id.to_string()));
         params.insert("field".into(), Value::String("content".to_string()));
         params.insert("value".into(), Value::String(content.to_string()));
-        let entity = "block".to_string().into();
-        self.execute_operation(&entity, "set_field", params)
+        self.execute_operation(&entity, "set_field", params, holon_api::OpOrigin::User)
             .await
             .map(|_| ())
             .map_err(|e| ApiError::InternalError {
                 message: format!("editor commit set_field failed: {e}"),
+            })?;
+        // Marks half of the org lens: replace the block's mark set alongside
+        // its content (Null clears), matching the `marks IS NOT NULL` column
+        // discriminator and the Loro `write_field(marks)` route.
+        let marks_value = match marks {
+            Some(m) => Value::String(holon_api::marks_to_json(m)),
+            None => Value::Null,
+        };
+        let mut params: StorageEntity = HashMap::new();
+        params.insert("id".into(), Value::String(id.to_string()));
+        params.insert("field".into(), Value::String("marks".to_string()));
+        params.insert("value".into(), marks_value);
+        self.execute_operation(&entity, "set_field", params, holon_api::OpOrigin::User)
+            .await
+            .map(|_| ())
+            .map_err(|e| ApiError::InternalError {
+                message: format!("editor commit set_field(marks) failed: {e}"),
             })
     }
 }
@@ -458,9 +503,9 @@ impl InMemEditorComponent {
     /// later-stage concern (non-Text editing).
     async fn commit(&self) {
         if let Some((id, text)) = self.take_commit() {
-            let normalized = normalize_content_for_org_roundtrip(&text, ContentType::Text);
+            let (normalized, marks) = normalize_content_for_org_roundtrip(&text, ContentType::Text);
             self.commit_target
-                .commit_block_content(id.as_str(), &normalized)
+                .commit_block_content(id.as_str(), &normalized, marks.as_deref())
                 .await
                 .expect(
                     "InMemEditorComponent commit: commit_block_content into shared store must not \

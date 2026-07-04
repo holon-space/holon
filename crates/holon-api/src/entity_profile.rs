@@ -14,6 +14,7 @@
 //! and compiles on-demand during resolution. Compilation is fast for small
 //! expressions (<1µs each).
 
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -53,8 +54,14 @@ pub struct StoredVariant {
     pub priority: i32,
     /// Original full Rhai condition source (empty = always matches).
     pub condition_source: String,
+    /// Required-column set of `condition_source` (type-aware binding). A row
+    /// missing any of these makes the condition a structural non-match without
+    /// invoking Rhai. Empty when `condition_source` is empty.
+    pub condition_required: BTreeSet<String>,
     /// Data-only Rhai condition (None = always true on data side).
     pub data_condition: Option<String>,
+    /// Required-column set of `data_condition` (empty when `None`).
+    pub data_condition_required: BTreeSet<String>,
     /// Frontend-evaluable UI condition extracted from the full condition.
     pub ui_condition: Predicate,
     pub profile: Arc<StoredProfile>,
@@ -72,6 +79,23 @@ pub struct VirtualChildConfig {
     pub defaults: std::collections::HashMap<String, Value>,
 }
 
+impl VirtualChildConfig {
+    /// Widen the defaults to the entity's DECLARED schema: every declared
+    /// column the `virtual_child:` YAML block does not set is seeded `Null` —
+    /// the same value a projected row carries for an unset column.
+    ///
+    /// Without this the synthetic slot row is a NARROWER projection than any
+    /// real row of the entity, so every computed field / variant condition over
+    /// an unset declared column reports a projection gap the in-process row
+    /// cannot possibly have.
+    pub fn widened_to_declared(mut self, declared_columns: &BTreeSet<String>) -> Self {
+        for col in declared_columns {
+            self.defaults.entry(col.clone()).or_insert(Value::Null);
+        }
+        self
+    }
+}
+
 /// Complete profile for one entity type.
 /// Computed field expressions are pre-compiled at parse time.
 #[derive(Debug, Clone)]
@@ -86,6 +110,14 @@ pub struct EntityProfile {
     /// virtual editable placeholder at the end. Typing into it materializes
     /// a real entity.
     pub virtual_child: Option<VirtualChildConfig>,
+    /// The entity's DECLARED schema columns — the persistent field names of its
+    /// `TypeDefinition` (the columns a well-formed row of this type always
+    /// carries). Used for type-aware binding classification: a required column
+    /// MISSING from a row is a real projection gap (LOUD) iff it is declared
+    /// here; otherwise it is expected heterogeneity — an optional property or a
+    /// UI-state variable — and is silent. Empty for profiles built without a
+    /// TypeDefinition (org-source / test fixtures): every miss is then silent.
+    pub declared_columns: BTreeSet<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -93,6 +125,17 @@ pub struct EntityProfile {
 // ---------------------------------------------------------------------------
 
 impl EntityProfile {
+    /// Normalize the creation-slot config against this profile's declared
+    /// schema (see [`VirtualChildConfig::widened_to_declared`]). Idempotent —
+    /// widening only fills columns the config does not already carry.
+    pub fn with_widened_virtual_child(mut self) -> Self {
+        self.virtual_child = self
+            .virtual_child
+            .take()
+            .map(|c| c.widened_to_declared(&self.declared_columns));
+        self
+    }
+
     /// Resolve a single row to its RenderProfile.
     pub fn resolve(
         &self,
@@ -117,6 +160,25 @@ impl EntityProfile {
         (profile, computed)
     }
 
+    /// Evaluate ONLY the computed fields for a row — no variant resolution.
+    ///
+    /// Callers that need the computed-field map but NOT a resolved profile (the
+    /// enrichment boundary, `enrich_row`) must use this instead of discarding
+    /// the profile from [`Self::resolve_with_computed`]. Running full
+    /// variant resolution there evaluated every variant's condition —
+    /// including UI-bearing ones like `is_source && is_focused` — against a
+    /// raw storage row that carries no such bindings, emitting spurious
+    /// eval errors. Computing the fields directly (build scope → extract
+    /// computed) skips that entirely.
+    pub fn compute_fields_only(
+        &self,
+        row: &HashMap<String, Value>,
+        engine: &RhaiEngine,
+    ) -> HashMap<String, Value> {
+        let scope = self.build_scope(row, engine);
+        self.extract_computed_values(&scope)
+    }
+
     /// Resolve ALL matching candidates for a row (multi-variant mode).
     ///
     /// Evaluates each variant's `data_condition` via Rhai. Returns all variants
@@ -138,7 +200,13 @@ impl EntityProfile {
         for variant in &self.variants {
             let data_matches = match &variant.data_condition {
                 None => true, // No data condition = always matches on data side
-                Some(dc) => eval_bool_source(engine, dc, &mut scope),
+                Some(dc) => eval_condition(
+                    engine,
+                    dc,
+                    &variant.data_condition_required,
+                    &self.declared_columns,
+                    &mut scope,
+                ),
             };
             if data_matches {
                 candidates.push((variant, variant.profile.clone()));
@@ -164,7 +232,13 @@ impl EntityProfile {
         // match.
         for variant in &self.variants {
             if variant.condition_source.is_empty()
-                || eval_bool_source(engine, &variant.condition_source, scope)
+                || eval_condition(
+                    engine,
+                    &variant.condition_source,
+                    &variant.condition_required,
+                    &self.declared_columns,
+                    scope,
+                )
             {
                 return Some(variant.profile.clone());
             }
@@ -173,12 +247,18 @@ impl EntityProfile {
     }
 
     fn extract_computed_values(&self, scope: &Scope<'_>) -> HashMap<String, Value> {
+        // Every computed field appears in the output. A field UNBOUND for this
+        // row (type-aware binding skipped it, so it was never pushed to scope)
+        // defaults to `Null` — preserving the row's shape for consumers without
+        // letting the unbound field poison downstream scope evaluation.
         self.computed_fields
             .iter()
-            .filter_map(|(name, _expr)| {
-                scope
+            .map(|(name, _expr)| {
+                let value = scope
                     .get_value::<rhai::Dynamic>(name)
-                    .map(|d| (name.clone(), dynamic_to_value(&d)))
+                    .map(|d| dynamic_to_value(&d))
+                    .unwrap_or(Value::Null);
+                (name.clone(), value)
             })
             .collect()
     }
@@ -203,13 +283,15 @@ impl EntityProfile {
             }
         }
 
-        // Evaluate computed fields in topo order via shared evaluator
+        // Evaluate computed fields in topo order via shared evaluator, with
+        // type-aware binding against this entity's declared schema.
         let mut computed_ctx = row.clone();
         crate::computed::resolve_computed_fields_with_scope(
             engine,
             &mut scope,
             &self.computed_fields,
             &mut computed_ctx,
+            &self.declared_columns,
         );
 
         scope
@@ -236,16 +318,51 @@ pub fn dynamic_to_value(d: &rhai::Dynamic) -> Value {
     }
 }
 
-fn eval_bool_source(engine: &RhaiEngine, source: &str, scope: &mut Scope) -> bool {
+/// Evaluate a profile variant condition against a row scope with **type-aware
+/// binding** — the same contract as computed fields.
+///
+/// `required` is the condition's precompiled required-column set (free vars
+/// minus `is_def_var` guards minus `let` locals — see
+/// [`holon_expr::required_columns`]). `declared` is the entity's declared
+/// schema.
+///
+/// - If any required column is ABSENT from scope, the condition is *unbound*:
+///   the row is structurally the wrong shape (heterogeneous rows expose
+///   different columns; an unbound sibling computed field is likewise absent).
+///   We return a NON-MATCH **without invoking Rhai** — so no "Variable not
+///   found" is raised and, crucially, no `() && …` type-error cascade occurs. A
+///   missing column that IS in `declared` is disclosed LOUDLY once (a real
+///   projection gap); missing UI-state vars and optional columns are silent.
+/// - If every required column is present, we evaluate. A genuine error now
+///   (type mismatch on present data, non-bool result) is surfaced at WARN and
+///   treated as a non-match — a disclosed degraded signal, never a silent
+///   false. WARN not ERROR: one bad condition degrades one variant, it must not
+///   abort the render.
+fn eval_condition(
+    engine: &RhaiEngine,
+    source: &str,
+    required: &BTreeSet<String>,
+    declared: &BTreeSet<String>,
+    scope: &mut Scope,
+) -> bool {
+    let missing: Vec<&String> = required.iter().filter(|c| !scope.contains(c)).collect();
+    if !missing.is_empty() {
+        for col in &missing {
+            if declared.contains(*col) {
+                crate::computed::warn_missing_declared_column(source, col);
+            }
+        }
+        return false;
+    }
     match engine.eval_with_scope::<bool>(scope, source) {
         Ok(val) => val,
         Err(e) => {
-            let msg = format!("{e}");
-            if msg.contains("Variable not found") || msg.contains("Output type incorrect") {
-                tracing::trace!("[eval_bool_source] '{source}': {e}");
-            } else {
-                tracing::warn!("[eval_bool_source] '{source}' failed: {e}");
-            }
+            tracing::warn!(
+                condition = source,
+                "profile condition failed to evaluate on PRESENT columns (type mismatch / \
+                 non-bool result) — treated as non-match, this variant is DEGRADED. Fix the \
+                 condition or the row data producing it: {e}"
+            );
             false
         }
     }
@@ -291,6 +408,19 @@ pub trait ProfileResolving: Send + Sync {
         row: &HashMap<String, Value>,
     ) -> (Arc<RenderProfile>, HashMap<String, Value>);
 
+    /// Compute a row's computed-field values WITHOUT resolving its render
+    /// profile.
+    ///
+    /// The enrichment boundary needs only the computed fields; resolving the
+    /// profile there evaluates variant conditions against rows that lack the
+    /// bindings those conditions reference (e.g. UI-state variables on a raw
+    /// storage row), producing spurious eval errors. Real resolvers override
+    /// this with the resolution-free path; the default falls back to the
+    /// full pass so mock/test resolvers keep working unchanged.
+    fn resolve_computed_only(&self, row: &HashMap<String, Value>) -> HashMap<String, Value> {
+        self.resolve_with_computed(row).1
+    }
+
     fn resolve_batch(&self, rows: &[HashMap<String, Value>]) -> Vec<Arc<RenderProfile>>;
 
     /// Resolve ALL matching variant candidates for a row (multi-variant mode).
@@ -303,6 +433,32 @@ pub trait ProfileResolving: Send + Sync {
     ) -> (Arc<RenderProfile>, HashMap<String, Value>) {
         // Default: fall back to single-variant resolution
         self.resolve_with_computed(row)
+    }
+
+    /// Resolve a row that the caller DECLARES must be entity-shaped.
+    ///
+    /// This is the CONTRACT seam (Martin ruling 2026-07-11). Most render paths
+    /// accept either row shape and call [`Self::resolve_with_computed`], where
+    /// a value row (no entity `id`) is a legitimate display case rendered
+    /// plainly. But an entity TEMPLATE / entity-id-dependent widget (e.g.
+    /// click-to-open the entity) genuinely REQUIRES an entity row: handing
+    /// it a value row is a contract violation, not a display case. Such
+    /// callers route through this method, which returns a loud `Err`
+    /// instead of silently rendering a value row — the fail-loud path for a
+    /// declared expectation.
+    fn resolve_entity_required(
+        &self,
+        row: &HashMap<String, Value>,
+    ) -> anyhow::Result<(Arc<RenderProfile>, HashMap<String, Value>)> {
+        if crate::RowIdentity::of_row(row).is_value() {
+            anyhow::bail!(
+                "widget declared it requires an ENTITY row but received a VALUE row (no \
+                 entity-shaped `id`): {row:?}. Entity templates / entity-id click handling cannot \
+                 resolve a synthetic value row — project a real `... AS id` or render this query \
+                 through a value-row-tolerant widget"
+            );
+        }
+        Ok(self.resolve_with_computed(row))
     }
 
     /// Get virtual child config for an entity type, if declared in its profile.
@@ -324,6 +480,21 @@ pub trait ProfileResolving: Send + Sync {
     /// columns (e.g. parent_id for trees) can use them.
     fn resolve_collection_variants(&self) -> Vec<RenderVariant> {
         Vec::new()
+    }
+
+    /// Collection-level variants resolved through a NAMED profile instead of
+    /// the default `collection` profile — the seam a perspective's
+    /// `profile_override` drives (a "Kanban perspective" points its panels at
+    /// a profile whose collection variants default to `board`).
+    ///
+    /// Returns `None` when no profile of that name is in the cache, so the
+    /// caller can disclose the degraded default-variant behaviour
+    /// (fail-visible, not fail-silent).
+    // ALLOW(fallback): documents a disclosed, fail-visible degrade (returns None so
+    // the caller surfaces it), not a hidden swallow ALLOW(unused_param): trait
+    // shape; default impl (mocks) has no cache
+    fn resolve_collection_variants_named(&self, _name: &EntityName) -> Option<Vec<RenderVariant>> {
+        None
     }
 
     /// Mutable holding the current profile cache snapshot.
@@ -354,7 +525,16 @@ impl ProfileCache {
 
     /// Cache over a pre-built profile map (used by `ProfileResolver`'s
     /// rebuild path).
+    ///
+    /// Every profile is normalized on the way in, so a cached profile can
+    /// never hand out a creation-slot config narrower than its declared
+    /// schema — this is the one funnel every profile source (type-defined,
+    /// org-sourced, merged) passes through.
     pub fn new(profiles: HashMap<EntityName, EntityProfile>) -> Self {
+        let profiles = profiles
+            .into_iter()
+            .map(|(name, profile)| (name, profile.with_widened_virtual_child()))
+            .collect();
         Self { profiles }
     }
 

@@ -45,6 +45,16 @@ enum Command {
     Replay(ReplayArgs),
     /// Minimize a .sql trace to a minimal crash reproducer
     Minimize(MinimizeArgs),
+    /// Split a trace into prefix + suffix around the first divergence, then
+    /// verify the split reproduces the SAME failure mechanism (see the
+    /// mechanism-preservation trap on `verify_mechanism_preservation`).
+    Split(SplitArgs),
+    /// Replay a trace N times in N fresh processes and report the red-rate.
+    /// Per-process-seeded IVM bugs (std HashMap RandomState iteration order in
+    /// DBSP consolidate) are deterministic within a process but vary across
+    /// processes, so in-process repetition samples one seed; this sweep samples
+    /// the distribution and makes A/B trigger removal cheap.
+    Sweep(SweepArgs),
     /// Extract from log then replay in one shot
     Run {
         #[command(flatten)]
@@ -95,6 +105,21 @@ struct ReplayArgs {
     /// Check matview consistency after each DML statement
     #[arg(long)]
     check_after_each: bool,
+    /// Run the lightweight CHK oracle after every COMMIT: for each active
+    /// matview, compare its stored row count (`SELECT count(*) FROM <view>`)
+    /// against a fresh recompute of the view's defining SELECT. This is the
+    /// recursive-CTE-safe oracle — the recompute runs the defining SELECT
+    /// directly (never wrapped in a subquery, which fails with "Recursive CTEs
+    /// are not yet supported") and counts the rows it yields. The first commit
+    /// after which MV != recompute is reported as the first divergence point.
+    #[arg(long)]
+    check_after_commit: bool,
+    /// With `--check-after-commit`, when the cheap row-count CHK agrees, also
+    /// run the precise multiset compare (full EXCEPT diff via a shadow matview)
+    /// so same-count-but-different-rows drift is caught too. Heavier — it
+    /// creates and drops a shadow matview per view per commit.
+    #[arg(long)]
+    chk_precise: bool,
     /// Start consistency checks from this statement number
     #[arg(long, default_value_t = 0)]
     check_from: usize,
@@ -153,6 +178,58 @@ struct ReplayArgs {
     /// path (e.g. async post-commit `aggregate_operator` invariants).
     #[arg(long)]
     via_holon_actor: bool,
+    /// Path to the scratch database this replay opens. Defaults to
+    /// `/tmp/turso-sql-replay.db`. Overriding it lets independent replays
+    /// (e.g. the parallel `sweep` runs, or a prefix/suffix split) each use a
+    /// private on-disk file so they don't clobber each other.
+    #[arg(long, value_name = "PATH")]
+    db_path: Option<String>,
+}
+
+#[derive(clap::Args)]
+struct SplitArgs {
+    /// Path to the .sql replay file
+    replay_file: String,
+    /// 1-based index of the transaction to isolate as the suffix (the failing
+    /// tx). When omitted, the tool auto-detects it by replaying with
+    /// `--check-after-commit` and reading the first-divergence commit.
+    #[arg(long, value_name = "N")]
+    at: Option<usize>,
+    /// Output basename; produces `<base>.prefix.sql` and `<base>.suffix.sql`.
+    /// Defaults to the replay file with its `.sql` suffix stripped.
+    #[arg(short, long)]
+    output_prefix: Option<String>,
+    /// Skip the mechanism-preservation verification (not recommended — a
+    /// fresh-process suffix replay exercises the state-restore path, a
+    /// DIFFERENT mechanism than the in-process divergence).
+    #[arg(long)]
+    skip_verify: bool,
+}
+
+#[derive(clap::Args)]
+struct SweepArgs {
+    /// Path to the .sql replay file
+    replay_file: String,
+    /// Number of fresh-process runs to sample.
+    #[arg(short = 'n', long, default_value_t = 40)]
+    runs: usize,
+    /// Second .sql file to A/B against (e.g. the same trace with the suspected
+    /// trigger feature removed). Reported as a second red-rate.
+    #[arg(long, value_name = "PATH")]
+    compare: Option<String>,
+    /// Number of runs to execute concurrently (each in its own process with a
+    /// private `--db-path`).
+    #[arg(long, default_value_t = 4)]
+    jobs: usize,
+    /// Directory to keep artifacts (stdout + database) of red runs. Green runs
+    /// are cleaned up. Defaults to `/tmp/turso-sweep`.
+    #[arg(long, value_name = "DIR")]
+    keep_dir: Option<String>,
+    /// Extra argument to pass through to each `replay` child (repeatable).
+    /// Defaults to `--check-after-commit` when none are given, so matview drift
+    /// counts as red (panics are always red via the panic hook regardless).
+    #[arg(long = "replay-arg", value_name = "ARG")]
+    replay_arg: Vec<String>,
 }
 
 #[derive(clap::Args)]
@@ -740,6 +817,177 @@ async fn get_matview_sql(conn: &turso::Connection, name: &str) -> anyhow::Result
     } else {
         Ok(None)
     }
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Byte offset of the next whole-word, case-insensitive `keyword` at
+/// parenthesis depth 0, scanning from `start`. Matches inside single-quoted
+/// string literals and inside any parenthesised subexpression (depth > 0) are
+/// skipped. Used to locate the outer query's clauses when preparing a
+/// recursive-CTE view for the CHK oracle: the CTE bodies live inside `(...)`
+/// at depth > 0, and window `OVER (ORDER BY …)` clauses likewise, so the outer
+/// SELECT / FROM / ORDER BY / LIMIT are the depth-0 hits.
+fn find_kw_depth0(sql: &str, keyword: &str, start: usize) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let kw = keyword.as_bytes();
+    let mut depth: i32 = 0;
+    let mut in_lit = false;
+    let mut i = start;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_lit {
+            if c == b'\'' {
+                in_lit = false;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'\'' => in_lit = true,
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            _ => {
+                if depth == 0
+                    && i + kw.len() <= bytes.len()
+                    && bytes[i..i + kw.len()].eq_ignore_ascii_case(kw)
+                    && (i == 0 || !is_ident_byte(bytes[i - 1]))
+                    && (i + kw.len() == bytes.len() || !is_ident_byte(bytes[i + kw.len()]))
+                {
+                    return Some(i);
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Strip a trailing top-level `ORDER BY …` and/or `LIMIT …` from a SELECT so it
+/// can be replayed purely to count its rows. Removing `LIMIT` is mandatory —
+/// it would otherwise cap the recompute count; `ORDER BY` is dropped for speed.
+/// Clauses inside parens (subqueries, window `OVER (...)`) are at depth > 0 and
+/// left untouched.
+fn strip_trailing_order_limit(sql: &str) -> String {
+    let trimmed = sql.trim().trim_end_matches(';').trim_end();
+    let mut cut = trimmed.len();
+    if let Some(p) = find_kw_depth0(trimmed, "LIMIT", 0) {
+        cut = cut.min(p);
+    }
+    let mut search = 0;
+    while let Some(p) = find_kw_depth0(trimmed, "ORDER", search) {
+        let rest = trimmed[p + "ORDER".len()..].trim_start();
+        if rest.len() >= 2 && rest[..2].eq_ignore_ascii_case("BY") {
+            cut = cut.min(p);
+            break;
+        }
+        search = p + "ORDER".len();
+    }
+    trimmed[..cut].trim_end().to_string()
+}
+
+/// Recursive-CTE-safe row count of a view's defining SELECT. The SELECT is run
+/// directly (never wrapped in `SELECT count(*) FROM (<select>)`, which fails
+/// with "Recursive CTEs are not yet supported"); its rows are drained and
+/// counted client-side. `ORDER BY` / `LIMIT` tails are stripped so the count
+/// reflects the full result set regardless of the view's own presentation
+/// clauses.
+async fn chk_recompute_count(conn: &turso::Connection, select_sql: &str) -> anyhow::Result<i64> {
+    let query = strip_trailing_order_limit(select_sql);
+    let mut rows = conn.query(&query, ()).await?;
+    let mut n = 0i64;
+    while rows.next().await?.is_some() {
+        n += 1;
+    }
+    Ok(n)
+}
+
+struct ChkOutcome {
+    mismatch: bool,
+    first_divergence: Option<String>,
+    lines: Vec<String>,
+}
+
+/// The CHK oracle: after a COMMIT, compare each matview's stored row count
+/// against a fresh recompute of its defining SELECT. Emits one
+/// `CHK|commit<K>|<view>|MV=<n>|RC=<m>` line per view (a machine-parseable
+/// first-line oracle); a row-count mismatch flags divergence. With `precise`,
+/// agreeing counts are further checked for same-count-different-rows drift via
+/// the full multiset compare.
+async fn chk_after_commit(
+    conn: &turso::Connection,
+    matview_names: &[String],
+    commit_idx: usize,
+    precise: bool,
+) -> ChkOutcome {
+    let mut outcome = ChkOutcome {
+        mismatch: false,
+        first_divergence: None,
+        lines: Vec::new(),
+    };
+    for name in matview_names {
+        let mv = match count_rows(conn, &format!("SELECT count(*) FROM {name}")).await {
+            Ok(n) => n,
+            Err(e) => {
+                outcome
+                    .lines
+                    .push(format!("CHK|commit{commit_idx}|{name}|ERROR MV-count: {e}"));
+                continue;
+            }
+        };
+        let select_sql = match get_matview_sql(conn, name).await {
+            Ok(Some(sql)) => sql,
+            Ok(None) => continue,
+            Err(e) => {
+                outcome
+                    .lines
+                    .push(format!("CHK|commit{commit_idx}|{name}|ERROR view-sql: {e}"));
+                continue;
+            }
+        };
+        let rc = match chk_recompute_count(conn, &select_sql).await {
+            Ok(n) => n,
+            Err(e) => {
+                outcome.lines.push(format!(
+                    "CHK|commit{commit_idx}|{name}|ERROR recompute: {e}"
+                ));
+                continue;
+            }
+        };
+        let line = format!("CHK|commit{commit_idx}|{name}|MV={mv}|RC={rc}");
+        if mv != rc {
+            let full = format!("{line}  <<< MISMATCH");
+            println!("!!! {full}");
+            outcome.lines.push(full);
+            outcome.mismatch = true;
+            if outcome.first_divergence.is_none() {
+                outcome.first_divergence =
+                    Some(format!("commit#{commit_idx} view={name} MV={mv} RC={rc}"));
+            }
+        } else {
+            println!("{line}");
+            outcome.lines.push(line);
+            if precise
+                && let Ok(res) = check_matview_consistency(
+                    conn,
+                    std::slice::from_ref(name),
+                    &format!("commit{commit_idx}"),
+                )
+                .await
+                && res.has_data_mismatch
+            {
+                outcome.mismatch = true;
+                if outcome.first_divergence.is_none() {
+                    outcome.first_divergence =
+                        Some(format!("commit#{commit_idx} view={name} multiset-drift"));
+                }
+                outcome.lines.extend(res.inconsistencies);
+            }
+        }
+    }
+    outcome
 }
 
 struct ConsistencyResult {
@@ -1336,6 +1584,10 @@ struct ReplayProgress {
     all_inconsistencies: Vec<String>,
     has_data_mismatch: bool,
     stmt_idx: usize,
+    /// COMMIT counter, used to label CHK-oracle divergences by transaction.
+    commit_idx: usize,
+    /// First `commit#K view=… MV=… RC=…` at which the CHK oracle diverged.
+    first_divergence: Option<String>,
     tracker_prev: Vec<Option<Vec<bool>>>,
 }
 
@@ -1346,6 +1598,8 @@ impl ReplayProgress {
             all_inconsistencies: Vec::new(),
             has_data_mismatch: false,
             stmt_idx: 0,
+            commit_idx: 0,
+            first_divergence: None,
             tracker_prev: vec![None; tracker_count],
         }
     }
@@ -1362,6 +1616,7 @@ enum LoopControl {
 /// statements, probes id trackers, and—when `--check-after-each`—diffs
 /// matviews after each DML. Returns `Break` only when an inconsistency was
 /// found and the caller asked to stop on the first one.
+#[allow(clippy::too_many_arguments)] // each arg is a distinct replay subsystem
 async fn replay_sql_directive(
     conn: &turso::Connection,
     args: &ReplayArgs,
@@ -1420,6 +1675,39 @@ async fn replay_sql_directive(
                 }
             }
         }
+
+        if args.check_after_commit {
+            progress.commit_idx += 1;
+            let matview_names = extract_matview_names(&progress.executed_sqls);
+            if !matview_names.is_empty() {
+                let outcome =
+                    chk_after_commit(conn, &matview_names, progress.commit_idx, args.chk_precise)
+                        .await;
+                if outcome.mismatch {
+                    let was_first = !progress.has_data_mismatch;
+                    progress.has_data_mismatch = true;
+                    progress.all_inconsistencies.extend(
+                        outcome
+                            .lines
+                            .iter()
+                            .filter(|l| l.contains("MISMATCH") || l.contains("drift"))
+                            .cloned(),
+                    );
+                    if progress.first_divergence.is_none() {
+                        progress.first_divergence = outcome.first_divergence.clone();
+                    }
+                    if was_first {
+                        println!(
+                            "\n=== FIRST DIVERGENCE (CHK oracle) after {} ===",
+                            progress.first_divergence.as_deref().unwrap_or("?")
+                        );
+                    }
+                    if !args.no_break_on_inconsistency {
+                        return Ok(LoopControl::Break);
+                    }
+                }
+            }
+        }
         return Ok(LoopControl::Continue);
     }
 
@@ -1427,7 +1715,7 @@ async fn replay_sql_directive(
     let is_dml = kind == StmtKind::Dml;
     let is_query = kind == StmtKind::Query;
 
-    if stmt_idx % 500 == 0 || stmt_idx >= args.check_from.saturating_sub(10) {
+    if stmt_idx.is_multiple_of(500) || stmt_idx >= args.check_from.saturating_sub(10) {
         let sql_preview: String = sql.chars().take(100).collect();
         println!(
             "[{stmt_idx}/{sql_count}] [{tag}] {sql_preview}  (CDC: {})",
@@ -1570,7 +1858,10 @@ async fn cmd_replay(args: &ReplayArgs, replay_file: &str) -> anyhow::Result<()> 
     }
     println!();
 
-    let db_path = "/tmp/turso-sql-replay.db";
+    let db_path = args
+        .db_path
+        .as_deref()
+        .unwrap_or("/tmp/turso-sql-replay.db");
     for ext in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{db_path}{ext}"));
     }
@@ -1721,6 +2012,7 @@ async fn cmd_replay(args: &ReplayArgs, replay_file: &str) -> anyhow::Result<()> 
     progress
         .all_inconsistencies
         .extend(final_result.inconsistencies);
+    let first_divergence = progress.first_divergence.clone();
     let all_inconsistencies = progress.all_inconsistencies;
 
     let captured_panics = panic_log.lock().unwrap().clone();
@@ -1731,6 +2023,9 @@ async fn cmd_replay(args: &ReplayArgs, replay_file: &str) -> anyhow::Result<()> 
     println!("  CDC events total: {}", cdc_count.load(Ordering::SeqCst));
     println!("  Issues found: {}", all_inconsistencies.len());
     println!("  Panics captured: {}", captured_panics.len());
+    if let Some(fd) = &first_divergence {
+        println!("  First divergence: {fd}");
+    }
     if hit_max_stmts {
         println!("  Budget: max-stmts hit (partial replay)");
     }
@@ -2506,6 +2801,369 @@ fn cmd_minimize(args: &MinimizeArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ─── Split & Sweep (fresh-process reproduction tooling) ─────────────────────
+
+/// Outcome of one `replay` child process. `red` is the coarse verdict —
+/// `cmd_replay` exits non-zero on a data mismatch or captured panic, so a
+/// failed exit status is the reproduction signal. `signature` normalizes the
+/// *kind* of failure across processes so single-process and split-process runs
+/// can be compared even though their commit indices differ.
+struct ChildRun {
+    red: bool,
+    signature: Option<String>,
+    output: String,
+}
+
+/// Shell out to `<self> replay <extra_args…>` and classify the result.
+///
+/// tursodb CLI gotchas, encoded here for anyone who extends this to drive the
+/// `tursodb` binary directly instead of re-execing this tool: dot-commands are
+/// NOT parsed inside a `.read` file, so pass `.read <file>` as the positional
+/// SQL argument; use `-m list` for machine-parseable output; matviews need
+/// `--experimental-views`; and a copied DB file of a live holon.db is readable
+/// by tursodb but NOT by sqlite3 (it rejects the materialized-view DDL). We
+/// deliberately re-exec *this* binary instead: per-process HashMap RandomState
+/// seeding (the DBSP consolidate iteration order that makes IVM bugs
+/// per-process-seeded) lives in the linked `turso_core`, so a fresh child of
+/// this same binary samples a fresh seed and carries the panic hook + CHK
+/// oracle for free.
+fn run_replay_child(extra_args: &[String]) -> ChildRun {
+    let exe = std::env::current_exe().expect("current_exe");
+    let out = std::process::Command::new(exe)
+        .arg("replay")
+        .args(extra_args)
+        .output()
+        .expect("spawn replay child");
+    let output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let red = !out.status.success();
+    let signature = parse_divergence_signature(&output);
+    ChildRun {
+        red,
+        signature,
+        output,
+    }
+}
+
+/// Normalize a replay child's output to a process-independent failure
+/// signature. The commit index is intentionally dropped: the same divergence
+/// lands at commit #K in the full trace but commit #1 in a split suffix, so the
+/// signature keys on the failure *kind* and the affected view/payload instead.
+fn parse_divergence_signature(output: &str) -> Option<String> {
+    for line in output.lines() {
+        if line.contains("<<< MISMATCH")
+            && let Some(view) = line.split('|').nth(2)
+        {
+            return Some(format!("chk-mismatch:{}", view.trim()));
+        }
+    }
+    for line in output.lines() {
+        if let Some(idx) = line.find("INCONSISTENCY in ") {
+            let rest = &line[idx + "INCONSISTENCY in ".len()..];
+            if let Some(name) = rest.split(':').next() {
+                return Some(format!("inconsistency:{}", name.trim()));
+            }
+        }
+    }
+    for line in output.lines() {
+        if (line.contains("[panic]") || line.contains("panicked at"))
+            && let Some(at) = line.find(" at ")
+        {
+            let tail = &line[at + 4..];
+            if let Some(cp) = tail.find(": ") {
+                let payload: String = tail[cp + 2..].chars().take(50).collect();
+                return Some(format!("panic:{}", payload.trim()));
+            }
+        }
+    }
+    None
+}
+
+/// First `commit#K` mentioned in a replay child's output (the CHK oracle's
+/// first-divergence report). Used by `split --at auto`.
+fn parse_first_divergence_commit(output: &str) -> Option<usize> {
+    let re = Regex::new(r"commit#(\d+)").unwrap();
+    re.captures(output)
+        .and_then(|c| c.get(1))
+        .and_then(|m| m.as_str().parse::<usize>().ok())
+}
+
+/// Byte-index bounds `(begin_idx, commit_idx)` of the `k`-th (1-based)
+/// transaction in `directives`, delimited by `actor_tx_begin` /
+/// `actor_tx_commit`.
+fn nth_transaction_bounds(directives: &[Directive], k: usize) -> Option<(usize, usize)> {
+    let mut last_begin: Option<usize> = None;
+    let mut commit_count = 0usize;
+    for (i, d) in directives.iter().enumerate() {
+        if let Directive::Sql { tag, .. } = d {
+            if tag == "actor_tx_begin" {
+                last_begin = Some(i);
+            } else if tag == "actor_tx_commit" {
+                commit_count += 1;
+                if commit_count == k {
+                    return Some((last_begin.unwrap_or(i), i));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn cmd_split(args: &SplitArgs) -> anyhow::Result<()> {
+    let directives = parse_replay_file(&args.replay_file)?;
+
+    let commit_k = match args.at {
+        Some(k) => k,
+        None => {
+            println!("--- Auto-detecting first divergence (replay --check-after-commit) ---");
+            let run = run_replay_child(&[args.replay_file.clone(), "--check-after-commit".into()]);
+            let k = parse_first_divergence_commit(&run.output).context(
+                "could not auto-detect first divergence from --check-after-commit output; \
+                 pass --at <N>",
+            )?;
+            println!("  First divergence at transaction #{k}\n");
+            k
+        }
+    };
+
+    let (begin_idx, commit_idx) = nth_transaction_bounds(&directives, commit_k)
+        .with_context(|| format!("could not locate transaction #{commit_k} bounds"))?;
+
+    let base = args.output_prefix.clone().unwrap_or_else(|| {
+        args.replay_file
+            .strip_suffix(".sql")
+            .unwrap_or(&args.replay_file)
+            .to_string()
+    });
+    let prefix_path = format!("{base}.prefix.sql");
+    let suffix_path = format!("{base}.suffix.sql");
+
+    let prefix: Vec<Directive> = directives[..begin_idx].to_vec();
+    let suffix: Vec<Directive> = directives[begin_idx..=commit_idx].to_vec();
+    write_directives(&prefix_path, &prefix)?;
+    write_directives(&suffix_path, &suffix)?;
+    println!(
+        "  Wrote {prefix_path} ({} directives) + {suffix_path} ({} directives)",
+        prefix.len(),
+        suffix.len()
+    );
+
+    if args.skip_verify {
+        println!("  (mechanism-preservation verification skipped)");
+    } else {
+        verify_mechanism_preservation(&args.replay_file, &prefix_path, &suffix_path)?;
+    }
+    Ok(())
+}
+
+/// Verify that replaying the suffix against a saved prefix DB in a FRESH
+/// process reproduces the SAME failure as the in-process full-trace replay.
+///
+/// THE MECHANISM-PRESERVATION TRAP (cost real time today): a fresh-process
+/// replay of the suffix forces the matview to be RELOADED FROM DISK, which
+/// exercises the state-RESTORE code path — a DIFFERENT mechanism than the
+/// in-process divergence that arises from live incremental DBSP updates. A
+/// split-mode red is therefore NOT proof that you reproduced the original bug;
+/// it can silently substitute one bug for another. Treat split-mode red as a
+/// SEPARATE finding until its red/green outcome AND signature match the
+/// single-process run.
+fn verify_mechanism_preservation(
+    original: &str,
+    prefix_path: &str,
+    suffix_path: &str,
+) -> anyhow::Result<()> {
+    println!("\n--- Verifying mechanism preservation ---");
+
+    let single = run_replay_child(&[original.into(), "--check-after-commit".into()]);
+    println!(
+        "  single-process (in-process divergence): red={} signature={:?}",
+        single.red, single.signature
+    );
+
+    let prefix_db = "/tmp/turso-split-prefix.db";
+    let saved_db = "/tmp/turso-split-saved.db";
+    let suffix_db = "/tmp/turso-split-suffix.db";
+    for base in [prefix_db, saved_db, suffix_db] {
+        for ext in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{base}{ext}"));
+        }
+    }
+
+    // Build prefix state, then snapshot it so the suffix runs against a
+    // pristine copy (replay mutates its --db-path in place).
+    let _prefix_run = run_replay_child(&[prefix_path.into(), "--db-path".into(), prefix_db.into()]);
+    for ext in ["", "-wal", "-shm"] {
+        let src = format!("{prefix_db}{ext}");
+        if std::path::Path::new(&src).exists() {
+            std::fs::copy(&src, format!("{saved_db}{ext}"))
+                .with_context(|| format!("copy {src}"))?;
+        }
+    }
+
+    let split = run_replay_child(&[
+        suffix_path.into(),
+        "--existing-db".into(),
+        saved_db.into(),
+        "--db-path".into(),
+        suffix_db.into(),
+        "--check-after-commit".into(),
+    ]);
+    println!(
+        "  split-process (state-restore from disk):  red={} signature={:?}",
+        split.red, split.signature
+    );
+
+    if single.red != split.red || single.signature != split.signature {
+        println!("\n  !!! WARNING: split-mode and single-process-mode DISAGREE.");
+        println!("      A fresh-process replay of the suffix reloads the matview from disk");
+        println!("      (state-restore path), which is NOT the same mechanism as the");
+        println!("      in-process divergence. Treat the split-mode result as a SEPARATE");
+        println!("      finding until proven identical.");
+    } else {
+        println!(
+            "\n  OK: split-mode matches single-process (red={}, signature={:?}).",
+            split.red, split.signature
+        );
+    }
+    Ok(())
+}
+
+/// Aggregated result of one sweep leg.
+struct SweepRate {
+    red: usize,
+    total: usize,
+    sigs: std::collections::HashMap<String, usize>,
+}
+
+fn print_sig_histogram(rate: &SweepRate) {
+    let mut sigs: Vec<(&String, &usize)> = rate.sigs.iter().collect();
+    sigs.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
+    for (sig, n) in sigs {
+        println!("      {n:>4}x  {sig}");
+    }
+}
+
+fn sweep_one(
+    file: &str,
+    label: &str,
+    runs: usize,
+    jobs: usize,
+    keep_dir: &str,
+    extra: &[String],
+) -> anyhow::Result<SweepRate> {
+    let next = AtomicUsize::new(0);
+    let results: Mutex<Vec<(bool, Option<String>)>> = Mutex::new(Vec::new());
+    let jobs = jobs.clamp(1, runs.max(1));
+
+    std::thread::scope(|scope| {
+        for _ in 0..jobs {
+            scope.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, Ordering::SeqCst);
+                    if i >= runs {
+                        break;
+                    }
+                    let db = format!("{keep_dir}/sweep-{label}-{i}.db");
+                    let mut child_args =
+                        vec![file.to_string(), "--db-path".to_string(), db.clone()];
+                    child_args.extend(extra.iter().cloned());
+                    let run = run_replay_child(&child_args);
+                    if run.red {
+                        let _ = std::fs::write(
+                            format!("{keep_dir}/sweep-{label}-{i}.out"),
+                            &run.output,
+                        );
+                    } else {
+                        for ext in ["", "-wal", "-shm"] {
+                            let _ = std::fs::remove_file(format!("{db}{ext}"));
+                        }
+                    }
+                    println!(
+                        "  [{label} {}/{runs}] {}  {}",
+                        i + 1,
+                        if run.red { "RED  " } else { "green" },
+                        run.signature.as_deref().unwrap_or("")
+                    );
+                    results.lock().unwrap().push((run.red, run.signature));
+                }
+            });
+        }
+    });
+
+    let results = results.into_inner().unwrap();
+    let mut rate = SweepRate {
+        red: 0,
+        total: results.len(),
+        sigs: std::collections::HashMap::new(),
+    };
+    for (red, sig) in results {
+        if red {
+            rate.red += 1;
+            let key = sig.unwrap_or_else(|| "red-no-signature".to_string());
+            *rate.sigs.entry(key).or_insert(0) += 1;
+        }
+    }
+    Ok(rate)
+}
+
+fn cmd_sweep(args: &SweepArgs) -> anyhow::Result<()> {
+    let keep_dir = args
+        .keep_dir
+        .clone()
+        .unwrap_or_else(|| "/tmp/turso-sweep".to_string());
+    std::fs::create_dir_all(&keep_dir)?;
+    let extra: Vec<String> = if args.replay_arg.is_empty() {
+        vec!["--check-after-commit".to_string()]
+    } else {
+        args.replay_arg.clone()
+    };
+
+    println!("=== Sweep: {} run(s) x {} job(s) ===", args.runs, args.jobs);
+    println!("  Replay args: {extra:?}");
+    println!("  Artifacts (red runs kept): {keep_dir}\n");
+
+    let rate_a = sweep_one(
+        &args.replay_file,
+        "A",
+        args.runs,
+        args.jobs,
+        &keep_dir,
+        &extra,
+    )?;
+    let mut rate_b = None;
+    if let Some(other) = &args.compare {
+        println!();
+        rate_b = Some(sweep_one(
+            other, "B", args.runs, args.jobs, &keep_dir, &extra,
+        )?);
+    }
+
+    let pct = |r: &SweepRate| 100.0 * r.red as f64 / r.total.max(1) as f64;
+    println!("\n=== SWEEP RESULT ===");
+    println!(
+        "  A {}: {}/{} red ({:.0}%)",
+        args.replay_file,
+        rate_a.red,
+        rate_a.total,
+        pct(&rate_a)
+    );
+    print_sig_histogram(&rate_a);
+    if let (Some(other), Some(rate_b)) = (&args.compare, &rate_b) {
+        println!(
+            "  B {}: {}/{} red ({:.0}%)",
+            other,
+            rate_b.red,
+            rate_b.total,
+            pct(rate_b)
+        );
+        print_sig_histogram(rate_b);
+    }
+    Ok(())
+}
+
 // ─── Main ───────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -2522,6 +3180,12 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Minimize(args) => {
             cmd_minimize(&args)?;
+        }
+        Command::Split(args) => {
+            cmd_split(&args)?;
+        }
+        Command::Sweep(args) => {
+            cmd_sweep(&args)?;
         }
         Command::Run {
             extract,
@@ -2832,5 +3496,107 @@ mod tests {
         let parsed = parse_replay_file(path).unwrap();
         let fmt = |ds: &[Directive]| ds.iter().map(|d| format!("{d:?}")).collect::<Vec<_>>();
         assert_eq!(fmt(&parsed), fmt(&original));
+    }
+
+    #[test]
+    fn find_kw_depth0_skips_subqueries_and_literals() {
+        // Outer SELECT is the first depth-0 hit; the subquery's SELECT is at
+        // depth 1 and must be skipped.
+        let sql = "SELECT a FROM (SELECT b FROM t) x";
+        assert_eq!(find_kw_depth0(sql, "SELECT", 0), Some(0));
+        assert_eq!(find_kw_depth0(sql, "FROM", "SELECT".len()), Some(9));
+        // A recursive CTE: the outer SELECT follows the parenthesised CTE body.
+        let cte = "WITH RECURSIVE r AS (SELECT 1 UNION SELECT n+1 FROM r) SELECT d.* FROM r d";
+        let sel = find_kw_depth0(cte, "SELECT", 0).unwrap();
+        assert_eq!(&cte[sel..sel + 6], "SELECT");
+        assert!(cte[sel..].starts_with("SELECT d.*"));
+        // Keyword inside a string literal is ignored.
+        assert_eq!(find_kw_depth0("SELECT 'FROM' AS x", "FROM", 6), None);
+        // Whole-word only: FROMAGE must not match FROM.
+        assert_eq!(find_kw_depth0("SELECT fromage", "FROM", 0), None);
+    }
+
+    #[test]
+    fn strip_trailing_order_limit_removes_tails_keeps_windows() {
+        assert_eq!(
+            strip_trailing_order_limit("SELECT a FROM t ORDER BY a LIMIT 10"),
+            "SELECT a FROM t"
+        );
+        assert_eq!(
+            strip_trailing_order_limit("SELECT a FROM t LIMIT 5"),
+            "SELECT a FROM t"
+        );
+        assert_eq!(
+            strip_trailing_order_limit("SELECT a FROM t;"),
+            "SELECT a FROM t"
+        );
+        // A window ORDER BY is inside parens (depth > 0) and must survive.
+        let win = "SELECT row_number() OVER (ORDER BY a) FROM t";
+        assert_eq!(strip_trailing_order_limit(win), win);
+    }
+
+    #[test]
+    fn parse_divergence_signature_kinds() {
+        assert_eq!(
+            parse_divergence_signature("!!! CHK|commit7|focus_roots|MV=10|RC=9  <<< MISMATCH"),
+            Some("chk-mismatch:focus_roots".to_string())
+        );
+        assert_eq!(
+            parse_divergence_signature("[stmt#3] INCONSISTENCY in block: matview=5, fresh=4"),
+            Some("inconsistency:block".to_string())
+        );
+        assert_eq!(
+            parse_divergence_signature(
+                "[panic] thread=main at src/x.rs:12:5: multiset went negative"
+            ),
+            Some("panic:multiset went negative".to_string())
+        );
+        assert_eq!(parse_divergence_signature("all good here"), None);
+    }
+
+    #[test]
+    fn parse_first_divergence_commit_reads_number() {
+        assert_eq!(
+            parse_first_divergence_commit("First divergence: commit#42 view=x MV=1 RC=0"),
+            Some(42)
+        );
+        assert_eq!(parse_first_divergence_commit("no divergence"), None);
+    }
+
+    #[test]
+    fn nth_transaction_bounds_finds_kth_tx() {
+        let d = vec![
+            Directive::Sql {
+                tag: "actor_ddl".into(),
+                sql: "CREATE TABLE t (id TEXT)".into(),
+            },
+            Directive::Sql {
+                tag: "actor_tx_begin".into(),
+                sql: "BEGIN".into(),
+            },
+            Directive::Sql {
+                tag: "actor_exec".into(),
+                sql: "INSERT INTO t VALUES ('a')".into(),
+            },
+            Directive::Sql {
+                tag: "actor_tx_commit".into(),
+                sql: "COMMIT".into(),
+            },
+            Directive::Sql {
+                tag: "actor_tx_begin".into(),
+                sql: "BEGIN".into(),
+            },
+            Directive::Sql {
+                tag: "actor_exec".into(),
+                sql: "INSERT INTO t VALUES ('b')".into(),
+            },
+            Directive::Sql {
+                tag: "actor_tx_commit".into(),
+                sql: "COMMIT".into(),
+            },
+        ];
+        assert_eq!(nth_transaction_bounds(&d, 1), Some((1, 3)));
+        assert_eq!(nth_transaction_bounds(&d, 2), Some((4, 6)));
+        assert_eq!(nth_transaction_bounds(&d, 3), None);
     }
 }

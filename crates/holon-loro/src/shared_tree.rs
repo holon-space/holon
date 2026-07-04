@@ -82,16 +82,13 @@ const MOUNT_KIND_VALUE: &str = "shared_tree";
 const MOUNT_SHARED_TREE_ID: &str = "shared_tree_id";
 const MOUNT_SHARED_ROOT: &str = "shared_root";
 
-/// Block property key that marks a row as a share-participating node.
-/// Value `"mount"` identifies the local mount block; other roles
-/// (e.g. `"participant"`) are reserved for future descendant projection.
-pub const SHARE_ROLE_PROPERTY: &str = "share-role";
-/// Value of `SHARE_ROLE_PROPERTY` for a shared-tree mount row.
-pub const SHARE_ROLE_MOUNT: &str = "mount";
-/// Block property key storing the shared tree's UUID.
-/// Mirrors `MOUNT_SHARED_TREE_ID` in Loro metadata so SQL queries can locate
-/// mount rows without traversing Loro.
-pub const SHARED_TREE_ID_PROPERTY: &str = "shared-tree-id";
+// Share-property keys live canonically in `holon-api::share_props` so every
+// layer (share backend, org write-back, SQL projection) agrees on one spelling.
+// Re-exported here for this crate's existing `shared_tree::SHARE_ROLE_*` /
+// `shared_tree::SHARED_TREE_ID_PROPERTY` call sites.
+pub use holon_api::share_props::SHARE_ROLE_MOUNT;
+pub use holon_api::share_props::SHARE_ROLE_PROPERTY;
+pub use holon_api::share_props::SHARED_TREE_ID_PROPERTY;
 
 /// Result of extracting a subtree for sharing.
 pub struct ExtractedSubtree {
@@ -159,11 +156,31 @@ pub fn extract_subtree(
         collect_non_subtree_descendants(&tree, *root, &keep, &mut to_delete);
     }
 
+    // Name every pruned node's root containers, then empty its content, BEFORE
+    // deleting any node: deleting a node also deletes its descendants'
+    // containers, a deleted container rejects further ops, and `meta.delete`
+    // inside `empty_child_containers` unnames the roots. All of `to_delete` is
+    // still alive at this point.
+    let mut pruned_roots = Vec::new();
+    for node in &to_delete {
+        pruned_roots.extend(crate::deleted_container_purge::subtree_roots(&tree, *node)?);
+    }
+    for node in &to_delete {
+        let meta = tree
+            .get_meta(*node)
+            .with_context(|| format!("meta of pruned node {node:?}"))?;
+        empty_child_containers(&meta).with_context(|| format!("pruning content of {node:?}"))?;
+    }
+
     for node in &to_delete {
         // Nodes may already be hidden (descendant of a deleted parent),
         // but delete is idempotent for already-deleted nodes.
         let _ = tree.delete(*node);
     }
+    // Emptying leaves the root containers alive with their op history; purging
+    // removes them, which is what keeps a pruned sibling's style-op payloads out
+    // of the shallow snapshot.
+    crate::deleted_container_purge::purge_roots(&forked, &pruned_roots)?;
     forked.commit();
 
     // Step 4: Export based on retention policy
@@ -239,6 +256,54 @@ fn collect_subtree_ids(tree: &LoroTree, root: TreeID) -> HashSet<TreeID> {
     result
 }
 
+/// Clear every container hanging off a tree node's `meta` map, and drop the map
+/// entries that point at them.
+///
+/// Mergeable children live at deterministic ROOT container ids rather than
+/// under their logical parent, so nothing about deleting the tree node reaches
+/// them.
+///
+/// Deleting a text's characters keeps them out of the exported bytes; its style
+/// spans are not, so `extract_subtree` follows this with
+/// [`crate::deleted_container_purge::purge_roots`] — see
+/// [`tests::none_retention_does_not_leak_sibling_mark_payloads_at_byte_level`].
+fn empty_child_containers(meta: &loro::LoroMap) -> Result<()> {
+    let keys: Vec<String> = match meta.get_value() {
+        LoroValue::Map(m) => m.keys().cloned().collect(),
+        other => bail!("tree node meta is not a map: {other:?}"),
+    };
+
+    for key in keys {
+        // Plain values need no clearing: they live IN the meta map, which dies
+        // with the tree node. Only containers outlive it.
+        let Some(ValueOrContainer::Container(container)) = meta.get(&key) else {
+            continue;
+        };
+        match container {
+            loro::Container::Text(t) => {
+                let len = t.len_unicode();
+                if len > 0 {
+                    t.delete(0, len)?;
+                }
+            }
+            loro::Container::Map(m) => empty_child_containers(&m)?,
+            loro::Container::List(l) => {
+                for i in (0..l.len()).rev() {
+                    l.delete(i, 1)?;
+                }
+            }
+            loro::Container::MovableList(l) => {
+                for i in (0..l.len()).rev() {
+                    l.delete(i, 1)?;
+                }
+            }
+            other => bail!("unexpected container kind under tree node meta {key:?}: {other:?}"),
+        }
+        meta.delete(&key)?;
+    }
+    Ok(())
+}
+
 /// Collect descendants of `node` that are NOT in `keep`, adding them to
 /// `to_delete`. Iterative to avoid stack overflow.
 fn collect_non_subtree_descendants(
@@ -296,6 +361,14 @@ pub struct ExtractedShare {
     pub shared_tree_id: String,
     pub node_count: usize,
     pub snapshot_size: usize,
+    /// Whether the source's own copy of the shared content is unrecoverable —
+    /// true for [`HistoryRetention::None`], which discards the lineage
+    /// merge-back needs (see
+    /// [`tests::none_retention_reintegration_fails_loudly`]).
+    /// [`commit_share_prune`] purges the copy only then: under `Full`/`Since`
+    /// it is the substrate `unmount(.., Some(..))` merges the collaboration
+    /// back onto.
+    pub source_copy_is_dead: bool,
 }
 
 /// Phase A (non-destructive): fork the source doc, extract the subtree
@@ -313,6 +386,7 @@ pub fn extract_for_share(
     shared_tree_id: String,
     retention: HistoryRetention,
 ) -> Result<ExtractedShare> {
+    let source_copy_is_dead = matches!(retention, HistoryRetention::None);
     let extracted = extract_subtree(source_doc, subtree_root, retention)?;
     Ok(ExtractedShare {
         shared_doc: extracted.shared_doc,
@@ -322,16 +396,32 @@ pub fn extract_for_share(
         shared_tree_id,
         node_count: extracted.node_count,
         snapshot_size: extracted.snapshot_size,
+        source_copy_is_dead,
     })
 }
 
 /// Phase B (destructive): delete the subtree from the source doc,
 /// create a mount node at the original position, and commit the source
 /// doc. Returns the new mount node's `TreeID`.
+///
+/// When the source's copy of the shared content is dead
+/// ([`ExtractedShare::source_copy_is_dead`]) the deleted blocks' root
+/// containers are purged too: the tree delete alone leaves them alive holding
+/// the plaintext, which every later export of the source carries — including
+/// the fork a later share of an unrelated subtree is cut from, where they are
+/// no longer reachable from any node and so escape [`extract_subtree`]'s purge.
 pub fn commit_share_prune(source_doc: &LoroDoc, extracted: &ExtractedShare) -> Result<TreeID> {
     let tree = source_doc.get_tree(TREE_NAME);
+    // Name the roots BEFORE the delete: it cascades to descendants, and a gone
+    // node no longer names its roots.
+    let pruned_roots = if extracted.source_copy_is_dead {
+        crate::deleted_container_purge::subtree_roots(&tree, extracted.subtree_root_in_source)?
+    } else {
+        Vec::new()
+    };
     tree.delete(extracted.subtree_root_in_source)
         .context("Failed to delete subtree from source after extraction")?;
+    crate::deleted_container_purge::purge_roots(source_doc, &pruned_roots)?;
 
     let mount_node = create_mount_node(
         &tree,
@@ -470,8 +560,17 @@ pub fn unmount(
         _ => None,
     };
 
+    // Name the mount's root containers BEFORE the delete: the delete cascades
+    // and a gone node no longer names its roots.
+    //
+    // `mount_roots` is empty on every path today (mount nodes carry only plain
+    // values). Should mounts ever own containers, this purge must move AFTER
+    // the reintegration import below — mergeable root ids are deterministic, so
+    // purging first would delete content the import brings back.
+    let mount_roots = crate::deleted_container_purge::subtree_roots(&tree, mount_node)?;
     tree.delete(mount_node)
         .context("Failed to delete mount node")?;
+    crate::deleted_container_purge::purge_roots(source_doc, &mount_roots)?;
 
     if let Some(shared_doc) = reintegrate_doc {
         // Import the shared doc's updates to merge CRDT state (text edits, etc.)
@@ -519,9 +618,7 @@ mod tests {
 
     fn set_text(tree: &LoroTree, node: TreeID, content: &str) {
         let meta = tree.get_meta(node).unwrap();
-        let text: LoroText = meta
-            .insert_container("content_raw", LoroText::new())
-            .unwrap();
+        let text: LoroText = meta.ensure_mergeable_text("content_raw").unwrap();
         text.insert(0, content).unwrap();
     }
 
@@ -618,6 +715,17 @@ mod tests {
             full.snapshot_size,
             none.snapshot_size
         );
+
+        // Pruning purges root containers on a doc whose history is then trimmed
+        // away — the shape `doc_lamport_height` panics on if a frontier ever
+        // references a trimmed change (task #78).
+        for (label, extracted) in [("full", &full), ("none", &none)] {
+            let height = crate::loro_backend::doc_lamport_height(&extracted.shared_doc);
+            assert!(
+                height > 0,
+                "{label}: lamport height collapsed after pruning"
+            );
+        }
     }
 
     #[test]
@@ -668,6 +776,228 @@ mod tests {
         assert!(
             String::from_utf8_lossy(&full_bytes).contains(SECRET),
             "expected the Full-retention snapshot to leak the sibling — test is vacuous otherwise"
+        );
+    }
+
+    /// The same guarantee for a link mark's payload (its url and label).
+    ///
+    /// Deleting a pruned node's characters keeps them out of the exported bytes
+    /// (the test above). Style spans have no such lever: the payload stayed in
+    /// the shallow snapshot's retained segment, and neither `unmark` nor a
+    /// re-import/re-export removed it. Purging the pruned node's mergeable ROOT
+    /// containers does — emptying them left them alive with their history.
+    ///
+    /// Byte-substring is a noisy oracle here (`mark_to_loro_value` builds a
+    /// `std::collections::HashMap`, so field order — and thus which of
+    /// url/label survives compression contiguously — varies per process);
+    /// a hit is nonetheless proof the plaintext is present.
+    #[test]
+    fn none_retention_does_not_leak_sibling_mark_payloads_at_byte_level() {
+        const URL: &str = "https://secret.example.invalid/PROD-LINK-SECRET-7f31";
+        const LABEL: &str = "PROD-LINK-LABEL-SECRET-7f31";
+
+        let doc = LoroDoc::new();
+        crate::loro_backend::configure_text_styles(&doc);
+        doc.set_peer_id(1).unwrap();
+        let tree = doc.get_tree(TREE_NAME);
+        tree.enable_fractional_index(0);
+
+        let doc_root = tree.create(None).unwrap();
+        let secret_sibling = tree.create(doc_root).unwrap();
+        set_text(&tree, secret_sibling, "click here for the private doc");
+        let mark = holon_api::InlineMark::Link {
+            target: holon_api::EntityRef::External {
+                url: URL.to_string(),
+            },
+            label: LABEL.to_string(),
+        };
+        {
+            let meta = tree.get_meta(secret_sibling).unwrap();
+            let text: LoroText = meta.ensure_mergeable_text("content_raw").unwrap();
+            text.mark(
+                0..5,
+                mark.loro_key(),
+                crate::loro_backend::mark_to_loro_value(&mark),
+            )
+            .unwrap();
+        }
+        let shared_root = tree.create(doc_root).unwrap();
+        set_text(&tree, shared_root, "Shared heading");
+        doc.commit();
+
+        let none = extract_subtree(&doc, shared_root, HistoryRetention::None).unwrap();
+        let bytes = none.shared_doc.export(ExportMode::Snapshot).unwrap();
+        let rendered = String::from_utf8_lossy(&bytes);
+
+        assert!(
+            !rendered.contains(URL) && !rendered.contains(LABEL),
+            "none-retention share leaked the pruned sibling's link payload into the raw bytes"
+        );
+    }
+
+    /// PRIVACY RUNG for the share's destructive half. `commit_share_prune`
+    /// deletes the shared subtree from the SOURCE doc, but its blocks'
+    /// mergeable children are ROOT containers: the tree delete leaves them
+    /// alive and unreachable, holding the plaintext in the source's state.
+    ///
+    /// That state is what every later export of the source reads from — most
+    /// consequentially the fork a LATER share of an unrelated subtree is cut
+    /// from, where the orphans are no longer reachable from any node and so
+    /// escape `extract_subtree`'s own purge. The first share's plaintext then
+    /// ships to the second share's recipient.
+    #[test]
+    fn commit_share_prune_leaves_no_pruned_plaintext_in_the_source_or_a_later_share() {
+        const FIRST_SECRET: &str = "FIRST-SHARE-SECRET-4a2e";
+
+        let doc = LoroDoc::new();
+        crate::loro_backend::configure_text_styles(&doc);
+        doc.set_peer_id(1).unwrap();
+        let tree = doc.get_tree(TREE_NAME);
+        tree.enable_fractional_index(0);
+
+        let doc_root = tree.create(None).unwrap();
+        let first = tree.create(doc_root).unwrap();
+        set_text(&tree, first, "first subtree heading");
+        let first_child = tree.create(first).unwrap();
+        set_text(&tree, first_child, FIRST_SECRET);
+        let second = tree.create(doc_root).unwrap();
+        set_text(&tree, second, "second subtree - shared later");
+        doc.commit();
+
+        share_subtree(
+            &doc,
+            first,
+            Some(doc_root),
+            "share-1".to_string(),
+            HistoryRetention::None,
+        )
+        .unwrap();
+
+        let source_bytes = doc
+            .export(ExportMode::shallow_snapshot(&doc.oplog_frontiers()))
+            .unwrap();
+        assert!(
+            !String::from_utf8_lossy(&source_bytes).contains(FIRST_SECRET),
+            "the pruned subtree's plaintext survived in the source doc's compacted state"
+        );
+
+        let later = share_subtree(
+            &doc,
+            second,
+            Some(doc_root),
+            "share-2".to_string(),
+            HistoryRetention::None,
+        )
+        .unwrap();
+        let later_bytes = later
+            .extracted
+            .shared_doc
+            .export(ExportMode::Snapshot)
+            .unwrap();
+        assert!(
+            !String::from_utf8_lossy(&later_bytes).contains(FIRST_SECRET),
+            "a later share of an unrelated subtree shipped the first share's plaintext"
+        );
+    }
+
+    /// TRIPWIRE, not a guarantee. `commit_share_prune` purges only when the
+    /// source's copy is dead, so a `Full`/`Since` share still leaves the
+    /// orphaned roots behind and the leak the test above closes stays open on
+    /// that path. Prod cannot reach it — `parse_retention` rejects "full" and
+    /// "since" (see `loro_share_backend::tests::
+    /// parse_retention_full_is_rejected_as_leaky`) — so nothing today makes the
+    /// gap visible if someone re-enables them.
+    ///
+    /// If you make `Full` purge, this test flips and the deferred ruling on
+    /// task #81 (privacy vs. `unmount(.., Some(..))` merge-back, which the
+    /// purge's deletion ops win against) must be revisited — do not simply
+    /// invert the assertion.
+    #[test]
+    fn full_retention_still_leaks_the_pruned_subtree_into_a_later_share() {
+        const FIRST_SECRET: &str = "FULL-RETENTION-TRIPWIRE-SECRET-8c5b";
+
+        let doc = LoroDoc::new();
+        crate::loro_backend::configure_text_styles(&doc);
+        doc.set_peer_id(1).unwrap();
+        let tree = doc.get_tree(TREE_NAME);
+        tree.enable_fractional_index(0);
+
+        let doc_root = tree.create(None).unwrap();
+        let first = tree.create(doc_root).unwrap();
+        set_text(&tree, first, "first subtree heading");
+        let first_child = tree.create(first).unwrap();
+        set_text(&tree, first_child, FIRST_SECRET);
+        let second = tree.create(doc_root).unwrap();
+        set_text(&tree, second, "second subtree - shared later");
+        doc.commit();
+
+        share_subtree(
+            &doc,
+            first,
+            Some(doc_root),
+            "tripwire-share-1".to_string(),
+            HistoryRetention::Full,
+        )
+        .unwrap();
+
+        // The later share is the prod shape (`None`) — the only thing carrying
+        // the secret into it is the unpurged orphan roots left by the `Full`
+        // prune above.
+        let later = share_subtree(
+            &doc,
+            second,
+            Some(doc_root),
+            "tripwire-share-2".to_string(),
+            HistoryRetention::None,
+        )
+        .unwrap();
+        let later_bytes = later
+            .extracted
+            .shared_doc
+            .export(ExportMode::Snapshot)
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&later_bytes).contains(FIRST_SECRET),
+            "the Full-retention purge gap closed — revisit the task #81 ruling before \
+             inverting this assertion"
+        );
+    }
+
+    /// `unmount` deletes the mount node, so whatever containers that node owns
+    /// must go with it. Prod mount nodes carry only plain values today (writes
+    /// to a mount are rejected — `loro_share_backend::tests::
+    /// write_to_mount_node_rejects`), so the container here is written
+    /// directly: this pins the call site's contract rather than a reachable
+    /// leak.
+    #[test]
+    fn unmount_takes_the_mount_nodes_own_containers_with_it() {
+        const MOUNT_SECRET: &str = "MOUNT-NODE-SECRET-b71c";
+
+        let doc = LoroDoc::new();
+        doc.set_peer_id(1).unwrap();
+        let (doc_root, _kept, shared_root, _block_b) = build_test_tree(&doc);
+
+        let result = share_subtree(
+            &doc,
+            shared_root,
+            Some(doc_root),
+            "collab-mount-purge".to_string(),
+            HistoryRetention::None,
+        )
+        .unwrap();
+
+        let tree = doc.get_tree(TREE_NAME);
+        set_text(&tree, result.mount_node, MOUNT_SECRET);
+        doc.commit();
+
+        unmount(&doc, result.mount_node, None).unwrap();
+
+        let bytes = doc
+            .export(ExportMode::shallow_snapshot(&doc.oplog_frontiers()))
+            .unwrap();
+        assert!(
+            !String::from_utf8_lossy(&bytes).contains(MOUNT_SECRET),
+            "the unmounted mount node's container survived in the source doc's compacted state"
         );
     }
 

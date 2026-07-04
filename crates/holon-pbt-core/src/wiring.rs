@@ -1,5 +1,9 @@
 //! Typed wiring manifest (ADR 0007).
 //!
+//! @pbt kind cap-plumbing
+//! @pbt covers all-slices — storage/sync/actor manifest + validity rules +
+//!   shrinkable `any_valid_wiring` strategy; fail-loud parse of env overrides.
+//!
 //! A [`Wiring`] declares which storage adapters, sync adapters, and actors
 //! are present in a given composition of Holon. It is the single input to
 //! both:
@@ -355,6 +359,20 @@ fn parse_wiring_axes(spec: &str) -> (Vec<StorageAdapter>, Vec<SyncAdapter>, Vec<
     )
 }
 
+/// Parse an EXACT pinned manifest (the `HOLON_PBT_PIN_WIRING` format): the same
+/// `"storage;sync;actors"` spec as `HOLON_PBT_WIRING_AXES`, but interpreted as
+/// the exact component sets of ONE wiring rather than a drawable universe.
+/// Fail-loud on a malformed spec or an invalid manifest -- a typo'd pin must
+/// never silently test a different grid point.
+pub fn wiring_from_exact_spec(spec: &str) -> Wiring {
+    let (storage, sync, actors) = parse_wiring_axes(spec);
+    let wiring = Wiring::custom(storage, sync, actors);
+    if let Err(e) = wiring.validate() {
+        panic!("pinned wiring {spec:?} is invalid: {e}");
+    }
+    wiring
+}
+
 /// Parse one comma-separated axis section into a deduplicated, order-preserving
 /// `Vec`. An empty section yields an empty axis.
 fn parse_axis<T: Copy + PartialEq>(
@@ -591,6 +609,11 @@ mod tests {
     }
 
     proptest! {
+        #![proptest_config(ProptestConfig {
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        })]
+
         /// `validate()`'s verdict agrees with the explicit rule table for
         /// every randomly drawn manifest (positive + negative coverage).
         #[test]

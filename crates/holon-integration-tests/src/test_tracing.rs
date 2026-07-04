@@ -1,8 +1,11 @@
 //! In-memory OpenTelemetry span collection for integration tests.
 //!
 //! The tracing subscriber is global (per-process), initialized once via
-//! `SpanCollector::global()`. Each PBT transition calls `reset()` to get
-//! per-transition isolation.
+//! `SpanCollector::global()`. Captured problems (ERROR events + panics) are
+//! NOT global: they are routed to the [`TestScope`] that OWNS the emitting
+//! thread, so parallel `--lib` tests can never be blamed for each other's
+//! failures. Each PBT transition calls `reset()` to clear its own scope's
+//! problems and the (still process-global) span exporter.
 //!
 //! Span names come from `#[tracing::instrument]` on SQL operations in
 //! `turso.rs`:
@@ -12,6 +15,8 @@
 //! - `"execute_ddl_with_deps"` — DDL with dependency tracking
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -27,7 +32,259 @@ pub struct SpanCollector {
     exporter: InMemorySpanExporter,
 }
 
+/// A problem captured during a test run that would otherwise be SWALLOWED: an
+/// ERROR-level tracing event, or a panic on ANY thread — including spawned
+/// background tokio workers, whose panics kill only that task and never fail
+/// the test thread (exactly how the advice `No id found` panic hid behind a
+/// green deterministic test). Drained per-case by the observability invariant.
+#[derive(Clone, Debug)]
+pub struct CapturedProblem {
+    pub kind: ProblemKind,
+    pub target: String,
+    pub message: String,
+    pub location: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProblemKind {
+    ErrorLog,
+    Panic,
+}
+
+impl std::fmt::Display for CapturedProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let kind = match self.kind {
+            ProblemKind::ErrorLog => "ERROR",
+            ProblemKind::Panic => "PANIC",
+        };
+        let loc = self.location.as_deref().unwrap_or("?");
+        write!(f, "[{kind}] {} ({loc}): {}", self.target, self.message)
+    }
+}
+
+/// Shared, resettable sink for captured problems.
+type ProblemSink = Arc<Mutex<Vec<CapturedProblem>>>;
+
+/// A `tracing` layer that routes every ERROR-level EVENT to the scope owning
+/// the emitting thread. Events (not spans) are what `tracing::error!(...)`
+/// emits; the OTel layer only captures spans, so a bare `error!` would
+/// otherwise be invisible to assertions.
+struct ErrorCaptureLayer;
+
+#[derive(Default)]
+struct MessageVisitor {
+    message: String,
+    extra: Vec<String>,
+}
+
+impl tracing::field::Visit for MessageVisitor {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.message = format!("{value:?}");
+        } else {
+            self.extra.push(format!("{}={value:?}", field.name()));
+        }
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ErrorCaptureLayer {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        if *event.metadata().level() != tracing::Level::ERROR {
+            return;
+        }
+        let mut v = MessageVisitor::default();
+        event.record(&mut v);
+        let meta = event.metadata();
+        let message = if v.message.is_empty() {
+            v.extra.join(" ")
+        } else if v.extra.is_empty() {
+            v.message
+        } else {
+            format!("{} ({})", v.message, v.extra.join(" "))
+        };
+        let location = match (meta.file(), meta.line()) {
+            (Some(file), Some(line)) => Some(format!("{file}:{line}")),
+            _ => None,
+        };
+        route_problem(CapturedProblem {
+            kind: ProblemKind::ErrorLog,
+            target: meta.target().to_string(),
+            message,
+            location,
+        });
+    }
+}
+
 static GLOBAL_COLLECTOR: OnceLock<SpanCollector> = OnceLock::new();
+
+/// Identifies one test case's observability window. Allocated by
+/// [`begin_test_scope`], carried by the owning driver thread and by every
+/// worker thread that scope registers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TestScope(u64);
+
+/// How a thread relates to a scope, which decides where its problems go.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ThreadRole {
+    /// The proptest/libtest thread running the harness. A panic on THIS thread
+    /// is never "swallowed" — it unwinds straight into the test runner and
+    /// fails the run loudly — so the panic hook must NOT capture it. Capturing
+    /// it created a feedback loop during proptest shrinking: the harness's own
+    /// divergence `assert!` panic (which Debug-embeds the failing invariant
+    /// messages) was recorded, the next shrink iteration's
+    /// `inv-no-observed-errors` embedded it (re-escaped) in a NEW divergence
+    /// panic, and the message doubled every iteration — gigabytes of
+    /// backslashes, runaway RSS, and a full disk (2026-07-11).
+    Driver(TestScope),
+    /// A background thread owned by a scope (tokio runtime workers, registered
+    /// via [`attach_scope_to_runtime`]). Its panics and ERROR logs ARE
+    /// swallowed by task isolation, so they are captured — into the OWNING
+    /// scope's sink, never into a concurrently-running test's.
+    Worker(TestScope),
+}
+
+#[derive(Default)]
+struct ScopeRegistry {
+    next_id: u64,
+    sinks: HashMap<TestScope, ProblemSink>,
+    threads: HashMap<std::thread::ThreadId, ThreadRole>,
+}
+
+static SCOPES: Mutex<Option<ScopeRegistry>> = Mutex::new(None);
+
+fn with_registry<R>(f: impl FnOnce(&mut ScopeRegistry) -> R) -> R {
+    let mut guard = SCOPES.lock().expect("SCOPES lock poisoned");
+    f(guard.get_or_insert_with(ScopeRegistry::default))
+}
+
+/// Open a fresh observability scope owned by the calling thread, retiring any
+/// scope this thread owned before (per-case isolation). The calling thread
+/// becomes the scope's [`ThreadRole::Driver`]. Call at case init, BEFORE
+/// building the SUT runtime, so [`attach_scope_to_runtime`] can bind its
+/// workers to this scope.
+pub fn begin_test_scope() -> TestScope {
+    let me = std::thread::current().id();
+    with_registry(|reg| {
+        if let Some(ThreadRole::Driver(old)) = reg.threads.get(&me).copied() {
+            reg.sinks.remove(&old);
+            reg.threads.retain(|_, role| {
+                !matches!(role, ThreadRole::Driver(s) | ThreadRole::Worker(s) if *s == old)
+            });
+        }
+        reg.next_id += 1;
+        let scope = TestScope(reg.next_id);
+        reg.sinks.insert(scope, Arc::new(Mutex::new(Vec::new())));
+        reg.threads.insert(me, ThreadRole::Driver(scope));
+        scope
+    })
+}
+
+/// Open a scope on the calling thread unless it already owns one. Harness
+/// entry points that may or may not sit under [`begin_test_scope`] (the
+/// per-case metrics owner is constructed from several harnesses) use this so a
+/// case always has a window, without retiring the scope — and with it the
+/// registered runtime workers — of a harness that already opened one.
+pub fn ensure_test_scope() -> TestScope {
+    let me = std::thread::current().id();
+    let existing = with_registry(|reg| reg.threads.get(&me).copied());
+    match existing {
+        Some(ThreadRole::Driver(scope) | ThreadRole::Worker(scope)) => scope,
+        None => begin_test_scope(),
+    }
+}
+
+/// The scope owning the calling thread. Panics when the thread has none —
+/// reading or resetting an observability window that was never opened is a
+/// harness wiring bug, not a recoverable condition.
+fn current_scope() -> TestScope {
+    let me = std::thread::current().id();
+    let role = with_registry(|reg| reg.threads.get(&me).copied());
+    match role {
+        Some(ThreadRole::Driver(scope) | ThreadRole::Worker(scope)) => scope,
+        None => panic!(
+            "thread {:?} ({}) has no test scope — call test_tracing::begin_test_scope() at case \
+             init before reading or resetting captured problems",
+            me,
+            std::thread::current().name().unwrap_or("<unnamed>"),
+        ),
+    }
+}
+
+/// Bind every thread the runtime starts to `scope`, so a panic or `error!` on a
+/// tokio worker is attributed to the test that owns the runtime. This is what
+/// keeps CROSS-THREAD capture alive under a thread-keyed sink.
+pub fn attach_scope_to_runtime(builder: &mut tokio::runtime::Builder, scope: TestScope) {
+    builder.on_thread_start(move || register_worker_thread(scope));
+    builder.on_thread_stop(unregister_worker_thread);
+}
+
+/// Register the calling thread as a background worker of `scope`.
+pub fn register_worker_thread(scope: TestScope) {
+    let me = std::thread::current().id();
+    with_registry(|reg| reg.threads.insert(me, ThreadRole::Worker(scope)));
+}
+
+/// Drop the calling thread's worker registration (thread ids are recycled by
+/// the OS, so a stale entry would misattribute a later thread's problems).
+pub fn unregister_worker_thread() {
+    let me = std::thread::current().id();
+    with_registry(|reg| reg.threads.remove(&me));
+}
+
+/// Route a captured problem to the scope that owns the emitting thread —
+/// driver and worker alike (an `error!` on the driver thread is still a
+/// swallowed problem; only PANICS are loud there, and the panic hook filters
+/// those out before calling this).
+///
+/// A thread owned by NO scope cannot be attributed; it is routed to the sole
+/// active scope when there is exactly one (unambiguous), and otherwise reported
+/// on stderr — disclosed, never silent, and never blamed on a bystander test.
+fn route_problem(problem: CapturedProblem) {
+    let me = std::thread::current().id();
+    let sink = with_registry(|reg| match reg.threads.get(&me).copied() {
+        Some(ThreadRole::Driver(scope) | ThreadRole::Worker(scope)) => Some(
+            reg.sinks
+                .get(&scope)
+                .expect("owning scope's sink must exist while the thread is registered")
+                .clone(),
+        ),
+        None => {
+            if reg.sinks.len() == 1 {
+                reg.sinks.values().next().cloned()
+            } else {
+                eprintln!(
+                    "[test_tracing] UNATTRIBUTED PROBLEM on thread {:?} ({}) — {} test scopes \
+                     active, cannot blame one: {problem}",
+                    me,
+                    std::thread::current().name().unwrap_or("<unnamed>"),
+                    reg.sinks.len(),
+                );
+                None
+            }
+        }
+    });
+    if let Some(sink) = sink {
+        sink.lock()
+            .expect("problem sink lock poisoned")
+            .push(problem);
+    }
+}
+
+/// The sink of `scope`. The scope must still be open — a retired scope's
+/// handle is a use-after-free of the observability window.
+fn scope_sink(scope: TestScope) -> ProblemSink {
+    with_registry(|reg| {
+        reg.sinks
+            .get(&scope)
+            .unwrap_or_else(|| panic!("{scope:?} has been retired; no sink to read"))
+            .clone()
+    })
+}
+
+fn is_driver_thread() -> bool {
+    let me = std::thread::current().id();
+    with_registry(|reg| matches!(reg.threads.get(&me), Some(ThreadRole::Driver(_))))
+}
 
 /// Holds the `tracing-chrome` flush guard for the lifetime of the
 /// process. Dropping it flushes the trace file. We park it in a static
@@ -68,15 +325,45 @@ impl SpanCollector {
     /// process and `set_global_default` can only be called once.
     pub fn global() -> &'static SpanCollector {
         GLOBAL_COLLECTOR.get_or_init(|| {
-            // Install a panic hook that flushes the chrome trace before
-            // the panic propagates. The PBT thread regularly panics
-            // (intentional, on invariant violations) and never reaches
-            // the explicit `flush_chrome_trace()` call in test main(),
-            // so without a hook the trace JSON is left truncated.
-            #[cfg(feature = "chrome-trace")]
+            // Record panics from EVERY thread — including spawned background tokio
+            // workers, whose panics kill only that task and never fail the test
+            // thread (exactly how the advice `No id found` panic hid behind a green
+            // test) — into the OWNING test scope's sink so `inv-no-observed-errors`
+            // fails on a swallowed panic, and only for the test that owns the
+            // thread. Then flush the chrome trace (the intentionally-panicking PBT
+            // thread would otherwise leave it truncated) and chain the previous
+            // hook.
             {
                 let prev_hook = std::panic::take_hook();
                 std::panic::set_hook(Box::new(move |info| {
+                    // Driver-thread panics unwind into the test runner and fail
+                    // the run loudly — not swallowed, not captured (see
+                    // `ThreadRole::Driver`; capturing them recursed during
+                    // shrinking).
+                    if is_driver_thread() {
+                        flush_chrome_trace();
+                        prev_hook(info);
+                        return;
+                    }
+                    let message = info
+                        .payload()
+                        .downcast_ref::<&str>()
+                        .map(|s| s.to_string())
+                        .or_else(|| info.payload().downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "<non-string panic payload>".to_string());
+                    let location = info
+                        .location()
+                        .map(|l| format!("{}:{}", l.file(), l.line()));
+                    let target = std::thread::current()
+                        .name()
+                        .unwrap_or("<unnamed>")
+                        .to_string();
+                    route_problem(CapturedProblem {
+                        kind: ProblemKind::Panic,
+                        target,
+                        message,
+                        location,
+                    });
                     flush_chrome_trace();
                     prev_hook(info);
                 }));
@@ -118,12 +405,36 @@ impl SpanCollector {
                 tracing_opentelemetry::OpenTelemetryLayer::new(global::tracer("holon-pbt"))
                     .with_filter(otel_filter);
 
-            let registry = tracing_subscriber::registry().with(otel_layer).with(
-                tracing_subscriber::fmt::layer()
-                    .with_test_writer()
-                    .with_filter(
-                        EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
-                    ),
+            // ERROR-only filter: registers interest in ERROR alone, so it does
+            // NOT raise the registry's global max-level and resurrect the hot
+            // DEBUG `interpret`-span cost the OTel filter above deliberately drops.
+            let error_capture =
+                ErrorCaptureLayer.with_filter(tracing_subscriber::filter::LevelFilter::ERROR);
+
+            let registry = tracing_subscriber::registry()
+                .with(otel_layer)
+                .with(error_capture)
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_test_writer()
+                        .with_filter(
+                            EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
+                        ),
+                );
+
+            // Reseed-attribution observer (Inc 0). Pinned to the `holon_latency`
+            // target only (via `Targets`). This DOES raise the registry's
+            // `max_level_hint` to DEBUG; what keeps the hot DEBUG render-tree
+            // spans out of this layer is per-layer interest caching — the
+            // `Targets` filter reports interest for `holon_latency` callsites
+            // ONLY, so every other DEBUG callsite is disabled for this layer
+            // (same mechanism as `error_capture` above).
+            #[cfg(feature = "pbt")]
+            let registry = registry.with(
+                crate::pbt::composed::reseed_observer::ReseedObserverLayer.with_filter(
+                    tracing_subscriber::filter::Targets::new()
+                        .with_target("holon_latency", tracing::Level::DEBUG),
+                ),
             );
 
             // tokio-console async-wait profiler. `spawn()` starts the gRPC
@@ -163,6 +474,9 @@ impl SpanCollector {
                         "holon_frontend=debug",
                         "holon_gpui=debug",
                         "holon_integration_tests=info",
+                        // The INFO `holon_latency` stage events are per-batch,
+                        // not spans — hundreds of zero-width trace entries.
+                        "holon_latency=warn",
                     ]
                     .join(",")
                 });
@@ -192,9 +506,31 @@ impl SpanCollector {
         })
     }
 
-    /// Clear all collected spans. Call at the start of each transition.
+    /// Clear the process-global span exporter and the CALLING THREAD's scope's
+    /// captured problems. Call at the start of each transition (per-transition
+    /// isolation for both spans and error/panic capture).
     pub fn reset(&self) {
         self.exporter.reset();
+        scope_sink(current_scope())
+            .lock()
+            .expect("problem sink lock poisoned")
+            .clear();
+    }
+
+    /// Problems (ERROR-level tracing events + panics on this scope's threads)
+    /// captured since the last [`SpanCollector::reset`], for the scope owning
+    /// the calling thread. Read by the observability invariant so a SWALLOWED
+    /// error/panic fails the run — the run that owns it, and no other.
+    pub fn captured_problems(&self) -> Vec<CapturedProblem> {
+        scope_sink(current_scope())
+            .lock()
+            .expect("problem sink lock poisoned")
+            .clone()
+    }
+
+    /// Count of problems captured since the last [`SpanCollector::reset`].
+    pub fn problem_count(&self) -> usize {
+        self.captured_problems().len()
     }
 
     /// Get all spans collected since last reset.
@@ -791,4 +1127,121 @@ pub fn maybe_write_flamegraph(collector: &SpanCollector, transition_key: &str) {
         perf_spans.len(),
         path.display()
     );
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use tracing_subscriber::Layer as _;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    use super::*;
+
+    /// The ERROR-capture layer records ERROR events and IGNORES lower levels —
+    /// verified against a THREAD-LOCAL subscriber whose layer routes into this
+    /// test's OWN scope, so it never lands in another test's sink.
+    #[test]
+    fn error_capture_layer_records_only_error_events() {
+        let collector = SpanCollector::global();
+        begin_test_scope();
+        let subscriber = tracing_subscriber::registry()
+            .with(ErrorCaptureLayer.with_filter(tracing_subscriber::filter::LevelFilter::ERROR));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!("ignored warning");
+            tracing::error!("captured boom");
+        });
+        let got = collector.captured_problems();
+        assert_eq!(
+            got.len(),
+            1,
+            "only the ERROR event is recorded; got {got:?}"
+        );
+        assert_eq!(got[0].kind, ProblemKind::ErrorLog);
+        assert!(
+            got[0].message.contains("captured boom"),
+            "message captured: {:?}",
+            got[0].message
+        );
+    }
+
+    /// Driver-thread panics are LOUD (they unwind into the test runner), so the
+    /// panic hook must not record them as swallowed problems — capturing them
+    /// recursed during proptest shrinking (each iteration's divergence panic
+    /// re-entered the next iteration's `inv-no-observed-errors` message,
+    /// doubling the escaped text every round). Panics on a WORKER thread this
+    /// scope owns stay captured — that is the invariant's whole point — and
+    /// they land in THIS scope's sink, not a concurrent test's.
+    #[test]
+    fn driver_panics_are_not_captured_but_owned_worker_panics_are() {
+        let collector = SpanCollector::global();
+        let scope = begin_test_scope();
+
+        // Worker thread owned by this scope: its panic IS captured, here.
+        let bg = std::thread::Builder::new()
+            .name("bg-panic-probe".into())
+            .spawn(move || {
+                register_worker_thread(scope);
+                panic!("bg-swallowed-marker-7f3a")
+            })
+            .expect("spawn");
+        assert!(bg.join().is_err());
+
+        // Driver-thread panic (this thread) is NOT captured.
+        let caught = std::panic::catch_unwind(|| panic!("driver-loud-marker-7f3a"));
+        assert!(caught.is_err());
+
+        let problems = collector.captured_problems();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.message.contains("bg-swallowed-marker-7f3a")),
+            "owned worker panic must be captured; got {problems:?}"
+        );
+        assert!(
+            !problems
+                .iter()
+                .any(|p| p.message.contains("driver-loud-marker-7f3a")),
+            "driver-thread panic must NOT be captured; got {problems:?}"
+        );
+    }
+
+    /// A worker panic is attributed to the scope that OWNS the worker, and is
+    /// invisible to a CONCURRENT scope — the misattribution that made the whole
+    /// `--lib` suite untrustworthy (parallel tests inheriting each other's
+    /// panics through one process-global sink).
+    #[test]
+    fn worker_panic_is_invisible_to_a_concurrent_scope() {
+        let collector = SpanCollector::global();
+        let bystander = begin_test_scope();
+
+        let victim = std::thread::Builder::new()
+            .name("other-test-driver".into())
+            .spawn(|| {
+                let owner = begin_test_scope();
+                let worker = std::thread::Builder::new()
+                    .name("owned-worker".into())
+                    .spawn(move || {
+                        register_worker_thread(owner);
+                        panic!("owner-only-marker-91c2")
+                    })
+                    .expect("spawn worker");
+                assert!(worker.join().is_err());
+                SpanCollector::global().captured_problems()
+            })
+            .expect("spawn other driver");
+        let owner_problems = victim.join().expect("other driver joins");
+
+        assert!(
+            owner_problems
+                .iter()
+                .any(|p| p.message.contains("owner-only-marker-91c2")),
+            "owning scope must see its worker's panic; got {owner_problems:?}"
+        );
+        assert!(
+            !collector
+                .captured_problems()
+                .iter()
+                .any(|p| p.message.contains("owner-only-marker-91c2")),
+            "bystander scope {bystander:?} must NOT inherit another test's panic"
+        );
+    }
 }

@@ -111,6 +111,37 @@ pub trait OperationProvider: Send + Sync {
     fn get_last_created_id(&self) -> Option<String> {
         None
     }
+
+    /// The identity minter for this provider, present **only** when this
+    /// provider is the Turso block-identity authority (ADR 0029 D1c: the active
+    /// consolidator selects the mint EXECUTOR, never the id VALUE). Mirrors
+    /// `order_key_minter`: default `None`; the SqlOperationProvider overrides
+    /// to `Some(self)`. A `create` that omits an id (mint a fresh
+    /// unique-random one) or supplies a derived one (recognize it against
+    /// its holder, D1b) reaches minting through this seam — fail-loud when
+    /// the mode that should own it returns `None`.
+    fn identity_minter(&self) -> Option<&dyn holon_api::identity_minting::IdentityMinting> {
+        None
+    }
+
+    /// Read the currently-stored `(content, marks)` of a block row, for the
+    /// CRUD authority that owns block state.
+    ///
+    /// The dispatcher's live-edit mark-extraction follow-up (links increment 3)
+    /// uses this to decide whether a `set_field("content")` actually CHANGED
+    /// the block's mark set — comparing the newly extracted marks against
+    /// ground truth instead of nulling marks blindly on every content
+    /// commit.
+    ///
+    /// - `Ok(Some((content, marks)))` — the stored stripped-label `content` and
+    ///   the `marks` column value (`Value::Null` when the block has no marks).
+    /// - `Ok(None)` — this provider does NOT own readable block state (the
+    ///   structural-ops providers, test stubs, and the Loro CRUD provider
+    ///   today). Callers MUST treat `None` as UNKNOWN and fail safe: never null
+    ///   a block's marks on the strength of an unreadable prior state.
+    async fn read_block_content_marks(&self, _: &str) -> Result<Option<(String, Value)>> {
+        Ok(None)
+    }
 }
 
 /// The single backend that owns block CRUD (set_field / create / update /
@@ -187,18 +218,25 @@ pub struct CompletionStateInfo {
     pub is_active: bool,
 }
 
-/// Represents the undo capability of an operation.
+/// Represents the undo classification of an operation.
 ///
-/// Operations return this type to indicate whether they can be undone
-/// and if so, what operation would undo them.
+/// Every provider result MUST carry a deliberate classification — either a
+/// concrete inverse ([`UndoAction::Undo`]) or an explicit
+/// [`UndoAction::DeclaredIrreversible`] naming *why* it cannot be undone. The
+/// third variant, [`UndoAction::Undeclared`], is the loud-failure default: a
+/// result that reaches the engine still `Undeclared` is a programming error
+/// (an arm that forgot to classify), not a silent no-op.
 #[derive(Debug, Clone)]
 pub enum UndoAction {
     /// The operation can be undone by executing the contained inverse
     /// operation.
     Undo(Operation),
-    /// The operation cannot be undone (e.g., complex operations like
-    /// split_block).
-    Irreversible,
+    /// The operation is deliberately not undoable; the reason is greppable and
+    /// user-surfaceable (e.g. "split_block: inverse not yet implemented").
+    DeclaredIrreversible(&'static str),
+    /// No classification was made. Reaching the engine in this state is a loud
+    /// error — providers must choose `Undo` or `DeclaredIrreversible`.
+    Undeclared,
 }
 
 impl UndoAction {
@@ -208,13 +246,18 @@ impl UndoAction {
     pub fn into_option(self) -> Option<Operation> {
         match self {
             UndoAction::Undo(op) => Some(op),
-            UndoAction::Irreversible => None,
+            UndoAction::DeclaredIrreversible(_) | UndoAction::Undeclared => None,
         }
     }
 
     /// Check if this action is reversible
     pub fn is_reversible(&self) -> bool {
         matches!(self, UndoAction::Undo(_))
+    }
+
+    /// Whether the provider forgot to classify (loud-error condition).
+    pub fn is_undeclared(&self) -> bool {
+        matches!(self, UndoAction::Undeclared)
     }
 }
 
@@ -228,9 +271,31 @@ impl From<Option<Operation>> for UndoAction {
     fn from(opt: Option<Operation>) -> Self {
         match opt {
             Some(op) => UndoAction::Undo(op),
-            None => UndoAction::Irreversible,
+            None => UndoAction::DeclaredIrreversible("inverse not provided"),
         }
     }
+}
+
+/// Whether a [`FieldDelta`] names a scalar (entity, field) the undo staleness
+/// reader can `SELECT` back from the projection table (`Readable`), or an
+/// edge/junction write that has NO readable column so it must be excluded from
+/// [`Precondition`](crate::undo::Precondition) fingerprints while still flowing
+/// into the history relation (`HistoryOnly`).
+///
+/// Parse-don't-validate: the delta itself carries the proof of which
+/// fingerprinting is legal, so `Precondition::forward`/`inverse` never emit a
+/// `SELECT <edge-field> FROM block_raw` the row table cannot answer (the edge
+/// lives in a junction table). `#[serde(default)]` on the field keeps this
+/// backward-compatible — a persisted delta with no fingerprint reads back as
+/// `Readable`, the historical behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum DeltaFingerprint {
+    /// The (entity, field) is a real projected scalar column: fingerprint it.
+    #[default]
+    Readable,
+    /// The change is an edge/junction write with no readable column: record it
+    /// in history, but never put it in a staleness precondition.
+    HistoryOnly,
 }
 
 /// Represents a single field change with old and new values.
@@ -241,6 +306,11 @@ pub struct FieldDelta {
     pub field: String,
     pub old_value: Value,
     pub new_value: Value,
+    /// Whether this delta may be fingerprinted for undo staleness. Defaults to
+    /// [`DeltaFingerprint::Readable`] (both for `FieldDelta::new` and for
+    /// deserialization of pre-fingerprint persisted entries).
+    #[serde(default)]
+    pub fingerprint: DeltaFingerprint,
 }
 
 impl FieldDelta {
@@ -255,9 +325,31 @@ impl FieldDelta {
             field: field.into(),
             old_value,
             new_value,
+            fingerprint: DeltaFingerprint::Readable,
+        }
+    }
+
+    /// A delta over an edge/junction field with no readable projection column
+    /// (e.g. `tags`): recorded in history, but excluded from undo staleness
+    /// preconditions so no invalid `SELECT <field> FROM block_raw` is
+    /// generated.
+    pub fn history_only(
+        entity_id: impl Into<String>,
+        field: impl Into<String>,
+        old_value: Value,
+        new_value: Value,
+    ) -> Self {
+        Self {
+            entity_id: entity_id.into(),
+            field: field.into(),
+            old_value,
+            new_value,
+            fingerprint: DeltaFingerprint::HistoryOnly,
         }
     }
 }
+
+pub use holon_api::operation_engine::Delivery;
 
 /// Result of an operation, containing changes for propagation and undo action.
 ///
@@ -271,6 +363,10 @@ impl FieldDelta {
 pub struct OperationResult {
     pub changes: Vec<FieldDelta>,
     pub undo: UndoAction,
+    /// Whether the effect is proven to have landed. Every local operation is
+    /// `Proven`; only a connector whose sidecar declares an outcome mapping
+    /// can report otherwise.
+    pub delivery: Delivery,
     /// Optional response payload from the operation (e.g. MCP tool call
     /// results). Non-MCP providers return `None`.
     pub response: Option<Value>,
@@ -289,16 +385,27 @@ impl OperationResult {
             undo: UndoAction::Undo(undo_operation),
             response: None,
             follow_ups: vec![],
+            delivery: Delivery::Proven,
         }
     }
 
-    /// Create an irreversible operation result
+    /// Create a deliberately-irreversible operation result with a default
+    /// reason. Behaviour-preserving replacement for the former silent
+    /// "no undo entry" path; the classification is now visible and greppable
+    /// (`UndoAction::DeclaredIrreversible`). Use
+    /// [`Self::declared_irreversible`] to name the specific reason.
     pub fn irreversible(changes: Vec<FieldDelta>) -> Self {
+        Self::declared_irreversible(changes, "inverse not yet implemented")
+    }
+
+    /// Create an irreversible result naming *why* it cannot be undone.
+    pub fn declared_irreversible(changes: Vec<FieldDelta>, reason: &'static str) -> Self {
         Self {
             changes,
-            undo: UndoAction::Irreversible,
+            undo: UndoAction::DeclaredIrreversible(reason),
             response: None,
             follow_ups: vec![],
+            delivery: Delivery::Proven,
         }
     }
 
@@ -311,6 +418,7 @@ impl OperationResult {
             undo,
             response: None,
             follow_ups: vec![],
+            delivery: Delivery::Proven,
         }
     }
 
@@ -386,6 +494,14 @@ pub trait BlockEntity: MaybeSendSync {
     /// Get the block content (text content of the block)
     fn content(&self) -> &str;
 
+    /// The block's inline marks (`[[link]]`, `*bold*`, …), if any. Default
+    /// `None` keeps synthetic test stores that don't model marks working;
+    /// production block entities override to return their stored set so
+    /// structural ops (`split_block`) can partition marks across the split.
+    fn marks(&self) -> Option<&[holon_api::MarkSpan]> {
+        None
+    }
+
     /// Tags attached to this block. The literal `"Page"` tag marks the
     /// block as a page (org file root).
     fn tags(&self) -> Tags;
@@ -419,16 +535,19 @@ where
     /// Set single field (returns changes and inverse operation for undo)
     /// Note: affected_fields is determined dynamically based on the field
     /// parameter
+    #[holon_macros::boundary_behavior(private_only)]
     async fn set_field(&self, id: &str, field: &str, value: Value) -> Result<OperationResult>;
 
     /// Create new entity (returns new ID, changes, and inverse operation for
     /// undo)
+    #[holon_macros::boundary_behavior(private_only)]
     async fn create(
         &self,
         fields: crate::storage::types::StorageEntity,
     ) -> Result<(String, OperationResult)>;
 
     /// Delete entity (returns changes and inverse operation for undo)
+    #[holon_macros::boundary_behavior(private_only)]
     async fn delete(&self, id: &str) -> Result<OperationResult>;
 
     /// Get operations metadata (automatically delegates to entity type)
@@ -636,10 +755,33 @@ where
 }
 
 /// Backward-compatible alias combining both query and maintenance helpers
+#[async_trait]
 pub trait BlockDataSourceHelpers<T>: BlockQueryHelpers<T> + BlockMaintenanceHelpers<T>
 where
     T: BlockEntity + MaybeSendSync + 'static,
 {
+    /// Authoritative `Page`-tag check — reads the WRITE authority for the tag,
+    /// NOT the possibly-lagging read projection that `get_by_id` deserializes
+    /// (`Block::tags` comes from the `block` matview, which trails the
+    /// block_tags edge write via CDC). Page-BOUNDARY guards (`outdent`) MUST
+    /// use this: a page whose `Page` tag is committed to the store but not
+    /// yet reflected in the matview would otherwise be mis-seen as a
+    /// non-page, letting a child escape its page container into the
+    /// enclosing page (the journals-phantom family — block_raw corruption
+    /// every downstream projection then faithfully mirrors). Deliberately
+    /// NOT on the `#[operations_trait]` `BlockOperations` (it is an
+    /// internal guard read, not a dispatchable operation). The default
+    /// falls back to the projected block, correct for stores with no
+    /// separate write authority (Loro / in-memory test substrate); the SQL
+    /// store overrides it to read `block_tags` directly, closing the
+    /// read-snapshot window completely.
+    async fn is_page_authoritative(&self, id: &EntityUri) -> Result<bool> {
+        Ok(self
+            .get_by_id(id.as_str())
+            .await?
+            .map(|b| b.is_page())
+            .unwrap_or(false))
+    }
 }
 
 /// Read a block's content through the cell registry. Returns `None`
@@ -688,6 +830,7 @@ async fn create_block_via_cells(
         content,
         &std::collections::HashMap::<String, holon_api::Value>::new(),
         &Tags::default(),
+        &[],
         &[],
     )
     .await
@@ -776,6 +919,8 @@ where
     /// propagation, plus the recursive-depth-update for descendants that the
     /// inline implementation was missing.
     #[holon_macros::affects("parent_id", "depth", "sort_key")]
+    #[holon_macros::menu_exposure(listed)]
+    #[holon_macros::boundary_behavior(crossing_widens)]
     async fn indent(&self, id: &EntityUri) -> Result<OperationResult> {
         let id_str = id.as_str();
         let block = self
@@ -818,6 +963,7 @@ where
     /// Position `id` under `parent_id`, immediately after `after_block_id`
     /// (or first when `None`). Delegates to the impl's `BlockOrdering` —
     /// see `crates/holon-core/src/block_ordering.rs`.
+    #[holon_macros::boundary_behavior(crossing_widens)]
     async fn move_to_position(
         &self,
         id: &EntityUri,
@@ -845,6 +991,8 @@ where
     #[holon_macros::affects("parent_id", "depth", "sort_key")]
     #[holon_macros::triggered_by(availability_of = "tree_position", providing = ["parent_id", "after_block_id"])]
     #[holon_macros::triggered_by(availability_of = "selected_id", providing = ["parent_id"])]
+    #[holon_macros::menu_exposure(pointer_gesture)]
+    #[holon_macros::boundary_behavior(crossing_widens)]
     async fn move_block(
         &self,
         id: &EntityUri,
@@ -865,11 +1013,44 @@ where
         // Compute new depth for descendants' delta-update.
         let maybe_parent: Option<T> = self.get_by_id(parent_id.as_str()).await?;
         let parent: T = maybe_parent.ok_or_else(|| anyhow::anyhow!("Parent not found"))?;
+
+        // No-pages-under-non-pages (interim ruling 2026-07-13, Fork B B1): a page
+        // block may only be reparented under another page (an org file nests only
+        // under an org file). Enforced HERE, at the single shared write chokepoint
+        // for every reparenting op — `move_block` itself plus `indent`/`outdent`/
+        // `move_up`/`move_down`, which all route through it — so both the SQL and
+        // Loro providers (each using this default `BlockOperations` impl) reject it
+        // identically. This is the WRITE-side guard; `name_chain` (writeback) is the
+        // downstream READ-side tripwire. Fail loud rather than let the prohibited
+        // topology land and surface deep in writeback.
+        if crate::block_op_catalog::page_under_non_page_prohibited(
+            block.is_page(),
+            Some(parent.is_page()),
+        ) {
+            return Err(anyhow::anyhow!(
+                "move_block: refusing to reparent page block '{}' under non-page parent '{}' — \
+                 pages under non-pages are prohibited (interim ruling 2026-07-13); a page may only \
+                 nest under another page",
+                id_str,
+                parent_id.as_str(),
+            )
+            .into());
+        }
+
         let new_depth = parent.depth() + 1;
         let depth_delta = new_depth - old_depth;
 
         // Position + depth update.
         let mut changes = self.move_to_position(id, parent_id, after_block_id).await?;
+        // Disclose the reparent itself: `move_to_position` reports no deltas
+        // (ordering-internal), but parent_id DID change — propagation consumers
+        // and the undo precondition both need the true field-level change.
+        changes.push(FieldDelta::new(
+            id_str,
+            "parent_id",
+            Value::String(old_parent_uri.as_str().to_string()),
+            Value::String(parent_id.as_str().to_string()),
+        ));
         let depth_result = self
             .set_field(id_str, "depth", Value::Integer(new_depth))
             .await?;
@@ -904,6 +1085,8 @@ where
 
     /// Move block out to parent's level (decrease indentation)
     #[holon_macros::affects("parent_id", "depth", "sort_key")]
+    #[holon_macros::menu_exposure(listed)]
+    #[holon_macros::boundary_behavior(forbidden_at_page_boundary)]
     async fn outdent(&self, id: &EntityUri) -> Result<OperationResult> {
         let id_str = id.as_str();
         let maybe_block: Option<T> = self.get_by_id(id_str).await?;
@@ -914,6 +1097,26 @@ where
 
         let maybe_parent: Option<T> = self.get_by_id(parent_id.as_str()).await?;
         let parent: T = maybe_parent.ok_or_else(|| anyhow::anyhow!("Parent not found"))?;
+
+        // ADR 0028 D1: outdenting a DIRECT PAGE CHILD would move the block out of
+        // its page container to the page's own level — escaping the page. That
+        // crossing is forbidden. Reject loudly (no structural change); the editor
+        // surfaces this as a user-visible CommandFailed toast.
+        //
+        // Read the parent's page-ness from the WRITE authority, not `parent`
+        // (deserialized from the lagging `block` matview): a seeded / nested
+        // day-page whose `Page` tag has not yet propagated to the matview would
+        // otherwise read as a non-page, letting this child escape into
+        // `journals` (the journals-phantom family — block_raw corruption that
+        // every downstream projection faithfully mirrors).
+        if self.is_page_authoritative(parent_id).await? {
+            return Err(anyhow::anyhow!(
+                "Cannot outdent a direct child of a page: block {id_str} would escape its page \
+                 container (ADR 0028 D1). Move it elsewhere instead."
+            )
+            .into());
+        }
+
         let grandparent_id = parent
             .parent_id()
             .ok_or_else(|| anyhow::anyhow!("Cannot outdent: parent is already at root level"))?;
@@ -961,6 +1164,8 @@ where
     /// * `position` - Character position to split at (as i64, will be converted
     ///   to usize)
     #[holon_macros::affects("content")]
+    #[holon_macros::menu_exposure(keyboard_gesture)]
+    #[holon_macros::boundary_behavior(private_only)]
     async fn split_block(&self, id: &EntityUri, position: i64) -> Result<OperationResult> {
         use uuid::Uuid;
 
@@ -1005,15 +1210,38 @@ where
             .into());
         }
 
-        // Split content at cursor
-        let mut content_before = content[..position].to_string();
-        let mut content_after = content[position..].to_string();
+        if !content.is_char_boundary(position) {
+            return Err(anyhow::anyhow!(
+                "Split position {position} is not a char boundary of {content:?}"
+            )
+            .into());
+        }
 
-        // Strip trailing whitespace from the old block
-        content_before = content_before.trim_end().to_string();
-
-        // Strip leading whitespace from the new block
-        content_after = content_after.trim_start().to_string();
+        // Split content AND partition marks at the cursor. `split_content_marks`
+        // is the single source of truth shared with the keystone reference model:
+        // it applies the same whitespace trimming (left `trim_end`, right
+        // `trim_start`) AND partitions the mark set so a `[[link]]` / `*bold*`
+        // that lies left of the split stays on the retained block (in bounds),
+        // one that lies right moves to the new block rebased, and one that
+        // straddles the split degrades (link → plain text on both sides) or
+        // truncates (formatting → both sides). Before this, split wrote only
+        // `content`: the retained block kept STALE out-of-bounds marks and the
+        // new block got NULL marks, destroying links across a split (dogfood
+        // 2026-07-20). Marks are read off the fetched block projection; in
+        // SqlOnly mode this is the same authority `content_owned` came from.
+        let origin_marks: Vec<holon_api::MarkSpan> = block.marks().unwrap_or(&[]).to_vec();
+        let holon_api::SplitContentMarks {
+            left:
+                holon_api::SplitSide {
+                    content: content_before,
+                    marks: left_marks,
+                },
+            right:
+                holon_api::SplitSide {
+                    content: content_after,
+                    marks: right_marks,
+                },
+        } = holon_api::split_content_marks(content, &origin_marks, position);
 
         // Generate new block ID. Mirror the rest of the system's URI
         // convention: SQL `block.id` stores the prefixed form (`block:UUID`)
@@ -1022,6 +1250,13 @@ where
         // would create an id-format mismatch — every later
         // `get_by_id`, `parent_id` lookup, and `EntityUri::try_from(Value)`
         // round-trip would silently miss this block.
+        // SEAM(ADR 0029 Inc 5): this unique-random block-id mint is hand-
+        // formatted (D2 prohibition 2). It is NOT migrated to the
+        // `IdentityMinting` witness surface here because `split_block`
+        // routes the create through the Loro cell registry when a Loro
+        // backing is present — so migrating it touches Loro-side minting,
+        // which is the Loro impl's increment (Inc 5), not this Turso lane.
+        // The value equals `EntityUri::block_random()` (class b).
         let new_block_uuid = Uuid::new_v4().to_string();
         let new_block_id = format!("block:{new_block_uuid}");
 
@@ -1051,10 +1286,19 @@ where
             &parent_for_split,
             Some(&after_uri),
             &new_block_uri,
-            // The new half of a split is always plain text — the reference
-            // model's `split_block` creates `Block::new_text`. (Splitting a
-            // source block is not a user-reachable op.)
-            holon_api::BlockContent::text(content_after.clone()),
+            // The new half of a split carries the marks that fell to the RIGHT
+            // of the split point (rebased by `split_content_marks`). RichText
+            // when there are marks so the cell registry applies them via
+            // Peritext; plain Text otherwise (a source-block split is not a
+            // user-reachable op).
+            if right_marks.is_empty() {
+                holon_api::BlockContent::text(content_after.clone())
+            } else {
+                holon_api::BlockContent::RichText {
+                    text: content_after.clone(),
+                    marks: right_marks.clone(),
+                }
+            },
         )
         .await?;
 
@@ -1099,6 +1343,15 @@ where
             let mut new_block_fields = crate::storage::types::StorageEntity::new();
             new_block_fields.insert("id".into(), Value::String(new_block_id.clone()));
             new_block_fields.insert("content".into(), Value::String(content_after));
+            if !right_marks.is_empty() {
+                // Marks that fell to the RIGHT of the split. The SqlOnly create
+                // path writes the `marks` column AND derives the `block_links`
+                // junction from this param (links increment 2).
+                new_block_fields.insert(
+                    "marks".into(),
+                    Value::String(holon_api::marks_to_json(&right_marks)),
+                );
+            }
             new_block_fields.insert("parent_id".into(), {
                 if let Some(ref pid) = block.parent_id() {
                     Value::String(pid.to_string())
@@ -1120,37 +1373,90 @@ where
             new_block_fields.insert("created_at".into(), Value::Integer(now));
             new_block_fields.insert("updated_at".into(), Value::Integer(now));
             new_block_fields.insert("collapsed".into(), Value::Boolean(false));
+            new_block_fields.insert("widget_only".into(), Value::Boolean(false));
             new_block_fields.insert("completed".into(), Value::Boolean(false));
             new_block_fields.insert("block_type".into(), Value::String("text".to_string()));
 
             let (_new_block_id, create_result) = self.create(new_block_fields).await?;
             changes.extend(create_result.changes);
+        } else {
+            // Loro (cell) create path emits no FieldDelta of its own. Fingerprint
+            // the new block's post-split content so the split's inverse
+            // (`restore_join`, which DELETES this block) is dropped LOUDLY if the
+            // block was deleted or edited under a later undo — closing the
+            // stale-guard gap that let an undo-after-delete destroy unrelated
+            // blocks (BugFunnel dogfood #4). `content` is a projected column the
+            // `SqlUndoStateReader` can read.
+            changes.push(FieldDelta::new(
+                new_block_id.clone(),
+                "content",
+                Value::Null,
+                Value::String(content_after.clone()),
+            ));
         }
 
-        // Update current block with truncated content. Prefer writing
-        // through the Loro CRDT layer (via the cell registry) when
-        // available so the `LoroSyncController.on_loro_changed` outbound
-        // projector becomes the single SQL writer for content. Drops
-        // through to a direct `set_field` write when no cell route exists
-        // (SqlOnly mode, synthetic in-memory test store, block not yet in
-        // Loro tree).
-        // `set_field` is the single content-write seam: it routes `content`
-        // through the cell registry (Loro in Full mode) and falls back to a
-        // direct SQL write when no cell route exists (SqlOnly, synthetic test
-        // store, block not yet in the Loro tree).
+        // Update current block with truncated content. `set_field("content")`
+        // is the single content-write seam: it routes through the cell registry
+        // (Loro in Full mode) and falls back to a direct SQL write when no cell
+        // route exists (SqlOnly, synthetic test store, block not yet in the Loro
+        // tree). The value stays a plain String — the cell registry's content
+        // arm only accepts a String, and a Loro String content write already
+        // resets that block's Peritext marks, so marks are re-established by the
+        // dedicated `set_field("marks")` write below.
         let content_result = self
             .set_field(id_str, "content", Value::String(content_before))
             .await?;
         changes.extend(content_result.changes);
+
+        // Re-establish the retained block's marks as the LEFT partition. The
+        // pre-fix code wrote only `content`, leaving the `marks` column STALE:
+        // spans computed against the pre-split content, now out of bounds — the
+        // `scalar_range_to_bytes` crash condition and the dogfood 2026-07-20
+        // link-loss. We fire this write exactly when the origin HAD marks (so a
+        // plain-text split is byte-unchanged and the synthetic in-memory test
+        // store — which models no marks — is untouched). `set_field("marks")`
+        // routes to the SQL authority (write_field returns `false` for `marks`),
+        // which writes the column AND re-derives the `block_links` junction. A
+        // now-empty left partition is written as `Null` to CLEAR the column (the
+        // case where every mark moved to the new right block). In Loro/Full mode
+        // this lands in the SQL projection but not Peritext — a documented
+        // follow-up; the SqlOnly desktop path (the reported repro) is correct.
+        if !origin_marks.is_empty() {
+            let left_marks_value = if left_marks.is_empty() {
+                Value::Null
+            } else {
+                Value::String(holon_api::marks_to_json(&left_marks))
+            };
+            let marks_result = self.set_field(id_str, "marks", left_marks_value).await?;
+            changes.extend(marks_result.changes);
+        }
 
         // Focus moves to the new block at caret offset 0. This is returned in
         // the op response (not dispatched as a backend `editor_focus`
         // follow-up): the frontend reads it off the result and moves the
         // in-memory focus authority in-process, so focus never round-trips
         // through the Turso `editor_cursor` cache (ADR 0010).
-        // TODO: Return inverse operation (combine set_field inverses + delete for new
-        // block)
-        Ok(OperationResult::irreversible(changes).with_response(focus_response(&new_block_id, 0)))
+        //
+        // Inverse: collapse the split. `restore_join` deletes the new block and
+        // resets the original block's content to its EXACT pre-split value
+        // (`content_owned`, captured before the prefix/suffix whitespace trim) —
+        // so the untrimmed original is restored byte-for-byte, not the trimmed
+        // `content_before`. Its own returned inverse re-splits deterministically
+        // (same new-block id) so redo re-applies.
+        use crate::__operations_block_operations;
+        Ok(OperationResult::new(
+            changes,
+            __operations_block_operations::restore_join_op(
+                // OperationDispatcher overwrites this with the resolved entity_name
+                // (see operation_dispatcher.rs:588). Valid placeholder scheme so
+                // EntityName::new's debug-assert passes.
+                "placeholder",
+                id,
+                content_owned.clone(),
+                &new_block_uri,
+            ),
+        )
+        .with_response(focus_response(&new_block_id, 0)))
     }
 
     /// Join a block into its merge target.
@@ -1178,6 +1484,7 @@ where
     ///   cursor is at byte 0, but the SQL caller path may pass through stale
     ///   positions, so we re-check here.
     #[holon_macros::affects("content", "parent_id", "sort_key")]
+    #[holon_macros::boundary_behavior(private_only)]
     async fn join_block(&self, id: &EntityUri, position: i64) -> Result<OperationResult> {
         if position != 0 {
             return Ok(OperationResult::irreversible(vec![]));
@@ -1230,6 +1537,10 @@ where
                 .map(|c| c.id().clone())
                 .collect(),
         };
+        // Captured before `block_children` is consumed by the re-parent loop:
+        // the undo inverse is only exact for the leaf case (see the inverse
+        // construction at the tail of this method).
+        let block_had_children = !block_children.is_empty();
 
         // Case-B refusal (Phase 3.5): joining a first-child block into its
         // parent when it has children of its own would orphan or reposition
@@ -1310,16 +1621,270 @@ where
             reg.on_entity_deleted(&join_block_uri);
         }
 
+        // Inverse: re-split the merge. `restore_split` recreates the merged-away
+        // block at its recorded slot (after the merge target in the prev-sibling
+        // case, or as first child in the child→parent case) and resets the merge
+        // target's content to its EXACT pre-join value (`target_content`).
+        //
+        // Only the leaf case is reversible: when the merged-away block had its
+        // own children they were re-parented under the target, and this single
+        // inverse cannot restore that subtree placement exactly. Declare it
+        // irreversible (fail loud rather than ship a lossy inverse) — the
+        // caret-position no-ops (position != 0), the refused
+        // case-B-with-children, and this case-A-with-children all stay
+        // irreversible by construction.
+        let inverse: UndoAction = if !block_had_children {
+            let block_parent = block
+                .parent_id()
+                .cloned()
+                .unwrap_or_else(EntityUri::no_parent);
+            // Slot anchor: the merged-away block sat directly after the merge
+            // target in the prev-sibling case; in the child→parent case it was
+            // the parent's first child (anchor `None`).
+            let after: Option<EntityUri> = if into_parent {
+                None
+            } else {
+                Some(target_uri.clone())
+            };
+            use crate::__operations_block_operations;
+            UndoAction::Undo(__operations_block_operations::restore_split_op(
+                // OperationDispatcher overwrites this placeholder (see split_block).
+                "placeholder",
+                &target_uri,
+                target_content.clone(),
+                id,
+                block_content.clone(),
+                &block_parent,
+                block.depth(),
+                after.as_ref(),
+            ))
+        } else {
+            UndoAction::DeclaredIrreversible(
+                "join_block: merged-away block had children re-parented under the target; a flat \
+                 inverse cannot restore that subtree placement",
+            )
+        };
+
         // Focus moves to the merge target at the join boundary. Returned in
         // the op response (see `split_block`) rather than dispatched as a
         // backend `editor_focus` follow-up — the frontend applies it in
         // process, no Turso `editor_cursor` round-trip (ADR 0010).
-        Ok(OperationResult::irreversible(changes)
-            .with_response(focus_response(&target_id, join_offset as i64)))
+        Ok(OperationResult {
+            changes,
+            undo: inverse,
+            response: Some(focus_response(&target_id, join_offset as i64)),
+            follow_ups: vec![],
+            delivery: Delivery::Proven,
+        })
+    }
+
+    /// Inverse primitive — recreate a block and reset a sibling's content.
+    ///
+    /// The exact inverse of [`restore_join`]. Recreates `block_id` under
+    /// `block_parent` (positioned directly after `after_id`, or as the first
+    /// child when `after_id` is `None`) with `block_content`, then resets
+    /// `target_id`'s content to `target_content`.
+    ///
+    /// This is the machine-generated inverse behind undo/redo of
+    /// `split_block` / `join_block`; it is not a user-facing editor action.
+    /// Positioning goes through the SAME create seam those ops use: the Loro
+    /// cell registry when present (preserving sibling ORDER — the projection
+    /// oracle's contract — while the fractional index is re-derived), and the
+    /// `OrderKeyMinting` order owner otherwise (SqlOnly / synthetic stores),
+    /// which for a deterministic minter reproduces the original `sort_key`
+    /// byte-for-byte between the same neighbours.
+    // Undo of a block split has to restore both sides plus their positions;
+    // a params struct here is a public trait-API change for one lint.
+    #[allow(clippy::too_many_arguments)]
+    #[holon_macros::affects("content", "parent_id", "sort_key")]
+    #[holon_macros::boundary_behavior(private_only)]
+    async fn restore_split(
+        &self,
+        target_id: &EntityUri,
+        target_content: String,
+        block_id: &EntityUri,
+        block_content: String,
+        block_parent: &EntityUri,
+        block_depth: i64,
+        after_id: Option<&EntityUri>,
+    ) -> Result<OperationResult> {
+        // Capture the target's current content so the returned inverse can put
+        // it back on redo.
+        let target_prior = match read_content_via_cells(self.cells(), target_id) {
+            Some(c) => c,
+            None => self
+                .get_by_id(target_id.as_str())
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("restore_split: target {target_id} not found"))?
+                .content()
+                .to_string(),
+        };
+
+        // Recreate the block. Prefer the Loro cell seam (positions after
+        // `after_id`); fall back to a SQL create with an explicitly-minted
+        // positional key for byte-identical restoration in SqlOnly / synthetic
+        // stores. Mirrors `split_block`'s two create branches.
+        let wrote_via_cell = create_block_via_cells(
+            self.cells(),
+            block_parent,
+            after_id,
+            block_id,
+            holon_api::BlockContent::text(block_content.clone()),
+        )
+        .await?;
+
+        let mut changes = Vec::new();
+        if !wrote_via_cell {
+            // ALLOW(fallback): SqlOnly / synthetic store — no Loro authority.
+            let minter = self.order_key_minter().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "restore_split's SqlOnly create path requires an OrderKeyMinting seam (the \
+                     Store consolidator's order owner) — this BlockOperations impl returned None \
+                     from order_key_minter()"
+                )
+            })?;
+            let new_sort_key = minter // ALLOW(order_minting): routed through the sibling-set owner's OrderKeyMinting seam
+                .new_child_anchor(block_parent, after_id)
+                .await?;
+            let mut fields = crate::storage::types::StorageEntity::new();
+            fields.insert("id".into(), Value::String(block_id.as_str().to_string()));
+            fields.insert("content".into(), Value::String(block_content.clone()));
+            fields.insert(
+                "parent_id".into(),
+                Value::String(block_parent.as_str().to_string()),
+            );
+            fields.insert("sort_key".into(), Value::String(new_sort_key));
+            fields.insert("depth".into(), Value::Integer(block_depth));
+            let (_new_id, create_result) = self.create(fields).await?;
+            changes.extend(create_result.changes);
+        }
+
+        // Reset the target's content.
+        let content_result = self
+            .set_field(target_id.as_str(), "content", Value::String(target_content))
+            .await?;
+        changes.extend(content_result.changes);
+
+        // Inverse: collapse again (delete `block_id`, restore the target's
+        // pre-restore content).
+        use crate::__operations_block_operations;
+        Ok(OperationResult::new(
+            changes,
+            __operations_block_operations::restore_join_op(
+                "placeholder",
+                target_id,
+                target_prior,
+                block_id,
+            ),
+        ))
+    }
+
+    /// Inverse primitive — delete a leaf block and reset a sibling's content.
+    ///
+    /// The exact inverse of [`restore_split`]. Deletes `deleted_id` and resets
+    /// `target_id`'s content to `target_content`. `deleted_id` MUST be a leaf:
+    /// a block with children cannot be deleted and later restored by this
+    /// single primitive (its subtree would be orphaned), so that is a loud
+    /// error rather than a lossy inverse. `split_block`'s new block is always a
+    /// leaf, and `join_block` only chooses this inverse for the leaf case, so
+    /// the guard never trips on the sanctioned paths.
+    #[holon_macros::affects("content", "parent_id", "sort_key")]
+    #[holon_macros::boundary_behavior(private_only)]
+    async fn restore_join(
+        &self,
+        target_id: &EntityUri,
+        target_content: String,
+        deleted_id: &EntityUri,
+    ) -> Result<OperationResult> {
+        let block = self
+            .get_by_id(deleted_id.as_str())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("restore_join: block {deleted_id} not found"))?;
+
+        // Leaf-only guard.
+        let children: Vec<EntityUri> = match self.ordering() {
+            Some(ordering) => ordering.children(deleted_id).await?,
+            None => self
+                .get_children(deleted_id)
+                .await?
+                .iter()
+                .map(|c| c.id().clone())
+                .collect(),
+        };
+        if !children.is_empty() {
+            return Err(anyhow::anyhow!(
+                "restore_join: block {deleted_id} has {} children; the leaf-only inverse cannot \
+                 restore a subtree",
+                children.len()
+            )
+            .into());
+        }
+
+        // Capture the block's full pre-delete state + its slot so the returned
+        // inverse (restore_split) can recreate it exactly.
+        let block_content = read_content_via_cells(self.cells(), deleted_id)
+            .unwrap_or_else(|| block.content().to_string());
+        let block_parent = block
+            .parent_id()
+            .cloned()
+            .unwrap_or_else(EntityUri::no_parent);
+        let block_depth = block.depth();
+        let after = self
+            .get_prev_sibling(deleted_id)
+            .await?
+            .map(|p| p.id().clone());
+
+        // Capture the target's current content for the redo inverse.
+        let target_prior = match read_content_via_cells(self.cells(), target_id) {
+            Some(c) => c,
+            None => self
+                .get_by_id(target_id.as_str())
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("restore_join: target {target_id} not found"))?
+                .content()
+                .to_string(),
+        };
+
+        // Delete the block through the same seam split/join use.
+        let mut changes = Vec::new();
+        let wrote_via_cell = delete_block_via_cells(self.cells(), deleted_id).await?;
+        if !wrote_via_cell {
+            // ALLOW(fallback): SqlOnly / synthetic store — no Loro authority.
+            let delete_result = self.delete(deleted_id.as_str()).await?;
+            changes.extend(delete_result.changes);
+        }
+        if let Some(reg) = self.cells() {
+            reg.on_entity_deleted(deleted_id);
+        }
+
+        // Reset the target's content.
+        let content_result = self
+            .set_field(target_id.as_str(), "content", Value::String(target_content))
+            .await?;
+        changes.extend(content_result.changes);
+
+        // Inverse: expand again (recreate `deleted_id` at its slot, restore the
+        // target's pre-restore content).
+        use crate::__operations_block_operations;
+        Ok(OperationResult::new(
+            changes,
+            __operations_block_operations::restore_split_op(
+                "placeholder",
+                target_id,
+                target_prior,
+                deleted_id,
+                block_content,
+                &block_parent,
+                block_depth,
+                after.as_ref(),
+            ),
+        ))
     }
 
     /// Move a block up (swap with previous sibling)
     #[holon_macros::affects("parent_id", "sort_key")]
+    #[holon_macros::menu_exposure(listed)]
+    #[holon_macros::boundary_behavior(private_only)]
     async fn move_up(&self, id: &EntityUri) -> Result<OperationResult> {
         let id_str = id.as_str();
         // Capture old state
@@ -1378,6 +1943,8 @@ where
     /// of the block's content.
     #[holon_macros::affects("content")]
     #[holon_macros::triggered_by(availability_of = "selected_id", providing = ["target_uri"])]
+    #[holon_macros::menu_exposure(listed)]
+    #[holon_macros::boundary_behavior(private_only)]
     async fn embed_entity(
         &self,
         id: &EntityUri,
@@ -1424,6 +1991,8 @@ where
 
     /// Move a block down (swap with next sibling)
     #[holon_macros::affects("parent_id", "sort_key")]
+    #[holon_macros::menu_exposure(listed)]
+    #[holon_macros::boundary_behavior(private_only)]
     async fn move_down(&self, id: &EntityUri) -> Result<OperationResult> {
         let id_str = id.as_str();
         // Capture old state
@@ -1466,6 +2035,113 @@ where
             ),
         ))
     }
+
+    /// Delete a block **and its entire subtree** (every descendant).
+    ///
+    /// This is the EXPLICIT cascade variant. The bare `delete` op refuses a
+    /// non-leaf block (destructive-delete ruling 2026-07-21) so that no caller
+    /// — keyboard, menu, or MCP/agent — cascades a subtree away by accident.
+    /// This op is how a caller opts INTO the cascade after confirming intent.
+    ///
+    /// Loro authority (`cells()` present): a single `tree.delete` cascades the
+    /// whole subtree — routed through the cell registry, the same path
+    /// `join_block` uses, so the outbound projector emits the SQL deletes.
+    /// SqlOnly / synthetic substrate (no cell route): descendants are deleted
+    /// deepest-first so every `delete` sees a leaf and the fail-closed
+    /// non-leaf guard is never tripped, then the now-childless root.
+    ///
+    /// Declared irreversible: faithfully resurrecting an ordered subtree is out
+    /// of scope (fail-loud, never a lossy inverse) — the same line the leaf
+    /// `delete` inverse draws.
+    #[holon_macros::menu_exposure(listed)]
+    #[holon_macros::boundary_behavior(private_only)]
+    async fn delete_subtree(&self, id: &EntityUri) -> Result<OperationResult> {
+        if delete_block_via_cells(self.cells(), id).await? {
+            return Ok(OperationResult::declared_irreversible(
+                Vec::new(),
+                "delete_subtree: subtree resurrection not implemented (Loro authority)",
+            ));
+        }
+        let mut descendants: Vec<T> = self.get_descendants(id).await?;
+        // Deepest-first: a node is deleted only after all of its descendants,
+        // so each `self.delete` operates on a leaf.
+        descendants.sort_by_key(|d| std::cmp::Reverse(d.depth()));
+        for d in &descendants {
+            self.delete(d.id().as_str()).await?;
+        }
+        self.delete(id.as_str()).await?;
+        Ok(OperationResult::declared_irreversible(
+            Vec::new(),
+            "delete_subtree: subtree resurrection not implemented",
+        ))
+    }
+
+    /// Delete a block but **keep its children**: reparent every child to the
+    /// deleted block's parent, spliced in at the block's own sibling slot so
+    /// relative order is preserved (destructive-delete ruling 2026-07-21).
+    ///
+    /// The reparent threads the positional anchor exactly like `join_block`:
+    /// children are read IN ORDER from the positional authority, then each is
+    /// `move_to_position`-ed after its predecessor starting from the deleted
+    /// block's own predecessor sibling — so the children take the block's slot
+    /// among its siblings in their original order. Once the block is a leaf it
+    /// is deleted through the Loro authority when present, else the SQL row
+    /// directly.
+    ///
+    /// Declared irreversible: the reparent + delete pair has no exact single
+    /// inverse (mirrors `join_block`'s with-children case).
+    #[holon_macros::affects("parent_id", "depth", "sort_key")]
+    #[holon_macros::menu_exposure(listed)]
+    #[holon_macros::boundary_behavior(crossing_widens)]
+    async fn delete_keep_children(&self, id: &EntityUri) -> Result<OperationResult> {
+        let id_str = id.as_str();
+        let block: T = self
+            .get_by_id(id_str)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
+        let parent_uri = block
+            .parent_id()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Cannot delete_keep_children on a root block"))?;
+
+        // Children IN ORDER from the positional authority — `get_children` is
+        // an unordered `get_all` filter (same authority rule as `join_block`).
+        let children: Vec<EntityUri> = match self.ordering() {
+            Some(ordering) => ordering.children(id).await?,
+            None => self
+                .get_children(id)
+                .await?
+                .iter()
+                .map(|c| c.id().clone())
+                .collect(),
+        };
+
+        // Splice the children into the block's OWN slot: anchor on the block's
+        // predecessor sibling, then thread each moved child as the next anchor
+        // so their relative order is preserved.
+        let mut changes = Vec::new();
+        let mut last_after: Option<EntityUri> =
+            self.get_prev_sibling(id).await?.map(|p| p.id().clone());
+        for child in children {
+            let move_changes = self
+                .move_to_position(&child, &parent_uri, last_after.as_ref())
+                .await?;
+            changes.extend(move_changes);
+            last_after = Some(child);
+        }
+
+        // `id` is now a leaf — delete it through the Loro authority when
+        // available, else the SQL row directly (mirrors `join_block`).
+        if !delete_block_via_cells(self.cells(), id).await? {
+            let delete_result = self.delete(id_str).await?;
+            changes.extend(delete_result.changes);
+        }
+
+        Ok(OperationResult::declared_irreversible(
+            changes,
+            "delete_keep_children: reparent+delete not yet invertible",
+        ))
+    }
 }
 
 /// Rename operations (for entities with a name field)
@@ -1480,6 +2156,7 @@ where
 {
     /// Rename an entity
     #[holon_macros::affects("name")]
+    #[holon_macros::boundary_behavior(identity_op)]
     async fn rename(&self, id: &str, name: String) -> Result<OperationResult>;
 }
 
@@ -1501,6 +2178,7 @@ where
     /// * `after_id` - Optional anchor entity (move after this entity, or
     ///   beginning if None)
     #[holon_macros::affects("parent_id", "depth", "sort_key")]
+    #[holon_macros::boundary_behavior(crossing_widens)]
     async fn move_entity(
         &self,
         id: &str,
@@ -1527,10 +2205,12 @@ where
 {
     /// Insert `text` at Unicode-scalar offset `pos` in the entity's text.
     #[holon_macros::affects("content")]
+    #[holon_macros::boundary_behavior(private_only)]
     async fn insert_text(&self, id: &str, pos: i64, text: String) -> Result<OperationResult>;
 
     /// Delete `len` Unicode scalars starting at `pos`.
     #[holon_macros::affects("content")]
+    #[holon_macros::boundary_behavior(private_only)]
     async fn delete_text(&self, id: &str, pos: i64, len: i64) -> Result<OperationResult>;
 }
 
@@ -1563,6 +2243,7 @@ where
     /// project convention used by `split_block` etc.); implementations
     /// validate non-negativity and convert to `usize` internally.
     #[holon_macros::affects("marks")]
+    #[holon_macros::boundary_behavior(private_only)]
     async fn apply_mark(
         &self,
         id: &str,
@@ -1575,6 +2256,7 @@ where
     /// range_end)`. Existing same-key spans that overlap the range are
     /// split or shortened; disjoint portions remain.
     #[holon_macros::affects("marks")]
+    #[holon_macros::boundary_behavior(private_only)]
     async fn remove_mark(
         &self,
         id: &str,
@@ -1598,6 +2280,7 @@ where
     /// Set task title
     #[holon_macros::affects("title")]
     #[holon_macros::triggered_by(availability_of = "title")]
+    #[holon_macros::boundary_behavior(private_only)]
     async fn set_title(&self, id: &str, title: &str) -> Result<OperationResult>;
 
     /// Returns the valid states for this task type with progress information
@@ -1613,19 +2296,23 @@ where
     #[holon_macros::affects("task_state")]
     #[holon_macros::triggered_by(availability_of = "task_state")]
     #[holon_macros::enum_from(method = "completion_states_with_progress", param = "task_state")]
+    #[holon_macros::boundary_behavior(private_only)]
     async fn set_state(&self, id: &str, task_state: String) -> Result<OperationResult>;
 
     /// Cycle to the next task state. "" → TODO → DOING → DONE → "".
     #[holon_macros::affects("task_state")]
+    #[holon_macros::boundary_behavior(private_only)]
     async fn cycle_task_state(&self, id: &str) -> Result<OperationResult>;
 
     /// Set task priority (1=highest, 4=lowest)
     #[holon_macros::affects("priority")]
     #[holon_macros::triggered_by(availability_of = "priority")]
+    #[holon_macros::boundary_behavior(private_only)]
     async fn set_priority(&self, id: &str, priority: i64) -> Result<OperationResult>;
 
     /// Set task due date
     #[holon_macros::affects("due_date")]
+    #[holon_macros::boundary_behavior(private_only)]
     async fn set_due_date(
         &self,
         id: &str,
@@ -1703,6 +2390,10 @@ impl BlockEntity for holon_api::block::Block {
 
     fn content(&self) -> &str {
         &self.content
+    }
+
+    fn marks(&self) -> Option<&[holon_api::MarkSpan]> {
+        self.marks.as_deref()
     }
 
     fn tags(&self) -> Tags {
@@ -1907,7 +2598,14 @@ pub fn generate_sync_operation(provider_name: &str) -> OperationDescriptor {
         required_params: vec![],
         affected_fields: vec![], // Sync operations don't affect specific fields
         param_mappings: vec![],
-        ..Default::default()
+        target_scope: holon_api::TargetScope::Block,
+        boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
+        menu_exposure: holon_api::MenuExposure::NotListed {
+            surface: holon_api::NonMenuSurface::External,
+        },
+        trigger: None,
+        bound_params: std::collections::HashMap::new(),
+        precondition: None,
     }
 }
 
@@ -1953,8 +2651,13 @@ mod trait_unit_tests {
         let inner = undo.into_option().expect("Undo(op) must yield Some(op)");
         assert_eq!(inner.op_name, "op");
 
-        assert!(!UndoAction::Irreversible.is_reversible());
-        assert!(UndoAction::Irreversible.into_option().is_none());
+        assert!(!UndoAction::DeclaredIrreversible("x").is_reversible());
+        assert!(
+            UndoAction::DeclaredIrreversible("x")
+                .into_option()
+                .is_none()
+        );
+        assert!(UndoAction::Undeclared.is_undeclared());
     }
 
     #[test]
@@ -2011,8 +2714,8 @@ mod trait_unit_tests {
         );
 
         // Non-block parents (doc URIs) must read as "no parent block".
-        // ALLOW(entity_uri_from_raw): constructing a doc-scheme parent fixture.
         let mut doc_child = test_block();
+        // ALLOW(entity_uri_from_raw): constructing a doc-scheme parent fixture.
         doc_child.parent_id = EntityUri::from_raw("doc:some-file");
         assert_eq!(BlockEntity::parent_id(&doc_child), None);
     }

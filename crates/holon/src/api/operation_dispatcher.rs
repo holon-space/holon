@@ -18,6 +18,7 @@ use fluxdi::Shared;
 use holon_api::EntityName;
 use holon_api::Operation;
 use holon_api::OperationDescriptor;
+use holon_core::BoundaryEnforcer;
 use holon_core::OperationObserver;
 use holon_core::OperationProvider;
 use holon_core::OperationResult;
@@ -43,6 +44,12 @@ pub struct OperationDispatcher {
     observers: Vec<Arc<dyn OperationObserver>>,
     sync_token_store: Option<Arc<dyn SyncTokenStore>>,
     matview_manager: Option<Arc<crate::sync::MatviewManager>>,
+    boundary_enforcer: Option<Arc<dyn BoundaryEnforcer>>,
+    /// Classifies `[[…]]` targets in live-edit content. Built from the
+    /// `TypeRegistry` at wiring time so a UI-authored `[[<entity>:<id>]]`
+    /// resolves for exactly the entities that exist; the `Default` value knows
+    /// only the built-in schemes.
+    link_classifier: holon_api::link_parser::LinkTargetClassifier,
 }
 
 impl OperationDispatcher {
@@ -70,6 +77,22 @@ impl OperationDispatcher {
 
     pub fn set_matview_manager(&mut self, mgr: Arc<crate::sync::MatviewManager>) {
         self.matview_manager = Some(mgr);
+    }
+
+    /// Install the registry-backed link classifier used to parse inline markup
+    /// at the UI intent boundary.
+    pub fn set_link_classifier(
+        &mut self,
+        classifier: holon_api::link_parser::LinkTargetClassifier,
+    ) {
+        self.link_classifier = classifier;
+    }
+
+    /// Install the ADR 0028 boundary/authz seam (C3). Consulted before every
+    /// dispatched operation that names a subject block; a rejection is returned
+    /// as an `Err` and the provider never runs (D2 "reject loud").
+    pub fn set_boundary_enforcer(&mut self, enforcer: Arc<dyn BoundaryEnforcer>) {
+        self.boundary_enforcer = Some(enforcer);
     }
 
     /// Add an observer to this dispatcher
@@ -123,6 +146,172 @@ impl OperationDispatcher {
     pub fn providers(&self) -> Vec<Arc<dyn OperationProvider>> {
         self.providers.clone()
     }
+
+    /// Fail-loud guard against the "block pipeline wired but no CRUD" trap.
+    ///
+    /// `EventInfraModule` registers `SqlBlockOperations`, which advertises only
+    /// **structural** block ops (`indent` / `outdent` / `move_*` /
+    /// `split_block` / `join_block`). The content-write ops (`create` /
+    /// `set_field` / `delete`) come from a *separate* provider -
+    /// `LoroBlockOperations` under Loro authority, or a bare
+    /// `SqlOperationProvider` in SqlOnly embedders. An embedder that wires
+    /// `EventInfraModule` alone therefore gets a block pipeline that
+    /// answers structural dispatches but silently drops every content write
+    /// as "No provider registered for entity: block" (this bit the
+    /// dioxus-web worker; see `frontends/holon-worker/src/lib.rs`).
+    ///
+    /// This check runs at startup (from [`OperationModule`], during
+    /// `BackendEngine` construction) so the misconfiguration crashes loudly
+    /// with a clear message instead of degrading to silent data loss. It is
+    /// a no-op when no `block` provider is registered at all (a read-only /
+    /// nav-only backend never dispatches block writes).
+    pub fn assert_content_write_capability(&self) -> Result<()> {
+        // The content-write ops any writable-block frontend dispatches. Kept in
+        // sync with `CrudOperations` (holon-core `traits.rs`): the ops a
+        // structural-only provider does NOT advertise.
+        const REQUIRED_BLOCK_WRITE_OPS: [&str; 3] = ["create", "set_field", "delete"];
+
+        // No block pipeline => nothing dispatches block writes => nothing to guard.
+        if !self.has_provider("block") {
+            return Ok(());
+        }
+
+        let block_ops: HashSet<String> = self
+            .operations()
+            .into_iter()
+            .filter(|op| op.entity_name == "block")
+            .map(|op| op.name)
+            .collect();
+
+        let missing: Vec<&str> = REQUIRED_BLOCK_WRITE_OPS
+            .into_iter()
+            .filter(|op| !block_ops.contains(*op))
+            .collect();
+
+        if missing.is_empty() {
+            return Ok(());
+        }
+
+        let mut present: Vec<&str> = block_ops.iter().map(String::as_str).collect();
+        present.sort_unstable();
+
+        Err(format!(
+            "[OperationDispatcher] the `block` pipeline is wired but the operation registry is \
+             missing content-write op(s) {missing:?}. Every dispatch of those ops would be \
+             silently dropped as \"No provider registered for entity: block\", losing user \
+             content. `EventInfraModule` alone advertises only STRUCTURAL block ops (indent / \
+             outdent / move_* / split_block / join_block); the CRUD ops (create / set_field / \
+             delete) come from a SEPARATE provider. Fix the wiring: register a block-CRUD \
+             `OperationProvider` - LoroModule + OrgModeModule (native, via holon-app \
+             `add_frontend`) under Loro authority, or a bare `SqlOperationProvider` for the \
+             `block` entity in SqlOnly embedders (see frontends/holon-worker/src/lib.rs). Present \
+             block ops: {present:?}"
+        )
+        .into())
+    }
+
+    /// The ADR 0028 C3 boundary/authz decision for one dispatched operation.
+    ///
+    /// The op's declared [`holon_api::BoundaryBehavior`] plus the containers of
+    /// the subject (`id`) and — when the intent carries one — the reparent
+    /// destination (`parent_id`) decide allow vs. reject-loud. A rejection is
+    /// an `Err`, so the operation never reaches its provider and is never
+    /// silently dropped (D2).
+    ///
+    /// Scoped to ops that NAME a subject: an op naming no block sits in no
+    /// container, so there is no boundary to judge.
+    fn enforce_boundary(
+        &self,
+        available_ops: &[OperationDescriptor],
+        resolved_entity_name: &str,
+        op_name: &str,
+        params: &StorageEntity,
+    ) -> Result<()> {
+        let Some(enforcer) = &self.boundary_enforcer else {
+            return Ok(());
+        };
+        let Some(subject) = params.get("id").and_then(|v| v.as_string()) else {
+            return Ok(());
+        };
+        let descriptor = available_ops
+            .iter()
+            .find(|op| op.entity_name == resolved_entity_name && op.name == op_name)
+            .ok_or_else(|| {
+                format!(
+                    "boundary seam: no descriptor for {resolved_entity_name}.{op_name} after \
+                     provider resolution"
+                )
+            })?;
+        enforcer
+            .check(
+                op_name,
+                &descriptor.boundary_behavior,
+                subject,
+                params.get("parent_id").and_then(|v| v.as_string()),
+            )
+            .map_err(|e| format!("ADR 0028 boundary enforcement: {e}"))?;
+        Ok(())
+    }
+
+    /// Fail-loud guard that a composed backend actually installed the ADR 0028
+    /// boundary seam.
+    ///
+    /// A dispatcher with no [`BoundaryEnforcer`] executes every op unchecked.
+    /// That is invisible from the outside — the vault behaves normally right up
+    /// to the point a share policy exists and is not enforced — so a second
+    /// composition site that forgets [`Self::set_boundary_enforcer`] must crash
+    /// at startup, exactly like the content-write guard above.
+    pub fn assert_boundary_seam_installed(&self) -> Result<()> {
+        if self.boundary_enforcer.is_some() {
+            return Ok(());
+        }
+        Err(
+            "[OperationDispatcher] no BoundaryEnforcer installed: every operation would execute \
+             without the ADR 0028 boundary check, so a committed share policy would not be \
+             enforced. Call `set_boundary_enforcer` at this composition site (prod installs \
+             `holon_sharing::PolicyOverlayEnforcer::inert()`)."
+                .into(),
+        )
+    }
+}
+
+/// Structural block ops that are knowingly double-advertised under Loro
+/// authority (SqlBlockOperations + LoroBlockOperations). A SEPARATE
+/// pre-existing duplicate from BugFunnel N1's CRUD dup; tolerated by the
+/// registry-uniqueness assertion until the structural-op authority/routing
+/// question is resolved.
+#[cfg(debug_assertions)]
+const STRUCTURAL_BLOCK_OP_DUP_ALLOWLIST: &[&str] = &[
+    "indent",
+    "outdent",
+    "move_block",
+    "move_to_position",
+    "move_up",
+    "move_down",
+    "split_block",
+    "join_block",
+    "restore_split",
+    "restore_join",
+    "embed_entity",
+    "delete_subtree",
+    "delete_keep_children",
+];
+
+/// Return the `entity::op` keys advertised more than once across `ops`.
+///
+/// Pure helper for the fail-loud registry-uniqueness invariant in
+/// [`OperationDispatcher::operations`]. Empty result == the invariant holds.
+/// Keyed on `(entity_name, name)` so per-provider `sync` ops (each carries a
+/// distinct `"<provider>.sync"` entity_name) never false-positive.
+fn duplicate_operations(ops: &[OperationDescriptor]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut dups = Vec::new();
+    for op in ops {
+        if !seen.insert((op.entity_name.as_str(), op.name.as_str())) {
+            dups.push(format!("{}::{}", op.entity_name, op.name));
+        }
+    }
+    dups
 }
 
 #[async_trait]
@@ -148,7 +337,17 @@ impl OperationProvider for OperationDispatcher {
                 name: "sync".to_string(),
                 display_name: "Sync".to_string(),
                 description: "Sync registered syncable providers".to_string(),
-                ..Default::default()
+                required_params: vec![],
+                affected_fields: vec![],
+                param_mappings: vec![],
+                target_scope: holon_api::TargetScope::Global,
+                boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::External,
+                },
+                trigger: None,
+                bound_params: Default::default(),
+                precondition: None,
             });
 
             // Add wildcard full_sync operation (clear caches + sync)
@@ -162,8 +361,49 @@ impl OperationProvider for OperationDispatcher {
                 description: "Clear all caches, reset sync tokens, and re-sync from external \
                               systems"
                     .to_string(),
-                ..Default::default()
+                required_params: vec![],
+                affected_fields: vec![],
+                param_mappings: vec![],
+                target_scope: holon_api::TargetScope::Global,
+                boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::External,
+                },
+                trigger: None,
+                bound_params: Default::default(),
+                precondition: None,
             });
+        }
+
+        // Registry-uniqueness invariant (fail-loud, debug/test builds): no two
+        // providers may advertise the same (entity, op) EXCEPT the known,
+        // pre-existing structural-block-op overlap. The registry unions provider
+        // `operations()` WITHOUT dedup and dispatch is first-registered-wins, so
+        // a stray duplicate leaks a second identical slash-menu entry (BugFunnel
+        // N1 — 12 block CRUD ops listed twice in SqlOnly). This fix removes the
+        // N1 CRUD duplicate at its source (holon_core::OperationSubset in
+        // holon-app turso_seams); the assertion guards against it regressing.
+        //
+        // The STRUCTURAL block ops (indent/outdent/split/join/move…) are ALSO
+        // double-advertised under Loro authority (SqlBlockOperations +
+        // LoroBlockOperations), a SEPARATE pre-existing dup surfaced by the
+        // keystone. Removing it is a structural-op authority/routing decision
+        // out of this fix's scope; it is explicitly tolerated here (named
+        // allowlist) so the guard stays loud for every OTHER duplicate.
+        #[cfg(debug_assertions)]
+        {
+            let unexpected: Vec<String> = duplicate_operations(&ops)
+                .into_iter()
+                .filter(|d| {
+                    !STRUCTURAL_BLOCK_OP_DUP_ALLOWLIST
+                        .contains(&d.strip_prefix("block::").unwrap_or(d))
+                })
+                .collect();
+            assert!(
+                unexpected.is_empty(),
+                "duplicate operation registrations (two providers advertise the same op — narrow \
+                 the redundant provider, see holon_core::OperationSubset): {unexpected:?}"
+            );
         }
 
         ops
@@ -507,6 +747,81 @@ impl OperationProvider for OperationDispatcher {
                     entity_name_str
                 };
 
+                // Intent boundary (Model.md invariant 3): parse the field of a
+                // block `set_field` intent into the closed `BlockWriteField`
+                // vocabulary. Order keys (`sort_key`) and storage-internal
+                // fields are a loud Err here, in EVERY mode — they are minted /
+                // written by the storage layer, never carried by intent. The
+                // ordering authority's own writes don't pass through the
+                // dispatcher (they call the SQL provider / CRUD seam directly),
+                // so this rejects exactly the smuggling path.
+                let mut params = params;
+                if resolved_entity_name == "block" && op_name == "set_field" {
+                    let field = params
+                        .get("field")
+                        .and_then(|v| v.as_string())
+                        .ok_or("block set_field: missing 'field' parameter")?;
+                    holon_api::BlockWriteField::parse(field)
+                        .map_err(|e| format!("intent boundary: {e}"))?;
+                }
+
+                // Links increment 3 — parse inline markup at the UI intent boundary.
+                //
+                // A live editor commit sends the block's content as RAW org markup
+                // (`[[Page]]`, `((block))`, `*bold*`) via `set_field("content")`.
+                // Ingest already splits such text into a stripped `content` label +
+                // a `marks` set at its own boundary (`extract_inline_marks` →
+                // `build_block_params`); the live-edit path did not, so typed links
+                // persisted as raw text with NULL `marks` and no `block_links`
+                // junction row — backlinks never populated for UI-authored links.
+                //
+                // Parse here with the SAME extractor ingest uses, then store the
+                // identical shape: the rendered label in `content` and the mark set
+                // in `marks`. Stripping the raw markup into the label ALWAYS happens
+                // (it is idempotent — re-stripping an already-stripped label is a
+                // no-op), so `content` never holds `[[…]]` syntax. Org-sync writes
+                // bypass this dispatcher (they call the CRUD seam directly with an
+                // already-stripped label + a separate `marks` param), so this only
+                // ever sees raw UI input — no double-strip, no clobber of ingest's
+                // marks.
+                //
+                // The `marks` write itself is DERIVED and is decided further down,
+                // once the CRUD-authority provider is resolved, by comparing the
+                // extracted marks against the block's currently-stored marks (see
+                // `content_marks_followup`). That comparison — not this extraction —
+                // is what keeps the follow-up from firing spuriously.
+                let content_edit: Option<(String, String, Vec<holon_api::MarkSpan>)> =
+                    if resolved_entity_name == "block"
+                        && op_name == "set_field"
+                        && params.get("field").and_then(|v| v.as_string()) == Some("content")
+                    {
+                        match params
+                            .get("value")
+                            .and_then(|v| v.as_string())
+                            .map(str::to_string)
+                        {
+                            Some(raw) => {
+                                let (label, marks) = holon_org_format::extract_inline_marks_with(
+                                    &raw,
+                                    &self.link_classifier,
+                                );
+                                let id = params
+                                    .get("id")
+                                    .and_then(|v| v.as_string())
+                                    .ok_or("block set_field(content): missing 'id' parameter")?
+                                    .to_string();
+                                params.insert(
+                                    "value".into(),
+                                    holon_api::Value::String(label.clone()),
+                                );
+                                Some((id, label, marks))
+                            }
+                            None => None,
+                        }
+                    } else {
+                        None
+                    };
+
                 if !available_ops
                     .iter()
                     .any(|op| op.entity_name == resolved_entity_name && op.name == op_name)
@@ -534,6 +849,10 @@ impl OperationProvider for OperationDispatcher {
                     })
                     .ok_or_else(|| format!("No provider registered for entity: {}", entity_name))?;
 
+                // ADR 0028 C3 — THE boundary/authz seam, before the provider runs
+                // and before any I/O.
+                self.enforce_boundary(&available_ops, resolved_entity_name, op_name, &params)?;
+
                 info!(
                     "[OperationDispatcher] Routing operation to provider: entity={}, op={}",
                     resolved_entity_name, op_name
@@ -548,17 +867,114 @@ impl OperationProvider for OperationDispatcher {
                         .collect();
                 let resolved_entity_name_typed = EntityName::new(resolved_entity_name);
 
+                // Links increment 3 — decide the DERIVED `marks` write for a
+                // content edit, BEFORE the content write lands (so we read the
+                // block's PRIOR stored state, not the value we are about to write).
+                //
+                // Contract (marks = truth, per links-ruling): fire the follow-up
+                // EXACTLY when the marks extracted from the new content differ from
+                // the block's currently-stored marks. It must NOT fire when the
+                // content commit carried no mark-relevant change, and must NEVER
+                // null a block's marks merely because the editor re-committed the
+                // already-stripped label without re-supplying markup.
+                //
+                // The over-dispatch bug (BugFunnel #66) fired a `marks = Null`
+                // follow-up on EVERY block `set_field("content")`. On the editor's
+                // blur/refocus re-commit — which sends back the stripped label with
+                // NO `[[…]]` syntax (SqlOnly hydrates `content` from the matview) —
+                // that nulled the real marks, replacing a live `[[link]]` with plain
+                // text (the LIVE bug). It also spuriously doubled the dispatch count
+                // on plain-text edits, inflating the undo replay tally.
+                //
+                // - Readable provider (SQL CRUD authority): compare against ground truth. Skip
+                //   when the mark set is unchanged, and skip a null-producing re-commit whose
+                //   stripped label already equals the stored content (the blur path). Otherwise
+                //   dispatch — including a legitimate `marks = Null` when an edit genuinely
+                //   REMOVED the link (new label differs from the stored content).
+                // - Unreadable provider (Loro CRUD authority, test stubs): fail safe — dispatch
+                //   only when the new content actually yields marks (a link was typed); never
+                //   null on an unknown prior state.
+                let content_marks_followup: Option<(String, holon_api::Value)> =
+                    if let Some((id, label, extracted)) = content_edit {
+                        let marks_value = |marks: &[holon_api::MarkSpan]| {
+                            if marks.is_empty() {
+                                holon_api::Value::Null
+                            } else {
+                                holon_api::Value::String(holon_api::marks_to_json(marks))
+                            }
+                        };
+                        match provider.read_block_content_marks(&id).await? {
+                            Some((stored_content, stored_marks_value)) => {
+                                let stored_marks: Vec<holon_api::MarkSpan> =
+                                    match &stored_marks_value {
+                                        holon_api::Value::String(s) if !s.is_empty() => {
+                                            holon_api::marks_from_json(s).map_err(|e| {
+                                                format!(
+                                                    "links increment 3: stored marks JSON for \
+                                                     {id} is corrupt: {e}"
+                                                )
+                                            })?
+                                        }
+                                        _ => Vec::new(),
+                                    };
+                                // Two independent skip-reasons (mark set unchanged; blur
+                                // re-commit with no marks and unchanged label) that both
+                                // resolve to `None` — kept separate, not merged, so each
+                                // guard stays legible against the comment above.
+                                #[allow(clippy::if_same_then_else)]
+                                if extracted == stored_marks {
+                                    None
+                                } else if extracted.is_empty() && label == stored_content {
+                                    None
+                                } else {
+                                    Some((id, marks_value(&extracted)))
+                                }
+                            }
+                            None => {
+                                if extracted.is_empty() {
+                                    None
+                                } else {
+                                    Some((id, marks_value(&extracted)))
+                                }
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
                 // Execute operation and get result with changes and undo action
                 let mut operation_result = provider
                     .execute_operation(&resolved_entity_name_typed, op_name, params)
                     .await?;
+
+                // Links increment 3 — the marks write derived from a content edit.
+                // Routed straight through the same provider (not re-entering this
+                // dispatcher): marks are a DERIVED consequence of the content edit,
+                // so they must not spawn a second observer notification or a
+                // separate undo entry (one user edit = one undoable content step).
+                // In Loro mode this lands via `update_block_marked` (Peritext) and
+                // the outbound projector carries `marks` to SQL, deriving the
+                // junction in the `update` arm; in SqlOnly mode it hits
+                // `set_field("marks")` directly, deriving the junction there.
+                if let Some((id, marks_value)) = content_marks_followup {
+                    let mut marks_params = StorageEntity::new();
+                    marks_params.insert("id".into(), holon_api::Value::String(id));
+                    marks_params.insert("field".into(), holon_api::Value::String("marks".into()));
+                    marks_params.insert("value".into(), marks_value);
+                    provider
+                        .execute_operation(&resolved_entity_name_typed, "set_field", marks_params)
+                        .await
+                        .map_err(|e| {
+                            format!("links increment 3: marks write after content edit failed: {e}")
+                        })?;
+                }
                 // Set entity_name on the inverse operation if present
                 operation_result.undo = match operation_result.undo {
                     UndoAction::Undo(mut op) => {
                         op.entity_name = resolved_entity_name_typed.clone();
                         UndoAction::Undo(op)
                     }
-                    UndoAction::Irreversible => UndoAction::Irreversible,
+                    other => other,
                 };
 
                 match &operation_result.undo {
@@ -569,10 +985,17 @@ impl OperationProvider for OperationDispatcher {
                             entity_name, op_name
                         );
                     }
-                    UndoAction::Irreversible => {
+                    UndoAction::DeclaredIrreversible(reason) => {
                         info!(
                             "[OperationDispatcher] Provider execution succeeded: entity={}, op={} \
-                             (no inverse operation)",
+                             (no inverse: {reason})",
+                            entity_name, op_name
+                        );
+                    }
+                    UndoAction::Undeclared => {
+                        info!(
+                            "[OperationDispatcher] Provider execution succeeded: entity={}, op={} \
+                             (undo UNDECLARED — engine will reject)",
                             entity_name, op_name
                         );
                     }
@@ -662,6 +1085,29 @@ impl Module for OperationModule {
                 dispatcher.set_sync_token_store(store);
             }
             dispatcher.set_matview_manager(matview_mgr);
+            dispatcher.set_link_classifier(
+                r.resolve_async::<holon_profiles::TypeRegistry>()
+                    .await
+                    .link_target_classifier(),
+            );
+
+            // ADR 0028 C3 — install the boundary/authz seam. The overlay is
+            // INERT today (no code mints or persists share policies yet), so a
+            // single-user vault pays one slice-length check per op; the moment
+            // a policy is committed the same seam enforces it.
+            dispatcher
+                .set_boundary_enforcer(Arc::new(holon_sharing::PolicyOverlayEnforcer::inert()));
+
+            // Fail loud if a block pipeline is wired without its content-write
+            // ops (the EventInfraModule-only trap). A silent "No provider" drop
+            // of every create/set_field/delete is worse than a startup crash.
+            dispatcher
+                .assert_content_write_capability()
+                .expect("[OperationModule] operation-registry startup check failed");
+            dispatcher
+                .assert_boundary_seam_installed()
+                .expect("[OperationModule] boundary-seam startup check failed");
+
             Shared::new(dispatcher)
         }));
         Ok(())
@@ -697,7 +1143,7 @@ mod tests {
                 )
                 .into());
             }
-            if op_name == "test_op" {
+            if matches!(op_name, "test_op" | "set_field") {
                 Ok(OperationResult::irreversible(Vec::new()))
             } else {
                 Err(format!("Unknown operation: {}", op_name).into())
@@ -716,7 +1162,14 @@ mod tests {
             required_params: vec![],
             affected_fields: vec![],
             param_mappings: vec![],
-            ..Default::default()
+            target_scope: holon_api::TargetScope::Block,
+            boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
+            menu_exposure: holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::Test,
+            },
+            trigger: None,
+            bound_params: Default::default(),
+            precondition: None,
         }
     }
 
@@ -730,6 +1183,46 @@ mod tests {
         let dispatcher = OperationDispatcher::new(vec![provider1]);
         assert!(dispatcher.has_provider("entity1"));
         assert_eq!(dispatcher.provider_count(), 1);
+    }
+
+    #[test]
+    fn duplicate_operations_detects_cross_provider_overlap() {
+        // Unique across providers → no duplicates.
+        let unique = vec![
+            create_test_operation("block", "create"),
+            create_test_operation("block", "delete"),
+            create_test_operation("doc", "create"),
+        ];
+        assert!(duplicate_operations(&unique).is_empty());
+
+        // Same (entity, op) advertised twice (the N1 shape) → flagged loud.
+        let dup = vec![
+            create_test_operation("block", "create"),
+            create_test_operation("block", "delete"),
+            create_test_operation("block", "create"),
+        ];
+        assert_eq!(
+            duplicate_operations(&dup),
+            vec!["block::create".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "duplicate operation registrations")]
+    async fn operations_invariant_fires_loud_on_duplicate_registration() {
+        // Two providers advertising the SAME (entity, op) — the exact N1
+        // double-registration shape. `operations()` must fail LOUD (debug
+        // build), not silently union the duplicate into the menu.
+        let p1 = Arc::new(MockProvider {
+            entity_name: "block".to_string(),
+            operations_list: vec![create_test_operation("block", "create")],
+        });
+        let p2 = Arc::new(MockProvider {
+            entity_name: "block".to_string(),
+            operations_list: vec![create_test_operation("block", "create")],
+        });
+        let dispatcher = OperationDispatcher::new(vec![p1, p2]);
+        let _ = dispatcher.operations();
     }
 
     #[tokio::test]
@@ -784,6 +1277,160 @@ mod tests {
                 .to_string()
                 .contains("No provider registered")
         );
+    }
+
+    /// Reproduces the `EventInfraModule`-only wiring at the dispatcher level:
+    /// a `block` provider advertising ONLY structural ops (what
+    /// `SqlBlockOperations` registers) and no CRUD provider. The startup guard
+    /// must reject it loudly, naming the missing content-write ops.
+    #[tokio::test]
+    async fn content_write_guard_rejects_structural_only_block_pipeline() {
+        let structural_only = Arc::new(MockProvider {
+            entity_name: "block".to_string(),
+            operations_list: vec![
+                create_test_operation("block", "indent"),
+                create_test_operation("block", "outdent"),
+                create_test_operation("block", "split_block"),
+                create_test_operation("block", "move_up"),
+            ],
+        });
+        let dispatcher = OperationDispatcher::new(vec![structural_only]);
+
+        let err = dispatcher
+            .assert_content_write_capability()
+            .expect_err("structural-only block pipeline must fail the content-write guard");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("create"),
+            "message names missing create: {msg}"
+        );
+        assert!(
+            msg.contains("set_field"),
+            "message names missing set_field: {msg}"
+        );
+        assert!(
+            msg.contains("delete"),
+            "message names missing delete: {msg}"
+        );
+        assert!(
+            msg.contains("EventInfraModule"),
+            "message points at the culprit module: {msg}"
+        );
+    }
+
+    /// A block pipeline that DOES advertise the CRUD triple (the fixed wiring:
+    /// EventInfraModule + a `SqlOperationProvider`, or Loro authority) passes.
+    #[tokio::test]
+    async fn content_write_guard_accepts_full_block_pipeline() {
+        let structural = Arc::new(MockProvider {
+            entity_name: "block".to_string(),
+            operations_list: vec![create_test_operation("block", "split_block")],
+        });
+        let crud = Arc::new(MockProvider {
+            entity_name: "block".to_string(),
+            operations_list: vec![
+                create_test_operation("block", "create"),
+                create_test_operation("block", "set_field"),
+                create_test_operation("block", "delete"),
+            ],
+        });
+        let dispatcher = OperationDispatcher::new(vec![structural, crud]);
+        dispatcher
+            .assert_content_write_capability()
+            .expect("full block pipeline must pass the content-write guard");
+    }
+
+    /// A backend with no `block` provider at all (nav-only / read-only) never
+    /// dispatches block writes, so the guard is a no-op.
+    #[tokio::test]
+    async fn content_write_guard_ignores_backend_without_block_provider() {
+        let nav = Arc::new(MockProvider {
+            entity_name: "navigation".to_string(),
+            operations_list: vec![create_test_operation("navigation", "navigate")],
+        });
+        let dispatcher = OperationDispatcher::new(vec![nav]);
+        dispatcher
+            .assert_content_write_capability()
+            .expect("no block pipeline => guard is a no-op");
+    }
+
+    /// Model.md invariant 3 at the intent boundary: a block `set_field`
+    /// carrying an order key is rejected by the dispatcher itself, before
+    /// any provider runs — mode-independent (SqlOnly's raw-SQL provider
+    /// never sees it either).
+    #[tokio::test]
+    async fn block_set_field_rejects_order_keys_at_intent_boundary() {
+        let crud = Arc::new(MockProvider {
+            entity_name: "block".to_string(),
+            operations_list: vec![create_test_operation("block", "set_field")],
+        });
+        let dispatcher = OperationDispatcher::new(vec![crud]);
+
+        for order_key_field in ["sort_key", "after_block_id"] {
+            let mut params = StorageEntity::new();
+            params.insert("id".into(), holon_api::Value::String("block:a".into()));
+            params.insert(
+                "field".into(),
+                holon_api::Value::String(order_key_field.into()),
+            );
+            params.insert("value".into(), holon_api::Value::String("A5".into()));
+            let err = dispatcher
+                .execute_operation(&EntityName::new("block"), "set_field", params)
+                .await
+                .expect_err("set_field over an order key must be rejected at the boundary");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("order key"),
+                "rejection must name the invariant, got: {msg}"
+            );
+            assert!(
+                msg.contains(order_key_field),
+                "rejection must name the offending field, got: {msg}"
+            );
+        }
+    }
+
+    /// Storage-internal fields (`depth`, `_expected_*` watermarks, …) are
+    /// equally not intent vocabulary — writable only by the storage layer's
+    /// own direct calls, which bypass the dispatcher.
+    #[tokio::test]
+    async fn block_set_field_rejects_storage_internal_fields() {
+        let crud = Arc::new(MockProvider {
+            entity_name: "block".to_string(),
+            operations_list: vec![create_test_operation("block", "set_field")],
+        });
+        let dispatcher = OperationDispatcher::new(vec![crud]);
+
+        let mut params = StorageEntity::new();
+        params.insert("id".into(), holon_api::Value::String("block:a".into()));
+        params.insert("field".into(), holon_api::Value::String("depth".into()));
+        params.insert("value".into(), holon_api::Value::Integer(3));
+        let err = dispatcher
+            .execute_operation(&EntityName::new("block"), "set_field", params)
+            .await
+            .expect_err("set_field(depth) must be rejected at the boundary");
+        assert!(err.to_string().contains("storage bookkeeping"), "{err}");
+    }
+
+    /// A normal field write passes the boundary and reaches the provider.
+    #[tokio::test]
+    async fn block_set_field_allows_intent_vocabulary_fields() {
+        let crud = Arc::new(MockProvider {
+            entity_name: "block".to_string(),
+            operations_list: vec![create_test_operation("block", "set_field")],
+        });
+        let dispatcher = OperationDispatcher::new(vec![crud]);
+
+        for field in ["content", "task_state", "DEADLINE"] {
+            let mut params = StorageEntity::new();
+            params.insert("id".into(), holon_api::Value::String("block:a".into()));
+            params.insert("field".into(), holon_api::Value::String(field.into()));
+            params.insert("value".into(), holon_api::Value::String("v".into()));
+            dispatcher
+                .execute_operation(&EntityName::new("block"), "set_field", params)
+                .await
+                .unwrap_or_else(|e| panic!("set_field({field}) must pass the boundary: {e}"));
+        }
     }
 
     #[tokio::test]

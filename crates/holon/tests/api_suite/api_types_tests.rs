@@ -73,7 +73,6 @@ fn test_new_block_serialization() {
         content: BlockContent::text("New block content"),
         after: Some(EntityUri::block("sibling-456")),
         id: Some(EntityUri::parse("todoist://task/789").unwrap()),
-        content_type_override: None,
     };
 
     let json = serde_json::to_string(&new_block).expect("Failed to serialize");

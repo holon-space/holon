@@ -77,6 +77,7 @@ pub fn widget_gallery_render_expr() -> RenderExpr {
         text_and_labels_section(),
         inputs_section(),
         layout_section(),
+        accordion_section(),
         data_display_section(),
         collections_section(),
         feedback_section(),
@@ -217,6 +218,67 @@ fn layout_section() -> RenderExpr {
                         ],
                     ),
                 )],
+            ),
+        ],
+    )
+}
+
+fn note(s: &str) -> RenderExpr {
+    call(
+        "text",
+        vec![pos(lit_str(s)), named("color", lit_str("muted"))],
+    )
+}
+
+/// Accordion — documentation entry (plan §3 prop table). Rendered as text, not
+/// a live `accordion(...)`: the widget is fail-loud about placement (it must be
+/// a DIRECT child of a main-panel flow column) and the gallery is not one, so a
+/// live instance would correctly render the placement error widget instead.
+fn accordion_section() -> RenderExpr {
+    section(
+        "Accordion (bounded auxiliary region)",
+        vec![
+            call(
+                "text",
+                vec![pos(lit_str(
+                    "accordion(#{...}, child…) — a bounded, collapsible region \
+                     pinned at the bottom of a main-panel column.",
+                ))],
+            ),
+            note("Props:"),
+            note("• title: String — header text (default: empty)."),
+            note("• icon: String — header icon name (optional)."),
+            note(
+                "• max_height_fraction: Float — cap as a fraction of the PANEL \
+                 height; default 0.4; must be finite and in (0.0, 1.0].",
+            ),
+            note("• collapsible: Bool — default true."),
+            note("• collapsed: Bool — initial state only; default false."),
+            note(
+                "• pinned: Bool — default true. true = pinned footer at the \
+                 column bottom (needs a flow-column parent). false = in-flow: \
+                 capped+collapsible at its natural position inside a section \
+                 stack (no split, scrolls with siblings).",
+            ),
+            note(
+                "• sticky: Bool — default false; wins over pinned. An absolute \
+                 .occlude() overlay footer inside a section stack, pinned by \
+                 min(viewport_bottom − footer_h, next_section_top); the cap is \
+                 px-computed (fraction × the section stack's DEFINITE height, \
+                 asserted fail-loud). A wheel over the footer is hard-contained \
+                 (v1 — no fall-through).",
+            ),
+            note(
+                "Placement (fail-loud; anywhere else renders the standard error \
+                 widget, never a silently-mispositioned region): pinned:true \
+                 MUST be a direct child of a main-panel (flow) column; \
+                 pinned:false and sticky:true MUST be inside a section stack.",
+            ),
+            note(
+                "Semantics: the cap is a fraction of the panel height (window \
+                 minus chrome). Content shorter than the cap shrinks to fit; \
+                 taller content scrolls WITHIN the capped region while the \
+                 outline above scrolls independently.",
             ),
         ],
     )
@@ -1179,6 +1241,333 @@ pub fn chat_mode_expr() -> RenderExpr {
     )
 }
 
+// ── Actions Mode (ADR 0024 / docs/Proposals/action-ux.md) ────────────────
+// Mocks the MVP action UX: rules become the most legible blocks on the page.
+// Everything is a render profile over (hard-coded) vault data — no backend.
+
+fn muted_line(text: &str) -> RenderExpr {
+    call(
+        "text",
+        vec![
+            pos(lit_str(text)),
+            named("size", lit_f64(13.0)),
+            named("color", lit_str("muted")),
+        ],
+    )
+}
+
+/// A rule block rendered as its collapsed **rule card**: name, enabled toggle,
+/// `last fired: …`, an optional fail-loud guard error, and the when/then
+/// source in an expandable section. `error` present → red error state.
+fn rule_card(
+    name: &str,
+    accent: &str,
+    enabled: bool,
+    last_fired: &str,
+    source: &str,
+    error: Option<&str>,
+) -> RenderExpr {
+    let header = row(
+        vec![
+            call(
+                "text",
+                vec![pos(lit_str("⚙")), named("color", lit_str(accent))],
+            ),
+            call(
+                "text",
+                vec![
+                    pos(lit_str(name)),
+                    named("bold", lit_bool(true)),
+                    named("size", lit_f64(16.0)),
+                ],
+            ),
+            call("checkbox", vec![named("checked", lit_bool(enabled))]),
+            call(
+                "text",
+                vec![
+                    pos(lit_str(if enabled { "Enabled" } else { "Disabled" })),
+                    named("size", lit_f64(13.0)),
+                    named("color", lit_str(if enabled { "success" } else { "muted" })),
+                ],
+            ),
+        ],
+        8.0,
+    );
+
+    let mut children = vec![pos(header)];
+    if let Some(err) = error {
+        children.push(pos(call("error", vec![pos(lit_str(err))])));
+    }
+    children.push(pos(muted_line(&format!("last fired: {last_fired}"))));
+    children.push(pos(call(
+        "collapsible",
+        vec![
+            named("summary", lit_str("when / then source")),
+            named("icon", lit_str("⚙")),
+            pos(call("text", vec![named("content", lit_str(source))])),
+        ],
+    )));
+
+    let mut args = vec![named("accent", lit_str(accent))];
+    args.extend(children);
+    call("card", args)
+}
+
+/// A journal-entry block row carrying the subtle ⚙ provenance affordance and
+/// inline "created by <rule> · <time>" secondary text (ADR 0024 P8 `fired-by`).
+fn provenance_row(entry: &str, rule: &str, time: &str, badge: bool) -> RenderExpr {
+    let gear = call(
+        "text",
+        vec![
+            pos(lit_str("⚙")),
+            named("size", lit_f64(12.0)),
+            named("color", lit_str("muted")),
+        ],
+    );
+    let mut cells = vec![call(
+        "text",
+        vec![pos(lit_str(entry)), named("size", lit_f64(14.0))],
+    )];
+    // DECIDED (action-ux.md, 2026-07-09 demo review): provenance is
+    // hover-only. The "created by <rule> · <time>" caption lives inside
+    // `on_hover`, revealed only while the ⚙ trigger is hovered.
+    if badge {
+        cells.push(call(
+            "on_hover",
+            vec![
+                pos(gear),
+                pos(muted_line(&format!("created by {rule} · {time}"))),
+            ],
+        ));
+    } else {
+        cells.push(gear);
+    }
+    row(cells, 8.0)
+}
+
+/// One firing in the Automations audit journal. `accent` tints the tick.
+fn automation_row(time: &str, rule: &str, detail: &str, accent: &str) -> RenderExpr {
+    row(
+        vec![
+            call(
+                "text",
+                vec![
+                    pos(lit_str(time)),
+                    named("size", lit_f64(12.0)),
+                    named("color", lit_str("muted")),
+                ],
+            ),
+            call(
+                "text",
+                vec![pos(lit_str("⚙")), named("color", lit_str(accent))],
+            ),
+            call(
+                "text",
+                vec![
+                    pos(lit_str(rule)),
+                    named("bold", lit_bool(true)),
+                    named("size", lit_f64(13.0)),
+                ],
+            ),
+            call(
+                "text",
+                vec![pos(lit_str("→")), named("color", lit_str("muted"))],
+            ),
+            call(
+                "text",
+                vec![pos(lit_str(detail)), named("size", lit_f64(13.0))],
+            ),
+        ],
+        8.0,
+    )
+}
+
+/// A named enabled-transition affordance for the in-context action bar (ADR
+/// 0024 presentation ladder #1: horizontal text is the highest-bandwidth
+/// label format). Rendered as a `badge` — the real data-driven `op_button`
+/// widget requires a `chain_ops`/`ops_of` row source, absent in this static
+/// mock; a badge carries the same named-transition label statically.
+fn action_button(display_name: &str) -> RenderExpr {
+    call("badge", vec![pos(lit_str(display_name))])
+}
+
+/// Actions mode: rule cards + provenance + automations page + action bar +
+/// dry-run dialog. One scrollable column of sections, like the other modes.
+pub fn actions_mode_expr() -> RenderExpr {
+    // ── 1. Rule cards ────────────────────────────────────────────────────
+    let rule_cards = section(
+        "Rules",
+        vec![
+            muted_line(
+                "Rules render as the most legible blocks on the page — not broken query results.",
+            ),
+            rule_card(
+                "Daily journal",
+                "#7D9D7D",
+                true,
+                "today 00:03",
+                "when: today and not journal(date = today)\nthen: block.create\n  parent: \
+                 journals\n  name: \"{today}\"",
+                None,
+            ),
+            rule_card(
+                "Weekly digest",
+                "#C97064",
+                false,
+                "never",
+                "when: jurnal(date = last_week)\nthen: block.create\n  parent: digests\n  name: \
+                 \"Digest {week}\"",
+                Some("guard references unknown relation 'jurnal'"),
+            ),
+        ],
+    );
+
+    // ── 2. Provenance badge ──────────────────────────────────────────────
+    let provenance = section(
+        "Provenance",
+        vec![
+            muted_line(
+                "Every auto-created block carries a ⚙ affordance back to the rule that made it.",
+            ),
+            provenance_row("2026-07-09", "Daily journal", "00:03", true),
+            provenance_row("2026-07-08", "Daily journal", "00:02", false),
+        ],
+    );
+
+    // ── 3. Automations page ──────────────────────────────────────────────
+    let automations = section(
+        "Automations",
+        vec![
+            muted_line(
+                "An ordinary, user-customizable page: a query over provenance-stamped effects.",
+            ),
+            call(
+                "text",
+                vec![
+                    pos(lit_str("Today — 2026-07-09")),
+                    named("bold", lit_bool(true)),
+                    named("size", lit_f64(13.0)),
+                ],
+            ),
+            automation_row(
+                "00:03",
+                "Daily journal",
+                "created '2026-07-09' in Journals",
+                "#7D9D7D",
+            ),
+            call(
+                "text",
+                vec![
+                    pos(lit_str("Yesterday — 2026-07-08")),
+                    named("bold", lit_bool(true)),
+                    named("size", lit_f64(13.0)),
+                ],
+            ),
+            automation_row(
+                "00:02",
+                "Daily journal",
+                "created '2026-07-08' in Journals",
+                "#7D9D7D",
+            ),
+            automation_row(
+                "14:20",
+                "Archive done",
+                "moved 'Ship v2.0' to Archive",
+                "#5DBDBD",
+            ),
+            automation_row(
+                "09:00",
+                "Weekly digest",
+                "guard error: unknown relation 'jurnal'",
+                "#C97064",
+            ),
+        ],
+    );
+
+    // ── 4. In-context action bar ─────────────────────────────────────────
+    let action_bar = section(
+        "In-context actions",
+        vec![
+            muted_line("The net computes what you can do; the UI offers it where you're looking."),
+            call(
+                "card",
+                vec![
+                    named("accent", lit_str("#5DBDBD")),
+                    pos(row(
+                        vec![
+                            call("state_toggle", vec![pos(lit_str("task_state_doing"))]),
+                            call(
+                                "text",
+                                vec![
+                                    pos(lit_str("Review PR from Sarah")),
+                                    named("bold", lit_bool(true)),
+                                    named("size", lit_f64(15.0)),
+                                ],
+                            ),
+                        ],
+                        8.0,
+                    )),
+                    pos(muted_line("3 actions available here")),
+                    pos(row(
+                        vec![
+                            action_button("Send to review"),
+                            action_button("Archive with note"),
+                            action_button("Split"),
+                        ],
+                        12.0,
+                    )),
+                ],
+            ),
+        ],
+    );
+
+    // ── 5. Dry-run dialog ────────────────────────────────────────────────
+    let dry_run = section(
+        "Dry-run before enable",
+        vec![
+            muted_line("Enabling a new rule first shows what it would do — scary becomes boring."),
+            call(
+                "card",
+                vec![
+                    named("accent", lit_str("#D4A373")),
+                    pos(call(
+                        "text",
+                        vec![
+                            pos(lit_str("Enable 'Daily journal'?")),
+                            named("bold", lit_bool(true)),
+                            named("size", lit_f64(16.0)),
+                        ],
+                    )),
+                    pos(call(
+                        "text",
+                        vec![
+                            pos(lit_str("This rule would fire 3 times right now:")),
+                            named("size", lit_f64(14.0)),
+                        ],
+                    )),
+                    pos(column_gap(
+                        vec![
+                            muted_line("→ create '2026-07-07' in Journals"),
+                            muted_line("→ create '2026-07-08' in Journals"),
+                            muted_line("→ create '2026-07-09' in Journals"),
+                        ],
+                        4.0,
+                    )),
+                    pos(row(
+                        vec![action_button("Cancel"), action_button("Confirm & fire")],
+                        12.0,
+                    )),
+                ],
+            ),
+        ],
+    );
+
+    column_gap(
+        vec![rule_cards, provenance, automations, action_bar, dry_run],
+        24.0,
+    )
+}
+
 /// Interpret a mode expression into a ReactiveViewModel.
 pub fn mode_view_model(expr: &RenderExpr) -> crate::reactive_view_model::ReactiveViewModel {
     let services = crate::reactive::StubBuilderServices::new();
@@ -1291,12 +1680,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gallery_expr_has_six_sections() {
+    fn gallery_expr_has_seven_sections() {
         let expr = widget_gallery_render_expr();
         match &expr {
             RenderExpr::FunctionCall { name, args } => {
                 assert_eq!(name, "column");
-                assert_eq!(args.len(), 6, "expected 6 sections in gallery");
+                assert_eq!(args.len(), 7, "expected 7 sections in gallery");
                 for arg in args {
                     match &arg.value {
                         RenderExpr::FunctionCall { name, .. } => {
@@ -1320,6 +1709,100 @@ mod tests {
             }
             other => panic!("expected column FunctionCall, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn actions_mode_has_five_sections_and_renders() {
+        let expr = actions_mode_expr();
+        match &expr {
+            RenderExpr::FunctionCall { name, args } => {
+                assert_eq!(name, "column");
+                // 5 sections + a trailing `gap` named arg.
+                let sections = args
+                    .iter()
+                    .filter(|a| matches!(&a.value, RenderExpr::FunctionCall { name, .. } if name == "section"))
+                    .count();
+                assert_eq!(sections, 5, "expected 5 Actions-mode sections");
+            }
+            other => panic!("expected column FunctionCall, got {other:?}"),
+        }
+        // Interprets into a non-empty tree via the shadow pipeline.
+        let vm = mode_view_model(&expr);
+        let snap = vm.snapshot();
+        assert!(!matches!(snap.kind, crate::view_model::ViewKind::Empty));
+
+        // Provenance is hover-only (action-ux.md): the "created by …" caption
+        // is wrapped in an `on_hover` node whose trigger is the ⚙ affordance.
+        fn find_on_hover(vm: &crate::view_model::ViewModel) -> Vec<&crate::view_model::ViewModel> {
+            let mut out = vec![];
+            if vm.widget_name() == Some("on_hover") {
+                out.push(vm);
+            }
+            for child in vm.children() {
+                out.extend(find_on_hover(child));
+            }
+            out
+        }
+        let on_hovers = find_on_hover(&snap);
+        assert!(
+            !on_hovers.is_empty(),
+            "expected at least one on_hover node in Actions-mode snapshot"
+        );
+        // Each on_hover carries a trigger child plus the revealed content.
+        assert!(
+            on_hovers.iter().all(|n| n.children().len() >= 2),
+            "on_hover should carry a trigger child and content child"
+        );
+    }
+
+    /// Root-cause guard for the "hover never reveals" bug: the on_hover node
+    /// carries its own `hovered` `Mutable<bool>`, and the reveal only survives
+    /// if the SAME node instance is reused across renders. The GPUI gallery
+    /// used to rebuild this tree every frame, so `.on_hover` flipped a Mutable
+    /// that the very next repaint discarded — the content could never show.
+    ///
+    /// This test pins both halves of that mechanism:
+    ///  - reusing the node preserves a flipped `hovered` (what the fixed
+    ///    gallery does by caching `Arc<ReactiveViewModel>` across renders),
+    ///  - a freshly rebuilt tree resets `hovered` to its `false` seed (why the
+    ///    per-frame rebuild hid the reveal).
+    #[test]
+    fn on_hover_state_survives_only_when_node_is_reused() {
+        fn find_on_hover(
+            node: &crate::reactive_view_model::ReactiveViewModel,
+        ) -> Option<&crate::reactive_view_model::ReactiveViewModel> {
+            if node.widget_name().as_deref() == Some("on_hover") {
+                return Some(node);
+            }
+            node.children.iter().find_map(|c| find_on_hover(c))
+        }
+
+        let expr = actions_mode_expr();
+
+        let vm = mode_view_model(&expr);
+        let node = find_on_hover(&vm).expect("actions mode has an on_hover node");
+        let hovered = node
+            .hovered
+            .clone()
+            .expect("on_hover node seeds a `hovered` Mutable");
+        assert!(!hovered.get(), "hover seeds `false`");
+
+        // Simulate `.on_hover(true)` firing on the persisted node.
+        hovered.set(true);
+        let same = find_on_hover(&vm).expect("on_hover node still present");
+        assert!(
+            same.hovered.as_ref().unwrap().get(),
+            "a reused node keeps the flipped hover state across a re-render"
+        );
+
+        // Rebuilding from scratch — the old per-frame behaviour — loses it.
+        let rebuilt = mode_view_model(&expr);
+        let fresh = find_on_hover(&rebuilt).expect("on_hover node present in rebuild");
+        assert!(
+            !fresh.hovered.as_ref().unwrap().get(),
+            "a freshly rebuilt tree resets hover to false — the per-frame rebuild is exactly what \
+             hid the reveal"
+        );
     }
 
     #[test]

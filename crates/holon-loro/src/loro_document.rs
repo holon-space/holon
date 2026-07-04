@@ -13,20 +13,37 @@ pub struct LoroDocument {
     doc_id: String,
 }
 
+/// Resolve the peer id for a fresh doc: an INJECTED id wins, else the process
+/// env, else random.
+///
+/// PBTs need a deterministic primary peer_id so the reference model's
+/// `loro_merge_text` prediction (which hardcodes peer_a=1, peer_b=2) matches
+/// actual production merge behaviour — RGA tiebreaks concurrent inserts at the
+/// same position by peer_id (lower wins). The env var cannot serve a
+/// two-instance test (both instances read the same process env and collide), so
+/// the injected value takes precedence.
+fn resolve_peer_id(injected: Option<PeerID>) -> Result<PeerID> {
+    if let Some(peer_id) = injected {
+        return Ok(peer_id);
+    }
+    match std::env::var("HOLON_LORO_PEER_ID") {
+        Ok(s) => s
+            .parse::<u64>()
+            .map_err(|e| anyhow::anyhow!("HOLON_LORO_PEER_ID must be a u64: {e}")),
+        Err(_) => Ok(rand::random::<u64>()),
+    }
+}
+
 impl LoroDocument {
     pub fn new(doc_id: String) -> Result<Self> {
-        // PBTs need a deterministic primary peer_id so the reference model's
-        // `loro_merge_text` prediction (which hardcodes peer_a=1, peer_b=2)
-        // matches actual production merge behaviour. RGA tiebreaks concurrent
-        // inserts at the same position by peer_id (lower wins), so a random
-        // primary u64 + peer_idx+100 peers can flip ordering relative to the
-        // reference's peer_a=1 < peer_b=2 assumption.
-        let peer_id = match std::env::var("HOLON_LORO_PEER_ID") {
-            Ok(s) => s
-                .parse::<u64>()
-                .map_err(|e| anyhow::anyhow!("HOLON_LORO_PEER_ID must be a u64: {e}"))?,
-            Err(_) => rand::random::<u64>(),
-        };
+        Self::new_with_peer_id(doc_id, None)
+    }
+
+    /// [`Self::new`] with the peer id supplied by the caller (the
+    /// session-config injection seam). See [`resolve_peer_id`] for the
+    /// precedence.
+    pub fn new_with_peer_id(doc_id: String, peer_id: Option<PeerID>) -> Result<Self> {
+        let peer_id = resolve_peer_id(peer_id)?;
         let doc = LoroDoc::new();
         // Install the rich-text mark policy (Bold/Italic/.../Link/Verbatim
         // expand types). Must run before any LoroText is created or marked,
@@ -193,14 +210,18 @@ impl LoroDocument {
 
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     pub fn load_from_file(path: &Path, doc_id: String) -> Result<Self> {
+        Self::load_from_file_with_peer_id(path, doc_id, None)
+    }
+
+    /// [`Self::load_from_file`] with the peer id supplied by the caller.
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    pub fn load_from_file_with_peer_id(
+        path: &Path,
+        doc_id: String,
+        peer_id: Option<PeerID>,
+    ) -> Result<Self> {
         let bytes = std::fs::read(path)?;
-        // See `LoroDocument::new` for why this honours HOLON_LORO_PEER_ID.
-        let peer_id = match std::env::var("HOLON_LORO_PEER_ID") {
-            Ok(s) => s
-                .parse::<u64>()
-                .map_err(|e| anyhow::anyhow!("HOLON_LORO_PEER_ID must be a u64: {e}"))?,
-            Err(_) => rand::random::<u64>(),
-        };
+        let peer_id = resolve_peer_id(peer_id)?;
 
         let doc = LoroDoc::new();
         doc.set_peer_id(peer_id)?;

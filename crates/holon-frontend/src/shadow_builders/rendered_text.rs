@@ -19,14 +19,11 @@ holon_macros::widget_builder! {
         if let Some(runtime) = ba.services.try_runtime_handle() {
             let props_handle = vm.props.clone();
             let derive = move |row: Arc<holon_api::widget_spec::DataRow>| {
-                let new_content = row
-                    .get(&field)
-                    .and_then(|v| v.as_string())
-                    .unwrap_or("")
-                    .to_string();
-                props_handle
-                    .lock_mut()
-                    .insert("content".to_string(), Value::String(new_content));
+                if let Some(new_content) = super::prelude::content_from_row(&row, &field) {
+                    props_handle
+                        .lock_mut()
+                        .insert("content".to_string(), Value::String(new_content));
+                }
             };
             let task = runtime.spawn(data.signal_cloned().for_each(move |row| {
                 derive(row);

@@ -1,3 +1,10 @@
+//! @c4 component
+//! @c4 layer Engine
+//! Pattern: Adapter
+//! @c4 uses holon-api "shared value & operation types" "Rust"
+//! @c4 uses holon-core "core datasource traits" "Rust"
+//! @c4 uses holon-engine "Petri-net engine" "Rust"
+//!
 //! Materialization layer: Holon task blocks → Petri Net for WSJF ranking.
 //!
 //! Reads task blocks from the database and constructs a Petri Net where:
@@ -27,23 +34,109 @@ use chrono::Utc;
 use holon_api::CompiledExpr;
 use holon_api::EntityUri;
 use holon_api::block::Block;
+use holon_api::computation::Computation;
 use holon_api::types::DependsOn;
 use holon_api::types::Priority;
 use holon_api::types::TaskState;
 use holon_api::types::Timestamp;
 use holon_engine::Marking;
 use holon_engine::NetDef;
+use holon_engine::PrecondSpec;
 use holon_engine::TokenState;
 use holon_engine::TransitionDef;
+use holon_engine::arc::AttrInit;
 use holon_engine::arc::CreateArc;
 use holon_engine::arc::InputArc;
 use holon_engine::arc::OutputArc;
 pub use holon_engine::engine::Engine;
 pub use holon_engine::engine::RankedTransition;
 use holon_engine::value::Value;
-use rhai::Dynamic;
 use rhai::Engine as RhaiEngine;
-use rhai::Scope;
+
+mod parser;
+pub use parser::DEFAULT_VERB_DICT;
+pub use parser::Executor;
+pub use parser::ParsedTask;
+pub use parser::Verb;
+pub use parser::VerbDict;
+pub use parser::VerbOp;
+pub use parser::VerbOpParseError;
+pub use parser::ViaRoute;
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+/// Failures materializing task blocks into a Petri net. These arise from
+/// *external* stored data (org drawer properties, block content, prototype
+/// blocks) reached via the live `rank_tasks` MCP tool, so they are returned as
+/// errors — never `panic!` — so the tool surfaces them instead of aborting the
+/// process (fail-loud, not fail-by-crash).
+#[derive(Debug, thiserror::Error)]
+pub enum PetriError {
+    #[error("stored property '{name}' on block {block_id} is not numeric: {detail}")]
+    NonNumericProperty {
+        block_id: String,
+        name: String,
+        detail: String,
+    },
+    #[error("stored property '{name}' = {value} on block {block_id} is not an integer")]
+    NonIntegerProperty {
+        block_id: String,
+        name: String,
+        value: f64,
+    },
+    #[error("stored '{field}' on block {block_id} has unexpected type: {detail}")]
+    UnexpectedPropertyType {
+        block_id: String,
+        field: String,
+        detail: String,
+    },
+    #[error("invalid prototype property '{name}' on block {block_id}: {detail}")]
+    InvalidPrototypeProperty {
+        block_id: String,
+        name: String,
+        detail: String,
+    },
+    #[error("stored priority {value} on block {block_id} is invalid: {detail}")]
+    InvalidPriority {
+        block_id: String,
+        value: i64,
+        detail: String,
+    },
+    #[error("stored deadline {value:?} on block {block_id} is not a valid timestamp: {detail}")]
+    InvalidDeadline {
+        block_id: String,
+        value: String,
+        detail: String,
+    },
+    #[error("Rhai eval error for computed property '{name}': {detail}\n  expr: {expr}")]
+    ComputedEval {
+        name: String,
+        detail: String,
+        expr: String,
+    },
+    #[error("Rhai computed property '{name}' returned non-numeric: {detail}")]
+    ComputedNonNumeric { name: String, detail: String },
+    #[error("block ids {a:?} and {b:?} both sanitize to Rhai identifier fragment {frag:?}")]
+    FragmentCollision { a: String, b: String, frag: String },
+    #[error("failed to compile objective expression: {detail}")]
+    ObjectiveCompile { detail: String },
+    #[error(
+        "stored duration {value} minutes on block {block_id} is out of range (expected 1..={max} \
+         — ~10 years); chrono clock arithmetic overflows far past this"
+    )]
+    DurationOutOfRange {
+        block_id: String,
+        value: i64,
+        max: i64,
+    },
+}
+
+/// Upper bound for task/prototype durations, ~10 years in minutes. Values
+/// beyond this are certainly data-entry errors and (much further out)
+/// overflow chrono's clock arithmetic in `Engine::fire`.
+pub const MAX_DURATION_MINUTES: i64 = 10 * 365 * 24 * 60;
 
 // ---------------------------------------------------------------------------
 // Token
@@ -115,16 +208,11 @@ impl TransitionDef for TaskTransition {
 pub struct TaskNet {
     pub transitions: Vec<TaskTransition>,
     pub objective_expr: CompiledExpr,
-    pub constraints: Vec<CompiledExpr>,
-    pub discount_rate: f64,
 }
 
 impl PartialEq for TaskNet {
     fn eq(&self, other: &Self) -> bool {
-        self.transitions == other.transitions
-            && self.objective_expr == other.objective_expr
-            && self.constraints == other.constraints
-            && (self.discount_rate - other.discount_rate).abs() < f64::EPSILON
+        self.transitions == other.transitions && self.objective_expr == other.objective_expr
     }
 }
 
@@ -143,12 +231,16 @@ impl NetDef for TaskNet {
         &self.objective_expr
     }
 
+    // The task adapter has no economic constraints and does not discount:
+    // the generated objective never references `discount`, so a discount rate
+    // would be inert. Both dimensions stay available on the generic `NetDef`
+    // trait for YAML nets that do use them.
     fn constraints(&self) -> &[CompiledExpr] {
-        &self.constraints
+        &[]
     }
 
     fn discount_rate(&self) -> f64 {
-        self.discount_rate
+        0.0
     }
 }
 
@@ -223,12 +315,14 @@ impl Marking for TaskMarking {
 // Prototype system — replaces MaterializeConfig + scoring helpers
 // ---------------------------------------------------------------------------
 
-/// A prototype property value: either a literal number or a pre-compiled Rhai
-/// expression.
+/// A prototype property value: either a literal number or a derived
+/// [`Computation`]. The computation is produced by the A2 subset parser (typed,
+/// SQL-plantable) when the `=` expression is in the subset, otherwise by the
+/// full Rhai compiler as a disclosed [`Computation::Script`] (seat B).
 #[derive(Clone, Debug)]
 pub enum PrototypeValue {
     Literal(f64),
-    Computed(CompiledExpr),
+    Computed(Computation),
 }
 
 impl PartialEq for PrototypeValue {
@@ -249,8 +343,26 @@ impl PrototypeValue {
     /// f64.
     pub fn parse(engine: &RhaiEngine, raw: &str) -> Result<Self, String> {
         if let Some(expr) = raw.strip_prefix('=') {
-            let compiled = CompiledExpr::compile(engine, expr)?;
-            Ok(PrototypeValue::Computed(compiled))
+            // A2: try the typed subset parser first (seat A, SQL-plantable). On
+            // reject, compile the full Rhai expression as a disclosed Script
+            // (seat B). A genuine Rhai compile error stays loud, enriched with
+            // the subset rejection reason.
+            match holon_api::expr_parser::parse(expr) {
+                Ok(comp) => Ok(PrototypeValue::Computed(comp)),
+                Err(subset_err) => {
+                    // Outside the typed subset -> Rhai Script (seat B). This
+                    // routing is disclosed downstream at `DerivedFieldPlan::plan`
+                    // time. A genuine Rhai error stays loud, enriched with the
+                    // subset rejection reason.
+                    let compiled = CompiledExpr::compile(engine, expr).map_err(|rhai_err| {
+                        format!(
+                            "expression '{expr}' is neither A2-subset-parseable ({subset_err}) \
+                             nor valid Rhai ({rhai_err})"
+                        )
+                    })?;
+                    Ok(PrototypeValue::Computed(Computation::Script(compiled)))
+                }
+            }
         } else {
             raw.parse::<f64>()
                 .map(PrototypeValue::Literal)
@@ -275,54 +387,37 @@ impl PrototypeValue {
 /// Default task prototype. Literal values are inherited defaults.
 pub const DEFAULT_TASK_PROTOTYPE: &[(&str, f64)] = &[
     ("default_duration_minutes", 60.0),
-    ("discount_rate", 0.05),
     ("deadline_buffer_days", 3.0),
     ("deadline_penalty", 200.0),
-    ("mental_slots_capacity", 7.0),
-    ("default_energy", 1.0),
-    ("default_focus", 0.8),
 ];
 
 fn default_computed_props(engine: &RhaiEngine) -> Vec<(&'static str, PrototypeValue)> {
+    // Route each default through `PrototypeValue::parse` (the `=` boundary) so
+    // they take the SAME A2-subset-first path as user-declared props. All four
+    // defaults ARE in the subset, so they become typed, SQL-plantable
+    // Computations (seat A) — verified by the flagship equivalence test.
+    let prop =
+        |src: &str| PrototypeValue::parse(engine, src).expect("default computed prop must parse");
     vec![
         (
             "priority_weight",
-            PrototypeValue::Computed(
-                CompiledExpr::compile(
-                    engine,
-                    "switch priority { 3.0 => 100.0, 2.0 => 40.0, 1.0 => 15.0, _ => 1.0 }",
-                )
-                .expect("default priority_weight must compile"),
-            ),
+            prop("=switch priority { 3.0 => 100.0, 2.0 => 40.0, 1.0 => 15.0, _ => 1.0 }"),
         ),
         (
             "urgency_weight",
-            PrototypeValue::Computed(
-                CompiledExpr::compile(
-                    engine,
-                    "if days_to_deadline > deadline_buffer_days { 0.0 } else if days_to_deadline \
-                     <= 0.0 { deadline_penalty } else { deadline_penalty * (1.0 - \
-                     days_to_deadline / deadline_buffer_days) }",
-                )
-                .expect("default urgency_weight must compile"),
+            prop(
+                "=if days_to_deadline > deadline_buffer_days { 0.0 } else if days_to_deadline \
+                 <= 0.0 { deadline_penalty } else { deadline_penalty * (1.0 - days_to_deadline \
+                 / deadline_buffer_days) }",
             ),
         ),
         (
             "position_weight",
-            PrototypeValue::Computed(
-                CompiledExpr::compile(engine, "0.001 * (max_position - position)")
-                    .expect("default position_weight must compile"),
-            ),
+            prop("=0.001 * (max_position - position)"),
         ),
         (
             "task_weight",
-            PrototypeValue::Computed(
-                CompiledExpr::compile(
-                    engine,
-                    "priority_weight * (1.0 + urgency_weight) + position_weight",
-                )
-                .expect("default task_weight must compile"),
-            ),
+            prop("=priority_weight * (1.0 + urgency_weight) + position_weight"),
         ),
     ]
 }
@@ -332,26 +427,25 @@ fn default_computed_props(engine: &RhaiEngine) -> Vec<(&'static str, PrototypeVa
 ///
 /// Returns all final attribute values as f64s.
 pub fn resolve_prototype(
-    engine: &RhaiEngine,
     prototype_props: &BTreeMap<String, PrototypeValue>,
     instance_props: &BTreeMap<String, PrototypeValue>,
     context_props: &BTreeMap<String, f64>,
-) -> BTreeMap<String, f64> {
+) -> Result<BTreeMap<String, f64>, PetriError> {
     let mut merged: BTreeMap<String, PrototypeValue> = prototype_props.clone();
     for (k, v) in instance_props {
         merged.insert(k.clone(), v.clone());
     }
 
     let mut literals: BTreeMap<String, f64> = BTreeMap::new();
-    let mut computed: BTreeMap<String, &CompiledExpr> = BTreeMap::new();
+    let mut computed: BTreeMap<String, &Computation> = BTreeMap::new();
 
     for (k, v) in &merged {
         match v {
             PrototypeValue::Literal(f) => {
                 literals.insert(k.clone(), *f);
             }
-            PrototypeValue::Computed(compiled) => {
-                computed.insert(k.clone(), compiled);
+            PrototypeValue::Computed(comp) => {
+                computed.insert(k.clone(), comp);
             }
         }
     }
@@ -362,46 +456,68 @@ pub fn resolve_prototype(
 
     let sorted = topo_sort_computed(&computed);
 
-    let mut scope = Scope::new();
-    for (k, v) in &literals {
-        scope.push(k.clone(), *v);
-    }
+    // C4 convergence: evaluate each computed prototype expression through the
+    // shared, fail-loud `Computation` evaluator (holon-api) instead of a private
+    // Rhai loop. rank_tasks scoring and the C4 derived-field pipeline now run the
+    // SAME bounded engine + coercion, so a computed field cannot rank one way
+    // here and materialize another way in the pipeline. Results thread back into
+    // the Value-typed context so later fields depend on earlier ones (topo
+    // order preserved).
+    let mut ctx: holon_api::computation::Context = literals
+        .iter()
+        .map(|(k, v)| (k.clone(), holon_api::Value::Float(*v)))
+        .collect();
 
     for name in &sorted {
-        let compiled = computed[name.as_str()];
-        let result: Dynamic = engine
-            .eval_ast_with_scope(&mut scope, &compiled.ast)
-            .unwrap_or_else(|e| {
-                panic!(
-                    "Rhai eval error for '{name}': {e}\n  expr: {}",
-                    compiled.source
-                )
-            });
-        let val = if result.is_float() {
-            result.as_float().unwrap()
-        } else if result.is_int() {
-            result.as_int().unwrap() as f64
-        } else {
-            panic!("Rhai expression '{name}' returned non-numeric: {result:?}");
-        };
-        scope.push(name.clone(), val);
+        let comp = computed[name.as_str()];
+        let value = comp.eval(&ctx).map_err(|e| PetriError::ComputedEval {
+            name: name.clone(),
+            detail: e.to_string(),
+            expr: computation_source(comp),
+        })?;
+        let val = value
+            .as_f64()
+            .ok_or_else(|| PetriError::ComputedNonNumeric {
+                name: name.clone(),
+                detail: format!("{value:?}"),
+            })?;
+        ctx.insert(name.clone(), holon_api::Value::Float(val));
         literals.insert(name.clone(), val);
     }
 
-    literals
+    Ok(literals)
+}
+
+/// A human-readable source for a computed [`Computation`], for error messages.
+/// `Script` carries its original Rhai text; typed shapes have no source string,
+/// so a structural debug rendering stands in.
+fn computation_source(comp: &Computation) -> String {
+    match comp {
+        Computation::Script(expr) => expr.source.clone(),
+        other => format!("{other:?}"),
+    }
+}
+
+/// Does `comp` reference the field `other`? `Script` is opaque to structural
+/// walking, so its Rhai source is scanned; typed shapes report their exact
+/// referenced fields.
+fn computation_references(comp: &Computation, other: &str) -> bool {
+    match comp {
+        Computation::Script(expr) => holon_core::util::expr_references(&expr.source, other),
+        typed => typed.referenced_fields().contains(other),
+    }
 }
 
 /// Topological sort of computed properties by dependency.
 /// Scans each expression for references to other computed property names.
-fn topo_sort_computed(computed: &BTreeMap<String, &CompiledExpr>) -> Vec<String> {
+fn topo_sort_computed(computed: &BTreeMap<String, &Computation>) -> Vec<String> {
     let computed_names: HashSet<&str> = computed.keys().map(|s| s.as_str()).collect();
     let mut deps: HashMap<&str, Vec<&str>> = HashMap::new();
 
-    for (name, compiled) in computed {
+    for (name, comp) in computed {
         let mut name_deps = Vec::new();
         for other in &computed_names {
-            if *other != name.as_str() && holon_core::util::expr_references(&compiled.source, other)
-            {
+            if *other != name.as_str() && computation_references(comp, other) {
                 name_deps.push(*other);
             }
         }
@@ -417,7 +533,7 @@ fn topo_sort_computed(computed: &BTreeMap<String, &CompiledExpr>) -> Vec<String>
 pub fn block_to_prototype_props(
     engine: &RhaiEngine,
     block: &Block,
-) -> BTreeMap<String, PrototypeValue> {
+) -> Result<BTreeMap<String, PrototypeValue>, PetriError> {
     use holon_api::Value as HValue;
     let mut props = BTreeMap::new();
     for (k, v) in &block.properties {
@@ -427,14 +543,19 @@ pub fn block_to_prototype_props(
         let pv = match v {
             HValue::Float(f) => PrototypeValue::Literal(*f),
             HValue::Integer(i) => PrototypeValue::Literal(*i as f64),
-            HValue::String(s) => PrototypeValue::parse(engine, s)
-                .unwrap_or_else(|e| panic!("invalid prototype property '{k}': {e}")),
+            HValue::String(s) => PrototypeValue::parse(engine, s).map_err(|detail| {
+                PetriError::InvalidPrototypeProperty {
+                    block_id: block.id.to_string(),
+                    name: k.clone(),
+                    detail,
+                }
+            })?,
             HValue::Boolean(b) => PrototypeValue::Literal(if *b { 1.0 } else { 0.0 }),
             _ => continue,
         };
         props.insert(k.clone(), pv);
     }
-    props
+    Ok(props)
 }
 
 /// Build context properties for a task during materialization.
@@ -480,72 +601,63 @@ pub fn default_prototype_props(engine: &RhaiEngine) -> BTreeMap<String, Prototyp
 /// Describes the "self" person — from a persistent Person block or defaults.
 ///
 /// A self block is identified by having an `is_self` property set to `true`.
+#[derive(Debug)]
 pub struct SelfDescriptor {
-    pub energy: f64,
-    pub focus: f64,
     pub mental_slots_capacity: i64,
 }
 
-const DEFAULT_ENERGY: f64 = 1.0;
-const DEFAULT_FOCUS: f64 = 0.8;
 const DEFAULT_MENTAL_SLOTS_CAPACITY: i64 = 7;
 
 /// Parse a numeric property value. Org drawer properties arrive as strings,
 /// so `String` is parsed; any other type is a stored-data bug — panic.
-fn numeric_prop(block_id: &EntityUri, name: &str, v: &holon_api::Value) -> f64 {
+fn numeric_prop(block_id: &EntityUri, name: &str, v: &holon_api::Value) -> Result<f64, PetriError> {
     use holon_api::Value as HValue;
     match v {
-        HValue::Float(f) => *f,
-        HValue::Integer(i) => *i as f64,
-        HValue::String(s) => s.parse().unwrap_or_else(|e| {
-            panic!("stored property {name} = {s:?} on block {block_id} is not numeric: {e}")
+        HValue::Float(f) => Ok(*f),
+        HValue::Integer(i) => Ok(*i as f64),
+        HValue::String(s) => s.parse().map_err(|e| PetriError::NonNumericProperty {
+            block_id: block_id.to_string(),
+            name: name.to_string(),
+            detail: format!("{s:?}: {e}"),
         }),
-        other => {
-            panic!("stored property {name} on block {block_id} has non-numeric type: {other:?}")
-        }
+        other => Err(PetriError::NonNumericProperty {
+            block_id: block_id.to_string(),
+            name: name.to_string(),
+            detail: format!("non-numeric type {other:?}"),
+        }),
     }
 }
 
 /// Parse an integer property value; fails loud on fractional or non-numeric
 /// values.
-fn integer_prop(block_id: &EntityUri, name: &str, v: &holon_api::Value) -> i64 {
-    let f = numeric_prop(block_id, name, v);
+fn integer_prop(block_id: &EntityUri, name: &str, v: &holon_api::Value) -> Result<i64, PetriError> {
+    let f = numeric_prop(block_id, name, v)?;
     if f.fract() != 0.0 {
-        panic!("stored property {name} = {f} on block {block_id} is not an integer");
+        return Err(PetriError::NonIntegerProperty {
+            block_id: block_id.to_string(),
+            name: name.to_string(),
+            value: f,
+        });
     }
-    f as i64
+    Ok(f as i64)
 }
 
 impl SelfDescriptor {
-    pub fn from_block(block: &Block) -> Self {
+    pub fn from_block(block: &Block) -> Result<Self, PetriError> {
         let props = &block.properties;
 
-        let energy = props
-            .get("energy")
-            .map(|v| numeric_prop(&block.id, "energy", v))
-            .unwrap_or(DEFAULT_ENERGY);
+        let mental_slots_capacity = match props.get("mental_slots_capacity") {
+            Some(v) => integer_prop(&block.id, "mental_slots_capacity", v)?,
+            None => DEFAULT_MENTAL_SLOTS_CAPACITY,
+        };
 
-        let focus = props
-            .get("focus")
-            .map(|v| numeric_prop(&block.id, "focus", v))
-            .unwrap_or(DEFAULT_FOCUS);
-
-        let mental_slots_capacity = props
-            .get("mental_slots_capacity")
-            .map(|v| integer_prop(&block.id, "mental_slots_capacity", v))
-            .unwrap_or(DEFAULT_MENTAL_SLOTS_CAPACITY);
-
-        Self {
-            energy,
-            focus,
+        Ok(Self {
             mental_slots_capacity,
-        }
+        })
     }
 
     pub fn defaults() -> Self {
         Self {
-            energy: DEFAULT_ENERGY,
-            focus: DEFAULT_FOCUS,
             mental_slots_capacity: DEFAULT_MENTAL_SLOTS_CAPACITY,
         }
     }
@@ -566,18 +678,98 @@ pub fn is_prototype_block(block: &Block) -> bool {
     block.properties.contains_key("prototype_for")
 }
 
+/// Returns true if `block` is a verb-dictionary block — one that extends the
+/// task-syntax verb dictionary at runtime. The marker is the presence of a
+/// `verb_op` property (its companion `verb_surface` names the lemma to match).
+pub fn is_verb_dict_block(block: &Block) -> bool {
+    block.properties.contains_key("verb_op")
+}
+
+/// Parse one verb-dictionary block into a `(surface, VerbOp)` entry.
+///
+/// Disclosed skip semantics (fail-loud, never silent): an unknown `verb_op`
+/// keyword, or a missing / empty / non-string `verb_surface`, yields a
+/// `tracing::warn!` naming the block id and the defect and returns `None`. It
+/// never panics and never silently drops a malformed block.
+fn verb_entry_from_block(block: &Block) -> Option<(String, VerbOp)> {
+    use holon_api::Value as HValue;
+
+    let op = match block.properties.get("verb_op") {
+        Some(HValue::String(kw)) => match VerbOp::from_keyword(kw) {
+            Ok(op) => op,
+            Err(e) => {
+                tracing::warn!(block_id = %block.id, error = %e, "skipping verb-dict block: {e}");
+                return None;
+            }
+        },
+        Some(other) => {
+            tracing::warn!(
+                block_id = %block.id,
+                "skipping verb-dict block: 'verb_op' is not a string ({other:?})"
+            );
+            return None;
+        }
+        None => return None,
+    };
+
+    let surface = match block.properties.get("verb_surface") {
+        Some(HValue::String(s)) if !s.trim().is_empty() => s.clone(),
+        Some(HValue::String(_)) => {
+            tracing::warn!(
+                block_id = %block.id,
+                "skipping verb-dict block: 'verb_surface' is empty"
+            );
+            return None;
+        }
+        Some(other) => {
+            tracing::warn!(
+                block_id = %block.id,
+                "skipping verb-dict block: 'verb_surface' is not a string ({other:?})"
+            );
+            return None;
+        }
+        None => {
+            tracing::warn!(
+                block_id = %block.id,
+                "skipping verb-dict block: missing 'verb_surface'"
+            );
+            return None;
+        }
+    };
+
+    Some((surface, op))
+}
+
+/// Resolve the runtime verb dictionary from a slice of blocks: the built-in
+/// baseline overlaid with every well-formed verb-dictionary block (marked by
+/// [`is_verb_dict_block`]). This is the ONLY way to obtain a runtime
+/// [`VerbDict`] — the live "dictionary-as-blocks" extension seam. Malformed
+/// entries are skipped with a disclosed warning (see
+/// [`verb_entry_from_block`]); well-formed siblings and the built-ins are
+/// unaffected.
+pub fn resolve_verb_dict(blocks: &[Block]) -> VerbDict {
+    let user_entries = blocks
+        .iter()
+        .filter(|b| is_verb_dict_block(b))
+        .filter_map(verb_entry_from_block);
+    VerbDict::resolve(user_entries)
+}
+
 // ---------------------------------------------------------------------------
 // Parsing
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug, PartialEq)]
-pub enum Executor {
-    SelfExec,
-    Delegated { person: String },
-}
-
 /// Parse content prefixes in order: `>`, `@[[Person]]:`, `?`.
 /// Returns (cleaned_content, has_sequential_dep, executor, is_question).
+///
+/// This is the narrow, materialization-facing slice of the richer boundary
+/// parser in [`mod@parser`] ([`ParsedTask`]): it detects the leading prefixes
+/// and executor while preserving the full (possibly multi-line) content body
+/// verbatim, so the existing `wiki_links` extraction path is unaffected. The
+/// reference-role classification, verb dictionary, `via:` routes and recurrence
+/// live on [`ParsedTask`]. The dictionary is now runtime-extensible via
+/// [`resolve_verb_dict`] (verb-dictionary blocks); the still-deferred step is
+/// having `materialize` consume [`ParsedTask::verb`] to shape the net.
 pub fn parse_content_prefixes(raw: &str) -> (String, bool, Executor, bool) {
     let mut content = raw.trim().to_string();
     let mut has_sequential_dep = false;
@@ -637,7 +829,6 @@ struct TaskInfo {
     block_id: String,
     parent_id: String,
     content: String,
-    task_state: Option<TaskState>,
     priority: Option<Priority>,
     deadline: Option<Timestamp>,
     depends_on: DependsOn,
@@ -650,65 +841,97 @@ struct TaskInfo {
 }
 
 impl TaskInfo {
-    fn from_block(block: &Block, position: usize) -> Option<Self> {
+    fn from_block(block: &Block, position: usize) -> Result<Option<Self>, PetriError> {
         use holon_api::Value as HValue;
         let props = &block.properties;
 
-        let task_state = props.get("task_state").map(|v| match v {
-            HValue::String(s) => TaskState::from_keyword(s),
-            other => panic!(
-                "stored task_state on block {} has non-string type: {other:?}",
-                block.id
-            ),
-        });
+        let task_state = match props.get("task_state") {
+            Some(HValue::String(s)) => Some(TaskState::from_keyword(s)),
+            Some(other) => {
+                return Err(PetriError::UnexpectedPropertyType {
+                    block_id: block.id.to_string(),
+                    field: "task_state".to_string(),
+                    detail: format!("{other:?}"),
+                });
+            }
+            None => None,
+        };
 
-        task_state.as_ref()?;
+        // Not a task (no task_state) — not an error, just skipped.
+        let Some(task_state) = task_state else {
+            return Ok(None);
+        };
 
-        let priority = props.get("priority").map(|v| {
-            let i = integer_prop(&block.id, "priority", v);
-            Priority::from_int(i as i32).unwrap_or_else(|e| {
-                panic!("stored priority {i} on block {} is invalid: {e}", block.id)
-            })
-        });
-
-        let deadline = props.get("deadline").map(|v| match v {
-            HValue::String(s) => Timestamp::parse(s).unwrap_or_else(|e| {
-                panic!(
-                    "stored deadline property {s:?} on block {} is not a valid timestamp: {e}",
-                    block.id
+        let priority = match props.get("priority") {
+            Some(v) => {
+                let i = integer_prop(&block.id, "priority", v)?;
+                Some(
+                    Priority::from_int(i as i32).map_err(|e| PetriError::InvalidPriority {
+                        block_id: block.id.to_string(),
+                        value: i,
+                        detail: e.to_string(),
+                    })?,
                 )
-            }),
-            other => panic!(
-                "stored deadline on block {} has non-string type: {other:?}",
-                block.id
-            ),
-        });
+            }
+            None => None,
+        };
 
-        let depends_on = props
-            .get("depends_on")
-            .map(|v| match v {
-                HValue::String(s) => DependsOn::from_csv(s),
-                other => panic!(
-                    "stored depends_on on block {} has non-string type: {other:?}",
-                    block.id
-                ),
-            })
-            .unwrap_or_default();
+        let deadline = match props.get("deadline") {
+            Some(HValue::String(s)) => {
+                Some(
+                    Timestamp::parse(s).map_err(|e| PetriError::InvalidDeadline {
+                        block_id: block.id.to_string(),
+                        value: s.clone(),
+                        detail: e.to_string(),
+                    })?,
+                )
+            }
+            Some(other) => {
+                return Err(PetriError::UnexpectedPropertyType {
+                    block_id: block.id.to_string(),
+                    field: "deadline".to_string(),
+                    detail: format!("{other:?}"),
+                });
+            }
+            None => None,
+        };
 
-        let duration_minutes = props
-            .get("duration")
-            .map(|v| integer_prop(&block.id, "duration", v));
+        let depends_on = match props.get("depends_on") {
+            Some(HValue::String(s)) => DependsOn::from_csv(s),
+            Some(other) => {
+                return Err(PetriError::UnexpectedPropertyType {
+                    block_id: block.id.to_string(),
+                    field: "depends_on".to_string(),
+                    detail: format!("{other:?}"),
+                });
+            }
+            None => DependsOn::default(),
+        };
 
-        let is_completed = task_state.as_ref().map(|ts| ts.is_done()).unwrap_or(false);
+        let duration_minutes = match props.get("duration") {
+            Some(v) => {
+                let d = integer_prop(&block.id, "duration", v)?;
+                if d <= 0 || d > MAX_DURATION_MINUTES {
+                    return Err(PetriError::DurationOutOfRange {
+                        block_id: block.id.to_string(),
+                        value: d,
+                        max: MAX_DURATION_MINUTES,
+                    });
+                }
+                Some(d)
+            }
+            None => None,
+        };
+
+        let is_completed = task_state.is_done();
 
         let (content, has_sequential_dep, executor, is_question) =
             parse_content_prefixes(&block.content);
 
-        Some(TaskInfo {
+        Ok(Some(TaskInfo {
             block_id: block.id.to_string(),
             parent_id: block.parent_id.to_string(),
             content,
-            task_state,
             priority,
             deadline,
             depends_on,
@@ -718,7 +941,7 @@ impl TaskInfo {
             has_sequential_dep,
             executor,
             is_question,
-        })
+        }))
     }
 
     fn wiki_links(&self) -> Vec<String> {
@@ -730,16 +953,19 @@ impl TaskInfo {
 // Materialization
 // ---------------------------------------------------------------------------
 
+#[derive(Debug)]
 pub struct MentalSlotsInfo {
     pub occupied: usize,
     pub capacity: usize,
 }
 
+#[derive(Debug)]
 pub struct RankResult {
     pub ranked: Vec<RankedTask>,
     pub mental_slots: MentalSlotsInfo,
 }
 
+#[derive(Debug)]
 pub struct RankedTask {
     pub block_id: String,
     pub label: String,
@@ -753,7 +979,7 @@ pub fn materialize(
     blocks: &[Block],
     self_desc: &SelfDescriptor,
     prototype_props: &BTreeMap<String, PrototypeValue>,
-) -> (TaskNet, TaskMarking) {
+) -> Result<(TaskNet, TaskMarking), PetriError> {
     materialize_at(
         blocks,
         self_desc,
@@ -768,14 +994,15 @@ pub fn materialize_at(
     self_desc: &SelfDescriptor,
     prototype_props: &BTreeMap<String, PrototypeValue>,
     now: DateTime<Utc>,
-) -> (TaskNet, TaskMarking) {
-    let rhai_engine = RhaiEngine::new();
+) -> Result<(TaskNet, TaskMarking), PetriError> {
+    let rhai_engine = holon_expr::bounded_engine();
 
-    let mut tasks: Vec<TaskInfo> = blocks
-        .iter()
-        .enumerate()
-        .filter_map(|(i, b)| TaskInfo::from_block(b, i))
-        .collect();
+    let mut tasks: Vec<TaskInfo> = Vec::new();
+    for (i, b) in blocks.iter().enumerate() {
+        if let Some(t) = TaskInfo::from_block(b, i)? {
+            tasks.push(t);
+        }
+    }
 
     resolve_sequential_deps(&mut tasks);
 
@@ -785,10 +1012,11 @@ pub fn materialize_at(
         if let Some(prev) = frag_to_id.insert(frag.clone(), &task.block_id)
             && prev != task.block_id
         {
-            panic!(
-                "block ids {prev:?} and {:?} both sanitize to Rhai identifier fragment {frag:?}",
-                task.block_id
-            );
+            return Err(PetriError::FragmentCollision {
+                a: prev.to_string(),
+                b: task.block_id.clone(),
+                frag,
+            });
         }
     }
 
@@ -799,13 +1027,21 @@ pub fn materialize_at(
         .get("default_duration_minutes")
         .and_then(|v| v.as_literal())
         .unwrap_or(60.0);
+    if !default_duration.is_finite()
+        || default_duration <= 0.0
+        || default_duration > MAX_DURATION_MINUTES as f64
+    {
+        return Err(PetriError::InvalidPrototypeProperty {
+            block_id: "<prototype>".to_string(),
+            name: "default_duration_minutes".to_string(),
+            detail: format!(
+                "{default_duration} is out of range (expected finite, 1..={MAX_DURATION_MINUTES} \
+                 minutes)"
+            ),
+        });
+    }
 
-    let discount_rate = prototype_props
-        .get("discount_rate")
-        .and_then(|v| v.as_literal())
-        .unwrap_or(0.05);
-
-    let mut tokens = vec![build_self_token(&active, self_desc)];
+    let mut tokens = vec![build_self_token(self_desc)];
     tokens.extend(build_completion_tokens(&completed));
     tokens.extend(build_entity_tokens(&active));
     tokens.extend(build_delegate_tokens(&active));
@@ -816,7 +1052,7 @@ pub fn materialize_at(
     for task in &active {
         let instance_props = task_to_instance_props_from_info(task);
         let context = build_context_props(task, now, max_position);
-        let resolved = resolve_prototype(&rhai_engine, prototype_props, &instance_props, &context);
+        let resolved = resolve_prototype(prototype_props, &instance_props, &context)?;
         let weight = resolved.get("task_weight").copied().unwrap_or(1.0);
         task_weights.insert(task.block_id.clone(), weight);
     }
@@ -828,17 +1064,15 @@ pub fn materialize_at(
 
     let objective_expr_src = build_objective_expr(&active, &task_weights);
     let objective_expr = CompiledExpr::compile(&rhai_engine, &objective_expr_src)
-        .unwrap_or_else(|e| panic!("failed to compile objective expression: {e}"));
+        .map_err(|detail| PetriError::ObjectiveCompile { detail })?;
 
     let net = TaskNet {
         transitions,
         objective_expr,
-        constraints: vec![],
-        discount_rate,
     };
     let marking = TaskMarking { clock: now, tokens };
 
-    (net, marking)
+    Ok((net, marking))
 }
 
 fn task_to_instance_props_from_info(task: &TaskInfo) -> BTreeMap<String, PrototypeValue> {
@@ -882,30 +1116,15 @@ fn resolve_sequential_deps(tasks: &mut [TaskInfo]) {
     }
 }
 
-fn build_self_token(active_tasks: &[&TaskInfo], self_desc: &SelfDescriptor) -> TaskToken {
-    let occupied = active_tasks
-        .iter()
-        .filter(|t| {
-            t.task_state
-                .as_ref()
-                .map(|ts| ts.is_doing())
-                .unwrap_or(false)
-        })
-        .count() as i64;
-
+// descriptor kept for imminent capacity wiring
+// ALLOW(unused_param): self-token attributes are fixed today
+fn build_self_token(_self_desc: &SelfDescriptor) -> TaskToken {
     TaskToken {
         id: "self".to_string(),
         token_type: "person".to_string(),
         attributes: {
             let mut a = BTreeMap::new();
             a.insert("status".to_string(), Value::String("active".to_string()));
-            a.insert("energy".to_string(), Value::Float(self_desc.energy));
-            a.insert("focus".to_string(), Value::Float(self_desc.focus));
-            a.insert("mental_slots_occupied".to_string(), Value::Int(occupied));
-            a.insert(
-                "mental_slots_capacity".to_string(),
-                Value::Int(self_desc.mental_slots_capacity),
-            );
             a
         },
     }
@@ -921,6 +1140,28 @@ pub fn rhai_ident_fragment(id: &str) -> String {
     id.chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect()
+}
+
+/// Encode an arbitrary string as a Rhai string literal (surrounding quotes plus
+/// escaping), so user-derived text embedded in a generated Rhai expression can
+/// never break out of the literal or inject code. Used where a value must be
+/// referenced inside a compiled expression (e.g. the objective) rather than
+/// carried as a typed token attribute.
+fn rhai_string_literal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn build_completion_tokens(completed: &[&TaskInfo]) -> Vec<TaskToken> {
@@ -999,7 +1240,10 @@ fn build_task_transitions(
     let mut creates = Vec::new();
 
     match &task.executor {
-        Executor::SelfExec => {
+        // `@agent:` async firing is not yet wired; until then an agent-executed
+        // task borrows Self exactly like a self transition (PetriNet.md defers the
+        // async agent sub-net). It never crashes — the task still materializes.
+        Executor::SelfExec | Executor::Agent { .. } => {
             inputs.push(InputArc {
                 bind: "self".to_string(),
                 token_type: "person".to_string(),
@@ -1027,12 +1271,20 @@ fn build_task_transitions(
                     postcond: BTreeMap::new(),
                 }],
                 creates: vec![CreateArc {
-                    id_expr: format!("\"waiting_for_{}\"", rhai_ident_fragment(&task.block_id)),
+                    id_expr: format!("\"waiting_for_{}\"", rhai_ident_fragment(&task.block_id))
+                        .parse()
+                        .expect("waiting_for id_expr is a Rhai string literal and must compile"),
                     token_type: "waiting".to_string(),
                     attrs: {
                         let mut a = BTreeMap::new();
-                        a.insert("source_task".to_string(), format!("\"{}\"", task.block_id));
-                        a.insert("delegate".to_string(), format!("\"{person}\""));
+                        a.insert(
+                            "source_task".to_string(),
+                            AttrInit::Literal(Value::String(task.block_id.clone())),
+                        );
+                        a.insert(
+                            "delegate".to_string(),
+                            AttrInit::Literal(Value::String(person.clone())),
+                        );
                         a
                     },
                 }],
@@ -1109,24 +1361,40 @@ fn build_task_transitions(
     let weight = task_weights.get(&task.block_id).copied().unwrap_or(1.0);
 
     creates.push(CreateArc {
-        id_expr: format!("\"completed_{}\"", rhai_ident_fragment(&task.block_id)),
+        id_expr: format!("\"completed_{}\"", rhai_ident_fragment(&task.block_id))
+            .parse()
+            .expect("completed id_expr is a Rhai string literal and must compile"),
         token_type: "completion".to_string(),
         attrs: {
             let mut a = BTreeMap::new();
-            a.insert("source_task".to_string(), format!("\"{}\"", task.block_id));
-            a.insert("task_weight".to_string(), format!("{weight}"));
+            a.insert(
+                "source_task".to_string(),
+                AttrInit::Literal(Value::String(task.block_id.clone())),
+            );
+            a.insert(
+                "task_weight".to_string(),
+                AttrInit::Literal(Value::Float(weight)),
+            );
             a
         },
     });
 
     if task.is_question {
         creates.push(CreateArc {
-            id_expr: format!("\"knowledge_{}\"", rhai_ident_fragment(&task.block_id)),
+            id_expr: format!("\"knowledge_{}\"", rhai_ident_fragment(&task.block_id))
+                .parse()
+                .expect("knowledge id_expr is a Rhai string literal and must compile"),
             token_type: "knowledge".to_string(),
             attrs: {
                 let mut a = BTreeMap::new();
-                a.insert("source_task".to_string(), format!("\"{}\"", task.block_id));
-                a.insert("confidence".to_string(), "0.8".to_string());
+                a.insert(
+                    "source_task".to_string(),
+                    AttrInit::Literal(Value::String(task.block_id.clone())),
+                );
+                a.insert(
+                    "confidence".to_string(),
+                    AttrInit::Literal(Value::Float(0.8)),
+                );
                 a
             },
         });
@@ -1160,10 +1428,10 @@ fn build_objective_expr(tasks: &[&TaskInfo], task_weights: &BTreeMap<String, f64
         .map(|task| {
             let weight = task_weights.get(&task.block_id).copied().unwrap_or(1.0);
             format!(
-                "(if is_def_var(\"completed_{frag}\") && completed_{frag}.source_task == \
-                 \"{bid}\" {{ {weight:.6} }} else {{ 0.0 }})",
+                "(if is_def_var(\"completed_{frag}\") && completed_{frag}.source_task == {bid} {{ \
+                 {weight:.6} }} else {{ 0.0 }})",
                 frag = rhai_ident_fragment(&task.block_id),
-                bid = task.block_id
+                bid = rhai_string_literal(&task.block_id)
             )
         })
         .collect();
@@ -1182,24 +1450,26 @@ fn build_objective_expr(tasks: &[&TaskInfo], task_weights: &BTreeMap<String, f64
 /// - A block with `is_self: true` → used as the self token source
 /// - All other blocks with `task_state` → treated as tasks
 pub fn rank_tasks(blocks: &[Block]) -> Result<RankResult, String> {
-    let rhai_engine = RhaiEngine::new();
+    let rhai_engine = holon_expr::bounded_engine();
 
     let prototype_block = blocks.iter().find(|b| is_prototype_block(b));
     let self_block = blocks.iter().find(|b| SelfDescriptor::is_self_block(b));
 
     let mut prototype_props = default_prototype_props(&rhai_engine);
     if let Some(pb) = prototype_block {
-        let overrides = block_to_prototype_props(&rhai_engine, pb);
+        let overrides = block_to_prototype_props(&rhai_engine, pb).map_err(|e| e.to_string())?;
         for (k, v) in overrides {
             prototype_props.insert(k, v);
         }
     }
 
-    let self_desc = self_block
-        .map(SelfDescriptor::from_block)
-        .unwrap_or_else(SelfDescriptor::defaults);
+    let self_desc = match self_block {
+        Some(b) => SelfDescriptor::from_block(b).map_err(|e| e.to_string())?,
+        None => SelfDescriptor::defaults(),
+    };
 
-    let (net, marking) = materialize(blocks, &self_desc, &prototype_props);
+    let (net, marking) =
+        materialize(blocks, &self_desc, &prototype_props).map_err(|e| e.to_string())?;
 
     let engine = Engine::new();
     let enabled = engine.enabled(&net, &marking)?;
@@ -1252,6 +1522,60 @@ mod tests {
         b
     }
 
+    /// C4 convergence: `resolve_prototype` now evaluates computed prototype
+    /// expressions through the shared `holon_api::computation::Computation`
+    /// evaluator. This pins that the switch/if/arithmetic shapes rank_tasks
+    /// depends on still resolve identically AND that dependent fields chain in
+    /// topological order (task_weight reads the freshly-computed
+    /// priority_weight).
+    #[test]
+    fn resolve_prototype_evaluates_through_computation_and_chains() {
+        let engine = holon_expr::bounded_engine();
+        let computed = |src: &str| PrototypeValue::parse(&engine, &format!("={src}")).unwrap();
+
+        let mut prototype: BTreeMap<String, PrototypeValue> = BTreeMap::new();
+        prototype.insert(
+            "priority_weight".to_string(),
+            computed("switch priority { 3.0 => 100.0, 2.0 => 40.0, _ => 1.0 }"),
+        );
+        prototype.insert("task_weight".to_string(), computed("priority_weight * 2.0"));
+
+        let mut context: BTreeMap<String, f64> = BTreeMap::new();
+        context.insert("priority".to_string(), 3.0);
+
+        let resolved = resolve_prototype(&prototype, &BTreeMap::new(), &context)
+            .expect("resolve_prototype must succeed");
+
+        assert_eq!(resolved.get("priority_weight").copied(), Some(100.0));
+        assert_eq!(
+            resolved.get("task_weight").copied(),
+            Some(200.0),
+            "task_weight must chain off the freshly-computed priority_weight"
+        );
+    }
+
+    /// C4 convergence keeps the fail-loud contract: a computed expression that
+    /// yields a non-numeric value surfaces as `PetriError`, never a silent
+    /// default — matching the shared evaluator's semantics.
+    #[test]
+    fn resolve_prototype_is_fail_loud_on_non_numeric() {
+        let engine = holon_expr::bounded_engine();
+        let mut prototype: BTreeMap<String, PrototypeValue> = BTreeMap::new();
+        // A string literal is outside the A2 subset, so this falls back to a
+        // Rhai Script that yields a non-numeric value -> fail-loud.
+        prototype.insert(
+            "bad".to_string(),
+            PrototypeValue::parse(&engine, "=\"not a number\"").unwrap(),
+        );
+
+        let err = resolve_prototype(&prototype, &BTreeMap::new(), &BTreeMap::new())
+            .expect_err("non-numeric computed value must fail loud");
+        assert!(
+            matches!(err, PetriError::ComputedNonNumeric { .. }),
+            "expected ComputedNonNumeric, got {err:?}"
+        );
+    }
+
     /// Real block ids are EntityUris (`block:<uuid>`) whose `:`/`-` are invalid
     /// in Rhai identifiers — rank_tasks must still compile the objective and
     /// return real block ids, never delegate sub-transition ids.
@@ -1284,28 +1608,288 @@ mod tests {
         );
     }
 
+    /// Pins the exact WSJF `rank()` output so the load-time compilation of
+    /// postconditions / create-arc id-exprs (`PostcondExpr`) cannot silently
+    /// change ranking semantics. Two self-executed TODO tasks, distinct
+    /// priorities, no deadline: higher priority must rank first and each
+    /// Δobjective must equal its completion-token weight
+    /// (`priority_weight * (1 + urgency=0) + position_weight`), with
+    /// Δper-minute = Δobjective / 60m default duration.
+    #[test]
+    fn rank_output_is_pinned_for_priority_ordering() {
+        let high = EntityUri::block_random();
+        let low = EntityUri::block_random();
+
+        let mut hb = task_block(&high, "High priority task", "TODO");
+        hb.set_property("priority", holon_api::Value::Integer(3));
+        let mut lb = task_block(&low, "Low priority task", "TODO");
+        lb.set_property("priority", holon_api::Value::Integer(1));
+
+        let result = rank_tasks(&[hb, lb]).expect("rank_tasks must succeed");
+
+        assert_eq!(result.ranked.len(), 2, "both active tasks must be ranked");
+        assert_eq!(
+            result.ranked[0].block_id,
+            high.to_string(),
+            "priority 3 must rank first"
+        );
+        assert_eq!(
+            result.ranked[1].block_id,
+            low.to_string(),
+            "priority 1 must rank second"
+        );
+
+        // max_position = 2 active tasks; positions are block indices 0 and 1.
+        let expect_high = 100.0 + 0.001 * (2.0 - 0.0);
+        let expect_low = 15.0 + 0.001 * (2.0 - 1.0);
+        let eps = 1e-6;
+        assert!(
+            (result.ranked[0].delta_obj - expect_high).abs() < eps,
+            "high Δobj = {}, want {expect_high}",
+            result.ranked[0].delta_obj
+        );
+        assert!(
+            (result.ranked[1].delta_obj - expect_low).abs() < eps,
+            "low Δobj = {}, want {expect_low}",
+            result.ranked[1].delta_obj
+        );
+        assert!(
+            (result.ranked[0].delta_per_minute - expect_high / 60.0).abs() < eps,
+            "high Δ/min = {}",
+            result.ranked[0].delta_per_minute
+        );
+        assert!(
+            (result.ranked[1].delta_per_minute - expect_low / 60.0).abs() < eps,
+            "low Δ/min = {}",
+            result.ranked[1].delta_per_minute
+        );
+    }
+
     /// Org drawer properties arrive as strings — they must be parsed, and
     /// garbage must fail loud rather than silently defaulting.
     #[test]
     fn self_descriptor_parses_string_properties() {
         let mut b = Block::new_text(EntityUri::block_random(), EntityUri::block("p"), "Self");
         b.set_property("is_self", holon_api::Value::Boolean(true));
-        b.set_property("energy", holon_api::Value::String("0.5".to_string()));
         b.set_property(
             "mental_slots_capacity",
             holon_api::Value::String("5".to_string()),
         );
 
-        let desc = SelfDescriptor::from_block(&b);
-        assert_eq!(desc.energy, 0.5);
+        let desc = SelfDescriptor::from_block(&b).expect("valid self block parses");
         assert_eq!(desc.mental_slots_capacity, 5);
     }
 
     #[test]
-    #[should_panic(expected = "is not numeric")]
-    fn self_descriptor_panics_on_garbage_energy() {
+    fn self_descriptor_errors_on_garbage_mental_slots_capacity() {
         let mut b = Block::new_text(EntityUri::block_random(), EntityUri::block("p"), "Self");
-        b.set_property("energy", holon_api::Value::String("high".to_string()));
-        SelfDescriptor::from_block(&b);
+        b.set_property(
+            "mental_slots_capacity",
+            holon_api::Value::String("lots".to_string()),
+        );
+        let err = SelfDescriptor::from_block(&b)
+            .expect_err("garbage mental_slots_capacity must fail loud, not silently default");
+        assert!(
+            err.to_string().contains("is not numeric"),
+            "error must name the failure, got: {err}"
+        );
+    }
+
+    /// A delegate name containing `"` and `\\` must be carried as typed token
+    /// data (`AttrInit::Literal`), never spliced into Rhai source. Before the
+    /// injection fix this produced invalid Rhai (`"Al"ice\\Bob"`) that failed
+    /// at fire time, so `rank_tasks` returned `Err`.
+    #[test]
+    fn rank_tasks_tolerates_quotes_and_backslashes_in_names() {
+        let self_task = EntityUri::block_random();
+        let delegated = EntityUri::block_random();
+        let blocks = vec![
+            task_block(&self_task, "Write the report", "TODO"),
+            task_block(&delegated, "@[[Al\"ice\\Bob]]: review doc", "TODO"),
+        ];
+        let result =
+            rank_tasks(&blocks).expect("names with quotes/backslashes must not break ranking");
+        assert!(!result.ranked.is_empty(), "active tasks must be ranked");
+    }
+
+    /// F3.1 regression: `duration: 200000000000000` used to reach
+    /// `chrono::Duration::minutes` in `Engine::fire` and PANIC past the
+    /// PetriError boundary, aborting the live `rank_tasks` MCP tool. It must
+    /// be rejected at the parse boundary with a `PetriError`, not a panic.
+    #[test]
+    fn rank_tasks_errors_on_overflowing_duration() {
+        let t = EntityUri::block_random();
+        let mut b = task_block(&t, "Huge task", "TODO");
+        b.set_property("duration", holon_api::Value::Integer(200_000_000_000_000));
+        let err = rank_tasks(&[b]).expect_err("overflowing duration must be an Err, not a panic");
+        assert!(
+            err.contains("out of range"),
+            "error must name the range violation, got: {err}"
+        );
+    }
+
+    /// F3.2 regression: a stored `task_weight: "= while true {}"` used to
+    /// hang `rank_tasks` forever (unbounded Rhai engine). The bounded engine
+    /// must abort the eval with an error naming the operations limit.
+    #[test]
+    fn rank_tasks_errors_on_infinite_loop_task_weight() {
+        let t = EntityUri::block_random();
+        let b = task_block(&t, "Normal task", "TODO");
+        let mut proto = Block::new_text(
+            EntityUri::block_random(),
+            EntityUri::block("p"),
+            "Prototype",
+        );
+        proto.set_property(
+            "prototype_for",
+            holon_api::Value::String("task".to_string()),
+        );
+        proto.set_property(
+            "task_weight",
+            holon_api::Value::String("= while true {}".to_string()),
+        );
+        let err =
+            rank_tasks(&[b, proto]).expect_err("unbounded Rhai loop must abort with Err, not hang");
+        assert!(
+            err.to_lowercase().contains("operations"),
+            "error must name the operations limit, got: {err}"
+        );
+    }
+
+    fn verb_dict_block(id: &EntityUri, verb_op: &str, verb_surface: &str) -> Block {
+        let mut b = Block::new_text(id.clone(), EntityUri::block("dict-parent"), "verb entry");
+        b.set_property("verb_op", holon_api::Value::String(verb_op.to_string()));
+        b.set_property(
+            "verb_surface",
+            holon_api::Value::String(verb_surface.to_string()),
+        );
+        b
+    }
+
+    #[test]
+    fn is_verb_dict_block_marker() {
+        let dict = verb_dict_block(&EntityUri::block_random(), "research", "recensire");
+        assert!(is_verb_dict_block(&dict));
+
+        let task = task_block(&EntityUri::block_random(), "a task", "TODO");
+        assert!(!is_verb_dict_block(&task));
+    }
+
+    #[test]
+    fn resolve_verb_dict_from_blocks() {
+        let blocks = vec![
+            verb_dict_block(&EntityUri::block_random(), "research", "recensire"),
+            // Re-point a built-in surface: "prüfen" is Check by default.
+            verb_dict_block(&EntityUri::block_random(), "research", "prüfen"),
+        ];
+        let dict = resolve_verb_dict(&blocks);
+
+        let novel = ParsedTask::parse_with_dict("recensire [[Report]]", &dict);
+        assert_eq!(novel.verb.map(|v| v.op), Some(VerbOp::Research));
+
+        let repointed = ParsedTask::parse_with_dict("prüfen [[Report]]", &dict);
+        assert_eq!(repointed.verb.map(|v| v.op), Some(VerbOp::Research));
+
+        // Built-ins that no block touched survive.
+        let builtin = ParsedTask::parse_with_dict("check [[Report]]", &dict);
+        assert_eq!(builtin.verb.map(|v| v.op), Some(VerbOp::Check));
+    }
+
+    #[test]
+    fn malformed_verb_block_is_skipped_disclosed() {
+        // Unknown verb_op keyword — skipped, so its unique surface never lands.
+        let bad_keyword = verb_dict_block(&EntityUri::block_random(), "frobnicate", "brokenverb");
+
+        // Missing verb_surface (marker present so it is still discovered) — skipped.
+        let mut missing_surface = Block::new_text(
+            EntityUri::block_random(),
+            EntityUri::block("dict-parent"),
+            "verb entry",
+        );
+        missing_surface.set_property("verb_op", holon_api::Value::String("order".to_string()));
+
+        let good = verb_dict_block(&EntityUri::block_random(), "research", "recensire");
+
+        let dict = resolve_verb_dict(&[bad_keyword, missing_surface, good]);
+
+        // The good sibling still lands.
+        assert_eq!(
+            ParsedTask::parse_with_dict("recensire [[X]]", &dict)
+                .verb
+                .map(|v| v.op),
+            Some(VerbOp::Research)
+        );
+        // Built-ins remain intact.
+        assert_eq!(
+            ParsedTask::parse_with_dict("check [[X]]", &dict)
+                .verb
+                .map(|v| v.op),
+            Some(VerbOp::Check)
+        );
+        // The bad-keyword block's unique surface was NOT added.
+        assert!(
+            ParsedTask::parse_with_dict("brokenverb [[X]]", &dict)
+                .verb
+                .is_none(),
+            "a block with an unknown verb_op keyword must not register its surface"
+        );
+    }
+
+    #[test]
+    fn user_surface_is_lowercased_at_insert() {
+        // A2: a mixed-case verb_surface must match lowercased task words.
+        let blocks = vec![verb_dict_block(
+            &EntityUri::block_random(),
+            "research",
+            "ReCeNsIrE",
+        )];
+        let dict = resolve_verb_dict(&blocks);
+        let parsed = ParsedTask::parse_with_dict("recensire [[Report]]", &dict);
+        assert_eq!(parsed.verb.map(|v| v.op), Some(VerbOp::Research));
+    }
+
+    #[test]
+    fn vault_verb_block_changes_parse_output() {
+        // End-to-end: a vault Vec<Block> resolves to a dict that recognizes a
+        // novel lemma the built-in dictionary does not.
+        let raw = "recensire [[Report]]";
+
+        let builtin = ParsedTask::parse(raw);
+        assert!(
+            builtin.verb.is_none(),
+            "built-in dict must not know the lemma"
+        );
+        assert!(builtin.objects.is_empty());
+
+        let blocks = vec![verb_dict_block(
+            &EntityUri::block_random(),
+            "research",
+            "recensire",
+        )];
+        let dict = resolve_verb_dict(&blocks);
+        let parsed = ParsedTask::parse_with_dict(raw, &dict);
+        assert_eq!(parsed.verb.map(|v| v.op), Some(VerbOp::Research));
+        assert_eq!(parsed.objects, vec!["Report".to_string()]);
+    }
+
+    /// A1: verb-dictionary blocks arrive in the `rank_tasks` slice (the SQL now
+    /// selects them) but must NOT be ranked/materialized as tasks. Exclusion is
+    /// implicit — `TaskInfo::from_block` returns `Ok(None)` for any block
+    /// without a `task_state`, exactly as it does for prototype blocks.
+    /// This pins it.
+    #[test]
+    fn verb_dict_block_is_not_ranked_as_task() {
+        let task_id = EntityUri::block_random();
+        let task = task_block(&task_id, "a real task", "TODO");
+        let dict = verb_dict_block(&EntityUri::block_random(), "research", "recensire");
+
+        let result = rank_tasks(&[task, dict]).expect("rank_tasks must succeed");
+
+        assert_eq!(
+            result.ranked.len(),
+            1,
+            "only the task_state block is ranked; the verb-dict block is excluded"
+        );
+        assert_eq!(result.ranked[0].block_id, task_id.to_string());
     }
 }

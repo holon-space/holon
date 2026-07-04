@@ -75,7 +75,7 @@ impl ReactiveRowProvider for LaneFilteredProvider {
 
     fn keyed_rows_signal_vec(
         &self,
-    ) -> Pin<Box<dyn SignalVec<Item = (holon_api::EntityUri, Arc<DataRow>)> + Send>> {
+    ) -> Pin<Box<dyn SignalVec<Item = (holon_api::RowKey, Arc<DataRow>)> + Send>> {
         let lane_field = self.lane_field.clone();
         let lane_value = self.lane_value.clone();
         Box::pin(self.upstream.keyed_rows_signal_vec().filter(move |entry| {
@@ -116,6 +116,12 @@ impl ReactiveRowProvider for LaneFilteredProvider {
         // Pass through — the row's mutable cell is owned by the upstream
         // provider regardless of which lane it currently sits in.
         self.upstream.row_mutable(id)
+    }
+
+    fn ordering_spec(&self) -> Option<String> {
+        // Filtering a relation preserves its order, so the lane inherits the
+        // upstream query's declared order.
+        self.upstream.ordering_spec()
     }
 }
 

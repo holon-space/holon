@@ -4,6 +4,11 @@
 //! reactive engine, frontend, navigation, or CDC-mirror machinery that the
 //! monolithic `E2ESut` carries.
 //!
+//! @pbt kind sut-arm
+//! @pbt covers sql-slice — real Turso `BackendEngine` over `block_raw`, driven
+//!   through production block ops; no reactive engine / frontend / CDC mirror.
+//!   Storage-layer arm of the future `E2ESut` replacement (§F2 convergence).
+//!
 //! This is deliberately the storage-layer slice of the *future `E2ESut`
 //! replacement*: it reuses `E2ESut`'s own SQL realization (the same `block_raw`
 //! queries, the shared [`parse_block_row`](crate::pbt::sut_row_parsing)) so
@@ -127,6 +132,17 @@ impl SqlProjectionComponent {
         self.execute_op("set_field", params).await;
     }
 
+    /// Append one tag to a block's `tags` set via the production element-wise
+    /// `add_tag` operation — the same op prod uses to mark a block a `Page`
+    /// (`tag="Page"`). Used to seed a page-root so its `is_page()` matches the
+    /// oracle, closing the structural-slice oracle/seed asymmetry.
+    pub async fn add_tag(&self, id: &EntityUri, tag: &str) {
+        let mut params: StorageEntity = HashMap::new();
+        params.insert("id".into(), Value::String(id.to_string()));
+        params.insert("tag".into(), Value::String(tag.to_string()));
+        self.execute_op("add_tag", params).await;
+    }
+
     /// Delete a block via the production `delete` operation.
     pub async fn delete_block(&self, id: &EntityUri) {
         let mut params: StorageEntity = HashMap::new();
@@ -137,7 +153,7 @@ impl SqlProjectionComponent {
     async fn execute_op(&self, op: &str, params: StorageEntity) {
         let entity = "block".to_string().into();
         self.engine
-            .execute_operation(&entity, op, params)
+            .execute_operation(&entity, op, params, holon_api::OpOrigin::User)
             .await
             .unwrap_or_else(|e| panic!("block/{op} operation failed: {e}"));
     }

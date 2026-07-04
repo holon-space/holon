@@ -1,5 +1,10 @@
 //! Per-tick memoisation wrapper for SUT capability reads.
 //!
+//! @pbt kind cap-plumbing
+//! @pbt covers all-slices — memoises ONE SUT's own reads within a single tick
+//! so   co-scheduled invariants see a consistent snapshot; not a cross-SUT
+//! source.
+//!
 //! Multiple invariants evaluated in the same tick often need the same
 //! SUT snapshot. `drain_vm_emissions` is particularly tricky: it has
 //! drain-once semantics — calling it twice returns an empty Vec the
@@ -415,6 +420,18 @@ impl<'a, S: SutRenderer> SutRenderer for CachingProxy<'a, S> {
             }
         }
         let snap = self.inner.widget_tree_snapshot().await;
+        *self.widget_tree_snapshot_cache.borrow_mut() = Some(snap.clone());
+        snap
+    }
+
+    /// Deliberately uncached — bounded-wait invariants re-read per retry to
+    /// observe a self-healing transient. Forwards to the inner SUT's own
+    /// fresh path (which likewise bypasses its internal memo) and refreshes
+    /// the memoised slot, so a same-tick invariant that runs later sees the
+    /// newest frame instead of one frozen mid-poll. Mirrors
+    /// `rendered_elements_fresh`.
+    async fn widget_tree_snapshot_fresh(&self) -> WidgetSnapshot {
+        let snap = self.inner.widget_tree_snapshot_fresh().await;
         *self.widget_tree_snapshot_cache.borrow_mut() = Some(snap.clone());
         snap
     }

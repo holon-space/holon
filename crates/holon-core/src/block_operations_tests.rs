@@ -33,6 +33,7 @@ mod tests {
         sort_key: String,
         depth: i64,
         content: String,
+        tags: holon_api::Tags,
     }
 
     impl BlockEntity for TestBlock {
@@ -49,7 +50,7 @@ mod tests {
             &self.content
         }
         fn tags(&self) -> holon_api::Tags {
-            holon_api::Tags::default()
+            self.tags.clone()
         }
     }
 
@@ -170,6 +171,7 @@ mod tests {
                     .and_then(|v| v.as_string())
                     .unwrap_or("")
                     .to_string(),
+                tags: holon_api::Tags::default(),
             };
             self.blocks.lock().unwrap().push(block);
             Ok((id, OperationResult::irreversible(vec![])))
@@ -368,6 +370,7 @@ mod tests {
                             .and_then(|v| v.as_string())
                             .unwrap_or_default()
                             .to_string(),
+                        tags: holon_api::Tags::default(),
                     });
                     return Ok(());
                 }
@@ -403,6 +406,23 @@ mod tests {
             sort_key,
             depth,
             content: format!("Content {}", id),
+            tags: holon_api::Tags::default(),
+        });
+    }
+
+    /// Insert a `Page`-tagged block (an org-file root) at `parent_id`.
+    fn insert_page(store: &MemStore, id: &str, parent_id: Option<&str>) {
+        let sort_key = gen_key_between(None, None).unwrap();
+        let depth: i64 = if parent_id.is_some() { 1 } else { 0 };
+        let mut tags = holon_api::Tags::default();
+        tags.insert(holon_api::PAGE_TAG);
+        store.insert(TestBlock {
+            id: EntityUri::block(id),
+            parent_id: parent_id.map(EntityUri::block),
+            sort_key,
+            depth,
+            content: format!("Page {}", id),
+            tags,
         });
     }
 
@@ -492,6 +512,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 2,
             content: "Content B".to_string(),
+            tags: holon_api::Tags::default(),
         };
         store.insert(b);
 
@@ -510,6 +531,105 @@ mod tests {
 
         let result = store.outdent(&EntityUri::block("R")).await;
         assert!(result.is_err());
+    }
+
+    /// Destructive-delete ruling 2026-07-21: `delete_keep_children` reparents
+    /// the deleted block's children into ITS OWN sibling slot, preserving their
+    /// relative order. P has [A, B, C]; B has [B1, B2]. Deleting B keeping
+    /// children yields [A, B1, B2, C] — the children take B's position IN
+    /// ORDER, not appended at the end (a naive append would give [A, C, B1,
+    /// B2]).
+    #[tokio::test]
+    async fn delete_keep_children_reparents_into_slot_preserving_order() {
+        let store = MemStore::new();
+        insert_block(&store, "P", None, None);
+        insert_block(&store, "A", Some("P"), None);
+        let key_a = store.sorted_children("P").last().unwrap().sort_key.clone();
+        insert_block(&store, "B", Some("P"), Some(&key_a));
+        let key_b = store.sorted_children("P").last().unwrap().sort_key.clone();
+        insert_block(&store, "C", Some("P"), Some(&key_b));
+        insert_block(&store, "B1", Some("B"), None);
+        let key_b1 = store.sorted_children("B").last().unwrap().sort_key.clone();
+        insert_block(&store, "B2", Some("B"), Some(&key_b1));
+
+        store
+            .delete_keep_children(&EntityUri::block("B"))
+            .await
+            .unwrap();
+
+        assert!(store.get("B").is_none(), "B itself must be deleted");
+        let ids: Vec<EntityUri> = store
+            .sorted_children("P")
+            .iter()
+            .map(|c| c.id.clone())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                EntityUri::block("A"),
+                EntityUri::block("B1"),
+                EntityUri::block("B2"),
+                EntityUri::block("C"),
+            ]
+        );
+    }
+
+    /// `delete_subtree` removes the target AND every descendant, leaving
+    /// siblings untouched. P has [A, B]; B has [B1, B2]. Deleting B's subtree
+    /// leaves P with just [A].
+    #[tokio::test]
+    async fn delete_subtree_removes_target_and_all_descendants() {
+        let store = MemStore::new();
+        insert_block(&store, "P", None, None);
+        insert_block(&store, "A", Some("P"), None);
+        let key_a = store.sorted_children("P").last().unwrap().sort_key.clone();
+        insert_block(&store, "B", Some("P"), Some(&key_a));
+        insert_block(&store, "B1", Some("B"), None);
+        let key_b1 = store.sorted_children("B").last().unwrap().sort_key.clone();
+        insert_block(&store, "B2", Some("B"), Some(&key_b1));
+
+        store.delete_subtree(&EntityUri::block("B")).await.unwrap();
+
+        assert!(store.get("B").is_none());
+        assert!(store.get("B1").is_none());
+        assert!(store.get("B2").is_none());
+        let remaining = store.sorted_children("P");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, EntityUri::block("A"));
+    }
+
+    /// ADR 0028 D1: outdenting a DIRECT PAGE CHILD is rejected — it would move
+    /// the block out of its page container, escaping the page. Structurally a
+    /// grandparent exists (GP), so the ONLY reason this must fail is the
+    /// page-parent rule; before that rule this outdent succeeded (moved B to
+    /// GP).
+    #[tokio::test]
+    async fn outdent_direct_page_child_is_rejected() {
+        let store = MemStore::new();
+        insert_block(&store, "GP", None, None);
+        // P is a Page nested under GP, so B (child of P) HAS a grandparent —
+        // the generic "no grandparent" guard does not apply here.
+        insert_page(&store, "P", Some("GP"));
+
+        let b = TestBlock {
+            id: EntityUri::block("B"),
+            parent_id: Some(EntityUri::block("P")),
+            sort_key: gen_key_between(None, None).unwrap(),
+            depth: 2,
+            content: "Content B".to_string(),
+            tags: holon_api::Tags::default(),
+        };
+        store.insert(b);
+
+        let result = store.outdent(&EntityUri::block("B")).await;
+        assert!(
+            result.is_err(),
+            "outdent of a direct page child must be rejected (ADR 0028 D1)"
+        );
+
+        // Rejection is inert: B stays under the page, unchanged.
+        let b = store.get("B").unwrap();
+        assert_eq!(b.parent_id, Some(EntityUri::block("P")));
     }
 
     #[tokio::test]
@@ -574,6 +694,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 1,
             content: "Hello World".to_string(),
+            tags: holon_api::Tags::default(),
         });
 
         store.split_block(&EntityUri::block("A"), 5).await.unwrap();
@@ -601,6 +722,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 1,
             content: "Hello".to_string(),
+            tags: holon_api::Tags::default(),
         });
 
         store.split_block(&EntityUri::block("A"), 0).await.unwrap();
@@ -628,6 +750,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 1,
             content: "Hello".to_string(),
+            tags: holon_api::Tags::default(),
         });
 
         store.split_block(&EntityUri::block("A"), 5).await.unwrap();
@@ -653,6 +776,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 1,
             content: "Hi".to_string(),
+            tags: holon_api::Tags::default(),
         });
 
         let result = store.split_block(&EntityUri::block("A"), 10).await;
@@ -672,6 +796,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 1,
             content: "foo".to_string(),
+            tags: holon_api::Tags::default(),
         });
         let key_a = store.sorted_children("P").last().unwrap().sort_key.clone();
         store.insert(TestBlock {
@@ -680,6 +805,7 @@ mod tests {
             sort_key: gen_key_between(Some(&key_a), None).unwrap(),
             depth: 1,
             content: "bar".to_string(),
+            tags: holon_api::Tags::default(),
         });
 
         store.join_block(&EntityUri::block("B"), 0).await.unwrap();
@@ -710,6 +836,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 0,
             content: "parent ".to_string(),
+            tags: holon_api::Tags::default(),
         });
         store.insert(TestBlock {
             id: EntityUri::block("A"),
@@ -717,6 +844,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 1,
             content: "child".to_string(),
+            tags: holon_api::Tags::default(),
         });
         let key_a = store.sorted_children("P").last().unwrap().sort_key.clone();
         store.insert(TestBlock {
@@ -725,6 +853,7 @@ mod tests {
             sort_key: gen_key_between(Some(&key_a), None).unwrap(),
             depth: 1,
             content: "sib1".to_string(),
+            tags: holon_api::Tags::default(),
         });
         let key_b = store.sorted_children("P").last().unwrap().sort_key.clone();
         store.insert(TestBlock {
@@ -733,6 +862,7 @@ mod tests {
             sort_key: gen_key_between(Some(&key_b), None).unwrap(),
             depth: 1,
             content: "sib2".to_string(),
+            tags: holon_api::Tags::default(),
         });
 
         store.join_block(&EntityUri::block("A"), 0).await.unwrap();
@@ -767,6 +897,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 0,
             content: "parent ".to_string(),
+            tags: holon_api::Tags::default(),
         });
         store.insert(TestBlock {
             id: EntityUri::block("A"),
@@ -774,6 +905,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 1,
             content: "child".to_string(),
+            tags: holon_api::Tags::default(),
         });
         let key_a = store.sorted_children("P").last().unwrap().sort_key.clone();
         store.insert(TestBlock {
@@ -782,6 +914,7 @@ mod tests {
             sort_key: gen_key_between(Some(&key_a), None).unwrap(),
             depth: 1,
             content: "sib".to_string(),
+            tags: holon_api::Tags::default(),
         });
         store.insert(TestBlock {
             id: EntityUri::block("X"),
@@ -789,6 +922,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 2,
             content: "x".to_string(),
+            tags: holon_api::Tags::default(),
         });
         let key_x = store.sorted_children("A").last().unwrap().sort_key.clone();
         store.insert(TestBlock {
@@ -797,6 +931,7 @@ mod tests {
             sort_key: gen_key_between(Some(&key_x), None).unwrap(),
             depth: 2,
             content: "y".to_string(),
+            tags: holon_api::Tags::default(),
         });
 
         store.join_block(&EntityUri::block("A"), 0).await.unwrap();
@@ -830,6 +965,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 0,
             content: "alone".to_string(),
+            tags: holon_api::Tags::default(),
         });
 
         let result = store.join_block(&EntityUri::block("Root"), 0).await;
@@ -878,6 +1014,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 1,
             content: "A".to_string(),
+            tags: holon_api::Tags::default(),
         });
         // B is child of A, depth 2
         store.insert(TestBlock {
@@ -886,6 +1023,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 2,
             content: "B".to_string(),
+            tags: holon_api::Tags::default(),
         });
 
         // Move A under P2 (depth doesn't change since both parents are depth 0)
@@ -921,6 +1059,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 1,
             content: "foo".to_string(),
+            tags: holon_api::Tags::default(),
         });
         let key_a = store.sorted_children("P").last().unwrap().sort_key.clone();
         store.insert(TestBlock {
@@ -929,6 +1068,7 @@ mod tests {
             sort_key: gen_key_between(Some(&key_a), None).unwrap(),
             depth: 1,
             content: "bar".to_string(),
+            tags: holon_api::Tags::default(),
         });
         store.insert(TestBlock {
             id: EntityUri::block("W"),
@@ -936,6 +1076,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 2,
             content: "w".to_string(),
+            tags: holon_api::Tags::default(),
         });
         store.insert(TestBlock {
             id: EntityUri::block("X"),
@@ -943,6 +1084,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 2,
             content: "x".to_string(),
+            tags: holon_api::Tags::default(),
         });
         let key_x = store.sorted_children("B").last().unwrap().sort_key.clone();
         store.insert(TestBlock {
@@ -951,6 +1093,7 @@ mod tests {
             sort_key: gen_key_between(Some(&key_x), None).unwrap(),
             depth: 2,
             content: "y".to_string(),
+            tags: holon_api::Tags::default(),
         });
 
         store.join_block(&EntityUri::block("B"), 0).await.unwrap();
@@ -980,6 +1123,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 1,
             content: "A".to_string(),
+            tags: holon_api::Tags::default(),
         });
         store.insert(TestBlock {
             id: EntityUri::block("B"),
@@ -987,6 +1131,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 2,
             content: "B".to_string(),
+            tags: holon_api::Tags::default(),
         });
         store.insert(TestBlock {
             id: EntityUri::block("C"),
@@ -994,6 +1139,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 3,
             content: "C".to_string(),
+            tags: holon_api::Tags::default(),
         });
         store.insert(TestBlock {
             id: EntityUri::block("D"),
@@ -1001,6 +1147,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 1,
             content: "D".to_string(),
+            tags: holon_api::Tags::default(),
         });
         store.insert(TestBlock {
             id: EntityUri::block("E"),
@@ -1008,6 +1155,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             depth: 2,
             content: "E".to_string(),
+            tags: holon_api::Tags::default(),
         });
 
         store
@@ -1021,6 +1169,347 @@ mod tests {
         // Blocks outside the moved subtree are untouched.
         assert_eq!(store.get("D").unwrap().depth, 1);
         assert_eq!(store.get("E").unwrap().depth, 2);
+    }
+
+    // ---- No-pages-under-non-pages op guard (interim ruling 2026-07-13) -------
+
+    /// Red-first proof of the write-side guard in `move_block`: a `Page`-tagged
+    /// block may NOT be reparented under a non-page block. Both the SQL and
+    /// Loro providers use this default `BlockOperations::move_block`, so
+    /// the single guard covers both. Without the guard the move lands (the
+    /// prohibited topology surfaces only deep in writeback via
+    /// `name_chain`); with it the op fails loud and the tree is untouched.
+    #[tokio::test]
+    async fn move_block_rejects_page_under_non_page() {
+        let store = MemStore::new();
+        // `folder` is a page (org-file root); `date` is a page nested under it —
+        // the valid page-under-page topology the journal rule produces.
+        insert_page(&store, "folder", None);
+        insert_page(&store, "date", Some("folder"));
+        // `text` is an ordinary non-page block, also under `folder`.
+        insert_block(&store, "text", Some("folder"), None);
+
+        let err = store
+            .move_block(&EntityUri::block("date"), &EntityUri::block("text"), None)
+            .await
+            .expect_err("reparenting a page under a non-page block must fail loud");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("pages under non-pages are prohibited"),
+            "error must name the ruling; got: {msg}"
+        );
+
+        // The rejected move left the tree untouched: `date` still parents `folder`.
+        assert_eq!(
+            store.get("date").unwrap().parent_id,
+            Some(EntityUri::block("folder")),
+        );
+    }
+
+    /// The guard is scoped to PAGES: a non-page block may still be reparented
+    /// under a non-page block (the common outline-indent case), and a page may
+    /// be reparented under another page.
+    #[tokio::test]
+    async fn move_block_allows_page_under_page_and_non_page_anywhere() {
+        let store = MemStore::new();
+        insert_page(&store, "folderA", None);
+        insert_page(&store, "folderB", None);
+        insert_page(&store, "date", Some("folderA"));
+        insert_block(&store, "text1", Some("folderA"), None);
+        insert_block(&store, "text2", Some("folderA"), None);
+
+        // page under a different page: allowed.
+        store
+            .move_block(
+                &EntityUri::block("date"),
+                &EntityUri::block("folderB"),
+                None,
+            )
+            .await
+            .expect("a page may nest under another page");
+        assert_eq!(
+            store.get("date").unwrap().parent_id,
+            Some(EntityUri::block("folderB")),
+        );
+
+        // non-page under a non-page: allowed.
+        store
+            .move_block(&EntityUri::block("text1"), &EntityUri::block("text2"), None)
+            .await
+            .expect("a non-page may nest under a non-page");
+        assert_eq!(
+            store.get("text1").unwrap().parent_id,
+            Some(EntityUri::block("text2")),
+        );
+    }
+
+    // ---- U4: split_block / join_block compound inverses ---------------------
+
+    /// A byte-comparable snapshot of the whole block table: every block's
+    /// (id, parent_id, sort_key, depth, content), sorted by id. Undo must
+    /// restore this EXACTLY (the U4 contract).
+    fn snapshot(store: &MemStore) -> Vec<(String, Option<String>, String, i64, String)> {
+        let mut rows: Vec<_> = store
+            .blocks
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|b| {
+                (
+                    b.id.as_str().to_string(),
+                    b.parent_id.as_ref().map(|p| p.as_str().to_string()),
+                    b.sort_key.clone(),
+                    b.depth,
+                    b.content.clone(),
+                )
+            })
+            .collect();
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        rows
+    }
+
+    /// Dispatch an inverse `Operation` (from `OperationResult::undo`) back
+    /// through the generated block-operations dispatcher — the same path the
+    /// production undo engine (`OperationEngine::undo`) uses to re-execute an
+    /// inverse. Returns the executed inverse's OWN result (whose `.undo` is the
+    /// redo operation).
+    async fn apply_inverse(store: &MemStore, undo: &UndoAction) -> OperationResult {
+        let op = match undo {
+            UndoAction::Undo(op) => op,
+            other => panic!("expected reversible op, got {other:?}"),
+        };
+        let params: crate::storage::types::StorageEntity = op
+            .params
+            .iter()
+            .map(|(k, v)| (std::sync::Arc::from(k.as_str()), v.clone()))
+            .collect();
+        crate::__operations_block_operations::dispatch_operation::<MemStore, TestBlock>(
+            store,
+            &op.op_name,
+            &params,
+        )
+        .await
+        .expect("inverse dispatch failed")
+    }
+
+    #[tokio::test]
+    async fn split_block_undo_restores_exact_pre_op_state_and_redo_reapplies() {
+        let store = MemStore::new();
+        insert_block(&store, "P", None, None);
+        store.insert(TestBlock {
+            id: EntityUri::block("A"),
+            parent_id: Some(EntityUri::block("P")),
+            sort_key: gen_key_between(None, None).unwrap(),
+            depth: 1,
+            // Whitespace at the split point that the trim discards — the undo
+            // must still restore the UNtrimmed original, proving the inverse
+            // uses the recorded pre-split content, not `content_before`.
+            content: "Hello World".to_string(),
+            tags: holon_api::Tags::default(),
+        });
+
+        let before = snapshot(&store);
+
+        // Split "Hello World" at position 5 ("Hello| World"): A -> "Hello",
+        // new block -> "World" (leading space trimmed).
+        let split = store.split_block(&EntityUri::block("A"), 5).await.unwrap();
+        assert_eq!(store.get("A").unwrap().content, "Hello");
+        let after_split = snapshot(&store);
+        assert_ne!(before, after_split, "split must change state");
+
+        // Undo: delete the new block, restore A's exact original content.
+        let undo_result = apply_inverse(&store, &split.undo).await;
+        assert_eq!(
+            snapshot(&store),
+            before,
+            "undo of split_block must restore byte-identical pre-op state"
+        );
+
+        // Redo: re-split deterministically (same new-block id, same content).
+        apply_inverse(&store, &undo_result.undo).await;
+        assert_eq!(
+            snapshot(&store),
+            after_split,
+            "redo must re-apply the split byte-identically"
+        );
+    }
+
+    #[tokio::test]
+    async fn split_block_at_start_undo_restores_exact_pre_op_state() {
+        // Boundary: split at 0 truncates A to "" and puts all content in the new
+        // block. Undo must delete the new block and restore A's content.
+        let store = MemStore::new();
+        insert_block(&store, "P", None, None);
+        store.insert(TestBlock {
+            id: EntityUri::block("A"),
+            parent_id: Some(EntityUri::block("P")),
+            sort_key: gen_key_between(None, None).unwrap(),
+            depth: 1,
+            content: "Hello".to_string(),
+            tags: holon_api::Tags::default(),
+        });
+        let before = snapshot(&store);
+
+        let split = store.split_block(&EntityUri::block("A"), 0).await.unwrap();
+        assert_eq!(store.get("A").unwrap().content, "");
+
+        apply_inverse(&store, &split.undo).await;
+        assert_eq!(snapshot(&store), before);
+    }
+
+    #[tokio::test]
+    async fn join_block_into_prev_sibling_undo_restores_exact_pre_op_state_and_redo_reapplies() {
+        let store = MemStore::new();
+        insert_block(&store, "P", None, None);
+        store.insert(TestBlock {
+            id: EntityUri::block("A"),
+            parent_id: Some(EntityUri::block("P")),
+            sort_key: gen_key_between(None, None).unwrap(),
+            depth: 1,
+            content: "foo".to_string(),
+            tags: holon_api::Tags::default(),
+        });
+        let key_a = store.sorted_children("P").last().unwrap().sort_key.clone();
+        store.insert(TestBlock {
+            id: EntityUri::block("B"),
+            // B minted directly after A between (key_a, None) — the same slot
+            // `restore_split` re-mints on undo, so B's sort_key comes back
+            // byte-identical (deterministic fractional index).
+            parent_id: Some(EntityUri::block("P")),
+            sort_key: gen_key_between(Some(&key_a), None).unwrap(),
+            depth: 1,
+            content: "bar".to_string(),
+            tags: holon_api::Tags::default(),
+        });
+        let before = snapshot(&store);
+
+        // Join B into A: A -> "foobar", B deleted.
+        let join = store.join_block(&EntityUri::block("B"), 0).await.unwrap();
+        assert_eq!(store.get("A").unwrap().content, "foobar");
+        assert!(store.get("B").is_none());
+        let after_join = snapshot(&store);
+
+        // Undo: recreate B at its slot with its exact fields, restore A.
+        let undo_result = apply_inverse(&store, &join.undo).await;
+        assert_eq!(
+            snapshot(&store),
+            before,
+            "undo of join_block must restore byte-identical pre-op state (incl. B's sort_key)"
+        );
+
+        // Redo: re-join deterministically.
+        apply_inverse(&store, &undo_result.undo).await;
+        assert_eq!(
+            snapshot(&store),
+            after_join,
+            "redo must re-apply the join byte-identically"
+        );
+    }
+
+    #[tokio::test]
+    async fn join_block_into_parent_first_child_undo_restores_order_and_content() {
+        // Child->parent join (B has no prev sibling): B merges into parent P,
+        // B deleted. Undo recreates B as P's first child. In this case B's
+        // sort_key is re-minted against different neighbours, so we assert the
+        // observable contract the projection oracle enforces: sibling ORDER +
+        // content + ids + parent, rather than the raw key bytes.
+        let store = MemStore::new();
+        insert_block(&store, "P", None, None);
+        store.insert(TestBlock {
+            id: EntityUri::block("B"),
+            parent_id: Some(EntityUri::block("P")),
+            sort_key: gen_key_between(None, None).unwrap(),
+            depth: 1,
+            content: "child".to_string(),
+            tags: holon_api::Tags::default(),
+        });
+        let key_b = store.sorted_children("P").last().unwrap().sort_key.clone();
+        store.insert(TestBlock {
+            id: EntityUri::block("C"),
+            parent_id: Some(EntityUri::block("P")),
+            sort_key: gen_key_between(Some(&key_b), None).unwrap(),
+            depth: 1,
+            content: "sib".to_string(),
+            tags: holon_api::Tags::default(),
+        });
+        // Give the parent content so the join boundary is observable.
+        store
+            .set_field("block:P", "content", Value::String("parent".to_string()))
+            .await
+            .unwrap();
+
+        let order_before: Vec<String> = store
+            .sorted_children("P")
+            .iter()
+            .map(|b| b.content.clone())
+            .collect();
+        assert_eq!(order_before, vec!["child", "sib"]);
+
+        let join = store.join_block(&EntityUri::block("B"), 0).await.unwrap();
+        assert_eq!(store.get("P").unwrap().content, "parentchild");
+        assert!(store.get("B").is_none());
+
+        apply_inverse(&store, &join.undo).await;
+        // P content restored, B back as first child, order preserved.
+        assert_eq!(store.get("P").unwrap().content, "parent");
+        let order_after: Vec<(String, String)> = store
+            .sorted_children("P")
+            .iter()
+            .map(|b| (b.id.as_str().to_string(), b.content.clone()))
+            .collect();
+        assert_eq!(
+            order_after,
+            vec![
+                ("block:B".to_string(), "child".to_string()),
+                ("block:C".to_string(), "sib".to_string()),
+            ]
+        );
+        assert_eq!(store.get("B").unwrap().depth, 1);
+        assert_eq!(
+            store.get("B").unwrap().parent_id,
+            Some(EntityUri::block("P"))
+        );
+    }
+
+    #[tokio::test]
+    async fn join_block_with_children_stays_irreversible() {
+        // A subtree join (B has its own child) re-parents the child under A;
+        // one flat inverse cannot restore that placement, so the op must fail
+        // loud as Irreversible rather than ship a lossy inverse.
+        let store = MemStore::new();
+        insert_block(&store, "P", None, None);
+        store.insert(TestBlock {
+            id: EntityUri::block("A"),
+            parent_id: Some(EntityUri::block("P")),
+            sort_key: gen_key_between(None, None).unwrap(),
+            depth: 1,
+            content: "foo".to_string(),
+            tags: holon_api::Tags::default(),
+        });
+        let key_a = store.sorted_children("P").last().unwrap().sort_key.clone();
+        store.insert(TestBlock {
+            id: EntityUri::block("B"),
+            parent_id: Some(EntityUri::block("P")),
+            sort_key: gen_key_between(Some(&key_a), None).unwrap(),
+            depth: 1,
+            content: "bar".to_string(),
+            tags: holon_api::Tags::default(),
+        });
+        store.insert(TestBlock {
+            id: EntityUri::block("B1"),
+            parent_id: Some(EntityUri::block("B")),
+            sort_key: gen_key_between(None, None).unwrap(),
+            depth: 2,
+            content: "grandchild".to_string(),
+            tags: holon_api::Tags::default(),
+        });
+
+        let join = store.join_block(&EntityUri::block("B"), 0).await.unwrap();
+        assert!(
+            matches!(join.undo, UndoAction::DeclaredIrreversible(_)),
+            "join with re-parented children must stay DeclaredIrreversible, got {:?}",
+            join.undo
+        );
     }
 
     /// Store that relies on the DEFAULT `DataSource`/`BlockQueryHelpers`
@@ -1066,6 +1555,7 @@ mod tests {
             sort_key: key.to_string(),
             depth,
             content: format!("Content {id}"),
+            tags: holon_api::Tags::default(),
         };
         DefaultHelpersStore {
             blocks: vec![

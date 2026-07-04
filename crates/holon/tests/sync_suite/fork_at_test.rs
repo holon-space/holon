@@ -29,6 +29,8 @@ mod tests {
     }
 
     #[test]
+    // legacy-convert migration pending — task #12
+    #[allow(deprecated)]
     fn fork_at_rewinds_lorotext_after_local_update() {
         let doc = LoroDoc::new();
         doc.set_peer_id(1).unwrap();
@@ -36,9 +38,7 @@ mod tests {
         tree.enable_fractional_index(0);
         let node = tree.create(None).unwrap();
         let meta = tree.get_meta(node).unwrap();
-        let text: LoroText = meta
-            .insert_container("content_raw", LoroText::new())
-            .unwrap();
+        let text: LoroText = meta.ensure_mergeable_text("content_raw").unwrap();
         text.insert(0, "original").unwrap();
         doc.commit();
 
@@ -46,9 +46,7 @@ mod tests {
         assert_eq!(read_content(&doc), "original");
 
         // Local update
-        let text: LoroText = meta
-            .get_or_create_container("content_raw", LoroText::new())
-            .unwrap();
+        let text: LoroText = meta.ensure_mergeable_text("content_raw").unwrap();
         text.delete(0, text.len_unicode()).unwrap();
         text.insert(0, "updated").unwrap();
         doc.commit();
@@ -67,6 +65,8 @@ mod tests {
     }
 
     #[test]
+    // legacy-convert migration pending — task #12
+    #[allow(deprecated)]
     fn fork_at_rewinds_lorotext_after_peer_import() {
         // Primary: create a block with content "original"
         let primary = LoroDoc::new();
@@ -75,9 +75,7 @@ mod tests {
         tree.enable_fractional_index(0);
         let node = tree.create(None).unwrap();
         let meta = tree.get_meta(node).unwrap();
-        let text: LoroText = meta
-            .insert_container("content_raw", LoroText::new())
-            .unwrap();
+        let text: LoroText = meta.ensure_mergeable_text("content_raw").unwrap();
         text.insert(0, "original").unwrap();
         primary.commit();
 
@@ -102,9 +100,7 @@ mod tests {
                 continue;
             }
             let peer_meta = peer_tree.get_meta(peer_node.id).unwrap();
-            let t: LoroText = peer_meta
-                .get_or_create_container("content_raw", LoroText::new())
-                .unwrap();
+            let t: LoroText = peer_meta.ensure_mergeable_text("content_raw").unwrap();
             let old_len = t.len_unicode();
             if old_len > 0 {
                 t.delete(0, old_len).unwrap();

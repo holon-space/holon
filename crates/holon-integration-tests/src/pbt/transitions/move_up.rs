@@ -1,5 +1,10 @@
 //! Transition: move the focused block up (swap with its previous sibling).
 //!
+//! @pbt rung input-pipeline
+//!   KEYSTONE: send_block_chord resolves the bound Alt+Up chord; fixed-id
+//!   slices fall back to OpDispatchWriter (dispatch floor).
+//! @pbt covers reorder-chord-up — Alt+Up chord -> move_up reducer
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:1138-1153`
 //! (generator), `state_machine.rs:3344-3358` (precondition),
 //! `state_machine.rs:2667-2671` (ref-state apply),
@@ -8,7 +13,6 @@
 
 use holon_api::EntityUri;
 use holon_pbt_core::TransitionFactory;
-use holon_pbt_core::TransitionImpl;
 use holon_pbt_core::TransitionRef;
 use holon_pbt_core::capabilities::CapRegion;
 use holon_pbt_core::capabilities::RefBlockTree;
@@ -18,19 +22,16 @@ use holon_pbt_core::capabilities::RefFocus;
 use holon_pbt_core::capabilities::RefFocusMut;
 use holon_pbt_core::capabilities::RefLifecycle;
 use holon_pbt_core::capabilities::SutBlockTreeWrite;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::check;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::reference_state::ReferenceState;
-#[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::ExpectedSql;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::MutationKind;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::expected_sql_for_kind;
-use crate::pbt::validation::Reason;
-use crate::pbt::validation::check;
 
 /// Move the focused block up: swap its sort_key with its previous sibling's.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -100,7 +101,11 @@ pub fn move_up_weighted_generator<R: RefBlockTree + RefFocus + RefLifecycle>(
         let instance = MoveUp {
             block_id: focus_str,
         };
-        (1, Just(instance).boxed())
+        // F16 (chord-sampling starvation): structural chords were weight 1 vs
+        // split_block's 100 (~1/180 of the mass). Raise to 20 so the
+        // highest-value input-pipeline path is actually sampled; guarded above,
+        // so an invalid draw is filtered rather than flooding.
+        (20, Just(instance).boxed())
     })
 }
 
@@ -123,9 +128,7 @@ pub fn move_up_apply_to_ref<
 
 impl<R: RefBlockTree + RefFocus + RefLifecycle> TransitionFactory<R> for MoveUp {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        vec![::holon_pbt_core::composition::CapId::of::<
-            dyn ::holon_pbt_core::capabilities::SutBlockTreeWrite,
-        >()]
+        Self::declared_caps()
     }
 
     type Reason = Reason;
@@ -148,21 +151,18 @@ impl<R: RefBlockTree + RefBlockTreeMut + RefFocus + RefFocusMut + RefEditorMirro
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutBlockTreeWrite> TransitionImpl<ReferenceState, S> for MoveUp {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.apply_move_up(&self.block_id).await;
+crate::cap_transition! {
+    MoveUp: SutBlockTreeWrite,
+    where R: [ RefBlockTree + RefFocus + RefLifecycle ],
+    |me, _state, sut| {
+        sut.apply_move_up(&me.block_id).await;
     }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for MoveUp {
-    fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
+    sql_budget: |_me, state| {
         let mut sql = expected_sql_for_kind(
             MutationKind::Update,
-            state.mcp.active_watches.len(),
-            state.domain.block_state.blocks.len(),
-            state.files.documents.len(),
+            state.active_watch_count(),
+            state.block_count(),
+            state.document_count(),
         );
         sql.tolerance += 5; // extra margin for ordering operations
         sql

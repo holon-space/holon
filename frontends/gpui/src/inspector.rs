@@ -55,7 +55,7 @@ fn render_inspector(
                         .rounded(px(4.0))
                         .when(is_picking, |d| d.bg(gpui::rgba(0x3b82f660)))
                         .hover(|s| s.bg(gpui::rgba(0xffffff10)))
-                        .child("🔍")
+                        .child(crate::icon("🔍"))
                         .on_mouse_down(MouseButton::Left, {
                             cx.listener(|inspector, _, window, _cx| {
                                 inspector.start_picking();

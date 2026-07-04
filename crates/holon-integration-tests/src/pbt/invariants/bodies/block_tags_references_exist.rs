@@ -1,5 +1,12 @@
 //! `inv-block-tags-references-exist`.
 //!
+//! @pbt oracle internal-consistency
+//! @pbt covers junction referential integrity — block_tags.block_id orphaned
+//!   w.r.t. block_raw (no DB-level FK in Turso IVM mode)
+//! @pbt slips-if-removed a block DELETE that leaves its block_tags rows behind
+//!   (cascade not wired) creates orphan junction rows that resurface phantom
+//!   tags in tag-driven queries
+//!
 //! Referential integrity check: every `block_id` in the `block_tags`
 //! junction table must have a corresponding row in `block_raw`. Orphan
 //! rows are not prevented by a DB-level FK constraint (Turso doesn't

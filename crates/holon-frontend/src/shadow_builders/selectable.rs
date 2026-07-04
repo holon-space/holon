@@ -31,13 +31,31 @@ fn build_wiring(name: &str, args: &[Arg], row: &DataRow, trigger: Trigger) -> Op
             name: op_name,
             trigger: Some(trigger),
             bound_params,
-            ..Default::default()
+            entity_short_name: String::new(),
+            id_column: "id".to_string(),
+            display_name: String::new(),
+            description: String::new(),
+            required_params: vec![],
+            affected_fields: vec![],
+            param_mappings: vec![],
+            target_scope: holon_api::TargetScope::Block,
+            boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
+            menu_exposure: holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::PointerGesture,
+            },
+            precondition: None,
         },
     }
 }
 
 holon_macros::widget_builder! {
-    raw fn selectable(ba: BA<'_>) -> ViewModel {
+    fn selectable(
+        action: Expr,
+        shift_action: Expr,
+        cmd_action: Expr,
+        ctrl_action: Expr,
+        alt_action: Expr,
+    ) -> ViewModel {
         let child = if let Some(child_expr) = ba.args.positional_exprs.first() {
             (ba.interpret)(child_expr, ba.ctx)
         } else {
@@ -53,7 +71,7 @@ holon_macros::widget_builder! {
         // as `bound_params`. Positional args are stashed under `pos_<i>` to
         // preserve the previous wire format for ops that consume them.
         let mut operations = Vec::new();
-        if let Some(RenderExpr::FunctionCall { name, args, .. }) = ba.args.get_template("action") {
+        if let Some(RenderExpr::FunctionCall { name, args, .. }) = action {
             operations.push(build_wiring(
                 name,
                 args,
@@ -63,22 +81,35 @@ holon_macros::widget_builder! {
                 },
             ));
         }
-        // `shift_action:` — a separate wiring fired on shift+click. Frontends
-        // must `stop_propagation` on any modifier-click path so the row-level
-        // click doesn't also fire (LogSeq-style "pin to sidebar without
-        // focusing"). Future modifier-bound DSL aliases (`alt_action:`,
-        // `cmd_action:`, …) plug in here without growing the trigger enum.
-        if let Some(RenderExpr::FunctionCall { name, args, .. }) =
-            ba.args.get_template("shift_action")
-        {
-            operations.push(build_wiring(
-                name,
-                args,
-                ba.ctx.row(),
-                Trigger::Click {
-                    modifiers: ClickModifiers::shift(),
-                },
-            ));
+        // Modifier-bound secondary actions. Each `<modifier>_action:` template
+        // declares a SEPARATE wiring fired only when that modifier is held at
+        // click — a fully declarative "secondary action for modifier-click".
+        // Frontends `stop_propagation` on any modifier-click path so the
+        // row-level click doesn't also fire. This is the generic capability;
+        // tabs are its first user (Q2): the left sidebar declares
+        // `cmd_action: navigation_open_tab(...)` (macOS) and
+        // `ctrl_action: navigation_open_tab(...)` (Windows/Linux) so a
+        // modifier-click opens the page in a new tab instead of replacing the
+        // current one. Adding a modifier is one table row here plus its name in
+        // `holon_api::render_eval::is_template_arg` — without the latter the arg
+        // parses as a scalar and `get_template` silently returns `None`, leaving
+        // the affordance dead. No change to the `Trigger` enum or the frontend
+        // dispatch (it looks the active modifier set up in a
+        // `HashMap<ClickModifiers, _>`).
+        // Touch mapping (mobile): long-press → the same secondary action; the
+        // desktop-first wiring above is the reference, mobile long-press routes
+        // to the identical `<modifier>_action` intent.
+        for (template, modifiers) in [
+            (shift_action, ClickModifiers::shift()),
+            (cmd_action, ClickModifiers::cmd()),
+            (ctrl_action, ClickModifiers::ctrl()),
+            (alt_action, ClickModifiers::alt()),
+        ] {
+            if let Some(RenderExpr::FunctionCall { name, args, .. }) = template {
+                operations.push(build_wiring(name, args, ba.ctx.row(), Trigger::Click {
+                    modifiers,
+                }));
+            }
         }
 
         // Wire to the shared per-row signal cell. `bound_params` here are

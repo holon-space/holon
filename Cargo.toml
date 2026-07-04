@@ -1,12 +1,14 @@
 [workspace]
 members = [
     "crates/holon",
+    "crates/holon-advice",
     "crates/holon-api",
     "crates/holon-core",
     "crates/holon-turso",
     "crates/holon-engine",
     "crates/holon-expr",
     "crates/holon-org-format",
+    "crates/holon-toon",
     "crates/holon-orgmode",
     "crates/holon-markdown",
     "crates/holon-filesystem",
@@ -14,14 +16,19 @@ members = [
     "crates/holon-app",
     "crates/holon-block-roundtrip-testing",
     "crates/holon-layout-testing",
+    "crates/holon-loro-testing",
+    "crates/holon-turso-testing",
+    "crates/holon-oracles",
     "crates/holon-pbt-core",
     "crates/holon-integration-tests",
     "crates/holon-mcp-client",
+    "crates/holon-mcp-mock",
     "crates/holon-macros",
     "crates/holon-macros-test",
     "crates/holon-petri",
     "crates/holon-profiles",
     "crates/holon-loro",
+    "crates/holon-sharing",
     "crates/holon-architecture-tests",
     "frontends/tui",
     "frontends/mcp",
@@ -93,7 +100,14 @@ ulid = "1.1"
 fluent-uri = { version = "0.3", features = ["serde"] }
 
 # === Data structures ===
-loro = "= 1.11.1"
+# Bumped 1.11.1 -> 1.13.7 to ride the Holon loro fork (branch `fork-at-shallow`),
+# which implements `fork_at` / `SnapshotAt` on shallow-snapshot docs — required
+# for live share-sync projection (ADR 0028 §H4). The fix is redirected via the
+# `[patch.crates-io]` entry below. 1.13.7 also carries perf + a checkout-hang fix.
+loro = "= 1.13.7"
+# Holon's own crates stay on loro_fractional_index 1.6.0 (registry). The fork's
+# loro-internal pulls its workspace loro_fractional_index 1.13.0 as a separate
+# path package — both are loro-family and coexist without touching other deps.
 loro_fractional_index = "= 1.6.0"
 indexmap = "2.12"
 regex = "1.10"
@@ -154,10 +168,14 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 
 # === External git deps ===
 # Local path overrides in .cargo/config.toml (not checked in)
-turso = { git = "https://github.com/nightscape/turso.git", branch = "holon", default-features = false }
-turso_core = { git = "https://github.com/nightscape/turso.git", branch = "holon", default-features = false, features = ["json"] }
-turso_sdk_kit = { git = "https://github.com/nightscape/turso.git", branch = "holon", default-features = false }
-turso_ext = { git = "https://github.com/nightscape/turso.git", branch = "holon", default-features = false }
+# `fts` (Tantivy full-text index method + fts_match/fts_score/fts_highlight) is
+# native-only by construction: the wasm frontends (holon-worker, dioxus-web) are
+# excluded from this workspace with their own dep graphs, and turso_core
+# additionally cfg-gates all fts code behind `not(target_family = "wasm")`.
+turso = { git = "https://github.com/nightscape/turso.git", rev = "9d7394fb379d680473aa4acec8519078c1d46d39", default-features = false, features = ["fts"] }
+turso_core = { git = "https://github.com/nightscape/turso.git", rev = "9d7394fb379d680473aa4acec8519078c1d46d39", default-features = false, features = ["json", "fts"] }
+turso_sdk_kit = { git = "https://github.com/nightscape/turso.git", rev = "9d7394fb379d680473aa4acec8519078c1d46d39", default-features = false }
+turso_ext = { git = "https://github.com/nightscape/turso.git", rev = "9d7394fb379d680473aa4acec8519078c1d46d39", default-features = false }
 prqlc = { git = "https://github.com/nightscape/prql.git", branch = "main" }
 prqlc-parser = { git = "https://github.com/nightscape/prql.git", branch = "main" }
 gql-parser = { git = "https://github.com/holon-space/gql-to-sql.git", branch = "main" }
@@ -167,7 +185,9 @@ r3bl_tui = { git = "https://github.com/nightscape/r3bl-open-core.git", branch = 
 
 # === Internal crates ===
 holon = { path = "crates/holon" }
+holon-advice = { path = "crates/holon-advice" }
 holon-api = { path = "crates/holon-api" }
+holon-oracles = { path = "crates/holon-oracles" }
 holon-core = { path = "crates/holon-core" }
 holon-engine = { path = "crates/holon-engine" }
 holon-expr = { path = "crates/holon-expr" }
@@ -178,6 +198,7 @@ holon-profiles = { path = "crates/holon-profiles" }
 # native builds are unchanged; the wasm worker (holon default-features = false)
 # gets a loro stack with no iroh. holon is the only holon-loro consumer.
 holon-loro = { path = "crates/holon-loro", default-features = false }
+holon-sharing = { path = "crates/holon-sharing" }
 holon-turso = { path = "crates/holon-turso" }
 holon-frontend = { path = "crates/holon-frontend" }
 holon-app = { path = "crates/holon-app" }
@@ -255,8 +276,29 @@ gpui_platform = { git = "https://github.com/holon-space/zed.git", branch = "holo
 [patch."https://github.com/itsbalamurali/gpui-mobile"]
 gpui-mobile = { git = "https://github.com/holon-space/gpui-mobile.git", branch = "holon" }
 
-# Point at local clone while the `context_menu_extender` commit is
-# unpublished — once pushed to holon-space/gpui-component the `path`
-# can be replaced by the git+branch spec used in frontends/gpui/Cargo.toml.
-[patch."https://github.com/holon-space/gpui-component"]
-gpui-component = { path = "/Users/martin/Workspaces/rust/gpui-component/crates/ui" }
+# Pre-existing ed25519-dalek 3.0.0-pre.1 incompatible with pkcs8 0.11: locally
+# patched to pass KeyError::Invalid to KeyMalformed (matching 3.0.0-rc.0 fix).
+[patch.crates-io]
+ed25519-dalek = { path = ".cargo/patches/ed25519-dalek" }
+# core-graphics 0.24.0 unchanged EXCEPT the never-called `set_font_smoothing_style`
+# wrapper + its `CGContextSetFontSmoothingStyle` extern are `#[cfg(not(target_os =
+# "ios"))]`. That method is dead code (no caller in the tree) but font-kit /
+# gpui-mobile use sibling `CGContext` methods from the same crate, so the whole
+# core-graphics staticlib CGU — including the SPI reference — is force-loaded into
+# the iOS app with dead-stripping off, tripping App Store review (ITMS-90338,
+# _CGContextSetFontSmoothingStyle). Gating it off keeps the symbol out of every
+# iOS binary; macOS/desktop are unaffected.
+core-graphics = { path = ".cargo/patches/core-graphics" }
+
+# Holon loro fork — implements `fork_at` / `SnapshotAt` on shallow-snapshot docs
+# (branch `fork-at-shallow`, based on loro-internal-v1.13.7). Needed because a
+# recipient's shared subtree is a shallow-imported doc, and the per-share SQL
+# projection worker forks it at a watermark to compute incremental diffs
+# (crates/holon-loro/src/loro_share_backend.rs:362). Upstream 1.13.7 still bails
+# with NotImplemented("fork_at on shallow docs"); this fork fills the at/after-
+# shallow-root case. Patching `loro` catches ALL crates.io references (incl.
+# lorotree-spike's literal `loro = "1.0"`), so the whole workspace uses the
+# fork's loro-internal — no duplicate registry/path loro-internal.
+# PR upstream is planned (fork-and-contribute); drop this patch when a released
+# loro version ships fork_at-on-shallow.
+loro = { git = "https://github.com/nightscape/loro.git", rev = "855da28b" }

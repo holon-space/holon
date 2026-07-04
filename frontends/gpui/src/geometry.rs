@@ -23,6 +23,7 @@ use gpui::Pixels;
 use gpui::Window;
 use holon_frontend::geometry::ElementInfo;
 use holon_frontend::geometry::GeometryProvider;
+use holon_frontend::geometry::VmNode;
 use holon_frontend::size_expectation::SizeBounds;
 
 /// Shared registry of element metadata, populated during GPUI render passes.
@@ -205,6 +206,42 @@ impl GeometryProvider for BoundsRegistry {
     }
 }
 
+/// [`GeometryProvider`] over a [`BoundsRegistry`] that promotes the staged
+/// buffer before every read. A window that paints once and then goes idle
+/// (iOS) leaves the last frame's bounds in `staged` forever — no next
+/// `begin_pass` ever rotates them — so an idle-window reader (the MCP
+/// driver) would see stale/empty `committed`. MCP reads arrive when the app
+/// is quiescent (no render pass in flight), so an on-demand `flush` commits
+/// exactly the last complete frame. Do NOT hand this wrapper to a
+/// render-concurrent reader: a mid-pass flush splits one frame's writes
+/// across two rotations.
+#[derive(Clone)]
+pub struct FlushOnReadGeometry(pub BoundsRegistry);
+
+impl GeometryProvider for FlushOnReadGeometry {
+    fn element_info(&self, id: &str) -> Option<ElementInfo> {
+        self.0.flush();
+        GeometryProvider::element_info(&self.0, id)
+    }
+
+    fn all_elements(&self) -> Vec<(String, ElementInfo)> {
+        self.0.flush();
+        GeometryProvider::all_elements(&self.0)
+    }
+
+    fn changed(&self) -> futures::future::BoxFuture<'static, ()> {
+        GeometryProvider::changed(&self.0)
+    }
+
+    fn generation(&self) -> u64 {
+        GeometryProvider::generation(&self.0)
+    }
+
+    fn clone_box(&self) -> Box<dyn GeometryProvider> {
+        Box::new(self.clone())
+    }
+}
+
 // Thread-local render-path stack used by `BoundsTracker` / `TransparentTracker`
 // to record each widget's immediate tracked parent. Pushed on `prepaint` before
 // recursing into children, popped after.
@@ -268,6 +305,7 @@ pub fn tracked(
         has_content,
         displayed_text,
         focused: None,
+        styled_runs: None,
         expected_size: SizeBounds::default(),
         child: Some(child),
     }
@@ -288,6 +326,15 @@ impl BoundsTracker {
         self.focused = Some(focused);
         self
     }
+
+    /// Record the read-mode styled-run fingerprint this widget painted (the
+    /// runs handed to `StyledText::with_highlights`). Only the mark-styling
+    /// path sets it; a plain-text render leaves it `None`. Read back by
+    /// `inv-paint-text-styling` via the `GeometryProvider`.
+    pub fn with_styled_runs(mut self, runs: Vec<holon_api::StyledRun>) -> Self {
+        self.styled_runs = Some(Arc::from(runs));
+        self
+    }
 }
 
 /// Transparent wrapper element that records its child's bounds into a
@@ -306,6 +353,7 @@ pub struct BoundsTracker {
     has_content: bool,
     displayed_text: Option<Arc<str>>,
     focused: Option<bool>,
+    styled_runs: Option<Arc<[holon_api::StyledRun]>>,
     expected_size: SizeBounds,
     child: Option<AnyElement>,
 }
@@ -332,6 +380,14 @@ pub struct TransparentTracker {
     /// which subtree of the rendered tree belongs to which panel (e.g.
     /// `block:default-left-sidebar`) without consulting ref-state predictions.
     entity_id: Option<Arc<str>>,
+    /// What the wrapped element paints, when it is a leaf that paints text
+    /// (the tree row's disclosure glyph, say) rather than a container.
+    displayed_text: Option<Arc<str>>,
+    /// The alpha the wrapped element declares — see [`ElementInfo::opacity`].
+    opacity: Option<f32>,
+    /// The view-model node this tracker wraps — see [`VmNode`]. Set by the
+    /// node-dispatch `tag_node()`, which is the only site that holds the node.
+    vm_node: Option<VmNode>,
     child: Option<AnyElement>,
 }
 
@@ -348,8 +404,36 @@ impl TransparentTracker {
             registry,
             expected_size: SizeBounds::default(),
             entity_id: None,
+            displayed_text: None,
+            opacity: None,
+            vm_node: None,
             child: Some(child),
         }
+    }
+
+    /// Record the text the wrapped element paints, so invariants can judge
+    /// *which* glyph a control drew (e.g. a chevron's direction).
+    pub fn with_displayed_text(mut self, text: impl Into<Arc<str>>) -> Self {
+        self.displayed_text = Some(text.into());
+        self
+    }
+
+    /// Record the wrapped element's paint alpha, so invariants can tell a
+    /// visible control from one that is laid out but transparent.
+    pub fn with_opacity(mut self, opacity: f32) -> Self {
+        self.opacity = Some(opacity);
+        self
+    }
+
+    /// Declare which view-model node this tracker was created for, so
+    /// `describe_ui` can join that node to THIS rect instead of to a sibling
+    /// element that merely renders the same entity.
+    pub fn with_vm_node(mut self, entity: Option<&str>) -> Self {
+        self.vm_node = Some(VmNode {
+            tag: Arc::clone(&self.widget_type),
+            entity: entity.map(Arc::from),
+        });
+        self
     }
 
     /// Bind an entity URI so region queries can find this subtree by
@@ -422,9 +506,12 @@ impl Element for TransparentTracker {
                 entity_id: self.entity_id.clone(),
                 has_content: false,
                 parent_id,
-                displayed_text: None,
+                displayed_text: self.displayed_text.clone(),
                 focused: None,
+                styled_runs: None,
+                opacity: self.opacity,
                 expected_size: self.expected_size.clone(),
+                vm_node: self.vm_node.clone(),
             },
         );
         push_parent(Arc::clone(&self.el_id));
@@ -506,7 +593,10 @@ impl Element for BoundsTracker {
                 parent_id,
                 displayed_text: self.displayed_text.clone(),
                 focused: self.focused,
+                styled_runs: self.styled_runs.clone(),
+                opacity: None,
                 expected_size: self.expected_size.clone(),
+                vm_node: None,
             },
         );
         push_parent(Arc::clone(&self.el_id));
@@ -525,5 +615,77 @@ impl Element for BoundsTracker {
         cx: &mut App,
     ) {
         self.child.as_mut().unwrap().paint(window, cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use holon_frontend::geometry::GeometryProvider;
+
+    use super::*;
+
+    fn elem(entity: &str) -> ElementInfo {
+        ElementInfo {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 20.0,
+            widget_type: Arc::from("live_block"),
+            entity_id: Some(Arc::from(entity)),
+            has_content: true,
+            parent_id: None,
+            displayed_text: None,
+            focused: None,
+            styled_runs: None,
+            opacity: None,
+            expected_size: SizeBounds::default(),
+            vm_node: None,
+        }
+    }
+
+    /// Promotion-timing invariant that `click_entity`'s retry-until-committed
+    /// depends on: once cold start is over, a freshly `record()`ed element is
+    /// invisible to plain committed reads until the next `begin_pass`/`flush`
+    /// — yet a `FlushOnReadGeometry` read promotes it immediately. A
+    /// single-shot click on such a just-rendered `:__virtual:` slot would miss
+    /// on the plain read (the dogfood #3 race); the driver must either read
+    /// flush-on-read or retry across a commit to see it.
+    #[test]
+    fn fresh_record_invisible_until_promoted_but_flush_on_read_sees_it() {
+        let reg = BoundsRegistry::new();
+        // Leave cold start: the first non-empty rotation clears `cold`, after
+        // which records hit staged only (real double-buffering).
+        reg.record("render-entity-block:warmup".into(), elem("block:warmup"));
+        reg.begin_pass();
+        assert!(
+            GeometryProvider::element_info(&reg, "render-entity-block:warmup").is_some(),
+            "warmup element must be committed after its begin_pass rotation"
+        );
+
+        // A brand-new creation slot appears in THIS frame (staged only).
+        let slot = "render-entity-block:__virtual:default-main-panel";
+        reg.record(slot.into(), elem("block:__virtual:default-main-panel"));
+
+        // Plain committed read races the promotion: not yet visible.
+        assert!(
+            GeometryProvider::element_info(&reg, slot).is_none(),
+            "post-cold record must stay staged until the next begin_pass/flush — this is the race \
+             that made the single-shot click fail"
+        );
+
+        // Flush-on-read promotes the last frame's staged bounds on demand, so
+        // the freshly-rendered slot becomes clickable without a second pass.
+        let flush = FlushOnReadGeometry(reg.clone());
+        let gen_before = GeometryProvider::generation(&reg);
+        assert!(
+            GeometryProvider::element_info(&flush, slot).is_some(),
+            "flush-on-read must promote the just-rendered creation slot"
+        );
+        assert_eq!(
+            GeometryProvider::generation(&reg),
+            gen_before + 1,
+            "flush must rotate committed_gen so retry loops waking on `changed()`/generation \
+             observe the new frame"
+        );
     }
 }
