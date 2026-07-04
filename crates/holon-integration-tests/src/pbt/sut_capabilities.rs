@@ -777,8 +777,8 @@ impl SutEditorMirrorWrite for E2ESut {
 // ─── SutEditorMirrorRead: DELETED (E3, 2026-06-25) ────────────────────
 // The headless editor caret/live-text read surface (`editor_caret_byte` /
 // `editor_live_text`) is now hosted by the composed `full_headless` editor read cap.
-// Its two ref-comparison invariants (`inv-editor-caret-matches-ref`,
-// `inv-editor-text-matches-ref`) run only via the composed catalog — see
+// Its two ref-comparison invariants (`inv-editor-caret/mirror`,
+// `inv-editor-text/mirror`) run only via the composed catalog — see
 // `NATIVE_ONLY_EXCLUDED` + the `SutEditorMirrorRead` row in `E1_RELOCATED_CAP_COVERAGE`.
 
 /// Block-tree mutation capability: structural edits driven through the

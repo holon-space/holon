@@ -24,8 +24,6 @@
 pub mod blocks_match;
 pub mod displayed_text;
 pub mod editable_text_has_draggable;
-pub mod editor_caret;
-pub mod editor_text;
 pub mod focus_matches_ref;
 pub mod focus_roots;
 pub mod frontend_bounds_rendered;

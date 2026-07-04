@@ -47,7 +47,7 @@
 /// so the ref must leave the editor and its caret untouched. Re-seeding
 /// the caret to end-of-text here diverged from every SUT after
 /// `SplitBlock → <chord op>` on the freshly-focused new block
-/// (`inv-editor-caret-matches-ref`: ref end-of-text vs SUT 0).
+/// (`inv-editor-caret/mirror`: ref end-of-text vs SUT 0).
 pub fn model_chord_click_focus<
     R: holon_pbt_core::capabilities::RefBlockTree
         + holon_pbt_core::capabilities::RefBlockTreeMut

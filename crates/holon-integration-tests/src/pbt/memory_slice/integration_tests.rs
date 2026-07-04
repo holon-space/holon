@@ -140,8 +140,8 @@ async fn memory_slice_editor_invariants_deselected_without_editor() {
     .await;
 
     for id in [
-        "inv-editor-text-matches-ref",
-        "inv-editor-caret-matches-ref",
+        "inv-editor-text/mirror",
+        "inv-editor-caret/mirror",
     ] {
         assert!(
             report.deselected.iter().any(|d| d.0 == id),
@@ -182,8 +182,8 @@ async fn memory_slice_editor_text_and_caret_match_when_wired() {
     .await;
 
     for id in [
-        "inv-editor-text-matches-ref",
-        "inv-editor-caret-matches-ref",
+        "inv-editor-text/mirror",
+        "inv-editor-caret/mirror",
     ] {
         assert!(
             report.ran_ids().contains(&id),

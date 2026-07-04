@@ -874,7 +874,7 @@ impl ReferenceState {
 
         // Deleting a block CLOSES its editor — drop without committing
         // (the block is gone; committing dirty text to it is meaningless,
-        // and a lingering ActiveEditor makes inv-editor-text-matches-ref
+        // and a lingering ActiveEditor makes inv-editor-text/mirror
         // compare a ghost editor against whatever stale cell the SUT still
         // caches for the deleted block — the slash-command "/delete"
         // residue face, 2026-06-11).

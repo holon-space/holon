@@ -1080,8 +1080,8 @@ mod teeth {
         for id in [
             "inv-blocks-match-ref/block_raw",
             "inv-block-content/block_raw",
-            "inv-editor-text-matches-ref",
-            "inv-editor-caret-matches-ref",
+            "inv-editor-text/mirror",
+            "inv-editor-caret/mirror",
         ] {
             assert!(
                 report.ran_ids().contains(&id),
@@ -1115,7 +1115,7 @@ mod teeth {
         let report = run_with_seeded_ref(&composed_invariant_catalog(), &caps, resolved).await;
         assert!(
             report.failures().iter().any(|(id, _)| {
-                *id == "inv-block-content/block_raw" || *id == "inv-editor-text-matches-ref"
+                *id == "inv-block-content/block_raw" || *id == "inv-editor-text/mirror"
             }),
             "SUT-only TypeChars must be CAUGHT by the content/editor-text parity; \
              failures: {:?}, ran: {:?}",
@@ -1185,7 +1185,7 @@ mod teeth {
         );
         // The editor live-text + committed-content parity must RUN — proving the type
         // landed on the new block (active editor selected, not skipped).
-        for id in ["inv-editor-text-matches-ref", "inv-block-content/block_raw"] {
+        for id in ["inv-editor-text/mirror", "inv-block-content/block_raw"] {
             assert!(
                 report.ran_ids().contains(&id),
                 "non-vacuity: {id} must run over the split-then-typed block (ran: {:?})",

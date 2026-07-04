@@ -25,8 +25,6 @@ pub fn composed_invariant_catalog() -> Vec<Box<dyn CapInvariant>> {
         // frontend slice supplies it (production CacheBlockReader + OrgRenderer).
         invariants::org_render_fixed_point::wire(),
         invariants::no_orphan::wire(),
-        invariants::editor_text::wire(),
-        invariants::editor_caret::wire(),
         invariants::loro_no_errors::wire(),
         invariants::loro_children_match_ref::wire(),
         invariants::no_errors::wire(),
@@ -116,9 +114,13 @@ pub fn composed_invariant_catalog() -> Vec<Box<dyn CapInvariant>> {
     // see `pbt::correspondence`). The `inv-blocks-match-ref/{block_raw,matview,
     // loro}` family lives in `correspondences::non_seed_blocks`; the per-id
     // `inv-block-content/{block_raw,sql}` and `inv-block-parent/block_raw`
-    // families in `correspondences::block_{content,parent}`.
+    // families in `correspondences::block_{content,parent}`; the editor-mirror
+    // `inv-editor-{text,caret}/mirror` families in
+    // `correspondences::active_editor_{text,caret}`.
     catalog.extend(correspondences::non_seed_blocks().wire());
     catalog.extend(correspondences::block_content().wire());
     catalog.extend(correspondences::block_parent().wire());
+    catalog.extend(correspondences::active_editor_text().wire());
+    catalog.extend(correspondences::active_editor_caret().wire());
     catalog
 }

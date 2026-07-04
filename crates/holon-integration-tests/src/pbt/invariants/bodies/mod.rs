@@ -10,8 +10,6 @@ pub mod block_tags_references_exist;
 pub mod blocks_match_ref;
 pub mod displayed_text;
 pub mod editable_text_has_draggable;
-pub mod editor_caret_matches_ref;
-pub mod editor_text_matches_ref;
 pub mod focus_matches_ref;
 pub mod focus_roots;
 pub mod frontend_bounds_rendered;

@@ -249,7 +249,7 @@ pub trait UserDriver: Send + Sync {
     /// this medium (default; a disclosed skip, not a silent pass — GPUI's
     /// caret lives in window-local `InputState`). `Ok(None)` = observable
     /// medium but no caret tracked for this block yet (no keystroke since
-    /// focus). Used by `inv-editor-caret-matches-ref`.
+    /// focus). Used by `inv-editor-caret/mirror`.
     fn editor_cursor_byte(&self, block_id: &EntityUri) -> Result<Option<usize>, String> {
         let _ = block_id;
         Err("editor caret not observable by this driver".to_string())

@@ -12,7 +12,8 @@ use std::pin::Pin;
 
 use holon_api::Block;
 use holon_pbt_core::capabilities::{
-    EntityUri, RefBackend, RefBlockTree, SutBackend, SutLoroLog, SutSqlProjection,
+    EntityUri, RefBackend, RefBlockTree, RefEditorMirror, SutBackend, SutEditorMirrorRead,
+    SutLoroLog, SutSqlProjection,
 };
 use holon_pbt_core::composition::{CapId, CapMap, Needs};
 use holon_pbt_core::invariant::InvariantResult;
@@ -442,10 +443,170 @@ fn compare_block_parent_block_raw(
     Ok(())
 }
 
+// ─── Observable: active-editor text (the `inv-editor-text/*` family) ─────────
+
+/// The live text of the actively-edited block, as the SUT's `MutableText`
+/// mirror sees it vs the reference's `active_editor_text()`. The *reference*
+/// owns which block is active (`active_editor_block()`); both sides are keyed
+/// off it. Both are 3-valued: the ref is `Unobservable` with no active editor,
+/// and the SUT's `editor_live_text` is `Unobservable` (`Err`) when no frontend
+/// engine / `MutableText` is resolvable yet. Consolidates the hand-written
+/// `inv-editor-text-matches-ref` body.
+///
+/// `Value` carries the active block id alongside the text so the compare's
+/// fail message can name the block (the two-value compare has no other context).
+pub struct ActiveEditorText;
+
+impl Observable for ActiveEditorText {
+    type Value = (EntityUri, String);
+    const NAME: &'static str = "editor-text";
+}
+
+pub fn active_editor_text() -> Correspondence<ActiveEditorText> {
+    Correspondence {
+        ref_project: ref_active_editor_text,
+        stores: vec![StoreProjection {
+            id: "inv-editor-text/mirror",
+            store: "mirror",
+            needs: Needs {
+                sut_present: vec![CapId::of::<dyn SutEditorMirrorRead>()],
+                sut_absent: Vec::new(),
+                ref_present: vec![CapId::of::<dyn RefEditorMirror>()],
+            },
+            extract: extract_editor_text_mirror,
+            compare: NamedCompare {
+                name: "compare_editor_text",
+                f: compare_editor_text,
+            },
+            converge: Converge::None,
+        }],
+    }
+}
+
+fn ref_active_editor_text(refs: &CapMap) -> Extraction<(EntityUri, String)> {
+    let Some(block) = RefEditorMirror::active_editor_block(refs) else {
+        return Extraction::Unobservable("no active editor in reference model".to_string());
+    };
+    let text = RefEditorMirror::active_editor_text(refs)
+        .expect("ref invariant: active_editor_block() implies active_editor_text()")
+        .to_string();
+    Extraction::Value((block, text))
+}
+
+fn extract_editor_text_mirror<'a>(
+    sut: &'a CapMap,
+    refs: &'a CapMap,
+) -> Pin<Box<dyn Future<Output = Extraction<(EntityUri, String)>> + 'a>> {
+    Box::pin(async move {
+        // `ref_project` already proved the active block is `Some`; the registry
+        // short-circuits to Skip otherwise, so `extract` never runs without it.
+        let block = RefEditorMirror::active_editor_block(refs)
+            .expect("registry: extract runs only after ref_project yielded a value");
+        match SutEditorMirrorRead::editor_live_text(sut, &block) {
+            Err(reason) => Extraction::Unobservable(format!("live text unobservable: {reason}")),
+            Ok(text) => Extraction::Value((block, text)),
+        }
+    })
+}
+
+fn compare_editor_text(
+    sut: &(EntityUri, String),
+    ref_: &(EntityUri, String),
+) -> Result<(), String> {
+    let (block, sut_text) = sut;
+    let (_, ref_text) = ref_;
+    if sut_text == ref_text {
+        return Ok(());
+    }
+    Err(format!(
+        "[inv-editor-text/mirror] Live editor text mismatch on {block}:\n  \
+         reference: {ref_text:?}\n  SUT MutableText: {sut_text:?}"
+    ))
+}
+
+// ─── Observable: active-editor caret (the `inv-editor-caret/*` family) ───────
+
+/// The tracked caret byte of the actively-edited block (SUT mirror vs the
+/// reference's `active_editor_cursor()`). Keyed off the reference's active
+/// block like [`ActiveEditorText`]. 3-valued on both sides plus one extra SUT
+/// Skip: `Ok(None)` = the SUT tracks no caret yet (no keystroke since focus —
+/// the headless mirror initializes lazily). Consolidates the hand-written
+/// `inv-editor-caret-matches-ref` body.
+///
+/// NOTE: the old body appended the ref editor text to its fail message as a
+/// diagnostic breadcrumb; the registry's two-value compare carries only the
+/// (block, caret) pair, so that breadcrumb is dropped. The block id and both
+/// caret bytes remain.
+pub struct ActiveEditorCaret;
+
+impl Observable for ActiveEditorCaret {
+    type Value = (EntityUri, usize);
+    const NAME: &'static str = "editor-caret";
+}
+
+pub fn active_editor_caret() -> Correspondence<ActiveEditorCaret> {
+    Correspondence {
+        ref_project: ref_active_editor_caret,
+        stores: vec![StoreProjection {
+            id: "inv-editor-caret/mirror",
+            store: "mirror",
+            needs: Needs {
+                sut_present: vec![CapId::of::<dyn SutEditorMirrorRead>()],
+                sut_absent: Vec::new(),
+                ref_present: vec![CapId::of::<dyn RefEditorMirror>()],
+            },
+            extract: extract_editor_caret_mirror,
+            compare: NamedCompare {
+                name: "compare_editor_caret",
+                f: compare_editor_caret,
+            },
+            converge: Converge::None,
+        }],
+    }
+}
+
+fn ref_active_editor_caret(refs: &CapMap) -> Extraction<(EntityUri, usize)> {
+    let Some(block) = RefEditorMirror::active_editor_block(refs) else {
+        return Extraction::Unobservable("no active editor in reference model".to_string());
+    };
+    let cursor = RefEditorMirror::active_editor_cursor(refs)
+        .expect("ref invariant: active_editor_block() implies active_editor_cursor()");
+    Extraction::Value((block, cursor))
+}
+
+fn extract_editor_caret_mirror<'a>(
+    sut: &'a CapMap,
+    refs: &'a CapMap,
+) -> Pin<Box<dyn Future<Output = Extraction<(EntityUri, usize)>> + 'a>> {
+    Box::pin(async move {
+        let block = RefEditorMirror::active_editor_block(refs)
+            .expect("registry: extract runs only after ref_project yielded a value");
+        match SutEditorMirrorRead::editor_caret_byte(sut, &block) {
+            Err(reason) => Extraction::Unobservable(format!("caret unobservable: {reason}")),
+            Ok(None) => Extraction::Unobservable(format!(
+                "SUT tracks no caret for {block} yet (no keystroke since focus)"
+            )),
+            Ok(Some(caret)) => Extraction::Value((block, caret)),
+        }
+    })
+}
+
+fn compare_editor_caret(sut: &(EntityUri, usize), ref_: &(EntityUri, usize)) -> Result<(), String> {
+    let (block, sut_cursor) = sut;
+    let (_, ref_cursor) = ref_;
+    if sut_cursor == ref_cursor {
+        return Ok(());
+    }
+    Err(format!(
+        "[inv-editor-caret/mirror] Caret mismatch on {block}: \
+         reference model cursor_byte={ref_cursor}, SUT tracked caret={sut_cursor}"
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::pbt::composed::fixtures::*;
-    use crate::pbt::composed::subsystem_seed::{run_with_seeded_ref, seed_ref};
+    use crate::pbt::composed::subsystem_seed::{run_with_seeded_ref, seed_ref, seed_ref_with_editor};
 
     /// Catch (doc §6 gate): a `block_raw` content that diverged from the
     /// reference's `RefBlockTree` view — the borrow-returning read driving a
@@ -558,5 +719,68 @@ mod tests {
                 "{clean} must stay green (only parent linkage diverged); failures={failures:?}",
             );
         }
+    }
+
+    /// Catch (doc §6 gate): a SUT editor whose `MutableText` lost a character
+    /// relative to the reference is caught by the registry-emitted
+    /// `inv-editor-text/mirror` (reads the borrow-returning
+    /// `RefEditorMirror::active_editor_text` off the ref `CapMap`).
+    #[tokio::test]
+    async fn editor_text_mirror_catches_live_text_divergence() {
+        let block = uri("local://e");
+        let sut = buggy_editor_map(BuggyEditor {
+            block: block.clone(),
+            text: "helo".to_string(),
+            caret: 4,
+        });
+        // The real oracle holds "hello" (caret = len = 5); the buggy SUT dropped
+        // a char to "helo".
+        let ref_state = seed_ref_with_editor(Vec::new(), block, "hello");
+
+        let report = run_with_seeded_ref(
+            &composed_invariant_catalog(),
+            &sut,
+            crate::pbt::reference_state::Resolved::identity(ref_state),
+        )
+        .await;
+
+        let failures = report.failures();
+        assert!(
+            failures.iter().any(|(id, _)| *id == "inv-editor-text/mirror"),
+            "the live-text divergence must be caught; failures={failures:?}",
+        );
+    }
+
+    /// Catch (doc §6 gate): a SUT editor whose tracked byte caret is off by one
+    /// (the `MoveCursor` byte/keystroke-conflation bug class). Text agrees, so
+    /// only `inv-editor-caret/mirror` fires — proving caret isolation.
+    #[tokio::test]
+    async fn editor_caret_mirror_catches_caret_divergence() {
+        let block = uri("local://e");
+        let sut = buggy_editor_map(BuggyEditor {
+            block: block.clone(),
+            text: "hello".to_string(),
+            caret: 4,
+        });
+        // The real oracle opens the editor at end-of-text (caret = len = 5); the
+        // buggy SUT reports caret 4. Text agrees on "hello".
+        let ref_state = seed_ref_with_editor(Vec::new(), block, "hello");
+
+        let report = run_with_seeded_ref(
+            &composed_invariant_catalog(),
+            &sut,
+            crate::pbt::reference_state::Resolved::identity(ref_state),
+        )
+        .await;
+
+        let failures = report.failures();
+        assert!(
+            failures.iter().any(|(id, _)| *id == "inv-editor-caret/mirror"),
+            "the caret divergence must be caught; failures={failures:?}",
+        );
+        assert!(
+            !failures.iter().any(|(id, _)| *id == "inv-editor-text/mirror"),
+            "text agrees, so only the caret invariant fires; failures={failures:?}",
+        );
     }
 }

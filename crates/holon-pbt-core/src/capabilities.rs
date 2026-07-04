@@ -506,7 +506,7 @@ impl<T: SutEditorMirrorWrite + ?Sized> SutEditorMirrorWrite for std::sync::Arc<T
 /// (pre-commit) editor text for a block. `ref_`-side id space is accepted
 /// — impls resolve synthetic ids themselves (mirroring
 /// `SutDriver::resolve_ref_block_id`). Binds
-/// `inv-editor-caret-matches-ref` and `inv-editor-text-matches-ref`.
+/// `inv-editor-caret/mirror` and `inv-editor-text/mirror`.
 ///
 /// `#[capmap_adapter]` hosts this on `CapMap` (sync, owned `Result` returns →
 /// no `#[async_trait]`; existing `E2ESut` impl untouched).
