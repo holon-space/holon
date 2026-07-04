@@ -1,0 +1,30 @@
+{
+  "mcpServers": {
+    "holon-mcp": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "reloaderoo",
+        "proxy",
+        "--",
+        "/Users/martin/Workspaces/pkm/holon/target/debug/holon-mcp",
+        "--stdio",
+        "--orgmode-root",
+        "/Users/martin/Workspaces/pkm/holon-pkm",
+        ":memory:"
+      ],
+      "env": {
+        "HOLON_ACTOR_STATS": "5"
+      }
+    },
+    "holon-live": {
+      "type": "stdio",
+      "command": "mcp-rust-proxy",
+      "args": [
+        "--config",
+        "/Users/martin/Workspaces/pkm/holon/mcp-proxy.yaml",
+        "--stdio"
+      ]
+    }
+  }
+}

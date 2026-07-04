@@ -19,6 +19,7 @@ use chrono::{DateTime, Utc};
 use holon_api::block::Block;
 use holon_api::types::{DependsOn, Priority, TaskState, Timestamp};
 use holon_api::{CompiledExpr, EntityUri};
+use holon_engine::PrecondSpec;
 use holon_engine::arc::{CreateArc, InputArc, OutputArc};
 use holon_engine::value::Value;
 use holon_engine::{Marking, NetDef, TokenState, TransitionDef};
