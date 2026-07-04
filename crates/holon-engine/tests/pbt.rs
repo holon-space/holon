@@ -95,7 +95,12 @@ fn arb_transition(
                 let mut outputs = Vec::new();
                 for (i, &idx) in selected_indices.iter().enumerate() {
                     let mut precond = BTreeMap::new();
-                    precond.insert("status".to_string(), statuses[i].to_string());
+                    precond.insert(
+                        "status".to_string(),
+                        statuses[i]
+                            .parse()
+                            .expect("generated status is a valid exact-match spec"),
+                    );
                     let consume = consumes[i];
                     inputs.push(InputArc {
                         bind: token_ids[idx].clone(),

@@ -3,9 +3,10 @@
 > A "Big Picture" Event Storm of everything that touches a `Block` as it crosses
 > Org, Markdown, Loro+Iroh, Turso, and the UI. Read the colour legend, then the
 > timeline, then the hotspots. Generated 2026-06-28 from a code/ADR sweep;
-> **hotspot statuses re-verified 2026-07-01** (four had already been fixed:
-> H1, H4, H11, H12 — three days of drift was enough to invalidate half the red
-> stickies).
+> **hotspot statuses re-verified 2026-07-02** (the 2026-07-01 sweep found four
+> already fixed: H1, H4, H11, H12 — three days of drift was enough to invalidate
+> half the red stickies; the 2026-07-02 sweep closed the track — see the status
+> board in §4).
 >
 > ⚠ **Staleness protocol**: hotspot statuses decay fast. Before acting on any
 > 🔴, grep for the anchor *symbol* (not the line number — several drifted within
@@ -380,7 +381,7 @@ adding a future edge field cannot silently miss the gate again. Fixed in the rig
 order (after the H1 sidecar round-trip), so closing the gate did not reintroduce
 cold-boot churn. Caught via the composed `SetEdgeField` PBT transition +
 `SutEdgeFieldWrite` cap. Anchor: `fn blocks_differ`
-(`holon-loro/src/loro_sync_controller.rs:886`).
+(`holon-loro/src/loro_sync_controller.rs`).
 
 ---
 

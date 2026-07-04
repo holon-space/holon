@@ -929,14 +929,6 @@ impl RefWatch for ReferenceState {
             .map(|ws| ws.query.columns.clone())
             .unwrap_or_default()
     }
-
-    fn watch_block_raw_sql(&self, query_id: &str) -> String {
-        self.mcp
-            .active_watches
-            .get(query_id)
-            .map(|ws| ws.query.to_block_raw_sql())
-            .unwrap_or_default()
-    }
 }
 
 impl RefGlobalFocus for ReferenceState {

@@ -1670,19 +1670,11 @@ holon_macros::capability_pair! {
         #[sut_only]
         fn watch_rows(&self, query_id: &str) -> Vec<WatchRow>;
 
-        /// Run the given `block_raw` truth-check SQL and return the set of
-        /// `id` values it yields. Used by the CDC-lag classifier to decide
-        /// whether a matview/`ui_model` divergence is a pure CDC delivery race
-        /// (write-side already converged) or a real write-pipeline bug. Wide
-        /// PBT: `ctx.query_sql(sql)` projecting the `id` column.
+        /// Run the given SQL against the SUT's DB and return the set of `id`
+        /// values it yields (e.g. `SELECT id FROM block_raw`). Wide PBT:
+        /// `ctx.query_sql(sql)` projecting the `id` column.
         #[sut_only]
         fn block_raw_query_ids(&self, sql: &str) -> BTreeSet<EntityUri>;
-
-        /// Read a single `field` from `block_raw` for `id`. Used by the
-        /// per-field CDC-lag classifier. Wide PBT:
-        /// `SELECT {field} FROM block_raw WHERE id = ?`. `None` if absent/NULL.
-        #[sut_only]
-        fn block_raw_field(&self, id: &EntityUri, field: &str) -> Option<String>;
 
         /// Expected result rows for the watch `query_id`, stringified into the
         /// [`WatchRow`] shape. Wide PBT: `query_results(active_watches[query_id])`
@@ -1697,13 +1689,6 @@ holon_macros::capability_pair! {
         /// empty if `query_id` is unknown.
         #[ref_only]
         fn watch_query_columns(&self, query_id: &str) -> Vec<String>;
-
-        /// The `block_raw` truth-check SQL for the watch `query_id` (reads the
-        /// write-side base table, bypassing the matview). Used by the CDC-lag
-        /// classifier. Wide PBT: `active_watches[query_id].query.to_block_raw_sql()`;
-        /// empty string if `query_id` is unknown.
-        #[ref_only]
-        fn watch_block_raw_sql(&self, query_id: &str) -> String;
     }
 }
 

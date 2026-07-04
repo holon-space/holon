@@ -753,7 +753,9 @@ fn compare_no_ghost_rows(
 #[cfg(test)]
 mod tests {
     use crate::pbt::composed::fixtures::*;
-    use crate::pbt::composed::subsystem_seed::{run_with_seeded_ref, seed_ref, seed_ref_with_editor};
+    use crate::pbt::composed::subsystem_seed::{
+        run_with_seeded_ref, seed_ref, seed_ref_with_editor,
+    };
 
     /// Catch (doc §6 gate): with the ref wired, a SUT `block_raw` whose content
     /// diverged from the reference is caught by the registry-emitted
@@ -926,7 +928,9 @@ mod tests {
 
         let failures = report.failures();
         assert!(
-            failures.iter().any(|(id, _)| *id == "inv-editor-text/mirror"),
+            failures
+                .iter()
+                .any(|(id, _)| *id == "inv-editor-text/mirror"),
             "the live-text divergence must be caught; failures={failures:?}",
         );
     }
@@ -955,11 +959,15 @@ mod tests {
 
         let failures = report.failures();
         assert!(
-            failures.iter().any(|(id, _)| *id == "inv-editor-caret/mirror"),
+            failures
+                .iter()
+                .any(|(id, _)| *id == "inv-editor-caret/mirror"),
             "the caret divergence must be caught; failures={failures:?}",
         );
         assert!(
-            !failures.iter().any(|(id, _)| *id == "inv-editor-text/mirror"),
+            !failures
+                .iter()
+                .any(|(id, _)| *id == "inv-editor-text/mirror"),
             "text agrees, so only the caret invariant fires; failures={failures:?}",
         );
     }

@@ -13,9 +13,11 @@ The `holon-engine` crate is a standalone CLI binary for Petri-net simulation and
 ```rust
 pub trait TokenState    { fn id(&self) -> &str; fn token_type(&self) -> &str; fn get(&self, attr: &str) -> Option<&Value>; fn attrs(&self) -> &BTreeMap<String, Value>; }
 pub trait TransitionDef { fn id(&self) -> &str; fn inputs(&self) -> &[InputArc]; fn outputs(&self) -> &[OutputArc]; fn creates(&self) -> &[CreateArc]; fn duration_minutes(&self) -> f64; }
-pub trait NetDef        { fn transitions(&self) -> &[impl TransitionDef]; }
-pub trait Marking       { fn tokens(&self) -> Vec<&dyn TokenState>; fn add_token(...); fn remove_token(...); }
+pub trait NetDef        { type Transition: TransitionDef; fn transitions(&self) -> Box<dyn Iterator<Item = &Self::Transition> + '_>; fn transition(&self, id: &str) -> Option<&Self::Transition>; fn objective_expr(&self) -> &CompiledExpr; fn constraints(&self) -> &[CompiledExpr]; fn discount_rate(&self) -> f64; }
+pub trait Marking: Clone { type Token: TokenState; fn clock(&self) -> DateTime<Utc>; fn set_clock(&mut self, t: DateTime<Utc>); fn tokens(&self) -> Box<dyn Iterator<Item = &Self::Token> + '_>; fn tokens_of_type(&self, token_type: &str) -> Vec<&Self::Token>; fn token(&self, id: &str) -> Option<&Self::Token>; fn set_attr(&mut self, token_id: &str, attr: &str, value: Value); fn create_token(&mut self, id: String, token_type: String, attrs: BTreeMap<String, Value>); fn remove_token(&mut self, id: &str); }
 ```
+
+(Authoritative source: `crates/holon-engine/src/lib.rs` — regenerate with `ast-outline outline crates/holon-engine/src/lib.rs` if this drifts.)
 
 ### Key Components
 
@@ -28,23 +30,23 @@ pub trait Marking       { fn tokens(&self) -> Vec<&dyn TokenState>; fn add_token
 | `YamlMarking` | `yaml/state.rs` | YAML-serialized token state (load/save) |
 | `History` | `yaml/history.rs` | Append-only event log with replay support |
 
-### Relationship to `holon/src/petri.rs`
+### Relationship to `crates/holon-petri`
 
-`petri.rs` in the main `holon` crate materializes blocks into Petri-net structures for WSJF ranking. It depends on `holon-engine` for the core simulation logic. The standalone `holon-engine` binary allows running Petri-net simulations independently of the full Holon application.
+The `holon-petri` crate materializes task blocks into Petri-net structures for WSJF ranking (tokens = entities, transitions = tasks; see its `lib.rs` module doc). It depends on `holon-api`, `holon-core`, and `holon-engine`, and is re-exported by the fat crate as `holon::petri` (`crates/holon/src/lib.rs`). The standalone `holon-engine` binary allows running Petri-net simulations independently of the full Holon application.
 
 ## Ordering with Fractional Indexing
 
 Block ordering uses fractional indexing:
-- Sort keys are base-26-like strings
+- Sort keys are hex-encoded fractional indices minted via the `loro_fractional_index` crate (`gen_key_between` in `crates/holon-core/src/fractional_index.rs`; `DEFAULT_SORT_KEY = "A0"`). The crate dependency is deliberately kept — see the module-doc rationale in that file; do not hand-roll key generation.
 - Supports arbitrary insertion without rewriting all keys
-- Automatic rebalancing when keys get too long
+- The only production rebalancing is the tied-key rebalance in `crates/holon/src/core/sql_block_operations.rs`, which triggers on duplicate sibling keys — there is no length-based rebalancing (`MAX_SORT_KEY_LENGTH` is asserted only in `fractional_index.rs` tests)
 
 ## Platform Support
 
 ### WASM Compatibility
 
-- `MaybeSendSync` trait alias relaxes Send+Sync on WASM
-- `#[async_trait(?Send)]` for non-Send futures
+- `MaybeSendSync` is `Send + Sync` on **all** targets (`crates/holon-core/src/traits.rs`) — the historical wasm relaxation was removed because the wasm32 browser demo uses Arc/Mutex-backed types; do not reintroduce the cfg split
+- `#[async_trait(?Send)]` survives only at a few specific sites (e.g. `crates/holon-macros`)
 - Conditional compilation for platform-specific features
 
 ### Supported Frontends
@@ -52,9 +54,9 @@ Block ordering uses fractional indexing:
 | Frontend | Status | Notes |
 |----------|--------|-------|
 | GPUI | Primary | Desktop. Mobile via `gpui-mobile` optional dep (`frontends/gpui/Cargo.toml`); screen-layout optimization ongoing. Embeds MCP server. |
-| TUI | Active | Keyboard-driven terminal UI; also used as integration-test harness. |
+| TUI | Active | Keyboard-driven terminal UI. |
 | MCP | Active | Model Context Protocol server (stdio + HTTP modes). |
-| Dioxus / dioxus-web | Prototype | Core works; not actively tested. |
+| Dioxus / dioxus-web | Prototype | Core works; not actively tested. Both are currently in the workspace `exclude` list (root `Cargo.toml`): `dioxus` temporarily (cocoa version conflict with gpui — see the TEMP comment), `dioxus-web` permanently (wasm32-only, built via `trunk`). |
 | Flutter | Deprecated | Directory removed; integrating a second language/toolstack was too painful. |
 | Ply / WaterUI | Excluded from workspace | Upstream compatibility issues. |
 | Blinc | — | `blinc` feature flag in `crates/holon-frontend/Cargo.toml`, not a frontend directory; excluded from workspace due to upstream compatibility issues. |

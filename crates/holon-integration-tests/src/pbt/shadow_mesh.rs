@@ -201,8 +201,7 @@ impl ShadowMesh {
                     peer_ops::find_node_by_stable_id(doc, p)
                         .unwrap_or_else(|| panic!("shadow move target parent {p} missing"))
                 });
-                multi_peer::move_block(doc, node, new_parent)
-                    .expect("shadow primary move_block");
+                multi_peer::move_block(doc, node, new_parent).expect("shadow primary move_block");
             }
             if have_content != want_content {
                 multi_peer::update_block(doc, node, want_content);
@@ -240,7 +239,12 @@ impl ShadowMesh {
         content: &str,
         stable_id: &str,
     ) {
-        peer_ops::peer_create_block(&self.peers[peer_idx].doc, parent_stable_id, content, stable_id);
+        peer_ops::peer_create_block(
+            &self.peers[peer_idx].doc,
+            parent_stable_id,
+            content,
+            stable_id,
+        );
     }
 
     pub fn peer_update(&self, peer_idx: usize, stable_id: &str, content: &str) {

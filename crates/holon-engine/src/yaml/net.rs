@@ -135,6 +135,86 @@ impl YamlNet {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::PrecondSpec;
+
+    #[test]
+    fn malformed_precond_operator_fails_loudly_at_load() {
+        let yaml = r#"
+transitions:
+  finish:
+    inputs:
+      - bind: task
+        token_type: task
+        precond:
+          state: "= done"
+        consume: true
+    outputs: []
+"#;
+        let err = serde_yaml::from_str::<YamlNetFile>(yaml)
+            .expect_err("'= done' must be rejected at load")
+            .to_string();
+        assert!(
+            err.contains("= done"),
+            "error must name the bad spec: {err}"
+        );
+        assert!(err.contains("=="), "error must list valid operators: {err}");
+    }
+
+    #[test]
+    fn transposed_operator_fails_loudly_at_load() {
+        let yaml = r#"
+transitions:
+  finish:
+    inputs:
+      - bind: task
+        token_type: task
+        precond:
+          count: "=> 5"
+        consume: true
+    outputs: []
+"#;
+        let err = serde_yaml::from_str::<YamlNetFile>(yaml)
+            .expect_err("'=> 5' must be rejected at load")
+            .to_string();
+        assert!(err.contains("=> 5"), "error must name the bad spec: {err}");
+    }
+
+    #[test]
+    fn documented_precond_forms_load() {
+        let yaml = r#"
+transitions:
+  t:
+    inputs:
+      - bind: a
+        token_type: task
+        precond:
+          exact: "done"
+          ph: "$who"
+          ge: ">= 0.2"
+          le: "<= 10"
+          gt: "> 1"
+          lt: "< 2"
+          eq: "== 3"
+          ne: "!= 4"
+        consume: true
+    outputs: []
+"#;
+        let file: YamlNetFile = serde_yaml::from_str(yaml).unwrap();
+        let arc = &file.transitions["t"].inputs[0];
+        assert!(matches!(&arc.precond["exact"], PrecondSpec::Exact(s) if s == "done"));
+        assert!(matches!(&arc.precond["ph"], PrecondSpec::Placeholder(s) if s == "$who"));
+        for key in ["ge", "le", "gt", "lt", "eq", "ne"] {
+            assert!(
+                matches!(&arc.precond[key], PrecondSpec::Comparison { .. }),
+                "'{key}' should parse as a comparison"
+            );
+        }
+    }
+}
+
 impl TransitionDef for YamlTransition {
     fn id(&self) -> &str {
         &self.name

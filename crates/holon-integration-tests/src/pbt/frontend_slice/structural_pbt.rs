@@ -1263,8 +1263,16 @@ mod teeth {
             &[],
         )
         .await;
-        let raw = bundle.caps.expect::<dyn SutBackend>().block_raw_snapshot().await;
-        let org = bundle.caps.expect::<dyn SutOrgRead>().org_block_snapshot().await;
+        let raw = bundle
+            .caps
+            .expect::<dyn SutBackend>()
+            .block_raw_snapshot()
+            .await;
+        let org = bundle
+            .caps
+            .expect::<dyn SutOrgRead>()
+            .org_block_snapshot()
+            .await;
         let editor = bundle.caps.expect::<dyn SutEditorMirrorRead>();
         let content_of = |blocks: &[holon_api::Block], sid: &str| {
             blocks
@@ -1445,7 +1453,8 @@ mod teeth {
         // Shadow universe: primary seeded with ONLY the working tree (same
         // base strings as WIDE_TREE_ORG), peers forked at clock-padded heights.
         let shadow_primary = multi_peer::init_doc(1);
-        let page = create_block_with_id(&shadow_primary, None, "structural-page", "structural-page");
+        let page =
+            create_block_with_id(&shadow_primary, None, "structural-page", "structural-page");
         // parent/c1/c2 are SIBLINGS under the page (WIDE_TREE_ORG is flat).
         create_block_with_id(&shadow_primary, Some(page), "parent", "parent");
         create_block_with_id(&shadow_primary, Some(page), "c1", "c1");
@@ -1585,7 +1594,8 @@ mod teeth {
 
         // Shadow universe (same flat working tree as WIDE_TREE_ORG).
         let shadow_primary = multi_peer::init_doc(1);
-        let page = create_block_with_id(&shadow_primary, None, "structural-page", "structural-page");
+        let page =
+            create_block_with_id(&shadow_primary, None, "structural-page", "structural-page");
         create_block_with_id(&shadow_primary, Some(page), "parent", "parent");
         create_block_with_id(&shadow_primary, Some(page), "c1", "c1");
         create_block_with_id(&shadow_primary, Some(page), "c2", "c2");
@@ -1643,7 +1653,9 @@ mod teeth {
             text: "Z".to_string(),
         };
         typ.apply_to_ref(&mut oracle);
-        let oracle_c1 = oracle.domain.block_state.blocks[&ids.c1].content_text().to_string();
+        let oracle_c1 = oracle.domain.block_state.blocks[&ids.c1]
+            .content_text()
+            .to_string();
         {
             let node = crate::pbt::peer_ops::find_node_by_stable_id(&shadow_primary, "c1").unwrap();
             multi_peer::update_block(&shadow_primary, node, &oracle_c1);

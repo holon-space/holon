@@ -1,14 +1,15 @@
 Target Architecture: Persistent Reactive ViewModel (MVVM with FRP)
 
-Core principle: A hierarchy of reactive ViewModel nodes, built once, updated in place via `Mutable<T>` (per-instance widget state) and `Cell<T>` (entity field state). Every node handles its own part of a reactive update and pushes everything else down to its children.
+Core principle: A hierarchy of reactive ViewModel nodes, built once, updated in place via `Mutable<T>` (UI-local state — per-instance widget state and app-level singletons) and `Cell<T>` (entity field state). Every node handles its own part of a reactive update and pushes everything else down to its children.
 
-## Two layers of reactive state
+## Three kinds of reactive state
 
-The UI layer holds two distinct kinds of reactive state, with a clear cut between them:
+The UI layer holds three distinct kinds of reactive state, with a clear cut between them:
 
 | State kind | Tool | Examples | Authority |
 |------------|------|----------|-----------|
-| **Per-instance widget state** | `Mutable<T>` on the ViewModel node | tree-item `expanded`, view-mode-switcher selection, focused_block, scroll position, drag offset, hover, cursor blink | None — UI-local. Lost on reload. |
+| **Per-instance widget state** | `Mutable<T>` on the ViewModel node | tree-item `expanded`, view-mode-switcher selection, scroll position, drag offset, hover, cursor blink | None — UI-local. Lost on reload. |
+| **App-level UI singletons** | `Mutable<T>` on `UiState` (`crates/holon-frontend/src/reactive.rs`) | `focused_block`, `pending_caret_seed`, viewport | None — UI-local, but window-global: exactly one focused block per window, and focus must move atomically. Per-instance homes would let two editors both believe they hold focus. |
 | **Entity field state** | `Cell<T>` from the per-entity cell registry | block `content`, block `completed`, block `parent_id`, todoist-task `priority`, jira-issue `description` | The entity's authority (Loro for blocks, Todoist API for todoist-task, etc.) — see [Sync](Sync.md). |
 
 **Why not one or the other?** Per-instance widget state needs *per-render-slot* identity: two same-id rows in different trees / regions / panes legitimately need independent expansion state, view mode, etc. (FU-1 lesson — migrating these to a `(uri, field)` registry would collapse them and reintroduce a same-id-collision bug class.) Entity field state needs *cross-consumer* identity: every consumer of `block.completed` for the same `block_uri` must see the same value, which is exactly what a `(uri, field)`-keyed registry gives.
@@ -29,11 +30,11 @@ Change sources: Cell signals (entity field state, sourced from CDC + projector) 
 
 Shared Mutables for broadcast: A collection's item template is a `Mutable<RenderExpr>` cloned into each child ItemNode. Setting it once propagates to all items — each self-reinterprets via `map_ref!` on its (data, template) signals.
 
-Per-node self-interpretation: Each node owns `Mutable<RenderExpr>` (its template) + `Mutable<Arc<DataRow>>` (its data; data flows in from cells through the rendering pipeline). A `map_ref!` of both produces the rendered output. The node IS a live reactive processor, not just the output of one.
+Per-node self-interpretation: Each node owns `Mutable<RenderExpr>` (its template) + `ReadOnlyMutable<Arc<DataRow>>` (its data; data flows in from cells through the rendering pipeline). The read-only type is load-bearing: the sole writable handle to a row lives inside `ReactiveRowSet` and `apply_change` is the sole writer, so a node `.set()`-ing its own data is a compile error — data flows in only; the node's writable surface is its template and its per-instance widget Mutables. A `map_ref!` of both produces the rendered output. The node IS a live reactive processor, not just the output of one.
 
 Structural changes: When the backend sends a new RenderExpr for a block, the root node receives it and handles the diff locally — keep matching children, create new ones, drop removed ones. Each child that's kept receives its updated sub-expression and handles it the same way, recursively.
 
-Clean slate: This is not an evolution of the current ReactiveViewModel / ReactiveView / UiState architecture. It reuses useful components (futures-signals, RenderExpr, DataRow, the mini-interpreter concept) but is architecturally independent — no fallbacks to or remainders from centralized state, ephemeral trees, or ui_generation cascades.
+Implementation status: This architecture is IMPLEMENTED — `ReactiveViewModel` (`crates/holon-frontend/src/reactive_view_model.rs`) is the target, reusing the old name; it replaced the earlier snapshot-based `ReactiveViewModel` + `ReactiveViewKind` enum, and [RenderPipeline](RenderPipeline.md) cites it as the canonical shared-VM boundary. `ReactiveView` (`crates/holon-frontend/src/reactive_view.rs`) is part of the design, not a leftover: it is the reactive collection backing a node's children (`ReactiveViewModel.collection`). Sanctioned remainders: `UiState` (`crates/holon-frontend/src/reactive.rs`) holds the app-level UI singletons from the table above, and the GPUI frontend still uses `ui_generation` bumps (`frontends/gpui/src/lib.rs`) for viewport changes — focus changes deliberately do NOT bump it, so no global cascade on focus moves.
 
 ## Editable text in the UI
 

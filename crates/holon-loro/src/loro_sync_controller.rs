@@ -1000,7 +1000,11 @@ mod marks_outbound_tests {
     }
 
     fn block_with_source_lang(lang: Option<holon_api::SourceLanguage>) -> SnapshotBlock {
-        let mut b = Block::new_text(EntityUri::block("b1"), EntityUri::no_parent(), "q".to_string());
+        let mut b = Block::new_text(
+            EntityUri::block("b1"),
+            EntityUri::no_parent(),
+            "q".to_string(),
+        );
         b.source_language = lang;
         SnapshotBlock {
             block: b,
@@ -1018,7 +1022,10 @@ mod marks_outbound_tests {
     fn block_diff_params_emits_null_when_source_language_cleared() {
         let old = block_with_source_lang(Some(holon_api::SourceLanguage::Render));
         let new = block_with_source_lang(None);
-        assert!(blocks_differ(&old, &new), "blocks_differ must see the clear");
+        assert!(
+            blocks_differ(&old, &new),
+            "blocks_differ must see the clear"
+        );
         let params = block_diff_params(&old, &new);
         assert_eq!(
             params.get("source_language"),
@@ -1032,7 +1039,7 @@ mod marks_outbound_tests {
     /// through the typed intent vocabulary (no `agrees_with_ops` divergence).
     #[test]
     fn source_language_clear_update_agrees_with_ops() {
-        use holon_api::{agrees_with_ops, ChangeSet, Provenance};
+        use holon_api::{ChangeSet, Provenance, agrees_with_ops};
         let old = block_with_source_lang(Some(holon_api::SourceLanguage::Render));
         let new = block_with_source_lang(None);
         let ops = vec![("update".to_string(), block_diff_params(&old, &new))];

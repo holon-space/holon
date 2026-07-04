@@ -134,8 +134,16 @@ per-integration Rust code is required.  `McpIntegrationsModule` in
 for each `*.yaml` file:
 
 1. Parses an `IntegrationFileConfig` — transport, auth, entities, tools.
-2. Expands `${VAR}` references from environment variables or app settings
-   (fail-loud if unset; empty string counts as unset).
+2. Expands `${VAR}` references, layered: environment variable first, then an
+   app-settings value whose key matches case-insensitively with `.`/`_` as the
+   same separator (`normalize_var_name`, so the `todoist.api_key` setting
+   resolves `${TODOIST_API_KEY}`); empty string counts as unset. An unresolved
+   `${VAR}` is a **disclosed skip** — the typed `UnresolvedVar` error
+   (`integration_config.rs`) is caught, a warning is logged, and an inert
+   `EmptyOperationProvider` is registered for that integration ("not configured
+   yet, e.g. missing API key"). Any *other* config error (malformed YAML,
+   structurally invalid config) fails loud with a panic. Connection failures
+   are also warn-and-skip with the same inert provider.
 3. Calls `build_mcp_integration()` which connects to the MCP server, builds a
    `QueryableCache<DynamicEntity>` Turso table for each entity that declares a
    `schema`, registers an `McpSyncEngine` with one strategy per entity's `sync`
@@ -145,9 +153,13 @@ for each `*.yaml` file:
 5. Spawns a background initial sync and re-syncs individual entities when the
    MCP server sends resource-update notifications (MCP `subscribe` protocol).
 
-For entities with a `vtable` config, a Turso foreign-data-wrapper table
-(`<entity>_fdw`) is also registered, providing query-time MCP fetch in addition
-to (or instead of) the cache table.
+For entities with a `vtable` config, two tables exist: the cache table itself
+(e.g. `cc_session`, created by the cache factory when a schema is declared)
+plus a Turso foreign table registered under the `_fdw`-suffixed name (e.g.
+`cc_session_fdw` — see `mcp_integration.rs`), providing query-time MCP fetch
+in addition to (or instead of) background sync. `fdw_backed_tables` holds the
+plain cache-table names, and only for entities whose vtable has
+`write_through: true`.
 
 ```
 YAML file (e.g. ~/.config/holon/integrations/todoist.yaml)
@@ -176,7 +188,7 @@ No Rust code is needed for an MCP-backed integration unless the MCP server
 requires special connection handling (OAuth flows are already supported
 generically via `AuthMode::OAuth`).
 
-> **Future direction (F5 follow-up of the Cells plan)**: each external system will gain its own `EntityCellRegistry` impl alongside its `OperationProvider`. Consumers will then read entity field state through `services.cells().live_field::<T>(uri, field)` uniformly across local and external entities. The third-party API stays as the authority; cells project from the existing CDC stream. No changes to the integration story above — this is additive once the cell infrastructure lands.
+> **Future direction (F5 follow-up of the Cells plan)**: each external system will gain its own `EntityCellRegistry` impl alongside its `OperationProvider`. Consumers will then read entity field state through `services.cells().live_field::<T>(uri, field)` uniformly across local and external entities. The third-party API stays as the authority; cells project from the existing CDC stream. The cell infrastructure itself has landed — `EntityCellRegistry`/`live_field` in `holon-core` (`cell_registry.rs`, `traits.rs`) and `BlockCellRegistry` in `holon-loro` cover the `block` entity — so the remaining future work is the per-external-system registry impls. No changes to the integration story above.
 
 ### MCP Client Integration (holon-mcp-client)
 
@@ -222,7 +234,9 @@ MCP Server (e.g. ai.todoist.net/mcp)
 #### YAML Sidecar
 
 Each integration YAML file (`IntegrationFileConfig`) combines transport/auth
-config with entity and tool declarations.  The full schema:
+config with entity and tool declarations.  A representative example (the source
+of truth for the full schema is `IntegrationFileConfig` in
+`integration_config.rs` and `McpSidecar` in `mcp_sidecar.rs`):
 
 ```yaml
 # Transport — one of http or child_process
@@ -246,21 +260,32 @@ auth:
 entities:
   todoist_tasks:
     short_name: task          # display name used in the UI
+    # source_name: task       # server-side entity name when it differs from the YAML key
     id_column: id             # primary key column (default: "id")
     schema:                   # DDL for the Turso cache table
       - { name: id,       sql_type: TEXT, primary_key: true }
       - { name: content,  sql_type: TEXT }
       - { name: priority, sql_type: TEXT }
       - { name: parentId, sql_type: TEXT, indexed: true }
-    sync:
+    # profile_variants: [...] # render variants, passed to TypeDefinition
+    sync:                             # tool-based sync (list_tool present)
       list_tool: find-tasks           # MCP tool to call for bulk fetch
       extract_path: tasks             # JSON key in tool response containing array
       list_params: { filter: "all" }  # static params passed to list tool
       cursor:                         # optional cursor-based incremental sync
         request_param: cursor
         response_field: nextCursor
-    # vtable:                         # alternative: foreign-data-wrapper (FDW)
-    #   list_resource: ".../{id}"     # on-demand fetch via SQL push-down
+    # OR resource-based sync (list_resource present selects ResourceSync):
+    # sync:
+    #   list_resource: "tasks://{project_id}"
+    #   uri_params: { project_id: "inbox" }
+    # vtable:                         # alternative: foreign table (FDW) on the cache table
+    #   # tool-based mode — SQL WHERE constraints pushed down as tool params:
+    #   search_tool: find-tasks
+    #   extract_path: tasks
+    #   # OR resource-based mode — full fetch of a resource URI, NO pushdown:
+    #   # list_resource: "tasks://{project_id}"
+    #   # uri_params: { project_id: "inbox" }
 
 tools:
   complete-tasks:
@@ -275,6 +300,7 @@ tools:
   update-tasks:
     entity: todoist_tasks
     affected_fields: [content, description, priority, dueString, labels]
+    # param_overrides: { ... }        # per-parameter TypeHint / display overrides
     undo:
       tool: update-tasks              # mirror undo: re-call same tool with old values
       capture: [content, description, priority, dueString, labels]
@@ -302,9 +328,12 @@ code exists — the old `holon-todoist` crate has been deleted.
 
 Key pieces registered by `McpIntegrationsModule::configure()`:
 
-- **`McpIntegrationRegistry`** (async DI singleton): builds all `McpIntegration`
-  objects in parallel at startup, resolves Turso `DbHandle` and `SyncTokenStore`
-  from DI, runs initial `sync_all()` in a background `tokio::spawn`.
+- **`McpIntegrationRegistry`** (async DI singleton): resolved concurrently with
+  other DI services at startup, but builds the `McpIntegration` objects
+  themselves sequentially (one awaited `build_mcp_integration()` per config —
+  startup cost is additive per integration); resolves Turso `DbHandle` and
+  `SyncTokenStore` from DI, runs initial `sync_all()` in a background
+  `tokio::spawn`.
 - **`RegistryOperationProxy`** (one per YAML file, added to the
   `dyn OperationProvider` set): delegates `operations()` and
   `execute_operation()` to the matching `McpOperationProvider` inside the registry.
@@ -326,60 +355,90 @@ Todoist, Claude History, and any future MCP server — just add a YAML file.  Se
 
 ## Frontend Architecture
 
-Holon's primary frontend is **GPUI** — a native Rust desktop application. The Dioxus web frontend (see below) is a **prototype**: the core works, but it is not actively tested. See [Engine.md §Supported Frontends](Engine.md) for the full status table.
+Holon's primary frontend is **GPUI** — a native Rust desktop application. The Dioxus frontend (see below) is a **prototype**: the core works, but it is not actively tested. See [Engine.md §Supported Frontends](Engine.md) for the full status table.
 
-### Dioxus Web Frontend (Prototype)
+### Dioxus Frontend (Prototype)
 
-```rust
-// Inversion of Control: frontend asks for what to render, backend resolves everything.
-// No FFI — direct async calls within the same WASM binary (or to a backend server).
-
-async fn get_root_block_id() -> Result<String>;
-
-async fn render_entity(
-    block_id: String,
-    preferred_variant: Option<String>,
-    is_root: bool,
-) -> Result<WatchHandle>;  // returns a Stream<UiEvent>
-
-// Operations: frontend dispatches user actions
-async fn execute_operation(
-    entity: String,
-    op: String,
-    params: HashMap<String, Value>,
-) -> Result<Option<String>>;
-```
-
-The frontend never sends queries — it only sends block IDs and receives render instructions. In the browser context, the backend may run in the same WASM thread (for local-only mode) or connect to a remote Holon backend via WebSocket/HTTP.
-
-### Reactive Updates
-
-Frontends subscribe to change streams via Dioxus signals:
+Inversion of Control: the frontend asks for what to render, the backend
+resolves everything. The engine runs in-process (a desktop webview via
+`dioxus::desktop`; `frontends/dioxus/src/main.rs`), so there is no FFI — the
+frontend calls the backend API directly on the shared tokio runtime. The real
+surface (all signatures verified against the code):
 
 ```rust
-use dioxus::prelude::*;
+// crates/holon/src/api/block_domain.rs — resolve a block into a render
+// expression plus a CDC stream (first batch = initial query results):
+impl BlockDomain {
+    pub async fn render_entity(
+        &self,
+        block_id: &EntityUri,
+        preferred_variant: &Option<String>,
+    ) -> Result<(RenderExpr, RowChangeStream)>;
+}
 
-fn BlockView(block_id: String) -> Element {
-    let mut block_data = use_signal(|| None);
+// crates/holon/src/api/ui_watcher.rs — watch a block's UI; re-renders via
+// render_entity() on structural change, streams UiEvents + data deltas:
+pub async fn watch_ui(engine: Arc<BackendEngine>, block_id: EntityUri)
+    -> Result<WatchHandle>;  // WatchHandle: crates/holon-api/src/streaming.rs
 
-    use_effect(move || {
-        let mut stream = watch_changes(block_id.clone());
-        // Update signal whenever backend pushes a change
-        spawn(async move {
-            while let Some(change) = stream.next().await {
-                block_data.set(Some(change.data));
-            }
-        });
-    });
-
-    // Dioxus auto-rerenders when signal changes
-    rsx! { div { "{block_data.read()}" } }
+// crates/holon-frontend/src/lib.rs — frontend dispatches user actions:
+impl FrontendSession {
+    pub async fn execute_operation(
+        &self,
+        entity_name: &EntityName,
+        op_name: &str,
+        params: HashMap<String, Value>,
+    ) -> Result<Option<Value>>;
 }
 ```
 
-No explicit refresh calls — UI state derives from the change stream, and Dioxus's fine-grained reactivity handles re-rendering.
+The frontend never sends queries — it only sends block IDs and receives render
+instructions. Clicks become writes through one funnel: display builders build
+an `OperationIntent` and `dispatch_intent()`
+(`frontends/dioxus/src/render/builders/dispatch.rs`) spawns
+`FrontendSession::execute_operation` onto the tokio runtime, fire-and-forget
+with loud error logging.
+
+### Reactive Updates
+
+The Dioxus frontend subscribes to `ViewModel` snapshots via
+`ReactiveEngine::watch` (`crates/holon-frontend/src/reactive.rs`) and bridges
+them into a Dioxus signal. The actual loop from
+`frontends/dioxus/src/main.rs` `App()`:
+
+```rust
+let mut view_model: Signal<Option<ViewModel>> = use_signal(|| None);
+
+// Bridge: tokio watch stream (Send) -> dioxus signal (!Send), carrying the
+// root-layout ViewModel snapshots produced by ReactiveEngine::watch.
+let watch_rx = use_hook(move || {
+    let (tx, rx) = tokio::sync::watch::channel::<Option<ViewModel>>(None);
+    rt.spawn(async move {
+        let uri = holon_api::root_layout_block_uri();
+        let mut stream = engine.watch(&uri);
+        while let Some(rvm) = stream.next().await {
+            if tx.send(Some(rvm.snapshot())).is_err() { break; }
+        }
+    });
+    rx
+});
+
+use_future(move || {
+    let mut rx = watch_rx.clone();
+    async move {
+        while rx.changed().await.is_ok() {
+            view_model.set(rx.borrow_and_update().clone());
+        }
+    }
+});
+```
+
+No explicit refresh calls — UI state derives from the change stream, and
+Dioxus's fine-grained reactivity handles re-rendering.
 
 ### MCP Apps Rendering in Dioxus
+
+> **Status: target architecture** — same caveat as the MCP Apps banner above; no `AppBridge` or `McpAppView` exists in the code yet.
 
 The MCP Apps host component renders sandboxed iframes through Dioxus's native `iframe` element support:
 

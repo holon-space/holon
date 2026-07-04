@@ -141,10 +141,7 @@ async fn memory_slice_editor_invariants_deselected_without_editor() {
     )
     .await;
 
-    for id in [
-        "inv-editor-text/mirror",
-        "inv-editor-caret/mirror",
-    ] {
+    for id in ["inv-editor-text/mirror", "inv-editor-caret/mirror"] {
         assert!(
             report.deselected.iter().any(|d| d.0 == id),
             "{id} must be deselected without an editor component; ran={:?} deselected={:?}",
@@ -183,10 +180,7 @@ async fn memory_slice_editor_text_and_caret_match_when_wired() {
     )
     .await;
 
-    for id in [
-        "inv-editor-text/mirror",
-        "inv-editor-caret/mirror",
-    ] {
+    for id in ["inv-editor-text/mirror", "inv-editor-caret/mirror"] {
         assert!(
             report.ran_ids().contains(&id),
             "wiring the editor + ref editor must select {id}; ran={:?}",

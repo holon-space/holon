@@ -11,7 +11,7 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 rhai.workspace = true
-tokio = { workspace = true, features = ["sync", "rt"] }
+tokio = { workspace = true, features = ["sync", "rt", "time"] }
 tracing.workspace = true
 
 rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", tag = "rmcp-v0.12.0", features = ["client", "transport-streamable-http-client-reqwest", "transport-child-process", "auth"] }

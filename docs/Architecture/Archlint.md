@@ -70,7 +70,7 @@ tens of seconds.
 ```
 archlint/
 ├── archlint                  # bash wrapper (picks Python ≥ 3.11)
-├── archlint.py               # ~700-line runner
+├── archlint.py               # ~870-line runner
 ├── sgconfig.yml              # ast-grep config (ruleDirs: [rules])
 ├── rules/                    # ast-grep YAML rules — one file per rule
 │   ├── ok.yml                                  # `.ok()` defensive pattern
@@ -79,12 +79,14 @@ archlint/
 │   ├── no-block-on-in-async.yml                # block_on inside async fn
 │   ├── no-jsonb-as-string.yml                  # `.as_string()` on jsonb cols
 │   └── no-underscore-params.yml                # `fn f(_x: T)` masking unused
-├── smells/                   # ripgrep regex smells (TOML)
-│   ├── words.toml            # fallback / compatibility / global_registry / raw_sql / routing_payload_key / sort_key_writer / deleted_cell_symbol
-│   ├── imports.toml          # loro / turso / platform / frontend-provider-dep / frontend-storage-backend / orgmode-raw-sql
-│   ├── focus.toml            # direct_focus_mutation / navigation_execute_op / focus-no-from-raw
-│   ├── entity_uri.toml       # entity_uri_from_raw / entity_uri_parse_default
-│   └── pbt_transitions.toml  # pbt-transition-helper-concrete-ref / pbt-slice-invariant-foreign-module / pbt-transition-apply-intent / pbt-sut-handle-frontend-simulation
+├── smells/                   # ripgrep regex smells (TOML) — smell ids in the production table below
+│   ├── words.toml            # vocabulary smells (fallback / compatibility / …)
+│   ├── imports.toml          # crate-boundary import + manifest smells
+│   ├── focus.toml            # focus/navigation mutation smells
+│   ├── entity_uri.toml       # EntityUri parse-boundary smells
+│   ├── block_writes.toml     # sole_block_writer (single raw-SQL writer for block tables)
+│   ├── order_minting.toml    # order_minting (fractional-index minting monopoly)
+│   └── pbt_transitions.toml  # PBT transition / SUT-handle discipline smells
 ├── dylint/                   # type-aware Rust lints (cdylib via dylint 5.0)
 │   ├── README.md
 │   ├── result_to_none/                       # `match r { Ok(x) => Some(x), Err(_) => None }`
@@ -199,6 +201,10 @@ fastest path.
 
 ## Production rule set (current)
 
+This table is a hand-maintained inventory and rots. Regenerate it from the
+definitions: `grep '^id = ' archlint/smells/*.toml`,
+`grep '^id:' archlint/rules/*.yml`, `ls archlint/dylint/`.
+
 | Rule id | Layer | Tag | Maps to |
 |---|---|---|---|
 | `no-underscore-params` | ast-grep | `unused_param` | unused-variable warning suppression hygiene |
@@ -214,6 +220,8 @@ fastest path.
 | `frontend-storage-backend` | smell | `frontend-storage-backend` | `holon-frontend` must not import Loro/Turso/RowChangeStream |
 | `frontend-raw-sql` | smell | `frontend-raw-sql` | No raw SQL in `holon-frontend` (storage-agnostic ViewModel layer) |
 | `orgmode-raw-sql` | smell | `orgmode-raw-sql` | No raw SQL in `holon-orgmode` outside `di.rs` |
+| `orgmode-holon-dep` / `orgmode-holon-dep-manifest` | smell | same as id | `holon-orgmode` must not depend on the `holon` engine crate (source imports / Cargo.toml) |
+| `mcp-client-holon-dep` / `mcp-client-holon-dep-manifest` | smell | same as id | `holon-mcp-client` must not import the `holon` engine crate (source imports / Cargo.toml) |
 | `global_registry` | smell | `global_registry` | No `Arc<RwLock<HashMap<String, Entity<…>>>>` registries |
 | `fallback` | smell | `fallback` | The word "fallback" usually means a hidden failure mode |
 | `compatibility` | smell | `compatibility` | "Compatibility" usually means a backwards-compat shim to delete |
@@ -224,6 +232,8 @@ fastest path.
 | `entity_uri_parse_default` | smell | `entity_uri_parse_default` | `EntityUri::parse(..).unwrap_or[_else](..)` silently substituting a default |
 | `routing_payload_key` | smell | `routing_payload_key` | `"_routing_*"` string literals — typed `Event` fields should be used instead |
 | `sort_key_writer` | smell | `sort_key_writer` | Producer-side `sort_key` write in `holon-orgmode` — emit `after_block_id` instead |
+| `order_minting` | smell | `order_minting` | `gen_key_between` / `new_child_anchor` outside the sibling-set's order owner (Model.md invariants 2/10) |
+| `sole_block_writer` | smell | `sole_block_writer` | Raw SQL write to `block`/`block_raw` outside the sanctioned single writer |
 | `deleted_cell_symbol` | smell | `deleted_cell_symbol` | Pre-Phase-2 symbols reappearing (`BlockContentResolver`, `live_content`, watermark fields) |
 | `pbt-transition-helper-concrete-ref` | smell | `pbt-transition-helper-concrete-ref` | PBT transition helpers binding to concrete `ReferenceState` instead of capability traits |
 | `pbt-slice-invariant-foreign-module` | smell | `pbt-slice-invariant-foreign-module` | Slice test importing `Inv*` from outside `invariants::bodies::` |
@@ -245,7 +255,7 @@ These gates lock in the Cells architecture (see [Storage](Storage.md), [Sync](Sy
 | Rule id | Status | Layer | Tag | What it catches |
 |---------|--------|-------|-----|-----------------|
 | `deleted_cell_symbol` | **Implemented** (smells/words.toml) | smell | `deleted_cell_symbol` | `BlockContentResolver` / `live_content` / `set_live_content` / `EditableTextProvider` / `with_content_resolver` / `_expected_*` watermark fields reappearing in source |
-| `sole_block_writer` | **Implemented** (smells/ — added by sibling archlint task) | smell | `sole_block_writer` | Direct `INSERT INTO block` / `UPDATE block SET` outside `BlockConsolidator` and the startup-seed path |
+| `sole_block_writer` | **Implemented** (smells/block_writes.toml) | smell | `sole_block_writer` | Direct `INSERT INTO block` / `UPDATE block SET` outside `BlockConsolidator` and the startup-seed path |
 | `no-block-content-resolver` | Planned | ast-grep | `no_block_content_resolver` | Re-introducing any `*ContentResolver` trait or struct for blocks |
 | `cells-only-constructed-in-registry-layer` | Planned | ast-grep | `cells_construct` | `Cell::new` and cell backing constructors callable only from cell-registry code + tests |
 | `no-raw-mutable-for-cell-fields` | Planned | ast-grep | `cell_field_mutable` | `Mutable<T>` for entity field types outside cell-registry crates (deny-list grows per migrated field) |

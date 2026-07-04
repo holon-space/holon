@@ -1,3 +1,4 @@
+use crate::arc::PrecondSpec;
 use crate::value::Value;
 use crate::{InputArc, Marking, TokenState};
 use rhai::{Engine, Scope};

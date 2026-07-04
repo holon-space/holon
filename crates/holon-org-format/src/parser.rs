@@ -940,6 +940,32 @@ mod tests {
     }
 
     #[test]
+    fn test_custom_done_keyword_preserves_category() {
+        // `set_task_state` must not destroy the category the parser derived
+        // from the file's `#+TODO:` config: SHIPPED is a done keyword here
+        // even though it is not in DEFAULT_DONE_KEYWORDS.
+        let content = "#+TODO: TODO | SHIPPED\n* SHIPPED Task";
+        let result = parse_test_org(content);
+
+        assert_eq!(result.blocks.len(), 1);
+        assert_eq!(
+            result.blocks[0].task_state(),
+            Some(TaskState::done("SHIPPED"))
+        );
+        assert!(result.blocks[0].is_completed());
+
+        // Custom ACTIVE categorization of a default-done keyword must
+        // survive too (`#+TODO: DONE | SHIPPED` makes DONE an active state).
+        let content = "#+TODO: DONE | SHIPPED\n* DONE Task";
+        let result = parse_test_org(content);
+        assert_eq!(
+            result.blocks[0].task_state(),
+            Some(TaskState::active("DONE"))
+        );
+        assert!(!result.blocks[0].is_completed());
+    }
+
+    #[test]
     fn test_parse_title_and_todo_keywords() {
         let content = "#+TITLE: My Document\n#+TODO: TODO INPROGRESS | DONE CANCELLED\n* Task";
         let result = parse_test_org(content);

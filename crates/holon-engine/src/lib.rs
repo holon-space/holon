@@ -17,7 +17,7 @@ use chrono::{DateTime, Utc};
 use std::collections::BTreeMap;
 use value::Value;
 
-pub use arc::{CreateArc, InputArc, OutputArc};
+pub use arc::{CmpOp, CreateArc, InputArc, OutputArc, PrecondSpec};
 pub use guard::CompiledExpr;
 
 pub trait TokenState {

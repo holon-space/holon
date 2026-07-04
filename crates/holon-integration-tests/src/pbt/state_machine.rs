@@ -190,15 +190,17 @@ pub(crate) fn merge_peer_blocks_into_primary(
         );
         block.created_at = 0;
         block.updated_at = 0;
-        let next_seq = next_seq_by_parent.entry(parent_uri.clone()).or_insert_with(|| {
-            block_state
-                .blocks
-                .values()
-                .filter(|b| b.parent_id == parent_uri)
-                .map(|b| b.sequence())
-                .max()
-                .map_or(0, |m| m + 1)
-        });
+        let next_seq = next_seq_by_parent
+            .entry(parent_uri.clone())
+            .or_insert_with(|| {
+                block_state
+                    .blocks
+                    .values()
+                    .filter(|b| b.parent_id == parent_uri)
+                    .map(|b| b.sequence())
+                    .max()
+                    .map_or(0, |m| m + 1)
+            });
         block.set_sequence(*next_seq);
         *next_seq += 1;
         block_state.blocks.insert(block_uri.clone(), block);

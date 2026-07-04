@@ -8,7 +8,7 @@
 
 ```
 PRQL string ──→ prqlc compile → SQL (pure data query, no render directives)
-GQL string  ──→ gql_parser::parse → AST → gql_transform::transform_default → SQL
+GQL string  ──→ gql_parser::parse → AST → gql_transform::transform(&query, &GraphSchema) → SQL → gql_params_to_dollar (`:param` → `$param`)
 SQL string  ──→ (used directly)
 ```
 
@@ -23,7 +23,7 @@ GQL queries operate on an Entity-Attribute-Value schema with 14 tables:
 - `node_props_{int,text,real,bool,json}` — typed node properties
 - `edge_props_{int,text,real,bool,json}` — typed edge properties
 
-GQL also operates on ordinary tables with foreign key relations — not only the EAV schema. The schema is initialized idempotently (all `IF NOT EXISTS`) during database startup.
+GQL also operates on ordinary tables with foreign key relations — not only the EAV schema. The unifying mechanism is the `GraphSchema` passed to `gql_transform::transform` (cached in `BackendEngine::graph_schema_cache`): it maps relational tables (`blocks`, `documents`) into graph nodes alongside the EAV tables, so both are queryable as one graph. After transform, `gql_params_to_dollar` normalizes GQL `:param` placeholders to `$param` — anyone debugging GQL parameters will hit this. The schema is initialized idempotently (all `IF NOT EXISTS`) during database startup.
 
 ### EntityProfile System (Render Architecture)
 
@@ -31,7 +31,8 @@ Render specifications are resolved **at runtime per-row** via the EntityProfile 
 
 **Location**: data model + `ProfileResolving` trait in
 `crates/holon-api/src/entity_profile.rs` (storage de-leak Stage 10);
-`ProfileResolver` and profile parsing stay in `crates/holon/src/entity_profile.rs`.
+`ProfileResolver` and profile parsing live in the `holon-profiles` crate
+(`crates/holon-profiles/src/lib.rs`, re-exported as `holon::entity_profile`).
 
 #### Overview
 
@@ -58,21 +59,21 @@ list(#{item_template: render_entity()})
 
 Adding a new widget (kanban, calendar, parametric-style, …) does **not** touch the `RenderExpr` enum, the Rhai parser, or the PBT `DisplayNode` assertions. The seam:
 
-1. **Parse-time** (`crates/holon/src/render_dsl.rs`): every identifier-followed-by-`(` in the source is treated as a widget call. The parser scans the source for such names and registers them with the Rhai engine on the fly. `register_widget_names()` is an **optional** startup hint the frontend uses to seed the engine with the canonical builder list; backend tests / headless engines / `action_watcher` work without it because of source-driven discovery.
+1. **Parse-time** (`crates/holon-api/src/render_dsl.rs`): every identifier-followed-by-`(` in the source is treated as a widget call. The parser scans the source for such names and registers them with the Rhai engine on the fly. `register_widget_names()` is an **optional** startup hint the frontend uses to seed the engine with the canonical builder list; backend tests / headless engines / `action_watcher` work without it because of source-driven discovery.
 2. **Interpret-time** (`crates/holon-frontend/src/shadow_builders/`): the auto-generated `builder_registry!` macro picks up any new builder file and exposes it via `builder_names()`. The widget name resolves to the new builder at render time.
 
 A new widget therefore lands as a single new file under `shadow_builders/`. No enum variant, no parser change, no PBT update. See `codev/specs/0006-pre-velocity-refactors.md` Phase 2.
 
-**Profile Resolution** (BackendEngine / entity_profile.rs):
+**CDC stream forwarding** (`ui_watcher.rs`):
+`watch_ui(block_id)` returns a `WatchHandle` carrying a `Stream<UiEvent>`. `merge_triggers` merges three event sources — structural CDC, `SetVariant` commands, and profile version changes — into a single `RenderTrigger` stream. This drives a `switch_map` that aborts the previous data forwarder and spawns a new one on each trigger. Each CDC Created/Updated event is enriched with profile-resolved computed fields before forwarding.
+
+**Profile Resolution** happens per-row inside those data forwarders (`ui_watcher.rs`: `enrich_batch` / `enrich_row`, via the `Arc<dyn ProfileResolving>` obtained from `BackendEngine::profile_resolver()`):
 ```
 For each row:
   - Look up EntityProfile by row's entity scheme in the `id` column
   - Evaluate Rhai variant conditions against row data
   - Attach matching RowProfile (render expr + operations)
 ```
-
-**CDC stream forwarding** (`ui_watcher.rs`):
-`watch_ui(block_id)` returns a `WatchHandle` carrying a `Stream<UiEvent>`. `merge_triggers` merges three event sources — structural CDC, `SetVariant` commands, and profile version changes — into a single `RenderTrigger` stream. This drives a `switch_map` that aborts the previous data forwarder and spawns a new one on each trigger. Each CDC Created/Updated event is enriched with profile-resolved computed fields before forwarding.
 
 **Reactive layer** (`holon-frontend`):
 Query results flow into `ReactiveView` (a self-managing reactive collection backed by futures-signals `MutableVec`). Each row is wrapped in a `ReactiveViewModel` — a persistent node that owns its `RenderExpr` and `DataRow` as `Mutable<_>` fields. When either changes the node re-interprets itself and pushes updates to child nodes without rebuilding the tree. `DataRowAccumulator` (`holon-api/src/widget_spec.rs`) is the single source of truth for `Change<DataRow>` → keyed collection conversion.

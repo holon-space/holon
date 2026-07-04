@@ -380,10 +380,6 @@ impl<'a, S: SutWatch> SutWatch for CachingProxy<'a, S> {
     async fn block_raw_query_ids(&self, sql: &str) -> BTreeSet<EntityUri> {
         self.inner.block_raw_query_ids(sql).await
     }
-
-    async fn block_raw_field(&self, id: &EntityUri, field: &str) -> Option<String> {
-        self.inner.block_raw_field(id, field).await
-    }
 }
 
 // ─── SutRenderer ──────────────────────────────────────────────────────

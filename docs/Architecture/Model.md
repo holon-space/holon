@@ -10,7 +10,7 @@ intent and the detail doc may be stale — flag it, don't silently pick one.*
 ## One sentence
 
 Holon is one logical block tree, replicated across heterogeneous partial
-replicas (org/markdown files, the Loro store, external APIs, the UI editor),
+replicas (org files, the Loro store, external APIs, the UI editor),
 kept convergent by a single per-vault **consolidator** doing 3-way merges
 against per-replica **bases**, and projected one-way into an incremental query
 pipeline.
@@ -22,7 +22,7 @@ The read path is **one incremental computation**:
 
 | # | Layer | Members | The rule |
 |---|-------|---------|----------|
-| 1 | **Replicas** | org/md files, Loro store, external APIs, UI editor | Every replica has a base; inbound intent = `diff(base, current)`. No replica writes another replica. |
+| 1 | **Replicas** | org files, Loro store, external APIs, UI editor | Every replica has a base; inbound intent = `diff(base, current)`. No replica writes another replica. |
 | 2 | **Consolidator** | one per vault, epoch-pinned (Loro when enabled; Turso-LWW in SqlOnly) | The only merger. Monopolist of order: it mints every fractional index. Text merges via the CRDT merge *function*; structure via the tree CRDT (store present) or AST 3-way (absent). |
 | 3 | **Projection** | Turso | Exactly one writer per mode; verbatim and total; never re-merges; ephemeral by contract. |
 | 4 | **Reactive pipeline** | matviews → CDC → `LiveData<Block>` / cells | Convergent state, not an event log; recovery is resync (`Replace`), not acks. |
@@ -37,7 +37,7 @@ concepts separate even where the config isn't:
 | Axis | Values |
 |------|--------|
 | Storage backend | Loro store on / off |
-| File adapter | org / markdown / none |
+| File adapter | org / none (`crates/holon-markdown` exists but is unwired — no crate depends on it; markdown is not a selectable adapter today) |
 | Merge fidelity (per field) | op-CRDT ≻ base-3-way ≻ LWW |
 | Transport | Iroh P2P on / off |
 
@@ -89,6 +89,13 @@ for any field is: op-fidelity (store) → base-limited 3-way (transient) → LWW
     incomparable timestamps) and mixes fi keyspaces (`gen_key_between` vs
     Loro-fi in one `sort_key` column). Handover = explicit migration: seed the
     new consolidator from the old consolidated state, rewrite all bases.
+    **Today that migration is unbuilt** (spec 0008 Phase 4.1): the startup
+    guard (`guard_consolidator_epoch` in
+    `crates/holon-app/src/consolidator_epoch.rs`) refuses a mode flip, and
+    acknowledging it with `HOLON_CONSOLIDATOR_MIGRATE=1` is an INTERIM
+    wipe-and-reseed — it deletes every component's durable state, destroying
+    anything not re-derivable from surviving replicas (Loro op history,
+    SQL-only fields).
 11. **One consolidator per file replica** — cross-device convergence travels
     through Loro/P2P, never through a byte-level file syncer
     (Syncthing/iCloud/Dropbox on the vault is out of contract). A foreign
@@ -96,18 +103,25 @@ for any field is: op-fidelity (store) → base-limited 3-way (transient) → LWW
     device re-ingests the other's projections as fresh intent: duplicated ops
     with wrong attribution, order oscillation, and `.sync-conflict` files
     ingested as duplicate-ID documents.
-12. **Every field write goes through a cell backing** — scalars now resolve a
-    `LoroMetaCellBacking<T>` in Full mode (Phase 2.1/2.2 landed). The remaining
-    `write_field` carve-outs (`id`/`depth`/`content_type`/`source_name` +
-    `_expected_*` watermarks routed to SQL; the tree-position fields
-    `parent_id`/`sort_key`, Phase 2.3; the disclosed unseeded-vault content
-    case) are disclosed debt, not design; the target is a backing per field
-    even when the backing is "SQL LWW".
+12. **Every field write resolves a cell backing** — content and scalars do so
+    in both modes: `LoroTextCellBacking`/`LoroMetaCellBacking<T>` in Full,
+    `LwwTextCellBacking`/`LwwScalarBacking<T>` in SqlOnly (via
+    `BlockCellRegistry::sql_only_wired`). The disclosed exceptions: the
+    tree-position fields (`parent_id`/`sort_key`, pending Cells plan
+    Phase 2.3 — `set_field("sort_key")` is a hard error, order is minted by
+    the consolidator only), the derived/control fields
+    (`id`/`depth`/`content_type`/`source_name`, `_expected_*` watermarks —
+    routed to SQL), and the unseeded-vault content case. Per-backing status
+    lives in [Storage §Cells](Storage.md).
 
 ## Cell vs Mutable (the UI state cut)
 
-- `Cell<T>`, keyed `(uri, field)`: entity field state — has identity, an
-  authority behind it, cross-consumer coherence. `current()` reflects the
+- `Cell<T>`, keyed `(uri, field, type)` (the registry cache key is
+  `(EntityUri, String, TypeId)`, `crates/holon-core/src/cell_registry.rs`):
+  entity field state — has identity, an authority behind it, cross-consumer
+  coherence. Coherence is guaranteed by the shared backing, not by
+  cell-object identity — two consumers at different `T` get distinct `Cell`
+  instances. `current()` reflects the
   *local authority replica* including uncommitted local ops; cross-device
   confirmation is invisible by design (CRDT).
 - `Mutable<T>` on the ViewModel node: per-render-slot widget state (expanded,

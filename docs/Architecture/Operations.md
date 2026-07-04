@@ -34,7 +34,7 @@ dispatcher.execute_operation(&EntityName::new("todoist-task"), "set_completion",
 // Returns an OperationResult (field deltas + UndoAction) immediately
 
 // Confirmation comes via CDC stream
-watch_changes().await  // UI updates when change arrives
+watch_changes_since(...).await  // UI updates when change arrives (crates/holon-api/src/streaming.rs)
 ```
 
 `EntityName` (`crates/holon-api/src/types.rs`) is an enum (`Named(String)` / `Wildcard`), constructed via `EntityName::new(...)`.
@@ -52,7 +52,7 @@ pub struct OperationDispatcher {
 // Routes by entity_name to appropriate provider:
 // "block"          → LoroBlockOperations   (authority for blocks; SqlOperationProvider in SqlOnly mode)
 // "todoist-tasks"  → McpOperationProvider  (via RegistryOperationProxy for MCP integrations)
-// "org-headline"   → OrgModeSyncProvider   (implements OperationProvider)
+// "orgmode.sync"   → OrgModeSyncProvider   (single sync-trigger op; rejects any other entity/op)
 ```
 
 ### Operation Metadata via Macros
@@ -122,7 +122,9 @@ pub struct UndoStack {
 
 #### OperationLogStore (Persistent)
 
-For persistent undo/redo that survives app restarts, `OperationLogStore` stores operations in a database table:
+> **Status: write-only today.** `OperationLogObserver` is registered (`crates/holon/src/di/registration.rs`) and appends every executed operation to the log, but nothing reads the log back: `mark_undone`/`mark_redone` have no production callers and no frontend queries the `operation` table. The only live undo/redo path is the in-memory `UndoStack` above — persistent undo/redo that survives restarts is the *target* this store was built for, not shipped behavior.
+
+`OperationLogStore` stores operations in a database table:
 
 **Location**: `crates/holon/src/core/operation_log.rs`
 
@@ -133,28 +135,29 @@ pub struct OperationLogStore {
 }
 ```
 
-**Operations Table Schema:**
+**Operation Table Schema** (`crates/holon-turso/sql/schema/operations.sql`, applied by `OperationsSchemaModule` in `crates/holon-turso/src/schema_modules.rs` — must match the `OperationLogEntry` entity):
 
 ```sql
-CREATE TABLE operations (
-    id INTEGER PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS operation (
+    id INTEGER PRIMARY KEY NOT NULL,
     operation TEXT NOT NULL,       -- JSON-serialized Operation
     inverse TEXT,                  -- JSON-serialized inverse Operation (nullable)
     status TEXT NOT NULL,          -- 'pending_sync', 'synced', 'undone', 'cancelled'
     created_at INTEGER NOT NULL,   -- Unix timestamp in milliseconds
     display_name TEXT NOT NULL,    -- Denormalized for efficient queries
     entity_name TEXT NOT NULL,     -- Denormalized for efficient queries
-    op_name TEXT NOT NULL          -- Denormalized for efficient queries
+    op_name TEXT NOT NULL,         -- Denormalized for efficient queries
+    _change_origin TEXT
 );
 ```
 
 #### OperationLogEntry
 
-The `OperationLogEntry` entity represents a logged operation:
+The `OperationLogEntry` entity (`crates/holon-core/src/operation_log.rs`) represents a logged operation:
 
 ```rust
 #[derive(Entity)]
-#[entity(name = "operations", short_name = "op")]
+#[entity(name = "operation", short_name = "op")]
 pub struct OperationLogEntry {
     #[primary_key]
     pub id: i64,
@@ -183,7 +186,7 @@ pub enum OperationStatus {
 }
 ```
 
-**Status Transitions:**
+**Status Transitions** (target design — the `mark_undone`/`mark_redone` transitions below are implemented on `OperationLogStore` but have no production callers yet):
 
 | From | To | When |
 |------|-----|------|
@@ -194,6 +197,8 @@ pub enum OperationStatus {
 | Undone | Cancelled | New operation executed (clears redo stack) |
 
 #### Undo/Redo Flow
+
+The flows below describe the *persistent-log* path (future). The live flow runs entirely against the in-memory `UndoStack` inside `DispatchingOperationEngine` (`crates/holon/src/api/operation_engine.rs`) — same shape, but no status marking and nothing survives a restart.
 
 **Undo Flow:**
 
@@ -241,16 +246,16 @@ impl OperationObserver for OperationLogObserver {
 
 #### UI Integration
 
-For UI undo/redo state, query the operations table:
+Future: for UI undo/redo state, query the `operation` table (no frontend does this today — UI undo/redo state comes from the in-memory `UndoStack`):
 
 ```sql
 -- Undo candidate: most recent non-undone operation
-SELECT * FROM operations
+SELECT * FROM operation
 WHERE status NOT IN ('undone', 'cancelled')
 ORDER BY id DESC LIMIT 1;
 
 -- Redo candidate: most recent undone operation
-SELECT * FROM operations
+SELECT * FROM operation
 WHERE status = 'undone'
 ORDER BY id DESC LIMIT 1;
 ```
@@ -398,7 +403,6 @@ impl TryFromEntity for TodoistTask {
 | `#[primary_key]` | Marks field as PRIMARY KEY |
 | `#[indexed]` | Creates index on this column |
 | `#[reference(EntityName)]` | Foreign key reference (positional; optional `edge = "..."`) |
-| `#[lens(skip)]` | Exclude from lens generation |
 
 ### Operations Trait Macro
 
@@ -572,33 +576,40 @@ pub async fn dispatch_operation<DS, E>(
 ### Usage in Operation Providers
 
 ```rust
-// Example: hand-written OperationProvider using macro-generated dispatch helpers.
-// (MCP integrations use McpOperationProvider instead — no macros needed there.)
-impl OperationProvider for OrgModeSyncProvider {
+// Real example (condensed from crates/holon-loro/src/loro_block_operations.rs):
+// hand-written OperationProvider aggregating macro-generated dispatch helpers.
+// (MCP integrations use McpOperationProvider instead — no macros needed there;
+// OrgModeSyncProvider exposes only a single "{provider}.sync" operation.)
+impl OperationProvider for LoroBlockOperations {
     fn operations(&self) -> Vec<OperationDescriptor> {
-        let mut ops = vec![];
-        // Aggregate from all applicable traits
-        ops.extend(__operations_crud_operations::crud_operations(
-            "org-headline", "headline", "org_headlines", "id"));
-        ops.extend(__operations_task_operations::task_operations(
-            "org-headline", "headline", "org_headlines", "id"));
+        // Aggregate descriptors from all applicable traits
+        let mut ops = __operations_task_operations::task_operations_with_resolver(
+            self, "block", "block", "block", "id");
+        ops.extend(__operations_crud_operations::crud_operations("block", "block", "block", "id"));
+        ops.extend(__operations_block_operations::block_operations("block", "block", "block", "id"));
+        // ... mark_operations, text_operations
         ops
     }
 
-    async fn execute_operation(&self, op: &Operation) -> Result<OperationResult> {
-        let params = op.to_storage_entity();
+    async fn execute_operation(
+        &self,
+        entity_name: &EntityName,
+        op_name: &str,
+        params: StorageEntity,
+    ) -> Result<OperationResult> {
+        if entity_name != "block" {
+            return Err(format!("Expected entity_name 'block', got '{}'", entity_name).into());
+        }
 
-        // Try each trait's dispatch function
-        match __operations_crud_operations::dispatch_operation(&self.datasource, &op.name, &params).await {
+        // Try each trait's dispatch function until one recognizes op_name
+        match __operations_crud_operations::dispatch_operation::<_, Block>(self, op_name, &params).await {
             Ok(result) => return Ok(result),
-            Err(e) if UnknownOperationError::is_unknown(&*e) => {}
+            Err(e) if UnknownOperationError::is_unknown(e.as_ref()) => {}
             Err(e) => return Err(e),
         }
 
-        match __operations_task_operations::dispatch_operation(&self.datasource, &op.name, &params).await {
-            Ok(result) => return Ok(result),
-            Err(e) => return Err(e),
-        }
+        // ... block_operations, mark_operations, text_operations, then:
+        __operations_task_operations::dispatch_operation::<_, Block>(self, op_name, &params).await
     }
 }
 ```

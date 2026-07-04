@@ -1063,20 +1063,6 @@ impl SutWatch for HeadlessFrontendComponent {
             })
             .collect()
     }
-
-    async fn block_raw_field(&self, id: &EntityUri, field: &str) -> Option<String> {
-        let escaped_id = id.as_str().replace('\'', "''");
-        let sql = format!("SELECT {field} FROM block_raw WHERE id = '{escaped_id}'");
-        let rows = self
-            .engine
-            .db_handle()
-            .query(&sql, std::collections::HashMap::new())
-            .await
-            .expect("SutWatch::block_raw_field query failed");
-        rows.into_iter()
-            .next()
-            .and_then(|r| r.get(field).and_then(|v| v.as_string()).map(str::to_string))
-    }
 }
 
 /// `SutOrgRead` over the **production** org parser (E1 org block-equivalence):
@@ -1977,9 +1963,8 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
         // `SutWatchRegister`/`inv-active-watches-match-ref` track.
         let engine = self.engine();
         for i in 0..3 {
-            let prql = format!(
-                "from block_raw | select {{id, content}} | filter id != \"dummy-{i}\" "
-            );
+            let prql =
+                format!("from block_raw | select {{id, content}} | filter id != \"dummy-{i}\" ");
             let sql = engine
                 .compile_to_sql(&prql, QueryLanguage::HolonPrql)
                 .expect("ConcurrentSchemaInit: PRQL compilation should succeed");

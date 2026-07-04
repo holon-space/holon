@@ -1,49 +1,30 @@
-//! `inv-watch-rows-match-ref` (STRICT, CDC-lag tolerant).
+//! `inv-watch-rows-match-ref` (STRICT).
 //!
 //! Per-watch equality between each registered watch's CDC-delivered rows
 //! (the SUT's `ui_model`, keyed by query_id) and the reference model's
 //! expected rows for that watch (`query_results(watch_spec)`). Checks the
 //! id set, then the per-row content fields the query selected, then
-//! `parent_id` (normalized for document-root sentinels).
+//! `parent_id` (normalized for document-root sentinels). Any divergence is a
+//! `Fail`.
 //!
-//! # CDC-lag handling → `Skipped`
+//! # No CDC-lag downgrade — the settle covers it
 //!
-//! Each `ui_model` watch is fed by Turso IVM CDC, which can lag a write
-//! that has already landed in the write-side `block_raw` table. Two
-//! classifiers apply two CDC-lag downgrades:
-//!
-//! - **id-set lag**: when a watch's `ui_model` id set disagrees with the
-//!   reference, re-run the watch's `to_block_raw_sql()` truth query. If
-//!   `block_raw` matches the reference, the matview merely lagged → that
-//!   watch is skipped. If `block_raw` ALSO disagrees, the write/parse
-//!   pipeline has a real bug → `Fail`.
-//! - **field-level lag**: when a per-row field disagrees, read the field
-//!   directly from `block_raw`. If `block_raw` agrees with the reference,
-//!   the matview lagged → that field is skipped. If `block_raw` also
-//!   disagrees → `Fail`.
-//!
-//! `parent_id` has **no** CDC-lag downgrade — it is asserted hard.
-//! A `parent_id` divergence is therefore always a
-//! `Fail`. This is the path that currently catches the real pre-existing
-//! `block:root-layout` CDC parent_id bug, and it must keep doing so.
-//!
-//! Across all registered watches the body returns `Fail` on the first
-//! real divergence (id-set, field, or parent_id), else `Skipped` if any
-//! watch was downgraded by a CDC-lag classifier, else `Ok`.
-//!
-//! # Why STRICT, not WARN
-//!
-//! Every real divergence must **fail** the run; the only non-panic paths are
-//! the two CDC-lag downgrades, modelled here as `Skipped` (orthogonal to
-//! `RunMode`). So the faithful run mode is `Strict` — the CDC-lag downgrade is
-//! orthogonal to the run mode, not a reason to weaken it to `Warn`.
+//! `ui_model` is fed by Turso IVM CDC, which historically could lag a write
+//! already landed in the write-side `block_raw` table. This body used to carry
+//! two `block_raw`-consulting staleness classifiers (id-set and per-field) that
+//! downgraded a lagging watch/field to `Skipped`. Both were proven dead under
+//! the deterministic convergence settle (`WideE2E::settle_after_apply` →
+//! `converge_projections`, covering CDC): a probe converting both `Lag` arms to
+//! hard failures kept the keystone green across three full runs. They were
+//! removed (2026-07-04) — the settle quiesces `ui_model` before the check, so a
+//! divergence is now a real bug, not a delivery race. `parent_id` was already
+//! asserted hard (the path that catches the `block:root-layout` CDC parent_id
+//! bug); that is unchanged.
 
 use std::collections::HashSet;
 
 use holon_pbt_core::capabilities::{EntityUri, RefWatch, SutWatch, WatchRow};
 use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
-
-use crate::pbt::staleness::{Staleness, classify_staleness};
 
 pub struct InvWatchRowsMatchRef;
 
@@ -100,7 +81,6 @@ where
         // Watches present on BOTH sides — `ui_model` query_ids that are also
         // in `active_watches`, i.e. the intersection.
         let sut_watch_ids: HashSet<String> = sut.watch_query_ids().await.into_iter().collect();
-        let mut any_lag_skipped = false;
 
         for query_id in ref_.active_watch_ids() {
             if !sut_watch_ids.contains(&query_id) {
@@ -113,47 +93,22 @@ where
             let ui_ids: HashSet<EntityUri> = ui_rows.iter().filter_map(id_of).collect();
             let expected_ids: HashSet<EntityUri> = expected_rows.iter().filter_map(id_of).collect();
 
-            // ── id-set CDC-lag classifier ──────────────────────────────
-            // ui_model is the downstream projection; `block_raw` (via the watch's
-            // `to_block_raw_sql()` truth query) the authoritative upstream.
-            match classify_staleness(&ui_ids, &expected_ids, || async {
-                let truth_sql = ref_.watch_block_raw_sql(&query_id);
-                sut.block_raw_query_ids(&truth_sql)
-                    .await
-                    .into_iter()
-                    .collect::<HashSet<EntityUri>>()
-            })
-            .await
-            {
-                Staleness::Converged => {}
-                Staleness::Lag => {
-                    // ui_model lagged for this watch — skip its per-row checks.
-                    // Re-checking against stale rows would just mask the next signal.
-                    any_lag_skipped = true;
-                    continue;
-                }
-                // block_raw ALSO disagrees → real write/parse pipeline bug.
-                Staleness::Divergent {
-                    upstream: truth_ids,
-                } => {
-                    let missing: Vec<&EntityUri> = expected_ids.difference(&ui_ids).collect();
-                    let spurious: Vec<&EntityUri> = ui_ids.difference(&expected_ids).collect();
-                    return InvariantResult::Fail(format!(
-                        "CDC UI model for watch '{query_id}' has wrong block IDs (block_raw also \
-                         disagrees — real bug, not a CDC delivery race).\n\
-                         Expected {} blocks: {expected_ids:?}\n\
-                         Got {} blocks (ui_model): {ui_ids:?}\n\
-                         Got {} blocks (block_raw truth): {truth_ids:?}\n\
-                         Missing in ui_model: {missing:?}\n\
-                         Spurious in ui_model: {spurious:?}",
-                        expected_ids.len(),
-                        ui_ids.len(),
-                        truth_ids.len(),
-                    ));
-                }
+            // ── id-set check (strict; the settle quiesced ui_model) ────────
+            if ui_ids != expected_ids {
+                let missing: Vec<&EntityUri> = expected_ids.difference(&ui_ids).collect();
+                let spurious: Vec<&EntityUri> = ui_ids.difference(&expected_ids).collect();
+                return InvariantResult::Fail(format!(
+                    "CDC UI model for watch '{query_id}' has wrong block IDs.\n\
+                     Expected {} blocks: {expected_ids:?}\n\
+                     Got {} blocks (ui_model): {ui_ids:?}\n\
+                     Missing in ui_model: {missing:?}\n\
+                     Spurious in ui_model: {spurious:?}",
+                    expected_ids.len(),
+                    ui_ids.len(),
+                ));
             }
 
-            // ── per-row field + parent_id checks ───────────────────────
+            // ── per-row field + parent_id checks (strict) ──────────────
             let query_cols = ref_.watch_query_columns(&query_id);
             let fields_to_check: Vec<&str> =
                 ["content", "content_type", "source_language", "source_name"]
@@ -183,26 +138,13 @@ where
                         .and_then(|v| v.as_ref())
                         .map(|s| normalize_content(s));
 
-                    // field-level CDC-lag classifier: ui_model field is downstream,
-                    // the same field read straight from `block_raw` is upstream.
-                    match classify_staleness(&actual_val, &expected_val, || async {
-                        sut.block_raw_field(&expected_id, field)
-                            .await
-                            .map(|s| normalize_content(&s))
-                    })
-                    .await
-                    {
-                        Staleness::Converged => {}
-                        Staleness::Lag => any_lag_skipped = true,
-                        Staleness::Divergent { upstream: sql_val } => {
-                            return InvariantResult::Fail(format!(
-                                "CDC field '{field}' mismatch for block '{expected_id}' in watch \
-                                 '{query_id}'\n\
-                                 actual_ui_model={actual_val:?}\n\
-                                 actual_sql={sql_val:?}\n\
-                                 expected={expected_val:?}"
-                            ));
-                        }
+                    if actual_val != expected_val {
+                        return InvariantResult::Fail(format!(
+                            "CDC field '{field}' mismatch for block '{expected_id}' in watch \
+                             '{query_id}'\n\
+                             actual_ui_model={actual_val:?}\n\
+                             expected={expected_val:?}"
+                        ));
                     }
                 }
 
@@ -212,9 +154,9 @@ where
                     let expected_parent =
                         normalize_parent(expected_row.get("parent_id").and_then(|v| v.as_ref()));
                     if actual_parent != expected_parent {
-                        // No CDC-lag downgrade here — parent_id is asserted
-                        // hard. This is the path that catches the
-                        // pre-existing `block:root-layout` parent_id bug.
+                        // No CDC-lag downgrade — parent_id is asserted hard. This
+                        // is the path that catches the pre-existing
+                        // `block:root-layout` parent_id bug.
                         return InvariantResult::Fail(format!(
                             "CDC parent_id mismatch for {expected_id} in watch '{query_id}'\n\
                              actual_ui_model={actual_parent:?}\n\
@@ -225,14 +167,6 @@ where
             }
         }
 
-        if any_lag_skipped {
-            InvariantResult::Skipped(
-                "[inv-watch-rows-match-ref] one or more watches lagged (Turso IVM CDC delivery \
-                 race): ui_model stale, block_raw matches reference"
-                    .to_string(),
-            )
-        } else {
-            InvariantResult::Ok
-        }
+        InvariantResult::Ok
     }
 }

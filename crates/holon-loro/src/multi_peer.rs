@@ -988,7 +988,11 @@ mod clock_parity_spike {
     /// `script` receives (universe, is_shadow, &mut clock) where `clock`
     /// yields the real universe's recorded heights to the shadow run.
     fn assert_parity(
-        script: impl Fn(&mut Universe, &mut dyn FnMut(&Universe) -> u32, &mut dyn FnMut(&Universe, usize)),
+        script: impl Fn(
+            &mut Universe,
+            &mut dyn FnMut(&Universe) -> u32,
+            &mut dyn FnMut(&Universe, usize),
+        ),
         parents_to_check: &[&str],
         texts_to_check: &[&str],
     ) {
@@ -1180,9 +1184,7 @@ mod clock_parity_spike {
                 let node = tree.create(parent).unwrap();
                 let meta = tree.get_meta(node).unwrap();
                 meta.insert(STABLE_ID, loro::LoroValue::from(sid)).unwrap();
-                let text: LoroText = meta
-                    .insert_container(CONTENT_RAW, LoroText::new())
-                    .unwrap();
+                let text: LoroText = meta.insert_container(CONTENT_RAW, LoroText::new()).unwrap();
                 primary.commit();
                 for (i, ch) in content.chars().enumerate() {
                     text.insert(i, &ch.to_string()).unwrap();
@@ -1278,11 +1280,7 @@ mod clock_parity_spike {
         // Peer index note: peers[0] = id 101 (added first), peers[1] = id 100.
 
         // Padded shadow must match (same machinery as assert_parity).
-        assert_parity(
-            |u, clock, junk| script(u, clock, junk),
-            &["parent"],
-            &[],
-        );
+        assert_parity(|u, clock, junk| script(u, clock, junk), &["parent"], &[]);
 
         // UNPADDED shadow must DIVERGE — otherwise the parity tests are vacuous.
         let mut real = Universe::new();

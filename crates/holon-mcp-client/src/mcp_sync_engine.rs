@@ -462,6 +462,12 @@ impl McpSyncEngine {
         &self.sidecar
     }
 
+    /// Access the underlying MCP peer (e.g. to build additional typed
+    /// sources like `McpClaudeSessionSource` over the same connection).
+    pub fn peer(&self) -> &Peer<RoleClient> {
+        &self.peer
+    }
+
     /// Subscribe to a specific resource URI for change notifications.
     async fn subscribe_to_resource(&self, uri: &str) {
         match self

@@ -9,43 +9,43 @@
 │                     Application                          │
 └─────────────────────────────────────────────────────────┘
                            │
-           ┌───────────────┴───────────────┐
-           ▼                               ▼
-┌─────────────────────┐         ┌─────────────────────────┐
-│  Cell Registry      │         │   Cell Registry         │
-│  (Todoist)          │         │   (Block)               │
-│  Cell<T> per field  │         │   Cell<T> per field     │
-└─────────────────────┘         └─────────────────────────┘
-           │                               │
-           ▼                               ▼
-┌─────────────────────┐         ┌─────────────────────────┐
-│  QueryableCache<T>  │         │   QueryableCache<T>     │
-│  (Todoist tasks)    │         │   (Blocks / Org files)  │
-│  + matview reads    │         │   + matview reads       │
-└─────────────────────┘         └─────────────────────────┘
-           │                               │
-           ▼                               ▼
-┌─────────────────────┐         ┌─────────────────────────┐
-│   TursoBackend      │         │     TursoBackend        │
-│   (SQLite           │         │     (SQLite             │
-│    projection)      │         │      projection)        │
-└─────────────────────┘         └─────────────────────────┘
-           ▲                               ▲
-           │                               │
-   projects from                    projects from
-           │                               │
-┌─────────────────────┐         ┌─────────────────────────┐
-│   Todoist API       │         │   Loro CRDT             │
-│   (authority)       │         │   (authority for blocks)│
-└─────────────────────┘         └─────────────────────────┘
-                                            ▲
-                                            │
-                                  ┌─────────┴────────────┐
-                                  │  FileSyncController   │
-                                  │  (file watcher,      │
-                                  │   feeds Loro)        │
-                                  └──────────────────────┘
+                           ▼
+                ┌─────────────────────────┐
+                │   Cell Registry         │
+                │   (Block)               │
+                │   Cell<T> per field     │
+                └─────────────────────────┘
+                           │
+                           ▼
+                ┌─────────────────────────┐
+                │   QueryableCache<Block> │
+                │   + matview reads       │
+                └─────────────────────────┘
+                           │
+                           ▼
+                ┌─────────────────────────┐
+                │     TursoBackend        │
+                │     (SQLite             │
+                │      projection)        │
+                └─────────────────────────┘
+                           ▲
+                           │
+                    projects from
+                           │
+                ┌─────────────────────────┐
+                │   Loro CRDT             │
+                │   (authority for blocks)│
+                └─────────────────────────┘
+                           ▲
+                           │
+                 ┌─────────┴────────────┐
+                 │  FileSyncController   │
+                 │  (file watcher,      │
+                 │   feeds Loro)        │
+                 └──────────────────────┘
 ```
+
+Block is currently the only entity type with a cell registry and cache (`BlockCellRegistry` in `crates/holon-loro/src/block_cell_registry.rs`; `QueryableCache<Block>` wired in `crates/holon/src/sync/event_infra_module.rs`). A second entity type (e.g. a future Todoist integration — planned as an MCP server, see [Integrations](Integrations.md)) would add a sibling column with its own registry, cache, and authority.
 
 The **Cell Registry** layer (added in 2026-05) gives the UI and chord ops a unified reactive read primitive over storage. Cells project from authorities through the event log + matview projection; writes through cells flow back to the authority via typed `CrudOperations` methods.
 
@@ -54,7 +54,7 @@ The **Cell Registry** layer (added in 2026-05) gives the UI and chord ops a unif
 A `Cell<T>` is a reactive container for one entity field, keyed by `(EntityUri, FieldPath)`. Each cell exposes:
 
 - `current() -> T` — synchronous read of the latest authority-confirmed value
-- `signal() -> impl Signal<Item = T>` — reactive stream of updates
+- `signal() -> BoxStream<'static, T>` — reactive stream of updates (first item is the current value)
 - `set(T)` — write that dispatches via the entity's typed `CrudOperations` methods (NOT through `OperationDispatcher` — see [Operations](Operations.md))
 
 **Location**: `crates/holon-core/src/cell.rs`, `crates/holon-core/src/cell_registry.rs`
@@ -102,8 +102,9 @@ In Full (Loro) mode `block.content` (rich text) and every scalar field are now c
 Wraps a `TypeDefinition` and `DbHandle` to provide:
 - Local caching in Turso (SQLite) via the actor-based `DbHandle`
 - CDC streaming of changes
-- Operation dispatch to external systems
-- Stream ingestion from sync providers
+- Batch ingestion of changes from sync engines via `apply_batch`
+
+Operations (CRUD, Task, Block) are handled by separate operation structs — `SqlBlockOperations` / `SqlOperationProvider` (see [Operations](Operations.md)), not by the cache.
 
 **Location**: `crates/holon/src/core/queryable_cache.rs`
 
@@ -117,7 +118,7 @@ where
     _phantom: PhantomData<T>,
 }
 
-// Implements: DataSource<T>, CrudOperations<T>, OperationProvider, ChangeNotifications<StorageEntity>
+// Implements: DataSource<T>, Queryable<T>, EntityCache<T>, ChangeNotifications<StorageEntity>
 ```
 
 #### Stream Ingestion
