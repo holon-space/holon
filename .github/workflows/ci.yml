@@ -101,6 +101,16 @@ jobs:
       - name: Run Rust tests
         run: cargo test --workspace --exclude rust_lib_holon
 
+      # Rot guard for the out-of-workspace wasi worker (own lockfile, no other
+      # CI coverage): a plain check on its real target. EMNAPI_LINK_DIR is a
+      # safe empty stub — napi-build's wasi shim insists on it, but `cargo
+      # check` never links; the real dir is supplied by `napi build` in
+      # frontends/holon-worker/scripts/build.sh. Do not "fix" this away.
+      - name: Check holon-worker (wasm32-wasip1-threads)
+        run: |
+          rustup target add wasm32-wasip1-threads
+          EMNAPI_LINK_DIR="$(mktemp -d)" cargo check --manifest-path frontends/holon-worker/Cargo.toml --target wasm32-wasip1-threads --features browser
+
   # Rust code quality (dependency audit, unused deps, duplication)
   rust-quality:
     name: Rust Quality

@@ -68,7 +68,7 @@ cargo nextest run --profile dev
 
 ### Configuration
 
-Test runner configuration is in `Nextest.toml` in the workspace root. Key settings:
+Test runner configuration is in `.config/nextest.toml` in the workspace root. Key settings:
 
 - **`test-threads`**: Number of parallel test threads (`auto` = all available CPUs)
 - **`timeout`**: Individual test timeout in seconds (default: 300s)
@@ -169,6 +169,14 @@ Case strategies: `component` (default, groups by `[Component]` tag), `time_windo
 uv run scripts/analyze-log-drain3.py /tmp/holon.log --show-rare
 uv run scripts/analyze-log-drain3.py /tmp/holon.log --min-level INFO --top 30
 ```
+
+**Coarse GROUP BY** (`normalize-log.py`) — strips timestamps, ANSI colour codes, UUIDs/ULIDs, `block:` URIs, paths, large integers and inline JSON/SQL param blobs, then groups and counts. Collapses ~16k raw lines into ~1k unique normalized lines, so the top of the output is almost always the bottleneck:
+
+```bash
+python3 scripts/normalize-log.py /tmp/holon.log | head -80
+```
+
+Reach for this first when investigating "why is startup slow" or "what is the app actually doing". Pure stdlib Python, no deps.
 
 **Metric sparklines** — extracts numeric time-series (RSS memory, sync durations, tx latencies, event rate) and renders ASCII sparklines with outlier detection:
 
