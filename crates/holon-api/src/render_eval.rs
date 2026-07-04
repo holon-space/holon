@@ -1193,3 +1193,268 @@ mod tests {
         assert!(legacy.rows.is_empty() && with_empty.rows.is_empty());
     }
 }
+
+#[cfg(test)]
+mod mutation_gap_tests {
+    use super::*;
+
+    fn empty_args() -> ResolvedArgs {
+        ResolvedArgs {
+            positional: vec![],
+            positional_exprs: vec![],
+            named: HashMap::new(),
+            rows: HashMap::new(),
+            templates: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn sort_value_orders_ints_floats_strings_and_missing() {
+        let sv = |v: &Value| sort_value(Some(v));
+
+        assert!(sv(&Value::Integer(2)) < sv(&Value::Integer(10)));
+        assert!(sv(&Value::Integer(0)) < sv(&Value::Integer(7)));
+
+        // IEEE bit-flip trick must order negatives < zero < positives.
+        assert!(sv(&Value::Float(-2.5)) < sv(&Value::Float(-1.5)));
+        assert!(sv(&Value::Float(-1.5)) < sv(&Value::Float(0.0)));
+        assert!(sv(&Value::Float(0.0)) < sv(&Value::Float(2.5)));
+        assert!(sv(&Value::Float(2.5)) < sv(&Value::Float(10.25)));
+
+        // FractionalIndex hex strings pass through untouched.
+        assert_eq!(sv(&Value::String("7F80".to_string())), "7F80");
+
+        // Missing sorts after any string/int representation.
+        let missing = sort_value(None);
+        assert_eq!(missing, "\u{10FFFF}");
+        assert!(sv(&Value::String("zz".to_string())) < missing);
+        assert!(sv(&Value::Integer(i64::MAX)) < missing);
+    }
+
+    #[test]
+    fn cmp_values_total_order() {
+        use std::cmp::Ordering::*;
+        let int = |i: i64| Value::Integer(i);
+        let f = |x: f64| Value::Float(x);
+        let s = |x: &str| Value::String(x.to_string());
+
+        assert_eq!(cmp_values(Some(&int(1)), Some(&int(2))), Less);
+        assert_eq!(cmp_values(Some(&int(2)), Some(&int(1))), Greater);
+        assert_eq!(cmp_values(Some(&f(1.5)), Some(&f(2.5))), Less);
+        assert_eq!(cmp_values(Some(&s("a")), Some(&s("b"))), Less);
+        assert_eq!(cmp_values(None, None), Equal);
+        assert_eq!(cmp_values(None, Some(&int(1))), Greater);
+        assert_eq!(cmp_values(Some(&int(1)), None), Less);
+    }
+
+    #[test]
+    fn binary_op_arithmetic_semantics() {
+        let i = |x: i64| Value::Integer(x);
+        let f = |x: f64| Value::Float(x);
+        let s = |x: &str| Value::String(x.to_string());
+
+        assert_eq!(eval_binary_op(&BinaryOperator::Add, &i(2), &i(3)), i(5));
+        assert_eq!(eval_binary_op(&BinaryOperator::Add, &f(1.5), &f(2.25)), f(3.75));
+        assert_eq!(eval_binary_op(&BinaryOperator::Add, &s("a"), &s("b")), s("ab"));
+
+        assert_eq!(eval_binary_op(&BinaryOperator::Sub, &i(5), &i(2)), i(3));
+        assert_eq!(eval_binary_op(&BinaryOperator::Sub, &f(5.5), &f(2.0)), f(3.5));
+
+        assert_eq!(eval_binary_op(&BinaryOperator::Mul, &i(3), &i(4)), i(12));
+        assert_eq!(eval_binary_op(&BinaryOperator::Mul, &f(1.5), &f(2.0)), f(3.0));
+
+        assert_eq!(eval_binary_op(&BinaryOperator::Div, &i(7), &i(2)), i(3));
+        assert_eq!(eval_binary_op(&BinaryOperator::Div, &f(3.0), &f(2.0)), f(1.5));
+        // Division by zero yields Null, never panics.
+        assert_eq!(eval_binary_op(&BinaryOperator::Div, &i(7), &i(0)), Value::Null);
+        assert_eq!(eval_binary_op(&BinaryOperator::Div, &f(1.0), &f(0.0)), Value::Null);
+
+        // Type mismatch yields Null.
+        assert_eq!(eval_binary_op(&BinaryOperator::Add, &i(1), &f(1.0)), Value::Null);
+    }
+
+    #[test]
+    fn binary_op_ordering_semantics() {
+        let i = |x: i64| Value::Integer(x);
+        let f = |x: f64| Value::Float(x);
+        let b = |x: bool| Value::Boolean(x);
+
+        assert_eq!(eval_binary_op(&BinaryOperator::Gt, &i(3), &i(2)), b(true));
+        assert_eq!(eval_binary_op(&BinaryOperator::Gt, &i(2), &i(2)), b(false));
+        assert_eq!(eval_binary_op(&BinaryOperator::Gt, &f(2.5), &f(2.0)), b(true));
+        assert_eq!(eval_binary_op(&BinaryOperator::Gt, &f(2.0), &f(2.0)), b(false));
+
+        assert_eq!(eval_binary_op(&BinaryOperator::Lt, &i(1), &i(2)), b(true));
+        assert_eq!(eval_binary_op(&BinaryOperator::Lt, &i(2), &i(2)), b(false));
+        assert_eq!(eval_binary_op(&BinaryOperator::Lt, &f(1.0), &f(2.0)), b(true));
+        assert_eq!(eval_binary_op(&BinaryOperator::Lt, &f(2.0), &f(2.0)), b(false));
+
+        assert_eq!(eval_binary_op(&BinaryOperator::Gte, &i(2), &i(2)), b(true));
+        assert_eq!(eval_binary_op(&BinaryOperator::Gte, &i(1), &i(2)), b(false));
+        assert_eq!(eval_binary_op(&BinaryOperator::Gte, &f(2.0), &f(2.0)), b(true));
+        assert_eq!(eval_binary_op(&BinaryOperator::Gte, &f(1.0), &f(2.0)), b(false));
+
+        assert_eq!(eval_binary_op(&BinaryOperator::Lte, &i(2), &i(2)), b(true));
+        assert_eq!(eval_binary_op(&BinaryOperator::Lte, &i(3), &i(2)), b(false));
+        assert_eq!(eval_binary_op(&BinaryOperator::Lte, &f(2.0), &f(2.0)), b(true));
+        assert_eq!(eval_binary_op(&BinaryOperator::Lte, &f(3.0), &f(2.0)), b(false));
+    }
+
+    #[test]
+    fn state_and_color_display_tables() {
+        assert_eq!(state_icon(""), "");
+        assert_eq!(state_icon("CANCELLED"), "✗");
+        assert_eq!(state_icon("DOING"), "◑");
+        assert_eq!(state_icon("DONE"), "✓");
+        assert_eq!(state_icon("TODO"), "○");
+
+        assert_eq!(state_display(""), ("", "muted"));
+        assert_eq!(state_display("TODO"), ("TODO", "muted"));
+        assert_eq!(state_display("DOING"), ("DOING", "warning"));
+        assert_eq!(state_display("DONE"), ("[x]", "success"));
+        assert_eq!(state_display("CANCELLED"), ("CANCELLED", "error"));
+        assert_eq!(state_display("WAITING"), ("WAITING", "primary"));
+
+        assert_eq!(resolve_color_name("red"), "#FF0000");
+        assert_eq!(resolve_color_name("green"), "#00FF00");
+        assert_eq!(resolve_color_name("blue"), "#0000FF");
+        assert_eq!(resolve_color_name("yellow"), "#FFFF00");
+        assert_eq!(resolve_color_name("white"), "#FFFFFF");
+        assert_eq!(resolve_color_name("gray"), "#808080");
+        assert_eq!(resolve_color_name("grey"), "#808080");
+        assert_eq!(resolve_color_name("muted"), "#808080");
+        assert_eq!(resolve_color_name("#ABCDEF"), "#ABCDEF");
+        assert_eq!(resolve_color_name("chartreuse"), "#FFFFFF");
+    }
+
+    #[test]
+    fn resolve_states_template_and_default() {
+        let row: HashMap<String, Value> = [(
+            "sts".to_string(),
+            Value::Array(vec![
+                Value::String("A".to_string()),
+                Value::String("B".to_string()),
+            ]),
+        )]
+        .into_iter()
+        .collect();
+
+        let mut args = empty_args();
+        args.templates.insert(
+            "states".to_string(),
+            RenderExpr::ColumnRef {
+                name: "sts".to_string(),
+            },
+        );
+        assert_eq!(resolve_states(&args, &row), vec!["A".to_string(), "B".to_string()]);
+
+        let default = resolve_states(&empty_args(), &row);
+        assert_eq!(
+            default,
+            vec![
+                String::new(),
+                "TODO".to_string(),
+                "DOING".to_string(),
+                "DONE".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn drawer_rows_and_column_refs() {
+        let drawer_row: Arc<DataRow> = Arc::new(
+            [("collapse_to".to_string(), Value::String("Drawer".to_string()))]
+                .into_iter()
+                .collect(),
+        );
+        let plain_row: Arc<DataRow> = Arc::new(
+            [("collapse_to".to_string(), Value::String("inline".to_string()))]
+                .into_iter()
+                .collect(),
+        );
+        assert!(has_drawer_rows(&[plain_row.clone(), drawer_row]));
+        assert!(!has_drawer_rows(&[plain_row]));
+        assert!(!has_drawer_rows(&[]));
+
+        let col = RenderExpr::ColumnRef {
+            name: "title".to_string(),
+        };
+        assert_eq!(column_ref_name(&col), Some("title"));
+        assert_eq!(column_ref_name(&RenderExpr::Array { items: vec![] }), None);
+
+        let mut args = empty_args();
+        assert_eq!(sort_key_column(&args), None);
+        args.templates.insert(
+            "sort_key".to_string(),
+            RenderExpr::ColumnRef {
+                name: "seq".to_string(),
+            },
+        );
+        assert_eq!(sort_key_column(&args), Some("seq"));
+    }
+
+    #[test]
+    fn resolved_args_getters() {
+        let mut args = empty_args();
+        args.positional = vec![
+            Value::Integer(7),
+            Value::String("s".to_string()),
+            Value::Float(1.25),
+            Value::Boolean(true),
+            Value::Null,
+        ];
+        args.positional_exprs = vec![RenderExpr::ColumnRef {
+            name: "c0".to_string(),
+        }];
+        args.named = [
+            ("s".to_string(), Value::String("v".to_string())),
+            ("f".to_string(), Value::Float(2.5)),
+            ("i".to_string(), Value::Integer(3)),
+            ("bt".to_string(), Value::Boolean(true)),
+            ("bf".to_string(), Value::Boolean(false)),
+        ]
+        .into_iter()
+        .collect();
+        args.templates.insert(
+            "tpl".to_string(),
+            RenderExpr::ColumnRef {
+                name: "x".to_string(),
+            },
+        );
+
+        assert_eq!(args.get_string("s"), Some("v"));
+        assert_eq!(args.get_string("missing"), None);
+        assert_eq!(args.get_string_or("s", "d"), "v");
+        assert_eq!(args.get_string_or("missing", "d"), "d");
+
+        assert_eq!(args.get_f64("f"), Some(2.5));
+        assert_eq!(args.get_f64("i"), Some(3.0));
+        assert_eq!(args.get_f64("s"), None);
+        assert_eq!(args.get_f64("missing"), None);
+
+        assert_eq!(args.get_bool("bt"), Some(true));
+        assert_eq!(args.get_bool("bf"), Some(false));
+        assert_eq!(args.get_bool("s"), None);
+
+        assert_eq!(args.get_positional_f64(0), Some(7.0));
+        assert_eq!(args.get_positional_f64(2), Some(1.25));
+        assert_eq!(args.get_positional_f64(9), None);
+
+        assert_eq!(args.get_positional_string(0), Some("7".to_string()));
+        assert_eq!(args.get_positional_string(1), Some("s".to_string()));
+        assert_eq!(args.get_positional_string(2), Some("1.25".to_string()));
+        assert_eq!(args.get_positional_string(3), Some("true".to_string()));
+        assert_eq!(args.get_positional_string(4), None);
+        assert_eq!(args.get_positional_string(9), None);
+
+        assert_eq!(args.get_positional_column_name(0), Some("c0"));
+        assert_eq!(args.get_positional_column_name(5), None);
+
+        assert!(matches!(
+            args.get_template("tpl"),
+            Some(RenderExpr::ColumnRef { name }) if name == "x"
+        ));
+        assert!(args.get_template("nope").is_none());
+        assert!(args.get_rows("nope").is_none());
+    }
+}

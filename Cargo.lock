@@ -5178,6 +5178,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "futures",
  "holon-api",
  "holon-core",
  "holon-macros",
