@@ -31,7 +31,7 @@ pub mod sync_ports;
 #[cfg(not(target_arch = "wasm32"))]
 pub use change_source::{FileChange, FileChangeKind, FileChangeSource, NotifyWatcher};
 #[cfg(not(target_arch = "wasm32"))]
-pub use directory::{ChangesWithMetadata, DirectoryChangeProvider, DirectoryDataSource};
+pub use directory::{ChangesWithMetadata, DirectoryChangeProvider};
 #[cfg(not(target_arch = "wasm32"))]
 pub use directory::{Directory, ROOT_ID};
 pub use error::FilesystemError;

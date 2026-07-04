@@ -64,7 +64,6 @@ pub use models::{OrgBlockExt, OrgDocumentExt, SourceBlock, ToOrg};
 // Sync providers and adapters
 pub use file_format::OrgFormatAdapter;
 pub use file_watcher::OrgFileWatcher;
-pub use holon_filesystem::directory::DirectoryDataSource;
 pub use org_renderer::OrgRenderer;
 pub use orgmode_sync_provider::OrgModeSyncProvider;
 pub use parser::{parse_org_file, ParseResult};
