@@ -7,15 +7,9 @@ use holon_macros::Entity;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
-use holon_api::streaming::ChangeNotifications;
 use holon_api::OperationDescriptor;
-use holon_api::StorageEntity;
-use holon_api::{ApiError, Change, StreamPosition};
-use holon_api::{BatchMetadata, EntityName, Value, WithMetadata};
-use holon_core::traits::{
-    CrudOperations, DataSource, OperationProvider, OperationRegistry, OperationResult,
-    RenameOperations, Result,
-};
+use holon_api::{BatchMetadata, Change, WithMetadata};
+use holon_core::traits::{OperationResult, Result};
 
 /// Synthetic root ID for top-level directories
 pub const ROOT_ID: &str = "null";
