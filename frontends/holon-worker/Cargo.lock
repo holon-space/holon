@@ -3279,6 +3279,7 @@ name = "holon-worker"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "fluxdi",
  "futures",
  "holon",
  "holon-api",

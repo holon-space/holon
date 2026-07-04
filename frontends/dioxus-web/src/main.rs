@@ -14,7 +14,7 @@ use std::cell::RefCell;
 
 use bridge::WorkerBridge;
 use dioxus::prelude::*;
-use holon_frontend::view_model::ViewModel;
+use holon_frontend::view_model::{ViewModel, WatchEnvelope};
 use js_sys::Reflect;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -76,6 +76,12 @@ fn App() -> Element {
         // Connect the MCP relay bridge (best-effort; reconnects automatically on close).
         connect_mcp_relay(bridge.clone());
 
+        // Seed the viewport BEFORE the first watch so the root
+        // `if_space(...)` picks the real breakpoint on the first paint,
+        // then keep it live on window resize.
+        send_viewport(&bridge).await;
+        install_resize_listener(bridge.clone());
+
         // The root layout block has a well-known id set by seed_default_layout.
         let root_val = match bridge
             .call(
@@ -129,12 +135,21 @@ fn App() -> Element {
         };
 
         bridge.on_snapshot(handle, move |json| {
-            match serde_json::from_str::<ViewModel>(&json) {
-                Ok(v) => {
-                    if let Some(saved) = editor::cursor::save() {
-                        editor::cursor::enqueue_restore(saved);
+            match serde_json::from_str::<WatchEnvelope>(&json) {
+                Ok(env) => {
+                    // Focus unchanged → preserve the local caret across the
+                    // re-render (structural remounts blur the old element).
+                    // Focus CHANGED → the worker's word wins (ADR 0010):
+                    // worker_focus moves DOM focus instead, and no stale
+                    // restore may snap it back.
+                    let dom_focus = editor::cursor::save();
+                    if env.focused_block == dom_focus.as_ref().map(|s| s.entity_id.clone()) {
+                        if let Some(saved) = dom_focus {
+                            editor::cursor::enqueue_restore(saved);
+                        }
                     }
-                    view_model.set(Some(v));
+                    view_model.set(Some(env.view_model));
+                    editor::worker_focus::apply(env.focused_block, env.caret_offset);
                 }
                 Err(e) => tracing::error!("[snapshot] deserialize failed: {e}"),
             }
@@ -187,10 +202,6 @@ fn App() -> Element {
                             style: "color: #7fdf7f; font-size: 0.75em;",
                             "ready ({cold_start_ms}ms)"
                         }
-                        span {
-                            style: "color: #555; font-size: 0.75em;",
-                            "· [layout: degraded — AvailableSpace=None in worker]"
-                        }
                     },
                     BootState::Failed(err) => rsx! {
                         span { style: "color: #ff5252; font-size: 0.8em;", "⚠ {err}" }
@@ -230,6 +241,54 @@ fn App() -> Element {
             }
         }
     }
+}
+
+/// Push the current window viewport (CSS px + devicePixelRatio) into the
+/// worker's `UiState` so `if_space(...)` container queries evaluate against
+/// real dimensions. Errors are loud: a failed viewport push means the
+/// layout silently renders the desktop-first branch.
+async fn send_viewport(bridge: &WorkerBridge) {
+    let Some(win) = web_sys::window() else {
+        tracing::error!("[viewport] no window object — viewport not sent");
+        return;
+    };
+    let width = win.inner_width().ok().and_then(|v| v.as_f64()); // ALLOW(ok): JS reflection — non-numeric is handled below
+    let height = win.inner_height().ok().and_then(|v| v.as_f64()); // ALLOW(ok): JS reflection — non-numeric is handled below
+    let (Some(width), Some(height)) = (width, height) else {
+        tracing::error!("[viewport] window.innerWidth/Height not numeric — viewport not sent");
+        return;
+    };
+    let scale = win.device_pixel_ratio();
+    if let Err(e) = bridge
+        .call(
+            "engineSetViewport",
+            [width.into(), height.into(), scale.into()],
+        )
+        .await
+    {
+        tracing::error!("[viewport] engineSetViewport failed: {e}");
+    }
+}
+
+/// Re-send the viewport on every window resize (leaked closure — lives for
+/// the page lifetime, like the tick pump).
+fn install_resize_listener(bridge: WorkerBridge) {
+    let Some(win) = web_sys::window() else {
+        tracing::error!("[viewport] no window object — resize listener not installed");
+        return;
+    };
+    let closure: Closure<dyn Fn()> = Closure::wrap(Box::new(move || {
+        let bridge = bridge.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            send_viewport(&bridge).await;
+        });
+    }));
+    if let Err(e) =
+        win.add_event_listener_with_callback("resize", closure.as_ref().unchecked_ref())
+    {
+        tracing::error!("[viewport] resize listener install failed: {e:?}");
+    }
+    closure.forget();
 }
 
 /// Connect to the MCP relay hub as `role=browser`. All incoming tool calls

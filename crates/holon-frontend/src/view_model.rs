@@ -35,6 +35,25 @@ impl LazyChildren {
     }
 }
 
+/// Wire envelope for snapshot-pipeline watch emissions (wasm worker →
+/// web page). Carries the in-memory editor-focus state (ADR 0010)
+/// atomically with the `ViewModel` interpretation that consumed it, so
+/// the page can move DOM focus and seed the caret without a second,
+/// racy RPC. Produced by the worker's `engine_watch_view` callback from
+/// `ReactiveEngine::watch_snapshot_stream` emissions; parsed by
+/// `holon-dioxus-web`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WatchEnvelope {
+    pub view_model: ViewModel,
+    /// The focused block's entity URI, if any (`UiState::focused_block`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focused_block: Option<String>,
+    /// One-shot initial caret offset armed for the focused block
+    /// (`UiState::peek_caret_seed`) — split/join/nav placement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caret_offset: Option<usize>,
+}
+
 /// How a drawer behaves relative to sibling layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

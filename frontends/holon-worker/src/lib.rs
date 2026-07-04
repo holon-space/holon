@@ -164,8 +164,21 @@ mod backend {
         );
 
         let path = PathBuf::from(db_path);
+        // EventInfraModule registers `SqlBlockOperations` as the "block"
+        // OperationProvider (update / set_field / split_block / join_block /
+        // indent / outdent / move_*). Native frontends get it via
+        // holon-app's `add_frontend` wiring; without it the worker's
+        // operation registry is EMPTY and every editor dispatch fails.
         let engine = runtime
-            .block_on(async { create_backend_engine(path, |_| Ok(())).await })
+            .block_on(async {
+                create_backend_engine(path, |injector| {
+                    use fluxdi::Module as _;
+                    holon::sync::EventInfraModule
+                        .configure(injector)
+                        .map_err(|e| anyhow::anyhow!("EventInfraModule: {e}"))
+                })
+                .await
+            })
             .map_err(|e| super::nerr("create_backend_engine", e))?;
 
         // Seed default layout blocks if none exist yet (idempotent).
@@ -350,15 +363,32 @@ mod backend {
             // Fail-loud helper: serialize + call. On serialize failure,
             // panic — the task aborts and the bug surfaces instead of
             // silently swallowing a malformed ViewModel.
-            let emit = |rvm: &holon_frontend::ReactiveViewModel| {
-                let snapshot = rvm.snapshot();
-                let json = serde_json::to_string(&snapshot).unwrap_or_else(|e| {
-                    panic!("[watch_view handle={handle}] ViewModel serialize failed: {e}")
+            //
+            // Emissions are wrapped in a `WatchEnvelope` carrying the
+            // in-memory focus state (ADR 0010) read AFTER the
+            // interpretation, so the page applies DOM focus consistent
+            // with the variant (`rendered_text` ⇄ `editable_text`) the
+            // snapshot renders.
+            let reactive_emit = reactive.clone();
+            let emit = move |rvm: &holon_frontend::ReactiveViewModel| {
+                let focused = reactive_emit.ui_state().focused_block();
+                let caret_offset = focused
+                    .as_ref()
+                    .and_then(|f| reactive_emit.ui_state().peek_caret_seed(f));
+                let envelope = holon_frontend::view_model::WatchEnvelope {
+                    view_model: rvm.snapshot(),
+                    focused_block: focused.map(|f| f.to_string()),
+                    caret_offset,
+                };
+                let json = serde_json::to_string(&envelope).unwrap_or_else(|e| {
+                    panic!("[watch_view handle={handle}] WatchEnvelope serialize failed: {e}")
                 });
                 tsfn.call(json, ThreadsafeFunctionCallMode::NonBlocking);
             };
 
-            let mut stream = reactive.watch(&block_uri);
+            // Snapshot-pipeline watch: re-fires on focus changes too (the
+            // page has no live tree to patch focus variants into).
+            let mut stream = reactive.watch_snapshot_stream(&block_uri);
             while let Some(mut rvm) = stream.next().await {
                 // Coalesce: drain any immediately-available snapshots and
                 // keep only the latest. `futures::poll!` peeks without
@@ -419,6 +449,104 @@ mod backend {
             .map_err(|e| super::nerr("execute_operation", e))?;
 
         serde_json::to_string(&result).map_err(|e| super::nerr("serialize result", e))
+    }
+
+    /// Dispatch a chain of operation intents through the ReactiveEngine —
+    /// the same UI-adjacent seam GPUI handlers use (`dispatch_intent_chain`).
+    /// Unlike `execute_operation` (raw FrontendSession), this path applies
+    /// navigation-focus mirroring, structural-focus projection from
+    /// split/join results, and preference routing, and guarantees in-order
+    /// execution (structural ops are commit points — a pending content
+    /// flush chained before a split MUST land first).
+    ///
+    /// Fire-and-forget: the chain runs on the worker runtime, advanced by
+    /// the page's `engine_tick` pump. Failures abort the remaining chain
+    /// and are disclosed via the session error tracker + logs.
+    pub(super) fn dispatch_intents(intents_json: String) -> napi::Result<()> {
+        // Hand-rolled decode: `holon-worker` deliberately has no direct
+        // `serde` derive dep (own mini-workspace, see Cargo.toml header),
+        // and each field is required — fail loud on a malformed intent.
+        let wire: serde_json::Value =
+            serde_json::from_str(&intents_json).map_err(|e| super::nerr("parse intents", e))?;
+        let serde_json::Value::Array(items) = wire else {
+            return Err(super::nerr(
+                "dispatch_intents",
+                "expected a JSON array of {entity, op, params}",
+            ));
+        };
+        if items.is_empty() {
+            return Err(super::nerr("dispatch_intents", "empty intent chain"));
+        }
+        let intents = items
+            .iter()
+            .map(|item| {
+                let entity = item.get("entity").and_then(|v| v.as_str()).ok_or_else(|| {
+                    super::nerr("dispatch_intents", format!("intent missing 'entity': {item}"))
+                })?;
+                let op = item.get("op").and_then(|v| v.as_str()).ok_or_else(|| {
+                    super::nerr("dispatch_intents", format!("intent missing 'op': {item}"))
+                })?;
+                let params_val = item.get("params").cloned().ok_or_else(|| {
+                    super::nerr("dispatch_intents", format!("intent missing 'params': {item}"))
+                })?;
+                let params: HashMap<String, holon_api::Value> =
+                    serde_json::from_value(params_val)
+                        .map_err(|e| super::nerr("parse intent params", e))?;
+                Ok(holon_frontend::OperationIntent::new(
+                    EntityName::from(entity),
+                    op.to_string(),
+                    params,
+                ))
+            })
+            .collect::<napi::Result<Vec<_>>>()?;
+        let (reactive, _runtime) = reactive_and_rt("dispatch_intents")?;
+        let services: Arc<dyn BuilderServices> = reactive;
+        holon_frontend::reactive::dispatch_intent_chain(&services, intents);
+        Ok(())
+    }
+
+    /// Push the page viewport into `UiState` (mirrors GPUI
+    /// `AppModel::apply_viewport`). Bumps the viewport generation, which
+    /// re-interprets watched render expressions so `if_space(...)`
+    /// container queries pick the real breakpoint instead of the
+    /// desktop-first `AvailableSpace=None` default branch.
+    pub(super) fn set_viewport(
+        width_px: f64,
+        height_px: f64,
+        scale_factor: f64,
+    ) -> napi::Result<()> {
+        let (reactive, _runtime) = reactive_and_rt("set_viewport")?;
+        reactive
+            .ui_state()
+            .set_viewport(holon_frontend::reactive::ViewportInfo {
+                width_px: width_px as f32,
+                height_px: height_px as f32,
+                scale_factor: scale_factor as f32,
+            });
+        Ok(())
+    }
+
+    /// Editor focus is pure in-memory UI state (ADR 0010): clicks call
+    /// `set_focus` directly, never a dispatched op. Flips the `is_focused`
+    /// variant so the next snapshot swaps `rendered_text` → `editable_text`.
+    /// `caret_offset` arms the one-shot caret seed (split/join/nav placement).
+    pub(super) fn set_focus(
+        block_id: Option<String>,
+        caret_offset: Option<u32>,
+    ) -> napi::Result<()> {
+        let (reactive, _runtime) = reactive_and_rt("set_focus")?;
+        match (block_id, caret_offset) {
+            (Some(id), Some(offset)) => {
+                // ALLOW(entity_uri_from_raw): NAPI/FFI block_id String from JS worker caller
+                reactive.set_focus_with_caret(EntityUri::from_raw(&id), offset as usize);
+            }
+            (Some(id), None) => {
+                // ALLOW(entity_uri_from_raw): NAPI/FFI block_id String from JS worker caller
+                reactive.set_focus(Some(EntityUri::from_raw(&id)));
+            }
+            (None, _) => reactive.set_focus(None),
+        }
+        Ok(())
     }
 
     /// B4: switch the active render variant for a watched block.
@@ -1077,6 +1205,41 @@ mod engine_exports {
         params_json: String,
     ) -> napi::Result<String> {
         backend::execute_operation(entity, op, params_json)
+    }
+
+    /// Dispatch an ordered chain of operation intents through the
+    /// ReactiveEngine (the GPUI-parity seam: focus mirroring, structural
+    /// focus from split/join results, preference routing). Fire-and-forget;
+    /// the chain advances on subsequent `engine_tick` calls.
+    ///
+    /// `intents_json` is a JSON array:
+    /// `[{"entity":"block","op":"split_block","params":{"id":"block:x","position":5}}, …]`
+    #[napi_derive::napi]
+    pub fn engine_dispatch_intents(intents_json: String) -> napi::Result<()> {
+        backend::dispatch_intents(intents_json)
+    }
+
+    /// Push the page viewport (CSS px + devicePixelRatio) into the engine so
+    /// `if_space(...)` container queries stop falling back to desktop-first.
+    /// Call on mount and on every resize.
+    #[napi_derive::napi]
+    pub fn engine_set_viewport(
+        width_px: f64,
+        height_px: f64,
+        scale_factor: f64,
+    ) -> napi::Result<()> {
+        backend::set_viewport(width_px, height_px, scale_factor)
+    }
+
+    /// Set the in-memory editor focus (ADR 0010). `block_id: None` clears
+    /// focus; `caret_offset` arms the one-shot caret seed for the editor
+    /// that mounts for the block.
+    #[napi_derive::napi]
+    pub fn engine_set_focus(
+        block_id: Option<String>,
+        caret_offset: Option<u32>,
+    ) -> napi::Result<()> {
+        backend::set_focus(block_id, caret_offset)
     }
 
     /// Switch the active render variant for a watched block. Errors if the

@@ -39,6 +39,10 @@ tokio = { version = "1", default-features = false, features = ["rt", "time", "ma
 # worker runs an in-memory DB (`:memory:`), so at-rest encryption is moot.
 turso_core = { git = "https://github.com/nightscape/turso.git", branch = "holon", default-features = false, features = ["fs", "json", "uuid", "time", "series"] }
 anyhow = "1"
+# fluxdi::Module trait, needed to register EventInfraModule (the block
+# OperationProvider) during engine_init. Same git source as the root
+# workspace (can't inherit — this package opts out of the workspace).
+fluxdi = { git = "https://github.com/holon-space/fluxdi", branch = "dev", features = ["thread-safe", "async-factory", "lifecycle", "dynamic", "eager-resolution"] }
 parking_lot = "0.12"
 tracing = "0.1"
 serde_json = "1"

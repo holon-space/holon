@@ -212,6 +212,22 @@ self.addEventListener('message', async (e) => {
         // args: [entity, op, paramsJson]
         value = JSON.parse(mod.engineExecuteOperation(args[0], args[1], args[2]))
         break
+      case 'engineDispatchIntents':
+        // args: [intentsJson] — JSON array of {entity, op, params}.
+        // Fire-and-forget chain; it advances on subsequent engineTick calls.
+        mod.engineDispatchIntents(args[0])
+        value = null
+        break
+      case 'engineSetViewport':
+        // args: [widthPx, heightPx, scaleFactor]
+        mod.engineSetViewport(args[0], args[1], args[2])
+        value = null
+        break
+      case 'engineSetFocus':
+        // args: [blockIdOrNull, caretOffsetOrNull]
+        mod.engineSetFocus(args[0] ?? null, args[1] ?? null)
+        value = null
+        break
       case 'engineSetVariant':
         // args: [blockId, variant]
         mod.engineSetVariant(args[0], args[1])

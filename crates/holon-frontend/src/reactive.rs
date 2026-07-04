@@ -1307,6 +1307,40 @@ impl ReactiveEngine {
         Box::pin(self.watch_signal(block_id).to_stream())
     }
 
+    /// Watch a block for snapshot-pipeline frontends (the wasm worker → web
+    /// page path): unlike [`Self::watch`], the stream ALSO re-fires when
+    /// editor focus moves. `is_focused` is baked into every interpretation
+    /// (`UiState::context_for`), and a snapshot consumer has no live widget
+    /// tree with a focus driver to patch the `rendered_text` ⇄
+    /// `editable_text` variant in place — re-interpreting is its only way
+    /// to observe a focus change. GPUI must NOT use this: re-interpreting
+    /// per focus change would recreate its editors (see the
+    /// [`UiState::set_focus`] doc on multiple cursors).
+    pub fn watch_snapshot_stream(
+        &self,
+        block_id: &EntityUri,
+    ) -> Pin<Box<dyn futures::Stream<Item = ReactiveViewModel> + Send>> {
+        let results = self.ensure_watching(block_id);
+        let vp_gen = self.ui_state.generation_signal();
+        let focus = self.ui_state.focused_block_mutable().signal_cloned();
+        let combined = map_ref! {
+            let g = vp_gen,
+            let f = focus
+            => {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                g.hash(&mut h);
+                f.hash(&mut h);
+                h.finish()
+            }
+        };
+        Box::pin(
+            results
+                .reactive_signal_with_ui_gen(self.interpret_fn.clone(), combined)
+                .to_stream(),
+        )
+    }
+
     /// Watch a block with per-row collection reactivity.
     ///
     /// Returns a `LiveBlock` whose `tree` contains `ReactiveChildren` with

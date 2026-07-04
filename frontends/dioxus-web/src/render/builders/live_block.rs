@@ -92,8 +92,15 @@ fn LiveBlockNode(block_id: String, content: ViewModel) -> Element {
             }
             state_task.borrow_mut().handle = Some(handle);
             bridge.on_snapshot(handle, move |json| {
-                match serde_json::from_str::<ViewModel>(&json) {
-                    Ok(v) => inner_vm.set(Some(v)),
+                match serde_json::from_str::<holon_frontend::view_model::WatchEnvelope>(&json) {
+                    Ok(env) => {
+                        inner_vm.set(Some(env.view_model));
+                        // Idempotent (no-ops when the root watcher already
+                        // applied the same state); a sub-block emission can
+                        // carry a focus change the coalesced root emission
+                        // hasn't delivered yet.
+                        crate::editor::worker_focus::apply(env.focused_block, env.caret_offset);
+                    }
                     Err(e) => {
                         tracing::error!("[live_block] snapshot parse: {e}")
                     }

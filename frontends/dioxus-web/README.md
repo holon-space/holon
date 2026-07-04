@@ -297,6 +297,27 @@ bare JSON: `Value::String("x") → "x"`, `Value::Integer(42) → 42`,
 `Value::Float(3.5) → 3.5`, `Value::Null → null`. There is **NO**
 `{"Text": …}` or `{"String": …}` wrapping.
 
+`engineWatchView` snapshot callbacks carry a `WatchEnvelope` (defined in
+`holon_frontend::view_model`), **not** a bare `ViewModel`:
+
+```json
+{ "view_model": { … }, "focused_block": "block:x", "caret_offset": 5 }
+```
+
+`focused_block`/`caret_offset` mirror the worker's in-memory focus
+authority (ADR 0010) atomically with the interpretation that consumed
+it; the page projects them onto DOM focus (`editor::worker_focus`).
+`engineSnapshotView` (MCP `describe_ui` path) still returns a bare
+`ViewModel`.
+
+Writes go through **one lane**: `engineDispatchIntents` (a JSON array of
+`{entity, op, params}`) → `dispatch_intent_chain` → the same
+`ReactiveEngine::dispatch_intent` seam GPUI handlers use (navigation
+focus mirroring, structural-focus projection from split/join results,
+preference routing). Don't mix in `engineExecuteOperation` for writes —
+it `block_on`s the same runtime the spawned chains advance on, so
+ordering across the two lanes is unspecified.
+
 Lockdown tests live in `crates/holon-api/src/lib.rs`:
 
 - `tests::value_serde_wire_format_is_untagged`
@@ -354,21 +375,39 @@ Both fail loudly if anyone adds `#[serde(tag = "…")]` to `Value`.
    accept yet. Don't chase these when triaging — they have nothing to
    do with the rendering pipeline.
 
+## Supported interactions (GPUI parity, 2026-07-04)
+
+- **Viewport-aware layout**: `engineSetViewport` is sent on boot (before
+  the first watch) and on window resize; `if_space(...)` breakpoints are
+  live. The old `[layout: degraded]` banner is gone.
+- **Structural editing keys** via the shared `structural_block_action`
+  decision table: `Enter` → `block.split_block` (at the caret's byte
+  offset), `Backspace` at offset 0 → `block.join_block`, `Tab` /
+  `Shift+Tab` → `block.indent` / `block.outdent`. Structural ops are
+  commit points: the pending debounced content update is cancelled and
+  its live text chained *before* the structural op.
+- **Blur flushes the content debounce** (no more 50 ms clobber race).
+- **Click-to-focus**: `rendered_text` click → `engineSetFocus` → worker
+  flips the `is_focused` variant → next envelope mounts `editable_text`
+  and `worker_focus::apply` moves DOM focus (caret from the worker's
+  seed, end-of-text default). Direct clicks into an editor mirror back
+  via `engineSetFocus` from `onfocusin`.
+- **Task-state cycling**: `state_toggle` click dispatches the same
+  `set_field(task_state, <next>)` as GPUI / the headless driver.
+- **Expand/collapse**: `expand_toggle` chevron, pure local UI state
+  (GPUI parity — no op dispatched).
+
 ## Known limitations
 
-- **Layout always degraded.** The title bar shows `[layout: degraded
-  — AvailableSpace=None in worker]`. The worker has no viewport
-  dimensions, so container queries like `if_space(600.0, …)` always
-  take the fallback branch. Fix: pipe page viewport into the worker
-  via `engineSetViewport(w, h)` on mount + resize.
+- **Deferred interactions**: drag & drop / board reorder, pie menu,
+  slash-command + `[[link]]` popups, cross-block caret navigation
+  (Up/Down at boundaries), rich-text marks, `selectable` modifier
+  clicks, drawer toggle, `op_button` (needs `present_op` param
+  collection), `view_mode_switcher` (needs template swap).
 
-- **Editor `Enter` key is silently swallowed.** `editor.rs::EditorCell`
-  prevents default but doesn't dispatch a block split. A real
-  implementation should emit a `block.split` operation.
-
-- **Debounced dispatch + blur racing.** If the user types, blurs, and
-  the 50 ms debounce hasn't flushed yet, the next snapshot can clobber
-  pending text. Fix: flush debounce on blur.
+- **Caret seed unit**: `caret_offset` is a byte offset into the block's
+  content (matches `split_block`'s `position`); the page converts to
+  UTF-16 for DOM selection.
 
 - **`engineExecuteSql` returns `()`** instead of an affected-row count.
   `DbHandle::query` doesn't expose `changes()`; needs a new accessor

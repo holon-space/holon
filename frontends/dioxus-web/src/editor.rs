@@ -46,6 +46,8 @@ use std::collections::HashMap;
 
 use dioxus::prelude::*;
 use gloo_timers::callback::Timeout;
+use holon_frontend::editor_view_model::{structural_block_action, EditorKey};
+use holon_frontend::OperationIntent;
 
 use crate::BRIDGE;
 
@@ -82,12 +84,53 @@ pub fn EditorCell(entity_id: String, content: String) -> Element {
                     schedule_content_update(eid.clone(), new_content);
                 }
             },
-            onkeydown: move |evt: KeyboardEvent| {
-                // Prevent Enter from inserting a <div> / <br> in Chrome.
-                // Actual newline handling should go through an explicit
-                // split-block operation (not yet wired).
-                if evt.key() == Key::Enter && !evt.modifiers().shift() {
-                    evt.prevent_default();
+            onfocusin: {
+                let eid = entity_id.clone();
+                move |_| {
+                    // A direct click landed DOM focus here. Mirror it into
+                    // the worker's in-memory focus authority (ADR 0010) so
+                    // variant selection + focus_chain follow. Skipped when
+                    // the focus originated FROM the worker (worker_focus
+                    // already records it).
+                    if worker_focus::note_local_focus(&eid) {
+                        let Some(bridge) = BRIDGE.with(|cell| cell.borrow().clone()) else {
+                            tracing::error!("[EditorCell] BRIDGE missing on focusin {eid}");
+                            return;
+                        };
+                        let eid = eid.clone();
+                        wasm_bindgen_futures::spawn_local(async move {
+                            if let Err(e) = bridge
+                                .call("engineSetFocus", [eid.clone().into(), wasm_bindgen::JsValue::NULL])
+                                .await
+                            {
+                                tracing::error!("[EditorCell] engineSetFocus({eid}) failed: {e}");
+                            }
+                        });
+                    }
+                }
+            },
+            onfocusout: {
+                let eid = entity_id.clone();
+                let prop_content = content.clone();
+                move |_| {
+                    let flushed = flush_pending_now(&eid);
+                    // Focus moved away with nothing pending (e.g. a split
+                    // moved it to the new block): the element may hold text
+                    // this render already superseded — `sync_dom_to_prop`
+                    // skipped it while it was focused, and no later render
+                    // re-runs the effect. Reconcile now. When a flush WAS
+                    // dispatched, the prop is older than the user's text;
+                    // leave the DOM alone until the update echoes back.
+                    if !flushed {
+                        sync_dom_to_prop(&eid, &prop_content);
+                    }
+                }
+            },
+            onkeydown: {
+                let eid = entity_id.clone();
+                let prop_content = content.clone();
+                move |evt: KeyboardEvent| {
+                    handle_structural_key(&evt, &eid, &prop_content);
                 }
             },
             // NOTE: no body. The content is set imperatively via
@@ -132,6 +175,172 @@ thread_local! {
         RefCell::new(HashMap::new());
 }
 
+/// Route Enter / Backspace-at-0 / Tab / Shift+Tab through the shared
+/// `structural_block_action` decision table (the same one GPUI's
+/// `editor_view` capture handlers use), chained behind a pending-content
+/// commit: structural ops are commit points (docs/Architecture/UI.md),
+/// and the chain guarantees the flush lands before the structural op.
+fn handle_structural_key(evt: &KeyboardEvent, entity_id: &str, prop_content: &str) {
+    let shift = evt.modifiers().shift();
+    let key = match evt.key() {
+        Key::Enter if !shift => {
+            // Always prevent the browser's <div>/<br> insertion, even if
+            // the caret can't be read — a mangled DOM is worse than a
+            // dropped split.
+            evt.prevent_default();
+            EditorKey::Enter
+        }
+        Key::Tab => {
+            // The browser default would move focus out of the editor.
+            evt.prevent_default();
+            if shift {
+                EditorKey::BackTab
+            } else {
+                EditorKey::Tab
+            }
+        }
+        Key::Backspace if !shift => EditorKey::Backspace,
+        _ => return,
+    };
+
+    let caret = cursor::save().filter(|s| s.entity_id == entity_id);
+    let caret_collapsed_at = caret
+        .as_ref()
+        .filter(|s| s.anchor == s.focus)
+        .map(|s| s.focus as usize);
+
+    // Backspace is only structural with a collapsed caret at offset 0 —
+    // anything else keeps the browser's default text deletion.
+    if key == EditorKey::Backspace && caret_collapsed_at != Some(0) {
+        return;
+    }
+
+    // Live DOM text: strictly newer than both the prop and any pending
+    // debounced update. Used for the commit flush AND the split position.
+    let live_text = cursor::find_element(entity_id)
+        .and_then(|el| el.text_content())
+        .unwrap_or_else(|| prop_content.to_string());
+
+    let cursor_byte = match key {
+        EditorKey::Enter => {
+            let Some(utf16_off) = caret_collapsed_at else {
+                tracing::error!(
+                    "[EditorCell] Enter in {entity_id} without a collapsed caret — split dropped"
+                );
+                return;
+            };
+            utf16_to_byte_offset(&live_text, utf16_off)
+        }
+        _ => 0,
+    };
+
+    let Some(intent) = structural_block_action(key, entity_id, cursor_byte) else {
+        return;
+    };
+    if key == EditorKey::Backspace {
+        evt.prevent_default();
+    }
+
+    let mut chain = Vec::new();
+    if let Some(flush) = take_pending_commit(entity_id, prop_content, &live_text) {
+        chain.push(flush);
+    }
+    chain.push(intent_to_wire(&intent));
+    dispatch_chain(chain);
+}
+
+/// Cancel the entity's pending debounced update and, if the live DOM text
+/// diverged from the last-rendered prop, return a `block.update` wire
+/// intent carrying it. MUST run before any structural dispatch for the
+/// same entity — a stale debounce firing after a split would resurrect
+/// the pre-split text into the truncated block.
+fn take_pending_commit(
+    entity_id: &str,
+    prop_content: &str,
+    live_text: &str,
+) -> Option<serde_json::Value> {
+    let had_pending = PENDING_DISPATCH
+        .with(|cell| cell.borrow_mut().remove(entity_id))
+        .is_some();
+    if !had_pending && live_text == prop_content {
+        return None;
+    }
+    Some(update_wire(entity_id, live_text))
+}
+
+/// Flush the pending debounced update for `entity_id` immediately with the
+/// element's live text. Called on blur so the 50 ms window can't race a
+/// subsequent snapshot into clobbering the user's final keystrokes.
+/// Returns whether an update was dispatched.
+fn flush_pending_now(entity_id: &str) -> bool {
+    let Some(_pending) = PENDING_DISPATCH.with(|cell| cell.borrow_mut().remove(entity_id)) else {
+        return false;
+    };
+    let Some(text) = cursor::find_element(entity_id).and_then(|el| el.text_content()) else {
+        tracing::error!("[EditorCell] blur flush: element for {entity_id} gone — update dropped");
+        return false;
+    };
+    dispatch_chain(vec![update_wire(entity_id, &text)]);
+    true
+}
+
+pub(crate) fn update_wire(entity_id: &str, content: &str) -> serde_json::Value {
+    serde_json::json!({
+        "entity": "block",
+        "op": "update",
+        "params": { "id": entity_id, "content": content },
+    })
+}
+
+pub(crate) fn intent_to_wire(intent: &OperationIntent) -> serde_json::Value {
+    serde_json::json!({
+        "entity": intent.entity_name.to_string(),
+        "op": intent.op_name,
+        "params": intent.params,
+    })
+}
+
+/// Send an ordered intent chain through `engineDispatchIntents` — the
+/// single write lane. All content + structural writes go through here so
+/// the worker's `dispatch_intent_chain` serializes them; mixing lanes
+/// with `engineExecuteOperation` (block_on) could interleave a spawned
+/// chain with a blocking op in unspecified order.
+pub(crate) fn dispatch_chain(intents: Vec<serde_json::Value>) {
+    let Some(bridge) = BRIDGE.with(|cell| cell.borrow().clone()) else {
+        tracing::error!("[EditorCell] BRIDGE not initialized — dropping intent chain");
+        return;
+    };
+    let json = serde_json::Value::Array(intents).to_string();
+    wasm_bindgen_futures::spawn_local(async move {
+        if let Err(e) = bridge.call("engineDispatchIntents", [json.into()]).await {
+            tracing::error!("[EditorCell] engineDispatchIntents failed: {e}");
+        }
+    });
+}
+
+/// Convert a flat UTF-16 offset (DOM Selection units) into a byte offset
+/// into `s` (what `split_block`'s `position` param expects). Past-end
+/// offsets clamp to `s.len()`.
+fn utf16_to_byte_offset(s: &str, utf16_off: usize) -> usize {
+    let mut u16_seen = 0usize;
+    for (byte_idx, ch) in s.char_indices() {
+        if u16_seen >= utf16_off {
+            return byte_idx;
+        }
+        u16_seen += ch.len_utf16();
+    }
+    s.len()
+}
+
+/// Byte → flat UTF-16 offset (inverse of [`utf16_to_byte_offset`]) for
+/// placing the caret from a worker caret seed. Past-end clamps.
+fn byte_to_utf16_offset(s: &str, byte_off: usize) -> u32 {
+    s.char_indices()
+        .take_while(|(i, _)| *i < byte_off)
+        .map(|(_, c)| c.len_utf16() as u32)
+        .sum()
+}
+
 /// Schedule a trailing-edge debounced `block.update` for `entity_id`.
 ///
 /// Called from every keystroke. The previous pending dispatch for the
@@ -157,29 +366,115 @@ fn schedule_content_update(entity_id: String, content: String) {
     });
 }
 
-/// Fire the actual `engineExecuteOperation` RPC. Used only by the
-/// debounced scheduler above — do not call directly from event handlers.
+/// Fire the debounced content update through the single
+/// `engineDispatchIntents` write lane. Used only by the debounced
+/// scheduler above — do not call directly from event handlers.
 fn dispatch_content_update_now(entity_id: String, content: String) {
-    let bridge = BRIDGE.with(|cell| cell.borrow().clone());
-    let Some(bridge) = bridge else {
-        tracing::error!("[EditorCell] BRIDGE not initialized — dropping update");
-        return;
-    };
-    wasm_bindgen_futures::spawn_local(async move {
-        let params = serde_json::json!({
-            "id": entity_id,
-            "content": content,
+    dispatch_chain(vec![update_wire(&entity_id, &content)]);
+}
+
+/// Worker-authoritative editor focus (ADR 0010: the worker's in-memory
+/// `UiState.focused_block` is the single authority; the page's DOM focus
+/// is a projection of it).
+///
+/// Every `WatchEnvelope` carries `{focused_block, caret_offset}` read
+/// atomically with the interpretation. `apply` moves DOM focus to match:
+/// the newly-focused block's editor may only mount in the re-render the
+/// same envelope triggers, so application retries briefly until the
+/// element exists. Moving DOM focus FIRST also un-focuses the previously
+/// focused element, so `sync_dom_to_prop`'s "focused element keeps its
+/// local text" rule can't pin a stale (e.g. pre-split) text.
+pub mod worker_focus {
+    use std::cell::RefCell;
+
+    use wasm_bindgen::JsCast;
+
+    thread_local! {
+        /// Last focus applied or locally noted. `apply` no-ops when the
+        /// envelope agrees, so user caret movement isn't disturbed by
+        /// every snapshot.
+        static CURRENT: RefCell<Option<String>> = const { RefCell::new(None) };
+        /// Bumped per `apply` change so a stale retry loop aborts instead
+        /// of stealing focus back.
+        static GENERATION: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
+    /// Record a locally-initiated focus (direct click on an editor cell).
+    /// Returns `true` when this is news — the caller then informs the
+    /// worker via `engineSetFocus`; `false` when it merely echoes the
+    /// worker's own focus application.
+    pub fn note_local_focus(entity_id: &str) -> bool {
+        CURRENT.with(|c| {
+            let mut cur = c.borrow_mut();
+            if cur.as_deref() == Some(entity_id) {
+                return false;
+            }
+            *cur = Some(entity_id.to_string());
+            true
+        })
+    }
+
+    /// Apply the worker's focus state from a `WatchEnvelope`. `caret_byte`
+    /// is the worker's one-shot caret seed (byte offset into the block's
+    /// content); `None` defaults to end-of-text, matching GPUI's mount rule.
+    pub fn apply(focused: Option<String>, caret_byte: Option<usize>) {
+        let changed = CURRENT.with(|c| {
+            let mut cur = c.borrow_mut();
+            if *cur == focused {
+                return false;
+            }
+            *cur = focused.clone();
+            true
         });
-        if let Err(e) = bridge
-            .call(
-                "engineExecuteOperation",
-                ["block".into(), "update".into(), params.to_string().into()],
-            )
-            .await
-        {
-            tracing::error!("[EditorCell] execute_operation failed: {e}");
+        if !changed {
+            return;
         }
-    });
+        let generation = GENERATION.with(|g| {
+            g.set(g.get() + 1);
+            g.get()
+        });
+
+        let Some(target) = focused else {
+            // Worker cleared focus: blur whichever editor cell holds it.
+            if let Some(active) = web_sys::window()
+                .and_then(|w| w.document())
+                .and_then(|d| d.active_element())
+            {
+                if active.get_attribute("data-role").as_deref() == Some("editor-cell") {
+                    if let Some(html) = active.dyn_ref::<web_sys::HtmlElement>() {
+                        let _ = html.blur();
+                    }
+                }
+            }
+            return;
+        };
+
+        wasm_bindgen_futures::spawn_local(async move {
+            // The editable variant for `target` renders in the re-render
+            // this same envelope triggered; poll briefly for it to mount.
+            for _ in 0..30u32 {
+                if GENERATION.with(|g| g.get()) != generation {
+                    return; // superseded by a newer focus change
+                }
+                if let Some(el) = super::cursor::find_element(&target) {
+                    if super::cursor::is_element_focused(&el) {
+                        return; // e.g. local click that we merely echo
+                    }
+                    let text = el.text_content().unwrap_or_default();
+                    let utf16 = match caret_byte {
+                        Some(b) => super::byte_to_utf16_offset(&text, b),
+                        None => text.encode_utf16().count() as u32,
+                    };
+                    super::cursor::focus_and_place(&el, utf16);
+                    return;
+                }
+                gloo_timers::future::TimeoutFuture::new(16).await;
+            }
+            tracing::error!(
+                "[worker_focus] editor element for {target} never mounted — focus not applied"
+            );
+        });
+    }
 }
 
 /// Cursor save/restore for `contenteditable` elements using a flat
@@ -350,6 +645,13 @@ pub mod cursor {
         // anchor) natively, unlike Range::set_start / set_end which
         // require ordered positions.
         let _ = sel.set_base_and_extent(&anchor_node, local_anchor, &focus_node, local_focus);
+    }
+
+    /// Focus `el` and place a collapsed caret at flat UTF-16 offset
+    /// `offset`. Used by [`super::worker_focus`] to project the worker's
+    /// focus authority onto the DOM.
+    pub(crate) fn focus_and_place(el: &Element, offset: u32) {
+        restore_flat(el, offset, offset);
     }
 
     /// Enqueue a restore to be applied after the next render.
