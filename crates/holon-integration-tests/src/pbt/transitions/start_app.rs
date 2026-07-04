@@ -8,15 +8,35 @@
 
 use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
-use holon_api::{ContentType, Region, SourceLanguage};
+use holon_api::{ContentType, QueryLanguage, Region, SourceLanguage};
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
 use crate::pbt::local_caps::SutAppLifecycle;
+use crate::pbt::query::{QuerySource, QueryTable, TestQuery, WatchSpec, all_block_columns};
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::validation::{Reason, check};
+use holon_pbt_core::capabilities::SutWatchRegister;
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
+
+/// Query id of the production seeded left-sidebar watch (`assets/default/index.org`).
+/// Registered on BOTH ref and SUT after boot so `inv-watch-rows-match-ref` (which
+/// intersects the two sides) covers the sidebar's `PageBlocks` query.
+pub(crate) const SEEDED_SIDEBAR_WATCH_ID: &str = "seeded-left-sidebar-pages";
+
+/// The seeded left-sidebar watch spec (production `index.org` page query).
+fn seeded_sidebar_watch_spec() -> WatchSpec {
+    WatchSpec {
+        query: TestQuery {
+            table: QueryTable::Blocks,
+            columns: all_block_columns(),
+            predicates: vec![],
+            source: QuerySource::PageBlocks,
+        },
+        language: QueryLanguage::HolonSql,
+    }
+}
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
@@ -112,6 +132,16 @@ impl TransitionRef<ReferenceState> for StartApp {
         // (replacing its phantom `started-ref-layout-query`), keeping
         // `inv-watch-rows-match-ref` a full-fidelity comparison.
         seed_booted_layout_into_ref(state, fresh);
+
+        // Register the production seeded left-sidebar watch on the ref side. The
+        // SUT registers the identical query after boot; `inv-watch-rows-match-ref`
+        // intersects the two sides, so this ref-side entry only participates when
+        // the SUT also has it (the watch is a real ref-checked production query,
+        // not a phantom).
+        state.mcp.active_watches.insert(
+            SEEDED_SIDEBAR_WATCH_ID.to_string(),
+            seeded_sidebar_watch_spec(),
+        );
 
         // Load the seed entity profile from the TypeRegistry's bundled
         // block_profile.yaml (not from org blocks — the seed index.org
@@ -354,8 +384,43 @@ pub(crate) fn seed_booted_layout_into_ref(state: &mut ReferenceState, fresh: boo
     } // end fresh-only default-layout seed
 }
 
+/// SUT-side registration of the seeded left-sidebar watch, run after boot so the
+/// SUT's `ui_model` carries the same production sidebar query the ref side seeds.
+/// A dedicated cap (not folded into `SutAppLifecycle`) because a SUT may boot
+/// without watch support — those provide an explicit no-op impl below.
 #[allow(async_fn_in_trait)]
-impl<S: SutAppLifecycle> TransitionImpl<ReferenceState, S> for StartApp {
+pub trait SutBootWatches {
+    async fn register_seeded_sidebar_watch(&self);
+}
+
+/// `E2ESut` hosts `SutWatchRegister` directly, so it registers the compiled
+/// seeded-sidebar SQL through it (identical path to `SetupWatch`).
+#[allow(async_fn_in_trait)]
+impl SutBootWatches for crate::pbt::sut::E2ESut {
+    async fn register_seeded_sidebar_watch(&self) {
+        let spec = seeded_sidebar_watch_spec();
+        self.register_watch(SEEDED_SIDEBAR_WATCH_ID, &spec.query.to_sql(), spec.language)
+            .await;
+    }
+}
+
+/// The composed `CapMap` registers the watch only when it actually hosts
+/// `SutWatchRegister`. If the cap is absent, this is a deliberate no-op:
+/// `inv-watch-rows-match-ref` intersects the two sides, so a ref-only entry is
+/// simply skipped — no phantom comparison.
+#[allow(async_fn_in_trait)]
+impl SutBootWatches for holon_pbt_core::composition::CapMap {
+    async fn register_seeded_sidebar_watch(&self) {
+        if let Some(reg) = self.get::<dyn SutWatchRegister>() {
+            let spec = seeded_sidebar_watch_spec();
+            reg.register_watch(SEEDED_SIDEBAR_WATCH_ID, &spec.query.to_sql(), spec.language)
+                .await;
+        }
+    }
+}
+
+#[allow(async_fn_in_trait)]
+impl<S: SutAppLifecycle + SutBootWatches> TransitionImpl<ReferenceState, S> for StartApp {
     async fn apply_to_sut(&self, state: &ReferenceState, sut: &mut S) {
         // Boundary-precompute the `ref_state`-derived values the cap consumes
         // at action time (the HARD RULE forbids `ref_state` in the cap sig, not
@@ -373,6 +438,7 @@ impl<S: SutAppLifecycle> TransitionImpl<ReferenceState, S> for StartApp {
             self.enable_loro,
         )
         .await;
+        sut.register_seeded_sidebar_watch().await;
     }
 }
 

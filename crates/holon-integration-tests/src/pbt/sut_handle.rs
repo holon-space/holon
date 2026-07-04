@@ -235,6 +235,45 @@ impl crate::pbt::local_caps::SutAppLifecycle for E2ESut {
             .unwrap_or_else(|e| panic!("Failed to create document: {e}"));
     }
 
+    async fn delete_document(&self, file_name: &str) {
+        use holon_filesystem::FileSystem;
+        tracing::trace!("[apply] Deleting document: {}", file_name);
+        let file_path = self.ctx.org_root().join(file_name);
+        FileSystem::remove(self.ctx.org_fs.as_ref(), &file_path)
+            .await
+            .unwrap_or_else(|e| panic!("Failed to delete document {file_name}: {e:#}"));
+
+        // Inverse of `TestEnvironment::create_document`'s poll: wait until the
+        // page block is no longer resolvable (backend-agnostic —
+        // `resolve_page_uri_by_name` reads Turso `block_raw` or the Loro
+        // snapshot). The removal went through the bare fs port — the harness
+        // analog of the user deleting the file OUTSIDE Holon (the scenario the
+        // prod bug was observed in) — and the in-memory fs emitted a `Remove`
+        // change, so the production `FileSyncController::on_file_deleted`
+        // cascade ran for the vanished path. Fail loud on timeout — it means
+        // that cascade regressed and blocks linger after an external deletion.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if self.ctx.resolve_page_uri_by_name(file_name).await.is_err() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "[SutAppLifecycle::delete_document] timeout: the doc page for {file_name} is \
+                 still resolvable 5s after removing the file — prod is not deleting blocks when \
+                 an org file is deleted outside Holon (regression of \
+                 FileSyncController::on_file_deleted's cascade)"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // Untrack the doc so later file-seam lookups don't resolve a dead path.
+        self.ctx
+            .documents
+            .borrow_mut()
+            .retain(|_, p| *p != file_path);
+    }
+
     async fn assert_epoch_flip_rejected(&self) {
         use std::ops::Deref;
         // `deref()` forces `TestEnvironment::assert_epoch_flip_rejected` — a bare

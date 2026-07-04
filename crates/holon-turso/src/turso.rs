@@ -1838,12 +1838,66 @@ impl TursoBackend {
     async fn handle_ddl(conn: &turso::Connection, sql: &str) -> Result<()> {
         trace_sql("actor_ddl", sql);
 
-        conn.execute(sql, ())
-            .await
-            .map_err(|e| StorageError::DatabaseError(format!("Failed to execute DDL: {}", e)))?;
+        // The actor processes commands sequentially, so an unbounded DDL await
+        // parks the *entire* DB actor: every later query/exec queues behind it
+        // and never gets a response — the app freezes with no error. A
+        // `CREATE MATERIALIZED VIEW` that selects FROM another matview can hang
+        // forever in Turso IVM (matview-on-matview is unsupported — see
+        // .claude/skills/turso-chained-matview-hang/SKILL.md). Bounding the
+        // execution here lets the actor recover and surface a loud error
+        // instead. The caller-side DEPENDENCY_TIMEOUT (120s) does NOT help:
+        // it only abandons the caller's wait; the actor stays parked forever.
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        {
+            let timeout = Self::ddl_execution_timeout();
+            match tokio::time::timeout(timeout, conn.execute(sql, ())).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    return Err(StorageError::DatabaseError(format!(
+                        "Failed to execute DDL: {}",
+                        e
+                    )));
+                }
+                Err(_elapsed) => {
+                    let sql_preview: String = sql.chars().take(160).collect();
+                    return Err(StorageError::DatabaseError(format!(
+                        "DDL execution timed out after {:?} — actor would have hung. \
+                         Suspected Turso chained-matview (matview-on-matview) limitation: \
+                         CREATE MATERIALIZED VIEW selecting FROM another matview hangs \
+                         indefinitely in Turso IVM. See \
+                         .claude/skills/turso-chained-matview-hang/SKILL.md. SQL: {}...",
+                        timeout, sql_preview
+                    )));
+                }
+            }
+        }
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        {
+            conn.execute(sql, ()).await.map_err(|e| {
+                StorageError::DatabaseError(format!("Failed to execute DDL: {}", e))
+            })?;
+        }
 
         tracing::debug!("[TursoBackend::Actor] DDL completed successfully");
         Ok(())
+    }
+
+    /// Upper bound on a single DDL statement's execution inside the actor.
+    ///
+    /// Kept well under the caller-side `DEPENDENCY_TIMEOUT` (120s) so a genuine
+    /// hang is caught here first (freeing the actor) rather than only abandoning
+    /// one caller's wait. Overridable via `HOLON_DDL_TIMEOUT_MS` so tests can
+    /// exercise the hang guard without a 30s wall.
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    fn ddl_execution_timeout() -> std::time::Duration {
+        const DDL_EXECUTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+        match std::env::var("HOLON_DDL_TIMEOUT_MS") {
+            Ok(ms) => std::time::Duration::from_millis(
+                ms.parse()
+                    .expect("HOLON_DDL_TIMEOUT_MS must be a u64 millisecond count"),
+            ),
+            Err(_) => DDL_EXECUTION_TIMEOUT,
+        }
     }
 
     /// Handle a transaction command

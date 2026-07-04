@@ -68,9 +68,9 @@ use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::sql_slice::SqlProjectionComponent;
 use crate::pbt::transitions::toggle_state::CycleTarget;
 use crate::pbt::transitions::{
-    CreateDocument, DeleteBackward, E2ETransition, FocusEditableText, Indent, JoinBlock,
-    NavigateBack, NavigateFocus, NavigateForward, NavigateHome, Nothing, Outdent, PinBlock,
-    SimulateRestart, SplitBlock, ToggleState, TypeChars,
+    CreateDocument, DeleteBackward, DeleteDocument, E2ETransition, FocusEditableText, Indent,
+    JoinBlock, NavigateBack, NavigateFocus, NavigateForward, NavigateHome, Nothing, Outdent,
+    PinBlock, SimulateRestart, SplitBlock, ToggleState, TypeChars,
 };
 use holon_pbt_core::capabilities::{
     SutBackend, SutBlockTreeWrite, SutEditorMirrorRead, SutFocus, SutQueryResults, SutSqlProjection,
@@ -351,6 +351,11 @@ fn wide_aggregate(state: &ReferenceState) -> BoxedStrategy<E2ETransition> {
     // by the harness's per-tick reconcile (doc-uri-minting generalization) — the
     // doc-uri case the old E2ESut `block_tree_post_action` CreateDocument arm handled.
     arm!(CreateDocument, E2ETransition::CreateDocument);
+    // Inverse of SR-1: `DeleteDocument` removes a `CreateDocument`-minted org file via
+    // the production `FileSystem::remove` seam (the watcher observes the deletion). Its
+    // generator self-gates on a synthetic `doc_<n>.org` existing, so it only fires after
+    // a create landed.
+    arm!(DeleteDocument, E2ETransition::DeleteDocument);
     // Nav-history transitions folded from the nav slice (toward deleting it). The wide boot's
     // nav-history is aligned in `structural_ref_wired` ([journals#1, page#2], next=3), and the
     // probe proved the structural/editor/doc transitions write NO nav rows, so the AUTOINCREMENT

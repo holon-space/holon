@@ -1952,6 +1952,56 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
         }
     }
 
+    async fn delete_document(&self, file_name: &str) {
+        use holon_filesystem::FileSystem;
+        let file_path = self.org_root.join(file_name);
+        FileSystem::remove(self.org_fs.as_ref(), &file_path)
+            .await
+            .unwrap_or_else(|e| {
+                panic!("[SutAppLifecycle::delete_document] remove {file_name} failed: {e:#}")
+            });
+
+        // Inverse of `create_document`'s poll: wait for the page block whose
+        // title is the file stem to VANISH from `block_raw`. The removal went
+        // through the bare fs port — the harness analog of the user deleting
+        // the file OUTSIDE Holon (the scenario the prod bug was observed in) —
+        // and the in-memory fs emitted a `Remove` change, so the production
+        // `FileSyncController::on_file_deleted` cascade ran for the vanished
+        // path. Fail loud on timeout — it means that cascade regressed and
+        // blocks linger after an external deletion.
+        let stem = std::path::Path::new(file_name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(file_name)
+            .to_string();
+        let timeout = Duration::from_secs(5);
+        let start = std::time::Instant::now();
+        loop {
+            if !self
+                .all_blocks()
+                .await
+                .into_iter()
+                .any(|b| b.title() == stem)
+            {
+                break;
+            }
+            assert!(
+                start.elapsed() < timeout,
+                "[SutAppLifecycle::delete_document] timeout: the doc block (title {stem:?}) is \
+                 still in the block set 5s after removing {file_name} — prod is not deleting \
+                 blocks when an org file is deleted outside Holon (regression of \
+                 FileSyncController::on_file_deleted's cascade)"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // Untrack the doc so later file-seam lookups don't resolve a dead path.
+        self.documents
+            .lock()
+            .expect("documents lock")
+            .retain(|(_, p)| *p != file_path);
+    }
+
     async fn concurrent_schema_init(&self) {
         // Ported from the E2ESut/`SutHandle` impl: the regression this guards is the
         // double-`ensure_navigation_schema` "database is locked" bug — sequential schema

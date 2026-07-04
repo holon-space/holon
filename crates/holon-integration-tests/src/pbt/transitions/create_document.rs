@@ -43,7 +43,9 @@ impl TransitionFactory<ReferenceState> for CreateDocument {
         };
         instance.preconditions(state).map(|_| {
             let strat = Just(instance).boxed();
-            (1, strat)
+            // Weight 2: feeds DeleteDocument's candidate pool; at weight 1 a
+            // 16-case run created only 6 docs and never drew a deletion.
+            (2, strat)
         })
     }
 }

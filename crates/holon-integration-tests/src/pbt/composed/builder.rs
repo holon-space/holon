@@ -1163,6 +1163,7 @@ mod tests {
             UndoLastMutation,
             ToggleState,
             CreateDocument,
+            DeleteDocument,
             SimulateRestart,
             StartApp,
             ConcurrentSchemaInit,

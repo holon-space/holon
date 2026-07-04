@@ -21,7 +21,7 @@ use holon_api::types::{DependsOn, Priority, TaskState, Timestamp};
 use holon_api::{CompiledExpr, EntityUri};
 use holon_engine::arc::{CreateArc, InputArc, OutputArc};
 use holon_engine::value::Value;
-use holon_engine::{Marking, NetDef, TokenState, TransitionDef};
+use holon_engine::{Marking, NetDef, PrecondSpec, TokenState, TransitionDef};
 use rhai::{Dynamic, Engine as RhaiEngine, Scope};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
