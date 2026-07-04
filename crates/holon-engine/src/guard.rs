@@ -101,57 +101,54 @@ impl RhaiEvaluator {
         let mut new_placeholders = BTreeMap::new();
         for (attr, spec) in &arc.precond {
             let token_val = token.get(attr);
-            if spec.starts_with('$') {
-                // Placeholder bind: capture value, unifying with any earlier capture
-                let val = token_val.cloned().unwrap_or(Value::Null);
-                let prior = existing_placeholders
-                    .get(spec)
-                    .or_else(|| new_placeholders.get(spec));
-                match prior {
-                    Some(existing) if *existing != val => return Ok(None),
-                    _ => {
-                        new_placeholders.insert(spec.clone(), val);
+            match spec {
+                PrecondSpec::Placeholder(name) => {
+                    // Placeholder bind: capture value, unifying with any earlier capture
+                    let val = token_val.cloned().unwrap_or(Value::Null);
+                    let prior = existing_placeholders
+                        .get(name)
+                        .or_else(|| new_placeholders.get(name));
+                    match prior {
+                        Some(existing) if *existing != val => return Ok(None),
+                        _ => {
+                            new_placeholders.insert(name.clone(), val);
+                        }
                     }
                 }
-            } else if spec.starts_with(">=")
-                || spec.starts_with("<=")
-                || spec.starts_with('>')
-                || spec.starts_with('<')
-                || spec.starts_with("==")
-                || spec.starts_with("!=")
-            {
-                // Rhai comparison expression
-                let Some(token_val) = token_val else {
-                    return Ok(None);
-                };
-                let rhai_val = token_val.to_rhai_dynamic();
-                let expr = format!("x {spec}");
-                let mut scope = Scope::new();
-                scope.push("x", rhai_val);
-                match self.engine.eval_with_scope::<bool>(&mut scope, &expr) {
-                    Ok(true) => {}
-                    Ok(false) => return Ok(None),
-                    Err(e) => {
-                        return Err(format!(
-                            "precondition '{attr}: {spec}' on arc '{}' failed to evaluate: {e}",
-                            arc.bind
-                        ))
+                PrecondSpec::Comparison { compiled, .. } => {
+                    let Some(token_val) = token_val else {
+                        return Ok(None);
+                    };
+                    let mut scope = Scope::new();
+                    scope.push("x", token_val.to_rhai_dynamic());
+                    match self
+                        .engine
+                        .eval_ast_with_scope::<bool>(&mut scope, &compiled.ast)
+                    {
+                        Ok(true) => {}
+                        Ok(false) => return Ok(None),
+                        Err(e) => {
+                            return Err(format!(
+                                "precondition '{attr}: {spec}' on arc '{}' failed to evaluate: {e}",
+                                arc.bind
+                            ))
+                        }
                     }
                 }
-            } else {
-                // Exact match
-                let Some(token_val) = token_val else {
-                    return Ok(None);
-                };
-                let matches = match token_val {
-                    Value::String(s) => s == spec,
-                    Value::Float(f) => spec.parse::<f64>().is_ok_and(|v| (*f - v).abs() < 1e-9),
-                    Value::Int(i) => spec.parse::<i64>() == Ok(*i),
-                    Value::Bool(b) => spec.parse::<bool>() == Ok(*b),
-                    Value::Null => spec == "null",
-                };
-                if !matches {
-                    return Ok(None);
+                PrecondSpec::Exact(lit) => {
+                    let Some(token_val) = token_val else {
+                        return Ok(None);
+                    };
+                    let matches = match token_val {
+                        Value::String(s) => s == lit,
+                        Value::Float(f) => lit.parse::<f64>().is_ok_and(|v| (*f - v).abs() < 1e-9),
+                        Value::Int(i) => lit.parse::<i64>() == Ok(*i),
+                        Value::Bool(b) => lit.parse::<bool>() == Ok(*b),
+                        Value::Null => lit == "null",
+                    };
+                    if !matches {
+                        return Ok(None);
+                    }
                 }
             }
         }

@@ -19,7 +19,7 @@ use chrono::{DateTime, Utc};
 use holon_api::block::Block;
 use holon_api::types::{DependsOn, Priority, TaskState, Timestamp};
 use holon_api::{CompiledExpr, EntityUri};
-use holon_engine::arc::{CreateArc, InputArc, OutputArc};
+use holon_engine::arc::{CreateArc, InputArc, OutputArc, PrecondSpec};
 use holon_engine::value::Value;
 use holon_engine::{Marking, NetDef, TokenState, TransitionDef};
 use rhai::{Dynamic, Engine as RhaiEngine, Scope};
@@ -1009,7 +1009,7 @@ fn build_task_transitions(
 
             let person_bind = format!("delegate_{}", person.replace(' ', "_"));
             let mut pcond = BTreeMap::new();
-            pcond.insert("name".to_string(), person.clone());
+            pcond.insert("name".to_string(), PrecondSpec::Exact(person.clone()));
             inputs.push(InputArc {
                 bind: person_bind.clone(),
                 token_type: "person".to_string(),
@@ -1023,7 +1023,10 @@ fn build_task_transitions(
 
             let wait_bind = format!("wait_{}", task.block_id);
             let mut wcond = BTreeMap::new();
-            wcond.insert("source_task".to_string(), task.block_id.clone());
+            wcond.insert(
+                "source_task".to_string(),
+                PrecondSpec::Exact(task.block_id.clone()),
+            );
             inputs.push(InputArc {
                 bind: wait_bind,
                 token_type: "waiting".to_string(),
@@ -1055,7 +1058,7 @@ fn build_task_transitions(
     for (i, dep_id) in task.depends_on.iter().enumerate() {
         let bind_name = format!("dep_{i}");
         let mut precond = BTreeMap::new();
-        precond.insert("source_task".to_string(), dep_id.clone());
+        precond.insert("source_task".to_string(), PrecondSpec::Exact(dep_id.clone()));
         inputs.push(InputArc {
             bind: bind_name.clone(),
             token_type: "completion".to_string(),
