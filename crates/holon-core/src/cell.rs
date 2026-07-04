@@ -507,4 +507,50 @@ mod tests {
         check_delta("foo😀bar", "foobar");
         check_delta("naïve", "native");
     }
+
+    /// Text backing stub whose cursor anchors are plain offsets, to pin the
+    /// `Cell<String>` cursor forwarding (must return the backing's answer,
+    /// not a constant).
+    struct OffsetTextBacking;
+
+    impl CellBacking<String> for OffsetTextBacking {
+        fn current(&self) -> String {
+            "0123456789".to_string()
+        }
+        fn signal(&self) -> BoxStream<'static, String> {
+            Box::pin(futures::stream::empty())
+        }
+        fn apply_replace(&self, _v: String) -> BoxFuture<'static, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn as_text_backing(&self) -> Option<&dyn TextCellBacking> {
+            Some(self)
+        }
+    }
+
+    impl TextCellBacking for OffsetTextBacking {
+        fn apply_text_op(&self, _op: TextOp) -> Result<()> {
+            Ok(())
+        }
+        fn anchor_cursor(&self, char_offset: usize, bias: CursorBias) -> CursorAnchor {
+            CursorAnchor::new(Box::new(char_offset), bias)
+        }
+        fn resolve_cursor(&self, anchor: &CursorAnchor) -> usize {
+            *anchor.inner.downcast_ref::<usize>().expect("offset anchor")
+        }
+        fn remote_deltas(&self) -> BoxStream<'static, TextDelta> {
+            Box::pin(futures::stream::empty())
+        }
+    }
+
+    #[test]
+    fn cursor_anchor_resolve_round_trips_through_cell() {
+        let cell = Cell::from_backing(Arc::new(OffsetTextBacking) as Arc<dyn CellBacking<String>>);
+        let anchor = cell.anchor_cursor(7, CursorBias::Right).unwrap();
+        assert_eq!(
+            cell.resolve_cursor(&anchor).unwrap(),
+            7,
+            "resolve_cursor must return the backing's resolved offset"
+        );
+    }
 }

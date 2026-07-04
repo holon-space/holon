@@ -1026,8 +1026,8 @@ where
         )
         .await?;
 
-        eprintln!(
-            "[split_block-diag] new_block_id={} parent={} after={} wrote_create_via_cell={}",
+        tracing::trace!(
+            "[split_block] new_block_id={} parent={} after={} wrote_create_via_cell={}",
             new_block_id,
             parent_for_split.as_str(),
             after_uri.as_str(),
@@ -1866,4 +1866,117 @@ pub trait MatviewHook: Send + Sync {
     /// Called after a successful FDW prime query. `cache_table` is the primed table
     /// (e.g. `"cc_message"`), `fdw_sql` is the executed query including WHERE clause.
     async fn on_fdw_primed(&self, cache_table: &str, fdw_sql: &str);
+}
+
+#[cfg(test)]
+mod trait_unit_tests {
+    use super::*;
+    use holon_api::block::Block;
+
+    #[test]
+    fn event_origin_round_trips_through_str() {
+        for origin in [
+            EventOrigin::Loro,
+            EventOrigin::Org,
+            EventOrigin::Ui,
+            EventOrigin::Other("sql".to_string()),
+        ] {
+            assert_eq!(EventOrigin::parse_str(origin.as_str()), origin);
+        }
+        assert_eq!(EventOrigin::Loro.as_str(), "loro");
+        assert_eq!(EventOrigin::Org.as_str(), "org");
+        assert_eq!(EventOrigin::Ui.as_str(), "ui");
+    }
+
+    #[test]
+    fn undo_action_semantics() {
+        let op = Operation::new("test", "op", "op", std::collections::HashMap::new());
+        let undo = UndoAction::from(op);
+        assert!(undo.is_reversible());
+        let inner = undo.into_option().expect("Undo(op) must yield Some(op)");
+        assert_eq!(inner.op_name, "op");
+
+        assert!(!UndoAction::Irreversible.is_reversible());
+        assert!(UndoAction::Irreversible.into_option().is_none());
+    }
+
+    #[test]
+    fn unknown_operation_error_detection_and_display() {
+        let err = UnknownOperationError::new("BlockOperations", "frobnicate");
+        assert!(UnknownOperationError::is_unknown(&err));
+        let msg = err.to_string();
+        assert!(msg.contains("frobnicate"), "display must name the operation: {msg}");
+        assert!(msg.contains("BlockOperations"), "display must name the trait: {msg}");
+
+        let other = std::io::Error::other("boom");
+        assert!(!UnknownOperationError::is_unknown(&other));
+    }
+
+    fn test_block() -> Block {
+        Block::new_text(
+            EntityUri::block("11111111-1111-1111-1111-111111111111"),
+            EntityUri::block("22222222-2222-2222-2222-222222222222"),
+            "hello world",
+        )
+    }
+
+    #[test]
+    fn block_entity_view_maps_id_parent_content_tags() {
+        let mut block = test_block();
+        block.tags.insert("foo");
+
+        assert_eq!(BlockEntity::id(&block), &block.id);
+        assert_eq!(
+            BlockEntity::parent_id(&block),
+            Some(&EntityUri::block("22222222-2222-2222-2222-222222222222")),
+            "block-scheme parent must surface as the full URI"
+        );
+        assert_eq!(BlockEntity::content(&block), "hello world");
+        assert!(BlockEntity::tags(&block).contains("foo"));
+        assert_eq!(BlockEntity::depth(&block), 0, "flattened entity depth is always 0");
+        assert!(!block.is_page());
+
+        let mut page = test_block();
+        page.set_page(true);
+        assert!(
+            BlockEntity::is_page(&page),
+            "default is_page must derive from the Page tag"
+        );
+
+        // Non-block parents (doc URIs) must read as "no parent block".
+        // ALLOW(entity_uri_from_raw): constructing a doc-scheme parent fixture.
+        let mut doc_child = test_block();
+        doc_child.parent_id = EntityUri::from_raw("doc:some-file");
+        assert_eq!(BlockEntity::parent_id(&doc_child), None);
+    }
+
+    #[test]
+    fn task_entity_view_maps_state_priority_due_date() {
+        let mut done = test_block();
+        done.set_property("task_state", "DONE");
+        assert!(TaskEntity::completed(&done));
+
+        let mut todo = test_block();
+        todo.set_property("task_state", "TODO");
+        assert!(!TaskEntity::completed(&todo));
+        assert!(!TaskEntity::completed(&test_block()));
+
+        let mut prioritized = test_block();
+        prioritized.set_property("PRIORITY", 2i64);
+        assert_eq!(TaskEntity::priority(&prioritized), Some(2));
+        assert_eq!(TaskEntity::priority(&test_block()), None);
+
+        let mut due = test_block();
+        due.set_property("DEADLINE", "<2026-07-04 Sat>");
+        let date = TaskEntity::due_date(&due).expect("DEADLINE must yield a due date");
+        assert_eq!(date.date_naive().to_string(), "2026-07-04");
+        assert!(TaskEntity::due_date(&test_block()).is_none());
+    }
+
+    #[test]
+    fn block_operation_registry_metadata() {
+        assert_eq!(<Block as OperationRegistry>::entity_name(), "block");
+        assert_eq!(<Block as OperationRegistry>::short_name(), Some("block"));
+        assert!(<Block as OperationRegistry>::all_operations().is_empty());
+    }
 }

@@ -328,4 +328,71 @@ mod tests {
             .unwrap();
         assert!(!b_constructed);
     }
+
+    #[test]
+    fn evict_dead_removes_only_dead_slots() {
+        let cache = CellCache::new();
+        let live_uri = EntityUri::block("live");
+        let dead_uri = EntityUri::block("dead");
+        let kept = cache
+            .get_or_construct::<String, _>(&live_uri, "content", || Ok(dummy_text_backing()))
+            .unwrap();
+        // Construct and immediately drop: this slot's backing dies.
+        let _ = cache
+            .get_or_construct::<String, _>(&dead_uri, "content", || Ok(dummy_text_backing()))
+            .unwrap();
+
+        assert_eq!(cache.evict_dead(), 1, "exactly the dead slot is pruned");
+        assert_eq!(cache.evict_dead(), 0, "second pass has nothing to prune");
+
+        // The live slot survives eviction: a warm lookup must not construct.
+        let again = cache
+            .get_or_construct::<String, _>(&live_uri, "content", || {
+                panic!("live slot must survive evict_dead")
+            })
+            .unwrap();
+        let cell_kept = kept.downcast::<Cell<String>>().unwrap();
+        let cell_again = again.downcast::<Cell<String>>().unwrap();
+        assert!(Arc::ptr_eq(cell_kept.inner_arc(), cell_again.inner_arc()));
+    }
+
+    /// Registry that implements only the required surface, to pin the
+    /// default `Ok(false)` ("not handled — caller must use its SQL path")
+    /// contracts of the optional write seams.
+    struct MinimalRegistry;
+
+    #[async_trait::async_trait]
+    impl EntityCellRegistry for MinimalRegistry {
+        fn live_field_any(
+            &self,
+            _uri: &EntityUri,
+            _field: &str,
+            _type_id: TypeId,
+        ) -> Result<Arc<dyn Any + Send + Sync>> {
+            unimplemented!("not exercised")
+        }
+        fn on_entity_deleted(&self, _uri: &EntityUri) {}
+    }
+
+    #[tokio::test]
+    async fn optional_write_seams_default_to_not_handled() {
+        let registry = MinimalRegistry;
+        let uri = EntityUri::block("a");
+        let parent = EntityUri::block("p");
+
+        assert!(!registry.write_position(&uri, "p", None).await.unwrap());
+        assert!(!registry
+            .create_entity(
+                &parent,
+                None,
+                &uri,
+                holon_api::BlockContent::text("x"),
+                &std::collections::HashMap::new(),
+                &holon_api::Tags::default(),
+                &[],
+            )
+            .await
+            .unwrap());
+        assert!(!registry.delete_entity(&uri).await.unwrap());
+    }
 }

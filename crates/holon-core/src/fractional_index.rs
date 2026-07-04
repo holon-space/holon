@@ -200,11 +200,29 @@ mod tests {
     }
 
     #[test]
+    fn test_default_sort_key_matches_sql_column_default() {
+        // The SQL `block.sort_key` column default is the literal "A0";
+        // both must stay in lockstep (this fn is the single owner).
+        assert_eq!(default_sort_key(), "A0");
+        assert_eq!(default_sort_key(), DEFAULT_SORT_KEY);
+        // And it must be a valid fractional index other keys can be
+        // minted around.
+        let after = gen_key_after(DEFAULT_SORT_KEY).unwrap();
+        assert!(after.as_str() > DEFAULT_SORT_KEY);
+    }
+
+    #[test]
     fn test_gen_key_after() {
         let prev_key = gen_key_between(None, None).unwrap();
         let after_key = gen_key_after(&prev_key).unwrap();
 
         assert!(after_key > prev_key);
+        // The generated key must itself be a valid hex fractional index
+        // (parse round-trip), not just any lexicographically-larger string.
+        assert_eq!(
+            loro_fractional_index::FractionalIndex::from_hex_string(&after_key).to_string(),
+            after_key
+        );
 
         let mut keys = vec![gen_key_between(None, None).unwrap()];
         for _ in 0..5 {
@@ -216,5 +234,9 @@ mod tests {
         let mut sorted = keys.clone();
         sorted.sort();
         assert_eq!(keys, sorted);
+        // Strictly increasing: a constant key would survive the sort check.
+        for pair in keys.windows(2) {
+            assert!(pair[0] < pair[1], "keys must be strictly increasing: {pair:?}");
+        }
     }
 }

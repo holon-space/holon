@@ -229,3 +229,120 @@ pub trait OrderKeyMinting: Send + Sync {
         after_id: Option<&EntityUri>,
     ) -> Result<String>;
 }
+
+#[cfg(test)]
+mod default_contract_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Minimal ordering impl: records `place` calls, everything else is
+    /// irrelevant to the default-method contracts under test.
+    struct RecordingOrdering {
+        places: Mutex<Vec<(String, String, Option<String>)>>,
+    }
+
+    #[async_trait]
+    impl BlockOrdering for RecordingOrdering {
+        async fn place(
+            &self,
+            uri: &EntityUri,
+            parent_id: &EntityUri,
+            after_id: Option<&EntityUri>,
+        ) -> Result<()> {
+            self.places.lock().unwrap().push((
+                uri.as_str().to_string(),
+                parent_id.as_str().to_string(),
+                after_id.map(|u| u.as_str().to_string()),
+            ));
+            Ok(())
+        }
+
+        async fn prev_sibling(&self, _: &EntityUri) -> Result<Option<EntityUri>> {
+            unimplemented!("not exercised")
+        }
+        async fn next_sibling(&self, _: &EntityUri) -> Result<Option<EntityUri>> {
+            unimplemented!("not exercised")
+        }
+        async fn first_child(&self, _: &EntityUri) -> Result<Option<EntityUri>> {
+            unimplemented!("not exercised")
+        }
+        async fn last_child(&self, _: &EntityUri) -> Result<Option<EntityUri>> {
+            unimplemented!("not exercised")
+        }
+        async fn children(&self, _: &EntityUri) -> Result<Vec<EntityUri>> {
+            unimplemented!("not exercised")
+        }
+        async fn update_in_tree(&self, _: holon_api::StorageEntity) -> Result<()> {
+            unimplemented!("not exercised")
+        }
+        async fn delete_in_tree(&self, _: holon_api::StorageEntity) -> Result<()> {
+            unimplemented!("not exercised")
+        }
+    }
+
+    #[tokio::test]
+    async fn default_place_all_places_each_id_after_its_predecessor() {
+        let ordering = RecordingOrdering {
+            places: Mutex::new(Vec::new()),
+        };
+        let parent = EntityUri::block("P");
+        let ids = vec![
+            EntityUri::block("A"),
+            EntityUri::block("B"),
+            EntityUri::block("C"),
+        ];
+
+        ordering.place_all(&parent, &ids).await.unwrap();
+
+        let places = ordering.places.lock().unwrap();
+        assert_eq!(
+            *places,
+            vec![
+                ("block:A".to_string(), "block:P".to_string(), None),
+                (
+                    "block:B".to_string(),
+                    "block:P".to_string(),
+                    Some("block:A".to_string())
+                ),
+                (
+                    "block:C".to_string(),
+                    "block:P".to_string(),
+                    Some("block:B".to_string())
+                ),
+            ],
+            "place_all must realize the total order via predecessor-threaded place calls"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_mode_signals_are_sql_only() {
+        // SqlOnly-mode contracts: no separate tree (`in_tree` = None, the
+        // question doesn't apply), no upstream consolidator, and therefore
+        // the Store consolidator owns order. Flipping any of these silently
+        // changes write routing (org-scan re-seed, command-bus create skip).
+        let ordering = RecordingOrdering {
+            places: Mutex::new(Vec::new()),
+        };
+        assert_eq!(ordering.in_tree(&EntityUri::block("A")).await.unwrap(), None);
+        assert!(
+            !ordering
+                .create_in_tree(
+                    &EntityUri::block("P"),
+                    None,
+                    &EntityUri::block("A"),
+                    BlockContent::text("x"),
+                    &std::collections::HashMap::new(),
+                    &Tags::default(),
+                    &[],
+                )
+                .await
+                .unwrap(),
+            "default create_in_tree must signal not-handled (SQL create path)"
+        );
+        assert!(!ordering.has_upstream_consolidator());
+        assert!(matches!(
+            ordering.consolidator(),
+            holon_api::capability::Consolidator::Store
+        ));
+    }
+}

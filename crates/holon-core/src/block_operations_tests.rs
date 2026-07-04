@@ -606,6 +606,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn split_block_at_end_of_content_succeeds() {
+        // Enter at end-of-line: position == content.len() is the most common
+        // split in practice and must be accepted (only position > len errors).
+        let store = MemStore::new();
+        insert_block(&store, "P", None, None);
+        store.insert(TestBlock {
+            id: EntityUri::block("A"),
+            parent_id: Some(EntityUri::block("P")),
+            sort_key: gen_key_between(None, None).unwrap(),
+            depth: 1,
+            content: "Hello".to_string(),
+        });
+
+        store.split_block(&EntityUri::block("A"), 5).await.unwrap();
+
+        let a = store.get("A").unwrap();
+        assert_eq!(a.content, "Hello");
+        let children = store.sorted_children("P");
+        assert_eq!(children.len(), 2);
+        let new_block = children
+            .iter()
+            .find(|b| b.id.as_str() != "block:A")
+            .unwrap();
+        assert_eq!(new_block.content, "");
+    }
+
+    #[tokio::test]
     async fn split_block_invalid_position_fails() {
         let store = MemStore::new();
         insert_block(&store, "P", None, None);
@@ -862,5 +889,235 @@ mod tests {
 
         let b = store.get("B").unwrap();
         assert_eq!(b.depth, 2); // unchanged since depth delta is 0
+    }
+
+    #[tokio::test]
+    async fn join_block_with_children_reparents_them_in_order_into_prev_sibling() {
+        // Case A (prev sibling exists) with children: B's children X, Y must
+        // be appended under A AFTER A's existing child W, in document order.
+        // Layout:
+        //   P
+        //     A ("foo")
+        //       W ("w")
+        //     B ("bar")   <- join target
+        //       X ("x")
+        //       Y ("y")
+        let store = MemStore::new();
+        insert_block(&store, "P", None, None);
+        store.insert(TestBlock {
+            id: EntityUri::block("A"),
+            parent_id: Some(EntityUri::block("P")),
+            sort_key: gen_key_between(None, None).unwrap(),
+            depth: 1,
+            content: "foo".to_string(),
+        });
+        let key_a = store.sorted_children("P").last().unwrap().sort_key.clone();
+        store.insert(TestBlock {
+            id: EntityUri::block("B"),
+            parent_id: Some(EntityUri::block("P")),
+            sort_key: gen_key_between(Some(&key_a), None).unwrap(),
+            depth: 1,
+            content: "bar".to_string(),
+        });
+        store.insert(TestBlock {
+            id: EntityUri::block("W"),
+            parent_id: Some(EntityUri::block("A")),
+            sort_key: gen_key_between(None, None).unwrap(),
+            depth: 2,
+            content: "w".to_string(),
+        });
+        store.insert(TestBlock {
+            id: EntityUri::block("X"),
+            parent_id: Some(EntityUri::block("B")),
+            sort_key: gen_key_between(None, None).unwrap(),
+            depth: 2,
+            content: "x".to_string(),
+        });
+        let key_x = store.sorted_children("B").last().unwrap().sort_key.clone();
+        store.insert(TestBlock {
+            id: EntityUri::block("Y"),
+            parent_id: Some(EntityUri::block("B")),
+            sort_key: gen_key_between(Some(&key_x), None).unwrap(),
+            depth: 2,
+            content: "y".to_string(),
+        });
+
+        store.join_block(&EntityUri::block("B"), 0).await.unwrap();
+
+        let a = store.get("A").unwrap();
+        assert_eq!(a.content, "foobar");
+        assert!(store.get("B").is_none(), "B must be deleted after join");
+        let a_children = store.sorted_children("A");
+        assert_eq!(
+            a_children.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            vec!["block:W", "block:X", "block:Y"],
+            "B's children append after A's existing child, in order"
+        );
+    }
+
+    #[tokio::test]
+    async fn move_block_deeper_updates_descendant_depths_exactly() {
+        // Moving A (depth 1, subtree B depth 2, C depth 3) under E (depth 2)
+        // gives depth_delta = +2: A -> 3, B -> 4, C -> 5. Exact values kill
+        // the +/- and +/* arithmetic mutations and the delta != 0 gate flip.
+        let store = MemStore::new();
+        insert_block(&store, "P1", None, None); // depth 0
+        insert_block(&store, "P2", None, None); // depth 0
+        store.insert(TestBlock {
+            id: EntityUri::block("A"),
+            parent_id: Some(EntityUri::block("P1")),
+            sort_key: gen_key_between(None, None).unwrap(),
+            depth: 1,
+            content: "A".to_string(),
+        });
+        store.insert(TestBlock {
+            id: EntityUri::block("B"),
+            parent_id: Some(EntityUri::block("A")),
+            sort_key: gen_key_between(None, None).unwrap(),
+            depth: 2,
+            content: "B".to_string(),
+        });
+        store.insert(TestBlock {
+            id: EntityUri::block("C"),
+            parent_id: Some(EntityUri::block("B")),
+            sort_key: gen_key_between(None, None).unwrap(),
+            depth: 3,
+            content: "C".to_string(),
+        });
+        store.insert(TestBlock {
+            id: EntityUri::block("D"),
+            parent_id: Some(EntityUri::block("P2")),
+            sort_key: gen_key_between(None, None).unwrap(),
+            depth: 1,
+            content: "D".to_string(),
+        });
+        store.insert(TestBlock {
+            id: EntityUri::block("E"),
+            parent_id: Some(EntityUri::block("D")),
+            sort_key: gen_key_between(None, None).unwrap(),
+            depth: 2,
+            content: "E".to_string(),
+        });
+
+        store
+            .move_block(&EntityUri::block("A"), &EntityUri::block("E"), None)
+            .await
+            .unwrap();
+
+        assert_eq!(store.get("A").unwrap().depth, 3);
+        assert_eq!(store.get("B").unwrap().depth, 4);
+        assert_eq!(store.get("C").unwrap().depth, 5);
+        // Blocks outside the moved subtree are untouched.
+        assert_eq!(store.get("D").unwrap().depth, 1);
+        assert_eq!(store.get("E").unwrap().depth, 2);
+    }
+
+    /// Store that relies on the DEFAULT `DataSource`/`BlockQueryHelpers`
+    /// impls (only `children_ordered` provided, as required) so the default
+    /// sibling-navigation logic in traits.rs is exercised, not overridden.
+    struct DefaultHelpersStore {
+        blocks: Vec<TestBlock>,
+    }
+
+    #[async_trait]
+    impl DataSource<TestBlock> for DefaultHelpersStore {
+        async fn get_all(&self) -> Result<Vec<TestBlock>> {
+            Ok(self.blocks.clone())
+        }
+        async fn get_by_id(&self, id: &str) -> Result<Option<TestBlock>> {
+            Ok(self.blocks.iter().find(|b| b.id.as_str() == id).cloned())
+        }
+    }
+
+    #[async_trait]
+    impl BlockQueryHelpers<TestBlock> for DefaultHelpersStore {
+        async fn children_ordered(&self, parent_id: &EntityUri) -> Result<Vec<TestBlock>> {
+            let mut children: Vec<TestBlock> = self
+                .blocks
+                .iter()
+                .filter(|b| b.parent_id.as_ref() == Some(parent_id))
+                .cloned()
+                .collect();
+            children.sort_by(|a, b| a.sort_key.cmp(&b.sort_key));
+            Ok(children)
+        }
+    }
+
+    fn default_helpers_fixture() -> DefaultHelpersStore {
+        // P
+        //   A
+        //     A1
+        //   B
+        //   C
+        let mk = |id: &str, parent: Option<&str>, key: &str, depth: i64| TestBlock {
+            id: EntityUri::block(id),
+            parent_id: parent.map(EntityUri::block),
+            sort_key: key.to_string(),
+            depth,
+            content: format!("Content {id}"),
+        };
+        DefaultHelpersStore {
+            blocks: vec![
+                mk("P", None, "A0", 0),
+                mk("A", Some("P"), "A1", 1),
+                mk("A1", Some("A"), "A1", 2),
+                mk("B", Some("P"), "A2", 1),
+                mk("C", Some("P"), "A3", 1),
+            ],
+        }
+    }
+
+    fn ids(blocks: &[TestBlock]) -> Vec<&str> {
+        blocks.iter().map(|b| b.id.as_str()).collect()
+    }
+
+    #[tokio::test]
+    async fn default_data_source_children_and_descendants() {
+        let store = default_helpers_fixture();
+        let p = EntityUri::block("P");
+
+        let children = DataSource::get_children(&store, &p).await.unwrap();
+        let mut child_ids = ids(&children);
+        child_ids.sort();
+        assert_eq!(child_ids, vec!["block:A", "block:B", "block:C"]);
+
+        let descendants = store.get_descendants(&p).await.unwrap();
+        let mut desc_ids = ids(&descendants);
+        desc_ids.sort();
+        assert_eq!(
+            desc_ids,
+            vec!["block:A", "block:A1", "block:B", "block:C"],
+            "descendants include grandchildren, not P itself"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_sibling_navigation_helpers() {
+        let store = default_helpers_fixture();
+        let a = EntityUri::block("A");
+        let b = EntityUri::block("B");
+        let c = EntityUri::block("C");
+        let p = EntityUri::block("P");
+
+        let sibs = store.get_siblings(&b).await.unwrap();
+        assert_eq!(ids(&sibs), vec!["block:A", "block:C"]);
+
+        assert_eq!(
+            store.get_prev_sibling(&b).await.unwrap().unwrap().id,
+            a,
+            "prev sibling of B is A"
+        );
+        assert!(store.get_prev_sibling(&a).await.unwrap().is_none());
+        assert_eq!(
+            store.get_next_sibling(&b).await.unwrap().unwrap().id,
+            c,
+            "next sibling of B is C"
+        );
+        assert!(store.get_next_sibling(&c).await.unwrap().is_none());
+
+        assert_eq!(store.get_first_child(Some(&p)).await.unwrap().unwrap().id, a);
+        assert_eq!(store.get_last_child(Some(&p)).await.unwrap().unwrap().id, c);
+        assert!(store.get_first_child(None).await.unwrap().is_none());
+        assert!(store.get_last_child(None).await.unwrap().is_none());
     }
 }
