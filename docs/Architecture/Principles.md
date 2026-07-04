@@ -33,6 +33,30 @@ Unlike traditional PKM tools that treat external systems as import/export target
 
 ---
 
+## State Ownership
+
+Every piece of state lives in the store whose owner authors it.
+
+- **User-authored state** — blocks, their positions, tags, notes, properties —
+  lives in the user's stores: org files and the CRDT document. Only there does
+  it get the guarantees user data needs: it survives re-ingest, replicates
+  across devices, participates in sharing, and answers to undo.
+- **Provider-authored state** — the fields of an external entity — lives in
+  that integration's cache table, refetchable from the source. Copying it
+  into user stores would create a second copy with no answer to "which one
+  wins" when the provider changes it.
+
+The two meet through references, not through mixing: a block *links to* an
+entity by its URI, and queries join the two stores on that key. What the user
+says *about* an entity is user-authored and therefore lives in blocks; what
+the entity *is* stays provider-authored in the cache. Putting user-authored
+state anywhere else (for example, rows in a derived SQL table only) silently
+demotes it to second-class data that a re-ingest or sync will drop; putting
+provider-authored state into blocks turns every provider update into a
+conflict.
+
+---
+
 ## The Three Modes
 
 Capture, Orient, and Flow ship as **default layout and profile configuration** (overridable by users), which is why no mode enum exists in the production codebase. The modes are a design vocabulary and a default set of layouts/profiles — not a built-in state machine.
@@ -403,7 +427,7 @@ Cells (`Cell<T>`) are the system's universal reactive read primitive. Each cell 
 
 Per-entity-type cell registries hold the cells. `BlockCellRegistry` knows how to construct each block field's backing — in the default (CRDT-enabled) wiring: meta-backed for `completed`/`collapsed`/etc., text-backed for `content`; LWW-scalar-backed in SqlOnly mode. The backing kind is a wiring choice, not a property of the field. Cells are `Weak`-keyed: held alive while consumers reference them; reaped when the last consumer drops.
 
-**Cells vs `Mutable<T>`**: `Cell<T>` is for entity field state (has identity, has authority, could be persisted/queried/synced). Per-VM `Mutable<T>` (FU-1 pattern) is for per-instance widget state (tree-item `expanded`, view-mode-switcher selection, focused_block) — same-id entities in different render slots need independent state. Genuinely-ephemeral state (cursor blink, hover, drag offset) stays raw `Mutable<T>` too.
+**Cells vs `Mutable<T>`**: `Cell<T>` is for entity field state (has identity, has authority, could be persisted/queried/synced). Per-VM `Mutable<T>` (FU-1 pattern) is for per-instance widget state (tree-item `expanded`, view-mode-switcher selection) — same-id entities in different render slots need independent state. Not everything on a `Mutable<T>` is per-instance, though: `focused_block` is a **window-global `UiState` singleton** (`Mutable<Option<EntityUri>>`, `reactive.rs:953`), deliberately NOT per-instance — exactly one focused block per window, moved atomically, so two editors can't both believe they hold focus (see [UI.md](UI.md) app-level UI singletons and ADR 0010). Genuinely-ephemeral state (cursor blink, hover, drag offset) stays raw `Mutable<T>` too.
 
 ### Plain-Text File Layer
 
@@ -497,7 +521,10 @@ OperationDescriptor {
     name: "set_completion",
     required_params: ["id", "completed"],
     affected_fields: ["completed"],
-    precondition: Some(PreconditionChecker { ... }),
+    // Relational guard (ADR 0031 P6=A) parsed from `#[require("…")]` at
+    // macro-expansion time. Parameter validity lives in the params' TypeHints,
+    // never here. Ops declaring nothing carry `OpGuard::None`.
+    guard: OpGuard::parse("has_tag(\"Page\") and parent(not has_tag(\"Page\"))"),
 }
 ```
 

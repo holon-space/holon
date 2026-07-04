@@ -86,6 +86,10 @@ impl BlockQuerySource for LoroBlockQuerySource {
         // this slice — see plan task V3. An in-memory nav source is deferred.
         Ok(BlockSnapshot::from_ordered(ordered, Vec::new()))
     }
+
+    fn change_version(&self) -> Option<u64> {
+        self.backend.change_version().map(u64::from)
+    }
 }
 
 /// Register `Arc<dyn BlockQuerySource>` resolving to a [`LoroBlockQuerySource`]
@@ -179,12 +183,34 @@ pub fn register_loro_operation_engine(
     // a Loro-only session; an in-memory provider keeps per-device focus history
     // so click / arrow / back-forward navigation dispatches succeed.
     let nav_ops = crate::navigation::InMemoryNavigationProvider::new();
-    let dispatcher = OperationDispatcher::new(vec![
+    let mut dispatcher = OperationDispatcher::new(vec![
         Arc::new(block_ops) as Arc<dyn OperationProvider>,
         Arc::new(nav_ops) as Arc<dyn OperationProvider>,
     ]);
-    let engine: Arc<dyn OperationEngine> =
-        Arc::new(DispatchingOperationEngine::new(Arc::new(dispatcher)));
+    // ADR 0028 C3 — the Loro-only session dispatches through THIS dispatcher,
+    // so it needs the same boundary seam `OperationModule` installs; a
+    // dispatcher without one is an enforcement bypass, not a fast path.
+    dispatcher.set_boundary_enforcer(Arc::new(holon_sharing::PolicyOverlayEnforcer::inert()));
+    // Same fail-loud assembly guard the Turso path runs via `OperationModule`:
+    // this is the ONE dispatcher construction outside DI, so a future edit that
+    // drops block CRUD here must crash at composition time, not silently drop
+    // content writes (the EventInfraModule-alone class of bug).
+    dispatcher
+        .assert_content_write_capability()
+        .expect("[loro_block_query_source] operation-registry assembly check failed");
+    dispatcher
+        .assert_boundary_seam_installed()
+        .expect("[loro_block_query_source] boundary-seam assembly check failed");
+    dispatcher
+        .assert_declared_arcs_match_schema(&holon_api::schema::BuiltinSchemas)
+        .expect("[loro_block_query_source] arc-schema assembly check failed");
+    // History relation (C2b): no Turso query substrate here, so wire the
+    // DISCLOSED degraded store (warns at construction; reads fail loud) rather
+    // than silently omitting history.
+    let engine: Arc<dyn OperationEngine> = Arc::new(
+        DispatchingOperationEngine::new(Arc::new(dispatcher))
+            .with_history_store(Arc::new(crate::api::DegradedHistoryStore::new())),
+    );
     injector.provide::<dyn OperationEngine>(Provider::root(move |_| engine.clone()));
 }
 

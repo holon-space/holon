@@ -1,7 +1,0 @@
-# Seeds for failure cases proptest has generated in the past. It is
-# automatically read and these particular cases re-run before any
-# novel cases are generated.
-#
-# It is recommended to check this file in to source control so that
-# everyone who runs the test benefits from these saved cases.
-cc 08d20f8dfc58a41cce49e5a074b3bfac2493c4f55366677a9cc425e5409af02c # shrinks to forest = [GenBlock { parent: None, is_source: true }, GenBlock { parent: Some(0), is_source: true }, GenBlock { parent: None, is_source: false }, GenBlock { parent: Some(2), is_source: false }, GenBlock { parent: Some(2), is_source: true }]

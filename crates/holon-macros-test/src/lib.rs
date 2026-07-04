@@ -17,265 +17,325 @@ use holon_core::Result;
 use holon_core::UndoAction;
 use holon_macros::require;
 
-// Test trait with require attributes
+/// `#[require]` fixtures for the ADR 0031 guard retarget.
+///
+/// Every guard is RELATIONAL (P6=A): a predicate over the state the op touches,
+/// never over its parameters — parameter validity is the typed params' job, and
+/// a parameter predicate binds nothing to iterate.
 #[holon_macros::operations_trait]
 #[async_trait]
 pub trait TestTrait<T>: Send + Sync
 where
     T: Send + Sync + 'static,
 {
-    /// Delete an item by ID
-    #[require(!id.is_empty())]
-    async fn delete(&self, id: &str) -> Result<UndoAction>;
-
-    /// Set a boolean flag
-    #[require(value || !value)]
+    /// Delete an item by ID. Clock-driven: a builtin makes the guard iterate
+    /// the clock relation, so this exercises `Subject` inference through the
+    /// macro.
+    #[require("not block_exists(\"Journals/{today}\")")]
     // ALLOW(unused_param): test fixture — id is part of the trait shape
-    async fn set_flag(&self, _id: &str, value: bool) -> Result<UndoAction>;
+    async fn delete(&self, _id: &str) -> Result<UndoAction>;
 
-    /// Set priority with range check
-    #[require(priority >= 1)]
-    #[require(priority <= 5)]
+    /// Set a boolean flag. Block-driven single leaf.
+    #[require("has_tag(\"flaggable\")")]
+    // ALLOW(unused_param): test fixture — the trait shape carries both params
+    async fn set_flag(&self, _id: &str, _value: bool) -> Result<UndoAction>;
+
+    /// Set priority. Two attributes conjoin — the composition escape hatch for
+    /// the 80-character literal lint — into `page_under_non_page`.
+    #[require("has_tag(\"Page\")")]
+    #[require("parent(not has_tag(\"Page\"))")]
+    // ALLOW(unused_param): test fixture — the trait shape carries both params
+    async fn set_priority(&self, _id: &str, _priority: i64) -> Result<UndoAction>;
+
+    /// Method without precondition. Also the `TransitionArcs::Undeclared`
+    /// fixture: no `#[reads]`/`#[emits]` at all.
     // ALLOW(unused_param): test fixture — id is part of the trait shape
-    async fn set_priority(&self, _id: &str, priority: i64) -> Result<UndoAction>;
+    async fn no_precondition(&self, _id: &str) -> Result<UndoAction>;
 
-    /// Method without precondition
-    async fn no_precondition(&self, id: &str) -> Result<UndoAction>;
+    /// Arc fixture: reads two places, writes one, and declares one place
+    /// EXCLUDED with its reason. `#[affects]` is declared alongside so the
+    /// `emits ⊇ affects` consistency lock (OQ-2=A) has something to bite on.
+    #[holon_macros::affects("parent_id")]
+    #[holon_macros::reads("block.parent_id", "block.tags")]
+    #[holon_macros::emits("block.parent_id")]
+    #[holon_macros::emits(excluded("block.sort_key", "the ordering authority mints order keys"))]
+    // ALLOW(unused_param): test fixture — the trait shape carries both params
+    async fn move_it(&self, _id: &str, _parent: &str) -> Result<UndoAction>;
+
+    /// Arc fixture: a genuinely read-only declaration. `#[emits()]` is empty on
+    /// purpose — "writes nothing", which is a different claim from
+    /// `Undeclared`.
+    #[holon_macros::reads("clock.today")]
+    #[holon_macros::emits()]
+    // ALLOW(unused_param): test fixture — id is part of the trait shape
+    async fn peek(&self, _id: &str) -> Result<UndoAction>;
 }
 
 #[cfg(test)]
 mod tests {
-    use std::any::Any;
     use std::collections::HashMap;
 
-    use holon_api::Value;
+    use holon_api::arcs::ArcEmit;
+    use holon_api::arcs::ArcPlace;
+    use holon_api::arcs::ArcRelation;
+    use holon_api::arcs::TransitionArcs;
+    use holon_api::pattern::Binding;
+    use holon_api::pattern::BuiltinRef;
+    use holon_api::pattern::CurrentSchema;
+    use holon_api::pattern::Guard;
+    use holon_api::pattern::InMemoryWorld;
+    use holon_api::pattern::OpGuard;
+    use holon_api::pattern::PathPattern;
+    use holon_api::pattern::PathSegment;
+    use holon_api::pattern::Pattern;
+    use holon_api::pattern::Subject;
+    use holon_api::pattern::WorldBlock;
 
     use super::*;
 
+    fn ops() -> Vec<holon_api::OperationDescriptor> {
+        __operations_test_trait::test_trait("test-entity", "test", "test_table", "id")
+    }
+
+    fn guard_of(name: &str) -> Guard {
+        ops()
+            .iter()
+            .find(|op| op.name == name)
+            .unwrap_or_else(|| panic!("op {name} exists"))
+            .guard
+            .guard()
+            .unwrap_or_else(|| panic!("op {name} declares a guard"))
+            .clone()
+    }
+
+    fn block(id: &str, name: &str, parent: Option<&str>, tags: &[&str]) -> WorldBlock {
+        WorldBlock {
+            id: id.to_string(),
+            name: name.to_string(),
+            parent_id: parent.map(str::to_string),
+            properties: HashMap::new(),
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+        }
+    }
+
+    /// The macro emits the guard the Pattern parser produces — declarative
+    /// data, parsed at expansion time, not a closure.
     #[test]
-    fn test_require_precondition_extraction() {
-        // Test that preconditions are extracted and included in OperationDescriptor
-        let ops = __operations_test_trait::test_trait("test-entity", "test", "test_table", "id");
-
-        // Find delete operation
-        let delete_op = ops.iter().find(|op| op.name == "delete").unwrap();
-        assert!(
-            delete_op.precondition.is_some(),
-            "delete operation should have precondition"
+    fn require_emits_the_parsed_guard_ast() {
+        assert_eq!(
+            guard_of("delete"),
+            Guard {
+                subject: Subject::Clock,
+                body: Pattern::Not(Box::new(Pattern::BlockExists(PathPattern {
+                    segments: vec![
+                        PathSegment::Lit("Journals".to_string()),
+                        PathSegment::Builtin(BuiltinRef::Today),
+                    ],
+                }))),
+            },
+            "a builtin makes the guard clock-driven"
         );
-
-        // Find set_flag operation
-        let set_flag_op = ops.iter().find(|op| op.name == "set_flag").unwrap();
-        assert!(
-            set_flag_op.precondition.is_some(),
-            "set_flag operation should have precondition"
-        );
-
-        // Find set_priority operation (should have combined preconditions)
-        let set_priority_op = ops.iter().find(|op| op.name == "set_priority").unwrap();
-        assert!(
-            set_priority_op.precondition.is_some(),
-            "set_priority operation should have precondition"
-        );
-
-        // Find no_precondition operation
-        let no_precondition_op = ops.iter().find(|op| op.name == "no_precondition").unwrap();
-        assert!(
-            no_precondition_op.precondition.is_none(),
-            "no_precondition operation should not have precondition"
+        assert_eq!(
+            guard_of("set_flag"),
+            Guard {
+                subject: Subject::Block,
+                body: Pattern::HasTag("flaggable".to_string()),
+            }
         );
     }
 
+    /// Several `#[require]`s conjoin into one `And`.
     #[test]
-    fn test_precondition_closure_evaluation() {
-        let ops = __operations_test_trait::test_trait("test-entity", "test", "test_table", "id");
-
-        // Test delete operation precondition
-        let delete_op = ops.iter().find(|op| op.name == "delete").unwrap();
-        let precondition = delete_op.precondition.as_ref().unwrap();
-
-        // Create test parameters - wrap Value in Box<dyn Any>
-        let mut params_valid: HashMap<String, Box<dyn Any + Send + Sync>> = HashMap::new();
-        params_valid.insert(
-            "id".to_string(),
-            Box::new(Value::String("test123".to_string())),
-        );
-
-        let mut params_invalid: HashMap<String, Box<dyn Any + Send + Sync>> = HashMap::new();
-        params_invalid.insert("id".to_string(), Box::new(Value::String("".to_string())));
-
-        // Test valid precondition
-        let result_valid = precondition(&params_valid);
-        assert!(
-            result_valid.is_ok(),
-            "Precondition should pass for valid input"
-        );
-        assert!(result_valid.unwrap(), "Precondition should return true");
-
-        // Test invalid precondition
-        let result_invalid = precondition(&params_invalid);
-        assert!(result_invalid.is_ok(), "Precondition should not error");
-        assert!(
-            !result_invalid.unwrap(),
-            "Precondition should return false for empty string"
+    fn multiple_requires_conjoin_into_one_guard() {
+        assert_eq!(
+            guard_of("set_priority"),
+            Guard {
+                subject: Subject::Block,
+                body: Pattern::And(vec![
+                    Pattern::HasTag("Page".to_string()),
+                    Pattern::Parent(Box::new(Pattern::Not(Box::new(Pattern::HasTag(
+                        "Page".to_string()
+                    ))))),
+                ]),
+            }
         );
     }
 
+    /// The emitted guard carries the developer's own literal, and the
+    /// conjunction case carries the JOINED text — a refusal quoting one of two
+    /// `#[require]`s would misdescribe what refused.
     #[test]
-    fn test_precondition_with_multiple_requires() {
-        let ops = __operations_test_trait::test_trait("test-entity", "test", "test_table", "id");
-
-        // Test set_priority operation which has multiple require attributes
-        let set_priority_op = ops.iter().find(|op| op.name == "set_priority").unwrap();
-        let precondition = set_priority_op.precondition.as_ref().unwrap();
-
-        // Test valid priority (within range)
-        let mut params_valid: HashMap<String, Box<dyn Any + Send + Sync>> = HashMap::new();
-        params_valid.insert(
-            "id".to_string(),
-            Box::new(Value::String("test".to_string())),
-        );
-        params_valid.insert("priority".to_string(), Box::new(Value::Integer(3)));
-
-        let result = precondition(&params_valid);
-        assert!(
-            result.is_ok(),
-            "Precondition should pass for valid priority"
-        );
-        assert!(
-            result.unwrap(),
-            "Precondition should return true for priority 3"
-        );
-
-        // Test invalid priority (too low)
-        let mut params_low: HashMap<String, Box<dyn Any + Send + Sync>> = HashMap::new();
-        params_low.insert(
-            "id".to_string(),
-            Box::new(Value::String("test".to_string())),
-        );
-        params_low.insert("priority".to_string(), Box::new(Value::Integer(0)));
-
-        let result_low = precondition(&params_low);
-        assert!(result_low.is_ok(), "Precondition should not error");
-        assert!(
-            !result_low.unwrap(),
-            "Precondition should return false for priority 0"
-        );
-
-        // Test invalid priority (too high)
-        let mut params_high: HashMap<String, Box<dyn Any + Send + Sync>> = HashMap::new();
-        params_high.insert(
-            "id".to_string(),
-            Box::new(Value::String("test".to_string())),
-        );
-        params_high.insert("priority".to_string(), Box::new(Value::Integer(6)));
-
-        let result_high = precondition(&params_high);
-        assert!(result_high.is_ok(), "Precondition should not error");
-        assert!(
-            !result_high.unwrap(),
-            "Precondition should return false for priority 6"
+    fn require_emits_the_source_literal_joined() {
+        let source_of = |name: &str| {
+            ops()
+                .iter()
+                .find(|op| op.name == name)
+                .unwrap_or_else(|| panic!("op {name} exists"))
+                .guard
+                .source()
+                .unwrap_or_else(|| panic!("op {name} declares a guard"))
+                .to_string()
+        };
+        assert_eq!(source_of("set_flag"), "has_tag(\"flaggable\")");
+        assert_eq!(
+            source_of("set_priority"),
+            "has_tag(\"Page\") and parent(not has_tag(\"Page\"))"
         );
     }
 
+    fn arcs_of(name: &str) -> TransitionArcs {
+        ops()
+            .iter()
+            .find(|op| op.name == name)
+            .unwrap_or_else(|| panic!("op {name} exists"))
+            .arcs
+            .clone()
+    }
+
+    /// The macro emits the PARSED arcs — typed places, not the strings the
+    /// developer wrote.
     #[test]
-    fn test_precondition_with_bool_parameter() {
-        let ops = __operations_test_trait::test_trait("test-entity", "test", "test_table", "id");
-
-        // Test set_flag operation
-        let set_flag_op = ops.iter().find(|op| op.name == "set_flag").unwrap();
-        let precondition = set_flag_op.precondition.as_ref().unwrap();
-
-        // Test with true value
-        let mut params_true: HashMap<String, Box<dyn Any + Send + Sync>> = HashMap::new();
-        params_true.insert(
-            "id".to_string(),
-            Box::new(Value::String("test".to_string())),
+    fn reads_and_emits_are_parsed_into_typed_places() {
+        let place = |relation, field: &str| ArcPlace {
+            relation,
+            field: field.to_string(),
+        };
+        assert_eq!(
+            arcs_of("move_it"),
+            TransitionArcs::Declared {
+                reads: vec![
+                    place(ArcRelation::block(), "parent_id"),
+                    place(ArcRelation::block(), "tags"),
+                ],
+                emits: vec![
+                    ArcEmit::Writes(place(ArcRelation::block(), "parent_id")),
+                    ArcEmit::Excluded {
+                        place: place(ArcRelation::block(), "sort_key"),
+                        reason: "the ordering authority mints order keys".to_string(),
+                    },
+                ],
+            }
         );
-        params_true.insert("value".to_string(), Box::new(Value::Boolean(true)));
-
-        let result_true = precondition(&params_true);
-        assert!(result_true.is_ok(), "Precondition should pass for true");
-        assert!(result_true.unwrap(), "Precondition should return true");
-
-        // Test with false value
-        let mut params_false: HashMap<String, Box<dyn Any + Send + Sync>> = HashMap::new();
-        params_false.insert(
-            "id".to_string(),
-            Box::new(Value::String("test".to_string())),
-        );
-        params_false.insert("value".to_string(), Box::new(Value::Boolean(false)));
-
-        let result_false = precondition(&params_false);
-        assert!(result_false.is_ok(), "Precondition should pass for false");
-        assert!(
-            result_false.unwrap(),
-            "Precondition should return true for false (it's a valid bool)"
+        assert_eq!(
+            arcs_of("move_it").written_places(),
+            vec![&place(ArcRelation::block(), "parent_id")],
+            "an EXCLUDED place is declared, not written"
         );
     }
 
+    /// No `#[reads]`/`#[emits]` yields the fail-closed `Undeclared`, which is
+    /// distinguishable from a declared empty write set.
     #[test]
-    fn test_precondition_missing_parameter() {
-        let ops = __operations_test_trait::test_trait("test-entity", "test", "test_table", "id");
-
-        let delete_op = ops.iter().find(|op| op.name == "delete").unwrap();
-        let precondition = delete_op.precondition.as_ref().unwrap();
-
-        // Test with missing parameter
-        let params_missing: HashMap<String, Box<dyn Any + Send + Sync>> = HashMap::new();
-        // Don't add "id" parameter
-
-        let result = precondition(&params_missing);
-        assert!(
-            result.is_err(),
-            "Precondition should error when required parameter is missing"
+    fn absent_arcs_are_undeclared_and_empty_arcs_are_not() {
+        assert_eq!(arcs_of("no_precondition"), TransitionArcs::Undeclared);
+        assert_eq!(arcs_of("no_precondition").emits(), None);
+        assert_eq!(
+            arcs_of("peek"),
+            TransitionArcs::Declared {
+                reads: vec![ArcPlace {
+                    relation: ArcRelation::clock(),
+                    field: "today".to_string(),
+                }],
+                emits: vec![],
+            }
         );
-        assert!(
-            result.unwrap_err().contains("Missing"),
-            "Error should mention missing parameter"
+        assert_eq!(
+            arcs_of("peek").emits(),
+            Some(&[][..]),
+            "\"writes nothing\" is a statement; Undeclared is the refusal to make one"
         );
     }
 
+    /// OQ-2=(A): `#[emits]` must cover every `#[affects]` field. The lock lives
+    /// over the real catalog in `holon-app`; this is the mechanism check that
+    /// it can actually bite — `affects` names bare block fields, so the
+    /// mapping is `field ↦ block.field`.
     #[test]
-    fn test_precondition_boundary_values() {
-        let ops = __operations_test_trait::test_trait("test-entity", "test", "test_table", "id");
-
-        let set_priority_op = ops.iter().find(|op| op.name == "set_priority").unwrap();
-        let precondition = set_priority_op.precondition.as_ref().unwrap();
-
-        // Test boundary values (1 and 5 should pass)
-        let mut params_min: HashMap<String, Box<dyn Any + Send + Sync>> = HashMap::new();
-        params_min.insert(
-            "id".to_string(),
-            Box::new(Value::String("test".to_string())),
-        );
-        params_min.insert("priority".to_string(), Box::new(Value::Integer(1)));
-
-        let result_min = precondition(&params_min);
+    fn declared_emits_cover_the_declared_affects() {
+        let op = ops();
+        let op = op.iter().find(|op| op.name == "move_it").expect("move_it");
+        let written: Vec<String> = op
+            .arcs
+            .written_places()
+            .iter()
+            .map(|p| p.to_string())
+            .collect();
+        for field in &op.affected_fields {
+            assert!(
+                written.contains(&format!("block.{field}")),
+                "#[affects({field:?})] is not covered by #[emits]; declared writes: {written:?}"
+            );
+        }
         assert!(
-            result_min.is_ok(),
-            "Precondition should pass for priority 1 (lower bound)"
+            !op.affected_fields.is_empty(),
+            "the lock is not vacuous here"
         );
+    }
+
+    /// No `#[require]` is an explicit stated fact, not an absence.
+    #[test]
+    fn no_require_declares_op_guard_none() {
+        let op = ops();
+        let op = op.iter().find(|op| op.name == "no_precondition").unwrap();
+        assert_eq!(op.guard, OpGuard::None);
+        assert!(op.guard.guard().is_none());
+    }
+
+    /// The emitted guard evaluates: `page_under_non_page` binds exactly the
+    /// page whose parent is not a page.
+    #[test]
+    fn emitted_guard_evaluates_over_a_world() {
+        let g = guard_of("set_priority");
+        let world = InMemoryWorld::new(
+            vec![
+                block("root", "Root", None, &["Page"]),
+                block("ok", "OK", Some("root"), &["Page"]),
+                block("plain", "Plain", Some("root"), &[]),
+                block("bad", "Bad", Some("plain"), &["Page"]),
+            ],
+            "2026-08-10",
+        );
+        assert_eq!(
+            g.evaluate(&world).bindings,
+            vec![Binding::Block("bad".to_string())],
+            "only the page under a non-page parent is bound"
+        );
+    }
+
+    /// The clock-driven guard re-fires on day rollover, and compiles to SQL
+    /// that reads the clock relation rather than `date('now')`.
+    #[test]
+    fn emitted_clock_guard_evaluates_and_compiles() {
+        let g = guard_of("delete");
+        let journals = vec![block("j", "Journals", None, &[])];
         assert!(
-            result_min.unwrap(),
-            "Precondition should return true for priority 1"
+            g.evaluate(&InMemoryWorld::new(journals.clone(), "2026-08-10"))
+                .enabled(),
+            "no journal today ⇒ enabled"
         );
 
-        let mut params_max: HashMap<String, Box<dyn Any + Send + Sync>> = HashMap::new();
-        params_max.insert(
-            "id".to_string(),
-            Box::new(Value::String("test".to_string())),
+        let mut with_today = journals;
+        with_today.push(block("d", "2026-08-10", Some("j"), &[]));
+        assert!(
+            !g.evaluate(&InMemoryWorld::new(with_today, "2026-08-10"))
+                .enabled(),
+            "today's journal exists ⇒ disabled"
         );
-        params_max.insert("priority".to_string(), Box::new(Value::Integer(5)));
 
-        let result_max = precondition(&params_max);
-        assert!(
-            result_max.is_ok(),
-            "Precondition should pass for priority 5 (upper bound)"
-        );
-        assert!(
-            result_max.unwrap(),
-            "Precondition should return true for priority 5"
-        );
+        let sql = g.to_sql(&CurrentSchema);
+        assert!(sql.contains("FROM clock c"), "{sql}");
+        assert!(!sql.contains("date('now')"), "{sql}");
+    }
+
+    /// The descriptor's guard is plain data: it round-trips through serde,
+    /// which is what makes the catalog loadable by a second consumer.
+    #[test]
+    fn emitted_guard_is_serializable_data() {
+        let op = ops();
+        let op = op.iter().find(|op| op.name == "set_priority").unwrap();
+        let json = serde_json::to_string(op).expect("serialize");
+        let back: holon_api::OperationDescriptor =
+            serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(&back, op);
     }
 }

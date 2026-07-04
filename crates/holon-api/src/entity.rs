@@ -295,6 +295,19 @@ pub struct TypeDefinition {
     pub profile_variants: Vec<ProfileVariant>,
 }
 
+/// A runtime entity type answers the same place question as an in-tree
+/// declaration, so an arc naming it can be checked at registration by the very
+/// same code path the macro uses at expansion.
+impl holon_pattern::schema::SchemaSource for TypeDefinition {
+    fn arc_places(&self, relation: &str) -> Option<Vec<String>> {
+        (self.name == relation).then(|| self.fields.iter().map(|f| f.name.clone()).collect())
+    }
+
+    fn relations(&self) -> Vec<String> {
+        vec![self.name.clone()]
+    }
+}
+
 fn default_primary_key() -> String {
     "id".to_string()
 }
@@ -331,7 +344,7 @@ impl TypeDefinition {
             .fields
             .iter()
             .map(|f| {
-                let mut col = format!("{} {}", f.name, f.sql_type);
+                let mut col = format!("\"{}\" {}", f.name, f.sql_type);
                 if f.primary_key && inline_pk {
                     col.push_str(" PRIMARY KEY");
                     if let Some(ref target) = self.id_references {
@@ -357,7 +370,8 @@ impl TypeDefinition {
                 .filter(|f| f.primary_key)
                 .map(|f| f.name.as_str())
                 .collect();
-            body.push_str(&format!(",\n  PRIMARY KEY ({})", pk_cols.join(", ")));
+            let quoted_pk: Vec<String> = pk_cols.iter().map(|c| format!("\"{c}\"")).collect();
+            body.push_str(&format!(",\n  PRIMARY KEY ({})", quoted_pk.join(", ")));
         }
 
         format!(
@@ -373,7 +387,7 @@ impl TypeDefinition {
             .filter(|f| f.indexed && !f.primary_key)
             .map(|f| {
                 format!(
-                    "CREATE INDEX IF NOT EXISTS idx_{}_{} ON \"{}\" ({})",
+                    "CREATE INDEX IF NOT EXISTS idx_{}_{} ON \"{}\" (\"{}\")",
                     self.name, f.name, self.name, f.name
                 )
             })
@@ -579,6 +593,37 @@ pub const ROUTING_DOC_URI_KEY: &str = "_routing_doc_uri";
 /// from the persisted row.
 pub const POSITION_AFTER_BLOCK_ID_PARAM: &str = "after_block_id";
 
+/// Operation-control param carrying a minted position's sibling re-keys to the
+/// write that consumes the key, so both land in ONE transaction (ADR 0030 D1).
+/// Never persisted: the SQL writer lifts it into statements and drops it.
+///
+/// INTERNAL. It travels in the same params map an outside caller can populate,
+/// so a writer acting on it MUST prove its targets rather than trust them, and
+/// every intent boundary MUST refuse it — see [`is_operation_control_param`].
+pub const ORDER_REKEYS_PARAM: &str = "_order_rekeys";
+
+/// True for the params keys a writer INTERPRETS rather than stores: positional
+/// intent, sibling re-keys, routing hints, diff guards.
+///
+/// This is the operation-control namespace. It is the set the SQL provider's
+/// `partition_params` refuses to PERSIST, AND the set every intent boundary
+/// (`BlockWriteField::parse`, the MCP tool boundary, the Loro→SQL projection)
+/// must refuse to ACCEPT — these keys are instructions, so taking one from
+/// outside hands the caller a writer primitive the boundary otherwise refuses
+/// (ADR 0005 keeps the order key out of `BlockWriteField` for the same reason).
+/// One definition so the persist-side strip and the accept-side refusal cannot
+/// drift.
+///
+/// Underscore-prefixed keys are NOT all control: `_source_header_args` and
+/// `_source_results` are real block properties and must keep flowing through,
+/// which is why this is a named set and not a prefix test.
+pub fn is_operation_control_param(key: &str) -> bool {
+    key == ORDER_REKEYS_PARAM
+        || key == POSITION_AFTER_BLOCK_ID_PARAM
+        || key.starts_with("_routing_")
+        || key.starts_with("_expected_")
+}
+
 // =============================================================================
 // Graph schema intermediate types
 // =============================================================================
@@ -648,12 +693,12 @@ mod create_table_sql_tests {
         // with "table has more than one primary key" — the table-level clause
         // is the only legal form.
         assert!(
-            !sql.contains("owner TEXT PRIMARY KEY"),
+            !sql.contains("\"owner\" TEXT PRIMARY KEY"),
             "inline PK leaked: {sql}"
         );
         assert!(
-            sql.contains("PRIMARY KEY (owner, repo, number)"),
-            "expected composite PK clause; got: {sql}"
+            sql.contains("PRIMARY KEY (\"owner\", \"repo\", \"number\")"),
+            "expected composite PK clause with quoted identifiers; got: {sql}"
         );
     }
 
@@ -673,8 +718,8 @@ mod create_table_sql_tests {
             source: TypeSource::default(),
         };
         let sql = td.to_create_table_sql();
-        assert!(sql.contains("id TEXT PRIMARY KEY"), "got: {sql}");
-        assert!(!sql.contains("PRIMARY KEY (id)"), "got: {sql}");
+        assert!(sql.contains("\"id\" TEXT PRIMARY KEY"), "got: {sql}");
+        assert!(!sql.contains("PRIMARY KEY (\"id\")"), "got: {sql}");
     }
 }
 
@@ -742,8 +787,8 @@ mod mutation_gap_tests {
         assert_eq!(
             idx,
             vec![
-                "CREATE INDEX IF NOT EXISTS idx_thing_title ON \"thing\" (title)".to_string(),
-                "CREATE INDEX IF NOT EXISTS idx_thing_cache ON \"thing\" (cache)".to_string(),
+                "CREATE INDEX IF NOT EXISTS idx_thing_title ON \"thing\" (\"title\")".to_string(),
+                "CREATE INDEX IF NOT EXISTS idx_thing_cache ON \"thing\" (\"cache\")".to_string(),
             ]
         );
 

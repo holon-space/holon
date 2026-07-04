@@ -22,10 +22,48 @@ pub fn column_ref_name(expr: &RenderExpr) -> Option<&str> {
 }
 
 pub fn sort_key_column(args: &ResolvedArgs) -> Option<&str> {
-    match args.get_template("sort_key") {
+    // Both spellings are accepted template args (see `is_template_arg`);
+    // profiles/index.org write `sortkey:`, so ignoring it here silently
+    // fell back to `data_row_sort_key`.
+    //
+    // Two authoring forms are honored: `sortkey: col("name")` and the plain
+    // string form `sortkey: "name"` / `sortkey: "-name"`. The leading `-`
+    // means DESCENDING (`sorted_rows` strips it and reverses); the journal
+    // feed uses `"-content"` for newest-first. The string form is returned
+    // verbatim (with any `-`) so the direction survives to the sort.
+    match args
+        .get_template("sortkey")
+        .or_else(|| args.get_template("sort_key"))
+    {
         Some(RenderExpr::ColumnRef { name }) => Some(name.as_str()),
+        Some(RenderExpr::Literal {
+            value: Value::String(s),
+        }) => Some(s.as_str()),
         _ => None,
     }
+}
+
+/// Split a sort-key spec into `(column, descending)`. A leading `-` marks a
+/// descending sort (e.g. `"-content"` → `("content", true)`); otherwise
+/// ascending.
+pub fn parse_sort_key(spec: &str) -> (&str, bool) {
+    match spec.strip_prefix('-') {
+        Some(rest) => (rest, true),
+        None => (spec, false),
+    }
+}
+
+/// Invert the lexicographic ordering of a `sort_value` key so an
+/// ASCENDING string sort (the streaming `MutableTree`'s only order) yields a
+/// DESCENDING result. Each Unicode scalar is complemented against the scalar
+/// range; the streaming path uses this for `-`-prefixed sort keys so its order
+/// matches the static path's `ord.reverse()`. Exact for the fixed-width keys
+/// `sort_value` emits (ISO dates, zero-padded numbers); it does not attempt to
+/// correct prefix-length effects for ragged strings.
+pub fn reverse_order_key(key: &str) -> String {
+    key.chars()
+        .map(|c| char::from_u32(0x0010_FFFF - c as u32).unwrap_or('\u{FFFD}'))
+        .collect()
 }
 
 /// Convert a sort key value to a string whose lexicographic ordering
@@ -69,8 +107,12 @@ pub fn cmp_values(a: Option<&Value>, b: Option<&Value>) -> std::cmp::Ordering {
 
 pub fn sorted_rows(rows: &[Arc<DataRow>], sort_key: Option<&str>) -> Vec<Arc<DataRow>> {
     let mut sorted: Vec<_> = rows.to_vec();
-    if let Some(key) = sort_key {
-        sorted.sort_by(|a, b| cmp_values(a.get(key), b.get(key)));
+    if let Some(spec) = sort_key {
+        let (col, descending) = parse_sort_key(spec);
+        sorted.sort_by(|a, b| {
+            let ord = cmp_values(a.get(col), b.get(col));
+            if descending { ord.reverse() } else { ord }
+        });
     }
     sorted
 }
@@ -92,10 +134,13 @@ pub fn resolve_states<K: RowKey>(args: &ResolvedArgs, row: &HashMap<K, Value>) -
     if let Some(states_expr) = args.get_template("states") {
         let val = eval_to_value(states_expr, row);
         if let Value::Array(items) = val {
-            return items
+            let states: Vec<String> = items
                 .iter()
                 .filter_map(|v| v.as_string().map(|s| s.to_string()))
                 .collect();
+            if !states.is_empty() {
+                return states;
+            }
         }
     }
     vec![
@@ -110,9 +155,53 @@ pub fn cycle_state(current: &str, states: &[String]) -> String {
     if states.is_empty() {
         return String::new();
     }
+    // LogSeq dialect flow (ForeignVaultCompat §4): a block already in a
+    // LogSeq keyword stays in the LogSeq ring — LATER -> NOW -> DONE — rather
+    // than snapping into the native TODO/DOING/DONE ring (which the default
+    // `states` list carries and which does not contain LATER/NOW). This keeps
+    // an imported LogSeq task's keyword faithful across a cycle. Once it
+    // reaches DONE it re-enters the native ring (DONE -> "" -> TODO).
+    match current {
+        "LATER" => return "NOW".to_string(),
+        "NOW" => return "DONE".to_string(),
+        _ => {}
+    }
     let idx = states.iter().position(|s| s == current).unwrap_or(0);
     let next = (idx + 1) % states.len();
     states[next].clone()
+}
+
+/// Font size (px) for a semantic text `style` keyword (`text(.., #{style:
+/// "h1"})`).
+///
+/// Single source of truth for the heading type scale, shared by every frontend
+/// (the value flows through the `text` widget's `size` prop, so gpui/dioxus
+/// render identically and the PBT widget-tree snapshot can assert on it).
+/// Returns `None` for an unrecognized keyword so the caller can fail loud
+/// instead of silently rendering a heading at body size — the exact silent
+/// drop that let the page-title-not-a-heading regression ship.
+pub fn text_style_font_size(style: &str) -> Option<f32> {
+    match style {
+        "h1" => Some(28.0),
+        "h2" => Some(22.0),
+        "h3" => Some(18.0),
+        "body" => Some(15.0),
+        _ => None,
+    }
+}
+
+/// Resolve what a `text(..)` widget shows: the real `content`, or a disclosed
+/// placeholder when `content` is empty. `empty_placeholder` is the `#{empty:
+/// ..}` named arg (`text(col("content"), #{empty: "(untitled)"})`). Returns the
+/// string to display plus whether it is the placeholder, so a caller can style
+/// the placeholder as degraded (muted/italic) — a genuinely empty value must
+/// never render as a blank row (fail-loud, never fake). Single source shared by
+/// every frontend, so the "no blank row" guarantee has one implementation.
+pub fn text_display<'a>(content: &'a str, empty_placeholder: Option<&'a str>) -> (&'a str, bool) {
+    match empty_placeholder {
+        Some(p) if content.is_empty() => (p, true),
+        _ => (content, false),
+    }
 }
 
 pub fn state_icon(state: &str) -> &'static str {
@@ -139,6 +228,12 @@ pub fn state_display(state: &str) -> (&str, &str) {
         "DOING" => ("DOING", "warning"),
         "DONE" => ("[x]", "success"),
         "CANCELLED" => ("CANCELLED", "error"),
+        // LogSeq dialect (ForeignVaultCompat §4): LATER is TODO-family
+        // (not started), NOW is DOING-family (in progress). Rendered with
+        // the same accents as their native counterparts; the label keeps
+        // the source keyword for round-trip fidelity.
+        "LATER" => ("LATER", "muted"),
+        "NOW" => ("NOW", "warning"),
         _ => (state, "primary"),
     }
 }
@@ -154,7 +249,25 @@ pub struct OutlineTree {
 }
 
 impl OutlineTree {
-    pub fn from_rows(rows: &[Arc<DataRow>], parent_id_col: &str, sort_col: &str) -> Self {
+    /// Build the sibling-bucketed tree with **per-level sort keys** (RULING
+    /// C1'). Bucketing under a parent is structural (a row is a child iff its
+    /// `parent_id_col` names a present `id`); only the *within-bucket* order is
+    /// a sort concern, and it differs by level:
+    ///
+    /// - **CHILD buckets** keep `sort_col` (document order) — the streaming
+    ///   `sort_value` order the global sort below applies.
+    /// - **ROOTS** sort by `root_sort_key` when the render declares one (a spec
+    ///   like `"-added_ts"`, `-` = descending), so a tree can honor its backing
+    ///   query's top-level `ORDER BY` even though query row order does not
+    ///   survive the CDC pipeline (`CdcAccumulator` is a `HashMap`). A `None`
+    ///   root key leaves roots in `sort_col` order — **byte-identical** to the
+    ///   pre-C1' behavior for every render that declares no root key.
+    pub fn from_rows(
+        rows: &[Arc<DataRow>],
+        parent_id_col: &str,
+        sort_col: &str,
+        root_sort_key: Option<&str>,
+    ) -> Self {
         let mut sorted_rows = rows.to_vec();
         sorted_rows.sort_by(|a, b| {
             let ka = sort_value(a.get(sort_col));
@@ -183,6 +296,20 @@ impl OutlineTree {
             } else {
                 children_of.entry(pid.to_string()).or_default().push(i);
             }
+        }
+
+        // Per-level sort keys: child buckets already carry `sort_col` order
+        // (the global sort above); ROOTS re-sort by the declared root key when
+        // present. The re-sort is STABLE over the `sort_col`-ordered `roots`
+        // vec, so roots that tie on the root key keep `sort_col` order (the
+        // deterministic tie-break). `None` skips it → roots stay in `sort_col`
+        // order (pre-C1', byte-identical).
+        if let Some(spec) = root_sort_key {
+            let (col, descending) = parse_sort_key(spec);
+            roots.sort_by(|&a, &b| {
+                let ord = cmp_values(sorted_rows[a].get(col), sorted_rows[b].get(col));
+                if descending { ord.reverse() } else { ord }
+            });
         }
 
         Self {
@@ -340,6 +467,11 @@ pub struct ResolvedArgs {
     /// existing scalar accessors and builders stay byte-compatible.
     pub rows: HashMap<String, Arc<dyn ReactiveRowProvider>>,
     pub templates: HashMap<String, RenderExpr>,
+    /// The widget these args were resolved for, when the caller knew it.
+    /// Its declared params answer "is this arg a template?" per-widget;
+    /// `None` (value functions, synthetic arg bags) falls back to the
+    /// global `is_template_arg` allowlist.
+    pub widget: Option<&'static crate::WidgetMeta>,
 }
 
 impl ResolvedArgs {
@@ -350,6 +482,7 @@ impl ResolvedArgs {
             named: HashMap::new(),
             rows: HashMap::new(),
             templates: HashMap::new(),
+            widget: None,
         }
     }
 
@@ -360,6 +493,7 @@ impl ResolvedArgs {
             named: HashMap::new(),
             rows: HashMap::new(),
             templates: HashMap::new(),
+            widget: None,
         }
     }
 
@@ -388,6 +522,18 @@ impl ResolvedArgs {
         })
     }
 
+    /// Read a named bool arg, failing loud when it is present with a
+    /// non-boolean value. `Ok(None)` = absent, `Ok(Some(b))` = a real boolean,
+    /// `Err` = present but not a boolean literal (a config bug the caller must
+    /// surface, never silently coerce).
+    pub fn get_bool_strict(&self, name: &str) -> Result<Option<bool>, String> {
+        match self.named.get(name) {
+            None => Ok(None),
+            Some(Value::Boolean(b)) => Ok(Some(*b)),
+            Some(other) => Err(format!("arg `{name}` must be a boolean, got {other:?}")),
+        }
+    }
+
     /// Get positional arg as string, coercing non-string values.
     pub fn get_positional_string(&self, index: usize) -> Option<String> {
         self.positional.get(index).and_then(|v| match v {
@@ -408,7 +554,23 @@ impl ResolvedArgs {
         }
     }
 
+    /// The unevaluated expression passed under `name`, or `None` when the arg
+    /// was absent.
+    ///
+    /// Asking for a name that this widget does not classify as a template is a
+    /// programming error, not an absent arg: such an arg was already evaluated
+    /// to a scalar during resolution, so the lookup could never succeed and the
+    /// feature behind it would be silently dead. Declare the param as `Expr` /
+    /// `Collection` on the widget (or, for `raw fn` widgets, add it to
+    /// `is_template_arg`).
     pub fn get_template(&self, name: &str) -> Option<&RenderExpr> {
+        assert!(
+            is_template_arg_for(self.widget, name),
+            "widget `{}`: get_template({name:?}) but `{name}` is not a \
+             declared Expr/Collection param and is not on the \
+             is_template_arg allowlist — it was resolved as a scalar",
+            self.widget.map_or("<unknown>", |m| m.name),
+        );
         self.templates.get(name)
     }
 
@@ -439,11 +601,10 @@ pub trait ValueFnLookup {
 }
 
 /// Built-in value functions available to every caller — `concat` for
-/// now, more added later. Frontend registries chain through this as a
-/// fallback so user-supplied registrations can still override built-in //
-/// ALLOW(fallback): doc describes registry chaining order names (collision
-/// check at `register_value_fn` enforces uniqueness against widgets, not
-/// against the core list).
+/// now, more added later. Frontend registries chain through this as the
+/// base layer so user-supplied registrations can still override built-in
+/// names (collision check at `register_value_fn` enforces uniqueness
+/// against widgets, not against the core list).
 ///
 /// Replaces the previous `EmptyValueFnLookup` + inline `if name ==
 /// "concat"` shim that lived in `eval_to_interp`.
@@ -499,6 +660,18 @@ pub fn resolve_args_with<K: RowKey>(
     row: &HashMap<K, Value>,
     fns: &dyn ValueFnLookup,
 ) -> ResolvedArgs {
+    resolve_args_for_widget(args, row, fns, None)
+}
+
+/// `resolve_args_with` for a call site that knows which widget it is
+/// resolving args for: the widget's declared params decide templateness,
+/// so a migrated widget needs no entry in `is_template_arg`.
+pub fn resolve_args_for_widget<K: RowKey>(
+    args: &[Arg],
+    row: &HashMap<K, Value>,
+    fns: &dyn ValueFnLookup,
+    widget: Option<&'static crate::WidgetMeta>,
+) -> ResolvedArgs {
     let mut positional = Vec::new();
     let mut positional_exprs = Vec::new();
     let mut named = HashMap::new();
@@ -507,7 +680,7 @@ pub fn resolve_args_with<K: RowKey>(
 
     for arg in args {
         match &arg.name {
-            Some(name) if is_template_arg(name) => {
+            Some(name) if is_template_arg_for(widget, name) => {
                 templates.insert(name.clone(), arg.value.clone());
             }
             Some(name) => match eval_to_interp(&arg.value, row, fns) {
@@ -537,9 +710,26 @@ pub fn resolve_args_with<K: RowKey>(
         named,
         rows,
         templates,
+        widget,
     }
 }
 
+/// Per-widget answer to "must this named arg stay an unevaluated template?".
+///
+/// A widget that declares the param decides for itself; everything else —
+/// `raw fn` widgets with no declared params, value functions, undeclared args
+/// — is judged by the global allowlist below. Migrating a widget to typed
+/// params is therefore what retires its allowlist entries.
+pub fn is_template_arg_for(widget: Option<&crate::WidgetMeta>, name: &str) -> bool {
+    match widget.and_then(|m| m.classifies_as_template(name)) {
+        Some(declared) => declared,
+        None => is_template_arg(name),
+    }
+}
+
+/// Global allowlist for widgets that have not been migrated to typed
+/// params. Templateness is really per-widget, so every name here is a widget's
+/// question answered for the whole DSL — shrink this list, don't grow it.
 pub fn is_template_arg(name: &str) -> bool {
     matches!(
         name,
@@ -549,6 +739,10 @@ pub fn is_template_arg(name: &str) -> bool {
             | "header_template"
             | "child_template"
             | "action"
+            | "shift_action"
+            | "cmd_action"
+            | "ctrl_action"
+            | "alt_action"
             | "parent_id"
             | "sortkey"
             | "sort_key"
@@ -576,9 +770,8 @@ pub fn eval_to_value<K: RowKey>(expr: &RenderExpr, row: &HashMap<K, Value>) -> V
 /// Drives argument evaluation for `resolve_args_with`. Dispatches
 /// `FunctionCall`s through the provided registry; unknown names
 /// (other than the legacy `concat` shim) produce `Value::Null`. The
-/// pre-F1 "silently return first arg" fallback is gone — a typo'd //
-/// ALLOW(fallback): historical name in doc comment function call now produces a
-/// visible `Null` at the consumer.
+/// pre-F1 "silently return first arg" behavior is gone — a typo'd
+/// function call now produces a visible `Null` at the consumer.
 pub fn eval_to_interp<K: RowKey>(
     expr: &RenderExpr,
     row: &HashMap<K, Value>,
@@ -711,7 +904,57 @@ pub fn eval_binary_op(op: &BinaryOperator, left: &Value, right: &Value) -> Value
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render_dsl::parse_render_dsl;
     use crate::render_types::Arg;
+
+    /// First `target`-named call in `expr`, depth-first.
+    fn find_call<'a>(expr: &'a RenderExpr, target: &str) -> Option<&'a [Arg]> {
+        match expr {
+            RenderExpr::FunctionCall { name, args } if name == target => Some(args),
+            RenderExpr::FunctionCall { args, .. } => {
+                args.iter().find_map(|a| find_call(&a.value, target))
+            }
+            RenderExpr::Object { fields } => fields.values().find_map(|v| find_call(v, target)),
+            RenderExpr::Array { items } => items.iter().find_map(|v| find_call(v, target)),
+            _ => None,
+        }
+    }
+
+    /// The shipped left sidebar is the reference user of modifier-click:
+    /// cmd-click (macOS) / ctrl-click (Windows+Linux) open the page in a tab.
+    /// Parsing the real asset rather than a synthetic expression keeps this
+    /// pinned to the affordance users actually get.
+    #[test]
+    fn shipped_left_sidebar_resolves_modifier_click_action_templates() {
+        let org = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/default/index.org"
+        ))
+        .expect("read assets/default/index.org");
+        let source = org
+            .lines()
+            .find(|l| l.contains("item_template: selectable("))
+            .expect("left-sidebar render expression in assets/default/index.org");
+
+        let expr = parse_render_dsl(source).expect("parse the shipped left-sidebar expression");
+        let args =
+            find_call(&expr, "selectable").expect("selectable call in the shipped expression");
+        let resolved = resolve_args(args, &HashMap::<String, Value>::new());
+
+        // `action` is allowlisted, so its presence proves the fixture parsed and
+        // reached `selectable` — a failure below is then specifically about the
+        // modifier-click names, not a malformed fixture.
+        assert!(
+            resolved.get_template("action").is_some(),
+            "primary `action` template missing — the fixture is malformed"
+        );
+        for key in ["cmd_action", "ctrl_action"] {
+            assert!(
+                resolved.get_template(key).is_some(),
+                "`{key}` did not resolve as a template, so the modifier-click action is dead"
+            );
+        }
+    }
 
     #[test]
     fn test_eval_binary_op_arithmetic() {
@@ -1022,7 +1265,7 @@ mod tests {
             ])),
         ];
 
-        let tree = OutlineTree::from_rows(&rows, "parent_id", "sort_key");
+        let tree = OutlineTree::from_rows(&rows, "parent_id", "sort_key", None);
         assert_eq!(tree.roots.len(), 2);
 
         let items: Vec<(String, usize)> = tree.walk_depth_first(|row, depth| {
@@ -1036,6 +1279,134 @@ mod tests {
                 ("2".to_string(), 1),
                 ("3".to_string(), 0),
             ]
+        );
+    }
+
+    // ── RULING C1' — per-level tree sort keys ──────────────────────────
+    //
+    // Helper: DFS the tree, collecting `id`s in render order.
+    fn tree_ids(tree: &OutlineTree) -> Vec<String> {
+        tree.walk_depth_first(|row, _| row.get("id").unwrap().as_string().unwrap().to_string())
+    }
+
+    fn row(pairs: &[(&str, Value)]) -> Arc<DataRow> {
+        Arc::new(
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+        )
+    }
+
+    /// The C1' RED→GREEN core: two ROOT pins whose `added_ts` (pin recency) is
+    /// REVERSED vs `sort_key` (ingest order). With a declared root key
+    /// `"-added_ts"`, roots must render most-recently-pinned-first
+    /// (`[apple, zebra]`), while `apple`'s CHILDREN keep `sort_key` ASC — the
+    /// per-level split. Pre-C1' (root key ignored) roots would follow
+    /// `sort_key` → `[zebra, apple]`, so this reds until the per-level re-sort
+    /// lands.
+    #[test]
+    fn from_rows_roots_sort_by_root_key_children_keep_sort_key() {
+        let s = |x: &str| Value::String(x.into());
+        let i = |n: i64| Value::Integer(n);
+        let rows: Vec<Arc<DataRow>> = vec![
+            // zebra: ingested 1st (sort_key=1), pinned 1st (added_ts=10)
+            row(&[
+                ("id", s("zebra")),
+                ("parent_id", s("root")),
+                ("sort_key", i(1)),
+                ("added_ts", i(10)),
+            ]),
+            // apple: ingested 2nd (sort_key=2), pinned last (added_ts=20)
+            row(&[
+                ("id", s("apple")),
+                ("parent_id", s("root")),
+                ("sort_key", i(2)),
+                ("added_ts", i(20)),
+            ]),
+            // apple's children, supplied OUT of sort_key order in the input.
+            row(&[
+                ("id", s("apple-c2")),
+                ("parent_id", s("apple")),
+                ("sort_key", i(2)),
+                ("added_ts", i(99)),
+            ]),
+            row(&[
+                ("id", s("apple-c1")),
+                ("parent_id", s("apple")),
+                ("sort_key", i(1)),
+                ("added_ts", i(5)),
+            ]),
+        ];
+        let tree = OutlineTree::from_rows(&rows, "parent_id", "sort_key", Some("-added_ts"));
+        assert_eq!(
+            tree_ids(&tree),
+            vec![
+                "apple".to_string(),    // root, added_ts DESC → first
+                "apple-c1".to_string(), // child, sort_key ASC
+                "apple-c2".to_string(),
+                "zebra".to_string(), // root, added_ts DESC → last
+            ],
+            "roots must sort by the declared root key (added_ts DESC) while child \
+             buckets keep sort_key (document) order",
+        );
+    }
+
+    /// No root key declared → roots stay in `sort_key` order, byte-identical to
+    /// the pre-C1' behavior. Locks the "no global flip" guarantee.
+    #[test]
+    fn from_rows_none_root_key_keeps_sort_key_order_exactly() {
+        let s = |x: &str| Value::String(x.into());
+        let i = |n: i64| Value::Integer(n);
+        let rows: Vec<Arc<DataRow>> = vec![
+            row(&[
+                ("id", s("zebra")),
+                ("parent_id", s("root")),
+                ("sort_key", i(1)),
+                ("added_ts", i(10)),
+            ]),
+            row(&[
+                ("id", s("apple")),
+                ("parent_id", s("root")),
+                ("sort_key", i(2)),
+                ("added_ts", i(20)),
+            ]),
+        ];
+        let tree = OutlineTree::from_rows(&rows, "parent_id", "sort_key", None);
+        assert_eq!(
+            tree_ids(&tree),
+            vec!["zebra".to_string(), "apple".to_string()],
+            "with no root key, roots keep sort_key order (pre-C1' behavior)",
+        );
+    }
+
+    /// Roots that TIE on the root key fall back to `sort_key` order
+    /// deterministically (the re-sort is stable over the `sort_col`-ordered
+    /// bucket). `zebra` (sort_key=1) precedes `apple` (sort_key=2) despite both
+    /// having `added_ts=10`.
+    #[test]
+    fn from_rows_root_key_ties_fall_back_to_sort_key_deterministically() {
+        let s = |x: &str| Value::String(x.into());
+        let i = |n: i64| Value::Integer(n);
+        let rows: Vec<Arc<DataRow>> = vec![
+            row(&[
+                ("id", s("apple")),
+                ("parent_id", s("root")),
+                ("sort_key", i(2)),
+                ("added_ts", i(10)),
+            ]),
+            row(&[
+                ("id", s("zebra")),
+                ("parent_id", s("root")),
+                ("sort_key", i(1)),
+                ("added_ts", i(10)),
+            ]),
+        ];
+        let tree = OutlineTree::from_rows(&rows, "parent_id", "sort_key", Some("-added_ts"));
+        assert_eq!(
+            tree_ids(&tree),
+            vec!["zebra".to_string(), "apple".to_string()],
+            "root-key ties break deterministically on sort_key order",
         );
     }
 
@@ -1211,6 +1582,7 @@ mod mutation_gap_tests {
             named: HashMap::new(),
             rows: HashMap::new(),
             templates: HashMap::new(),
+            widget: None,
         }
     }
 
@@ -1382,6 +1754,35 @@ mod mutation_gap_tests {
     }
 
     #[test]
+    fn text_style_font_size_maps_headings_and_fails_loud_on_unknown() {
+        // The heading type scale is monotonically decreasing h1 > h2 > h3, and
+        // every heading is strictly larger than the 14px body default so a
+        // `#{style: "h1"}` title can never render at body size.
+        let h1 = text_style_font_size("h1").expect("h1 is a known style");
+        let h2 = text_style_font_size("h2").expect("h2 is a known style");
+        let h3 = text_style_font_size("h3").expect("h3 is a known style");
+        assert!(h1 > h2 && h2 > h3, "heading scale must decrease h1>h2>h3");
+        assert!(h3 > 14.0, "even h3 must exceed the 14px body default");
+        assert_eq!(h1, 28.0, "h1 pins the page-title heading scale");
+        // Unknown keyword returns None (caller fails loud) rather than silently
+        // resolving to body size — the exact swallow that hid the title bug.
+        assert_eq!(text_style_font_size("h7"), None);
+        assert_eq!(text_style_font_size(""), None);
+    }
+
+    #[test]
+    fn text_display_shows_disclosed_placeholder_only_for_empty_content() {
+        // Non-empty content always wins — the placeholder never masks real text.
+        assert_eq!(text_display("hello", Some("(untitled)")), ("hello", false));
+        // Empty content with a placeholder discloses the stand-in (styled muted
+        // by the caller) so an empty Page can never render as a blank row.
+        assert_eq!(text_display("", Some("(untitled)")), ("(untitled)", true));
+        // No placeholder configured → empty stays empty (never fabricated).
+        assert_eq!(text_display("", None), ("", false));
+        assert_eq!(text_display("hello", None), ("hello", false));
+    }
+
+    #[test]
     fn resolve_states_template_and_default() {
         let row: HashMap<String, Value> = [(
             "sts".to_string(),
@@ -1408,6 +1809,59 @@ mod mutation_gap_tests {
         let default = resolve_states(&empty_args(), &row);
         assert_eq!(
             default,
+            vec![
+                String::new(),
+                "TODO".to_string(),
+                "DOING".to_string(),
+                "DONE".to_string()
+            ]
+        );
+    }
+
+    /// When a document has no `#+TODO:` keywords, `todo_states` evaluates
+    /// to `Value::Null`. `resolve_states` must fall back to the default
+    /// cycle `["", "TODO", "DOING", "DONE"]` — otherwise a task block in a
+    /// journal day page (which never declares `#+TODO:`) would cycle from
+    /// TODO straight to empty, skipping DOING.
+    #[test]
+    fn resolve_states_null_value_falls_back_to_default() {
+        let row: HashMap<String, Value> = [("sts".to_string(), Value::Null)].into_iter().collect();
+        let mut args = empty_args();
+        args.templates.insert(
+            "states".to_string(),
+            RenderExpr::ColumnRef {
+                name: "sts".to_string(),
+            },
+        );
+        assert_eq!(
+            resolve_states(&args, &row),
+            vec![
+                String::new(),
+                "TODO".to_string(),
+                "DOING".to_string(),
+                "DONE".to_string()
+            ]
+        );
+    }
+
+    /// When a document explicitly sets an empty `#+TODO:` list (or the
+    /// stored JSON is `[]`), `resolve_states` receives an empty Array and
+    /// must still fall back to the default cycle — otherwise `cycle_state`
+    /// would return `""` for every click.
+    #[test]
+    fn resolve_states_empty_array_falls_back_to_default() {
+        let row: HashMap<String, Value> = [("sts".to_string(), Value::Array(vec![]))]
+            .into_iter()
+            .collect();
+        let mut args = empty_args();
+        args.templates.insert(
+            "states".to_string(),
+            RenderExpr::ColumnRef {
+                name: "sts".to_string(),
+            },
+        );
+        assert_eq!(
+            resolve_states(&args, &row),
             vec![
                 String::new(),
                 "TODO".to_string(),
@@ -1479,7 +1933,7 @@ mod mutation_gap_tests {
         .into_iter()
         .collect();
         args.templates.insert(
-            "tpl".to_string(),
+            "item_template".to_string(),
             RenderExpr::ColumnRef {
                 name: "x".to_string(),
             },
@@ -1514,10 +1968,52 @@ mod mutation_gap_tests {
         assert_eq!(args.get_positional_column_name(5), None);
 
         assert!(matches!(
-            args.get_template("tpl"),
+            args.get_template("item_template"),
             Some(RenderExpr::ColumnRef { name }) if name == "x"
         ));
-        assert!(args.get_template("nope").is_none());
         assert!(args.get_rows("nope").is_none());
+    }
+
+    /// The backstop: a name no widget declares and the allowlist does not
+    /// carry was resolved as a scalar, so `get_template` can only ever answer
+    /// `None`. That silent `None` is what kept `expand_toggle`'s `content`
+    /// dead, so it is a panic now rather than an absent-arg answer.
+    #[test]
+    #[should_panic(expected = "not a")]
+    fn get_template_for_an_unclassified_name_panics() {
+        let row: HashMap<String, Value> = HashMap::new();
+        let args = resolve_args(&[], &row);
+        let _ = args.get_template("nope");
+    }
+
+    /// A widget's own declared params answer templateness — the allowlist is
+    /// consulted only for names the widget says nothing about.
+    #[test]
+    fn declared_params_override_the_global_allowlist() {
+        static META: crate::WidgetMeta = crate::WidgetMeta {
+            name: "probe",
+            category: crate::WidgetCategory::Special,
+            params: &[
+                crate::StaticParam {
+                    name: "content",
+                    type_hint: "Expr",
+                    default: None,
+                },
+                crate::StaticParam {
+                    name: "header",
+                    type_hint: "String",
+                    default: None,
+                },
+            ],
+            doc: "",
+        };
+        // Undeclared by `probe`, so the allowlist still rules.
+        assert!(is_template_arg_for(Some(&META), "item_template"));
+        // Declared as Expr though the allowlist has never heard of it.
+        assert!(is_template_arg_for(Some(&META), "content"));
+        assert!(!is_template_arg("content"));
+        // Declared as a scalar though the allowlist calls it a template.
+        assert!(!is_template_arg_for(Some(&META), "header"));
+        assert!(is_template_arg("header"));
     }
 }

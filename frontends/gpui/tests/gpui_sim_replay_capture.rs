@@ -25,6 +25,9 @@ use holon_integration_tests::pbt::fixtures::json;
 use pbt_harness::windowed_wide::replay_fixture_windowed;
 
 fn main() {
+    if pbt_harness::handled_list_protocol("gpui_sim_replay_capture") {
+        return;
+    }
     let path = std::env::var("HOLON_CAPTURE").unwrap_or_else(|_| {
         concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -47,3 +50,7 @@ fn main() {
          ComposedSut<WideE2E>"
     );
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;

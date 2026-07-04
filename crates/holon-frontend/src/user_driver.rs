@@ -43,6 +43,7 @@ use crate::operations::OperationIntent;
 use crate::reactive::BuilderServices;
 use crate::reactive::ReactiveEngine;
 use crate::reactive_view_model::ReactiveViewModel;
+use crate::row_origin::RowOrigin;
 
 /// Default operation dispatched when a drop completes on a block drop zone.
 /// Used as fallback when `ViewKind::DropZone { op_name }` isn't readable. //
@@ -362,6 +363,27 @@ pub trait UserDriver: Send + Sync {
         )
     }
 
+    /// Insert `text` the way a soft keyboard's `insertText:` delivers it —
+    /// as a finished string committed straight into the focused editor's input
+    /// handler, NOT as hardware `KeyDown` keystrokes routed through the keymap.
+    ///
+    /// This is the harness rung for the iOS UIKit text-input path
+    /// (`gpui-mobile`'s `IosWindow::handle_text_input`). A soft `Return`
+    /// arrives as `"\n"` and must become an `enter` action, not a literal
+    /// newline — a class of bug that `send_raw_keystroke` (KeyDown) cannot
+    /// reach, and therefore cannot catch.
+    ///
+    /// Default impl is `bail!` — headless drivers have no window input handler,
+    /// mirroring `send_raw_keystroke`.
+    async fn insert_text(&self, text: &str) -> Result<()> {
+        let _ = text;
+        anyhow::bail!(
+            "insert_text is unimplemented for this UserDriver. The soft-keyboard insertText: path \
+             needs a real-window driver (GpuiUserDriver / McpUserDriver). Was a \
+             soft-keyboard-input transition generated for a headless run?"
+        )
+    }
+
     /// Like [`UserDriver::send_raw_keystroke`], but retry until some handler
     /// consumes the keystroke or `timeout` elapses. Real-window drivers
     /// override this to cover the editor-mount race: after a focus move, the
@@ -381,18 +403,25 @@ pub trait UserDriver: Send + Sync {
 
     /// Set block `target`'s expand/collapse state to `expanded`.
     ///
-    /// Block expansion has NO engine representation — it is a per-widget,
-    /// view-local `Mutable<bool>` (the GPUI chevron's `on_mouse_down` flips it
-    /// directly; `Block` documents "UI state like collapsed is NOT stored
-    /// here - kept locally"). So unlike every other gesture, this verb cannot
-    /// dispatch an `OperationIntent`; each driver drives the REAL per-frontend
-    /// mechanism:
+    /// UPDATE (2026-07-11, Martin ruling): collapse IS document state now —
+    /// the production chevron (`render/builders/expand_toggle.rs`) dispatches
+    /// a real `set_field(collapsed)` `OperationIntent` alongside the local
+    /// gate poke, so it is undoable/synced/provenance-tagged like any other
+    /// field write. The doc below (poke the view-local `Mutable` gate
+    /// directly) still describes what each headless/windowed driver here
+    /// does — that remains a faithful simulation of "the user clicked the
+    /// chevron" for gesture-level PBT driving, since the local gate is what
+    /// gates lazy materialisation and what `find_expand_toggle_gate` can
+    /// reach. It does NOT yet dispatch the op, so a driver-driven toggle does
+    /// not itself exercise the durability/undo path — see the keystone-rung
+    /// note this leaves for a future assert-collapsed-persisted rung.
     /// - headless (`ReactiveEngineDriver`): find the `expand_toggle` node in a
     ///   reactive snapshot and `gate.set(expanded)` — the same poke the GPUI
     ///   handler performs.
     /// - windowed (`GpuiUserDriver` / `SimUserDriver`): synthesize a real click
     ///   on the chevron registered under `expand_toggle_id_for(target)`, so the
-    ///   production handler flips the gate exactly as a user's tap would.
+    ///   production handler flips the gate AND dispatches `set_field` exactly
+    ///   as a user's tap would.
     ///
     /// Absoluteness is owned jointly with the ref model: the windowed chevron
     /// is a toggle, and the PBT generates expand/collapse only in the
@@ -475,6 +504,207 @@ impl ReactiveEngineDriver {
         }
     }
 
+    /// Headless live editor text (Inc 4): the block's cell-free editor VM
+    /// buffer (`HeadlessEditorMirror::live_text`) — the pre-commit value
+    /// keystrokes mutate, which after an own trailing-whitespace echo can
+    /// diverge from the SQL-trimmed `block.content`. `None` when no editor
+    /// VM is open. This is the
+    /// source `SutEditorMirrorRead::editor_live_text` reads for the frontend
+    /// SUT.
+    pub fn editor_live_text(&self, block_id: &EntityUri) -> Option<String> {
+        self.editor_mirror.live_text(&block_id.to_string())
+    }
+
+    /// Converge the currently-focused editor's buffer against the settled SQL
+    /// authority (Inc 4 — the headless data-sync loop). No-op when nothing is
+    /// focused or no VM is open. Called from the composed harness settle after
+    /// the projection fixed point so the buffer reflects the settled echo.
+    pub async fn converge_editors(&self) -> Result<()> {
+        if let Some(block) = self.engine.focused_block() {
+            // A structural op may have armed a caret seed for an editor that
+            // is already open (a position-0 split keeps the caret on the
+            // ORIGINAL id), in which case nothing mounts to apply it. GPUI
+            // re-seats from its focus subscription; do the same here before
+            // converging the buffer.
+            self.editor_mirror
+                .adopt_armed_caret_seed(&self.engine, &block);
+            self.editor_mirror
+                .converge_editor(&self.engine, &block.to_string())
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Seed the just-focused editor's VM from authority on OPEN (Inc 4). Called
+    /// by the editable-focus cap AFTER the production `click_entity` focus, so
+    /// a focused-but-not-yet-typed block already hosts a VM (exercising the
+    /// VM read+converge path even before any keystroke). `click_entity`
+    /// seeds via `seed_for_click` only when the target was NOT already
+    /// focused; a focus on an already-focused block (e.g. a freshly-created
+    /// block) would otherwise have no VM until the first keystroke. This
+    /// closes that gap and matches the reference's fresh
+    /// `open_active_editor`.
+    pub async fn seed_focused_editor(&self, block_id: &EntityUri) -> Result<()> {
+        self.editor_mirror
+            .reset_editor_from_authority(&self.engine, block_id)
+            .await
+    }
+
+    /// Headless equivalent of GPUI `editor_view.rs`'s on-blur / authority-leave
+    /// commit for the focused main panel's creation slot. Resolves the slot's
+    /// parent the SAME way the render pipeline keys the `:__virtual:<parent>`
+    /// slot — `row_origin::resolve_creation_parent` over the main panel's LIVE
+    /// query rows (WP-E's navigation focus root) — then runs the production
+    /// `ViewEventHandler::handle_text_sync` create path
+    /// ([`EditorViewModel::pending_commit_intent`]) to obtain the
+    /// `block.create{parent_id, content}` intent and dispatches it exactly as
+    /// GPUI does via `dispatch_intent`.
+    ///
+    /// Why compute the parent instead of reading a rendered slot node: the slot
+    /// materializes only on the streaming `create_tree_driver` render path (the
+    /// `AppendedRowsProvider` creation-slot). The pure `engine.snapshot` /
+    /// MCP render path a headless reader sees does NOT append it for a panel
+    /// rendered via `live_block` — `virtual_parent: true` is resolved only in
+    /// the `live_query` builder (`resolve_virtual_parent`), the documented
+    /// "live_block still pending" gap in `shadow_builders::tree`. So there is
+    /// no rendered virtual node to read here. Rather than re-derive from
+    /// the editor caret (`engine.focused_block()`, ADR 0010 — WRONG,
+    /// diverges from the nav root under
+    /// `SplitBlock`/`JoinBlock`/`FocusEditableText`), this reuses the exact
+    /// production parent-resolution (`resolve_creation_parent`) on the
+    /// exact rows the render uses, so the committed parent is byte-identical to
+    /// the slot id the streaming render keys. It is NOT a new create path — the
+    /// `create` intent still comes from `handle_text_sync`.
+    ///
+    /// This is the shared seam the iOS render-path focus edge (B1, deferred)
+    /// will later call; here it lets the headless keystone drive WP-E's
+    /// creation-slot focus-root parenting cross-backend. Fails loud (per the
+    /// project's error policy) if the focused main panel resolves no creation
+    /// parent (empty / cold-boot rowset) or the commit yields no intent.
+    pub async fn commit_creation_slot(&self, content: &str) -> Result<EntityUri> {
+        let main_panel = region_panel_block_id(holon_api::Region::Main);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let parent = loop {
+            let (_expr, rows) = self.engine.ensure_watching(&main_panel).snapshot();
+            // WP-E: the slot parents to the main panel's navigation focus root,
+            // resolved from the rendered rowset (NOT the caret, NOT the panel
+            // container). This is the SAME call the render's `interpret_virtual_child`
+            // (static path) / `AppendedRowsProvider::creation_slot` (streaming path)
+            // makes, so the parent matches the rendered slot id exactly.
+            // The main panel is always a single focus-rooted tree, so the
+            // `no_parent` forest-root opt-in never applies here (`false`).
+            if let Some(parent) =
+                crate::row_origin::resolve_creation_parent(&rows, &main_panel, false)
+            {
+                break parent;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                let row_ids: Vec<String> = rows
+                    .iter()
+                    .filter_map(|r| r.get("id").and_then(|v| v.as_string()).map(String::from))
+                    .collect();
+                anyhow::bail!(
+                    "commit_creation_slot: main panel {main_panel} resolves NO creation parent \
+                     after 3s (caret focus {:?}; {} live rows {row_ids:?}) — the focused main \
+                     panel query returned an empty / not-yet-resolvable rowset (cold-boot \
+                     empty-page case). WP-E's `resolve_creation_parent` needs at least one real \
+                     row to key the slot on the nav focus root.",
+                    self.engine.focused_block(),
+                    rows.len()
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(120)).await;
+        };
+
+        // Build the affordance id exactly as the render keys it, then drive the
+        // PRODUCTION focus path: focus reaching an affordance is what births a
+        // real empty block (`ReactiveEngine::birth_creation_affordance`). The
+        // newborn's id is the focus authority's value straight afterwards — the
+        // birth seats it synchronously.
+        let slot_id = RowOrigin::creation_placeholder_id(&parent);
+        let slot_uri = EntityUri::parse(&slot_id)
+            .with_context(|| format!("creation-slot id {slot_id:?} is not a valid EntityUri"))?;
+        crate::reactive::BuilderServices::set_focus(&*self.engine, Some(slot_uri));
+        let born = self.engine.focused_block().with_context(|| {
+            format!(
+                "focusing creation affordance {slot_id} seated no focus — the birth did not run"
+            )
+        })?;
+
+        // Wait for the newborn to exist before writing into it. This is not a
+        // test-only nicety: in the real UI the newborn's editor mounts only
+        // when its row arrives, so the first keystroke is BY CONSTRUCTION after
+        // the create. A driver that writes the instant focus moves would race
+        // ahead of the create and see "Block not found".
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            use holon_api::ReactiveRowProvider;
+            if self
+                .engine
+                .ensure_watching(&born)
+                .row_mutable(&born)
+                .is_some()
+            {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                anyhow::bail!(
+                    "creation-affordance birth of {born} under {parent} did not land within 3s — \
+                     the block.create dispatched by the focus edge never produced a row"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // The typed text lands the same way any first keystroke does: the
+        // content write against the now-real block.
+        if !content.is_empty() {
+            let mut params = std::collections::HashMap::new();
+            params.insert("id".into(), holon_api::Value::String(born.to_string()));
+            params.insert(
+                "field".into(),
+                holon_api::Value::String("content".to_string()),
+            );
+            params.insert(
+                "value".into(),
+                holon_api::Value::String(content.to_string()),
+            );
+            self.engine.ephemeral_newborns_handle().retire(&born);
+            self.engine
+                .dispatch_intent_sync(crate::operations::OperationIntent::new(
+                    holon_api::EntityName::new("block"),
+                    "set_field".to_string(),
+                    params,
+                ))
+                .await?;
+        }
+        Ok(born)
+    }
+
+    /// Create a block under `parent` with an explicit, born-equal `id` — the
+    /// counterpart to [`commit_creation_slot`] for the case where the caller
+    /// already owns the id (no slot gesture applies to an explicit id). Builds
+    /// the production `block.create{id, parent_id, content}` intent and
+    /// dispatches it through the same `dispatch_intent_sync` seam GPUI uses.
+    /// Unlike `commit_creation_slot` it does NOT re-resolve the parent from the
+    /// live rowset — the caller passes the resolved focus root directly.
+    pub async fn create_block_with_id(
+        &self,
+        parent: &EntityUri,
+        content: &str,
+        id: &EntityUri,
+    ) -> Result<()> {
+        let mut params = HashMap::new();
+        params.insert("id".to_string(), Value::String(id.to_string()));
+        params.insert("parent_id".to_string(), Value::String(parent.to_string()));
+        params.insert("content".to_string(), Value::String(content.to_string()));
+        let intent = OperationIntent::new(EntityName::new("block"), "create".to_string(), params);
+        self.engine
+            .dispatch_intent_sync(intent)
+            .await
+            .with_context(|| format!("create_block_with_id({id}) under {parent} failed"))
+    }
+
     /// Ensure the router is warmed for `root_block_id`. Idempotent — safe to
     /// call before every chord. Used by per-frontend drivers that route input
     /// through the real UI pipeline but still need the engine-quiescence
@@ -508,32 +738,19 @@ impl ReactiveEngineDriver {
     }
 }
 
-#[async_trait::async_trait]
-impl UserDriver for ReactiveEngineDriver {
-    async fn synthetic_dispatch(
-        &self,
-        entity: &str,
-        op: &str,
-        params: HashMap<String, Value>,
-    ) -> Result<()> {
-        let intent = OperationIntent::new(entity.into(), op.into(), params);
-        self.engine.dispatch_intent_sync(intent).await
-    }
-
+impl ReactiveEngineDriver {
     /// Mirror GPUI's `selectable` + `render_entity` click priority:
-    /// dispatch the node's bound click intent if one exists; otherwise
-    /// fall through to `navigation::editor_focus` (cursor placement).
+    /// dispatch the node's click intent bound for exactly `modifiers` if one
+    /// exists; otherwise fall through to cursor placement.
     ///
-    /// The bound-action path is the same one GPUI takes
-    /// (`frontends/gpui/src/render/builders/selectable.rs:46-54` reads
-    /// `node.click_intent()` and dispatches it from `on_mouse_down`).
+    /// `modifiers` is the set held down at mouse-down. `ClickModifiers::none()`
+    /// selects the widget's `action:` wiring, `shift()` its `shift_action:`,
+    /// and so on — the same lookup GPUI's `selectable` performs against its
+    /// `HashMap<ClickModifiers, OperationIntent>`
+    /// (`frontends/gpui/src/render/builders/selectable.rs`).
     /// `BuilderServices::snapshot_resolved` recursively interprets every
-    /// nested `live_block` so the resolved tree contains the
-    /// sidebar/panel children where the bound action lives;
-    /// `find_click_intent_in_view_model` then walks it.
-    ///
-    /// This keeps the headless and GPUI paths converging on the same
-    /// click semantics: ViewModels carry the intent, drivers dispatch it.
+    /// nested `live_block` so the resolved tree contains the sidebar/panel
+    /// children where the bound action lives.
     ///
     /// Poll for the entity in the resolved tree: nested `live_block`
     /// watches stream in async, so a click that lands immediately after
@@ -542,9 +759,15 @@ impl UserDriver for ReactiveEngineDriver {
     /// ALLOW(fallback): pre-existing doc on router-poll behavior
     /// never found, we fall through to cursor placement — same as GPUI
     /// when nothing intercepts the click.
-    async fn click_entity(&self, entity_id: &EntityUri, region: &str) -> Result<()> {
+    pub async fn click_entity_with_modifiers(
+        &self,
+        entity_id: &EntityUri,
+        region: &str,
+        modifiers: holon_api::ClickModifiers,
+    ) -> Result<()> {
         let root_uri = holon_api::root_layout_block_uri();
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let resolve_budget = Duration::from_secs(2);
+        let deadline = Instant::now() + resolve_budget;
         loop {
             let resolved = self.engine.snapshot_resolved(&root_uri);
             // Scope the intent lookup to the clicked region. The same
@@ -554,9 +777,9 @@ impl UserDriver for ReactiveEngineDriver {
             // walker would return the LeftSidebar's `navigation.focus` for a
             // Main click and diverge from production GPUI semantics. See
             // FU-15 in `devlog/2026-05-07-164740-logseq-sidebar-followups.md`.
-            if let Some(intent) =
-                crate::focus_path::find_click_intent_in_region(&resolved, entity_id, region)
-            {
+            if let Some(intent) = crate::focus_path::find_click_intent_in_region(
+                &resolved, entity_id, region, modifiers,
+            ) {
                 return self.apply_intent(intent).await;
             }
             // The entity is already rendered in this region but binds no
@@ -572,6 +795,13 @@ impl UserDriver for ReactiveEngineDriver {
                 break;
             }
             if Instant::now() >= deadline {
+                tracing::warn!(
+                    entity_id = %entity_id,
+                    region,
+                    deadline_ms = resolve_budget.as_millis() as u64,
+                    "click_entity: entity never appeared in the resolved tree; the click binds no \
+                     intent and degrades to bare focus (no navigate)."
+                );
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -580,9 +810,46 @@ impl UserDriver for ReactiveEngineDriver {
         // focusing the block, matching GPUI's `render_entity` click handler.
         // Focus is pure in-memory state (ADR 0010): set the authority
         // directly instead of dispatching `navigation.editor_focus`.
+        //
+        // A real click also RE-PLACES the caret: GPUI re-mounts the block's
+        // editor at the click position (modeled as end-of-text, see
+        // `model_chord_click_focus` in the PBT ref). Seed the headless caret
+        // mirror the same way `send_key_chord` does, or a cursor tracked
+        // during an earlier editor session on this block — or a stale armed
+        // caret seed (split → 0) that `set_focus` keeps for the same block —
+        // survives the click and diverges from the freshly-mounted editor.
+        // Clicking the already-focused block is a no-op on the caret, like
+        // the already-active early-return in the ref model.
         let _ = region;
+        if self.engine.focused_block().as_ref() != Some(entity_id) {
+            self.editor_mirror
+                .seed_for_click(&self.engine, entity_id)
+                .await
+                .with_context(|| format!("click_entity: caret seed for clicked {entity_id}"))?;
+        }
         self.engine.set_focus(Some(entity_id.clone()));
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl UserDriver for ReactiveEngineDriver {
+    async fn synthetic_dispatch(
+        &self,
+        entity: &str,
+        op: &str,
+        params: HashMap<String, Value>,
+    ) -> Result<()> {
+        let intent = OperationIntent::new(entity.into(), op.into(), params);
+        self.engine.dispatch_intent_sync(intent).await
+    }
+
+    /// Primary (no-modifier) click. The general gesture — including
+    /// modifier-carrying clicks — is
+    /// [`ReactiveEngineDriver::click_entity_with_modifiers`].
+    async fn click_entity(&self, entity_id: &EntityUri, region: &str) -> Result<()> {
+        self.click_entity_with_modifiers(entity_id, region, holon_api::ClickModifiers::none())
+            .await
     }
 
     /// Headless `state_toggle` click. `click_entity` cannot disambiguate the
@@ -603,9 +870,9 @@ impl UserDriver for ReactiveEngineDriver {
             }
             if Instant::now() >= deadline {
                 anyhow::bail!(
-                    "cycle_state_toggle: no state_toggle glyph for {entity_id} in region {region} \
-                     within 2s — the target rendered no state_toggle (not a visible task row?), \
-                     so its cycle set_field intent could not be resolved."
+                    "cycle_state_toggle: could not resolve the state_toggle cycle intent for \
+                     {entity_id} in region {region} within 2s. {}",
+                    crate::focus_path::state_toggle_miss_reason(&resolved, entity_id, region)
                 );
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -613,27 +880,81 @@ impl UserDriver for ReactiveEngineDriver {
     }
 
     /// Headless expand/collapse: find the `expand_toggle` node in a reactive
-    /// snapshot and `gate.set(expanded)` — the same view-local poke the GPUI
-    /// chevron's `on_mouse_down` handler performs. Shares the tree walk with
+    /// snapshot and `gate.set(expanded)`, THEN dispatch the same
+    /// `set_field(collapsed)` intent the production GPUI chevron handler
+    /// dispatches (collapse is document state since the 2026-07-11 ruling —
+    /// the gate poke alone would leave the SUT's `collapsed` column stale and
+    /// diverge from a ref model that tracks it). Shares the tree walk with
     /// the headless test gate (`set_expand_toggle_gate`). Fails loud if no
     /// matching node exists (a shadow_builder / interpret regression). The
-    /// flipped `Mutable` is reborn on the next `snapshot_reactive` (the tree is
-    /// rebuilt per call) — the expansion source of truth is the ref model, as
-    /// documented on the trait method.
+    /// flipped `Mutable` is reborn on the next `snapshot_reactive` (the tree
+    /// is rebuilt per call), so BOTH paths below record the same view-local
+    /// expansion store the production chevron handler writes — the store the
+    /// gate is seeded from. Anything this driver writes that production does
+    /// not is a harness/production divergence at the affordance under test.
     async fn set_block_expanded(&self, target: &EntityUri, expanded: bool) -> Result<()> {
         let root_uri = holon_api::root_layout_block_uri();
-        let root = self.engine.snapshot_reactive(&root_uri);
         let target_str = target.as_str();
         let bare = target_str.strip_prefix("block:").unwrap_or(target_str);
-        let gate = root.find_expand_toggle_gate(bare).ok_or_else(|| {
-            anyhow::anyhow!(
-                "set_block_expanded: no expand_toggle node with target_id={bare} in the reactive \
-                 tree under {root_uri}. The fixture grew an expand_toggle render but the engine \
-                 didn't produce a matching node — likely a shadow_builder or interpret regression."
-            )
-        })?;
-        gate.set(expanded);
-        Ok(())
+
+        // Explicit / mounted toggle: a block whose render expr carries
+        // `expand_toggle` renders a live gate directly in the one-shot
+        // root-layout snapshot AND collapse is DOCUMENT state (2026-07-11
+        // ruling). Flip the node gate for an immediate mounted re-render,
+        // record the view-local seed, and dispatch `set_field(collapsed)` so
+        // the SUT block row changes — the same three writes the production
+        // chevron handler performs.
+        if let Some(gate) = self
+            .engine
+            .snapshot_reactive(&root_uri)
+            .find_expand_toggle_gate(bare)
+        {
+            gate.set(expanded);
+            self.engine
+                .ui_state()
+                .set_block_expanded_view(bare, expanded);
+            let intent = OperationIntent::set_field(
+                &EntityName::new("block"),
+                "set_field",
+                target.as_str(),
+                "collapsed",
+                Value::Boolean(!expanded),
+            );
+            self.engine.dispatch_intent_sync(intent).await?;
+            return Ok(());
+        }
+
+        // Profile-driven embedded page: the `expand_toggle` is synthesized
+        // during recursive resolve (no gate in a one-shot snapshot), so there is
+        // no `Mutable` to poke and the view store is the whole gesture
+        // (RATIFIED 2026-07-16, Option B). The `expand_toggle` builder seeds its
+        // gate from it on the next (re)build; the write bumps the render
+        // generation.
+        self.engine
+            .ui_state()
+            .set_block_expanded_view(bare, expanded);
+
+        // Fail loud: force the render pipeline to rebuild (recursive `snapshot`
+        // warms one nested level per call, so loop to a short deadline like the
+        // SUT's fixed-point re-snapshot) and warn if the target renders no
+        // `expand_toggle` at all — the write would otherwise be silently absorbed.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let _ = self.engine.snapshot(&root_uri);
+            if self.engine.ui_state().expand_toggle_observed(bare) {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                tracing::warn!(
+                    target_id = %bare,
+                    %root_uri,
+                    "set_block_expanded: recorded view-local expansion for a target that renders \
+                     no expand_toggle; the flip will not be visible (view-state write absorbed)."
+                );
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(120)).await;
+        }
     }
 
     async fn send_key_chord(

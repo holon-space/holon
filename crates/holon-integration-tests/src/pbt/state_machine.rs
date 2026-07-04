@@ -150,7 +150,7 @@ pub struct ReferenceMachine;
 ///   child order — the clock-padded shadow reproduces the op-id tie-break
 ///   exactly (`clock_parity_spike`).
 pub(crate) fn merge_peer_blocks_into_primary(
-    block_state: &mut super::reference_state::BlockState,
+    block_state: &mut super::block_state::BlockState,
     peer_blocks: &[super::peer_ops::PeerBlock],
     modified_stable_ids: &std::collections::HashSet<String>,
     created_stable_ids: &std::collections::HashSet<String>,
@@ -279,6 +279,19 @@ impl ReferenceStateMachine for ReferenceMachine {
     }
 
     fn preconditions(state: &Self::State, transition: &Self::Transition) -> bool {
+        // Alphabet gate FIRST, exactly as `WideE2EMachine::preconditions` and the
+        // generation/replay/shrink stepper apply it: a transition whose
+        // `required_wiring` + `required_caps` the state cannot satisfy is not in
+        // the alphabet, so `preconditions` (the ONLY filter proptest re-applies
+        // when it shrinks the initial state) must reject it too. A NO-OP for THIS
+        // machine's fixed `Wiring::full()` / `cap_set == None` init (nothing is
+        // ever gated out), but the gate lives here so a future variant that draws
+        // its wiring can never keep a transition its shrunk CapMap has no provider
+        // for and die in `CapMap::expect` instead of shrinking the divergence
+        // (task #46's escape class).
+        if !crate::pbt::stepper::transition_applicable(state, transition) {
+            return false;
+        }
         // Dispatched through the per-transition `TransitionRef` trait
         // (ref-side, S-independent); each variant's precondition lives in
         // `transitions/<name>.rs`.
@@ -287,7 +300,7 @@ impl ReferenceStateMachine for ReferenceMachine {
         match transition.preconditions(state) {
             Validated::Good(()) => true,
             Validated::Fail(reasons) => {
-                crate::pbt::validation::record_rejection(transition.variant_name(), &reasons);
+                holon_pbt_core::validation::record_rejection(transition.variant_name(), &reasons);
                 false
             }
         }
@@ -297,5 +310,83 @@ impl ReferenceStateMachine for ReferenceMachine {
         transition.apply_to_ref(&mut state);
         state.action.last_transition_kind = Some(transition.variant_name());
         state
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use holon_pbt_core::StorageAdapter;
+    use holon_pbt_core::TransitionRef;
+    use holon_pbt_core::Wiring;
+    use proptest_state_machine::ReferenceStateMachine;
+
+    use super::ReferenceMachine;
+    use crate::pbt::composed::wide_e2e::wide_e2e_ref_for;
+    use crate::pbt::reference_state::ReferenceState;
+    use crate::pbt::transitions::CreateDocument;
+    use crate::pbt::transitions::E2ETransition;
+
+    /// Twin of `wide_e2e::tests::shrunk_wiring_rejects_a_transition_its_capmap_cannot_host`
+    /// at the `ReferenceMachine` level. The machine's own `init_state` fixes
+    /// `Wiring::full()` / `cap_set == None`, so its gate never actually fires —
+    /// but if a future variant drew a restrictive wiring, `preconditions` (the
+    /// ONLY filter proptest re-applies while shrinking the initial state) MUST
+    /// reject a gated-out transition. Here we hand
+    /// `ReferenceMachine::preconditions` a restrictive state directly to
+    /// prove the alphabet gate is wired in, not only present in
+    /// `WideE2EMachine` (task #46's escape class).
+    ///
+    /// `CreateDocument` is the witness: its ref-side precondition is only
+    /// `app_started`, which holds for every wiring, so the cap gate is the sole
+    /// possible rejecter.
+    #[test]
+    fn reference_machine_preconditions_reject_a_capmap_gated_transition() {
+        let narrow = Wiring::custom(vec![StorageAdapter::Loro], vec![], vec![]);
+        let shrunk = wide_e2e_ref_for(&narrow);
+        let transition = E2ETransition::CreateDocument(CreateDocument {
+            file_name: "ref-shrink-probe.org".to_string(),
+        });
+
+        assert!(
+            !shrunk.caps_available(&transition.required_caps()),
+            "premise: a Loro-only draw composes no frontend component, so its CapMap has no \
+             SutAppLifecycle"
+        );
+        assert!(
+            <E2ETransition as TransitionRef<ReferenceState>>::preconditions(&transition, &shrunk)
+                .is_good(),
+            "premise: the ref-side precondition (app_started) holds for every wiring, so the cap \
+             gate is the only thing that can reject this transition"
+        );
+
+        assert!(
+            !<ReferenceMachine as ReferenceStateMachine>::preconditions(&shrunk, &transition),
+            "ReferenceMachine::preconditions must reproduce the alphabet gate: a transition whose \
+             caps the wiring cannot provide has to be rejected, otherwise a future wiring-drawing \
+             variant boots a SUT that panics in CapMap::expect (task #46)"
+        );
+    }
+
+    /// The no-op-today half: under the machine's real init (full wiring,
+    /// unrestricted cap_set) the gate rejects NOTHING, so `preconditions` is
+    /// governed purely by the ref-side precondition — the added gate cannot
+    /// change any current keystone/hand-authored result.
+    #[test]
+    fn reference_machine_gate_is_a_noop_under_full_wiring() {
+        let full = wide_e2e_ref_for(&Wiring::full());
+        let transition = E2ETransition::CreateDocument(CreateDocument {
+            file_name: "ref-full-probe.org".to_string(),
+        });
+
+        assert!(
+            crate::pbt::stepper::transition_applicable(&full, &transition),
+            "the alphabet gate must pass under full wiring / unrestricted cap_set — it gates \
+             nothing here, so the fix is a pure no-op for the shipped ReferenceMachine"
+        );
+        assert!(
+            <ReferenceMachine as ReferenceStateMachine>::preconditions(&full, &transition),
+            "with the gate a no-op, the ref-side precondition (app_started) governs and admits \
+             CreateDocument exactly as before"
+        );
     }
 }

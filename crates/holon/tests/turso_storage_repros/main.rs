@@ -1,4 +1,8 @@
 mod cdc_base_vs_matview_repro;
+mod navigation_focus_refuses_unresolvable_target;
+mod tabs_close_cursor_follow;
+mod tabs_cursor_filtered_panel;
+mod tabs_main_panel_delivery;
 mod turso_ivm_cdc_zero_changes_repro;
 mod turso_ivm_join_test;
 mod turso_ivm_navigation_cursor_repro;

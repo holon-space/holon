@@ -18,6 +18,11 @@
 //!    building an `E2ESut` per node. It is expensive (a SUT per lattice node),
 //!    so it runs only when `HOLON_BISECT_CAPTURE` is set; otherwise it is a
 //!    no-op. This is the CLI/env entry of ADR 0009 migration step 4.
+//!
+//! @pbt kind harness
+//! @pbt covers replay-portability-bisection — ADR 0009 cross-ComponentSet
+//! replay + component bisection machinery @pbt overlaps
+//! general_e2e_composed_pbt — kept: tests the bisection/replay infra itself
 
 #![cfg(feature = "pbt")]
 

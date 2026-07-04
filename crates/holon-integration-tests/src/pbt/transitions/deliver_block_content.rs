@@ -1,5 +1,12 @@
 //! Transition: deliver async content into a deferred `live_block` placeholder.
 //!
+//! @pbt rung dispatch
+//!   BACKEND-PBT-ONLY: `apply_to_sut` panics in the composed runner (the
+//!   backend PBT rejects it). Never dispatched into any composed alphabet;
+//!   a deferred-live-block delivery probe for the pure backend slice only.
+//! @pbt covers deferred-live-block-delivery — async content into a live_block
+//! placeholder (backend slice)
+//!
 //! Only meaningful in the fast-UI layout PBT (where blueprints can mount
 //! deferred placeholders). The integration-tests PBT runs a real backend
 //! that always returns real data — no deferred placeholders to deliver.
@@ -9,17 +16,11 @@ pub use holon_pbt_core::DeliverBlockContent;
 use holon_pbt_core::TransitionFactory;
 use holon_pbt_core::TransitionImpl;
 use holon_pbt_core::TransitionRef;
+use holon_pbt_core::validation::Reason;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
 use crate::pbt::reference_state::ReferenceState;
-#[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::ExpectedSql;
-#[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::REACTIVE_BASE;
-#[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::docs_tolerance;
-use crate::pbt::validation::Reason;
 
 impl TransitionFactory<ReferenceState> for DeliverBlockContent {
     type Reason = Reason;
@@ -50,17 +51,5 @@ impl<S> TransitionImpl<ReferenceState, S> for DeliverBlockContent {
              dead here.",
             self.block_id
         );
-    }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for DeliverBlockContent {
-    fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
-        ExpectedSql {
-            reads: REACTIVE_BASE + 10,
-            writes: 0,
-            ddl: 0,
-            tolerance: docs_tolerance(state) + 5,
-        }
     }
 }

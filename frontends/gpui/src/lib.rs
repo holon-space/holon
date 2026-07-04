@@ -8,6 +8,7 @@
 
 #![recursion_limit = "1024"]
 
+pub mod breadcrumb;
 pub mod di;
 pub mod entity_view_registry;
 pub mod geometry;
@@ -16,12 +17,18 @@ pub mod inspector;
 #[cfg(feature = "mobile")]
 pub mod mobile;
 pub mod navigation_state;
+#[cfg(debug_assertions)]
+pub mod oracles_ui;
 pub mod reactive_vm_poc;
 pub mod render;
+pub mod reset;
+pub mod search_ui;
 pub mod share_ui;
+pub mod tab_strip;
 
 pub mod user_driver;
 pub mod views;
+pub mod window_state;
 
 use std::sync::Arc;
 
@@ -43,6 +50,325 @@ use holon_frontend::theme::ThemeRegistry;
 use holon_frontend::view_model::ViewModel;
 use navigation_state::NavigationState;
 use render::builders::GpuiRenderContext;
+
+/// Half-spread (in HSLA lightness, 0.0–1.0) of the subtle root-background
+/// gradient painted in `render`. The top of the window is lightened by this
+/// amount and the bottom darkened by it, both derived from the active theme's
+/// `background` token so the fade tracks light/dark themes automatically.
+/// Keep it small — this is a hint of depth, not a visible band. Raise it for a
+/// more pronounced fade; set it to `0.0` to restore a flat fill.
+const BG_GRADIENT_LIGHTNESS_SPREAD: f32 = 0.035;
+
+// ── Android icon-glyph substitutes ──────────────────────────────────────────
+//
+// UI-chrome icons that are *monochrome* Unicode symbols DejaVu Sans covers
+// (☰ ◧ ⚙, chevrons, checkboxes, arrows, …) render on Android via the DejaVu
+// Sans coverage font we embed and register in
+// `mobile::register_android_icon_fonts` — cosmic-text's per-glyph resolution
+// picks up their glyphs from it.
+//
+// Two other classes render as tofu on Android and need a substitute:
+//   • color emoji (🎨 🔗 🔍 🔎 ⛔ 🗑) — Android's on-device NotoColorEmoji uses
+//     COLR v1 outlines that gpui-mobile's swash rasteriser cannot render, and
+//     no CBDT emoji font ships in the APK; DejaVu has no astral-plane emoji.
+//   • monochrome symbols DejaVu simply lacks (⧉ U+29C9) — same mechanism.
+// On Android each is swapped for a DejaVu-covered symbol; mac/iOS use their own
+// system text systems and keep the original glyph.
+//
+// INVARIANT (enforced by the icon-font coverage tests in this crate — see
+// `icon_font_tests` here and the co-located sweeps in `render::builders::
+// op_button` and `render::builders::icon`): every substitute here is present in
+// the embedded DejaVu Sans cmap, and every source glyph is genuinely absent
+// from it. When you add an icon glyph the DejaVu font can't render, add a row
+// here (and route the glyph through `icon()`), or it will tofu on Android.
+// Referenced by the Android `icon()`/`substitute_glyph` and by the tests; on
+// desktop non-test builds those paths don't compile, so it reads as dead there.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) const ICON_SUBSTITUTES: &[(&str, &str)] = &[
+    ("🎨", "▦"), // widget gallery  → square with crosshatch (grid/gallery)
+    ("🔗", "⚭"), // accept ticket   → interlocked rings (link)
+    ("🔍", "⚲"), // inspector       → magnifier-like symbol
+    ("🔎", "⚲"), // search field    → magnifier-like symbol
+    ("⛔", "⊘"), // degraded banner → circled slash (blocked)
+    ("🗑", "⌦"),  // delete op       → erase-to-the-right (delete)
+    ("⧉", "❐"),  // embed op        → shadowed square (overlay/embed)
+];
+
+/// Monochrome glyphs the embedded DejaVu Sans genuinely cannot render on
+/// Android for which no acceptable DejaVu substitute exists — DejaVu ships no
+/// padlock glyph at all. These are only reachable if a layout names the `lock`
+/// / `unlock` semantic icon (`render::builders::icon`); no current layout does
+/// (the widget gallery uses lucide SVG names that fall through to `•`). Listed
+/// here so the coverage tests record the gap loudly instead of it re-escaping
+/// silently. If one becomes reachable, ship an SVG icon or a lock-capable
+/// coverage font rather than a misleading substitute.
+#[allow(dead_code)] // read only by the icon-font coverage tests
+pub(crate) const KNOWN_ANDROID_GLYPH_GAPS: &[&str] = &["🔒", "🔓"];
+
+/// Every non-ASCII icon glyph rendered from an *inline literal* (not from a
+/// name→glyph table like `op_button`/`icon`). Kept here as the single place the
+/// coverage test sweeps inline literals — the hand-maintained list that missing
+/// an entry is the one drift risk, so each entry names its source site.
+#[allow(dead_code)] // read only by the icon-font coverage tests
+pub(crate) const INLINE_UI_GLYPHS: &[&str] = &[
+    "☰",  // lib.rs left-sidebar toggle
+    "◧",  // lib.rs right-sidebar toggle
+    "⚙",  // lib.rs settings gear
+    "🎨", // lib.rs widget-gallery toggle
+    "🔗", // lib.rs accept-ticket toggle
+    "🔎", // lib.rs search field
+    "🔍", // inspector.rs
+    "✕",  // lib.rs / share_ui.rs / oracles_ui.rs close/dismiss
+    "⚠",  // share_ui.rs degraded banner
+    "↻",  // share_ui.rs rehydration banner
+    "⛔", // share_ui.rs blocked banner
+    "▸",  // collapsible.rs collapsed chevron
+    "▾",  // collapsible.rs expanded chevron
+    "▼",  // expand_toggle.rs / reactive_vm_poc.rs expanded
+    "▶",  // expand_toggle.rs / reactive_vm_poc.rs collapsed
+    "◉",  // checkbox.rs checked
+    "○",  // checkbox.rs unchecked
+];
+
+/// Apply the Android icon substitution table to a glyph (see
+/// [`ICON_SUBSTITUTES`]). Non-`cfg`-gated so the host-side coverage tests can
+/// exercise the exact mapping the Android `icon()` uses.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) fn substitute_glyph(glyph: &'static str) -> &'static str {
+    let mut i = 0;
+    while i < ICON_SUBSTITUTES.len() {
+        if ICON_SUBSTITUTES[i].0 == glyph {
+            return ICON_SUBSTITUTES[i].1;
+        }
+        i += 1;
+    }
+    glyph
+}
+
+/// Map a UI-chrome icon glyph to a platform-renderable form.
+///
+/// On Android, glyphs DejaVu can't render are swapped for DejaVu-covered
+/// substitutes (see [`ICON_SUBSTITUTES`]); everything else passes through. On
+/// every other platform this is the identity.
+#[cfg(target_os = "android")]
+pub(crate) fn icon(glyph: &'static str) -> &'static str {
+    substitute_glyph(glyph)
+}
+
+/// See the Android variant. Identity on non-Android platforms.
+#[cfg(not(target_os = "android"))]
+pub(crate) fn icon(glyph: &'static str) -> &'static str {
+    glyph
+}
+
+/// Shared host-side coverage helper for the icon-font tests. Asserts that
+/// `glyph`, after the Android substitution, is renderable by the embedded
+/// DejaVu Sans font — i.e. every non-ASCII char resolves to a glyph — OR that
+/// it is a documented [`KNOWN_ANDROID_GLYPH_GAPS`] entry. `source` names the
+/// call site for a legible failure.
+#[cfg(test)]
+pub(crate) fn assert_icon_renderable_on_android(glyph: &'static str, source: &str) {
+    const DEJAVU_SANS: &[u8] = include_bytes!("../../../assets/fonts/DejaVuSans.ttf");
+    let face = ttf_parser::Face::parse(DEJAVU_SANS, 0).expect("embedded DejaVu Sans must parse");
+    if KNOWN_ANDROID_GLYPH_GAPS.contains(&glyph) {
+        return;
+    }
+    let effective = substitute_glyph(glyph);
+    for ch in effective.chars() {
+        assert!(
+            ch.is_ascii() || face.glyph_index(ch).is_some(),
+            "{source}: icon {glyph:?} → Android-effective {effective:?} has char U+{:04X} that \
+             DejaVu Sans cannot render and no substitute covers (add a row to ICON_SUBSTITUTES \
+             or KNOWN_ANDROID_GLYPH_GAPS)",
+            ch as u32
+        );
+    }
+}
+
+// ── Global undo/redo actions ────────────────────────────────────────────────
+//
+// `gpui_component::input::{Undo, Redo}` (bound to cmd-z / cmd-shift-z inside
+// `InputState`, see gpui-component's `input/state.rs`) are scoped to the
+// "Input" key context, so they never resolve at all while no editor is
+// focused — that's the dogfooded "No handler matched the key chord" bug.
+// These two actions are bound with `context: None` below (`launch_holon_
+// window_impl`) so cmd-z/cmd-shift-z always resolves to *something*
+// dispatchable, regardless of focus. The page-level capture_action handlers
+// in `HolonApp::render` intercept both these and the `Input` actions (in the
+// capture phase, before `InputState`'s own bubble-phase text-undo can run)
+// and route both to the engine-level `FrontendSession::undo`/`redo`.
+actions!(holon_gpui, [TriggerUndo, TriggerRedo, OpenSearch]);
+
+// Open-blocks tab navigation (Increment 2). Cycle next/prev through the open
+// MAIN tabs (cmd/ctrl-] / cmd/ctrl-[) and jump to the Nth open tab
+// (cmd/ctrl-1..9). Unit actions, bound globally (context None) like undo/redo
+// so they resolve regardless of which element holds focus; the app-level
+// `cx.on_action` handlers dispatch `navigation.activate` for the target tab.
+// Nine unit jump actions (the GPUI `actions!` macro emits unit structs; there
+// is no action payload here), one per digit.
+actions!(
+    holon_gpui,
+    [
+        CycleTabNext,
+        CycleTabPrev,
+        JumpToTab1,
+        JumpToTab2,
+        JumpToTab3,
+        JumpToTab4,
+        JumpToTab5,
+        JumpToTab6,
+        JumpToTab7,
+        JumpToTab8,
+        JumpToTab9,
+    ]
+);
+
+// "Turn into page" (engine-synthetic `convert_block_to_page`, Option B) as an
+// editor keybinding, sitting beside indent/outdent (`IndentInline`/
+// `OutdentInline`) which are likewise editor-context actions intercepted by
+// `EditorView`'s capture handlers. Bound in the "Input" context so it fires
+// only while a block editor is focused; `EditorView::render` supplies the
+// per-row `capture_action` that dispatches the op for the focused block.
+actions!(holon_gpui, [TurnIntoPage]);
+
+/// One window-level chord: the keymap registration plus the metadata an agent
+/// needs to read it back out of `list_keybindings`.
+pub struct WindowChordRow {
+    pub action: &'static str,
+    pub chord: String,
+    pub context: Option<&'static str>,
+    pub binding: KeyBinding,
+}
+
+fn window_chord(
+    action: &'static str,
+    chord: String,
+    context: Option<&'static str>,
+    make: impl FnOnce(&str) -> KeyBinding,
+) -> WindowChordRow {
+    let binding = make(&chord);
+    WindowChordRow {
+        action,
+        chord,
+        context,
+        binding,
+    }
+}
+
+/// Every chord this frontend registers with the platform keymap, as the ONE
+/// source for both `cx.bind_keys` and the `list_keybindings` snapshot.
+///
+/// Two registries used to exist — the structural one in `ReactiveEngine` and
+/// this keymap — and only the first was introspectable, so an agent obeying
+/// "read a shortcut before you send it" concluded undo was unbound (dogfood
+/// 2026-08-07). A chord added here is registered AND reported; it cannot go
+/// missing from one side.
+pub fn window_key_bindings() -> Vec<WindowChordRow> {
+    #[cfg(target_os = "macos")]
+    let (m, redo_chord) = ("cmd", "cmd-shift-z".to_string());
+    #[cfg(not(target_os = "macos"))]
+    let (m, redo_chord) = ("ctrl", "ctrl-y".to_string());
+
+    let mut rows = vec![
+        // Context-free undo/redo — see the `actions!(holon_gpui, ...)` comment
+        // above for why `gpui_component::input::{Undo, Redo}` alone (context
+        // "Input") can't cover the no-editor-focused case.
+        window_chord("undo", format!("{m}-z"), None, |c| {
+            KeyBinding::new(c, TriggerUndo, None)
+        }),
+        window_chord("redo", redo_chord, None, |c| {
+            KeyBinding::new(c, TriggerRedo, None)
+        }),
+        // Quick-open / search — cmd-K (free chord; cmd-P is unbound too but
+        // cmd-K matches the VS Code / Linear / Slack command-palette idiom).
+        window_chord("open_search", format!("{m}-k"), None, |c| {
+            KeyBinding::new(c, OpenSearch, None)
+        }),
+        // Open-blocks tab navigation (Increment 2).
+        window_chord("cycle_tab_next", format!("{m}-]"), None, |c| {
+            KeyBinding::new(c, CycleTabNext, None)
+        }),
+        window_chord("cycle_tab_prev", format!("{m}-["), None, |c| {
+            KeyBinding::new(c, CycleTabPrev, None)
+        }),
+        window_chord("jump_to_tab_1", format!("{m}-1"), None, |c| {
+            KeyBinding::new(c, JumpToTab1, None)
+        }),
+        window_chord("jump_to_tab_2", format!("{m}-2"), None, |c| {
+            KeyBinding::new(c, JumpToTab2, None)
+        }),
+        window_chord("jump_to_tab_3", format!("{m}-3"), None, |c| {
+            KeyBinding::new(c, JumpToTab3, None)
+        }),
+        window_chord("jump_to_tab_4", format!("{m}-4"), None, |c| {
+            KeyBinding::new(c, JumpToTab4, None)
+        }),
+        window_chord("jump_to_tab_5", format!("{m}-5"), None, |c| {
+            KeyBinding::new(c, JumpToTab5, None)
+        }),
+        window_chord("jump_to_tab_6", format!("{m}-6"), None, |c| {
+            KeyBinding::new(c, JumpToTab6, None)
+        }),
+        window_chord("jump_to_tab_7", format!("{m}-7"), None, |c| {
+            KeyBinding::new(c, JumpToTab7, None)
+        }),
+        window_chord("jump_to_tab_8", format!("{m}-8"), None, |c| {
+            KeyBinding::new(c, JumpToTab8, None)
+        }),
+        window_chord("jump_to_tab_9", format!("{m}-9"), None, |c| {
+            KeyBinding::new(c, JumpToTab9, None)
+        }),
+    ];
+    // "Turn into page" — bound in the editor's "Input" context (same context
+    // gpui_component binds Tab/Shift-Tab -> IndentInline/OutdentInline in), so
+    // it only fires while a block editor is focused. `EditorView`'s per-row
+    // `capture_action(&TurnIntoPage)` handles it for the focused block.
+    rows.push(window_chord(
+        "turn_into_page",
+        format!("{m}-shift-p"),
+        Some("Input"),
+        |c| KeyBinding::new(c, TurnIntoPage, Some("Input")),
+    ));
+    rows
+}
+
+/// Publish the keymap registry into `DebugServices` so `list_keybindings` can
+/// union it with the structural one. Chord strings are translated into the
+/// `holon_api::Key` wire vocabulary here so a reported chord can be handed
+/// straight back to `send_key_chord`; a segment that does not parse is a
+/// programming error in [`window_key_bindings`], not user input.
+fn publish_window_key_bindings(
+    rows: &[WindowChordRow],
+    debug: &Arc<holon_mcp::server::DebugServices>,
+) {
+    let bindings: Vec<holon_mcp::server::WindowKeyBinding> = rows
+        .iter()
+        .map(|row| {
+            let keys: Vec<String> = row
+                .chord
+                .split('-')
+                .map(|seg| {
+                    seg.parse::<holon_api::Key>()
+                        .unwrap_or_else(|e| {
+                            panic!(
+                                "window_key_bindings: chord {:?} for action {:?} has segment \
+                                 {seg:?} outside the holon_api::Key vocabulary ({e}) — an agent \
+                                 could not send it back",
+                                row.chord, row.action
+                            )
+                        })
+                        .to_string()
+                })
+                .collect();
+            holon_mcp::server::WindowKeyBinding {
+                action: row.action.to_string(),
+                keys,
+                context: row.context.map(str::to_string),
+            }
+        })
+        .collect();
+    debug.window_key_bindings.set(bindings).ok(); // ALLOW(ok): a second window reuses the first's identical registry
+}
 
 // ── AppModel: Entity-based reactive state ──────────────────────────────────
 
@@ -77,6 +403,10 @@ struct AppModel {
     /// triggering a full tree rebuild. Present iff the current root is a
     /// Reactive variant (i.e. a streaming container like `columns`).
     root_view: Option<Arc<holon_frontend::ReactiveView>>,
+    /// Last observed navigation focus. Used to auto-close overlay-mode
+    /// (phone) drawers when navigation focus changes — see
+    /// [`AppModel::close_overlay_drawers_on_nav`].
+    last_focused_block: Option<holon_api::EntityUri>,
 }
 
 /// Extract the root `ReactiveView` from a `ReactiveViewModel`, if its top
@@ -140,6 +470,33 @@ impl AppModel {
         self.nav.set_root(self.root_vm.clone());
     }
 
+    /// When navigation focus changes, auto-close any OPEN overlay-mode drawers
+    /// (the phone left/right sidebars). Shrink-mode (desktop) sidebars are left
+    /// alone — keeping them open after navigation is the correct desktop UX.
+    /// Gated on [`DrawerMode::Overlay`], NOT `cfg(feature = "mobile")`, so a
+    /// narrow desktop window (which also gets overlay drawers via `if_space`)
+    /// behaves identically. Returns true iff at least one drawer was closed.
+    ///
+    /// Note: keyed on a *change* of focus, so re-selecting the already-focused
+    /// page does not re-close the drawer (an accepted edge case).
+    fn close_overlay_drawers_on_nav(&mut self) -> bool {
+        let focused = self.engine.ui_state().focused_block();
+        if focused == self.last_focused_block {
+            return false;
+        }
+        self.last_focused_block = focused;
+        let mut closed = false;
+        for (bid, mode) in self.view_model.collect_drawers() {
+            if matches!(mode, holon_frontend::view_model::DrawerMode::Overlay)
+                && self.session.drawer_open(&bid, mode)
+            {
+                self.session.set_widget_open(&bid, false);
+                closed = true;
+            }
+        }
+        closed
+    }
+
     /// Re-point this window's root view at a *different* SUT — a fresh
     /// `session` + `engine` — without re-opening the GPUI window. Used by the
     /// windowed capture-minimizer (`RebindHandle`) to reuse one live window
@@ -194,8 +551,8 @@ impl AppModel {
 
         for block_id in &needed {
             if !self.root_live_blocks.contains_key(block_id) {
-                // ALLOW(entity_uri_from_raw): block_id string from LiveBlock nodes in root
-                // ViewModel tree
+                // block_id string from LiveBlock nodes in the root ViewModel tree
+                // ALLOW(entity_uri_from_raw): block_id from LiveBlock nodes (boundary)
                 let uri = holon_api::EntityUri::from_raw(block_id);
                 let services: Arc<dyn BuilderServices> = self.engine.clone();
                 let live_block = services.watch_live(&uri, services.clone());
@@ -206,7 +563,17 @@ impl AppModel {
                 let ancestors = entity_view_registry::LiveBlockAncestors::new();
                 let entity = cx.new(|cx| {
                     views::ReactiveShell::new_for_block(
-                        bid, render_ctx, services, live_block, nav, b, ancestors, cx,
+                        bid,
+                        render_ctx,
+                        services,
+                        live_block,
+                        nav,
+                        b,
+                        ancestors,
+                        // Root-layout live_blocks ARE the panels — `columns`
+                        // hands each one a definite-height slot.
+                        views::reactive_shell::ShellPlacement::Panel,
+                        cx,
                     )
                 });
                 self.root_live_blocks.insert(block_id.clone(), entity);
@@ -287,6 +654,7 @@ fn interpret_and_render(
             window,
             cx,
         )
+        .with_shell_placement(gpui_ctx.placement)
     });
     render::builders::render(&rvm, &inner_ctx)
 }
@@ -311,10 +679,15 @@ fn modal_overlay(
         .flex()
         .items_center()
         .justify_center()
+        // Inset so the panel keeps a margin on narrow (phone) viewports; the
+        // panel is `w_full` capped at 640px, so this padding is what stops it
+        // from touching the screen edges on mobile.
+        .p(px(16.0))
         .child(
             div()
                 .id(SharedString::from(format!("{id}-panel")))
-                .w(px(640.0))
+                .w_full()
+                .max_w(px(640.0))
                 .max_h(px(720.0))
                 .overflow_y_scroll()
                 .bg(panel_bg)
@@ -392,6 +765,31 @@ pub struct HolonApp {
     /// so the render pass can build overlays without a double-read through
     /// `app_model.read(cx).share_ui.read(cx)`.
     pub share_ui: Entity<share_ui::ShareUiState>,
+    /// User-facing search modal (quick-open + full-text content), cmd-K.
+    pub search_ui: Entity<search_ui::SearchUiState>,
+    /// Page-ancestor breadcrumb for the focused page.
+    pub breadcrumb: Entity<breadcrumb::BreadcrumbState>,
+    /// Last focus the breadcrumb was resolved for; a change re-resolves it.
+    last_breadcrumb_focus: Option<holon_api::EntityUri>,
+    /// Open-blocks tab strip for the MAIN region.
+    pub tab_strip: Entity<tab_strip::TabStripState>,
+    /// Last focus the tab strip was resolved for; a change re-resolves it
+    /// (e.g. `navigation.open_tab` moves focus to the newly-opened tab).
+    last_tab_strip_focus: Option<holon_api::EntityUri>,
+    /// Live-oracle violations (debug builds): mirrors the global
+    /// `holon_oracles` status; rendered as an impossible-to-miss top banner.
+    #[cfg(debug_assertions)]
+    pub oracle_ui: Entity<oracles_ui::OracleUiState>,
+    /// Name of the theme currently applied to the `gpui_component` global.
+    /// Compared against the session's selected theme on every render so a
+    /// theme change (settings dropdown, or any other path) re-applies live.
+    applied_theme: String,
+    /// Last-observed `UiState::main_nav_generation`. When it advances, a page
+    /// navigation landed in the main region — the main panel's scroll is reset
+    /// to the top so the new page opens above the fold (LogSeq parity, dogfood
+    /// #5 row 146). Same-page block clicks move `focused_block` but NOT this
+    /// counter, so they leave the scroll position untouched.
+    last_main_nav_gen: u64,
 }
 
 impl Render for HolonApp {
@@ -407,6 +805,101 @@ impl Render for HolonApp {
         {
             self.safe_area_top = crate::mobile::safe_area_top_px();
             self.safe_area_bottom = crate::mobile::safe_area_bottom_px();
+        }
+        // Live theme application. The gpui_component `Theme` global is seeded
+        // once at launch; the settings dropdown only persists the pref and
+        // calls `window.refresh()`. Re-apply here whenever the selected theme
+        // differs from what's applied, so a theme switch repaints immediately
+        // (and the correct theme is applied on the first frame). Must run
+        // before `cx.theme()` is read below.
+        let desired_theme = self
+            .session
+            .ui_settings()
+            .theme
+            .clone()
+            .unwrap_or_else(|| "holonLight".to_string());
+        if desired_theme != self.applied_theme {
+            apply_holon_theme(&self.session, cx);
+            self.applied_theme = desired_theme;
+        }
+        // Reset main-panel scroll to the top when a page navigation lands in the
+        // main region (LogSeq parity, dogfood #5 row 146). `main_nav_generation`
+        // advances only on `navigation.focus`(region=main)/`go_home`, NOT on
+        // same-page block clicks, so mid-page editing keeps its scroll offset.
+        let main_nav_gen = self
+            .app_model
+            .read(cx)
+            .engine
+            .ui_state()
+            .main_nav_generation();
+        if main_nav_gen != self.last_main_nav_gen {
+            self.last_main_nav_gen = main_nav_gen;
+            if let Some(main_panel) = self
+                .app_model
+                .read(cx)
+                .root_live_blocks
+                .get("block:default-main-panel")
+                .cloned()
+            {
+                scroll_reactive_shell_tree_to_top(&main_panel, cx);
+            }
+        }
+        // Re-resolve the page-ancestor breadcrumb whenever the focused block
+        // changes. The trail is fetched async (matview-backed) and pumped back
+        // into `self.breadcrumb`.
+        {
+            let focused = self.app_model.read(cx).engine.ui_state().focused_block();
+            if focused != self.last_breadcrumb_focus {
+                self.last_breadcrumb_focus = focused.clone();
+                match focused {
+                    Some(block_id) => {
+                        let generation = self.breadcrumb.update(cx, |s, _| {
+                            s.block_id = Some(block_id.clone());
+                            s.error = None;
+                            s.generation = s.generation.wrapping_add(1);
+                            s.generation
+                        });
+                        let session = self.session.clone();
+                        let rt_handle = self.rt_handle.clone();
+                        let state = self.breadcrumb.clone();
+                        let wh = window.window_handle();
+                        let async_cx = cx.to_async();
+                        breadcrumb::resolve_breadcrumb(
+                            block_id, generation, session, rt_handle, state, wh, &async_cx,
+                        );
+                    }
+                    None => {
+                        self.breadcrumb.update(cx, |s, _| {
+                            s.block_id = None;
+                            s.segments.clear();
+                            s.error = None;
+                        });
+                    }
+                }
+            }
+        }
+        // Re-resolve the open-tabs strip whenever the focused block changes.
+        // `navigation.open_tab` moves focus to the newly-opened tab, so this
+        // catches new/closed tabs. A plain `navigation.activate` (tab switch)
+        // does NOT change the focused block and so does NOT re-resolve here —
+        // the strip's active-tab highlight is kept in sync by the optimistic
+        // update in the click / keyboard handlers instead (see `tab_strip`).
+        {
+            let focused = self.app_model.read(cx).engine.ui_state().focused_block();
+            if focused != self.last_tab_strip_focus {
+                self.last_tab_strip_focus = focused;
+                let generation = self.tab_strip.update(cx, |s, _| {
+                    s.error = None;
+                    s.generation = s.generation.wrapping_add(1);
+                    s.generation
+                });
+                let session = self.session.clone();
+                let rt_handle = self.rt_handle.clone();
+                let state = self.tab_strip.clone();
+                let wh = window.window_handle();
+                let async_cx = cx.to_async();
+                tab_strip::resolve_tab_strip(generation, session, rt_handle, state, wh, &async_cx);
+            }
         }
         let (view_model, shadow_ctx, services, show_settings, show_widget_gallery) = {
             let model = self.app_model.read(cx);
@@ -474,6 +967,31 @@ impl Render for HolonApp {
         } else {
             theme.background
         };
+
+        // Root window fill. A flat single color reads as dull; instead paint a
+        // very subtle top→bottom luminance sweep DERIVED from the active theme's
+        // background token (hue/saturation preserved, so it tracks light and
+        // dark themes and any accent tint automatically). The spread is tiny
+        // (`BG_GRADIENT_LIGHTNESS_SPREAD`) — a hint of depth, never enough to
+        // change text contrast. Glass mode keeps its flat translucent fill.
+        let page_background: gpui::Background = if glass {
+            bg.into()
+        } else {
+            let base = theme.background;
+            let hi = gpui::Hsla {
+                l: (base.l + BG_GRADIENT_LIGHTNESS_SPREAD).min(1.0),
+                ..base
+            };
+            let lo = gpui::Hsla {
+                l: (base.l - BG_GRADIENT_LIGHTNESS_SPREAD).max(0.0),
+                ..base
+            };
+            gpui::linear_gradient(
+                160.0,
+                gpui::linear_color_stop(hi, 0.0),
+                gpui::linear_color_stop(lo, 1.0),
+            )
+        };
         let text = theme.foreground;
 
         // Drawer (id, mode) pairs from static snapshot (simpler than walking
@@ -491,6 +1009,18 @@ impl Render for HolonApp {
         let settings_overlay = if show_settings {
             let (render_expr, rows) = self.session.preferences_render_data();
             let content = interpret_and_render(&render_expr, rows, &gpui_ctx);
+            let build_stamp = div()
+                .pt_3()
+                .mt_2()
+                .text_size(px(11.0))
+                .text_color(theme.muted_foreground)
+                .child(concat!(
+                    "Build ",
+                    env!("HOLON_BUILD_TIME"),
+                    " · ",
+                    env!("HOLON_BUILD_SHA")
+                ));
+            let content = div().flex_col().child(content).child(build_stamp);
             Some(modal_overlay(
                 "settings",
                 "Settings",
@@ -530,6 +1060,7 @@ impl Render for HolonApp {
         let right_model = self.app_model.clone();
         let settings_model = self.app_model.clone();
         let gallery_model = self.app_model.clone();
+        let search_ui_for_btn = self.search_ui.clone();
 
         let title_bar = div()
             .id("title-bar")
@@ -614,6 +1145,24 @@ impl Render for HolonApp {
                     )
                     .child(
                         div()
+                            .id("search-open")
+                            .cursor_pointer()
+                            .text_size(px(15.0))
+                            .px(px(6.0))
+                            .py(px(4.0))
+                            .rounded(px(4.0))
+                            .hover(|s| s.bg(gpui::rgba(0x00000010)))
+                            .child(icon("🔎"))
+                            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                                search_ui_for_btn.update(cx, |s, cx| {
+                                    s.open(window, cx);
+                                    cx.emit(search_ui::NotifySearchUi);
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                    .child(
+                        div()
                             .id("settings-gear")
                             .cursor_pointer()
                             .text_size(px(15.0))
@@ -629,23 +1178,27 @@ impl Render for HolonApp {
                                 });
                             }),
                     )
-                    .child(
-                        div()
-                            .id("gallery-toggle")
-                            .cursor_pointer()
-                            .text_size(px(15.0))
-                            .px(px(6.0))
-                            .py(px(4.0))
-                            .rounded(px(4.0))
-                            .hover(|s| s.bg(gpui::rgba(0x00000010)))
-                            .child("🎨")
-                            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                                gallery_model.update(cx, |m, cx| {
-                                    m.show_widget_gallery = !m.show_widget_gallery;
-                                    cx.notify();
-                                });
-                            }),
-                    )
+                    // Widget Gallery is a dev tool — demoted off the toolbar
+                    // outside debug builds (matches the Inspector's gating).
+                    .when(cfg!(debug_assertions), |this| {
+                        this.child(
+                            div()
+                                .id("gallery-toggle")
+                                .cursor_pointer()
+                                .text_size(px(15.0))
+                                .px(px(6.0))
+                                .py(px(4.0))
+                                .rounded(px(4.0))
+                                .hover(|s| s.bg(gpui::rgba(0x00000010)))
+                                .child(icon("🎨"))
+                                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                    gallery_model.update(cx, |m, cx| {
+                                        m.show_widget_gallery = !m.show_widget_gallery;
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                    })
                     .child({
                         let share_state = self.share_ui.clone();
                         div()
@@ -656,7 +1209,7 @@ impl Render for HolonApp {
                             .py(px(4.0))
                             .rounded(px(4.0))
                             .hover(|s| s.bg(gpui::rgba(0x00000010)))
-                            .child("🔗")
+                            .child(icon("🔗"))
                             .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                                 share_state.update(cx, |s, cx| {
                                     if s.show_accept_modal {
@@ -669,27 +1222,33 @@ impl Render for HolonApp {
                                 });
                             })
                     })
-                    .when(cfg!(debug_assertions), |this| {
-                        this.child(
-                            div()
-                                .id("inspector-toggle")
-                                .cursor_pointer()
-                                .text_size(px(15.0))
-                                .px(px(6.0))
-                                .py(px(4.0))
-                                .rounded(px(4.0))
-                                .hover(|s| s.bg(gpui::rgba(0x00000010)))
-                                .child("🔎")
-                                .on_mouse_down(MouseButton::Left, |_, window, cx| {
-                                    #[cfg(debug_assertions)]
-                                    window.toggle_inspector(cx);
-                                    #[cfg(not(debug_assertions))]
-                                    {
-                                        let _ = (window, cx);
-                                    }
-                                }),
-                        )
-                    }),
+                    .when(
+                        cfg!(all(debug_assertions, not(feature = "mobile"))),
+                        |this| {
+                            this.child(
+                                div()
+                                    .id("inspector-toggle")
+                                    .cursor_pointer()
+                                    .text_size(px(15.0))
+                                    .px(px(6.0))
+                                    .py(px(4.0))
+                                    .rounded(px(4.0))
+                                    .hover(|s| s.bg(gpui::rgba(0x00000010)))
+                                    // 🐞 not 🔎 — the magnifier now opens the
+                                    // user search modal; this stays the debug
+                                    // inspector (debug builds only).
+                                    .child(icon("🐞"))
+                                    .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                                        #[cfg(debug_assertions)]
+                                        window.toggle_inspector(cx);
+                                        #[cfg(not(debug_assertions))]
+                                        {
+                                            let _ = (window, cx);
+                                        }
+                                    }),
+                            )
+                        },
+                    ),
             );
 
         // Page-level chord pump. Cross-block navigation (MoveUp/MoveDown
@@ -703,16 +1262,117 @@ impl Render for HolonApp {
                 let m = self.app_model.read(cx);
                 (m.session.clone(), m.rt_handle.clone())
             };
+            // Window-registry chords bypass `dispatch_intent`; they journal
+            // themselves so a reply can tell "ran" from "nothing ran".
+            let journal = self.app_model.read(cx).engine.ui_state().dispatch_journal();
+            let reseed = self
+                .app_model
+                .read(cx)
+                .engine
+                .ui_state()
+                .authority_reseed_handle();
+            let window_handle = window.window_handle();
             div()
                 .size_full()
                 .flex_1()
                 .flex()
                 .flex_col()
                 .overflow_hidden()
+                // Engine-level undo/redo. Two action types land here:
+                // `gpui_component::input::{Undo, Redo}` resolve while an
+                // editor has focus (their "Input"-context binding); our own
+                // `TriggerUndo`/`TriggerRedo` (bound with `context: None` in
+                // `launch_holon_window_impl`) resolve everywhere else. Both
+                // are captured here — top-down, before `InputState`'s own
+                // bubble-phase local-text-undo handler — and `stop_propagation`d
+                // so the engine op is the only thing that runs; the editor's
+                // own undo/redo history is not a substrate we want to diverge
+                // from the engine's operation-log undo stack.
+                .capture_action({
+                    let session = session.clone();
+                    let rt_handle = rt_handle.clone();
+                    let share_ui = self.share_ui.clone();
+                    let journal = journal.clone();
+                    let reseed = reseed.clone();
+                    move |_: &gpui_component::input::Undo, _window, cx: &mut App| {
+                        let async_cx = cx.to_async();
+                        share_ui::dispatch_undo(
+                            session.clone(),
+                            rt_handle.clone(),
+                            share_ui.clone(),
+                            window_handle,
+                            journal.clone(),
+                            reseed.clone(),
+                            &async_cx,
+                        );
+                        cx.stop_propagation();
+                    }
+                })
+                .capture_action({
+                    let session = session.clone();
+                    let rt_handle = rt_handle.clone();
+                    let share_ui = self.share_ui.clone();
+                    let journal = journal.clone();
+                    let reseed = reseed.clone();
+                    move |_: &gpui_component::input::Redo, _window, cx: &mut App| {
+                        let async_cx = cx.to_async();
+                        share_ui::dispatch_redo(
+                            session.clone(),
+                            rt_handle.clone(),
+                            share_ui.clone(),
+                            window_handle,
+                            journal.clone(),
+                            reseed.clone(),
+                            &async_cx,
+                        );
+                        cx.stop_propagation();
+                    }
+                })
+                .capture_action({
+                    let session = session.clone();
+                    let rt_handle = rt_handle.clone();
+                    let share_ui = self.share_ui.clone();
+                    let journal = journal.clone();
+                    let reseed = reseed.clone();
+                    move |_: &TriggerUndo, _window, cx: &mut App| {
+                        let async_cx = cx.to_async();
+                        share_ui::dispatch_undo(
+                            session.clone(),
+                            rt_handle.clone(),
+                            share_ui.clone(),
+                            window_handle,
+                            journal.clone(),
+                            reseed.clone(),
+                            &async_cx,
+                        );
+                        cx.stop_propagation();
+                    }
+                })
+                .capture_action({
+                    let session = session.clone();
+                    let rt_handle = rt_handle.clone();
+                    let share_ui = self.share_ui.clone();
+                    let journal = journal.clone();
+                    let reseed = reseed.clone();
+                    move |_: &TriggerRedo, _window, cx: &mut App| {
+                        let async_cx = cx.to_async();
+                        share_ui::dispatch_redo(
+                            session.clone(),
+                            rt_handle.clone(),
+                            share_ui.clone(),
+                            window_handle,
+                            journal.clone(),
+                            reseed.clone(),
+                            &async_cx,
+                        );
+                        cx.stop_propagation();
+                    }
+                })
                 .on_key_down({
                     let nav = nav.clone();
                     let session = session.clone();
-                    let rt_handle = rt_handle.clone();
+                    let spawner: Arc<dyn holon_api::spawner::Spawner> =
+                        Arc::new(holon_api::spawner::TokioSpawner::new(rt_handle.clone()));
                     let services: Arc<dyn BuilderServices> = self.app_model.read(cx).engine.clone();
                     move |event: &gpui::KeyDownEvent, _window, cx: &mut App| {
                         let keys = keystroke_to_keys(&event.keystroke);
@@ -745,7 +1405,7 @@ impl Render for HolonApp {
                                 holon_api::Value::String(entity_id.to_string()),
                             );
                             holon_frontend::operations::dispatch_operation(
-                                &rt_handle,
+                                &spawner,
                                 &session,
                                 &EntityName::new(entity_name),
                                 operation.name,
@@ -758,20 +1418,65 @@ impl Render for HolonApp {
                 .child(root)
         };
 
+        let search_theme = search_ui::SearchTheme {
+            bg,
+            border: border_color,
+            fg: text,
+            muted_fg: theme.muted_foreground,
+            selected_bg: theme.accent,
+            selected_fg: theme.accent_foreground,
+        };
+
+        // Page-ancestor breadcrumb bar, between the title bar and the content.
+        // Full width for v1 (disclosed) — a slim path-back strip under the top
+        // bar; clicking a segment navigates via the shared chokepoint.
+        let breadcrumb_bar = breadcrumb::render_breadcrumb_bar(
+            self.breadcrumb.read(cx),
+            services.clone(),
+            search_theme,
+            16.0,
+        );
+
+        // Open-blocks tab strip for the MAIN region, mounted ABOVE the
+        // breadcrumb bar (tabs on top, then breadcrumb, then content).
+        let tab_strip_bar = tab_strip::render_tab_strip(
+            self.tab_strip.read(cx),
+            self.tab_strip.clone(),
+            services.clone(),
+            search_theme,
+            16.0,
+        );
+
         let mut page = div()
             .size_full()
-            .bg(bg)
+            .bg(page_background)
             .text_color(text)
             .flex_col()
             .pt(px(self.safe_area_top))
             .pb(px(self.safe_area_bottom))
-            .child(title_bar)
-            .child(content);
+            .child(title_bar);
+        if let Some(bar) = tab_strip_bar {
+            page = page.child(bar);
+        }
+        if let Some(bar) = breadcrumb_bar {
+            page = page.child(bar);
+        }
+        page = page.child(content);
 
         if let Some(overlay) = settings_overlay {
             page = page.child(overlay);
         }
         if let Some(overlay) = gallery_overlay {
+            page = page.child(overlay);
+        }
+
+        // User search modal (quick-open + full-text content), cmd-K / 🔎.
+        if let Some(overlay) = search_ui::render_search_overlay(
+            self.search_ui.read(cx),
+            self.search_ui.clone(),
+            services.clone(),
+            search_theme,
+        ) {
             page = page.child(overlay);
         }
 
@@ -790,6 +1495,9 @@ impl Render for HolonApp {
             };
             let async_cx = cx.to_async();
             let wh = window.window_handle();
+            let pending_store = cx
+                .try_global::<share_ui::PendingWritesGlobal>()
+                .map(|g| g.0.clone());
             let share_state_read = self.share_ui.read(cx);
             let overlays = share_ui::render_overlays(
                 share_state_read,
@@ -799,10 +1507,61 @@ impl Render for HolonApp {
                 self.rt_handle.clone(),
                 wh,
                 async_cx,
+                pending_store,
                 overlay_theme,
             );
             for ov in overlays {
                 page = page.child(ov);
+            }
+        }
+
+        // Full-window capture surface for an in-progress sidebar drag-resize.
+        // Present ONLY while the handle is held (drag global active) so it never
+        // intercepts normal input; it tracks the cursor beyond the 12px grip and
+        // finalizes on release (persist width, or toggle if it was a plain
+        // click). Mounted here so it sits above the content it resizes.
+        if cx
+            .try_global::<crate::render::builders::SidebarResizeState>()
+            .is_some_and(|s| s.active.is_some())
+        {
+            let move_services = services.clone();
+            let up_services = services.clone();
+            page = page.child(
+                div()
+                    .id("sidebar-resize-capture")
+                    .absolute()
+                    .inset_0()
+                    .size_full()
+                    .cursor_col_resize()
+                    .on_mouse_move(move |ev, window, cx| {
+                        if ev.dragging() {
+                            let cursor_x = f32::from(ev.position.x);
+                            let viewport_width = f32::from(window.viewport_size().width);
+                            if crate::render::builders::drag_sidebar_to(
+                                &*move_services,
+                                cursor_x,
+                                viewport_width,
+                                cx,
+                            ) {
+                                window.refresh();
+                            }
+                        }
+                    })
+                    .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+                        crate::render::builders::finalize_sidebar_resize(&*up_services, window, cx);
+                    }),
+            );
+        }
+
+        // Live-oracle violation banner (debug builds) — rendered LAST so it
+        // sits on top of everything: a violation must be impossible to miss.
+        #[cfg(debug_assertions)]
+        {
+            let oracle_state_read = self.oracle_ui.read(cx);
+            if let Some(banner) =
+                oracles_ui::render_banner(oracle_state_read, self.oracle_ui.clone())
+            {
+                page = page.child(banner);
             }
         }
 
@@ -830,21 +1589,33 @@ pub fn launch_holon_window_with_engine(
     session: Arc<FrontendSession>,
     engine: Arc<ReactiveEngine>,
     debug: Arc<holon_mcp::server::DebugServices>,
+    degraded_bus: Arc<holon::sync::DegradedSignalBus>,
     rt_handle: tokio::runtime::Handle,
     cx: &mut App,
 ) -> BoundsRegistry {
-    launch_holon_window_with_engine_and_share(session, engine, debug, None, rt_handle, cx)
+    launch_holon_window_with_engine_and_share(
+        session,
+        engine,
+        debug,
+        None,
+        degraded_bus,
+        rt_handle,
+        cx,
+    )
 }
 
-/// Variant of `launch_holon_window_with_engine` that also wires the
-/// subtree-share UI's degraded-bus bridge. `share_backend` is resolved from
-/// the DI injector at top-level (see `main.rs`) and is `None` when the
-/// `iroh-sync` feature is disabled.
+/// Variant of `launch_holon_window_with_engine` that also wires the subtree
+/// SHARE actions. `share_backend` is resolved from the DI injector at
+/// top-level (see `main.rs`) and is `None` when the `iroh-sync` feature is
+/// disabled — it gates the share context menu only. `degraded_bus` is
+/// required and NOT optional: the disclosure bridge must exist in every
+/// consolidator mode.
 pub fn launch_holon_window_with_engine_and_share(
     session: Arc<FrontendSession>,
     engine: Arc<ReactiveEngine>,
     debug: Arc<holon_mcp::server::DebugServices>,
     share_backend: Option<Arc<holon::sync::loro_share_backend::LoroShareBackend>>,
+    degraded_bus: Arc<holon::sync::DegradedSignalBus>,
     rt_handle: tokio::runtime::Handle,
     cx: &mut App,
 ) -> BoundsRegistry {
@@ -856,6 +1627,7 @@ pub fn launch_holon_window_with_engine_and_share(
         Some(engine),
         Some(debug),
         share_backend,
+        Some(degraded_bus),
         rt_handle,
         nav,
         bounds_registry.clone(),
@@ -887,6 +1659,7 @@ pub fn launch_holon_window_with_title(
         Some(engine),
         debug,
         None,
+        None,
         rt_handle,
         nav,
         bounds_registry,
@@ -916,11 +1689,24 @@ pub struct RebindHandle {
     entity_cache: entity_view_registry::EntityCache,
     /// The live-engine cell the interaction pump reads (see [`LiveEngine`]).
     live_engine: LiveEngine,
+    /// The quick-open modal's state, so a caller can read the effect the
+    /// `open_search` chord produces. `None` if the window never built one.
+    search_ui: Option<Entity<search_ui::SearchUiState>>,
 }
 
 impl RebindHandle {
     pub fn window(&self) -> AnyWindowHandle {
         self.window
+    }
+
+    /// Whether the quick-open modal is open — the user-visible effect the
+    /// `open_search` chord exists to produce.
+    pub fn search_modal_open(&self, cx: &App) -> bool {
+        self.search_ui
+            .as_ref()
+            .expect("the window built a search modal")
+            .read(cx)
+            .open
     }
 
     /// Re-point the window at `session` + `engine`, re-seed the viewport from
@@ -958,6 +1744,7 @@ pub fn launch_holon_window_rebindable(
     nav: NavigationState,
     bounds_registry: BoundsRegistry,
     debug: Option<Arc<holon_mcp::server::DebugServices>>,
+    degraded_bus: Option<Arc<holon::sync::DegradedSignalBus>>,
     title: &str,
     cx: &mut App,
 ) -> Option<RebindHandle> {
@@ -966,6 +1753,7 @@ pub fn launch_holon_window_rebindable(
         Some(engine),
         debug,
         None,
+        degraded_bus,
         rt_handle,
         nav,
         bounds_registry,
@@ -973,11 +1761,12 @@ pub fn launch_holon_window_rebindable(
         cx,
     )
     .map(
-        |(window, app_model, entity_cache, live_engine)| RebindHandle {
+        |(window, app_model, entity_cache, live_engine, search_ui)| RebindHandle {
             window,
             app_model,
             entity_cache,
             live_engine,
+            search_ui,
         },
     )
 }
@@ -993,6 +1782,7 @@ pub fn launch_holon_window_with_engine_and_registry(
     launch_holon_window_impl(
         session,
         Some(engine),
+        None,
         None,
         None,
         rt_handle,
@@ -1013,6 +1803,7 @@ pub fn launch_holon_window_with_registry(
 ) {
     launch_holon_window_impl(
         session,
+        None,
         None,
         None,
         None,
@@ -1058,6 +1849,14 @@ fn spawn_root_layout_signal(
                         m.reconcile_root_live_blocks(cx);
                         m.view_model =
                             resolved_view_model(&m.root_vm, &m.engine, &m.root_live_blocks, cx);
+                        // Auto-close phone overlay sidebars when navigation
+                        // focus changed (e.g. a page tap in the drawer), then
+                        // re-resolve so the closed state renders this frame.
+                        if m.close_overlay_drawers_on_nav() {
+                            m.reconcile_root_live_blocks(cx);
+                            m.view_model =
+                                resolved_view_model(&m.root_vm, &m.engine, &m.root_live_blocks, cx);
+                        }
                         m.nav.set_root(m.root_vm.clone());
                         cx.notify();
                     });
@@ -1073,13 +1872,17 @@ fn spawn_root_layout_signal(
 ///
 /// If `existing_engine` is `Some`, reuses it (shared with MCP server).
 /// Otherwise creates a fresh `ReactiveEngine` inside the window callback.
-/// `share_backend` is resolved from the DI injector in `main.rs`; pass
-/// `None` to skip wiring the degraded-bus bridge (PBT / mobile paths).
+/// `share_backend` gates the share context menu (`ShareTrigger`) only.
+/// `degraded_bus` gates the disclosure bridge and is independent of it: every
+/// production entry point supplies the bus, so the bridge is wired in every
+/// consolidator mode. `None` only in PBT launchers with no container behind
+/// them.
 fn launch_holon_window_impl(
     session: Arc<FrontendSession>,
     existing_engine: Option<Arc<ReactiveEngine>>,
     debug: Option<Arc<holon_mcp::server::DebugServices>>,
     share_backend: Option<Arc<holon::sync::loro_share_backend::LoroShareBackend>>,
+    degraded_bus: Option<Arc<holon::sync::DegradedSignalBus>>,
     rt_handle: tokio::runtime::Handle,
     nav: NavigationState,
     bounds_registry: BoundsRegistry,
@@ -1090,8 +1893,15 @@ fn launch_holon_window_impl(
     Entity<AppModel>,
     entity_view_registry::EntityCache,
     LiveEngine,
+    Option<Entity<search_ui::SearchUiState>>,
 )> {
     gpui_component::init(cx);
+
+    let window_chords = window_key_bindings();
+    if let Some(debug) = debug.as_ref() {
+        publish_window_key_bindings(&window_chords, debug);
+    }
+    cx.bind_keys(window_chords.into_iter().map(|row| row.binding));
 
     #[cfg(debug_assertions)]
     inspector::init(cx);
@@ -1105,11 +1915,33 @@ fn launch_holon_window_impl(
         Arc::new(std::sync::OnceLock::new());
     let model_slot = model_entity.clone();
 
+    // Slot to carry the search-UI entity out of the window-creation closure so
+    // the cmd-K `OpenSearch` action handler (registered app-level, after the
+    // window exists) can open + focus it.
+    let search_entity_slot: Arc<std::sync::OnceLock<Entity<search_ui::SearchUiState>>> =
+        Arc::new(std::sync::OnceLock::new());
+    let search_entity_slot_for_window = search_entity_slot.clone();
+
+    // Slot to carry the tab-strip entity out of the window-creation closure so
+    // the app-level tab keyboard action handlers (registered after the window
+    // exists) can read/update it.
+    let tab_strip_entity_slot: Arc<std::sync::OnceLock<Entity<tab_strip::TabStripState>>> =
+        Arc::new(std::sync::OnceLock::new());
+    let tab_strip_entity_slot_for_window = tab_strip_entity_slot.clone();
+
+    // Slot to carry the oracle-UI entity out of the window-creation closure
+    // so the status bridge (needs the window handle) can be wired after.
+    #[cfg(debug_assertions)]
+    let oracle_entity_slot: Arc<std::sync::OnceLock<Entity<oracles_ui::OracleUiState>>> =
+        Arc::new(std::sync::OnceLock::new());
+    #[cfg(debug_assertions)]
+    let oracle_entity_slot_for_window = oracle_entity_slot.clone();
+
     let glass = session_clone
         .ui_settings()
         .glass_background
         .unwrap_or(false);
-    let initial_bounds = std::env::var("HOLON_INITIAL_WINDOW_SIZE")
+    let env_bounds = std::env::var("HOLON_INITIAL_WINDOW_SIZE")
         .ok()
         .and_then(|s| {
             let (w, h) = s.split_once('x')?;
@@ -1122,6 +1954,29 @@ fn launch_holon_window_impl(
                 size: gpui::size(px(w), px(h)),
             })
         });
+    // Restore persisted window bounds for the real production window only. PBT /
+    // custom-title windows run against temp config dirs and set their own bounds,
+    // and the dev HOLON_INITIAL_WINDOW_SIZE override always wins when present.
+    let persisted_bounds = if custom_title.is_none() && env_bounds.is_none() {
+        window_state::load(session.config_dir()).map(|state| {
+            let displays = window_state::connected_displays(cx);
+            tracing::info!(
+                mode = ?state.mode,
+                displays = displays.len(),
+                "restoring persisted window bounds"
+            );
+            state.to_window_bounds(&displays)
+        })
+    } else {
+        None
+    };
+    let restored_window_bounds =
+        persisted_bounds.or_else(|| env_bounds.map(gpui::WindowBounds::Windowed));
+    // Config dir to persist window state into — `None` for PBT / custom-title
+    // windows so they never write over the user's real window_state.json.
+    let persist_config_dir: Option<std::path::PathBuf> = custom_title
+        .is_none()
+        .then(|| session.config_dir().to_path_buf());
     let window_options = WindowOptions {
         titlebar: Some(TitlebarOptions {
             title: Some(
@@ -1138,7 +1993,7 @@ fn launch_holon_window_impl(
         } else {
             WindowBackgroundAppearance::Opaque
         },
-        window_bounds: initial_bounds.map(gpui::WindowBounds::Windowed),
+        window_bounds: restored_window_bounds,
         ..Default::default()
     };
 
@@ -1155,6 +2010,16 @@ fn launch_holon_window_impl(
     // synchronously on gpui's background executor so that the call path
     // stays on the main thread and the outer cx.spawn wrapper (which
     // breaks on iOS) can be avoided.
+    //
+    // Android: NEVER block here. gpui-mobile runs `finish_launching`
+    // (and therefore this whole function) on the event-loop thread — the
+    // one that must keep pumping to present frames. `fg_executor.block_on`
+    // on the foreground executor's own thread is a re-entrancy wedge: the
+    // loop stops pumping, the first frame is never presented, and the app
+    // shows a permanent black screen. Skip the pre-warm and open with the
+    // loading state; the tokio root-layout signal drives the first real
+    // repaint asynchronously once the event loop is running.
+    #[cfg(not(target_os = "android"))]
     if let Some(ref engine) = existing_engine {
         use futures::StreamExt;
         use futures::future::Either;
@@ -1208,10 +2073,27 @@ fn launch_holon_window_impl(
     // `HolonApp::entity_cache` clones this same Arc, so both ends observe
     // the same map.
     let entity_cache: entity_view_registry::EntityCache = Default::default();
+    holon_core::memstats::register("entity_cache", {
+        // Weak: the sampler's reader must not outlive the window's cache.
+        let cache = std::sync::Arc::downgrade(&entity_cache);
+        std::sync::Arc::new(move || match cache.upgrade() {
+            Some(cache) => entity_view_registry::cache_counts(&cache).as_stats(),
+            None => Vec::new(),
+        })
+    });
     let entity_cache_for_view = entity_cache.clone();
     let window_result = cx.open_window(window_options, move |window, cx| {
         tracing::debug!("[GPUI] Inside open_window callback — building root view");
-        window.on_window_should_close(cx, |_window, cx| {
+        let close_persist_dir = persist_config_dir.clone();
+        window.on_window_should_close(cx, move |window, cx| {
+            // Final save on clean shutdown — captures the last position/size
+            // even if it changed within the resize debounce window.
+            if let Some(dir) = close_persist_dir.as_deref() {
+                let state = window_state::PersistedWindowState::from_window(window, cx);
+                if let Err(e) = window_state::save(dir, &state) {
+                    tracing::warn!(error = %e, "persisting window state on close failed");
+                }
+            }
             cx.quit();
             true
         });
@@ -1262,6 +2144,21 @@ fn launch_holon_window_impl(
 
         let initial_root_view = root_reactive_view(&root_vm);
         let share_ui_entity = cx.new(|_cx| share_ui::ShareUiState::new());
+        let search_ui_entity = cx.new(|cx| search_ui::SearchUiState::new(window, cx));
+        search_entity_slot_for_window
+            .set(search_ui_entity.clone())
+            .ok();
+        let breadcrumb_entity = cx.new(|_cx| breadcrumb::BreadcrumbState::default());
+        let tab_strip_entity = cx.new(|_cx| tab_strip::TabStripState::default());
+        tab_strip_entity_slot_for_window
+            .set(tab_strip_entity.clone())
+            .ok();
+        #[cfg(debug_assertions)]
+        let oracle_ui_entity = cx.new(|_cx| oracles_ui::OracleUiState::default());
+        #[cfg(debug_assertions)]
+        oracle_entity_slot_for_window
+            .set(oracle_ui_entity.clone())
+            .ok();
         let app_model = cx.new(|cx| {
             let mut model = AppModel {
                 session: Arc::clone(&session_clone),
@@ -1277,6 +2174,7 @@ fn launch_holon_window_impl(
                 share_ui: share_ui_entity.clone(),
                 root_live_blocks: std::collections::HashMap::new(),
                 root_view: initial_root_view,
+                last_focused_block: None,
             };
             // Initial reconciliation — create root LiveBlockView entities.
             // Each LiveBlockView manages its own child entities (editors, live queries).
@@ -1292,6 +2190,7 @@ fn launch_holon_window_impl(
         });
         model_slot.set(app_model.clone()).ok();
         let app_model_for_view = app_model.clone();
+        let bounds_persist_dir = persist_config_dir.clone();
         let view = cx.new(|cx| {
             cx.observe(&app_model, |_this, _model, cx| cx.notify())
                 .detach();
@@ -1302,9 +2201,26 @@ fn launch_holon_window_impl(
             // and the root ReactiveView's `space` Mutable. The reactive
             // cascade rebuilds only affected subtrees — no full rebuild,
             // transient widget state is preserved in untouched branches.
+            let mut last_bounds_save: Option<std::time::Instant> = None;
             cx.observe_window_bounds(window, move |_this, window, cx| {
                 let vp = viewport_info_from_window(window.viewport_size(), window.scale_factor());
                 app_model_for_view.update(cx, |m, _cx| m.apply_viewport(vp));
+                // Debounced persistence: this fires per pixel during a drag /
+                // resize, so throttle disk writes. The on-close handler covers
+                // whatever change lands inside the trailing window.
+                if let Some(dir) = bounds_persist_dir.as_deref() {
+                    let now = std::time::Instant::now();
+                    let due = last_bounds_save
+                        .map(|t| now.duration_since(t) >= std::time::Duration::from_millis(800))
+                        .unwrap_or(true);
+                    if due {
+                        last_bounds_save = Some(now);
+                        let state = window_state::PersistedWindowState::from_window(window, cx);
+                        if let Err(e) = window_state::save(dir, &state) {
+                            tracing::warn!(error = %e, "persisting window state failed");
+                        }
+                    }
+                }
             })
             .detach();
 
@@ -1314,6 +2230,72 @@ fn launch_holon_window_impl(
             cx.subscribe(
                 &share_ui_entity,
                 move |_, _, _: &share_ui::NotifyShareUi, cx| {
+                    cx.notify();
+                },
+            )
+            .detach();
+
+            // Re-render + re-search whenever the search modal state changes.
+            cx.subscribe(
+                &search_ui_entity,
+                move |_, _, _: &search_ui::NotifySearchUi, cx| {
+                    cx.notify();
+                },
+            )
+            .detach();
+            cx.subscribe(
+                &breadcrumb_entity,
+                move |_, _, _: &breadcrumb::NotifyBreadcrumb, cx| {
+                    cx.notify();
+                },
+            )
+            .detach();
+            cx.subscribe(
+                &tab_strip_entity,
+                move |_, _, _: &tab_strip::NotifyTabStrip, cx| {
+                    cx.notify();
+                },
+            )
+            .detach();
+
+            // Search input → async query. Each keystroke bumps `generation`
+            // (stale-response guard) and kicks off `run_search`, whose result
+            // pumps back into the search entity.
+            let search_input = search_ui_entity.read(cx).input.clone();
+            cx.subscribe_in(
+                &search_input,
+                window,
+                move |this: &mut HolonApp,
+                      _input,
+                      event: &gpui_component::input::InputEvent,
+                      window,
+                      cx| {
+                    if matches!(event, gpui_component::input::InputEvent::Change) {
+                        let query = this.search_ui.read(cx).input.read(cx).value().to_string();
+                        let generation = this.search_ui.update(cx, |s, _| {
+                            s.query = query.clone();
+                            s.generation = s.generation.wrapping_add(1);
+                            s.generation
+                        });
+                        let session = this.session.clone();
+                        let rt_handle = this.rt_handle.clone();
+                        let state = this.search_ui.clone();
+                        let wh = window.window_handle();
+                        let async_cx = cx.to_async();
+                        search_ui::run_search(
+                            query, generation, session, rt_handle, state, wh, &async_cx,
+                        );
+                    }
+                },
+            )
+            .detach();
+
+            // Re-render whenever the live-oracle status changes, so a
+            // violation banner appears the moment an oracle fires.
+            #[cfg(debug_assertions)]
+            cx.subscribe(
+                &oracle_ui_entity,
+                move |_, _, _: &oracles_ui::NotifyOracleUi, cx| {
                     cx.notify();
                 },
             )
@@ -1329,6 +2311,15 @@ fn launch_holon_window_impl(
                 safe_area_top: 0.0,
                 safe_area_bottom: 0.0,
                 share_ui: share_ui_entity,
+                search_ui: search_ui_entity,
+                breadcrumb: breadcrumb_entity,
+                last_breadcrumb_focus: None,
+                tab_strip: tab_strip_entity,
+                last_tab_strip_focus: None,
+                #[cfg(debug_assertions)]
+                oracle_ui: oracle_ui_entity.clone(),
+                applied_theme: String::new(),
+                last_main_nav_gen: 0,
             }
         });
         let any_view: AnyView = view.into();
@@ -1356,6 +2347,163 @@ fn launch_holon_window_impl(
     let app_model = model_entity.get().unwrap().clone();
     let wh: AnyWindowHandle = window_handle.into();
 
+    // App-level handlers for TriggerUndo/TriggerRedo. The page-level
+    // `capture_action` handlers in `HolonApp::render` only sit on the action
+    // dispatch path while some element inside the content div has window
+    // focus; with NO focus (fresh boot, focus cleared by Escape) the dispatch
+    // path is just the window root, so element listeners never see the
+    // action and cmd-z used to fall through to "No handler matched the key
+    // chord". Global `cx.on_action` handlers run at the end of the bubble
+    // phase precisely when no element consumed the action. `stop_propagation`
+    // also means that on a rebind (a second `launch_holon_window_impl` in the
+    // same App) only the newest registration runs — global listeners are
+    // invoked newest-first and the break on `!propagate_event` skips stale
+    // ones pointing at the previous window.
+    {
+        let journal = app_model.read(cx).engine.ui_state().dispatch_journal();
+        let session_for_undo = app_model.read(cx).session.clone();
+        let rt_for_undo = rt_handle.clone();
+        let share_ui_for_undo = app_model.read(cx).share_ui.clone();
+        let journal_for_undo = journal.clone();
+        let reseed_for_undo = app_model
+            .read(cx)
+            .engine
+            .ui_state()
+            .authority_reseed_handle();
+        cx.on_action(move |_: &TriggerUndo, cx: &mut App| {
+            let async_cx = cx.to_async();
+            share_ui::dispatch_undo(
+                session_for_undo.clone(),
+                rt_for_undo.clone(),
+                share_ui_for_undo.clone(),
+                wh,
+                journal_for_undo.clone(),
+                reseed_for_undo.clone(),
+                &async_cx,
+            );
+            cx.stop_propagation();
+        });
+        let session_for_redo = app_model.read(cx).session.clone();
+        let rt_for_redo = rt_handle.clone();
+        let share_ui_for_redo = app_model.read(cx).share_ui.clone();
+        let journal_for_redo = journal.clone();
+        let reseed_for_redo = app_model
+            .read(cx)
+            .engine
+            .ui_state()
+            .authority_reseed_handle();
+        cx.on_action(move |_: &TriggerRedo, cx: &mut App| {
+            let async_cx = cx.to_async();
+            share_ui::dispatch_redo(
+                session_for_redo.clone(),
+                rt_for_redo.clone(),
+                share_ui_for_redo.clone(),
+                wh,
+                journal_for_redo.clone(),
+                reseed_for_redo.clone(),
+                &async_cx,
+            );
+            cx.stop_propagation();
+        });
+    }
+
+    // App-level cmd-K handler: open + focus the search modal. Registered
+    // globally (like undo/redo) so it fires regardless of which element holds
+    // focus.
+    //
+    // Focusing the input needs a `Window`, and this handler runs INSIDE the
+    // window's action dispatch — where GPUI has the window `take()`n out of
+    // `App::windows`, so an immediate `update_window` re-enters an empty slot
+    // and fails with "window not found". `defer` runs the hop at the end of
+    // the effect cycle, once the window is back; that is exactly what it is
+    // documented for.
+    if let Some(search_entity) = search_entity_slot.get().cloned() {
+        let journal_for_search = app_model.read(cx).engine.ui_state().dispatch_journal();
+        cx.on_action(move |_: &OpenSearch, cx: &mut App| {
+            let search_entity = search_entity.clone();
+            // Opening the panel IS the whole action, so the deferred hop's
+            // result IS the outcome — hence the settle inside the defer. A
+            // window that dies before the effect flush leaves the entry
+            // Pending, which reads as "unknown", never as success.
+            let seq = journal_for_search.record_window_action("open_search");
+            let journal = journal_for_search.clone();
+            cx.defer(move |cx| {
+                let opened = cx.update_window(wh, move |_, window, cx| {
+                    search_entity.update(cx, |s, cx| {
+                        s.open(window, cx);
+                        cx.emit(search_ui::NotifySearchUi);
+                        cx.notify();
+                    });
+                });
+                journal.settle(
+                    seq,
+                    opened
+                        .map(|_| ())
+                        .map_err(|e| format!("open_search: the window is gone: {e}")),
+                );
+            });
+            cx.stop_propagation();
+        });
+    }
+
+    // App-level open-blocks tab navigation handlers (Increment 2). Each reads
+    // the ordered tabs + active cursor from `TabStripState`, computes the
+    // target `history_id`, dispatches `navigation.activate`, and optimistically
+    // updates the highlight. Registered globally (like undo/redo) so they fire
+    // regardless of focus. Cleanly no-op when there are 0 tabs / no Nth tab.
+    //
+    // Both families work on the tab entity through `&mut App` alone — no
+    // `Window` is involved, so they must NOT hop through `update_window`: a
+    // handler invoked from the window's own action dispatch cannot re-enter
+    // that window (see the cmd-K handler above).
+    if let Some(tab_entity) = tab_strip_entity_slot.get().cloned() {
+        let tab_services: Arc<dyn BuilderServices> = app_model.read(cx).engine.clone();
+
+        // Each tab action journals under its REGISTRY name. The follow-on
+        // `navigation.activate` intent journals itself separately, so a reply
+        // shows both the chord that ran and what it caused.
+        let tab_journal = app_model.read(cx).engine.ui_state().dispatch_journal();
+
+        macro_rules! on_cycle {
+            ($action:ty, $delta:expr, $name:expr) => {{
+                let entity = tab_entity.clone();
+                let services = tab_services.clone();
+                let journal = tab_journal.clone();
+                cx.on_action(move |_: &$action, cx: &mut App| {
+                    let seq = journal.record_window_action($name);
+                    tab_strip::apply_cycle(&entity, &services, $delta, cx);
+                    journal.settle(seq, Ok(()));
+                    cx.stop_propagation();
+                });
+            }};
+        }
+        on_cycle!(CycleTabNext, 1, "cycle_tab_next");
+        on_cycle!(CycleTabPrev, -1, "cycle_tab_prev");
+
+        macro_rules! on_jump {
+            ($action:ty, $n:expr, $name:expr) => {{
+                let entity = tab_entity.clone();
+                let services = tab_services.clone();
+                let journal = tab_journal.clone();
+                cx.on_action(move |_: &$action, cx: &mut App| {
+                    let seq = journal.record_window_action($name);
+                    tab_strip::apply_jump(&entity, &services, $n, cx);
+                    journal.settle(seq, Ok(()));
+                    cx.stop_propagation();
+                });
+            }};
+        }
+        on_jump!(JumpToTab1, 1, "jump_to_tab_1");
+        on_jump!(JumpToTab2, 2, "jump_to_tab_2");
+        on_jump!(JumpToTab3, 3, "jump_to_tab_3");
+        on_jump!(JumpToTab4, 4, "jump_to_tab_4");
+        on_jump!(JumpToTab5, 5, "jump_to_tab_5");
+        on_jump!(JumpToTab6, 6, "jump_to_tab_6");
+        on_jump!(JumpToTab7, 7, "jump_to_tab_7");
+        on_jump!(JumpToTab8, 8, "jump_to_tab_8");
+        on_jump!(JumpToTab9, 9, "jump_to_tab_9");
+    }
+
     // Root layout signal — structural changes only (render_expr).
     // Does NOT react to ui_generation (focus/view_mode) — the root
     // layout is a static columns container whose structure doesn't
@@ -1378,24 +2526,101 @@ fn launch_holon_window_impl(
         );
     }
 
-    // Wire the share-subtree degraded-bus bridge + ShareTrigger global. If
-    // `share_backend` is `None` (iroh-sync disabled or PBT) no bridge is
-    // spawned and ShareTrigger is not installed — the share context menu
-    // silently no-ops with a warning.
-    if let Some(backend) = share_backend {
+    // Wire the live-oracle status bridge (debug builds): global OracleStatus
+    // changes → OracleUiState entity → top banner. The runner itself is
+    // spawned in main.rs (plain tokio, no GPUI needed); this only wires the
+    // surfacing. Gated on the same env switch as the runner.
+    #[cfg(debug_assertions)]
+    if holon_oracles::OracleMode::from_env().enabled() {
         let async_cx = cx.to_async();
-        let share_ui_entity = app_model.read(cx).share_ui.clone();
-        share_ui::spawn_degraded_bus_bridge(
-            backend,
-            rt_handle.clone(),
-            share_ui_entity.clone(),
+        let oracle_ui_entity = oracle_entity_slot
+            .get()
+            .expect("oracle entity slot must be populated by the window closure")
+            .clone();
+        oracles_ui::spawn_oracle_bridge(
+            &rt_handle,
+            oracle_ui_entity,
             window_handle.into(),
             &async_cx,
         );
+    }
 
+    // Install the DegradedToastSink global so any view (e.g. a failed
+    // slash-command) can surface a toast without plumbing the ShareUiState
+    // entity through every builder. Unconditional — the share_ui entity always
+    // exists, independent of the (optional) iroh share backend.
+    {
+        let toast_ui_entity = app_model.read(cx).share_ui.clone();
+        let toast_window_handle: AnyWindowHandle = window_handle.into();
+        cx.set_global(share_ui::DegradedToastSink::new(
+            move |toast, cx: &mut App| {
+                let _ = toast_window_handle.update(cx, |_, _window, cx| {
+                    toast_ui_entity.update(cx, |s, cx| {
+                        s.push_toast(toast);
+                        cx.emit(share_ui::NotifyShareUi);
+                        cx.notify();
+                    });
+                });
+            },
+        ));
+    }
+
+    // Route fire-and-forget op-execution failures (`dispatch_intent`) to a
+    // visible CommandFailed toast. Without this the engine only records + logs
+    // the error, so a refused op (e.g. a fail-closed non-leaf delete) is
+    // invisible in the UI even though the gesture already moved the caret.
+    {
+        let toast_ui_entity = app_model.read(cx).share_ui.clone();
+        let async_cx = cx.to_async();
+        let op_failure_sink = share_ui::spawn_op_failure_toast_bridge(
+            toast_ui_entity,
+            window_handle.into(),
+            &async_cx,
+        );
+        engine.ui_state().set_op_failure_sink(op_failure_sink);
+    }
+
+    // Wire the pending connector-write bus bridge (leases/read-write ruling,
+    // increment 4c). The shared store is installed as a GPUI global in `main.rs`
+    // from the DI-resolved handle; when MCP integrations are absent the global
+    // is missing and no bridge is spawned (no once_only writes are possible).
+    if let Some(pending) = cx.try_global::<share_ui::PendingWritesGlobal>().cloned() {
+        let async_cx = cx.to_async();
+        let pending_ui_entity = app_model.read(cx).share_ui.clone();
+        share_ui::spawn_pending_writes_bridge(
+            pending.0.clone(),
+            rt_handle.clone(),
+            pending_ui_entity,
+            window_handle.into(),
+            &async_cx,
+        );
+    }
+
+    // Wire the degraded-disclosure bridge. Deliberately NOT keyed off
+    // `share_backend`: MCP integrations and org ingest raise conditions in
+    // every consolidator mode, and gating the only subscriber on a Loro-only
+    // handle is what made the shipped SqlOnly build render blank pages with no
+    // banner.
+    if let Some(bus) = degraded_bus {
+        let async_cx = cx.to_async();
+        let share_ui_entity = app_model.read(cx).share_ui.clone();
+        share_ui::spawn_degraded_bus_bridge(
+            bus,
+            rt_handle.clone(),
+            share_ui_entity,
+            window_handle.into(),
+            &async_cx,
+        );
+    }
+
+    // Wire the ShareTrigger global. `share_backend` is `None` when iroh-sync
+    // is disabled or Loro is off — then the share context menu silently
+    // no-ops with a warning.
+    if share_backend.is_some() {
         // Install the ShareTrigger global so block right-click handlers can
         // dispatch `share_subtree` without plumbing session/rt_handle/async_cx
         // through every intermediate builder.
+        let share_ui_entity = app_model.read(cx).share_ui.clone();
         let session_for_trigger = app_model.read(cx).session.clone();
         let rt_handle_for_trigger = rt_handle.clone();
         let window_handle_for_trigger: AnyWindowHandle = window_handle.into();
@@ -1464,6 +2689,7 @@ fn launch_holon_window_impl(
         model_entity.get().unwrap().clone(),
         entity_cache,
         live_engine,
+        search_entity_slot.get().cloned(),
     ))
 }
 
@@ -1509,7 +2735,13 @@ pub fn setup_interaction_pump(
     // UI mutations through the same pipeline as click/key/scroll. The MCP-facing
     // driver binds the *current* engine at install time (re-pointing it on rebind
     // is out of scope — MCP isn't driven during minimization).
-    let geometry: Arc<dyn holon_frontend::geometry::GeometryProvider> = Arc::new(bounds_registry);
+    // Flush-on-read: the MCP driver reads geometry from a window that may have
+    // gone idle after its last paint (iOS) — see `FlushOnReadGeometry`.
+    let geometry: Arc<dyn holon_frontend::geometry::GeometryProvider> =
+        Arc::new(geometry::FlushOnReadGeometry(bounds_registry));
+    // `describe_ui` reads the same measured rects, so an agent inspecting the
+    // tree sees what the window painted rather than structure alone.
+    debug.geometry.set(geometry.clone()).ok();
     let driver: Arc<dyn holon_frontend::user_driver::UserDriver> = Arc::new(
         user_driver::GpuiUserDriver::new(tx, geometry, engine.read().unwrap().clone()),
     );
@@ -1521,9 +2753,50 @@ pub fn setup_interaction_pump(
         async move |cx| {
             use futures::StreamExt;
             while let Some(cmd) = rx.next().await {
+                if let holon_mcp::server::InteractionEvent::CaptureScreenshot = &cmd.event {
+                    // Capture the last rendered frame off the swapchain via the
+                    // platform's `render_to_image` (offscreen wgpu readback on
+                    // Android). Fail loud: a render/readback error is surfaced in
+                    // `detail`, never a blank image.
+                    let captured =
+                        cx.update_window(window_handle, |_, window, _cx| window.render_to_image());
+                    let response = match captured {
+                        Ok(Ok(img)) => holon_mcp::server::InteractionResponse {
+                            handled: true,
+                            detail: None,
+                            screenshot: Some(holon_mcp::server::CapturedImage {
+                                width: img.width(),
+                                height: img.height(),
+                                rgba: img.into_raw(),
+                            }),
+                        },
+                        Ok(Err(e)) => holon_mcp::server::InteractionResponse {
+                            handled: false,
+                            detail: Some(format!("render_to_image failed: {e:#}")),
+                            screenshot: None,
+                        },
+                        Err(e) => holon_mcp::server::InteractionResponse {
+                            handled: false,
+                            detail: Some(format!("window update failed during capture: {e}")),
+                            screenshot: None,
+                        },
+                    };
+                    cmd.response_tx.send(response).ok();
+                    continue;
+                }
                 let result = cx.update_window(window_handle, |_, window, cx| {
                     use holon_mcp::server::InteractionEvent;
                     match &cmd.event {
+                        InteractionEvent::ForceFrame => {
+                            // `refresh()` marks dirty; `draw()` is what actually
+                            // produces the frame, and it does not care whether
+                            // the window is key, visible, or on this Space. The
+                            // returned token must clear the element arena before
+                            // the next draw.
+                            window.refresh();
+                            window.draw(cx).clear();
+                            Ok((true, None))
+                        }
                         InteractionEvent::ScrollEntityIntoView { entity_id } => {
                             // Read the *live* engine: after a rebind the window is
                             // bound to a new engine, and scroll-into-view must look
@@ -1542,6 +2815,26 @@ pub fn setup_interaction_pump(
                             // committed BoundsRegistry.
                             window.refresh();
                             scrolled.map(|s| (s, None))
+                        }
+                        InteractionEvent::ScrollList { entity_id, dy, .. } => {
+                            // Drive the target panel's `ListState::scroll_by`
+                            // directly — the reliable path a synthetic
+                            // `ScrollWheel` can't take (hover-gate no-op).
+                            let scrolled =
+                                scroll_list_by(entity_id, *dy, &entity_cache_for_pump, cx);
+                            window.refresh();
+                            match scrolled {
+                                Ok(true) => Ok((true, None)),
+                                Ok(false) => Ok((
+                                    false,
+                                    Some(format!(
+                                        "scroll: no scrollable list reached for {entity_id:?} — \
+                                         the entity is neither a rendered `block:default-*` panel \
+                                         with a virtualized list nor a block inside one"
+                                    )),
+                                )),
+                                Err(detail) => Err(detail),
+                            }
                         }
                         _ => {
                             // Synthetic key events route through the window's
@@ -1585,16 +2878,20 @@ pub fn setup_interaction_pump(
                     }
                 });
                 let response = match result {
-                    Ok(Ok((handled, detail))) => {
-                        holon_mcp::server::InteractionResponse { handled, detail }
-                    }
+                    Ok(Ok((handled, detail))) => holon_mcp::server::InteractionResponse {
+                        handled,
+                        detail,
+                        screenshot: None,
+                    },
                     Ok(Err(detail)) => holon_mcp::server::InteractionResponse {
                         handled: false,
                         detail: Some(detail),
+                        screenshot: None,
                     },
                     Err(e) => holon_mcp::server::InteractionResponse {
                         handled: false,
                         detail: Some(e.to_string()),
+                        screenshot: None,
                     },
                 };
                 cmd.response_tx.send(response).ok();
@@ -1696,6 +2993,105 @@ fn scroll_entity_into_view(
     Ok(false)
 }
 
+/// Scroll a virtualized panel list by a pixel `dy`, driving its
+/// `ListState::scroll_by` directly. Counterpart to [`scroll_entity_into_view`]
+/// (which reveals a specific row); this applies a relative wheel/trackpad-style
+/// delta without going through the platform `ScrollWheel` path, which no-ops
+/// for a synthetic off-cursor event (gpui's `should_handle_scroll` hover gate).
+///
+/// `entity_id` is resolved against the same panel walk as
+/// `scroll_entity_into_view`: a `block:default-*` panel scrolls its primary
+/// (first) list-mode shell; any other block scrolls the list shell that
+/// contains it (`visible_index_of` hit). Returns `Ok(false)` when no scrollable
+/// list matches — the caller turns that into a loud error rather than a silent
+/// success.
+///
+/// `pub` for the fail-loud regression test (`tests/mcp_scroll_fail_loud.rs`),
+/// which exercises the unreachable-target → `Ok(false)` contract.
+/// Reset a panel shell and every list-mode shell nested under it back to the
+/// top. Used on cross-page navigation into the main region so the new page
+/// opens above the fold (LogSeq parity). `panel_shell` is the block-mode shell
+/// (its own `list_state` is a no-op); the scrollable state lives in the nested
+/// list shells cached under it — the same descent `scroll_list_by` uses.
+fn scroll_reactive_shell_tree_to_top(
+    panel_shell: &gpui::Entity<views::ReactiveShell>,
+    cx: &mut App,
+) {
+    use crate::views::ReactiveShell;
+    let panel_cache = panel_shell.read(cx).entity_cache_clone();
+    let list_shells: Vec<gpui::Entity<ReactiveShell>> = {
+        let cache = panel_cache.read().unwrap();
+        cache
+            .values()
+            .filter_map(|any| any.clone().downcast::<ReactiveShell>().ok()) // ALLOW(filter_map_ok): non-ReactiveShell entries are skipped, not errors — ALLOW(ok)
+            .collect()
+    };
+    for list_shell in list_shells {
+        list_shell.update(cx, |shell, cx| {
+            shell.scroll_to_top();
+            cx.notify();
+        });
+    }
+    panel_shell.update(cx, |shell, cx| {
+        shell.scroll_to_top();
+        cx.notify();
+    });
+}
+
+pub fn scroll_list_by(
+    entity_id: &str,
+    dy: f32,
+    entity_cache: &entity_view_registry::EntityCache,
+    cx: &mut App,
+) -> Result<bool, String> {
+    use crate::entity_view_registry::CacheKey;
+    use crate::views::ReactiveShell;
+
+    let entity_uri = holon_api::EntityUri::parse(entity_id)
+        .map_err(|e| format!("scroll_list_by: {entity_id:?} is not an EntityUri: {e}"))?;
+    for panel_id in [
+        "block:default-left-sidebar",
+        "block:default-main-panel",
+        "block:default-right-sidebar",
+    ] {
+        let panel_shell: Option<gpui::Entity<ReactiveShell>> = {
+            let cache = entity_cache.read().unwrap();
+            cache
+                .get(&CacheKey::LiveBlock(panel_id.to_string()))
+                .and_then(|any| any.clone().downcast::<ReactiveShell>().ok()) // ALLOW(ok): downcast Err = cached Any wasn't a ReactiveShell; treat as miss
+        };
+        let Some(panel_shell) = panel_shell else {
+            continue;
+        };
+        // Targeting the panel itself scrolls its primary list; targeting a
+        // block scrolls whichever of the panel's list shells contains it.
+        let target_is_panel = entity_id == panel_id;
+        let panel_cache = panel_shell.read(cx).entity_cache_clone();
+        let list_shells: Vec<gpui::Entity<ReactiveShell>> = {
+            let cache = panel_cache.read().unwrap();
+            cache
+                .values()
+                // ALLOW(filter_map_ok): non-ReactiveShell entries are skipped, not errors.
+                // ALLOW(ok): a downcast miss is a type mismatch to skip, not a swallowed error
+                .filter_map(|any| any.clone().downcast::<ReactiveShell>().ok())
+                .collect()
+        };
+        for list_shell in list_shells {
+            let matches =
+                target_is_panel || list_shell.read(cx).visible_index_of(&entity_uri).is_some();
+            if !matches {
+                continue;
+            }
+            list_shell.update(cx, |shell, cx| {
+                shell.list_state_handle().scroll_by(gpui::px(dy));
+                cx.notify();
+            });
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub fn dispatch_interaction(
     event: &holon_mcp::server::InteractionEvent,
     window: &mut Window,
@@ -1719,6 +3115,7 @@ pub fn dispatch_interaction(
             }
             false
         }
+        InteractionEvent::InsertText { text } => dispatch_insert_text(text, window, cx),
         _ => {
             let inputs = interaction_event_to_platform_inputs(event);
             let mut handled = false;
@@ -1915,15 +3312,71 @@ pub fn interaction_event_to_platform_inputs(
                 touch_phase: gpui::TouchPhase::default(),
             })]
         }
-        InteractionEvent::ScrollEntityIntoView { .. } => {
-            // Handled directly by `dispatch_interaction`'s match arm via
-            // cache walk + `ListState::scroll_to_reveal_item`, not by
-            // synthesizing a platform input. Returning an empty vec keeps
-            // this fn's callers (which iterate inputs) a no-op for this
-            // variant.
+        InteractionEvent::ScrollEntityIntoView { .. }
+        | InteractionEvent::ScrollList { .. }
+        | InteractionEvent::InsertText { .. }
+        | InteractionEvent::CaptureScreenshot
+        | InteractionEvent::ForceFrame => {
+            // Handled directly by the interaction pump's match arms
+            // (`scroll_entity_into_view` / `scroll_list_by` / `dispatch_insert_text`),
+            // not by synthesizing a platform input. Returning an empty vec keeps
+            // this fn's callers (which iterate inputs) a no-op for these
+            // variants.
             vec![]
         }
     }
+}
+
+/// Deliver text the way a soft keyboard's `insertText:` does: bypass the GPUI
+/// keymap and commit the string straight into the focused editor's input
+/// handler. This mirrors `gpui-mobile`'s `IosWindow::handle_text_input` so the
+/// harness can exercise the soft-keyboard input path that `type_text`'s
+/// `KeyDown` route cannot reach.
+///
+/// A soft `Return` arrives as `"\n"`/`"\r"`/`"\r\n"`; the real soft keyboard
+/// (post-fix) translates it into an `enter` action rather than inserting a
+/// literal newline, so we do the same here — otherwise driving a soft Return
+/// through this path would split nothing.
+///
+/// MOBILE-FIDELITY NOTE: on the `mobile` build this still routes through GPUI's
+/// public `Window` API (`dispatch_keystroke` with a `key_char`), which reaches
+/// the SAME `EntityInputHandler::replace_text_in_range` that
+/// `IosWindow::handle_text_input` ultimately calls — it does NOT traverse the
+/// Objective-C `insertText:` FFI glue itself. Covering that final hop requires
+/// a `gpui-mobile` fork addition: a `pub fn gpui_mobile::insert_text(&str)`
+/// that reaches `ios::ffi::IOS_WINDOW_LIST` and calls a `&str` variant of the
+/// (currently `pub(crate)`) `IosWindow::handle_text_input`. Until that hook
+/// lands, this rung covers the editor-side behavior (the class of the escaped
+/// soft-Return bug) but not the fork's own FFI translation.
+fn dispatch_insert_text(text: &str, window: &mut Window, cx: &mut App) -> bool {
+    #[cfg(feature = "mobile")]
+    tracing::warn!(
+        "insert_text on the mobile build routes through GPUI's Window input handler, NOT the \
+         Objective-C insertText: FFI (IosWindow::handle_text_input) — that final hop needs a \
+         gpui_mobile::insert_text fork hook (see dispatch_insert_text doc comment)"
+    );
+
+    if matches!(text, "\n" | "\r" | "\r\n") {
+        // Soft Return → `enter` action, mirroring handle_text_input's
+        // Return-translation so the editor's Enter capture (split_block) fires.
+        let ks = gpui::Keystroke {
+            modifiers: gpui::Modifiers::default(),
+            key: "enter".to_string(),
+            key_char: None,
+        };
+        return window.dispatch_keystroke(ks, cx);
+    }
+
+    // Commit the text through the focused element's input handler. A keystroke
+    // carrying `key_char` drives GPUI's `input_handler.dispatch_input` →
+    // `replace_text_in_range` — the same editor entry point the soft keyboard
+    // reaches — without matching the keymap character-by-character.
+    let ks = gpui::Keystroke {
+        modifiers: gpui::Modifiers::default(),
+        key: text.to_string(),
+        key_char: Some(text.to_string()),
+    };
+    window.dispatch_keystroke(ks, cx)
 }
 
 /// Apply holon's custom theme colors on top of gpui_component's base theme.
@@ -1991,7 +3444,11 @@ fn load_theme_def(session: &FrontendSession) -> holon_frontend::theme::ThemeDef 
         .map(|h| std::path::PathBuf::from(h).join(".config/holon/themes"));
     let registry = ThemeRegistry::load(user_dir.as_deref());
     let ui = session.ui_settings();
-    let name = ui.theme.as_deref().unwrap_or("holonDark");
+    // Default must match the preferences schema default ("holonLight",
+    // preferences.rs) so the settings UI and the renderer agree on a fresh
+    // install (no `ui.theme` set) — otherwise the modal shows Light while the
+    // renderer applies Dark.
+    let name = ui.theme.as_deref().unwrap_or("holonLight");
     registry.get(name).cloned().unwrap_or_else(|| {
         tracing::warn!("Theme '{name}' not found, using holonDark");
         registry
@@ -2069,4 +3526,63 @@ fn keystroke_to_keys(ks: &gpui::Keystroke) -> std::collections::BTreeSet<holon_a
         _ => {}
     }
     keys
+}
+
+// ── Icon-font coverage tests ─────────────────────────────────────────────────
+//
+// Guard the Android icon fix. Every icon glyph the app renders must be
+// Android-renderable: covered directly by the embedded DejaVu Sans font, or
+// swapped for a covered glyph via `ICON_SUBSTITUTES`, or a documented
+// `KNOWN_ANDROID_GLYPH_GAPS` entry. The name→glyph tables
+// (`op_button::OP_ICONS`, `icon::ICON_CHARS`) are swept by co-located tests in
+// those modules via `assert_icon_renderable_on_android`; here we sweep the
+// inline literals (`INLINE_UI_GLYPHS`) and check the substitution table's own
+// invariants. These run host-side (parsing only the embedded font bytes), so
+// `cargo test -p holon-gpui` on macOS/Linux catches a truncated/wrong font
+// asset or an unrenderable/unnecessary substitute before it ever reaches a
+// device.
+#[cfg(test)]
+mod icon_font_tests {
+    use ttf_parser::Face;
+
+    use super::ICON_SUBSTITUTES;
+    use super::INLINE_UI_GLYPHS;
+
+    const DEJAVU_SANS: &[u8] = include_bytes!("../../../assets/fonts/DejaVuSans.ttf");
+
+    fn face() -> Face<'static> {
+        Face::parse(DEJAVU_SANS, 0).expect("embedded DejaVu Sans must parse")
+    }
+
+    /// Every inline UI glyph literal (toolbar, chevrons, checkboxes, banners)
+    /// must render on Android — covered by DejaVu directly or
+    /// substitution-routed.
+    #[test]
+    fn inline_ui_glyphs_render_on_android() {
+        for glyph in INLINE_UI_GLYPHS {
+            super::assert_icon_renderable_on_android(glyph, "INLINE_UI_GLYPHS");
+        }
+    }
+
+    /// Every substitute must be a glyph DejaVu actually has, and the source
+    /// glyph it replaces must NOT be in DejaVu — otherwise the substitution is
+    /// either broken (tofu substitute) or unnecessary (source was covered).
+    #[test]
+    fn substitutes_are_covered_and_needed() {
+        let face = face();
+        for (from, sub) in ICON_SUBSTITUTES {
+            let sub_char = sub.chars().next().expect("substitute is non-empty");
+            assert!(
+                face.glyph_index(sub_char).is_some(),
+                "substitute {sub:?} (U+{:04X}) for {from:?} not covered by DejaVu Sans",
+                sub_char as u32
+            );
+            let from_char = from.chars().next().expect("source glyph is non-empty");
+            assert!(
+                face.glyph_index(from_char).is_none(),
+                "source glyph {from:?} (U+{:04X}) IS covered by DejaVu Sans — substitution unnecessary",
+                from_char as u32
+            );
+        }
+    }
 }

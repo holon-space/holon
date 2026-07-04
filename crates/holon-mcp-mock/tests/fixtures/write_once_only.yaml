@@ -1,0 +1,23 @@
+# Once-only sidecar, DEFAULT writer designation (`once_only: confirm_manually`,
+# the absent-field default). `write-item` is `once_only`, so the dispatch
+# chokepoint QUEUES it for human confirmation instead of firing (leases/read-
+# write ruling, increment 4). No `key_param`: this connector has no remote
+# dedup, so the LOCAL pending-write store is the sole at-most-once authority.
+# The test overrides `command` and inserts MOCK_MCP_SCENARIO.
+transport:
+  child_process:
+    command: /bin/false
+entity_prefix: "mock_"
+writes: enabled
+entities:
+  items:
+    short_name: item
+    id_column: id
+    schema:
+      - { name: id,    sql_type: TEXT, primary_key: true }
+      - { name: title, sql_type: TEXT }
+      - { name: body,  sql_type: TEXT }
+tools:
+  write-item:
+    entity: items
+    effect: once_only

@@ -1,0 +1,1 @@
+/Users/martin/.claude/plans/holon-editor-buffer-ownership-inversion-2026-07-20.md

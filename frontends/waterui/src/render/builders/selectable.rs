@@ -20,10 +20,12 @@ pub fn build(ba: BA) -> AnyView {
 
     if let Some(action) = holon_frontend::operations::parse_action_expr(action_expr, ba.ctx.row()) {
         let session = ba.ctx.session.clone();
-        let handle = ba.ctx.runtime_handle.clone();
+        let spawner: std::sync::Arc<dyn holon_api::spawner::Spawner> = std::sync::Arc::new(
+            holon_api::spawner::TokioSpawner::new(ba.ctx.runtime_handle.clone()),
+        );
         return AnyView::new(child.on_tap(move || {
             holon_frontend::operations::dispatch_operation(
-                &handle,
+                &spawner,
                 &session,
                 action.entity_name.clone(),
                 action.op_name.clone(),

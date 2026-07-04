@@ -1,5 +1,17 @@
 //! Language-neutral query representation for PBT testing.
 //!
+//! @pbt kind oracle
+//! @pbt gen `QuerySource` has 6 variants but the file generator only mints 3
+//!   (AllBlocks, DirectChildren, DescendantsOfAny); FocusRootDescendants,
+//!   FocusRootOnly and PageBlocks are seeded by the default layout / start_app
+//!   only, never by a user-authored index.org override — so a layout-override
+//!   bug specific to those traversals is not reachable via WriteOrgFile
+//! @pbt gen watched-query generator (`generate_test_query`) is fixed: always
+//!   AllBlocks + the same 6 columns + 0..=2 preds drawn from a 4-element
+//!   `generate_predicate` set (Ne/Eq×2/IsNotNull) — no Lt/Gt/Contains, no
+//!   custom-property predicates, no negation; the predicate compiler's untested
+//!   surface is the AST in query_ast.rs, not this one
+//!
 //! `TestQuery` compiles to PRQL, SQL, or GQL and evaluates against the
 //! reference model. Uses `holon_api::Predicate` directly — no separate
 //! TestPredicate type.
@@ -7,9 +19,11 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::str::FromStr;
 
 use holon_api::EntityUri;
 use holon_api::QueryLanguage;
+use holon_api::Region;
 use holon_api::Value;
 use holon_api::block::Block;
 use holon_api::predicate::Predicate;
@@ -30,6 +44,15 @@ pub struct WatchSpec {
 pub enum QueryTable {
     Blocks,
 }
+
+/// Nesting depth at which the compiled main-panel query truncates its
+/// recursion (`WHERE _vl2.depth < 20 … AND _vl2.depth <= 20`, pinned by
+/// `crates/holon/tests/turso_storage_repros/tabs_main_panel_delivery.rs`).
+/// A block deeper than this renders NO panel row, so it is neither a legal
+/// click target nor a row any invariant may demand. Single-sourced here
+/// because both the reference query evaluator and the reference's
+/// `main_editable_descendants` visibility predicate must agree with it.
+pub const MAIN_PANEL_MAX_DEPTH: u32 = 20;
 
 /// The traversal/source form a query reads from — the dimension that
 /// distinguishes a flat watched query (`AllBlocks`) from the LAYOUT queries
@@ -53,11 +76,41 @@ pub enum QuerySource {
     /// GQL `MATCH (root:block)<-[:CHILD_OF*min..max]-(d:block) RETURN d` with
     /// an unbound root. Navigation-blind. `max_depth == 0` means unbounded.
     DescendantsOfAny { min_depth: u32, max_depth: u32 },
+
     /// Navigation-aware: descendants (including self, depth `0..=max_depth`) of
     /// the focus-root(s) for `region`. The default layout's panel form
     /// (`MATCH (fr:focus_root),(root:block)<-[:CHILD_OF*0..max]-(d:block)
     /// WHERE fr.region = R AND root.id = fr.root_id RETURN d`).
-    FocusRootDescendants { region: String, max_depth: u32 },
+    FocusRootDescendants {
+        region: String,
+        max_depth: u32,
+        /// When true, the recursive descent stops at non-root pages (page
+        /// identity via `block_tags.tag = 'Page'`). The new holon_sql layout
+        /// queries (Phase 3 data half of embedded-page collapse+lazy) set
+        /// this; the legacy GQL form and the no-user-index-org default do
+        /// not.
+        stop_at_pages: bool,
+    },
+    /// Navigation-aware: the focus-root row(s) for `region` and nothing else.
+    /// The main panel's form — it delegates the subtree to the focus root's
+    /// own render via `live_block()`, so its own query selects one row per
+    /// open root.
+    FocusRootOnly { region: String },
+    /// The journals page's OWN feed source (`SELECT * FROM journal_feed`),
+    /// reached when the main panel delegates to a focused `block:journals`.
+    /// The `journal_feed` matview chains on `journal_day_pages`, whose whole
+    /// predicate is `block_tags.tag = 'Page' AND parent_id = 'block:journals'`
+    /// — so the feed lists the day pages and NOTHING else under journals (not
+    /// its source blocks, not plain text children). The root id is hardcoded
+    /// in the matview DDL, so it is not a parameter here either.
+    JournalFeed,
+    /// The production seeded left-sidebar watch from
+    /// `assets/default/index.org`: every page block except the
+    /// `__default__` seed page. SQL-only — `SELECT b.* FROM block b JOIN
+    /// block_tags bt ON bt.block_id = b.id WHERE bt.tag = 'Page' AND b.id
+    /// != 'block:__default__'`. No PRQL/GQL surface (the sidebar is
+    /// authored in holon_sql).
+    PageBlocks,
 }
 
 impl Default for QuerySource {
@@ -89,7 +142,8 @@ impl QuerySource {
                 } else if q.starts_with("from focused_children") {
                     QuerySource::FocusRootDescendants {
                         region: "main".to_string(),
-                        max_depth: 20,
+                        max_depth: MAIN_PANEL_MAX_DEPTH,
+                        stop_at_pages: false,
                     }
                 } else {
                     QuerySource::AllBlocks
@@ -99,7 +153,8 @@ impl QuerySource {
                 if q.contains("focus_root") {
                     QuerySource::FocusRootDescendants {
                         region: gql_focus_region(q),
-                        max_depth: 20,
+                        max_depth: MAIN_PANEL_MAX_DEPTH,
+                        stop_at_pages: false,
                     }
                 } else if let Some((min_depth, max_depth)) = gql_childof_star_bounds(q) {
                     QuerySource::DescendantsOfAny {
@@ -115,7 +170,35 @@ impl QuerySource {
                 }
             }
             QueryLanguage::HolonSql => {
-                if q.contains("parent_id") && q.contains("content_type") {
+                if q.contains("journal_feed") {
+                    QuerySource::JournalFeed
+                } else if q.contains("focus_roots") {
+                    // Canonical prod keys (`Region::as_str()`): a focus SQL
+                    // filters `navigation_history.region`, whose values are
+                    // exactly what `focus_pin` writes. Default to `Main` when no
+                    // region predicate is present.
+                    let region = if q.contains("region = 'right_sidebar'") {
+                        Region::RightSidebar
+                    } else if q.contains("region = 'left_sidebar'") {
+                        Region::LeftSidebar
+                    } else {
+                        Region::Main
+                    };
+                    // No descendant walk in the SQL means the panel selects the
+                    // root row alone and delegates its subtree to that root's
+                    // own render.
+                    if q.contains("focus_descendants") {
+                        QuerySource::FocusRootDescendants {
+                            region: region.as_str().to_string(),
+                            max_depth: MAIN_PANEL_MAX_DEPTH,
+                            stop_at_pages: true,
+                        }
+                    } else {
+                        QuerySource::FocusRootOnly {
+                            region: region.as_str().to_string(),
+                        }
+                    }
+                } else if q.contains("parent_id") && q.contains("content_type") {
                     QuerySource::DirectChildren {
                         context: layout_block.clone(),
                     }
@@ -127,14 +210,35 @@ impl QuerySource {
     }
 }
 
-/// Parse `'region'` out of a GQL `WHERE fr.region = 'main'` clause; defaults to
-/// `"main"`.
+/// Parse the region literal out of a GQL `WHERE fr.region = '<region>'` clause
+/// into the canonical [`Region`] key prod uses. Parse-don't-validate at the
+/// boundary: the returned string is `Region::as_str()` (the exact value
+/// `focus_pin` writes to `navigation_history.region` and the focus matview
+/// keys by), NOT whatever literal the seed happens to carry. A focus-root
+/// query with no `fr.region` clause defaults to `Region::Main`; an UNKNOWN
+/// region literal (e.g. a stale `'right'` instead of `'right_sidebar'`) is a
+/// loud parse error here — never a silently-empty filter that mirrors a broken
+/// seed and hides the divergence from prod.
 fn gql_focus_region(gql: &str) -> String {
-    gql.split_once("fr.region")
+    let literal = gql
+        .split_once("fr.region")
         .and_then(|(_, rest)| rest.split_once('\''))
         .and_then(|(_, rest)| rest.split_once('\''))
-        .map(|(region, _)| region.to_string())
-        .unwrap_or_else(|| "main".to_string())
+        .map(|(region, _)| region);
+    match literal {
+        None => Region::Main.as_str().to_string(),
+        Some(lit) => Region::from_str(lit)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "focus-root GQL carries an unknown region literal {lit:?} — the reference \
+                     interpreter parses region literals into the prod Region enum so a seed that \
+                     drifts from Region::as_str() fails loud instead of silently rendering an \
+                     empty region: {e}"
+                )
+            })
+            .as_str()
+            .to_string(),
+    }
 }
 
 /// Parse `a..b` out of a GQL `CHILD_OF*a..b` clause.
@@ -151,6 +255,16 @@ fn gql_childof_star_bounds(gql: &str) -> Option<(u32, u32)> {
     let max = max_s.parse().ok()?;
     Some((min, max))
 }
+
+holon_pbt_core::step_field_via_json!(
+    TestQuery,
+    vec![TestQuery {
+        table: QueryTable::Blocks,
+        columns: vec!["id".to_string()],
+        predicates: Vec::new(),
+        source: QuerySource::AllBlocks,
+    }]
+);
 
 /// A language-neutral query that can compile to PRQL, SQL, or GQL and also
 /// evaluate against the reference model.
@@ -258,6 +372,15 @@ impl TestQuery {
             QuerySource::DirectChildren { .. } => "from children".to_string(),
             QuerySource::DescendantsOfAny { .. } => "from descendants".to_string(),
             QuerySource::FocusRootDescendants { .. } => "from focused_children".to_string(),
+            QuerySource::FocusRootOnly { .. } => {
+                unreachable!("FocusRootOnly is SQL-only (seeded main-panel query)")
+            }
+            QuerySource::JournalFeed => {
+                unreachable!("JournalFeed is SQL-only (the journals page's own source)")
+            }
+            QuerySource::PageBlocks => {
+                unreachable!("PageBlocks is SQL-only (seeded sidebar watch)")
+            }
         };
         let cols = self.columns.join(", ");
         let mut q = format!("{from} | select {{{cols}}} ");
@@ -267,7 +390,38 @@ impl TestQuery {
         q
     }
 
+    /// The seeded-sidebar watch SQL over `table` (`block` for the matview
+    /// read-path, `block_raw` for the lag-classifier truth-path). Reproduces
+    /// the production `index.org` left-sidebar query, projecting
+    /// `self.columns` qualified with the `b.` alias (both tables carry
+    /// `id`, so the JOIN needs disambiguation). Single source for both
+    /// [`to_sql`](Self::to_sql) and
+    /// [`to_block_raw_sql`](Self::to_block_raw_sql).
+    fn page_blocks_sql(&self, table: &str) -> String {
+        let cols = self
+            .columns
+            .iter()
+            .map(|c| format!("b.{c}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut wheres = vec![
+            "bt.tag = 'Page'".to_string(),
+            format!(
+                "b.id != {}",
+                value_to_sql_literal(&Value::String("block:__default__".to_string()))
+            ),
+        ];
+        wheres.extend(self.predicates.iter().map(pred_to_sql_where));
+        format!(
+            "SELECT {cols} FROM {table} b JOIN block_tags bt ON bt.block_id = b.id WHERE {}",
+            wheres.join(" AND ")
+        )
+    }
+
     pub fn to_sql(&self) -> String {
+        if let QuerySource::PageBlocks = &self.source {
+            return self.page_blocks_sql("block");
+        }
         let cols = self.columns.join(", ");
         let mut wheres: Vec<String> = Vec::new();
         let from = match &self.source {
@@ -279,12 +433,16 @@ impl TestQuery {
                 ));
                 "block".to_string()
             }
-            QuerySource::DescendantsOfAny { .. } | QuerySource::FocusRootDescendants { .. } => {
+            QuerySource::DescendantsOfAny { .. }
+            | QuerySource::FocusRootDescendants { .. }
+            | QuerySource::FocusRootOnly { .. }
+            | QuerySource::JournalFeed => {
                 // These transitive/navigation-aware forms have no flat-SQL
                 // surface in the PBT; only PRQL/GQL emit them. `to_sql` is the
                 // watched-query path (always AllBlocks/DirectChildren).
                 "block".to_string()
             }
+            QuerySource::PageBlocks => unreachable!("handled by early return above"),
         };
         let mut q = format!("SELECT {cols} FROM {from}");
         wheres.extend(self.predicates.iter().map(pred_to_sql_where));
@@ -307,6 +465,11 @@ impl TestQuery {
     /// IDs returned by `block_raw` and `block` are identical, so this is a
     /// safe truth source.
     pub fn to_block_raw_sql(&self) -> String {
+        if let QuerySource::PageBlocks = &self.source {
+            // block_tags is a base table in both wirings, so the seeded-sidebar
+            // JOIN reads straight from `block_raw`.
+            return self.page_blocks_sql("block_raw");
+        }
         let cols = self.columns.join(", ");
         let mut q = format!("SELECT {cols} FROM block_raw");
         let wheres: Vec<String> = self.predicates.iter().map(pred_to_sql_where).collect();
@@ -337,13 +500,24 @@ impl TestQuery {
                 format!("MATCH (root:block)<-[:CHILD_OF*{min_depth}..{max_depth}]-(d:block)"),
                 "d",
             ),
-            QuerySource::FocusRootDescendants { region, max_depth } => (
+            QuerySource::FocusRootDescendants {
+                region, max_depth, ..
+            } => (
                 format!(
                     "MATCH (fr:focus_root), (root:block)<-[:CHILD_OF*0..{max_depth}]-(d:block) \
                      WHERE fr.region = '{region}' AND root.id = fr.root_id"
                 ),
                 "d",
             ),
+            QuerySource::FocusRootOnly { .. } => {
+                unreachable!("FocusRootOnly is SQL-only (seeded main-panel query)")
+            }
+            QuerySource::JournalFeed => {
+                unreachable!("JournalFeed is SQL-only (the journals page's own source)")
+            }
+            QuerySource::PageBlocks => {
+                unreachable!("PageBlocks is SQL-only (seeded sidebar watch)")
+            }
         };
         let returns = self
             .columns
@@ -416,16 +590,33 @@ impl TestQuery {
             ) => format!(
                 "MATCH (root:block)<-[:CHILD_OF*{min_depth}..{max_depth}]-(d:block) RETURN d"
             ),
-            (QuerySource::FocusRootDescendants { region, max_depth }, _) => format!(
+            (
+                QuerySource::FocusRootDescendants {
+                    region, max_depth, ..
+                },
+                _,
+            ) => format!(
                 "MATCH (fr:focus_root), (root:block)<-[:CHILD_OF*0..{max_depth}]-(d:block) WHERE \
                  fr.region = '{region}' AND root.id = fr.root_id RETURN d"
             ),
+            (QuerySource::FocusRootOnly { region }, _) => format!(
+                "SELECT root.* FROM focus_roots fr JOIN block root ON root.id = fr.root_id JOIN \
+                 navigation_cursor nc ON nc.region = fr.region AND nc.history_id = fr.history_id \
+                 WHERE fr.region = '{region}'"
+            ),
+            (QuerySource::JournalFeed, _) => {
+                "SELECT * FROM journal_feed ORDER BY content DESC".to_string()
+            }
+            (QuerySource::PageBlocks, _) => {
+                unreachable!("PageBlocks is a watched query, not a layout query")
+            }
         };
         // DescendantsOfAny / FocusRootDescendants only have a GQL surface.
         let effective = match &self.source {
             QuerySource::DescendantsOfAny { .. } | QuerySource::FocusRootDescendants { .. } => {
                 QueryLanguage::HolonGql
             }
+            QuerySource::FocusRootOnly { .. } => QueryLanguage::HolonSql,
             _ => lang,
         };
         (q, effective)
@@ -483,14 +674,48 @@ impl TestQuery {
                 .filter(|b| depth_from_some_root(blocks, &b.id) >= *min_depth)
                 .map(|b| b.id.clone())
                 .collect(),
-            QuerySource::FocusRootDescendants { region, max_depth } => {
-                // Same `CHILD_OF*` mechanism as DescendantsOfAny — does NOT
-                // filter `content_type = 'source'`. Callers that only want
-                // editable content filter to text blocks themselves.
+            QuerySource::FocusRootDescendants {
+                region,
+                max_depth,
+                stop_at_pages,
+            } => {
                 let roots = focus_roots.get(region).cloned().unwrap_or_default();
+                if *stop_at_pages {
+                    blocks
+                        .values()
+                        .filter(|b| {
+                            descendant_within_stopping_at_pages(blocks, &b.id, &roots, *max_depth)
+                        })
+                        .map(|b| b.id.clone())
+                        .collect()
+                } else {
+                    blocks
+                        .values()
+                        .filter(|b| descendant_within(blocks, &b.id, &roots, *max_depth))
+                        .map(|b| b.id.clone())
+                        .collect()
+                }
+            }
+            QuerySource::FocusRootOnly { region } => focus_roots
+                .get(region)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|id| blocks.contains_key(id))
+                .collect(),
+            QuerySource::JournalFeed => {
+                let journals = EntityUri::block("journals");
                 blocks
                     .values()
-                    .filter(|b| descendant_within(blocks, &b.id, &roots, *max_depth))
+                    .filter(|b| b.is_page() && b.parent_id == journals)
+                    .map(|b| b.id.clone())
+                    .collect()
+            }
+            QuerySource::PageBlocks => {
+                let default_page = EntityUri::block("__default__");
+                blocks
+                    .values()
+                    .filter(|b| b.is_page() && b.id != default_page)
                     .map(|b| b.id.clone())
                     .collect()
             }
@@ -656,4 +881,136 @@ fn descendant_within(
         current = parent;
     }
     false
+}
+
+/// Like [`descendant_within`] but the traversal stops at any non-root page:
+/// a block whose nearest-root ancestor path includes a page that is not itself
+/// a root is excluded. This mirrors the Phase 3 holon_sql recursive CTE's
+/// `LEFT JOIN block_tags ... WHERE fd._depth = 0 OR bt.block_id IS NULL`
+/// guard, which descends into children of the root (depth 0) unconditionally
+/// but into children of non-root nodes only if those nodes are not pages.
+pub(crate) fn descendant_within_stopping_at_pages(
+    blocks: &BTreeMap<EntityUri, Block>,
+    id: &EntityUri,
+    roots: &BTreeSet<EntityUri>,
+    max_depth: u32,
+) -> bool {
+    if roots.contains(id) {
+        return true;
+    }
+    let mut current = id.clone();
+    for _ in 0..max_depth.min(50) {
+        let Some(block) = blocks.get(&current) else {
+            return false;
+        };
+        let parent = block.parent_id.clone();
+        // Descent out of the ROOT is unconditional (`fd._depth = 0`).
+        if roots.contains(&parent) {
+            return true;
+        }
+        if parent.is_no_parent() || parent.is_sentinel() {
+            return false;
+        }
+        // The guard is on the node being descended FROM — the PARENT — not on
+        // `current`. `current` being a page never excludes `current` itself; it
+        // excludes its children. Testing `current` instead skipped the stop
+        // entirely whenever the page was a direct child of the root (the walk
+        // reached the root from the page and returned early), which is exactly
+        // the shape `BlockToPage` creates.
+        let Some(parent_block) = blocks.get(&parent) else {
+            return false;
+        };
+        if parent_block.is_page() {
+            return false;
+        }
+        current = parent;
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use holon_api::EntityUri;
+    use holon_api::QueryLanguage;
+    use holon_api::Region;
+
+    use super::QuerySource;
+
+    const DEFAULT_INDEX_ORG: &str = include_str!("../../../../assets/default/index.org");
+
+    /// The `holon_sql` body of the `#+BEGIN_SRC holon_sql :id <id>` block.
+    fn seeded_sql(org: &str, id: &str) -> String {
+        let header = format!("#+BEGIN_SRC holon_sql :id {id}");
+        let start = org
+            .find(&header)
+            .unwrap_or_else(|| panic!("{id} holon_sql block missing from the shipped index.org"))
+            + header.len();
+        let body = &org[start..];
+        let end = body
+            .find("#+END_SRC")
+            .unwrap_or_else(|| panic!("{id} holon_sql block is unterminated"));
+        body[..end].trim().to_string()
+    }
+
+    /// **The ref↔asset pin for the main panel's query form.**
+    ///
+    /// `ReferenceState::active_main_query` hardcodes the default layout's
+    /// source instead of reading the org, so a change to the shipped
+    /// `assets/default/index.org` can silently desynchronize the oracle from
+    /// production. This pins both ends against the asset: the SQL the app
+    /// actually seeds must recognize as [`QuerySource::FocusRootOnly`] — the
+    /// row-only form that delegates its subtree through `live_block()` —
+    /// and NOT as the descendant-walking form the panel used to run.
+    ///
+    /// @pbt kind harness
+    /// @pbt covers main-panel-query-form — the oracle's model of the default
+    /// main panel must match the query the shipped index.org seeds.
+    #[test]
+    fn seeded_main_panel_sql_recognizes_as_focus_root_only() {
+        let sql = seeded_sql(DEFAULT_INDEX_ORG, "default-main-panel::src::0");
+        assert!(
+            sql.contains("focus_roots") && !sql.contains("focus_descendants"),
+            "the shipped main-panel SQL must select the focus-root row alone \
+             and delegate the subtree via live_block(): {sql}"
+        );
+
+        let recognized = QuerySource::recognize(
+            &sql,
+            QueryLanguage::HolonSql,
+            &EntityUri::block("default-main-panel"),
+        );
+        assert_eq!(
+            recognized,
+            QuerySource::FocusRootOnly {
+                region: Region::Main.as_str().to_string(),
+            },
+            "shipped main-panel SQL recognized as the wrong source form: {sql}"
+        );
+    }
+
+    /// The sibling pin: the descendant-walking form must still recognize as
+    /// [`QuerySource::FocusRootDescendants`], so the split in `recognize`
+    /// discriminates on the `focus_descendants` CTE rather than collapsing
+    /// both forms onto whichever arm was written last.
+    ///
+    /// @pbt kind harness
+    /// @pbt covers main-panel-query-form
+    #[test]
+    fn focus_descendant_sql_still_recognizes_as_descendants() {
+        let sql = "WITH RECURSIVE focus_descendants AS (SELECT b.id FROM block b JOIN \
+                   focus_roots fr ON b.id = fr.root_id) SELECT d.* FROM focus_roots fr JOIN \
+                   focus_descendants d ON 1 = 1 WHERE fr.region = 'main'";
+        assert_eq!(
+            QuerySource::recognize(
+                sql,
+                QueryLanguage::HolonSql,
+                &EntityUri::block("default-main-panel"),
+            ),
+            QuerySource::FocusRootDescendants {
+                region: Region::Main.as_str().to_string(),
+                max_depth: super::MAIN_PANEL_MAX_DEPTH,
+                stop_at_pages: true,
+            },
+        );
+    }
 }

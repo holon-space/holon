@@ -29,3 +29,35 @@ use crate::navigation::NavDirection;
 pub trait SutArrowNavigate {
     async fn apply_arrow_navigate(&self, region: CapRegion, direction: NavDirection, steps: u8);
 }
+
+/// A direction reads as its lowercase name in a step. The impl lives here
+/// because the trait is `holon-pbt-core`'s and the type is this crate's.
+impl holon_pbt_core::step_vocabulary::StepField for NavDirection {
+    const QUOTED: bool = true;
+    fn render_step_field(&self) -> String {
+        match self {
+            NavDirection::Up => "up",
+            NavDirection::Down => "down",
+            NavDirection::Left => "left",
+            NavDirection::Right => "right",
+        }
+        .to_string()
+    }
+    fn parse_step_field(raw: &str) -> Result<Self, String> {
+        match raw.to_lowercase().as_str() {
+            "up" => Ok(NavDirection::Up),
+            "down" => Ok(NavDirection::Down),
+            "left" => Ok(NavDirection::Left),
+            "right" => Ok(NavDirection::Right),
+            other => Err(format!("unknown navigation direction: {other:?}")),
+        }
+    }
+    fn step_field_examples() -> Vec<Self> {
+        vec![
+            NavDirection::Up,
+            NavDirection::Down,
+            NavDirection::Left,
+            NavDirection::Right,
+        ]
+    }
+}

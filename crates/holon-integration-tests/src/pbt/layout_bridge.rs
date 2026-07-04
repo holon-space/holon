@@ -5,12 +5,12 @@
 //!   `weighted_generator` / `preconditions` bodies in
 //!   `holon_layout_testing::transitions::*` consume our reference state
 //!   directly (via `LayoutRef::new(&state)`).
-//! - `SutClickAdapter`: wraps `&mut dyn SutHandle` so it implements the
+//! - `SutClickAdapter`: wraps `&mut dyn SUT caps` so it implements the
 //!   capability traits (`Clickable`, `LiveBlockSink`) the shared `apply_to_sut`
 //!   bodies require. Delegates to two new `SutHandle` methods
 //!   (`apply_click_at_element` and `apply_deliver_block_content_loaded`).
 //!
-//! ## Why a bridge instead of impls on `SutHandle` directly?
+//! ## Why a bridge instead of impls on the SUT cap bundle directly?
 //!
 //! `SutHandle` is `dyn`-safe and already big. The capability impls live
 //! on a wrapper so the trait surface of `SutHandle` doesn't grow a

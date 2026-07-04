@@ -4,21 +4,31 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+# `workspace-hack` is the cargo-hakari feature-unification crate: every
+# member depends on it and no member references it in source, by design.
+[package.metadata.cargo-machete]
+ignored = ["workspace-hack"]
+
 [dependencies]
 orgize.workspace = true
 anyhow.workspace = true
-chrono.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+# `preserve_order` is load-bearing, not incidental: the file-level and headline
+# `:PROPERTIES:` drawers replay their keys in the order the author wrote them,
+# and that order lives in a `serde_json::Map`. Declared here rather than
+# inherited from workspace-hack's feature unification, which a hakari regen
+# could withdraw — alphabetizing every drawer in the vault on the next write.
+serde_json = { workspace = true, features = ["preserve_order"] }
 sha2.workspace = true
 hex.workspace = true
 uuid.workspace = true
 tracing.workspace = true
-once_cell.workspace = true
 holon-api.workspace = true
-holon-core.workspace = true
-holon-macros.workspace = true
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]
 proptest.workspace = true
+tracing-subscriber.workspace = true
+# Dev-only cycle (that crate depends on this one): the shared `(content, marks)`
+# store-state generators live there per the shared-generator directive.
+holon-block-roundtrip-testing = { workspace = true }

@@ -149,6 +149,10 @@ action create_todoist_task(
 
 This unifies the mental model: queries select data, then either `render` (for UI) or `action` (for automation).
 
+#### 3.1 Freshness as First-Class Metadata
+
+*(influence: LifeOS)* Knowledge rots silently; tasks at least have due dates. Holon extends the nothing-forgotten guarantee to knowledge by letting any entity carry freshness metadata: `provenance` (who/what wrote it), `last_updated`, and an optional `review_cadence`. The Watcher surfaces entities past their cadence the same way it surfaces at-risk deadlines. This is the concrete mechanism behind "functional debt" tracking (see [Vision/LongTerm.md](Vision/LongTerm.md) §Track "Functional Debt"): stale reference notes, decayed entity attributes, and reviews that never happen become visible, queryable state instead of vague unease. LifeOS runs this convention across its whole config tree and it is load-bearing there — staleness detection is what triggers its review loops.
+
 ### 4. Offline-First with Strong Sync
 
 Work on notes and tasks across devices without internet connection. Everything syncs automatically when back online.
@@ -448,7 +452,7 @@ Common operations work uniformly; system-specific features accessible when neede
 3. **Platform Differences**: Some features won't work on mobile (complex plugins). That's OK.
 4. **Complexity**: This is an advanced tool. Not targeting complete beginners.
 5. **Flow over Features**: We prioritize flow-enabling features over feature count.
-6. **Structure over Model**: We invest in data structure (schemas, typed relationships, materialized views) over AI model capability. The substitution test: swap the AI model — the system must still work. Remove the data structure — nothing can reconstruct it. See [Vision/AI.md](Vision/AI.md) §Structural Primacy.
+6. **Structure over Model**: We invest in data structure (schemas, typed relationships, materialized views) over AI model capability. The substitution test: swap the AI model — the system must still work. Remove the data structure — nothing can reconstruct it. See [Vision/AI.md](Vision/AI.md) §Structural Primacy. Empirical support from LifeOS (a file-based prototype of Holon's AI layers): its reliable parts are the deterministic ones (freshness checks, guarded generators that refuse to silently drop data, health doctor), while its recurring failure mode is derived-data divergence between redundant file projections that only a reconciliation script keeps consistent — precisely the tax that "one canonical location, multiple projections" (materialized views over a single store) eliminates.
 
 ---
 

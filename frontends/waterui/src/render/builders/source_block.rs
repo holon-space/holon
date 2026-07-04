@@ -33,7 +33,9 @@ pub fn build(ba: BA) -> AnyView {
             .unwrap_or_else(|| exec_op.descriptor.entity_name.to_string());
         let op_name = exec_op.descriptor.name.clone();
         let session = ba.ctx.session.clone();
-        let handle = ba.ctx.runtime_handle.clone();
+        let spawner: std::sync::Arc<dyn holon_api::spawner::Spawner> = std::sync::Arc::new(
+            holon_api::spawner::TokioSpawner::new(ba.ctx.runtime_handle.clone()),
+        );
         header_views.push(AnyView::new(
             text("[run]")
                 .size(11.0)
@@ -43,7 +45,7 @@ pub fn build(ba: BA) -> AnyView {
                     let mut params = HashMap::new();
                     params.insert("id".to_string(), Value::String(id.clone()));
                     holon_frontend::operations::dispatch_operation(
-                        &handle,
+                        &spawner,
                         &session,
                         entity_name.clone(),
                         op_name.clone(),

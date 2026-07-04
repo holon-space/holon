@@ -41,7 +41,10 @@ fn t0() -> DateTime<Utc> {
     "2026-01-01T00:00:00Z".parse().unwrap()
 }
 
-fn marking(tokens: Vec<(&str, &str, Vec<(&str, Value)>)>) -> YamlMarking {
+/// One token fixture: `(id, token_type, [(field, value)])`.
+type TokenSpec<'a> = (&'a str, &'a str, Vec<(&'a str, Value)>);
+
+fn marking(tokens: Vec<TokenSpec<'_>>) -> YamlMarking {
     YamlMarking {
         clock: t0(),
         tokens: tokens
@@ -562,4 +565,52 @@ fn evaluator_expr_and_bool() {
     assert_eq!(ev.eval_expr("2.0 + 3.0", &mut scope), Ok(5.0));
     assert_eq!(ev.eval_bool("1 < 2", &mut scope), Ok(true));
     assert_eq!(ev.eval_bool("2 < 1", &mut scope), Ok(false));
+}
+
+/// F3.1 regression: a duration past chrono::Duration's minute range must be
+/// an `Err` from `fire()`, never a panic — `rank()` simulates `fire` on the
+/// live `rank_tasks` MCP path with vault-stored durations.
+#[test]
+fn fire_returns_err_on_duration_overflowing_chrono_duration() {
+    let net = net_from_yaml(
+        r#"
+transitions:
+  megatask:
+    duration: 200000000000000
+    inputs:
+      - { bind: doc, token_type: document, consume: false }
+    outputs: []
+"#,
+    );
+    let mut m = marking(vec![("doc1", "document", vec![])]);
+    let engine = Engine::new();
+    let enabled = engine.enabled(&net, &m).unwrap();
+    assert_eq!(enabled.len(), 1);
+    let err = engine
+        .fire(&net, &mut m, &enabled[0], 0)
+        .expect_err("2e14 minutes must be an Err, not a chrono panic");
+    assert!(err.contains("overflow"), "got: {err}");
+}
+
+/// Companion: a duration that fits in `chrono::Duration` but overflows the
+/// representable `DateTime` range hits the second checked step.
+#[test]
+fn fire_returns_err_on_duration_overflowing_datetime_range() {
+    let net = net_from_yaml(
+        r#"
+transitions:
+  megatask:
+    duration: 200000000000
+    inputs:
+      - { bind: doc, token_type: document, consume: false }
+    outputs: []
+"#,
+    );
+    let mut m = marking(vec![("doc1", "document", vec![])]);
+    let engine = Engine::new();
+    let enabled = engine.enabled(&net, &m).unwrap();
+    let err = engine
+        .fire(&net, &mut m, &enabled[0], 0)
+        .expect_err("2e11 minutes must be an Err, not a chrono panic");
+    assert!(err.contains("overflow"), "got: {err}");
 }

@@ -11,6 +11,19 @@ slow-timeout = { period = "30s", terminate-after = 4 }   # 2 min hard cap
 filter = "binary(general_e2e_composed_pbt) + binary(petri_e2e_pbt) + binary(round_trip_pbt) + binary(sync_controller_mutation_pbt) + binary(sync_suite)"
 slow-timeout = { period = "60s", terminate-after = 20 }  # 20 min hard cap
 
+# The slice PBTs live in the LIB test binary, which the binary() filters above
+# cannot name, so they inherited the 2 min default while legitimately running
+# minutes. Measured 2026-08-12 on the `--features pbt --lib` run:
+# frontend_structural_pbt 113s, sqlonly_generated_cases_… 110s,
+# the_shrinker_never_yields_… 67s — two of them within ~10s of the cap. A draw
+# that shrinks longer then dies as a TIMEOUT, which reads nothing like the
+# assertion underneath: frontend_navigation_pbt did exactly that (43s FAIL on one
+# run, 120s TIMEOUT on the next). Module-scoped, not per-test, so a rename cannot
+# silently drop the override; the other ~270 lib tests stay capped at 2 min.
+[[profile.default.overrides]]
+filter = "binary_id(holon-integration-tests) & (test(frontend_slice::navigation_pbt) + test(frontend_slice::structural_pbt) + test(composed::wide_e2e::tests))"
+slow-timeout = { period = "60s", terminate-after = 10 }  # 10 min hard cap
+
 # test_turso_backend_state_machine takes ~30 min when green (measured
 # 1771s on 2026-06-12); 20 min always killed it mid-run.
 [[profile.default.overrides]]

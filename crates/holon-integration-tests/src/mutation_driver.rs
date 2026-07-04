@@ -24,9 +24,13 @@ use holon_frontend::ReactiveViewModel;
 use holon_frontend::operations::OperationIntent;
 pub use holon_frontend::user_driver::ReactiveEngineDriver;
 pub use holon_frontend::user_driver::UserDriver;
+use holon_pbt_core::capabilities::SutBlockCreate;
+use holon_pbt_core::capabilities::SutBlockToPage;
 use holon_pbt_core::capabilities::SutBlockTreeWrite;
+use holon_pbt_core::capabilities::SutTemplateInstantiate;
 
 use crate::pbt::op_write_cap::IdResolver;
+use crate::template_fixture;
 
 /// Dispatches mutations directly via `BackendEngine::execute_operation`.
 /// Legacy driver — bypasses FrontendSession and ReactiveEngine.
@@ -62,12 +66,7 @@ impl DirectUserDriver {
     }
 
     fn resolve(&self, id: &EntityUri) -> EntityUri {
-        self.resolver
-            .lock()
-            .expect("resolver lock")
-            .get(id)
-            .cloned()
-            .unwrap_or_else(|| id.clone())
+        holon_pbt_core::types::resolve_sut_id(&self.resolver, id)
     }
 
     /// Dispatch a `block` op directly to the engine — the floor below
@@ -116,7 +115,21 @@ impl SutBlockTreeWrite for DirectUserDriver {
     }
 
     async fn apply_outdent(&self, id: &EntityUri) {
-        self.dispatch_block("outdent", self.id_only(id)).await;
+        // The ADR 0028 D1 page-boundary refusal is a modelled no-op, not a floor
+        // failure — see `is_page_boundary_outdent_refusal`. Any OTHER dispatch
+        // error stays fail-loud.
+        let params: HashMap<String, Value> = self
+            .id_only(id)
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        if let Err(e) = self.synthetic_dispatch("block", "outdent", params).await {
+            let msg = format!("{e:#}");
+            assert!(
+                crate::pbt::op_write_cap::is_page_boundary_outdent_refusal(&msg),
+                "[DirectUserDriver floor] block/outdent failed: {msg}"
+            );
+        }
     }
 
     async fn apply_move_up(&self, id: &EntityUri) {
@@ -125,6 +138,97 @@ impl SutBlockTreeWrite for DirectUserDriver {
 
     async fn apply_move_down(&self, id: &EntityUri) {
         self.dispatch_block("move_down", self.id_only(id)).await;
+    }
+}
+
+/// The op-floor `SutBlockCreate` (`CreateBlockUnderFocus`). Unlike the headless
+/// UI's creation-slot gesture, this dispatches `block.create` straight to the
+/// engine under the ref-resolved `parent` — deterministic, no dependency on a
+/// live rendered slot rowset. This is what makes `CreateBlockUnderFocus` run
+/// under a no-UI (storage-only) pin. The `parent` is resolved through the
+/// shared id map (a minted/synthetic parent → its real id); the born-equal
+/// `id`, when present, is passed verbatim so oracle and SUT share it. When `id`
+/// is `None` the `id` key is OMITTED — exercising the provider's
+/// mint-when-absent path.
+#[async_trait::async_trait(?Send)]
+impl SutBlockCreate for DirectUserDriver {
+    async fn apply_create_under_focus(
+        &self,
+        parent: &EntityUri,
+        content: &str,
+        id: Option<&EntityUri>,
+    ) {
+        let parent = self.resolve(parent).to_string();
+        let Some(uri) = id else {
+            return self.birth_via_creation_slot(&parent, content).await;
+        };
+        let mut params: StorageEntity = HashMap::new();
+        params.insert("parent_id".into(), Value::String(parent));
+        params.insert("content".into(), Value::String(content.to_string()));
+        params.insert("id".into(), Value::String(uri.to_string()));
+        self.dispatch_block("create", params).await;
+    }
+}
+
+impl DirectUserDriver {
+    /// The op-floor mirror of the production creation-slot gesture (ruling C +
+    /// sub-ruling B). The UI births an empty block on focus as a non-user op
+    /// and writes the typed text separately; the op floor must do the SAME two
+    /// ops, or the two drivers would exhibit different undo granularity for one
+    /// transition and no single oracle could describe both.
+    ///
+    /// The birth deliberately omits `id`, so the provider's mint-when-absent
+    /// path stays covered; the minted id comes back in the op's response and
+    /// the content write targets it.
+    ///
+    /// UNMIRRORED HALF, stated rather than faked: the gesture also MOVES the
+    /// caret into the newborn, and the reference models that
+    /// (`birth_block_under_slot` sets `focused_block` + opens the editor). This
+    /// driver cannot mirror it — `DirectUserDriver` implements no focus or
+    /// editor capability at all (`SutBlockTreeWrite`, `SutBlockCreate`,
+    /// `SutTemplateInstantiate`, `SutBlockToPage`, `SutPageIdentity` and
+    /// `UserDriver`, none of them focus), so on this pin focus-reading
+    /// invariants are deselected as "cap absent" and cannot observe the
+    /// mismatch. Dispatching `navigation.focus` here would NOT fix it and would
+    /// be worse: production's birth moves only the in-memory focus authority
+    /// and never persists a nav-history row, so the op floor would then be
+    /// MORE eager than prod on a second axis. The moment a focus-reading cap
+    /// lands on this pin, that cap must move focus to the newborn here.
+    async fn birth_via_creation_slot(&self, parent: &str, content: &str) {
+        let mut birth: HashMap<String, Value> = HashMap::new();
+        birth.insert("parent_id".into(), Value::String(parent.to_string()));
+        birth.insert("content".into(), Value::String(String::new()));
+        let outcome = self
+            .engine
+            .execute_operation(
+                &EntityName::new("block"),
+                "create",
+                birth
+                    .into_iter()
+                    .map(|(k, v)| (std::sync::Arc::from(k.as_str()), v))
+                    .collect(),
+                holon_api::OpOrigin::Rule {
+                    transition_id: holon_frontend::creation_slot::BIRTH_TRANSITION_ID.to_string(),
+                },
+            )
+            .await
+            .unwrap_or_else(|e| {
+                panic!("[DirectUserDriver floor] creation-slot birth failed: {e:#}")
+            });
+
+        let born = match outcome.response {
+            Some(Value::String(id)) => id,
+            other => panic!(
+                "[DirectUserDriver floor] creation-slot birth: block.create must return the \
+                 minted id as Value::String, got {other:?}"
+            ),
+        };
+
+        let mut write: StorageEntity = HashMap::new();
+        write.insert("id".into(), Value::String(born));
+        write.insert("field".into(), Value::String("content".into()));
+        write.insert("value".into(), Value::String(content.to_string()));
+        self.dispatch_block("set_field", write).await;
     }
 }
 
@@ -145,6 +249,7 @@ impl UserDriver for DirectUserDriver {
                 &EntityName::new(entity),
                 op,
                 params.into_iter().map(|(k, v)| (k.into(), v)).collect(),
+                holon_api::OpOrigin::User,
             )
             .await
             .map(|_| ())
@@ -263,5 +368,188 @@ impl UserDriver for DirectUserDriver {
 
     fn displayed_text(&self, _: &EntityUri) -> Option<String> {
         None
+    }
+}
+
+/// Op-floor `SutTemplateInstantiate`: seeds the canned template blocks
+/// (idempotent `block.create`), then dispatches
+/// `block.instantiate_template` through the production engine.
+#[async_trait::async_trait(?Send)]
+impl SutTemplateInstantiate for DirectUserDriver {
+    async fn instantiate_template(
+        &self,
+        template_id: &EntityUri,
+        target_parent: &EntityUri,
+        context_key: &str,
+        bindings: &[(String, String)],
+    ) {
+        // Seed the template blocks idempotent (UPSERT).
+        let mut root_params: HashMap<String, Value> = HashMap::new();
+        root_params.insert("id".to_string(), Value::String(template_id.to_string()));
+        // The template DEFINITION root is a top-level (parentless) block. Supply
+        // the canonical root sentinel explicitly so BOTH engines accept the seed as
+        // a root — the frontend Loro engine fails loud when `parent_id` is absent.
+        // `sentinel:no_parent` is the same parent pages/journals boot under.
+        root_params.insert(
+            "parent_id".to_string(),
+            Value::String(EntityUri::no_parent().to_string()),
+        );
+        root_params.insert(
+            "content".to_string(),
+            Value::String(template_fixture::TPL_ROOT_CONTENT.to_string()),
+        );
+        root_params.insert("template".to_string(), Value::String("t".to_string()));
+        root_params.insert(
+            "template_vars".to_string(),
+            Value::String(template_fixture::TPL_VARS.to_string()),
+        );
+        self.synthetic_dispatch("block", "create", root_params)
+            .await
+            .unwrap_or_else(|e| {
+                panic!("[DirectUserDriver floor] seed tpl root {template_id} failed: {e:#}")
+            });
+
+        let child_id = template_fixture::TPL_CHILD.to_string();
+        let mut child_params: HashMap<String, Value> = HashMap::new();
+        child_params.insert("id".to_string(), Value::String(child_id.clone()));
+        child_params.insert(
+            "parent_id".to_string(),
+            Value::String(template_id.to_string()),
+        );
+        child_params.insert(
+            "content".to_string(),
+            Value::String(template_fixture::TPL_CHILD_CONTENT.to_string()),
+        );
+        child_params.insert(
+            "marks".to_string(),
+            Value::String(template_fixture::tpl_child_marks_json()),
+        );
+        self.synthetic_dispatch("block", "create", child_params)
+            .await
+            .unwrap_or_else(|e| {
+                panic!("[DirectUserDriver floor] seed tpl child {child_id} failed: {e:#}")
+            });
+
+        // Dispatch instantiate_template.
+        let bindings_obj: HashMap<String, Value> = bindings
+            .iter()
+            .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+            .collect();
+        let mut params: HashMap<String, Value> = HashMap::new();
+        params.insert(
+            "template_id".to_string(),
+            Value::String(template_id.to_string()),
+        );
+        params.insert(
+            "target_parent".to_string(),
+            Value::String(self.resolve(target_parent).to_string()),
+        );
+        params.insert(
+            "context_key".to_string(),
+            Value::String(context_key.to_string()),
+        );
+        params.insert("bindings".to_string(), Value::Object(bindings_obj));
+        self.synthetic_dispatch("block", "instantiate_template", params)
+            .await
+            .unwrap_or_else(|e| {
+                panic!("[DirectUserDriver floor] block/instantiate_template failed: {e:#}")
+            });
+    }
+}
+
+/// Op-floor `SutBlockToPage`: dispatch `block.convert_block_to_page` through
+/// the production engine (BlockToPageTransform Option B). An empty
+/// `destination_path` is OMITTED so the op takes its `destination_path`-absent
+/// branch — defaulting to the origin's nearest page ancestor — which is exactly
+/// what the reference effect models, so the born-equal page id agrees.
+#[async_trait::async_trait(?Send)]
+impl SutBlockToPage for DirectUserDriver {
+    async fn convert_block_to_page(&self, target: &EntityUri, destination_path: &str) {
+        let mut params: HashMap<String, Value> = HashMap::new();
+        params.insert(
+            "target".to_string(),
+            Value::String(self.resolve(target).to_string()),
+        );
+        // Empty ⇒ omit, so the backend defaults to the nearest page ancestor
+        // (the ref model's destination). A non-empty path is passed verbatim.
+        if !destination_path.is_empty() {
+            params.insert(
+                "destination_path".to_string(),
+                Value::String(destination_path.to_string()),
+            );
+        }
+        if let Err(e) = self
+            .synthetic_dispatch("block", "convert_block_to_page", params)
+            .await
+        {
+            // Interim identity policy (plan §5) / resolve-before-mint (ADR 0029):
+            // a convert whose destination page id is already held by a DIFFERENT
+            // entity (a page renamed away from that name but still holding its
+            // derived id) is REFUSED fail-loud before any constituent runs. That
+            // refusal is the SPECIFIED behaviour, NOT a driver failure: model it
+            // as a disclosed no-op (the reference mirrors it in
+            // `apply_block_to_page`). Any OTHER failure is a real defect — panic
+            // loud. Recognised by the stable marker (the concrete
+            // `IdentityCollision` type is erased by the dispatch chain's wrappers).
+            let msg = format!("{e:#}");
+            assert!(
+                msg.contains(holon_api::IDENTITY_COLLISION_MARKER),
+                "[DirectUserDriver floor] block/convert_block_to_page failed: {msg}"
+            );
+        }
+    }
+}
+
+/// Op-floor `SutPageIdentity`: the two production ops the page-identity
+/// property needs, dispatched straight to the engine.
+///
+/// * `rename_page` → `block.set_field("content")`. This is the SAME op the
+///   editor's on-blur write takes, so a page rename is journaled for undo and
+///   is an ordinary edit to the existing entity — the id does not re-mint
+///   (`docs/Plans/PageIdentityDeterminism.md` §5.3).
+/// * `create_page_from_link` → `block.create_page_from_link(target)`, the lazy
+///   page-creation path a click on a dangling `[[Target]]` takes. It mints each
+///   missing segment's id as `PageId::for_path(accumulated_path)`.
+///
+/// `target` is a page PATH, not an id, so it is passed verbatim — there is no
+/// synthetic id to resolve.
+#[async_trait::async_trait(?Send)]
+impl holon_pbt_core::capabilities::SutPageIdentity for DirectUserDriver {
+    async fn rename_page(&self, page: &EntityUri, new_title: &str) {
+        let mut params: HashMap<String, Value> = HashMap::new();
+        params.insert(
+            "id".to_string(),
+            Value::String(self.resolve(page).to_string()),
+        );
+        params.insert("field".to_string(), Value::String("content".to_string()));
+        params.insert("value".to_string(), Value::String(new_title.to_string()));
+        self.synthetic_dispatch("block", "set_field", params)
+            .await
+            .unwrap_or_else(|e| {
+                panic!("[DirectUserDriver floor] block/set_field(content) on {page} failed: {e:#}")
+            });
+    }
+
+    async fn create_page_from_link(&self, target: &str) {
+        let mut params: HashMap<String, Value> = HashMap::new();
+        params.insert("target".to_string(), Value::String(target.to_string()));
+        if let Err(e) = self
+            .synthetic_dispatch("block", "create_page_from_link", params)
+            .await
+        {
+            // Interim identity policy (plan §5): re-creating a page at a path a
+            // `RenamePage` FREED is REFUSED fail-loud — the derived id is still
+            // held by the renamed page. That refusal is the SPECIFIED behaviour,
+            // NOT a driver failure: model it as a disclosed no-op (the reference
+            // mirrors it in `apply_create_page_at_path`). Any OTHER failure is a
+            // real defect — panic loud. Recognised by the stable marker because
+            // the concrete `IdentityCollision` type is erased by the dispatch
+            // chain's string-enriching wrappers.
+            let msg = format!("{e:#}");
+            assert!(
+                msg.contains(holon_api::IDENTITY_COLLISION_MARKER),
+                "[DirectUserDriver floor] block/create_page_from_link({target:?}) failed: {msg}"
+            );
+        }
     }
 }

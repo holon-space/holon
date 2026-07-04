@@ -1,0 +1,25 @@
+# A vtable entity that declares NO row identity (no primary_key column, no
+# id_column, no column named `id`) while a `live_query` reads its `_fdw` table
+# directly. The engine keeps such a table on snapshot semantics and builds no
+# mirror, so the view would silently never update. Connect must refuse.
+transport:
+  child_process:
+    command: /bin/false
+entity_prefix: "mock_"
+entities:
+  note:
+    short_name: note
+    profile_variants:
+      - name: default
+        render: >-
+          live_query(#{
+            sql: "SELECT title, body FROM mock_note_fdw ORDER BY title",
+            item_template: row(text(col("title")))
+          })
+    schema:
+      - { name: title, sql_type: TEXT }
+      - { name: body, sql_type: TEXT }
+    vtable:
+      list_resource: mock://items
+      fetch_contract: snapshot
+tools: {}

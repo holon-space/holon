@@ -1,5 +1,11 @@
 //! Transition: focus an editable text block in the main region.
 //!
+//! @pbt rung input-pipeline
+//!   `apply_focus_editable_text_to_sut`: click_entity(main) through the
+//!   production driver (editable_text binds no intent -> falls through to
+//!   in-memory set_focus, ADR 0010).
+//! @pbt covers focus-editor-click — main-panel click -> editor focus
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:1563-1628`
 //! (generator), `state_machine.rs:3529-3550` (precondition),
 //! `state_machine.rs:2935-2955` (ref-state apply),
@@ -8,26 +14,33 @@
 
 use std::time::Duration;
 
-use holon_api::ContentType;
 use holon_api::entity_uri::EntityUri;
 use holon_pbt_core::TransitionFactory;
-use holon_pbt_core::TransitionImpl;
 use holon_pbt_core::TransitionRef;
+use holon_pbt_core::capabilities::CapRegion;
+use holon_pbt_core::capabilities::RefBlockTree;
+use holon_pbt_core::capabilities::RefBlockTreeMut;
+use holon_pbt_core::capabilities::RefEditorMirror;
+use holon_pbt_core::capabilities::RefEditorMirrorMut;
+use holon_pbt_core::capabilities::RefFocus;
+use holon_pbt_core::capabilities::RefFocusMut;
+use holon_pbt_core::capabilities::RefFocusRoots;
+use holon_pbt_core::capabilities::RefLayout;
+use holon_pbt_core::capabilities::RefLifecycle;
 use holon_pbt_core::capabilities::SutDriver;
+use holon_pbt_core::capabilities::SutFocusWrite;
 use holon_pbt_core::capabilities::SutLayout;
+use holon_pbt_core::capabilities::commit_active_editor_if_dirty;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::check;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::reference_state::ActiveEditor;
-use crate::pbt::reference_state::ReferenceState;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::REACTIVE_BASE;
-use crate::pbt::transition_dispatch::SutHandle;
-use crate::pbt::validation::Reason;
-use crate::pbt::validation::check;
 
 // ── Capability-bound free function (Phase C) ──────────────────────
 
@@ -50,16 +63,26 @@ pub async fn apply_focus_editable_text_to_sut<S: SutLayout + SutDriver>(sut: &S,
 
 /// Focus a live-rendered editable text block in the main panel.
 /// Gated to `PBT_ATOMIC_EDITOR=1` runs.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I focus the editor of block {block_id}")]
 pub struct FocusEditableText {
     pub block_id: EntityUri,
 }
 
-impl TransitionFactory<ReferenceState> for FocusEditableText {
+impl<
+    R: RefLifecycle
+        + RefLayout
+        + RefFocus
+        + RefFocusMut
+        + RefEditorMirror
+        + RefEditorMirrorMut
+        + RefBlockTree
+        + RefBlockTreeMut
+        + RefFocusRoots,
+> TransitionFactory<R> for FocusEditableText
+{
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        vec![::holon_pbt_core::composition::CapId::of::<
-            dyn ::holon_pbt_core::capabilities::SutFocusWrite,
-        >()]
+        Self::declared_caps()
     }
 
     type Reason = Reason;
@@ -75,28 +98,25 @@ impl TransitionFactory<ReferenceState> for FocusEditableText {
         ])
     }
 
-    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // Enumerate parameter space (text blocks in main panel) and let
         // `preconditions` be the single source of truth for which ones are
         // actually focusable. Avoids duplicating the content_type / layout /
         // focusable / page checks across two sites.
         let candidates: Vec<EntityUri> = state
-            .domain
-            .block_state
-            .blocks
-            .keys()
-            .filter(|&uri| {
+            .all_block_ids()
+            .into_iter()
+            .filter(|uri| {
                 FocusEditableText {
                     block_id: uri.clone(),
                 }
                 .preconditions(state)
                 .is_good()
             })
-            .cloned()
             .collect();
 
         check(!candidates.is_empty(), Reason::NoFocusableBlocks).map(|_| {
-            let last = state.action.last_transition_kind;
+            let last = state.last_transition_kind();
             let weight = match last {
                 Some("StartApp")
                 | Some("NavigateFocus")
@@ -113,54 +133,50 @@ impl TransitionFactory<ReferenceState> for FocusEditableText {
     }
 }
 
-impl TransitionRef<ReferenceState> for FocusEditableText {
+impl<
+    R: RefLifecycle
+        + RefFocus
+        + RefFocusMut
+        + RefEditorMirror
+        + RefEditorMirrorMut
+        + RefBlockTree
+        + RefBlockTreeMut
+        + RefFocusRoots,
+> TransitionRef<R> for FocusEditableText
+{
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
-        let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
-        let no_content_update: std::collections::HashSet<EntityUri> = state
-            .domain
-            .layout_blocks
-            .render_source_ids
-            .iter()
-            .chain(state.domain.layout_blocks.query_source_ids.iter())
-            .chain(state.domain.profile_block_ids.iter())
-            .cloned()
-            .collect();
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
+        let focus_roots = state.rendered_focus_root_ids(CapRegion::Main);
 
         let checks: Vec<Validated<(), Reason>> = vec![
             check(state.has_editor_buffer(), Reason::NoEditorBuffer),
-            check(state.action.app_started, Reason::AppNotStarted),
+            check(state.app_started(), Reason::AppNotStarted),
             check(state.is_properly_setup(), Reason::NotProperlySetup),
             // Block-interaction transitions need the block to render as an
             // interactive widget (ops/draggable) reactively over the navigated
             // focus. Only the default layout does; custom `index.org` query
             // layouts don't (see RefLifecycle::renders_block_interactively).
             check(
-                holon_pbt_core::capabilities::RefLifecycle::renders_block_interactively(
-                    state,
-                    &self.block_id,
-                ),
+                state.renders_block_interactively(&self.block_id),
                 Reason::BlocksNotInteractiveUnderLayout,
             ),
             check(
-                state.current_focus(holon_api::Region::Main).is_some(),
+                state.current_focus(CapRegion::Main).is_some(),
                 Reason::NoFocusInMain,
             ),
             // Only when no editor is active (FocusEditableText opens an editor;
             // continue using it with MoveCursor/TypeChars/... while active).
-            check(state.ui.tab.active_editor.is_none(), Reason::NoActiveEditor),
             check(
-                state
-                    .domain
-                    .block_state
-                    .blocks
-                    .get(&self.block_id)
-                    .is_some_and(|b| b.content_type == ContentType::Text && !b.is_page()),
+                state.active_editor_block().is_none(),
+                Reason::NoActiveEditor,
+            ),
+            check(
+                state.is_text_block(&self.block_id) && !state.is_page_block(&self.block_id),
                 Reason::FocusedNotText,
             ),
             check(
-                !state.domain.layout_blocks.contains(&self.block_id),
+                !state.is_layout_block(&self.block_id),
                 Reason::FocusedInLayoutBlocks,
             ),
             check(
@@ -168,7 +184,7 @@ impl TransitionRef<ReferenceState> for FocusEditableText {
                 Reason::FocusedNotDescendantOfFocusRoot,
             ),
             check(
-                !no_content_update.contains(&self.block_id),
+                !state.is_no_content_update(&self.block_id),
                 Reason::PreconditionFailed,
             ),
         ];
@@ -178,25 +194,17 @@ impl TransitionRef<ReferenceState> for FocusEditableText {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
+    fn apply_to_ref(&self, state: &mut R) {
         // Clicking into another editable moves the focus authority away
         // from any currently active editor; prod commits its user-authored
         // pending text on that authority move (focus-binding arm).
-        holon_pbt_core::capabilities::commit_active_editor_if_dirty(state);
-        let saved = state
-            .domain
-            .block_state
-            .blocks
-            .get(&self.block_id)
-            .map(|b| b.content.clone())
-            .unwrap_or_default();
+        commit_active_editor_if_dirty(state);
+        // The editor opens on the block's SOURCE PROJECTION, not its content
+        // column: a task shows `TODO milk`, and the caret lands after it.
+        let saved = state.editor_surface_text(&self.block_id);
         let cursor_byte = saved.len();
-        state.ui.tab.active_editor = Some(ActiveEditor {
-            block_id: self.block_id.clone(),
-            in_memory_content: saved,
-            cursor_byte,
-            dirty: false,
-        });
+        // Open a fresh (clean) active editor on the target at end-of-content.
+        state.open_active_editor(self.block_id.clone(), saved, cursor_byte);
         // Deliberately do not update navigation focus here. While an
         // editor is active, `active_editor.block_id` is the source of
         // truth for editor focus and the engine's global `focused_block`
@@ -208,16 +216,13 @@ impl TransitionRef<ReferenceState> for FocusEditableText {
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutHandle> TransitionImpl<ReferenceState, S> for FocusEditableText {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.apply_focus_editable_text(&self.block_id).await;
+crate::cap_transition! {
+    FocusEditableText: SutFocusWrite,
+    where R: [ RefLifecycle ],
+    |me, _state, sut| {
+        sut.apply_focus_editable_text(&me.block_id).await;
     }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for FocusEditableText {
-    fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
+    sql_budget: |_me, _state| {
         ExpectedSql {
             reads: REACTIVE_BASE,
             writes: 0,

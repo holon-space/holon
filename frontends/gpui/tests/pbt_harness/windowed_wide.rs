@@ -14,8 +14,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 use gpui::AssetSource;
+use gpui::HeadlessAppContext;
 use gpui::PlatformTextSystem;
-use gpui::TestApp;
 use holon_frontend::geometry::GeometryProvider;
 use holon_frontend::user_driver::UserDriver;
 use holon_gpui::geometry::BoundsRegistry;
@@ -33,8 +33,10 @@ use holon_integration_tests::pbt::composed::wide_e2e::windowed_composed_sut;
 use holon_integration_tests::pbt::fixtures::NamedFixture;
 use holon_integration_tests::pbt::fixtures::replay_steps;
 use holon_integration_tests::pbt::op_write_cap::IdResolver;
+use holon_integration_tests::pbt::window_slice::builders::WindowMountConvention;
 use holon_integration_tests::pbt::window_slice::builders::overlay_windowed_caps;
 
+use super::capture::FrameSink;
 use super::sim_windowed_replay::SimUserDriver;
 
 pub fn real_text_system() -> Arc<dyn PlatformTextSystem> {
@@ -45,7 +47,7 @@ pub fn real_text_system() -> Arc<dyn PlatformTextSystem> {
 /// pump until the element count is stable and no `"loading"` placeholders
 /// remain.
 pub fn settle_to_fixed_point(
-    app: &mut TestApp,
+    app: &mut HeadlessAppContext,
     bounds: &BoundsRegistry,
     runtime: &tokio::runtime::Runtime,
     timeout: Duration,
@@ -80,18 +82,18 @@ pub fn settle_to_fixed_point(
     );
 }
 
-/// `*const TestApp` behind a `Send` newtype so the window-settle closure (a
-/// `SettleHook = Box<dyn Fn() + Send>`) can hold it. SAFETY: the closure is
-/// only ever called on the gpui thread that owns the window, and `app` is
-/// pinned for the driver's lifetime — the same single-thread contract
+/// `*const HeadlessAppContext` behind a `Send` newtype so the window-settle
+/// closure (a `SettleHook = Box<dyn Fn() + Send>`) can hold it. SAFETY: the
+/// closure is only ever called on the gpui thread that owns the window, and
+/// `app` is pinned for the driver's lifetime — the same single-thread contract
 /// `SimUserDriver` relies on.
-struct SendApp(*const TestApp);
+struct SendApp(*const HeadlessAppContext);
 unsafe impl Send for SendApp {}
 impl SendApp {
     // A `&self` accessor so a `move` closure captures the whole `SendApp` (Send)
     // rather than disjoint-capturing the raw-pointer field (2021 edition),
     // which would be !Send.
-    fn app(&self) -> &TestApp {
+    fn app(&self) -> &HeadlessAppContext {
         unsafe { &*self.0 }
     }
 }
@@ -100,12 +102,14 @@ impl SendApp {
 /// over a `compose_sut` session + the wide-seeded backend caps + the window's
 /// `SimUserDriver` gesture caps, assembled by `overlay_windowed_caps`), hand it
 /// to `run` to drive/check, then tear the window down. `app` stays pinned on
-/// this frame for the whole call, so the `*const TestApp` the settle hook /
-/// `SimUserDriver` hold stays valid. `run` takes the SUT by value and returns
-/// it (so it can call the by-value `StateMachineTest::apply`). It also receives
-/// the harness's default `wide_e2e_ref()` oracle — the windowed loop IGNORES
-/// that and supplies its own windowed-cap-set oracle (same tree, narrower cap
-/// set), which is sound because the seed tree is identical.
+/// this frame for the whole call, so the `*const HeadlessAppContext` the settle
+/// hook / `SimUserDriver` / `FrameSink` hold stays valid. `run` takes the SUT
+/// by value and returns it (so it can call the by-value
+/// `StateMachineTest::apply`). It also receives the harness's default
+/// `wide_e2e_ref()` oracle — the windowed loop IGNORES that and supplies its
+/// own windowed-cap-set oracle (same tree, narrower cap set), which is sound
+/// because the seed tree is identical — and a `FrameSink` for opt-in pixel
+/// capture (a no-op unless `HOLON_CAPTURE_DIR` is set).
 ///
 /// `run` returns `Option<ComposedSut>`: `Some(sut)` is leaked on teardown
 /// (avoids the gpui leak detector + a runtime drop in async context); `None`
@@ -113,11 +117,13 @@ impl SendApp {
 /// inside a `catch_unwind` drive loop), so teardown just leaks the app. ⚠
 /// `--test-threads=1` mandatory (gpui not parallel-safe).
 pub fn with_windowed_wide_sut(
-    run: impl FnOnce(ComposedSut<WideE2E>, &ReferenceState) -> Option<ComposedSut<WideE2E>>,
+    run: impl FnOnce(ComposedSut<WideE2E>, &ReferenceState, &FrameSink) -> Option<ComposedSut<WideE2E>>,
 ) {
     let text_system = real_text_system();
     let assets: Arc<dyn AssetSource> = Arc::new(());
-    let mut app = TestApp::with_text_system_and_assets(text_system, assets);
+    let mut app = HeadlessAppContext::with_platform(text_system, assets, || {
+        gpui_platform::current_headless_renderer()
+    });
 
     let runtime = Arc::new(tokio::runtime::Runtime::new().expect("tokio runtime"));
     let resolver: IdResolver = Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()));
@@ -150,6 +156,7 @@ pub fn with_windowed_wide_sut(
                 nav,
                 bounds.clone(),
                 Some(debug.clone()),
+                None,
                 "Holon-ComposeSut-Windowed-Loop",
                 cx,
             )
@@ -164,7 +171,7 @@ pub fn with_windowed_wide_sut(
         .get()
         .expect("interaction_tx set by the window interaction pump")
         .clone();
-    let app_ptr: *const TestApp = &app;
+    let app_ptr: *const HeadlessAppContext = &app;
     let driver: Arc<dyn UserDriver> = Arc::new(SimUserDriver::new(
         app_ptr,
         rebind.window(),
@@ -182,7 +189,15 @@ pub fn with_windowed_wide_sut(
     // so the windowed per-apply settle converges CDC + Loro + org like the
     // headless path.
     let handle = WideHandle::from_bundle(&bundle);
-    let overlaid = overlay_windowed_caps(bundle.caps, frontend, geometry, engine.clone(), driver);
+    let overlaid = overlay_windowed_caps(
+        bundle.caps,
+        frontend,
+        geometry,
+        engine.clone(),
+        driver,
+        resolver.clone(),
+        WindowMountConvention::PerBlockShell,
+    );
 
     // The window-settle hook the ComposedSut pumps before each check (mirror sim
     // `pump_cycle`: real wall-clock time for backend watchers on their own worker
@@ -230,9 +245,14 @@ pub fn with_windowed_wide_sut(
     // `dispatch_intent_sync`).
     let sut = windowed_composed_sut(overlaid, handle, resolver, scaffold, composed_rt, settle);
 
+    // Pixel-capture sink: enabled only when HOLON_CAPTURE_DIR is set. Created
+    // here (after the window exists + has settled) and handed to `run` so
+    // per-step capture has both the app context and the window handle.
+    let sink = FrameSink::new(&app, rebind.window());
+
     // Hand the live SUT to the caller to drive + check, then take it back for
     // teardown.
-    let sut = run(sut, &oracle);
+    let sut = run(sut, &oracle, &sink);
 
     // Teardown (see the 3b tests): release window entities, shut down, leak the
     // !Send app
@@ -279,33 +299,38 @@ pub fn replay_fixture_windowed(
     fixture: &NamedFixture,
 ) -> Result<(), Box<dyn std::any::Any + Send + 'static>> {
     let mut result: Result<(), Box<dyn std::any::Any + Send + 'static>> = Ok(());
-    with_windowed_wide_sut(|sut, oracle| {
+    with_windowed_wide_sut(|sut, oracle, sink| {
         // The composed windowed base is full_headless-wired; a capture recorded under a
         // different wiring would replay against the wrong oracle — fail loud, don't
         // fake.
         if let Some(recorded) = &fixture.wiring {
             assert_eq!(
-                *recorded, oracle.wiring,
+                *recorded, oracle.harness.wiring,
                 "[{label}] fixture {:?} was recorded under wiring {recorded:?}, but the windowed \
                  composed base is fixed to {:?} — re-record or replay headless",
-                fixture.name, oracle.wiring
+                fixture.name, oracle.harness.wiring
             );
         }
+        // Boot frame: the wide-seeded window, settled and rendered.
+        sink.capture_action("boot");
         match catch_unwind(AssertUnwindSafe(|| {
             replay_steps::<WideE2EMachine, ComposedSut<WideE2E>>(
                 label,
                 &fixture.steps,
                 oracle.clone(),
                 sut,
-                |_| {},
-                |_, _| {},
+                |_| sink.capture_action("start"),
+                |_, _| sink.capture_pass("step"),
                 None,
             )
         })) {
             Ok(sut) => Some(sut),
             Err(payload) => {
-                // The SUT was consumed and dropped inside the unwind (this thread is not
-                // runtime-entered, so its Drop is safe); teardown only leaks the app.
+                // One failure frame before re-raising, so the flipbook ends on the
+                // frame that actually failed. The SUT was consumed and dropped inside
+                // the unwind (this thread is not runtime-entered, so its Drop is
+                // safe); teardown only leaks the app.
+                sink.capture_fail("failure", "");
                 result = Err(payload);
                 None
             }

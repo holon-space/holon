@@ -65,8 +65,12 @@ fn block_row(id: &str, content: &str) -> holon_api::StorageEntity {
     row.insert("content_type".into(), Value::String("text".to_string()));
     row.insert("created_at".into(), Value::Integer(0));
     row.insert("updated_at".into(), Value::Integer(0));
-    row.insert("tags".into(), Value::Json("[]".to_string()));
-    row.insert("requires".into(), Value::Json("[]".to_string()));
+    // Derived from the closed edge-field set, never hand-listed: `Block`'s row
+    // parser requires EVERY edge column, so a hand-list here goes stale the day
+    // an edge field is added and every CDC row silently fails to parse.
+    for field in holon_api::EdgeField::ALL {
+        row.insert(field.column().into(), Value::Json("[]".to_string()));
+    }
     row
 }
 

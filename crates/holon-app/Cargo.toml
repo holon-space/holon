@@ -2,6 +2,7 @@
 name = "holon-app"
 version = "0.1.0"
 edition = "2021"
+publish = false
 
 # The wiring crate (storage de-leak Stage 6, ADR plan quirky-dazzling-map):
 # owns all DI assembly that names concrete backends (BackendEngine, Loro/OrgMode
@@ -28,7 +29,9 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+holon = { workspace = true, features = ["test-helpers"] }
 holon-block-roundtrip-testing.workspace = true
+holon-org-format.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

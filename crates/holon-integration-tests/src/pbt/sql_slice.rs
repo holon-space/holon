@@ -5,6 +5,9 @@
 //! block operations, but with **none** of the reactive engine / frontend /
 //! navigation / CDC-mirror machinery the monolithic `E2ESut` carries.
 //!
+//! @pbt kind slice-mod
+//! @pbt covers sql-slice — component list + builders for the Turso storage arm.
+//!
 //! This is deliberately the storage-layer slice of the *future `E2ESut`
 //! replacement* (the §F2 convergence): it reuses `E2ESut`'s own SQL realization
 //! so that when the monolith is retired the composed components already cover

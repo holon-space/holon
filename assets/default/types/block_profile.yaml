@@ -17,33 +17,120 @@ computed:
   is_task: 'task_state != ()'
   is_source: 'content_type == "source"'
   is_image: 'content_type == "image"'
-  is_holon_source: 'is_source && (source_language.starts_with("holon_") || source_language == "render")'
-  has_query_source: 'query_source(id) != ()'
-  todo_states: 'if is_def_var("document_id") && document_id != () { let d = document(document_id); if d != () { d.todo_keywords } else { () } } else { () }'
+  # Query/render machinery that must be hidden (spacer) rather than shown as raw
+  # text. TYPED enumeration of the exact languages — replaces the banned stringly
+  # `source_language.starts_with("holon_")` smell (ADR 0024 WP3 / Q2). Crucially
+  # this NO LONGER matches `holon_rule`, so a rule block is routed by `is_program`
+  # to the rule card instead of being silently swallowed by the spacer variant.
+  is_holon_source: 'is_source && (source_language == "holon_prql" || source_language == "holon_gql" || source_language == "holon_sql" || source_language == "render")'
+  # A block renders as a live query page (the `query_block` variant → `live_block`
+  # → `render_entity` → `query_and_watch`) iff it owns a query-source child AND is
+  # NOT a rule-machinery heading. `rule_sibling(id) != ()` ("does block `id` own a
+  # rule-head child?") is true for the `Journal Auto-Create` heading, whose only
+  # query-source child is the rule's TRIGGER — program machinery that the action
+  # watcher alone evaluates. Excluding it here keeps the trigger off the display-
+  # query path (C-revised ruling); the same `rule_sibling` live entity already
+  # backs `is_program`, so no new lookup is introduced.
+  has_query_source: 'query_source(id) != () && rule_sibling(id) == ()'
+  # Opt-OUT of the headline. A query-source block draws its own text by default
+  # — a user-authored heading like `** Projects` must never render blank — so
+  # only the seeded layout regions, whose heading is a container name nobody
+  # wants drawn, set `:WIDGET_ONLY: t`. Written `== true || == 1` rather than
+  # `!= ()`: the column arrives as Boolean from a Loro row and Integer from SQL,
+  # and Rhai's cross-type `!=` is TRUE for `false != 0`, which would invert the
+  # default for every un-flagged block.
+  is_widget_only: 'widget_only == true || widget_only == 1'
+  # A rule head: the `holon_rule` language or the retired `action` language
+  # (ADR 0024). Pure-row check — no DB lookup.
+  is_rule_head: 'is_source && (source_language == "holon_rule" || source_language == "action")'
+  # Program marking (ADR 0024 WP3 / Q2 option a): a block is program iff it is a
+  # rule head OR the trigger sibling of one. Clause (b) reuses the discovery
+  # parent-sibling join via the `rule_sibling` live-entity lookup keyed by
+  # parent_id (`rule_sibling(parent_id)` = "does my parent have a rule-head
+  # child?"). `||` short-circuits so a rule head never runs the DB lookup, and
+  # the sibling clause only runs for source blocks.
+  is_program: 'is_rule_head || (is_source && rule_sibling(parent_id) != ())'
+  # A rule using the retired `action` language — surfaced loud on the card.
+  is_legacy_rule: 'source_language == "action"'
+  # No live source of a document's custom TODO keywords: `document_id` and the
+  # `document` lookup were retired with the `doc:` scheme (ADR 0014), so this
+  # field yields () and `state_toggle` uses its default keyword cycle. Restoring
+  # per-document cycles needs a registered `document` live entity (own task).
+  todo_states: '()'
+  is_page_row: 'tags != () && tags.contains("\"Page\"")'
+  # Bullet glyph by disclosure state (Logseq convention): a COLLAPSED block —
+  # which always has hidden children — keeps the ringed `orgmode` fisheye; every
+  # other block (leaf, or an expanded parent) shows a plain filled `circle`. A
+  # childless block is never collapsed, so the `collapsed` column alone is a
+  # faithful proxy for "collapsed AND has children". When `collapsed` is absent
+  # the field is unbound (Null) and the `icon` name falls back to its "circle"
+  # default — so a missing column degrades safely to the plain dot.
+  bullet_shape: 'if collapsed != () && collapsed != 0 { "orgmode" } else { "circle" }'
 
 variants:
   - name: page_title
     priority: 2
     condition: 'role == "page_title"'
     render: 'text(col("content"), #{style: "h1"})'
-  - name: root_layout
-    priority: 1
-    condition: 'id == "block:root-layout"'
-    # Narrow-viewport branch (≤600 px) stacks the phone three-panel
-    # columns above a bottom-docked action bar composed from primitives —
-    # no specialized widget. `bottom_dock` pins the bar to the bottom
-    # inset; `chain_ops(0)` emits one row per operation registered on the
-    # focused block's URI scheme; each row renders as a tappable
-    # `op_button`. Wider branches keep the existing 3-column layout (no
-    # bar — there's plenty of room for inline operation menus).
+  # Embedded page-blocks rendered EXPANDED by default (children eagerly loaded).
+  # Selected when the embedding query TAGS its rows with an `expand_default`
+  # column (the Journal-feed context adds `1 AS expand_default`); plain embedded
+  # pages lack the column, so `is_def_var("expand_default")` is false and they
+  # fall through to the collapsed `embedded_page` variant below. Priority 2 (same
+  # tier as page_title, whose `role == "page_title"` never matches a feed row) so
+  # it is checked before the collapsed embedded_page (priority 1). The
+  # `default_expanded: true` param seeds the expand_toggle gate OPEN; the header
+  # is a click-to-open navigation link (LogSeq-style journal feed).
+  - name: embedded_page_expanded
+    priority: 2
+    condition: 'is_def_var("expand_default") && expand_default == 1 && (!is_def_var("role") || role != "page_title")'
     render: >-
-      if_space(600,
-        bottom_dock(
-          columns(drawer("block:default-left-sidebar", live_block("block:default-left-sidebar"), #{mode: "overlay"}), live_block("block:default-main-panel"), drawer("block:default-right-sidebar", live_block("block:default-right-sidebar"), #{mode: "overlay"})),
-          columns(#{gap: 8, collection: chain_ops(0), item_template: op_button(col("name"))})),
-        if_space(1000,
-          columns(drawer("block:default-left-sidebar", live_block("block:default-left-sidebar"), #{mode: "shrink"}), live_block("block:default-main-panel"), drawer("block:default-right-sidebar", live_block("block:default-right-sidebar"), #{mode: "overlay"})),
-          columns(drawer("block:default-left-sidebar", live_block("block:default-left-sidebar"), #{mode: "shrink"}), live_block("block:default-main-panel"), drawer("block:default-right-sidebar", live_block("block:default-right-sidebar"), #{mode: "shrink"}))))
+      expand_toggle(#{
+        default_expanded: true,
+        hover_reveal_toggle: true,
+        header: selectable(row(icon("orgmode", #{size: 12}), text(col("content"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})}),
+        content: live_query(#{
+          prql: "from descendants",
+          item_template: tree(#{parent_id: col("parent_id"), sortkey: col("sort_key"), item_template: render_entity()})
+        })
+      })
+  # Embedded page-blocks: non-root pages (strict descendants of the focus root)
+  # rendered as a collapsed expand_toggle with lazy subtree. condition uses
+  # is_def_var guard because rows from live_query content queries have no `role`
+  # column, so `role != "page_title"` would raise "Variable not found". Priority
+  # 1 slots between page_title (2) and rule_card (0).
+  - name: embedded_page
+    priority: 1
+    condition: 'is_page_row && (!is_def_var("role") || role != "page_title")'
+    render: >-
+      expand_toggle(#{
+        hover_reveal_toggle: true,
+        header: row(icon("orgmode", #{size: 12}), text(col("content"))),
+        content: live_query(#{
+          prql: "from descendants",
+          item_template: tree(#{parent_id: col("parent_id"), sortkey: col("sort_key"), item_template: render_entity()})
+        })
+      })
+  # NOTE: the former `root_layout` variant (hardcoded 3-column layout keyed on
+  # `id == "block:root-layout"`) is GONE: the ROOT display slot's layout is now
+  # synthesized from perspective/panel DATA by both render-derivation arms
+  # (`BlockDomain::render_root_slot` / `loro_ui_watcher::derive_root_slot_expr`
+  # via `PerspectiveSpec::layout_expr`). See holon_api::perspective.
+  # Program blocks (rule heads + their trigger siblings, ADR 0024 WP3) render as
+  # the rule card, NEVER as a query result or raw source text. Priority 0 wins
+  # over the whole -1 variant cluster (holon_source spacer, source query_result),
+  # so a `holon_sql` trigger that also matches `is_holon_source` is still routed
+  # here — documented precedence, not implied variant ordering. The `if_col`
+  # surfaces a loud red deprecation banner for the retired `action` language.
+  - name: rule_card
+    priority: 0
+    condition: 'is_program'
+    render: >-
+      card(#{accent: "primary"},
+        row(icon("orgmode"), text("Automation rule", #{bold: true}), checkbox(#{checked: true}), text("Enabled", #{color: "success"})),
+        if_col("source_language", "action", error("legacy 'action' language - rename source block to holon_rule"), spacer(0)),
+        text("last fired: -", #{color: "muted"}),
+        text(col("content")))
   - name: source_editing
     priority: -1
     condition: 'is_source && is_focused'
@@ -54,8 +141,15 @@ variants:
     render: 'spacer(0)'
   - name: query_block
     priority: -1
-    condition: 'has_query_source'
+    condition: 'has_query_source && is_widget_only'
     render: 'live_block()'
+  # The DEFAULT for a query-source block: its own headline, then its widget.
+  # Same row as the `default` variant so a query page's title, bullet, task
+  # toggle and drag affordance behave identically to any other block.
+  - name: query_block_titled
+    priority: -1
+    condition: 'has_query_source && !is_widget_only'
+    render: 'column(row(#{gap: 2, align: "start"}, selectable(draggable(icon(col("bullet_shape"), #{size: 12, color: "primary", mt: 12})), #{shift_action: focus_pin(#{region: "right_sidebar", block_id: col("id")})}), state_toggle(col("task_state"), #{states: col("todo_states"), mt: 10}), rendered_text(col("content"))), live_block(), drop_zone())'
   - name: image_block
     priority: -1
     condition: 'is_image'
@@ -63,14 +157,14 @@ variants:
   - name: editing
     priority: -1
     condition: 'is_focused'
-    render: 'column(row(selectable(draggable(icon("orgmode")), #{shift_action: focus_pin(#{region: "right", block_id: col("id")})}), state_toggle(col("task_state"), #{states: col("todo_states")}), spacer(8), editable_text(col("content"))), drop_zone())'
+    render: 'column(row(#{gap: 2, align: "start"}, selectable(draggable(icon(col("bullet_shape"), #{size: 12, color: "primary", mt: 12})), #{shift_action: focus_pin(#{region: "right_sidebar", block_id: col("id")})}), state_toggle(col("task_state"), #{states: col("todo_states"), mt: 10}), editable_text(col("content"))), drop_zone())'
   - name: source
     priority: -1
-    condition: 'is_source'
+    condition: 'is_source && !is_program'
     render: 'query_result(#{language: col("source_language")})'
   - name: default
     priority: -1
-    render: 'column(row(selectable(draggable(icon("orgmode")), #{shift_action: focus_pin(#{region: "right", block_id: col("id")})}), state_toggle(col("task_state"), #{states: col("todo_states")}), spacer(8), rendered_text(col("content"))), drop_zone())'
+    render: 'column(row(#{gap: 2, align: "start"}, selectable(draggable(icon(col("bullet_shape"), #{size: 12, color: "primary", mt: 12})), #{shift_action: focus_pin(#{region: "right_sidebar", block_id: col("id")})}), state_toggle(col("task_state"), #{states: col("todo_states"), mt: 10}), rendered_text(col("content"))), drop_zone())'
 
 virtual_child:
   defaults:

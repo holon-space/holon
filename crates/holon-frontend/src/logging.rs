@@ -21,7 +21,12 @@
 //! HOLON_LOG=otlp                            # collector only
 //! ```
 //!
-//! `RUST_LOG` controls filtering for all destinations.
+//! `RUST_LOG` controls filtering for all destinations. The `holon_latency`
+//! target is the one exception: its events are INFO-level (they must survive
+//! `tracing/release_max_level_info` in release builds) and would otherwise be
+//! printed by the workspace-wide `holon=info` directive, so the target is held
+//! at `warn` unless `HOLON_LATENCY_SLO=1` or an explicit `RUST_LOG` directive
+//! names it.
 // TODO: Why is this in holon-frontend? Logging is not frontend-specific. Is
 // there a duplicate implementation outside of holon-frontend?
 use tracing_subscriber::EnvFilter;
@@ -31,6 +36,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 const HOLON_LOG_ENV: &str = "HOLON_LOG";
 const DEFAULT_FILTER: &str = "holon_gpui=info,holon=info,holon_tui=info";
+const LATENCY_TARGET: &str = "holon_latency";
 
 /// Initialize tracing from `HOLON_LOG` env var.
 ///
@@ -53,8 +59,81 @@ pub struct LogGuard {
     _chrome_trace_guard: Option<crate::memory_monitor::chrome_trace::FlushGuard>,
 }
 
+/// The per-stage `holon_latency` events are emitted at INFO so they survive
+/// `tracing/release_max_level_info` (see [`latency_events_enabled`]). INFO also
+/// means the workspace-wide `holon=info` directive would print all of them by
+/// default — hundreds per boot — so the target is held at `warn` unless the
+/// opt-in is on. An explicit `holon_latency` directive in `RUST_LOG` always
+/// wins.
 fn env_filter() -> EnvFilter {
-    EnvFilter::try_from_default_env().unwrap_or_else(|_| DEFAULT_FILTER.into())
+    env_filter_with_default(DEFAULT_FILTER)
+}
+
+/// The single filter-building entry point: `RUST_LOG` when set, else
+/// `default_spec`, always with the `holon_latency` directive applied.
+///
+/// Every subscriber in the workspace must go through this — a self-built
+/// `EnvFilter` inherits none of the above and floods its output with the INFO
+/// stage events. Enforced by
+/// `latency_target_is_suppressed_by_every_filter_builder`.
+pub fn env_filter_with_default(default_spec: &str) -> EnvFilter {
+    let base = std::env::var("RUST_LOG")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| default_spec.to_string());
+    let spec = filter_spec(&base, latency_events_enabled());
+    EnvFilter::builder()
+        .parse(&spec)
+        .unwrap_or_else(|e| panic!("invalid RUST_LOG filter '{spec}': {e}"))
+}
+
+fn filter_spec(base: &str, latency_on: bool) -> String {
+    if names_latency_target(base) {
+        return base.to_string();
+    }
+    // `warn` rather than `off`: the target also carries fail-loud disclosures
+    // (`stage=e2e_expired`), which must stay visible without the opt-in.
+    let level = if latency_on { "info" } else { "warn" };
+    format!("{base},{LATENCY_TARGET}={level}")
+}
+
+/// Whether `spec` already carries a directive FOR the target — a per-directive
+/// check, so a span or field name that merely contains the string does not
+/// silently disable the default.
+fn names_latency_target(spec: &str) -> bool {
+    spec.split(',').any(|directive| {
+        let target = directive.split('=').next().unwrap_or_default();
+        let target = target.split('[').next().unwrap_or_default();
+        target.trim() == LATENCY_TARGET
+    })
+}
+
+/// Whether the `holon_latency` stage events reach the log. Opt-in via
+/// `HOLON_LATENCY_SLO` in every profile — the events are INFO-level, so
+/// gating them on `debug_assertions` (the way the oracle LAYER is gated)
+/// would flood the default dev log with per-batch timing lines.
+fn latency_events_enabled() -> bool {
+    matches!(
+        std::env::var("HOLON_LATENCY_SLO").as_deref(),
+        Ok("1") | Ok("true") | Ok("on")
+    )
+}
+
+/// Whether to install the live latency-SLO oracle layer. `HOLON_ORACLES=off`
+/// opts out everywhere. Otherwise on by default in debug; in release it is
+/// opt-in via `HOLON_LATENCY_SLO` (`1`/`true`/`on`) so dogfooding a release
+/// build can still surface SLO breaches.
+fn latency_slo_enabled() -> bool {
+    if !holon_oracles::OracleMode::from_env().enabled() {
+        return false;
+    }
+    if cfg!(debug_assertions) {
+        return true;
+    }
+    matches!(
+        std::env::var("HOLON_LATENCY_SLO").as_deref(),
+        Ok("1") | Ok("true") | Ok("on")
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,8 +162,7 @@ fn parse_single_dest(s: &str) -> LogDest {
     let s = s.trim();
 
     // Handle file:// destinations — the :json suffix comes after the path
-    if s.starts_with("file://") {
-        let rest = &s["file://".len()..];
+    if let Some(rest) = s.strip_prefix("file://") {
         return if let Some(path) = rest.strip_suffix(":json") {
             LogDest::File(path.to_string(), LogFormat::Json)
         } else {
@@ -179,8 +257,30 @@ fn init_with_destinations(destinations: &[LogDest]) -> LogGuard {
         }
     }
 
+    // tokio-console async-stall profiler. `spawn()` starts the gRPC aggregator
+    // on its own background thread so the `tokio-console` CLI can attach. Only
+    // records task busy/idle data when built with `--cfg tokio_unstable` (plus
+    // tokio's `tracing` feature, pulled in by the `tokio-console` cargo
+    // feature). Bind address overridable via `TOKIO_CONSOLE_BIND`.
+    #[cfg(feature = "tokio-console")]
+    layers.push(Box::new(
+        console_subscriber::ConsoleLayer::builder()
+            .with_default_env()
+            .spawn(),
+    ));
+
     #[cfg(feature = "chrome-trace")]
     let (chrome_layer, chrome_guard) = crate::memory_monitor::chrome_trace::layer();
+
+    // Live-oracle latency SLO: watch the existing `holon_latency` stage events
+    // (dispatch/rows always; projection when CRDT is on); a stage slower than
+    // the SLO becomes a violation (banner + error log). Always compiled;
+    // enabled by default in debug, opt-in in release via `HOLON_LATENCY_SLO=1`
+    // so dogfooding a release build can still catch SLO breaches.
+    // HOLON_ORACLES=off opts out everywhere; HOLON_ORACLES_SLO_MS tunes.
+    if latency_slo_enabled() {
+        layers.push(Box::new(holon_oracles::latency::LatencySloLayer::from_env()));
+    }
 
     let registry = tracing_subscriber::registry().with(layers);
 
@@ -255,4 +355,91 @@ fn init_otlp_layer() -> impl tracing_subscriber::Layer<tracing_subscriber::Regis
 
     let tracer = global::tracer(Box::leak(service_name.into_boxed_str()) as &'static str);
     tracing_opentelemetry::OpenTelemetryLayer::new(tracer)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    use tracing::Subscriber;
+    use tracing_subscriber::layer::Context;
+    use tracing_subscriber::layer::Layer;
+    use tracing_subscriber::prelude::*;
+
+    use super::DEFAULT_FILTER;
+    use super::EnvFilter;
+    use super::filter_spec;
+
+    #[derive(Clone, Default)]
+    struct Seen(Arc<Mutex<Vec<String>>>);
+
+    impl<S: Subscriber> Layer<S> for Seen {
+        fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+            self.0
+                .lock()
+                .expect("seen lock")
+                .push(event.metadata().target().to_string());
+        }
+    }
+
+    /// Emit one INFO event per target through `spec`; report what survived.
+    fn targets_passing(spec: &str, targets: &[&str]) -> Vec<String> {
+        let seen = Seen::default();
+        let subscriber =
+            tracing_subscriber::registry().with(seen.clone().with_filter(EnvFilter::new(spec)));
+        tracing::subscriber::with_default(subscriber, || {
+            for t in targets {
+                match *t {
+                    "holon_latency" => tracing::info!(target: "holon_latency", stage = "x"),
+                    "holon_latency@warn" => tracing::warn!(target: "holon_latency", stage = "x"),
+                    "holon_core" => tracing::info!(target: "holon_core", "x"),
+                    other => panic!("unhandled probe target {other}"),
+                }
+            }
+        });
+        let out = seen.0.lock().expect("seen lock").clone();
+        out
+    }
+
+    /// The default (opt-out) log keeps its volume: the stage events are INFO
+    /// now, and the workspace-wide `holon=info` directive would otherwise print
+    /// them all. The target's fail-loud `warn!` disclosures still get through.
+    #[test]
+    fn default_drops_the_stage_events_but_keeps_warnings() {
+        let spec = filter_spec(DEFAULT_FILTER, false);
+        let probes = &["holon_latency", "holon_core", "holon_latency@warn"];
+        let passed = targets_passing(&spec, probes);
+        let expected = vec!["holon_core".to_string(), "holon_latency".to_string()];
+        assert_eq!(passed, expected, "spec: {spec}");
+    }
+
+    /// With the opt-in the events reach the log — the point of
+    /// `HOLON_LATENCY_SLO=1` on a release build.
+    #[test]
+    fn latency_target_passes_under_the_opt_in() {
+        let spec = filter_spec(DEFAULT_FILTER, true);
+        let passed = targets_passing(&spec, &["holon_latency"]);
+        assert_eq!(passed, vec!["holon_latency".to_string()], "spec: {spec}");
+    }
+
+    /// An explicit directive is the user's call, opt-in or not.
+    #[test]
+    fn explicit_rust_log_directive_wins() {
+        let base = "warn,holon_latency=info";
+        assert_eq!(filter_spec(base, false), base);
+        let passed = targets_passing(base, &["holon_latency"]);
+        assert_eq!(passed, vec!["holon_latency".to_string()]);
+    }
+
+    /// Only a directive whose TARGET is the latency target counts as explicit —
+    /// a span or field of that name, or a longer target, must not disable the
+    /// default suppression.
+    #[test]
+    fn a_mere_mention_of_the_target_is_not_a_directive() {
+        for base in ["info[holon_latency]=debug", "holon_latency_probe=debug"] {
+            let spec = filter_spec(base, false);
+            assert!(spec.ends_with("holon_latency=warn"), "spec: {spec}");
+        }
+    }
 }

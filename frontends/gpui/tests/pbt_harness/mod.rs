@@ -13,8 +13,11 @@
 
 #![allow(dead_code)]
 
+pub mod capture;
 pub mod sim_windowed_replay;
 pub mod windowed_wide;
+
+pub use holon_integration_tests::libtest_list::handled_list_protocol;
 
 /// Extract the panic message from a caught payload (`panic!`/`format!` →
 /// `String`; `expect`/`&str` literals → `&str`).

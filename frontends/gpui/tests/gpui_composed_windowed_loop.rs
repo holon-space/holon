@@ -28,6 +28,7 @@ use holon_integration_tests::pbt::composed::wide_e2e::disclose_excluded;
 use holon_integration_tests::pbt::composed::wide_e2e::narrow_to_windowed_alphabet;
 use holon_integration_tests::pbt::composed::wide_e2e::set_windowed_cap_set;
 use holon_integration_tests::pbt::composed::wide_e2e::wide_e2e_windowed_ref;
+use holon_integration_tests::pbt::run_result::RunResultGuard;
 use holon_integration_tests::pbt::transitions::ClickBlock;
 use holon_integration_tests::pbt::transitions::E2ETransition;
 use proptest::test_runner::Config;
@@ -38,6 +39,7 @@ use proptest_state_machine::StateMachineTest;
 
 #[path = "pbt_harness/mod.rs"]
 mod pbt_harness;
+use pbt_harness::capture::FrameSink;
 use pbt_harness::panic_message;
 use pbt_harness::windowed_wide::with_windowed_wide_sut;
 
@@ -50,7 +52,7 @@ fn benchmark_windowed_per_case_boot_cost() {
     let mut timings = Vec::new();
     for i in 0..iters {
         let t0 = Instant::now();
-        with_windowed_wide_sut(|mut sut, _default_oracle| {
+        with_windowed_wide_sut(|mut sut, _default_oracle, _sink| {
             let live = sut.cap_set();
             if i == 0 {
                 disclose_excluded(&live);
@@ -108,6 +110,7 @@ fn drive_windowed_case(
     transitions: Vec<E2ETransition>,
     seen_counter: Option<Arc<AtomicUsize>>,
     out: &RefCell<Option<String>>,
+    sink: &FrameSink,
 ) -> Option<ComposedSut<WideE2E>> {
     let mut ref_state = initial_ref;
 
@@ -123,8 +126,10 @@ fn drive_windowed_case(
             return Some(sut);
         }
     }
+    sink.capture_action("boot");
 
     for transition in transitions {
+        let step_label = transition.variant_name();
         // Mirror `test_sequential`: mark the transition seen BEFORE applying, so the
         // shrinker's "delete unseen trailing transitions" step is correct.
         if let Some(c) = seen_counter.as_ref() {
@@ -140,7 +145,9 @@ fn drive_windowed_case(
         })) {
             Ok(s) => sut = s,
             Err(p) => {
-                *out.borrow_mut() = Some(format!("SUT apply panicked: {}", panic_message(&p)));
+                let msg = format!("SUT apply panicked: {}", panic_message(&p));
+                sink.capture_fail(step_label, &msg);
+                *out.borrow_mut() = Some(msg);
                 return None;
             }
         }
@@ -150,9 +157,12 @@ fn drive_windowed_case(
         if let Err(p) = catch_unwind(AssertUnwindSafe(|| {
             ComposedSut::<WideE2E>::check_invariants(s, r)
         })) {
-            *out.borrow_mut() = Some(panic_message(&p));
+            let msg = panic_message(&p);
+            sink.capture_fail(step_label, &msg);
+            *out.borrow_mut() = Some(msg);
             return Some(sut);
         }
+        sink.capture_pass(step_label);
     }
 
     Some(sut)
@@ -187,7 +197,7 @@ fn drive_windowed_case(
 fn general_e2e_composed_pbt_windowed() {
     // One throwaway window boot to read + narrow + DISCLOSE the live windowed cap
     // set. The strategy's `init_state` needs it before generation begins.
-    with_windowed_wide_sut(|sut, _default_oracle| {
+    with_windowed_wide_sut(|sut, _default_oracle, _sink| {
         let live = sut.cap_set();
         disclose_excluded(&live);
         set_windowed_cap_set(narrow_to_windowed_alphabet(live));
@@ -202,6 +212,8 @@ fn general_e2e_composed_pbt_windowed() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(6);
+
+    let mut guard = RunResultGuard::new("keystone-windowed", cases);
 
     let config = Config {
         cases,
@@ -224,13 +236,14 @@ fn general_e2e_composed_pbt_windowed() {
             kinds
         );
         let out: RefCell<Option<String>> = RefCell::new(None);
-        with_windowed_wide_sut(|sut, _default_oracle| {
+        with_windowed_wide_sut(|sut, _default_oracle, sink| {
             drive_windowed_case(
                 sut,
                 initial_ref.clone(),
                 transitions.clone(),
                 seen_counter,
                 &out,
+                sink,
             )
         });
         match out.into_inner() {
@@ -247,10 +260,17 @@ fn general_e2e_composed_pbt_windowed() {
     });
 
     match result {
-        Ok(()) => eprintln!(
-            "[4b-loop] PASS — {cases} windowed generated-sequence case(s) (seq 1..={seq_max}) \
-             GREEN against wide_e2e_windowed_ref + non-vacuity floor"
-        ),
+        Ok(()) => {
+            guard.set_green();
+            eprintln!(
+                "[4b-loop] PASS — {cases} windowed generated-sequence case(s) (seq 1..={seq_max}) \
+                 GREEN against wide_e2e_windowed_ref + non-vacuity floor"
+            );
+        }
         Err(e) => panic!("[4b-loop] windowed PBT failed (shrunk): {e}"),
     }
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;

@@ -143,9 +143,7 @@ mod tests {
     proptest_state_machine::prop_state_machine! {
         #![proptest_config(ProptestConfig {
             cases: 30,
-            failure_persistence: Some(Box::new(
-                proptest::test_runner::FileFailurePersistence::WithSource("pbt-regressions")
-            )),
+            failure_persistence: None,
             timeout: 30000,
             verbose: 2,
             .. ProptestConfig::default()
@@ -159,9 +157,7 @@ mod tests {
     proptest_state_machine::prop_state_machine! {
         #![proptest_config(ProptestConfig {
             cases: 30,
-            failure_persistence: Some(Box::new(
-                proptest::test_runner::FileFailurePersistence::WithSource("pbt-regressions")
-            )),
+            failure_persistence: None,
             timeout: 120000,
             verbose: 2,
             .. ProptestConfig::default()
@@ -192,6 +188,7 @@ mod tests {
         use std::path::Path;
         use std::sync::Arc;
 
+        use holon::sync::degraded_signal_bus::DegradedChange;
         use holon::sync::degraded_signal_bus::DegradedSignalBus;
         use holon::sync::degraded_signal_bus::ShareDegraded;
         use holon::sync::degraded_signal_bus::ShareDegradedReason;
@@ -366,9 +363,7 @@ mod tests {
             let node = tree.create(parent_tid).unwrap();
             let meta = tree.get_meta(node).unwrap();
             meta.insert("id", loro::LoroValue::from(stable_id)).unwrap();
-            let text: LoroText = meta
-                .insert_container("content_raw", LoroText::new())
-                .unwrap();
+            let text: LoroText = meta.ensure_mergeable_text("content_raw").unwrap();
             text.insert(0, content).unwrap();
             doc.commit();
         }
@@ -511,10 +506,12 @@ mod tests {
         /// Drain any queued `ShareDegraded` events from a receiver
         /// without blocking. Used between actions to observe which
         /// degraded signals fired.
-        fn drain_bus(rx: &mut broadcast::Receiver<ShareDegraded>) -> Vec<ShareDegraded> {
+        fn drain_bus(rx: &mut broadcast::Receiver<DegradedChange>) -> Vec<ShareDegraded> {
             let mut out = Vec::new();
-            while let Ok(ev) = rx.try_recv() {
-                out.push(ev);
+            while let Ok(change) = rx.try_recv() {
+                if let Some(ev) = change.raised() {
+                    out.push(ev);
+                }
             }
             out
         }
@@ -719,8 +716,8 @@ mod tests {
             // catch any degraded events during the scenario. Slow
             // subscribers would lag; broadcast channel has capacity 64
             // which is plenty for our invariants.
-            let mut rx_a = bus_a.subscribe();
-            let _rx_b = bus_b.subscribe();
+            let mut rx_a = bus_a.subscribe().changes;
+            let _rx_b = bus_b.subscribe().changes;
 
             seed(&a, "root-a", None, "root-a").await;
             seed(&a, "shared-parent", Some("root-a"), "Shared heading").await;
@@ -1146,9 +1143,7 @@ mod tests {
             #![proptest_config(ProptestConfig {
                 cases: 24,
                 timeout: 120000,
-                failure_persistence: Some(Box::new(
-                    proptest::test_runner::FileFailurePersistence::WithSource("pbt-regressions")
-                )),
+                failure_persistence: None,
                 .. ProptestConfig::default()
             })]
 

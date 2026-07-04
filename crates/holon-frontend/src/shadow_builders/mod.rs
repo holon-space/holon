@@ -10,7 +10,6 @@ holon_macros::builder_registry!("src/shadow_builders",
 );
 
 use crate::render_interpreter::RenderInterpreter;
-use crate::render_interpreter::shared_col_build;
 
 /// Build the shadow `RenderInterpreter<ReactiveViewModel>` from the
 /// macro-generated builder registry plus the manual `col` builder.
@@ -47,6 +46,7 @@ pub fn register_render_dsl_widget_names() {
         "chain_ops",
         "state_accent",
         "column",
+        "section_stack",
     ]);
     holon_api::render_dsl::register_widget_names(&all_names);
 }
@@ -55,14 +55,83 @@ pub fn build_shadow_interpreter() -> RenderInterpreter<ReactiveViewModel> {
     register_render_dsl_widget_names();
     let mut interp = RenderInterpreter::new();
     register_all(&mut interp);
+    interp.set_widget_metas(all_widget_metas());
     interp.register("column", |ba: prelude::BA<'_>| {
         let gap = ba.args.get_f64("gap").unwrap_or(0.0) as f32;
-        let children: Vec<ReactiveViewModel> = shared_col_build(&ba);
+        // Placement guard (accordion.rs, §3): bless ONLY direct `accordion(...)`
+        // child EXPRESSIONS with the accordion-parent flag; strip it from every
+        // other child's context. Inspecting the child expr's function name
+        // (rather than an inherited flag) makes "direct child of a column" the
+        // exact, leak-free condition — an accordion nested inside a `row`,
+        // drawer, or another container never sees the flag and so errors loudly.
+        let children: Vec<ReactiveViewModel> = ba
+            .args
+            .positional_exprs
+            .iter()
+            .map(|expr| {
+                let is_accordion = matches!(
+                    expr,
+                    holon_api::render_types::RenderExpr::FunctionCall { name, .. }
+                        if name == "accordion"
+                );
+                let mut child_flags = ba.ctx.flags.clone();
+                if is_accordion {
+                    child_flags.insert(
+                        accordion::ACCORDION_PARENT_FLAG.to_string(),
+                        holon_api::Value::Boolean(true),
+                    );
+                } else {
+                    child_flags.remove(accordion::ACCORDION_PARENT_FLAG);
+                }
+                let child_ctx = ba.ctx.with_flags(child_flags);
+                (ba.interpret)(expr, &child_ctx)
+            })
+            .collect();
         let mut props = std::collections::HashMap::new();
         props.insert("gap".to_string(), holon_api::Value::Float(gap as f64));
         ReactiveViewModel {
             children: children.into_iter().map(std::sync::Arc::new).collect(),
             ..ReactiveViewModel::from_widget("column", props)
+        }
+    });
+    interp.register("section_stack", |ba: prelude::BA<'_>| {
+        // Section-stack container (Inc C): a scroll region of variable-height
+        // sections, each optionally bearing an in-flow (`pinned:false`) or
+        // `sticky` accordion. Mirrors `column`'s placement-flag discipline but
+        // stamps SECTION_STACK_FLAG on direct `accordion(...)` children so those
+        // variants prove their context at build time; a pinned accordion here
+        // (or a section-stack accordion elsewhere) errors loudly.
+        let gap = ba.args.get_f64("gap").unwrap_or(0.0) as f32;
+        let children: Vec<ReactiveViewModel> = ba
+            .args
+            .positional_exprs
+            .iter()
+            .map(|expr| {
+                let is_accordion = matches!(
+                    expr,
+                    holon_api::render_types::RenderExpr::FunctionCall { name, .. }
+                        if name == "accordion"
+                );
+                let mut child_flags = ba.ctx.flags.clone();
+                child_flags.remove(accordion::ACCORDION_PARENT_FLAG);
+                if is_accordion {
+                    child_flags.insert(
+                        accordion::SECTION_STACK_FLAG.to_string(),
+                        holon_api::Value::Boolean(true),
+                    );
+                } else {
+                    child_flags.remove(accordion::SECTION_STACK_FLAG);
+                }
+                let child_ctx = ba.ctx.with_flags(child_flags);
+                (ba.interpret)(expr, &child_ctx)
+            })
+            .collect();
+        let mut props = std::collections::HashMap::new();
+        props.insert("gap".to_string(), holon_api::Value::Float(gap as f64));
+        props.insert("section_stack".to_string(), holon_api::Value::Boolean(true));
+        ReactiveViewModel {
+            children: children.into_iter().map(std::sync::Arc::new).collect(),
+            ..ReactiveViewModel::from_widget("section_stack", props)
         }
     });
     // Value functions — registered alongside widgets, disjoint name

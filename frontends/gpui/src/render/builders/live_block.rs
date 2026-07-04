@@ -30,13 +30,8 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
 
     let entity = get_or_create_live_block(&block_id, ctx);
 
-    // Note: we deliberately do NOT wrap in tracked() here. The BoundsTracker's
-    // forced style (width: 100%, flex_grow: 1) is calibrated for small content
-    // widgets inside column-flex lists; wrapping a whole region (row-flex child)
-    // causes the wrapper to collapse to height=0 and clips all region content.
-    //
     // For PANEL containers (`block:default-*` — the LeftSidebar / Main /
-    // RightSidebar wrappers), we ALSO wrap in a layout-transparent tracker
+    // RightSidebar wrappers), we wrap in a layout-transparent tracker
     // that binds the block_id as `entity_id`. This lets PBT region queries
     // locate the panel by URI in `BoundsRegistry`. We deliberately DON'T do
     // this for non-panel live_blocks because invariants like
@@ -66,6 +61,10 @@ fn get_or_create_live_block(
     // set in its own renders. The render fn already refused above if the
     // child id is already on the chain.
     let ancestors = ctx.live_block_ancestors.clone();
+    // The slot this live_block is being placed into decides the shell's shape.
+    // A panel wrapper inherits `Panel` from the window root; a `live_block()`
+    // inside an outline row inherits `Nested` from the row's context.
+    let placement = ctx.placement;
 
     ctx.local.get_or_create_typed(key, || {
         ctx.with_gpui(|_window, cx| {
@@ -79,6 +78,7 @@ fn get_or_create_live_block(
                     NavigationState::new(),
                     bounds,
                     ancestors,
+                    placement,
                     cx,
                 )
             })

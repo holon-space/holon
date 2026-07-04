@@ -1,5 +1,10 @@
 //! Transition: outdent the focused block (move it up to its grandparent level).
 //!
+//! @pbt rung input-pipeline
+//!   KEYSTONE: chord (Shift+Tab) via KeystrokeBlockTreeWriter; fixed-id slices
+//!   fall back to OpDispatchWriter (dispatch floor).
+//! @pbt covers outdent-chord — outdent chord -> structural reducer
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:1122-1137`
 //! (generator), `state_machine.rs:3329-3343` (precondition),
 //! `state_machine.rs:2662-2665` (ref-state apply),
@@ -8,7 +13,6 @@
 
 use holon_api::EntityUri;
 use holon_pbt_core::TransitionFactory;
-use holon_pbt_core::TransitionImpl;
 use holon_pbt_core::TransitionRef;
 use holon_pbt_core::capabilities::CapRegion;
 use holon_pbt_core::capabilities::RefBlockTree;
@@ -16,25 +20,24 @@ use holon_pbt_core::capabilities::RefBlockTreeMut;
 use holon_pbt_core::capabilities::RefEditorMirrorMut;
 use holon_pbt_core::capabilities::RefFocus;
 use holon_pbt_core::capabilities::RefFocusMut;
+use holon_pbt_core::capabilities::RefGlobalFocus;
 use holon_pbt_core::capabilities::RefLifecycle;
 use holon_pbt_core::capabilities::SutBlockTreeWrite;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::check;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::reference_state::ReferenceState;
-#[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::ExpectedSql;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::MutationKind;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::expected_sql_for_kind;
-use crate::pbt::validation::Reason;
-use crate::pbt::validation::check;
 
 /// Outdent the focused block: move it up one level to its grandparent via the
 /// `Alt+Left` / Shift+Tab chord.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I outdent block {block_id}")]
 pub struct Outdent {
     pub block_id: EntityUri,
 }
@@ -90,21 +93,34 @@ pub fn outdent_weighted_generator<R: RefBlockTree + RefLifecycle>(
         .filter(|id| outdent_preconditions(id, state).is_good())
         .collect();
     check(!candidates.is_empty(), Reason::PreconditionFailed).map(|_| {
-        let strat = prop::sample::select(candidates)
+        let strat = super::select_bias::select_with_edge_bias(candidates)
             .prop_map(|block_id| Outdent { block_id })
             .boxed();
-        (1, strat)
+        // F16: raise structural chord weight 1 → 20 (was ~1/180 vs split=100).
+        (20, strat)
     })
 }
 
 pub fn outdent_apply_to_ref<
-    R: RefBlockTree + RefBlockTreeMut + RefFocus + RefFocusMut + RefEditorMirrorMut,
+    R: RefBlockTree + RefBlockTreeMut + RefFocus + RefGlobalFocus + RefFocusMut + RefEditorMirrorMut,
 >(
     block_id: &EntityUri,
     state: &mut R,
 ) {
     // Model the chord-dispatch click (see mod.rs::model_chord_click_focus).
     super::model_chord_click_focus(block_id, state);
+
+    // ADR 0028 D1: the op engine REJECTS outdent of a direct page child (it would
+    // escape the page container) — fail-loud, no structural change. Mirror that
+    // rejection here so the model stays faithful: no undo snapshot, no move. The
+    // focus click above still models the gesture reaching the block.
+    let parent_is_page = state
+        .parent_of(block_id)
+        .is_some_and(|parent| state.is_page_block(&parent));
+    if parent_is_page {
+        return;
+    }
+
     state.push_undo_snapshot();
     state.outdent(block_id);
 }
@@ -113,9 +129,7 @@ pub fn outdent_apply_to_ref<
 
 impl<R: RefBlockTree + RefLifecycle> TransitionFactory<R> for Outdent {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        vec![::holon_pbt_core::composition::CapId::of::<
-            dyn ::holon_pbt_core::capabilities::SutBlockTreeWrite,
-        >()]
+        Self::declared_caps()
     }
 
     type Reason = Reason;
@@ -124,8 +138,15 @@ impl<R: RefBlockTree + RefLifecycle> TransitionFactory<R> for Outdent {
     }
 }
 
-impl<R: RefBlockTree + RefBlockTreeMut + RefFocus + RefFocusMut + RefEditorMirrorMut + RefLifecycle>
-    TransitionRef<R> for Outdent
+impl<
+    R: RefBlockTree
+        + RefBlockTreeMut
+        + RefFocus
+        + RefGlobalFocus
+        + RefFocusMut
+        + RefEditorMirrorMut
+        + RefLifecycle,
+> TransitionRef<R> for Outdent
 {
     type Reason = Reason;
 
@@ -138,21 +159,18 @@ impl<R: RefBlockTree + RefBlockTreeMut + RefFocus + RefFocusMut + RefEditorMirro
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutBlockTreeWrite> TransitionImpl<ReferenceState, S> for Outdent {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.apply_outdent(&self.block_id).await;
+crate::cap_transition! {
+    Outdent: SutBlockTreeWrite,
+    where R: [ RefBlockTree + RefLifecycle ],
+    |me, _state, sut| {
+        sut.apply_outdent(&me.block_id).await;
     }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for Outdent {
-    fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
+    sql_budget: |_me, state| {
         let mut sql = expected_sql_for_kind(
             MutationKind::Update,
-            state.mcp.active_watches.len(),
-            state.domain.block_state.blocks.len(),
-            state.files.documents.len(),
+            state.active_watch_count(),
+            state.block_count(),
+            state.document_count(),
         );
         sql.tolerance += 5; // extra margin for ordering operations
         sql

@@ -15,7 +15,7 @@ Holon is a reactive personal knowledge management (PKM) system built in Rust. It
 ### Backend Crates (`crates/`)
 
 | Spec | Crate | Summary |
-|------|-------|---------|
+| ------ | ------- | --------- |
 | [service-holon.md](components/service-holon.md) | `holon` | Root backend: Turso storage, Loro sync, type registry, Petri net wiring, render DSL |
 | [service-holon-api.md](components/service-holon-api.md) | `holon-api` | Shared types: Block, EntityUri, RenderExpr, UiEvent, streaming types |
 | [service-holon-core.md](components/service-holon-core.md) | `holon-core` | Core traits: CRUD, BlockOperations, DataSource, UndoStack, FractionalIndex |
@@ -31,16 +31,16 @@ Holon is a reactive personal knowledge management (PKM) system built in Rust. It
 ### Frontend Crates (`frontends/`)
 
 | Spec | Frontend | Summary |
-|------|----------|---------|
+| ------ | ---------- | --------- |
 | [service-frontend-gpui.md](components/service-frontend-gpui.md) | `gpui` | **Primary** — GPUI desktop/mobile UI; ReactiveShell, block rendering, navigation |
 | [service-frontend-mcp.md](components/service-frontend-mcp.md) | `mcp` | MCP server exposing backend tools + resources to AI agents |
 | [service-frontend-dioxus.md](components/service-frontend-dioxus.md) | `dioxus` + `dioxus-web` | Web UI via Dioxus (SSR/CSR/WASM) |
-| [service-frontend-other.md](components/service-frontend-other.md) | TUI / WaterUI / Ply / Flutter / holon-worker | Secondary frontends |
+| [service-frontend-other.md](components/service-frontend-other.md) | TUI / WaterUI / Flutter / holon-worker | Secondary frontends |
 
 ### Test Crates (`crates/`)
 
 | Spec | Crate | Summary |
-|------|-------|---------|
+| ------ | ------- | --------- |
 | [service-holon-integration-tests.md](components/service-holon-integration-tests.md) | `holon-integration-tests` | **Primary E2E PBT** — general_e2e_pbt.rs; real Turso DB; first stop for bug reproduction |
 | [service-holon-layout-testing.md](components/service-holon-layout-testing.md) | `holon-layout-testing` | GPUI layout snapshots (insta) + proptest visual regressions |
 | [service-holon-architecture-tests.md](components/service-holon-architecture-tests.md) | `holon-architecture-tests` | Architectural rule enforcement (crate layering) |
@@ -50,7 +50,7 @@ Holon is a reactive personal knowledge management (PKM) system built in Rust. It
 ## External Resource Specs (6 resources)
 
 | Spec | Resource | Summary |
-|------|----------|---------|
+| ------ | ---------- | --------- |
 | [url-futures-signals.md](external/url-futures-signals.md) | futures-signals v0.3 | FRP reactive streaming (Signal, MutableVec) |
 | [url-loro.md](external/url-loro.md) | Loro v1.0 | CRDT framework for org-mode sync |
 | [url-gpui.md](external/url-gpui.md) | GPUI (holon-space/zed fork) | GPU-accelerated UI framework |
@@ -63,7 +63,7 @@ Holon is a reactive personal knowledge management (PKM) system built in Rust. It
 ## Key Architecture Patterns
 
 | Pattern | Where |
-|---------|-------|
+| --------- | ------- |
 | **Operations Registry** | `holon-macros` `#[operations_trait]` + `holon-core` traits |
 | **Reactive CDC Streaming** | Turso IVM → `CacheEventSubscriber` → `ReactiveViewModel` → GPUI |
 | **DI Composition** | FluxDI modules wired at startup (CoreInfra, Loro, EventInfra) |
@@ -80,7 +80,7 @@ Holon is a reactive personal knowledge management (PKM) system built in Rust. It
 ## Codebase Stats
 
 | Category | Count |
-|----------|-------|
+| ---------- | ------- |
 | Backend crates | 11 |
 | Frontend crates | 9 (4 tracked here) |
 | Test crates | 3 (all tracked) |

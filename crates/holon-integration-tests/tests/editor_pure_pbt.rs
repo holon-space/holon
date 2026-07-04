@@ -20,6 +20,12 @@
 //! function for preconditions / apply_to_ref, then invokes the SUT-side
 //! mutation directly on `EditorPureSut` (which the pure slice owns; no
 //! `dyn SutHandle` indirection since this slice has no wide-PBT SUT).
+//!
+//! @pbt kind harness
+//! @pbt covers editor-transition-sharing — proves migrated editor transitions
+//! are SHARED with WideE2E, not duplicated @pbt overlaps
+//! general_e2e_composed_pbt — kept as fast storage-free editor fuzz + sharing
+//! proof
 
 #![cfg(feature = "pbt")]
 
@@ -61,6 +67,7 @@ use holon_pbt_core::capabilities::RefEditorMirror;
 use holon_pbt_core::capabilities::RefEditorMirrorMut;
 use holon_pbt_core::capabilities::RefFocus;
 use holon_pbt_core::capabilities::RefFocusMut;
+use holon_pbt_core::capabilities::RefGlobalFocus;
 use holon_pbt_core::capabilities::RefLifecycle;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
@@ -239,6 +246,11 @@ impl RefBlockTree for EditorPureRef {
             }
         }
     }
+    fn main_panel_renders(&self, id: &EntityUri) -> bool {
+        // The editor-pure slice has no panel query and no pages: every block
+        // under the single root is rendered.
+        self.is_descendant_of_any(id, &BTreeSet::from([self.root_id.clone()]))
+    }
     fn is_layout_block(&self, _: &EntityUri) -> bool {
         false
     }
@@ -263,25 +275,53 @@ impl RefBlockTreeMut for EditorPureRef {
             b.content = text.to_string();
         }
     }
+    /// The id follows the text: at position 0 `id` keeps the whole string and
+    /// the minted block is the empty one sorted BEFORE it, so the returned
+    /// focus target is `id` itself.
     fn split_block(&mut self, id: &EntityUri, position: usize) -> EntityUri {
         let new_id = self.fresh_id();
-        let (parent, tail, new_sort_key) = {
+        let at_start = position == 0;
+        let (parent, minted_content, new_sort_key) = {
             let b = self.blocks.get_mut(id).expect("split target exists");
             let position = position.min(b.content.len());
             let tail = b.content.split_off(position);
-            (b.parent.clone(), tail, format!("{}m", b.sort_key))
+            if at_start {
+                // The minted (empty) block takes the origin's slot and the
+                // origin steps one slot down, so it ends up BELOW.
+                let stepped_key = format!("{}m", b.sort_key);
+                let minted_key = std::mem::replace(&mut b.sort_key, stepped_key);
+                let minted = std::mem::replace(&mut b.content, tail);
+                (b.parent.clone(), minted, minted_key)
+            } else {
+                let sort_key = format!("{}m", b.sort_key);
+                (b.parent.clone(), tail, sort_key)
+            }
         };
         self.blocks.insert(
             new_id.clone(),
             PureBlock {
                 parent,
-                content: tail,
+                content: minted_content,
                 sort_key: new_sort_key,
                 is_text: true,
             },
         );
-        new_id
+        if at_start { id.clone() } else { new_id }
     }
+
+    // ALLOW(unused_param): trait signature requires old_id, unreachable arm below
+    fn remint_block(&mut self, _old_id: &EntityUri) -> EntityUri {
+        unimplemented!(
+            "remint_block: only reachable via StaleExternalRewrite, which requires the composed \
+             environment"
+        )
+    }
+    /// Mirrors `ReferenceState::join_block`, INCLUDING the child re-parenting:
+    /// the joined-away block's children move onto the merge target. Dropping
+    /// them orphans a subtree, which `inv-tree-structural-integrity` catches.
+    /// Their relative order among the target's existing children is not
+    /// modelled — this slice checks structure and cursor, not sibling
+    /// order.
     fn join_block(&mut self, id: &EntityUri) -> usize {
         let into = self.previous_sibling(id).unwrap_or_else(|| {
             self.blocks
@@ -289,6 +329,11 @@ impl RefBlockTreeMut for EditorPureRef {
                 .and_then(|b| b.parent.clone())
                 .expect("join_block: no prev sibling AND no parent")
         });
+        for block in self.blocks.values_mut() {
+            if block.parent.as_ref() == Some(id) {
+                block.parent = Some(into.clone());
+            }
+        }
         let appended = self.blocks.remove(id).expect("join target exists").content;
         let into_block = self.blocks.get_mut(&into).expect("join destination exists");
         let cursor_at_join = into_block.content.len();
@@ -372,6 +417,10 @@ impl RefEditorMirrorMut for EditorPureRef {
     fn move_cursor(&mut self, byte_position: usize) {
         self.editor.cursor = byte_position.min(self.editor.text.len());
     }
+    fn reseed_active_editor(&mut self, text: &str, cursor: usize) {
+        self.editor.text = text.to_string();
+        self.editor.cursor = cursor.min(self.editor.text.len());
+    }
 }
 
 impl RefFocus for EditorPureRef {
@@ -386,6 +435,17 @@ impl RefFocus for EditorPureRef {
     }
     fn focused_cursor(&self, _: CapRegion) -> Option<CapCursor> {
         self.focus_cursor_main
+    }
+}
+
+/// The ADR-0010 global focus mirror is an engine-backed signal; this slice has
+/// no engine (its `focus_main` is the slice's own per-region focus, not that
+/// mirror). `None` is the documented pure-slice answer — it leaves
+/// `model_chord_click_focus`'s focus arm inert here, so the slice keeps
+/// deciding on its active editor alone.
+impl RefGlobalFocus for EditorPureRef {
+    fn global_focused_block(&self) -> Option<EntityUri> {
+        None
     }
 }
 
@@ -622,6 +682,7 @@ prop_state_machine! {
     #![proptest_config(proptest::test_runner::Config {
         cases: 256,
         max_shrink_iters: 200,
+        failure_persistence: None,
         .. proptest::test_runner::Config::default()
     })]
     #[test]

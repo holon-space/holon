@@ -1,6 +1,16 @@
 //! `inv-viewmodel-shows-source-when-no-query` — the degraded ("shows source")
 //! render twin.
 //!
+//! @pbt oracle sut-internal — ref is cap-blind to the storage backend and
+//!   would predict the full-mode render, so a ref comparison is a guaranteed
+//!   false Fail; the expected value is fixed by the sut_absent-SutQueryResults
+//!   selection
+//! @pbt covers degradation-regression — no-Turso wiring fails to degrade a
+//!   query-source block to the bare `source_editor` view (ADR 0004 Phase 9)
+//! @pbt slips-if-removed without a query engine the app attempts a full-mode
+//!   render of a query block and shows an error/blank instead of the source
+//!   editor; the degraded-mode contract silently breaks
+//!
 //! In a no-query-engine wiring (no Turso), the production
 //! `loro_ui_watcher::derive_render_expr` degrades a query-source block to the
 //! bare `source` view mode (ADR 0004 Phase 9, capability-driven degradation):

@@ -1,0 +1,39 @@
+# split_block latency lines, task-#37 lane, windowed GPUI app (port 8710), 2026-08-08.
+# Extracted verbatim (truncated to 220 cols) from the lane evidence
+# `evidence-typed-gesture-8710-app.txt`, which is not itself committable (400 KB).
+#
+# READ THE TIMESTAMPS. Burst 1 at 05:50:50-55 runs on NEVER-TYPED blocks: 8 splits,
+# 8 `stage="dispatch"` AND 8 `stage="e2e"` samples, e2e 30-46 ms. Bursts 2 and 3 at
+# 05:53:49-53 and 05:56:21-24 use the dogfood gesture (click -> type -> Enter) on the
+# SAME blocks, which stamps `block_raw.write_seq`: 8 + 4 `dispatch` samples and ZERO
+# `e2e` samples. Same build, same blocks, same gesture minus the typing.
+# That asymmetry IS the correlator defect (docs/Testing/BugFunnel.md, 2026-08-08 row).
+
+2026-08-08T05:50:50.871572Z  INFO live_data.subscribe_actor{source="document_blocks"}: holon_latency: holon_latency stage="e2e" action=split_block block=block:bench-18 source="block" ms=32
+2026-08-08T05:50:50.890935Z  INFO live_data.subscribe_actor{source="block"}: holon_latency: holon_latency stage="dispatch" action=split_block block=block:bench-18 ms=51
+2026-08-08T05:50:51.449730Z  INFO live_data.subscribe_actor{source="document_blocks"}: holon_latency: holon_latency stage="e2e" action=split_block block=block:bench-17 source="block" ms=34
+2026-08-08T05:50:51.466556Z  INFO live_data.subscribe_actor{source="document_blocks"}: holon_latency: holon_latency stage="dispatch" action=split_block block=block:bench-17 ms=51
+2026-08-08T05:50:52.097993Z  INFO holon_latency: holon_latency stage="e2e" action=split_block block=block:bench-16 source="block" ms=46
+2026-08-08T05:50:52.123006Z  INFO holon_latency: holon_latency stage="dispatch" action=split_block block=block:bench-16 ms=72
+2026-08-08T05:50:52.671235Z  INFO holon_latency: holon_latency stage="e2e" action=split_block block=block:bench-15 source="block" ms=40
+2026-08-08T05:50:52.694514Z  INFO holon_latency: holon_latency stage="dispatch" action=split_block block=block:bench-15 ms=64
+2026-08-08T05:50:53.244823Z  INFO holon_latency: holon_latency stage="e2e" action=split_block block=block:bench-14 source="block" ms=41
+2026-08-08T05:50:53.270043Z  INFO holon_latency: holon_latency stage="dispatch" action=split_block block=block:bench-14 ms=66
+2026-08-08T05:50:53.816538Z  INFO live_data.subscribe_actor{source="document_blocks"}: holon_latency: holon_latency stage="e2e" action=split_block block=block:bench-13 source="block" ms=30
+2026-08-08T05:50:53.835365Z  INFO live_data.subscribe_actor{source="entity_keyed"}: holon_latency: holon_latency stage="dispatch" action=split_block block=block:bench-13 ms=49
+2026-08-08T05:50:54.413502Z  INFO holon_latency: holon_latency stage="e2e" action=split_block block=block:bench-12 source="block" ms=41
+2026-08-08T05:50:54.434301Z  INFO holon_latency: holon_latency stage="dispatch" action=split_block block=block:bench-12 ms=62
+2026-08-08T05:50:55.000223Z  INFO live_data.subscribe_actor{source="entity_keyed"}: holon_latency: holon_latency stage="e2e" action=split_block block=block:bench-11 source="block" ms=37
+2026-08-08T05:50:55.017939Z  INFO live_data.subscribe_actor{source="document_blocks"}: holon_latency: holon_latency stage="dispatch" action=split_block block=block:bench-11 ms=55
+2026-08-08T05:53:49.074634Z  INFO holon_latency: holon_latency stage="dispatch" action=split_block block=block:bench-17 ms=61
+2026-08-08T05:53:49.752126Z  INFO holon_latency: holon_latency stage="dispatch" action=split_block block=block:bench-16 ms=88
+2026-08-08T05:53:50.346337Z  INFO live_data.subscribe_actor{source="block"}: holon_latency: holon_latency stage="dispatch" action=split_block block=block:bench-15 ms=62
+2026-08-08T05:53:51.008169Z  INFO holon_latency: holon_latency stage="dispatch" action=split_block block=block:bench-14 ms=63
+2026-08-08T05:53:51.716918Z  INFO holon_latency: holon_latency stage="dispatch" action=split_block block=block:bench-13 ms=104
+2026-08-08T05:53:52.393600Z  INFO holon_latency: holon_latency stage="dispatch" action=split_block block=block:bench-12 ms=96
+2026-08-08T05:53:53.060818Z  INFO live_data.subscribe_actor{source="entity_keyed"}: holon_latency: holon_latency stage="dispatch" action=split_block block=block:bench-11 ms=76
+2026-08-08T05:56:21.649197Z  INFO live_data.subscribe_actor{source="entity_keyed"}: holon_latency: holon_latency stage="dispatch" action=split_block block=block:bench-15 ms=89
+2026-08-08T05:56:22.925134Z  INFO live_data.subscribe_actor{source="entity_keyed"}:live_data.subscribe_actor{source="focus_roots"}: holon_latency: holon_latency stage="dispatch" action=split_block block=block:bench-13 ms
+2026-08-08T05:56:23.437657Z  INFO holon_latency: holon_latency stage="dispatch" action=split_block block=block:bench-12 ms=118
+2026-08-08T05:56:24.124491Z  INFO live_data.subscribe_actor{source="block"}: holon_latency: holon_latency stage="dispatch" action=split_block block=block:bench-11 ms=187
+2026-08-08T05:58:59.645294Z  INFO live_data.subscribe_actor{source="document_blocks"}: holon_latency: holon_latency stage="dispatch" action=split_block block=block:bench-10 ms=41

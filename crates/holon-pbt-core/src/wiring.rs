@@ -1,5 +1,9 @@
 //! Typed wiring manifest (ADR 0007).
 //!
+//! @pbt kind cap-plumbing
+//! @pbt covers all-slices — storage/sync/actor manifest + validity rules +
+//!   shrinkable `any_valid_wiring` strategy; fail-loud parse of env overrides.
+//!
 //! A [`Wiring`] declares which storage adapters, sync adapters, and actors
 //! are present in a given composition of Holon. It is the single input to
 //! both:
@@ -308,7 +312,24 @@ impl RequiredWiring {
 /// while still exercising Turso (and shrinking it *out* first, since a weighted
 /// bool shrinks `true → false`). The bias is explicit, not incidental: a
 /// uniform subset would include Turso in ~half of all draws.
-const QUERY_ADAPTER_INCLUSION_PROB: f64 = 0.15;
+///
+/// **Floored by write-back reachability** (holder design §9.5/§10.2.7): a
+/// `BlockFeed` exists only under Turso, and without it the whole feed-driven
+/// org write-back path (the `group_by`/`home_by` resolver + the
+/// `FileSyncController` delta drain) never runs. This inclusion probability is
+/// therefore the keystone's coverage of that path and must keep the post-filter
+/// Turso share above [`MIN_QUERY_ADAPTER_DRAW_SHARE`] — see
+/// `query_adapter_draw_share_meets_writeback_floor`.
+const QUERY_ADAPTER_INCLUSION_PROB: f64 = 0.20;
+
+/// The floor the *post-filter* Turso share must clear, i.e. the fraction of
+/// keystone cases whose draw can exercise the feed-driven write-back path at
+/// all. Deliberately expressed on the accepted draws, not on
+/// [`QUERY_ADAPTER_INCLUSION_PROB`]: `any_valid_wiring`'s validity filter drops
+/// `ActionEngine`-without-query-adapter and empty-storage manifests, which are
+/// all Turso-free, so the accepted share is materially higher than the raw
+/// inclusion probability and IT is what the keystone actually runs.
+pub const MIN_QUERY_ADAPTER_DRAW_SHARE: f64 = 1.0 / 3.0;
 
 /// The toggleable adapter/actor universe a generated [`Wiring`] may draw from.
 ///
@@ -353,6 +374,20 @@ fn parse_wiring_axes(spec: &str) -> (Vec<StorageAdapter>, Vec<SyncAdapter>, Vec<
         parse_axis(sections[1], parse_sync_adapter, "sync adapter"),
         parse_axis(sections[2], parse_actor, "actor"),
     )
+}
+
+/// Parse an EXACT pinned manifest (the `HOLON_PBT_PIN_WIRING` format): the same
+/// `"storage;sync;actors"` spec as `HOLON_PBT_WIRING_AXES`, but interpreted as
+/// the exact component sets of ONE wiring rather than a drawable universe.
+/// Fail-loud on a malformed spec or an invalid manifest -- a typo'd pin must
+/// never silently test a different grid point.
+pub fn wiring_from_exact_spec(spec: &str) -> Wiring {
+    let (storage, sync, actors) = parse_wiring_axes(spec);
+    let wiring = Wiring::custom(storage, sync, actors);
+    if let Err(e) = wiring.validate() {
+        panic!("pinned wiring {spec:?} is invalid: {e}");
+    }
+    wiring
 }
 
 /// Parse one comma-separated axis section into a deduplicated, order-preserving
@@ -494,6 +529,46 @@ mod tests {
 
     use super::*;
 
+    /// Write-back reachability floor (holder design §9.5/§10.2.7). The
+    /// feed-driven org write-back path exists ONLY under a query-capable
+    /// (`BlockFeed`-bearing) storage adapter, so the share of accepted draws
+    /// that include one IS the keystone's coverage of that path. A generator
+    /// change that pushes it back under [`MIN_QUERY_ADAPTER_DRAW_SHARE`] would
+    /// silently return write-back to the near-untested state §9.5 found —
+    /// fixed-seed runner (`TestRunner::deterministic`), so this fails loudly
+    /// and reproducibly instead.
+    #[test]
+    fn query_adapter_draw_share_meets_writeback_floor() {
+        use proptest::strategy::ValueTree;
+        use proptest::test_runner::TestRunner;
+
+        let strategy = any_valid_wiring();
+        let mut runner = TestRunner::deterministic();
+        let draws = 8192;
+        let mut with_query = 0usize;
+        for _ in 0..draws {
+            let tree = strategy
+                .new_tree(&mut runner)
+                .expect("any_valid_wiring must always produce a valid manifest");
+            if tree
+                .current()
+                .storage_adapters
+                .iter()
+                .any(|a| a.is_query_capable())
+            {
+                with_query += 1;
+            }
+        }
+        let share = with_query as f64 / draws as f64;
+        assert!(
+            share >= MIN_QUERY_ADAPTER_DRAW_SHARE,
+            "write-back reachability floor: only {with_query}/{draws} ({share:.3}) accepted draws \
+             include a query-capable storage adapter, below the {MIN_QUERY_ADAPTER_DRAW_SHARE:.3} \
+             floor — the feed-driven org write-back path (BlockFeed → group_by/home_by resolver → \
+             FileSyncController) would run in fewer keystone cases than the floor allows"
+        );
+    }
+
     #[test]
     fn blessed_manifests_are_all_valid() {
         for m in Wiring::blessed_manifests() {
@@ -591,6 +666,11 @@ mod tests {
     }
 
     proptest! {
+        #![proptest_config(ProptestConfig {
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        })]
+
         /// `validate()`'s verdict agrees with the explicit rule table for
         /// every randomly drawn manifest (positive + negative coverage).
         #[test]

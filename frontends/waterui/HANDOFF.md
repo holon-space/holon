@@ -5,8 +5,8 @@
 Parked experimental frontend. It is **excluded from the root workspace**
 (root `Cargo.toml` `exclude` list) because naga 27 (via wgpu) +
 codespan-reporting 0.12 breaks workspace feature unification
-(https://github.com/gfx-rs/wgpu/issues/7915; fix pending backport in
-https://github.com/gfx-rs/wgpu/issues/8366). It therefore declares its own
+(<https://github.com/gfx-rs/wgpu/issues/7915>; fix pending backport in
+<https://github.com/gfx-rs/wgpu/issues/8366>). It therefore declares its own
 `[workspace]` table (like `frontends/holon-worker`) so it builds standalone:
 
 ```sh
@@ -19,10 +19,9 @@ unfetchable. Re-pin to a newer rev once upstream fixes the submodule pointer.
 
 **Known build blocker on Xcode 26+ SDKs**: `waterkit-screen` (mandatory dep
 of `waterui-internal`) compiles Swift using `CGWindowListCreateImage`, which
-the macOS 26 SDK removed ("use ScreenCaptureKit instead") — the same issue
-for which `frontends/ply` is workspace-excluded. Everything else (744 crates
-including all holon crates) checks cleanly; the Swift build script is the
-sole failure. Needs an older SDK/toolchain or an upstream waterkit fix.
+the macOS 26 SDK removed ("use ScreenCaptureKit instead"). Everything else
+(744 crates including all holon crates) checks cleanly; the Swift build script
+is the sole failure. Needs an older SDK/toolchain or an upstream waterkit fix.
 `Cargo.lock` here is seeded from the root workspace lock — a fresh resolve
 picks stable `ed25519 3.0.0` which breaks `ed25519-dalek 3.0.0-pre.1` (root
 pins the `-rc` line); keep the seeded pins.
@@ -115,13 +114,16 @@ The `Cargo.toml` pins `waterui` and `waterui-ffi` to a dev-branch rev of the wat
 After the CLI scaffolds `.water/apple/`, you must patch the Xcode project before building:
 
 **1. Switch apple-backend to dev branch** — in `.water/apple/WaterUIApp.xcodeproj/project.pbxproj`, change:
+
 ```
 requirement = {
     kind = upToNextMajorVersion;
     minimumVersion = 0.2.0;
 };
 ```
+
 to:
+
 ```
 requirement = {
     kind = branch;
@@ -130,15 +132,19 @@ requirement = {
 ```
 
 **2. Add framework linker flags** — `hyper_util` (via `system_configuration` crate) needs macOS frameworks. Change both `OTHER_LDFLAGS` entries from:
+
 ```
 OTHER_LDFLAGS = "-lwaterui_app -lc++";
 ```
+
 to:
+
 ```
 OTHER_LDFLAGS = "-lwaterui_app -lc++ -framework SystemConfiguration -framework Security -framework CoreFoundation";
 ```
 
 **3. Delete stale Package.resolved** (if it exists):
+
 ```sh
 rm -f .water/apple/WaterUIApp.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
 ```
@@ -163,6 +169,7 @@ cd .water/apple && xcodebuild -project WaterUIApp.xcodeproj -scheme WaterUIApp \
 ### Running
 
 The app is an FFI library loaded by the Swift host — env vars must be passed at launch time:
+
 ```sh
 HOLON_DB_PATH=/tmp/holon-water.db \
 HOLON_VAULT_ROOT=/path/to/orgfiles/ \

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use anyhow::Context;
 use anyhow::Result;
 use fluxdi::Injector;
 use fluxdi::Module;
@@ -27,6 +28,7 @@ use super::schema_providers::BlockHierarchyView;
 use super::schema_providers::CoreTables;
 use super::schema_providers::DbReady;
 use super::schema_providers::GraphEavSchema;
+use super::schema_providers::HistoryTables;
 use super::schema_providers::IdentityTables;
 use super::schema_providers::LinkTables;
 use super::schema_providers::NavigationTables;
@@ -52,6 +54,40 @@ use crate::storage::sync_token_store::DatabaseSyncTokenStore;
 use crate::storage::turso::DbHandle;
 use crate::storage::turso::TursoBackend;
 use crate::sync::LiveData;
+
+/// How often the clock scheduler checks for a day-rollover. Cheap — the write
+/// only happens on an actual day change (ADR 0024 P5).
+const CLOCK_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Boot guard: fail loud unless the `clock` day row is seeded with a real,
+/// post-1970 date. Proves the clock scheduler ran on this embedder's boot path
+/// (ENVIRONMENT is the top BugFunnel escape category — every embedder must
+/// seed).
+async fn assert_clock_seeded(db_handle: &DbHandle) -> Result<()> {
+    let rows = db_handle
+        .query(
+            "SELECT epoch_day FROM clock WHERE grain = 'day'",
+            HashMap::new(),
+        )
+        .await
+        .context("[DI] boot guard: reading the clock day row failed")?;
+    let epoch_day = rows
+        .first()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "[DI] boot guard: clock day row missing — schema seed or scheduler did not run"
+            )
+        })?
+        .get("epoch_day")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| anyhow::anyhow!("[DI] boot guard: clock.epoch_day is not an integer"))?;
+    anyhow::ensure!(
+        epoch_day > 0,
+        "[DI] boot guard: clock day row still holds the 1970 placeholder (epoch_day={epoch_day}) \
+         — the clock scheduler did not seed the real date"
+    );
+    Ok(())
+}
 
 /// Build the default set of SQL-level transformers (applied after compilation).
 fn build_sql_transformers() -> Vec<Box<dyn SqlTransformer>> {
@@ -86,7 +122,20 @@ async fn init_sync_token_store(db_handle: DbHandle) -> Arc<dyn SyncTokenStore> {
 fn build_graph_schema_registry(type_registry: &TypeRegistry) -> GraphSchemaRegistry {
     let mut registry = GraphSchemaRegistry::new();
 
-    for type_def in type_registry.all() {
+    for mut type_def in type_registry.all() {
+        // `sort_key` is a physical `block` column (the internal fractional
+        // index) that lives outside the `Block` struct (ADR 0005), so the
+        // derived type_def omits it. GQL panel queries legitimately ORDER BY
+        // `d.sort_key`, so expose it as a queryable graph property. `RETURN d`
+        // projects `node.*`, so this only enables property references — it does
+        // not change the projected column set.
+        if type_def.graph_label.as_deref() == Some("block")
+            && !type_def.fields.iter().any(|f| f.name == "sort_key")
+        {
+            type_def
+                .fields
+                .push(holon_api::entity::FieldSchema::new("sort_key", "TEXT"));
+        }
         registry.register_type(type_def);
     }
 
@@ -116,7 +165,8 @@ async fn create_initialized_engine(
     ui_info: holon_api::UiInfo,
     graph_schema_registry: GraphSchemaRegistry,
     type_registry: &TypeRegistry,
-) -> BackendEngine {
+    clock: Arc<dyn holon_api::Clock>,
+) -> Result<BackendEngine> {
     let backend_guard = backend.read().await;
     let db_handle = backend_guard.handle().clone();
     drop(backend_guard);
@@ -136,32 +186,98 @@ async fn create_initialized_engine(
     )
     .await;
 
-    let engine = BackendEngine::new(
-        db_handle,
+    let mut engine = BackendEngine::new(
+        db_handle.clone(),
         dispatcher,
         profile_resolver.clone(),
         build_sql_transformers(),
         graph_schema_registry,
     )
-    .expect("Failed to create BackendEngine");
+    .context("Failed to create BackendEngine")?;
+
+    // Undo substrate: back the per-session undo stack with the replica DB
+    // (`undo_log` snapshot + live-state precondition reader) so history survives
+    // a restart and stale entries are dropped loudly at replay.
+    engine
+        .enable_undo_persistence()
+        .await
+        .context("Failed to enable undo persistence")?;
+
+    // Local, non-syncing UI state (C8 ruling): the `local_ui_state` table
+    // backs per-device view choices; slot queries COALESCE it over the
+    // synced choice. Local-only — outside every projection/reseed path.
+    engine
+        .ensure_local_state()
+        .await
+        .context("Failed to create local_ui_state table")?;
+
+    // Advice-rule reconciler (ADR 0022): discover `holon_advice_rule_yaml` blocks
+    // and keep their `advice_rule_{slug}` matviews synthesized/diffed/torn-down
+    // as the rule blocks are edited — the exact profile-resolver pattern, one
+    // view per *rule*. DDL runs off the CDC delivery path (see
+    // `spawn_advice_reconciler`).
+    let advice_status = holon_advice::AdviceRuleStatusHandle::new();
+    match crate::sync::spawn_advice_reconciler(
+        &matview_mgr,
+        db_handle.clone(),
+        advice_status.clone(),
+    )
+    .await
+    {
+        Ok(handle) => engine.install_advice_reconciler(advice_status, handle),
+        Err(e) => tracing::error!(
+            error = %format!("{e:#}"),
+            "[DI] advice-rule reconciler failed to start — advice rules will not be synthesized"
+        ),
+    }
+
+    // Clock scheduler (ADR 0024 P5, time-as-data): seed the `clock` day row from
+    // the injected wall clock and re-fire temporal-guard matviews on
+    // day-rollover. Every embedder resolves through this shared path, so
+    // spawning it here covers GPUI, iOS, dioxus-web worker, and headless tests.
+    // Boot guard below fails loud if the seed did not land. The production
+    // wiring uses the real `SystemClock`; the keystone `AdvanceDay` transition
+    // injects a fake clock (via `InjectedClock`, resolved in the factory below)
+    // instead (§6).
+    let clock_scheduler = crate::sync::clock_scheduler::spawn_clock_scheduler(
+        db_handle.clone(),
+        clock,
+        CLOCK_TICK_INTERVAL,
+    )
+    .await
+    .context("[DI] clock scheduler failed to seed the clock relation at boot")?;
+    engine.install_clock_scheduler(clock_scheduler);
+
+    // Boot guard: the `clock` day row must be seeded and hold a real (post-1970)
+    // date, proving the scheduler actually ran on this embedder's boot path.
+    assert_clock_seeded(&db_handle).await?;
 
     // Preload startup matviews (reuses existing ones from previous sessions).
     preload_startup_views(&engine, None)
         .await
-        .expect("Failed to preload startup views");
+        .context("Failed to preload startup views")?;
 
-    let live_entities = create_live_entities(&matview_mgr).await;
+    let live_entities = create_live_entities(&matview_mgr)
+        .await
+        .context("Failed to build the profile resolver's live entities")?;
     profile_resolver.set_live_entities(live_entities);
 
-    engine
+    Ok(engine)
 }
 
 /// Register services shared between `register_core_services` and
 /// `register_core_services_with_backend`: TypeRegistry, OperationObserver,
 /// NavigationProvider, OperationProvider (nav), OperationModule.
 fn register_shared_services(injector: &Injector) -> Result<()> {
-    let type_registry = create_default_registry().expect("Failed to create default TypeRegistry");
+    let type_registry =
+        create_default_registry().context("Failed to create default TypeRegistry")?;
+    // The classifier holds the registry, so it tracks entities registered later
+    // (an MCP sidecar connecting) without re-wiring.
+    let link_classifier = type_registry.link_target_classifier();
     injector.provide::<TypeRegistry>(Provider::root(move |_| type_registry.clone()));
+    injector.provide::<holon_api::link_parser::LinkTargetClassifier>(Provider::root(move |_| {
+        Shared::new(link_classifier.clone())
+    }));
 
     injector.provide_into_set::<dyn OperationObserver>(Provider::root_async(
         move |inj| async move {
@@ -205,19 +321,28 @@ pub fn register_core_services_no_turso(injector: &Injector, db_path: PathBuf) ->
         Shared::new(DatabasePathConfig::new(db_path.clone()))
     }));
 
-    let type_registry = create_default_registry().expect("Failed to create default TypeRegistry");
+    let type_registry =
+        create_default_registry().context("Failed to create default TypeRegistry")?;
+    // The classifier holds the registry, so it tracks entities registered later
+    // (an MCP sidecar connecting) without re-wiring.
+    let link_classifier = type_registry.link_target_classifier();
     injector.provide::<TypeRegistry>(Provider::root(move |_| type_registry.clone()));
+    injector.provide::<holon_api::link_parser::LinkTargetClassifier>(Provider::root(move |_| {
+        Shared::new(link_classifier.clone())
+    }));
 
     Ok(())
 }
 
 const PROFILE_SQL: &str = include_str!("../../sql/profiles/get_profiles.sql");
-fn query_source_blocks_sql() -> String {
+
+/// The CDC read backing one live entity: the three columns the Rhai lookups
+/// project, filtered by the spec's own predicate.
+fn live_entity_sql(spec: holon_profiles::LiveEntitySpec) -> String {
     format!(
-        "SELECT id, parent_id, source_language FROM {table} WHERE content_type = 'source' AND \
-         source_language IN {langs}",
+        "SELECT id, parent_id, source_language FROM {table} WHERE {predicate}",
         table = crate::storage::BLOCK_READ_TABLE,
-        langs = holon_api::QueryLanguage::sql_in_list(),
+        predicate = spec.sql_predicate(),
     )
 }
 
@@ -227,41 +352,52 @@ async fn create_live_data_keyed_by(
     matview_manager: &crate::sync::MatviewManager,
     sql: &str,
     key_column: &'static str,
-) -> Option<Arc<LiveData<holon_core::storage::types::StorageEntity>>> {
-    match matview_manager.watch(sql).await {
-        Ok(result) => {
-            let live = LiveData::new(
-                result.initial_rows,
-                move |row| {
-                    let id = row
-                        .get(key_column)
-                        .and_then(|v| v.as_string())
-                        .map(|s| s.to_string())
-                        .ok_or_else(|| anyhow::anyhow!("entity row missing '{key_column}'"))?;
-                    Ok(id)
-                },
-                |row| Ok(row.clone()),
-            );
-            live.subscribe("entity_keyed", result.stream);
-            Some(live)
-        }
-        Err(e) => {
-            tracing::warn!("[DI] Failed to create live data for '{sql}': {e}");
-            None
-        }
-    }
+) -> Result<Arc<LiveData<holon_core::storage::types::StorageEntity>>> {
+    let result = matview_manager
+        .watch(sql)
+        .await
+        .with_context(|| format!("[DI] failed to watch live-entity query '{sql}'"))?;
+    let live = LiveData::new(
+        result.initial_rows,
+        move |row| {
+            let id = row
+                .get(key_column)
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_string())
+                .ok_or_else(|| anyhow::anyhow!("entity row missing '{key_column}'"))?;
+            Ok(id)
+        },
+        |row| Ok(row.clone()),
+    );
+    live.subscribe("entity_keyed", result.stream);
+    Ok(live)
 }
 
 /// Build the `live_entities` map for ProfileResolver's Rhai entity lookups.
+///
+/// Every spec must land: a missing entity leaves its lookup unregistered, so
+/// every computed field calling it evaluates to `Null` and the routing it
+/// drives (query pages, rule machinery) silently disappears — hence the loud
+/// error instead of a skipped entry.
 async fn create_live_entities(
     matview_manager: &crate::sync::MatviewManager,
-) -> crate::entity_profile::LiveEntities {
+) -> Result<crate::entity_profile::LiveEntities> {
     let mut live_entities = std::collections::HashMap::new();
-    let qs_sql = query_source_blocks_sql();
-    if let Some(qs) = create_live_data_keyed_by(matview_manager, &qs_sql, "parent_id").await {
-        live_entities.insert(holon_api::EntityName::new("query_source"), qs);
+    for spec in holon_profiles::LiveEntitySpec::ALL.iter().copied() {
+        let name = spec.entity_name();
+        let live = create_live_data_keyed_by(matview_manager, &live_entity_sql(spec), "parent_id")
+            .await
+            .with_context(|| {
+                format!(
+                    "[DI] live entity '{}' could not be registered — the `{}` Rhai lookup would \
+                     be missing and every computed field using it would resolve to Null",
+                    name.as_str(),
+                    name.as_str(),
+                )
+            })?;
+        live_entities.insert(name, live);
     }
-    live_entities
+    Ok(live_entities)
 }
 
 /// Create a CDC-driven ProfileResolver via MatviewManager + LiveData.
@@ -281,6 +417,24 @@ async fn create_profile_resolver(
             .or_default()
             .push(op);
     }
+    // Engine-synthetic `block` compounds are not dispatcher-registered
+    // providers, so they are absent from the loop above. Inject them from the
+    // SAME single source `available_operations` uses
+    // (`block_synthetic_descriptors`), so the profile resolver and MCP
+    // discovery can never drift. `convert_block_to_page` thus reaches
+    // `resolve_profile(row).operations` and every op-driven UI surface (slash
+    // menu via the `Listed` filter, op-button toolbar, key-chord pump), beside
+    // indent/outdent/move_up/move_down. `instantiate_template` is NOT injected
+    // here (`include_template_picker = false`): it is surfaced via the template
+    // picker, not as a bare profile op.
+    entity_operations
+        .entry(EntityName::new("block"))
+        .or_default()
+        .extend(
+            crate::api::operation_engine::DispatchingOperationEngine::block_synthetic_descriptors(
+                false,
+            ),
+        );
     match matview_manager.watch(PROFILE_SQL).await {
         Ok(result) => {
             let live_profiles = LiveData::new(
@@ -440,6 +594,22 @@ pub fn register_core_services_with_backend(
                 let type_registry = inj.resolve::<TypeRegistry>();
                 let graph_schema_registry = build_graph_schema_registry(&type_registry);
 
+                // Clock DI seam (ADR 0024 §6): the `ClockScheduler` ticks on the
+                // injected wall clock. Production registers nothing → real
+                // `SystemClock`; a test wiring registers `InjectedClock` holding a
+                // controllable `TestClock` so `AdvanceDay` advances time through the
+                // scheduler's own reconcile path, never a raw `clock`-relation write.
+                let clock: Arc<dyn holon_api::Clock> = inj
+                    .try_resolve::<holon_api::InjectedClock>()
+                    .map(|c| c.0.clone())
+                    .unwrap_or_else(|_| Arc::new(holon_api::SystemClock));
+
+                // BackendEngine::new wires TursoHistoryStore (C2b) over the raw
+                // db handle; `block_history` must exist before any engine op
+                // records history (lazy wirings never resolve this marker
+                // otherwise — fresh-db GPUI boot panicked in seed_default_layout).
+                let _history = inj.resolve_async::<DbReady<HistoryTables>>().await;
+
                 Shared::new(
                     create_initialized_engine(
                         backend,
@@ -447,12 +617,25 @@ pub fn register_core_services_with_backend(
                         ui_info,
                         graph_schema_registry,
                         &type_registry,
+                        clock,
                     )
-                    .await,
+                    .await
+                    // fluxdi async providers return `T`, not `Result<T>`, and
+                    // bootstrap installs no `catch_unwind` — so this is the
+                    // terminal boundary for the engine spine. Every failable
+                    // step inside `create_initialized_engine` now propagates
+                    // here as one enriched, attributed error instead of N bare
+                    // panics. Increment 4 (BootReport-carrying engine) replaces
+                    // this last `.expect` with true Result propagation.
+                    .expect(
+                        "boot [component=turso stage=engine-resolve]: \
+                         BackendEngine initialization failed",
+                    ),
                 )
             }
         })
         .with_dependency::<DbReady<CoreTables>>()
+        .with_dependency::<DbReady<HistoryTables>>()
         .with_dependency::<DbReady<BlockHierarchyView>>()
         .with_dependency::<DbReady<NavigationTables>>()
         .with_dependency::<DbReady<SyncStateTables>>()
@@ -463,4 +646,115 @@ pub fn register_core_services_with_backend(
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod bundled_gql_query_smoke {
+    //! Boot the production GQL `GraphSchema` (the same schema modules the app
+    //! wires) and compile every shipped/desk GQL query against it. Catches the
+    //! "a bundled query references a property the entity does not declare"
+    //! class (BugFunnel row 37: `UnknownProperty { entity: "focus_root",
+    //! property: "added_ts" }`) at test time instead of as a permanently-broken
+    //! panel at boot.
+
+    use super::build_graph_schema_registry;
+    use super::create_default_registry;
+
+    /// Extract the body of every `#+BEGIN_SRC holon_gql … #+END_SRC` block.
+    fn extract_gql_blocks(org: &str) -> Vec<String> {
+        let mut blocks = Vec::new();
+        let mut current: Option<Vec<&str>> = None;
+        for line in org.lines() {
+            let trimmed = line.trim_start();
+            if current.is_none() {
+                if trimmed
+                    .to_ascii_lowercase()
+                    .starts_with("#+begin_src holon_gql")
+                {
+                    current = Some(Vec::new());
+                }
+            } else if trimmed.to_ascii_lowercase().starts_with("#+end_src") {
+                let body = current.take().unwrap().join("\n");
+                blocks.push(body);
+            } else {
+                current.as_mut().unwrap().push(line);
+            }
+        }
+        assert!(
+            current.is_none(),
+            "unterminated #+BEGIN_SRC holon_gql block"
+        );
+        blocks
+    }
+
+    fn compile(gql: &str, schema: &gql_transform::resolver::GraphSchema) -> Result<(), String> {
+        let parsed =
+            gql_parser::parse(gql).map_err(|e| format!("GQL parse error: {}", e.message))?;
+        let query = match parsed {
+            gql_parser::QueryOrUnion::Query(q) => q,
+            gql_parser::QueryOrUnion::Union(_) => {
+                return Err("UNION queries not supported".into());
+            }
+        };
+        crate::storage::graph_schema::validate_referenced_edges(schema, &query)
+            .map_err(|e| format!("GQL edge validation error: {e}"))?;
+        gql_transform::transform(&query, schema)
+            .map(|_| ())
+            .map_err(|e| format!("GQL transform error: {e:?}"))
+    }
+
+    #[test]
+    fn every_bundled_and_desk_gql_query_compiles_against_booted_schema() {
+        let type_registry = create_default_registry().expect("default TypeRegistry");
+        let schema = build_graph_schema_registry(&type_registry).build();
+
+        // Canonical desk panel queries: the forms the frontend emits and that
+        // real vaults persist on disk. The right-sidebar orders pins by
+        // pin-recency. The recency key is `fr.history_id` (the monotonic
+        // `navigation_history.id` AUTOINCREMENT), NOT `fr.added_ts` (a
+        // second-granularity wall-clock that TIES when two pins land in the
+        // same second — see tab_strip.rs "ORDER BY history_id, never
+        // added_ts"). It is aliased `AS added_ts` because the render block's
+        // level-0 `sortkey: "-added_ts"` reads that column name; the alias
+        // carries the monotonic value under the render's expected column.
+        let mut corpus: Vec<(String, String)> = vec![
+            (
+                "desk:right-sidebar".into(),
+                "MATCH (fr:focus_root), (root:block)<-[:CHILD_OF*0..20]-(d:block) WHERE \
+                 fr.region = 'right_sidebar' AND root.id = fr.root_id RETURN d, \
+                 fr.history_id AS added_ts ORDER BY fr.history_id DESC, d.sort_key"
+                    .into(),
+            ),
+            (
+                "desk:main-panel".into(),
+                "MATCH (fr:focus_root), (root:block)<-[:CHILD_OF*0..20]-(d:block) WHERE \
+                 fr.region = 'main' AND root.id = fr.root_id RETURN d"
+                    .into(),
+            ),
+        ];
+
+        // Any holon_gql block shipped in the default vault assets (future-proof:
+        // currently the panels ship as holon_sql, but if a GQL block is ever
+        // bundled it is auto-covered here).
+        let index_org = include_str!("../../../../assets/default/index.org");
+        for (i, body) in extract_gql_blocks(index_org).into_iter().enumerate() {
+            corpus.push((format!("assets/default/index.org#gql[{i}]"), body));
+        }
+
+        let failures: Vec<String> = corpus
+            .iter()
+            .filter_map(|(name, q)| {
+                compile(q, &schema)
+                    .err()
+                    .map(|e| format!("  {name}: {e}\n    query: {q}"))
+            })
+            .collect();
+
+        assert!(
+            failures.is_empty(),
+            "shipped/bundled GQL queries failed to compile against the booted schema \
+             (broken-at-boot):\n{}",
+            failures.join("\n")
+        );
+    }
 }

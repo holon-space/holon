@@ -28,6 +28,7 @@
 
 // Format modules — re-exported from holon-org-format for backward compat.
 // Internal code can use `crate::models::`, `crate::parser::`, etc. as before.
+pub use holon_org_format::dense;
 pub use holon_org_format::inline_marks;
 pub use holon_org_format::link_parser;
 pub use holon_org_format::models;
@@ -43,7 +44,9 @@ pub mod file_io;
 #[cfg(feature = "di")]
 pub mod file_sync_controller;
 pub mod file_watcher;
+pub mod home_authority;
 pub mod orgmode_sync_provider;
+pub mod writeback_guard;
 
 // Re-export key types
 // build_block_params for seeding default layouts (no di feature needed)
@@ -62,11 +65,12 @@ pub use file_io::{
     format_header_args_from_values, format_org_source_block, insert_source_block,
     update_source_block, value_to_header_arg_string,
 };
+pub use file_watcher::FileEvent;
 pub use file_watcher::OrgFileWatcher;
+pub use file_watcher::classify_change_to_event;
 // Core types
 // Note: Block is NOT re-exported here to avoid duplicate type issues with flutter_rust_bridge
 // Use holon_api::block::Block directly instead
-pub use holon_filesystem::directory::{Directory, ROOT_ID};
 pub use models::BlockResolver;
 pub use models::HashMapBlockResolver;
 pub use models::OrgBlockExt;

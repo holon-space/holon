@@ -19,12 +19,34 @@ use holon_api::EntityUri;
 use holon_api::block::Block;
 use holon_core::block_ordering::BlockOrdering;
 use holon_filesystem::AliasRegistrar;
+use holon_filesystem::BlockDelta;
 use holon_filesystem::BlockReader;
 use holon_filesystem::DocumentManager;
 use holon_filesystem::FileSyncController;
 
+use crate::file_watcher::FileEvent;
 use crate::file_watcher::OrgFileWatcher;
+use crate::home_authority::DocHome;
 use crate::org_renderer::OrgRenderer;
+
+/// Documents written back from the write-back holder in this process.
+///
+/// Liveness evidence, not a metric. The holder is the ONLY write-back path
+/// now, so a suite that asserts on-disk org content while this stays at zero
+/// proved nothing about it — the content it checked came from the ingest
+/// direction or from the authoritative bulk pass. Suites that mean to exercise
+/// write-back gate on this being non-zero.
+static DOCS_WRITTEN_FROM_HOLDER: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+fn note_doc_written_from_holder() {
+    DOCS_WRITTEN_FROM_HOLDER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// How many documents this process wrote back from the holder.
+pub fn docs_written_from_holder() -> u64 {
+    DOCS_WRITTEN_FROM_HOLDER.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// Signal that indicates the FileWatcher is ready to receive file change
 /// events.
@@ -293,6 +315,25 @@ pub async fn seed_default_org_assets(
     }
 }
 
+/// The container's file-format adapter, defaulting to org when none is bound.
+async fn resolve_file_format(resolver: &Injector) -> Arc<dyn holon_core::FileFormatAdapter> {
+    let classifier = resolver
+        .optional_resolve_async::<holon_api::link_parser::LinkTargetClassifier>()
+        .await
+        .map(|c| (*c).clone());
+    resolver
+        .optional_resolve_async::<dyn holon_core::FileFormatAdapter>()
+        .await
+        .unwrap_or_else(|| {
+            // The container binds a registry-backed classifier; without one the
+            // adapter falls back to the built-in entity schemes.
+            let classifier = classifier.unwrap_or_default();
+            Arc::new(crate::file_format::OrgFormatAdapter::with_classifier(
+                classifier,
+            )) as Arc<dyn holon_core::FileFormatAdapter>
+        })
+}
+
 /// Register the backend-blind file-sync core: FileSystem/FileChangeSource
 /// port defaults, the ready/idle signals, OrgRenderer, and the
 /// [`FileSyncStarted`] marker whose resolution spawns the controller over
@@ -365,6 +406,20 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
     // Register OrgRenderer
     injector.provide::<OrgRenderer>(Provider::root(|_resolver| Shared::new(OrgRenderer)));
 
+    // The write-back render, resolvable on its own so inspection callers (the
+    // `render_org` MCP tool) answer from the same code path — and the same
+    // seams — the FileSyncController writes through. Stateless, so this
+    // instance and the controller's are interchangeable.
+    injector.provide::<holon_filesystem::WritebackRenderer>(Provider::root_async(
+        |resolver| async move {
+            Shared::new(holon_filesystem::WritebackRenderer::new(
+                resolver.resolve_async::<dyn BlockReader>().await,
+                resolver.resolve_async::<dyn DocumentManager>().await,
+                resolve_file_format(&resolver).await,
+            ))
+        },
+    ));
+
     // FileSyncStarted: resolving this marker builds the backend-blind
     // FileSyncController over the DI-provided seams and spawns its loop.
     // Root scope => built once. Both backends resolve it AFTER seeding
@@ -391,13 +446,7 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                     .optional_resolve_async::<holon_api::live_data::BlockFeed>()
                     .await
                     .map(|bf| bf.0.clone());
-                let format = resolver
-                    .optional_resolve_async::<dyn holon_core::FileFormatAdapter>()
-                    .await
-                    .unwrap_or_else(|| {
-                        Arc::new(crate::file_format::OrgFormatAdapter::new())
-                            as Arc<dyn holon_core::FileFormatAdapter>
-                    });
+                let format = resolve_file_format(&resolver).await;
                 // The alias registrar (doc_id ↔ path) is a Loro-backed seam
                 // registered at the composition root — `dyn AliasRegistrar` in
                 // both the Turso container (app `wiring.rs`, off `LoroBlockOperations`)
@@ -414,7 +463,40 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                     .optional_resolve_async::<dyn holon_filesystem::ThreeWayTextMerge>()
                     .await;
 
+                // Disclosure seam for shared-subtree write-back gaps (Inc 1).
+                // Present in the app container (forwards to `DegradedSignalBus`);
+                // absent in test/no-Turso containers — then shared-subtree edits
+                // that fail to materialize log at WARN instead of a banner.
+                let share_disclosure = resolver
+                    .optional_resolve_async::<dyn holon_filesystem::ShareWritebackDisclosure>()
+                    .await;
+
+                // Disclosure seam for the write-back supervisor giving up.
+                // Absent in test/no-Turso containers → a spent restart budget is
+                // audible in the log only.
+                let writeback_disclosure = resolver
+                    .optional_resolve_async::<dyn holon_filesystem::WritebackDisclosure>()
+                    .await;
+
+                // Authoritative mount registry (Inc 3): lets the ingest guard
+                // skip a shared-subtree projection file only when its page id is
+                // a real mount node (not a user-authored `share-role` drawer).
+                // Absent in test/SqlOnly containers → the guard never skips.
+                let mount_registry = resolver
+                    .optional_resolve_async::<dyn holon_filesystem::MountRegistry>()
+                    .await;
+
                 let idle_signal_weak = std::sync::Arc::downgrade(&idle_signal);
+
+                // Keep an authoritative-read handle for the feed resolver BEFORE
+                // the reader is moved into the controller: block routing must
+                // read the `Page` tag from the write authority (`block_raw`), not
+                // the lagging matview-backed feed (see `resolve_doc_for_block`).
+                let feed_block_reader = block_reader.clone();
+                // The write-back holder's order authority. The same handle the
+                // controller writes through, so `prev` and the rendered sibling
+                // order can never come from two different stores.
+                let home_ordering = ordering.clone();
 
                 let mut controller = FileSyncController::with_format(
                     block_reader,
@@ -436,39 +518,172 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                 if let Some(merger) = text_merge {
                     controller = controller.with_text_merge(merger);
                 }
+                if let Some(registry) = mount_registry {
+                    controller = controller.with_mount_registry(registry);
+                }
+                // The same seam the supervisor's give-up uses. The controller
+                // raises it for a different persistent failure with the same
+                // consequence: one document's fold stops converging, so its
+                // edits stop reaching disk while everything else keeps working.
+                if let Some(disclosure) = writeback_disclosure.clone() {
+                    controller = controller.with_writeback_disclosure(disclosure);
+                }
+
+                // Image bytes for `[[file:…]]` blocks, so an image synced from a
+                // peer materializes on disk. Absent in every container today →
+                // `materialize_images` / `ingest_images` stay no-ops.
+                if let Some(images) = resolver
+                    .optional_resolve_async::<dyn holon_filesystem::ImageDataProvider>()
+                    .await
+                {
+                    controller = controller.with_image_data(images);
+                }
+
+                // R3b: wire the C2b history store so the org-ingest doc-page
+                // create records provenance (absent in org-standalone/no-Turso
+                // wirings). Plus the injected clock, when a test provides one, so
+                // the ingest history `at_millis` is deterministic under replay.
+                if let Some(history) = resolver
+                    .optional_resolve_async::<dyn holon_api::HistoryStore>()
+                    .await
+                {
+                    controller = controller.with_history_store(history);
+                }
+                if let Some(injected) = resolver
+                    .optional_resolve_async::<holon_api::InjectedClock>()
+                    .await
+                {
+                    controller = controller.with_clock(injected.0.clone());
+                }
 
                 let (rerender_tx, rerender_rx) =
                     tokio::sync::mpsc::unbounded_channel::<OrgRerender>();
                 if let Some(feed) = block_feed.clone() {
-                    let resolver_feed = feed.clone();
                     let tx = rerender_tx.clone();
+                    let disclosure = share_disclosure.clone();
+                    let disclosed: Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
+                        Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+                    let authority = Arc::new(crate::home_authority::BlockHomeAuthority::new(
+                        feed_block_reader.clone(),
+                        home_ordering,
+                    ));
+                    let degraded = writeback_disclosure.clone();
+                    let feed_for_stream = feed.clone();
+
+                    // The write-back document mirror IS the `home_by`
+                    // combinator's output, under let-it-die supervision: the
+                    // supervisor holds the stream FACTORY, so a dead
+                    // incarnation is replaced by a fresh subscription that
+                    // re-seeds itself from the feed's `MapDiff::Replace`. Boot
+                    // and recovery are structurally the same path — `Reset`
+                    // precedes every incarnation, including the first.
+                    let mut supervised = holon_api::live_data::supervision::spawn_supervised(
+                        "org-writeback",
+                        move || feed_for_stream.home_by(authority.clone()),
+                        move |component, restarts, err| {
+                            // A spent restart budget means edits stop reaching
+                            // disk for the rest of the process — exactly the
+                            // persistent-failure case let-it-die exists to
+                            // disclose, so it must be audible outside the log.
+                            match degraded.as_deref() {
+                                Some(d) => d.writeback_degraded(&format!(
+                                    "{component} gave up after {restarts} restarts: {err:#}"
+                                )),
+                                None => tracing::error!(
+                                    "[{component}] gave up after {restarts} restarts ({err:#}) — \
+                                     org write-back is DOWN for the rest of this process and no \
+                                     disclosure seam is wired in this container"
+                                ),
+                            }
+                        },
+                    );
+
                     tokio::spawn(async move {
-                        use futures_signals::signal_map::MapDiff;
-                        use futures_signals::signal_map::SignalMapExt;
-                        resolver_feed
-                            .signal_map()
-                            .for_each(move |diff| {
-                                let tx = tx.clone();
-                                let feed = feed.clone();
-                                async move {
-                                    let msg = match diff {
-                                        MapDiff::Insert { value, .. }
-                                        | MapDiff::Update { value, .. } => {
-                                            match resolve_doc_for_block(&feed, &value) {
-                                                Some(doc) => OrgRerender::Doc(doc),
-                                                // ALLOW(fallback): doc unresolved (matview lag /
-                                                // nested) → full re-render
-                                                None => OrgRerender::All,
-                                            }
-                                        }
-                                        MapDiff::Remove { .. }
-                                        | MapDiff::Replace { .. }
-                                        | MapDiff::Clear {} => OrgRerender::All,
-                                    };
-                                    let _ = tx.send(msg);
+                        use holon_api::live_data::home_by::HomedDiff;
+                        use holon_api::live_data::supervision::Supervised;
+
+                        // The initial snapshot fans out one `Upsert` per block.
+                        // Rendering each of them would be N per-block boot
+                        // renders, which destabilises the cold-boot matview (the
+                        // frontend's creation slot then resolves NO parent). So
+                        // snapshot blocks SEED the holder and one debounced bulk
+                        // pass renders them together; the set drains as the
+                        // snapshot is consumed, after which everything routes
+                        // per block.
+                        let mut snapshot_pending: std::collections::HashSet<String> =
+                            std::collections::HashSet::new();
+
+                        while let Some(item) = supervised.recv().await {
+                            // `None` routes nothing at all — see
+                            // [`route_homed_block`].
+                            let msg: Option<OrgRerender> = match item {
+                                Supervised::Reset => {
+                                    snapshot_pending = feed.read().keys().cloned().collect();
+                                    // Drop the dead incarnation's derived state,
+                                    // then cover the incoming seed with one bulk
+                                    // render off the authority.
+                                    let _ = tx.send(OrgRerender::Reset);
+                                    Some(OrgRerender::All)
                                 }
-                            })
-                            .await;
+                                Supervised::Diff(HomedDiff::Upsert {
+                                    doc,
+                                    key,
+                                    prev,
+                                    value,
+                                }) => {
+                                    let seeding = snapshot_pending.remove(&key);
+                                    if !seeding {
+                                        // Boot-snapshot blocks do not disclose:
+                                        // the gap is a property of the share's
+                                        // wiring, not of any one edit, and
+                                        // announcing it once per pre-existing
+                                        // block at startup is banner spam.
+                                        disclose_unmaterialized_share(
+                                            &feed,
+                                            &value,
+                                            disclosure.as_deref(),
+                                            &disclosed,
+                                        );
+                                    }
+                                    route_upsert(&doc, &value, prev.as_deref(), seeding)
+                                }
+                                Supervised::Diff(HomedDiff::Remove { doc, key }) => {
+                                    // The DEPARTURE. A retraction always lands
+                                    // before the matching `Upsert` at the new
+                                    // document, so the source document
+                                    // re-renders WITHOUT the block whether it
+                                    // was deleted or merely re-homed — one
+                                    // uniform path, and no authoritative
+                                    // presence-check that would short-circuit a
+                                    // move.
+                                    snapshot_pending.remove(&key);
+                                    // A departure carries no block value, so the
+                                    // proposal predicates have nothing to read:
+                                    // retracting a proposal still arms the bulk
+                                    // pass. Unchanged here deliberately.
+                                    match (doc, EntityUri::parse(&key)) {
+                                        (DocHome::Resolved(doc), Ok(id)) => {
+                                            Some(OrgRerender::Block {
+                                                doc,
+                                                delta: Box::new(BlockDelta::Remove(id)),
+                                            })
+                                        }
+                                        (DocHome::Unresolved, _) => Some(OrgRerender::All),
+                                        (DocHome::Resolved(_), Err(e)) => {
+                                            tracing::error!(
+                                                "[OrgMode] block feed Remove key {key:?} is not a \
+                                                 valid EntityUri: {e} — falling back to full \
+                                                 re-render"
+                                            );
+                                            Some(OrgRerender::All)
+                                        }
+                                    }
+                                }
+                            };
+                            if let Some(msg) = msg {
+                                let _ = tx.send(msg);
+                            }
+                        }
                     });
                 }
                 drop(rerender_tx);
@@ -504,35 +719,178 @@ pub struct FileSyncStarted;
 /// org controller's single-owner `select!` loop (Phase 5: replaces the EventBus
 /// `Consumer::ORG` block-event path).
 pub enum OrgRerender {
-    /// Re-render exactly this document (resolved to its `Page` root).
-    Doc(EntityUri),
-    /// Document could not be resolved (matview lag, deleted block, etc.) —
-    /// fall back to a debounced re-render of every tracked file.
+    /// Fold this homed diff into the document's holder entry, then write the
+    /// document back.
+    Block {
+        doc: EntityUri,
+        delta: Box<holon_filesystem::BlockDelta>,
+    },
+    /// Fold into the holder WITHOUT writing: this diff belongs to a fresh
+    /// subscription's initial snapshot, and the `All` that accompanies the
+    /// snapshot renders every one of them in a single bulk pass. Per-block boot
+    /// renders destabilise the cold-boot matview.
+    Seed {
+        doc: EntityUri,
+        delta: Box<holon_filesystem::BlockDelta>,
+    },
+    /// The supervised stream restarted (or booted): drop all derived state. A
+    /// complete re-seed follows on the next incarnation.
+    Reset,
+    /// No document could be resolved for a change, or a re-seed just landed —
+    /// converge via a debounced re-render of every tracked file, read from the
+    /// authority rather than the holder.
     All,
 }
 
-/// Resolve the owning document URI for a feed `Block` by walking `parent_id`
-/// up the in-memory block feed to the nearest `Page`-tagged ancestor (the block
-/// itself included). Mirrors `SqlOperationProvider::find_document_uri`'s
-/// recursive CTE (depth-bounded at 50). Returns `None` when the chain ends
-/// without a `Page` — e.g. an ancestor not yet present in the matview-backed
-/// feed — and the caller falls back to a full re-render.
-fn resolve_doc_for_block(
-    feed: &holon_api::live_data::LiveData<Block>,
+/// Parse the combinator's document-relative previous-sibling id.
+///
+/// `home_by` carries ids as strings; the holder keys on [`EntityUri`]. An
+/// unparseable id is a genuine defect in whatever minted it, so it surfaces as
+/// an `Err` the caller escalates to a full re-render — never silently as
+/// "first in its sibling group", which would reorder the document.
+fn parse_prev(prev: Option<&str>) -> anyhow::Result<Option<EntityUri>> {
+    match prev {
+        None => Ok(None),
+        Some(p) => Ok(Some(EntityUri::parse(p)?)),
+    }
+}
+
+/// Where one block the feed homed is routed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlockRoute {
+    /// Render into this document.
+    Document(EntityUri),
+    /// Route nothing at all: the block is not vault content.
+    Drop,
+    /// No document owns the block — converge via the authoritative bulk pass.
+    Recover,
+}
+
+/// The routing decision for one homed block, as a pure function of its home
+/// and its own fields.
+///
+/// `Recover` is the designed recovery for vault content whose document cannot
+/// be resolved, and it costs a re-render of EVERY tracked file. Proposal blocks
+/// would take it on every write: the trust gate mints them under a parentless,
+/// non-page place, so they home `Unresolved` by construction rather than by
+/// fault. They are not vault content and route nowhere; every other block keeps
+/// the recovery behaviour unchanged.
+pub fn route_homed_block(
+    home: &DocHome,
+    id: &EntityUri,
+    parent_id: &EntityUri,
+    properties: &std::collections::HashMap<String, holon_api::Value>,
+) -> BlockRoute {
+    if holon_api::is_proposal_block(properties) || holon_api::is_proposals_place(id, parent_id) {
+        return BlockRoute::Drop;
+    }
+    match home {
+        DocHome::Resolved(doc) => BlockRoute::Document(doc.clone()),
+        DocHome::Unresolved => BlockRoute::Recover,
+    }
+}
+
+/// The re-render request one homed `Upsert` becomes, or `None` when it routes
+/// nowhere.
+///
+/// This is the production call site of [`route_homed_block`]: the feed loop
+/// does no routing of its own, so a test driving this drives the real decision
+/// AND the message the loop acts on, rather than a transcription of either.
+pub fn route_upsert(
+    home: &DocHome,
     block: &Block,
-) -> Option<EntityUri> {
-    let map = feed.read();
-    let mut current = block.clone();
-    for _ in 0..50 {
-        if current.is_page() {
-            return Some(current.id.clone());
+    prev: Option<&str>,
+    seeding: bool,
+) -> Option<OrgRerender> {
+    let route = route_homed_block(home, &block.id, &block.parent_id, &block.properties);
+    match (route, parse_prev(prev)) {
+        (BlockRoute::Document(doc), Ok(prev)) => {
+            let delta = Box::new(BlockDelta::Upsert {
+                block: block.clone(),
+                prev,
+            });
+            Some(if seeding {
+                OrgRerender::Seed { doc, delta }
+            } else {
+                OrgRerender::Block { doc, delta }
+            })
         }
-        match map.get(current.parent_id.as_str()) {
-            Some(parent) => current = (**parent).clone(),
-            None => return None,
+        // Not vault content: no document renders and no recovery pass arms.
+        (BlockRoute::Drop, _) => None,
+        // No `Page` ancestor, or the authority faulted: the block belongs to no
+        // document we can write, so recover through the authoritative bulk pass.
+        (BlockRoute::Recover, _) => Some(OrgRerender::All),
+        (BlockRoute::Document(doc), Err(e)) => {
+            tracing::error!(
+                "[OrgMode] home_by homed block {} to {doc} with an unparseable \
+                 previous sibling: {e} — falling back to full re-render",
+                block.id
+            );
+            Some(OrgRerender::All)
         }
     }
-    None
+}
+
+/// Inc 1 — loud disclosure of a shared-subtree write-back gap.
+///
+/// A block that belongs to a share (`shared_tree_id` property present) is
+/// "materialized" once its owning page is the share's mount page-file
+/// (`is_share_mount()`). Until Inc 2 tags the mount a page, walking up from a
+/// shared block terminates at a non-mount global page (content would inline
+/// into a global-truth file) or at nothing — either way the shared content owns
+/// no dedicated file and the edit cannot reach disk. That gap is DISCLOSED
+/// (banner via the seam, or WARN log when no seam is wired), never silently
+/// dropped. Deduped once per `shared_tree_id` per session to avoid banner spam.
+///
+/// Post-Inc-2 the mount is a `is_share_mount()` page, so the walk terminates at
+/// it and this never fires — the same predicate self-disarms once the path
+/// works.
+fn disclose_unmaterialized_share(
+    feed: &holon_api::live_data::LiveData<Block>,
+    block: &Block,
+    disclosure: Option<&dyn holon_filesystem::ShareWritebackDisclosure>,
+    disclosed: &Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+) {
+    let Some(stid) = block.shared_tree_id() else {
+        return;
+    };
+    // Walk to the owning page; materialized iff that page is the mount page.
+    let owning_is_mount = {
+        let map = feed.read();
+        let mut current = block.clone();
+        let mut found = false;
+        for _ in 0..50 {
+            if current.is_page() {
+                found = current.is_share_mount();
+                break;
+            }
+            match map.get(current.parent_id.as_str()) {
+                Some(parent) => current = (**parent).clone(),
+                None => break,
+            }
+        }
+        found
+    };
+    if owning_is_mount {
+        return;
+    }
+    // Not materialized. Disclose once per share.
+    {
+        let mut seen = disclosed.lock().unwrap();
+        if !seen.insert(stid.clone()) {
+            return;
+        }
+    }
+    match disclosure {
+        Some(d) => d.shared_subtree_not_materialized(&block.id, &stid),
+        None => tracing::warn!(
+            block_id = %block.id,
+            shared_tree_id = %stid,
+            "[OrgMode] shared-subtree edit could not be materialized to a dedicated org file \
+             (mount is not yet a page-file); edit is safe in Loro + SQL and syncs to peers, but \
+             on-disk org is stale. No disclosure seam wired in this container.",
+        ),
+    }
 }
 
 /// Backend-blind FileSyncController driver: initialize, build the file watcher,
@@ -608,8 +966,29 @@ pub async fn run_file_sync_controller(
             .instrument(tracing::info_span!("org.initial_scan.parallel_read"))
             .await;
         let mut failures = Vec::new();
+        // Boot ingest latency (Options 0+1): batch the per-file feed barrier.
+        // `begin_initial_scan` makes each `on_file_changed` buffer its feed-catch-up
+        // ids instead of paying an up-to-2s round-trip per file; `finish_initial_scan`
+        // below does ONE convergence wait over the union before `signal_ready`.
+        // `block_raw` is written synchronously per file, so the per-file
+        // `get_blocks` count-check + `ordering.children` propagation gate still
+        // cover intra-file correctness; only the sidebar-facing `block`-matview
+        // feed is deferred. Scoped to the initial scan — runtime edits keep the
+        // per-edit barrier.
+        let files = preloaded.len();
+        let t_scan = std::time::Instant::now();
+        controller.begin_initial_scan();
         for (file_path, _content) in preloaded {
-            if let Err(e) = controller.on_file_changed(&file_path).await {
+            let t_file = std::time::Instant::now();
+            let result = controller.on_file_changed(&file_path).await;
+            tracing::info!(
+                target: "holon_latency",
+                stage = "boot_file",
+                ms = t_file.elapsed().as_millis() as u64,
+                path = %file_path.display(),
+                "holon_latency",
+            );
+            if let Err(e) = result {
                 error!(
                     "[OrgMode] Failed to process existing file {}: {}",
                     file_path.display(),
@@ -618,18 +997,64 @@ pub async fn run_file_sync_controller(
                 failures.push((file_path, e));
             }
         }
+        // ONE end-of-scan convergence wait (30s loud ceiling). A stall becomes a
+        // scan failure routed through the existing `signal_error` path below.
+        if let Err(e) = controller.finish_initial_scan(30_000).await {
+            error!("[OrgMode] initial-scan feed convergence failed: {}", e);
+            failures.push((root_directory.clone(), e));
+        } else if let Err(e) = controller.materialize_missing_page_files().await {
+            error!("[OrgMode] fileless-page materialization failed: {}", e);
+            failures.push((root_directory.clone(), e));
+        }
+        // Store-health sweep (BugFunnel row 295): repair title-less
+        // (empty-content) `Page` doc-roots left by a broken convert/delete.
+        // UNCONDITIONAL, after the scan — the ingest byte-identity fast-path skips
+        // unchanged degraded files, so their heal cannot live in ingest; it is a
+        // separate store-health concern owned by this one sweep (which reaches the
+        // same heal implementation the file-watch path uses). Idempotent; a
+        // healthy vault writes nothing.
+        if let Err(e) = controller.heal_title_less_doc_roots().await {
+            error!(
+                "[OrgMode] title-less doc-root store-health sweep failed: {}",
+                e
+            );
+            failures.push((root_directory.clone(), e));
+        }
+        // Boot seed/re-seed phase is over. From here a runtime user edit to a
+        // copy-on-write seed doc (e.g. `block:__default__`) materializes its
+        // vault file (copy-on-write); every boot re-seed write stayed virtual.
+        controller.finish_boot_seeding();
+        tracing::info!(
+            target: "holon_latency",
+            stage = "boot_ingest_total",
+            ms = t_scan.elapsed().as_millis() as u64,
+            files = files as u64,
+            "holon_latency",
+        );
+        tracing::info!(
+            "[OrgMode] initial scan complete: {} file(s) in {}ms, {} failure(s)",
+            files,
+            t_scan.elapsed().as_millis(),
+            failures.len(),
+        );
         failures
     }
     .instrument(tracing::info_span!("org.initial_scan.ingest"))
     .await;
 
-    // Project rule: fail loud, never fake. Any
-    // initial-scan failure propagates as a startup
-    // error — silently continuing past it hides
-    // upstream bugs (e.g. Loro inbound runtime not
-    // mirroring org-ingested blocks, surfacing later
-    // as `update_block_position`/`resolve_parent_tree_id`
-    // failures).
+    // Project rule: fail loud, never fake — but NEVER let one bad file kill
+    // sync for every other file. A per-file initial-scan failure is surfaced
+    // through the ready signal (`signal_error`), which the frontend turns into
+    // a VISIBLE degraded-mode banner (see holon-app wiring `post_ready`), and
+    // then we FALL THROUGH to arm() + the watch loop below so the healthy
+    // files keep syncing and the user can fix the bad file live.
+    //
+    // Regression guard (dogfood 2026-07-10 ship-blocker): this used to
+    // `return` early on ANY failure, so a single bad vault file left arm()
+    // unspawned and every file's runtime sync dead while the window still
+    // looked healthy — a silent sync death with no user-visible signal. The
+    // detached-worker `panic!` that consumed this error at the wiring layer is
+    // likewise replaced by the banner. Do NOT reinstate the early return.
     if !scan_failures.is_empty() {
         let summary = scan_failures
             .iter()
@@ -645,19 +1070,17 @@ pub async fn run_file_sync_controller(
         if let Some(sender) = ready_sender.lock().unwrap().take() {
             sender.signal_error(msg);
         }
-        return;
-    }
-
-    // Phase 1 fix: signal_ready BEFORE arm(). The
-    // 9+ s `notify::watch(Recursive)` on macOS runs
-    // detached in the background. Correctness during
-    // the unarmed window is preserved by
-    // `poll_external_changes`, which now also walks
-    // the tree to discover new files via
-    // `scan_directory` (see file_sync_controller.rs).
-    // Without that Phase A→B extension, this fix
-    // breaks `create_document`.
-    if let Some(sender) = ready_sender.lock().unwrap().take() {
+        // No early return — arm() + the watch loop run below regardless.
+    } else if let Some(sender) = ready_sender.lock().unwrap().take() {
+        // Phase 1 fix: signal_ready BEFORE arm(). The
+        // 9+ s `notify::watch(Recursive)` on macOS runs
+        // detached in the background. Correctness during
+        // the unarmed window is preserved by
+        // `poll_external_changes`, which now also walks
+        // the tree to discover new files via
+        // `scan_directory` (see file_sync_controller.rs).
+        // Without that Phase A→B extension, this fix
+        // breaks `create_document`.
         sender.signal_ready();
     }
 
@@ -740,22 +1163,41 @@ pub async fn run_file_sync_controller(
             return;
         };
         tokio::select! {
-            Some((maybe_path, change_seq)) = file_rx.recv() => {
-                if let Some(file_path) = maybe_path {
-                    tracing::debug!("[ORGSYNC_TRACE] file_rx -> on_file_changed({})", file_path.display());
-                    if let Err(e) = controller.on_file_changed(&file_path).await {
-                        tracing::debug!(
-                            "[ORGSYNC_TRACE] on_file_changed ERROR for {}: {}",
-                            file_path.display(), e
-                        );
-                        error!(
-                            "[OrgMode] File change error {}: {}",
-                            file_path.display(), e
-                        );
-                    } else {
-                        tracing::debug!("[ORGSYNC_TRACE] on_file_changed OK for {}", file_path.display());
+            Some((maybe_evt, change_seq)) = file_rx.recv() => {
+                match maybe_evt {
+                    Some(FileEvent::Changed(file_path)) => {
+                        tracing::debug!("[ORGSYNC_TRACE] file_rx -> on_file_changed({})", file_path.display());
+                        if let Err(e) = controller.on_file_changed(&file_path).await {
+                            tracing::debug!(
+                                "[ORGSYNC_TRACE] on_file_changed ERROR for {}: {}",
+                                file_path.display(), e
+                            );
+                            error!(
+                                "[OrgMode] File change error {}: {}",
+                                file_path.display(), e
+                            );
+                        } else {
+                            tracing::debug!("[ORGSYNC_TRACE] on_file_changed OK for {}", file_path.display());
+                        }
+                        idle_signal_for_task.mark_progress();
                     }
-                    idle_signal_for_task.mark_progress();
+                    Some(FileEvent::Renamed { from, to }) => {
+                        tracing::debug!("[ORGSYNC_TRACE] file_rx -> on_file_renamed({} -> {})", from.display(), to.display());
+                        if let Err(e) = controller.on_file_renamed(&from, &to).await {
+                            tracing::debug!(
+                                "[ORGSYNC_TRACE] on_file_renamed ERROR for {} -> {}: {}",
+                                from.display(), to.display(), e
+                            );
+                            error!(
+                                "[OrgMode] File rename error {} -> {}: {}",
+                                from.display(), to.display(), e
+                            );
+                        } else {
+                            tracing::debug!("[ORGSYNC_TRACE] on_file_renamed OK for {} -> {}", from.display(), to.display());
+                        }
+                        idle_signal_for_task.mark_progress();
+                    }
+                    None => {}
                 }
                 // Advance even on error / filtered events: the change was
                 // handled (errors are surfaced above); a wedged watermark
@@ -792,31 +1234,198 @@ pub async fn run_file_sync_controller(
             Some(rerender) = rerender_rx.recv() => {
                 let span = tracing::info_span!("org.on_block_feed");
                 async {
-                    match rerender {
-                        OrgRerender::Doc(doc_id) => {
-                            match controller.on_block_changed(&doc_id).await {
-                                Ok(true) => {}
+                    // Drain everything the channel already holds before doing any
+                    // I/O. The feed fans one message per member, so a single page
+                    // toggle or re-home arrives as a burst that is fully queued by
+                    // the time the first message wakes this loop. Rendering per
+                    // message made that burst cost one render per member; draining
+                    // first lets `on_block_changed_coalesced` spend one render per
+                    // DOCUMENT. Pure latency win — nothing waits for a timer, and a
+                    // lone message drains to a batch of one.
+                    let mut drained = vec![rerender];
+                    while let Ok(next) = rerender_rx.try_recv() {
+                        drained.push(next);
+                    }
+
+                    // Order is preserved and `Reset` is a barrier: it means the
+                    // stream that produced everything before it is gone, so any
+                    // fold accumulated earlier in this batch must be discarded
+                    // with the holder rather than rendered after the reset.
+                    let mut pending_blocks: Vec<(EntityUri, BlockDelta)> = Vec::new();
+                    for msg in drained {
+                        match msg {
+                            OrgRerender::Block { doc, delta } => {
+                                pending_blocks.push((doc, *delta));
+                            }
+                            OrgRerender::Seed { doc, delta } => {
+                                controller.apply_block_delta(&doc, &delta);
+                            }
+                            OrgRerender::Reset => {
+                                pending_blocks.clear();
+                                controller.reset_holder();
+                            }
+                            OrgRerender::All => { pending_full_rerender = true; }
+                        }
+                    }
+
+                    if !pending_blocks.is_empty() {
+                        for (doc, verdict) in
+                            controller.on_block_changed_coalesced(&pending_blocks).await
+                        {
+                            match verdict {
+                                Ok(true) => { note_doc_written_from_holder(); }
                                 // ALLOW(fallback): doc resolved to no tracked file → full re-render
                                 Ok(false) => { pending_full_rerender = true; }
                                 Err(e) => {
                                     error!(
                                         "[OrgMode] Block change error for {}: {}",
-                                        doc_id, e
+                                        doc, e
                                     );
                                 }
                             }
                         }
-                        OrgRerender::All => { pending_full_rerender = true; }
                     }
                 }.instrument(span).await;
                 idle_signal_for_task.mark_progress();
             }
             _ = rerender_flush_tick.tick(), if pending_full_rerender => {
                 pending_full_rerender = false;
-                if let Err(e) = controller.re_render_all_tracked().await {
+                // Recovery reseeds carry no per-block Remove intent — departures and
+                // deletions route as `OrgRerender::Block { Remove }` and ground per
+                // file via `on_block_changed`, so the bulk pass never needs a
+                // sanctioned set.
+                if let Err(e) = controller
+                    .re_render_all_tracked(&std::collections::HashSet::new())
+                    .await
+                {
                     error!("[OrgMode] re_render_all_tracked (debounced) error: {}", e);
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod share_disclosure_tests {
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    use holon_api::EntityUri;
+    use holon_api::block::Block;
+    use holon_api::live_data::LiveData;
+    use holon_api::share_props::SHARE_ROLE_MOUNT;
+    use holon_api::share_props::SHARE_ROLE_PROPERTY;
+    use holon_api::share_props::SHARED_TREE_ID_PROPERTY;
+
+    use super::disclose_unmaterialized_share;
+
+    #[derive(Default)]
+    struct RecordingDisclosure {
+        calls: Mutex<Vec<(String, String)>>,
+    }
+    impl holon_filesystem::ShareWritebackDisclosure for RecordingDisclosure {
+        fn shared_subtree_not_materialized(&self, block_id: &EntityUri, shared_tree_id: &str) {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((block_id.to_string(), shared_tree_id.to_string()));
+        }
+    }
+
+    fn empty_feed() -> Arc<LiveData<Block>> {
+        LiveData::new(vec![], |_| unreachable!(), |_| unreachable!())
+    }
+
+    fn block(id: &str, parent: &str, content: &str) -> Block {
+        let parent_uri = if parent == "no_parent" {
+            EntityUri::no_parent()
+        } else {
+            EntityUri::parse(parent).unwrap()
+        };
+        Block::new_text(EntityUri::parse(id).unwrap(), parent_uri, content)
+    }
+
+    // A shared descendant whose owning page is NOT the mount page (pre-Inc-2:
+    // the mount is a plain block, so the walk terminates at a non-mount global
+    // page) is DISCLOSED once, then deduped for the same share.
+    #[test]
+    fn unmaterialized_shared_edit_discloses_once() {
+        let feed = empty_feed();
+        // Global page P.
+        let mut page = block("block:page", "no_parent", "P");
+        page.set_page(true);
+        // Mount M under P — a plain block carrying share-role=mount (pre-Inc-2).
+        let mut mount = block("block:mount", "block:page", "shared");
+        mount.set_property(SHARE_ROLE_PROPERTY, SHARE_ROLE_MOUNT);
+        mount.set_property(SHARED_TREE_ID_PROPERTY, "stid-1");
+        // Shared descendants under M, stamped with the share id.
+        let mut d1 = block("block:d1", "block:mount", "child one");
+        d1.set_property(SHARED_TREE_ID_PROPERTY, "stid-1");
+        let mut d2 = block("block:d2", "block:mount", "child two");
+        d2.set_property(SHARED_TREE_ID_PROPERTY, "stid-1");
+
+        feed.insert("block:page".into(), Arc::new(page));
+        feed.insert("block:mount".into(), Arc::new(mount));
+        feed.insert("block:d1".into(), Arc::new(d1.clone()));
+        feed.insert("block:d2".into(), Arc::new(d2.clone()));
+
+        let disc = RecordingDisclosure::default();
+        let seen = Arc::new(Mutex::new(std::collections::HashSet::new()));
+
+        disclose_unmaterialized_share(&feed, &d1, Some(&disc), &seen);
+        disclose_unmaterialized_share(&feed, &d2, Some(&disc), &seen);
+
+        let calls = disc.calls.lock().unwrap();
+        assert_eq!(
+            calls.len(),
+            1,
+            "one disclosure per share, deduped: {calls:?}"
+        );
+        assert_eq!(calls[0].0, "block:d1");
+        assert_eq!(calls[0].1, "stid-1");
+    }
+
+    // A non-shared block never discloses.
+    #[test]
+    fn non_shared_block_never_discloses() {
+        let feed = empty_feed();
+        let mut page = block("block:page", "no_parent", "P");
+        page.set_page(true);
+        let plain = block("block:plain", "block:page", "no share");
+        feed.insert("block:page".into(), Arc::new(page));
+        feed.insert("block:plain".into(), Arc::new(plain.clone()));
+
+        let disc = RecordingDisclosure::default();
+        let seen = Arc::new(Mutex::new(std::collections::HashSet::new()));
+        disclose_unmaterialized_share(&feed, &plain, Some(&disc), &seen);
+        assert!(disc.calls.lock().unwrap().is_empty());
+    }
+
+    // Post-Inc-2 shape: the mount IS a page tagged share-role=mount, so a shared
+    // descendant's owning page is the mount page — MATERIALIZED, no disclosure.
+    // The same predicate self-disarms once materialization is wired.
+    #[test]
+    fn materialized_mount_page_does_not_disclose() {
+        let feed = empty_feed();
+        let mut page = block("block:page", "no_parent", "P");
+        page.set_page(true);
+        let mut mount = block("block:mount", "block:page", "shared page");
+        mount.set_page(true);
+        mount.set_property(SHARE_ROLE_PROPERTY, SHARE_ROLE_MOUNT);
+        mount.set_property(SHARED_TREE_ID_PROPERTY, "stid-2");
+        let mut d1 = block("block:d1", "block:mount", "child");
+        d1.set_property(SHARED_TREE_ID_PROPERTY, "stid-2");
+
+        feed.insert("block:page".into(), Arc::new(page));
+        feed.insert("block:mount".into(), Arc::new(mount));
+        feed.insert("block:d1".into(), Arc::new(d1.clone()));
+
+        let disc = RecordingDisclosure::default();
+        let seen = Arc::new(Mutex::new(std::collections::HashSet::new()));
+        disclose_unmaterialized_share(&feed, &d1, Some(&disc), &seen);
+        assert!(
+            disc.calls.lock().unwrap().is_empty(),
+            "materialized mount-page must not disclose"
+        );
     }
 }

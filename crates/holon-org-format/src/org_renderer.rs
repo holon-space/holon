@@ -11,8 +11,28 @@ use holon_api::Value;
 use holon_api::block::Block;
 
 use crate::models::OrgBlockExt;
+use crate::models::OrgDocumentExt;
 use crate::models::ToOrg;
 use crate::models::render_document_header;
+use crate::task_keyword::TaskKeywordVocabulary;
+
+/// The `:PROPERTIES:` drawer keys in the order the author wrote them, as
+/// recorded by the parser. Empty for blocks that never came from a file.
+fn authored_drawer_order(block: &Block) -> Vec<String> {
+    let Some(json) = block
+        .get_property(crate::models::org_props::DRAWER_ORDER)
+        .and_then(|v| v.as_string().map(|s| s.to_string()))
+    else {
+        return Vec::new();
+    };
+    serde_json::from_str(&json).unwrap_or_else(|e| {
+        panic!(
+            "malformed {} {json:?}: {e} — we wrote it, so a parse failure means the drawer-order \
+             carrier was corrupted in transit",
+            crate::models::org_props::DRAWER_ORDER
+        )
+    })
+}
 
 /// Render a Loro document (represented as blocks) to org-mode format.
 ///
@@ -27,14 +47,43 @@ impl OrgRenderer {
     pub fn render_document(
         doc_block: &Block,
         blocks: &[Block],
-        file_path: &Path,
+        _: &Path,
         file_id: &EntityUri,
     ) -> String {
         let mut result = render_document_header(doc_block);
         if !result.is_empty() && !result.ends_with('\n') {
             result.push('\n');
         }
-        result.push_str(&Self::render_entitys(blocks, file_path, file_id));
+        // The doc-root's OWN body — the pre-first-headline text. Like a
+        // headline, a doc-root stores `title\nbody` in its content; the title
+        // went out as `#+TITLE:` above, so everything after the first line is
+        // body that belongs on disk between the `#+` directives and the first
+        // headline. Without this it is silently deleted on every write-back,
+        // and a page promoted from a `:Page:`-tagged headline loses the whole
+        // body it was carrying.
+        let preamble = crate::models::trim_blank_lines(
+            doc_block
+                .content
+                .split_once('\n')
+                .map(|(_, rest)| rest)
+                .unwrap_or(""),
+        );
+        if !preamble.is_empty() {
+            result.push('\n');
+            result.push_str(preamble);
+            result.push('\n');
+        }
+        // The document's OWN `#+TODO:` declaration governs what its headlines
+        // may spell — the same chain (`from_declared`) the editor's surface
+        // projection resolves. Rendering a keyword this document does not
+        // declare emits bytes the next parse reads as ordinary title text.
+        let vocabulary = TaskKeywordVocabulary::from_declared(doc_block.todo_keywords());
+        result.push_str(&Self::render_walk(
+            blocks,
+            file_id,
+            Some(&vocabulary),
+            &|b: &Block| b.to_org(),
+        ));
         // Every org file ends with exactly one '\n'. Strip any trailing
         // whitespace/newlines and re-add one — keeps disk content stable across
         // render → parse → render so PBT round-trips converge to a fixed point.
@@ -57,9 +106,38 @@ impl OrgRenderer {
     ///
     /// # Returns
     /// Org-mode formatted string
-    // ALLOW(unused_param): file_path is documented public API; kept for OrgBlock
-    // metadata wiring
-    pub fn render_entitys(blocks: &[Block], _file_path: &Path, file_id: &EntityUri) -> String {
+    /// No document accompanies these blocks, so no vocabulary is KNOWN — which
+    /// is not the same as "declares nothing", and must not be substituted with
+    /// the defaults (the representability rule the editor's `Surface::Pending`
+    /// encodes). Task states therefore render as stored here; the refusal in
+    /// [`Self::refuse_undeclared_task_state`] applies only where the owning
+    /// document is in hand, i.e. [`Self::render_document`].
+    pub fn render_entitys(blocks: &[Block], _: &Path, file_id: &EntityUri) -> String {
+        Self::render_walk(blocks, file_id, None, &|b: &Block| b.to_org())
+    }
+
+    /// Dense projection variant of [`Self::render_entitys`]: identical tree
+    /// walk and projection invariants, but each headline's `:ID:` drawer
+    /// scaffolding is compressed to a trailing `{#alias}` token via
+    /// `alias_table` (projection-only — see [`crate::dense`]). Source/Image
+    /// blocks keep their canonical form.
+    pub fn render_entitys_dense(
+        blocks: &[Block],
+        file_id: &EntityUri,
+        alias_table: &crate::dense::AliasTable,
+        gap_ids: &std::collections::HashSet<String>,
+    ) -> String {
+        Self::render_walk(blocks, file_id, None, &|b: &Block| {
+            crate::dense::to_org_dense(b, alias_table, gap_ids)
+        })
+    }
+
+    fn render_walk<F: Fn(&Block) -> String>(
+        blocks: &[Block],
+        file_id: &EntityUri,
+        vocabulary: Option<&TaskKeywordVocabulary>,
+        render_block: &F,
+    ) -> String {
         let mut result = String::new();
 
         // Sibling order is the caller's responsibility — `blocks` arrives in
@@ -67,11 +145,45 @@ impl OrgRenderer {
         // it and never re-derives order from a per-block key. Build a
         // parent→children index that preserves the input order.
         let mut children_by_parent: HashMap<&str, Vec<&Block>> = HashMap::new();
+        let mut ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for b in blocks {
+            ids.insert(b.id.as_str());
             children_by_parent
                 .entry(b.parent_id.as_str())
                 .or_default()
                 .push(b);
+        }
+
+        // WP-F projection assertion (cheap, no extra pass beyond ids we already
+        // built): every block's stated parent must be the file root or another
+        // block in this set. Otherwise the block is a dangling orphan that this
+        // renderer would silently drop (never reachable from the file roots).
+        // A self-parented row (the filtered-out `sentinel:no_parent` FK anchor)
+        // is excluded so it can never trip a false positive. This path returns
+        // `String` (see the `FileFormat::render_document` trait), so a `Result`
+        // is not available — per the fail-loud directive a `panic!` is used.
+        let file_id_str = file_id.as_str();
+        for b in blocks {
+            let parent = b.parent_id.as_str();
+            if parent == b.id.as_str() {
+                continue; // self-parented FK-anchor sentinel; never a real
+                // block
+            }
+            if parent != file_id_str && !ids.contains(parent) {
+                panic!(
+                    "{}",
+                    holon_api::ProjectionInvariantViolated {
+                        detail: format!(
+                            "org render: block {} has dangling parent {} (not the file root {} \
+                             and not in the {}-block set)",
+                            b.id.as_str(),
+                            parent,
+                            file_id_str,
+                            blocks.len()
+                        ),
+                    }
+                );
+            }
         }
         // The only re-ordering the renderer imposes is a content-type grouping:
         // Source/Image children render before Text children (sub-headings) so a
@@ -81,9 +193,46 @@ impl OrgRenderer {
             kids.sort_by_key(|b| b.content_type.sibling_order_group());
         }
 
+        let mut visited: std::collections::HashSet<&str> = std::collections::HashSet::new();
         if let Some(roots) = children_by_parent.get(file_id.as_str()) {
             for root_block in roots {
-                Self::render_entity_tree(root_block, &children_by_parent, &mut result, 0);
+                Self::render_entity_tree(
+                    root_block,
+                    &children_by_parent,
+                    &mut result,
+                    0,
+                    &mut visited,
+                    vocabulary,
+                    render_block,
+                );
+            }
+        }
+
+        // WP-F projection assertion (free — `visited` is populated by the walk we
+        // already performed): with dangling parents ruled out above, every real
+        // block chains up to a file root, so every block must have been visited.
+        // A block that was NOT visited is present with a present parent yet
+        // unreachable from any root — the signature of a parent CYCLE (or a
+        // disconnected component). Self-parented sentinel rows are skipped so
+        // they cannot masquerade as a cycle. No `Result` on this path → `panic!`.
+        for b in blocks {
+            if b.parent_id.as_str() == b.id.as_str() {
+                continue; // self-parented FK-anchor sentinel
+            }
+            if !visited.contains(b.id.as_str()) {
+                panic!(
+                    "{}",
+                    holon_api::ProjectionInvariantViolated {
+                        detail: format!(
+                            "org render: block {} (parent {}) is unreachable from file root {} \
+                             despite its parent being present — parent cycle or disconnected \
+                             component",
+                            b.id.as_str(),
+                            b.parent_id.as_str(),
+                            file_id.as_str()
+                        ),
+                    }
+                );
             }
         }
 
@@ -91,30 +240,93 @@ impl OrgRenderer {
     }
 
     /// Render a block and its children recursively.
-    fn render_entity_tree(
-        block: &Block,
-        children_by_parent: &HashMap<&str, Vec<&Block>>,
+    fn render_entity_tree<'b, F: Fn(&Block) -> String>(
+        block: &'b Block,
+        children_by_parent: &HashMap<&'b str, Vec<&'b Block>>,
         result: &mut String,
         depth: usize,
+        visited: &mut std::collections::HashSet<&'b str>,
+        vocabulary: Option<&TaskKeywordVocabulary>,
+        render_block: &F,
     ) {
+        // Record reachability for the WP-F cycle/disconnected-component assertion
+        // in `render_entitys` — free, we are already walking every reachable node.
+        visited.insert(block.id.as_str());
+
         // Prepare block for org rendering - transfer Loro properties to org_props
         // format
         let mut prepared_block = block.clone();
-        Self::prepare_block_for_org(&mut prepared_block, depth);
+        Self::prepare_block_for_org(&mut prepared_block, depth, vocabulary);
 
-        // Render using Block::to_org() which guarantees trailing newline
-        result.push_str(&prepared_block.to_org());
+        // Render via the caller-supplied per-block renderer (canonical
+        // `Block::to_org` or the dense token form). Both guarantee a trailing
+        // newline.
+        result.push_str(&render_block(&prepared_block));
 
         if let Some(kids) = children_by_parent.get(block.id.as_str()) {
             for child_block in kids {
-                Self::render_entity_tree(child_block, children_by_parent, result, depth + 1);
+                Self::render_entity_tree(
+                    child_block,
+                    children_by_parent,
+                    result,
+                    depth + 1,
+                    visited,
+                    vocabulary,
+                    render_block,
+                );
             }
         }
     }
 
     /// Prepare a block for org rendering by transferring Loro properties to
     /// org_props format.
-    fn prepare_block_for_org(block: &mut Block, depth: usize) {
+    ///
+    /// Public so a caller that owns its own tree walk (the integration-test
+    /// serializer) can reach `Block::to_org` through the SAME preparation
+    /// write-back uses instead of re-deriving the drawer.
+    /// Drop a `task_state` this document's vocabulary does not declare from the
+    /// render (the block is a CLONE; the store keeps its column).
+    ///
+    /// The same refusal the editable surface makes
+    /// (`SourceProjection::Refused` / `Surface::Refused`): a surface that
+    /// cannot SHOW the keyword must not write it. Rendering `* TODO x` into a
+    /// `#+TODO: NEXT | DONE` document emits bytes the very next parse reads as
+    /// ordinary title text, so the keyword lands in `content` and the file
+    /// grows one more of them on every cold boot.
+    ///
+    /// The state is therefore not durable on disk for as long as it stays
+    /// undeclared — a loss, but a DISCLOSED one, and strictly smaller than the
+    /// alternative, which also loses the state and corrupts the user's text
+    /// with it. Declaring the keyword in the document's `#+TODO:` line makes
+    /// the state renderable and the loss disappears.
+    fn refuse_undeclared_task_state(block: &mut Block, vocabulary: Option<&TaskKeywordVocabulary>) {
+        let (Some(vocabulary), Some(state)) = (vocabulary, block.task_state()) else {
+            return;
+        };
+        if vocabulary.all_keywords().contains(&state.keyword) {
+            return;
+        }
+        tracing::warn!(
+            target: "org.render",
+            block = %block.id,
+            keyword = %state.keyword,
+            declared = ?vocabulary.all_keywords(),
+            "task_state is not declared by this document's `#+TODO:` vocabulary — the headline \
+             keyword is NOT written. Rendering it would re-ingest as ordinary title text and add \
+             one keyword per cold boot. Declare the keyword in the document to make the state \
+             durable on disk."
+        );
+        block.set_task_state(None);
+    }
+
+    /// `vocabulary` is the owning document's declaration (the parser's defaults
+    /// when it declares none); a `task_state` it does not admit is dropped from
+    /// the RENDER — see [`Self::refuse_undeclared_task_state`].
+    pub fn prepare_block_for_org(
+        block: &mut Block,
+        depth: usize,
+        vocabulary: Option<&TaskKeywordVocabulary>,
+    ) {
         let properties = block.properties_map();
 
         // Set level from depth (level = depth + 1)
@@ -126,6 +338,7 @@ impl OrgRenderer {
                 block.set_task_state(Some(holon_api::TaskState::from_keyword(todo)));
             }
         }
+        Self::refuse_undeclared_task_state(block, vocabulary);
 
         // Transfer PRIORITY to priority if not already set
         if block.priority().is_none() {
@@ -184,11 +397,24 @@ impl OrgRenderer {
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| block.id.id().to_string());
 
-            // Sort drawer properties by key for deterministic output.
+            // Order drawer properties by the sequence the author wrote them
+            // (recorded at parse in `_drawer_order`); keys the author never
+            // wrote follow, alphabetically, for determinism.
             // serde_json::Map uses IndexMap (preserve_order feature is enabled
             // by a transitive dependency), so insertion order matters.
+            // Exact spelling wins, so `:Effort:` and `:effort:` keep their own
+            // slots; the case-insensitive probe then catches the lifted keys the
+            // renderer re-spells (`:collapsed:` authored, `COLLAPSED` emitted).
+            let authored = authored_drawer_order(block);
+            let rank = |key: &str| {
+                authored
+                    .iter()
+                    .position(|k| k == key)
+                    .or_else(|| authored.iter().position(|k| k.eq_ignore_ascii_case(key)))
+                    .unwrap_or(usize::MAX)
+            };
             let mut drawer_props: Vec<_> = block.drawer_properties().into_iter().collect();
-            drawer_props.sort_by(|(a, _), (b, _)| a.cmp(b));
+            drawer_props.sort_by(|(a, _), (b, _)| rank(a).cmp(&rank(b)).then_with(|| a.cmp(b)));
 
             let mut org_props = serde_json::Map::new();
             org_props.insert("ID".to_string(), serde_json::Value::String(id));
@@ -252,6 +478,68 @@ mod tests {
         assert!(org_text.contains("* Test Title"));
         assert!(org_text.contains("Body content here"));
         assert!(org_text.contains(":ID: local://test-uuid"));
+    }
+
+    // WP-F: dangling parent must fail loud, not silently drop the block.
+    #[test]
+    #[should_panic(expected = "projection invariant violated")]
+    fn wpf_dangling_parent_panics() {
+        let doc = test_doc_uri();
+        // Block whose parent is neither the file root nor any block in the set.
+        let mut orphan = Block::new_text(
+            EntityUri::block("orphan"),
+            EntityUri::block("ghost-parent-not-in-set"),
+            "Orphan",
+        );
+        orphan.set_property("ID", Value::String("orphan".to_string()));
+        let _ = OrgRenderer::render_entitys(&[orphan], Path::new("/test/file.org"), &doc);
+    }
+
+    // WP-F: a parent cycle (present parents, unreachable from the file root)
+    // must fail loud rather than silently dropping the whole component.
+    #[test]
+    #[should_panic(expected = "projection invariant violated")]
+    fn wpf_parent_cycle_panics() {
+        let doc = test_doc_uri();
+        let mut a = Block::new_text(EntityUri::block("a"), EntityUri::block("b"), "A");
+        a.set_property("ID", Value::String("a".to_string()));
+        let mut b = Block::new_text(EntityUri::block("b"), EntityUri::block("a"), "B");
+        b.set_property("ID", Value::String("b".to_string()));
+        let _ = OrgRenderer::render_entitys(&[a, b], Path::new("/test/file.org"), &doc);
+    }
+
+    // WP-F guard against false positives: a normal tree (roots parented to the
+    // file root, children parented to present blocks) renders without panicking.
+    #[test]
+    fn wpf_normal_tree_does_not_panic() {
+        let doc = test_doc_uri();
+        let mut root = Block::new_text(EntityUri::block("root"), doc.clone(), "Root");
+        root.set_property("ID", Value::String("root".to_string()));
+        let mut child =
+            Block::new_text(EntityUri::block("child"), EntityUri::block("root"), "Child");
+        child.set_property("ID", Value::String("child".to_string()));
+        let out = OrgRenderer::render_entitys(&[root, child], Path::new("/test/file.org"), &doc);
+        assert!(out.contains("Root"));
+        assert!(out.contains("Child"));
+    }
+
+    // WP-F: a self-parented row (the filtered-out `sentinel:no_parent` FK anchor
+    // shape) must NOT trip the dangling or cycle assertion.
+    #[test]
+    fn wpf_self_parented_sentinel_does_not_panic() {
+        let doc = test_doc_uri();
+        let mut root = Block::new_text(EntityUri::block("root"), doc.clone(), "Root");
+        root.set_property("ID", Value::String("root".to_string()));
+        // Self-parented sentinel-shaped row (id == parent_id) alongside a normal
+        // root — the same self-parent shape as the filtered `sentinel:no_parent`.
+        let mut sentinel = Block::new_text(
+            EntityUri::block("selfanchor"),
+            EntityUri::block("selfanchor"),
+            "Sentinel",
+        );
+        sentinel.set_property("ID", Value::String("selfanchor".to_string()));
+        let out = OrgRenderer::render_entitys(&[root, sentinel], Path::new("/test/file.org"), &doc);
+        assert!(out.contains("Root"));
     }
 
     #[test]

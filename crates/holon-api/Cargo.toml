@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+# `workspace-hack` is the cargo-hakari feature-unification crate: every
+# member depends on it and no member references it in source, by design.
+[package.metadata.cargo-machete]
+ignored = ["workspace-hack"]
+
 [dependencies]
 anyhow.workspace = true
 blake3.workspace = true
@@ -12,6 +17,7 @@ serde_json.workspace = true
 chrono.workspace = true
 holon-expr.workspace = true
 holon-macros.workspace = true
+holon-pattern.workspace = true
 rhai = { version = "1", features = ["sync"] }
 opentelemetry.workspace = true
 thiserror.workspace = true
@@ -27,6 +33,10 @@ async-trait.workspace = true
 once_cell.workspace = true
 regex.workspace = true
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+
+[dev-dependencies]
+proptest.workspace = true
+tracing-subscriber.workspace = true
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 wasm-bindgen-futures = "0.4"

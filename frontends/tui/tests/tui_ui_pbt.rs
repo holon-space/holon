@@ -22,5 +22,8 @@
 mod common;
 
 fn main() {
+    if holon_integration_tests::libtest_list::handled_list_protocol("tui_ui_pbt") {
+        return;
+    }
     common::pbt_main::run("tui_ui_pbt");
 }

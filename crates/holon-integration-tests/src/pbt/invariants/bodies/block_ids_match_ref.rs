@@ -1,5 +1,12 @@
 //! `inv-block-ids-match-ref`.
 //!
+//! @pbt oracle correspondence
+//! @pbt covers block-tree drift — SQL projection block-id set vs ref non-seed
+//!   block ids (coarse set equality)
+//! @pbt slips-if-removed a block created in the ref never reaches SQL (or a
+//!   ghost row survives a delete); the block is silently missing from / extra
+//!   in every SQL-backed query and panel
+//!
 //! Set-equality check between the SQL projection's block ids and the
 //! reference model's non-seed block ids. Bound only on `SutSqlProjection`
 //! + `RefBlockTree` — runs in any slice with a storage backing.

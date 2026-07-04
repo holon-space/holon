@@ -3,10 +3,10 @@
 //! In the Loro-present session, **Loro is the consolidator**: it owns sibling
 //! order and merge (pinned at session start via [`SessionCapabilities`]). The
 //! projection ([`crate::loro_sync_controller::LoroProjection`]) computes
-//! the diff of the Loro authority against the persisted base and hands the
-//! result here as a typed-intent [`ChangeSet`] carrying [`Provenance`]. The
-//! consolidator records the intent (op-multiset agreement — the Phase-2
-//! equivalence relation) and writes the SQL sink.
+//! the diff of the Loro authority against its in-memory `live` snapshot and
+//! hands the result here as a typed-intent [`ChangeSet`] carrying
+//! [`Provenance`]. The consolidator records the intent (op-multiset agreement —
+//! the Phase-2 equivalence relation) and writes the SQL sink.
 //!
 //! Routing every block sink-write through this one seam is the Phase-5
 //! "writes flow as intent to the consolidator" end-state: the projection no
@@ -65,11 +65,12 @@ impl BlockConsolidator {
     /// Apply a block change batch as a typed intent.
     ///
     /// `ops` is the lossless diff the projection computed (Loro authority vs
-    /// the persisted base); `provenance` records the base it was diffed
-    /// against (and, when known, the originating command). The consolidator
-    /// records the typed [`ChangeSet`] — asserting it round-trips to the
-    /// same op multiset (the intent vocabulary must capture every op) — and
-    /// writes the SQL sink. This is the ONLY block sink-write path.
+    /// the in-memory `live` snapshot); `provenance` records the base it was
+    /// diffed against (and, when known, the originating command). The
+    /// consolidator records the typed [`ChangeSet`] — asserting it
+    /// round-trips to the same op multiset (the intent vocabulary must
+    /// capture every op) — and writes the SQL sink. This is the ONLY block
+    /// sink-write path.
     ///
     /// Divergences are logged loudly and counted but never abort the write: the
     /// write carries the lossless `ops`, and the gate checks the counter.
@@ -100,14 +101,41 @@ impl BlockConsolidator {
             }
             Err(why) => {
                 self.divergences.fetch_add(1, Ordering::SeqCst);
-                tracing::error!("[BlockConsolidator] intent DIVERGENCE: {why}");
+                let detail: Vec<String> = ops
+                    .iter()
+                    .map(|(name, params)| {
+                        let id = params
+                            .get("id")
+                            .and_then(holon_api::Value::as_string)
+                            .unwrap_or("<no-id>");
+                        let mut keys: Vec<&str> = params.keys().map(|k| &**k).collect();
+                        keys.sort_unstable();
+                        format!("{name}:{id}{{{}}}", keys.join(","))
+                    })
+                    .collect();
+                tracing::error!(
+                    "[BlockConsolidator] intent DIVERGENCE: {why} :: ops=[{}]",
+                    detail.join(", ")
+                );
             }
         }
 
         // Loro is the consolidator (owns merge/order); the SQL sink is its
         // derived single-writer projection. Tag the write `EventOrigin::Loro`.
+        //
+        // SECURITY (Ruling B, load-bearing): every projection op is built with
+        // `position: None`. The Loro tree owns each block's fractional index and
+        // the projection writes `sort_key` as an ordinary column from that
+        // index; it NEVER mints sibling re-keys. So an untrusted PEER block that
+        // carries an `_order_rekeys` property can never become a re-key
+        // instruction to the SQL writer — the re-key channel is structurally
+        // unreachable from this path, not merely filtered.
+        let batch: Vec<holon_core::BatchOp> = ops
+            .into_iter()
+            .map(|(op_name, params)| holon_core::BatchOp::data(op_name, params))
+            .collect();
         self.command_bus
-            .execute_batch_with_origin(&EntityName::new("block"), ops, EventOrigin::Loro)
+            .execute_batch_with_origin(&EntityName::new("block"), batch, EventOrigin::Loro)
             .await
             .map_err(|e| anyhow::anyhow!("BlockConsolidator sink write failed: {}", e))?;
         Ok(())

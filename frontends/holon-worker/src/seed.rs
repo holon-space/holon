@@ -111,10 +111,15 @@ pub async fn seed_default_layout(engine: &Arc<BackendEngine>) -> anyhow::Result<
             "a4",
             r#"{"sequence":3,"level":2,"collapse_to":"drawer"}"#,
         ),
+        // Sidebar mirrors assets/default/index.org: pages are blocks tagged
+        // 'Page' (see the block_tags seeding below), displayed by content.
+        // The old seed filtered on a `name` column that the `block` matview
+        // does not project — the generated watch_view failed to create and
+        // the sidebar rendered an error banner (HANDOFF gap #1).
         (
             "block:default-left-sidebar::render::0",
             "block:default-left-sidebar",
-            r#"list(#{sortkey: "name", item_template: selectable(row(icon("notebook"), spacer(6), text(col("name"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})})})"#,
+            r#"tree(#{parent_id: col("parent_id"), sortkey: col("sort_key"), item_template: selectable(row(icon("notebook"), spacer(6), text(col("content"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})})})"#,
             "source",
             "render",
             "a5",
@@ -123,10 +128,10 @@ pub async fn seed_default_layout(engine: &Arc<BackendEngine>) -> anyhow::Result<
         (
             "block:default-left-sidebar::src::0",
             "block:default-left-sidebar",
-            "from block\nfilter name != null\nfilter name != \"\" && name != \"index\" && name != \
-             \"__default__\"",
+            "SELECT b.* FROM block b JOIN block_tags bt ON bt.block_id = b.id WHERE bt.tag = \
+             'Page' AND b.id != 'block:__default__'",
             "source",
-            "holon_prql",
+            "holon_sql",
             "a6",
             r#"{"sequence":5}"#,
         ),
@@ -142,10 +147,14 @@ pub async fn seed_default_layout(engine: &Arc<BackendEngine>) -> anyhow::Result<
         (
             "block:default-main-panel::src::0",
             "block:default-main-panel",
-            "MATCH (fr:focus_root), (root:block)<-[:CHILD_OF*0..20]-(d:block) WHERE fr.region = \
-             'main' AND root.id = fr.root_id RETURN d",
+            "WITH RECURSIVE focus_descendants AS (\n  SELECT b.*, 0 AS _depth\n  FROM \
+             focus_roots fr\n  JOIN block b ON b.id = fr.root_id\n  WHERE fr.region = 'main'\n  \
+             UNION ALL\n  SELECT child.*, fd._depth + 1\n  FROM focus_descendants fd\n  JOIN block \
+             child ON child.parent_id = fd.id\n  LEFT JOIN block_tags bt ON bt.block_id = fd.id \
+             AND bt.tag = 'Page'\n  WHERE fd._depth = 0 OR bt.block_id IS NULL\n)\nSELECT * FROM \
+             focus_descendants ORDER BY _depth, sort_key",
             "source",
-            "holon_gql",
+            "holon_sql",
             "a8",
             r#"{"sequence":7}"#,
         ),
@@ -189,39 +198,26 @@ pub async fn seed_default_layout(engine: &Arc<BackendEngine>) -> anyhow::Result<
             "c1",
             r#"{"sequence":101,"level":2}"#,
         ),
-        // Journals page — bundled inline because the org parser is not available
-        // on wasm32. Native equivalent: `assets/default/Journals.org` parsed by
-        // `seed_default_layout` via DEFAULT_ASSETS. The two source children
-        // (`::src::0` PRQL listing journal entries, `::render::0` render
-        // expression) make `block:journals` resolve to a list-of-journal-entries
-        // when focused. The "Journal Auto-Create" subtree (trigger + action) is
-        // intentionally omitted — auto-create is a page-level concern.
+        // A few sibling blocks so structural interactions (drag & drop,
+        // indent/outdent, split/join) have material to work with on first boot.
         (
-            "block:journals",
-            DOC_ID,
-            "Journals",
+            "block:welcome::para::1",
+            "block:welcome",
+            "Try dragging a block by its bullet and dropping it on another block.",
             "text",
             "",
-            "d0",
-            r#"{"name":"Journals","sequence":200,"level":1}"#,
+            "c2",
+            r#"{"sequence":102,"level":2}"#,
         ),
         (
-            "block:journals::src::0",
-            "block:journals",
-            "from block\nfilter parent_id == 'block:journals'\nfilter name != null\nsort {-name}",
-            "source",
-            "holon_prql",
-            "d1",
-            r#"{"sequence":201}"#,
-        ),
-        (
-            "block:journals::render::0",
-            "block:journals",
-            r#"list(#{sortkey: "-name", item_template: selectable(row(icon("calendar"), spacer(6), text(col("name"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})})})"#,
-            "source",
-            "render",
-            "d2",
-            r#"{"sequence":202}"#,
+            "block:welcome::para::2",
+            "block:welcome",
+            "Enter splits a block, Backspace at the start joins it, Tab / Shift-Tab indent and \
+             outdent.",
+            "text",
+            "",
+            "c3",
+            r#"{"sequence":103,"level":2}"#,
         ),
     ];
 
@@ -252,13 +248,53 @@ pub async fn seed_default_layout(engine: &Arc<BackendEngine>) -> anyhow::Result<
         db.execute(&sql, vec![]).await?;
     }
 
-    // `name` is carried in the `properties` JSON (set in the INSERTs above:
-    // `{"name":"Welcome",…}` / `{"name":"Journals",…}`); the `block` read view
-    // derives the `name` column from it. The write table no longer has a
-    // top-level `name` column, so the old per-doc name-update statements were
-    // removed — they tripped a "no such column" parse error during seeding.
+    // Journals page + auto-create rule: the SAME blocks the native seed builds
+    // (`build_default_layout_blocks` → `journals_page_blocks` shell + display
+    // query + render, PLUS `journals_auto_create_blocks` trigger + action),
+    // translated to the worker's hand-rolled SQL. Sharing one block spec keeps the
+    // journals infrastructure identical across the browser and native frontends.
+    // The `block:journals` page parents under the no-parent sentinel, matching
+    // this module's DOC_ID convention for the other bundled pages.
+    for (i, block) in holon_frontend::journals_page_blocks()
+        .into_iter()
+        .chain(holon_frontend::journals_auto_create_blocks())
+        .enumerate()
+    {
+        let content_escaped = block.content.replace('\'', "''");
+        let (lang_col, lang_val) = match block.source_language.as_ref() {
+            Some(lang) => (", source_language".to_string(), format!(", '{lang}'")),
+            None => (String::new(), String::new()),
+        };
+        let content_type = block.content_type.to_string();
+        let sort_key = format!("d{i}");
+        let sql = format!(
+            // ALLOW(sql): seed INSERT for the bundled default layout
+            "INSERT OR IGNORE INTO {BLOCK_WRITE_TABLE} (id, parent_id, content, \
+             content_type{lang_col}, sort_key, properties, created_at, updated_at) VALUES \
+             ('{id}', '{parent_id}', '{content_escaped}', '{content_type}'{lang_val}, \
+             '{sort_key}', '{{}}', {now}, {now})",
+            id = block.id.as_str(),
+            parent_id = block.parent_id.as_str(),
+        );
+        // ALLOW(sole_block_writer): bootstrap seed for the bundled default layout
+        // (see the doc-comment on the tuple loop above).
+        db.execute(&sql, vec![]).await?;
+    }
 
-    // FU-10 browser parity: land first-launch users on `block:journals`. Going
+    // Pages surface in the left sidebar via the 'Page' tag (same convention
+    // the native org ingest uses); the sidebar query joins block_tags.
+    for page_id in ["block:welcome", "block:journals"] {
+        db.execute(
+            &format!(
+                // ALLOW(sql): seed INSERT for the bundled default layout
+                "INSERT OR IGNORE INTO block_tags (block_id, tag) VALUES ('{page_id}', 'Page')"
+            ),
+            vec![],
+        )
+        .await?;
+    }
+
+    // FU-10 browser parity: land first-launch users on `block:welcome`. Going
     // through `navigation::focus` (rather than raw INSERT into navigation_history)
     // keeps navigation_history and navigation_cursor atomically in sync, so the
     // focus_roots / current_focus matviews resolve correctly on first render.
@@ -268,15 +304,163 @@ pub async fn seed_default_layout(engine: &Arc<BackendEngine>) -> anyhow::Result<
     nav_params.insert("region".into(), Value::from(Region::Main));
     nav_params.insert(
         "block_id".into(),
-        Value::String(EntityUri::block("journals").as_str().to_string()),
+        Value::String(EntityUri::block("welcome").as_str().to_string()),
     );
     engine
-        .execute_operation(&EntityName::from("navigation"), "focus", nav_params)
+        .execute_operation(
+            &EntityName::from("navigation"),
+            "focus",
+            nav_params,
+            holon_api::OpOrigin::Ingest,
+        )
         .await?;
 
     tracing::info!(
-        "[seed] seeded {} default layout blocks; main panel focused on block:journals",
+        "[seed] seeded {} default layout blocks; main panel focused on block:welcome",
         stmts.len()
     );
+    Ok(())
+}
+
+const SENTINEL_NO_PARENT: &str = "sentinel:no_parent";
+
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock before epoch")
+        .as_millis() as i64
+}
+
+/// `INSERT OR IGNORE` one text block into `block_raw`, mirroring
+/// `seed_default_layout`'s hand-rolled SQL (worker can't use the org/Loro
+/// create path — holon-orgmode doesn't build on wasm). Properties are `{}`;
+/// content is single-quote-escaped.
+async fn insert_text_block(
+    engine: &Arc<BackendEngine>,
+    id: &str,
+    parent_id: &str,
+    content: &str,
+    sort_key: &str,
+    now: i64,
+) -> anyhow::Result<()> {
+    let content_escaped = content.replace('\'', "''");
+    let sql = format!(
+        // ALLOW(sql): seed INSERT for the reset-vault working page (no wasm org parser)
+        "INSERT OR IGNORE INTO {BLOCK_WRITE_TABLE} (id, parent_id, content, content_type, \
+         sort_key, properties, created_at, updated_at) VALUES ('{id}', '{parent_id}', \
+         '{content_escaped}', 'text', '{sort_key}', '{{}}', {now}, {now})"
+    );
+    // ALLOW(sole_block_writer): reset-vault bootstrap seed on a fresh in-memory DB,
+    // same rationale as seed_default_layout (no BlockOperations writer path on
+    // wasm).
+    engine.db_handle().execute(&sql, vec![]).await?;
+    Ok(())
+}
+
+/// Tag `block_id` as a `Page` so it surfaces in the left sidebar — the same
+/// convention `seed_default_layout` and the native org ingest use.
+async fn tag_page(engine: &Arc<BackendEngine>, block_id: &str) -> anyhow::Result<()> {
+    engine
+        .db_handle()
+        .execute(
+            &format!(
+                // ALLOW(sql): seed INSERT for the reset-vault working page
+                "INSERT OR IGNORE INTO block_tags (block_id, tag) VALUES ('{block_id}', 'Page')"
+            ),
+            vec![],
+        )
+        .await?;
+    Ok(())
+}
+
+/// Seed the `structural-page` working document + its three headline blocks,
+/// mirroring `scripts/seed_wide/structural-page.org` exactly as the org parser
+/// materializes it: the `#+ID: structural-page` doc becomes
+/// `block:structural-page` under the no-parent sentinel (content = file stem
+/// `structural-page`, `set_page(true)`); the `* parent`/`* c1`/`* c2` headlines
+/// (`:ID:` drawers) become `block:parent`/`block:c1`/`block:c2` under the doc,
+/// content = title.
+///
+/// The (id, parent_id, content) tuples below MUST equal the parsed org — the
+/// native drift-guard test `tests::seed_wide_matches_worker_seed` in
+/// `crates/holon-integration-tests/src/pbt/composed/live_mcp.rs` gates it;
+/// update BOTH together. sort_keys MUST be valid fractional indices (hex
+/// strings) minted the SAME way the native ingest mints them
+/// (`holon_core::fractional_index::gen_n_keys` for same-level siblings,
+/// `default_sort_key` for a lone doc) — the reorder ops (indent/outdent/move)
+/// parse sibling keys as hex (`loro_fractional_index::from_hex_string`), so an
+/// arbitrary key like "s1" panics `ParseIntError` on the first reorder. The org
+/// parser mints no keys; the ingest does — and this raw-SQL seed bypasses the
+/// ingest, so it must mint them here.
+pub async fn seed_structural(engine: &Arc<BackendEngine>) -> anyhow::Result<()> {
+    use holon_core::fractional_index::default_sort_key;
+    use holon_core::fractional_index::gen_n_keys;
+
+    let now = now_millis();
+    // parent / c1 / c2 are same-level siblings under the doc: evenly-spaced
+    // fractional indices in ascending order (index 0 < 1 < 2).
+    let child_keys = gen_n_keys(3)?;
+    let doc_key = default_sort_key();
+    // (id, parent_id, content, sort_key)
+    let blocks: [(&str, &str, &str, &str); 4] = [
+        (
+            "block:structural-page",
+            SENTINEL_NO_PARENT,
+            "structural-page",
+            doc_key.as_str(),
+        ),
+        (
+            "block:parent",
+            "block:structural-page",
+            "parent",
+            child_keys[0].as_str(),
+        ),
+        (
+            "block:c1",
+            "block:structural-page",
+            "c1",
+            child_keys[1].as_str(),
+        ),
+        (
+            "block:c2",
+            "block:structural-page",
+            "c2",
+            child_keys[2].as_str(),
+        ),
+    ];
+    for (id, parent_id, content, sort_key) in blocks {
+        insert_text_block(engine, id, parent_id, content, sort_key, now).await?;
+    }
+    // The doc is an org Page (`document.set_page(true)`).
+    tag_page(engine, "block:structural-page").await?;
+    tracing::info!("[seed] seeded structural working page (block:parent/c1/c2)");
+    Ok(())
+}
+
+/// Seed the journals document, mirroring `scripts/seed_wide/Journals.org`
+/// (`#+ID: journals`, NO headlines) → one `Page` doc `block:journals` under the
+/// no-parent sentinel (content = file stem `Journals`).
+///
+/// `block:journals` is ALSO seeded by `seed_default_layout`; `INSERT OR IGNORE`
+/// makes this idempotent (the layout copy wins). This function documents the
+/// org-file mirror and is drift-gated by the native
+/// `tests::seed_wide_matches_worker_seed` — the (id, parent_id, content) tuple
+/// MUST equal the parsed `Journals.org`.
+pub async fn seed_journals(engine: &Arc<BackendEngine>) -> anyhow::Result<()> {
+    let now = now_millis();
+    // Valid fractional index (hex) so a reorder that reaches the doc level does
+    // not panic parsing "j0" — see seed_structural's note.
+    let doc_key = holon_core::fractional_index::default_sort_key();
+    insert_text_block(
+        engine,
+        "block:journals",
+        SENTINEL_NO_PARENT,
+        "Journals",
+        doc_key.as_str(),
+        now,
+    )
+    .await?;
+    tag_page(engine, "block:journals").await?;
+    tracing::info!("[seed] seeded journals page (block:journals)");
     Ok(())
 }

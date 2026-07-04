@@ -4,6 +4,15 @@
 //! `FrontendInjectorExt::add_frontend()` registers all frontend-specific
 //! services (ThemeRegistry, conditional modules, FrontendSession factory)
 //! so that callers can `injector.resolve_async::<FrontendSession>().await`.
+//!
+//! **Relationship to the PBT `CapMap` (ADR 0019 §5) — NESTED, not parallel.**
+//! This `fluxdi` wiring *assembles the real application*. The PBT composition
+//! spine (`holon_pbt_core::composition::CapMap`) is a capability-*disclosure
+//! facade* that wraps a fluxdi-assembled app: the headless PBT host boots this
+//! exact wiring via `new_from_config_with_di` and exposes the result as
+//! `Sut*`/`Ref*` capabilities. `CapMap` does NOT duplicate this wiring, and
+//! prod does NOT boot through `CapMap`. The two DI containers must stay
+//! separate — see ADR 0019 (do-not-unify).
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -69,6 +78,14 @@ impl FrontendInjectorExt for Injector {
     ) -> Result<()> {
         let db_path = holon_config.resolve_db_path(&config_dir);
 
+        // Lets a legacy-loro-state rejection name this process's actual files.
+        holon_loro::mergeable_child::disclose_migration_paths(
+            holon_loro::mergeable_child::MigrationPaths {
+                db_path: db_path.clone(),
+                crdt_storage_dir: holon_config.resolve_crdt_storage_dir(&config_dir),
+            },
+        );
+
         // Register configs as singletons (pre-wrap in Arc for non-Clone types)
         let holon_config_arc: Shared<HolonConfig> = Shared::new(holon_config.clone());
         self.provide::<HolonConfig>(Provider::root({
@@ -87,6 +104,36 @@ impl FrontendInjectorExt for Injector {
         self.provide::<LockedKeys>(Provider::root({
             let k = locked_keys.clone();
             move |_| Shared::new(LockedKeys(k.clone()))
+        }));
+
+        // Boot-ordering gate for provider syncs. Starts `DeferredUntilScan`;
+        // the `post_ready` scan barrier opens it once the org initial scan has
+        // finished, so MCP/provider syncs never contend with boot ingest on the
+        // serialized DatabaseActor.
+        self.provide::<holon_core::SyncGate>(Provider::root({
+            let gate = holon_core::SyncGate::new();
+            move |_| Shared::new(gate.clone())
+        }));
+
+        // Degraded-state disclosure bus. Registered UNCONDITIONALLY, before any
+        // conditional module: it is the only channel through which a frontend
+        // learns that something degraded (dead MCP integration, failed org
+        // ingest, share write-back gap), and a container without it degrades
+        // invisibly — blank pages, no banner. It is a plain broadcast channel
+        // with no Loro/iroh dependency, so mode has no say in whether it exists.
+        self.provide::<Arc<holon::sync::DegradedSignalBus>>(Provider::root(|_| {
+            Shared::new(Arc::new(holon::sync::DegradedSignalBus::new()))
+        }));
+
+        // Write-back supervision disclosure. Registered UNCONDITIONALLY for the
+        // same reason as the bus itself: org write-back runs in every mode, so
+        // the one signal saying "your edits stopped reaching disk" must not be
+        // reachable only in Loro mode.
+        self.provide::<dyn holon_filesystem::WritebackDisclosure>(Provider::root(|resolver| {
+            let bus = resolver.resolve::<Arc<holon::sync::DegradedSignalBus>>();
+            Arc::new(crate::loro_seams::WritebackDegradedDisclosure {
+                bus: (*bus).clone(),
+            }) as Arc<dyn holon_filesystem::WritebackDisclosure>
         }));
 
         // ThemeRegistry + PreferenceDefs
@@ -158,8 +205,9 @@ impl FrontendInjectorExt for Injector {
         // Loro CRDT (must be before OrgMode so OrgMode can detect it)
         if loro_enabled {
             let loro_dir = loro_dir.clone();
+            let loro_peer_id = session_config.loro_peer_id;
             self.provide::<LoroConfig>(Provider::root(move |_| {
-                Shared::new(LoroConfig::new(loro_dir.clone()))
+                Shared::new(LoroConfig::new(loro_dir.clone()).with_peer_id(loro_peer_id))
             }));
             LoroModule
                 .configure(self)
@@ -192,6 +240,37 @@ impl FrontendInjectorExt for Injector {
                 let ops = resolver.resolve::<LoroBlockOperations>();
                 Shared::new(CrudAuthority(ops as Arc<dyn OperationProvider>))
             }));
+
+            // Shared-subtree write-back disclosure (Inc 1). Forwards a
+            // not-yet-materialized shared edit to the `DegradedSignalBus` (which
+            // the composition root provides in every mode) so the frontend
+            // banners it instead of the edit silently failing to reach disk.
+            // Only wired in Loro mode — shares don't exist in SqlOnly, so its
+            // absence there (di.rs WARN-logs) is correct.
+            self.provide::<dyn holon_filesystem::ShareWritebackDisclosure>(Provider::root(
+                |resolver| {
+                    let bus = resolver.resolve::<Arc<holon::sync::DegradedSignalBus>>();
+                    Arc::new(crate::loro_seams::ShareDegradedDisclosure {
+                        bus: (*bus).clone(),
+                    }) as Arc<dyn holon_filesystem::ShareWritebackDisclosure>
+                },
+            ));
+
+            // Authoritative mount registry (Inc 3): the org ingest guard skips a
+            // shared-subtree projection file ONLY when its page id is a real
+            // mount node in the global Loro tree — never on drawer content alone
+            // (which round-trips from any user file). Backed by LoroShareBackend
+            // (async-provided), so resolve async.
+            self.provide::<dyn holon_filesystem::MountRegistry>(Provider::root_async(
+                |resolver| async move {
+                    let backend = resolver
+                        .resolve_async::<Arc<holon_loro::loro_share_backend::LoroShareBackend>>()
+                        .await;
+                    Arc::new(crate::loro_seams::LoroMountRegistry {
+                        backend: (*backend).clone(),
+                    }) as Arc<dyn holon_filesystem::MountRegistry>
+                },
+            ));
         }
 
         // OrgMode (native-only — holon-orgmode uses tokio::fs + tokio::process)
@@ -208,7 +287,12 @@ impl FrontendInjectorExt for Injector {
             // deliberately excluded from the sidebar query, so the seed uses
             // a different filename (notes.org).
             if !root.exists() {
-                std::fs::create_dir_all(&root).expect("Failed to create org root directory");
+                std::fs::create_dir_all(&root).map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to create org root directory {}: {e}",
+                        root.display()
+                    )
+                })?;
             }
 
             let mut org_config = OrgModeConfig::new(root);
@@ -272,10 +356,15 @@ impl FrontendInjectorExt for Injector {
                         for table in mcp_registry.fdw_backed_tables() {
                             engine.register_fdw_table(&table).await;
                         }
-                        if let Some(integration) = mcp_registry.integrations().first() {
-                            engine
-                                .set_matview_hook(integration.sync_engine.clone())
-                                .await;
+                        let hooks = mcp_registry
+                            .integrations()
+                            .iter()
+                            .map(|i| {
+                                i.sync_engine.clone() as std::sync::Arc<dyn holon_core::MatviewHook>
+                            })
+                            .collect();
+                        if let Some(hook) = holon_core::combine_matview_hooks(hooks) {
+                            engine.set_matview_hook(hook).await;
                         }
                     }
                 }
@@ -338,9 +427,33 @@ impl FrontendInjectorExt for Injector {
                             .is_ok_and(|content| content.contains(":ID: root-layout")),
                         _ => false,
                     };
-                    crate::seed::seed_default_layout(&engine, ordering, user_index_org_exists)
-                        .await
-                        .expect("Failed to seed default layout");
+                    // Copy-on-write: a materialized `__default__.org` on disk is
+                    // the durable "user modified the seed layout" marker. When
+                    // present, that file WINS — the org scan owns `__default__`
+                    // and `seed_default_layout` must NOT re-seed/replace it.
+                    // When absent, the seed layout is virtual and re-seeds from
+                    // the current bundled asset (auto-update).
+                    let default_org_exists = match (
+                        resolver.try_resolve::<holon_orgmode::di::OrgModeConfig>(),
+                        resolver.try_resolve::<dyn holon_filesystem::FileSystem>(),
+                    ) {
+                        (Ok(cfg), Ok(fs)) => fs
+                            .read_to_string(&cfg.root_directory.join("__default__.org"))
+                            .await
+                            .is_ok(),
+                        _ => false,
+                    };
+                    crate::seed::seed_default_layout(
+                        &engine,
+                        ordering,
+                        user_index_org_exists,
+                        default_org_exists,
+                    )
+                    .await
+                    .expect(
+                        "boot [component=session stage=session-resolve]: \
+                             seed_default_layout failed",
+                    );
                 }
                 .instrument(tracing::info_span!(
                     "di.factory.FrontendSession.seed_default_layout"
@@ -397,7 +510,10 @@ impl FrontendInjectorExt for Injector {
                 async {
                     holon::api::action_watcher::start_action_watchers(engine.clone())
                         .await
-                        .expect("Failed to start action watchers");
+                        .expect(
+                            "boot [component=session stage=session-resolve]: \
+                             start_action_watchers failed",
+                        );
                 }
                 .instrument(tracing::info_span!(
                     "di.factory.FrontendSession.start_action_watchers"
@@ -419,14 +535,57 @@ impl FrontendInjectorExt for Injector {
                     let ready_signal_bg = ready_signal.clone();
                     let post_ready_work = async move {
                         if let Some(mut signal) = ready_signal_bg {
-                            let result = signal
-                                .wait_for(|v| v.is_some())
-                                .await
-                                .expect("FileWatcherReadySignal sender dropped");
-                            match result.as_ref().unwrap() {
-                                Ok(()) => {}
-                                Err(msg) => panic!("OrgMode startup failed: {msg}"),
+                            // Copy the outcome out and drop the non-`Send`
+                            // `watch::Ref` BEFORE any `.await` below.
+                            let scan_error: Option<String> = {
+                                let result = signal.wait_for(|v| v.is_some()).await.expect(
+                                    "boot [component=org-sync stage=session-resolve]: \
+                                         FileWatcherReadySignal sender dropped",
+                                );
+                                match result.as_ref().unwrap() {
+                                    Ok(()) => None,
+                                    Err(msg) => Some(msg.clone()),
+                                }
+                            };
+                            if let Some(msg) = scan_error {
+                                // A per-file initial-scan failure. Do NOT panic
+                                // this detached worker — that left the window
+                                // looking healthy with file sync silently dead
+                                // (dogfood 2026-07-10 ship-blocker). The org
+                                // watch loop is already armed (holon-orgmode
+                                // di.rs no longer early-returns on failure), so
+                                // the OTHER files keep syncing. Surface the
+                                // failure loudly + as a visible degraded banner.
+                                tracing::error!(
+                                    "OrgMode initial scan degraded — some vault files were not \
+                                     ingested; other files continue syncing: {msg}"
+                                );
+                                resolver_bg
+                                    .resolve_async::<Arc<holon::sync::DegradedSignalBus>>()
+                                    .await
+                                    .emit(holon::sync::ShareDegraded {
+                                        shared_tree_id: "org-initial-scan".to_string(),
+                                        reason: holon::sync::ShareDegradedReason::OrgIngestFailed(
+                                            msg.clone(),
+                                        ),
+                                    });
                             }
+                        }
+                        // Org initial scan is done (success, degraded, or no
+                        // org module at all) — the serialized DatabaseActor is
+                        // no longer saturated by boot ingest. Open the sync gate
+                        // so deferred provider syncs run against an idle actor.
+                        // Opened on EVERY path so a deferred sync always
+                        // eventually runs (fail-loud: never a silent never-sync).
+                        match resolver_bg.try_resolve::<holon_core::SyncGate>() {
+                            Ok(gate) => {
+                                gate.open();
+                                tracing::info!("[post_ready] org scan complete — sync gate opened");
+                            }
+                            Err(e) => tracing::error!(
+                                "[post_ready] SyncGate failed to resolve — deferred MCP syncs \
+                                 will fall back to the 600s watchdog: {e}"
+                            ),
                         }
                         let _ = resolver_bg
                             .try_resolve_async::<holon::sync::LoroSyncControllerHandle>()
@@ -449,6 +608,10 @@ impl FrontendInjectorExt for Injector {
                 let preference_defs = resolver.resolve::<Vec<preferences::PreferenceDef>>();
                 let holon_config = resolver.resolve::<HolonConfig>();
                 let locked_keys = resolver.resolve::<LockedKeys>();
+                // Registry-backed: it answers for entity types registered after
+                // boot (an MCP sidecar connecting) without re-wiring.
+                let link_classifier =
+                    (*resolver.resolve::<holon_api::link_parser::LinkTargetClassifier>()).clone();
 
                 let profiles = engine.profile_resolver().clone();
                 let query_engine = Some(engine.clone() as Arc<dyn holon::api::QueryEngine>);
@@ -464,8 +627,9 @@ impl FrontendInjectorExt for Injector {
                     )
                     .await
                     .expect(
-                        "FrontendSession factory: TursoBlockQuerySource::watch_default failed \
-                         (the `block` + `focus_roots` matviews must exist by this point)",
+                        "boot [component=turso stage=session-resolve]: FrontendSession factory: \
+                         TursoBlockQuerySource::watch_default failed (the `block` + `focus_roots` \
+                         matviews must exist by this point)",
                     ),
                 )
                     as Arc<dyn holon_core::storage::BlockQuerySource>;
@@ -475,6 +639,7 @@ impl FrontendInjectorExt for Injector {
                     operation_engine,
                     ui_watcher,
                     profiles,
+                    link_classifier,
                     error_tracker,
                     ready_signal,
                     preference_defs,

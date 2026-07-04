@@ -1,10 +1,8 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
 
 use holon_api::entity::FieldSchema;
 use holon_api::entity::TypeDefinition;
-use holon_api::render_types::PreconditionChecker;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -16,6 +14,20 @@ pub struct McpSidecar {
     #[serde(default)]
     pub entity_prefix: Option<String>,
     pub entities: HashMap<String, EntityConfig>,
+    /// Master write switch (leases/read-write ruling). Absent = `disabled` =
+    /// today's fail-loud behaviour: every non-`read` tool is denied at
+    /// dispatch. `enabled` lets `idempotent`/`keyed` tools through;
+    /// `once_only` tools stay blocked until a writer/lease is configured
+    /// (increment 4).
+    #[serde(default)]
+    pub writes: WritesPolicy,
+    /// Writer designation for this connector's `once_only` effects (leases/
+    /// read-write ruling, increment 4). Absent = `confirm_manually` = the safe
+    /// default: once_only becomes usable but every such write pauses for
+    /// explicit human confirmation and never fires unattended. `always_run`
+    /// means this device holds write authority and dispatches immediately.
+    #[serde(default)]
+    pub once_only: OnceOnlyAuthorization,
     #[serde(default)]
     pub tools: HashMap<String, ToolConfig>,
     /// Sidecar-declared derived views, created as Turso materialized views at
@@ -90,6 +102,33 @@ impl EntityConfig {
     pub fn id_column_or_default(&self) -> String {
         self.id_column.clone().unwrap_or_else(|| "id".to_string())
     }
+
+    /// The columns carrying this entity's row identity, most authoritative
+    /// declaration first: schema columns marked `primary_key`, else an
+    /// explicitly declared `id_column`, else a column literally named `id`.
+    ///
+    /// Empty means the entity declares no identity at all — distinct from
+    /// [`Self::id_column_or_default`], whose `"id"` is an answer to a question
+    /// the entity never asked and therefore cannot be read as a declaration.
+    pub fn identity_columns(&self) -> Vec<String> {
+        let primary_keys: Vec<String> = self
+            .schema
+            .iter()
+            .filter(|f| f.primary_key)
+            .map(|f| f.name.clone())
+            .collect();
+        if !primary_keys.is_empty() {
+            return primary_keys;
+        }
+        if let Some(ref col) = self.id_column {
+            return vec![col.clone()];
+        }
+        self.schema
+            .iter()
+            .filter(|f| f.name == "id")
+            .map(|f| f.name.clone())
+            .collect()
+    }
 }
 
 /// Declarative sync recipe: either tool-based or resource-based.
@@ -110,6 +149,12 @@ pub struct SyncConfig {
     pub list_params: HashMap<String, serde_json::Value>,
     /// Optional cursor-based incremental sync configuration (tool sync only).
     pub cursor: Option<CursorConfig>,
+    /// Optional per-column field projection (tool sync only): lifts nested JSON
+    /// scalars into flat columns (e.g. Google Calendar's `start.dateTime` →
+    /// `start`, `start.date` presence → `all_day`). See
+    /// [`crate::mcp_sync_strategy::Projection`].
+    #[serde(default)]
+    pub project: HashMap<String, crate::mcp_sync_strategy::Projection>,
     /// MCP resource URI (or URI template) to read for listing records.
     /// Required for resource-based sync.
     pub list_resource: Option<String>,
@@ -219,6 +264,7 @@ impl SyncConfig {
                 extract_path,
                 list_params: self.list_params.clone(),
                 cursor: self.cursor.clone(),
+                project: self.project.clone(),
             }))
         } else if let Some(ref list_resource) = self.list_resource {
             let uri = expand_uri_template(list_resource, &self.uri_params)?;
@@ -247,6 +293,170 @@ pub struct ToolConfig {
     pub precondition: Option<RhaiPrecondition>,
     pub param_overrides: Option<HashMap<String, ParamOverride>>,
     pub undo: Option<UndoConfig>,
+    /// Write-effect classification (leases/read-write ruling). Governs whether
+    /// the dispatch chokepoint lets this tool through under the connector's
+    /// `writes` policy. A write-shaped tool (has `affected_fields` or `undo`)
+    /// MUST declare this — an absent `effect` on such a tool is a loud config
+    /// error at load. Absent on a non-write-shaped tool means
+    /// [`ToolEffect::Read`].
+    #[serde(default)]
+    pub effect: Option<ToolEffect>,
+    /// For `effect: keyed` tools, names the tool argument that carries the
+    /// minted idempotency key. Required when `effect` is `keyed`; a loud config
+    /// error otherwise.
+    #[serde(default)]
+    pub key_param: Option<String>,
+    /// How this tool's *successful* response reports whether the effect
+    /// provably landed. Absent means a transport-level ack is itself the proof
+    /// — correct only for providers that never ack an unproven effect.
+    #[serde(default)]
+    pub outcome: Option<OutcomeConfig>,
+}
+
+/// Which response field carries the provider's own delivery verdict, and which
+/// of its values PROVE the effect landed.
+///
+/// Some providers deliberately ack an effect they cannot prove happened (the
+/// claude-history server returns `{"outcome":"unconfirmed"}` as a success
+/// whenever it cannot confirm a message reached the session). Without this
+/// declaration such an ack is indistinguishable from proof of delivery, and the
+/// UI claims a message landed that may never have.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OutcomeConfig {
+    /// Response field holding the verdict, e.g. `outcome`.
+    pub field: String,
+    /// Values that PROVE the effect landed.
+    pub proven: Vec<String>,
+    /// Values that explicitly state the effect is NOT proven to have landed.
+    #[serde(default)]
+    pub unproven: Vec<String>,
+}
+
+/// What a successful response says about whether the effect landed. Parsed
+/// from the provider's payload at the dispatch chokepoint, never re-decided
+/// downstream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AckVerdict {
+    /// The provider vouched for delivery.
+    Proven,
+    /// The call succeeded but delivery is not proven; `detail` is the
+    /// provider's own wording, for verbatim disclosure.
+    Unproven { detail: String },
+}
+
+impl OutcomeConfig {
+    /// Classify a successful tool response. A field that is missing, non-string
+    /// or carries a word this declaration does not know is UNPROVEN with a
+    /// detail naming exactly what was seen: the one thing we may never do is
+    /// assume delivery from a payload we could not read.
+    pub fn classify(&self, tool: &str, response: &holon_api::Value) -> AckVerdict {
+        let holon_api::Value::Object(map) = response else {
+            return AckVerdict::Unproven {
+                detail: format!(
+                    "'{tool}' declares `outcome.field: {}` but its response is not an object: \
+                     {response:?}",
+                    self.field
+                ),
+            };
+        };
+        let Some(holon_api::Value::String(verdict)) = map.get(self.field.as_str()) else {
+            return AckVerdict::Unproven {
+                detail: format!(
+                    "'{tool}' response carries no string `{}` field, so delivery is unproven: \
+                     {response:?}",
+                    self.field
+                ),
+            };
+        };
+        if self.proven.iter().any(|p| p == verdict) {
+            return AckVerdict::Proven;
+        }
+        if self.unproven.iter().any(|u| u == verdict) {
+            return AckVerdict::Unproven {
+                detail: format!(
+                    "'{tool}' acked `{}: {verdict}` — dispatched, but delivery is NOT proven",
+                    self.field
+                ),
+            };
+        }
+        AckVerdict::Unproven {
+            detail: format!(
+                "'{tool}' acked `{}: {verdict}`, which the sidecar classifies as neither proven \
+                 nor unproven — treating it as unproven",
+                self.field
+            ),
+        }
+    }
+}
+
+/// Connector-wide write policy (leases/read-write ruling).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WritesPolicy {
+    /// No external writes: every non-`read` tool is denied loud at dispatch.
+    #[default]
+    Disabled,
+    /// `idempotent`/`keyed` tools may execute; `once_only` stays gated on a
+    /// writer/lease (increment 4).
+    Enabled,
+}
+
+/// Per-connector writer designation for `once_only` effects (leases/read-write
+/// ruling, increment 4; Martin 2026-07-19). Parse-don't-validate: a fixed set
+/// of legal values parsed at sidecar load, mapped to a
+/// [`crate::write_authorization::WriteAuthorizationPolicy`] impl. Future
+/// designations (vault-block role, TTL lease) add variants here without
+/// touching the dispatch chokepoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnceOnlyAuthorization {
+    /// Safe default: pause every once_only write for explicit human
+    /// confirmation; never fire unattended.
+    #[default]
+    ConfirmManually,
+    /// This device holds write authority: dispatch once_only writes
+    /// immediately.
+    AlwaysRun,
+}
+
+/// Per-tool write-effect classification (ADR 0024 P4 taxonomy). Parse-don't-
+/// validate: a fixed set of legal values, parsed at sidecar load, so the
+/// dispatch chokepoint matches on an enum instead of re-deciding from strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolEffect {
+    /// No mutation; always allowed regardless of `writes` policy.
+    Read,
+    /// Convergent by construction — re-applying yields the same state (e.g.
+    /// set-field, complete). Allowed when `writes: enabled`.
+    Idempotent,
+    /// Non-idempotent but dedupable via a minted idempotency key (increment 3).
+    /// Allowed when `writes: enabled`.
+    Keyed,
+    /// Once-only external effect (send, create-without-key). Needs a writer/
+    /// lease asymmetry (increment 4); blocked until then even when enabled.
+    OnceOnly,
+}
+
+impl ToolEffect {
+    /// The YAML spelling, for diagnostics.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ToolEffect::Read => "read",
+            ToolEffect::Idempotent => "idempotent",
+            ToolEffect::Keyed => "keyed",
+            ToolEffect::OnceOnly => "once_only",
+        }
+    }
+}
+
+impl ToolConfig {
+    /// A tool is write-shaped if it declares mutation metadata. Such a tool
+    /// MUST carry an explicit `effect` — see [`McpSidecar::from_yaml`]
+    /// validation.
+    fn is_write_shaped(&self) -> bool {
+        self.affected_fields.is_some() || self.undo.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -271,6 +481,13 @@ pub struct ParamOverride {
 
 /// A Rhai expression validated at parse time. Guarantees the expression
 /// compiles.
+///
+/// **DEPRECATED and IGNORED.** Parsing it keeps a malformed expression a loud
+/// load-time failure, and nothing else consumes it. It cannot become a
+/// descriptor guard: it is parameter-shaped, and ADR 0031 P6=A makes guards
+/// relational predicates over the state an op touches. Add no new
+/// `precondition:` keys — use a relational `#[require("…")]`, or the
+/// parameter's own `TypeHint`.
 #[derive(Debug, Clone)]
 pub struct RhaiPrecondition(String);
 
@@ -281,31 +498,6 @@ impl RhaiPrecondition {
             .compile_expression(expr)
             .map_err(|e| format!("invalid Rhai precondition '{expr}': {e}"))?;
         Ok(Self(expr.to_string()))
-    }
-
-    pub fn to_checker(&self) -> Arc<Box<PreconditionChecker>> {
-        let expr = self.0.clone();
-        Arc::new(Box::new(move |fields| {
-            let engine = rhai::Engine::new();
-            let mut scope = rhai::Scope::new();
-            for (k, v) in fields {
-                if let Some(b) = v.downcast_ref::<bool>() {
-                    scope.push(k.clone(), *b);
-                } else if let Some(s) = v.downcast_ref::<String>() {
-                    scope.push(k.clone(), s.clone());
-                } else if let Some(n) = v.downcast_ref::<f64>() {
-                    scope.push(k.clone(), *n);
-                } else if let Some(n) = v.downcast_ref::<i64>() {
-                    scope.push(k.clone(), *n);
-                }
-            }
-            let ast = engine
-                .compile_expression(&expr)
-                .map_err(|e| format!("Rhai compile error: {e}"))?;
-            engine
-                .eval_ast::<bool>(&ast)
-                .map_err(|e| format!("Rhai eval error for '{expr}': {e}"))
-        }))
     }
 }
 
@@ -334,6 +526,13 @@ impl EntityConfig {
     /// Sets `graph_label` (PascalCase of table name) and `primary_key` so
     /// `GraphSchemaRegistry` can build GQL schema directly from the result.
     /// Returns `None` if no schema fields are declared.
+    ///
+    /// `td.primary_key` is a SCALAR — the entity's GQL node key — and is not
+    /// the table's primary key when the schema declares a composite one (see
+    /// `claude-history` `agent`, keyed on `(id, project_id)`). The table's real
+    /// key is carried by the fields' `primary_key` flags, which the DDL
+    /// generator reads; [`Self::identity_columns`] is the authority for row
+    /// identity. Do not read this scalar as the table key.
     pub fn to_type_definition(&self, table_name: &str) -> Option<TypeDefinition> {
         if self.schema.is_empty() {
             return None;
@@ -404,7 +603,43 @@ impl McpSidecar {
 
     pub fn from_yaml(yaml: &str) -> anyhow::Result<Self> {
         let sidecar: McpSidecar = serde_yaml::from_str(yaml)?;
+        sidecar.validate_write_policy()?;
         Ok(sidecar)
+    }
+
+    /// Fail loud at load if the write policy is under-specified — the same
+    /// discipline as a failing `views:` reconcile. A write-shaped tool with no
+    /// `effect`, or a `keyed` tool with no `key_param`, is a config error, not
+    /// a silently-defaulted setting (parse, don't validate).
+    fn validate_write_policy(&self) -> anyhow::Result<()> {
+        for (name, tool) in &self.tools {
+            match tool.effect {
+                None if tool.is_write_shaped() => anyhow::bail!(
+                    "sidecar tool '{name}' declares write metadata (affected_fields/undo) but no \
+                     `effect:` — classify it as read|idempotent|keyed|once_only"
+                ),
+                Some(ToolEffect::Keyed) if tool.key_param.is_none() => anyhow::bail!(
+                    "sidecar tool '{name}' is `effect: keyed` but declares no `key_param:` — name \
+                     the tool argument that carries the idempotency key"
+                ),
+                _ => {}
+            }
+            if let Some(outcome) = &tool.outcome {
+                if outcome.proven.is_empty() {
+                    anyhow::bail!(
+                        "sidecar tool '{name}' declares `outcome:` with no `proven:` values — \
+                         nothing could ever count as delivery"
+                    );
+                }
+                if let Some(clash) = outcome.proven.iter().find(|p| outcome.unproven.contains(p)) {
+                    anyhow::bail!(
+                        "sidecar tool '{name}' lists outcome value '{clash}' as BOTH proven and \
+                         unproven"
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn default_entity(&self) -> &str {
@@ -419,6 +654,90 @@ impl McpSidecar {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn outcome_sidecar(extra: &str) -> anyhow::Result<McpSidecar> {
+        McpSidecar::from_yaml(&format!(
+            r#"
+entities:
+  session:
+    id_column: id
+tools:
+  send_message:
+    entity: session
+    effect: once_only
+    undo:
+      reversible: false
+    outcome:
+      field: outcome
+{extra}
+"#
+        ))
+    }
+
+    fn verdict(response: serde_json::Value) -> AckVerdict {
+        let sidecar = outcome_sidecar("      proven: [delivered]\n      unproven: [unconfirmed]")
+            .expect("valid outcome declaration");
+        sidecar.tools["send_message"]
+            .outcome
+            .as_ref()
+            .expect("declared")
+            .classify("send_message", &holon_api::Value::from(response))
+    }
+
+    #[test]
+    fn a_proven_outcome_value_is_proof_of_delivery() {
+        assert_eq!(
+            verdict(serde_json::json!({"outcome": "delivered"})),
+            AckVerdict::Proven
+        );
+    }
+
+    /// The headline: a SUCCESSFUL response the provider labels unproven must
+    /// not be read as delivery, and the disclosure must quote its word.
+    #[test]
+    fn a_declared_unproven_outcome_is_not_proof_of_delivery() {
+        let AckVerdict::Unproven { detail } =
+            verdict(serde_json::json!({"outcome": "unconfirmed"}))
+        else {
+            panic!("`unconfirmed` must not classify as proven")
+        };
+        assert!(detail.contains("unconfirmed"), "got: {detail}");
+    }
+
+    /// An outcome word the declaration does not know is disclosed as unproven,
+    /// never silently defaulted into success.
+    #[test]
+    fn an_unknown_outcome_value_is_not_proof_of_delivery() {
+        let AckVerdict::Unproven { detail } = verdict(serde_json::json!({"outcome": "who_knows"}))
+        else {
+            panic!("an unknown outcome word must not classify as proven")
+        };
+        assert!(detail.contains("who_knows"), "got: {detail}");
+    }
+
+    /// A response missing the declared field means the sidecar and the provider
+    /// disagree — that is a reason to doubt delivery, not to assume it.
+    #[test]
+    fn a_missing_outcome_field_is_not_proof_of_delivery() {
+        let AckVerdict::Unproven { detail } = verdict(serde_json::json!({"ok": true})) else {
+            panic!("a missing outcome field must not classify as proven")
+        };
+        assert!(detail.contains("outcome"), "got: {detail}");
+    }
+
+    #[test]
+    fn an_outcome_declaration_with_no_proven_values_is_a_loud_config_error() {
+        let err = outcome_sidecar("      proven: []").unwrap_err().to_string();
+        assert!(err.contains("no `proven:` values"), "got: {err}");
+    }
+
+    #[test]
+    fn an_outcome_value_that_is_both_proven_and_unproven_is_a_loud_config_error() {
+        let err = outcome_sidecar("      proven: [delivered]\n      unproven: [delivered]")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("BOTH proven and unproven"), "got: {err}");
+    }
 
     #[test]
     fn parse_valid_precondition() {
@@ -741,5 +1060,74 @@ entities:
         assert_eq!(td.fields[0].name, "msg_id");
         assert!(!td.fields[0].nullable);
         assert!(td.fields[2].nullable);
+    }
+
+    #[test]
+    fn writes_policy_defaults_to_disabled() {
+        let yaml = "entities:\n  x:\n    short_name: x\n";
+        let sidecar = McpSidecar::from_yaml(yaml).unwrap();
+        assert_eq!(sidecar.writes, WritesPolicy::Disabled);
+    }
+
+    #[test]
+    fn parses_writes_and_effect() {
+        let yaml = r#"
+writes: enabled
+entities:
+  x:
+    short_name: x
+tools:
+  set-thing:
+    entity: x
+    effect: idempotent
+    affected_fields: [thing]
+  send-thing:
+    entity: x
+    effect: keyed
+    key_param: idempotency_key
+"#;
+        let sidecar = McpSidecar::from_yaml(yaml).unwrap();
+        assert_eq!(sidecar.writes, WritesPolicy::Enabled);
+        assert_eq!(
+            sidecar.tools["set-thing"].effect,
+            Some(ToolEffect::Idempotent)
+        );
+        assert_eq!(sidecar.tools["send-thing"].effect, Some(ToolEffect::Keyed));
+    }
+
+    #[test]
+    fn write_shaped_tool_without_effect_fails_loud() {
+        let yaml = r#"
+entities:
+  x:
+    short_name: x
+tools:
+  set-thing:
+    entity: x
+    affected_fields: [thing]
+"#;
+        let err = McpSidecar::from_yaml(yaml).unwrap_err().to_string();
+        assert!(
+            err.contains("set-thing") && err.contains("effect"),
+            "config error must name the tool and demand an effect, got: {err}"
+        );
+    }
+
+    #[test]
+    fn keyed_tool_without_key_param_fails_loud() {
+        let yaml = r#"
+entities:
+  x:
+    short_name: x
+tools:
+  send-thing:
+    entity: x
+    effect: keyed
+"#;
+        let err = McpSidecar::from_yaml(yaml).unwrap_err().to_string();
+        assert!(
+            err.contains("send-thing") && err.contains("key_param"),
+            "config error must demand a key_param, got: {err}"
+        );
     }
 }

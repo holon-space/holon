@@ -1,17 +1,291 @@
 use holon_frontend::ReactiveViewModel;
+use holon_frontend::reactive_view::ReactiveView;
 
 use super::prelude::*;
+
+/// True if `c` contributes a scrollable collection that a stacking `column`
+/// must render at CONTENT height (see the loop below for why). Either the node
+/// is itself a collection (`tree`/`list`/`live_query`), or it is a
+/// `view_mode_switcher` whose slot holds the block's collection outline
+/// (`collection_view()` composed inside `column(...)`).
+fn holds_collection(c: &ReactiveViewModel) -> bool {
+    c.collection.is_some() || vms_slot_collection(c).is_some()
+}
+
+/// The collection backing a `view_mode_switcher` node's slot, if this node is
+/// one and its slot content is a collection.
+fn vms_slot_collection(c: &ReactiveViewModel) -> Option<std::sync::Arc<ReactiveView>> {
+    if c.widget_name().as_deref() != Some("view_mode_switcher") {
+        return None;
+    }
+    let slot = c.slot.as_ref()?;
+    let content = slot.content.lock_ref();
+    content.collection.clone()
+}
+
+fn is_accordion(c: &ReactiveViewModel) -> bool {
+    c.widget_name().as_deref() == Some("accordion")
+}
+
+fn is_live_query(c: &ReactiveViewModel) -> bool {
+    c.widget_name().as_deref() == Some("live_query")
+}
+
+/// True if `node` is a `column` with ≥1 direct `accordion` child — the trigger
+/// for the flow-panel split (plan §4). Detected by widget name at render time
+/// (the same mechanism as `holds_collection` / `is_drawer`); a column WITHOUT
+/// an accordion child takes the byte-identical original path (sidebar
+/// firewall).
+pub(crate) fn has_accordion_child(node: &ReactiveViewModel) -> bool {
+    node.widget_name().as_deref() == Some("column") && node.children.iter().any(|c| is_accordion(c))
+}
+
+/// True when `node` is a main-panel flow `column` that hosts the scrollable
+/// outline — it carries either a pinned `accordion` footer OR a scrollable
+/// collection (`tree`/`list`/`live_query`/`collection_view`). Such columns
+/// render through [`render_accordion_split`] so the outline VIRTUALIZES
+/// (`gpui::list`, only viewport rows/frame) while fixed sections pin. The
+/// sidebar's column reaches [`render`]'s eager content-height path instead
+/// (the blank-panel firewall, BugFunnel 230/232) and is never routed here —
+/// only Flex flow panels / the accordion-bearing block-mode arm are.
+pub(crate) fn is_main_panel_flow_column(node: &ReactiveViewModel) -> bool {
+    node.widget_name().as_deref() == Some("column")
+        && node
+            .children
+            .iter()
+            .any(|c| is_accordion(c) || holds_collection(c))
+}
+
+/// Render a scrollable collection at CONTENT height (eager, non-virtualized).
+///
+/// A `tree`/`list`/`live_query` stacked inside a `column` among fixed siblings
+/// must render at CONTENT height, not through the `scrollable_list_wrapper`'s
+/// `size_full` viewport. In a stacking column the column is content-sized
+/// (indefinite height) — and it may itself sit inside an absolute-positioned
+/// wrapper (the left sidebar's `view_mode_switcher`, or the main panel) — so a
+/// `size_full`/`h_full` viewport resolves to 0 and the virtualized
+/// `gpui::list` paints nothing. That was the left-sidebar page-tree blank bug
+/// (BugFunnel rows 230 + 232) and the main-panel `collection_view()` 0-height
+/// bug (BugFunnel 2026-07-22).
+///
+/// Rows are built eagerly from the collection snapshot every frame.
+/// Reactivity is preserved: the enclosing block-mode `ReactiveShell`
+/// subscribes to every nested collection's `MutableVec`
+/// (`walk_for_collections`/`collection_subs`), so a data change re-renders the
+/// parent and this loop re-reads a fresh snapshot.
+///
+/// TRADEOFF (accepted): this eager path is NON-virtualized — every row is built
+/// each frame. Fine for the sidebar's handful of pages / the focused page's
+/// outline. Follow-up if a large collection ever gets column-wrapped: a
+/// content-height *virtualized* mode in `ReactiveShell` (Infer sizing).
+///
+/// Collapse filtering is applied here (the virtualized list did it via
+/// `ReactiveShell::compute_visible_indices`): descendants of a collapsed
+/// `tree_item` are skipped. `tree_item_collapse_state` returns `None` for flat
+/// rows (e.g. the sync-states `live_query`), so those always render.
+pub(crate) fn eager_collection_div(view: &ReactiveView, ctx: &GpuiRenderContext) -> Div {
+    let mut list_div = div().flex().flex_col().w_full();
+    let mut skip_below: Option<usize> = None;
+    for item in view.children_snapshot() {
+        if let Some((depth, collapsed)) = super::tree_item_collapse_state(item.as_ref(), ctx) {
+            if let Some(threshold) = skip_below {
+                if depth > threshold {
+                    continue;
+                }
+                skip_below = None;
+            }
+            if collapsed {
+                skip_below = Some(depth);
+            }
+        }
+        list_div = list_div.child(super::render(item.as_ref(), ctx));
+    }
+    list_div
+}
+
+/// Append one column child to `container`, routing it to the correct
+/// content-height path: a collection renders eagerly, a `view_mode_switcher`
+/// slot renders content-height, everything else renders normally. Shared by
+/// `render`, the accordion split's main body, and the accordion body so the
+/// routing lives in exactly one place.
+fn push_content_child(container: Div, child: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
+    if let Some(view) = child.collection.as_ref() {
+        container.child(eager_collection_div(view, ctx))
+    } else if vms_slot_collection(child).is_some() {
+        // `collection_view()` composed inside `column(...)` expands to a
+        // `view_mode_switcher` whose slot holds the outline collection. Its
+        // default (`size_full`, absolutely-positioned slot content) render path
+        // collapses to 0 height in a content-sized column — the exact
+        // 2026-07-22 main-panel bug. Render it content-height instead, keeping
+        // the mode-switcher chrome as an overlay.
+        container.child(super::view_mode_switcher::render_content_height(child, ctx))
+    } else {
+        container.child(super::render(child, ctx))
+    }
+}
+
+/// Append one MAIN-region child, VIRTUALIZING the outline collection. The
+/// outline (a bare collection, or a `collection_view` whose slot holds one)
+/// renders through the nested collection-mode `ReactiveShell` + `gpui::list`
+/// (only viewport rows built per frame) inside a `flex_1 min_h_0` region that
+/// owns its own scroll — NO outer `overflow_y_scroll` double-wrap. Non-
+/// collection siblings (divider, section header) stay content-height and pin
+/// (`flex_shrink_0`). Contrast [`push_content_child`], the eager sidebar path.
+fn push_main_child(container: Div, child: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
+    if child.collection.is_some() {
+        container.child(
+            div()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .child(super::render(child, ctx)),
+        )
+    } else if vms_slot_collection(child).is_some() {
+        container.child(
+            div()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .child(super::view_mode_switcher::render_virtualized(child, ctx)),
+        )
+    } else {
+        container.child(
+            div()
+                .flex_shrink_0()
+                .w_full()
+                .child(super::render(child, ctx)),
+        )
+    }
+}
 
 pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
     let gap = node.prop_f64("gap").unwrap_or(0.0) as f32;
     let children = &node.children;
 
+    // Content-only columns render through the original container unchanged
+    // (`div().flex().flex_col()`). A column that stacks a scrollable
+    // collection additionally pins `w_full` so the eagerly-rendered rows fill
+    // the sidebar width. Gating on the collection avoids widening the many
+    // content-only `column(...)`s (block templates, widget gallery, list item
+    // templates) that must keep their intrinsic cross-axis width.
+    let has_collection_child = children.iter().any(|c| holds_collection(c));
+
     let mut container = div().flex().flex_col();
+    if has_collection_child {
+        container = container.w_full();
+    }
     if gap > 0.0 {
         container = container.gap(px(gap));
     }
-    for child in render_children(children, ctx) {
-        container = container.child(child);
+    for child in children {
+        // This container is content-sized (`flex_col`, no height), so a
+        // `live_query` child's `Panel` shape — shell `size_full` plus
+        // `height: relative(1.0)` — has no definite height to resolve against
+        // and collapses to 0 px, taking the whole section with it (the shipped
+        // sidebar's Integrations rows). Render it content-height instead. The
+        // accordion body keeps the greedy shape: `render_bounded` gives ITS
+        // region a definite height first.
+        container = if is_live_query(child) {
+            container.child(super::tag_node(
+                ctx,
+                "live_query",
+                child,
+                super::live_query::render_content_height(child, ctx),
+            ))
+        } else {
+            push_content_child(container, child, ctx)
+        };
     }
     container
+}
+
+/// Render the column's NON-accordion children as the VIRTUALIZED main body that
+/// fills the `flex_1 min_h_0` main region of the accordion split. The outline
+/// collection renders through the nested collection-mode `ReactiveShell` +
+/// `gpui::list` (via `push_main_child`); the accordion(s) become the pinned
+/// footer. Non-collection siblings (divider, header) stay content-height.
+fn render_main_body(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
+    let gap = node.prop_f64("gap").unwrap_or(0.0) as f32;
+
+    // Fill the split's `flex_1 min_h_0` main region so the virtualized outline
+    // inside `push_main_child` inherits a DEFINITE viewport height (the
+    // condition `gpui::list` needs for a nonzero `scroll_max`).
+    let mut container = div().flex().flex_col().flex_1().min_h_0().w_full();
+    if gap > 0.0 {
+        container = container.gap(px(gap));
+    }
+    for child in &node.children {
+        if is_accordion(child) {
+            continue;
+        }
+        container = push_main_child(container, child, ctx);
+    }
+    container
+}
+
+/// Render a slice of children as a content-height `flex_col` (used for the
+/// accordion body's eager content).
+pub(crate) fn render_children_content_height(
+    children: &[std::sync::Arc<ReactiveViewModel>],
+    ctx: &GpuiRenderContext,
+) -> Div {
+    let mut container = div().flex().flex_col().w_full();
+    for child in children {
+        container = push_content_child(container, child, ctx);
+    }
+    container
+}
+
+/// The flow-panel accordion split (plan §4, Martin's R8 = PINNED FOOTER).
+///
+/// `inner` is the definite-height `absolute size_full` div from
+/// `columns::panel_wrap`. We turn it into a `flex_col` whose:
+///   - MAIN region (`flex_1 min_h_0`) holds the column's non-accordion
+///     children; its outline collection renders VIRTUALIZED (`gpui::list` via
+///     the nested collection-mode `ReactiveShell`, only viewport rows/frame)
+///     and owns its own scroll — Inc 5 (`main_outline_virtualized_pbt`);
+///   - FOOTER(s) are the bounded accordion(s), `flex_shrink_0`, PINNED at the
+///     panel bottom — they never scroll with the outline (Martin's ruling:
+///     fixed sections pin, they do not scroll with the outline).
+/// `pad` is `(horizontal, vertical)` padding for the drawer-branch main panel
+/// (`None` for the plain flow branch, which had no padding).
+pub(crate) fn render_accordion_split(
+    inner: Div,
+    node: &ReactiveViewModel,
+    scroll_id: ElementId,
+    pad: Option<(f32, f32)>,
+    ctx: &GpuiRenderContext,
+) -> AnyElement {
+    // MAIN region: `flex_1 min_h_0` gives the outline a definite viewport; the
+    // virtualized `gpui::list` inside `render_main_body` OWNS its own scroll, so
+    // there is deliberately NO `overflow_y_scroll` here (a double scroll
+    // viewport would inflate the list's measured size and zero out scroll_max).
+    let mut main = div()
+        .flex_1()
+        .min_h_0()
+        .w_full()
+        .flex()
+        .flex_col()
+        .id(scroll_id);
+    if let Some((_, pad_y)) = pad {
+        main = main.py(px(pad_y));
+    }
+    main = main.child(render_main_body(node, ctx));
+
+    let mut wrapper = inner.flex().flex_col();
+    if let Some((pad_x, _)) = pad {
+        wrapper = wrapper.px(px(pad_x));
+    }
+    wrapper = wrapper.child(main);
+
+    for child in &node.children {
+        if is_accordion(child) {
+            wrapper = wrapper.child(super::tag(
+                ctx,
+                "accordion",
+                super::accordion::render_bounded(child, ctx),
+            ));
+        }
+    }
+    wrapper.into_any_element()
 }

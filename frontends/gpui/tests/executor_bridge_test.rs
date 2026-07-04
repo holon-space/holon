@@ -8,6 +8,9 @@ use std::time::Duration;
 use gpui::Application;
 
 fn main() {
+    if holon_integration_tests::libtest_list::handled_list_protocol("executor_bridge_test") {
+        return;
+    }
     let app = Application::with_platform(gpui_platform::current_platform(false));
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -116,3 +119,7 @@ fn main() {
         .detach();
     });
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;

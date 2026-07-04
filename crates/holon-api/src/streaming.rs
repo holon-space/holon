@@ -14,13 +14,6 @@ use crate::ApiError;
 use crate::RenderExpr;
 use crate::render_types::RenderVariant;
 
-// Task-local storage for trace context propagation through async call chains
-tokio::task_local! {
-    /// Current trace context for the executing task
-    /// Set at FFI boundary, read by BatchTraceContext::from_current_span()
-    pub static CURRENT_TRACE_CONTEXT: BatchTraceContext;
-}
-
 /// Position in the change stream to start watching from.
 ///
 /// Used with `watch_changes_since()` to control whether to receive current
@@ -121,23 +114,18 @@ impl ChangeOrigin {
         }
     }
 
-    /// Extract trace context (operation_id, trace_id) from task-local or
-    /// current span
+    /// Extract trace context (operation_id, trace_id) from the current span.
     ///
-    /// Priority:
-    /// 1. Task-local CURRENT_TRACE_CONTEXT (most reliable for async
-    ///    propagation)
-    /// 2. OpenTelemetry span context (via set_parent)
-    /// 3. Last resort: derive from the tracing span ID // ALLOW(fallback): doc
-    ///    enumerates resolution order
+    /// Propagation is span-based: the `dispatch_intent*` entry points open an
+    /// interaction span and `.instrument()` the detached future with it, so
+    /// every write below inherits that trace id.
+    ///
+    /// Yields `(None, None)` unless an OpenTelemetry layer is installed, which
+    /// is the honest answer: a trace id derived from the tracing span id would
+    /// be reused after that span closes, and this value is persisted.
     ///
     /// flutter_rust_bridge:ignore
     fn extract_trace_context_from_current_span() -> (Option<String>, Option<String>) {
-        // First, try task-local storage (most reliable for async propagation)
-        if let Ok(ctx) = CURRENT_TRACE_CONTEXT.try_with(|ctx| ctx.clone()) {
-            return (Some(ctx.span_id), Some(ctx.trace_id));
-        }
-
         use opentelemetry::trace::TraceContextExt;
         use tracing_opentelemetry::OpenTelemetrySpanExt;
 
@@ -163,14 +151,6 @@ impl ChangeOrigin {
                 .map(|id| format!("{:016x}", id.into_u64()))
                 .unwrap_or_else(|| format!("{:016x}", span_ctx.span_id()));
 
-            return (Some(operation_id), Some(trace_id));
-        }
-
-        // ALLOW(fallback): last-resort derive from tracing span ID when no OTel context
-        // present
-        if let Some(id) = span.id() {
-            let operation_id = format!("{:016x}", id.into_u64());
-            let trace_id = format!("{:032x}", id.into_u64());
             return (Some(operation_id), Some(trace_id));
         }
 
@@ -237,7 +217,8 @@ impl ChangeOrigin {
     ///
     /// flutter_rust_bridge:ignore
     pub fn from_json(json: &str) -> Option<Self> {
-        serde_json::from_str(json).ok() // ALLOW(ok): trace context may be malformed
+        serde_json::from_str(json).ok() // ALLOW(ok): trace context may be
+        // malformed
     }
 }
 
@@ -521,22 +502,18 @@ impl BatchTraceContext {
         self.trace_flags & 0x01 != 0
     }
 
-    /// Extract trace context from task-local storage or current span
+    /// Extract trace context from the current span.
     ///
     /// Priority:
-    /// 1. Task-local CURRENT_TRACE_CONTEXT (set at FFI boundary)
-    /// 2. OpenTelemetry Context::current()
-    /// 3. Tracing span context (via set_parent)
-    /// 4. Last resort: derive from the tracing span ID // ALLOW(fallback): doc
-    ///    enumerates resolution order
+    /// 1. OpenTelemetry `Context::current()`
+    /// 2. Tracing span context (via set_parent)
+    ///
+    /// Yields `None` unless an OpenTelemetry layer is installed — see
+    /// [`ChangeOrigin::extract_trace_context_from_current_span`] for why a
+    /// span-id-derived substitute is not acceptable here.
     ///
     /// flutter_rust_bridge:ignore
     pub fn from_current_span() -> Option<Self> {
-        // First, try task-local storage (most reliable for async propagation)
-        if let Ok(ctx) = CURRENT_TRACE_CONTEXT.try_with(|ctx| ctx.clone()) {
-            return Some(ctx);
-        }
-
         use opentelemetry::trace::TraceContextExt;
         use tracing_opentelemetry::OpenTelemetrySpanExt;
 
@@ -559,16 +536,6 @@ impl BatchTraceContext {
 
             if span_ctx.is_valid() {
                 return Some(Self::from_span_context(span_ctx));
-            }
-
-            // ALLOW(fallback): last-resort derive from tracing span ID
-            if let Some(id) = span.id() {
-                return Some(Self {
-                    trace_id: format!("{:032x}", id.into_u64()),
-                    span_id: format!("{:016x}", id.into_u64()),
-                    trace_flags: 0x01, // Sampled
-                    trace_state: None,
-                });
             }
         }
 
@@ -933,5 +900,63 @@ mod mutation_gap_tests {
             ..ctx.clone()
         };
         assert!(bad.to_span_context().is_none());
+    }
+}
+
+#[cfg(test)]
+mod no_otel_layer_tests {
+    use super::*;
+
+    /// Without an OpenTelemetry layer — the shape of every build that does not
+    /// enable `--features otel` — extraction must yield no trace context at
+    /// all. Tracing span ids are recycled once a span closes, so a trace id
+    /// derived from one and persisted into `_change_origin` re-parents later
+    /// changes onto an unrelated operation.
+    #[test]
+    fn no_otel_layer_yields_no_trace_context() {
+        tracing::subscriber::with_default(tracing_subscriber::registry(), || {
+            let span = tracing::info_span!("interaction.dispatch");
+            let _enter = span.enter();
+
+            // Without a live span id the fabrication arm never runs and every
+            // assertion below would pass vacuously.
+            let span_id = tracing::Span::current()
+                .id()
+                .expect("subscriber must assign a span id");
+
+            let origin = ChangeOrigin::local_with_current_span();
+            assert_eq!(
+                origin.trace_id(),
+                None,
+                "no OTel layer is installed, yet a trace id was fabricated from tracing span id \
+                 {span_id:?}: {:?} (expected the 32-hex fabrication {:032x})",
+                origin.trace_id(),
+                span_id.into_u64(),
+            );
+            assert_eq!(
+                origin.operation_id(),
+                None,
+                "no OTel layer is installed, yet an operation id was fabricated: {:?}",
+                origin.operation_id(),
+            );
+            assert!(
+                origin.to_batch_trace_context().is_none(),
+                "fabricated context is reassemblable and would re-parent apply_batch: {:?}",
+                origin.to_batch_trace_context(),
+            );
+
+            assert!(
+                ChangeOrigin::remote_with_current_span()
+                    .to_batch_trace_context()
+                    .is_none(),
+                "remote origin fabricated a trace context without an OTel layer",
+            );
+
+            assert!(
+                BatchTraceContext::from_current_span().is_none(),
+                "BatchTraceContext fabricated a context without an OTel layer: {:?}",
+                BatchTraceContext::from_current_span(),
+            );
+        });
     }
 }

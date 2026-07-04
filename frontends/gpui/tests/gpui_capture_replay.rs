@@ -11,10 +11,10 @@
 //! phased capture fails loud at the precondition assert.
 //!
 //! `harness = false`. Run with:
-//!   cargo test -p holon-gpui --features pbt --test gpui_capture_replay
-//! Select the capture with HOLON_CAPTURE=/abs/path.json (default: the
-//! composed keystone's capture path). A missing capture is a DISCLOSED no-op
-//! (there is nothing to replay), mirroring `fixtures::json::load_dir`.
+//!   HOLON_CAPTURE=/abs/path.json cargo test -p holon-gpui --features pbt \
+//!     --test gpui_capture_replay
+//! Replay is OPT-IN: without `HOLON_CAPTURE` this is a disclosed no-op, so the
+//! suite stays hermetic no matter what sits in the gitignored `.captures/`.
 
 #[path = "pbt_harness/mod.rs"]
 mod pbt_harness;
@@ -22,25 +22,24 @@ mod pbt_harness;
 use holon_integration_tests::pbt::fixtures::json;
 use pbt_harness::windowed_wide::replay_fixture_windowed;
 
-fn capture_path() -> String {
-    std::env::var("HOLON_CAPTURE").unwrap_or_else(|_| {
-        // The integration-tests crate owns the `.captures/` dir, so resolve it
-        // relative to this gpui crate's manifest dir.
-        concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../crates/holon-integration-tests/tests/.captures/general_e2e_composed_pbt.\
-             captured.json"
-        )
-        .to_string()
-    })
-}
-
 fn main() {
-    let path = capture_path();
-    if !std::path::Path::new(&path).exists() {
-        eprintln!("[Holon Capture Replay] {path} does not exist — no capture to replay");
+    if pbt_harness::handled_list_protocol("gpui_capture_replay") {
         return;
     }
+    // A capture is by construction a RECORDED FAILING sequence, and `.captures/`
+    // is gitignored — so replaying whatever happens to sit at a default path
+    // would flip the suite red from state version control cannot see. Replay is
+    // opt-in; an explicitly requested capture that is missing fails loud.
+    let Ok(path) = std::env::var("HOLON_CAPTURE") else {
+        eprintln!(
+            "[Holon Capture Replay] no capture requested; set HOLON_CAPTURE=<path> to replay"
+        );
+        return;
+    };
+    assert!(
+        std::path::Path::new(&path).exists(),
+        "[Holon Capture Replay] HOLON_CAPTURE={path} does not exist"
+    );
     let fixture = json::load_file(std::path::Path::new(&path));
     eprintln!(
         "[Holon Capture Replay] replaying {:?} ({} steps) from {path}",
@@ -60,3 +59,7 @@ fn main() {
          ComposedSut<WideE2E>"
     );
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;

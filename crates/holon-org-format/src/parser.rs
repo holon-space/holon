@@ -6,10 +6,12 @@ use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
 use holon_api::types::ContentType;
 use holon_api::types::SourceLanguage;
+use holon_api::types::Tags;
 use holon_api::types::TaskState;
 use orgize::ParseConfig;
 use orgize::SyntaxKind;
 use orgize::ast::Headline;
+use orgize::ast::Section;
 use orgize::ast::SourceBlock as OrgizeSourceBlock;
 use orgize::rowan::ast::AstNode;
 use sha2::Digest;
@@ -22,13 +24,6 @@ use crate::models::OrgBlockExt;
 use crate::models::OrgDocumentExt;
 use crate::models::SourceBlock;
 use crate::models::parse_header_args_from_str;
-
-/// Generate a directory ID from its path (ID is the relative path from root)
-pub fn generate_directory_id(path: &Path, root_directory: &Path) -> String {
-    path.strip_prefix(root_directory)
-        .map(|rel_path| rel_path.to_string_lossy().to_string())
-        .unwrap_or_else(|_| path.to_string_lossy().to_string())
-}
 
 /// Generate a file URI from a file path relative to a root directory.
 ///
@@ -121,17 +116,197 @@ pub fn parse_doc_id(content: &str) -> Option<String> {
     None
 }
 
-/// Parse an org file and return Document + Block entities
+/// The FILE-LEVEL `:PROPERTIES:` drawer, split off the front of raw file
+/// content: the authored key/value pairs in order, plus the content with the
+/// drawer's lines removed.
+///
+/// Holon reads this drawer ITSELF instead of asking orgize for a
+/// `PROPERTY_DRAWER` node, and hands orgize only `rest`. Two live defects came
+/// from splitting the job — a cheap probe that answered one way and the grammar
+/// that answered another — and both were silent, because a document that
+/// resolves to no identity is minted a fresh one rather than reported. Owning
+/// the read end to end means there is only one answer to disagree with:
+///
+/// - orgize's `node_property_node` requires whitespace after the key, so ONE
+///   value-less `:KEY:` line makes its whole drawer parse fail; the drawer then
+///   decays into body text and the file loses its identity.
+/// - orgize's `PropertyDrawer::iter()` pairs two TEXT tokens per property, so a
+///   key with an empty value yields none and the line is dropped outright.
+///
+/// Both are lines the author wrote, and neither may be lost. Position is still
+/// the grammar: org admits a file-level drawer only as the first element of the
+/// file, and `drawer_begin_node` allows leading horizontal space, so the first
+/// line is matched after `trim_start`.
+fn split_file_drawer(content: &str) -> (Option<Vec<(String, String)>>, &str) {
+    let no_drawer = (None, content);
+    let mut lines = content.lines();
+    let Some(first) = lines.next() else {
+        return no_drawer;
+    };
+    if !first.trim().eq_ignore_ascii_case(":PROPERTIES:") {
+        return no_drawer;
+    }
+
+    let mut entries = Vec::new();
+    // Byte offset just past the `:PROPERTIES:` line. `lines()` strips the
+    // terminator, so step over it explicitly to keep `rest` line-aligned.
+    let mut consumed = first.len();
+    consumed += newline_len_at(content, consumed);
+
+    for line in lines {
+        let line_end = consumed + line.len() + newline_len_at(content, consumed + line.len());
+        let trimmed = line.trim();
+        if trimmed.eq_ignore_ascii_case(":END:") {
+            return (Some(entries), &content[line_end..]);
+        }
+        match parse_drawer_line(line) {
+            Some(entry) => entries.push(entry),
+            // A line that is neither a property nor `:END:` means this is not a
+            // well-formed drawer. Leave the whole region to orgize rather than
+            // swallow text that was never drawer content.
+            None if !trimmed.is_empty() => return no_drawer,
+            None => {}
+        }
+        consumed = line_end;
+    }
+    // Ran out of lines without `:END:` — unterminated, so not a drawer.
+    no_drawer
+}
+
+/// Length of the line terminator at `at` (0 at end of input).
+fn newline_len_at(content: &str, at: usize) -> usize {
+    if content[at..].starts_with("\r\n") {
+        2
+    } else if content[at..].starts_with('\n') {
+        1
+    } else {
+        0
+    }
+}
+
+/// One `:KEY:` or `:KEY: value` line of a property drawer. `None` for the
+/// `:PROPERTIES:` / `:END:` delimiters and for anything that is not a property
+/// line. The value is optional on purpose — see [`split_file_drawer`].
+fn parse_drawer_line(line: &str) -> Option<(String, String)> {
+    let rest = line.trim_start().strip_prefix(':')?;
+    let (key, value) = rest.split_once(':')?;
+    if key.is_empty() || key.contains(char::is_whitespace) {
+        return None;
+    }
+    if key.eq_ignore_ascii_case("PROPERTIES") || key.eq_ignore_ascii_case("END") {
+        return None;
+    }
+    Some((key.to_string(), value.trim().to_string()))
+}
+
+/// A file-level drawer's `:ID:` when it carries a usable one.
+///
+/// THE single definition of "the drawer identifies the document". The lenient
+/// probe, the strict parse and the renderer all ask through here, so none of
+/// them can disagree about whether a drawer owns the identity — a disagreement
+/// between the probe and the parse is what makes the sync controller stamp a
+/// second, conflicting `#+ID:` onto the file.
+///
+/// An EMPTY `:ID:` is not a carrier. It names nothing, so the document keeps
+/// its other identity and the empty value stays in the drawer as authored.
+fn drawer_id(drawer: &[(String, String)]) -> Option<&str> {
+    drawer
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("ID"))
+        .map(|(_, value)| value.as_str())
+        .filter(|value| !value.is_empty())
+}
+
+/// A file-level `:PROPERTIES:` drawer read straight from raw file content.
+///
+/// The cheap probe `FileFormat::doc_id_from_content` needs, and LITERALLY the
+/// same function the full parse uses — not merely an agreeing reimplementation.
+/// Nothing here builds a syntax tree, so it stays affordable for the per-file
+/// scan, and no third divergence axis can open up between probe and parse.
+pub fn parse_file_drawer_from_content(content: &str) -> Option<Vec<(String, String)>> {
+    split_file_drawer(content).0
+}
+
+/// The document's bare id as the file declares it, from EITHER carrier, with
+/// the drawer preferred. Lenient by design: when the two carriers disagree this
+/// still answers, and [`parse_org_file_with`] is where the file is rejected.
+///
+/// Answering for a drawer-identified file is the whole point. A `None` here
+/// tells the sync controller the file has no stable identity, and it responds
+/// by force-writing `#+ID: <name-chain uuid>` — manufacturing exactly the
+/// two-carrier conflict that then rejects the file on every subsequent load.
+pub fn parse_doc_id_any_carrier(content: &str) -> Option<String> {
+    if let Some(drawer) = parse_file_drawer_from_content(content) {
+        if let Some(id) = drawer_id(&drawer) {
+            return Some(id.to_string());
+        }
+    }
+    parse_doc_id(content)
+}
+
+/// The document's bare id from the two carriers a file may use — the
+/// file-level drawer's `:ID:` and the `#+ID:` keyword — or `None` when it uses
+/// neither and keeps its path-derived `file:` identity.
+///
+/// Two carriers naming DIFFERENT ids is unresolvable: either answer discards an
+/// identity the author wrote, and a document silently adopting the loser is how
+/// links and backlinks detach from their page. Reject the file at the parse
+/// boundary instead, the same policy `reject_id_cycles` applies next door.
+fn resolve_document_identity(
+    path: &Path,
+    file_drawer: Option<&[(String, String)]>,
+    id_keyword: Option<&str>,
+) -> Result<Option<String>> {
+    let drawer_id = file_drawer.and_then(drawer_id);
+
+    match (drawer_id, id_keyword) {
+        (Some(drawer), Some(keyword)) if drawer != keyword => anyhow::bail!(
+            "org identity conflict in {}: the file-level :PROPERTIES: drawer says :ID: {:?} but \
+             the #+ID: keyword says {:?}. Both name the document, so there is no safe way to \
+             pick one — every link written against the loser would detach. Make them agree, or \
+             delete one carrier.",
+            path.display(),
+            drawer,
+            keyword,
+        ),
+        (Some(id), _) | (None, Some(id)) => Ok(Some(id.to_string())),
+        (None, None) => Ok(None),
+    }
+}
+
+/// Parse an org file and return Document + Block entities, classifying link
+/// targets against the BUILT-IN entity schemes only.
+///
+/// Production ingest uses [`parse_org_file_with`] so links resolve against the
+/// entities that are actually registered; this form is for tests and fixtures
+/// that have no registry.
 pub fn parse_org_file(
     path: &Path,
     content: &str,
     parent_dir_id: &EntityUri,
     root: &Path,
 ) -> Result<ParseResult> {
+    parse_org_file_with(
+        path,
+        content,
+        parent_dir_id,
+        root,
+        &holon_api::link_parser::LinkTargetClassifier::default(),
+    )
+}
+
+/// [`parse_org_file`] against an explicit link-target classifier.
+pub fn parse_org_file_with(
+    path: &Path,
+    content: &str,
+    parent_dir_id: &EntityUri,
+    root: &Path,
+    classifier: &holon_api::link_parser::LinkTargetClassifier,
+) -> Result<ParseResult> {
+    // Use the file stem (no extension) as the page title. The reference model
+    // and PBT downstream consumers all normalize on stem.
     // ALLOW(fallback): file stem is a deterministic title source, not a
-    // failure-mode shim Use the file stem (no extension) as the page title
-    // fallback. The reference model and PBT downstream consumers all normalize
-    // on stem.
+    // failure-mode shim
     let file_name = path
         .file_stem()
         .and_then(|n| n.to_str())
@@ -141,15 +316,6 @@ pub fn parse_org_file(
     // Parse file-level metadata
     let title = parse_title(content);
     let todo_keywords_raw = parse_todo_keywords_config(content);
-
-    // `#+ID: <bare>` (when present) overrides the path-derived `file:` identity
-    // with a stable `block:<bare>` URI, so renames don't change document
-    // identity. The resolved `file_id` is used both as the document's id and
-    // as the parent for top-level headlines.
-    let file_id = match parse_doc_id(content) {
-        Some(bare) => EntityUri::block(&bare),
-        None => generate_file_id(path, root),
-    };
 
     // Build TaskState array from raw config (or None if no config)
     let todo_task_states: Option<Vec<TaskState>> = todo_keywords_raw.as_ref().map(|kw| {
@@ -164,15 +330,13 @@ pub fn parse_org_file(
         states
     });
 
-    // Create document block. The first line of content is the title; the
-    // `Page` tag marks it as a page (formerly the `name`-bearing variant).
-    let title_line = title.clone().unwrap_or(file_name);
-    let mut document = Block::new_text(file_id.clone(), parent_dir_id.clone(), title_line);
-    document.set_page(true);
-
-    // Set org-specific properties using extension trait
-    document.set_file_title(title);
-    document.set_todo_keywords(todo_task_states);
+    // The file-level `:PROPERTIES:` drawer (org 9.0+, org-roam's default) —
+    // authored data that must survive write-back untouched, and whose `:ID:`
+    // names the document exactly as `#+ID:` does. Split off BEFORE orgize sees
+    // the content: Holon owns this drawer, and handing orgize a body that still
+    // contained it would either duplicate it (parsed as a node) or fold it into
+    // the doc-root preamble (when its grammar refuses one of the lines).
+    let (file_drawer, body_src) = split_file_drawer(content);
 
     // Parse org content
     let org = if let Some(ref kw) = todo_keywords_raw {
@@ -181,7 +345,7 @@ pub fn parse_org_file(
             todo_keywords: (active, done),
             ..Default::default()
         };
-        config.parse(content)
+        config.parse(body_src)
     } else {
         let active: Vec<String> = DEFAULT_ACTIVE_KEYWORDS
             .iter()
@@ -195,8 +359,65 @@ pub fn parse_org_file(
             todo_keywords: (active, done),
             ..Default::default()
         };
-        config.parse(content)
+        config.parse(body_src)
     };
+
+    let id_keyword = parse_doc_id(content);
+    let resolved = resolve_document_identity(path, file_drawer.as_deref(), id_keyword.as_deref())?;
+
+    // THE CLASS-KILLER. `FileSyncController` asks `doc_id_from_content` for this
+    // file's identity BEFORE parsing, and treats `None` as "no stable identity"
+    // by minting one and stamping it on the file — silently rewriting the id the
+    // author wrote. So the probe disagreeing with the parse is not a cosmetic
+    // inconsistency, it is data loss with no error and no log line, and it has
+    // now happened twice (indented drawer; value-less `:KEY:` line).
+    //
+    // The two share one function today, so this cannot fire. It is here because
+    // "cannot fire" is a property of the current factoring, not of the contract:
+    // if they are ever split again, the third axis must be LOUD instead of
+    // costing another vault its ids.
+    let probed = parse_doc_id_any_carrier(content);
+    if probed != resolved {
+        anyhow::bail!(
+            "org identity probe/parse divergence in {}: the cheap probe used to resolve this \
+             document reports {:?} but the full parse resolves {:?}. The controller trusts the \
+             probe, so a `None` there means this file's authored id is REPLACED by a minted one \
+             with no other symptom. Refusing to parse rather than silently re-identify the \
+             document.",
+            path.display(),
+            probed,
+            resolved,
+        );
+    }
+
+    let file_id = resolved
+        .map(|bare| EntityUri::block(&bare))
+        .unwrap_or_else(|| generate_file_id(path, root));
+
+    // Create document block. The first line of content is the title; the
+    // `Page` tag marks it as a page (formerly the `name`-bearing variant).
+    let title_line = title.clone().unwrap_or(file_name);
+    let mut document = Block::new_text(file_id.clone(), parent_dir_id.clone(), title_line);
+    document.set_page(true);
+
+    // Set org-specific properties using extension trait
+    document.set_file_title(title);
+    document.set_todo_keywords(todo_task_states);
+    if let Some(drawer) = &file_drawer {
+        let mut map = serde_json::Map::new();
+        for (key, value) in drawer {
+            map.insert(key.clone(), serde_json::Value::String(value.clone()));
+        }
+        document.set_file_drawer(Some(map));
+    }
+    // Only a file that declares its identity BOTH ways needs this marker, and
+    // only to keep write-back from dropping one of the two carriers. Recording
+    // it for every ordinary `#+ID:` file would put a new property on every
+    // doc-root in the vault to remember something none of them need.
+    let drawer_carries_id = file_drawer.as_deref().and_then(drawer_id).is_some();
+    if id_keyword.is_some() && drawer_carries_id {
+        document.set_property(crate::models::org_props::FILE_ID_KEYWORD, "t");
+    }
 
     // Extract blocks (headlines)
     let mut blocks = Vec::new();
@@ -211,6 +432,33 @@ pub fn parse_org_file(
 
     // Process document headlines recursively
     let doc = org.document();
+
+    // Top-level (pre-first-headline) source/image children of the document —
+    // emitted FIRST so they precede headline blocks in document order. A page
+    // whose direct child is a source block (row-28: `convert_block_to_page` on a
+    // block owning a `holon_rule`) renders that child as a top-level
+    // `#+BEGIN_SRC` under the file `#+ID:` header; `process_headlines` only
+    // walks headlines, so without this pass the block is dropped on round-trip.
+    let top_section = extract_section_content(doc.section());
+    // The pre-first-headline body belongs to the doc-root, stored exactly as a
+    // headline stores its own: `title\nbody`. Dropping it here is what let the
+    // renderer delete it from disk on every write-back.
+    if let Some(body) = top_section
+        .body
+        .as_deref()
+        .map(crate::models::trim_blank_lines)
+        .filter(|b| !b.is_empty())
+    {
+        document.content = format!("{}\n{}", document.content, body);
+    }
+    emit_section_children(
+        top_section.source_blocks,
+        top_section.image_paths,
+        file_id.id(),
+        &mut sequence_counter,
+        &mut blocks,
+    )?;
+
     process_headlines(
         doc.headlines(),
         file_id.as_str(), // Top-level headlines have document as parent
@@ -219,6 +467,30 @@ pub fn parse_org_file(
         &mut blocks,
         &mut headlines_needing_ids,
         &done_kws,
+        classifier,
+    )?;
+
+    // Parse boundary (F8, dogfood 2026-07-21): a single file must project to a
+    // valid FOREST. Every block id must be distinct from the document id and
+    // from every other block id in the file. A duplicate id makes a block its
+    // own ancestor -- the classic case is a doc `#+ID:` equal to a heading `:ID:`,
+    // which sets `block.parent_id == block.id` (a self-parent 1-cycle); two
+    // headings sharing an `:ID:` likewise tie one identity to two nodes.
+    // Downstream the recursive `focus_descendants` tree projection walks
+    // `child.parent_id = fd.id` with no cycle guard, so a self-parent recurses
+    // without bound -- boot stack-overflow that kills the whole app. Parse,
+    // don't validate: reject the malformed file HERE with an enriched error so
+    // the ingest boundary quarantines it (loud + disclosed, other files keep
+    // syncing) instead of writing the cyclic row the projection then crashes on.
+    reject_id_cycles(
+        path,
+        &document,
+        &blocks,
+        if drawer_carries_id {
+            "the document root (file-level :PROPERTIES: :ID:)"
+        } else {
+            "the document root (#+ID:)"
+        },
     )?;
 
     // Sibling order is conveyed positionally — blocks are pushed in document
@@ -233,6 +505,48 @@ pub fn parse_org_file(
         blocks,
         headlines_needing_ids,
     })
+}
+
+/// Parse-boundary forest check (F8, dogfood 2026-07-21): reject a file whose
+/// parsed blocks do not form a valid forest under the document root. A
+/// duplicate id -- a heading `:ID:` equal to the doc `#+ID:`, or to another
+/// heading's `:ID:` -- makes a block its own ancestor; the recursive
+/// `focus_descendants` projection then recurses without bound and crashes the
+/// app on boot. Fail loud here so the offending file is quarantined at ingest,
+/// never written to the store where the projection would overflow the stack.
+fn reject_id_cycles(
+    path: &Path,
+    document: &Block,
+    blocks: &[Block],
+    doc_id_carrier: &'static str,
+) -> Result<()> {
+    let mut owners: HashMap<&str, &'static str> = HashMap::new();
+    owners.insert(document.id.as_str(), doc_id_carrier);
+    for block in blocks {
+        if let Some(prev) = owners.insert(block.id.as_str(), "a heading/block (:ID:)") {
+            anyhow::bail!(
+                "org id collision in {}: id {:?} is claimed by both {} and a heading/block -- \
+                 duplicate ids make a block its own ancestor (self-parent cycle), which recurses \
+                 the tree projection without bound and crashes the app on boot. Give the colliding \
+                 heading a distinct :ID: (or change the document's own id in {}).",
+                path.display(),
+                block.id.as_str(),
+                prev,
+                doc_id_carrier,
+            );
+        }
+        // Direct 1-cycle backstop: any block naming itself as parent, however
+        // its id was assigned.
+        if block.id == block.parent_id {
+            anyhow::bail!(
+                "org self-parent in {}: block {:?} lists itself as its own parent -- a 1-cycle \
+                 that recurses the tree projection without bound and crashes the app on boot.",
+                path.display(),
+                block.id.as_str(),
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Split a headline TITLE LINE into (title, tags) exactly the way the org
@@ -276,6 +590,163 @@ fn parse_keywords_from_config(config: &str) -> (Vec<String>, Vec<String>) {
     (active, done)
 }
 
+/// Emit a section's source-block and image children as `Block`s parented to
+/// `parent_bare` (the bare id of the owning headline OR the document root for
+/// top-level, pre-first-headline content). Shared by `process_headlines` and
+/// the document top-level pass in `parse_org_file` so a source/image block
+/// round-trips identically whether it sits under a `* headline` or directly
+/// under the file `#+ID:` header (row-28: a `convert_block_to_page` page whose
+/// direct child is a `holon_rule` renders that child as a top-level
+/// `#+BEGIN_SRC`; without this pass the parser dropped it silently).
+fn emit_section_children(
+    source_blocks: Vec<SourceBlock>,
+    image_paths: Vec<String>,
+    parent_bare: &str,
+    sequence_counter: &mut i64,
+    output: &mut Vec<Block>,
+) -> anyhow::Result<()> {
+    let now = holon_api::clock::now_millis();
+    // Create child Block entities for each source block
+    for (src_index, mut source_block) in source_blocks.into_iter().enumerate() {
+        // Extract :id from header args if present (preserves ID across round-trips)
+        // Otherwise fall back to stable ID based on parent + index
+        let src_id = source_block
+            .header_args
+            .remove("id")
+            .and_then(|v| v.as_string().map(|s| s.to_string()))
+            .unwrap_or_else(|| format!("{}::src::{}", parent_bare, src_index));
+
+        let src_sequence = *sequence_counter;
+        *sequence_counter += 1;
+
+        let mut src_block = Block {
+            id: EntityUri::block(&src_id),
+            // ALLOW(entity_uri_from_raw): org parser output: parent headline raw org slug
+            parent_id: EntityUri::from_raw(parent_bare),
+            content: source_block.source,
+            content_type: ContentType::Source,
+            source_language: source_block
+                .language
+                .map(|l| l.parse::<SourceLanguage>().unwrap()),
+            source_name: source_block.name,
+            created_at: now,
+            updated_at: now,
+            ..Block::default()
+        };
+        src_block.set_sequence(src_sequence);
+
+        // Separate standard org header args from custom properties.
+        // Standard args (results, session, connection, var, etc.) go into
+        // _source_header_args. Everything else is a custom property stored
+        // directly in block.properties for round-trip fidelity.
+        if !source_block.header_args.is_empty() {
+            const KNOWN_HEADER_ARGS: &[&str] = &[
+                "results",
+                "session",
+                "connection",
+                "var",
+                "tangle",
+                "noweb",
+                "exports",
+                "cache",
+                "dir",
+                "eval",
+                "file",
+                "hlines",
+                "colnames",
+                "rownames",
+                "sep",
+                "mkdirp",
+                "padline",
+                "shebang",
+                "wrap",
+                "post",
+                "prologue",
+                "epilogue",
+            ];
+            let mut standard_args = HashMap::new();
+            for (k, v) in source_block.header_args {
+                if KNOWN_HEADER_ARGS.contains(&k.as_str()) {
+                    standard_args.insert(k, v);
+                } else if k.eq_ignore_ascii_case("REQUIRES") || k.eq_ignore_ascii_case("BLOCKED-BY")
+                {
+                    // `:BLOCKED-BY <bare>` (canonical) / `:REQUIRES <bare>`
+                    // (legacy alias) is an edge-typed header arg emitted by
+                    // `source_block_to_org` via `drawer_properties()`. UNION
+                    // both spellings into the typed `block.requires` edge field
+                    // (the `block_requires` junction) so it round-trips as an
+                    // edge, symmetric with the headline path above.
+                    if let Some(s) = v.as_string() {
+                        for slug in s
+                            .split(|c: char| c == ',' || c.is_whitespace())
+                            .filter(|s| !s.is_empty())
+                        {
+                            // ALLOW(entity_uri_from_raw): org src-block REQUIRES/BLOCKED-BY
+                            // header arg bare slug at parse boundary
+                            let uri = EntityUri::from_raw(slug);
+                            if !src_block.requires.contains(&uri) {
+                                src_block.requires.push(uri);
+                            }
+                        }
+                    }
+                } else if k.eq_ignore_ascii_case("contributes-to") {
+                    if let Some(s) = v.as_string() {
+                        src_block.contributes_to = parse_contributes_to(s, src_block.id.as_str())?;
+                    }
+                } else if k.eq_ignore_ascii_case("ADVICE_SUPPRESSED") {
+                    if let Some(s) = v.as_string() {
+                        src_block.advice_suppressed = s
+                            .split(|c: char| c == ',' || c.is_whitespace())
+                            .filter(|s| !s.is_empty())
+                            // ALLOW(entity_uri_from_raw): org src-block ADVICE_SUPPRESSED
+                            // header arg: bare slug promoted at parse boundary
+                            .map(EntityUri::from_raw)
+                            .collect();
+                    }
+                } else if k.eq_ignore_ascii_case("TAGS") {
+                    // `:TAGS <space-joined>` is emitted by `source_block_to_org`
+                    // because a Source block has no headline to carry `:tag:`
+                    // notation. Lift it back into the typed `block.tags` set so
+                    // tags survive the org round-trip on rule/source blocks.
+                    if let Some(s) = v.as_string() {
+                        src_block.tags = Tags::from_tag_iter(
+                            s.split(|c: char| c == ',' || c.is_whitespace())
+                                .filter(|s| !s.is_empty())
+                                .map(|s| s.to_string()),
+                        );
+                    }
+                } else if let Some(s) = v.as_string() {
+                    src_block.set_property(&k, holon_api::Value::String(s.to_string()));
+                }
+            }
+            if !standard_args.is_empty() {
+                src_block.set_source_header_args(standard_args);
+            }
+        }
+
+        output.push(src_block);
+    }
+
+    // Create child Block entities for each image link
+    for (img_index, image_path) in image_paths.into_iter().enumerate() {
+        let img_id = format!("{}::img::{}", parent_bare, img_index);
+        let img_sequence = *sequence_counter;
+        *sequence_counter += 1;
+
+        let mut img_block = Block::new_image(
+            EntityUri::block(&img_id),
+            // ALLOW(entity_uri_from_raw): org parser output: parent headline raw org slug
+            EntityUri::from_raw(parent_bare),
+            image_path,
+        );
+        img_block.set_sequence(img_sequence);
+        img_block.created_at = now;
+        img_block.updated_at = now;
+        output.push(img_block);
+    }
+    Ok(())
+}
+
 /// Recursively process headlines and their children
 #[allow(clippy::only_used_in_recursion)] // file_id threaded for future log/diagnostic plumbing
 fn process_headlines(
@@ -286,6 +757,7 @@ fn process_headlines(
     output: &mut Vec<Block>,
     needs_id: &mut Vec<String>,
     done_keywords: &[String],
+    classifier: &holon_api::link_parser::LinkTargetClassifier,
 ) -> Result<()> {
     for headline in headlines {
         // Extract headline level (number of stars)
@@ -306,14 +778,13 @@ fn process_headlines(
             .todo_keyword()
             .map(|t| TaskState::from_keyword_with_done_list(t.as_ref(), done_keywords));
 
-        // Extract title using title_raw() and remove TODO keyword if present
-        let mut title = headline.title_raw().trim().to_string();
-        if let Some(ref todo) = task_state {
-            let kw = todo.keyword.as_str();
-            if title.starts_with(kw) {
-                title = title[kw.len()..].trim_start().to_string();
-            }
-        }
+        // `title_raw()` is the HEADLINE_TITLE node, and the parser consumes the
+        // TODO keyword into its own token BEFORE building that node — so the
+        // keyword is already gone. Stripping it again here would delete a
+        // keyword the title legitimately OWNS: `* TODO TODO x` is a TODO task
+        // whose text is `TODO x`, and re-stripping turns it into `x` on every
+        // read of the file.
+        let title = headline.title_raw().trim().to_string();
 
         // Extract priority (Token contains just the letter like "A")
         let priority = headline.priority().map(|t| {
@@ -329,7 +800,7 @@ fn process_headlines(
         );
 
         // Extract section content with source blocks
-        let section = extract_section_content(&headline);
+        let section = extract_section_content(headline.section());
         let body = section.body;
         let source_blocks = section.source_blocks;
 
@@ -393,7 +864,8 @@ fn process_headlines(
         // returns empty marks and we keep the raw content byte-identical to
         // preserve today's behavior for non-rich blocks.
         let (content, marks) = {
-            let (rendered, spans) = crate::inline_marks::extract_inline_marks(&raw_content);
+            let (rendered, spans) =
+                crate::inline_marks::extract_inline_marks_with(&raw_content, classifier);
             if spans.is_empty() {
                 (raw_content, None)
             } else {
@@ -433,115 +905,117 @@ fn process_headlines(
         // matches block.id (per docs/Reference/ORG_SYNTAX.md). Anything else stays as
         // a flat string property on block.properties.
         for (key, value) in string_properties.iter() {
-            if key.eq_ignore_ascii_case("REQUIRES") {
-                block.requires = value
+            if key.eq_ignore_ascii_case("REQUIRES") || key.eq_ignore_ascii_case("BLOCKED-BY") {
+                // `:REQUIRES:` and `:BLOCKED-BY:` are two org-drawer spellings of
+                // the SAME dependency edge (the `block_requires` junction — see
+                // block_requires.sql). Accept both on input and UNION them into
+                // `block.requires`; the renderer emits the canonical
+                // `:REQUIRES:` (ruling 2026-07-16; `:BLOCKED-BY:` converges).
+                for slug in value
                     .split(|c: char| c == ',' || c.is_whitespace())
                     .filter(|s| !s.is_empty())
-                    // ALLOW(entity_uri_from_raw): org drawer REQUIRES value: bare slug promoted at
-                    // parse boundary
-                    .map(|s| EntityUri::from_raw(s))
-                    .collect();
+                {
+                    // ALLOW(entity_uri_from_raw): org drawer REQUIRES/BLOCKED-BY bare slug at parse
+                    // boundary
+                    let uri = EntityUri::from_raw(slug);
+                    if !block.requires.contains(&uri) {
+                        block.requires.push(uri);
+                    }
+                }
+            } else if key.eq_ignore_ascii_case("contributes-to") {
+                // `:contributes-to:` is the Compass CONTRIBUTION edge — same
+                // bare-ID grammar as `:REQUIRES:`, routed to the
+                // `block_contributes_to` junction. `none` is the authored
+                // sentinel for "advances nothing"; it names no block, so it
+                // parses to the empty set and the renderer omits the key.
+                block.contributes_to = parse_contributes_to(value, id.as_str())?;
+            } else if key.eq_ignore_ascii_case("ADVICE_SUPPRESSED") {
+                // `:ADVICE_SUPPRESSED:` is the authored advice-suppression
+                // exclusion set (ADR 0021): identical bare-ID grammar to
+                // REQUIRES, pulled into block.advice_suppressed so the SQL edge
+                // partition routes it to the advice_suppressed junction.
+                // Closure kept deliberately: archlint's rule matches the call
+                // form, so point-free would drop this boundary from the ledger.
+                #[allow(clippy::redundant_closure)]
+                {
+                    block.advice_suppressed = value
+                        .split(|c: char| c == ',' || c.is_whitespace())
+                        .filter(|s| !s.is_empty())
+                        // ALLOW(entity_uri_from_raw): org drawer ADVICE_SUPPRESSED bare slug at
+                        // parse boundary
+                        .map(|s| EntityUri::from_raw(s))
+                        .collect();
+                }
+            } else if key.eq_ignore_ascii_case("COLLAPSED") {
+                // Outline fold state is document state (Martin ruling
+                // 2026-07-11), so it round-trips through org the same as any
+                // other block field — a plain drawer property, following
+                // org-mode's own boolean-drawer convention (LogSeq's
+                // `collapsed:: true`; org-mode itself uses `t`/`nil` for
+                // drawer booleans, e.g. `:VISIBILITY:`). Absent means
+                // expanded (Block::default() already sets `collapsed: false`).
+                block.collapsed =
+                    value.eq_ignore_ascii_case("t") || value.eq_ignore_ascii_case("true");
+            } else if key.eq_ignore_ascii_case("WIDGET_ONLY") {
+                // Same boolean-drawer grammar as `:COLLAPSED:`, but a present
+                // value outside the accepted spellings is a hard parse error:
+                // silently defaulting a render-mode flag to false would hide
+                // the authored intent behind a correct-looking page.
+                if value.eq_ignore_ascii_case("t") || value.eq_ignore_ascii_case("true") {
+                    block.widget_only = true;
+                } else {
+                    anyhow::bail!(
+                        "block {id}: :WIDGET_ONLY: must be `t` or `true` (case-insensitive), got \
+                         {value:?}"
+                    );
+                }
             } else {
                 block.set_property(key, holon_api::Value::String(value.to_string()));
             }
         }
+        // Record the authored drawer key order so the renderer replays it
+        // instead of alphabetizing — a reordered drawer is pure write-back
+        // churn. `:BLOCKED-BY:` folds onto the canonical `:REQUIRES:` spelling
+        // so the slot it occupied is the one `:REQUIRES:` gets back.
+        let mut drawer_order: Vec<String> = Vec::new();
+        for (key, _) in string_properties.iter() {
+            let canonical = if key.eq_ignore_ascii_case("BLOCKED-BY") {
+                "REQUIRES".to_string()
+            } else {
+                key.clone()
+            };
+            // Exact-match dedupe: `:Effort:` and `:effort:` are DISTINCT drawer
+            // keys and both round-trip, so collapsing them by case would hand
+            // one of them the other's slot.
+            if !drawer_order.contains(&canonical) {
+                drawer_order.push(canonical);
+            }
+        }
+        if !drawer_order.is_empty() {
+            block.set_property(
+                crate::models::org_props::DRAWER_ORDER,
+                holon_api::Value::String(
+                    serde_json::to_string(&drawer_order)
+                        .expect("drawer key order is a Vec<String> — always serializable"),
+                ),
+            );
+        }
+
         // Store ID in properties (extract_properties filters it out since it's used for
         // block.id)
         block.set_property("ID", holon_api::Value::String(id.clone()));
 
         output.push(block);
 
-        // Create child Block entities for each source block
-        for (src_index, mut source_block) in source_blocks.into_iter().enumerate() {
-            // Extract :id from header args if present (preserves ID across round-trips)
-            // Otherwise fall back to stable ID based on parent + index
-            let src_id = source_block
-                .header_args
-                .remove("id")
-                .and_then(|v| v.as_string().map(|s| s.to_string()))
-                .unwrap_or_else(|| format!("{}::src::{}", id, src_index));
-
-            let src_sequence = *sequence_counter;
-            *sequence_counter += 1;
-
-            let mut src_block = Block {
-                id: EntityUri::block(&src_id),
-                // ALLOW(entity_uri_from_raw): org parser output: parent headline raw org slug
-                parent_id: EntityUri::from_raw(&id),
-                content: source_block.source,
-                content_type: ContentType::Source,
-                source_language: source_block
-                    .language
-                    .map(|l| l.parse::<SourceLanguage>().unwrap()),
-                source_name: source_block.name,
-                created_at: now,
-                updated_at: now,
-                ..Block::default()
-            };
-            src_block.set_sequence(src_sequence);
-
-            // Separate standard org header args from custom properties.
-            // Standard args (results, session, connection, var, etc.) go into
-            // _source_header_args. Everything else is a custom property stored
-            // directly in block.properties for round-trip fidelity.
-            if !source_block.header_args.is_empty() {
-                const KNOWN_HEADER_ARGS: &[&str] = &[
-                    "results",
-                    "session",
-                    "connection",
-                    "var",
-                    "tangle",
-                    "noweb",
-                    "exports",
-                    "cache",
-                    "dir",
-                    "eval",
-                    "file",
-                    "hlines",
-                    "colnames",
-                    "rownames",
-                    "sep",
-                    "mkdirp",
-                    "padline",
-                    "shebang",
-                    "wrap",
-                    "post",
-                    "prologue",
-                    "epilogue",
-                ];
-                let mut standard_args = HashMap::new();
-                for (k, v) in source_block.header_args {
-                    if KNOWN_HEADER_ARGS.contains(&k.as_str()) {
-                        standard_args.insert(k, v);
-                    } else if let Some(s) = v.as_string() {
-                        src_block.set_property(&k, holon_api::Value::String(s.to_string()));
-                    }
-                }
-                if !standard_args.is_empty() {
-                    src_block.set_source_header_args(standard_args);
-                }
-            }
-
-            output.push(src_block);
-        }
-
-        // Create child Block entities for each image link
-        for (img_index, image_path) in section.image_paths.into_iter().enumerate() {
-            let img_id = format!("{}::img::{}", id, img_index);
-            let img_sequence = *sequence_counter;
-            *sequence_counter += 1;
-
-            let mut img_block = Block::new_image(
-                EntityUri::block(&img_id),
-                // ALLOW(entity_uri_from_raw): org parser output: parent headline raw org slug
-                EntityUri::from_raw(&id),
-                image_path,
-            );
-            img_block.set_sequence(img_sequence);
-            img_block.created_at = now;
-            img_block.updated_at = now;
-            output.push(img_block);
-        }
+        // Source-block + image children (shared with the document top-level
+        // pass in `parse_org_file`).
+        emit_section_children(
+            source_blocks,
+            section.image_paths,
+            &id,
+            sequence_counter,
+            output,
+        )?;
 
         // Recursively process children
         process_headlines(
@@ -552,17 +1026,25 @@ fn process_headlines(
             output,
             needs_id,
             done_keywords,
+            classifier,
         )?;
     }
 
     Ok(())
 }
 
-/// Extract :ID: property from headline, or generate a new UUID
+/// Extract :ID: property from headline, or generate a new UUID.
+/// Lookup is case-insensitive so Logseq-written lowercase `:id:` is matched.
 /// Returns (id, needs_write_back)
 fn extract_or_generate_id(headline: &Headline) -> (String, bool) {
     if let Some(drawer) = headline.properties() {
-        if let Some(id_token) = drawer.get("ID") {
+        if let Some(id_token) = drawer.iter().find_map(|(k, v)| {
+            if k.trim().eq_ignore_ascii_case("ID") {
+                Some(v)
+            } else {
+                None
+            }
+        }) {
             let value = id_token.to_string().trim().to_string();
             if !value.is_empty() {
                 return (value, false);
@@ -589,11 +1071,13 @@ fn extract_planning(headline: &Headline) -> (Option<String>, Option<String>) {
     (scheduled, deadline)
 }
 
-/// Extract custom properties from the property drawer (excludes :ID:).
-fn extract_properties(headline: &Headline) -> HashMap<String, String> {
+/// Extract custom properties from the property drawer (excludes :ID:), in the
+/// order the author wrote them. That order is authored data — the renderer
+/// replays it so write-back does not churn the file.
+fn extract_properties(headline: &Headline) -> Vec<(String, String)> {
     let drawer = match headline.properties() {
         Some(d) => d,
-        None => return HashMap::new(),
+        None => return Vec::new(),
     };
 
     drawer
@@ -618,18 +1102,16 @@ struct SectionContent {
     image_paths: Vec<String>,
     // ALLOW(fallback): orgize misclassifies SCHEDULED as PARAGRAPH when properties drawer precedes
     // planning
-    /// SCHEDULED extracted from paragraph text (fallback when orgize
-    /// misclassifies)
+    /// SCHEDULED recovered from paragraph text when orgize misclassifies it.
     scheduled_fallback: Option<String>,
     // ALLOW(fallback): orgize misclassifies DEADLINE as PARAGRAPH when properties drawer precedes
     // planning
-    /// DEADLINE extracted from paragraph text (fallback when orgize
-    /// misclassifies)
+    /// DEADLINE recovered from paragraph text when orgize misclassifies it.
     deadline_fallback: Option<String>,
 }
 
-fn extract_section_content(headline: &Headline) -> SectionContent {
-    let section = match headline.section() {
+fn extract_section_content(section_opt: Option<Section>) -> SectionContent {
+    let section = match section_opt {
         Some(s) => s,
         None => {
             return SectionContent {
@@ -812,7 +1294,7 @@ fn extract_image_links(body: &str) -> (Option<String>, Vec<String>) {
         remaining.push_str(line);
     }
 
-    let trimmed = remaining.trim();
+    let trimmed = crate::models::trim_blank_lines(&remaining);
     let plain_text = if trimmed.is_empty() {
         None
     } else {
@@ -873,6 +1355,33 @@ fn extract_name_from_block_text(text: &str) -> Option<String> {
     None
 }
 
+/// Parse a `contributes-to` value into edge targets. Bare block IDs, separated
+/// by whitespace or commas; the legacy `none` sentinel means the empty set.
+///
+/// The `[[…]]` link form names no block id and so cannot become an edge — it is
+/// refused by name rather than handed to `EntityUri`, which would panic on it
+/// (docs/Reference/CompassConventions.md). `owner` labels the offending block
+/// in the error.
+fn parse_contributes_to(value: &str, owner: &str) -> anyhow::Result<Vec<EntityUri>> {
+    let mut targets = Vec::new();
+    for slug in value
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("none"))
+    {
+        if slug.contains(['[', ']']) {
+            anyhow::bail!(
+                "block {owner}: :contributes-to: takes bare block IDs, got {slug:?} — the \
+                 `[[…]]` link form names no block id and cannot become an edge \
+                 (docs/Reference/CompassConventions.md)"
+            );
+        }
+        // ALLOW(entity_uri_from_raw): contributes-to bare slug at the org parse
+        // boundary
+        targets.push(EntityUri::from_raw(slug));
+    }
+    Ok(targets)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -885,6 +1394,60 @@ mod tests {
         let path = PathBuf::from("/test/file.org");
         let root = PathBuf::from("/test");
         parse_org_file(&path, content, &EntityUri::no_parent(), &root).unwrap()
+    }
+
+    /// F8 (dogfood 2026-07-21): a doc `#+ID:` equal to a heading `:ID:` makes
+    /// the heading its own parent (`block.parent_id == block.id`). Before
+    /// the fix the parser happily emitted that self-parent block and the
+    /// recursive `focus_descendants` projection blew the stack on boot.
+    /// Parse must now reject it loudly (â ingest quarantine) naming the
+    /// file and colliding id.
+    #[test]
+    fn parse_rejects_doc_id_equal_to_heading_id_self_parent() {
+        let content = "#+ID: cyc-id\n* Cyc\n:PROPERTIES:\n:ID: cyc-id\n:END:\n";
+        let path = PathBuf::from("/test/file.org");
+        let root = PathBuf::from("/test");
+        let err = match parse_org_file(&path, content, &EntityUri::no_parent(), &root) {
+            Ok(_) => {
+                panic!("doc-id == heading-id collision must be rejected, not silently ingested")
+            }
+            Err(e) => e,
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("cyc-id") && msg.contains("file.org"),
+            "error must name the colliding id and the file: {msg}"
+        );
+    }
+
+    /// Two headings sharing an `:ID:` tie one identity to two nodes --
+    /// ambiguous parenthood that can cycle the projection. Reject at parse.
+    #[test]
+    fn parse_rejects_duplicate_heading_ids() {
+        let content =
+            "* One\n:PROPERTIES:\n:ID: dup\n:END:\n* Two\n:PROPERTIES:\n:ID: dup\n:END:\n";
+        let path = PathBuf::from("/test/file.org");
+        let root = PathBuf::from("/test");
+        let err = match parse_org_file(&path, content, &EntityUri::no_parent(), &root) {
+            Ok(_) => panic!("duplicate heading :ID: must be rejected"),
+            Err(e) => e,
+        };
+        assert!(
+            format!("{err:#}").contains("dup"),
+            "error must name the duplicate id"
+        );
+    }
+
+    /// A well-formed file (distinct ids, no `#+ID:` collision) still parses.
+    #[test]
+    fn parse_accepts_distinct_ids() {
+        let content = "#+ID: doc-root\n* A\n:PROPERTIES:\n:ID: a1\n:END:\n* B\n:PROPERTIES:\n:ID: b1\n:END:\n";
+        let path = PathBuf::from("/test/file.org");
+        let root = PathBuf::from("/test");
+        assert!(
+            parse_org_file(&path, content, &EntityUri::no_parent(), &root).is_ok(),
+            "distinct ids must parse cleanly"
+        );
     }
 
     #[test]
@@ -911,6 +1474,32 @@ mod tests {
         assert_eq!(h.tags(), holon_api::Tags::from_csv("work,urgent"));
     }
 
+    /// Both authoring surfaces for the contribution edge — the headline drawer
+    /// and the source-block header arg — refuse the `[[…]]` link form by name.
+    /// The header-arg branch reached `EntityUri` directly and PANICKED on it,
+    /// which a `Result`-returning parser must never do.
+    #[test]
+    fn contributes_to_refuses_the_link_form_on_both_authoring_surfaces() {
+        let headline = "* Goal\n:PROPERTIES:\n:ID: p0\n:contributes-to: [[Some Page]]\n:END:\n";
+        let src = "#+begin_src prql :id probe-src :contributes-to [[Some Page]]\nfrom                    x\n#+end_src\n";
+
+        for source in [headline, src] {
+            let Err(err) = parse_org_file(
+                std::path::Path::new("/vault/doc.org"),
+                source,
+                &EntityUri::no_parent(),
+                std::path::Path::new("/vault"),
+            ) else {
+                panic!("the link form must be refused, not parsed: {source:?}");
+            };
+            let err = err.to_string();
+            assert!(
+                err.contains("takes bare block IDs") && err.contains("[[Some"),
+                "the refusal must name the offending value: {err}"
+            );
+        }
+    }
+
     #[test]
     fn test_parse_requires_drawer_promotes_bare_slugs_to_block_uris() {
         // Bare slugs in :REQUIRES: must be promoted to `block:` URIs so the
@@ -931,12 +1520,369 @@ mod tests {
     }
 
     #[test]
+    fn test_blocked_by_drawer_lifts_into_requires_edge() {
+        // `:BLOCKED-BY:` is the canonical org-drawer spelling of the `requires`
+        // dependency edge (block_requires junction). It must lift into
+        // `block.requires` exactly like `:REQUIRES:`, and NOT leak as a raw
+        // property.
+        let content = "* TODO Task\n:PROPERTIES:\n:ID: t1\n:BLOCKED-BY: foo, bar baz\n:END:\n";
+        let result = parse_test_org(content);
+
+        let h = result.blocks.iter().find(|b| b.id.id() == "t1").unwrap();
+        assert_eq!(
+            h.requires,
+            vec![
+                EntityUri::parse("block:foo").unwrap(),
+                EntityUri::parse("block:bar").unwrap(),
+                EntityUri::parse("block:baz").unwrap(),
+            ],
+            ":BLOCKED-BY: must lift into block.requires as block: URIs"
+        );
+        assert!(
+            !h.properties.contains_key("BLOCKED-BY"),
+            "`BLOCKED-BY` must NOT leak into properties; found: {:?}",
+            h.properties
+        );
+    }
+
+    #[test]
+    fn test_blocked_by_edge_roundtrips_via_canonical_requires() {
+        // End-to-end org round-trip for the dependency edge through the real
+        // render path (`OrgRenderer::render_entitys`). Canonical render key is
+        // `:REQUIRES:` (owner ruling 2026-07-16); a `:BLOCKED-BY:`-authored edge
+        // survives render -> re-parse losslessly, converged to `:REQUIRES:`.
+        use crate::org_renderer::OrgRenderer;
+
+        let content = "* TODO Task\n:PROPERTIES:\n:BLOCKED-BY: orient-daily-view \
+                       now-query-mcp\n:ID: t1\n:END:\n";
+        let path = PathBuf::from("/test/file.org");
+        let root = PathBuf::from("/test");
+        let file_id = generate_file_id(&path, &root);
+
+        let result = parse_org_file(&path, content, &EntityUri::no_parent(), &root).unwrap();
+        let h = result.blocks.iter().find(|b| b.id.id() == "t1").unwrap();
+        assert_eq!(
+            h.requires,
+            vec![
+                EntityUri::parse("block:orient-daily-view").unwrap(),
+                EntityUri::parse("block:now-query-mcp").unwrap(),
+            ],
+            ":BLOCKED-BY: must lift into block.requires"
+        );
+
+        let rendered = OrgRenderer::render_entitys(&result.blocks, &path, &file_id);
+        // Canonical key :REQUIRES:, targets sorted (set-valued edge):
+        // "now-query-mcp" < "orient-daily-view".
+        assert!(
+            rendered.contains(":REQUIRES: now-query-mcp orient-daily-view"),
+            "renderer must emit the canonical sorted :REQUIRES: drawer; got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains(":BLOCKED-BY:"),
+            ":BLOCKED-BY: must converge to :REQUIRES: on render; got:\n{rendered}"
+        );
+
+        // Re-parse the rendered text: the typed edge survives (sorted order).
+        let result2 = parse_org_file(&path, &rendered, &EntityUri::no_parent(), &root).unwrap();
+        let h2 = result2.blocks.iter().find(|b| b.id.id() == "t1").unwrap();
+        assert_eq!(
+            h2.requires,
+            vec![
+                EntityUri::parse("block:now-query-mcp").unwrap(),
+                EntityUri::parse("block:orient-daily-view").unwrap(),
+            ],
+            "dependency edge must survive render -> re-parse (sorted canonical order)"
+        );
+    }
+
+    #[test]
+    fn test_blocked_by_alias_converges_to_requires_on_writeback() {
+        // `:BLOCKED-BY:` input is accepted and converges to the canonical
+        // `:REQUIRES:` spelling on re-render (convergent canonical form; owner
+        // ruling 2026-07-16). Both spellings name the same block_requires edge.
+        use crate::org_renderer::OrgRenderer;
+
+        let content = "* TODO Task\n:PROPERTIES:\n:BLOCKED-BY: dep-a\n:ID: t2\n:END:\n";
+        let path = PathBuf::from("/test/file.org");
+        let root = PathBuf::from("/test");
+        let file_id = generate_file_id(&path, &root);
+
+        let result = parse_org_file(&path, content, &EntityUri::no_parent(), &root).unwrap();
+        let h = result.blocks.iter().find(|b| b.id.id() == "t2").unwrap();
+        assert_eq!(h.requires, vec![EntityUri::parse("block:dep-a").unwrap()]);
+
+        let rendered = OrgRenderer::render_entitys(&result.blocks, &path, &file_id);
+        assert!(
+            rendered.contains(":REQUIRES: dep-a") && !rendered.contains(":BLOCKED-BY:"),
+            ":BLOCKED-BY: input must render back as canonical :REQUIRES:; got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn test_source_block_requires_survives_org_roundtrip() {
+        // A source block carrying a typed `requires` edge must round-trip
+        // through org render -> re-parse. The renderer emits `requires` via
+        // `drawer_properties()` as a `:REQUIRES <bare>` header arg on the
+        // #+BEGIN_SRC line; the parser must lift that back into the typed
+        // `block.requires` edge field, symmetric with the headline path.
+        // (Regression: forced-weight keystone red on inv-blocks-match-ref/org.)
+        let mut src = Block {
+            id: EntityUri::block("lessons_for_tasks::src::0"),
+            parent_id: EntityUri::block("lessons_for_tasks"),
+            content: "select 1".to_string(),
+            content_type: ContentType::Source,
+            source_language: Some("holon_prql".parse::<SourceLanguage>().unwrap()),
+            requires: vec![EntityUri::parse("block:lessons_for_tasks::rule::0").unwrap()],
+            ..Block::default()
+        };
+        src.set_sequence(0);
+
+        use crate::models::ToOrg;
+        let org = format!(
+            "* Rule\n:PROPERTIES:\n:ID: lessons_for_tasks\n:END:\n{}",
+            src.to_org()
+        );
+        let result = parse_test_org(&org);
+
+        let parsed = result
+            .blocks
+            .iter()
+            .find(|b| b.content_type == ContentType::Source)
+            .expect("source block must survive re-parse");
+        assert_eq!(
+            parsed.requires,
+            vec![EntityUri::parse("block:lessons_for_tasks::rule::0").unwrap()],
+            "source-block `requires` edge must survive the org round-trip as a typed edge"
+        );
+        assert!(
+            !parsed.properties.contains_key("REQUIRES"),
+            "`REQUIRES` must NOT leak into properties as a raw string; found: {:?}",
+            parsed.properties
+        );
+    }
+
+    #[test]
+    fn test_source_block_tags_survive_org_roundtrip() {
+        // A Source block has no headline to carry `:tag:` notation, so its tags
+        // ride a `:TAGS <space-joined>` header arg on the #+BEGIN_SRC line and
+        // the parser must lift them back into `block.tags`. (Regression: keystone
+        // red on inv-blocks-match-ref/org — a `task` tag added to the journals
+        // holon_rule block was destroyed on org re-ingest.)
+        let mut src = Block {
+            id: EntityUri::block("journals::action::0"),
+            parent_id: EntityUri::block("journals::auto-create"),
+            content: "name: daily_journal".to_string(),
+            content_type: ContentType::Source,
+            source_language: Some("holon_rule".parse::<SourceLanguage>().unwrap()),
+            tags: Tags::from_tag_iter(["task".to_string(), "urgent".to_string()]),
+            ..Block::default()
+        };
+        src.set_sequence(0);
+
+        use crate::models::ToOrg;
+        let org = format!(
+            "* Rule\n:PROPERTIES:\n:ID: journals::auto-create\n:END:\n{}",
+            src.to_org()
+        );
+        let result = parse_test_org(&org);
+
+        let parsed = result
+            .blocks
+            .iter()
+            .find(|b| b.content_type == ContentType::Source)
+            .expect("source block must survive re-parse");
+        assert_eq!(
+            parsed.tags,
+            Tags::from_tag_iter(["task".to_string(), "urgent".to_string()]),
+            "source-block tags must survive the org round-trip"
+        );
+        assert!(
+            !parsed.properties.contains_key("TAGS"),
+            "`TAGS` must NOT leak into properties as a raw string; found: {:?}",
+            parsed.properties
+        );
+    }
+
+    #[test]
     fn test_parse_requires_preserves_existing_block_uris() {
         let content = "* TODO Task\n:PROPERTIES:\n:ID: t2\n:REQUIRES: block:foo\n:END:\n";
         let result = parse_test_org(content);
 
         let h = result.blocks.iter().find(|b| b.id.id() == "t2").unwrap();
         assert_eq!(h.requires, vec![EntityUri::parse("block:foo").unwrap()]);
+    }
+
+    #[test]
+    fn test_advice_suppressed_drawer_round_trips_byte_identically() {
+        // The `:ADVICE_SUPPRESSED:` drawer (ADR 0021) parses into the typed
+        // `block.advice_suppressed` edge field (bare slugs promoted to
+        // `block:` URIs at the boundary) and renders back to the same bare
+        // space-separated list — a byte-identical round-trip.
+        use crate::org_renderer::OrgRenderer;
+
+        let content = "* TODO Task\n:PROPERTIES:\n:ADVICE_SUPPRESSED: id1 id2\n:ID: a1\n:END:\n";
+        let path = PathBuf::from("/test/file.org");
+        let root = PathBuf::from("/test");
+        let file_id = generate_file_id(&path, &root);
+
+        let result = parse_org_file(&path, content, &EntityUri::no_parent(), &root).unwrap();
+        let h = result.blocks.iter().find(|b| b.id.id() == "a1").unwrap();
+        assert_eq!(
+            h.advice_suppressed,
+            vec![
+                EntityUri::parse("block:id1").unwrap(),
+                EntityUri::parse("block:id2").unwrap(),
+            ],
+            "bare slugs must normalise to block: URIs in the typed field"
+        );
+
+        let rendered = OrgRenderer::render_entitys(&result.blocks, &path, &file_id);
+        assert!(
+            rendered.contains(":ADVICE_SUPPRESSED: id1 id2"),
+            "renderer must emit the bare space-joined list, got:\n{rendered}"
+        );
+
+        // Re-parse the rendered text: the typed field must be identical.
+        let result2 = parse_org_file(&path, &rendered, &EntityUri::no_parent(), &root).unwrap();
+        let h2 = result2.blocks.iter().find(|b| b.id.id() == "a1").unwrap();
+        assert_eq!(
+            h2.advice_suppressed, h.advice_suppressed,
+            "advice_suppressed must survive render → re-parse unchanged"
+        );
+    }
+
+    #[test]
+    fn test_collapsed_drawer_round_trips() {
+        // Outline fold state is document state (Martin ruling 2026-07-11):
+        // `:COLLAPSED: t` in the properties drawer parses into
+        // `block.collapsed`, and a folded block renders that property back
+        // out on write. Absent property means expanded (false) — a
+        // never-folded file's drawer must NOT gain a `:COLLAPSED: nil` line
+        // (matches the `requires`/`advice_suppressed` only-if-set convention).
+        use crate::org_renderer::OrgRenderer;
+
+        let content = "* TODO Task\n:PROPERTIES:\n:COLLAPSED: t\n:ID: c1\n:END:\n";
+        let path = PathBuf::from("/test/file.org");
+        let root = PathBuf::from("/test");
+        let file_id = generate_file_id(&path, &root);
+
+        let result = parse_org_file(&path, content, &EntityUri::no_parent(), &root).unwrap();
+        let h = result.blocks.iter().find(|b| b.id.id() == "c1").unwrap();
+        assert!(
+            h.collapsed,
+            "COLLAPSED: t must parse to block.collapsed = true"
+        );
+
+        let rendered = OrgRenderer::render_entitys(&result.blocks, &path, &file_id);
+        assert!(
+            rendered.contains(":COLLAPSED: t"),
+            "renderer must emit the drawer property for a folded block, got:\n{rendered}"
+        );
+
+        let result2 = parse_org_file(&path, &rendered, &EntityUri::no_parent(), &root).unwrap();
+        let h2 = result2.blocks.iter().find(|b| b.id.id() == "c1").unwrap();
+        assert!(
+            h2.collapsed,
+            "collapsed must survive render -> re-parse unchanged"
+        );
+
+        // An expanded (never-collapsed) block must not gain the property.
+        let expanded_content = "* TODO Task2\n:PROPERTIES:\n:ID: c2\n:END:\n";
+        let expanded_result =
+            parse_org_file(&path, expanded_content, &EntityUri::no_parent(), &root).unwrap();
+        let e = expanded_result
+            .blocks
+            .iter()
+            .find(|b| b.id.id() == "c2")
+            .unwrap();
+        assert!(!e.collapsed);
+        let expanded_rendered =
+            OrgRenderer::render_entitys(&expanded_result.blocks, &path, &file_id);
+        assert!(
+            !expanded_rendered.contains("COLLAPSED"),
+            "an expanded block must not gain a :COLLAPSED: drawer line, got:\n{expanded_rendered}"
+        );
+    }
+
+    #[test]
+    fn test_widget_only_drawer_round_trips() {
+        // `:WIDGET_ONLY: t` is a typed Block field, so it survives the org
+        // round-trip that drops untyped non-String properties. A block without
+        // the flag must not gain the drawer key.
+        use crate::org_renderer::OrgRenderer;
+
+        let content = "* Query\n:PROPERTIES:\n:WIDGET_ONLY: t\n:ID: w1\n:END:\n";
+        let path = PathBuf::from("/test/file.org");
+        let root = PathBuf::from("/test");
+        let file_id = generate_file_id(&path, &root);
+
+        let result = parse_org_file(&path, content, &EntityUri::no_parent(), &root).unwrap();
+        let h = result.blocks.iter().find(|b| b.id.id() == "w1").unwrap();
+        assert!(
+            h.widget_only,
+            "WIDGET_ONLY: t must parse to block.widget_only = true"
+        );
+
+        let rendered = OrgRenderer::render_entitys(&result.blocks, &path, &file_id);
+        assert!(
+            rendered.contains(":WIDGET_ONLY: t"),
+            "renderer must emit the drawer property, got:\n{rendered}"
+        );
+
+        let result2 = parse_org_file(&path, &rendered, &EntityUri::no_parent(), &root).unwrap();
+        let h2 = result2.blocks.iter().find(|b| b.id.id() == "w1").unwrap();
+        assert!(
+            h2.widget_only,
+            "widget_only must survive render -> re-parse unchanged"
+        );
+
+        let plain = "* Query2\n:PROPERTIES:\n:ID: w2\n:END:\n";
+        let plain_result = parse_org_file(&path, plain, &EntityUri::no_parent(), &root).unwrap();
+        let p = plain_result
+            .blocks
+            .iter()
+            .find(|b| b.id.id() == "w2")
+            .unwrap();
+        assert!(!p.widget_only);
+        let plain_rendered = OrgRenderer::render_entitys(&plain_result.blocks, &path, &file_id);
+        assert!(
+            !plain_rendered.contains("WIDGET_ONLY"),
+            "a plain block must not gain a :WIDGET_ONLY: drawer line, got:\n{plain_rendered}"
+        );
+    }
+
+    #[test]
+    fn test_widget_only_rejects_unknown_spelling() {
+        // Unlike :COLLAPSED:, an unrecognised :WIDGET_ONLY: value fails loud
+        // instead of silently rendering the headline the author asked to hide.
+        let content = "* Query\n:PROPERTIES:\n:WIDGET_ONLY: banana\n:ID: w3\n:END:\n";
+        let path = PathBuf::from("/test/file.org");
+        let root = PathBuf::from("/test");
+
+        // `ParseResult` is not `Debug`, so unwrap the Err arm by hand.
+        let msg = match parse_org_file(&path, content, &EntityUri::no_parent(), &root) {
+            Ok(_) => panic!(":WIDGET_ONLY: banana must be a parse error, not a silent false"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(msg.contains("w3"), "error must name the block, got: {msg}");
+        assert!(
+            msg.contains("banana"),
+            "error must name the bad value, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_widget_only_accepts_case_insensitive_spellings() {
+        let path = PathBuf::from("/test/file.org");
+        let root = PathBuf::from("/test");
+        for spelling in ["t", "T", "true", "TRUE", "True"] {
+            let content =
+                format!("* Query\n:PROPERTIES:\n:WIDGET_ONLY: {spelling}\n:ID: w4\n:END:\n");
+            let result = parse_org_file(&path, &content, &EntityUri::no_parent(), &root)
+                .unwrap_or_else(|e| panic!("{spelling:?} must parse: {e:#}"));
+            let b = result.blocks.iter().find(|b| b.id.id() == "w4").unwrap();
+            assert!(b.widget_only, "{spelling:?} must parse as widget_only");
+        }
     }
 
     #[test]
@@ -959,6 +1905,56 @@ mod tests {
             Some(TaskState::done("CANCELLED"))
         );
         assert_eq!(result.blocks[2].org_title(), "Dropped task");
+    }
+
+    #[test]
+    fn test_logseq_dialect_keywords_recognized() {
+        // A foreign LogSeq vault carries no `#+TODO:` header. LATER and NOW
+        // must still parse as task keywords (ForeignVaultCompat §4): LATER is
+        // TODO-family (active, not started), NOW is DOING-family (active, in
+        // progress). Neither is a done keyword.
+        let content = "* LATER Draft the proposal\n* NOW Review the draft\n* DONE Ship it";
+        let result = parse_test_org(content);
+
+        assert_eq!(result.blocks.len(), 3);
+        assert_eq!(
+            result.blocks[0].task_state(),
+            Some(TaskState::active("LATER"))
+        );
+        assert_eq!(result.blocks[0].org_title(), "Draft the proposal");
+        assert_eq!(
+            result.blocks[1].task_state(),
+            Some(TaskState::active("NOW"))
+        );
+        assert_eq!(result.blocks[1].org_title(), "Review the draft");
+        assert_eq!(result.blocks[2].task_state(), Some(TaskState::done("DONE")));
+
+        // NOW is DOING-family (drives the in-progress glyph); LATER is not.
+        assert!(result.blocks[1].task_state().unwrap().is_doing());
+        assert!(!result.blocks[0].task_state().unwrap().is_doing());
+    }
+
+    #[test]
+    fn test_logseq_dialect_keyword_round_trips_byte_identical() {
+        // Round-trip fidelity (ADR 0025 write-back doctrine): a LATER/NOW
+        // block must render back with the SAME source keyword, never
+        // normalized to TODO/DOING.
+        use crate::models::ToOrg;
+        for keyword in ["LATER", "NOW"] {
+            let content = format!("* {keyword} Task headline");
+            let result = parse_test_org(&content);
+            let block = &result.blocks[0];
+
+            // The typed keyword renders back to its exact source spelling.
+            assert_eq!(block.task_state().unwrap().to_string(), keyword);
+
+            // The full headline line renders byte-identical.
+            let rendered = block.to_org();
+            assert_eq!(
+                rendered.lines().next().unwrap(),
+                format!("* {keyword} Task headline")
+            );
+        }
     }
 
     #[test]
@@ -985,6 +1981,23 @@ mod tests {
             Some(TaskState::active("DONE"))
         );
         assert!(!result.blocks[0].is_completed());
+    }
+
+    /// A task whose TEXT begins with a keyword is a legal, reachable state:
+    /// promote a block with `TODO `, then type `TODO x` into it. Its headline
+    /// is `* TODO TODO x` and it must read back with the keyword in
+    /// `task_state` and `TODO x` — not `x` — as content, or every read of the
+    /// file deletes another word.
+    #[test]
+    fn a_task_whose_text_starts_with_a_keyword_keeps_that_word() {
+        let result = parse_test_org("* TODO TODO x\n");
+
+        assert_eq!(result.blocks.len(), 1);
+        assert_eq!(
+            result.blocks[0].task_state().map(|t| t.keyword.clone()),
+            Some("TODO".to_string())
+        );
+        assert_eq!(result.blocks[0].content, "TODO x");
     }
 
     #[test]
@@ -1064,6 +2077,51 @@ mod tests {
 
         assert_eq!(result.blocks.len(), 1);
         assert!(!result.headlines_needing_ids.is_empty());
+    }
+
+    #[test]
+    fn test_parse_lowercase_id_property() {
+        let content = "* Headline\n:PROPERTIES:\n:id: lower-case-uuid\n:END:";
+        let result = parse_test_org(content);
+
+        assert_eq!(result.blocks.len(), 1);
+        assert_eq!(result.blocks[0].id.id(), "lower-case-uuid");
+        assert!(result.headlines_needing_ids.is_empty());
+    }
+
+    #[test]
+    fn test_parse_mixed_case_id_property() {
+        let content = "* Headline\n:PROPERTIES:\n:Id: mixed-case-uuid\n:END:";
+        let result = parse_test_org(content);
+
+        assert_eq!(result.blocks.len(), 1);
+        assert_eq!(result.blocks[0].id.id(), "mixed-case-uuid");
+        assert!(result.headlines_needing_ids.is_empty());
+    }
+
+    #[test]
+    fn test_case_insensitive_id_does_not_absorb_other_properties() {
+        let content = "* Headline\n:PROPERTIES:\n:id: my-id\n:Custom: val\n:END:";
+        let result = parse_test_org(content);
+
+        assert_eq!(result.blocks.len(), 1);
+        assert_eq!(result.blocks[0].id.id(), "my-id");
+        assert!(result.headlines_needing_ids.is_empty());
+        let props = &result.blocks[0].properties;
+        assert_eq!(
+            props.get("Custom").and_then(|v| v.as_string()),
+            Some("val"),
+            "custom property keyed 'Custom' must survive"
+        );
+        // The parser always stores the id under the canonical "ID" key
+        // (line ~473). The :id: property (any casing) is correctly extracted
+        // as the block ID and stored; it does NOT appear under its original
+        // casing.
+        assert_eq!(
+            props.get("ID").and_then(|v| v.as_string()),
+            Some("my-id"),
+            "ID must be stored under canonical key 'ID'"
+        );
     }
 
     #[test]

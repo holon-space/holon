@@ -34,8 +34,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 use gpui::AssetSource;
+use gpui::HeadlessAppContext;
 use gpui::PlatformTextSystem;
-use gpui::TestApp;
 use holon_api::EntityUri;
 use holon_api::Region;
 use holon_frontend::geometry::GeometryProvider;
@@ -52,6 +52,7 @@ use holon_integration_tests::pbt::fixtures::replay_steps;
 use holon_integration_tests::pbt::op_write_cap::IdResolver;
 use holon_integration_tests::pbt::transitions::ClickBlock;
 use holon_integration_tests::pbt::transitions::E2ETransition;
+use holon_integration_tests::pbt::window_slice::builders::WindowMountConvention;
 use holon_integration_tests::pbt::window_slice::builders::overlay_windowed_caps;
 use holon_integration_tests::pbt::window_slice::builders::window_layout;
 use holon_pbt_core::ComponentSet;
@@ -75,7 +76,7 @@ fn real_text_system() -> Arc<dyn PlatformTextSystem> {
 /// pump until the element count is stable and no `"loading"` placeholders
 /// remain.
 fn settle_to_fixed_point(
-    app: &mut TestApp,
+    app: &mut HeadlessAppContext,
     bounds: &BoundsRegistry,
     runtime: &tokio::runtime::Runtime,
     timeout: Duration,
@@ -114,7 +115,9 @@ fn settle_to_fixed_point(
 fn window_renders_compose_sut_base_and_base_hosts_backend() {
     let text_system = real_text_system();
     let assets: Arc<dyn AssetSource> = Arc::new(());
-    let mut app = TestApp::with_text_system_and_assets(text_system, assets);
+    let mut app = HeadlessAppContext::with_platform(text_system, assets, || {
+        gpui_platform::current_headless_renderer()
+    });
 
     let runtime = Arc::new(tokio::runtime::Runtime::new().expect("tokio runtime"));
 
@@ -163,6 +166,7 @@ fn window_renders_compose_sut_base_and_base_hosts_backend() {
                 nav,
                 bounds.clone(),
                 None,
+                None,
                 "Holon-ComposeSut-Windowed",
                 cx,
             )
@@ -199,7 +203,8 @@ fn window_renders_compose_sut_base_and_base_hosts_backend() {
     );
 
     // gpui teardown (mirror `gpui_window_slice.rs`): release the window entities,
-    // shut the app down, then leak the `!Send` TestApp + the booted composition
+    // shut the app down, then leak the `!Send` HeadlessAppContext + the booted
+    // composition
     // so their Drops don't run the gpui leak detector / drop the session's
     // tokio runtime in async context. The process exits right after the test,
     // so the leak is inert.
@@ -221,7 +226,9 @@ fn overlay_windowed_caps_composes_layout_backend_and_driver_over_a_live_window()
     // `SimUserDriver` construction over a compose_sut window.
     let text_system = real_text_system();
     let assets: Arc<dyn AssetSource> = Arc::new(());
-    let mut app = TestApp::with_text_system_and_assets(text_system, assets);
+    let mut app = HeadlessAppContext::with_platform(text_system, assets, || {
+        gpui_platform::current_headless_renderer()
+    });
 
     let runtime = Arc::new(tokio::runtime::Runtime::new().expect("tokio runtime"));
     let resolver: IdResolver = Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()));
@@ -253,6 +260,7 @@ fn overlay_windowed_caps_composes_layout_backend_and_driver_over_a_live_window()
                 nav,
                 bounds.clone(),
                 Some(debug.clone()),
+                None,
                 "Holon-ComposeSut-Overlay",
                 cx,
             )
@@ -267,7 +275,7 @@ fn overlay_windowed_caps_composes_layout_backend_and_driver_over_a_live_window()
         .get()
         .expect("interaction_tx set by the window interaction pump")
         .clone();
-    let app_ptr: *const TestApp = &app;
+    let app_ptr: *const HeadlessAppContext = &app;
     let driver: Arc<dyn UserDriver> = Arc::new(SimUserDriver::new(
         app_ptr,
         rebind.window(),
@@ -285,7 +293,15 @@ fn overlay_windowed_caps_composes_layout_backend_and_driver_over_a_live_window()
         .frontend
         .clone()
         .expect("full_headless → booted HeadlessFrontendComponent");
-    let overlaid = overlay_windowed_caps(composed.caps, frontend, geometry, engine.clone(), driver);
+    let overlaid = overlay_windowed_caps(
+        composed.caps,
+        frontend,
+        geometry,
+        engine.clone(),
+        driver,
+        resolver.clone(),
+        WindowMountConvention::PerBlockShell,
+    );
 
     // (1) The overlay INSERTED the window driver rung (absent in the deferred
     // base).
@@ -339,7 +355,7 @@ fn windowed_composed_sut_runs_full_catalog_green_on_the_initial_frame() {
     // block/storage families AND the windowed geometry/focus families, GREEN
     // against ONE `wide_e2e_ref()` oracle in a single SUT (the repoint's whole
     // point: one SUT, not E2ESut + a parallel windowed check).
-    with_windowed_wide_sut(|sut, oracle| {
+    with_windowed_wide_sut(|sut, oracle, _sink| {
         ComposedSut::<WideE2E>::check_invariants(&sut, oracle);
         eprintln!(
             "[compose_sut-windowed-3b] PASS - ComposedSut<WideE2E>::check_invariants ran the \
@@ -360,7 +376,7 @@ fn windowed_composed_sut_drives_a_click_gesture_sequence_green() {
     // Every tick re-checks the unified catalog. `ClickBlock` is non-minting, so the
     // per-tick id-reconcile is a no-op. Proves the apply -> window-gesture ->
     // settle -> check loop.
-    with_windowed_wide_sut(|mut sut, oracle0| {
+    with_windowed_wide_sut(|mut sut, oracle0, _sink| {
         // The initial frame must be green before we drive anything.
         ComposedSut::<WideE2E>::check_invariants(&sut, oracle0);
 
@@ -410,7 +426,7 @@ fn windowed_composed_sut_replays_a_fixture_via_replay_steps_green() {
     // steer the ONE PBT windowed. The fixture is post-boot only (no `StartApp`
     // — the composed alphabet has none; the SUT is already booted by the
     // harness), matching composed-keystone captures.
-    with_windowed_wide_sut(|sut, oracle| {
+    with_windowed_wide_sut(|sut, oracle, _sink| {
         let steps = vec![
             FixtureStep::Action(E2ETransition::ClickBlock(ClickBlock {
                 region: Region::Main,
@@ -438,3 +454,89 @@ fn windowed_composed_sut_replays_a_fixture_via_replay_steps_green() {
         Some(sut)
     });
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// SPLIT-BOUNDS REGRESSION — windowed id-minting reconcile through the driver.
+//
+// A `SplitBlock` mints a FRESH uuid in the real SUT backend; the composed
+// reconcile maps the oracle's synthetic `block::split-N` to that uuid in the
+// shared `IdResolver`. Before the fix, `overlay_windowed_caps` built the
+// windowed `DriverInputComponent` WITHOUT that resolver (`with_input`,
+// `resolver: None`), so the bounds precheck resolved `block::split-N` to
+// itself and false-failed `no registered bounds` — even though the row had
+// rendered under its real uuid. This drives Split→ClickBlock on the minted
+// block N times in one boot; each `ClickBlock` bounds-prechecks the freshly
+// minted row. RED before the fix on iter 0 (identity resolve → wrong id);
+// GREEN after (shared resolver → real uuid → registered bounds found).
+// ═══════════════════════════════════════════════════════════════════
+#[test]
+fn windowed_split_then_clickblock_resolves_minted_id() {
+    use std::collections::BTreeSet;
+
+    use holon_integration_tests::pbt::transitions::SplitBlock;
+
+    with_windowed_wide_sut(|mut sut, oracle0, _sink| {
+        ComposedSut::<WideE2E>::check_invariants(&sut, oracle0);
+        let mut oracle = oracle0.clone();
+        let iters: usize = std::env::var("SPLIT_AMP_ITERS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(8);
+        // Chain: split `c1` first, then split each freshly-minted tail (it carries
+        // the "c1" content, so it stays a splittable text leaf).
+        let mut target = EntityUri::block("c1");
+        let mut landed = 0usize;
+        for i in 0..iters {
+            let split = E2ETransition::SplitBlock(SplitBlock {
+                block_id: target.clone(),
+                position: 0,
+            });
+            if !<WideE2EMachine as ReferenceStateMachine>::preconditions(&oracle, &split) {
+                eprintln!("[split-reg] iter {i}: SplitBlock precondition false on {target}, stop");
+                break;
+            }
+            let before: BTreeSet<EntityUri> =
+                oracle.domain.block_state.blocks.keys().cloned().collect();
+            oracle = <WideE2EMachine as ReferenceStateMachine>::apply(oracle, &split);
+            let after: BTreeSet<EntityUri> =
+                oracle.domain.block_state.blocks.keys().cloned().collect();
+            sut = ComposedSut::<WideE2E>::apply(sut, &oracle, split);
+            ComposedSut::<WideE2E>::check_invariants(&sut, &oracle);
+            let minted: Vec<EntityUri> = after.difference(&before).cloned().collect();
+            assert_eq!(
+                minted.len(),
+                1,
+                "iter {i}: expected 1 minted split id, got {minted:?}"
+            );
+            let new_id = minted[0].clone();
+            // The regression probe: ClickBlock's FIRST act is `require_bounds` on the
+            // minted (synthetic) id — the exact precheck that false-failed pre-fix.
+            let click = E2ETransition::ClickBlock(ClickBlock {
+                region: Region::Main,
+                block_id: new_id.clone(),
+            });
+            assert!(
+                <WideE2EMachine as ReferenceStateMachine>::preconditions(&oracle, &click),
+                "iter {i}: ClickBlock precondition false for minted {new_id}"
+            );
+            oracle = <WideE2EMachine as ReferenceStateMachine>::apply(oracle, &click);
+            sut = ComposedSut::<WideE2E>::apply(sut, &oracle, click);
+            ComposedSut::<WideE2E>::check_invariants(&sut, &oracle);
+            landed += 1;
+            eprintln!("[split-reg] iter {i}: minted {new_id}, ClickBlock bounds precheck GREEN");
+            target = new_id;
+        }
+        assert!(
+            landed >= 1,
+            "regression vacuous: no split→click iteration ran"
+        );
+        eprintln!(
+            "[split-reg] PASS — {landed} split→ClickBlock iteration(s) resolved the minted id and found registered bounds"
+        );
+        Some(sut)
+    });
+}
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;

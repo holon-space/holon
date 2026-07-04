@@ -1,10 +1,227 @@
+# Sidecar-format generation. The app runs its own bundled copy of this file
+# unless an INSTALLED copy declares the generation the running build understands
+# (crates/holon-mcp-client/src/bundled_sidecars.rs).
+schema_version: 1
+
 transport:
   child_process:
     command: /Users/martin/Workspaces/ai/claude-code-history-mcp/target/debug/claude-code-history-mcp
     env:
       CLAUDE_DATA_DIR: "/Users/martin/.claude"
 entity_prefix: "cc_"
+
+# Two rules every `live_query` here obeys, both load-bearing for the chat view:
+#
+#   1. Read the CACHE table (`cc_message`), never the `_fdw` one.
+#      `MatviewManager::prime_fdw_caches` keys on the cache name: it runs the
+#      watch SQL against `{table}_fdw` first to force the fetch + write_through,
+#      then builds the matview on the btree table. Naming `_fdw` directly
+#      matches nothing, so the cache stays empty AND the matview sits on a
+#      foreign table, which is a one-shot snapshot — a foreign source emits no
+#      deltas, so the IVM circuit never streams. See
+#      docs/Plans/turso-fdw-ivm-handoff-2026-08-04.md.
+#   2. Join child tables on `$context_local_id`, not `$context_id`. The mirror
+#      stores each entity's OWN key scheme-qualified (`cc-session:<uuid>`) and
+#      every other column verbatim, so `cc_message.session_id` holds the raw id.
+#      `$context_local_id` is `$context_id` with the scheme stripped, bound off
+#      the parsed EntityUri in BackendEngine::bind_context_params.
+#      This covers CONTEXT-param joins only. The `enumerate_from.where` clauses
+#      below still strip with `substr(cc_*.id, N)` and must: they are evaluated
+#      per candidate row of a table scan, where the schemed id is a COLUMN and
+#      no query context exists for a param to come from.
 entities:
+  # Multi-project root. `claude-history://projects` lists every Claude Code
+  # project the local `~/.claude` knows about. This entity is SYNC-only (a
+  # static, param-free resource): the sync engine warms the `cc_project` cache
+  # table on connect and refreshes it on each `projects` change notification.
+  # `session`/`task` then `enumerate_from` this cache table to fan out across
+  # ALL projects (Martin orchestrates 3-4 at once) instead of the single pinned
+  # project this integration used to hard-code.
+  #
+  # SYNC-only (no `vtable.write_through`) is deliberate: an entity may declare a
+  # `sync` strategy OR a write-through vtable on its cache table, never both —
+  # the sync engine's in-memory mirror must be the sole writer (finish_integration
+  # clash check). Enumeration reads the cache TABLE directly, so no fdw is needed.
+  project:
+    profile_variants:
+      - name: default
+        render: 'row(text(col("original_path")))'
+    schema:
+      - name: id
+        sql_type: TEXT
+        primary_key: true
+      - name: original_path
+        sql_type: TEXT
+        nullable: true
+      - name: session_count
+        sql_type: INTEGER
+        nullable: true
+      - name: last_activity
+        sql_type: TEXT
+        nullable: true
+    sync:
+      list_resource: "claude-history://projects"
+
+  # The fleet of sessions running RIGHT NOW. Liveness is not derivable from
+  # `session` (a projection of transcripts on disk, where a finished and a
+  # running session look alike), so anything that must act on a live process —
+  # sending a message to a backgrounded session, or just showing who is busy —
+  # reads this entity instead.
+  #
+  # SYNC-only and MIRROR semantics: `claude-history://live` is a param-free
+  # resource returning a top-level array of the currently-live sessions, and
+  # each sync replaces the cache wholesale. A session the provider stops
+  # listing (its job reached a terminal state) therefore DISAPPEARS from
+  # `cc_live_session` — a stale row here would name a dead process.
+  # The chat view lives HERE, not on `session`, because `send_message` addresses
+  # a session by its background job id and `job_id` exists only on this entity —
+  # the provider resolves the target by `live_session.id` or `job_id` and never
+  # by the transcript uuid, so a compose box bound to a `session` row can only
+  # dispatch a send the provider rejects.
+  #
+  # `id` is the job id for a backgrounded session and `pid-<pid>` for an attached
+  # one; `job_id` is the one that is always the address, so the action binds it
+  # explicitly. A foreground row has none, and the send fails loudly at the
+  # provider rather than being silently swallowed here.
+  #
+  # The transcript is keyed by the TRANSCRIPT uuid, which this row carries as
+  # `session_id`. `live_query` cannot be handed that column directly — its
+  # `context:` arg is on the global template allowlist, so a `col()` there is
+  # captured unevaluated instead of resolved — so the correlation is done in
+  # SQL, against the local cache table, off the row id `$context_id` already
+  # supplies.
+  live_session:
+    profile_variants:
+      - name: default
+        render: >-
+          expand_toggle(#{
+            header: row(text(col("name")), spacer(8), text(col("state"))),
+            content: column(
+              live_query(#{
+                sql: "SELECT uuid, role, content, timestamp AS ts FROM cc_message WHERE session_id = (SELECT ls.session_id FROM cc_live_session ls WHERE ls.id = $context_id) AND role IS NOT NULL ORDER BY timestamp",
+                item_template: chat_bubble(#{sender: col("role"), time: col("ts")}, text(col("content")))
+              }),
+              input_box(#{
+                placeholder: "Message this session",
+                submit_label: "Send",
+                text_param: "text",
+                action: send_message(#{id: col("job_id")})
+              })
+            )
+          })
+    schema:
+      - name: id
+        sql_type: TEXT
+        primary_key: true
+      - name: kind
+        sql_type: TEXT
+      - name: session_id
+        sql_type: TEXT
+        indexed: true
+      - name: project_id
+        sql_type: TEXT
+        nullable: true
+      - name: cwd
+        sql_type: TEXT
+      - name: name
+        sql_type: TEXT
+        nullable: true
+      - name: state
+        sql_type: TEXT
+        nullable: true
+      - name: status
+        sql_type: TEXT
+        nullable: true
+      - name: tempo
+        sql_type: TEXT
+        nullable: true
+      - name: needs
+        sql_type: TEXT
+        nullable: true
+      - name: detail
+        sql_type: TEXT
+        nullable: true
+      - name: started_at
+        sql_type: TEXT
+        nullable: true
+      - name: updated_at
+        sql_type: TEXT
+        nullable: true
+      - name: pid
+        sql_type: INTEGER
+        nullable: true
+      # Set only for backgrounded sessions; the handle a later feature needs to
+      # address one.
+      - name: job_id
+        sql_type: TEXT
+        nullable: true
+      - name: cli_version
+        sql_type: TEXT
+        nullable: true
+      - name: tokens
+        sql_type: INTEGER
+        nullable: true
+    sync:
+      list_resource: "claude-history://live"
+
+  # What the live fleet is BLOCKED on right now — the AskUserQuestion a session
+  # is sitting on. Same SYNC-only MIRROR semantics as `live_session`: each sync
+  # replaces the cache wholesale, so a question the provider stops listing
+  # (answered, or its session died) DISAPPEARS instead of offering an answer
+  # nobody is waiting for.
+  #
+  # `id` is the provider's `answer_question.question_id`: server-derived, opaque,
+  # and VOLATILE — it fingerprints the question text and its labels, so editing
+  # the question mints a new id and the old one fails to RESOLVE rather than
+  # answering something else. It is therefore read off the row at dispatch time
+  # and never persisted anywhere longer-lived than this evicting mirror.
+  #
+  # `options` holds the offered answers as a JSON array in a TEXT column; the
+  # `question_options` widget parses it and renders one button per answer.
+  # Only the head question of a session (`answerable`) can actually be answered.
+  pending_question:
+    profile_variants:
+      - name: default
+        render: >-
+          row(text(col("question")), spacer(8),
+              question_options(#{
+                options: col("options"),
+                action: answer_question()
+              }))
+    schema:
+      - name: id
+        sql_type: TEXT
+        primary_key: true
+      - name: session_id
+        sql_type: TEXT
+        indexed: true
+      - name: job_id
+        sql_type: TEXT
+        nullable: true
+      - name: question_index
+        sql_type: INTEGER
+        nullable: true
+      - name: question
+        sql_type: TEXT
+        nullable: true
+      - name: multi_select
+        sql_type: INTEGER
+        nullable: true
+      - name: options
+        sql_type: TEXT
+        nullable: true
+      - name: answerable
+        sql_type: INTEGER
+        nullable: true
+      - name: asked_at
+        sql_type: TEXT
+        nullable: true
+    sync:
+      list_resource: "claude-history://live/questions"
+
+  # Transcripts on disk: READ-ONLY. A session here may have exited months ago,
+  # and nothing on the row can address a running process, so this profile offers
+  # no compose box — replying is `live_session`'s affordance.
   session:
     profile_variants:
       - name: default
@@ -12,7 +229,7 @@ entities:
           expand_toggle(#{
             header: row(text(col("first_prompt")), spacer(8), text(col("message_count"))),
             content: live_query(#{
-              sql: "SELECT uuid, role, content, timestamp AS ts FROM cc_message_fdw WHERE session_id = $context_id AND role IS NOT NULL ORDER BY timestamp",
+              sql: "SELECT uuid, role, content, timestamp AS ts FROM cc_message WHERE session_id = $context_local_id AND role IS NOT NULL ORDER BY timestamp",
               item_template: chat_bubble(#{sender: col("role"), time: col("ts")}, text(col("content")))
             })
           })
@@ -49,15 +266,36 @@ entities:
       - name: is_sidechain
         sql_type: INTEGER
         nullable: true
-    sync:
-      list_resource: "claude-history://projects/{project_id}/sessions"
-      uri_params:
-        project_id: "-Users-martin-Workspaces-pkm-holon"
+    # Sessions fan out over every cached project instead of one pinned id.
+    # When a query supplies `project_id` in WHERE, exactly one resource read
+    # happens; an unpinned `SELECT ... FROM cc_session_fdw` enumerates the
+    # `cc_project` cache table and fans out one read per matching project.
+    # write_through lands the fetched rows in `cc_session`, warming the cache
+    # (and the chained session_status views) for the desktop overview.
+    #
+    # Bounded + incremental (fail-loud, no silent truncation):
+    #   - `where` watermark (pure local SQL, correlated subquery): only
+    #     re-fetch a project whose `last_activity` is newer than the newest
+    #     session already cached for it. substr(cc_project.id, 12) strips the
+    #     'cc-project:' scheme prefix to match cc_session.project_id, which
+    #     stores raw ids.
+    #   - `order_by`/`limit`: most-recently-active projects first, capped.
+    #   - `max_fan_out`: FAILS LOUD if enumeration still exceeds the bound.
     vtable:
       list_resource: "claude-history://projects/{project_id}/sessions"
       uri_params:
-        project_id: "-Users-martin-Workspaces-pkm-holon"
+        project_id:
+          enumerate_from:
+            entity: project
+            field: id
+            where: >-
+              last_activity > COALESCE((SELECT MAX(s.modified) FROM cc_session s
+                                        WHERE s.project_id = substr(cc_project.id, 12)), '')
+            order_by: last_activity DESC
+            limit: 50
       write_through: true
+      fetch_contract: scoped_snapshot
+      max_fan_out: 50
 
   task:
     profile_variants:
@@ -88,23 +326,115 @@ entities:
       - name: completed_at
         sql_type: TEXT
         nullable: true
-    sync:
-      list_resource: "claude-history://projects/{project_id}/tasks"
-      uri_params:
-        project_id: "-Users-martin-Workspaces-pkm-holon"
+    # Tasks fan out over every cached project, same mechanism as `session`.
+    # Tasks carry no `modified` column, so there is no incremental watermark:
+    # each fan-out re-reads a bounded set of projects (most-recently-active
+    # first). Cheap — tasks are few, and the fan-out only fires on an unpinned
+    # query or a `tasks` change notification.
     vtable:
       list_resource: "claude-history://projects/{project_id}/tasks"
       uri_params:
-        project_id: "-Users-martin-Workspaces-pkm-holon"
+        project_id:
+          enumerate_from:
+            entity: project
+            field: id
+            order_by: last_activity DESC
+            limit: 50
       write_through: true
+      fetch_contract: scoped_snapshot
+      max_fan_out: 50
+
+  # Agent-grain attribution: one row per subagent invocation, so a Holon task
+  # can link to the Claude agents that worked on it. Session rollups (how many
+  # agents, when) derive by grouping on session_id — no separate entity.
+  #
+  # Fans out over cached projects exactly like `task`. The provider reads only
+  # each transcript's head plus its mtime, so a project's agents cost O(agents)
+  # rather than O(transcript bytes) — the bodies run to hundreds of megabytes.
+  # Like `task`, there is no incremental watermark: agents carry no field that
+  # tracks against what is already cached, so each fan-out re-reads a bounded
+  # set of most-recently-active projects.
+  agent:
+    profile_variants:
+      - name: default
+        render: >-
+          expand_toggle(#{
+            header: row(text(col("agent_type")), spacer(8), text(col("description"))),
+            content: live_query(#{
+              sql: "SELECT uuid, role, content, timestamp AS ts FROM cc_agent_message WHERE agent_id = $context_local_id AND role IS NOT NULL ORDER BY timestamp",
+              item_template: chat_bubble(#{sender: col("role"), time: col("ts")}, text(col("content")))
+            })
+          })
+    schema:
+      # `id` is NOT globally unique: resume/fork copies the subagents/
+      # directory byte-identically, so one agent id can sit under several
+      # (session_id, project_id) pairs. The provider dedups per listing;
+      # cross-project dedup is Deferred, so a duplicate spanning projects still
+      # lands fan-out-order.
+      #
+      # The row identity is therefore the COMPOSITE (id, project_id) — measured
+      # unique and non-NULL over a full 42-project fan-out (1990 rows, 3 ids
+      # duplicated across projects), see crates/holon-mcp-mock/tests/
+      # claude_history_identity.rs. `id` alone is refused by the mirror's
+      # PRIMARY KEY, by the REFRESH sweep, and by the push path.
+      #
+      # `project_id` drops `nullable: true` DELIBERATELY, not incidentally: an
+      # identity column that may be NULL is not an identity (a NULL can never be
+      # matched across scans, and both the REFRESH sweep and the push refuse
+      # it). Fresh cache tables therefore get `project_id TEXT NOT NULL` and a
+      # 2-column `PRIMARY KEY (id, project_id)`; existing ones keep their old
+      # single-column PK, since the DDL is CREATE TABLE IF NOT EXISTS.
+      - name: id
+        sql_type: TEXT
+        primary_key: true
+      - name: session_id
+        sql_type: TEXT
+        indexed: true
+      - name: project_id
+        sql_type: TEXT
+        primary_key: true
+      - name: agent_type
+        sql_type: TEXT
+        nullable: true
+      - name: description
+        sql_type: TEXT
+        nullable: true
+      - name: parent_agent_id
+        sql_type: TEXT
+        nullable: true
+      - name: tool_use_id
+        sql_type: TEXT
+        nullable: true
+      - name: spawn_depth
+        sql_type: INTEGER
+        nullable: true
+      - name: started_at
+        sql_type: TEXT
+        nullable: true
+      - name: ended_at
+        sql_type: TEXT
+        nullable: true
+    vtable:
+      list_resource: "claude-history://projects/{project_id}/agents"
+      uri_params:
+        project_id:
+          enumerate_from:
+            entity: project
+            field: id
+            order_by: last_activity DESC
+            limit: 50
+      write_through: true
+      fetch_contract: scoped_snapshot
+      max_fan_out: 50
 
   message:
-    # OPT-IN (commented out below, inside the vtable block): unpinned fan-out
-    # over locally cached sessions. Today cc_message_fdw requires a pinned
-    # session_id (uri_params: session_id: ""), so `SELECT ... WHERE
-    # session_id = X` costs exactly one resource read. Swapping the empty
-    # value for the enumerate_from block makes unpinned queries work by
-    # fanning out one resource read per matching cached session.
+    # ENABLED: unpinned fan-out over locally cached sessions. A pinned query
+    # (`SELECT ... FROM cc_message_fdw WHERE session_id = X`, which is what
+    # `prime_fdw_caches` issues on the session render's behalf) still costs
+    # exactly one resource read. An unpinned
+    # query enumerates the `cc_session` cache table and fans out one read per
+    # matching session — warming `cc_message` (and thus the session_status
+    # views) without Martin opening each session by hand.
     #
     # Trade-off: every unpinned query pays fan-out cost at the MCP server.
     # The knobs below keep it bounded and incremental:
@@ -116,21 +446,21 @@ entities:
     #   - `order_by`/`limit`: most-recently-modified sessions first, capped.
     #   - `max_fan_out`: FAILS LOUD (no silent truncation) if the enumeration
     #     still produces more parents than the bound.
-    #
-    # vtable:
-    #   list_resource: "claude-history://sessions/{session_id}/messages"
-    #   uri_params:
-    #     session_id:
-    #       enumerate_from:
-    #         entity: session
-    #         field: id
-    #         where: >-
-    #           modified > COALESCE((SELECT MAX(m.timestamp) FROM cc_message m
-    #                                WHERE m.session_id = substr(cc_session.id, 12)), '')
-    #         order_by: modified DESC
-    #         limit: 20
-    #   write_through: true
-    #   max_fan_out: 50
+    vtable:
+      list_resource: "claude-history://sessions/{session_id}/messages"
+      uri_params:
+        session_id:
+          enumerate_from:
+            entity: session
+            field: id
+            where: >-
+              modified > COALESCE((SELECT MAX(m.timestamp) FROM cc_message m
+                                   WHERE m.session_id = substr(cc_session.id, 12)), '')
+            order_by: modified DESC
+            limit: 20
+      write_through: true
+      fetch_contract: scoped_snapshot
+      max_fan_out: 50
     profile_variants:
       - name: default
         render: 'row(text(col("content")))'
@@ -139,6 +469,11 @@ entities:
         sql_type: TEXT
         primary_key: true
       - name: session_id
+        sql_type: TEXT
+        nullable: true
+      # Null throughout the main conversation; set on every row the provider
+      # serves from a subagent transcript.
+      - name: agent_id
         sql_type: TEXT
         nullable: true
       - name: parent_uuid
@@ -165,13 +500,126 @@ entities:
       - name: cwd
         sql_type: TEXT
         nullable: true
-    vtable:
-      list_resource: "claude-history://sessions/{session_id}/messages"
-      uri_params:
-        session_id: ""
-      write_through: true
 
-tools: {}
+  # A subagent's transcript. Separate from `message` because the provider
+  # serves it under a different resource (`agents/{agent_id}/messages`) — one
+  # entity can declare only one list_resource. Same row shape as `message`;
+  # here `agent_id` is always set and `session_id` names the spawning session.
+  #
+  # The `agent` render pins this by agent id, so opening one agent costs
+  # exactly one resource read and always shows live rows. An unpinned query
+  # enumerates `cc_agent`, bounded the same way as `message`.
+  #
+  # The watermark is "nothing cached yet", NOT the `modified > MAX(timestamp)`
+  # idiom `message` uses: cc_agent.ended_at is the transcript's mtime, which is
+  # always >= its last message timestamp, so that comparison would be
+  # permanently true and re-fetch every agent on every notification. Cost of
+  # this choice: the unpinned warm-up does not backfill messages appended to an
+  # agent it already cached — the pinned render reads through and is unaffected.
+  # substr(cc_agent.id, 10) strips the 'cc-agent:' scheme (9 chars) to match
+  # cc_agent_message.agent_id, which stores raw ids.
+  agent_message:
+    vtable:
+      list_resource: "claude-history://agents/{agent_id}/messages"
+      uri_params:
+        agent_id:
+          enumerate_from:
+            entity: agent
+            field: id
+            where: >-
+              NOT EXISTS (SELECT 1 FROM cc_agent_message m
+                          WHERE m.agent_id = substr(cc_agent.id, 10))
+            order_by: ended_at DESC
+            limit: 20
+      write_through: true
+      fetch_contract: scoped_snapshot
+      max_fan_out: 50
+    profile_variants:
+      - name: default
+        render: 'row(text(col("content")))'
+    schema:
+      - name: uuid
+        sql_type: TEXT
+        primary_key: true
+      - name: session_id
+        sql_type: TEXT
+        nullable: true
+      - name: agent_id
+        sql_type: TEXT
+        indexed: true
+        nullable: true
+      - name: parent_uuid
+        sql_type: TEXT
+        nullable: true
+      - name: type
+        sql_type: TEXT
+        nullable: true
+      - name: timestamp
+        sql_type: TEXT
+        nullable: true
+      - name: role
+        sql_type: TEXT
+        nullable: true
+      - name: model
+        sql_type: TEXT
+        nullable: true
+      - name: content
+        sql_type: TEXT
+        nullable: true
+      - name: git_branch
+        sql_type: TEXT
+        nullable: true
+      - name: cwd
+        sql_type: TEXT
+        nullable: true
+
+# Messaging a live agent session is an irreversible external effect with no
+# natural dedup key — the provider has no idempotency parameter, so a second
+# dispatch is a second message in someone's session. Hence `once_only` under the
+# safe designation: every send is queued for explicit human approval and the
+# store's compare-and-take makes one intent fire at most once.
+#
+# The tool targets `live_session` because that is the only entity carrying the
+# address the provider accepts: it resolves `id` against a live listing by
+# `live_session.id` or `job_id`, and never by the transcript uuid a `session`
+# row is keyed on.
+writes: enabled
+once_only: confirm_manually
+tools:
+  send_message:
+    entity: live_session
+    display_name: Send message
+    effect: once_only
+    # This provider acks a send it CANNOT prove landed: `unconfirmed` is a
+    # successful MCP response meaning "dispatched, delivery not proven", and it
+    # is the common outcome for a busy session. Without this mapping the ack
+    # alone would be read as delivery and the UI would fabricate a record of a
+    # message that may never have arrived.
+    outcome:
+      field: outcome
+      proven: [delivered]
+      unproven: [unconfirmed]
+    undo:
+      reversible: false
+  # Answering unblocks a live human-owned session — irreversible, and the
+  # provider exposes no idempotency parameter, so this is `once_only` for the
+  # same reason `send_message` is. `keyed` is a PROPOSAL about the provider
+  # deduping on `question_id`, and no mock can validate a claim about the real
+  # provider's dedup; the safe fallback stands until that is measured against
+  # the real binary.
+  answer_question:
+    entity: pending_question
+    display_name: Answer question
+    effect: once_only
+    # `recorded` is the provider's proof that the answer reached the dialog.
+    # Anything else it may report — including the `wrong_option_recorded`
+    # correction — is not proof, and the unlisted-value path discloses it
+    # verbatim rather than defaulting to success.
+    outcome:
+      field: outcome
+      proven: [recorded]
+    undo:
+      reversible: false
 
 # Sidecar-declared derived views (generic `views:` mechanism, Phase 2).
 # Each entry becomes `CREATE MATERIALIZED VIEW {entity_prefix}{name} AS {sql}`

@@ -1,5 +1,10 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use gpui::*;
+use holon_app::BootComponent;
+use holon_app::BootError;
+use holon_app::BootStage;
 use holon_frontend::FrontendSession;
 use holon_frontend::cli;
 use holon_frontend::reactive::ReactiveEngine;
@@ -34,7 +39,7 @@ fn main() -> Result<()> {
 
     let runtime = tokio::runtime::Runtime::new()?;
 
-    let mut app = runtime.block_on(async {
+    let boot_result = runtime.block_on(async {
         tracing::info!("Starting GPUI frontend...");
 
         let mut app = fluxdi::Application::new(GpuiModule {
@@ -44,14 +49,30 @@ fn main() -> Result<()> {
             locked_keys: locked,
         });
         let timeout = std::time::Duration::from_secs(180);
-        tokio::time::timeout(timeout, app.bootstrap())
-            .await
-            .map_err(|_| anyhow::anyhow!("Bootstrap timed out after {timeout:?}"))?
-            .map_err(|e| anyhow::anyhow!("Bootstrap failed: {e}"))?;
+        match tokio::time::timeout(timeout, app.bootstrap()).await {
+            Err(_) => Err(BootError::new(
+                BootComponent::Session,
+                BootStage::SessionResolve,
+                anyhow::anyhow!("Bootstrap timed out after {timeout:?}"),
+            )),
+            Ok(Err(e)) => Err(BootError::from_bootstrap_error(e)),
+            Ok(Ok(())) => {
+                tracing::info!("Session ready");
+                Ok(app)
+            }
+        }
+    });
 
-        tracing::info!("Session ready");
-        Ok::<_, anyhow::Error>(app)
-    })?;
+    // Boot failed: emit a structured, component-attributed report (which
+    // component, which stage, and the full source chain) and exit non-zero.
+    // Increment 2 replaces this terminal exit with the recovery shell.
+    let mut app = match boot_result {
+        Ok(app) => app,
+        Err(boot_err) => {
+            eprint!("{}", boot_err.structured_report());
+            std::process::exit(1);
+        }
+    };
 
     let injector = app.injector();
     let session = injector.resolve::<FrontendSession>();
@@ -64,6 +85,22 @@ fn main() -> Result<()> {
     // happens concurrently with the first frames.
 
     let rt_handle = runtime.handle().clone();
+
+    // Live oracles (debug builds): run the cheap tier of the keystone PBT
+    // invariants as background checks against the live DB, so every manual
+    // dogfood session carries oracles. HOLON_ORACLES=off opts out. The UI
+    // bridge + banner are wired inside the window launch; the latency-SLO
+    // layer is installed by `holon_frontend::logging::init` above.
+    #[cfg(debug_assertions)]
+    {
+        let mode = holon_oracles::OracleMode::from_env();
+        if mode.enabled() {
+            let backend_engine = injector
+                .try_resolve::<holon::api::backend_engine::BackendEngine>()
+                .map_err(|e| anyhow::anyhow!("live oracles need BackendEngine from DI: {e}"))?;
+            holon_gpui::oracles_ui::spawn_oracle_runner(backend_engine, &rt_handle, mode);
+        }
+    }
 
     // Shutdown flush: spawn a tokio task that awaits Ctrl+C and flushes
     // every in-flight shared-doc save before exit. The 150ms debounce
@@ -118,18 +155,168 @@ fn main() -> Result<()> {
         std::sync::Arc<holon::sync::loro_share_backend::LoroShareBackend>,
     > = None;
 
+    // Resolve the shared pending connector-write store (leases/read-write
+    // ruling, increment 4c). `McpIntegrationsModule` registers it via
+    // `provide::<PendingWriteStore>`, so `resolve` returns the shared
+    // `Arc<PendingWriteStore>` directly. `None` when no MCP integrations exist
+    // (no once_only writes are possible → no approve panel).
+    // Degraded-disclosure bus. `add_frontend` registers it unconditionally, so
+    // a missing one is a wiring bug, not a mode — resolve hard rather than ship
+    // a window whose only degradation channel is the log.
+    let degraded_bus: std::sync::Arc<holon::sync::DegradedSignalBus> =
+        (*injector.resolve::<std::sync::Arc<holon::sync::DegradedSignalBus>>()).clone();
+
+    let pending_writes: Option<std::sync::Arc<holon_app::PendingWriteStore>> =
+        match injector.try_resolve::<holon_app::PendingWriteStore>() {
+            Ok(store) => Some(store),
+            Err(e) => {
+                tracing::debug!(error = %e, "[pending-writes] no shared store in DI — approve panel inert");
+                None
+            }
+        };
+
+    // TEST MODE seam (single flag check): `HOLON_MCP_ALLOW_RESET` — the same
+    // env that un-gates the MCP `reset_vault` tool — additionally routes the
+    // desktop launch through the REBINDABLE window and installs the gpui-side
+    // reset builder + reset pump (previously mobile-only, which made the
+    // live-MCP keystone iOS-sim-only). Without the flag this arm is dead and
+    // the desktop launch path is unchanged.
+    let mcp_reset_test_mode = std::env::var("HOLON_MCP_ALLOW_RESET").is_ok();
+
+    // Reset-safe debug handles for the MCP inspection tools (`render_org`,
+    // `await_quiescence`, `debug_pbt_snapshot`); a later `reset_vault` swaps the
+    // cell for the fresh session's handles.
+    {
+        let injector_for_cell = injector.clone();
+        let session_for_cell = session.clone();
+        let engine_for_cell = engine.clone();
+        let cell = runtime.block_on(async move {
+            let loro_sync_handle = injector_for_cell
+                .try_resolve_async::<holon::sync::LoroSyncControllerHandle>()
+                .await
+                .ok();
+            let block_query_source = Some(session_for_cell.block_query().clone());
+            let org_idle_signal = injector_for_cell
+                .try_resolve::<holon_orgmode::OrgSyncIdleSignal>()
+                .ok();
+            let loro_doc_store = injector_for_cell
+                .try_resolve::<holon::sync::LoroBlockOperations>()
+                .ok()
+                .map(|ops| ops.shared_doc_store());
+            let writeback_renderer = injector_for_cell
+                .try_resolve_async::<holon_filesystem::WritebackRenderer>()
+                .await
+                .ok();
+            holon_mcp::server::DebugHandlesCell {
+                loro_sync_handle,
+                org_idle_signal,
+                block_query_source,
+                loro_doc_store,
+                reactive_engine: Some(engine_for_cell),
+                writeback_renderer,
+            }
+        });
+        *debug.live_debug.write().expect("live_debug cell poisoned") = cell;
+
+        // The invariant catalog the suite runs lives in the pbt-only test crate,
+        // so a release build carries no suite and `run_self_checks` reports that
+        // absence as an error rather than an empty report.
+        #[cfg(feature = "pbt")]
+        {
+            assert!(
+                debug
+                    .self_check_suite
+                    .set(std::sync::Arc::new(
+                        holon_integration_tests::pbt::live_self_check::LiveSelfCheck
+                    ))
+                    .is_ok(),
+                "self_check_suite registered twice"
+            );
+        }
+    }
+
     #[cfg(feature = "desktop")]
     {
         let gpui_app = Application::with_platform(gpui_platform::current_platform(false));
         gpui_app.run(move |cx| {
-            launch_holon_window_with_engine_and_share(
-                session,
-                engine,
-                debug,
-                share_backend,
-                rt_handle,
-                cx,
-            );
+            // Install the pending-write store as a GPUI global so the window
+            // wiring can spawn the bus bridge and the render pass can build the
+            // approve panel (mirrors the DegradedToastSink/ShareTrigger globals).
+            if let Some(store) = pending_writes {
+                cx.set_global(holon_gpui::share_ui::PendingWritesGlobal(store));
+            }
+            if mcp_reset_test_mode {
+                // Disclosed degraded/test mode — unmissable by design.
+                tracing::warn!(
+                    "MCP reset builder enabled — TEST MODE (HOLON_MCP_ALLOW_RESET): rebindable \
+                     window, share/accept actions not wired (the degraded-disclosure bridge is)"
+                );
+                eprintln!("[holon] MCP reset builder enabled — TEST MODE (HOLON_MCP_ALLOW_RESET)");
+
+                let mut nav = holon_gpui::navigation_state::NavigationState::with_input_router(
+                    debug.input_router.clone(),
+                );
+                nav.set_navigation_debug(debug.navigation_state.clone());
+                let bounds_registry = holon_gpui::geometry::BoundsRegistry::new();
+                let handle = holon_gpui::launch_holon_window_rebindable(
+                    session,
+                    engine,
+                    rt_handle,
+                    nav,
+                    bounds_registry,
+                    Some(debug.clone()),
+                    Some(degraded_bus),
+                    "Holon",
+                    cx,
+                )
+                .unwrap_or_else(|| {
+                    eprintln!("[holon] rebindable Holon window failed to open");
+                    std::process::exit(1);
+                });
+
+                // gpui-side reset builder: boots a fresh seeded SUT for the
+                // (tokio) `reset_vault` tool. Mirrors the mobile install.
+                let reset_builder: holon_mcp::server::ResetBuilderFn = Arc::new(|files| {
+                    Box::pin(holon_gpui::reset::build_fresh_sut_from_files(files))
+                        as futures::future::BoxFuture<
+                            'static,
+                            anyhow::Result<holon_mcp::server::ResetBuildOutput>,
+                        >
+                });
+                debug.reset_builder.set(reset_builder).ok();
+
+                // Main-thread reset pump: owns the `!Send` `RebindHandle` and
+                // re-points the live window on each `ResetRequest`. This
+                // repo's gpui fork makes `AsyncApp::update` infallible (it
+                // returns the closure result directly), so the rebind always
+                // runs on the main thread before the ack fires.
+                let (reset_tx, mut reset_rx) =
+                    futures::channel::mpsc::channel::<holon_mcp::server::ResetRequest>(4);
+                debug.reset_tx.set(reset_tx).ok();
+                cx.spawn(async move |cx| {
+                    use futures::StreamExt;
+                    while let Some(req) = reset_rx.next().await {
+                        let holon_mcp::server::ResetRequest {
+                            session,
+                            engine,
+                            ack,
+                        } = req;
+                        cx.update(|cx| handle.rebind(session, engine, cx));
+                        ack.send(Ok(())).ok();
+                    }
+                })
+                .detach();
+            } else {
+                launch_holon_window_with_engine_and_share(
+                    session,
+                    engine,
+                    debug,
+                    share_backend,
+                    degraded_bus,
+                    rt_handle,
+                    cx,
+                );
+            }
             cx.activate(true);
         });
     }

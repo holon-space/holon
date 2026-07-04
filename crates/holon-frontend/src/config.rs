@@ -83,6 +83,10 @@ pub struct HolonConfig {
 
     #[cfg_attr(not(target_arch = "wasm32"), command(flatten))]
     #[serde(default)]
+    pub mcp: McpConfig,
+
+    #[cfg_attr(not(target_arch = "wasm32"), command(flatten))]
+    #[serde(default)]
     pub hooks: HooksConfig,
 
     /// MCP integrations directory (default: `{config_dir}/integrations`)
@@ -145,6 +149,34 @@ pub struct CrdtPreferences {
     )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_dir: Option<PathBuf>,
+}
+
+/// Preferences for the embedded MCP server (the debug/automation control
+/// surface every frontend launches on loopback by default).
+///
+/// Security-conscious users can disable it entirely (`mcp.enabled = false`) to
+/// remove that attack surface: with it off, the frontend boots with NO MCP
+/// server — nothing listens, no MCP task is spawned. Default is ON so existing
+/// behavior is unchanged.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(clap::Args))]
+#[serde(deny_unknown_fields)]
+pub struct McpConfig {
+    /// Launch the embedded MCP server at boot. Default: `true` (unchanged
+    /// behavior). Set to `false` to boot with no MCP server / no listener —
+    /// attack-surface reduction. Boot-time on/off only; not per-tool.
+    // `id` MUST be set explicitly: clap derive defaults the argument id to the
+    // FIELD NAME (`enabled`), and `CrdtPreferences.enabled` is also flattened
+    // into `HolonConfig` — two args with id `enabled` make clap `debug_assert`
+    // at Command-build time, panicking EVERY CLI parse (incl. `--help`). The
+    // `long`/`env` rename does not change the id; only `id` does. Guarded by
+    // `clap_command_arg_ids_are_unique` below.
+    #[cfg_attr(
+        not(target_arch = "wasm32"),
+        arg(id = "mcp_enabled", long = "mcp-enabled", env = "HOLON_MCP_ENABLED")
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -222,6 +254,12 @@ pub struct SessionConfig {
     /// `FrontendSession::new`. Mostly used by tests that assert on final
     /// state.
     pub wait_for_ready: bool,
+    /// Peer id this session's Loro documents are minted under. `None` = the
+    /// `HOLON_LORO_PEER_ID` env / random fallback. Set it when more than one
+    /// session lives in ONE process: the env var is process-global, so two
+    /// sessions reading it would author under the SAME peer id and their CRDT
+    /// histories would silently fail to converge.
+    pub loro_peer_id: Option<u64>,
 }
 
 impl SessionConfig {
@@ -229,11 +267,17 @@ impl SessionConfig {
         Self {
             ui_info,
             wait_for_ready: true,
+            loro_peer_id: None,
         }
     }
 
     pub fn without_wait(mut self) -> Self {
         self.wait_for_ready = false;
+        self
+    }
+
+    pub fn with_loro_peer_id(mut self, peer_id: u64) -> Self {
+        self.loro_peer_id = Some(peer_id);
         self
     }
 }
@@ -351,6 +395,19 @@ pub fn load_config(
 
     let toml_path = config_dir.join("holon.toml");
 
+    // First run: a missing config file is not an error. Persist the built-in
+    // defaults so the rest of the pipeline reads a real file (and the user has
+    // something to edit), and disclose it via an info line. A PRESENT but
+    // malformed file is NOT first run — it falls through to `Toml::file`, which
+    // surfaces the parse error loudly below.
+    if !toml_path.exists() {
+        save_config(config_dir, &HolonConfig::default())?;
+        tracing::info!(
+            "first run: created default config at {}",
+            toml_path.display()
+        );
+    }
+
     let traced = Config::<HolonConfig>::builder()
         .source(premortem::sources::Defaults::from(HolonConfig::default()))
         .source(premortem::sources::Toml::file(&toml_path))
@@ -449,6 +506,14 @@ impl HolonConfig {
         self.crdt.enabled.unwrap_or(false)
     }
 
+    /// Whether the embedded MCP server should launch at boot. Defaults to
+    /// `true` (unchanged behavior); set `mcp.enabled = false` in `holon.toml`
+    /// (or `HOLON_MCP_ENABLED=false` / `--mcp-enabled=false`) to boot with no
+    /// MCP server — no listener, no MCP task (attack-surface reduction).
+    pub fn mcp_enabled(&self) -> bool {
+        self.mcp.enabled.unwrap_or(true)
+    }
+
     pub fn glass_background(&self) -> bool {
         self.ui.glass_background.unwrap_or(false)
     }
@@ -494,20 +559,63 @@ impl HolonConfig {
         }
     }
 
+    /// Boot config for a platform launch that pins its paths programmatically
+    /// (mobile: iOS / Android) instead of reading them from CLI/env.
+    ///
+    /// Desktop boots through [`load_config`], which layers the persisted
+    /// `holon.toml` over the built-in defaults via premortem — so a preference
+    /// set in a prior session (e.g. `ui.theme = "dracula"`) is applied at boot.
+    /// Mobile does NOT go through `load_config`; it must load the persisted
+    /// config the same way, or every restart boots the built-in defaults and
+    /// silently discards the user's saved theme (dogfood 2026-07-19).
+    ///
+    /// Starts from [`Self::load_runtime`] (persisted file → typed config; first
+    /// run with no file → built-in defaults; a MALFORMED file panics loud,
+    /// never a silent default), then applies the platform overrides that
+    /// are *not* user preferences: the platform-resolved db/vault paths
+    /// (only when the caller actually resolved one — `None` never clobbers
+    /// a persisted value) and the unconditional mobile CRDT opt-in. A
+    /// missing `ui.theme` key falls through to the documented default theme
+    /// downstream — that default is not a swallowed error.
+    pub fn load_runtime_with_platform_overrides(
+        config_dir: &Path,
+        db_path: Option<PathBuf>,
+        vault_root: Option<PathBuf>,
+        crdt_enabled: bool,
+    ) -> Self {
+        let mut config = Self::load_runtime(config_dir);
+        if db_path.is_some() {
+            config.db_path = db_path;
+        }
+        if vault_root.is_some() {
+            config.vault.root = vault_root;
+        }
+        config.crdt.enabled = Some(crdt_enabled);
+        config
+    }
+
     /// Save config to `{config_dir}/holon.toml`, preserving any keys not owned
     /// by HolonConfig. On wasm32, logs a visible warning and no-ops —
     /// config persistence is not supported.
-    pub fn save_runtime(&self, config_dir: &Path) {
+    ///
+    /// Returns `Err` (never panics/aborts) when the config dir can't be created
+    /// or the file can't be written — e.g. on Android when the config dir
+    /// resolves under a read-only filesystem. A preference write that cannot
+    /// persist MUST surface a visible degraded-mode notice and keep the app
+    /// alive, never SIGABRT the process (fail-loud, not fail-fatal).
+    pub fn save_runtime(&self, config_dir: &Path) -> anyhow::Result<()> {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = config_dir;
             tracing::warn!(
                 "[HolonConfig] config save not supported on wasm32 — using in-memory config"
             );
-            return;
+            Ok(())
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
+            use anyhow::Context;
+
             let path = config_dir.join("holon.toml");
 
             let mut table: toml::Table = match std::fs::read_to_string(&path) {
@@ -515,28 +623,28 @@ impl HolonConfig {
                     .parse::<toml::Table>()
                     .unwrap_or_else(|_| toml::Table::new()),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
-                Err(e) => panic!("Failed to read {}: {}", path.display(), e),
+                Err(e) => {
+                    return Err(e).with_context(|| format!("Failed to read {}", path.display()));
+                }
             };
 
-            let our_toml = toml::to_string_pretty(self)
-                .unwrap_or_else(|e| panic!("Failed to serialize config: {}", e));
+            let our_toml = toml::to_string_pretty(self).context("Failed to serialize config")?;
             let our_table: toml::Table = our_toml
                 .parse::<toml::Table>()
-                .unwrap_or_else(|e| panic!("Failed to re-parse serialized config: {}", e));
+                .context("Failed to re-parse serialized config")?;
 
             for (k, v) in our_table {
                 table.insert(k, v);
             }
 
-            let content = toml::to_string_pretty(&table)
-                .unwrap_or_else(|e| panic!("Failed to serialize config: {}", e));
+            let content = toml::to_string_pretty(&table).context("Failed to serialize config")?;
             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).unwrap_or_else(|e| {
-                    panic!("Failed to create config dir {}: {}", parent.display(), e)
-                });
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("Failed to create config dir {}", parent.display()))?;
             }
             std::fs::write(&path, content)
-                .unwrap_or_else(|e| panic!("Failed to write {}: {}", path.display(), e));
+                .with_context(|| format!("Failed to write {}", path.display()))?;
+            Ok(())
         }
     }
 
@@ -608,6 +716,51 @@ mod tests {
         assert_eq!(vault["root"].as_str().unwrap(), "/org");
     }
 
+    /// A happy-path `save_runtime` persists and returns `Ok`.
+    #[test]
+    fn save_runtime_persists_and_returns_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = HolonConfig {
+            ui: UiConfig {
+                theme: Some("dracula".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        config
+            .save_runtime(dir.path())
+            .expect("save_runtime must succeed on a writable dir");
+        let content = std::fs::read_to_string(dir.path().join("holon.toml")).unwrap();
+        assert!(content.contains("dracula"), "persisted config: {content}");
+    }
+
+    /// Regression for the Android SIGABRT (dogfood 2026-07-19): a config dir on
+    /// an UNWRITABLE parent must make `save_runtime` return `Err` — NOT panic /
+    /// abort the process. A preference that cannot persist has to keep the app
+    /// alive so the frontend can surface a visible degraded-mode notice.
+    #[cfg(unix)]
+    #[test]
+    fn save_runtime_unwritable_parent_returns_err_not_panic() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        // Read+execute but NOT write: create_dir_all of a child must fail.
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        let config_dir = root.path().join("nested-config");
+
+        let result = HolonConfig::default().save_runtime(&config_dir);
+
+        // Restore write bits so the tempdir can be cleaned up.
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let err = result.expect_err("unwritable parent must surface an Err, never panic");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("config dir") || msg.contains("nested-config"),
+            "error must name the failed config dir: {msg}"
+        );
+    }
+
     #[test]
     fn save_preference_preserves_existing_keys() {
         let dir = tempfile::tempdir().unwrap();
@@ -640,6 +793,210 @@ mod tests {
             config.resolve_db_path(dir),
             PathBuf::from("/custom/db.sqlite")
         );
+    }
+
+    /// First run: a fresh config dir with no `holon.toml` must NOT fail. It
+    /// boots from built-in defaults and persists them to disk, and a second
+    /// load reads that file back to an identical config (round-trip).
+    #[test]
+    fn first_run_creates_default_config_and_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml_path = dir.path().join("holon.toml");
+        assert!(!toml_path.exists(), "precondition: no config file yet");
+
+        let (traced1, _) = load_config(dir.path(), HolonConfig::default())
+            .expect("first run must load from defaults, not fail");
+        let config1 = traced1.into_inner();
+
+        assert!(
+            toml_path.exists(),
+            "first run must persist a default config"
+        );
+        let on_disk_first = std::fs::read_to_string(&toml_path).unwrap();
+
+        // Loaded config equals built-in defaults.
+        assert_eq!(
+            toml::to_string_pretty(&config1).unwrap(),
+            toml::to_string_pretty(&HolonConfig::default()).unwrap(),
+            "first-run config must equal built-in defaults"
+        );
+
+        // Second load reads the now-present file back identically and does not
+        // mutate it.
+        let (traced2, _) =
+            load_config(dir.path(), HolonConfig::default()).expect("second load must succeed");
+        let config2 = traced2.into_inner();
+        let on_disk_second = std::fs::read_to_string(&toml_path).unwrap();
+
+        assert_eq!(
+            on_disk_first, on_disk_second,
+            "second load must not rewrite the config file"
+        );
+        assert_eq!(
+            toml::to_string_pretty(&config1).unwrap(),
+            toml::to_string_pretty(&config2).unwrap(),
+            "config must round-trip identically across loads"
+        );
+    }
+
+    /// DESKTOP boot path: `load_config` (Defaults → holon.toml → CLI/env) must
+    /// apply a `ui.theme` persisted in `holon.toml`. Proves the desktop path is
+    /// NOT affected by the boot-theme regression (that one is mobile-only).
+    #[test]
+    fn load_config_applies_persisted_ui_theme() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("holon.toml"), "[ui]\ntheme = \"dracula\"\n").unwrap();
+
+        let (traced, _) = load_config(dir.path(), HolonConfig::default())
+            .expect("load_config must succeed for a valid config");
+        assert_eq!(
+            traced.into_inner().ui.theme.as_deref(),
+            Some("dracula"),
+            "desktop boot (load_config) must apply the persisted ui.theme"
+        );
+    }
+
+    /// MOBILE boot path regression (dogfood 2026-07-19): mobile built its
+    /// `HolonConfig` from `::default()`, so a `ui.theme` persisted by the
+    /// settings UI was ignored on restart (booted `holonLight`). The boot
+    /// config must read the persisted `ui.theme`, while platform-resolved
+    /// paths and the mobile CRDT opt-in still override.
+    #[test]
+    fn mobile_boot_applies_persisted_ui_theme() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("holon.toml"), "[ui]\ntheme = \"dracula\"\n").unwrap();
+
+        let config = HolonConfig::load_runtime_with_platform_overrides(
+            dir.path(),
+            Some(PathBuf::from("/data/holon.db")),
+            None,
+            true,
+        );
+
+        assert_eq!(
+            config.ui.theme.as_deref(),
+            Some("dracula"),
+            "mobile boot must apply the persisted ui.theme, not reset to default"
+        );
+        assert_eq!(
+            config.db_path,
+            Some(PathBuf::from("/data/holon.db")),
+            "platform-resolved db_path must still override"
+        );
+        assert_eq!(
+            config.crdt.enabled,
+            Some(true),
+            "mobile CRDT opt-in must still apply"
+        );
+    }
+
+    /// First-run mobile boot (no persisted file yet) must NOT fail and must
+    /// land on the built-in default theme (`ui.theme == None` → default
+    /// downstream).
+    #[test]
+    fn mobile_boot_first_run_defaults_theme_and_keeps_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!dir.path().join("holon.toml").exists());
+
+        let config = HolonConfig::load_runtime_with_platform_overrides(
+            dir.path(),
+            None,
+            Some(PathBuf::from("/vault")),
+            true,
+        );
+
+        assert_eq!(
+            config.ui.theme, None,
+            "no persisted theme → default downstream"
+        );
+        assert_eq!(config.vault.root, Some(PathBuf::from("/vault")));
+        assert_eq!(config.crdt.enabled, Some(true));
+    }
+
+    /// A PRESENT but malformed config file is NOT first run — it must fail loud
+    /// (surface the parse error), never silently fall back to defaults.
+    #[test]
+    fn malformed_config_fails_loud() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("holon.toml"),
+            "this is = = not valid toml [[[\n",
+        )
+        .unwrap();
+
+        let result = load_config(dir.path(), HolonConfig::default());
+        let err = result.expect_err("malformed config must fail loud, not fall back to defaults");
+        assert!(
+            err.to_string().contains("Config errors"),
+            "error must surface the config parse failure: {err}"
+        );
+    }
+
+    /// The clap `Command` built from `HolonConfig` must have unique argument
+    /// ids across ALL flattened sub-structs. clap derive uses the FIELD NAME as
+    /// the arg id (not the `long` rename), so two flattened fields both named
+    /// `enabled` (`CrdtPreferences.enabled` + `McpConfig.enabled`) collide and
+    /// clap `debug_assert`s at Command-build time — i.e. every CLI parse
+    /// (including `--help`) panics on launch. cargo check and struct-only DI
+    /// tests cannot see this (it is a runtime assert on the built Command), so
+    /// this is the guard for it — and for the NEXT flattened `enabled` too.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn clap_command_arg_ids_are_unique() {
+        use clap::CommandFactory;
+        HolonConfig::command().debug_assert();
+    }
+
+    /// `--mcp-enabled false` must land in `mcp.enabled` (proves the flag is
+    /// wired to the field, not just id-deconflicted).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn clap_mcp_enabled_flag_parses_into_field() {
+        use clap::Parser;
+        let cfg = HolonConfig::try_parse_from(["holon", "--mcp-enabled", "false"])
+            .expect("parse must succeed");
+        assert_eq!(cfg.mcp.enabled, Some(false));
+        assert!(!cfg.mcp_enabled(), "--mcp-enabled false must disable");
+
+        let cfg_on = HolonConfig::try_parse_from(["holon", "--mcp-enabled", "true"])
+            .expect("parse must succeed");
+        assert_eq!(cfg_on.mcp.enabled, Some(true));
+        assert!(cfg_on.mcp_enabled());
+    }
+
+    /// Env parse + absent-default, in ONE test. `HOLON_MCP_ENABLED` is a
+    /// process-global mutated here; splitting the env assertion from the absent
+    /// assertion lets the two run in parallel and the "absent" parse observe
+    /// the env test's half-set var (`Some(false)` instead of `None`).
+    /// Keeping both in a single test is the only serialization that holds —
+    /// this is the sole test that touches `HOLON_MCP_ENABLED`, and
+    /// explicit-flag tests override env so they are unaffected regardless
+    /// of ordering.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn clap_mcp_enabled_env_and_absent_default() {
+        use clap::Parser;
+
+        // Absent flag/env → None, and `mcp_enabled()` defaults to TRUE (opt-out).
+        // Asserted BEFORE any env mutation.
+        let absent = HolonConfig::try_parse_from(["holon"]).expect("parse must succeed");
+        assert_eq!(absent.mcp.enabled, None, "absent flag → None");
+        assert!(absent.mcp_enabled(), "absent → default enabled (TRUE)");
+
+        // `HOLON_MCP_ENABLED=false` (env) must land in `mcp.enabled`.
+        unsafe {
+            std::env::set_var("HOLON_MCP_ENABLED", "false");
+        }
+        let from_env = HolonConfig::try_parse_from(["holon"]).expect("parse must succeed");
+        unsafe {
+            std::env::remove_var("HOLON_MCP_ENABLED");
+        }
+        assert_eq!(
+            from_env.mcp.enabled,
+            Some(false),
+            "HOLON_MCP_ENABLED=false must disable via env"
+        );
+        assert!(!from_env.mcp_enabled());
     }
 
     /// HYP-5: a pre-rename `[orgmode]` section must fail loud with a migration

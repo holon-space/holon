@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+# `workspace-hack` is the cargo-hakari feature-unification crate: every
+# member depends on it and no member references it in source, by design.
+[package.metadata.cargo-machete]
+ignored = ["workspace-hack"]
+
 [lib]
 name = "holon_turso"
 path = "src/lib.rs"
@@ -15,10 +20,8 @@ async-trait.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
-similar.workspace = true
 futures.workspace = true
 tokio-stream.workspace = true
 turso.workspace = true
@@ -26,6 +29,7 @@ turso_core.workspace = true
 turso_sdk_kit.workspace = true
 sqlparser.workspace = true
 gql-transform.workspace = true
+gql-parser.workspace = true
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

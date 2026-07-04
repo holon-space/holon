@@ -12,6 +12,7 @@ use crate::pbt::composed::subsystem_seed::assert_ref_seeded;
 use crate::pbt::composed::subsystem_seed::run_with_seeded_ref;
 use crate::pbt::composed::subsystem_seed::seed_ref;
 use crate::pbt::sql_slice::builders::new_sql_engine;
+use crate::pbt::sql_slice::builders::new_sql_engine_with_structural_ops;
 use crate::pbt::sql_slice::builders::sql_wide;
 use crate::pbt::sql_slice::components::SqlProjectionComponent;
 
@@ -49,6 +50,7 @@ async fn sql_slice_runs_structural_block_invariants_over_turso() {
     assert_eq!(
         ran,
         [
+            "inv-mark-bounds-within-content",
             "inv-no-orphan-blocks",
             "inv-no-parent-cycles",
             "inv-source-language-iff-source",
@@ -112,5 +114,214 @@ async fn sql_slice_runs_ref_comparison_over_turso() {
         report.failures().is_empty(),
         "the Turso store matches the reference, so all selected invariants pass: {:?}",
         report.failures(),
+    );
+}
+
+/// `split_block` must PARTITION the origin block's inline marks across the
+/// split point — the dogfood 2026-07-20 headline data-loss. Before the fix,
+/// split wrote only `content`: the retained block kept STALE out-of-bounds
+/// marks and the split-off block got NULL marks, so a `[[link]]` crossing the
+/// cut vanished on both sides (and the stale left span was the exact
+/// `scalar_range_to_bytes` crash condition).
+///
+/// This drives the PRODUCTION SqlOnly split path end-to-end over a real Turso
+/// engine — `SqlBlockOperations::split_block` (the fixed default impl) over the
+/// CRUD `SqlOperationProvider` — and asserts LINK PRESERVATION, so it stands on
+/// its own regardless of any global mark-bounds invariant. Cases:
+///  1. link entirely left of the split → stays on the retained block, in
+///     bounds;
+///  2. link straddling the split → degrades to plain text on both sides;
+///  3. link entirely right of the split → moves to the new block, rebased.
+#[tokio::test(flavor = "multi_thread")]
+async fn split_block_partitions_link_marks_over_turso() {
+    use holon_api::EntityRef;
+    use holon_api::InlineMark;
+    use holon_api::MarkSpan;
+    use holon_api::OpOrigin;
+    use holon_api::StorageEntity;
+    use holon_api::Value;
+    use holon_api::marks_from_json;
+    use holon_api::marks_to_json;
+
+    let link = |name: &str| InlineMark::Link {
+        target: EntityRef::Name {
+            name: name.to_string(),
+        },
+        label: name.to_string(),
+    };
+
+    // Read back a block's (content, marks) from the `block_raw` base table.
+    async fn read_block(
+        engine: &holon::api::backend_engine::BackendEngine,
+        id: &str,
+    ) -> (String, Vec<MarkSpan>) {
+        let rows = engine
+            .db_handle()
+            .query(
+                &format!(
+                    "SELECT content, marks FROM block_raw WHERE id = '{}'",
+                    id.replace('\'', "''")
+                ),
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("query block_raw");
+        let row = rows
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("block {id} not found in block_raw"));
+        let content = row
+            .get("content")
+            .and_then(|v| v.as_string())
+            .unwrap_or("")
+            .to_string();
+        // `marks` is a `#[jsonb]` column: CDC delivers it as `Value::Json`
+        // (or `Value::String` when empty/absent), never a plain string.
+        let marks = match row.get("marks") {
+            Some(Value::Json(s)) | Some(Value::String(s)) if !s.is_empty() => {
+                marks_from_json(s).expect("marks JSON parses")
+            }
+            _ => Vec::new(),
+        };
+        (content, marks)
+    }
+
+    // Dispatch one production `block` operation over the engine.
+    async fn op(
+        engine: &holon::api::backend_engine::BackendEngine,
+        name: &str,
+        params: holon_api::StorageEntity,
+    ) {
+        let entity = holon_api::EntityName::new("block");
+        engine
+            .execute_operation(&entity, name, params, OpOrigin::User)
+            .await
+            .unwrap_or_else(|e| panic!("block/{name} failed: {e}"));
+    }
+
+    // One full create → split → read-back cycle. `content` is the stripped
+    // label; `mark` covers `[mark_start, mark_end)`; the block is split at byte
+    // `split_pos`. Returns the resulting (origin, new-block) (content, marks).
+    async fn split_case(
+        content: &str,
+        mark: MarkSpan,
+        split_pos: i64,
+    ) -> ((String, Vec<MarkSpan>), (String, Vec<MarkSpan>)) {
+        let engine = new_sql_engine_with_structural_ops().await;
+        let root = "block:mk-root";
+        let child = "block:mk-child";
+
+        // Parent (a plain block, not a Page — split refuses Pages).
+        let mut rp: StorageEntity = StorageEntity::new();
+        rp.insert("id".into(), Value::String(root.into()));
+        rp.insert("parent_id".into(), Value::Null);
+        rp.insert("content".into(), Value::String("Root".into()));
+        rp.insert("content_type".into(), holon_api::ContentType::Text.into());
+        op(&engine, "create", rp).await;
+
+        // Child carrying the link mark.
+        let mut cp: StorageEntity = StorageEntity::new();
+        cp.insert("id".into(), Value::String(child.into()));
+        cp.insert("parent_id".into(), Value::String(root.into()));
+        cp.insert("content".into(), Value::String(content.into()));
+        cp.insert("content_type".into(), holon_api::ContentType::Text.into());
+        cp.insert(
+            "marks".into(),
+            Value::String(marks_to_json(std::slice::from_ref(&mark))),
+        );
+        op(&engine, "create", cp).await;
+
+        // Split.
+        let mut sp: StorageEntity = StorageEntity::new();
+        sp.insert("id".into(), Value::String(child.into()));
+        sp.insert("position".into(), Value::Integer(split_pos));
+        op(&engine, "split_block", sp).await;
+
+        // The new block is the only child of root that is not the origin.
+        let sibling_rows = engine
+            .db_handle()
+            .query(
+                "SELECT id FROM block_raw WHERE parent_id = 'block:mk-root' AND id != \
+                 'block:mk-child'",
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("query siblings");
+        let new_id = sibling_rows
+            .into_iter()
+            .next()
+            .and_then(|r| r.get("id").and_then(|v| v.as_string()).map(str::to_string))
+            .expect("split created a new sibling block");
+
+        let origin = read_block(&engine, child).await;
+        let new_block = read_block(&engine, &new_id).await;
+        (origin, new_block)
+    }
+
+    // Case 1 — link entirely LEFT of the split (dogfood repro shape).
+    // "Owner is Ada Lovelace and reviewer", link over "Ada Lovelace" = [9,21);
+    // split after "and" (byte 25). Link stays on the retained block in bounds;
+    // the split-off "reviewer" carries no marks.
+    let (origin, new_block) = split_case(
+        "Owner is Ada Lovelace and reviewer",
+        MarkSpan::new(9, 21, link("Ada Lovelace")),
+        25,
+    )
+    .await;
+    assert_eq!(origin.0, "Owner is Ada Lovelace and");
+    assert_eq!(
+        origin.1,
+        vec![MarkSpan::new(9, 21, link("Ada Lovelace"))],
+        "the link must survive on the retained block, in bounds"
+    );
+    assert_eq!(new_block.0, "reviewer");
+    assert!(
+        new_block.1.is_empty(),
+        "the split-off block has no link, got {:?}",
+        new_block.1
+    );
+
+    // Case 2 — link entirely RIGHT of the split. "see Ada Lovelace", link
+    // [4,16); split after "see " (byte 4). Buggy code left the origin span
+    // [4,16) dangling out of bounds over "see" AND gave the new block NULL
+    // marks, LOSING the link. Fixed: origin bare, link moves right rebased.
+    let (origin, new_block) = split_case(
+        "see Ada Lovelace",
+        MarkSpan::new(4, 16, link("Ada Lovelace")),
+        4,
+    )
+    .await;
+    assert_eq!(origin.0, "see");
+    assert!(
+        origin.1.is_empty(),
+        "retained block must not keep a dangling out-of-bounds mark, got {:?}",
+        origin.1
+    );
+    assert_eq!(new_block.0, "Ada Lovelace");
+    assert_eq!(
+        new_block.1,
+        vec![MarkSpan::new(0, 12, link("Ada Lovelace"))],
+        "the link must move to the new block, rebased to [0,12)"
+    );
+
+    // Case 3 — split INSIDE the link → degrade to plain text on BOTH sides.
+    // "Ada Lovelace", link [0,12); split after "Ada L" (byte 5).
+    let (origin, new_block) = split_case(
+        "Ada Lovelace",
+        MarkSpan::new(0, 12, link("Ada Lovelace")),
+        5,
+    )
+    .await;
+    assert_eq!(origin.0, "Ada L");
+    assert!(
+        origin.1.is_empty(),
+        "a straddled link degrades to plain text on the left, got {:?}",
+        origin.1
+    );
+    assert_eq!(new_block.0, "ovelace");
+    assert!(
+        new_block.1.is_empty(),
+        "a straddled link degrades to plain text on the right, got {:?}",
+        new_block.1
     );
 }

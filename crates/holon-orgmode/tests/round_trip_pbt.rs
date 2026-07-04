@@ -276,12 +276,114 @@ fn parse_org(org_text: &str) -> Result<holon_orgmode::parser::ParseResult, Strin
 }
 
 // ============================================================================
+// Disk fixed-point: render(parse(disk)) == disk
+// ============================================================================
+
+/// `test_render_string_stability` below proves render→parse→render converges.
+/// That is NOT the property the keystone's `inv-org-render-fixed-point` checks:
+/// it compares the renderer's output against a file that already exists on
+/// disk. A renderer that unconditionally adds presentational whitespace the
+/// parser drops is perfectly *stable* and still permanently unequal to any
+/// hand-authored (or externally written) file — write-back then churns the file
+/// and every render-vs-disk comparison reports drift forever.
+///
+/// The corpus payload: `fixture-logs-2026-07-31/keystone-nightly-20260731-\
+/// 083505-run2.log.zst`, disk 277 bytes vs rendered 278, differing only by a
+/// blank line between a multi-line body and the next heading.
+#[test]
+fn render_of_parsed_disk_text_is_byte_identical() {
+    let disk = "\
+#+ID: forward-edge-page
+* fe-parent
+:PROPERTIES:
+:ID: fe-parent
+:END:
+* fe-blocked
+:PROPERTIES:
+:ID: fe-blocked
+:REQUIRES: fe-target
+:END:
+** rlJWtK
+:PROPERTIES:
+:ID: block-4
+:column-priority: L
+:END:
+foVL623I188Qt
+dTL dC Nh8GfJ M
+* fe-target
+:PROPERTIES:
+:ID: fe-target
+:END:
+";
+
+    let parsed = parse_org(disk).expect("fixture must parse");
+    let rendered = build_org_text(&parsed.document, &parsed.blocks);
+
+    assert_eq!(
+        rendered,
+        disk,
+        "\n=== DISK ({} bytes) ===\n{disk}\n=== RENDERED ({} bytes) ===\n{rendered}",
+        disk.len(),
+        rendered.len(),
+    );
+}
+
+/// The other half of the fixed point: a blank line the renderer must KEEP.
+///
+/// When a body's last line starts a list item, the blank line is org syntax,
+/// not decoration — it closes the list. Without it the following
+/// `#+BEGIN_SRC` child parses as list content and the source block is silently
+/// LOST on write-back → ingest, which is real data loss on the production
+/// `FileFormatAdapter` seam. Counterexample supplied by adversarial
+/// verification of the first (unconditional-removal) attempt at this fix.
+#[test]
+fn blank_line_closing_a_list_body_survives_round_trip() {
+    let disk = "\
+#+ID: list-body-page
+* h
+:PROPERTIES:
+:ID: h
+:END:
+body line
+0.
+
+#+BEGIN_SRC holon_prql :id h::src::0
+x
+#+END_SRC
+";
+
+    let parsed = parse_org(disk).expect("fixture must parse");
+
+    let source_blocks: Vec<_> = parsed
+        .blocks
+        .iter()
+        .filter(|b| b.content_type == ContentType::Source)
+        .collect();
+    assert_eq!(
+        source_blocks.len(),
+        1,
+        "the source block must survive parsing — if it is 0 the list swallowed it\nblocks: {:#?}",
+        parsed.blocks,
+    );
+
+    let rendered = build_org_text(&parsed.document, &parsed.blocks);
+    assert_eq!(
+        rendered,
+        disk,
+        "\n=== DISK ({} bytes) ===\n{disk}\n=== RENDERED ({} bytes) ===\n{rendered}",
+        disk.len(),
+        rendered.len(),
+    );
+}
+
+// ============================================================================
 // PBT: Comprehensive round-trip test
 // ============================================================================
 
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 100,
+        failure_persistence: None,
         ..ProptestConfig::default()
     })]
 
@@ -880,7 +982,6 @@ enum TextMutation {
 #[derive(Debug, Clone)]
 struct HeadlineSection {
     start_line: usize,
-    end_line: usize,
     level: usize,
     id: Option<String>,
 }
@@ -914,7 +1015,6 @@ fn find_headline_sections(org_text: &str) -> Vec<HeadlineSection> {
 
                 sections.push(HeadlineSection {
                     start_line: i,
-                    end_line: end,
                     level,
                     id,
                 });
@@ -928,8 +1028,8 @@ fn find_headline_sections(org_text: &str) -> Vec<HeadlineSection> {
 fn extract_id_from_section_lines(lines: &[&str]) -> Option<String> {
     for line in lines {
         let trimmed = line.trim();
-        if trimmed.starts_with(":ID:") {
-            return Some(trimmed[4..].trim().to_string());
+        if let Some(rest) = trimmed.strip_prefix(":ID:") {
+            return Some(rest.trim().to_string());
         }
     }
     None
@@ -1172,7 +1272,7 @@ fn remove_priority_from_headline(line: &str) -> String {
 /// Apply the equivalent semantic mutation to blocks that corresponds to a
 /// TextMutation.
 fn apply_equivalent_block_mutation(
-    blocks: &mut Vec<Block>,
+    blocks: &mut [Block],
     mutation: &TextMutation,
     sections: &[HeadlineSection],
 ) {
@@ -1185,7 +1285,13 @@ fn apply_equivalent_block_mutation(
             if let Some(id) = &section.id {
                 if let Some(block) = blocks.iter_mut().find(|b| b.id.id() == id) {
                     let body = block.body();
-                    block.set_title_and_body(new_title.clone(), body);
+                    // The mutation writes `new_title` into the org TEXT, so
+                    // org's inline-markup semantics apply to it: `+x+` typed
+                    // into a file IS strike markup, and the store keeps the
+                    // delimiter-stripped text plus a mark.
+                    let (parsed_title, _) =
+                        holon_orgmode::inline_marks::extract_inline_marks(new_title);
+                    block.set_title_and_body(parsed_title, body);
                 }
             }
         }
@@ -1242,47 +1348,12 @@ fn apply_equivalent_block_mutation(
     }
 }
 
-fn text_mutation_strategy(max_sections: usize) -> impl Strategy<Value = TextMutation> {
-    // Generate a section index and mutation type
-    let idx = 0..max_sections;
-    prop_oneof![
-        (idx.clone(), valid_title()).prop_map(|(i, t)| TextMutation::ReplaceTitle {
-            section_idx: i,
-            new_title: t
-        }),
-        (
-            idx.clone(),
-            prop_oneof![
-                Just("TODO".to_string()),
-                Just("DOING".to_string()),
-                Just("DONE".to_string()),
-            ]
-        )
-            .prop_map(|(i, kw)| TextMutation::AddTodoKeyword {
-                section_idx: i,
-                keyword: kw
-            }),
-        idx.clone()
-            .prop_map(|i| TextMutation::RemoveTodoKeyword { section_idx: i }),
-        (idx.clone(), valid_tag()).prop_map(|(i, t)| TextMutation::AddTag {
-            section_idx: i,
-            tag: t
-        }),
-        (idx.clone(), prop_oneof![Just('A'), Just('B'), Just('C')]).prop_map(|(i, l)| {
-            TextMutation::SetPriority {
-                section_idx: i,
-                letter: l,
-            }
-        }),
-        idx.prop_map(|i| TextMutation::RemovePriority { section_idx: i }),
-    ]
-}
-
 // -- Mutation PBT: in-memory mutations ---------------------------------------
 
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 100,
+        failure_persistence: None,
         ..ProptestConfig::default()
     })]
 
@@ -1379,6 +1450,7 @@ proptest! {
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 100,
+        failure_persistence: None,
         ..ProptestConfig::default()
     })]
 
@@ -1447,4 +1519,64 @@ proptest! {
         // Step 5: Assert full equality
         assert_normalized_docs_equal(&expected, &actual, "org_text_mutation")?;
     }
+}
+
+/// Regression: a headline with BOTH SCHEDULED and DEADLINE, and no explicit
+/// `:ID:` (so a `:PROPERTIES:` drawer still follows the planning line).
+///
+/// orgize's `planning_node` parser reads `(keyword, timestamp)` pairs back to
+/// back with no intervening newline, then consumes a single end-of-line — so
+/// SCHEDULED and DEADLINE on separate lines only let the FIRST keyword parse
+/// as planning; the second keyword (and the `:PROPERTIES:` drawer meant to
+/// follow it) got swallowed into the section body as plain text, silently
+/// renaming the block's id and duplicating a `:PROPERTIES:` drawer on
+/// re-render. Both keywords must render on one line.
+#[test]
+fn planning_scheduled_and_deadline_share_one_line_and_round_trip_stably() {
+    use holon_block_roundtrip_testing::HeadlineSpec;
+    use holon_block_roundtrip_testing::PropertiesDrawer;
+    use holon_block_roundtrip_testing::build_blocks;
+    let hl = HeadlineSpec {
+        block_id: EntityUri::block("00000000-0000-0000-00d2-6a8b21a78458"),
+        properties_drawer: PropertiesDrawer {
+            explicit_id: None,
+            other_props: std::collections::HashMap::new(),
+        },
+        level: 1,
+        task_state: None,
+        priority: None,
+        title: "AA".to_string(),
+        tags: None,
+        body: None,
+        scheduled: Some("<2024-01-15 Mon>".to_string()),
+        deadline: Some("<2024-01-15 Mon>".to_string()),
+        source_blocks: vec![],
+        child_headlines: vec![],
+    };
+    let doc_id = EntityUri::block("test-doc");
+    let mut doc = Block::new_text(doc_id.clone(), EntityUri::no_parent(), "test.org");
+    doc.set_page(true);
+    let blocks = build_blocks(&doc_id, &[hl]);
+    let org_text_1 = build_org_text(&doc, &blocks);
+    assert!(
+        org_text_1.contains("SCHEDULED: <2024-01-15 Mon> DEADLINE: <2024-01-15 Mon>\n"),
+        "SCHEDULED and DEADLINE must share one planning line: {org_text_1:?}"
+    );
+
+    let parsed = parse_org(&org_text_1).expect("parse failed");
+    assert!(
+        parsed
+            .blocks
+            .iter()
+            .any(|b| b.id.id() == "00000000-0000-0000-00d2-6a8b21a78458"),
+        "headline id must survive the round-trip, not get replaced by a fresh UUID from a \
+         misparsed drawer-as-body: {:?}",
+        parsed.blocks
+    );
+
+    let org_text_2 = build_org_text(&parsed.document, &parsed.blocks);
+    assert_eq!(
+        org_text_1, org_text_2,
+        "render must be stable across a round-trip"
+    );
 }

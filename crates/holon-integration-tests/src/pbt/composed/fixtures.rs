@@ -28,6 +28,7 @@ use holon_pbt_core::capabilities::SutEditorMirrorRead;
 use holon_pbt_core::capabilities::SutErrorLog;
 use holon_pbt_core::capabilities::SutLoroLog;
 use holon_pbt_core::capabilities::SutLoroTaskState;
+use holon_pbt_core::capabilities::SutOrderKeys;
 use holon_pbt_core::capabilities::SutSqlProjection;
 use holon_pbt_core::capabilities::SutViewSelection;
 pub use holon_pbt_core::composition::CapMap;
@@ -74,6 +75,38 @@ impl CapProvider for FixtureBackend {
 
 pub fn fixture_slice(blocks: Vec<Block>) -> CapMap {
     Config::new().with(FixtureBackend { blocks }).build()
+}
+
+/// The order column a real projection carries beside its blocks. A SEPARATE
+/// component from [`FixtureBackend`] so `fixture_slice` keeps projecting no
+/// order keys at all — `inv-birth-contract-satisfied` then deselects there
+/// (the honest answer for a double with no order column) instead of failing
+/// every existing catch test on a facet that fixture never modelled.
+pub struct FixtureOrderKeys {
+    pub keys: Vec<(EntityUri, String)>,
+}
+
+#[async_trait::async_trait(?Send)]
+impl SutOrderKeys for FixtureOrderKeys {
+    async fn live_block_order_keys(&self) -> Vec<(EntityUri, String)> {
+        self.keys.clone()
+    }
+}
+
+impl CapProvider for FixtureOrderKeys {
+    fn register(self: Arc<Self>, caps: &mut CapMap) {
+        caps.insert(self as Arc<dyn SutOrderKeys>);
+    }
+}
+
+pub fn fixture_slice_with_order_keys(
+    blocks: Vec<Block>,
+    order_keys: Vec<(EntityUri, String)>,
+) -> CapMap {
+    Config::new()
+        .with(FixtureBackend { blocks })
+        .with(FixtureOrderKeys { keys: order_keys })
+        .build()
 }
 
 // ─── Editor (second SUT component) doubles ───────────────────────────────
@@ -322,6 +355,42 @@ pub fn task_state_maps(sql: Vec<(EntityUri, &str)>, loro: Vec<(EntityUri, &str)>
         .build()
 }
 
+// ─── Reference task_state double ──────────────────────────────────────────
+
+/// A hand-crafted [`RefTaskState`] reference — its `id → task_state` map is the
+/// canonical task_state `inv-task-state-storage-coherence` anchors BOTH SUT
+/// stores against (F4). An id absent from the map yields `None`.
+#[derive(Default)]
+pub struct FixtureRefTaskState {
+    pub task_state: HashMap<EntityUri, String>,
+}
+
+impl holon_pbt_core::capabilities::RefTaskState for FixtureRefTaskState {
+    fn task_state_of(&self, id: &EntityUri) -> Option<String> {
+        self.task_state.get(id).cloned()
+    }
+}
+
+impl CapProvider for FixtureRefTaskState {
+    fn register(self: Arc<Self>, caps: &mut CapMap) {
+        caps.insert(self as Arc<dyn holon_pbt_core::capabilities::RefTaskState>);
+    }
+}
+
+/// Build a reference `CapMap` hosting `RefTaskState` over a hand-set
+/// `id → task_state` map — the ref side `inv-task-state-storage-coherence`
+/// now needs to select and to compare both SUT stores against.
+pub fn ref_task_state(states: Vec<(EntityUri, &str)>) -> CapMap {
+    Config::new()
+        .with(FixtureRefTaskState {
+            task_state: states
+                .into_iter()
+                .map(|(id, s)| (id, s.to_string()))
+                .collect(),
+        })
+        .build()
+}
+
 // ─── ViewModel SUT double ─────────────────────────────────────────────────
 
 /// A hand-crafted [`SutViewSelection`] SUT — its `headless_error_node_count`
@@ -398,4 +467,77 @@ impl CapProvider for FixtureBudget {
 #[cfg(feature = "otel-testing")]
 pub fn budget_map(b: FixtureBudget) -> CapMap {
     Config::new().with(b).build()
+}
+
+/// A hand-crafted [`ComposedTrend`] SUT over a PLANTED counter series, so the
+/// `inv-complexity-class-trend` teeth can inject an accumulating transition
+/// without driving a whole growing sequence through a real backend.
+///
+/// The series is fed through the production [`TrendAccumulator`] — the fit
+/// under test is the real one, only its input is synthetic.
+///
+/// [`ComposedTrend`]: crate::pbt::composed::complexity_trend::ComposedTrend
+/// [`TrendAccumulator`]: crate::pbt::complexity_trend::TrendAccumulator
+pub struct FixtureTrend {
+    pub kind: String,
+    pub class: crate::pbt::complexity_trend::ComplexityClass,
+    pub reads: Vec<usize>,
+    /// Arms the gate for this fixture — the teeth's stand-in for
+    /// `HOLON_TREND_BUDGET`, with no process environment to race a sibling
+    /// test.
+    pub enforce: bool,
+}
+
+impl crate::pbt::composed::complexity_trend::ComposedTrend for FixtureTrend {
+    fn trend_report(&self) -> crate::pbt::complexity_trend::TrendReport {
+        let mut acc = crate::pbt::complexity_trend::TrendAccumulator::new();
+        for (i, reads) in self.reads.iter().enumerate() {
+            acc.record(self.kind.clone(), self.class, *reads, 2, i + 1);
+        }
+        let mut report = acc.report();
+        report.enforce = self.enforce;
+        report
+    }
+}
+
+impl CapProvider for FixtureTrend {
+    fn register(self: Arc<Self>, caps: &mut CapMap) {
+        caps.insert(self as Arc<dyn crate::pbt::composed::complexity_trend::ComposedTrend>);
+    }
+}
+
+/// Build a SUT `CapMap` exposing only `ComposedTrend` over a planted series.
+pub fn trend_map(t: FixtureTrend) -> CapMap {
+    Config::new().with(t).build()
+}
+
+/// A hand-crafted [`SettleLatency`] SUT — a canned per-transition settle
+/// duration, so the `inv-settle-budget` teeth can inject the vault-scale
+/// latency regime without booting a 25k-block vault.
+///
+/// [`SettleLatency`]: crate::pbt::composed::settle_latency::SettleLatency
+pub struct FixtureSettleLatency {
+    pub elapsed: Option<std::time::Duration>,
+}
+
+impl crate::pbt::composed::settle_latency::SettleLatency for FixtureSettleLatency {
+    fn last_settle(&self) -> Option<crate::pbt::invariants::bodies::settle_budget::SettleSample> {
+        self.elapsed.map(
+            |elapsed| crate::pbt::invariants::bodies::settle_budget::SettleSample {
+                action: "NavigateFocus".to_string(),
+                elapsed,
+            },
+        )
+    }
+}
+
+impl CapProvider for FixtureSettleLatency {
+    fn register(self: Arc<Self>, caps: &mut CapMap) {
+        caps.insert(self as Arc<dyn crate::pbt::composed::settle_latency::SettleLatency>);
+    }
+}
+
+/// Build a SUT `CapMap` exposing only `SettleLatency` over a canned duration.
+pub fn settle_map(elapsed: Option<std::time::Duration>) -> CapMap {
+    Config::new().with(FixtureSettleLatency { elapsed }).build()
 }

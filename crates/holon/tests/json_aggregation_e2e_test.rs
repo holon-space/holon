@@ -58,12 +58,13 @@ fn strip_render_directives(prql: &str) -> String {
 
 /// Setup test tables that mimic the production schema
 async fn setup_test_schema(engine: &Arc<BackendEngine>) -> Result<()> {
-    // Create directories table (matches Directory struct - NO path column)
+    // Local fixture table for exercising json_object compilation. Deliberately
+    // NOT a production entity — it just needs a few typed columns.
     engine
         .db_handle()
         .execute(
             r#"
-        CREATE TABLE IF NOT EXISTS directory (
+        CREATE TABLE IF NOT EXISTS tree_node (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
             parent_id TEXT,
@@ -116,19 +117,19 @@ async fn setup_test_schema(engine: &Arc<BackendEngine>) -> Result<()> {
 
 /// Insert test data
 async fn insert_test_data(engine: &Arc<BackendEngine>) -> Result<()> {
-    // Insert directories
+    // Insert fixture rows
     engine
         .db_handle()
         .execute(
-            "INSERT INTO directory (id, name, parent_id, depth) VALUES ('dir-1', 'Root', NULL, 0)",
+            "INSERT INTO tree_node (id, name, parent_id, depth) VALUES ('node-1', 'Root', NULL, 0)",
             vec![],
         )
         .await?;
     engine
         .db_handle()
         .execute(
-            "INSERT INTO directory (id, name, parent_id, depth) VALUES ('dir-2', 'Subdir', \
-             'dir-1', 1)",
+            "INSERT INTO tree_node (id, name, parent_id, depth) VALUES ('node-2', 'Subdir', \
+             'node-1', 1)",
             vec![],
         )
         .await?;
@@ -180,7 +181,7 @@ async fn test_simple_json_object_query_via_backend_engine() -> Result<()> {
 
     // Simple query with json_object - uses BackendEngine::compile_to_sql
     let prql = r#"
-from directory
+from tree_node
 derive { data = s"json_object('id', {id}, 'name', {name}, 'parent_id', {parent_id}, 'depth', {depth})" }
 select { id, name, data }
     "#;
@@ -193,7 +194,7 @@ select { id, name, data }
     let results = engine.execute_query(sql, HashMap::new(), None).await?;
 
     assert!(!results.is_empty(), "Should have results");
-    assert_eq!(results.len(), 2, "Should have 2 directories");
+    assert_eq!(results.len(), 2, "Should have 2 fixture rows");
 
     // Verify data column was flattened (turso.rs flattens json_object results)
     for row in &results {

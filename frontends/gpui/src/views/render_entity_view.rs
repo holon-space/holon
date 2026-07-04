@@ -1,8 +1,12 @@
 use std::sync::Arc;
 
 use gpui::*;
+use gpui_component::input::Enter;
+use holon_api::EntityName;
 use holon_api::EntityUri;
 use holon_frontend::RenderContext;
+use holon_frontend::input::Key;
+use holon_frontend::input::WidgetInput;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
 
@@ -104,7 +108,10 @@ impl Render for RenderEntityView {
             window,
             cx,
         )
-        .with_live_block_ancestors(self.live_block_ancestors.clone());
+        .with_live_block_ancestors(self.live_block_ancestors.clone())
+        // A `render_entity` IS one row of a collection: its parent has no
+        // definite height, so anything it builds must be content-sized.
+        .with_shell_placement(crate::views::ShellPlacement::Nested);
 
         let Some(ref slot) = self.current.slot else {
             return builders::render(&self.current, &gpui_ctx);
@@ -127,7 +134,49 @@ impl Render for RenderEntityView {
         let is_focused = gpui_ctx.services().focused_block().as_ref() == Some(id);
         if is_focused {
             self.editor_pending_evict = true;
-            return child_el;
+            // When focused but not editing, route key chords through the
+            // input router so Cmd+Enter dispatches cycle_task_state even
+            // without an active editor (dogfood Risk 2).
+            let nav = self.nav.clone();
+            let entity_id = id.clone();
+            let services = gpui_ctx.services.clone();
+            return div()
+                .child(child_el)
+                .capture_action(move |enter: &Enter, _window, cx| {
+                    // The chord's own modifier, as GPUI parsed it into the
+                    // action — not `window.modifiers()`, which is ambient
+                    // state about no particular keystroke. Same non-macOS
+                    // residual as `editor_view`'s twin: `secondary` is ctrl
+                    // off macOS while the registry advertises Cmd.
+                    if enter.secondary {
+                        let input = WidgetInput::chord(&[Key::Cmd, Key::Enter]);
+                        if let Some(action) = nav.bubble_input(&entity_id, &input) {
+                            match action {
+                                holon_frontend::input::InputAction::ExecuteOperation {
+                                    entity_name,
+                                    operation,
+                                    entity_id,
+                                } => {
+                                    let mut params = std::collections::HashMap::new();
+                                    params.insert(
+                                        "id".into(),
+                                        holon_api::Value::String(entity_id.as_str().to_string()),
+                                    );
+                                    services.dispatch_intent(
+                                        holon_frontend::operations::OperationIntent::new(
+                                            EntityName::new(entity_name),
+                                            operation.name,
+                                            params,
+                                        ),
+                                    );
+                                    cx.stop_propagation();
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                })
+                .into_any_element();
         }
 
         let eviction_enabled = std::env::var("HOLON_EDITOR_EVICT")
@@ -159,7 +208,11 @@ impl Render for RenderEntityView {
             }
         }
 
-        let el_id = format!("render-entity-{}", id);
+        // Suffix the occurrence coordinate (ADR 0016 §3): a display-placed
+        // second occurrence renders under its own element identity. `Canonical`
+        // → empty suffix → byte-identical to the historical key.
+        let occ = self.current.occurrence().key_suffix();
+        let el_id = format!("render-entity-{}{}", id, occ);
         let services = gpui_ctx.services.clone();
         click_to_focus(&el_id, child_el, id.clone(), services).into_any_element()
     }

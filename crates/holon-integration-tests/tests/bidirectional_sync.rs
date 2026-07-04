@@ -6,6 +6,10 @@
 //! - Backward: UI mutation via BackendEngine → FileSyncController → Org file on
 //!   disk
 //! - Round-trip: Both directions in sequence, verifying stability
+//!
+//! @pbt kind harness
+//! @pbt covers orgmode-backend-sync — full OrgMode<->Backend bidirectional sync
+//! loop
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -740,6 +744,67 @@ fn stability_multiple_rapid_ui_updates_converge() {
             all.iter()
                 .filter_map(|r| r.get("id").and_then(|v| v.as_string()))
                 .collect::<Vec<_>>()
+        );
+    });
+}
+
+/// Option C Inc 1 shadow LIVENESS gate.
+///
+/// The differential shadow is default-ON in debug builds, and budget-asserting
+/// suites opt out (design doc §9.8). That "enumerate the exclusions" policy can
+/// rot silently — an exclusion added elsewhere, or a quiescence rule the
+/// suite's cadence never satisfies, would leave the shadow armed but never
+/// comparing, and a green run would prove nothing. So this suite asserts the
+/// shadow actually COMPLETED a comparison.
+///
+/// The settle below is deliberate environment strengthening, not a weakened
+/// rule: quiescence requires both the feed and the controller to stop moving
+/// for consecutive 250 ms ticks, which a fast test never reaches on its own.
+#[test]
+fn shadow_completes_at_least_one_quiescent_comparison() {
+    let rt = runtime();
+    rt.block_on(async {
+        let env = TestEnvironmentBuilder::new()
+            // NESTED deliberately: two sibling groups (the document's child,
+            // and that child's own child). A single-group fixture makes a flat
+            // sequence and a per-parent grouping identical by construction, so
+            // it cannot witness the flat-vs-per-parent oracle defect (§9.7).
+            .with_org_file(
+                "shadow.org",
+                "* Shadow Liveness\n:PROPERTIES:\n:ID: shadow-1\n:END:\n\
+                 ** Nested Child\n:PROPERTIES:\n:ID: shadow-2\n:END:\n\
+                 ** Second Child\n:PROPERTIES:\n:ID: shadow-3\n:END:\n",
+            )
+            .build(rt.clone())
+            .await
+            .expect("Failed to build environment");
+
+        assert!(
+            env.wait_for_block("shadow-1", SYNC_TIMEOUT).await,
+            "block must sync before the shadow can be quiescent"
+        );
+
+        // Let both sides go still long enough for consecutive quiescent ticks.
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+
+        assert!(
+            env.wait_for_block("shadow-2", SYNC_TIMEOUT).await,
+            "nested child must sync so the fixture has >=2 sibling groups"
+        );
+
+        // Holder-path liveness. The `home_by` holder is now the ONLY write-back
+        // path, so the differential shadow that used to guard this suite has
+        // nothing left to differ from — but its liveness question survives
+        // intact and matters more: an assertion about on-disk org content is
+        // only evidence about write-back if write-back actually ran. Content
+        // can equally arrive from the ingest direction or from the
+        // authoritative bulk pass, and both would leave this at zero.
+        let written = holon_orgmode::di::docs_written_from_holder();
+        assert!(
+            written >= 1,
+            "this suite asserted on-disk org content while ZERO documents were written back from \
+             the home_by holder — the feed-driven write-back path never ran, so the green proves \
+             nothing about it (Option C Inc 2 holder-liveness gate, design doc §10.3)"
         );
     });
 }

@@ -116,4 +116,57 @@ mod tests {
         let module = DynamicSchemaModule::new(td);
         assert!(module.requires().is_empty());
     }
+
+    // ensure_schema must actually CREATE the table (and its indexes), not just
+    // return Ok(()). Drives a real in-memory backend and confirms the table +
+    // its declared index land in sqlite_master.
+    #[tokio::test]
+    async fn ensure_schema_creates_the_table_and_index() {
+        use std::collections::HashMap;
+
+        use crate::turso::TursoBackend;
+
+        let (_backend, handle) = TursoBackend::new_in_memory()
+            .await
+            .expect("in-memory backend");
+
+        let td = TypeDefinition::new(
+            "widget",
+            vec![
+                FieldSchema::new("id", "TEXT").primary_key(),
+                FieldSchema::new("label", "TEXT").indexed(),
+            ],
+        );
+        DynamicSchemaModule::new(td)
+            .ensure_schema(&handle)
+            .await
+            .expect("ensure_schema");
+
+        let tables = handle
+            .query(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='widget'",
+                HashMap::new(),
+            )
+            .await
+            .expect("query table presence");
+        assert_eq!(
+            tables.len(),
+            1,
+            "ensure_schema must create the `widget` table"
+        );
+
+        let indexes = handle
+            .query(
+                "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='widget'",
+                HashMap::new(),
+            )
+            .await
+            .expect("query index presence");
+        assert!(
+            !indexes.is_empty(),
+            "ensure_schema must create the declared index on `widget`"
+        );
+
+        handle.shutdown().await.expect("shutdown");
+    }
 }

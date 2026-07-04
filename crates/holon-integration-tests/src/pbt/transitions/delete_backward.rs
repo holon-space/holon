@@ -1,5 +1,10 @@
 //! Transition: delete characters backward in the active editor.
 //!
+//! @pbt rung input-pipeline
+//!   `apply_delete_backward` drives editor backspace keystrokes through the
+//!   production ReactiveEngineDriver -> HeadlessEditorMirror.
+//! @pbt covers editor-backspace — backspace keystroke -> MutableText edit
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:1664-1680`
 //! (generator), `state_machine.rs:3552-3556` (precondition, shared arm),
 //! `state_machine.rs:2966-2969` (ref-state apply),
@@ -7,7 +12,6 @@
 //! `transition_budgets.rs:368-377` (expected SQL).
 
 use holon_pbt_core::TransitionFactory;
-use holon_pbt_core::TransitionImpl;
 use holon_pbt_core::TransitionRef;
 use holon_pbt_core::capabilities::CapRegion;
 use holon_pbt_core::capabilities::RefBlockTreeMut;
@@ -18,21 +22,23 @@ use holon_pbt_core::capabilities::RefFocusMut;
 use holon_pbt_core::capabilities::RefLifecycle;
 use holon_pbt_core::capabilities::SutEditorMirrorWrite;
 use holon_pbt_core::capabilities::commit_active_editor_if_changed;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::check;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::reference_state::ReferenceState;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::REACTIVE_BASE;
-use crate::pbt::validation::Reason;
-use crate::pbt::validation::check;
+#[cfg(feature = "otel-testing")]
+use crate::pbt::transitions::join_block::join_expected_sql;
 
 /// Delete `count` characters backward in the active editor.
 /// Gated to `PBT_ATOMIC_EDITOR=1` runs.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I press backspace {count} times")]
 pub struct DeleteBackward {
     pub count: usize,
 }
@@ -92,6 +98,10 @@ where
     // deletes one char. Modeling the whole `count` as a flat char delete
     // missed the join — the SUT merged blocks while the ref only trimmed
     // text (the Full-slice SplitBlock→DeleteBackward divergence).
+    // Counted for `inv-sql-budget`: each join is a structural mutation the
+    // budget charges a `JoinBlock`, and the post-apply state it inspects can no
+    // longer tell a merge from a mid-line delete.
+    let mut joins = 0usize;
     for _ in 0..count {
         let cursor = state.active_editor_cursor().unwrap_or(0);
         if cursor > 0 {
@@ -122,14 +132,21 @@ where
         // Join boundary = the merge target's pre-join content length —
         // prod returns it in the op response and the (now seed-aware)
         // headless mirror adopts it for the next keystroke.
+        // The join boundary is the merge target's pre-join CONTENT length, and
+        // the editor that consumes it opens on the SURFACE — so it crosses the
+        // keyword prefix on a tasked target, exactly as prod's seed does
+        // (task #93).
         let boundary = state.block_content(&target).map(str::len).unwrap_or(0);
+        let prefix = state
+            .editor_surface_text(&target)
+            .len()
+            .saturating_sub(state.block_content(&target).map_or(0, str::len));
         crate::pbt::transitions::join_block::join_block_apply_to_ref(&block_id, state);
-        let joined = state
-            .block_content(&target)
-            .map(str::to_owned)
-            .unwrap_or_default();
-        state.open_active_editor(target, joined, boundary);
+        joins += 1;
+        let joined = state.editor_surface_text(&target);
+        state.open_active_editor(target, joined, boundary + prefix);
     }
+    state.note_backspace_joins(joins);
     // Same Phase 2 contract as TypeChars: per-keystroke writes flow
     // through MutableText → Loro → SQL between transitions. The CDC
     // quiescence barrier in the PBT runner means block.content has
@@ -150,9 +167,7 @@ where
 
 impl<R: RefEditorMirror + RefFocus + RefLifecycle> TransitionFactory<R> for DeleteBackward {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        vec![::holon_pbt_core::composition::CapId::of::<
-            dyn ::holon_pbt_core::capabilities::SutEditorMirrorWrite,
-        >()]
+        Self::declared_caps()
     }
 
     type Reason = Reason;
@@ -188,21 +203,29 @@ impl<
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutEditorMirrorWrite> TransitionImpl<ReferenceState, S> for DeleteBackward {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.apply_delete_backward(self.count).await;
+crate::cap_transition! {
+    DeleteBackward: SutEditorMirrorWrite,
+    where R: [ RefEditorMirror + RefFocus + RefLifecycle ],
+    |me, _state, sut| {
+        sut.apply_delete_backward(me.count).await;
     }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for DeleteBackward {
-    fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
+    sql_budget: |_me, state| {
+        // A backspace at caret 0 is a JOIN, not a keystroke: it merges the
+        // block into its predecessor, which legitimately writes. Each merge the
+        // run performed costs one `JoinBlock` budget on top of the single
+        // reactive base every transition pays; `joins = 0` reduces this to the
+        // pure in-buffer keystroke (5 reads, 0 writes) it always was.
+        let joins = state.last_backspace_joins();
+        let join = join_expected_sql(
+            state.active_watch_count(),
+            state.block_count(),
+            state.document_count(),
+        );
         ExpectedSql {
-            reads: REACTIVE_BASE,
-            writes: 0,
+            reads: REACTIVE_BASE + joins * (join.reads - REACTIVE_BASE),
+            writes: joins * join.writes,
             ddl: 0,
-            tolerance: 5,
+            tolerance: 5 + joins * join.tolerance,
         }
     }
 }

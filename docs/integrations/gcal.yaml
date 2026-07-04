@@ -1,0 +1,269 @@
+# Sidecar-format generation. The app runs its own bundled copy of this file
+# unless an INSTALLED copy declares the generation the running build understands
+# (crates/holon-mcp-client/src/bundled_sidecars.rs).
+schema_version: 1
+
+# Google Calendar — direct REST API (`transport: rest`) + generic OAuth2.
+#
+# WHY REST (not an MCP server): the `rest` transport is pure in-app HTTP with no
+# subprocess, so this exact sidecar runs unchanged on desktop AND on Android/iOS
+# (Martin's ruling). Google Calendar has no MCP server; it is a plain JSON API,
+# reached directly via the UTCP-style manual below and authenticated with the
+# transport's generic `oauth2` arm (refresh-token grant — nothing Google-named
+# in the engine).
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# ONE-TIME SETUP
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Steps 1-3:
+#  1. Create an OAuth client in Google Cloud (one-time):
+#       a. https://console.cloud.google.com → create/pick a project.
+#       b. APIs & Services → Enable APIs → enable "Google Calendar API".
+#       c. APIs & Services → OAuth consent screen → External (or Internal for a
+#          Workspace) → add yourself as a Test user; scope
+#          ".../auth/calendar.readonly" is enough.
+#       d. APIs & Services → Credentials → Create credentials → OAuth client ID →
+#          Application type: **Desktop app**. "Download JSON" → save it as
+#          ~/.config/holon/gcal-client.json (chmod 600).
+#
+#  2. Extract the client id/secret into the 0600 files this sidecar reads (they
+#     stay OUT of this file — it references paths only). Needs `jq`:
+#       umask 077
+#       jq -r '.installed.client_id'     ~/.config/holon/gcal-client.json > ~/.config/holon/gcal-client-id
+#       jq -r '.installed.client_secret' ~/.config/holon/gcal-client.json > ~/.config/holon/gcal-client-secret
+#       chmod 600 ~/.config/holon/gcal-client-id ~/.config/holon/gcal-client-secret
+#     (Google nests these under `.installed` for Desktop-app clients; some
+#     exports use `.web` — adjust the jq path if so.)
+#
+#  3. Run the one-time consent flow to mint a long-lived refresh token. The
+#     helper opens the Google consent page, captures the redirect on
+#     127.0.0.1, exchanges the code, and writes ONLY the refresh token to
+#     ~/.config/holon/gcal-refresh-token with mode 0600. It NEVER prints the
+#     token to the terminal, and Holon NEVER writes this file itself:
+#       GCAL_CLIENT_ID=$(cat ~/.config/holon/gcal-client-id) \
+#       GCAL_CLIENT_SECRET=$(cat ~/.config/holon/gcal-client-secret) \
+#         scripts/gcal-oauth-bootstrap.sh
+#     Verify the file is private (must print `-rw-------`):
+#       ls -l ~/.config/holon/gcal-refresh-token
+#     (If a credential file is group/world-readable, Holon REFUSES to start this
+#     integration and tells you to `chmod 600` it — a readable secret is a
+#     compromised one.)
+#
+#  4. Activate the sidecar (Holon auto-scans this directory at startup — no
+#     registry entry needed):
+#       cp docs/integrations/gcal.yaml ~/.config/holon/integrations/gcal.yaml
+#
+#  5. Restart Holon. On boot the poll runner warms `gcal_calendar` and
+#     `gcal_event` (primary calendar, rolling now-1d .. now+14d window), feeding
+#     the `gcal_upcoming` matview. Access tokens live only in memory; only the
+#     refresh token is on disk.
+#
+#  6. Verify via the `holon` MCP after restart:
+#       execute_query: SELECT summary, primary FROM gcal_calendar ORDER BY summary
+#       execute_query: SELECT start, summary FROM gcal_event ORDER BY start LIMIT 10
+#       execute_query: SELECT start, summary FROM gcal_upcoming ORDER BY start
+#
+# TROUBLESHOOTING
+#  - Nothing synced, no error: the refresh-token file is absent → the
+#    integration is disclosed-skipped (see the boot log warning). Re-run step 3.
+#  - "invalid_grant" on refresh: the refresh token was revoked/expired (e.g. the
+#    Google project is still in "Testing" and the 7-day test-token window
+#    lapsed). Re-run step 3. Publish the consent screen to stop expiry.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# SCOPE OF THIS v1 (documented TODOs)
+# ─────────────────────────────────────────────────────────────────────────────
+# * Events are pinned to the **primary** calendar. Multi-calendar fan-out (one
+#   list-events call per row of gcal_calendar) needs per-parent enumeration on
+#   the SYNC path; today `enumerate_from` lives only on the write-through
+#   `vtable` path, which the read-only `rest` transport rejects. TODO: add
+#   sync-side `enumerate_from` (bounded, fail-loud max_fan_out) to sync events
+#   across all calendars and populate `event.calendar_id` from the parent id.
+#   Until then `gcal_event.calendar_id` is NULL (every row is the primary
+#   calendar).
+
+transport:
+  rest:
+    base_url: https://www.googleapis.com/calendar/v3
+    # REST has no push freshness; poll every 5 minutes (per-entity sync.interval
+    # would override this). Bounds staleness without hammering the API.
+    poll_interval: 5m
+    auth:
+      # Generic OAuth2 refresh-token grant. Secrets are referenced by name only.
+      oauth2:
+        token_url: https://oauth2.googleapis.com/token
+        # Credentials are sourced from files here, because Holon is a GUI app and
+        # environment variables do not reach it cleanly. `client_secret_file` is
+        # 0600-enforced (refused loudly if group/world-readable), exactly like
+        # `refresh_token_file`; `client_id_file` is not perm-checked (the OAuth
+        # client id is not secret). See the extraction one-liner in the setup doc.
+        #
+        # Alternative (env / app-settings): drop the *_file keys and use
+        #   client_id_env: GCAL_CLIENT_ID
+        #   client_secret_env: GCAL_CLIENT_SECRET
+        client_id_file: ~/.config/holon/gcal-client-id
+        client_secret_file: ~/.config/holon/gcal-client-secret
+        # Written by scripts/gcal-oauth-bootstrap.sh (mode 0600, never by Holon).
+        # A leading ~/ expands to $HOME.
+        refresh_token_file: ~/.config/holon/gcal-refresh-token
+        # Informational only (documents what the refresh token was consented
+        # for; not sent on the refresh grant).
+        scopes:
+          - https://www.googleapis.com/auth/calendar.readonly
+    calls:
+      # Calendar list. Response: { "items": [ {id, summary, primary, selected} ],
+      # "nextPageToken"? }. Paginated (usually one page).
+      list-calendars:
+        method: GET
+        path: /users/me/calendarList
+        pagination:
+          items_path: items
+          next_token_path: nextPageToken
+          token_param: pageToken
+          max_pages: 20
+      # Events for the pinned primary calendar over a rolling window. `{now-1d}`
+      # / `{now+14d}` render to RFC3339 UTC at request time (generic now-token,
+      # distinct from `${VAR}` secrets and `{arg}` path/query data).
+      # singleEvents=true expands recurrences; orderBy=startTime requires it.
+      list-events:
+        method: GET
+        path: /calendars/{calendar_id}/events
+        query:
+          timeMin: "{now-1d}"
+          timeMax: "{now+14d}"
+          singleEvents: "true"
+          orderBy: "startTime"
+          maxResults: "250"
+        pagination:
+          items_path: items
+          next_token_path: nextPageToken
+          token_param: pageToken
+          max_pages: 50
+
+entity_prefix: "gcal_"
+
+entities:
+  # SYNC-only parent (calendar list). `summary`/`selected` are top-level scalars
+  # mapped by name (`selected` is absent → NULL on some calendars). `is_primary`
+  # is derived from the presence of Google's `primary` field (1 on the primary
+  # calendar, else 0).
+  calendar:
+    profile_variants:
+      - name: default
+        render: 'row(text(col("summary")))'
+    schema:
+      - name: id
+        sql_type: TEXT
+        primary_key: true
+      - name: summary
+        sql_type: TEXT
+        nullable: true
+      # `is_primary` (not `primary`): the cache-table DDL builder does not quote
+      # column identifiers, and `primary`/`end` are SQL keywords. Renamed to keep
+      # CREATE TABLE valid. Google's field is `primary`; the projection/mapping
+      # below reads it by its Google name.
+      - name: is_primary
+        sql_type: INTEGER
+        nullable: true
+      - name: selected
+        sql_type: INTEGER
+        nullable: true
+    sync:
+      list_tool: list-calendars
+      extract_path: items
+      # Map Google's `primary` field onto the keyword-safe `is_primary` column.
+      project:
+        is_primary:
+          exists: "primary"
+
+  # Events on the primary calendar. Google nests times under start/end objects
+  # ({dateTime} for timed, {date} for all-day), so a generic field `project`
+  # lifts them into flat, comparable columns and derives `all_day` from the
+  # presence of `start.date`. `calendar_id` is NULL in v1 (pinned primary — see
+  # the scope note in the header).
+  event:
+    profile_variants:
+      - name: default
+        render: 'row(text(col("start")), spacer(8), text(col("summary")))'
+    schema:
+      - name: id
+        sql_type: TEXT
+        primary_key: true
+      - name: calendar_id
+        sql_type: TEXT
+        nullable: true
+      - name: summary
+        sql_type: TEXT
+        nullable: true
+      - name: start
+        sql_type: TEXT
+        nullable: true
+      # `end_time` (not `end`): END is a SQL keyword and the cache-table DDL
+      # builder does not quote column identifiers, so a bare `end` column breaks
+      # CREATE TABLE. See the note on `is_primary` above.
+      - name: end_time
+        sql_type: TEXT
+        nullable: true
+      - name: all_day
+        sql_type: INTEGER
+        nullable: true
+      - name: location
+        sql_type: TEXT
+        nullable: true
+      - name: status
+        sql_type: TEXT
+        nullable: true
+      - name: updated
+        sql_type: TEXT
+        nullable: true
+    sync:
+      list_tool: list-events
+      extract_path: items
+      # Pin the primary calendar: fills the {calendar_id} path placeholder.
+      list_params:
+        calendar_id: primary
+      # Flatten Google's nested times into flat columns (see Projection docs).
+      project:
+        start:
+          path: ["start.dateTime", "start.date"]
+        end_time:
+          path: ["end.dateTime", "end.date"]
+        all_day:
+          exists: "start.date"
+
+tools: {}
+
+# Derived views (generic `views:` mechanism). Each becomes
+# `CREATE MATERIALIZED VIEW {entity_prefix}{name} AS {sql}` at startup.
+#
+# TWO CHAINED VIEWS (not one filtered view) — a measured Turso-IVM dialect limit:
+# strftime('now') in a matview WHERE drops ALL rows (the DBSP filter operator
+# does not evaluate it per-row), but strftime('now') in the SELECT projection
+# works (same as claude-history's session_status). So:
+#   1. gcal_upcoming_flagged — projects every event plus an `is_upcoming` flag
+#      computed with iif(... strftime ...) in the SELECT list (IVM-supported).
+#   2. gcal_upcoming — a chained view with a PLAIN-column WHERE (`is_upcoming=1`),
+#      which IVM's filter operator does support. matview-on-matview is supported.
+# Both verified by crates/holon-turso/tests/sidecar_views.rs — keep SQL in sync.
+#
+# CAVEAT (mirrors claude-history.yaml's session_status): strftime('now') is
+# evaluated when IVM recomputes a row (i.e. when that event's row changes), NOT
+# continuously — an event already in cache keeps its is_upcoming flag until its
+# next write; the "+7 days" horizon advances on re-sync, not by wall-clock alone.
+# Times are compared lexically: all-day dates ("2026-07-22") and offset
+# timestamps are approximate at the window edges — good enough for an upcoming
+# glance, not for exact alarms.
+views:
+  - name: upcoming_flagged
+    sql: >-
+      SELECT id, calendar_id, summary, start, end_time, all_day, location, status, updated,
+             iif(start >= strftime('%Y-%m-%dT%H:%M:%S', 'now')
+                 AND start < strftime('%Y-%m-%dT%H:%M:%S', 'now', '+7 days'),
+                 1, 0) AS is_upcoming
+      FROM gcal_event
+  - name: upcoming
+    sql: >-
+      SELECT id, calendar_id, summary, start, end_time, all_day, location, status, updated
+      FROM gcal_upcoming_flagged
+      WHERE is_upcoming = 1

@@ -7,62 +7,292 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::*;
+use holon_app::BootComponent;
+use holon_app::BootError;
+use holon_app::BootStage;
 use holon_frontend::FrontendSession;
 use holon_frontend::HolonConfig;
 use holon_frontend::SessionConfig;
 
 use crate::geometry::BoundsRegistry;
 
-fn open_holon_window(cx: &mut App, db_path: Option<PathBuf>, orgmode_root: Option<PathBuf>) {
-    let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+/// Single mobile boot-failure chokepoint.
+///
+/// The recovery shell (increment 2) does not exist yet, so a load-bearing boot
+/// failure still terminates the process — but it terminates HERE, through one
+/// funnel that logs the structured, component-attributed [`BootError`] loudly
+/// on every platform first (android_logger bridges `log`; iOS routes `tracing`
+/// to os_log; stderr always). Increment 2 replaces the `exit` with the rung-0
+/// recovery shell without touching any call site. No `catch_unwind` — that is
+/// open question 2, deliberately unresolved.
+fn boot_failed(err: BootError) -> ! {
+    let report = err.structured_report();
+    #[cfg(target_os = "android")]
+    log::error!("BOOT FAILED\n{report}");
+    #[cfg(not(target_os = "android"))]
+    tracing::error!("BOOT FAILED\n{report}");
+    eprintln!("BOOT FAILED\n{report}");
+    std::process::exit(1);
+}
+
+/// Register the embedded DejaVu Sans coverage font so Android renders the
+/// app's monochrome Unicode icon glyphs (☰ ◧ ⚙, chevrons, checkboxes, …).
+///
+/// Android's bundled fonts (Roboto, Noto Sans — loaded by the gpui-mobile
+/// platform) do NOT cover the Miscellaneous-Symbols / Geometric-Shapes /
+/// Dingbats Unicode blocks these icons live in, so they render as tofu boxes.
+/// DejaVu Sans (permissive Bitstream Vera license, shipped unmodified in
+/// `assets/fonts/`) has broad symbol coverage; adding it to the cosmic-text
+/// font database lets cosmic-text's per-glyph resolution find the icon glyphs.
+/// Color-emoji icons (🎨 🔗 …) are handled separately by `crate::icon` since
+/// swash cannot rasterise the device's COLR v1 emoji font. mac/iOS use their
+/// own system text systems and never call this.
+///
+/// Fails loud: a registration error is logged at error level, not swallowed.
+#[cfg(target_os = "android")]
+fn register_android_icon_fonts(cx: &mut App) {
+    const DEJAVU_SANS: &[u8] = include_bytes!("../../../assets/fonts/DejaVuSans.ttf");
+    match cx
+        .text_system()
+        .add_fonts(vec![std::borrow::Cow::Borrowed(DEJAVU_SANS)])
+    {
+        Ok(()) => log::info!(
+            "registered DejaVu Sans coverage font ({} bytes) for Android icon glyphs",
+            DEJAVU_SANS.len()
+        ),
+        Err(e) => log::error!("failed to register DejaVu Sans coverage font: {e:#}"),
+    }
+}
+
+/// Derive the three writable storage locations Holon needs on Android from the
+/// platform-provided data dirs.
+///
+/// The process CWD on Android is `/` (read-only), so any path that resolves
+/// *relative* (like [`resolve_config_dir`]'s `.holon` default) lands on a
+/// read-only filesystem and a config write SIGABRTs the process. Route ALL
+/// writable state through the app-private dirs the platform hands us:
+///
+/// - `config` + `db` → INTERNAL storage (`internal_data_path`, always writable,
+///   not user-visible) — the config dir MUST be here so preference writes never
+///   hit the read-only relative `.holon`.
+/// - `orgmode_root` → EXTERNAL app-private storage (`external_data_path`), so
+///   the vault is reachable via the Files app / MTP for the user to inspect.
+///
+/// Kept as a free function (not inlined into `android_main`) so it is unit-
+/// testable host-side — it is pure path joining with no Android dependency.
+#[cfg(any(target_os = "android", test))]
+fn android_storage_paths(
+    internal: Option<PathBuf>,
+    external: Option<PathBuf>,
+) -> AndroidStoragePaths {
+    AndroidStoragePaths {
+        config_dir: internal.as_ref().map(|p| p.join("config")),
+        db_path: internal.as_ref().map(|p| p.join("holon.db")),
+        orgmode_root: external.as_ref().map(|p| p.join("holon-pkm")),
+    }
+}
+
+#[cfg(any(target_os = "android", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AndroidStoragePaths {
+    config_dir: Option<PathBuf>,
+    db_path: Option<PathBuf>,
+    orgmode_root: Option<PathBuf>,
+}
+
+/// Open the main Holon window.
+///
+/// `config_dir`, when `Some`, pins the directory `holon.toml` and other
+/// app-local config live in. Mobile platforms MUST pass their app-private dir
+/// here (see [`android_storage_paths`]); passing `None` defers to
+/// [`resolve_config_dir`], whose relative `.holon` default is fatal on Android
+/// (read-only CWD) but correct on iOS/desktop (writable `$HOME`).
+fn open_holon_window(
+    cx: &mut App,
+    db_path: Option<PathBuf>,
+    orgmode_root: Option<PathBuf>,
+    config_dir: Option<PathBuf>,
+) {
+    // Register the embedded icon-coverage font before the window renders any
+    // text, so the toolbar/menu Unicode symbols resolve on their first frame.
+    #[cfg(target_os = "android")]
+    register_android_icon_fonts(cx);
+
+    let rt = tokio::runtime::Runtime::new().unwrap_or_else(|e| {
+        boot_failed(BootError::new(
+            BootComponent::Platform,
+            BootStage::ConfigLoad,
+            anyhow::anyhow!("Failed to create tokio runtime: {e}"),
+        ))
+    });
     let rt_handle = rt.handle().clone();
 
-    let session = rt.block_on(async {
+    let (session, engine, debug, degraded_bus, app) = rt.block_on(async {
         let widgets = crate::render_supported_widgets();
         let ui_info = holon_api::UiInfo {
             available_widgets: widgets,
             screen_size: None,
         };
-        let mut holon_config = HolonConfig {
-            db_path: db_path,
-            vault: holon_frontend::config::VaultConfig { root: orgmode_root },
-            ..Default::default()
-        };
-        // Mobile builds don't read `~/.config/holon/holon.toml`, so the
-        // desktop-style opt-in (`[loro] enabled = true`) doesn't apply here.
-        // Without this, `LoroModule` is never configured → `Arc<LoroShareBackend>`
-        // is never registered → share/accept ops fail with
-        // "No provider registered for entity: tree". Mobile is a first-class
-        // target for sharing, so enable Loro unconditionally.
-        holon_config.loro.enabled = Some(true);
-        let config_dir = holon_frontend::config::resolve_config_dir(None);
+        // The caller pins the config dir on mobile (app-private storage); only
+        // defer to `resolve_config_dir` when unset. On Android the relative
+        // `.holon` default is on the read-only CWD `/` and any preference write
+        // there aborts the process, so the app-private dir is load-bearing.
+        let config_dir =
+            config_dir.unwrap_or_else(|| holon_frontend::config::resolve_config_dir(None));
+        // Load the PERSISTED config from `config_dir` (not `::default()`), so a
+        // `ui.theme` (and any other preference) saved by the settings UI in a
+        // prior session is applied at boot — desktop reads this via
+        // `load_config`; mobile skipping it booted the built-in `holonLight`
+        // every restart (dogfood 2026-07-19). CRDT is force-enabled: mobile is a
+        // first-class sharing target and without it `LoroModule` is never
+        // configured → `Arc<LoroShareBackend>` unregistered → share/accept ops
+        // fail with "No provider registered for entity: tree".
+        let holon_config = HolonConfig::load_runtime_with_platform_overrides(
+            &config_dir,
+            db_path,
+            orgmode_root,
+            true,
+        );
         let session_config = SessionConfig::new(ui_info);
-        holon_app::new_from_config(
+
+        // Bootstrap through `GpuiModule` (same path as desktop `main.rs`)
+        // instead of `holon_app::new_from_config`. This starts the embedded
+        // MCP server in `GpuiModule::on_start`, making mobile a first-class
+        // debuggable / automatable target. The iOS simulator shares the
+        // host's loopback, so the MCP HTTP server (default `:8520`, override
+        // with `MCP_SERVER_PORT`) is reachable from the host — set a distinct
+        // port when a desktop Holon already holds 8520.
+        let mut app = fluxdi::Application::new(crate::di::GpuiModule {
             holon_config,
             session_config,
             config_dir,
-            std::collections::HashSet::new(),
-        )
-        .await
-        .expect("FrontendSession init failed")
+            locked_keys: std::collections::HashSet::new(),
+        });
+        if let Err(e) = app.bootstrap().await {
+            boot_failed(BootError::from_bootstrap_error(e));
+        }
+
+        let injector = app.injector();
+        let session = injector.resolve::<FrontendSession>();
+        let engine = injector.resolve::<holon_frontend::reactive::ReactiveEngine>();
+        let debug = injector.resolve::<holon_mcp::server::DebugServices>();
+
+        // Populate the reset-safe `live_debug` cell so the debug PBT tools
+        // (`await_quiescence`, `debug_pbt_snapshot`) observe the boot session's
+        // convergence/mirror handles. These are `root_async` factories — awaited
+        // here so they are live (not raced) before any tool call; a later
+        // `reset_vault` swaps this cell for the fresh session's handles.
+        {
+            let loro_sync_handle = injector
+                .try_resolve_async::<holon::sync::LoroSyncControllerHandle>()
+                .await
+                .ok();
+            // `BlockQuerySource` is not a DI key — the FrontendSession factory
+            // builds it inline; the session accessor is the only handle.
+            let block_query_source = Some(session.block_query().clone());
+            let org_idle_signal = injector
+                .try_resolve::<holon_orgmode::OrgSyncIdleSignal>()
+                .ok();
+            let loro_doc_store = injector
+                .try_resolve::<holon::sync::LoroBlockOperations>()
+                .ok()
+                .map(|ops| ops.shared_doc_store());
+            let writeback_renderer = injector
+                .try_resolve_async::<holon_filesystem::WritebackRenderer>()
+                .await
+                .ok();
+            *debug.live_debug.write().expect("live_debug cell poisoned") =
+                holon_mcp::server::DebugHandlesCell {
+                    loro_sync_handle,
+                    org_idle_signal,
+                    block_query_source,
+                    loro_doc_store,
+                    reactive_engine: Some(engine.clone()),
+                    writeback_renderer,
+                };
+        }
+
+        let degraded_bus =
+            (*injector.resolve::<std::sync::Arc<holon::sync::DegradedSignalBus>>()).clone();
+
+        (session, engine, debug, degraded_bus, app)
     });
 
-    // Keep runtime alive on a background thread
+    // Keep the runtime AND the DI application alive for the process lifetime:
+    // the spawned MCP server task and background factories hold services
+    // resolved from `app`'s injector, and the `NavigationState` built below
+    // shares `debug.input_router` so MCP-injected input reaches the window.
     std::thread::spawn(move || {
+        let _app = app;
         rt.block_on(std::future::pending::<()>());
     });
 
-    let nav = crate::navigation_state::NavigationState::new();
+    // Phase 1 Option A: open a REBINDABLE window so a per-case `reset_vault`
+    // MCP call can swap the engine+session in place (keeping this one window,
+    // one MCP server). Mirror `launch_holon_window_with_engine`'s nav wiring so
+    // MCP-injected input still reaches the window.
+    let mut nav =
+        crate::navigation_state::NavigationState::with_input_router(debug.input_router.clone());
+    nav.set_navigation_debug(debug.navigation_state.clone());
     let bounds_registry = BoundsRegistry::new();
-    crate::launch_holon_window_with_registry(session, rt_handle, nav, bounds_registry, cx);
+    let handle = crate::launch_holon_window_rebindable(
+        session,
+        engine,
+        rt_handle,
+        nav,
+        bounds_registry,
+        Some(debug.clone()),
+        Some(degraded_bus),
+        "Holon",
+        cx,
+    )
+    .unwrap_or_else(|| {
+        boot_failed(BootError::new(
+            BootComponent::Platform,
+            BootStage::SessionResolve,
+            anyhow::anyhow!("rebindable Holon window failed to open"),
+        ))
+    });
+
+    // Install the gpui-side reset builder so the (tokio) `reset_vault` tool can
+    // boot a fresh SUT without a second MCP server. It runs on whatever runtime
+    // the tool awaits it on — the MCP server runs on `rt`, so this lands there.
+    let reset_builder: holon_mcp::server::ResetBuilderFn = Arc::new(|files| {
+        Box::pin(crate::reset::build_fresh_sut_from_files(files))
+            as futures::future::BoxFuture<
+                'static,
+                anyhow::Result<holon_mcp::server::ResetBuildOutput>,
+            >
+    });
+    debug.reset_builder.set(reset_builder).ok();
+
+    // Main-thread reset pump: owns the `!Send` `RebindHandle` and re-points the
+    // live window when a `ResetRequest` arrives. Mirrors `setup_interaction_pump`.
+    let (reset_tx, mut reset_rx) =
+        futures::channel::mpsc::channel::<holon_mcp::server::ResetRequest>(4);
+    debug.reset_tx.set(reset_tx).ok();
+    cx.spawn(async move |cx| {
+        use futures::StreamExt;
+        while let Some(req) = reset_rx.next().await {
+            let holon_mcp::server::ResetRequest {
+                session,
+                engine,
+                ack,
+            } = req;
+            // `AsyncApp::update` is infallible on the gpui-mobile fork (returns
+            // the closure result directly), so the rebind always runs on the
+            // main thread here; report success once it has.
+            cx.update(|cx| handle.rebind(session, engine, cx));
+            ack.send(Ok(())).ok();
+        }
+    })
+    .detach();
 }
 
 // ─── iOS ─────────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "ios")]
 const DEFAULT_INDEX_ORG: &str = include_str!("../../../assets/default/index.org");
-#[cfg(target_os = "ios")]
-const DEFAULT_JOURNALS_ORG: &str = include_str!("../../../assets/default/Journals.org");
 
 #[cfg(target_os = "ios")]
 fn ios_data_paths() -> (Option<PathBuf>, Option<PathBuf>) {
@@ -75,29 +305,49 @@ fn ios_data_paths() -> (Option<PathBuf>, Option<PathBuf>) {
     let orgmode_root = home.as_ref().map(|h| h.join("Documents").join("holon-pkm"));
     if let Some(db) = db_path.as_ref() {
         if let Some(parent) = db.parent() {
-            std::fs::create_dir_all(parent).expect("create Library dir for holon.db");
+            std::fs::create_dir_all(parent).unwrap_or_else(|e| {
+                boot_failed(BootError::new(
+                    BootComponent::Config,
+                    BootStage::ConfigLoad,
+                    anyhow::anyhow!("create Library dir for holon.db: {e}"),
+                ))
+            });
         }
     }
     if let Some(org) = orgmode_root.as_ref() {
-        std::fs::create_dir_all(org).expect("create orgmode root dir");
+        std::fs::create_dir_all(org).unwrap_or_else(|e| {
+            boot_failed(BootError::new(
+                BootComponent::Config,
+                BootStage::ConfigLoad,
+                anyhow::anyhow!("create orgmode root dir: {e}"),
+            ))
+        });
         let is_empty = std::fs::read_dir(org)
-            .expect("read orgmode root dir")
+            .unwrap_or_else(|e| {
+                boot_failed(BootError::new(
+                    BootComponent::Config,
+                    BootStage::ConfigLoad,
+                    anyhow::anyhow!("read orgmode root dir: {e}"),
+                ))
+            })
             .next()
             .is_none();
         if is_empty {
             let seed = org.join("index.org");
-            std::fs::write(&seed, DEFAULT_INDEX_ORG).expect("write seed index.org");
+            std::fs::write(&seed, DEFAULT_INDEX_ORG).unwrap_or_else(|e| {
+                boot_failed(BootError::new(
+                    BootComponent::Config,
+                    BootStage::ConfigLoad,
+                    anyhow::anyhow!("write seed index.org: {e}"),
+                ))
+            });
             eprintln!("GPUI iOS: seeded {}", seed.display());
         }
-        // Seed notes.org whenever it doesn't exist — independent of is_empty so
-        // existing installs that only have index.org also get a visible document.
-        // "index.org" is filtered from the sidebar (name == "index"), so without
-        // this file the sidebar is always empty on a fresh install.
-        let journals_path = org.join("Journals.org");
-        if !journals_path.exists() {
-            std::fs::write(&journals_path, DEFAULT_JOURNALS_ORG).expect("write seed Journals.org");
-            eprintln!("GPUI iOS: seeded {}", journals_path.display());
-        }
+        // The Journals page (`block:journals` + its query/render/auto-create
+        // rule) is seeded programmatically at boot by
+        // `build_default_layout_blocks`, NOT as a disk `Journals.org` —
+        // writing the org file too would mint a second "Journals" Page
+        // (the disk file parses to a distinct `file:` document).
     }
     (db_path, orgmode_root)
 }
@@ -105,6 +355,29 @@ fn ios_data_paths() -> (Option<PathBuf>, Option<PathBuf>) {
 #[cfg(target_os = "ios")]
 #[no_mangle]
 pub extern "C" fn gpui_ios_register_app() {
+    // Route `tracing` to BOTH stderr and Apple's unified logging (os_log). iOS
+    // installed no subscriber, so every `tracing::{error,warn,info,debug}!` —
+    // including the `dispatch_intent_chain` failure logs that explain why an
+    // operation didn't commit — was silently dropped, leaving the app
+    // undebuggable on device (a fail-loud violation).
+    //
+    // A simulator app's stderr is NOT captured by `xcrun simctl log show` or
+    // Console.app, so the stderr layer alone (captured only via
+    // `simctl launch --console-pty`) was invisible during live debugging. The
+    // os_log layer surfaces the same events to the unified log, queryable via
+    // `xcrun simctl log show --predicate 'process == "Holon"'` and Console.app
+    // (subsystem `space.holon.gpui`). Both layers share one `EnvFilter`;
+    // `RUST_LOG` overrides the default `info` filter (pass through
+    // `SIMCTL_CHILD_RUST_LOG`).
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    let filter = holon_frontend::logging::env_filter_with_default("info");
+    let _ = tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .with(tracing_oslog::OsLogger::new("space.holon.gpui", "rust"))
+        .try_init();
+
     std::panic::set_hook(Box::new(|info| {
         eprintln!("GPUI PANIC: {info}");
     }));
@@ -112,7 +385,9 @@ pub extern "C" fn gpui_ios_register_app() {
     gpui_mobile::ios::ffi::set_app_callback(Box::new(|cx: &mut App| {
         let (db_path, orgmode_root) = ios_data_paths();
         eprintln!("GPUI iOS: db_path={db_path:?} orgmode_root={orgmode_root:?}");
-        open_holon_window(cx, db_path, orgmode_root);
+        // iOS: `None` defers to `resolve_config_dir`, which resolves under the
+        // sandbox `$HOME` (writable) — correct here, unlike on Android.
+        open_holon_window(cx, db_path, orgmode_root, None);
     }));
 }
 
@@ -140,19 +415,29 @@ fn android_main(app: android_activity::AndroidApp) {
     let external = app.external_data_path();
     log::info!("android_main: internal_data_path={internal:?}, external_data_path={external:?}");
 
-    let db_path = internal.map(|p| p.join("holon.db"));
-    let orgmode_root = external.map(|p| p.join("holon-pkm"));
-    log::info!("android_main: db_path={db_path:?}, orgmode_root={orgmode_root:?}");
+    let AndroidStoragePaths {
+        config_dir,
+        db_path,
+        orgmode_root,
+    } = android_storage_paths(internal, external);
+    log::info!(
+        "android_main: config_dir={config_dir:?}, db_path={db_path:?}, orgmode_root={orgmode_root:?}"
+    );
 
     let _platform = gpui_mobile::android::jni::init_platform(&app);
     log::info!("android_main: platform initialised");
 
-    let shared = gpui_mobile::android::jni::shared_platform()
-        .expect("shared_platform() returned None after init_platform");
+    let shared = gpui_mobile::android::jni::shared_platform().unwrap_or_else(|| {
+        boot_failed(BootError::new(
+            BootComponent::Platform,
+            BootStage::ContainerConfigure,
+            anyhow::anyhow!("shared_platform() returned None after init_platform"),
+        ))
+    });
 
     let gpui_app = Application::with_platform(std::rc::Rc::new(shared));
-    gpui_app.run(|cx| {
-        open_holon_window(cx, db_path, orgmode_root);
+    gpui_app.run(move |cx| {
+        open_holon_window(cx, db_path, orgmode_root, config_dir);
     });
 }
 
@@ -189,4 +474,136 @@ pub fn safe_area_bottom_px() -> f32 {
     }
     #[allow(unreachable_code)]
     0.0
+}
+
+// ─── Soft keyboard lifecycle ─────────────────────────────────────────────
+//
+// The platform keyboard must be up exactly while a text input owns focus.
+// gpui delivers Blur/Focus in no guaranteed order on a block→block focus
+// move (the zombie-editor blur can arrive AFTER the next editor's focus),
+// so a naive hide-on-blur dismisses the keyboard mid-editing. Guard with a
+// focus generation counter: every focus bumps it; a blur schedules a
+// deferred hide that only fires if no focus arrived in the meantime.
+
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+
+static KEYBOARD_FOCUS_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// How long a scheduled hide waits for a successor focus before firing.
+/// One frame is enough for the mount→grab pipeline; 150ms adds margin for
+/// slow re-renders (variant switch re-mounts the editor) without a user-
+/// perceivable keyboard flicker window.
+const KEYBOARD_HIDE_GRACE: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// A text input gained focus: claim the next generation (cancelling any
+/// pending deferred hide) and raise the platform soft keyboard. Returns the
+/// generation this focus claimed; the editor stores it and passes it back to
+/// [`editor_focus_lost`] so a *stale* editor's later blur cannot hide the
+/// keyboard out from under whoever currently holds focus.
+pub fn editor_focus_gained() -> u64 {
+    let generation = KEYBOARD_FOCUS_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    tracing::debug!(generation, "soft keyboard: show (editor focus)");
+    platform_show_keyboard();
+    generation
+}
+
+/// A text input lost focus: schedule a deferred hide keyed to the generation
+/// that focus *claimed* (`my_generation`, from the matching
+/// [`editor_focus_gained`]).
+///
+/// The bare generation counter only guards blur-BEFORE-focus (a successor's
+/// focus bumps the counter, so a hide scheduled by the predecessor's earlier
+/// blur is skipped). It does NOT guard blur-AFTER-focus: gpui delivers
+/// Focus/Blur unordered on a block→block move (and on the iOS render-path the
+/// unmounting editor's `is_focused=false` edge can be evaluated *after* the
+/// successor's `true` edge in the same frame), so the stale editor's blur
+/// reads the already-advanced counter and schedules a hide that nothing
+/// cancels — the keyboard drops ~150ms after focus though a block is focused.
+///
+/// Fix: only the editor still holding the current generation may schedule a
+/// hide. A stale editor (`my_generation != current`) has already been
+/// superseded by a later focus and its blur is ignored.
+pub fn editor_focus_lost(cx: &mut App, my_generation: u64) {
+    if KEYBOARD_FOCUS_GENERATION.load(Ordering::SeqCst) != my_generation {
+        tracing::debug!(
+            my_generation,
+            "soft keyboard: hide skipped (stale editor blur; focus already moved on)"
+        );
+        return;
+    }
+    cx.spawn(async move |cx| {
+        cx.background_executor().timer(KEYBOARD_HIDE_GRACE).await;
+        if KEYBOARD_FOCUS_GENERATION.load(Ordering::SeqCst) == my_generation {
+            tracing::debug!("soft keyboard: hide (editor blur, no refocus)");
+            platform_hide_keyboard();
+        } else {
+            tracing::debug!("soft keyboard: hide skipped (focus moved to another input)");
+        }
+    })
+    .detach();
+}
+
+fn platform_show_keyboard() {
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    gpui_mobile::show_keyboard();
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    tracing::warn!(
+        "soft keyboard show requested but this platform has no soft-keyboard backend (mobile \
+         feature enabled on a desktop OS) — input continues via hardware keyboard"
+    );
+}
+
+fn platform_hide_keyboard() {
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    gpui_mobile::hide_keyboard();
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    tracing::warn!(
+        "soft keyboard hide requested but this platform has no soft-keyboard backend (mobile \
+         feature enabled on a desktop OS)"
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    // NB: import only what's needed — a `use super::*` glob would pull gpui's
+    // `test` attribute macro (via the module's `use gpui::*`) into scope and
+    // shadow the std `#[test]`, causing "recursion limit reached while expanding
+    // #[test]".
+    use std::path::PathBuf;
+
+    use super::android_storage_paths;
+
+    /// Regression for the Android SIGABRT (dogfood 2026-07-19): the CONFIG dir
+    /// MUST resolve under app-private INTERNAL storage — never a relative
+    /// `.holon` on the read-only CWD `/`. DB co-locates with config (internal);
+    /// the org vault goes to EXTERNAL app-private storage.
+    #[test]
+    fn android_storage_paths_routes_config_to_internal_app_private() {
+        let internal = PathBuf::from("/data/data/space.holon.gpui/files");
+        let external = PathBuf::from("/storage/emulated/0/Android/data/space.holon.gpui/files");
+
+        let paths = android_storage_paths(Some(internal.clone()), Some(external.clone()));
+
+        assert_eq!(paths.config_dir, Some(internal.join("config")));
+        assert_eq!(paths.db_path, Some(internal.join("holon.db")));
+        assert_eq!(paths.orgmode_root, Some(external.join("holon-pkm")));
+
+        // The critical invariant: config never resolves relative (which would
+        // land on the read-only `/` and SIGABRT on the first preference write).
+        assert!(
+            paths.config_dir.as_ref().unwrap().is_absolute(),
+            "config dir must be absolute app-private storage, not relative .holon"
+        );
+    }
+
+    /// Missing platform dirs propagate as `None` (defers to
+    /// `resolve_config_dir`) rather than fabricating a bogus path.
+    #[test]
+    fn android_storage_paths_passes_through_none() {
+        let paths = android_storage_paths(None, None);
+        assert_eq!(paths.config_dir, None);
+        assert_eq!(paths.db_path, None);
+        assert_eq!(paths.orgmode_root, None);
+    }
 }

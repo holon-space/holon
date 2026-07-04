@@ -159,18 +159,50 @@ fn build_run(byte_len: usize, active: &[&InlineMark], style: &RichTextStyle) -> 
 
 /// Convert a Unicode-scalar range to a byte range for `text`.
 ///
-/// Asserts the range fits within `text`. The editor uses this to translate
-/// `RichTextSelection` (scalar offsets) into byte-based hit-test coordinates
-/// for `WrappedLine::position_for_index`.
+/// Clamps an out-of-range span to the text length rather than aborting. The
+/// editor uses this to translate `RichTextSelection` (scalar offsets) into
+/// byte-based hit-test coordinates for `WrappedLine::position_for_index`, and
+/// the renderer uses it to place link-mark spans. A corrupt persisted mark
+/// (span longer than its content) must NOT SIGABRT the whole app on paint —
+/// clamp and disclose loudly via `tracing::error!` (fail-loud, not silent),
+/// yielding a degraded render. The durable fix is clamping at the read boundary
+/// (`holon_api::canonicalize_marks_against`); this is the last-resort net.
 pub fn scalar_range_to_bytes(text: &str, range: Range<usize>) -> Range<usize> {
     let mut char_to_byte: Vec<usize> = text.char_indices().map(|(i, _)| i).collect();
     char_to_byte.push(text.len());
     let total = char_to_byte.len() - 1;
-    assert!(
-        range.start <= total && range.end <= total,
-        "scalar_range_to_bytes: {range:?} exceeds text length {total} chars"
-    );
-    char_to_byte[range.start]..char_to_byte[range.end]
+    if range.start > total || range.end > total {
+        // Per-frame repaint of a corrupt block would spam this every frame;
+        // keep the first loud (ERROR), drop repeats of the SAME corrupt span
+        // to debug! (see render::warn_throttle). No block id reaches this fn,
+        // so the corrupt span itself is the throttle key.
+        let first = crate::render::warn_throttle::first_time_seen((
+            "scalar_range_to_bytes",
+            text,
+            range.start,
+            range.end,
+        ));
+        if first {
+            tracing::error!(
+                range.start,
+                range.end,
+                content_chars = total,
+                "scalar_range_to_bytes: range exceeds content length; clamping to \
+                 render degraded (corrupt mark span?)"
+            );
+        } else {
+            tracing::debug!(
+                range.start,
+                range.end,
+                content_chars = total,
+                "scalar_range_to_bytes: range exceeds content length (repeat; \
+                 first occurrence logged at ERROR)"
+            );
+        }
+    }
+    let start = range.start.min(total);
+    let end = range.end.min(total).max(start);
+    char_to_byte[start]..char_to_byte[end]
 }
 
 #[cfg(test)]
@@ -336,5 +368,28 @@ mod tests {
     fn scalar_range_to_bytes_full_range() {
         let r = scalar_range_to_bytes("hello", 0..5);
         assert_eq!(r, 0..5);
+    }
+
+    #[test]
+    fn scalar_range_to_bytes_clamps_out_of_bounds_instead_of_aborting() {
+        // A corrupt mark span (end past content) must NOT SIGABRT the render.
+        // Clamp to the content byte length; the block still paints (degraded).
+        let r = scalar_range_to_bytes("hello", 0..11);
+        assert_eq!(r, 0..5, "out-of-bounds end must clamp to content byte len");
+    }
+
+    #[test]
+    fn scalar_range_to_bytes_clamps_out_of_bounds_multibyte() {
+        // "a你好" = 3 scalars / 7 bytes. A span 0..9 clamps to the full byte range.
+        let r = scalar_range_to_bytes("a你好", 0..9);
+        assert_eq!(r, 0..7);
+    }
+
+    #[test]
+    fn scalar_range_to_bytes_clamps_start_past_end() {
+        // Both endpoints past content clamp to the tail; end is kept >= start so
+        // the returned range never inverts.
+        let r = scalar_range_to_bytes("hi", 5..9);
+        assert_eq!(r, 2..2);
     }
 }

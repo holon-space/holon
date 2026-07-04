@@ -53,25 +53,15 @@ use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive::BuilderServicesSlot;
 use holon_frontend::reactive::ReactiveEngine;
 use holon_loro::LoroBackend;
+use holon_pbt_core::types::LoroCorruptionType;
 use tempfile::TempDir;
 use tokio::sync::RwLock;
 
-/// Types of corruption for stale .loro files (for testing recovery)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum LoroCorruptionType {
-    /// Empty file (0 bytes)
-    Empty,
-    /// File with partial/truncated Loro header
-    Truncated,
-    /// File with invalid magic bytes
-    InvalidHeader,
-}
-
 /// Resolve the DI-registered `DebugServices` and pre-populate its
-/// optional fields (`loro_doc_store`) from other DI services. Mirrors
-/// what `holon_mcp::di::DebugServicesPopulatorModule` does for
-/// module-using consumers — the test path runs it inline because the
-/// `extra_resolve` callback is the natural post-`on_start` hook.
+/// optional fields from other DI services. Mirrors what
+/// `holon_mcp::di::DebugServicesPopulatorModule` does for module-using
+/// consumers — the test path runs it inline because the `extra_resolve`
+/// callback is the natural post-`on_start` hook.
 fn populate_debug_services(injector: &fluxdi::Injector) -> Arc<holon_mcp::server::DebugServices> {
     let debug = injector.resolve::<holon_mcp::server::DebugServices>();
     if let Ok(ops) = injector.try_resolve::<holon::sync::LoroBlockOperations>() {
@@ -303,6 +293,10 @@ pub struct TestEnvironmentBuilder {
     enable_fake_mcp: bool,
     /// Enable Loro CRDT layer (default: true)
     enable_loro: bool,
+    /// Pin the boot clock so "today" (and any date-derived boot behavior, e.g.
+    /// the daily-journal auto-create rule) is deterministic regardless of the
+    /// real wall-clock date. `None` uses the real `SystemClock`.
+    clock: Option<Arc<dyn holon_api::Clock>>,
 }
 
 impl TestEnvironmentBuilder {
@@ -314,7 +308,17 @@ impl TestEnvironmentBuilder {
             settle_delay_ms: 100,
             enable_fake_mcp: false,
             enable_loro: true,
+            clock: None,
         }
+    }
+
+    /// Pin the boot clock to a fixed instant so date-derived boot behavior (the
+    /// daily-journal auto-create rule's `{today}`) is deterministic under ANY
+    /// real wall-clock date. Registered as the DI `InjectedClock`, mirroring
+    /// the composed keystone's `keystone_boot_clock`.
+    pub fn with_clock(mut self, clock: Arc<dyn holon_api::Clock>) -> Self {
+        self.clock = Some(clock);
+        self
     }
 
     /// Add an org file to be created BEFORE engine initialization
@@ -416,6 +420,7 @@ impl TestEnvironmentBuilder {
         }
         let enable_fake_mcp = self.enable_fake_mcp;
         let org_fs_for_di = org_fs.clone();
+        let clock_for_di = self.clock.clone();
 
         let (
             session,
@@ -427,27 +432,21 @@ impl TestEnvironmentBuilder {
             config_dir,
             std::collections::HashSet::new(),
             move |injector| {
-                use holon_frontend::reactive::BuilderServicesSlot;
-                use holon_frontend::reactive::RenderInterpreterInjectorExt;
-                override_org_fs_bindings(injector, &org_fs_for_di);
-                let slot = injector.resolve::<BuilderServicesSlot>();
-                injector.set_render_interpreter(holon_frontend::reactive::make_interpret_fn(
-                    slot.0.clone(),
-                ));
+                install_headless_render_interpreter(injector, &org_fs_for_di);
                 holon_mcp::di::register_debug_services(injector);
                 if enable_fake_mcp {
                     crate::fake_mcp_module::register_fake_mcp(injector);
                 }
+                if let Some(clock) = clock_for_di.clone() {
+                    let injected = holon_api::InjectedClock(clock);
+                    injector.provide::<holon_api::InjectedClock>(fluxdi::Provider::root(
+                        move |_| injected.clone().into(),
+                    ));
+                }
                 Ok(())
             },
             move |injector| {
-                use holon_frontend::reactive::BuilderServices;
-                use holon_frontend::reactive::BuilderServicesSlot;
-                use holon_frontend::reactive::ReactiveEngine;
-                let engine = injector.resolve::<ReactiveEngine>();
-                let slot = injector.resolve::<BuilderServicesSlot>();
-                let services: Arc<dyn BuilderServices> = engine.clone();
-                slot.0.set(services).ok(); // ALLOW(ok): OnceLock set — idempotent
+                let engine = publish_reactive_builder_services(injector);
 
                 let doc_store = if enable_loro {
                     injector
@@ -545,6 +544,41 @@ pub(crate) fn override_org_fs_bindings(
     injector.override_provider::<dyn holon_filesystem::FileChangeSource>(fluxdi::Provider::root(
         move |_| cs.clone() as Arc<dyn holon_filesystem::FileChangeSource>,
     ));
+}
+
+/// The CapMap↔fluxdi bridge, `extra_setup` half (ADR 0019 §5). fluxdi's
+/// `add_frontend` / `new_from_config_with_di` assembles the REAL frontend app;
+/// a headless PBT host then wraps that assembled app as CapMap capabilities —
+/// it does NOT re-implement the wiring. This is the one shared adapter every
+/// headless boot runs in its `extra_setup` closure: rebind the org filesystem
+/// to the in-memory `org_fs` and install the render interpreter over
+/// `BuilderServicesSlot`. Site-specific registrations (debug services, fake
+/// MCP) run AFTER this, in the caller. Keeping it in ONE place is why the boot
+/// sites (`TestEnvironment`, `HeadlessFrontendComponent`) no longer each copy
+/// the block.
+pub(crate) fn install_headless_render_interpreter(
+    injector: &fluxdi::Injector,
+    org_fs: &Arc<holon_filesystem::InMemoryFileSystem>,
+) {
+    use holon_frontend::reactive::RenderInterpreterInjectorExt;
+    override_org_fs_bindings(injector, org_fs);
+    let slot = injector.resolve::<BuilderServicesSlot>();
+    injector.set_render_interpreter(holon_frontend::reactive::make_interpret_fn(slot.0.clone()));
+}
+
+/// The CapMap↔fluxdi bridge, `build` half (ADR 0019 §5): resolve the production
+/// `ReactiveEngine` and publish it into `BuilderServicesSlot` — breaking the
+/// engine↔interpreter cycle so render interpretation and the engine share one
+/// instance — then return the engine. Shared by every headless boot so the
+/// "publish ReactiveEngine as BuilderServices" step lives in ONE place.
+pub(crate) fn publish_reactive_builder_services(
+    injector: &fluxdi::Injector,
+) -> Arc<ReactiveEngine> {
+    let engine = injector.resolve::<ReactiveEngine>();
+    let slot = injector.resolve::<BuilderServicesSlot>();
+    let services: Arc<dyn BuilderServices> = engine.clone();
+    slot.0.set(services).ok(); // ALLOW(ok): OnceLock set — idempotent
+    engine
 }
 
 /// Spec 0008 §4.2(b) — re-boot the app IN-PROCESS with the consolidator flipped
@@ -750,7 +784,7 @@ impl TestEnvironment {
     ///
     /// Equivalent to `new()` followed by `start_app(true)`.
     pub async fn new_running(runtime: Arc<tokio::runtime::Runtime>) -> Result<Self> {
-        let mut env = Self::new(runtime)?;
+        let env = Self::new(runtime)?;
         env.start_app(true).await?;
         Ok(env)
     }
@@ -899,13 +933,7 @@ impl TestEnvironment {
             config_dir,
             std::collections::HashSet::new(),
             move |injector| {
-                use holon_frontend::reactive::BuilderServicesSlot;
-                use holon_frontend::reactive::RenderInterpreterInjectorExt;
-                override_org_fs_bindings(injector, &org_fs_for_di);
-                let slot = injector.resolve::<BuilderServicesSlot>();
-                injector.set_render_interpreter(holon_frontend::reactive::make_interpret_fn(
-                    slot.0.clone(),
-                ));
+                install_headless_render_interpreter(injector, &org_fs_for_di);
                 holon_mcp::di::register_debug_services(injector);
                 if enable_fake_mcp {
                     crate::fake_mcp_module::register_fake_mcp(injector);
@@ -913,13 +941,7 @@ impl TestEnvironment {
                 Ok(())
             },
             move |injector| {
-                use holon_frontend::reactive::BuilderServices;
-                use holon_frontend::reactive::BuilderServicesSlot;
-                use holon_frontend::reactive::ReactiveEngine;
-                let engine = injector.resolve::<ReactiveEngine>();
-                let slot = injector.resolve::<BuilderServicesSlot>();
-                let services: Arc<dyn BuilderServices> = engine.clone();
-                slot.0.set(services).ok(); // ALLOW(ok): OnceLock set — idempotent
+                let engine = publish_reactive_builder_services(injector);
 
                 let doc_store = if enable_loro {
                     injector
@@ -1120,12 +1142,7 @@ impl TestEnvironment {
         .await?;
 
         let session = injector.resolve::<FrontendSession>();
-        let reactive_engine = injector.resolve::<ReactiveEngine>();
-        // Populate the OnceLock that breaks the engine↔interpreter cycle — the
-        // same step the Turso path performs after resolving the engine.
-        let slot = injector.resolve::<BuilderServicesSlot>();
-        let services: Arc<dyn BuilderServices> = reactive_engine.clone();
-        slot.0.set(services).ok(); // ALLOW(ok): OnceLock set — idempotent
+        let reactive_engine = publish_reactive_builder_services(&injector);
 
         self.latch_injector((*injector).clone());
         self.latch_session(session);
@@ -1326,6 +1343,12 @@ impl TestEnvironment {
         self.debug_services.get()
     }
 
+    /// The startup DI injector, for tests that need a production service the
+    /// harness does not surface. `None` before `start_app()` runs.
+    pub fn injector(&self) -> Option<&fluxdi::Injector> {
+        self.injector.get()
+    }
+
     /// The `LoroSyncController` handle, if Loro is enabled. Shared into
     /// `LoroSut` so peer-sync ops can wait for reactive quiescence.
     pub fn loro_sync_handle(&self) -> Option<&Arc<holon::sync::LoroSyncControllerHandle>> {
@@ -1391,7 +1414,9 @@ impl TestEnvironment {
         else {
             return;
         };
-        wait_for_loro_quiescence_on(handle, doc_store, timeout).await;
+        holon_loro_testing::quiescence::wait_for_loro_quiescence_on(handle, doc_store, timeout)
+            .await
+            .expect("wait_for_loro_quiescence: loro sync did not quiesce before the deadline");
     }
 
     /// Create an org file in the temp directory (requires running app).
@@ -2870,50 +2895,6 @@ impl TestEnvironment {
     pub async fn wait_for_external_processing_expiry(&self) {
         self.wait_for_org_files_stable(25, std::time::Duration::from_millis(5000))
             .await;
-    }
-}
-
-/// Wait until the `LoroSyncController`'s `last_synced` watermark matches the
-/// global doc's current `oplog_frontiers()`, bounded by `timeout`. Shared by
-/// [`TestEnvironment::wait_for_loro_quiescence`] and `LoroSut`'s peer-sync ops.
-pub async fn wait_for_loro_quiescence_on(
-    handle: &Arc<holon::sync::LoroSyncControllerHandle>,
-    doc_store: &Arc<RwLock<LoroDocumentStore>>,
-    timeout: std::time::Duration,
-) {
-    use tracing::field;
-    let span = tracing::info_span!(
-        "wait_for_loro_quiescence",
-        timeout_ms = timeout.as_millis() as u64,
-        attempts = field::Empty,
-        timed_out = field::Empty,
-    );
-    let _enter = span.enter();
-    let deadline = tokio::time::Instant::now() + timeout;
-    let mut attempts: u32 = 0;
-    loop {
-        attempts += 1;
-        let current = {
-            let store = doc_store.read().await;
-            store
-                .get_global_doc()
-                .await
-                .expect("wait_for_loro_quiescence: get_global_doc failed")
-                .doc()
-                .oplog_frontiers()
-        };
-        if handle.last_synced_frontiers() == current {
-            span.record("attempts", attempts);
-            span.record("timed_out", false);
-            return;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            span.record("attempts", attempts);
-            span.record("timed_out", true);
-            eprintln!("[wait_for_loro_quiescence] timeout after {:?}", timeout);
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 }
 

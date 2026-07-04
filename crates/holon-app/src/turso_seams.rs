@@ -17,24 +17,21 @@ use fluxdi::Module;
 use fluxdi::Provider;
 use fluxdi::Shared;
 use holon::core::queryable_cache::QueryableCache;
+use holon::core::sql_block_operations::SqlBlockOperations;
 use holon::storage::BLOCK_READ_TABLE;
 use holon::storage::BLOCK_WRITE_TABLE;
 use holon::storage::schema_module::SchemaModule;
-use holon_api::EntityName;
 use holon_api::EntityUri;
 use holon_api::block::Block;
 use holon_api::block::blocks_by_document;
 use holon_core::CrudAuthority;
-use holon_core::EventOrigin;
 use holon_core::OperationProvider;
 use holon_core::OperationWrapper;
-use holon_core::OriginTaggedWrites;
 use holon_core::SyncTokenStore;
 use holon_core::SyncableProvider;
 use holon_filesystem::BlockReader;
 use holon_filesystem::DocumentManager;
 use holon_filesystem::File;
-use holon_filesystem::directory::Directory;
 use holon_orgmode::OrgModeSyncProvider;
 use holon_orgmode::di::FileSyncStarted;
 use holon_orgmode::di::OrgModeConfig;
@@ -42,6 +39,8 @@ use holon_orgmode::di::register_org_file_sync_core;
 use holon_orgmode::di::seed_default_org_assets;
 use holon_profiles::TypeRegistry;
 use holon_turso::schema_modules::BlockSchemaModule;
+
+use crate::ordered_block_crud::OrderedBlockCrud;
 
 /// BlockReader backed by `QueryableCache<Block>`.
 ///
@@ -64,12 +63,73 @@ pub struct CacheBlockReader {
     block_feed: Option<Arc<holon::sync::LiveData<Block>>>,
 }
 
+/// The `block_raw` projection every [`CacheBlockReader`] read selects: native
+/// columns aliased `b.*`, plus one `json_group_array` subquery per edge field.
+/// `Block::try_from` REQUIRES every edge column, so a read that omits one fails
+/// the whole row rather than yielding a block with a silently empty edge set.
+const HYDRATED_BLOCK_COLUMNS: &str = "b.id, b.parent_id, b.sort_key, b.content, b.content_type, \
+     b.source_language, b.source_name, b.properties, b.marks, b.collapsed, b.widget_only, \
+     b.completed, b.block_type, b.created_at, b.updated_at, \
+     COALESCE((SELECT json_group_array(tag) FROM block_tags WHERE block_id = b.id), '[]') AS \
+     tags, \
+     COALESCE((SELECT json_group_array(required_id) FROM block_requires WHERE block_id = b.id), \
+     '[]') AS requires, \
+     COALESCE((SELECT json_group_array(lesson_id) FROM advice_suppressed WHERE anchor_id = \
+     b.id), '[]') AS advice_suppressed, \
+     COALESCE((SELECT json_group_array(target_id) FROM block_contributes_to WHERE block_id = \
+     b.id), '[]') AS contributes_to";
+
 impl CacheBlockReader {
     pub fn new(cache: Arc<QueryableCache<Block>>) -> Self {
         Self {
             cache,
             block_feed: None,
         }
+    }
+
+    /// The identity `id` was merged into, following redirect chains, or `None`
+    /// when nobody merged it away. Consulted only when a block lookup MISSES.
+    /// Fails loud on a cycle — `merge_blocks` refuses to create one, so
+    /// reaching it means the table was corrupted.
+    async fn follow_merge_redirect(&self, id: &EntityUri) -> anyhow::Result<Option<EntityUri>> {
+        let mut current = id.to_string();
+        let mut chain = vec![current.clone()];
+        loop {
+            let mut params = std::collections::HashMap::new();
+            params.insert(
+                "from_id".to_string(),
+                holon_api::Value::String(current.clone()),
+            );
+            let rows = self
+                .cache
+                .db_handle()
+                .query(
+                    "SELECT to_id FROM block_redirects WHERE from_id = $from_id",
+                    params,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("[CacheBlockReader] redirect lookup for {id}: {e}"))?;
+            let Some(next) = rows.into_iter().next().and_then(|r| {
+                r.get("to_id")
+                    .and_then(|v| v.as_string())
+                    .map(str::to_string)
+            }) else {
+                break;
+            };
+            if chain.contains(&next) {
+                anyhow::bail!(
+                    "block_redirects holds a cycle reached from {id}: {} -> {next}",
+                    chain.join(" -> ")
+                );
+            }
+            chain.push(next.clone());
+            current = next;
+        }
+        if chain.len() == 1 {
+            return Ok(None);
+        }
+        // ALLOW(entity_uri_from_raw): id read back from a block_redirects row
+        Ok(Some(EntityUri::from_raw(&current)))
     }
 
     /// Phase 5 keystone: wire the convergent `LiveData<Block>` feed so
@@ -97,12 +157,8 @@ impl CacheBlockReader {
     /// `block_raw`); see devlog/2026-05-05-110315.md.
     async fn load_all_blocks_with_hydration(&self) -> anyhow::Result<Vec<Block>> {
         let sql = format!(
-            "SELECT b.id, b.parent_id, b.depth, b.sort_key, b.content, b.content_type, \
-             b.source_language, b.source_name, b.properties, b.marks, b.collapsed, b.completed, \
-             b.block_type, b.created_at, b.updated_at, COALESCE((SELECT json_group_array(tag) \
-             FROM block_tags WHERE block_id = b.id), '[]') AS tags, COALESCE((SELECT \
-             json_group_array(required_id) FROM block_requires WHERE block_id = b.id), '[]') AS \
-             requires FROM {BLOCK_WRITE_TABLE} b ORDER BY b.sort_key, b.id"
+            "SELECT {HYDRATED_BLOCK_COLUMNS} FROM {BLOCK_WRITE_TABLE} b ORDER BY \
+             b.sort_key, b.id"
         );
 
         let rows = self
@@ -146,12 +202,8 @@ impl BlockReader for CacheBlockReader {
              $doc_id AND bt.block_id IS NULL UNION ALL SELECT b.id, d.depth_acc + 1 FROM {table} \
              b JOIN descendants d ON b.parent_id = d.id LEFT JOIN block_tags bt ON bt.block_id = \
              b.id AND bt.tag = 'Page' WHERE bt.block_id IS NULL AND d.depth_acc < 100 ) SELECT \
-             b.id, b.parent_id, b.depth, b.sort_key, b.content, b.content_type, \
-             b.source_language, b.source_name, b.properties, b.marks, b.collapsed, b.completed, \
-             b.block_type, b.created_at, b.updated_at, COALESCE((SELECT json_group_array(tag) \
-             FROM block_tags WHERE block_id = b.id), '[]') AS tags, COALESCE((SELECT \
-             json_group_array(required_id) FROM block_requires WHERE block_id = b.id), '[]') AS \
-             requires FROM {table} b JOIN descendants d ON d.id = b.id ORDER BY b.sort_key, b.id",
+             {HYDRATED_BLOCK_COLUMNS} FROM {table} b JOIN descendants d ON \
+             d.id = b.id ORDER BY b.sort_key, b.id",
             table = BLOCK_WRITE_TABLE,
         );
 
@@ -171,7 +223,8 @@ impl BlockReader for CacheBlockReader {
         // Same Block::try_from path as load_all_blocks_with_hydration — the
         // derived TryFromEntity would silently leave `tags` empty because
         // of `#[serde(skip, default)]`. See block_two_deserializers memory.
-        rows.into_iter()
+        let blocks: Vec<Block> = rows
+            .into_iter()
             .map(|row| {
                 Block::try_from(row).map_err(|e| {
                     anyhow::anyhow!(
@@ -179,7 +232,123 @@ impl BlockReader for CacheBlockReader {
                     )
                 })
             })
+            .collect::<anyhow::Result<Vec<Block>>>()?;
+        Ok(blocks)
+    }
+
+    async fn doc_block_topology(
+        &self,
+        doc_id: &EntityUri,
+    ) -> anyhow::Result<Vec<(EntityUri, EntityUri)>> {
+        // The SAME membership CTE as `get_blocks` — identical `Page`-boundary
+        // exclusion and identical depth bound, so the two can never disagree
+        // about who belongs to a document — with every hydrated column, every
+        // edge subquery and the ORDER BY dropped. Only `parent_id` is carried
+        // beyond the id, because the gate compares shape and nothing else.
+        let sql = format!(
+            "WITH RECURSIVE descendants(id, depth_acc) AS ( SELECT b.id, 0 FROM {table} b LEFT \
+             JOIN block_tags bt ON bt.block_id = b.id AND bt.tag = 'Page' WHERE b.parent_id = \
+             $doc_id AND bt.block_id IS NULL UNION ALL SELECT b.id, d.depth_acc + 1 FROM {table} \
+             b JOIN descendants d ON b.parent_id = d.id LEFT JOIN block_tags bt ON bt.block_id = \
+             b.id AND bt.tag = 'Page' WHERE bt.block_id IS NULL AND d.depth_acc < 100 ) SELECT \
+             b.id, b.parent_id FROM {table} b JOIN descendants d ON d.id = b.id",
+            table = BLOCK_WRITE_TABLE,
+        );
+
+        let mut params = std::collections::HashMap::new();
+        params.insert(
+            "doc_id".to_string(),
+            holon_api::Value::String(doc_id.to_string()),
+        );
+
+        let rows = self
+            .cache
+            .db_handle()
+            .query(&sql, params)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("[CacheBlockReader::doc_block_topology] CTE query failed: {e}")
+            })?;
+
+        rows.into_iter()
+            .map(|row| {
+                let field = |name: &str| match row.get(name) {
+                    Some(holon_api::Value::String(s)) => Ok(s.clone()),
+                    other => anyhow::bail!(
+                        "[CacheBlockReader::doc_block_topology] topology row for {doc_id} carried \
+                         no string `{name}` (got {other:?}) — refusing to report a partial shape, \
+                         which would let the write-back gate pass on an incomplete document"
+                    ),
+                };
+                let parse = |raw: String| {
+                    EntityUri::parse(&raw).map_err(|e| {
+                        anyhow::anyhow!(
+                            "[CacheBlockReader::doc_block_topology] topology row for {doc_id} \
+                             carried an unparseable uri {raw:?}: {e}"
+                        )
+                    })
+                };
+                Ok((parse(field("id")?)?, parse(field("parent_id")?)?))
+            })
             .collect()
+    }
+
+    async fn get_block_authoritative(&self, id: &EntityUri) -> anyhow::Result<Option<Block>> {
+        // Single-block point read on the write authority (`block_raw`), edge-
+        // hydrated identically to `get_blocks` (same COALESCE(json_group_array)
+        // subqueries). `id` is the primary key → O(1) indexed lookup, NO
+        // recursive CTE and NO read of the lagging `block` matview. This is the
+        // per-edit refresh for the org-writeback incremental cache; it shares
+        // `block_raw` authority with the cache's `get_blocks` seed.
+        let sql = format!(
+            "SELECT {HYDRATED_BLOCK_COLUMNS} FROM {table} b WHERE b.id = $id",
+            table = BLOCK_WRITE_TABLE,
+        );
+
+        let mut params = std::collections::HashMap::new();
+        params.insert("id".to_string(), holon_api::Value::String(id.to_string()));
+
+        let rows = self
+            .cache
+            .db_handle()
+            .query(&sql, params)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "[CacheBlockReader::get_block_authoritative] point read failed: {e}"
+                )
+            })?;
+
+        match rows.into_iter().next() {
+            Some(row) => {
+                let block = Block::try_from(row).map_err(|e| {
+                    anyhow::anyhow!(
+                        "[CacheBlockReader::get_block_authoritative] Block::try_from row failed: \
+                         {e}"
+                    )
+                })?;
+                Ok(Some(block))
+            }
+            // MISS: the id may have been merged away by `merge_blocks`. Consult
+            // the redirects and retry at the surviving identity. Deliberately on
+            // the miss path only — a hit never pays for this.
+            None => match self.follow_merge_redirect(id).await? {
+                Some(surviving) => {
+                    let block = Box::pin(self.get_block_authoritative(&surviving)).await?;
+                    // The redirect named a block that no longer exists: the merge
+                    // survivor was deleted, stranding every id merged into it.
+                    // Fail loud rather than report the id as simply absent.
+                    match block {
+                        Some(block) => Ok(Some(block)),
+                        None => anyhow::bail!(
+                            "merge redirect {id} -> {surviving} ends at a block that no longer \
+                             exists — the merge survivor was deleted"
+                        ),
+                    }
+                }
+                None => Ok(None),
+            },
+        }
     }
 
     async fn iter_documents_with_blocks(&self) -> anyhow::Result<Vec<(EntityUri, Vec<Block>)>> {
@@ -238,6 +407,16 @@ impl BlockReader for CacheBlockReader {
         }
     }
 
+    async fn blocks_in_feed_count(&self, block_ids: &[String]) -> usize {
+        match &self.block_feed {
+            Some(feed) => {
+                let m = feed.read();
+                block_ids.iter().filter(|id| m.contains_key(*id)).count()
+            }
+            None => block_ids.len(),
+        }
+    }
+
     async fn persist_file_hash(
         &self,
         file_id: &holon_api::EntityUri,
@@ -267,7 +446,12 @@ impl BlockReader for CacheBlockReader {
 /// CDC automatically propagates them into the LiveData.
 pub struct LiveDocumentManager {
     live: Arc<holon::sync::LiveData<Block>>,
-    command_bus: Arc<dyn OriginTaggedWrites>,
+    /// The authoritative block-write seam — Loro-first under `Consolidator::
+    /// Upstream`, direct SQL under `Store`. Doc-level metadata (`#+TODO:`,
+    /// `#+TITLE:`, the root body) is block state like any other, so it must
+    /// travel this way; a direct SQL write is reverted by the very next
+    /// Loro→SQL projection, which nulls every property Loro does not have.
+    ordering: Arc<dyn holon_core::block_ordering::BlockOrdering>,
     /// Serializes find-then-create against itself so two concurrent
     /// `get_or_create_by_name_chain` calls for the same `(parent_id, title)`
     /// can't both miss the LiveData lookup and INSERT distinct UUIDs. The
@@ -280,7 +464,7 @@ impl LiveDocumentManager {
     /// Create a LiveDocumentManager backed by a materialized view over document
     /// blocks.
     pub async fn new(
-        command_bus: Arc<dyn OriginTaggedWrites>,
+        ordering: Arc<dyn holon_core::block_ordering::BlockOrdering>,
         db_handle: holon::storage::DbHandle,
     ) -> anyhow::Result<Self> {
         let matview_mgr =
@@ -312,9 +496,76 @@ impl LiveDocumentManager {
 
         Ok(Self {
             live,
-            command_bus,
+            ordering,
             create_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
+    }
+
+    /// Insert a page row through the ordering authority and mirror it into
+    /// LiveData. Caller holds `create_lock` and has already decided (by title
+    /// or by id) that this page should be created — this method performs only
+    /// the write.
+    async fn insert_page(&self, doc: Block) -> anyhow::Result<Block> {
+        use holon_orgmode::build_block_params;
+
+        // Route document creation events to the document's own ID.
+        // _routing_doc_uri is only event routing metadata (not stored in DB) —
+        // it tells FileSyncController which file to re-render.
+        // Rebased onto main's `previous: Option<&Block>` signature: `None`
+        // here because a page create has no prior state to reconcile against.
+        let params = build_block_params(&doc, &doc.parent_id, &doc.id, None);
+
+        // Authority-only birth (ADR 0030): a page is a block, so it is born
+        // through the ordering authority carrying a minted position, exactly
+        // like every other block create. Routing this create straight at the
+        // command bus left the row on the SQL column default `sort_key` "A0",
+        // which is NOT a position (`is_minted_key` rejects it) — the doc root
+        // then sorted arbitrarily against its sibling roots and nothing ever
+        // re-minted it.
+        //
+        // Two arms, mirroring the ingest path's `flush_pending_creates`. The
+        // `BlockOrdering` wired in BOTH modes is `SqlBlockOperations`; which arm
+        // answers depends on whether its cell registry claims the create:
+        //
+        // - Loro: the Loro cell registry persists the block (it owns the fractional
+        //   index) and reports `true`.
+        // - SqlOnly: no cell-routed create exists, the registry reports `false`, and
+        //   `update_in_tree` writes the row — minting the key via `new_child_anchor`
+        //   and landing it through `create_row`, so key and row share one transaction
+        //   and the row is never observable unkeyed.
+        //
+        // `create_row` is also what runs the ADR 0029 D1b identity gate
+        // (`identity_minter().mint(CarriedId::from_stored(..))`), which refuses
+        // to upsert one page's row over another's identity. Reaching the write
+        // by any route that skips it — e.g. the batch seam — would turn a
+        // guarded upsert into an unguarded one.
+        let persisted = self
+            .ordering
+            .create_in_tree(
+                &doc.parent_id,
+                None,
+                &doc.id,
+                doc.to_block_content(),
+                &doc.properties,
+                &holon_api::BlockEdges::of(&doc),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("insert_page create_in_tree({}): {e:#}", doc.id))?;
+        if !persisted {
+            // `update_in_tree` tags its writes `EventOrigin::Org`, the origin
+            // this flow needs: page creation is triggered by
+            // `FileSyncController::on_file_changed`, and the
+            // `LoroSyncController` inbound gate routes `Org` to `Apply` rather
+            // than dropping it as a generic SQL-direct write.
+            self.ordering
+                .update_in_tree(params)
+                .await
+                .map_err(|e| anyhow::anyhow!("insert_page({}): {e:#}", doc.id))?;
+        }
+
+        self.live
+            .insert(doc.id.as_str().to_string(), Arc::new(doc.clone()));
+        Ok(doc)
     }
 }
 
@@ -333,8 +584,6 @@ impl DocumentManager for LiveDocumentManager {
     }
 
     async fn create(&self, doc: Block) -> anyhow::Result<Block> {
-        use holon_orgmode::build_block_params;
-
         // Serialize against concurrent creates so two callers asking for the
         // same `(parent_id, title)` page can't both observe LiveData empty
         // and both INSERT distinct UUIDs. Inside the lock, re-check LiveData;
@@ -353,59 +602,21 @@ impl DocumentManager for LiveDocumentManager {
             return Ok(existing);
         }
 
-        // Route document creation events to the document's own ID.
-        // _routing_doc_uri is only event routing metadata (not stored in DB) —
-        // it tells FileSyncController which file to re-render.
-        let params = build_block_params(&doc, &doc.parent_id, &doc.id);
-        // INSERT OR IGNORE: only triggers on PK collision now that the
-        // partial unique index on `(parent_id, name)` is gone. The
-        // `create_lock` above is what prevents same-title duplicates.
-        // Tag the create event with `EventOrigin::Org` so the
-        // `LoroSyncController` inbound gate routes it to `Apply` instead of
-        // dropping it as a generic SQL-direct write. This page-creation flow
-        // is triggered by `FileSyncController::on_file_changed`; semantically
-        // it's an Org-driven event.
-        let result = self
-            .command_bus
-            .execute_operation_with_origin(
-                &EntityName::new("block"),
-                "create",
-                params,
-                EventOrigin::Org,
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        self.insert_page(doc).await
+    }
 
-        // If the response carries an existing id, the INSERT was ignored —
-        // a page with the same (parent_id, title) already exists in the DB.
-        // Return that existing page instead of the one we tried to insert.
-        if let Some(holon_api::Value::String(existing_id)) = result.response {
-            tracing::debug!(
-                "[LiveDocumentManager] Page {:?} already exists as {} (attempted id={})",
-                doc.title(),
-                existing_id,
-                doc.id,
-            );
-            // ALLOW(entity_uri_from_raw): existing_id from command_bus execute_operation
-            // response (SQL Value::String)
-            let existing_uri = EntityUri::from_raw(&existing_id);
-            if let Some(existing) = self.get_by_id(&existing_uri).await? {
-                return Ok(existing);
-            }
-            // The document exists in SQL but not in LiveData.
-            // Insert it so subsequent find_by_parent_and_name / get_by_id lookups succeed.
-            let mut existing_doc = doc.clone();
-            existing_doc.id = existing_uri;
-            self.live.insert(
-                existing_doc.id.as_str().to_string(),
-                Arc::new(existing_doc.clone()),
-            );
-            return Ok(existing_doc);
+    async fn create_forcing_id(&self, doc: Block) -> anyhow::Result<Block> {
+        // Authoritative `#+ID` path (see trait docs): honor `doc.id` and NEVER
+        // substitute a same-`(parent, title)` placeholder. We still hold the
+        // create lock and re-check by ID so a concurrent create of this exact
+        // page can't race the same PK, but we deliberately skip the
+        // `(parent, title)` de-dup that `create` performs — that de-dup is what
+        // let an earlier sibling's random-id placeholder hijack the file's id.
+        let _guard = self.create_lock.lock().await;
+        if let Some(existing) = self.get_by_id(&doc.id).await? {
+            return Ok(existing);
         }
-
-        self.live
-            .insert(doc.id.as_str().to_string(), Arc::new(doc.clone()));
-        Ok(doc)
+        self.insert_page(doc).await
     }
 
     async fn get_by_id(&self, id: &EntityUri) -> anyhow::Result<Option<Block>> {
@@ -415,7 +626,7 @@ impl DocumentManager for LiveDocumentManager {
 
     async fn update_metadata(&self, doc: &Block) -> anyhow::Result<()> {
         use holon_orgmode::build_block_params;
-        let mut params = build_block_params(doc, &doc.parent_id, &doc.id);
+        let mut params = build_block_params(doc, &doc.parent_id, &doc.id, None);
         // `doc.properties` is authoritative for doc-level metadata, but
         // `build_block_params` only emits keys that are PRESENT — and the
         // SQL provider's property merge can't clear what isn't mentioned.
@@ -429,22 +640,19 @@ impl DocumentManager for LiveDocumentManager {
                 }
             }
         }
-        // Tag as `EventOrigin::Org` mirroring sibling `create` above.
-        // Without this, the `LoroSyncController` inbound gate
-        // drops the event as a generic SQL-direct write — and on doc rows
-        // whose `properties` contain `todo_keywords` from a `#+TODO:`
-        // directive, the keyword list is silently lost. Surfaced as the
-        // `inv-org-render-fixed-point` PBT flake (May 2026, see
-        // `devlog/2026-05-19-phase-c-validation-diagnosis.md`).
-        self.command_bus
-            .execute_operation_with_origin(
-                &EntityName::new("block"),
-                "update",
-                params,
-                EventOrigin::Org,
-            )
+        // A doc-root's parent and position are owned by the page hierarchy, not
+        // by its header metadata — leave them out so the update seam cannot
+        // read a re-parent intent out of a `#+TODO:` change.
+        params.remove("parent_id");
+        // Route through the authoritative block-write seam, NOT the SQL
+        // command bus: under Loro authority the projector diffs Loro against
+        // the SQL row and emits a `Value::Null` removal for every property
+        // Loro does not carry, so an SQL-direct write of `todo_keywords` is
+        // reverted within the same ingest.
+        self.ordering
+            .update_in_tree(params)
             .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+            .map_err(|e| anyhow::anyhow!("update_metadata({}): {e:#}", doc.id))?;
         // Update in-memory cache
         self.live
             .insert(doc.id.as_str().to_string(), Arc::new(doc.clone()));
@@ -494,13 +702,6 @@ impl Module for OrgModeModule {
 
         // Register filesystem entity types in the TypeRegistry for GQL graph.
         // Done inside an async provider so TypeRegistry is already available.
-        injector.provide::<QueryableCache<Directory>>(Provider::root_async(|r| async move {
-            let type_registry = r.resolve::<TypeRegistry>();
-            if let Err(e) = type_registry.register(Directory::type_definition()) {
-                tracing::warn!("[OrgModeModule] Failed to register Directory type: {e}");
-            }
-            Shared::new(holon::di::create_queryable_cache_async(&r).await)
-        }));
         injector.provide::<QueryableCache<File>>(Provider::root_async(|r| async move {
             let type_registry = r.resolve::<TypeRegistry>();
             if let Err(e) = type_registry.register(File::type_definition()) {
@@ -527,15 +728,10 @@ impl Module for OrgModeModule {
         }));
         injector.provide::<dyn DocumentManager>(Provider::root_async(|r| async move {
             let db_handle = r.resolve::<dyn holon::di::DbHandleProvider>().handle();
-            let sql_ops = Arc::new(holon::core::SqlOperationProvider::with_edge_fields(
-                db_handle.clone(),
-                BLOCK_WRITE_TABLE.to_string(),
-                "block".to_string(),
-                "block".to_string(),
-                BlockSchemaModule.edge_fields(),
-            ));
-            let command_bus: Arc<dyn OriginTaggedWrites> = sql_ops as Arc<dyn OriginTaggedWrites>;
-            let mgr = LiveDocumentManager::new(command_bus, db_handle)
+            let ordering = r
+                .resolve_async::<dyn holon_core::block_ordering::BlockOrdering>()
+                .await;
+            let mgr = LiveDocumentManager::new(ordering, db_handle)
                 .await
                 .expect("Failed to create LiveDocumentManager");
             Arc::new(mgr) as Arc<dyn DocumentManager>
@@ -553,7 +749,6 @@ impl Module for OrgModeModule {
                 // ============================================================
                 info!("[OrgMode] Phase 1: Resolving services (DDL)");
 
-                let _dir_cache = resolver.resolve_async::<QueryableCache<Directory>>().await;
                 let _file_cache = resolver.resolve_async::<QueryableCache<File>>().await;
                 let _block_cache = resolver.resolve_async::<QueryableCache<Block>>().await;
                 let sync_provider = resolver.resolve_async::<OrgModeSyncProvider>().await;
@@ -627,29 +822,8 @@ impl Module for OrgModeModule {
                 // inherent need for a durable replay buffer. Batches are coarse
                 // `Vec<Change>` messages, so the broadcast buffer never lags.)
                 {
-                    let dir_cache = resolver.resolve_async::<QueryableCache<Directory>>().await;
                     let file_cache = resolver.resolve_async::<QueryableCache<File>>().await;
-                    let mut dir_rx = sync_provider.subscribe_directories();
                     let mut file_rx = sync_provider.subscribe_files();
-                    tokio::spawn(async move {
-                        loop {
-                            match dir_rx.recv().await {
-                                Ok(batch) => {
-                                    if let Err(e) = dir_cache.apply_batch(&batch.inner, None).await
-                                    {
-                                        error!("[directory cache feed] apply_batch failed: {}", e);
-                                    }
-                                }
-                                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                                    tracing::warn!(
-                                        "[directory cache feed] lagged by {} batches",
-                                        n
-                                    );
-                                }
-                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                            }
-                        }
-                    });
                     tokio::spawn(async move {
                         loop {
                             match file_rx.recv().await {
@@ -723,15 +897,93 @@ impl Module for OrgModeModule {
                         Arc::new(wrapper) as Arc<dyn OperationProvider>
                     }
                     None => {
-                        let wrapper = OperationWrapper::new(
+                        // SQL is the order owner here, but this provider is a
+                        // bare `SqlOperationProvider` — it has no notion of
+                        // sibling order, so an unwrapped `create` would leave
+                        // `sort_key` on the column default and a re-parent
+                        // would carry the old parent's key over. `SqlBlockOperations`
+                        // built with its SqlOnly defaults IS that order owner;
+                        // `OrderedBlockCrud` routes the placement-changing
+                        // writes through it.
+                        let block_cache = resolver.resolve_async::<QueryableCache<Block>>().await;
+                        let order_owner =
+                            Arc::new(SqlBlockOperations::new(sql_ops.clone(), block_cache));
+                        let ordered = Arc::new(OrderedBlockCrud::new(
                             sql_ops.clone() as Arc<dyn OperationProvider>,
-                            Some(sync_provider),
-                        );
+                            order_owner,
+                            sql_ops.clone(),
+                        )) as Arc<dyn OperationProvider>;
+                        let wrapper = OperationWrapper::new(ordered, Some(sync_provider));
                         Arc::new(wrapper) as Arc<dyn OperationProvider>
                     }
                 }
             }
         }));
+
+        // Block→page transform planner/link-rewrite provider.
+        //
+        // The engine-level `convert_block_to_page` compound
+        // (`operation_engine.rs`) dispatches two ops that ONLY
+        // `SqlOperationProvider` advertises: `block_to_page_plan` (a read-only
+        // planner over `block_raw`) and `rewrite_link_resolution` (rewrites the
+        // SQL-side `block_links` junction). In SqlOnly mode the CRUD provider
+        // above IS a `SqlOperationProvider`, so it already serves these; but
+        // under Loro authority the CRUD provider is `LoroBlockOperations`, which
+        // advertises neither — so without this registration `convert_block_to_page`
+        // dies at dispatch ("No provider registered ... block_to_page_plan") in
+        // full/Loro mode. Register a bare `SqlOperationProvider` LAST so the
+        // dispatcher's first-registered-wins routing (operation_dispatcher.rs)
+        // leaves block CRUD with `LoroBlockOperations` and structural ops with
+        // `SqlBlockOperations` (EventInfraModule): this provider wins ONLY the
+        // two ops nobody else advertises. Authority-safe under Loro: the planner
+        // only READS the Loro-projected `block_raw`, and `rewrite_link_resolution`
+        // writes only the `block_links` junction (a SQL-side projection, NOT
+        // Loro-authoritative content), so no Loro authority is bypassed. In
+        // SqlOnly this provider is inert (the earlier CRUD provider already wins
+        // those ops on registration order).
+        //
+        // It advertises ONLY the four link/page-transform ops via
+        // `OperationSubset`, not the full block-op surface. A full
+        // `SqlOperationProvider` here re-advertises `create`/`set_field`/… that
+        // the primary CRUD provider already owns; the registry's `operations()`
+        // unions without dedup, so those showed up TWICE in the slash menu
+        // (BugFunnel N1 — 12 duplicate ops). Narrowing to the unique ops keeps
+        // the registry duplicate-free (guarded by the `operations_are_unique`
+        // invariant in operation_dispatcher.rs). Under SqlOnly the primary
+        // provider already serves these four, so the allowlist is EMPTY and this
+        // wrapper stays fully inert (advertises nothing) — the earlier provider
+        // wins them on registration order.
+        injector.provide_into_set::<dyn OperationProvider>(Provider::root_async(
+            |resolver| async move {
+                let db_handle = resolver
+                    .resolve::<dyn holon::di::DbHandleProvider>()
+                    .handle();
+                let sql = Arc::new(holon::core::SqlOperationProvider::with_edge_fields(
+                    db_handle,
+                    BLOCK_WRITE_TABLE.to_string(),
+                    "block".to_string(),
+                    "block".to_string(),
+                    BlockSchemaModule.edge_fields(),
+                )) as Arc<dyn OperationProvider>;
+                // ALLOW(ok): optional DI service — presence == Loro authority.
+                let loro_authority = resolver.try_resolve::<CrudAuthority>().is_ok();
+                let allowlist: &[&str] = if loro_authority {
+                    &[
+                        "create_page_from_link",
+                        "rewrite_link_resolution",
+                        "restore_link_resolution",
+                        "block_to_page_plan",
+                        "merge_blocks_plan",
+                    ]
+                } else {
+                    &[]
+                };
+                Arc::new(holon_core::OperationSubset::new(
+                    sql,
+                    allowlist.iter().map(|s| s.to_string()),
+                )) as Arc<dyn OperationProvider>
+            },
+        ));
 
         Ok(())
     }

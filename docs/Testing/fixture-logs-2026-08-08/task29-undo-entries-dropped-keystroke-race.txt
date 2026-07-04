@@ -1,0 +1,187 @@
+task #29 — undo entries silently dropped (dogfood 2026-08-08 P2 / F3)
+=====================================================================
+
+§1  THE PRODUCTION EVIDENCE (app2.log, dogfood pass 2, block:5260462b)
+
+Six ERROR lines, one typed word ("second line"), one block:
+
+  14:46:43.059 ERROR undo: dropped stale entry (state changed under undo:
+      block:5260462b-….content expected String("second lin") but found Some(String("second li")))
+  14:46:43.152 ERROR … expected String("second")      but found Some(String("second li"))
+  14:47:09.162 ERROR … expected String("second l")    but found Some(String("secon"))
+  14:47:09.762 ERROR … expected String("second")      but found Some(String("secon"))
+  14:47:11.642 ERROR … expected String("sec")         but found Some(String("se"))
+  14:47:12.872 ERROR … expected String("second line") but found None
+
+The write side of the same log, reconstructed (all `origin=user`, one per keystroke):
+
+  18.673 "s"          18.681 "se"         18.688 "sec"        18.696 "seco"
+  18.704 "secon"      18.712 "second"     18.719 "second "    18.727 "second l"
+  18.734 "second li"  18.742 "second lin" 18.750 "second line"
+
+and the completions of those same eleven dispatches:
+
+  18.687, 18.703, 18.719, 18.737, 18.754, 18.769, 18.782, 18.797, 18.811, 18.831, 18.844
+
+The last keystroke is ISSUED at 18.750 while six earlier ones have not yet
+completed — eleven writes to ONE block are in flight simultaneously. The undo
+replays that followed (14:46:30 → "second li", 14:46:43 → "secon", 14:47:10 →
+"seco", 14:47:11 → "se") each skip characters the user typed through, which is
+the same fact seen from the inverse side.
+
+§2  ROOT CAUSE
+
+  crates/holon-frontend/src/operations.rs:39
+      dispatch_operation spawns one un-awaited task per keystroke.
+  crates/holon/src/core/sql_operation_provider.rs:2401,2471
+      set_field reads the prior content in a statement separate from its UPDATE;
+      a keystroke that interleaves there captures a prior value already superseded,
+      so the stored inverse skips a character.
+  crates/holon/src/api/operation_engine.rs (leaf dispatch → undo push)
+      the entry is pushed after the dispatch returns, i.e. in COMPLETION order,
+      so the stack order need not match the write order; and the multi-character
+      deltas that the stale prior produces are not word-boundary-coalescible
+      (holon-core/src/undo.rs classify_delta), which is why undo moved ~1 char
+      per press instead of one word group.
+  crates/holon-core/src/undo.rs:53-66
+      verify_precondition then LEGITIMATELY fails, and the entry is dropped.
+
+The drop is the correct behaviour of a correct staleness check reading a history
+that was recorded wrong. The bug is upstream of the check.
+
+§3  RED (final test bodies, unfixed engine — 3/3 runs, both tests)
+
+  thread 'concurrent_keystroke_inverses_skip_no_character' panicked at
+    crates/holon/tests/undo_concurrent_keystrokes.rs:226:22:
+  undo dropped a step: StaleDropped { reason: "state changed under undo:
+    block:typed.content expected String(\"second l\") but found Some(String(\"second line\"))" }
+
+  thread 'concurrent_keystrokes_keep_every_undo_step' panicked at
+    crates/holon/tests/undo_concurrent_keystrokes.rs:167:22:
+  undo press 0 lost a step: StaleDropped { reason: "state changed under undo:
+    block:typed.content expected String(\"second li\") but found Some(String(\"second line\"))" }
+    (walk so far: []) — every undo entry recorded by our own typing must still verify
+
+Same signature as production, produced by the same shape (one spawned,
+un-awaited task per keystroke, issued 1 ms apart).
+
+§4  FIX
+
+crates/holon/src/api/operation_engine.rs — `EntityWriteLocks`: capture-prior /
+write / journal is ONE step per entity, striped over 64 fair
+`tokio::sync::Mutex`es keyed by (entity, id). Acquired after the compound
+interceptors, so a compound's constituent dispatches each lock their own target
+and no hold nests on the same entity; `replay` takes the same lock so an
+undo/redo write queues behind in-flight writes instead of interleaving.
+
+§5  MUTATION PROOF (round 1)
+
+  M1  lock_target returns None (= the pre-fix code)      → BOTH tests red,
+      verbatim StaleDropped signature.                     (lane-logs/29-mutM1.log)
+  M2  guard released after the dispatch, journal outside → BOTH tests GREEN,
+      8/8 repeats.                                          (lane-logs/29-mutM2-repeat.log)
+
+Round 2 replaced M2's disclosure with a proof — see §9.
+
+§6  DISCLOSURE
+
+MCP already answered `success:false` with a reason (frontends/mcp/src/tools.rs)
+— the dogfood pass drove undo through a script that discarded the reply, which
+is why it read as silent — but every surface described a PERMANENT loss as a
+retryable failure: the GPUI toast said "Undo/redo failed" (the press did not
+work), MCP said "Undo skipped (stale)" (try again).
+
+All three now read `holon_api::undo_step_dropped_detail`, beside `UndoOutcome`
+itself: "<undo|redo>: history step dropped — this edit can no longer be undone
+(<engine reason>)". The GPUI toast carries its own `DegradedKind::UndoStepDropped`,
+so a lost step never shares a kind with a press that merely failed. The ROUTING
+is pinned, not only the words: `undo_disclosure` maps outcome → (kind, detail),
+and `stale_dropped_entry_routes_to_its_own_kind_and_discloses_the_lost_step`
+reds when the kind is reverted (mutant D2, lane-logs/29r2-mutD2.log).
+
+=====================================================================
+ROUND 2 — the verifier's refutations and what they changed
+=====================================================================
+
+§7  COMPOUND BYPASS (the load-bearing one)
+
+The round-1 acquisition-site comment claimed a compound's constituents
+"re-enter this method" and take their own stripes. True for
+instantiate_template and accept_proposal; FALSE for the two compounds that
+matter:
+
+  dispatch_constituent       → dispatcher.execute_operation directly; used by
+                               run_convert_block_to_page for create /
+                               move_block / set_field(marks) /
+                               rewrite_link_resolution
+  dispatch_merge_constituent → same shape; used by run_merge_blocks for
+                               set_field(content) on the canonical
+
+Neither compound took any stripe, so its planner read and its constituent
+writes straddled in-flight writes to the same block, and its composite entry
+was pushed outside every hold — the identical class the singles fix closed.
+turn_into_page is the chord task #28 made reachable from a live window while
+typing.
+
+FIX: each compound takes the stripe of the block it REWRITES — `target` for the
+block→page transform, `canonical` for the merge — across planner read,
+constituents and composite push. Constituents keep dispatching straight at the
+dispatcher, so the hold never nests: at most ONE stripe is held at a time
+anywhere in the engine, which is what keeps the striping deadlock-free without
+a lock order.
+
+DISCLOSED SCOPE: only the rewritten block is held. A convert's minted page,
+re-homed children and re-pointed linkers, and a merge's duplicate and moved
+children, get no stripe — holding several would need the acquisition order this
+design deliberately avoids.
+
+§8  ROUND-2 REDS (crates/holon/tests/undo_compound_interleave.rs)
+
+  merge, keystrokes racing the canonical's content write:
+    undo press 9 lost a step: StaleDropped { reason: "state changed under undo:
+      block:canonical.content expected String("duplicate body") but found
+      Some(String("typed w"))" }
+
+  convert, a marks write racing the compound's own marks constituent:
+    undo press 0 lost a step: StaleDropped { reason: "state changed under undo:
+      block:origin.marks expected String("[{...\"kind\":\"Link\"...}]") but
+      found Some(String("[{\"kind\":\"Bold\",\"start\":0,\"end\":8}]"))" }
+
+Each is killed by removing THAT compound's stripe alone — C1a convert-only
+(lane-logs/29r2-mutC1a-v4.log), C1b merge-only
+(lane-logs/29r2-mutC1b-merge-only.log) — so neither red rides on the other's
+fix. Green 5/5 after (lane-logs/29r2-green-repeat.log).
+
+Two test-construction facts, both stated in the test file:
+  - The interleave is forced, not raced: `test-yield` (implied by
+    `test-helpers`) widens the two compound windows enough for a whole
+    competing write to fit. Timing-based versions were flaky in both
+    directions and were discarded.
+  - The convert test drives MARKS writes and deliberately does not mix in
+    typing: a content write schedules a DERIVED marks write of its own after
+    the op returns, which is a SEPARATE ordering hole (§10).
+
+§9  M2 IS NOW UNREPRESENTABLE
+
+Every scheduling probe for M2 survived — a uniform forced pause (any pause at
+the same point in every writer delays them all equally) and a
+state-synchronized racer both left it green. The position is therefore enforced
+by the type instead: the push goes through
+
+    journal_step(&self, _held: Option<&MutexGuard<'_, ()>>, entry) -> Result<()>
+
+and releasing the stripe first no longer compiles:
+
+    error[E0382]: borrow of moved value: `write_guard`
+      drop(write_guard);                            value moved here
+      self.journal_step(write_guard.as_ref(), ...)  value borrowed after move
+
+(lane-logs/29r2-mutM2-compile.log). The behavioural probe written for M2 was
+DELETED rather than kept green-forever: no mutation could kill it.
+
+§10  RESIDUAL FOUND WHILE BUILDING THE CONVERT RED
+
+A content `set_field` schedules a DERIVED marks write that runs AFTER the op
+returns — outside the journaled step and outside the stripe. Mixing typing with
+marks writes on one block produced `found Some(Null)` marks with no undo entry
+accounting for them. Not fixed here and not the same fix; filed as a follow-up.

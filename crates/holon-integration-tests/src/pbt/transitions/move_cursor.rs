@@ -1,5 +1,9 @@
 //! Transition: move the active editor's caret to a byte position.
 //!
+//! @pbt rung input-pipeline
+//!   `apply_move_cursor` drives caret keystrokes through the editor pipeline.
+//! @pbt covers editor-caret-move — caret keystroke -> InputState cursor
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:1637-1648`
 //! (generator), `state_machine.rs:3552-3556` (precondition, shared arm),
 //! `state_machine.rs:2956-2959` (ref-state apply),
@@ -7,7 +11,6 @@
 //! `transition_budgets.rs:368-377` (expected SQL).
 
 use holon_pbt_core::TransitionFactory;
-use holon_pbt_core::TransitionImpl;
 use holon_pbt_core::TransitionRef;
 use holon_pbt_core::capabilities::CapRegion;
 use holon_pbt_core::capabilities::RefEditorMirror;
@@ -15,21 +18,21 @@ use holon_pbt_core::capabilities::RefEditorMirrorMut;
 use holon_pbt_core::capabilities::RefFocus;
 use holon_pbt_core::capabilities::RefLifecycle;
 use holon_pbt_core::capabilities::SutEditorMirrorWrite;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::check;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::reference_state::ReferenceState;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::REACTIVE_BASE;
-use crate::pbt::validation::Reason;
-use crate::pbt::validation::check;
 
 /// Move the active editor caret to a given byte position.
 /// Gated to `PBT_ATOMIC_EDITOR=1` runs.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I move the cursor to byte {byte_position}")]
 pub struct MoveCursor {
     pub byte_position: usize,
 }
@@ -93,9 +96,7 @@ pub fn move_cursor_apply_to_ref<R: RefEditorMirrorMut>(byte_position: usize, sta
 
 impl<R: RefEditorMirror + RefFocus + RefLifecycle> TransitionFactory<R> for MoveCursor {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        vec![::holon_pbt_core::composition::CapId::of::<
-            dyn ::holon_pbt_core::capabilities::SutEditorMirrorWrite,
-        >()]
+        Self::declared_caps()
     }
 
     type Reason = Reason;
@@ -130,16 +131,13 @@ impl<R: RefEditorMirror + RefEditorMirrorMut + RefFocus + RefLifecycle> Transiti
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutEditorMirrorWrite> TransitionImpl<ReferenceState, S> for MoveCursor {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.apply_move_cursor(self.byte_position).await;
+crate::cap_transition! {
+    MoveCursor: SutEditorMirrorWrite,
+    where R: [ RefEditorMirror + RefFocus + RefLifecycle ],
+    |me, _state, sut| {
+        sut.apply_move_cursor(me.byte_position).await;
     }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for MoveCursor {
-    fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
+    sql_budget: |_me, _state| {
         ExpectedSql {
             reads: REACTIVE_BASE,
             writes: 0,

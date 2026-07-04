@@ -25,10 +25,13 @@
 //! ).await?;
 //! ```
 
+pub mod advice_weaver;
+pub mod bridge_thread;
 pub mod cdc;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cli;
 pub mod collection_layout;
+pub mod dispatch_journal;
 pub mod lane_filtered_provider;
 
 /// Re-exports for the cell primitive (defined in `holon-core`). Frontends
@@ -50,7 +53,12 @@ pub mod cell {
     pub use holon_core::cell_registry::EntityCellRegistryExt;
 }
 
-/// A default org file bundled with the app, seeded on first launch.
+/// A default org file bundled with the app, seeded to disk on first launch
+/// (empty vault). The journals page is NOT seeded this way — it is built
+/// programmatically as blocks (see [`journals_page_blocks`]) so its
+/// query/render/ auto-create machinery lives directly under the fixed
+/// `block:journals` shell with no separate org document (which would mint a
+/// duplicate "Journals" page).
 pub struct DefaultAsset {
     pub filename: &'static str,
     pub content: &'static str,
@@ -60,27 +68,146 @@ pub struct DefaultAsset {
     pub fixed_doc_id: Option<&'static str>,
 }
 
-/// Default assets seeded when the org root has no `.org` files.
-/// Production seeding and PBT reference model both consume this list.
-pub const DEFAULT_ASSETS: &[DefaultAsset] = &[DefaultAsset {
-    filename: "Journals.org",
-    content: include_str!("../../../assets/default/Journals.org"),
-    fixed_doc_id: Some("block:journals"),
-}];
+/// Org files seeded to disk when the vault has no `.org` files. Empty: the sole
+/// former entry (`Journals.org`) is now seeded programmatically via
+/// [`journals_page_blocks`] to avoid the duplicate-page defect (a disk
+/// `Journals.org` with no `#+ID:` parsed to a second `file:` page carrying the
+/// machinery, while `build_default_layout_blocks` minted a bare
+/// `block:journals` shell — two "Journals" Pages). Retained as a seam for
+/// future disk-seeded assets.
+pub const DEFAULT_ASSETS: &[DefaultAsset] = &[];
+
+/// Deterministic block ids for the journals page. Seeded on every boot so
+/// re-seeding is a no-op (never a duplicate).
+pub const JOURNALS_PAGE_ID: &str = "block:journals";
+pub const JOURNALS_SRC_ID: &str = "block:journals::src::0";
+pub const JOURNALS_RENDER_ID: &str = "block:journals::render::0";
+pub const JOURNALS_AUTO_CREATE_ID: &str = "block:journals::auto-create";
+/// The single-block `holon_rule` (ADR 0024 §7.2) that auto-creates today's
+/// journal. Named `::action::0` to match the ratified
+/// `assets/default/Journals.org` asset (and so its `RuleId` — the block id — is
+/// stable across the disk/programmatic seed paths).
+pub const JOURNALS_ACTION_ID: &str = "block:journals::action::0";
+
+/// The `block:journals` page, as programmatic blocks (no org document). The
+/// shell page owns, directly, its display query (`::src::0`, holon_prql listing
+/// the journal day-entries) and render (`::render::0`). All ids are
+/// deterministic, so seeding this on every boot is idempotent: create-if-absent
+/// never duplicates and never clobbers user edits.
+///
+/// The auto-create RULE (trigger + action) is intentionally NOT here — see
+/// [`journals_auto_create_blocks`] for why it cannot yet be co-located on the
+/// journals landing page.
+pub fn journals_page_blocks() -> Vec<holon_api::block::Block> {
+    use holon_api::block::Block;
+
+    let uri = |raw: &str| EntityUri::parse(raw).expect("static journals block id");
+    let journals = uri(JOURNALS_PAGE_ID);
+
+    let mut page = Block::new_text(journals.clone(), EntityUri::no_parent(), "Journals");
+    page.set_page(true);
+
+    // holon_sql read off the boot-owned `journal_feed` matview (the journal-feed
+    // chain: block matview → `journal_day_pages` detection → `journal_feed`; see
+    // docs/Plans/JournalFeed-2026-07-18.md). Day-page detection and the
+    // `expand_default` marker (which routes every feed row to the
+    // `embedded_page_expanded` default-expanded profile variant) are maintained
+    // O(delta) by IVM in the chain, so this read is just a projection + order.
+    // Newest-first via `content DESC` (ordering is the read's job, not the
+    // matview's).
+    let src = Block::new_source(
+        uri(JOURNALS_SRC_ID),
+        journals.clone(),
+        "holon_sql",
+        "SELECT * FROM journal_feed ORDER BY content DESC",
+    );
+
+    // LogSeq-style feed: each day-entry rendered as a default-EXPANDED embedded
+    // page (via the `embedded_page_expanded` variant, keyed on `expand_default`),
+    // separated by a `divider()`. `render_entity()` per row keeps the embedded
+    // page-boundary + lazy-descendant semantics (children load on materialise).
+    let render = Block::new_source(
+        uri(JOURNALS_RENDER_ID),
+        journals,
+        "render",
+        r#"list(#{sortkey: "-content", item_template: column(render_entity(), divider())})"#,
+    );
+
+    vec![page, src, render]
+}
+
+/// The journal auto-create RULE: a "Journal Auto-Create" heading owning a
+/// SINGLE `holon_rule` YAML block (ADR 0024 §7.2 ratified form — guard + emit
+/// in one block, matching `assets/default/Journals.org`). The
+/// `holon_rule_watcher` discovers it (the legacy `holon_sql`-trigger +
+/// `block.create`-action pairing is gone — no sibling source, so the old
+/// `action_watcher` leaves it alone), reads the `clock` day for its `{today}`
+/// binding, evaluates the `when:` inhibitor, and emits today's journal under
+/// the journals page via a WP2 deterministic id.
+///
+/// Seeded on every boot by [`FrontendSession::build_default_layout_blocks`]
+/// (dogfood #4 fix, 2026-07-12): the clock-day trigger fires the action so real
+/// vaults get today's journal. The prior render-panic blocker is resolved — the
+/// trigger/action are `is_program` blocks (fork-A: `rule_sibling` profile
+/// exclusion + `RowIdentity`-keyed reactive rows), so they are never
+/// display-evaluated as a collection and the id-less trigger row no longer
+/// panics the render worker. The end-to-end firing (clock scheduler seeds the
+/// `clock` day row → trigger matview → action watcher → deterministic-id
+/// `block.create`) is pinned by the directed capstone
+/// `advance_day_fires_one_journal_per_distinct_day_idempotently` and, in the
+/// composed keystone, by the fixed-clock boot-journal model in `wide_e2e`.
+pub fn journals_auto_create_blocks() -> Vec<holon_api::block::Block> {
+    use holon_api::block::Block;
+
+    let uri = |raw: &str| EntityUri::parse(raw).expect("static journals block id");
+    let journals = uri(JOURNALS_PAGE_ID);
+    let auto_create = uri(JOURNALS_AUTO_CREATE_ID);
+
+    let auto = Block::new_text(auto_create.clone(), journals, "Journal Auto-Create");
+
+    // Single-block holon_rule (sugar form): `when:` = clock-day inhibitor arc
+    // (`not block_exists("Journals/{today}")`), `emit:` = ratcheted create of the
+    // `{today}` block as a PAGE-file child of the journals page (`place:
+    // page(journals)`, LogSeq-parity daily-note ruling 2026-07-19): the day block
+    // is `Page`-tagged, becomes a first-class `[[{today}]]` link target, and
+    // materializes into its own `Journals/{today}.org`; the day's bullets nest
+    // UNDER it (no longer flat siblings of the journals shell). Byte-identical to
+    // the ratified `assets/default/Journals.org` rule so the disk and programmatic
+    // seeds agree.
+    let rule = Block::new_source(
+        uri(JOURNALS_ACTION_ID),
+        auto_create,
+        "holon_rule",
+        // No trailing newline: the block store normalizes it away (like every
+        // other seed block), so the reference — which models this exact content —
+        // must match `block_raw`/sql without one.
+        "name: daily_journal\nwhen: 'not block_exists(\"Journals/{today}\")'\nemit:\n  place: \
+         page(journals)\n  name: \"{today}\"",
+    );
+
+    vec![auto, rule]
+}
 pub mod command_provider;
 pub mod config;
+pub mod creation_slot;
+pub mod echo;
+pub mod editor_source;
 pub mod editor_view_model;
 pub mod focus_path;
 pub mod geometry;
 pub mod render_services;
+pub use geometry::disclosure_halo_id_for;
 pub use geometry::drawer_toggle_id_for;
 pub use geometry::expand_toggle_id_for;
+pub use geometry::tree_bullet_id_for;
 pub use geometry::vms_button_id_for;
 pub mod editor_caret;
 pub mod headless_editor_mirror;
 pub mod input;
 pub mod input_trigger;
 pub(crate) mod link_provider;
+pub mod link_segments;
+pub mod local_edit_epoch;
 pub mod logging;
 pub mod memory_monitor;
 pub mod mutable_tree;
@@ -100,10 +227,14 @@ pub mod reactive_view_model;
 mod render_context;
 pub mod render_interpreter;
 pub mod rich_text_selection;
+pub mod row_origin;
 pub mod row_pipeline;
 pub mod shadow_builders;
 pub mod size_expectation;
+pub mod sticky_accordion;
+pub mod template_placement;
 pub mod theme;
+pub mod tour;
 pub mod user_driver;
 pub mod value_fns;
 pub(crate) mod view_event_handler;
@@ -128,6 +259,7 @@ pub use editor_view_model::{EditorAction, EditorKey, EditorViewModel};
 use holon_api::EntityName;
 use holon_api::EntityUri;
 pub use holon_api::OperationDescriptor;
+pub use holon_api::PathContext;
 pub use holon_api::ProviderAuthStatus;
 pub use holon_api::QueryContext;
 pub use holon_api::UiEvent;
@@ -153,6 +285,7 @@ pub use preferences::PrefType;
 pub use preferences::PreferenceDef;
 pub use reactive::LiveBlock;
 pub use reactive::StubBuilderServices;
+pub use reactive::WatchGuard;
 pub use reactive::interpret_pure;
 pub use reactive_view::CollectionConfig;
 pub use reactive_view::ReactiveView;
@@ -166,6 +299,9 @@ pub use reactive_view_model::variants_match;
 pub use render_context::AvailableSpace;
 pub use render_context::LayoutHint;
 pub use render_context::RenderContext;
+pub use row_origin::Occurrence;
+pub use row_origin::OccurrenceId;
+pub use row_origin::RowOrigin;
 pub use shadow_builders::DEFAULT_DRAWER_WIDTH;
 pub use user_driver::ReactiveEngineDriver;
 pub use user_driver::UserDriver;
@@ -213,6 +349,11 @@ pub struct FrontendSession<T = ()> {
     /// type registry. Consumers read profiles through this handle and never
     /// branch on which storage backend is wired.
     profiles: Arc<dyn holon_api::entity_profile::ProfileResolving>,
+    /// Answers "does this scheme name a registered entity?" against the LIVE
+    /// registry. Marks persist only that a target is scheme-shaped, so link
+    /// decoration and link-click ask this at read time — a link ingested
+    /// before its provider connects heals on the next render.
+    link_classifier: holon_api::link_parser::LinkTargetClassifier,
     error_tracker: PublishErrorTracker,
     ready_signal: Option<tokio::sync::watch::Receiver<Option<Result<(), String>>>>,
     /// Extra services resolved from DI (for tests)
@@ -240,6 +381,7 @@ pub struct SessionParts {
     pub operation_engine: Option<Arc<dyn holon_api::OperationEngine>>,
     pub ui_watcher: Arc<dyn holon_api::UiWatcher>,
     pub profiles: Arc<dyn holon_api::entity_profile::ProfileResolving>,
+    pub link_classifier: holon_api::link_parser::LinkTargetClassifier,
     pub error_tracker: PublishErrorTracker,
     pub ready_signal: Option<tokio::sync::watch::Receiver<Option<Result<(), String>>>>,
     pub preference_defs: Arc<Vec<preferences::PreferenceDef>>,
@@ -259,6 +401,7 @@ impl SessionParts {
         operation_engine: Option<Arc<dyn holon_api::OperationEngine>>,
         ui_watcher: Arc<dyn holon_api::UiWatcher>,
         profiles: Arc<dyn holon_api::entity_profile::ProfileResolving>,
+        link_classifier: holon_api::link_parser::LinkTargetClassifier,
     ) -> Self {
         let theme_registry = Arc::new(theme::ThemeRegistry::load(None));
         let preference_defs = Arc::new(preferences::define_preferences(&theme_registry));
@@ -268,6 +411,7 @@ impl SessionParts {
             operation_engine,
             ui_watcher,
             profiles,
+            link_classifier,
             error_tracker: PublishErrorTracker::new(),
             ready_signal: None,
             preference_defs,
@@ -290,6 +434,7 @@ impl FrontendSession<()> {
             operation_engine: parts.operation_engine,
             ui_watcher: parts.ui_watcher,
             profiles: parts.profiles,
+            link_classifier: parts.link_classifier,
             error_tracker: parts.error_tracker,
             ready_signal: parts.ready_signal,
             extras: (),
@@ -330,6 +475,12 @@ impl<T> FrontendSession<T> {
     /// here so it never panics for lack of an engine.
     pub fn profiles(&self) -> &Arc<dyn holon_api::entity_profile::ProfileResolving> {
         &self.profiles
+    }
+
+    /// The live scheme classifier — the read-time authority on whether a
+    /// scheme-shaped link target names a registered entity.
+    pub fn link_classifier(&self) -> &holon_api::link_parser::LinkTargetClassifier {
+        &self.link_classifier
     }
 
     /// The query-execution capability (ADR 0004 — "Turso is one of four").
@@ -386,11 +537,27 @@ impl<T> FrontendSession<T> {
         self.holon_config.lock().unwrap().ui.clone()
     }
 
+    /// The config directory (where `holon.toml` and other app-local state
+    /// live).
+    pub fn config_dir(&self) -> &std::path::Path {
+        &self.config_dir
+    }
+
     /// Mutate UI config and persist to disk.
+    ///
+    /// The in-memory mutation always applies; a persistence failure (e.g. a
+    /// read-only config dir) is surfaced loudly in the log rather than
+    /// aborting the process. Widget-open toggles run through here — they must
+    /// never SIGABRT the app on a failed disk write.
     pub fn update_ui_settings(&self, f: impl FnOnce(&mut UiConfig)) {
         let mut guard = self.holon_config.lock().unwrap();
         f(&mut guard.ui);
-        guard.save_runtime(&self.config_dir);
+        if let Err(e) = guard.save_runtime(&self.config_dir) {
+            tracing::error!(
+                "[config] failed to persist UI settings to {}: {e:#}",
+                self.config_dir.display()
+            );
+        }
     }
 
     /// Look up widget state by block ID. Returns default (open=true) if not
@@ -432,6 +599,29 @@ impl<T> FrontendSession<T> {
         });
     }
 
+    /// Set a widget's stored width.
+    ///
+    /// `persist == false` mutates the in-memory config only — used for the
+    /// per-frame updates of a live drag-resize, where writing `holon.toml` on
+    /// every mouse-move would hammer the disk. `persist == true` writes through
+    /// to disk (call it once, on drag release) so the chosen width survives a
+    /// restart.
+    pub fn set_widget_width(&self, block_id: &str, width: f32, persist: bool) {
+        if persist {
+            self.update_ui_settings(|s| {
+                s.widgets.entry(block_id.to_string()).or_default().width = Some(width);
+            });
+        } else {
+            let mut guard = self.holon_config.lock().unwrap();
+            guard
+                .ui
+                .widgets
+                .entry(block_id.to_string())
+                .or_default()
+                .width = Some(width);
+        }
+    }
+
     // =========================================================================
     // Preferences API
     // =========================================================================
@@ -460,10 +650,19 @@ impl<T> FrontendSession<T> {
     }
 
     /// Set a preference value and persist to disk.
-    pub fn set_preference(&self, key: &preferences::PrefKey, value: toml::Value) {
+    ///
+    /// The in-memory mutation always applies. Returns `Err` (never panics) when
+    /// the write can't be persisted so the caller can surface a visible
+    /// degraded-mode notice — a preference that fails to save must keep the app
+    /// alive, not abort it.
+    pub fn set_preference(
+        &self,
+        key: &preferences::PrefKey,
+        value: toml::Value,
+    ) -> anyhow::Result<()> {
         let mut guard = self.holon_config.lock().unwrap();
         guard.set_preference(key, value);
-        guard.save_runtime(&self.config_dir);
+        guard.save_runtime(&self.config_dir)
     }
 
     /// Generate the render data for the preferences UI.
@@ -515,7 +714,7 @@ impl<T> FrontendSession<T> {
     pub fn is_ready(&self) -> bool {
         self.ready_signal
             .as_ref()
-            .map_or(true, |rx| rx.borrow().is_some())
+            .is_none_or(|rx| rx.borrow().is_some())
     }
 
     // =========================================================================
@@ -555,24 +754,18 @@ impl<T> FrontendSession<T> {
         let default_doc_uri = Self::default_doc_uri();
         let mut entries: Vec<Block> = Vec::new();
 
-        // Fixed-id document pages (e.g. block:journals). Always built so a
-        // missing page shell is repaired; persisting is idempotent.
-        for asset in crate::DEFAULT_ASSETS {
-            if let Some(doc_id) = asset.fixed_doc_id {
-                let title = asset
-                    .filename
-                    .strip_suffix(".org")
-                    .unwrap_or(asset.filename);
-                let mut page = Block::new_text(
-                    // ALLOW(entity_uri_from_raw): static asset literal asset.fixed_doc_id
-                    EntityUri::from_raw(doc_id),
-                    EntityUri::no_parent(),
-                    title.to_string(),
-                );
-                page.set_page(true);
-                entries.push(page);
-            }
-        }
+        // The `block:journals` page and its machinery, seeded programmatically
+        // (no org document). Always built so both an empty AND an already-seeded
+        // vault get the journal auto-create infrastructure; persisting is
+        // idempotent (deterministic ids), so a re-seed never duplicates the page
+        // and never clobbers user-created journal entries.
+        entries.extend(crate::journals_page_blocks());
+        // The auto-create RULE (trigger + action). Seeded on every boot so the
+        // clock-day trigger fires `block.create` and the vault gets today's
+        // journal (dogfood #4: real vaults never got one). The trigger/action are
+        // `is_program` blocks — profile routing keeps them out of display-query
+        // evaluation, so they never render as a collection (fork-A safeguards).
+        entries.extend(crate::journals_auto_create_blocks());
 
         if fresh {
             // The `__default__` page that owns the 3-column layout.
@@ -650,12 +843,32 @@ impl<T> FrontendSession<T> {
         entity_name: &EntityName,
         op_name: &str,
         params: HashMap<String, Value>,
-    ) -> Result<Option<Value>> {
+    ) -> Result<holon_api::OpOutcome> {
+        self.execute_operation_with_origin(entity_name, op_name, params, holon_api::OpOrigin::User)
+            .await
+    }
+
+    /// Execute an operation the session itself authored on the user's behalf
+    /// rather than at their direct gesture — the creation-slot birth and its
+    /// reaper (`OpOrigin::Rule`, ADR 0024's `fired-by` provenance slot). Such
+    /// ops must NOT enter the human undo stack: the user did not author the
+    /// empty block, so resurrecting it on Cmd-Z is noise.
+    ///
+    /// Everything else a `FrontendSession` dispatches is a direct user gesture
+    /// and goes through [`Self::execute_operation`].
+    pub async fn execute_operation_with_origin(
+        &self,
+        entity_name: &EntityName,
+        op_name: &str,
+        params: HashMap<String, Value>,
+        origin: holon_api::OpOrigin,
+    ) -> Result<holon_api::OpOutcome> {
         self.require_operation_engine()?
             .execute_operation(
                 entity_name,
                 op_name,
                 params.into_iter().map(|(k, v)| (k.into(), v)).collect(),
+                origin,
             )
             .await
     }
@@ -681,19 +894,15 @@ impl<T> FrontendSession<T> {
         }
     }
 
-    /// Undo the last operation
-    ///
-    /// Returns true if an operation was undone, false if the undo stack is
-    /// empty.
-    pub async fn undo(&self) -> Result<bool> {
+    /// Undo the last operation. See [`holon_api::UndoOutcome`] — a stale entry
+    /// is dropped with `StaleDropped` (surfaceable) rather than silently
+    /// skipped.
+    pub async fn undo(&self) -> Result<holon_api::UndoOutcome> {
         self.require_operation_engine()?.undo().await
     }
 
-    /// Redo the last undone operation
-    ///
-    /// Returns true if an operation was redone, false if the redo stack is
-    /// empty.
-    pub async fn redo(&self) -> Result<bool> {
+    /// Redo the last undone operation. See [`holon_api::UndoOutcome`].
+    pub async fn redo(&self) -> Result<holon_api::UndoOutcome> {
         self.require_operation_engine()?.redo().await
     }
 
@@ -727,5 +936,156 @@ impl<T> FrontendSession<T> {
             })?
             .lookup_block_path(block_id)
             .await
+    }
+}
+
+#[cfg(test)]
+mod journals_seed_tests {
+    use holon_api::ContentType;
+    use holon_api::SourceLanguage;
+    use holon_api::block::Block;
+
+    use super::*;
+
+    fn find<'a>(blocks: &'a [Block], id: &str) -> &'a Block {
+        blocks
+            .iter()
+            .find(|b| b.id.as_str() == id)
+            .unwrap_or_else(|| panic!("block {id} missing from {:?}", ids(blocks)))
+    }
+
+    fn ids(blocks: &[Block]) -> Vec<String> {
+        blocks.iter().map(|b| b.id.as_str().to_string()).collect()
+    }
+
+    #[test]
+    fn journals_page_blocks_shell_owns_query_and_render() {
+        let blocks = journals_page_blocks();
+
+        // The page shell + its display query/render, owned directly by the shell
+        // (no separate org document) — the fix for the duplicate-page defect.
+        let page = find(&blocks, JOURNALS_PAGE_ID);
+        assert!(page.is_page(), "block:journals is the Page shell");
+        assert_eq!(page.parent_id, EntityUri::no_parent());
+
+        // Display query + render are DIRECT children of the shell so the render
+        // system resolves them for the journals page.
+        for id in [JOURNALS_SRC_ID, JOURNALS_RENDER_ID] {
+            assert_eq!(
+                find(&blocks, id).parent_id.as_str(),
+                JOURNALS_PAGE_ID,
+                "{id} is a direct child of block:journals"
+            );
+        }
+        let src = find(&blocks, JOURNALS_SRC_ID);
+        assert_eq!(
+            src.source_language,
+            Some(SourceLanguage::Query(holon_api::QueryLanguage::HolonSql))
+        );
+        // The feed surface reads the boot-owned `journal_feed` matview (the
+        // journal-feed chain), not an inline JOIN — so day-page detection is
+        // IVM-maintained and reliable on every platform (ruling 2026-07-18).
+        assert!(
+            src.content.contains("FROM journal_feed"),
+            "journals feed reads the journal_feed matview: {:?}",
+            src.content
+        );
+        assert!(matches!(
+            find(&blocks, JOURNALS_RENDER_ID).source_language,
+            Some(SourceLanguage::Render)
+        ));
+
+        // `journals_page_blocks` is the page-display spec only: the auto-create
+        // rule is a separate spec (`journals_auto_create_blocks`), both seeded by
+        // `build_default_layout_blocks`. The page-display spec carries no rule.
+        assert!(
+            !blocks.iter().any(|b| b.id.as_str() == JOURNALS_ACTION_ID),
+            "the page-display spec carries no rule (it lives in the rule spec)"
+        );
+    }
+
+    #[test]
+    fn journals_auto_create_is_a_single_block_holon_rule() {
+        let blocks = journals_auto_create_blocks();
+        // A "Journal Auto-Create" heading hosting ONE self-contained holon_rule
+        // block (ADR 0024 §7.2) — no legacy holon_sql trigger sibling.
+        let auto = find(&blocks, JOURNALS_AUTO_CREATE_ID);
+        assert_eq!(auto.parent_id.as_str(), JOURNALS_PAGE_ID);
+        // Exactly two blocks: the heading + the rule. No holon_sql trigger sibling.
+        assert_eq!(
+            blocks.len(),
+            2,
+            "single-block rule: heading + one holon_rule"
+        );
+        assert!(
+            blocks
+                .iter()
+                .filter(|b| b.content_type == ContentType::Source)
+                .all(|b| b.source_language == Some(SourceLanguage::HolonRule)),
+            "the only source block is the holon_rule (no holon_sql trigger)"
+        );
+        let rule = find(&blocks, JOURNALS_ACTION_ID);
+        assert_eq!(rule.parent_id.as_str(), JOURNALS_AUTO_CREATE_ID);
+        assert!(matches!(
+            rule.source_language,
+            Some(SourceLanguage::HolonRule)
+        ));
+        // The ratified sugar form: `when:` guard + `emit:` place/name.
+        assert!(rule.content.contains("when:") && rule.content.contains("emit:"));
+        // LogSeq-parity daily-note ruling (2026-07-19): the day block is a
+        // PAGE-file child of the journals shell (`place: page(journals)`), so it is
+        // `Page`-tagged, a `[[{today}]]` link target, and owns `Journals/{today}.org`.
+        assert!(rule.content.contains("place: page(journals)"));
+    }
+
+    #[test]
+    fn journals_page_blocks_are_deterministic_and_idempotent() {
+        // Same ids on every call — so seeding on every boot upserts (never
+        // duplicates) the journal infrastructure.
+        assert_eq!(ids(&journals_page_blocks()), ids(&journals_page_blocks()));
+    }
+
+    #[test]
+    fn default_layout_includes_journal_machinery_on_every_boot() {
+        // Defect 2 (partial): a non-empty (already-seeded / org) vault boots with
+        // fresh=false but MUST still get the journals page + its display query, so
+        // no vault is left without journal infrastructure. Both the fresh and the
+        // non-fresh layout carry the page.
+        for fresh in [true, false] {
+            let entries =
+                FrontendSession::<()>::build_default_layout_blocks(fresh).expect("build layout");
+            let entry_ids: std::collections::HashSet<String> =
+                entries.iter().map(|b| b.id.as_str().to_string()).collect();
+            for id in [
+                JOURNALS_PAGE_ID,
+                JOURNALS_SRC_ID,
+                JOURNALS_RENDER_ID,
+                JOURNALS_AUTO_CREATE_ID,
+                JOURNALS_ACTION_ID,
+            ] {
+                assert!(
+                    entry_ids.contains(id),
+                    "fresh={fresh}: journals block {id} must be seeded"
+                );
+            }
+            // Exactly ONE Journals page shell — never a duplicate.
+            let page_count = entries
+                .iter()
+                .filter(|b| b.is_page() && b.content == "Journals")
+                .count();
+            assert_eq!(page_count, 1, "fresh={fresh}: exactly one Journals page");
+        }
+    }
+
+    #[test]
+    fn journals_disk_assets_are_empty_no_duplicate_page_source() {
+        // The journals page is NOT a disk-seeded asset anymore (a disk Journals.org
+        // with no `#+ID:` parsed to a SECOND `file:` page). Guard the regression.
+        assert!(
+            DEFAULT_ASSETS.is_empty(),
+            "journals must be seeded programmatically, not written to disk"
+        );
+        // ContentType round-trips through the worker's string SQL path.
+        assert_eq!(ContentType::Source.to_string(), "source");
     }
 }

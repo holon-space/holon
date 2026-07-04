@@ -30,7 +30,6 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use holon::api::BackendEngine;
-use holon::sync::LoroDocumentStore;
 use holon_api::EdgeFieldUpdate;
 use holon_api::EntityUri;
 use holon_api::StorageEntity;
@@ -38,15 +37,28 @@ use holon_api::Value;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive::ReactiveEngine;
 use holon_frontend::user_driver::UserDriver;
-use holon_loro::LoroBackend;
 use holon_pbt_core::capabilities::SutBlockTreeWrite;
 use holon_pbt_core::capabilities::SutEdgeFieldWrite;
 
-/// Shared oracle-synthetic → SUT-real id map (the `doc_uri_map` analog). The
-/// composed runner accumulates split reconciliations into it; the writer
-/// resolves every incoming id through it before dispatching — exactly
-/// `E2ESut::resolve_uri`.
-pub type IdResolver = Arc<Mutex<BTreeMap<EntityUri, EntityUri>>>;
+/// True for the ADR 0028 D1 page-boundary refusal of `outdent` — the op engine
+/// declining to move a direct page child out of its page container.
+///
+/// Every `SutBlockTreeWrite` realization must treat this refusal as a NO-OP,
+/// not as a driver failure: it is the correct production outcome (prod shows a
+/// `CommandFailed` toast and leaves the tree unchanged) and
+/// `outdent_apply_to_ref` models the same no-op. Swallowing it does not blind
+/// the oracle — the reference decides page-ness independently, so an engine
+/// that refused an outdent the reference DID apply still diverges the tree
+/// comparison.
+pub fn is_page_boundary_outdent_refusal(msg: &str) -> bool {
+    msg.contains("escape its page container")
+}
+
+/// Shared oracle-synthetic → SUT-real id map. The composed runner accumulates
+/// split reconciliations into it; the writer resolves every incoming id through
+/// it before dispatching — exactly `E2ESut::resolve_uri`. A re-export, not a
+/// parallel alias: a SUT adapter's `doc_uri_map` IS this map.
+pub type IdResolver = holon_pbt_core::types::DocUriMap;
 
 /// A `SutBlockTreeWrite` realization that dispatches the production `block`
 /// structural operations through a real [`BackendEngine`]. `&self` (the engine
@@ -56,7 +68,7 @@ pub type IdResolver = Arc<Mutex<BTreeMap<EntityUri, EntityUri>>>;
 /// runner driving this must reconcile the oracle's synthetic `block::split-N`
 /// against the minted id (the EXP-2/3 `ComposedRunner`).
 pub struct OpDispatchWriter {
-    engine: Arc<BackendEngine>,
+    sink: DispatchSink,
     /// Synthetic→real id map. Empty (`new`) ⇒ identity resolution (every id
     /// passes through), which is correct for fixed-id slices. A multi-tick
     /// composed runner over an id-minting backend shares a populated map
@@ -65,36 +77,92 @@ pub struct OpDispatchWriter {
     resolver: IdResolver,
 }
 
+/// Which production dispatch seam the writer's ops travel.
+///
+/// The two are NOT interchangeable for the structural focus movers: only the
+/// frontend seam runs `apply_structural_focus`, which reads `split_block` /
+/// `join_block`'s focus response (new block, caret 0) and moves the in-memory
+/// focus authority — the handoff the desktop app performs on every Enter and
+/// the one `SplitBlock::apply_to_ref` mirrors. A writer on the storage seam
+/// leaves `focused_block` on the pre-split block, so the next keystroke lands
+/// somewhere the oracle never sent it.
+enum DispatchSink {
+    /// Storage rung: no frontend is booted, so there is no focus authority to
+    /// move and the op engine is the whole system under test.
+    Storage(Arc<BackendEngine>),
+    /// Frontend rung: `dispatch_intent_sync`, the seam GPUI's keychord handler
+    /// and MCP `send_key_chord` dispatch through. (MCP's raw-op tools
+    /// `execute_operation`/`execute_command` go through `HolonService` below
+    /// this seam and deliberately do not move UI focus.)
+    Frontend(Arc<ReactiveEngine>),
+}
+
 impl OpDispatchWriter {
     /// Identity resolution (fixed-id slices: oracle id == store id).
     pub fn new(engine: Arc<BackendEngine>) -> Self {
         Self {
-            engine,
+            sink: DispatchSink::Storage(engine),
             resolver: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
     /// Share a populated id map with the composed runner (id-minting backends).
     pub fn with_resolver(engine: Arc<BackendEngine>, resolver: IdResolver) -> Self {
-        Self { engine, resolver }
+        Self {
+            sink: DispatchSink::Storage(engine),
+            resolver,
+        }
     }
 
-    /// Resolve an oracle-space id to its SUT-space id (identity if unmapped).
+    /// The frontend-rung writer: same ops, dispatched through the booted
+    /// `ReactiveEngine` so the structural focus handoff happens. Used wherever
+    /// a frontend exists but the keystroke writer cannot be — SqlOnly, where
+    /// `KeystrokeBlockTreeWriter` has no `MutableText` to press against.
+    pub fn with_frontend(reactive: Arc<ReactiveEngine>, resolver: IdResolver) -> Self {
+        Self {
+            sink: DispatchSink::Frontend(reactive),
+            resolver,
+        }
+    }
+
+    /// Resolve an oracle-space id to its SUT-space id.
     fn resolve(&self, id: &EntityUri) -> EntityUri {
-        self.resolver
-            .lock()
-            .expect("resolver lock")
-            .get(id)
-            .cloned()
-            .unwrap_or_else(|| id.clone())
+        holon_pbt_core::types::resolve_sut_id(&self.resolver, id)
     }
 
     async fn execute(&self, op: &str, params: StorageEntity) {
-        let entity = "block".to_string().into();
-        self.engine
-            .execute_operation(&entity, op, params)
-            .await
-            .unwrap_or_else(|e| panic!("block/{op} operation failed: {e}"));
+        if let Err(e) = self.try_execute(op, params).await {
+            panic!("block/{op} operation failed: {e}");
+        }
+    }
+
+    /// Dispatch without the fail-loud wrapper, for the one caller that has to
+    /// inspect a DOCUMENTED refusal ([`is_page_boundary_outdent_refusal`]).
+    async fn try_execute(&self, op: &str, params: StorageEntity) -> anyhow::Result<()> {
+        let entity: holon_api::EntityName = "block".to_string().into();
+        match &self.sink {
+            DispatchSink::Storage(engine) => engine
+                .execute_operation(&entity, op, params, holon_api::OpOrigin::User)
+                .await
+                .map(|_| ()),
+            DispatchSink::Frontend(reactive) => {
+                // Awaiting door normally; the fire-and-forget one production
+                // GPUI handlers use while the composed keystone has this engine
+                // armed for an interleaved transition kind.
+                holon_frontend::reactive::dispatch_intent_through_armed_door(
+                    reactive,
+                    holon_frontend::operations::OperationIntent::new(
+                        entity,
+                        op.to_string(),
+                        params
+                            .into_iter()
+                            .map(|(k, v)| (k.to_string(), v))
+                            .collect(),
+                    ),
+                )
+                .await
+            }
+        }
     }
 
     fn id_only(&self, id: &EntityUri) -> StorageEntity {
@@ -126,7 +194,17 @@ impl SutBlockTreeWrite for OpDispatchWriter {
     }
 
     async fn apply_outdent(&self, id: &EntityUri) {
-        self.execute("outdent", self.id_only(id)).await;
+        // The dispatch floor sees the ADR 0028 D1 page-boundary refusal RAW (its
+        // keystroke twin below sees the same refusal through the driver). It is a
+        // modelled no-op, not a failure — see `is_page_boundary_outdent_refusal`.
+        // Any OTHER dispatch error stays fail-loud.
+        if let Err(e) = self.try_execute("outdent", self.id_only(id)).await {
+            let msg = format!("{e:#}");
+            assert!(
+                is_page_boundary_outdent_refusal(&msg),
+                "block/outdent operation failed: {msg}"
+            );
+        }
     }
 
     async fn apply_move_up(&self, id: &EntityUri) {
@@ -322,7 +400,16 @@ impl SutBlockTreeWrite for KeystrokeBlockTreeWriter {
         // Shift+Tab → `outdent` (BackTab) in the `HeadlessEditorMirror`.
         let resolved = self.resolve(id);
         self.focus_editor(&resolved, "Outdent").await;
-        self.key("tab", &["shift"], "Outdent").await;
+        // The ADR 0028 D1 page-boundary refusal is a modelled no-op, not a driver
+        // failure — see `is_page_boundary_outdent_refusal`. Any OTHER keystroke
+        // error stays fail-loud.
+        if let Err(e) = self.driver.send_raw_keystroke("tab", &["shift"]).await {
+            let msg = format!("{e:#}");
+            assert!(
+                is_page_boundary_outdent_refusal(&msg),
+                "[Outdent/keystroke] tab [\"shift\"] failed: {msg}"
+            );
+        }
     }
 
     // `move_up`/`move_down` are block-reorder ops with NO editor-mirror keystroke
@@ -349,72 +436,168 @@ impl SutBlockTreeWrite for KeystrokeBlockTreeWriter {
 }
 
 /// `SutEdgeFieldWrite` realization for a Loro-authority composed config (the
-/// `full_headless` frontend). Writes a block edge field (`tags` / `requires`)
-/// through the production `LoroBackend` setters (`set_block_tags` /
-/// `set_block_requires`) over the frontend's authority doc — the SAME functions
-/// the org re-scan reconciliation calls, so the write flows Loro → `project()`
-/// → SQL exactly as production does. That is what lets the composed `/matview`
-/// invariant observe whether an edge-field change re-projects (H12 =
-/// `blocks_differ` dropping `requires` from its change gate).
+/// `full_headless` frontend). Dispatches the edge-field write as a production
+/// `block` `set_field` op through the real [`BackendEngine`] — the SAME path
+/// content/structural writes take (and the same `OpDispatchWriter` uses) — so
+/// the write is journaled on the engine's undo stack and `UndoLastMutation` can
+/// retract it. In Loro-authority mode `set_field` routes the edge value to the
+/// production `set_block_{tags,requires,advice_suppressed}` setters over the
+/// authority doc → `project()` → SQL, exactly as before, PLUS the undo entry
+/// (whole-set-restore inverse) the raw-`LoroBackend` path could never record.
 ///
 /// Resolves oracle ids through the shared [`IdResolver`] (like
-/// [`OpDispatchWriter`]) so a write — and each `requires` dependency target —
+/// [`OpDispatchWriter`]) so the write — and each `requires` dependency target —
 /// hits the real (split-reconciled) block, not a synthetic oracle id.
 pub struct EdgeFieldWriter {
-    doc_store: LoroDocumentStore,
+    engine: Arc<BackendEngine>,
     resolver: IdResolver,
 }
 
 impl EdgeFieldWriter {
-    pub fn new(doc_store: LoroDocumentStore, resolver: IdResolver) -> Self {
-        Self {
-            doc_store,
-            resolver,
-        }
+    pub fn new(engine: Arc<BackendEngine>, resolver: IdResolver) -> Self {
+        Self { engine, resolver }
     }
 
     fn resolve(&self, id: &EntityUri) -> EntityUri {
-        self.resolver
-            .lock()
-            .expect("resolver lock")
-            .get(id)
-            .cloned()
-            .unwrap_or_else(|| id.clone())
+        holon_pbt_core::types::resolve_sut_id(&self.resolver, id)
     }
 
-    /// A `LoroBackend` over the frontend's authority doc — the same
-    /// construction the production `LoroBlockOperations::get_backend` uses
-    /// (`from_document` over the global doc), so the write targets the doc
-    /// the op pipeline and the outbound projector share.
-    async fn backend(&self) -> LoroBackend {
-        let collab_doc = self
-            .doc_store
-            .get_global_doc()
-            .await
-            .unwrap_or_else(|e| panic!("EdgeFieldWriter: get_global_doc failed: {e:#}"));
-        LoroBackend::from_document(collab_doc)
+    /// Edge targets travel as a `Value::Array` of id strings — the shape the
+    /// `set_field` edge-field partition (SQL provider) and the Loro cell
+    /// registry both consume.
+    fn resolved_targets(&self, targets: &[EntityUri]) -> Value {
+        Value::Array(
+            targets
+                .iter()
+                .map(|t| Value::String(self.resolve(t).to_string()))
+                .collect(),
+        )
     }
 }
 
 #[async_trait::async_trait(?Send)]
 impl SutEdgeFieldWrite for EdgeFieldWriter {
     async fn apply_set_edge_field(&self, id: &EntityUri, update: &EdgeFieldUpdate) {
-        let backend = self.backend().await;
         let rid = self.resolve(id);
-        match update {
-            EdgeFieldUpdate::Tags(tags) => {
-                backend
-                    .set_block_tags(rid.as_str(), &tags.to_vec())
-                    .await
-                    .unwrap_or_else(|e| panic!("set_block_tags({rid}) failed: {e:#}"));
+        let (field, value) = match update {
+            EdgeFieldUpdate::Tags(tags) => (
+                "tags",
+                Value::Array(tags.to_vec().into_iter().map(Value::String).collect()),
+            ),
+            EdgeFieldUpdate::Requires(reqs) => ("requires", self.resolved_targets(reqs)),
+            EdgeFieldUpdate::AdviceSuppressed(reqs) => {
+                ("advice_suppressed", self.resolved_targets(reqs))
             }
-            EdgeFieldUpdate::Requires(reqs) => {
-                let resolved: Vec<EntityUri> = reqs.iter().map(|t| self.resolve(t)).collect();
-                backend
-                    .set_block_requires(rid.as_str(), &resolved)
-                    .await
-                    .unwrap_or_else(|e| panic!("set_block_requires({rid}) failed: {e:#}"));
-            }
-        }
+            EdgeFieldUpdate::ContributesTo(reqs) => ("contributes_to", self.resolved_targets(reqs)),
+        };
+        let mut params: StorageEntity = HashMap::new();
+        params.insert("id".into(), Value::String(rid.to_string()));
+        params.insert("field".into(), Value::String(field.to_string()));
+        params.insert("value".into(), value);
+        let entity = "block".to_string().into();
+        self.engine
+            .execute_operation(&entity, "set_field", params, holon_api::OpOrigin::User)
+            .await
+            .unwrap_or_else(|e| panic!("block/set_field({field}) on {rid} failed: {e:#}"));
+    }
+}
+
+#[cfg(test)]
+mod split_focus_handoff_tests {
+    use std::collections::BTreeSet;
+    use std::time::Duration;
+
+    use holon_pbt_core::capabilities::SutBackend;
+
+    use super::*;
+    use crate::pbt::frontend_slice::components::HeadlessFrontendComponent;
+
+    const SETTLE: Duration = Duration::from_millis(400);
+
+    async fn ids_and_contents(comp: &HeadlessFrontendComponent) -> BTreeMap<EntityUri, String> {
+        comp.block_raw_snapshot()
+            .await
+            .into_iter()
+            .map(|b| (b.id.clone(), b.content.clone()))
+            .collect()
+    }
+
+    fn id_of(rows: &BTreeMap<EntityUri, String>, content: &str) -> EntityUri {
+        rows.iter()
+            .find(|(_, c)| c.as_str() == content)
+            .unwrap_or_else(|| panic!("no block with content {content:?} in {rows:?}"))
+            .0
+            .clone()
+    }
+
+    /// Both rungs of [`OpDispatchWriter`], over ONE SqlOnly frontend (Loro off
+    /// — the shipped default), on the op whose result carries a focus
+    /// target.
+    ///
+    /// The storage rung must NOT move focus (it dispatches below the frontend
+    /// that owns it); the frontend rung MUST — `split_block` hands the caret to
+    /// the TEXT-bearing block at offset 0, and that handoff is the whole reason
+    /// a following keystroke lands where the user is looking. The position-0
+    /// identity routing is asserted alongside it: the text (and therefore the
+    /// caret) stays on the ORIGINAL id and the minted block is the empty one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn split_hands_focus_to_the_text_bearing_block_only_on_the_frontend_rung() {
+        let comp = HeadlessFrontendComponent::new(
+            &[("doc0.org", "#+ID: ref-doc-0\n* Alpha\n* Beta\n")],
+            SETTLE,
+        )
+        .await;
+        let before = ids_and_contents(&comp).await;
+        let alpha = id_of(&before, "Alpha");
+        let beta = id_of(&before, "Beta");
+        let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
+
+        let focus_before = comp.reactive().focused_block();
+        OpDispatchWriter::with_resolver(comp.engine(), resolver.clone())
+            .apply_split_block(&alpha, 0)
+            .await;
+        tokio::time::sleep(SETTLE).await;
+        assert_eq!(
+            comp.reactive().focused_block(),
+            focus_before,
+            "the storage rung dispatches below the frontend: it has no focus authority to move"
+        );
+
+        let mid = ids_and_contents(&comp).await;
+        OpDispatchWriter::with_frontend(comp.reactive(), resolver)
+            .apply_split_block(&beta, 0)
+            .await;
+        tokio::time::sleep(SETTLE).await;
+        let after = ids_and_contents(&comp).await;
+
+        let minted: BTreeSet<EntityUri> = after
+            .keys()
+            .filter(|id| !mid.contains_key(*id))
+            .cloned()
+            .collect();
+        assert_eq!(minted.len(), 1, "one block minted by the split: {minted:?}");
+        let new_block = minted.into_iter().next().expect("one minted id");
+
+        assert_eq!(
+            comp.reactive().focused_block(),
+            Some(beta.clone()),
+            "the frontend rung must apply split_block's focus response, which at position 0 names \
+             the ORIGINAL block — the one that still holds the text"
+        );
+        assert_eq!(
+            comp.reactive().peek_caret_seed(&beta),
+            Some(0),
+            "the caret sits at offset 0 of the text-bearing block"
+        );
+        assert_eq!(
+            after.get(&beta).map(String::as_str),
+            Some("Beta"),
+            "a split at position 0 keeps the whole text on the original id"
+        );
+        assert_eq!(
+            after.get(&new_block).map(String::as_str),
+            Some(""),
+            "the minted block is the empty one inserted above"
+        );
     }
 }

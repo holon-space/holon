@@ -1,4 +1,22 @@
 //! Reference model for the PBT state machine.
+//!
+//! @pbt kind ref
+//! @pbt oracle correspondence — the single `ReferenceState` oracle. Its
+//!   `BuilderServices::interpret` REUSES the production `ShadowInterpreter`
+//!   (render engine) driven from the ref's OWN block map (`get_block_data`),
+//!   never SUT read-back: legitimate reused-not-under-test-engine oracle,
+//!   deliberately blind to render-engine-internal bugs (covered by its own
+//!   tier), sharp on the ref↔SUT projection axis.
+//! @pbt covers block-tree/sibling-order — the structural mutation helpers
+//!   (`move_block`/`outdent_block`/`swap_sequence`/`split_block`/`join_block`)
+//!   each independently predict post-op sibling order. FIDELITY DRIFT:
+//!   `move_block` deliberately SUPPRESSES the canonical re-sort (models the
+//!   production fractional `sort_key`), whereas `outdent`/`swap`/content
+//!   mutations funnel through `recanon_and_rebuild` →
+//!   `assign_reference_sequences_canonical`, a HAND-mirror of the org
+//!   `process_headlines` re-emission order (Source<Image<Text). A move
+//!   followed by a same-parent content mutation re-canonicalizes and can
+//!   silently reorder what the move placed — see the REF honesty-drift finding.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -14,10 +32,13 @@ use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
 use holon_api::render_types::Arg;
 use holon_api::render_types::RenderExpr;
-use holon_frontend::editor_caret;
+use holon_loro_testing::ref_ext::LoroRefExt;
 use holon_pbt_core::Wiring;
 
 use super::action_actor_state::ActionActorState;
+use super::block_state::BlockState;
+use super::block_state::LayoutBlockInfo;
+use super::clock_state::ClockState;
 use super::file_adapter_state::FileAdapterState;
 use super::mcp_server_actor_state::MCPServerActorState;
 use super::query::QuerySource;
@@ -25,6 +46,8 @@ use super::query::TestQuery;
 use super::query::WatchSpec;
 use super::reference_domain_state::ReferenceDomainState;
 use super::ui_actor_state::UIActorState;
+use super::ui_types::CursorPosition;
+use crate::pbt::types::MutationApply;
 
 pub type ShadowInterpreter =
     holon_frontend::render_interpreter::RenderInterpreter<holon_frontend::ReactiveViewModel>;
@@ -204,6 +227,86 @@ pub fn default_root_render_expr() -> RenderExpr {
     )
 }
 
+/// The delegation node's name in its shadow-builder form. The only production
+/// delegation form is the bare `live_block()`, which reaches the interpreter as
+/// a `FunctionCall` resolving the target from the row's `id` column. The
+/// explicit-target form (`live_block("block:x")`, which parses to
+/// [`RenderExpr::LiveBlock`]) is seeded nowhere, so the ref asserts against it
+/// rather than guessing at a model for it.
+const LIVE_BLOCK_BUILDER: &str = "live_block";
+
+/// Whether `expr` hands its rows to another block's own render via
+/// `live_block()`.
+pub fn contains_live_block(expr: &RenderExpr) -> bool {
+    match expr {
+        RenderExpr::LiveBlock { .. } => {
+            unreachable!(
+                "explicit-target live_block(..) is seeded nowhere; the ref models only bare live_block()"
+            )
+        }
+        RenderExpr::FunctionCall { name, .. } if name == LIVE_BLOCK_BUILDER => true,
+        RenderExpr::FunctionCall { args, .. } => args.iter().any(|a| contains_live_block(&a.value)),
+        RenderExpr::Array { items } => items.iter().any(contains_live_block),
+        RenderExpr::Object { fields } => fields.values().any(contains_live_block),
+        RenderExpr::BinaryOp { left, right, .. } => {
+            contains_live_block(left) || contains_live_block(right)
+        }
+        RenderExpr::ColumnRef { .. } | RenderExpr::Literal { .. } => false,
+    }
+}
+
+/// Replace every `live_block()` delegation node in `expr` with `replacement`,
+/// recursing through the whole render tree.
+///
+/// A `live_block()` template hands each row to that block's own render, which
+/// the ref cannot evaluate — interpreting the raw node yields zero widgets and
+/// makes every block-interaction transition look impossible. The delegate a
+/// focus root without its own query resolves to is the profile collection over
+/// its subtree, so `main_rendered_block_ids` already expands the ROWS to that
+/// subtree; this is the same model applied to the TEMPLATE those rows render
+/// through.
+pub fn substitute_live_block(expr: RenderExpr, replacement: &RenderExpr) -> RenderExpr {
+    use holon_api::render_types::Arg;
+    match expr {
+        RenderExpr::LiveBlock { .. } => {
+            unreachable!(
+                "explicit-target live_block(..) is seeded nowhere; the ref models only bare live_block()"
+            )
+        }
+        RenderExpr::FunctionCall { ref name, .. } if name == LIVE_BLOCK_BUILDER => {
+            replacement.clone()
+        }
+        RenderExpr::FunctionCall { name, args } => RenderExpr::FunctionCall {
+            name,
+            args: args
+                .into_iter()
+                .map(|a| Arg {
+                    name: a.name,
+                    value: substitute_live_block(a.value, replacement),
+                })
+                .collect(),
+        },
+        RenderExpr::Array { items } => RenderExpr::Array {
+            items: items
+                .into_iter()
+                .map(|i| substitute_live_block(i, replacement))
+                .collect(),
+        },
+        RenderExpr::Object { fields } => RenderExpr::Object {
+            fields: fields
+                .into_iter()
+                .map(|(k, v)| (k, substitute_live_block(v, replacement)))
+                .collect(),
+        },
+        RenderExpr::BinaryOp { op, left, right } => RenderExpr::BinaryOp {
+            op,
+            left: Box::new(substitute_live_block(*left, replacement)),
+            right: Box::new(substitute_live_block(*right, replacement)),
+        },
+        other @ (RenderExpr::ColumnRef { .. } | RenderExpr::Literal { .. }) => other,
+    }
+}
+
 /// Backward-compatible string slice for code that still needs raw strings.
 pub fn valid_render_expression_strings() -> Vec<String> {
     valid_render_expressions()
@@ -264,114 +367,89 @@ pub static VALID_PROFILE_YAMLS: std::sync::LazyLock<Vec<String>> = std::sync::La
     yamls
 });
 
-/// Typed classification of layout block IDs in index.org.
+/// Harness-environment residue of the reference model (RefStateSplit Inc 3).
 ///
-/// Layout blocks are split into three categories with different mutation rules:
-/// - **headline_ids**: The text headline blocks that parent query/render
-///   sources. These can have content, task_state, priority, tags mutated.
-/// - **query_source_ids**: PRQL/GQL/SQL source blocks. These are truly
-///   immutable because changing them would break `initial_widget()`.
-/// - **render_source_ids**: Render DSL source blocks. These can have their
-///   content changed to any valid render expression.
-#[derive(Debug, Clone, Default)]
-pub struct LayoutBlockInfo {
-    pub headline_ids: HashSet<EntityUri>,
-    pub query_source_ids: HashSet<EntityUri>,
-    pub render_source_ids: HashSet<EntityUri>,
-}
-
-impl LayoutBlockInfo {
-    /// Returns true if the block is part of the layout at all.
-    pub fn contains(&self, id: &EntityUri) -> bool {
-        self.headline_ids.contains(id)
-            || self.query_source_ids.contains(id)
-            || self.render_source_ids.contains(id)
-    }
-
-    /// Returns true if the block must never be mutated (query sources only).
-    pub fn is_immutable(&self, id: &EntityUri) -> bool {
-        self.query_source_ids.contains(id)
-    }
-
-    /// Returns true if the block is focusable — i.e. it has an EditableText
-    /// node. Source blocks (query/render) are NOT focusable. Headline
-    /// blocks (parents of source blocks) ARE focusable in the current
-    /// reference model because the PBT uses them as navigation targets;
-    /// marking them non-focusable would break ClickBlock generation
-    /// entirely (see note in the editable transition generation).
-    pub fn is_focusable(&self, id: &EntityUri) -> bool {
-        !self.query_source_ids.contains(id) && !self.render_source_ids.contains(id)
-    }
-
-    /// Remove a block from all sets.
-    pub fn remove(&mut self, id: &EntityUri) {
-        self.headline_ids.remove(id);
-        self.query_source_ids.remove(id);
-        self.render_source_ids.remove(id);
-    }
-}
-
-/// Block-related state that is affected by undo/redo operations.
-/// Extracted so snapshots can be taken via `.clone()` before UI mutations.
+/// These fields are **not model state** — they are the async runtime, the
+/// wiring manifest, the composed cap set, the real-editor driver flag, and the
+/// shadow interpreter that the *harness* threads through the reference.
+/// Gathering them here (rather than leaving them loose on [`ReferenceState`])
+/// puts their `Clone` semantics in one visible place: proptest clones the
+/// reference per step and per case, so `runtime`/`interpreter` are `Arc`-shared
+/// (cheap clone, shared cell) while `wiring`/`cap_set`/`real_editor` are plain
+/// values that clone by copy.
+///
+/// `clock_feed` is NOT here: it moved with the Loro extension into
+/// [`LoroRefExt`] (RefStateSplit Inc 5), where its `Clone`-SHARES-the-cell seam
+/// is documented alongside the shadow mesh it drives.
 #[derive(Debug, Clone)]
-pub struct BlockState {
-    /// Canonical block state (using production Block struct).
-    ///
-    /// `BTreeMap` (not `HashMap`) so iteration order is deterministic across
-    /// process instantiations. The PBT canonicalizer (`apply_mutation`,
-    /// `recanon_and_rebuild`) builds a `Vec<Block>` from these values and the
-    /// resulting sequence numbers depend on iteration order — `HashMap`'s
-    /// random seed made the same proptest seed produce different reference
-    /// states across runs.
-    pub blocks: BTreeMap<EntityUri, Block>,
+pub struct HarnessEnv {
+    /// Runtime for async operations. `Arc`-shared across clones.
+    pub runtime: Arc<tokio::runtime::Runtime>,
 
-    /// Mapping of block_id → doc_uri (persists even after blocks are deleted).
-    /// `BTreeMap` for the same determinism reason as `blocks`.
-    pub block_documents: BTreeMap<EntityUri, EntityUri>,
+    /// The wiring manifest this reference run was built for (which storage
+    /// adapters, sync adapters, and actors are present). Drives the
+    /// `enable_loro()` capability check and per-transition / per-invariant
+    /// `RequiredWiring` gating (ADR 0007).
+    pub wiring: Wiring,
 
-    /// ID counter for generating unique block IDs
-    pub next_id: usize,
+    /// The capability set the SUT supplies, when the SUT is a composed
+    /// `CapMap`. `None` = unrestricted: a concrete SUT (`E2ESut`) provides
+    /// every cap, or this is a non-composed run, so the cap gate passes
+    /// everything and the alphabet behaves exactly as before. `Some(set)` =
+    /// a composed/partial SUT, so transitions whose
+    /// [`TransitionFactory::required_caps`] aren't all present are gated out of
+    /// the alphabet — the cap-analog of
+    /// [`wiring`](Self::wiring)/`RequiredWiring` (PCG-2).
+    pub cap_set: Option<holon_pbt_core::composition::CapSet>,
+
+    /// Whether a **real editor** (a live `InputState` driven by the GPUI/TUI
+    /// `UserDriver`) — not the headless `HeadlessEditorMirror` — drives the
+    /// SUT. Set by the real-editor driver harness, which builds the
+    /// reference state directly. When true,
+    /// [`ReferenceState::blur_active_editor`] commits the editor's dirty
+    /// buffer to block content on blur, mirroring prod's `on_blur` →
+    /// `set_field("content")`. Replaces the former process-global
+    /// `PBT_REAL_EDITOR` env gate — the property now lives on the state the
+    /// driver constructs, so it is deterministic and capture/replay-faithful
+    /// without an env-var side channel. Headless slices leave it `false`.
+    pub real_editor: bool,
+
+    /// Shadow interpreter resolved from FluxDI — source of truth for widget
+    /// names and render DSL parsing. `Arc`-shared across clones.
+    pub interpreter: Arc<ShadowInterpreter>,
+
+    /// Memoized profile engine — see [`ProfileEngineCache`]. Empty in a fresh
+    /// clone, so it never carries another state's engine.
+    pub profile_engine: ProfileEngineCache,
+
+    /// The reference's answer to "is this link scheme registered?" — built-in
+    /// schemes only, since the reference carries no live type registry.
+    pub link_classifier: holon_api::link_parser::LinkTargetClassifier,
 }
 
-impl BlockState {
-    /// Return a clone with every block's `id`/`parent_id` and the
-    /// `block_documents` keys remapped through `map` (synthetic doc URI →
-    /// real SUT UUID). URIs absent from `map` (i.e. all content-block IDs,
-    /// which the ref and SUT already share) pass through unchanged.
-    ///
-    /// Instead of every invariant translating IDs at each comparison point,
-    /// the reference model is mapped *once* into the SUT's ID space so
-    /// capability-bound invariant bodies can compare directly. Only doc URIs
-    /// differ, and only block `id`/`parent_id` + `block_documents` keys carry
-    /// them, so this resolves exactly `block.id`, `block.parent_id`, and the
-    /// `block_documents` keys.
-    pub fn remapped_doc_uris(&self, map: &BTreeMap<EntityUri, EntityUri>) -> BlockState {
-        let resolve = |u: &EntityUri| map.get(u).cloned().unwrap_or_else(|| u.clone());
-        let blocks = self
-            .blocks
-            .values()
-            .map(|b| {
-                let mut b = b.clone();
-                b.id = resolve(&b.id);
-                b.parent_id = resolve(&b.parent_id);
-                // `requires` is an edge field of block-id references; remap its
-                // targets into SUT ID space too so an edge-field comparison
-                // (e.g. `/matview`) matches when a dependency points at a
-                // minted (split-reconciled) block, not just a stable seed id.
-                b.requires = b.requires.iter().map(|u| resolve(u)).collect();
-                (b.id.clone(), b)
-            })
-            .collect();
-        let block_documents = self
-            .block_documents
-            .iter()
-            .map(|(id, doc)| (resolve(id), doc.clone()))
-            .collect();
-        BlockState {
-            blocks,
-            block_documents,
-            next_id: self.next_id,
-        }
+/// Memo for [`ReferenceState::profile_engine`], keyed by a fingerprint of the
+/// source-block projection the entity lookups read.
+///
+/// The key is derived from the very data the engine wraps, so a stale engine is
+/// unrepresentable: mutating any source block's id, parent or language changes
+/// the fingerprint and forces a rebuild. Without the memo, `resolve_profile`
+/// rebuilt the whole engine per ROW — O(rows × blocks) per snapshot.
+///
+/// `Clone` yields an EMPTY cell rather than sharing one: proptest clones the
+/// reference per step, and two clones that then diverge would otherwise evict
+/// each other's engine on every call.
+#[derive(Default)]
+pub struct ProfileEngineCache(std::sync::Mutex<Option<(u64, Arc<rhai::Engine>)>>);
+
+impl Clone for ProfileEngineCache {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl std::fmt::Debug for ProfileEngineCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProfileEngineCache")
     }
 }
 
@@ -393,8 +471,9 @@ pub struct ReferenceState {
     pub mcp: MCPServerActorState,
 
     /// Org/Markdown adapter file-state fragment (ADR 0004 Phase 5): the
-    /// doc_uri -> filename mapping. An adapter concern (how org/markdown
-    /// persist a document on disk), distinct from domain identity.
+    /// doc_uri -> filename mapping plus pre-startup file/VCS boot flags. An
+    /// adapter concern (how org/markdown persist a document on disk), distinct
+    /// from domain identity.
     pub files: FileAdapterState,
 
     /// Tier-3 UI actor fragment (ADR 0004/0006 Phase 3): navigation history,
@@ -403,211 +482,60 @@ pub struct ReferenceState {
     /// the whole fragment instead of carrying dead fields.
     pub ui: UIActorState,
 
-    /// Runtime for async operations
-    pub runtime: Arc<tokio::runtime::Runtime>,
+    /// Harness environment (RefStateSplit Inc 3): runtime, wiring, cap set,
+    /// real-editor flag, shadow interpreter. NOT model state — see
+    /// [`HarnessEnv`].
+    pub harness: HarnessEnv,
 
-    /// Pre-startup directories created (relative paths)
-    pub pre_startup_directories: Vec<String>,
+    /// Loro-private extension (RefStateSplit Inc 5): peer instances, the
+    /// E-solid shadow CRDT mesh, and the Lamport `clock_feed` side-channel.
+    /// Co-located in `holon-loro-testing` ([`LoroRefExt`]); the `RefPeers(Mut)`
+    /// cap impls in `ref_caps/peers.rs` delegate here (orphan rule). The two
+    /// Clone seams (`clock_feed` shares the cell; `shadow_mesh` deep-forks) are
+    /// documented at that home.
+    pub loro: LoroRefExt,
 
-    /// Whether git has been initialized
-    pub git_initialized: bool,
+    /// Calendar-clock model for the `AdvanceDay` transition (ADR 0024 §6).
+    pub clock: ClockState,
 
-    /// Whether jj has been initialized
-    pub jj_initialized: bool,
+    /// Sharing overlay (ADR 0028 C2/H3): per-block policy audience + per-doc
+    /// effective container audience + sharing epoch. Empty until a crossing
+    /// transition writes it; read by `inv-audience-never-over-approximates`
+    /// through the `RefAudience` cap.
+    pub sharing: super::sharing_state::SharingRefState,
 
-    /// Number of pre-startup org files created (for weighting StartApp)
-    pub pre_startup_file_count: usize,
+    /// C2 history-oracle expectation (NOT model state proper): populated by the
+    /// harness `run_report` from the id-reconcile map. `history_ever_created`
+    /// = every real id the oracle minted (anchor for the phantom-history subset
+    /// check); `history_min_op_groups` = the UI-driven create count the SUT's
+    /// `block_history` must meet or exceed (missed-history lower bound). Empty
+    /// / zero on a bare state; the harness fills them just before the
+    /// check.
+    pub history_ever_created: BTreeSet<EntityUri>,
+    pub history_min_op_groups: usize,
 
-    /// The wiring manifest this reference run was built for (which storage
-    /// adapters, sync adapters, and actors are present). Drives the
-    /// `enable_loro()` capability check and per-transition / per-invariant
-    /// `RequiredWiring` gating (ADR 0007).
-    pub wiring: Wiring,
+    /// Undo→redo burned-id oracle (NOT model state proper): the real block ids
+    /// the harness reconcile retired because a `Redo` re-minted their block
+    /// under a fresh uuid. Populated by `run_report` alongside the C2 fields;
+    /// empty on a bare state and on every run without a completed round trip.
+    /// Read by `inv-undo-redo-reference-heal` through `RefUndoRedoBurned`.
+    pub undo_redo_burned_ids: BTreeSet<EntityUri>,
 
-    /// The capability set the SUT supplies, when the SUT is a composed
-    /// `CapMap`. `None` = unrestricted: a concrete SUT (`E2ESut`) provides
-    /// every cap, or this is a non-composed run, so the cap gate passes
-    /// everything and the alphabet behaves exactly as before. `Some(set)` =
-    /// a composed/partial SUT, so transitions whose
-    /// [`TransitionFactory::required_caps`] aren't all present are gated out of
-    /// the alphabet — the cap-analog of
-    /// [`wiring`](Self::wiring)/`RequiredWiring` (PCG-2).
-    pub cap_set: Option<holon_pbt_core::composition::CapSet>,
-
-    /// Whether a **real editor** (a live `InputState` driven by the GPUI/TUI
-    /// `UserDriver`) — not the headless `HeadlessEditorMirror` — drives the
-    /// SUT. Set by the real-editor driver harness (`phased.rs`), which
-    /// builds the reference state directly. When true,
-    /// [`Self::blur_active_editor`] commits the editor's dirty buffer to
-    /// block content on blur, mirroring prod's `on_blur` →
-    /// `set_field("content")`. Replaces the former process-global
-    /// `PBT_REAL_EDITOR` env gate — the property now lives on the state the
-    /// driver constructs, so it is deterministic and capture/replay-faithful
-    /// without an env-var side channel. Headless slices leave it `false`.
-    pub real_editor: bool,
-
-    /// Loro-only peer instances for multi-instance sync testing.
-    pub peers: Vec<PeerRefState>,
-
-    /// E-solid shadow Loro peer mesh — the oracle-side CRDT predictor for
-    /// peer-merge outcomes (tie-break sibling order, concurrent-text
-    /// interleaving). Created lazily at the first `AddPeer`, seeded from the
-    /// ref block map at that moment. `Clone` deep-forks every shadow doc
-    /// (proptest clones per step and per case). See [`super::shadow_mesh`].
-    pub shadow_mesh: Option<super::shadow_mesh::ShadowMesh>,
-
-    /// Clock side-channel (the `IdResolver` pattern): the composed harness
-    /// writes the SUT's scalar Lamport height
-    /// (`SutLoroLog::loro_lamport_height`) here after every apply+settle
-    /// (and once after build); the ref pads the shadow primary to it before
-    /// boundary ops. `Clone` SHARES the cell — it is a harness seam, not
-    /// model state. Empty/stale during proptest's generation phase, which
-    /// is harmless: generation consumes no clock-dependent predictions and
-    /// execution re-evolves the ref fresh (padding is lenient — see
-    /// `ShadowMesh::pad_primary_to`).
-    pub clock_feed: Arc<std::sync::Mutex<Option<u32>>>,
-
-    /// Shadow interpreter resolved from FluxDI — source of truth for widget
-    /// names and render DSL parsing.
-    pub interpreter: Arc<ShadowInterpreter>,
-}
-
-/// Reference state for a Loro-only peer.
-#[derive(Debug, Clone)]
-pub struct PeerRefState {
-    pub peer_id: u64,
-    pub blocks: HashMap<String, super::peer_ops::PeerBlock>,
-    /// Stable IDs this peer has deleted since its last sync with the
-    /// primary. Propagated by `SyncWithPeer`/`MergeFromPeer` so the
-    /// primary's reference block map reflects the delete the production
-    /// controller just applied via `subscribe_root`.
-    pub deleted_stable_ids: std::collections::HashSet<String>,
-    /// Stable IDs explicitly modified by PeerEdit::Update since AddPeer.
-    /// Used by `merge_peer_blocks_into_primary` to distinguish peer edits
-    /// from inherited-at-AddPeer blocks.
-    pub modified_stable_ids: std::collections::HashSet<String>,
-    /// Stable IDs created by PeerEdit::Create since the last sync. Only
-    /// these are added to the primary on merge — inherited-at-AddPeer
-    /// blocks the primary may have since deleted must NOT be re-added,
-    /// because the actual Loro CRDT keeps primary-side deletes.
-    pub created_stable_ids: std::collections::HashSet<String>,
-}
-
-/// Cursor position within a focused block. Tracks line and column to predict
-/// whether arrow keys cause cross-block navigation or intra-block movement.
-#[derive(Debug, Clone, Copy)]
-pub struct CursorPosition {
-    pub line: usize,
-    pub column: usize,
-}
-
-impl CursorPosition {
-    pub fn start() -> Self {
-        Self { line: 0, column: 0 }
-    }
-}
-
-/// Mirror of the GPUI editor's live `InputState`: the in-memory text of the
-/// currently focused EditableText, plus the cursor offset within that text.
-/// Diverges from `block.content` whenever the user has typed/deleted without
-/// blurring — exactly the divergence that surfaces split-with-pending-edit
-/// (and similar) bugs.
-#[derive(Debug, Clone)]
-pub struct ActiveEditor {
-    pub block_id: EntityUri,
-    /// What the GPUI `InputState.text()` currently shows.
-    pub in_memory_content: String,
-    /// Byte offset of the caret within `in_memory_content`.
-    pub cursor_byte: usize,
-    /// True once modeled typing/deleting touched `in_memory_content` since
-    /// the editor opened (or since the last commit). Mirrors what prod's
-    /// commit paths observe: a DIRTY editor's text is user-authored and
-    /// commits on blur / at a structural commit point; a clean editor whose
-    /// text merely diverged from `block.content` is STALE against an
-    /// external change (prod's data subscription refreshes idle editors) —
-    /// committing it would write old text into the ref.
-    pub dirty: bool,
-}
-
-impl ActiveEditor {
-    /// Insert text at the cursor and advance. Delegates caret/text math to the
-    /// **shared** `editor_caret` primitive — the SAME one the SUT's
-    /// `InMemEditorComponent` drives — so ref and SUT cannot diverge on the
-    /// text primitive itself (multibyte-safe).
-    pub fn type_chars(&mut self, text: &str) {
-        debug_assert!(self.cursor_byte <= self.in_memory_content.len());
-        self.cursor_byte =
-            editor_caret::insert_at(&mut self.in_memory_content, self.cursor_byte, text);
-        self.dirty = true;
-    }
-
-    /// Delete `count` chars before the cursor (Backspace ×count). Stops at
-    /// start.
-    pub fn delete_backward(&mut self, count: usize) {
-        if count == 0 {
-            return;
-        }
-        self.cursor_byte =
-            editor_caret::delete_back(&mut self.in_memory_content, self.cursor_byte, count);
-        self.dirty = true;
-    }
-
-    /// Move the caret to a clamped byte position. Snaps to the nearest char
-    /// boundary at or before the target (a raw byte target — home/end/a click —
-    /// may land mid-codepoint); `clamp_boundary` keeps the caret legal.
-    pub fn move_cursor(&mut self, position: usize) {
-        self.cursor_byte = editor_caret::clamp_boundary(&self.in_memory_content, position);
-    }
-}
-
-/// Navigation history for a region (for back/forward navigation)
-#[derive(Debug, Clone)]
-pub struct NavigationHistory {
-    /// History entries: None = home view, Some(id) = focused on block
-    pub entries: Vec<Option<EntityUri>>,
-    /// Current cursor position in history
-    pub cursor: usize,
-}
-
-/// One open `navigation_history` row (`closed_at IS NULL`). Mirrors the
-/// open-rows projection that drives the `focus_roots` matview.
-///
-/// `block_id = None` represents a home row (block_id NULL in SQL); home
-/// rows are kept here because they bump `next_history_id` and contribute
-/// to move-to-top dedup, but they are excluded from `expected_focus_root_ids`
-/// (they're filtered out by the consumer GQL JOIN on `root.id = fr.root_id`).
-#[derive(Debug, Clone)]
-pub struct OpenPinEntry {
-    pub history_id: i64,
-    pub block_id: Option<EntityUri>,
-    pub added_ts_logical: u64,
-}
-
-impl Default for NavigationHistory {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl NavigationHistory {
-    pub fn new() -> Self {
-        Self {
-            entries: vec![None],
-            cursor: 0,
-        }
-    }
-
-    pub fn can_go_back(&self) -> bool {
-        self.cursor > 0
-    }
-
-    pub fn can_go_forward(&self) -> bool {
-        self.cursor < self.entries.len().saturating_sub(1)
-    }
-
-    pub fn current_focus(&self) -> Option<EntityUri> {
-        self.entries.get(self.cursor).cloned().flatten()
-    }
+    /// Page paths (`/`-joined, root->leaf) a `RenamePage` has VACATED -- the
+    /// temporal fuel for `CreatePageAtFreedPath`.
+    ///
+    /// Page ids are `blake3(path)` (`PageId::for_path`), so a path can only be
+    /// re-minted after something frees it. Nothing else in the reference
+    /// records that a name once belonged to a page that no longer carries it: a
+    /// rename leaves the entity in place under its NEW title, and every other
+    /// name-producing transition draws from a monotonic counter. Without this
+    /// ledger the generator can never reach the "name freed, then reused"
+    /// state -- exactly the shape `PageIdentityDeterminism.md` 5.3 speaks to.
+    ///
+    /// Append-only within a run and read through
+    /// [`holon_pbt_core::capabilities::RefPageIdentity::freed_page_paths`],
+    /// which filters out any path a page has since re-occupied.
+    pub renamed_away_page_paths: Vec<String>,
 }
 
 /// Witness that a [`ReferenceState`]'s ids live in the SUT's id space — either
@@ -665,6 +593,68 @@ impl Resolved<ReferenceState> {
 }
 
 impl ReferenceState {
+    /// The oracle's Rhai engine for evaluating the bundled `block` profile.
+    ///
+    /// The bundled profile's computed fields call entity lookups
+    /// (`query_source(id)`, `rule_sibling(id)`), which production registers on
+    /// the ProfileResolver's engine from live entities. The oracle predicts the
+    /// SAME profile, so it registers them through the SAME seat
+    /// (`holon_profiles::build_lookup_engine`) — backed by the model's own
+    /// block tree, not by prod's matviews.
+    ///
+    /// Memoized per source-block fingerprint ([`ProfileEngineCache`]): the
+    /// render path resolves a profile per row, and rebuilding the engine each
+    /// time walks the whole block map.
+    pub fn profile_engine(&self) -> Arc<rhai::Engine> {
+        let fingerprint = self.source_block_fingerprint();
+        let mut slot = self.harness.profile_engine.0.lock().unwrap();
+        if let Some((cached, engine)) = slot.as_ref()
+            && *cached == fingerprint
+        {
+            return Arc::clone(engine);
+        }
+        let engine = Arc::new(self.build_profile_engine());
+        *slot = Some((fingerprint, Arc::clone(&engine)));
+        engine
+    }
+
+    /// Hash of exactly what the lookups read: every source block's id, parent
+    /// and language. Two states agreeing here cannot disagree on any lookup.
+    fn source_block_fingerprint(&self) -> u64 {
+        use std::hash::Hash;
+        use std::hash::Hasher;
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for block in self.domain.block_state.blocks.values() {
+            if block.content_type != ContentType::Source {
+                continue;
+            }
+            let Some(lang) = block.source_language.as_ref() else {
+                continue;
+            };
+            block.id.as_str().hash(&mut hasher);
+            block.parent_id.as_str().hash(&mut hasher);
+            lang.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    /// The model's answer to production's live entities: the SAME
+    /// [`holon_profiles::LiveEntitySpec`] the Turso DI wiring and the Loro
+    /// session build theirs from, applied to the model's block map.
+    fn build_profile_engine(&self) -> rhai::Engine {
+        let entities: holon_profiles::LiveEntities = holon_profiles::LiveEntitySpec::ALL
+            .iter()
+            .map(|spec| {
+                (
+                    spec.entity_name(),
+                    spec.live_data_from_blocks(self.domain.block_state.blocks.values()),
+                )
+            })
+            .collect();
+        holon_profiles::build_lookup_engine(&entities)
+    }
+
     /// Return a [`Resolved`] clone of this reference state with its block tree
     /// remapped into the SUT's ID space via `map` (synthetic doc URI → real
     /// UUID). Capability-bound invariant bodies run against this resolved
@@ -738,6 +728,9 @@ impl ReferenceState {
         if let Some(editor) = resolved.ui.tab.active_editor.as_mut() {
             editor.block_id = resolve(&editor.block_id);
         }
+        // Sharing overlay keys are block/doc uris; remap into SUT id space so the
+        // audience oracle reads SUT-keyed audiences. A no-op on the empty default.
+        resolved.sharing = self.sharing.remapped(map);
         Resolved(resolved)
     }
 
@@ -748,18 +741,22 @@ impl ReferenceState {
             mcp: MCPServerActorState::new(),
             files: FileAdapterState::new(),
             ui: UIActorState::new(),
-            runtime: Arc::new(tokio::runtime::Runtime::new().unwrap()),
-            pre_startup_directories: Vec::new(),
-            git_initialized: false,
-            jj_initialized: false,
-            pre_startup_file_count: 0,
-            wiring,
-            cap_set: None,
-            real_editor: false,
-            peers: Vec::new(),
-            shadow_mesh: None,
-            clock_feed: Arc::new(std::sync::Mutex::new(None)),
-            interpreter,
+            harness: HarnessEnv {
+                runtime: Arc::new(tokio::runtime::Runtime::new().unwrap()),
+                wiring,
+                cap_set: None,
+                real_editor: false,
+                interpreter,
+                profile_engine: ProfileEngineCache::default(),
+                link_classifier: holon_api::link_parser::LinkTargetClassifier::default(),
+            },
+            loro: LoroRefExt::default(),
+            clock: ClockState::new(),
+            sharing: super::sharing_state::SharingRefState::default(),
+            history_ever_created: BTreeSet::new(),
+            history_min_op_groups: 0,
+            undo_redo_burned_ids: BTreeSet::new(),
+            renamed_away_page_paths: Vec::new(),
         }
     }
 
@@ -768,17 +765,17 @@ impl ReferenceState {
     /// auto-narrows to the transitions whose caps the `CapMap` actually
     /// supplies. Concrete-SUT runs leave it `None`.
     pub fn with_cap_set(mut self, cap_set: holon_pbt_core::composition::CapSet) -> Self {
-        self.cap_set = Some(cap_set);
+        self.harness.cap_set = Some(cap_set);
         self
     }
 
     /// Whether the active SUT supplies every cap in `required` — the cap gate
-    /// mirroring `RequiredWiring::satisfied_by(&self.wiring)`. Unrestricted
-    /// (`cap_set == None`) always passes, so concrete-SUT runs gate nothing
-    /// (regression-safe). **Necessary, not sufficient**, exactly like the
-    /// wiring gate.
+    /// mirroring `RequiredWiring::satisfied_by(&self.harness.wiring)`.
+    /// Unrestricted (`cap_set == None`) always passes, so concrete-SUT runs
+    /// gate nothing (regression-safe). **Necessary, not sufficient**,
+    /// exactly like the wiring gate.
     pub fn caps_available(&self, required: &[holon_pbt_core::composition::CapId]) -> bool {
-        match &self.cap_set {
+        match &self.harness.cap_set {
             None => true,
             Some(set) => required.iter().all(|cap| set.contains(cap)),
         }
@@ -789,7 +786,8 @@ impl ReferenceState {
     /// trait method so transition bodies that hold a concrete
     /// `&ReferenceState` can read it without importing the trait.
     pub fn enable_loro(&self) -> bool {
-        self.wiring
+        self.harness
+            .wiring
             .has_storage(holon_pbt_core::StorageAdapter::Loro)
     }
 
@@ -797,11 +795,24 @@ impl ReferenceState {
     /// the headless atomic-editor capability (the single editor-transition
     /// gate; see [`RefLifecycle::has_editor_buffer`]). Inherent mirror of
     /// the trait method so transition bodies holding a concrete
-    /// `&ReferenceState` can read it without importing the trait. Derived
-    /// from the wiring's UI actor (the editor's `InputState`/buffer host),
-    /// not Loro-as-storage or an env var.
+    /// `&ReferenceState` can read it without importing the trait.
+    ///
+    /// Two honest sources, never Loro-as-storage or an env var:
+    /// - `Actor::UI` — a real window hosts the editor's `InputState`. The only
+    ///   source for refs with no composed SUT behind them (the fixed-wiring lib
+    ///   slices), so their gating is unchanged.
+    /// - the composed SUT actually hosting `SutEditorMirrorWrite`.
+    ///   `compose_sut` FORBIDS `Actor::UI` (a GPUI window has thread affinity),
+    ///   so the manifest alone can never admit an editor transition into the
+    ///   composed keystone — yet its frontend arm runs the production
+    ///   `HeadlessEditorMirror` in BOTH storage modes. Reading the cap set
+    ///   makes the gate say what it means: "an editor is drivable here".
     pub fn has_editor_buffer(&self) -> bool {
-        self.wiring.has_actor(holon_pbt_core::Actor::UI)
+        self.harness.wiring.has_actor(holon_pbt_core::Actor::UI)
+            || (self.harness.cap_set.is_some()
+                && self.caps_available(&[holon_pbt_core::composition::CapId::of::<
+                    dyn holon_pbt_core::capabilities::SutEditorMirrorWrite,
+                >()]))
     }
 
     pub fn mutable_text_enabled() -> bool {
@@ -822,7 +833,7 @@ impl ReferenceState {
         // authority-left arm — deterministic, window-activation-independent).
         // A clean mirror that merely diverged from block.content is stale
         // against an external change and must not be committed.
-        if self.real_editor && self.ui.tab.active_editor.as_ref().is_some_and(|e| e.dirty) {
+        if self.harness.real_editor && self.ui.tab.active_editor.as_ref().is_some_and(|e| e.dirty) {
             self.commit_active_editor_if_changed();
         }
         self.ui.tab.active_editor = None;
@@ -847,18 +858,31 @@ impl ReferenceState {
         };
         let block_id = editor.block_id.clone();
         let in_memory = editor.in_memory_content.clone();
-        let Some(block) = self.domain.block_state.blocks.get_mut(&block_id) else {
+        if !self.domain.block_state.blocks.contains_key(&block_id) {
             return false;
+        }
+        // The buffer is the block's SOURCE PROJECTION, so the commit routes
+        // exactly as prod's editor routes it: the source channel re-derives
+        // content AND task state, the content channel writes one column.
+        let id = super::ref_caps::cap_id(&block_id);
+        let surface = {
+            use holon_pbt_core::capabilities::RefBlockTreeMut;
+            self.editor_surface_text(&id)
         };
-        let normalized =
-            super::types::normalize_content_for_org_roundtrip(&in_memory, block.content_type);
-        if block.content == normalized {
+        if surface == in_memory {
             if let Some(e) = self.ui.tab.active_editor.as_mut() {
                 e.dirty = false;
             }
             return false;
         }
-        block.content = normalized;
+        {
+            use holon_pbt_core::capabilities::RefBlockTreeMut;
+            if holon_org_format::source_channel_commit(&surface, &in_memory) {
+                self.commit_editor_source(&id, &in_memory);
+            } else {
+                self.set_block_content(&id, &in_memory);
+            }
+        }
         if let Some(e) = self.ui.tab.active_editor.as_mut() {
             e.dirty = false;
         }
@@ -866,20 +890,11 @@ impl ReferenceState {
     }
 
     pub fn current_focus(&self, region: Region) -> Option<EntityUri> {
-        self.ui
-            .tab
-            .navigation_history
-            .get(&region)
-            .and_then(|h| h.current_focus())
+        self.ui.tab.current_focus(region)
     }
 
     pub fn can_go_back(&self, region: Region) -> bool {
-        self.ui
-            .tab
-            .navigation_history
-            .get(&region)
-            .map(|h| h.can_go_back())
-            .unwrap_or(false)
+        self.ui.tab.can_go_back(region)
     }
 
     /// If `block_id` is the focused entity in any region, reset the cursor to
@@ -893,6 +908,71 @@ impl ReferenceState {
                     .tab
                     .focused_cursor
                     .insert(*region, CursorPosition::start());
+            }
+        }
+    }
+
+    /// If a CLEAN active editor is open on `block_id`, refresh its in-memory
+    /// text to the block's current content. Mirrors prod's data subscription:
+    /// the live editor cell (`editable_text(block, "content").current()`, the
+    /// exact source `editor_live_text` reads) IS the block's content container,
+    /// so an EXTERNAL content change to an idle (never-typed) editor surfaces
+    /// in the live text immediately. A DIRTY editor holds user-authored
+    /// pending text that prod's subscription does NOT clobber (the
+    /// split-with-pending-edit contract), so it is left untouched. Without
+    /// this, a clean editor opened at a split product (e.g. content "2")
+    /// then hit by an external `Update{content:"a"}` leaves the ref's
+    /// `active_editor.in_memory_content` stale at "2" while the SUT cell
+    /// already reads "a" — the `inv-editor-text/mirror` residual (editor
+    /// stale-buffer family).
+    ///
+    /// Only the live TEXT is refreshed, not the caret: the SUT's caret mirror
+    /// (`HeadlessEditorMirror::tracked_cursor`) is advanced solely by
+    /// keystrokes, so an external content change (no keystroke) leaves it
+    /// untouched — the ref must do the same or `inv-editor-caret/mirror` would
+    /// diverge on a `MoveCursor`-then-external-update sequence.
+    pub fn refresh_clean_active_editor(&mut self, block_id: &EntityUri) {
+        let Some(block) = self.domain.block_state.blocks.get(block_id) else {
+            return;
+        };
+        let content_type = block.content_type;
+        // A clean editor re-seeds from the AUTHORITY AS THE SURFACE SHOWS IT —
+        // vault syntax — because that is what prod's convergence targets.
+        let new_content = {
+            use holon_pbt_core::capabilities::RefBlockTreeMut;
+            let id = super::ref_caps::cap_id(block_id);
+            self.editor_surface_text(&id)
+        };
+        if let Some(editor) = self.ui.tab.active_editor.as_mut()
+            && &editor.block_id == block_id
+            && !editor.dirty
+        {
+            // Seq/trim-discriminator-aware echo model (Inc 4, EditorBufferOwnership
+            // plan). A clean editor is normally re-seeded to the block's stored
+            // content — prod's data subscription refreshes idle editors. BUT the
+            // stored content may be the SQL trailing-whitespace canonicalization of
+            // THIS editor's OWN just-committed text, echoed back carrying the SAME
+            // `write_seq` (non-editor writers do NOT bump `write_seq`, so seq alone
+            // cannot distinguish an own-echo from a genuine external write — the
+            // TRIM SHAPE is the load-bearing discriminator, mirroring the SUT's
+            // `evaluate_data_sync_echo`). When the divergence is EXACTLY that
+            // canonicalization, prod keeps the typed buffer
+            // (`EchoDecision::AdoptBaseline`) instead of regressing the trailing
+            // whitespace, so the ref must not regress it either; any SUBSTANTIVE
+            // external change (split/join/org/peer) still converges (refreshes).
+            let (canonical, _) = super::types::normalize_content_for_org_roundtrip(
+                &editor.in_memory_content,
+                content_type,
+            );
+            let is_own_trailing_ws_echo =
+                canonical == new_content && editor.in_memory_content != new_content;
+            if !is_own_trailing_ws_echo {
+                // A converge can SHORTEN the surface (the store canonicalizes
+                // `TODO  milk` into the task `milk`), so the caret is clamped
+                // onto it exactly as prod's `preserved_caret` clamps.
+                editor.cursor_byte =
+                    holon_frontend::editor_caret::clamp_boundary(&new_content, editor.cursor_byte);
+                editor.in_memory_content = new_content;
             }
         }
     }
@@ -931,110 +1011,58 @@ impl ReferenceState {
     /// Whether any region currently has a focused entity (required for
     /// ArrowNavigate).
     pub fn has_focus(&self) -> bool {
-        !self.ui.tab.focused_entity_id.is_empty()
+        self.ui.tab.has_focus()
     }
 
     /// Get the focused entity in a region (set by ClickBlock).
     pub fn focused_entity(&self, region: Region) -> Option<&EntityUri> {
-        self.ui.tab.focused_entity_id.get(&region)
+        self.ui.tab.focused_entity(region)
     }
 
     pub fn can_go_forward(&self, region: Region) -> bool {
-        self.ui
-            .tab
-            .navigation_history
-            .get(&region)
-            .map(|h| h.can_go_forward())
-            .unwrap_or(false)
+        self.ui.tab.can_go_forward(region)
     }
 
     pub fn current_view(&self) -> String {
-        self.ui.user.current_view.clone()
+        self.ui.user.current_view()
     }
 
     /// Returns expected query results for a watch using the TestQuery
     /// evaluator.
     pub fn query_results(&self, watch_spec: &WatchSpec) -> Vec<HashMap<String, Value>> {
-        watch_spec.query.evaluate(&self.domain.block_state.blocks)
+        self.domain.query_results(watch_spec)
     }
 
     /// Check if index.org exists with the structure required by
     /// initial_widget(). Generate a synthetic `block:ref-doc-N` URI for a
     /// new document and bump the counter.
     pub fn next_synthetic_doc_uri(&mut self) -> EntityUri {
-        let uri = EntityUri::block(&format!("ref-doc-{}", self.action.next_doc_id));
-        self.action.next_doc_id += 1;
-        uri
+        self.action.next_synthetic_doc_uri()
     }
 
     /// Find a page block by its title (first line of content, e.g. "index").
     pub fn doc_uri_by_name(&self, title: &str) -> Option<EntityUri> {
-        self.domain
-            .block_state
-            .blocks
-            .values()
-            .find(|b| b.is_page() && b.title() == title)
-            .map(|b| b.id.clone())
+        self.domain.block_state.doc_uri_by_name(title)
     }
 
     /// Whether the system has a valid root layout (from seed blocks or
     /// user-written index.org). Used to gate render_entity, ReactiveEngine,
     /// and ViewModel checks.
     pub fn is_properly_setup(&self) -> bool {
-        !self.domain.layout_blocks.query_source_ids.is_empty() || self.has_user_index_org()
+        self.domain.is_properly_setup()
     }
 
     /// Whether the user has written an index.org with query+render blocks.
     /// Used to gate block comparison invariants (seed blocks don't round-trip
     /// through org files).
     pub fn has_user_index_org(&self) -> bool {
-        let index_doc_uri = match self.doc_uri_by_name("index") {
-            Some(uri) => uri,
-            None => return false,
-        };
-
-        let root_blocks: Vec<&Block> = self
-            .domain
-            .block_state
-            .blocks
-            .values()
-            .filter(|b| b.parent_id == index_doc_uri)
-            .collect();
-
-        root_blocks.iter().any(|root_block| {
-            self.domain.block_state.blocks.values().any(|child| {
-                child.parent_id == root_block.id
-                    && child.content_type == ContentType::Source
-                    && child
-                        .source_language
-                        .as_ref()
-                        .and_then(|sl| sl.as_query())
-                        .is_some()
-            })
-        })
+        self.domain.has_user_index_org()
     }
 
     /// Get the first root layout block ID from index.org (a heading with a
     /// query source child).
     pub fn root_layout_block_id(&self) -> Option<EntityUri> {
-        let index_doc_uri = self.doc_uri_by_name("index")?;
-        self.domain
-            .block_state
-            .blocks
-            .values()
-            .filter(|b| b.parent_id == index_doc_uri)
-            .find(|root_block| {
-                self.domain.block_state.blocks.values().any(|child| {
-                    child.parent_id == root_block.id
-                        && child.content_type == ContentType::Source
-                        && child
-                            .source_language
-                            .as_ref()
-                            .and_then(|sl| sl.as_query())
-                            .is_some()
-                })
-            })
-            .map(|b| b.id.clone())
+        self.domain.root_layout_block_id()
     }
 
     /// Whether the active main-panel layout renders `block_id` as a
@@ -1054,6 +1082,37 @@ impl ReferenceState {
         self.main_layout_renders_widget(block_id, &["draggable"])
     }
 
+    /// The active main-panel render expression with both indirections prod
+    /// resolves before the frontend ever interprets it substituted away, so the
+    /// oracle's interpreted tree matches the SUT's.
+    ///
+    /// Two nodes stand for a render the raw expression does not contain:
+    /// `collection_view()`, which prod's `render_for_block` swaps for the
+    /// profile-derived collection, and `live_block()`, which hands the row to
+    /// another block's own render. Both resolve to the ref's canonical default
+    /// collection — every visible row renders `render_entity()`, whose block
+    /// profile carries the `state_toggle`, the `editable_text` and the
+    /// `draggable`.
+    pub fn resolved_main_panel_render_expr(&self) -> RenderExpr {
+        let expr = self
+            .main_panel_render_expr()
+            .or_else(|| self.root_render_expr())
+            .cloned()
+            .unwrap_or_else(default_root_render_expr);
+
+        let expr = if holon::api::block_domain::contains_collection_view(&expr) {
+            holon::api::block_domain::substitute_collection_view(expr, &default_root_render_expr())
+        } else {
+            expr
+        };
+
+        if contains_live_block(&expr) {
+            substitute_live_block(expr, &fc("render_entity", vec![]))
+        } else {
+            expr
+        }
+    }
+
     /// Whether the active main-panel layout's item template renders
     /// `block_id`'s row with any of `widgets` (by `widget_name`). Renders
     /// the row through the shadow interpreter (the same
@@ -1064,13 +1123,11 @@ impl ReferenceState {
     fn main_layout_renders_widget(&self, block_id: &EntityUri, widgets: &[&str]) -> bool {
         use holon_frontend::reactive::BuilderServices;
 
-        let Some(expr) = self
-            .main_panel_render_expr()
-            .or_else(|| self.root_render_expr())
-        else {
+        if self.main_panel_render_expr().is_none() && self.root_render_expr().is_none() {
             return false;
-        };
-        let Some(item_template) = holon_frontend::reactive_view_model::extract_item_template(expr)
+        }
+        let expr = self.resolved_main_panel_render_expr();
+        let Some(item_template) = holon_frontend::reactive_view_model::extract_item_template(&expr)
         else {
             return false;
         };
@@ -1085,17 +1142,17 @@ impl ReferenceState {
 
     /// The active main-panel layout query, as a [`TestQuery`].
     ///
-    /// Default layout (no user `index.org`) → the navigation-aware
-    /// [`QuerySource::FocusRootDescendants`] (GQL `focus_root` +
-    /// `CHILD_OF*0..20`). A user `index.org` → the [`QuerySource`]
+    /// Default layout (no user `index.org`) → [`QuerySource::FocusRootOnly`],
+    /// the form `assets/default/index.org` seeds: the panel selects the
+    /// focus-root row alone and delegates its subtree to that root's own
+    /// render via `live_block()`. A user `index.org` → the [`QuerySource`]
     /// recovered from its main-panel query source block (via
     /// [`QuerySource::recognize`]), bound to the layout block as the
     /// navigation-blind `from children` context.
     pub fn active_main_query(&self) -> TestQuery {
         if !self.has_user_index_org() {
-            return TestQuery::layout(QuerySource::FocusRootDescendants {
-                region: "main".to_string(),
-                max_depth: 20,
+            return TestQuery::layout(QuerySource::FocusRootOnly {
+                region: Region::Main.as_str().to_string(),
             });
         }
         let source = self
@@ -1135,14 +1192,37 @@ impl ReferenceState {
     pub fn main_rendered_block_ids(&self) -> BTreeSet<EntityUri> {
         let query = self.active_main_query();
         let mut focus_roots = std::collections::BTreeMap::new();
-        focus_roots.insert(
-            "main".to_string(),
-            self.expected_focus_root_ids(Region::Main),
-        );
-        query
+        focus_roots.insert("main".to_string(), self.rendered_focus_root(Region::Main));
+        let mut ids: BTreeSet<EntityUri> = query
             .rendered_block_ids(&self.domain.block_state.blocks, &focus_roots)
             .into_iter()
-            .collect()
+            .collect();
+
+        // A panel whose query selects only the focus-root row delegates the
+        // subtree to that root's own render, so the rendered set is the row
+        // plus what the delegate draws — the same page-stopping walk the
+        // backend synthesizes for a root that authors no query of its own.
+        if let QuerySource::FocusRootOnly { region } = &query.source {
+            // Journals delegates to its `journal_feed` (the Page-tagged day
+            // pages), not a descendant walk from journals: a non-page child of
+            // journals is absent from the feed and renders nothing.
+            let mut delegated_roots = focus_roots.clone();
+            if delegated_roots
+                .get(region)
+                .is_some_and(|r| r.contains(&EntityUri::block("journals")))
+            {
+                delegated_roots.insert(region.clone(), self.journal_feed_day_pages());
+            }
+            let delegated = TestQuery::layout(QuerySource::FocusRootDescendants {
+                region: region.clone(),
+                max_depth: crate::pbt::query::MAIN_PANEL_MAX_DEPTH,
+                stop_at_pages: true,
+            });
+            ids.extend(
+                delegated.rendered_block_ids(&self.domain.block_state.blocks, &delegated_roots),
+            );
+        }
+        ids
     }
 
     /// Whether the active layout's item template renders blocks interactively —
@@ -1182,34 +1262,14 @@ impl ReferenceState {
     /// Get the active `RenderExpr` for the root layout's render source block.
     /// Returns `None` if no render source is tracked.
     pub fn root_render_expr(&self) -> Option<&RenderExpr> {
-        let root_id = self.root_layout_block_id()?;
-        // Find the render source block that is a child of the root layout
-        self.domain
-            .layout_blocks
-            .render_source_ids
-            .iter()
-            .find(|id| {
-                self.domain
-                    .block_state
-                    .blocks
-                    .get(*id)
-                    .map(|b| b.parent_id == root_id)
-                    .unwrap_or(false)
-            })
-            .and_then(|id| self.domain.render_expressions.get(id))
+        self.domain.root_render_expr()
     }
 
     /// Name of the active render expression for `region` (e.g. "tree",
     /// "outline", "list"). Used by `build_reference_navigator` to pick
     /// the right `CollectionNavigator` shape for arrow-key navigation.
-    pub fn active_render_expr_name(&self, _: Region) -> Option<String> {
-        // For now, use the main panel's render expression (region is ignored
-        // because the PBT currently only has one navigable region).
-        let expr = self.main_panel_render_expr().or(self.root_render_expr())?;
-        match expr {
-            RenderExpr::FunctionCall { name, .. } => Some(name.clone()),
-            _ => None,
-        }
+    pub fn active_render_expr_name(&self, region: Region) -> Option<String> {
+        self.domain.active_render_expr_name(region)
     }
 
     /// Build a reference-state `CollectionNavigator` for `region` to mirror
@@ -1250,7 +1310,11 @@ impl ReferenceState {
             Some("tree") | Some("outline") => {
                 let mut dfs_order = Vec::new();
                 let mut parent_map = std::collections::HashMap::new();
-                self.collect_dfs_order(&focus_id, &mut dfs_order, &mut parent_map);
+                self.domain.block_state.collect_dfs_order(
+                    &focus_id,
+                    &mut dfs_order,
+                    &mut parent_map,
+                );
                 if dfs_order.is_empty() {
                     return None;
                 }
@@ -1273,46 +1337,17 @@ impl ReferenceState {
         }
     }
 
-    fn collect_dfs_order(
-        &self,
-        parent_id: &EntityUri,
-        dfs_order: &mut Vec<EntityUri>,
-        parent_map: &mut std::collections::HashMap<EntityUri, EntityUri>,
-    ) {
-        let children = self.sorted_children_of(parent_id);
-        for child in children {
-            if child.content_type != ContentType::Text {
-                continue;
-            }
-            dfs_order.push(child.id.clone());
-            if parent_id != &EntityUri::no_parent() {
-                parent_map.insert(child.id.clone(), parent_id.clone());
-            }
-            self.collect_dfs_order(&child.id, dfs_order, parent_map);
-        }
-    }
-
     /// Block IDs whose `content` must NEVER be mutated by an edit transition:
     /// query / render source blocks (would corrupt the active layout) and
     /// entity-profile blocks (typed YAML, not free-form text).
     pub fn no_content_update_set(&self) -> std::collections::HashSet<EntityUri> {
-        self.domain
-            .layout_blocks
-            .render_source_ids
-            .iter()
-            .chain(self.domain.layout_blocks.query_source_ids.iter())
-            .chain(self.domain.profile_block_ids.iter())
-            .cloned()
-            .collect()
+        self.domain.no_content_update_set()
     }
 
     /// Stable IDs of blocks any peer has modified. JoinBlock excludes these
-    /// to avoid edit/peer interleaving races.
+    /// to avoid edit/peer interleaving races. Delegates to the Loro ext.
     pub fn peer_modified_stable_ids(&self) -> std::collections::HashSet<String> {
-        self.peers
-            .iter()
-            .flat_map(|p| p.modified_stable_ids.iter().cloned())
-            .collect()
+        self.loro.all_modified_stable_ids()
     }
 
     /// The focused Main-region block, if it is a valid edit target:
@@ -1338,7 +1373,7 @@ impl ReferenceState {
         if self.no_content_update_set().contains(&focused) {
             return None;
         }
-        let focus_roots = self.expected_focus_root_ids(Region::Main);
+        let focus_roots = self.rendered_focus_root(Region::Main);
         if !self.is_descendant_of_any(&focused, &focus_roots) {
             return None;
         }
@@ -1351,8 +1386,19 @@ impl ReferenceState {
     ///
     /// Used by the "edit any visible block" transitions — JoinBlock today;
     /// SplitBlock and friends if/when the focus-only asymmetry is dropped.
+    ///
+    /// VISIBILITY is decided by the SAME traversal the main-panel query applies
+    /// (`descendant_within_stopping_at_pages`, the mirror of the compiled
+    /// recursive CTE), not by a bare parent-chain walk. The panel stops
+    /// descending at any NON-ROOT page and truncates at nesting depth
+    /// [`MAIN_PANEL_MAX_DEPTH`], so a plain ancestor check reports blocks the
+    /// panel legitimately does not render (`query::MAIN_PANEL_MAX_DEPTH`).
+    /// That mismatch had two costs: the
+    /// generator offered click targets no user could click (the driver then
+    /// spins its poll deadline and dispatches nothing), and
+    /// `inv-main-panel-rows-match-focus` demanded rows prod is right to omit.
     pub fn main_editable_descendants(&self) -> Vec<EntityUri> {
-        let focus_roots = self.expected_focus_root_ids(Region::Main);
+        let focus_roots = self.rendered_focus_root(Region::Main);
         let no_update = self.no_content_update_set();
         let peer_modified = self.peer_modified_stable_ids();
         self.domain
@@ -1365,9 +1411,61 @@ impl ReferenceState {
                     && !self.domain.layout_blocks.contains(id)
                     && !peer_modified.contains(id.id())
                     && !no_update.contains(id)
-                    && self.is_descendant_of_any(id, &focus_roots)
+                    && self.main_panel_renders_within(id, &focus_roots)
             })
             .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// Whether the main panel renders a row for `block_id` — the SAME traversal
+    /// the compiled panel query applies. See
+    /// [`RefBlockTree::main_panel_renders`] for why a bare ancestor walk is
+    /// not a visibility predicate.
+    pub fn main_panel_renders(&self, block_id: &EntityUri) -> bool {
+        let focus_roots = self.rendered_focus_root(Region::Main);
+        self.main_panel_renders_within(block_id, &focus_roots)
+    }
+
+    fn main_panel_renders_within(
+        &self,
+        block_id: &EntityUri,
+        focus_roots: &std::collections::BTreeSet<EntityUri>,
+    ) -> bool {
+        let journals = EntityUri::block("journals");
+        // Journals renders through its `journal_feed` — the Page-tagged day
+        // pages — not a descendant walk from journals itself. A non-page child
+        // of journals is absent from the feed and renders nothing, so root the
+        // page-stopping walk at the day pages instead of journals.
+        if focus_roots.contains(&journals) {
+            if block_id == &journals {
+                return true;
+            }
+            let day_pages = self.journal_feed_day_pages();
+            return crate::pbt::query::descendant_within_stopping_at_pages(
+                &self.domain.block_state.blocks,
+                block_id,
+                &day_pages,
+                crate::pbt::query::MAIN_PANEL_MAX_DEPTH,
+            );
+        }
+        crate::pbt::query::descendant_within_stopping_at_pages(
+            &self.domain.block_state.blocks,
+            block_id,
+            focus_roots,
+            crate::pbt::query::MAIN_PANEL_MAX_DEPTH,
+        )
+    }
+
+    /// The Page-tagged children of `block:journals` — the exact predicate
+    /// `journal_feed` selects (mirrors [`QuerySource::JournalFeed`]).
+    fn journal_feed_day_pages(&self) -> std::collections::BTreeSet<EntityUri> {
+        let journals = EntityUri::block("journals");
+        self.domain
+            .block_state
+            .blocks
+            .values()
+            .filter(|b| b.is_page() && b.parent_id == journals)
+            .map(|b| b.id.clone())
             .collect()
     }
 
@@ -1386,24 +1484,7 @@ impl ReferenceState {
     /// prod treats as plain editor-focus targets, breaking
     /// `inv-focus-roots-consistent-with-ref`.
     pub fn predicts_navigation_focus(&self, uri: &EntityUri, region: Region) -> bool {
-        if region != Region::LeftSidebar {
-            return false;
-        }
-        // A user index.org replaces the whole 3-column layout: there is no
-        // LeftSidebar live_block at all, so no sidebar row ever binds
-        // `navigation.focus` (same family as DragDropBlock's
-        // CustomLayoutNotDraggable gate).
-        if self.has_user_index_org() {
-            return false;
-        }
-        let Some(block) = self.domain.block_state.blocks.get(uri) else {
-            return false;
-        };
-        if block.content_type != ContentType::Text || !block.is_page() {
-            return false;
-        }
-        let t = block.title();
-        !t.is_empty() && t != "index" && t != "__default__"
+        self.domain.predicts_navigation_focus(uri, region)
     }
 
     /// Block IDs in the predicted LeftSidebar render set — the same set
@@ -1412,30 +1493,12 @@ impl ReferenceState {
     /// this is also the candidate set for `ClickBlock(LeftSidebar)` and
     /// `NavigateFocus` generators.
     pub fn predicted_sidebar_navigation_targets(&self) -> Vec<EntityUri> {
-        self.domain
-            .block_state
-            .blocks
-            .values()
-            .filter(|b| {
-                if b.content_type != ContentType::Text || !b.is_page() {
-                    return false;
-                }
-                let t = b.title();
-                !t.is_empty() && t != "index" && t != "__default__"
-            })
-            .map(|b| b.id.clone())
-            .collect()
+        self.domain.predicted_sidebar_navigation_targets()
     }
 
     /// Get IDs of text blocks only (not source blocks).
     pub fn text_block_ids(&self) -> Vec<EntityUri> {
-        self.domain
-            .block_state
-            .blocks
-            .iter()
-            .filter(|(_, b)| b.content_type == ContentType::Text)
-            .map(|(id, _)| id.clone())
-            .collect()
+        self.domain.block_state.text_block_ids()
     }
 
     // ── Block hierarchy query helpers ──────────────────────────────────
@@ -1443,20 +1506,7 @@ impl ReferenceState {
     /// Children of parent sorted by sequence then ID (matching canonical
     /// ordering).
     pub fn sorted_children_of(&self, parent_id: &EntityUri) -> Vec<&Block> {
-        use holon_orgmode::models::OrgBlockExt;
-        let mut children: Vec<&Block> = self
-            .domain
-            .block_state
-            .blocks
-            .values()
-            .filter(|b| b.parent_id == *parent_id)
-            .collect();
-        children.sort_by(|a, b| {
-            a.sequence()
-                .cmp(&b.sequence())
-                .then_with(|| a.id.cmp(&b.id))
-        });
-        children
+        self.domain.block_state.sorted_children_of(parent_id)
     }
 
     /// Predicted ordered child ids of `parent_id`. Mirrors what
@@ -1465,43 +1515,24 @@ impl ReferenceState {
     /// sides produce a `Vec<EntityUri>`, no `sort_key` / `sequence`
     /// strings cross the boundary.
     pub fn children_of(&self, parent_id: &EntityUri) -> Vec<EntityUri> {
-        self.sorted_children_of(parent_id)
-            .into_iter()
-            .map(|b| b.id.clone())
-            .collect()
+        self.domain.block_state.children_of(parent_id)
     }
 
     /// Previous sibling of block_id (same parent, immediately before in
     /// sequence order).
     pub fn previous_sibling(&self, block_id: &EntityUri) -> Option<EntityUri> {
-        let block = self.domain.block_state.blocks.get(block_id)?;
-        let children = self.sorted_children_of(&block.parent_id);
-        let idx = children.iter().position(|b| b.id == *block_id)?;
-        if idx > 0 {
-            Some(children[idx - 1].id.clone())
-        } else {
-            None
-        }
+        self.domain.block_state.previous_sibling(block_id)
     }
 
     /// Next sibling of block_id (same parent, immediately after in sequence
     /// order).
     pub fn next_sibling(&self, block_id: &EntityUri) -> Option<EntityUri> {
-        let block = self.domain.block_state.blocks.get(block_id)?;
-        let children = self.sorted_children_of(&block.parent_id);
-        let idx = children.iter().position(|b| b.id == *block_id)?;
-        children.get(idx + 1).map(|b| b.id.clone())
+        self.domain.block_state.next_sibling(block_id)
     }
 
     /// Grandparent of block_id (parent's parent). None if at root level.
     pub fn grandparent(&self, block_id: &EntityUri) -> Option<EntityUri> {
-        let block = self.domain.block_state.blocks.get(block_id)?;
-        let parent = self.domain.block_state.blocks.get(&block.parent_id)?;
-        if parent.parent_id.is_no_parent() || parent.parent_id.is_sentinel() {
-            None
-        } else {
-            Some(parent.parent_id.clone())
-        }
+        self.domain.block_state.grandparent(block_id)
     }
 
     // ── Block hierarchy mutation helpers ─────────────────────────────
@@ -1612,35 +1643,70 @@ impl ReferenceState {
     /// Split a block at the given byte position, mirroring
     /// `traits.rs::split_block`.
     ///
-    /// Original block keeps `content[..position].trim_end()`.
-    /// New block gets `content[position..].trim_start()` with a synthetic ID.
-    /// Returns the synthetic ID of the newly created block.
+    /// The id follows the TEXT. For `position > 0` the original keeps
+    /// `content[..position].trim_end()` and a fresh synthetic id takes the tail
+    /// in a new block below it. For `position == 0` the original keeps ALL the
+    /// text — so backlinks, marks and `:ID:`-addressed references stay on the
+    /// block the text is still in — and the fresh synthetic id goes to the
+    /// EMPTY block inserted ABOVE.
+    ///
+    /// Returns the id of the LOWER block, which is always the split's focus
+    /// target: the minted id for `position > 0`, the original at `position ==
+    /// 0`.
     pub fn split_block(&mut self, block_id: &EntityUri, position: usize) -> EntityUri {
         use holon_orgmode::models::OrgBlockExt;
 
         let original = self.domain.block_state.blocks.get(block_id).unwrap();
         let content = original.content.clone();
+        let origin_marks = original.marks.clone().unwrap_or_default();
         let parent_id = original.parent_id.clone();
         let original_seq = original.sequence();
 
-        // Split content (same logic as traits.rs:756-763)
-        let content_before = content[..position].trim_end().to_string();
-        let content_after = content[position..].trim_start().to_string();
+        // Split content AND partition marks — model-first parity with prod's
+        // `BlockOperations::split_block`, both routed through the ONE
+        // `holon_api::split_content_marks` (link straddling → plain text on both
+        // sides; formatting straddling → truncate; whitespace trims applied).
+        // Before this the model mirrored prod's OLD bug (split content, leave
+        // marks untouched) so a mark destroyed across a split diverged on
+        // neither side — invisible to the keystone. Now both carry marks and a
+        // regression that drops them goes RED.
+        let holon_api::SplitContentMarks {
+            left:
+                holon_api::SplitSide {
+                    content: content_before,
+                    marks: left_marks,
+                },
+            right:
+                holon_api::SplitSide {
+                    content: content_after,
+                    marks: right_marks,
+                },
+        } = holon_api::split_content_marks(&content, &origin_marks, position);
 
-        // Update original block
-        self.domain
-            .block_state
-            .blocks
-            .get_mut(block_id)
-            .unwrap()
-            .content = content_before;
+        // Identity follows the text: a position-0 split leaves the whole text on
+        // `block_id` and gives the minted id the empty side, so the two sides
+        // swap roles relative to a mid-text split.
+        let at_start = position == 0;
+        let (kept_content, kept_marks, minted_content, minted_marks) = if at_start {
+            (content_after, right_marks, content_before, left_marks)
+        } else {
+            (content_before, left_marks, content_after, right_marks)
+        };
+
+        {
+            let orig = self.domain.block_state.blocks.get_mut(block_id).unwrap();
+            orig.content = kept_content;
+            orig.marks = (!kept_marks.is_empty()).then_some(kept_marks);
+        }
 
         // Create new block with synthetic ID
         let new_id = EntityUri::block(&format!(":split-{}", self.domain.block_state.next_id));
-        let mut new_block = Block::new_text(new_id.clone(), parent_id.clone(), content_after);
-        // Place after original: shift every sibling already at or after this
-        // position one slot down before inserting, so the new block lands
-        // uniquely between the original and the next existing sibling.
+        let mut new_block = Block::new_text(new_id.clone(), parent_id.clone(), minted_content);
+        new_block.marks = (!minted_marks.is_empty()).then_some(minted_marks);
+        // Slot the new block directly ABOVE the original at a position-0 split
+        // (it is the empty one) and directly BELOW it otherwise: shift every
+        // sibling already at or after that slot one position down before
+        // inserting, so the new block lands uniquely between its neighbours.
         //
         // Without the shift the new block ends up sharing `original_seq + 1`
         // with whatever sibling occupied that slot; `recanon_and_rebuild` then
@@ -1650,14 +1716,18 @@ impl ReferenceState {
         // lands the new block strictly between the two — mirror that ordering
         // here so chord-op chains (e.g. SplitBlock → MoveUp → Indent) compute
         // the same `previous_sibling`.
-        let shift_threshold = original_seq + 1;
+        let slot = if at_start {
+            original_seq
+        } else {
+            original_seq + 1
+        };
         for sibling in self.domain.block_state.blocks.values_mut() {
-            if sibling.parent_id == parent_id && sibling.sequence() >= shift_threshold {
+            if sibling.parent_id == parent_id && sibling.sequence() >= slot {
                 let s = sibling.sequence();
                 sibling.set_sequence(s + 1);
             }
         }
-        new_block.set_sequence(shift_threshold);
+        new_block.set_sequence(slot);
 
         // Track in block_documents with same doc_uri as original
         let doc_uri = self
@@ -1677,7 +1747,659 @@ impl ReferenceState {
             .blocks
             .insert(new_id.clone(), new_block);
         self.recanon_and_rebuild();
+        if at_start { block_id.clone() } else { new_id }
+    }
+
+    /// Re-mint `old_id` with a FRESH synthetic `block::split-N` id: move the
+    /// block under the new key (content, parent, sequence all preserved) and
+    /// re-parent every child (`parent_id == old_id` -> new id). Models the
+    /// reference side of the R2 id-less-reconcile CHURN (see the
+    /// `RefBlockTreeMut::remint_block` trait doc). No `recanon_and_rebuild`:
+    /// positions are unchanged, and it would double-bump `next_id`.
+    pub fn remint_block(&mut self, old_id: &EntityUri) -> EntityUri {
+        let new_id = EntityUri::block(&format!(":split-{}", self.domain.block_state.next_id));
+        self.domain.block_state.next_id += 1;
+        let mut block = self
+            .domain
+            .block_state
+            .blocks
+            .remove(old_id)
+            .unwrap_or_else(|| panic!("remint_block: block {old_id} absent from ref block_state"));
+        block.id = new_id.clone();
+        self.domain.block_state.blocks.insert(new_id.clone(), block);
+        if let Some(doc) = self.domain.block_state.block_documents.remove(old_id) {
+            self.domain
+                .block_state
+                .block_documents
+                .insert(new_id.clone(), doc);
+        }
+        for child in self.domain.block_state.blocks.values_mut() {
+            if child.parent_id == *old_id {
+                child.parent_id = new_id.clone();
+            }
+        }
         new_id
+    }
+
+    /// Create a new text block under `parent` as its LAST child — the oracle
+    /// prediction for the creation-slot "type here to create" gesture
+    /// (`CreateBlockUnderFocus`). Prod's `block.create` from the
+    /// `:__virtual:<parent>` slot appends the block at the end of the parent's
+    /// children (the slot sorts last, then the created block takes a fresh
+    /// fractional index at the tail); mirror that ordering with `max_seq + 1`
+    /// so `recanon_and_rebuild`'s canonical pass lands it last. The synthetic
+    /// `block::create-N` id pairs 1:1 with the SUT's minted uuid via the
+    /// composed harness's per-tick reconcile. `recanon_and_rebuild` bumps
+    /// `next_id` (same as `split_block`), so this does not increment it.
+    pub fn create_block_under(&mut self, parent: &EntityUri, content: &str) -> EntityUri {
+        let new_id = EntityUri::block(&format!(":create-{}", self.domain.block_state.next_id));
+        self.create_block_under_with_id(parent, content, new_id.clone());
+        new_id
+    }
+
+    /// The born-equal sibling of [`create_block_under`]: append a new text
+    /// block under `parent` using exactly `new_id` (a fresh normal id
+    /// supplied by the transition, NOT a minted `create-N` synthetic). The
+    /// SUT's op-floor create dispatches the same id, so the reconcile
+    /// treats it as born-equal (both sides already hold it — no
+    /// synthetic→real pairing). Otherwise identical to
+    /// [`create_block_under`] (tail append, document ownership, re-canon).
+    pub fn create_block_under_with_id(
+        &mut self,
+        parent: &EntityUri,
+        content: &str,
+        new_id: EntityUri,
+    ) {
+        use holon_orgmode::models::OrgBlockExt;
+
+        // Undo-stack correspondence: CreateBlockUnderFocus dispatches a
+        // User-origin `block.create`, and the engine records an undo entry for
+        // every User-origin reversible op (operation_engine.rs — genuine insert
+        // journals a `delete` inverse). The ref MUST snapshot here to stay 1:1
+        // with that journal; without it, a later UndoLastMutation pops the ref's
+        // *previous* snapshot (e.g. a split) while the engine pops the create
+        // inverse, undoing different ops and diverging. This is the sole choke
+        // point for create-under-focus (`create_block_under` delegates here).
+        //
+        // No reversibility gate is needed while every caller supplies a FRESH
+        // id (always a genuine insert → always journaled). If a duplicate-id
+        // create is ever introduced, the engine IGNORES the insert and declares
+        // it irreversible — that path would then need to skip this snapshot to
+        // match, mirroring the join/slash-delete leaf gates.
+        self.push_undo_snapshot();
+        // The org lens applies to a block BORN from UI input exactly as it does
+        // to one edited (`set_block_content`): the creation slot commits typed
+        // text, so raw `[[Page]]` / `*bold*` markup arrives here and the store
+        // adopts it into (label, marks) at the write boundary. Without this the
+        // oracle carried raw markup with `marks = None` and no link case was
+        // expressible as a hand-authored regression at all.
+        let (content, marks) = super::types::normalize_content_for_org_roundtrip_with(
+            content,
+            ContentType::Text,
+            &self.harness.link_classifier,
+        );
+        self.insert_block_under_no_snapshot(parent, &content, new_id.clone());
+        if let Some(b) = self.domain.block_state.blocks.get_mut(&new_id) {
+            b.marks = marks;
+        }
+        self.recanon_and_rebuild();
+    }
+
+    /// The creation-slot GESTURE's reference effect, which is not one op but
+    /// two, because a creation affordance is not a block (ruling C, 2026-08-08,
+    /// with sub-ruling B, 2026-08-09: "a creation slot becomes a real born
+    /// block the moment it can receive input").
+    ///
+    /// Focus reaching the affordance births an EMPTY block under `parent` as an
+    /// authority-only, non-user operation — `OpOrigin::Rule`, which by
+    /// definition pushes no undo entry (ADR 0030 D1: empty content is a valid
+    /// contract value, so the birth is total in one firing). The text the user
+    /// then types is an ordinary undo-visible content write. So
+    /// `UndoLastMutation` after this gesture reverts the TEXT and leaves
+    /// the empty block standing — it is not the user's create to undo. The
+    /// reaper collects such a block when focus leaves; the reference models
+    /// no reaper, so the empty block simply persists in the prediction,
+    /// which is the SUT's state before reaping.
+    ///
+    /// The born-equal arm ([`create_block_under_with_id`]) is NOT this: an
+    /// explicit id means the caller dispatched `block.create` directly, with no
+    /// affordance and no gesture, so it stays one user-origin create.
+    pub fn birth_block_under_slot(&mut self, parent: &EntityUri, content: &str) -> EntityUri {
+        let new_id = EntityUri::block(&format!(":create-{}", self.domain.block_state.next_id));
+
+        // The birth: undo-INVISIBLE, so no snapshot. Canonicalize before the
+        // snapshot so undo restores a canonical state.
+        self.insert_block_under_no_snapshot(parent, "", new_id.clone());
+        self.recanon_and_rebuild();
+
+        // The user's first keystroke: one undo-visible content write, snapshotted
+        // over a state that ALREADY contains the empty block. The second pass
+        // must NOT mint: the gesture creates exactly one block, so exactly one
+        // synthetic id is burned — a second `recanon_and_rebuild` here would
+        // advance the allocator twice and shift every later `create-N` /
+        // `split-N` id out from under the pinned cases.
+        self.push_undo_snapshot();
+        let (content, marks) = super::types::normalize_content_for_org_roundtrip_with(
+            content,
+            ContentType::Text,
+            &self.harness.link_classifier,
+        );
+        let block = self
+            .domain
+            .block_state
+            .blocks
+            .get_mut(&new_id)
+            .expect("birth_block_under_slot: the block just born must exist");
+        block.content = content;
+        block.marks = marks;
+        self.recanon_without_minting();
+
+        // The gesture MOVES the caret: focus reaching the affordance is what
+        // births the block, and the birth seats focus + caret in it (offset 0).
+        // The global in-memory focus mirror (ADR 0010) must follow, or
+        // `inv-focus-matches-ref` compares the pre-gesture focus root against
+        // the SUT's newborn.
+        self.ui.tab.focused_block = Some(new_id.clone());
+        // NOT MODELLED HERE, deliberately, and it is a KNOWN gap rather than an
+        // oversight: the birth also seats a CARET, so production has an editor
+        // open over the newborn, and `inv-editor-text/mirror` /
+        // `inv-editor-caret/mirror` therefore sit Unobservable (both sides
+        // absent) across this gesture. Opening the ref editor here reds
+        // `inv-editor-text/mirror` — ref "a" vs SUT MutableText "" — because the
+        // driver commits the text as a `set_field` and then seeds the mirror
+        // from the authority, and the cell it reads has not received the write
+        // at seed time. Closing this needs the driver to TYPE the text through
+        // the editor keystroke sink instead of dispatching `set_field`, which
+        // changes what the transition drives and is its own decision.
+        new_id
+    }
+
+    /// [`recanon_and_rebuild`](Self::recanon_and_rebuild) without advancing the
+    /// synthetic-id allocator. For the second pass of a multi-op gesture that
+    /// mints only ONE block.
+    fn recanon_without_minting(&mut self) {
+        let mut blocks: Vec<Block> = self.domain.block_state.blocks.values().cloned().collect();
+        crate::assign_reference_sequences_canonical(&mut blocks);
+        self.domain.block_state.blocks = blocks.into_iter().map(|b| (b.id.clone(), b)).collect();
+        self.rebuild_profile_tracking();
+    }
+
+    /// Insert one text block under `parent` with `new_id`, WITHOUT pushing an
+    /// undo snapshot and WITHOUT re-canonicalizing. The snapshot + recanon
+    /// wrapper lives in the callers: `create_block_under_with_id` (one
+    /// block = one undo boundary) and `apply_instantiate_template` (a
+    /// multi-block composite that snapshots + recanons ONCE, so one undo
+    /// removes the whole instantiation).
+    fn insert_block_under_no_snapshot(
+        &mut self,
+        parent: &EntityUri,
+        content: &str,
+        new_id: EntityUri,
+    ) {
+        use holon_orgmode::models::OrgBlockExt;
+
+        let mut new_block = Block::new_text(new_id.clone(), parent.clone(), content.to_string());
+        let max_seq = self
+            .domain
+            .block_state
+            .blocks
+            .values()
+            .filter(|b| b.parent_id == *parent)
+            .map(|b| b.sequence())
+            .max();
+        new_block.set_sequence(max_seq.map_or(0, |s| s + 1));
+
+        // The new block belongs to the DOCUMENT that contains it, mirroring
+        // `split_block`. When the focus-root `parent` is itself a page /
+        // document root (its own `block_documents` entry is the sentinel
+        // `no_parent` — a page IS its own doc), the child lives in that page's
+        // document, i.e. the page id ITSELF — not the sentinel. Writing the
+        // sentinel here would make `seed_block_ids` misclassify the created
+        // block as a seed and `RefBackend::org_blocks` drop it from the org
+        // projection (while the SQL projection keeps it), diverging `/org` only.
+        // A regular-block parent contributes its own document unchanged.
+        let doc_uri = match self.domain.block_state.block_documents.get(parent) {
+            Some(doc) if doc.is_no_parent() || doc.is_sentinel() => parent.clone(),
+            Some(doc) => doc.clone(),
+            None => parent.clone(),
+        };
+        self.domain
+            .block_state
+            .block_documents
+            .insert(new_id.clone(), doc_uri);
+        self.domain
+            .block_state
+            .blocks
+            .insert(new_id.clone(), new_block);
+    }
+
+    /// Reference effect for `InstantiateTemplate`: mint the instance subtree
+    /// (root + child) under `target_parent` as ONE undoable unit, mirroring the
+    /// SUT's composite-undo group so one `UndoLastMutation` removes every
+    /// instance block. `inst_root_id`/`inst_child_id` are the production
+    /// deterministic instance ids the caller computed — born-equal with
+    /// `plan_instantiation`'s `(template_id, context_key, node.id)`, so no
+    /// synthetic→real reconcile.
+    pub fn apply_instantiate_template(
+        &mut self,
+        target_parent: &EntityUri,
+        inst_root_id: EntityUri,
+        inst_child_id: EntityUri,
+        root_content: &str,
+        child_content: &str,
+        child_marks: Option<Vec<holon_api::MarkSpan>>,
+        template_id: &str,
+    ) {
+        self.push_undo_snapshot();
+        self.insert_block_under_no_snapshot(target_parent, root_content, inst_root_id.clone());
+        self.insert_block_under_no_snapshot(&inst_root_id, child_content, inst_child_id.clone());
+        // An instance inherits the definition node's marks, remapped across the
+        // `{{var}}` substitution (`plan_instantiation` → `remap_marks`); a
+        // freshly minted plain block would model an instantiation that silently
+        // flattens the template's rich text.
+        if let Some(b) = self.domain.block_state.blocks.get_mut(&inst_child_id) {
+            b.marks = child_marks;
+        }
+        // The engine stamps the instance ROOT (only) with the persisted
+        // `instance_of` provenance property (`template_instantiation.rs`); it
+        // org-round-trips like any property, so the oracle carries it or
+        // `inv-blocks-match-ref/*` diverges.
+        if let Some(b) = self.domain.block_state.blocks.get_mut(&inst_root_id) {
+            b.properties.insert(
+                holon_api::INSTANCE_OF_PROPERTY.to_string(),
+                holon_api::Value::String(template_id.to_string()),
+            );
+        }
+        self.recanon_and_rebuild();
+    }
+
+    /// `BlockToPage` (Option B) reference effect — the ref-side mirror of the
+    /// engine-level `convert_block_to_page` compound. Mints a NEW page block
+    /// `page_id` (Page-tagged, its own document) as the last child of
+    /// `destination_parent`, carrying the origin's ORIGINAL content and marks;
+    /// re-homes the origin's direct children (and their non-page subtrees)
+    /// under it; and rewrites the origin in place as a non-page whose marks
+    /// become a single full-span `[[page_id]]` Link. The origin's own
+    /// content, parent, tags and document are untouched — it stays a
+    /// non-page under its old ancestor.
+    ///
+    /// The born-equal `page_id` (a `PageId::for_path` hash the caller computed
+    /// from the SAME title path the backend planner uses) and the reparented
+    /// children / origin-link marks make every field the block-comparison
+    /// invariants read agree with the SUT with no synthetic→real reconcile.
+    pub fn apply_block_to_page(
+        &mut self,
+        origin: &EntityUri,
+        page_id: EntityUri,
+        destination_parent: &EntityUri,
+    ) {
+        use holon_api::inline_mark::EntityRef;
+        use holon_api::inline_mark::InlineMark;
+        use holon_api::inline_mark::MarkSpan;
+        use holon_orgmode::models::OrgBlockExt;
+
+        // RECOGNITION refusal (resolve-before-mint, ADR 0029): if `page_id` is
+        // ALREADY held by a DIFFERENT-titled entity — the state a `RenamePage`
+        // leaves (title changed, id preserved) — production REFUSES the convert
+        // fail-loud rather than clobber. Model the refusal: no page minted, no
+        // re-home, no origin rewrite, and NO undo entry (checked BEFORE the
+        // snapshot). Uses the SAME `recognize_derived_id` as the SUT seam in
+        // `run_convert_block_to_page`; the SUT driver mirrors it by tolerating the
+        // `IdentityCollision`. Free / same-title ids fall through and convert.
+        let origin_content_for_recognition = self
+            .domain
+            .block_state
+            .blocks
+            .get(origin)
+            .expect("apply_block_to_page: origin block must exist (precondition)")
+            .content
+            .clone();
+        let holder_title = self
+            .domain
+            .block_state
+            .blocks
+            .get(&page_id)
+            .map(|b| b.content.clone());
+        // SINGLE-SOURCE the requested title through `sanitize_page_title` — the
+        // SAME sanitize the SUT planner applied to `plan.origin_content` (the
+        // title run_convert_block_to_page recognizes with). Recognizing the RAW
+        // content here would DIVERGE from the SUT for a trailing-slash title
+        // (normalize_for_hash keeps '/'). Fall back to raw only when sanitize
+        // yields nothing (empty content — unreachable past the planner's guard).
+        let requested_title = holon_api::sanitize_page_title(&origin_content_for_recognition)
+            .unwrap_or_else(|| origin_content_for_recognition.clone());
+        if let holon_api::Recognition::Collision(_) =
+            holon_api::recognize_derived_id(&page_id, holder_title.as_deref(), &requested_title)
+        {
+            return;
+        }
+
+        // Undo-stack correspondence: the compound records ONE User-origin undo
+        // entry, so the ref snapshots exactly once here (mirrors
+        // `create_block_under_with_id`).
+        self.push_undo_snapshot();
+
+        let origin_block = self
+            .domain
+            .block_state
+            .blocks
+            .get(origin)
+            .expect("apply_block_to_page: origin block must exist (precondition)")
+            .clone();
+        let origin_content = origin_block.content.clone();
+        let origin_marks = origin_block.marks.clone();
+
+        // Origin's DIRECT children in sort order, captured before mutating.
+        let children: Vec<EntityUri> = self
+            .sorted_children_of(origin)
+            .into_iter()
+            .map(|b| b.id.clone())
+            .collect();
+
+        // 1. Mint page P as the last child of `destination_parent`. The page TITLE
+        //    mirrors the backend sanitize (trailing `/` stripped; land 866977e85e) so
+        //    P's content + id + filename agree — the origin block and its `[[P]]` link
+        //    label below keep the RAW content (the backend leaves the origin text
+        //    unchanged). Marks carry over from the origin.
+        let page_content =
+            crate::pbt::transitions::block_to_page::sanitize_page_leaf(&origin_content)
+                .unwrap_or_else(|| origin_content.clone());
+        let mut page = Block::new_text(page_id.clone(), destination_parent.clone(), page_content);
+        page.set_page(true);
+        page.marks = origin_marks;
+        let max_seq = self
+            .domain
+            .block_state
+            .blocks
+            .values()
+            .filter(|b| b.parent_id == *destination_parent)
+            .map(|b| b.sequence())
+            .max();
+        page.set_sequence(max_seq.map_or(0, |s| s + 1));
+        self.domain
+            .block_state
+            .block_documents
+            .insert(page_id.clone(), page_id.clone());
+        self.domain.block_state.blocks.insert(page_id.clone(), page);
+
+        // 2. Re-home the origin's direct children under P, preserving order.
+        for (i, child) in children.iter().enumerate() {
+            let b = self
+                .domain
+                .block_state
+                .blocks
+                .get_mut(child)
+                .expect("apply_block_to_page: origin child must exist");
+            b.parent_id = page_id.clone();
+            b.set_sequence(i as i64);
+        }
+
+        // 3. Re-home the document of every non-page block in the moved subtrees to P
+        //    (they now live in P's file). A nested page owns its own file and
+        //    terminates the walk — its subtree stays homed to it.
+        let mut stack: Vec<EntityUri> = children.clone();
+        while let Some(id) = stack.pop() {
+            let is_page = self
+                .domain
+                .block_state
+                .blocks
+                .get(&id)
+                .is_some_and(|b| b.is_page());
+            if is_page {
+                continue;
+            }
+            self.domain
+                .block_state
+                .block_documents
+                .insert(id.clone(), page_id.clone());
+            let grandchildren: Vec<EntityUri> = self
+                .sorted_children_of(&id)
+                .into_iter()
+                .map(|b| b.id.clone())
+                .collect();
+            stack.extend(grandchildren);
+        }
+
+        // 4. Leave a full-span `[[P]]` link on the origin — content unchanged, marks
+        //    replaced by exactly the one Link the backend's `set_field` writes (label =
+        //    origin content).
+        let link_mark = MarkSpan::new(
+            0,
+            origin_content.chars().count(),
+            InlineMark::Link {
+                target: EntityRef::from_uri(&page_id.clone()),
+                label: origin_content.clone(),
+            },
+        );
+        self.domain
+            .block_state
+            .blocks
+            .get_mut(origin)
+            .expect("apply_block_to_page: origin block must exist")
+            .marks = Some(vec![link_mark]);
+
+        self.recanon_and_rebuild();
+    }
+
+    // ── Page identity (PageIdentityDeterminism.md 5.3) ────────────────────
+    //
+    // Page ids are `blake3(normalized path)`. A rename is an ordinary edit to
+    // the existing entity -- the id does NOT re-mint -- which means a rename
+    // FREES a path while leaving its blake3 id occupied. The two methods below
+    // are the reference halves of the transitions that reach that state.
+
+    /// The `/`-joined page path (root->leaf) of an existing page block.
+    ///
+    /// Mirrors the backend planner's `page_path_of` (and the twin in
+    /// `transitions::block_to_page`) so the ref hashes the SAME string the
+    /// writer does. `None` when `id` is not a page, or any page in its chain
+    /// has empty content (the backend would then produce an empty path segment
+    /// and `PageId::for_path` would reject it).
+    pub fn page_path_of_ref(&self, id: &EntityUri) -> Option<String> {
+        let mut segments: Vec<String> = Vec::new();
+        let mut seen: BTreeSet<EntityUri> = BTreeSet::new();
+        let mut cursor = Some(id.clone());
+        while let Some(cur) = cursor {
+            if !seen.insert(cur.clone()) {
+                break;
+            }
+            let block = self.domain.block_state.blocks.get(&cur)?;
+            if !block.is_page() {
+                break;
+            }
+            let title = block.content.trim().to_string();
+            if title.is_empty() {
+                return None;
+            }
+            segments.push(title);
+            cursor = Some(block.parent_id.clone())
+                .filter(|p| self.domain.block_state.blocks.contains_key(p));
+        }
+        if segments.is_empty() {
+            return None;
+        }
+        segments.reverse();
+        Some(segments.join("/"))
+    }
+
+    /// Reference mirror of `SqlOperationProvider::resolve_page_name` -- the
+    /// title-only lookup `create_page_from_link` uses to decide whether a
+    /// segment already exists.
+    ///
+    /// The production query matches Page-tagged blocks on `content = leaf`
+    /// GLOBALLY (no parent constraint), orders by "parent's content equals the
+    /// hint's second-to-last segment" first, then by id ascending, and takes
+    /// the first row. Mirroring the ordering exactly is what lets the reference
+    /// predict WHICH segments the op reuses and which it mints.
+    pub fn ref_resolve_page_name(&self, hint: &str) -> Option<EntityUri> {
+        let mut segs = hint.rsplit('/');
+        let leaf = segs.next().unwrap_or(hint).trim();
+        if leaf.is_empty() {
+            return None;
+        }
+        let parent_hint = segs.next().map(|s| s.trim().to_string());
+        let mut hits: Vec<(u8, EntityUri)> = self
+            .domain
+            .block_state
+            .blocks
+            .values()
+            .filter(|b| b.is_page() && b.content == leaf)
+            .map(|b| {
+                let parent_matches = parent_hint.as_deref().is_some_and(|h| {
+                    self.domain
+                        .block_state
+                        .blocks
+                        .get(&b.parent_id)
+                        .is_some_and(|p| p.content == h)
+                });
+                (u8::from(!parent_matches), b.id.clone())
+            })
+            .collect();
+        hits.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.as_str().cmp(b.1.as_str())));
+        hits.into_iter().next().map(|(_, id)| id)
+    }
+
+    /// Page paths a rename has vacated and that NO page currently occupies.
+    ///
+    /// A path leaves the pool the moment some page re-occupies it (the
+    /// `CreatePageAtFreedPath` this ledger feeds, or a rename back), so the
+    /// generator never offers a name that is already taken.
+    pub fn freed_page_paths_ref(&self) -> Vec<String> {
+        let occupied: BTreeSet<String> = self
+            .domain
+            .block_state
+            .blocks
+            .values()
+            .filter(|b| b.is_page())
+            .filter_map(|b| self.page_path_of_ref(&b.id))
+            .collect();
+        let mut out: Vec<String> = self
+            .renamed_away_page_paths
+            .iter()
+            .filter(|p| !occupied.contains(*p))
+            .cloned()
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// `RenamePage` reference effect -- 5.3: "a rename is an ordinary edit to
+    /// the existing entity", so ONLY the content changes. The id, parent, tags,
+    /// document and children are untouched, and the page's OLD path enters the
+    /// freed-path ledger.
+    pub fn apply_page_rename(&mut self, page_id: &EntityUri, new_title: &str) {
+        // One User-origin `set_field("content")` => one undo entry, exactly like
+        // the content-mutation path.
+        self.push_undo_snapshot();
+        let old_path = self.page_path_of_ref(page_id).unwrap_or_else(|| {
+            panic!("apply_page_rename: {page_id} must be a page with a well-formed path")
+        });
+        let block = self
+            .domain
+            .block_state
+            .blocks
+            .get_mut(page_id)
+            .expect("apply_page_rename: page block must exist (precondition)");
+        block.content = new_title.to_string();
+        self.renamed_away_page_paths.push(old_path);
+        self.recanon_and_rebuild();
+    }
+
+    /// `CreatePageAtFreedPath` reference effect -- the ref-side mirror of the
+    /// production `block.create_page_from_link(target)` op.
+    ///
+    /// Walks `path` segment by segment exactly as the op does: resolve the
+    /// accumulated hint through [`Self::ref_resolve_page_name`]; on a hit reuse
+    /// that page as the parent, on a miss mint a page titled by the segment
+    /// under the current parent.
+    ///
+    /// The minted id is where the ORACLE ENCODES THE SPEC. When
+    /// `PageId::for_path(seg_path)` is FREE the page is minted there. When it
+    /// is already occupied -- the state a `RenamePage` leaves behind (title
+    /// changed, id preserved) -- the INTERIM identity policy (plan §5) has
+    /// production REFUSE the `create` FAIL LOUD rather than let its
+    /// `ON CONFLICT(id) DO UPDATE` clobber the renamed page. So the reference
+    /// models the refusal: no new page, no undo entry, no state change. The SUT
+    /// driver mirrors it by tolerating the `IdentityCollision`.
+    ///
+    /// END-STATE (plan §5, ruled 2026-07-26): a recreate at a freed path will
+    /// mint a DISTINCT id and bind the NAME to it. When that lands, replace the
+    /// refusal below with the unique-mint and single-source the rule with the
+    /// writer the way `BlockToPage` single-sources `PageId::for_page_under`, so
+    /// oracle and writer stay born-equal.
+    pub fn apply_create_page_at_path(&mut self, path: &str) {
+        use holon_api::link_parser::PageId;
+        use holon_orgmode::models::OrgBlockExt;
+
+        // `create_page_from_link` returns `declared_irreversible` -- it records
+        // NO undo entry -- so the reference must not push one either.
+        let mut parent = EntityUri::no_parent();
+        let mut accumulated = String::new();
+        for (i, seg) in path.split('/').enumerate() {
+            let trimmed = seg.trim();
+            assert!(
+                !trimmed.is_empty(),
+                "apply_create_page_at_path: empty segment in {path:?} (generator must gate this \
+                 out -- the op errors on it)"
+            );
+            let hint = if i == 0 {
+                trimmed.to_string()
+            } else {
+                format!("{accumulated}/{trimmed}")
+            };
+            let seg_path = if accumulated.is_empty() {
+                trimmed.to_string()
+            } else {
+                format!("{accumulated}/{trimmed}")
+            };
+            match self.ref_resolve_page_name(&hint) {
+                Some(existing) => parent = existing,
+                None => {
+                    let id = PageId::for_path(&seg_path)
+                        .unwrap_or_else(|e| {
+                            panic!("apply_create_page_at_path: PageId::for_path({seg_path:?}): {e}")
+                        })
+                        .into_entity_uri();
+                    // INTERIM identity policy (plan §5): a derived id already held
+                    // by a DIFFERENT entity — exactly the state a `RenamePage`
+                    // leaves (title changed, id preserved) — makes production's
+                    // `create` FAIL LOUD. The op is REFUSED: nothing created,
+                    // nothing clobbered, no undo entry. Model that refusal (no
+                    // state change) and stop; the SUT driver mirrors it by
+                    // tolerating the `IdentityCollision`. (Only the leaf is ever
+                    // minted here — the generator gates every strict prefix to
+                    // resolve — so a refused leaf refuses the whole op.)
+                    //
+                    // END-STATE (plan §5, ruled 2026-07-26): a recreate at a
+                    // freed path mints a DISTINCT id and binds the NAME to it.
+                    // When that lands, replace this early return with the
+                    // unique-mint and single-source the rule with the writer.
+                    if self.domain.block_state.blocks.contains_key(&id) {
+                        return;
+                    }
+                    let mut page = Block::new_text(id.clone(), parent.clone(), trimmed.to_string());
+                    page.set_page(true);
+                    let max_seq = self
+                        .domain
+                        .block_state
+                        .blocks
+                        .values()
+                        .filter(|b| b.parent_id == parent)
+                        .map(|b| b.sequence())
+                        .max();
+                    page.set_sequence(max_seq.map_or(0, |s| s + 1));
+                    self.domain
+                        .block_state
+                        .block_documents
+                        .insert(id.clone(), id.clone());
+                    self.domain.block_state.blocks.insert(id.clone(), page);
+                    parent = id;
+                }
+            }
+            accumulated = seg_path;
+        }
+        self.recanon_and_rebuild();
     }
 
     /// Join `block_id` into its merge target.
@@ -1809,7 +2531,7 @@ impl ReferenceState {
 
     /// Apply a mutation to the block state, re-canonicalize, and rebuild
     /// profiles.
-    pub fn apply_mutation(&mut self, event: &super::types::MutationEvent) {
+    pub fn apply_mutation(&mut self, event: &holon_pbt_core::types::MutationEvent) {
         let mut blocks: Vec<Block> = self.domain.block_state.blocks.values().cloned().collect();
         event.mutation.apply_to(&mut blocks);
         self.domain.block_state.blocks = blocks.into_iter().map(|b| (b.id.clone(), b)).collect();
@@ -1825,13 +2547,8 @@ impl ReferenceState {
     /// shadow's concurrent-merge interleaving prediction exact (walking
     /// skeleton #2, `shadow_mesh_predicts_concurrent_primary_peer_merge`).
     pub fn shadow_catch_up_primary(&self) {
-        let Some(mesh) = &self.shadow_mesh else {
-            return;
-        };
-        if let Some(h) = *self.clock_feed.lock().expect("clock_feed lock") {
-            mesh.pad_primary_to(h);
-        }
-        mesh.catch_up_primary(&self.domain.block_state.blocks);
+        self.loro
+            .shadow_catch_up_primary(&self.domain.block_state.blocks);
     }
 
     /// Re-canonicalize sequences and rebuild profile tracking.
@@ -1848,11 +2565,12 @@ impl ReferenceState {
     /// of `navigation_history WHERE closed_at IS NULL`, excluding home rows
     /// (block_id NULL — they don't JOIN against `root.id` in the consumer GQL).
     ///
-    /// For Region::Main, the close-prior-then-insert contract of
-    /// `NavigateFocus`/`NavigateHome` keeps this set at size ≤ 1. For
-    /// Region::RightSidebar, `PinBlock` can grow it (move-to-top dedup
-    /// keeps each block_id unique within the region). Consumers use
-    /// CHILD_OF*0..N to expand to root + descendants.
+    /// This is the region's OPEN SET, not what the panel shows. `PinBlock`
+    /// grows it for Region::RightSidebar and `navigation.open_tab` grows it
+    /// for Region::Main (background tabs); even at boot it is not a singleton.
+    /// For what the main panel actually RENDERS, use
+    /// [`Self::rendered_focus_root`]. Consumers use CHILD_OF*0..N to expand to
+    /// root + descendants.
     pub fn expected_focus_root_ids(&self, region: Region) -> BTreeSet<EntityUri> {
         self.ui
             .user
@@ -1869,6 +2587,28 @@ impl ReferenceState {
     // intentionally trimmed body; downstream test files reference offsets.
     // Removing this comment shifts following ALLOW directives.
 
+    /// The region's RENDERED focus root — what the main panel actually shows,
+    /// as opposed to [`Self::expected_focus_root_ids`]'s open SET.
+    ///
+    /// Prod's main-panel query ends
+    /// `JOIN navigation_cursor nc ON nc.region = fr.region AND nc.history_id =
+    /// fr.history_id` (`assets/default/index.org`,
+    /// `default-main-panel::src::0`), so exactly one open row projects: the
+    /// cursor's. An open row that is not the cursor's is a BACKGROUND tab —
+    /// present in `focus_roots`, absent from the panel. A cursor sitting on a
+    /// row that is no longer open projects nothing at all (the blank-panel
+    /// mode `navigate_back_keeps_panel_populated` locks down).
+    ///
+    /// Returned as a set because every consumer expands it through
+    /// `is_descendant_of_any` / `rendered_block_ids`, which take a root set.
+    pub fn rendered_focus_root(&self, region: Region) -> BTreeSet<EntityUri> {
+        let open = self.expected_focus_root_ids(region);
+        match self.current_focus(region) {
+            Some(cursor) if open.contains(&cursor) => BTreeSet::from([cursor]),
+            _ => BTreeSet::new(),
+        }
+    }
+
     /// Check if `block_id` is a descendant of any block in `roots` (or is
     /// itself in `roots`).
     pub fn is_descendant_of_any(
@@ -1876,29 +2616,13 @@ impl ReferenceState {
         block_id: &EntityUri,
         roots: &std::collections::BTreeSet<EntityUri>,
     ) -> bool {
-        if roots.contains(block_id) {
-            return true;
-        }
-        // Walk up parent chain
-        let mut current = block_id.clone();
-        for _ in 0..50 {
-            if let Some(block) = self.domain.block_state.blocks.get(&current) {
-                if roots.contains(&block.parent_id) {
-                    return true;
-                }
-                if block.parent_id.is_no_parent() || block.parent_id.is_sentinel() {
-                    return false;
-                }
-                current = block.parent_id.clone();
-            } else {
-                return false;
-            }
-        }
-        false
+        self.domain
+            .block_state
+            .is_descendant_of_any(block_id, roots)
     }
 
     pub fn has_blocks_profile(&self) -> bool {
-        self.domain.active_profiles.contains_key("block")
+        self.domain.has_blocks_profile()
     }
 
     /// Rebuild profile tracking from current blocks state.
@@ -1946,27 +2670,171 @@ impl ReferenceState {
 
     /// Snapshot current block state before a UI mutation and clear redo stack.
     ///
-    /// Currently a no-op: the engine's SqlOperationProvider returns
-    /// `OperationResult::irreversible()` for all operations, so the real
-    /// undo stack is never populated. Re-enable once the provider produces
-    /// inverse operations.
+    /// Composition-root method: clones `domain.block_state` onto the
+    /// `action.undo_stack`, crossing the action↔domain fragment boundary, so it
+    /// must live on `ReferenceState` (not on either fragment alone). Enabling
+    /// this (was a no-op while the engine returned
+    /// `OperationResult::irreversible()` for every operation) activates the
+    /// keystone undo rung: the 8 mutating transitions that call it now
+    /// record snapshots, and `UndoLastMutation`
+    /// (gated on `has_undo_history`) can pop them back.
     pub fn push_undo_snapshot(&mut self) {
-        // self.undo_stack.push(self.block_state.clone());
-        // self.redo_stack.clear();
+        self.action.undo_stack.push(self.domain.block_state.clone());
+        self.action.redo_stack.clear();
     }
 
     /// Undo: snapshot current state onto redo stack, restore from undo stack.
+    ///
+    /// Id-minting is MONOTONIC across undo/redo: prod never reuses a burned
+    /// block id, so restoring an earlier tree must not roll back the synthetic
+    /// id-mint high-water mark (`block_state.next_id`, source of `split-N` /
+    /// `create-N`). Rolling it back re-mints an id the insert-only harness
+    /// resolver still maps to a now-deleted real block, tripping the
+    /// `per-tick reconcile: one synthetic per minted real id` desync
+    /// (SplitBlock → UndoLastMutation → SplitBlock). This mirrors
+    /// `next_doc_id`, which already lives outside the snapshotted
+    /// `block_state` for the same reason.
     pub fn pop_undo_to_redo(&mut self) {
-        self.action.redo_stack.push(self.domain.block_state.clone());
-        self.domain.block_state = self.action.undo_stack.pop().expect("undo stack is empty");
+        let pre_restore = self.domain.block_state.clone();
+        self.action.redo_stack.push(pre_restore.clone());
+        let id_hwm = self.domain.block_state.next_id;
+        let mut restored = self.action.undo_stack.pop().expect("undo stack is empty");
+        restored.next_id = restored.next_id.max(id_hwm);
+        self.domain.block_state = restored;
+        self.rematerialize_file_ingested(&pre_restore);
         self.recompute_derived();
     }
 
     /// Redo: snapshot current state onto undo stack, restore from redo stack.
+    /// Preserves the monotonic id-mint high-water mark — see
+    /// [`Self::pop_undo_to_redo`].
     pub fn pop_redo_to_undo(&mut self) {
-        self.action.undo_stack.push(self.domain.block_state.clone());
-        self.domain.block_state = self.action.redo_stack.pop().expect("redo stack is empty");
+        let pre_restore = self.domain.block_state.clone();
+        self.action.undo_stack.push(pre_restore.clone());
+        let id_hwm = self.domain.block_state.next_id;
+        let mut restored = self.action.redo_stack.pop().expect("redo stack is empty");
+        restored.next_id = restored.next_id.max(id_hwm);
+        self.domain.block_state = restored;
+        // REDO-direction hazard: `pre_restore` still holds a block this redo is
+        // supposed to re-delete, so re-materialising blindly from it would
+        // RESURRECT a user-deleted block (spurious `only_in_ref`). What keeps it
+        // sound is that a removing mutation un-marks the id
+        // (`apply_content_mutation`), so a user-deleted block is no longer
+        // file-backed and never enters the loop.
+        self.rematerialize_file_ingested(&pre_restore);
         self.recompute_derived();
+    }
+
+    /// Prod's `engine.undo()` reverts only USER-origin ops
+    /// (`operation_engine.rs:1220` — "only User-origin operations push undo
+    /// entries"); an INGEST-origin file-ingested doc page (minted by the
+    /// `FileSyncController` watcher for a `CreateDocument`) is NOT on the undo
+    /// stack, so a doc created before an undo PERSISTS in prod. The oracle,
+    /// however, snapshots the WHOLE `block_state`, so restoring a pre-doc
+    /// snapshot would drop the doc page the SUT still holds — surfacing it as a
+    /// phantom (`inv-viewmodel-entity-ids-subset-of-data` /
+    /// `inv-blocks-match-ref` spurious). `files.documents` lives OUTSIDE the
+    /// snapshot (like `next_doc_id`, see `pop_undo_to_redo`), so it is the
+    /// authority for which docs exist; re-materialise every doc page the
+    /// restore dropped, mirroring prod.
+    ///
+    /// The same argument covers the file's CONTENT blocks, not just its root:
+    /// what the watcher parses out of an org file is INGEST-origin too, so
+    /// `WriteOrgFile`/`BulkExternalAdd` blocks also survive prod's undo. They
+    /// are tracked in `files.ingest_origin_blocks` (also outside the
+    /// snapshot) and restored VERBATIM from `pre_restore` — the state just
+    /// before this undo — because that is exactly what prod's undo leaves
+    /// untouched. A block a user genuinely deleted is absent from
+    /// `pre_restore` and correctly stays gone, and one edited by a later
+    /// user op was re-snapshotted by that op, so it is in `restored`
+    /// already and never reaches this path.
+    ///
+    /// A doc root that is in `files.documents` but in NEITHER state is rebuilt
+    /// from the filename (title = file stem, `Page`) — the `insert_document`
+    /// shape, for docs whose block was dropped before this undo.
+    fn rematerialize_file_ingested(&mut self, pre_restore: &BlockState) {
+        for id in &self.files.ingest_origin_blocks {
+            if self.domain.block_state.blocks.contains_key(id) {
+                continue;
+            }
+            let Some(block) = pre_restore.blocks.get(id) else {
+                continue;
+            };
+            self.domain
+                .block_state
+                .blocks
+                .insert(id.clone(), block.clone());
+            if let Some(doc) = pre_restore.block_documents.get(id) {
+                self.domain
+                    .block_state
+                    .block_documents
+                    .insert(id.clone(), doc.clone());
+            }
+        }
+
+        let docs: Vec<(EntityUri, String)> = self
+            .files
+            .documents
+            .iter()
+            .map(|(uri, name)| (uri.clone(), name.clone()))
+            .collect();
+        for (doc_uri, file_name) in docs {
+            if self.domain.block_state.blocks.contains_key(&doc_uri) {
+                continue;
+            }
+            let path = std::path::Path::new(&file_name);
+            let doc_name = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(&file_name)
+                .to_string();
+            // A file in a SUBDIRECTORY (e.g. `Journals/2026-01-16.org`) is a page
+            // NESTED under its folder-page, not a top-level doc-root — the
+            // name-chain nesting the original create used. The only such folder
+            // today is the `journals` companion (the auto-create rule emits
+            // `place: page(journals)`), whose seed id is `block:journals`. Preserve
+            // that parent on undo re-materialisation so the rule-created journal
+            // day-block returns under `block:journals` (where the SUT keeps it),
+            // not as a phantom top-level doc-root. Non-subdir docs stay `no_parent`.
+            let is_journal_subdir = path
+                .parent()
+                .and_then(|d| d.file_name())
+                .and_then(|s| s.to_str())
+                .is_some_and(|dir| dir == "Journals");
+            let parent_uri = if is_journal_subdir {
+                EntityUri::block("journals")
+            } else {
+                EntityUri::no_parent()
+            };
+            let mut doc_block = Block::new_text(doc_uri.clone(), parent_uri, doc_name);
+            doc_block.set_page(true);
+            // Match the SUT's created-last sibling order under `block:journals`
+            // (see `RefClockMut::advance_day`): a re-materialised journal appends
+            // after every current sibling.
+            if is_journal_subdir {
+                use holon_orgmode::models::OrgBlockExt;
+                let journals = EntityUri::block("journals");
+                let next_seq = self
+                    .domain
+                    .block_state
+                    .blocks
+                    .values()
+                    .filter(|b| b.parent_id == journals)
+                    .map(|b| b.sequence())
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
+                doc_block.set_sequence(next_seq);
+            }
+            self.domain
+                .block_state
+                .blocks
+                .insert(doc_uri.clone(), doc_block);
+            self.domain
+                .block_state
+                .block_documents
+                .insert(doc_uri.clone(), doc_uri);
+        }
     }
 
     /// Recompute derived fields (profiles, render expressions) after undo/redo
@@ -1993,30 +2861,13 @@ impl ReferenceState {
     /// block state so callers (e.g. `inv-viewmodel-root-matches-render-expr`)
     /// never embed that literal themselves.
     pub fn main_panel_block_id(&self) -> Option<EntityUri> {
-        let main_panel_id = EntityUri::parse("block:default-main-panel").expect("static id");
-        self.domain
-            .block_state
-            .blocks
-            .contains_key(&main_panel_id)
-            .then(|| main_panel_id.clone())
+        self.domain.main_panel_block_id()
     }
 
     /// Get the main panel's render expression (the render source child of the
     /// main panel headline).
     pub fn main_panel_render_expr(&self) -> Option<&RenderExpr> {
-        let main_panel_id = self.main_panel_block_id()?;
-        self.domain
-            .layout_blocks
-            .render_source_ids
-            .iter()
-            .find(|id| {
-                self.domain
-                    .block_state
-                    .blocks
-                    .get(*id)
-                    .is_some_and(|b| b.parent_id == main_panel_id)
-            })
-            .and_then(|id| self.domain.render_expressions.get(id))
+        self.domain.main_panel_render_expr()
     }
 }
 
@@ -2080,6 +2931,7 @@ pub fn block_to_data_row(block: &Block) -> holon_api::widget_spec::DataRow {
     if let Some(sl) = &block.source_language {
         row.insert("source_language".into(), Value::String(sl.to_string()));
     }
+    row.insert("widget_only".into(), Value::Boolean(block.widget_only));
     row
 }
 
@@ -2089,7 +2941,22 @@ impl holon_frontend::reactive::BuilderServices for ReferenceState {
         expr: &RenderExpr,
         ctx: &holon_frontend::RenderContext,
     ) -> holon_frontend::ReactiveViewModel {
-        self.interpreter.interpret(expr, ctx, self)
+        self.harness.interpreter.interpret(expr, ctx, self)
+    }
+
+    /// The reference model is the proptest state machine's owned, mutating
+    /// state — a handle would have to be a COPY, and a lazy slot materialising
+    /// against a copy would render a snapshot the model has already moved past,
+    /// silently diverging from the SUT it exists to judge.
+    fn clone_arc(&self) -> Arc<dyn holon_frontend::reactive::BuilderServices> {
+        unimplemented!(
+            "ReferenceState::clone_arc — the ref model cannot hand out a \
+             handle; a lazy widget reached the reference render path"
+        )
+    }
+
+    fn link_classifier(&self) -> &holon_api::link_parser::LinkTargetClassifier {
+        &self.harness.link_classifier
     }
 
     fn get_block_data(
@@ -2161,7 +3028,7 @@ impl holon_frontend::reactive::BuilderServices for ReferenceState {
         use holon_api::render_types::RenderVariant;
 
         let profile = self.domain.seed_profile.as_ref()?;
-        let engine = rhai::Engine::new();
+        let engine = self.profile_engine();
         let (candidates, _computed) = profile.resolve_candidates(row, &engine);
         let ops = self.domain.block_operations.clone();
         let variants: Vec<RenderVariant> = candidates
@@ -2189,7 +3056,11 @@ impl holon_frontend::reactive::BuilderServices for ReferenceState {
         _: holon_api::QueryLanguage,
         _: Option<holon_frontend::QueryContext>,
     ) -> anyhow::Result<holon_api::EnrichedChangeStream> {
-        panic!("watch_query not supported on ReferenceState")
+        // The reference model must never panic on a prod render path. An empty
+        // stream is the faithful mirror: the keystone oracle asserts on
+        // inv-blocks-match-ref, not on the watch stream itself.
+        let (_tx, rx) = tokio::sync::mpsc::channel(1);
+        Ok(tokio_stream::wrappers::ReceiverStream::new(rx))
     }
 
     /// Mirror the ref's tracked drawer/toggle open-state (`ToggleDrawer`
@@ -2247,6 +3118,138 @@ impl holon_frontend::reactive::BuilderServices for ReferenceState {
         >,
     > {
         Box::pin(async { anyhow::bail!("search_link_candidates not supported on ReferenceState") })
+    }
+}
+
+#[cfg(test)]
+mod main_panel_visibility_tests {
+    use holon_orgmode::models::OrgBlockExt;
+
+    use super::*;
+    use crate::pbt::composed::wide_e2e::wide_e2e_ref;
+
+    /// F5 `state-toggle-row-absent`: the main panel stops descending at a
+    /// NON-ROOT page, so a block behind one renders no row and is neither a
+    /// legal click target nor a row any invariant may demand. A bare ancestor
+    /// walk says the opposite — the two must not be confused.
+    ///
+    /// Locked as a unit test, not a keystone JSONL case: the fix is a
+    /// PRECONDITION / candidate-set narrowing, and the hand-authored runner
+    /// replays its sequence verbatim without evaluating preconditions, so a
+    /// composed case naming the unrenderable target reproduces the signature
+    /// but can never go green. Disclosed deviation, same shape as the
+    /// `org-render-echo-loop` lock.
+    #[test]
+    fn main_panel_visibility_stops_at_a_non_root_page() {
+        let mut state = wide_e2e_ref();
+        let roots = state.rendered_focus_root(Region::Main);
+        let root = roots
+            .iter()
+            .next()
+            .cloned()
+            .expect("the default layout gives Main a focus root");
+
+        let page = EntityUri::block("vis-mid-page");
+        let leaf = EntityUri::block("vis-leaf");
+        let mut page_block = Block::new_text(page.clone(), root.clone(), "a nested page");
+        page_block.set_page(true);
+        state
+            .domain
+            .block_state
+            .blocks
+            .insert(page.clone(), page_block);
+        state.domain.block_state.blocks.insert(
+            leaf.clone(),
+            Block::new_text(leaf.clone(), page.clone(), "leaf"),
+        );
+
+        assert!(
+            state.is_descendant_of_any(&leaf, &roots),
+            "precondition of the test: the bare ancestor walk DOES reach the leaf"
+        );
+        assert!(
+            !state.main_panel_renders(&leaf),
+            "a block behind a non-root page renders no main-panel row, so it must not be \
+             reported as visible"
+        );
+        assert!(
+            !state.main_editable_descendants().contains(&leaf),
+            "the candidate set must not offer a click target the panel does not paint"
+        );
+    }
+}
+
+#[cfg(test)]
+mod ingest_origin_undo_tests {
+    use holon_pbt_core::capabilities::RefApplyMutationMut;
+    use holon_pbt_core::capabilities::RefDocumentsMut;
+    use holon_pbt_core::types::Mutation;
+
+    use super::*;
+    use crate::pbt::composed::wide_e2e::wide_e2e_ref;
+
+    fn ingest_one_block(state: &mut ReferenceState, id: &EntityUri) {
+        let placeholder =
+            EntityUri::block(crate::pbt::transitions::write_org_file::GEN_PLACEHOLDER);
+        let block = Block::new_text(id.clone(), placeholder, "external alpha");
+        state.seed_org_file("ingest_doc.org", std::slice::from_ref(&block), None);
+    }
+
+    /// The F2 fix itself, at the ref model alone: a file-ingested block is
+    /// INGEST-origin, so an undo that restores a pre-file snapshot must NOT
+    /// drop it — prod's undo stack never held it.
+    #[test]
+    fn undo_keeps_file_ingested_block_the_snapshot_predates() {
+        let mut state = wide_e2e_ref();
+        let ext = EntityUri::block("ext-a");
+
+        // A User-origin op snapshots the pre-file state, THEN the file arrives.
+        state.push_undo_snapshot();
+        ingest_one_block(&mut state, &ext);
+        assert!(state.domain.block_state.blocks.contains_key(&ext));
+
+        state.pop_undo_to_redo();
+
+        assert!(
+            state.domain.block_state.blocks.contains_key(&ext),
+            "undo over-reverted a file-ingested block: prod's undo stack holds only \
+             User-origin ops, so the ingest survives `engine.undo()`"
+        );
+    }
+
+    /// The REDO-direction twin, and the reason a removing mutation must un-mark
+    /// its ids. Un-constructable as a composed keystone case: deleting a block
+    /// that lives on disk trips the ADR-0025 write-back removal guard
+    /// (`quarantine_writeback`,
+    /// `crates/holon-filesystem/src/file_sync_controller.rs`),
+    /// whose `tracing::error!` reds `inv-no-errors` first — the case would go
+    /// red for the quarantine's reason, not this one. So the lock is here.
+    #[test]
+    fn redo_does_not_resurrect_a_user_deleted_file_ingested_block() {
+        let mut state = wide_e2e_ref();
+        let ext = EntityUri::block("ext-a");
+
+        ingest_one_block(&mut state, &ext);
+        assert!(state.domain.block_state.blocks.contains_key(&ext));
+
+        // A User-origin delete of that ingested block: snapshot, then remove.
+        state.push_undo_snapshot();
+        state.apply_content_mutation(&Mutation::Delete { id: ext.clone() }, false);
+        assert!(!state.domain.block_state.blocks.contains_key(&ext));
+
+        state.pop_undo_to_redo();
+        assert!(
+            state.domain.block_state.blocks.contains_key(&ext),
+            "undo of the delete must bring the block back"
+        );
+
+        state.pop_redo_to_undo();
+        assert!(
+            !state.domain.block_state.blocks.contains_key(&ext),
+            "redo RESURRECTED a user-deleted file-ingested block — `rematerialize_file_ingested` \
+             re-added it from the pre-redo state because the delete never un-marked it as \
+             file-backed"
+        );
     }
 }
 

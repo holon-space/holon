@@ -1,0 +1,291 @@
+Task #16 — the trailing "open nested page" chevron: red, green, and the
+mutation that proves which line the red convicts.
+
+Test: frontends/gpui/tests/nested_page_chevron_gate.rs (windowed, real GPUI
+window over the TestPlatform; the click is a synthesized left click at the
+chevron's MEASURED bounds, so it runs the production `on_mouse_down`).
+
+Shape under test: the `embedded_page` render rule verbatim —
+  expand_toggle(#{hover_reveal_toggle: true,
+                 header: text(col("content")),
+                 content: text("NESTED SUBTREE")})
+with the row id `block:nested-page`, driven through a `BuilderServices` impl
+that carries the view-local expansion store with `UiState`'s
+scheme-normalising key semantics (and passes ITSELF down as `ba.services`, so
+the builders read the store the handler writes — the first draft delegated
+`interpret` to an inner stub and therefore measured the stub's empty store;
+that harness bug is why the test carries its own interpreter handle).
+
+Two assertions, deliberately split:
+  chevron_click_opens_the_live_row          — CONTROL. The click reaches the
+    handler and flips the row's live `Mutable`. Green before AND after.
+  chevron_click_survives_the_structural_rebuild — THE DEFECT. A fresh
+    structural build (what recursive resolve performs on the very next
+    snapshot) must come back OPEN: gate, materialised subtree, painted glyph.
+
+────────────────────────────────────────────────────────────────────────
+RED (at base behaviour: the handler writes only set_field("collapsed"))
+
+running 2 tests
+test chevron_click_opens_the_live_row ... ok
+test chevron_click_survives_the_structural_rebuild ... FAILED
+
+---- chevron_click_survives_the_structural_rebuild stdout ----
+thread 'chevron_click_survives_the_structural_rebuild' panicked at
+frontends/gpui/tests/nested_page_chevron_gate.rs:285:5:
+the rebuilt row re-seeded CLOSED: the gate reads a store the production
+chevron handler never writes, so every resolve discards the click
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured
+
+The control passing beside it is the load-bearing half: the click DID land and
+DID flip the live view model, so the failure cannot be a missed hit-test or an
+unregistered chevron. The loss is on the read side, after the write — exactly
+what the original probe measured in the live app.
+
+────────────────────────────────────────────────────────────────────────
+GREEN (after the unification)
+
+running 2 tests
+test chevron_click_opens_the_live_row ... ok
+test chevron_click_survives_the_structural_rebuild ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured
+
+────────────────────────────────────────────────────────────────────────
+MUTATION — which line does the red convict?
+
+Replacing the ONE added line in the production handler
+(frontends/gpui/src/render/builders/expand_toggle.rs)
+
+    services.set_block_expanded_view(&seed_target, new_val);
+  ->  let _ = (&services, &seed_target, new_val);   // MUTATION
+
+reds exactly one test and leaves the control green:
+
+running 2 tests
+test chevron_click_opens_the_live_row ... ok
+test chevron_click_survives_the_structural_rebuild ... FAILED
+thread '...' panicked at frontends/gpui/tests/nested_page_chevron_gate.rs:285:5:
+the rebuilt row re-seeded CLOSED: the gate reads a store the production
+chevron handler never writes, so every resolve discards the click
+
+test result: FAILED. 1 passed; 1 failed
+
+So the assertion is sensitive to the handler's store write and to nothing else
+in the neighbourhood. Line restored afterwards.
+
+────────────────────────────────────────────────────────────────────────
+WHICH STORE IS AUTHORITATIVE, AND WHY IT IS NOT `collapsed`
+
+Option (a) — "seed the gate from the `collapsed` field the handler already
+writes" — was considered and REJECTED on the code's own documented grounds:
+a block row's default `collapsed = 0` means "not explicitly folded", NOT
+"auto-expand this lazy section" (shadow_builders/expand_toggle.rs states this
+above the gate). Seeding from `collapsed` would therefore open every nested
+page on first paint — the failure the 2026-07-16 ledger row
+"Nested pages are NOT collapsed by default" already records, and the reason
+the lazy gate defaults closed at all. `collapsed` also belongs to the OTHER
+affordance on the same row: the leading `tree_item` disclosure chevron, kept
+deliberately separate from the trailing one (double-chevron ruling
+2026-07-21).
+
+So the view-local expansion store stays the gate's authority (2026-07-16
+Option B) and the fix is that EVERY writer writes it:
+
+  crates/holon-frontend/src/reactive.rs
+    BuilderServices::set_block_expanded_view — the write half of the
+    pre-existing `block_expanded_view` reader; engine impl delegates to
+    `UiState::set_block_expanded_view` (which bumps `viewport_generation`).
+  frontends/gpui/src/render/builders/expand_toggle.rs
+    the chevron handler records the click there, beside its unchanged
+    `set_field("collapsed")` dispatch (document state, 2026-07-11 ruling).
+  crates/holon-frontend/src/shadow_builders/expand_toggle.rs
+    the live-follow subscription records EXTERNAL `collapsed` changes there
+    too — otherwise a rebuild would undo a remote fold exactly as it undid the
+    local click.
+  crates/holon-frontend/src/user_driver.rs
+    DirectUserDriver::set_block_expanded writes it in BOTH branches. The
+    mounted-gate branch previously wrote only the `Mutable` + `set_field`, so
+    the harness and production disagreed about the store; now the driver
+    writes nothing production does not.
+
+OBSERVABILITY (part of the ENVIRONMENT fix, added BEFORE the red): the
+trailing chevron registered bounds but no `displayed_text`, so open-vs-closed
+was unreadable from a painted frame — a test could see the element and not its
+state. It now records its glyph and its vm node, like `tree_item`'s chevron
+does, which is what lets the red assert the painted ▼/▶ rather than only the
+in-memory gate.
+
+────────────────────────────────────────────────────────────────────────
+GATES (this lane's base: main=876b0835)
+
+cargo fmt --all --check                       clean
+cargo check -p holon-gpui                     ok
+windowed suite (cargo nextest run -p holon-gpui --features pbt --no-fail-fast)
+  268 tests run: 267 passed, 1 failed
+  the 1 = capmap_hosts_windowed_sutlayout_over_real_geometry, the documented
+  pre-existing red (GPUI pre-warm timeout -> the window boots into loading
+  state, so inv-viewmodel-entity-ids-subset-of-data and
+  inv-matview-consistent-with-ref/root_layout see an empty data universe).
+  268 = the base's 266 plus this lane's 2 new tests; base passed 265 of 266.
+  NOTE on concurrency: the first run at nextest's default job count also
+  failed window_renders_compose_sut_base_and_base_hosts_backend and
+  overlay_windowed_caps_composes_layout_backend_and_driver_over_a_live_window,
+  both with the SAME pre-warm-timeout signature ("window never reached a fixed
+  point within 30s"); re-run serially they PASS, and the whole suite at -j 2 is
+  267/268. Load-dependent boot timeouts, not new signatures.
+keystone-smoke                                4 passed / 0 failed
+hand-authored                                 39 rows replayed, 9/9 unit tests
+bash scripts/bugfunnel-check.sh
+  ENVIRONMENT/PERCEPTION/ORACLE reconcile; COVERAGE header=93 vs rows=96 —
+  the pre-existing delta-of-3, unchanged by this lane.
+
+RESIDUAL, not closed here: `inv-embedded-page-collapsed-lazy` reports 0/N
+engagement across every keystone and hand-authored corpus in these runs. The
+invariant that most directly concerns this widget never fires, so the ORACLE
+half of the row is only partly paid — a dedicated windowed test now covers the
+gesture, but no generated draw exercises it.
+
+
+========================================================================
+ROUND 2 - VERIFIER REFUTATION OF THE LIVE-FOLLOW HALF, AND ITS FIX
+========================================================================
+
+Nothing above is rewritten. Two corrections and one new defect, appended.
+
+CORRECTION 1 (line number). The red panic above is quoted at
+nested_page_chevron_gate.rs:285; the actual line is :286. The panic TEXT is
+verbatim; only the cited line is off by one.
+
+CORRECTION 2 (overstated measurement). The RESIDUAL paragraph above says
+inv-embedded-page-collapsed-lazy "reports 0/N engagement across every keystone
+and hand-authored corpus". That was sampled, not counted, and it is too strong.
+Counted properly over the same hand-authored run (39 engagement summaries):
+  33 of 39 rows: 0/N (never engaged)
+   6 of 39 rows: engaged - 1/6, 2/4, 2/5, 2/6, 3/4, 3/7
+  keystone-smoke: the invariant does not appear in the engagement summary at
+                  all (0 draws).
+The conclusion is unchanged and arguably sharper: the invariant DOES fire in a
+handful of hand-authored rows and still caught neither the original write-only
+gate nor the round-2 unfold regression below.
+
+------------------------------------------------------------------------
+THE DEFECT THE VERIFIER FOUND
+
+Round 1 propagated BOTH `collapsed` edges into the view store:
+
+    follow_services.set_block_expanded_view(&follow_target, !collapsed);
+
+`collapsed` belongs to the LEADING `tree_item` chevron (the outline fold). So:
+
+  embedded-page row folded
+    -> user clicks the LEADING chevron to unfold the OUTLINE
+    -> set_field(collapsed = false)
+    -> live-follow writes set_block_expanded_view(id, true)   <-- DURABLE
+    -> next structural rebuild opens the TRAILING nested-page gate and
+       eagerly materialises a subtree nobody clicked, persistently.
+
+That is exactly the "auto-expand every nested page / unbounded eager load"
+class this file cites as the decisive reason to REJECT option (a). Round 1
+rejected seeding from `collapsed` at build time and then reintroduced it at
+edge time, with durability. The fold direction (0->1 -> store=false) is
+correct and intended; only the unfold direction is harmful.
+
+------------------------------------------------------------------------
+RED (round-1 tree), verbatim
+
+running 4 tests
+test chevron_click_opens_the_live_row ... ok
+test chevron_click_survives_the_structural_rebuild ... ok
+test an_external_unfold_leaves_the_nested_page_closed ... FAILED
+test an_external_fold_closes_the_nested_page_across_a_rebuild ... ok
+
+---- an_external_unfold_leaves_the_nested_page_closed stdout ----
+thread 'an_external_unfold_leaves_the_nested_page_closed' panicked at
+frontends/gpui/tests/nested_page_chevron_gate.rs:386:5:
+assertion `left == right` failed: unfolding the outline row must write NOTHING
+to the nested-page view store - that store is the trailing chevron's, and a
+durable entry here opens a page the user never clicked
+  left: {"nested-page": true}
+ right: {}
+
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured
+
+The left/right values reproduce the verifier's single-line A/B probe exactly.
+
+------------------------------------------------------------------------
+COVERAGE HOLE THAT LET IT THROUGH
+
+The two round-1 windowed tests use services whose `try_runtime_handle()`
+returns None, so the live-follow subscription NEVER SPAWNED in them: the
+regressing line had zero coverage in the very lane that added it. The
+directional tests fix that - their services hand out a real runtime handle, the
+subscription runs, and the tests drive real `collapsed` edges through a
+caller-owned row `Mutable` the way CDC does.
+
+------------------------------------------------------------------------
+FIX + GREEN
+
+crates/holon-frontend/src/shadow_builders/expand_toggle.rs - directional:
+
+    if collapsed {
+        follow_services.set_block_expanded_view(&follow_target, false);
+    }
+
+running 4 tests
+test chevron_click_opens_the_live_row ... ok
+test chevron_click_survives_the_structural_rebuild ... ok
+test an_external_unfold_leaves_the_nested_page_closed ... ok
+test an_external_fold_closes_the_nested_page_across_a_rebuild ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured
+
+MUTATION (fold direction, so the guard cannot silently drop it): deleting the
+whole `if collapsed { ... }` block reds exactly the fold test -
+
+---- an_external_fold_closes_the_nested_page_across_a_rebuild stdout ----
+assertion `left == right` failed: a remote fold must close the nested page
+durably, or the rebuild would re-open it from the stale click
+  left: Some(true)
+ right: Some(false)
+test result: FAILED. 3 passed; 1 failed
+
+So both directions are pinned by an assertion that fails when that direction's
+behaviour is removed.
+
+------------------------------------------------------------------------
+NOT EXERCISED BY THESE TESTS (flagged, not closed)
+
+1. ReactiveEngine::set_block_expanded_view -> UiState (reactive.rs:3092) is the
+   PRODUCTION binding, and no test here touches it: these tests carry their own
+   BuilderServices store. The delegation is one line, but it is unpinned.
+2. HeadlessBuilderServices (crates/holon-app/src/headless_builder_services.rs)
+   implements NEITHER the reader nor the writer, so MCP `describe_ui` reports
+   every expand_toggle closed regardless of what the user opened. Pre-existing,
+   and it matters because dogfood-explorer reads exactly that surface. It does
+   NOT fan in cheaply: HeadlessBuilderServices holds an Arc<BackendEngine>,
+   which has no UiState - UiState lives on holon-frontend's ReactiveEngine - so
+   wiring it means threading a UiState through holon-app's describe_ui
+   construction sites. Left flagged rather than done blind.
+
+
+========================================================================
+ROUND 4 CORRECTION — the sole windowed red is mislabelled above
+========================================================================
+
+The GATES section above calls the sole windowed red a "GPUI pre-warm timeout".
+That is the wrong label for
+`capmap_hosts_windowed_sutlayout_over_real_geometry`. Its documented signature
+is the INVARIANT FAILURE `inv-viewmodel-entity-ids-subset-of-data` (phantom
+ids) plus `inv-matview-consistent-with-ref/root_layout` (GHOST ROW
+`block:root-layout`) — PbtComposition_EndgameRoadmap.md:757. The attribution
+(pre-existing, identical at base, not this lane's regression) is unchanged and
+correct; only the name for it was wrong. A `[GPUI] pre-warm timeout` line does
+appear in that test's stderr, which is what misled the label, but it is not
+the failure the test reports.
+
+The two OTHER reds described above (window_renders_compose_sut_base... and
+overlay_windowed_caps..., and later page_with_a_nested_band...) genuinely ARE
+fixed-point/pre-warm timeouts ("window never reached a fixed point within
+30s") and pass when re-run serially — that part stands.

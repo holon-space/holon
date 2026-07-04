@@ -324,7 +324,15 @@ mod tests {
                 }],
                 affected_fields: vec![],
                 param_mappings: vec![],
-                ..Default::default()
+                target_scope: holon_api::TargetScope::Block,
+                boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::Test,
+                },
+                trigger: None,
+                bound_params: Default::default(),
+                guard: holon_api::pattern::OpGuard::None,
+                arcs: holon_api::arcs::TransitionArcs::Undeclared,
             },
             OperationDescriptor {
                 entity_name: "task".into(),
@@ -342,7 +350,15 @@ mod tests {
                 }],
                 affected_fields: vec![],
                 param_mappings: vec![],
-                ..Default::default()
+                target_scope: holon_api::TargetScope::Block,
+                boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::Test,
+                },
+                trigger: None,
+                bound_params: Default::default(),
+                guard: holon_api::pattern::OpGuard::None,
+                arcs: holon_api::arcs::TransitionArcs::Undeclared,
             },
         ]
     }

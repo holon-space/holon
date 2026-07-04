@@ -198,6 +198,11 @@ mod tests {
         }
 
         proptest! {
+            #![proptest_config(ProptestConfig {
+                failure_persistence: None,
+                ..ProptestConfig::default()
+            })]
+
             #[test]
             fn caret_stays_on_a_boundary_through_any_op_sequence(
                 ops in proptest::collection::vec(op_strategy(), 0..40)

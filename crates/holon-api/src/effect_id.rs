@@ -1,0 +1,414 @@
+// # Deterministic effect IDs (ADR 0024 P4)
+//
+// A rule-fired `block.create` must mint the *same* block id on every replica
+// that fires the same rule for the same key. Then the CRDT tree merge collapses
+// the concurrent creates into one node — at-most-once-per-key becomes a naming
+// discipline, not an execution-semantics problem.
+//
+// The id is a name-based UUIDv5 of `(rule-id, firing-key, output-slot)` under a
+// fixed Holon namespace. It is deterministic (same inputs → same UUID) and
+// distinct across rules, keys, and output slots.
+
+use uuid::Uuid;
+
+use crate::Value;
+use crate::entity::StorageEntity;
+use crate::entity_uri::EntityUri;
+
+/// Fixed, checked-in namespace for all Holon rule-effect UUIDs. Changing this
+/// re-homes every deterministic id, so it is a hard-coded constant, never
+/// derived at runtime.
+pub const HOLON_RULE_NAMESPACE: Uuid = Uuid::from_u128(0x9f8b7c6d_5e4f_4a3b_8c2d_1e0f9a8b7c6d);
+
+/// The identity of the rule whose firing produced an effect — the discovery
+/// `action_id`, parsed once at the discovery boundary and threaded through the
+/// watcher. Never a bare `String` at a call site.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RuleId(String);
+
+impl RuleId {
+    pub fn new(action_id: impl Into<String>) -> Self {
+        Self(action_id.into())
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The key that identifies *which* firing produced an effect: a canonical
+/// serialization of the produced trigger row (sorted `key=value` pairs, typed
+/// value rendering). Convergent across replicas because projection is total and
+/// each replica derives the same row (ADR 0024 A4).
+///
+/// Phase-1 stopgap (plan Q3): the whole row is the key. Phase 2 replaces this
+/// with the explicit `emit` key / interpolated builtins; the newtype boundary
+/// keeps that swap local.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct FiringKey(String);
+
+impl FiringKey {
+    pub fn from_row(row: &StorageEntity) -> Self {
+        // Internal columns (`_rowid`, watermarks) are excluded: they are not part
+        // of the semantic binding, and CDC delivers `_rowid` with a different
+        // Value type on the Created vs Updated path (Integer vs String), which
+        // would mint path-dependent ids and break cross-replica convergence.
+        let mut entries: Vec<String> = row
+            .iter()
+            .filter(|(k, _)| !k.starts_with('_'))
+            .map(|(k, v)| format!("{k}={}", canonical_value(v)))
+            .collect();
+        entries.sort();
+        Self(entries.join("\n"))
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Which output of a firing this id names. A single rule firing may emit more
+/// than one effect; each distinct output gets a distinct slot so the two ids do
+/// not collide. Phase-1 rules emit exactly one create per firing, so they use
+/// [`OutputSlot::first`], but the id signature carries the slot from day one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct OutputSlot(u32);
+
+impl OutputSlot {
+    pub fn first() -> Self {
+        Self(0)
+    }
+    pub fn nth(index: u32) -> Self {
+        Self(index)
+    }
+}
+
+/// Mint the deterministic block id for one emitted effect of a rule firing.
+pub fn deterministic_block_id(rule: &RuleId, key: &FiringKey, slot: &OutputSlot) -> EntityUri {
+    // Unit separator between components keeps them unambiguous even if a rule id
+    // or firing key happens to contain the delimiter characters used inside a
+    // component (`=`, `\n`).
+    let name = format!("{}\x1f{}\x1f{}", rule.0, key.0, slot.0);
+    let uuid = Uuid::new_v5(&HOLON_RULE_NAMESPACE, name.as_bytes());
+    EntityUri::block(&uuid.to_string())
+}
+
+/// Fixed, checked-in namespace for template-instance block ids. Distinct from
+/// [`HOLON_RULE_NAMESPACE`] so a template instantiation and a plain rule create
+/// can never collide even with pathological inputs.
+pub const HOLON_TEMPLATE_NAMESPACE: Uuid = Uuid::from_u128(0x3d2c1b0a_9e8f_4d7c_b6a5_4f3e2d1c0b9a);
+
+/// Mint the deterministic id for one node of a template instantiation
+/// (ADR 0024 P4 applied to templating): the same `(template, context key,
+/// source node)` triple yields the same block id on every replica and on every
+/// re-fire, so rule-driven instantiation converges by naming discipline. The
+/// `context_key` is the rule's firing key (rule path) or a caller-minted fresh
+/// key (manual path — each manual instantiation is deliberately a new
+/// instance).
+pub fn deterministic_instance_id(
+    template_id: &str,
+    context_key: &str,
+    source_node_id: &str,
+) -> EntityUri {
+    let name = format!("{template_id}\x1f{context_key}\x1f{source_node_id}");
+    let uuid = Uuid::new_v5(&HOLON_TEMPLATE_NAMESPACE, name.as_bytes());
+    EntityUri::block(&uuid.to_string())
+}
+
+/// Fixed, checked-in namespace for trust-gate proposal block ids
+/// (VisionGapAnalysis C5). Distinct from [`HOLON_RULE_NAMESPACE`] and
+/// [`HOLON_TEMPLATE_NAMESPACE`] so a coerced proposal can never collide with a
+/// rule effect or a template instance even with pathological inputs.
+pub const HOLON_PROPOSAL_NAMESPACE: Uuid = Uuid::from_u128(0x7a6b5c4d_3e2f_4c1b_9a8d_7e6f5a4b3c2d);
+
+/// Mint the deterministic block id for one coerced proposal (ADR 0024 P4
+/// applied to the trust gate): the same `(origin identity, entity, op, params
+/// firing key)` yields the same proposal id on every replica and on every
+/// re-fire, so a repeated sub-threshold dispatch upserts one proposal instead
+/// of stacking duplicates.
+pub fn deterministic_proposal_id(
+    origin_key: &str,
+    entity: &str,
+    op_name: &str,
+    key: &FiringKey,
+) -> EntityUri {
+    let name = format!("{origin_key}\x1f{entity}\x1f{op_name}\x1f{}", key.0);
+    let uuid = Uuid::new_v5(&HOLON_PROPOSAL_NAMESPACE, name.as_bytes());
+    EntityUri::block(&uuid.to_string())
+}
+
+/// Fixed, checked-in namespace for external-connector idempotency keys
+/// (leases/read-write ruling, ADR 0024 P4 applied to `keyed` connector writes).
+/// Distinct from the block-id namespaces so a connector intent key can never
+/// collide with a rule effect, template instance, or proposal id.
+pub const HOLON_CONNECTOR_NAMESPACE: Uuid = Uuid::from_u128(0x2c1d0e4f_6a5b_4c3d_8e7f_0a1b2c3d4e5f);
+
+/// The identity of ONE user submission, as opposed to the identity of its
+/// text.
+///
+/// A [`FiringKey`] over the params answers "is this the same request?"; for a
+/// compose box that is the wrong question. Two deliberate sends of "yes" are
+/// byte-identical requests but two different messages, and a key that cannot
+/// tell them apart refuses the second one forever. A `ComposeId` is minted per
+/// submission and CARRIED across that submission's re-dispatches, so
+/// at-most-once still collapses a retry storm while a genuine repeat gets
+/// through.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ComposeId(String);
+
+impl ComposeId {
+    /// The params key a compose id travels under. `_`-prefixed, which is
+    /// already the marker for a Holon-internal column: [`FiringKey`] skips
+    /// those, and the connector boundary drops them rather than handing a
+    /// remote tool an argument it never declared.
+    pub const PARAM: &'static str = "_compose_id";
+
+    /// Mint a fresh submission identity.
+    pub fn mint() -> Self {
+        Self(Uuid::new_v4().to_string())
+    }
+
+    /// Adopt an id that came in on a param. Empty is rejected: an empty id
+    /// would silently behave like "no compose id at all", which is the exact
+    /// collision this type exists to prevent.
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        if raw.is_empty() {
+            return Err(format!("`{}` must not be empty", Self::PARAM));
+        }
+        Ok(Self(raw.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Mint the deterministic idempotency key for one external-connector write
+/// (ADR 0024 P4: idempotent/keyed effects converge by naming discipline, never
+/// by an execution log). The same `(connector, tool, entity-id, intent
+/// fingerprint, submission)` yields the same key on every re-dispatch, so a
+/// retry storm collapses to one remote effect at a server that dedups on the
+/// key.
+///
+/// The `fingerprint` is a [`FiringKey`] over the write's params — a canonical,
+/// type-tagged, order-independent serialization — so two dispatches with the
+/// same intent produce the same key regardless of map iteration order.
+///
+/// `submission` is what makes the key name an ACT rather than a payload; see
+/// [`ComposeId`]. Callers with no notion of a submission (rule firings, agent
+/// dispatches) pass `None` and keep the pure payload-derived key.
+pub fn deterministic_intent_key(
+    connector: &str,
+    tool: &str,
+    entity_id: &str,
+    fingerprint: &FiringKey,
+    submission: Option<&ComposeId>,
+) -> Uuid {
+    let submission = submission.map(ComposeId::as_str).unwrap_or("");
+    let name = format!(
+        "{connector}\x1f{tool}\x1f{entity_id}\x1f{}\x1f{submission}",
+        fingerprint.0
+    );
+    Uuid::new_v5(&HOLON_CONNECTOR_NAMESPACE, name.as_bytes())
+}
+
+/// Typed, deterministic rendering of a value for the firing key. The type tag
+/// prevents `Integer(1)` and `String("1")` from producing the same key; nested
+/// objects are rendered with sorted keys so map iteration order never leaks in.
+fn canonical_value(v: &Value) -> String {
+    match v {
+        Value::String(s) => format!("s:{s}"),
+        Value::Integer(i) => format!("i:{i}"),
+        Value::Float(f) => format!("f:{f}"),
+        Value::Boolean(b) => format!("b:{b}"),
+        Value::DateTime(s) => format!("dt:{s}"),
+        Value::Json(s) => format!("j:{s}"),
+        Value::Null => "null".to_string(),
+        Value::Array(items) => {
+            let parts: Vec<String> = items.iter().map(canonical_value).collect();
+            format!("[{}]", parts.join(","))
+        }
+        Value::Object(map) => {
+            let mut kv: Vec<(&String, &Value)> = map.iter().collect();
+            kv.sort_by(|a, b| a.0.cmp(b.0));
+            let parts: Vec<String> = kv
+                .iter()
+                .map(|(k, val)| format!("{k}={}", canonical_value(val)))
+                .collect();
+            format!("{{{}}}", parts.join(","))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+
+    fn row(pairs: &[(&str, Value)]) -> StorageEntity {
+        pairs
+            .iter()
+            .map(|(k, v)| (Arc::from(*k), v.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn id_is_stable_across_calls() {
+        let rule = RuleId::new("journals::action::0");
+        let key = FiringKey::from_row(&row(&[("name", Value::String("2026-07-10".into()))]));
+        let slot = OutputSlot::first();
+        let a = deterministic_block_id(&rule, &key, &slot);
+        let b = deterministic_block_id(&rule, &key, &slot);
+        assert_eq!(a.as_str(), b.as_str());
+        assert!(a.as_str().starts_with("block:"));
+    }
+
+    #[test]
+    fn id_distinct_across_rule_key_slot() {
+        let rule_a = RuleId::new("rule-a");
+        let rule_b = RuleId::new("rule-b");
+        let key_1 = FiringKey::from_row(&row(&[("name", Value::String("2026-07-10".into()))]));
+        let key_2 = FiringKey::from_row(&row(&[("name", Value::String("2026-07-11".into()))]));
+        let slot_0 = OutputSlot::first();
+        let slot_1 = OutputSlot::nth(1);
+
+        let base = deterministic_block_id(&rule_a, &key_1, &slot_0);
+        // different rule
+        assert_ne!(
+            base.as_str(),
+            deterministic_block_id(&rule_b, &key_1, &slot_0).as_str()
+        );
+        // different key
+        assert_ne!(
+            base.as_str(),
+            deterministic_block_id(&rule_a, &key_2, &slot_0).as_str()
+        );
+        // two slots of one firing → two distinct ids
+        assert_ne!(
+            base.as_str(),
+            deterministic_block_id(&rule_a, &key_1, &slot_1).as_str()
+        );
+    }
+
+    #[test]
+    fn firing_key_is_order_independent_and_type_tagged() {
+        let r1 = row(&[
+            ("name", Value::String("d".into())),
+            ("parent_id", Value::String("block:journals".into())),
+        ]);
+        let r2 = row(&[
+            ("parent_id", Value::String("block:journals".into())),
+            ("name", Value::String("d".into())),
+        ]);
+        assert_eq!(
+            FiringKey::from_row(&r1).as_str(),
+            FiringKey::from_row(&r2).as_str()
+        );
+        // Integer 1 and String "1" must not collide.
+        let as_int = FiringKey::from_row(&row(&[("v", Value::Integer(1))]));
+        let as_str = FiringKey::from_row(&row(&[("v", Value::String("1".into()))]));
+        assert_ne!(as_int.as_str(), as_str.as_str());
+    }
+
+    #[test]
+    fn firing_key_excludes_internal_columns() {
+        // CDC delivers _rowid as Integer on the Created path but String on the
+        // Updated path; the key must be identical either way (and with no
+        // _rowid at all), or the same day's journal gets path-dependent ids.
+        let semantic = row(&[("name", Value::String("2026-07-10".into()))]);
+        let created_path = row(&[
+            ("name", Value::String("2026-07-10".into())),
+            ("_rowid", Value::Integer(1)),
+        ]);
+        let updated_path = row(&[
+            ("name", Value::String("2026-07-10".into())),
+            ("_rowid", Value::String("1".into())),
+        ]);
+        assert_eq!(
+            FiringKey::from_row(&semantic).as_str(),
+            FiringKey::from_row(&created_path).as_str()
+        );
+        assert_eq!(
+            FiringKey::from_row(&created_path).as_str(),
+            FiringKey::from_row(&updated_path).as_str()
+        );
+    }
+
+    #[test]
+    fn intent_key_is_stable_and_order_independent() {
+        let fp_a = FiringKey::from_row(&row(&[
+            ("id", Value::String("t1".into())),
+            ("content", Value::String("buy milk".into())),
+        ]));
+        let fp_b = FiringKey::from_row(&row(&[
+            ("content", Value::String("buy milk".into())),
+            ("id", Value::String("t1".into())),
+        ]));
+        let k1 = deterministic_intent_key("todoist", "update-tasks", "t1", &fp_a, None);
+        let k2 = deterministic_intent_key("todoist", "update-tasks", "t1", &fp_b, None);
+        assert_eq!(k1, k2, "same intent (any param order) → same key");
+    }
+
+    #[test]
+    fn intent_key_distinct_across_components() {
+        let fp = FiringKey::from_row(&row(&[("id", Value::String("t1".into()))]));
+        let base = deterministic_intent_key("todoist", "update-tasks", "t1", &fp, None);
+        assert_ne!(
+            base,
+            deterministic_intent_key("gmail", "update-tasks", "t1", &fp, None)
+        );
+        assert_ne!(
+            base,
+            deterministic_intent_key("todoist", "add-tasks", "t1", &fp, None)
+        );
+        assert_ne!(
+            base,
+            deterministic_intent_key("todoist", "update-tasks", "t2", &fp, None)
+        );
+        let fp2 = FiringKey::from_row(&row(&[
+            ("id", Value::String("t1".into())),
+            ("content", Value::String("x".into())),
+        ]));
+        assert_ne!(
+            base,
+            deterministic_intent_key("todoist", "update-tasks", "t1", &fp2, None)
+        );
+    }
+
+    /// The compose id is a real component of the key: identical params under
+    /// two submissions must NOT collapse, and one submission must key the same
+    /// however often it is re-dispatched.
+    #[test]
+    fn intent_key_separates_submissions_but_not_retries() {
+        let fp = FiringKey::from_row(&row(&[
+            ("id", Value::String("sess-1".into())),
+            ("message", Value::String("yes".into())),
+        ]));
+        let first = ComposeId::parse("compose-1").unwrap();
+        let second = ComposeId::parse("compose-2").unwrap();
+
+        let k1 = deterministic_intent_key("cc", "send_message", "sess-1", &fp, Some(&first));
+        let retry = deterministic_intent_key("cc", "send_message", "sess-1", &fp, Some(&first));
+        let k2 = deterministic_intent_key("cc", "send_message", "sess-1", &fp, Some(&second));
+
+        assert_eq!(k1, retry, "a retry of ONE submission keeps its key");
+        assert_ne!(k1, k2, "two submissions of identical text are two keys");
+        assert_ne!(
+            k1,
+            deterministic_intent_key("cc", "send_message", "sess-1", &fp, None),
+            "a submission-scoped key is distinct from the payload-only key"
+        );
+    }
+
+    /// An empty compose id would key exactly like "no compose id", silently
+    /// restoring the collision. It is refused at the boundary instead.
+    #[test]
+    fn an_empty_compose_id_is_refused() {
+        assert!(ComposeId::parse("").is_err());
+        assert_eq!(ComposeId::parse("x").unwrap().as_str(), "x");
+        assert_ne!(
+            ComposeId::mint().as_str(),
+            ComposeId::mint().as_str(),
+            "each mint is a distinct submission"
+        );
+    }
+}

@@ -16,7 +16,18 @@ variants:
     # `block_domain::collection_render_from_profile` (live_block path). The
     # tree builder reads the resolved string to construct the slot's
     # synthetic data row id (`<scheme>:__virtual:<parent_local>`).
-    render: 'tree(#{parent_id: col("parent_id"), sortkey: col("sequence"), item_template: render_entity(), creation_slot: true, virtual_parent: true})'
+    # Sort by `sort_key` (FractionalIndex), not `sequence`: blocks minted by
+    # split/insert carry no `sequence` and would sort to the end (see
+    # `data_row_sort_key` in holon-api/src/widget_spec.rs). The level-0 rule
+    # mirrors the right sidebar's inline render (assets/default/index.org).
+    # `show_bullet: false` on ALL rows (the trailing `always()` rule): every
+    # block already draws its own leading marker — the draggable orgmode bullet
+    # (◉) in the default/editing content variants — so the tree chrome's
+    # decorative `bullet_dot` would be a second, redundant bullet per row.
+    # Parent rows keep their disclosure chevron (show_chevron defaults to
+    # has_children and is not suppressed here). The sidebar page tree is a
+    # separate render and is unaffected.
+    render: 'tree(#{parent_id: col("parent_id"), sortkey: col("sort_key"), item_template: render_entity(), creation_slot: true, virtual_parent: true, rules: [#{when: eq("level", 0), override: #{role: "page_title", show_bullet: false, show_chevron: false}}, #{when: always(), override: #{show_bullet: false}}]})'
   - name: table_view
     priority: 1
     condition: 'view_mode == "table"'

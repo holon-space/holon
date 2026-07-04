@@ -53,6 +53,15 @@ pub enum PopupResult {
         replacement: String,
         prefix_start: usize,
     },
+    /// A menu selection was handled but FAILED. The selection consumed the
+    /// key, so the frontend must (a) surface `message` visibly, (b) strip the
+    /// typed command text (`strip_prefix_start..cursor`) if `Some`, and
+    /// (c) NOT fall through to a structural op (e.g. split_block). Fail-loud:
+    /// never let a failed command look like a silent no-op or a stray split.
+    Failed {
+        message: String,
+        strip_prefix_start: Option<usize>,
+    },
 }
 
 /// Keyboard keys the popup menu handles.
@@ -106,6 +115,12 @@ pub struct PopupMenu {
     /// Handle to stop the signal watcher when dismissed. The sender is dropped
     /// to signal cancellation; the watcher task checks the receiver.
     _cancel: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl Default for PopupMenu {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PopupMenu {

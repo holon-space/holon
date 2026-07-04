@@ -18,6 +18,14 @@
 //! fragment ([`super::reference_domain_state::ReferenceDomainState`]) and the
 //! production UI state — this is the PBT reference model's prediction of UI
 //! actor state.
+//!
+//! @pbt kind ref
+//! @pbt covers ui-actor-state — Tier-3 UI actor fragment (nav history, focus,
+//!   cursor, widget open-state, pins, active editor). Read-only lens over the
+//!   domain fragment; owns only UI-actor-private facts. Several fields
+//!   HAND-mirror SQLite tables — `next_history_id` (AUTOINCREMENT),
+//!   `drawer_open` (`widget_open` table), `open_pins` (`focus_roots` source
+//!   rows); keep them in sync with those schemas.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -25,10 +33,10 @@ use std::collections::HashSet;
 use holon_api::Region;
 use holon_api::entity_uri::EntityUri;
 
-use super::reference_state::ActiveEditor;
-use super::reference_state::CursorPosition;
-use super::reference_state::NavigationHistory;
-use super::reference_state::OpenPinEntry;
+use super::ui_types::ActiveEditor;
+use super::ui_types::CursorPosition;
+use super::ui_types::NavigationHistory;
+use super::ui_types::OpenPinEntry;
 
 /// Per-tab, ephemeral UI state — focus, cursor, widget open-state, and the
 /// per-region navigation history. Never synced; recreated per viewport.
@@ -78,6 +86,21 @@ pub struct UITabState {
     /// `NavigateFocus::apply_to_ref` because `expected_sql` only sees the
     /// post-apply state (where the target is already inserted).
     pub last_navigate_first_visit: bool,
+
+    /// Whether the most recent `open_tab` found a row already open for its
+    /// `(region, block_id)` and so delegated to `activate`. Recorded by
+    /// `nav_open_tab` because `expected_sql` only sees the post-apply state,
+    /// where the row is open under either branch. `inv-sql-budget` reads it to
+    /// pick which of the two `OPEN_TAB_*_READS` ceilings applies.
+    pub last_open_tab_activated: bool,
+
+    /// How many block MERGES the most recent `DeleteBackward` performed — a
+    /// backspace at caret 0 joins into the predecessor rather than deleting a
+    /// character. Recorded by `DeleteBackward::apply_to_ref` because
+    /// `expected_sql` only sees the post-apply state, where the merged block is
+    /// already gone and a merge is indistinguishable from a mid-line delete.
+    /// `inv-sql-budget` charges each merge one `JoinBlock` budget.
+    pub last_backspace_joins: usize,
 }
 
 impl UITabState {
@@ -93,7 +116,42 @@ impl UITabState {
             active_editor: None,
             seen_focus_targets: HashSet::new(),
             last_navigate_first_visit: false,
+            last_open_tab_activated: false,
+            last_backspace_joins: 0,
         }
+    }
+}
+
+impl UITabState {
+    pub fn current_focus(&self, region: Region) -> Option<EntityUri> {
+        self.navigation_history
+            .get(&region)
+            .and_then(|h| h.current_focus())
+    }
+
+    pub fn can_go_back(&self, region: Region) -> bool {
+        self.navigation_history
+            .get(&region)
+            .map(|h| h.can_go_back())
+            .unwrap_or(false)
+    }
+
+    pub fn can_go_forward(&self, region: Region) -> bool {
+        self.navigation_history
+            .get(&region)
+            .map(|h| h.can_go_forward())
+            .unwrap_or(false)
+    }
+
+    /// Whether any region currently has a focused entity (required for
+    /// ArrowNavigate).
+    pub fn has_focus(&self) -> bool {
+        !self.focused_entity_id.is_empty()
+    }
+
+    /// Get the focused entity in a region (set by ClickBlock).
+    pub fn focused_entity(&self, region: Region) -> Option<&EntityUri> {
+        self.focused_entity_id.get(&region)
     }
 }
 
@@ -125,6 +183,12 @@ impl UIUserState {
             next_pin_ts: 1,
             current_view: "all".to_string(),
         }
+    }
+}
+
+impl UIUserState {
+    pub fn current_view(&self) -> String {
+        self.current_view.clone()
     }
 }
 

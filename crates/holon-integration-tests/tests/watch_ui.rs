@@ -5,6 +5,10 @@
 //! - Structural hot-swap: editing query source triggers new Structure event
 //! - Trigger pipeline: slash command → ViewEventHandler → CommandMenu →
 //!   operation
+//!
+//! @pbt kind harness
+//! @pbt covers uievent-stream-lifecycle — UiEvent stream happy-path +
+//! error-recovery
 
 use std::collections::HashMap;
 use std::sync::Arc;

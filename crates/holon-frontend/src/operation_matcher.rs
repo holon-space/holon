@@ -83,10 +83,21 @@ fn filter_by_intent_params<'a>(
     operations: &[&'a OperationDescriptor],
     available_params: &HashMap<String, Value>,
 ) -> Vec<&'a OperationDescriptor> {
-    // Collect all "intent param sources" — params that any operation maps from
+    // Collect all "intent param sources" — GESTURE params that any operation
+    // maps from (e.g. `tree_position`, drop targets). The universal id column
+    // is explicitly NOT one: it is present in EVERY block's context, so
+    // treating an `id`-keyed mapping (e.g. `convert_block_to_page`'s
+    // `target` ← `id`) as a gesture source made `present` always contain `id`,
+    // which then filtered the menu down to only the id-mapped op ("Turn into
+    // page") and dropped every plain op (indent/outdent/move/delete). Intent
+    // filtering exists to stop `delete` matching during a drag, not to react to
+    // a column that is always there.
     let mut intent_param_sources = std::collections::HashSet::new();
     for op in operations {
         for mapping in &op.param_mappings {
+            if mapping.from == op.id_column || mapping.from == "id" {
+                continue;
+            }
             intent_param_sources.insert(mapping.from.as_str());
         }
     }
@@ -226,7 +237,18 @@ mod tests {
                 display_name: name.into(),
                 required_params: params,
                 param_mappings: mappings,
-                ..Default::default()
+                id_column: "id".to_string(),
+                description: String::new(),
+                affected_fields: vec![],
+                target_scope: holon_api::TargetScope::Block,
+                boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::Test,
+                },
+                trigger: None,
+                bound_params: Default::default(),
+                guard: holon_api::pattern::OpGuard::None,
+                arcs: holon_api::arcs::TransitionArcs::Undeclared,
             },
         }
     }
@@ -341,6 +363,59 @@ mod tests {
 
         let matches = find_satisfiable(&ops, &available);
         assert_eq!(matches.len(), 2);
+    }
+
+    #[test]
+    fn universal_id_mapping_does_not_filter_out_plain_ops() {
+        // Bug (A) (GPUI dogfood 2026-07-20): `convert_block_to_page` maps its
+        // `target` param FROM the universal `id` column. `id` is present in
+        // every block's editor context, so the intent filter treated it as a
+        // gesture-intent source and dropped EVERY op without an `id` mapping —
+        // leaving the slash menu with only "Turn into page". The casualties are
+        // the REAL, macro-generated block ops (indent/outdent/move_up/move_down),
+        // which carry no `id` mapping. Intent filtering is meant for GESTURE
+        // params (tree_position, drop targets), never a universal column.
+        //
+        // (The fully-real registry↔menu correspondence — feeding the resolved
+        // block profile through `build_command_items` — lives in the holon-app
+        // tier, which can reach the real convert descriptor; here we lock the
+        // pure filter against the real block-op descriptors it wrongly dropped.)
+        let mut ops: Vec<OperationWiring> =
+            holon_core::__operations_block_operations::block_operations(
+                "block", "block", "block", "id",
+            )
+            .into_iter()
+            .map(|d| d.to_default_wiring())
+            .collect();
+        // The id-mapped op whose arrival regressed the menu (convert's shape:
+        // `target` mapped from the always-present `id`).
+        ops.push(make_op(
+            "convert_block_to_page",
+            vec![param("target", TypeHint::String)],
+            vec![ParamMapping {
+                from: "id".into(),
+                provides: vec!["target".into()],
+                defaults: HashMap::new(),
+            }],
+        ));
+
+        let ctx: HashMap<String, Value> = [("id".into(), Value::String("block-1".into()))].into();
+        let names: Vec<String> = find_satisfiable(&ops, &ctx)
+            .into_iter()
+            .map(|m| m.operation_name().to_string())
+            .collect();
+
+        for expected in ["indent", "outdent", "move_up", "move_down"] {
+            assert!(
+                names.iter().any(|n| n == expected),
+                "id-only block op {expected:?} must survive: a universal `id` \
+                 mapping must not collapse the menu to the id-mapped op. Got: {names:?}"
+            );
+        }
+        assert!(
+            names.iter().any(|n| n == "convert_block_to_page"),
+            "the id-mapped op itself must still resolve. Got: {names:?}"
+        );
     }
 
     #[test]

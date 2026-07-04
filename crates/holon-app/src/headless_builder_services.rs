@@ -31,6 +31,9 @@ pub struct HeadlessBuilderServices {
     engine: Arc<BackendEngine>,
     interpreter: Arc<RenderInterpreter<ReactiveViewModel>>,
     rt_handle: tokio::runtime::Handle,
+    /// The `describe_ui` path holds a bare engine, not a DI container, so no
+    /// registry-backed classifier is reachable: built-in schemes only.
+    link_classifier: holon_api::link_parser::LinkTargetClassifier,
 }
 
 impl HeadlessBuilderServices {
@@ -45,6 +48,7 @@ impl HeadlessBuilderServices {
             engine,
             interpreter: Arc::new(holon_frontend::shadow_builders::build_shadow_interpreter()),
             rt_handle,
+            link_classifier: holon_api::link_parser::LinkTargetClassifier::default(),
         }
     }
 }
@@ -54,8 +58,25 @@ impl BuilderServices for HeadlessBuilderServices {
         self.interpreter.interpret(expr, ctx, self)
     }
 
+    /// A handle over the same engine and interpreter. `describe_ui` is the
+    /// caller that needs it: reporting what the UI *should* render means
+    /// materialising the lazy slots (`expand_toggle` content, tabs), which
+    /// interpret through the captured services long after the build returns.
+    fn clone_arc(&self) -> Arc<dyn BuilderServices> {
+        Arc::new(Self {
+            engine: self.engine.clone(),
+            interpreter: self.interpreter.clone(),
+            rt_handle: self.rt_handle.clone(),
+            link_classifier: holon_api::link_parser::LinkTargetClassifier::default(),
+        })
+    }
+
     fn get_block_data(&self, _: &EntityUri) -> (RenderExpr, Vec<Arc<DataRow>>) {
         (table_expr(), vec![])
+    }
+
+    fn link_classifier(&self) -> &holon_api::link_parser::LinkTargetClassifier {
+        &self.link_classifier
     }
 
     fn resolve_profile(&self, row: &DataRow) -> Option<holon_api::RenderProfile> {
@@ -76,12 +97,23 @@ impl BuilderServices for HeadlessBuilderServices {
         anyhow::bail!("HeadlessBuilderServices does not support live queries")
     }
 
+    /// One-shot querying IS available headlessly even though live watching is
+    /// not — `describe_ui`'s deferred-subtree expansion needs a snapshot, not a
+    /// subscription.
+    fn query_engine(&self) -> Option<Arc<dyn holon_api::QueryEngine>> {
+        Some(self.engine.clone() as Arc<dyn holon_api::QueryEngine>)
+    }
+
     fn widget_state(&self, _: &str) -> WidgetState {
         WidgetState::default()
     }
 
     fn set_widget_open(&self, _: &str, _: bool) {
         // Headless services have no UI to toggle.
+    }
+
+    fn set_widget_width(&self, _: &str, _: f32, _: bool) {
+        // Headless services have no UI to resize.
     }
 
     fn dispatch_intent(&self, intent: holon_frontend::operations::OperationIntent) {

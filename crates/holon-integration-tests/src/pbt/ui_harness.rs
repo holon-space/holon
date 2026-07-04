@@ -1,6 +1,10 @@
 //! Frontend-neutral scaffolding for PBT harnesses (the composed windowed
 //! runners: `gpui_composed_windowed_loop`, `tui_ui_pbt`, …).
 //!
+//! @pbt kind harness
+//! @pbt covers window-slice/live-mcp — env/config scaffolding + geometry-ready
+//!   gate + embedded-MCP boot for the cross-thread windowed runners.
+//!
 //! These helpers orchestrate the cross-thread / cross-runtime dance around a
 //! frontend rendering a composed SUT (`with_windowed_wide_sut` on gpui, the
 //! TUI composed runner in `frontends/tui/tests/common/pbt_main.rs`):
@@ -16,6 +20,8 @@
 //! genuinely platform-specific.
 
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
+use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -28,6 +34,8 @@ use std::time::Instant;
 use holon_frontend::geometry::GeometryProvider;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive::ReactiveEngine;
+
+use crate::pbt::invariants::bodies::inline_row_mount_present::is_inline_row_tag;
 
 /// Default `PBT_MEMORY_MULTIPLIER` for a frontend PBT.
 ///
@@ -89,40 +97,34 @@ pub fn install_rejection_histogram_panic_hook() {
     INSTALL.call_once(|| {
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            crate::pbt::validation::print_rejection_histogram();
+            holon_pbt_core::validation::print_rejection_histogram();
             prev(info);
         }));
     });
 }
 
 /// The standard `ProptestConfig` for a native-mode (`proptest_config:`) slice:
-/// activates the atomic editor, installs the rejection-histogram panic hook,
-/// and pins the failure-persistence file to
-/// `tests/<slice_name>.proptest-regressions` (the default `SourceParallel` mode
-/// mislocates `lib.rs`/`main.rs` for macro-generated tests and warns). `cases`
-/// defaults to 8 — `PROPTEST_CASES` overrides at runtime;
-/// `PROPTEST_MAX_SHRINK_ITERS` overrides the shrink budget (default 50). Slices
-/// sharing one state machine pass the *same* `slice_name` to share one
-/// regressions file (e.g. `general_e2e_pbt` + its `_sql_only` peer).
-pub fn standard_pbt_config(slice_name: &str) -> proptest::test_runner::Config {
+/// activates the atomic editor and installs the rejection-histogram panic
+/// hook. `cases` defaults to 8 — `PROPTEST_CASES` overrides at runtime;
+/// `PROPTEST_MAX_SHRINK_ITERS` overrides the shrink budget (default 50).
+/// Failure persistence is disabled — a failing case's seed lives in the
+/// hand-authored `keystone.jsonl` replay corpus, not an auto-written
+/// `*.proptest-regressions` file (see the shrunk failure's printed seed).
+pub fn standard_pbt_config(
+    // ALLOW(unused_param): kept for call-site stability; persistence is now file-less
+    _slice_name: &str,
+) -> proptest::test_runner::Config {
     use proptest::test_runner::Config;
-    use proptest::test_runner::FileFailurePersistence;
 
     install_rejection_histogram_panic_hook();
     let max_shrink = std::env::var("PROPTEST_MAX_SHRINK_ITERS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(50);
-    let regressions = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join(format!("{slice_name}.proptest-regressions"));
     Config {
         cases: 8,
         max_shrink_iters: max_shrink,
-        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(
-            // proptest wants a 'static str, so leak the resolved path.
-            Box::leak(regressions.to_string_lossy().into_owned().into_boxed_str()),
-        ))),
+        failure_persistence: None,
         ..Config::default()
     }
 }
@@ -143,8 +145,10 @@ pub fn screenshot_dir(subdir: &str) -> PathBuf {
 ///
 /// Mirrors the inline block at the top of each frontend PBT test:
 /// reads the port, enters the runtime, calls
-/// `holon_mcp::di::start_embedded_mcp_server`, and sleeps two seconds so
-/// the listener is bound before the renderer takes the main thread.
+/// `holon_mcp::di::start_embedded_mcp_server`, and blocks until the
+/// listener actually accepts a connection — the renderer takes the main
+/// thread the instant this returns, so an unbound port would race every
+/// early MCP client.
 ///
 /// `label` is used for the eprintln messages so logs disambiguate
 /// between simultaneous PBTs.
@@ -152,6 +156,7 @@ pub fn try_start_embedded_mcp(
     runtime: &tokio::runtime::Handle,
     engine: &Arc<holon::api::BackendEngine>,
     reactive_engine: &Arc<ReactiveEngine>,
+    type_registry: Arc<holon_profiles::TypeRegistry>,
     debug: Arc<holon_mcp::server::DebugServices>,
     env_var: &str,
     label: &str,
@@ -173,21 +178,64 @@ pub fn try_start_embedded_mcp(
     let engine = Some(engine.clone());
     let services: Arc<dyn BuilderServices> = reactive_engine.clone();
     let _guard = runtime.enter();
-    holon_mcp::di::start_embedded_mcp_server_with_debug(engine, Some(services), port, debug);
+    holon_mcp::di::start_embedded_mcp_server_with_registry(
+        engine,
+        Some(services),
+        port,
+        debug,
+        Some(type_registry),
+    );
     eprintln!("[{label}] MCP server starting on port {port}");
-    std::thread::sleep(Duration::from_secs(2));
-    eprintln!("[{label}] MCP server should be ready on port {port}");
+    wait_for_mcp_listener(port, MCP_BIND_TIMEOUT, label);
 }
 
-/// Block (polling every 500 ms) until `geometry` reports an element with
-/// both `has_content` and `entity_id`, or until `timeout` elapses.
+/// How long `wait_for_mcp_listener` waits for the embedded MCP listener to
+/// bind before declaring the harness broken. Far longer than the bind takes
+/// in practice (single-digit ms) because its only job is to turn a hang into
+/// a named failure.
+pub const MCP_BIND_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Block until the embedded MCP server accepts a TCP connection on `port`.
 ///
-/// This is the standard "frontend has rendered something the test can
-/// interact with" gate. Both GPUI and TUI use the same predicate
-/// (`has_content && entity_id.is_some()`) — placeholders that the
-/// auto-`tag()` pipeline registers don't carry an entity_id, so this
-/// only fires once `tracked()`/`render_entity()` has populated a real
-/// row.
+/// Panics on timeout: a listener that never binds is a broken harness, not a
+/// slow one, and every downstream MCP failure it would cause is far harder to
+/// read than this message.
+pub fn wait_for_mcp_listener(port: u16, timeout: Duration, label: &str) {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let started = Instant::now();
+    let deadline = started + timeout;
+    loop {
+        if TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_ok() {
+            eprintln!(
+                "[{label}] MCP server ready on port {port} after {:?}",
+                started.elapsed(),
+            );
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "[{label}] embedded MCP server never accepted a connection on 127.0.0.1:{port} within \
+             {timeout:?} — the listener failed to bind"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Re-sample interval for `wait_for_geometry_ready`, ALSO the delay before the
+/// first sample. Short because the readiness predicate identifies a
+/// block-bearing frame on its own — no timing margin is standing in for it.
+const GEOMETRY_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+/// Block until `geometry` reports a `render_entity`-tagged `block:*` row, or
+/// until `timeout` elapses.
+///
+/// This is the "frontend has rendered something the test can interact with"
+/// gate. The predicate is the mount observable
+/// `inv-inline-row-mount-present` asserts (shared via [`is_inline_row_tag`]),
+/// and it is frontend-neutral: both GPUI's `render_entity` builder and the
+/// TUI's collection boundary register a laid-out block row under that tag.
+/// The weaker `has_content && entity_id.is_some()` admitted frames carrying
+/// only chrome, which is what let a boot race look like a render bug.
 ///
 /// On timeout, dumps a `widget_type` histogram + a sample of entity
 /// ids so the test failure includes enough context to diagnose why the
@@ -197,17 +245,22 @@ pub fn wait_for_geometry_ready(
     timeout: Duration,
     label: &str,
 ) -> bool {
-    let deadline = Instant::now() + timeout;
+    let started = Instant::now();
+    let deadline = started + timeout;
+    let mut samples: u32 = 0;
     loop {
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(GEOMETRY_POLL_INTERVAL);
         let elements = geometry.all_elements();
-        let has_real_content = elements
+        samples += 1;
+        let row_mounted = elements
             .iter()
-            .any(|(_, info)| info.has_content && info.entity_id.is_some());
-        if has_real_content {
+            .any(|(_, info)| is_inline_row_tag(&info.widget_type, info.entity_id.as_deref()));
+        if row_mounted {
             let n_content = elements.iter().filter(|(_, i)| i.has_content).count();
             eprintln!(
-                "[{label}] Window ready: {} elements ({} with has_content)",
+                "[{label}] Window ready after {:?} ({samples} samples): {} elements ({} with \
+                 has_content)",
+                started.elapsed(),
                 elements.len(),
                 n_content,
             );
@@ -224,8 +277,9 @@ pub fn wait_for_geometry_ready(
                 .take(5)
                 .collect();
             eprintln!(
-                "[{label}] Window ready timeout — {} elements, widget_type hist={:?}, has_content \
-                 count={}, sample entity_ids={:?}",
+                "[{label}] Window ready timeout — no `render_entity`-tagged `block:*` row after \
+                 {} elements, widget_type hist={:?}, has_content count={}, sample \
+                 entity_ids={:?}",
                 elements.len(),
                 hist,
                 elements.iter().filter(|(_, i)| i.has_content).count(),
@@ -256,7 +310,9 @@ pub fn spawn_quit_on_pbt_finish(
 
     std::thread::spawn(move || {
         loop {
-            std::thread::sleep(Duration::from_millis(500));
+            // Granularity of the shutdown handoff: the window lingers this
+            // long after the PBT thread finishes.
+            std::thread::sleep(Duration::from_millis(25));
             if pbt_handle.is_finished() {
                 let thread_result = pbt_handle.join();
                 if thread_result.is_err() {

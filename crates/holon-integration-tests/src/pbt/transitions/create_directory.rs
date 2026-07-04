@@ -1,5 +1,9 @@
 //! Transition: create a directory in the temp workspace.
 //!
+//! @pbt rung external
+//! @pbt covers workspace-dir-create — fs directory creation in the temp
+//! workspace
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:354-361`
 //! (generator), `state_machine.rs:3102` (precondition),
 //! `state_machine.rs:1932-1934` (ref-state apply),
@@ -7,34 +11,33 @@
 //! `transition_budgets.rs:116-125` (expected SQL).
 
 use holon_pbt_core::TransitionFactory;
-use holon_pbt_core::TransitionImpl;
 use holon_pbt_core::TransitionRef;
+use holon_pbt_core::capabilities::RefBootMut;
+use holon_pbt_core::capabilities::RefLifecycle;
+use holon_pbt_core::capabilities::SutFixtureFs;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::check;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::local_caps::SutFixtureFs;
-use crate::pbt::reference_state::ReferenceState;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
-use crate::pbt::validation::Reason;
-use crate::pbt::validation::check;
 
 /// Create a directory (possibly nested) before app starts.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I create directory {path}")]
 pub struct CreateDirectory {
     pub path: String,
 }
 
-impl TransitionFactory<ReferenceState> for CreateDirectory {
+impl<R: RefLifecycle + RefBootMut> TransitionFactory<R> for CreateDirectory {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        vec![::holon_pbt_core::composition::CapId::of::<
-            dyn crate::pbt::local_caps::SutFixtureFs,
-        >()]
+        Self::declared_caps()
     }
 
     type Reason = Reason;
-    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // Test the preconditions on a dummy instance to ensure state is valid
         // for creating any directory; the specific path is generated randomly.
         CreateDirectory {
@@ -50,14 +53,14 @@ impl TransitionFactory<ReferenceState> for CreateDirectory {
     }
 }
 
-impl TransitionRef<ReferenceState> for CreateDirectory {
+impl<R: RefLifecycle + RefBootMut> TransitionRef<R> for CreateDirectory {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(!state.action.app_started, Reason::AppAlreadyStarted),
+            check(!state.app_started(), Reason::AppAlreadyStarted),
             check(
-                state.pre_startup_directories.len() < 10,
+                state.pre_startup_directory_count() < 10,
                 Reason::DirectoryLimitReached,
             ),
         ];
@@ -67,21 +70,18 @@ impl TransitionRef<ReferenceState> for CreateDirectory {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
-        state.pre_startup_directories.push(self.path.clone());
+    fn apply_to_ref(&self, state: &mut R) {
+        state.push_pre_startup_directory(&self.path);
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutFixtureFs> TransitionImpl<ReferenceState, S> for CreateDirectory {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.create_directory(&self.path).await;
+crate::cap_transition! {
+    CreateDirectory: SutFixtureFs,
+    where R: [ RefLifecycle + RefBootMut ],
+    |me, _state, sut| {
+        sut.create_directory(&me.path).await;
     }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for CreateDirectory {
-    fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
+    sql_budget: |_me, _state| {
         ExpectedSql {
             reads: 0,
             writes: 0,

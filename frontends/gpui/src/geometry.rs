@@ -1,10 +1,27 @@
 //! GPUI GeometryProvider — reads from a shared BoundsRegistry populated during
 //! render.
 //!
-//! `BoundsTracker` is a transparent wrapper element that records the computed
-//! bounds of its child into the `BoundsRegistry` during the prepaint phase. Use
-//! `tracked()` to wrap any element that should be locatable for click-based PBT
-//! testing.
+//! [`TransparentTracker`] records the computed bounds of its child into the
+//! `BoundsRegistry` during the prepaint phase. Use [`tracked()`] to wrap any
+//! element that should be locatable for click-based PBT testing.
+//!
+//! # The tracked-widget contract
+//!
+//! **A tracker observes layout; it never contributes any.** It returns its
+//! child's `LayoutId` as its own, so Taffy measures the child exactly as if
+//! the tracker weren't there, and the recorded rect is a measurement of the
+//! widget rather than of the instrument.
+//!
+//! The obligation this puts on widgets: **a widget that must fill its row
+//! says so itself** — `w_full()` / `flex_1()` on the element it hands to
+//! `tracked()`, not inherited from the wrapper. `rendered_text` and
+//! `editable_text` do; `selectable` deliberately does not, because a bullet's
+//! click region is the bullet.
+//!
+//! Enforced by `tests/tracked_layout_neutrality.rs` (fast-UI PBT over the
+//! shipped block-row shape) and, on live windowed runs, by the
+//! `expected-size-satisfied` sub-check of `inv-frontend-bounds-rendered`
+//! reading the [`SizeBounds`] that `selectable` declares.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,6 +40,7 @@ use gpui::Pixels;
 use gpui::Window;
 use holon_frontend::geometry::ElementInfo;
 use holon_frontend::geometry::GeometryProvider;
+use holon_frontend::geometry::VmNode;
 use holon_frontend::size_expectation::SizeBounds;
 
 /// Shared registry of element metadata, populated during GPUI render passes.
@@ -205,7 +223,43 @@ impl GeometryProvider for BoundsRegistry {
     }
 }
 
-// Thread-local render-path stack used by `BoundsTracker` / `TransparentTracker`
+/// [`GeometryProvider`] over a [`BoundsRegistry`] that promotes the staged
+/// buffer before every read. A window that paints once and then goes idle
+/// (iOS) leaves the last frame's bounds in `staged` forever — no next
+/// `begin_pass` ever rotates them — so an idle-window reader (the MCP
+/// driver) would see stale/empty `committed`. MCP reads arrive when the app
+/// is quiescent (no render pass in flight), so an on-demand `flush` commits
+/// exactly the last complete frame. Do NOT hand this wrapper to a
+/// render-concurrent reader: a mid-pass flush splits one frame's writes
+/// across two rotations.
+#[derive(Clone)]
+pub struct FlushOnReadGeometry(pub BoundsRegistry);
+
+impl GeometryProvider for FlushOnReadGeometry {
+    fn element_info(&self, id: &str) -> Option<ElementInfo> {
+        self.0.flush();
+        GeometryProvider::element_info(&self.0, id)
+    }
+
+    fn all_elements(&self) -> Vec<(String, ElementInfo)> {
+        self.0.flush();
+        GeometryProvider::all_elements(&self.0)
+    }
+
+    fn changed(&self) -> futures::future::BoxFuture<'static, ()> {
+        GeometryProvider::changed(&self.0)
+    }
+
+    fn generation(&self) -> u64 {
+        GeometryProvider::generation(&self.0)
+    }
+
+    fn clone_box(&self) -> Box<dyn GeometryProvider> {
+        Box::new(self.clone())
+    }
+}
+
+// Thread-local render-path stack used by `TransparentTracker`
 // to record each widget's immediate tracked parent. Pushed on `prepaint` before
 // recursing into children, popped after.
 //
@@ -249,8 +303,9 @@ fn pop_parent() {
 /// Wrap an element so its computed bounds and metadata are recorded in
 /// `BoundsRegistry` during prepaint.
 ///
-/// The wrapper is transparent — it takes the same layout as its child and adds
-/// no visual or interactive behavior.
+/// Layout-transparent, per the module's tracked-widget contract: the wrapper
+/// takes the child's own `LayoutId` and adds no style, no visual, and no
+/// interactive behavior.
 pub fn tracked(
     el_id: impl Into<String>,
     child: AnyElement,
@@ -259,79 +314,63 @@ pub fn tracked(
     entity_id: Option<&str>,
     has_content: bool,
     displayed_text: Option<Arc<str>>,
-) -> BoundsTracker {
-    BoundsTracker {
+) -> TransparentTracker {
+    TransparentTracker {
         el_id: Arc::from(el_id.into()),
-        registry: registry.clone(),
         widget_type: Arc::from(widget_type),
+        registry: registry.clone(),
+        expected_size: SizeBounds::default(),
         entity_id: entity_id.map(Arc::from),
         has_content,
         displayed_text,
         focused: None,
-        expected_size: SizeBounds::default(),
+        styled_runs: None,
+        opacity: None,
+        vm_node: None,
         child: Some(child),
     }
 }
 
-impl BoundsTracker {
-    /// Declare an expected min/max size for this tracked element. Picked
-    /// up by the layout invariant at check time — see
-    /// [`holon_frontend::size_expectation`].
-    pub fn with_expected_size(mut self, expected: SizeBounds) -> Self {
-        self.expected_size = expected;
-        self
-    }
-
-    /// Record whether this widget's focus handle held window focus at
-    /// render time (focusable widgets only — see `ElementInfo::focused`).
-    pub fn with_focused(mut self, focused: bool) -> Self {
-        self.focused = Some(focused);
-        self
-    }
-}
-
-/// Transparent wrapper element that records its child's bounds into a
-/// `BoundsRegistry`.
+/// Layout-transparent wrapper that records its child's final bounds into a
+/// `BoundsRegistry` during prepaint.
 ///
-/// **Note**: this wrapper is *not* layout-transparent. It overrides the
-/// child's style with `width: 100%; flex_grow: 1` to work around a specific
-/// `live_block` use case. For general per-widget bounds tracking (fast UI
-/// tests, observability) use `TransparentTracker` below, which returns the
-/// child's layout id directly and adds no style of its own.
-pub struct BoundsTracker {
-    el_id: Arc<str>,
-    registry: BoundsRegistry,
-    widget_type: Arc<str>,
-    entity_id: Option<Arc<str>>,
-    has_content: bool,
-    displayed_text: Option<Arc<str>>,
-    focused: Option<bool>,
-    expected_size: SizeBounds,
-    child: Option<AnyElement>,
-}
-
-/// Truly layout-transparent wrapper that records its child's final bounds
-/// into a `BoundsRegistry` during prepaint.
+/// It does *not* create its own layout node — it returns the child's
+/// `LayoutId` unchanged, so Taffy measures the child exactly as if the
+/// tracker weren't there. Both entry points produce it: `tracked()` for
+/// builders that know an entity identity, and `render::builders::tag()` for
+/// blanket per-widget observability.
 ///
-/// Unlike `BoundsTracker`, this does *not* create its own layout node — it
-/// returns the child's `LayoutId` unchanged, so Taffy measures the child
-/// exactly as if the tracker weren't there. This is the wrapper used by
-/// `render::builders::tag()` for every widget.
-///
-/// Fields other than `widget_type` (`entity_id`, `has_content`) are left
-/// defaulted because `tag()` is called for every builder and doesn't know
-/// about entity identity or "has content" semantics — those are recorded by
-/// specific builders (like `live_block`) on their own via `tracked()`.
+/// `tag()` leaves the identity fields (`entity_id`, `has_content`, …)
+/// defaulted because it runs for every builder and knows none of them; the
+/// specific builders record those through `tracked()`.
 pub struct TransparentTracker {
     el_id: Arc<str>,
     widget_type: Arc<str>,
     registry: BoundsRegistry,
     expected_size: SizeBounds,
+    /// Whether this element has visible content — see `ElementInfo`.
+    has_content: bool,
+    /// Whether this widget's focus handle held window focus at render time
+    /// (focusable widgets only — see `ElementInfo::focused`).
+    focused: Option<bool>,
+    /// The read-mode styled-run fingerprint this widget painted (the runs
+    /// handed to `StyledText::with_highlights`). Only the mark-styling path
+    /// sets it; a plain-text render leaves it `None`. Read back by
+    /// `inv-paint-text-styling` via the `GeometryProvider`.
+    styled_runs: Option<Arc<[holon_api::StyledRun]>>,
     /// Optional entity binding for region-scoped queries against
     /// `BoundsRegistry`. `live_block` sets this so PBT generators can find
     /// which subtree of the rendered tree belongs to which panel (e.g.
     /// `block:default-left-sidebar`) without consulting ref-state predictions.
     entity_id: Option<Arc<str>>,
+    /// What the wrapped element paints, when it is a leaf that paints text
+    /// (the tree row's disclosure glyph, say) rather than a container.
+    displayed_text: Option<Arc<str>>,
+    /// The alpha the wrapped element declares — see [`ElementInfo::opacity`].
+    opacity: Option<f32>,
+    /// The view-model node this tracker wraps — see [`VmNode`]. Set by the
+    /// node-dispatch `tag_node()`, which is the only site that holds the node.
+    vm_node: Option<VmNode>,
     child: Option<AnyElement>,
 }
 
@@ -347,9 +386,54 @@ impl TransparentTracker {
             widget_type: Arc::from(widget_type),
             registry,
             expected_size: SizeBounds::default(),
+            has_content: false,
+            focused: None,
+            styled_runs: None,
             entity_id: None,
+            displayed_text: None,
+            opacity: None,
+            vm_node: None,
             child: Some(child),
         }
+    }
+
+    /// Record whether this widget's focus handle held window focus at
+    /// render time (focusable widgets only — see `ElementInfo::focused`).
+    pub fn with_focused(mut self, focused: bool) -> Self {
+        self.focused = Some(focused);
+        self
+    }
+
+    /// Record the read-mode styled-run fingerprint this widget painted.
+    /// See the field's doc for who reads it back.
+    pub fn with_styled_runs(mut self, runs: Vec<holon_api::StyledRun>) -> Self {
+        self.styled_runs = Some(Arc::from(runs));
+        self
+    }
+
+    /// Record the text the wrapped element paints, so invariants can judge
+    /// *which* glyph a control drew (e.g. a chevron's direction).
+    pub fn with_displayed_text(mut self, text: impl Into<Arc<str>>) -> Self {
+        self.displayed_text = Some(text.into());
+        self
+    }
+
+    /// Record the wrapped element's paint alpha, so invariants can tell a
+    /// visible control from one that is laid out but transparent.
+    pub fn with_opacity(mut self, opacity: f32) -> Self {
+        self.opacity = Some(opacity);
+        self
+    }
+
+    /// Declare which view-model node this tracker was created for, so
+    /// `describe_ui` can join that node to THIS rect instead of to a sibling
+    /// element that merely renders the same entity.
+    pub fn with_vm_node(mut self, entity: Option<&str>) -> Self {
+        self.vm_node = Some(VmNode {
+            tag: Arc::clone(&self.widget_type),
+            entity: entity.map(Arc::from),
+        });
+        self
     }
 
     /// Bind an entity URI so region queries can find this subtree by
@@ -420,93 +504,14 @@ impl Element for TransparentTracker {
                 height: f32::from(vis.size.height),
                 widget_type: Arc::clone(&self.widget_type),
                 entity_id: self.entity_id.clone(),
-                has_content: false,
-                parent_id,
-                displayed_text: None,
-                focused: None,
-                expected_size: self.expected_size.clone(),
-            },
-        );
-        push_parent(Arc::clone(&self.el_id));
-        self.child.as_mut().unwrap().prepaint(window, cx);
-        pop_parent();
-    }
-
-    fn paint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        _: Bounds<Pixels>,
-        _: &mut (),
-        _: &mut (),
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        self.child.as_mut().unwrap().paint(window, cx);
-    }
-}
-
-impl IntoElement for BoundsTracker {
-    type Element = Self;
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
-impl Element for BoundsTracker {
-    type RequestLayoutState = LayoutId;
-    type PrepaintState = ();
-
-    fn id(&self) -> Option<ElementId> {
-        None
-    }
-
-    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
-        None
-    }
-
-    fn request_layout(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, Self::RequestLayoutState) {
-        let child_layout_id = self.child.as_mut().unwrap().request_layout(window, cx);
-        let mut style = gpui::Style::default();
-        // Propagate width so children using w_full() resolve against
-        // the BoundsTracker's parent rather than collapsing to zero.
-        style.size.width = gpui::relative(1.0).into();
-        style.flex_grow = 1.0;
-        let wrapper_layout_id = window.request_layout(style, [child_layout_id], cx);
-        (wrapper_layout_id, child_layout_id)
-    }
-
-    fn prepaint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        _: &mut LayoutId,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        let parent_id = current_parent();
-        let vis = visible_bounds(bounds, window);
-        self.registry.record(
-            self.el_id.to_string(),
-            ElementInfo {
-                x: f32::from(vis.origin.x),
-                y: f32::from(vis.origin.y),
-                width: f32::from(vis.size.width),
-                height: f32::from(vis.size.height),
-                widget_type: Arc::clone(&self.widget_type),
-                entity_id: self.entity_id.clone(),
                 has_content: self.has_content,
                 parent_id,
                 displayed_text: self.displayed_text.clone(),
                 focused: self.focused,
+                styled_runs: self.styled_runs.clone(),
+                opacity: self.opacity,
                 expected_size: self.expected_size.clone(),
+                vm_node: self.vm_node.clone(),
             },
         );
         push_parent(Arc::clone(&self.el_id));
@@ -519,11 +524,83 @@ impl Element for BoundsTracker {
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
         _: Bounds<Pixels>,
-        _: &mut LayoutId,
+        _: &mut (),
         _: &mut (),
         window: &mut Window,
         cx: &mut App,
     ) {
         self.child.as_mut().unwrap().paint(window, cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use holon_frontend::geometry::GeometryProvider;
+
+    use super::*;
+
+    fn elem(entity: &str) -> ElementInfo {
+        ElementInfo {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 20.0,
+            widget_type: Arc::from("live_block"),
+            entity_id: Some(Arc::from(entity)),
+            has_content: true,
+            parent_id: None,
+            displayed_text: None,
+            focused: None,
+            styled_runs: None,
+            opacity: None,
+            expected_size: SizeBounds::default(),
+            vm_node: None,
+        }
+    }
+
+    /// Promotion-timing invariant that `click_entity`'s retry-until-committed
+    /// depends on: once cold start is over, a freshly `record()`ed element is
+    /// invisible to plain committed reads until the next `begin_pass`/`flush`
+    /// — yet a `FlushOnReadGeometry` read promotes it immediately. A
+    /// single-shot click on such a just-rendered `:__virtual:` slot would miss
+    /// on the plain read (the dogfood #3 race); the driver must either read
+    /// flush-on-read or retry across a commit to see it.
+    #[test]
+    fn fresh_record_invisible_until_promoted_but_flush_on_read_sees_it() {
+        let reg = BoundsRegistry::new();
+        // Leave cold start: the first non-empty rotation clears `cold`, after
+        // which records hit staged only (real double-buffering).
+        reg.record("render-entity-block:warmup".into(), elem("block:warmup"));
+        reg.begin_pass();
+        assert!(
+            GeometryProvider::element_info(&reg, "render-entity-block:warmup").is_some(),
+            "warmup element must be committed after its begin_pass rotation"
+        );
+
+        // A brand-new creation slot appears in THIS frame (staged only).
+        let slot = "render-entity-block:__virtual:default-main-panel";
+        reg.record(slot.into(), elem("block:__virtual:default-main-panel"));
+
+        // Plain committed read races the promotion: not yet visible.
+        assert!(
+            GeometryProvider::element_info(&reg, slot).is_none(),
+            "post-cold record must stay staged until the next begin_pass/flush — this is the race \
+             that made the single-shot click fail"
+        );
+
+        // Flush-on-read promotes the last frame's staged bounds on demand, so
+        // the freshly-rendered slot becomes clickable without a second pass.
+        let flush = FlushOnReadGeometry(reg.clone());
+        let gen_before = GeometryProvider::generation(&reg);
+        assert!(
+            GeometryProvider::element_info(&flush, slot).is_some(),
+            "flush-on-read must promote the just-rendered creation slot"
+        );
+        assert_eq!(
+            GeometryProvider::generation(&reg),
+            gen_before + 1,
+            "flush must rotate committed_gen so retry loops waking on `changed()`/generation \
+             observe the new frame"
+        );
     }
 }

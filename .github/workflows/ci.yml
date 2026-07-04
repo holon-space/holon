@@ -24,9 +24,11 @@ on:
   workflow_dispatch:
 
 env:
-  FLUTTER_VERSION: "3.35.0"
-  RUST_VERSION: stable
-  FRB_VERSION: "2.11.1"
+  # MUST equal rust-toolchain.toml's `channel`. Every cargo invocation
+  # auto-overrides to that pin, so a looser value here (e.g. bare `nightly`)
+  # installs components onto a toolchain cargo never runs — `cargo fmt` then
+  # dies with "cargo-fmt is not installed for nightly-<date>".
+  RUST_VERSION: nightly-2026-07-17
 
 jobs:
   # Detect which parts of the codebase changed
@@ -37,7 +39,6 @@ jobs:
       pull-requests: read
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
-      flutter: ${{ steps.filter.outputs.flutter }}
       workflow: ${{ steps.filter.outputs.workflow }}
     steps:
       - name: Checkout code
@@ -52,14 +53,11 @@ jobs:
               - 'crates/**'
               - 'frontends/gpui/**'
               - 'frontends/tui/**'
-              - 'frontends/ply/**'
               - 'frontends/mcp/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'deny.toml'
               - '.jscpd.json'
-            flutter:
-              - 'frontends/flutter/**'
             workflow:
               - '.github/workflows/ci.yml'
 
@@ -79,27 +77,134 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
           components: rustfmt, clippy
 
-      - name: Cache Rust dependencies
-        uses: actions/cache@v4
+      # rust-cache keys on the rustc version (a nightly-toolchain bump can no
+      # longer reuse a stale-compiler target/) and prunes stale artifacts before
+      # saving, so the cached target/ can't grow unbounded and evict the
+      # infrequent release (tag) caches under the 10 GB repo budget. save-if
+      # restricts cache WRITES to main: PR branches restore from main's warm
+      # cache but never save, so the many parallel PR/agent branches stop
+      # churning the budget. rust-cache's built-in per-prefix lock-hash fallback
+      # replaces the old manual restore-keys. cache-on-failure keeps the old
+      # actions/cache behavior of warming even when the job fails.
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+          key: rust-checks
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+
+      # `--workspace --all-targets` pulls in every system-library crate reachable
+      # on Linux — GPUI's window stack AND xcap's screen-capture stack (via
+      # holon-mcp / holon-integration-tests dev-deps), which the narrower
+      # gated-suites target set never reaches.
+      #
+      # Enumerate by REVERSE-DEPENDING ON THE BUILD TOOL, not by crate name:
+      #   cargo tree -i pkg-config  --workspace --target x86_64-unknown-linux-gnu -e build,normal,dev
+      #   cargo tree -i system-deps --workspace --target x86_64-unknown-linux-gnu -e build,normal,dev
+      # A `-sys` name filter MISSES khronos-egl and smithay-client-toolkit.
+      #
+      # Crates that vendor their C (aws-lc-sys, onig_sys, zstd-sys,
+      # libmimalloc-sys, libsqlite3-sys `bundled`) need nothing beyond
+      # build-essential/cmake.
+      - name: Install Linux system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake pkg-config \
+            libfontconfig1-dev libwayland-dev libxkbcommon-dev \
+            libxcb1-dev libx11-dev libasound2-dev libudev-dev libssl-dev \
+            libdrm-dev \
+            libgbm-dev \
+            libegl1-mesa-dev \
+            libpipewire-0.3-dev \
+            libclang-dev
+          # libdrm-dev          — drm-sys: build.rs does `pkg_config.probe("libdrm").unwrap()`
+          # libgbm-dev          — gbm-sys: `#[link(name = "gbm")]`, needed to LINK test binaries
+          # libegl1-mesa-dev    — khronos-egl: pkg-config probe of `egl` (provides egl.pc)
+          # libpipewire-0.3-dev — libspa-sys + pipewire-sys: `system_deps` probe of `libpipewire-0.3`
+          # libclang-dev        — bindgen `runtime` feature dlopens libclang for the three above
+          # (libwayland-dev also covers smithay-client-toolkit's and wayland-sys' probes)
 
       - name: Check formatting
         run: cargo fmt --check
 
+      # Tests and the worker rot-guard run BEFORE clippy on purpose: lint debt
+      # must never mask test or build signal. Formatting stays first only
+      # because it is seconds, not minutes.
+      - name: Run Rust tests
+        run: cargo test --workspace --exclude rust_lib_holon
+
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      # Rot guard for the out-of-workspace wasi worker (own lockfile, no other
+      # CI coverage). Invoked through `just` so CI and the local `precommit`
+      # gate run the SAME steps — an inline copy here is how the two drift.
+      # Do not "fix" this away.
+      - name: Check holon-worker (wasm32-wasip1-threads)
+        run: just check-worker-wasm
+
       - name: Run clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Run Rust tests
-        run: cargo test --workspace --exclude rust_lib_holon
+  # Feature-gated test suites that the default `cargo test --workspace` does NOT
+  # reach. BugFunnel row 78: `holon-orgmode/tests/sync_controller_mutation_pbt.rs`
+  # is `#![cfg(feature = "di")]`-gated; `di` is non-default, so the workspace run
+  # compiled it to `0 tests` and it rotted invisibly with a real bug inside. This
+  # job (1) runs the anti-rot guard that fails loud on any gated binary that lists
+  # 0 tests with its feature on, and (2) actually EXECUTES the `di`-gated suites.
+  # (The `pbt`-gated integration suites are already run by `rust-checks` above,
+  # because `pbt` IS a default feature of holon-integration-tests.)
+  gated-suites:
+    name: Feature-gated test suites
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      # See rust-checks: rustc-version keying + prune + main-only save. Distinct
+      # `key` keeps this job's gated-integration-test target/ separate, as the
+      # old distinct `-cargo-gated-` prefix did.
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: gated-suites
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+
+      # The guard compiles the gated integration-test binaries; those link GPUI
+      # (libfontconfig), so install its Linux build deps (mirrors latency-gate).
+      - name: Install GPUI Linux build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake pkg-config \
+            libfontconfig1-dev libwayland-dev libxkbcommon-dev \
+            libxcb1-dev libx11-dev libasound2-dev libudev-dev libssl-dev
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      # (1) Anti-rot guard: every `#![cfg(feature=...)]` test binary must list >0
+      #     tests when built with its feature. Self-discovering — a new gated
+      #     suite that nobody wired up is caught here.
+      - name: Guard — no gated test binary is silently empty
+        run: bash scripts/check-gated-test-suites.sh
+
+      # (2) Execute the `di`-gated suites (not reached by the default workspace run).
+      - name: Run di-gated holon-orgmode suites
+        run: cargo nextest run -p holon-orgmode --features di
 
   # Rust code quality (dependency audit, unused deps, duplication)
   rust-quality:
@@ -119,22 +224,22 @@ jobs:
         with:
           toolchain: ${{ env.RUST_VERSION }}
 
-      - name: Cache Rust dependencies
-        uses: actions/cache@v4
+      # See rust-checks: rustc-version keying + prune + main-only save. Distinct
+      # `key` keeps this job's cache separate, as the old `-cargo-quality-`
+      # prefix did.
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-quality-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-quality-
+          key: rust-quality
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
 
+      # `--force` is load-bearing: rust-cache restores cargo's install metadata
+      # (`.crates2.json`) but not necessarily the binary, so a plain binstall
+      # reports "already installed" and skips, leaving `cargo machete` missing.
       - name: Install cargo-machete
         uses: cargo-bins/cargo-binstall@main
-      - run: cargo binstall --no-confirm cargo-machete
+      - run: cargo binstall --no-confirm --force cargo-machete
 
       - name: Check for unused dependencies
         run: cargo machete
@@ -147,332 +252,21 @@ jobs:
       - name: Detect code duplication
         run: npx jscpd .
 
-  # Flutter + FRB integration tests
-  flutter-integration:
-    name: Flutter Integration & Tests
-    needs: changes
-    if: needs.changes.outputs.flutter == 'true' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: frontends/flutter
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
-
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          channel: stable
-          cache: true
-
-      - name: Cache Rust dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            frontends/flutter/rust/target
-          key: ${{ runner.os }}-cargo-flutter-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-flutter-
-
-      - name: Cache Flutter dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.pub-cache
-          key: ${{ runner.os }}-flutter-${{ hashFiles('**/pubspec.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-flutter-
-
-      - uses: cargo-bins/cargo-binstall@main
-      - name: Install flutter_rust_bridge_codegen
-        run: cargo binstall flutter_rust_bridge_codegen --version ${{ env.FRB_VERSION }}
-
-      - name: Verify flutter_rust_bridge integration
-        run: flutter_rust_bridge_codegen integrate
-
-      - name: Generate flutter_rust_bridge bindings
-        run: flutter_rust_bridge_codegen generate
-
-      - name: Get Flutter dependencies
-        run: flutter pub get
-
-      - name: Verify FRB generated files
-        run: |
-          if [ ! -f "lib/src/rust/frb_generated.dart" ]; then
-            echo "FRB generated files not found!"
-            exit 1
-          fi
-
-      - name: Build Rust library
-        run: cd rust && cargo build --release
-
-      - name: Run Flutter build_runner
-        run: flutter pub run build_runner build --delete-conflicting-outputs
-
-      - name: Analyze Flutter code
-        run: flutter analyze
-
-      - name: Run Flutter tests
-        run: flutter test
-
-  # Quick platform verification (PR only)
-  quick-build:
-    name: Quick Build (${{ matrix.platform }})
-    if: github.event_name == 'pull_request' && (needs.changes.outputs.flutter == 'true' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflow == 'true')
-    needs: [changes, rust-checks, flutter-integration]
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            platform: linux
-            build_args: "linux --release"
-          - os: ubuntu-latest
-            platform: android
-            build_args: "apk --debug"
-
-    defaults:
-      run:
-        working-directory: frontends/flutter
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
-
-      - name: Setup Java (for Android)
-        if: matrix.platform == 'android'
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          channel: stable
-          cache: true
-
-      - name: Install Linux dependencies
-        if: matrix.platform == 'linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            clang cmake ninja-build pkg-config libgtk-3-dev \
-            liblzma-dev libstdc++-12-dev
-
-      - name: Cache dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            ~/.pub-cache
-            frontends/flutter/rust/target
-          key: ${{ runner.os }}-deps-${{ matrix.platform }}-${{ hashFiles('**/Cargo.lock', '**/pubspec.lock') }}
-
-      - uses: cargo-bins/cargo-binstall@main
-      - name: Install flutter_rust_bridge_codegen
-        run: cargo binstall flutter_rust_bridge_codegen --version ${{ env.FRB_VERSION }}
-
-      - name: Integrate flutter_rust_bridge
-        run: flutter_rust_bridge_codegen integrate
-
-      - name: Generate FRB bindings
-        run: flutter_rust_bridge_codegen generate
-
-      - name: Get Flutter dependencies
-        run: flutter pub get
-
-      - name: Build Rust library
-        run: cd rust && cargo build --release
-
-      - name: Run build_runner
-        run: flutter pub run build_runner build --delete-conflicting-outputs
-
-      - name: Build Flutter app
-        run: flutter build ${{ matrix.build_args }}
-
-  # Full platform builds (main/master only)
-  full-build:
-    name: Build ${{ matrix.platform }}
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && (needs.changes.outputs.flutter == 'true' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflow == 'true')
-    needs: [changes, rust-checks, flutter-integration]
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Android builds
-          - os: ubuntu-latest
-            platform: android-apk
-            build_args: "apk --release"
-            artifact_path: "build/app/outputs/apk/release/*.apk"
-            artifact_name: "android-apk"
-
-          - os: ubuntu-latest
-            platform: android-bundle
-            build_args: "appbundle --release"
-            artifact_path: "build/app/outputs/bundle/release/*.aab"
-            artifact_name: "android-aab"
-
-          # iOS build (unsigned for CI)
-          - os: macos-latest
-            platform: ios
-            build_args: "ios --no-codesign --release"
-            artifact_path: "build/ios/iphoneos/*.app"
-            artifact_name: "ios-app"
-
-          # macOS build
-          - os: macos-latest
-            platform: macos
-            build_args: "macos --release"
-            artifact_path: "build/macos/Build/Products/Release/*.app"
-            artifact_name: "macos-app"
-
-          # Linux build
-          - os: ubuntu-latest
-            platform: linux
-            build_args: "linux --release"
-            artifact_path: "build/linux/x64/release/bundle"
-            artifact_name: "linux-bundle"
-
-          # Windows build
-          - os: windows-latest
-            platform: windows
-            build_args: "windows --release"
-            artifact_path: "build/windows/x64/runner/Release"
-            artifact_name: "windows-executable"
-
-    defaults:
-      run:
-        working-directory: frontends/flutter
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
-
-      - name: Setup Java (for Android)
-        if: contains(matrix.platform, 'android')
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          channel: stable
-          cache: true
-
-      - name: Install Linux dependencies
-        if: matrix.platform == 'linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            clang cmake ninja-build pkg-config libgtk-3-dev \
-            liblzma-dev libstdc++-12-dev
-
-      - name: Cache Rust dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            frontends/flutter/rust/target
-          key: ${{ runner.os }}-cargo-${{ matrix.platform }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-${{ matrix.platform }}-
-            ${{ runner.os }}-cargo-
-
-      - name: Cache Flutter dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.pub-cache
-          key: ${{ runner.os }}-flutter-${{ matrix.platform }}-${{ hashFiles('**/pubspec.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-flutter-${{ matrix.platform }}-
-            ${{ runner.os }}-flutter-
-
-      - uses: cargo-bins/cargo-binstall@main
-      - name: Install flutter_rust_bridge_codegen
-        run: cargo binstall flutter_rust_bridge_codegen --version ${{ env.FRB_VERSION }}
-
-      - name: Integrate flutter_rust_bridge
-        run: flutter_rust_bridge_codegen integrate
-
-      - name: Generate flutter_rust_bridge bindings
-        run: flutter_rust_bridge_codegen generate
-
-      - name: Get Flutter dependencies
-        run: flutter pub get
-
-      - name: Build Rust library
-        run: cd rust && cargo build --release
-
-      - name: Run Flutter build_runner
-        run: flutter pub run build_runner build --delete-conflicting-outputs
-
-      - name: Build Flutter app
-        run: flutter build ${{ matrix.build_args }}
-
-      - name: Create iOS IPA
-        if: matrix.platform == 'ios'
-        run: |
-          cd build/ios/iphoneos
-          mkdir -p Payload
-          cp -r Runner.app Payload/
-          zip -r ../../../holon.ipa Payload
-          cd ../../..
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact_name }}
-          path: |
-            frontends/flutter/${{ matrix.artifact_path }}
-            ${{ matrix.platform == 'ios' && 'frontends/flutter/holon.ipa' || '' }}
-          retention-days: 30
-          if-no-files-found: error
-
   # Summary job
   ci-complete:
     name: CI Complete
-    needs: [changes, rust-checks, rust-quality, flutter-integration]
+    needs: [changes, rust-checks, gated-suites, rust-quality]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Check status
         run: |
           failed=false
-          for job in rust-checks rust-quality flutter-integration; do
+          for job in rust-checks gated-suites rust-quality; do
             case "$job" in
               rust-checks)    result="${{ needs.rust-checks.result }}" ;;
+              gated-suites)   result="${{ needs.gated-suites.result }}" ;;
               rust-quality)   result="${{ needs.rust-quality.result }}" ;;
-              flutter-integration) result="${{ needs.flutter-integration.result }}" ;;
             esac
             if [ "$result" != "success" ] && [ "$result" != "skipped" ]; then
               echo "❌ $job: $result"
@@ -482,25 +276,5 @@ jobs:
             fi
           done
           if [ "$failed" == "true" ]; then
-            exit 1
-          fi
-
-  # Build summary (only for main/master builds)
-  build-complete:
-    name: Build Complete
-    needs: full-build
-    if: always() && (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'))
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check build status
-        run: |
-          # A build is considered OK if it succeeded or was skipped
-          if [ "${{ needs.full-build.result }}" == "success" ]; then
-            echo "✅ All platform builds completed successfully!"
-          elif [ "${{ needs.full-build.result }}" == "skipped" ]; then
-            echo "⏭️  Platform builds were skipped (no relevant changes)"
-          else
-            echo "❌ Some platform builds failed. Check the logs above."
-            echo "  - Build result: ${{ needs.full-build.result }}"
             exit 1
           fi

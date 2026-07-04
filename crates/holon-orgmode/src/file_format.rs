@@ -10,6 +10,7 @@ use anyhow::Result;
 use holon_api::EntityUri;
 use holon_api::StorageEntity;
 use holon_api::block::Block;
+use holon_api::link_parser::LinkTargetClassifier;
 use holon_core::file_format::FileFormatAdapter;
 use holon_core::file_format::FileFormatParseResult;
 
@@ -17,20 +18,25 @@ use crate::block_params::build_block_params;
 use crate::models::OrgBlockExt;
 use crate::models::OrgDocumentExt;
 use crate::org_renderer::OrgRenderer;
-use crate::parser::parse_doc_id;
-use crate::parser::parse_org_file;
+use crate::parser::parse_doc_id_any_carrier;
+use crate::parser::parse_org_file_with;
 
-pub struct OrgFormatAdapter;
+/// Carries the link-target classifier used at the ingest parse boundary. The
+/// default knows only the built-in entity schemes; the container injects a
+/// registry-backed one so `[[<entity>:<id>]]` resolves for every registered
+/// entity.
+#[derive(Default)]
+pub struct OrgFormatAdapter {
+    classifier: LinkTargetClassifier,
+}
 
 impl OrgFormatAdapter {
     pub fn new() -> Self {
-        Self
+        Self::default()
     }
-}
 
-impl Default for OrgFormatAdapter {
-    fn default() -> Self {
-        Self::new()
+    pub fn with_classifier(classifier: LinkTargetClassifier) -> Self {
+        Self { classifier }
     }
 }
 
@@ -46,7 +52,7 @@ impl FileFormatAdapter for OrgFormatAdapter {
         parent_dir_id: &EntityUri,
         root: &Path,
     ) -> Result<FileFormatParseResult> {
-        let result = parse_org_file(path, content, parent_dir_id, root)?;
+        let result = parse_org_file_with(path, content, parent_dir_id, root, &self.classifier)?;
         Ok(FileFormatParseResult {
             document: result.document,
             blocks: result.blocks,
@@ -69,7 +75,12 @@ impl FileFormatAdapter for OrgFormatAdapter {
     }
 
     fn doc_id_from_content(&self, content: &str) -> Option<String> {
-        parse_doc_id(content)
+        // BOTH carriers, not just `#+ID:`. The controller treats `None` as "no
+        // stable identity" and force-writes `#+ID: <name-chain uuid>` onto the
+        // file; for a file identified by its file-level drawer that would add a
+        // SECOND, disagreeing carrier, and the next parse rejects the file
+        // outright. Seeing the drawer here is what keeps that from happening.
+        parse_doc_id_any_carrier(content)
     }
 
     fn build_block_params(
@@ -77,8 +88,9 @@ impl FileFormatAdapter for OrgFormatAdapter {
         block: &Block,
         parent_id: &EntityUri,
         document_uri: &EntityUri,
+        previous: Option<&Block>,
     ) -> StorageEntity {
-        build_block_params(block, parent_id, document_uri)
+        build_block_params(block, parent_id, document_uri, previous)
     }
 
     fn content_differs(&self, a: &Block, b: &Block) -> bool {
@@ -100,13 +112,92 @@ impl FileFormatAdapter for OrgFormatAdapter {
     }
 
     fn sync_document_metadata(&self, parsed: &Block, persisted: &mut Block) -> bool {
+        let mut changed = false;
         let parsed_kws = parsed.todo_keywords();
         if parsed_kws != persisted.todo_keywords() {
             persisted.set_todo_keywords(parsed_kws);
-            true
-        } else {
-            false
+            changed = true;
         }
+        // The doc-root's OWN content — its title line plus the
+        // pre-first-headline body — is what write-back renders above the first
+        // headline. Left unsynced, the persisted root keeps its
+        // filename-derived name and carries no body, so every write-back
+        // deletes the user's root text and rewrites `#+TITLE:` to the file stem.
+        // Only the BODY half. A doc-root's first content line is its name, and
+        // `authoritative_name_chain` builds the file path from it — overwriting
+        // it with the `#+TITLE:` value would rename every file whose title
+        // differs from its stem. The title round-trips through `file_title`
+        // below instead.
+        let parsed_body = parsed
+            .content
+            .split_once('\n')
+            .map(|(_, b)| b)
+            .unwrap_or("");
+        let name = persisted.title();
+        let merged = if parsed_body.is_empty() {
+            name
+        } else {
+            format!("{name}\n{parsed_body}")
+        };
+        if merged != persisted.content {
+            persisted.content = merged;
+            changed = true;
+        }
+        if parsed.file_title() != persisted.file_title() {
+            persisted.set_file_title(parsed.file_title());
+            changed = true;
+        }
+        // The file-level `:PROPERTIES:` drawer and the marker recording that the
+        // file ALSO spelled its id as `#+ID:`. This is the only place parsed
+        // doc-root metadata reaches the persisted root, and write-back renders
+        // the PERSISTED root — so a drawer left out here is a drawer the very
+        // next write-back deletes from the user's file.
+        if parsed.file_drawer() != persisted.file_drawer() {
+            persisted.set_file_drawer(parsed.file_drawer());
+            changed = true;
+        }
+        let parsed_marker = parsed.get_property(crate::models::org_props::FILE_ID_KEYWORD);
+        if parsed_marker != persisted.get_property(crate::models::org_props::FILE_ID_KEYWORD) {
+            match parsed_marker {
+                Some(value) => {
+                    persisted.set_property(crate::models::org_props::FILE_ID_KEYWORD, value)
+                }
+                None => {
+                    persisted
+                        .properties
+                        .remove(crate::models::org_props::FILE_ID_KEYWORD);
+                }
+            }
+            changed = true;
+        }
+        changed
+    }
+
+    fn writeback_drops(
+        &self,
+        path: &Path,
+        source: &str,
+        rendered: &str,
+        sibling_renders: &[(&Path, &str)],
+        sanctioned_removals: &std::collections::HashSet<String>,
+        root: &Path,
+    ) -> Result<holon_core::file_format::WritebackDropVerdict> {
+        let mut surviving =
+            crate::writeback_guard::SurvivingProjection::from_rendered(path, rendered, root)?;
+        for (sibling_path, sibling_rendered) in sibling_renders {
+            surviving.union_rendered(sibling_path, sibling_rendered, root)?;
+        }
+        let drops = crate::writeback_guard::writeback_drops(
+            path,
+            source,
+            &surviving,
+            sanctioned_removals,
+            root,
+        )?;
+        Ok(holon_core::file_format::WritebackDropVerdict {
+            dropped: drops.dropped,
+            source_block_count: drops.source_block_count,
+        })
     }
 }
 
@@ -125,13 +216,68 @@ mod tests {
         let content = "* Hello World\n:PROPERTIES:\n:ID: block-1\n:END:\n";
 
         let via_adapter = adapter.parse(&path, content, &parent, &root).unwrap();
-        let via_direct = parse_org_file(&path, content, &parent, &root).unwrap();
+        let via_direct = crate::parser::parse_org_file(&path, content, &parent, &root).unwrap();
 
         assert_eq!(via_adapter.blocks.len(), via_direct.blocks.len());
         assert_eq!(via_adapter.document.id, via_direct.document.id);
         assert_eq!(
             via_adapter.blocks_needing_ids,
             via_direct.headlines_needing_ids
+        );
+    }
+
+    /// Inc 2/3 org materialization: a mount PAGE (adopt-and-collapse page
+    /// share) materializes to an actual `.org` file that (a) contains the
+    /// shared content, and (b) round-trips the share markers so Inc 3's
+    /// ingest guard recognizes it as a projection sink (never re-ingested).
+    /// Asserts the real rendered file text, not just the SQL projection.
+    #[test]
+    fn mount_page_materializes_to_org_and_round_trips_share_markers() {
+        use holon_api::share_props::SHARE_ROLE_MOUNT;
+        use holon_api::share_props::SHARE_ROLE_PROPERTY;
+        use holon_api::share_props::SHARED_TREE_ID_PROPERTY;
+
+        let adapter = OrgFormatAdapter::new();
+        let path = PathBuf::from("/tmp/My Shared Page.org");
+        let root = PathBuf::from("/tmp");
+        let doc_uri = EntityUri::block("mount-1");
+
+        let mut mount = Block::new_text(doc_uri.clone(), EntityUri::no_parent(), "My Shared Page");
+        mount.set_page(true);
+        mount.set_property(SHARE_ROLE_PROPERTY, SHARE_ROLE_MOUNT);
+        mount.set_property(SHARED_TREE_ID_PROPERTY, "stid-x");
+        // ID drawer keeps identity stable across the render→parse round trip.
+        mount.set_property("ID", "mount-1");
+
+        let mut child = Block::new_text(
+            EntityUri::block("p-child"),
+            doc_uri.clone(),
+            "Child under P",
+        );
+        child.set_property(SHARED_TREE_ID_PROPERTY, "stid-x");
+        child.set_property("ID", "p-child");
+
+        let org = adapter.render_document(&mount, &[child], &path, &doc_uri);
+        // (a) the shared content is actually on disk.
+        assert!(
+            org.contains("Child under P"),
+            "child content materializes:\n{org}"
+        );
+
+        // (b) re-parsing the materialized file detects it as a shared projection
+        // (the Inc 3 guard predicate), so it is never re-ingested as global intent.
+        let reparsed = adapter
+            .parse(&path, &org, &EntityUri::no_parent(), &root)
+            .unwrap();
+        let detected = reparsed.document.is_share_mount()
+            || reparsed
+                .blocks
+                .iter()
+                .any(|b| b.is_share_mount() || b.shared_tree_id().is_some());
+        assert!(
+            detected,
+            "materialized mount file must round-trip a share marker so the ingest guard skips \
+             it; rendered:\n{org}"
         );
     }
 
@@ -153,5 +299,123 @@ mod tests {
     fn extensions_returns_org() {
         let adapter = OrgFormatAdapter::new();
         assert_eq!(adapter.extensions(), &["org"]);
+    }
+
+    /// `content_differs` is the sole gate that decides whether a file-parsed
+    /// block gets written back over the persisted one. A false negative
+    /// silently DROPS a user's edit (worst bug class); a mangled comparison
+    /// operator or an `||`→`&&` in the OR chain produces exactly that. This
+    /// pins the two required behaviours: identity ⇒ no diff, and a change
+    /// in ANY single compared dimension ⇒ diff. Each variant isolates one
+    /// clause, so together they kill the whole-function `-> true`/`->
+    /// false`, every `!= -> ==`, and every `|| -> &&` mutant in
+    /// `content_differs`.
+    #[test]
+    fn content_differs_flags_each_compared_field_and_not_identity() {
+        use holon_api::types::ContentType;
+        use holon_api::types::Priority;
+        use holon_api::types::SourceLanguage;
+        use holon_api::types::Tags;
+        use holon_api::types::TaskState;
+        use holon_api::types::Timestamp;
+
+        let adapter = OrgFormatAdapter::new();
+        let path = PathBuf::from("/vault/doc.org");
+        let root = PathBuf::from("/vault");
+        let parent = EntityUri::no_parent();
+        let parsed = adapter
+            .parse(&path, "* Base headline\nBody line\n", &parent, &root)
+            .unwrap();
+        let base = parsed.blocks[0].clone();
+
+        // Identity ⇒ not different (kills `content_differs -> true`).
+        assert!(
+            !adapter.content_differs(&base, &base),
+            "a block must not differ from itself"
+        );
+
+        let mut v;
+
+        v = base.clone();
+        v.content = "Different content".into();
+        assert!(
+            adapter.content_differs(&base, &v),
+            "content change undetected"
+        );
+
+        v = base.clone();
+        v.parent_id = EntityUri::block("other-parent");
+        assert!(
+            adapter.content_differs(&base, &v),
+            "parent_id change undetected"
+        );
+
+        v = base.clone();
+        v.content_type = ContentType::Source;
+        assert!(
+            adapter.content_differs(&base, &v),
+            "content_type change undetected"
+        );
+
+        v = base.clone();
+        v.source_language = Some(SourceLanguage::Other("python".into()));
+        assert!(
+            adapter.content_differs(&base, &v),
+            "source_language change undetected"
+        );
+
+        v = base.clone();
+        v.source_name = Some("snippet".into());
+        assert!(
+            adapter.content_differs(&base, &v),
+            "source_name change undetected"
+        );
+
+        v = base.clone();
+        v.set_task_state(Some(TaskState::from_keyword("TODO")));
+        assert!(
+            adapter.content_differs(&base, &v),
+            "task_state change undetected"
+        );
+
+        v = base.clone();
+        v.set_priority(Some(Priority::from_int(1).unwrap()));
+        assert!(
+            adapter.content_differs(&base, &v),
+            "priority change undetected"
+        );
+
+        v = base.clone();
+        v.set_tags(Tags::from_tag_iter(["urgent".to_string()]));
+        assert!(adapter.content_differs(&base, &v), "tags change undetected");
+
+        v = base.clone();
+        v.set_scheduled(Some(Timestamp::parse("<2026-02-21>").unwrap()));
+        assert!(
+            adapter.content_differs(&base, &v),
+            "scheduled change undetected"
+        );
+
+        v = base.clone();
+        v.set_deadline(Some(Timestamp::parse("<2026-03-01>").unwrap()));
+        assert!(
+            adapter.content_differs(&base, &v),
+            "deadline change undetected"
+        );
+
+        v = base.clone();
+        v.properties
+            .insert("Custom".into(), holon_api::Value::String("x".into()));
+        assert!(
+            adapter.content_differs(&base, &v),
+            "drawer property change undetected"
+        );
+
+        v = base.clone();
+        v.set_sequence(base.sequence() + 1);
+        assert!(
+            adapter.content_differs(&base, &v),
+            "sequence change undetected"
+        );
     }
 }

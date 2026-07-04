@@ -198,6 +198,11 @@ impl RefBlockTree for EditorPureRef {
             }
         }
     }
+    fn main_panel_renders(&self, id: &EntityUri) -> bool {
+        // No panel query and no pages in this slice: everything under the
+        // single root renders.
+        self.is_descendant_of_any(id, &BTreeSet::from([self.root_id.clone()]))
+    }
     fn is_layout_block(&self, _: &EntityUri) -> bool {
         false
     }
@@ -222,24 +227,49 @@ impl RefBlockTreeMut for EditorPureRef {
             b.content = text.to_string();
         }
     }
+    /// The id follows the text: at position 0 `id` keeps the whole string and
+    /// the minted block is the empty one sorted BEFORE it, so the returned
+    /// focus target is `id` itself.
     fn split_block(&mut self, id: &EntityUri, position: usize) -> EntityUri {
         let new_id = self.fresh_id();
-        let (parent, tail, new_sort_key) = {
+        let at_start = position == 0;
+        let (parent, minted_content, new_sort_key) = {
             let b = self.blocks.get_mut(id).expect("split target exists");
             let position = position.min(b.content.len());
             let tail = b.content.split_off(position);
-            (b.parent.clone(), tail, format!("{}m", b.sort_key))
+            if at_start {
+                // The minted (empty) block takes the origin's slot and the
+                // origin steps one slot down, so it ends up BELOW.
+                let stepped_key = format!("{}m", b.sort_key);
+                let minted_key = std::mem::replace(&mut b.sort_key, stepped_key);
+                let minted = std::mem::replace(&mut b.content, tail);
+                (b.parent.clone(), minted, minted_key)
+            } else {
+                let sort_key = format!("{}m", b.sort_key);
+                (b.parent.clone(), tail, sort_key)
+            }
         };
         self.blocks.insert(
             new_id.clone(),
             PureBlock {
                 parent,
-                content: tail,
+                content: minted_content,
                 sort_key: new_sort_key,
                 is_text: true,
             },
         );
-        new_id
+        if at_start { id.clone() } else { new_id }
+    }
+
+    fn remint_block(
+        &mut self,
+        // ALLOW(unused_param): trait signature requires old_id, unreachable arm below
+        _old_id: &EntityUri,
+    ) -> EntityUri {
+        unimplemented!(
+            "remint_block: only reachable via StaleExternalRewrite, which requires the composed \
+             environment"
+        )
     }
     fn join_block(&mut self, id: &EntityUri) -> usize {
         let into = self.previous_sibling(id).unwrap_or_else(|| {
@@ -248,6 +278,13 @@ impl RefBlockTreeMut for EditorPureRef {
                 .and_then(|b| b.parent.clone())
                 .expect("join_block: no prev sibling AND no parent")
         });
+        // The joined-away block's children move onto the merge target, as in
+        // `ReferenceState::join_block`; dropping them orphans a subtree.
+        for block in self.blocks.values_mut() {
+            if block.parent.as_ref() == Some(id) {
+                block.parent = Some(into.clone());
+            }
+        }
         let appended = self.blocks.remove(id).expect("join target exists").content;
         let into_block = self.blocks.get_mut(&into).expect("join destination exists");
         let cursor_at_join = into_block.content.len();
@@ -335,6 +372,10 @@ impl RefEditorMirrorMut for EditorPureRef {
     }
     fn move_cursor(&mut self, byte_position: usize) {
         self.editor.cursor = byte_position.min(self.editor.text.len());
+    }
+    fn reseed_active_editor(&mut self, text: &str, cursor: usize) {
+        self.editor.text = text.to_string();
+        self.editor.cursor = cursor.min(self.editor.text.len());
     }
 }
 
@@ -847,6 +888,7 @@ proptest_state_machine::prop_state_machine! {
     #![proptest_config(proptest::test_runner::Config {
         cases: 256,
         max_shrink_iters: 200,
+        failure_persistence: None,
         .. proptest::test_runner::Config::default()
     })]
     #[test]

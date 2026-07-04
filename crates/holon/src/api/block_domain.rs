@@ -19,52 +19,19 @@ const BLOCK_WITH_QUERY_SOURCE_SQL: &str =
 
 pub use holon_api::ROOT_LAYOUT_BLOCK_ID;
 
-/// Walk a `RenderExpr` and substitute `virtual_parent: Bool(true)` (the DSL
-/// sentinel) with `virtual_parent: String(<parent_id>)` so the tree builder's
-/// trailing-slot construction sees the resolved id.
-///
-/// Mirrors `holon_frontend::render_interpreter::resolve_virtual_parent` but
-/// lives in the `holon` crate so the live_block path
-/// (`collection_render_from_profile`) can use it without violating the crate
-/// dependency direction (`holon-frontend → holon → holon-api`). One level
-/// deep — the only place `virtual_parent` legitimately appears today.
-fn resolve_virtual_parent(expr: RenderExpr, parent_id: &str) -> RenderExpr {
-    use holon_api::render_types::Arg;
-    match expr {
-        RenderExpr::FunctionCall { name, args } => {
-            let mut substituted = false;
-            let args = args
-                .into_iter()
-                .map(|arg| {
-                    if arg.name.as_deref() == Some("virtual_parent")
-                        && matches!(
-                            &arg.value,
-                            RenderExpr::Literal {
-                                value: Value::Boolean(true)
-                            }
-                        )
-                    {
-                        substituted = true;
-                        Arg {
-                            name: arg.name,
-                            value: RenderExpr::Literal {
-                                value: Value::String(parent_id.to_string()),
-                            },
-                        }
-                    } else {
-                        arg
-                    }
-                })
-                .collect();
-            tracing::info!(
-                "[resolve_virtual_parent] name={name} parent_id={parent_id} \
-                 substituted={substituted}"
-            );
-            RenderExpr::FunctionCall { name, args }
-        }
-        other => other,
-    }
-}
+/// Bounds the focus-root subtree walk. Blocks nested deeper than this do not
+/// reach the panel; the cycle guard in the same CTE covers malformed parentage.
+const MAX_ROOT_SUBTREE_DEPTH: u32 = 20;
+
+// NOTE (bug 2A): `virtual_parent: true` on a collection render is a SENTINEL
+// meaning "parent new blocks under the query's focus root". This is a
+// query-source block path (`render_entity` → `collection_render_from_profile`),
+// so the focus root is a RUNTIME value (the `focus_roots` matview) that only
+// materialises in the query result — it is NOT the container `entity_uri`.
+// Resolving the sentinel to `entity_uri` here silently mis-parented every
+// top-level create under the panel container. We now leave the sentinel
+// unresolved; the frontend resolves it from the rendered rowset's focus-root
+// row (`holon_frontend::row_origin::resolve_creation_parent`).
 
 /// Domain layer for block-specific operations.
 ///
@@ -98,10 +65,15 @@ impl<'a> BlockDomain<'a> {
             return Ok(path.clone());
         }
 
-        // ALLOW(fallback): pre-existing comment-only — block_id used as path when
-        // block_with_path lookup races Block not in block_with_path yet - use
-        // block_id as fallback path
-        Ok(format!("/{}", block_id))
+        // Fail loud (#45): a missing `block_with_path` row means the block's
+        // path is UNKNOWN. Fabricating `/{block_id}` silently scopes a
+        // descendants query onto a path no other block shares — the same
+        // silent-empty class as the deleted `__NO_PATH__/` sentinel. The caller
+        // surfaces this Err as a visible degraded banner.
+        anyhow::bail!(
+            "block '{block_id}' has no path in block_with_path — its descendants path cannot be \
+             resolved (the matview may not yet reflect a just-created block)"
+        )
     }
 
     /// Render a block by its ID.
@@ -116,10 +88,47 @@ impl<'a> BlockDomain<'a> {
         block_id: &EntityUri,
         preferred_variant: &Option<String>,
     ) -> Result<(RenderExpr, RowChangeStream)> {
+        // ROOT display slot: its content is resolved by a query over data
+        // (the active-perspective pointer is the degenerate slot query), not
+        // by a hardcoded layout. See holon_api::perspective module docs.
+        if *block_id == holon_api::root_layout_block_uri() {
+            return self.render_root_slot(block_id).await;
+        }
+
         let block_info = match self.load_block_with_query_source(block_id).await {
-            Ok(info) => info,
-            Err(_) => return self.render_leaf_block(block_id).await,
+            Ok(info) => Some(info),
+            Err(_) => None,
         };
+        let Some(block_info) = block_info else {
+            // A block with no query source of its own renders as a bare leaf,
+            // except when a region has navigated to it: then it stands for its
+            // whole subtree and must supply the descendants query itself.
+            return if self.is_focus_root(block_id).await? {
+                self.render_region_root(block_id).await
+            } else {
+                self.render_leaf_block(block_id).await
+            };
+        };
+
+        // WP3 / C-revised ruling loud guard: a rule's trigger/action blocks are
+        // program machinery, evaluated ONLY by the action watcher — they must
+        // never reach display-query evaluation. Profile routing (`is_program` →
+        // rule_card, `has_query_source` excludes rule-machinery headings) keeps
+        // them off this path; if one slips through anyway, fail loud and visible
+        // (this Err surfaces as a red error node via UiWatcher) rather than
+        // running `query_and_watch` on a tableless/no-id trigger query.
+        if block_info
+            .get("query_src_is_rule_trigger")
+            .and_then(|v| v.as_i64())
+            == Some(1)
+        {
+            anyhow::bail!(
+                "block '{block_id}' resolved a rule TRIGGER as its display query source — a \
+                 rule's trigger/action blocks are program machinery (evaluated solely by the \
+                 action watcher) and must render as the rule card, never as a display query (ADR \
+                 0024 WP3 / C-revised ruling). This is a render-dispatch routing bypass."
+            );
+        }
 
         let query_source = block_info
             .get("query_source")
@@ -158,20 +167,53 @@ impl<'a> BlockDomain<'a> {
             .get("render_source")
             .is_some_and(|v| !v.is_null());
 
+        // A render source may embed the `collection_view()` marker to compose
+        // the block's profile-derived default collection view (tree/table/board
+        // switcher) with surrounding chrome — e.g. the main panel wraps its
+        // outline in `column(collection_view(), …, live_query(backlinks))`. When
+        // the marker is present the composed layout owns its own view-mode
+        // switcher, so we skip the auto query-source switcher wrap (which would
+        // nest a second result/source switcher above it).
+        let mut composes_collection_view = false;
         let result_expr = if has_render_source {
-            Self::parse_render_source(&block_info)
+            let parsed = Self::parse_render_source(&block_info);
+            if contains_collection_view(&parsed) {
+                composes_collection_view = true;
+                let collection = self.collection_render_expr(block_id).await?;
+                substitute_collection_view(parsed, &collection)
+            } else {
+                parsed
+            }
         } else {
-            Self::collection_render_from_profile(self.engine.profile_resolver().as_ref(), block_id)
+            self.collection_render_expr(block_id).await?
         };
 
-        let render_expr = Self::wrap_in_query_source_switcher(
-            block_id,
-            result_expr,
-            &query_source,
-            query_language,
-        );
+        let render_expr = if composes_collection_view {
+            result_expr
+        } else {
+            Self::wrap_in_query_source_switcher(
+                block_id,
+                result_expr,
+                &query_source,
+                query_language,
+            )
+        };
 
         Ok((render_expr, change_stream))
+    }
+
+    /// The block's profile-derived default collection view (tree/table/board
+    /// view-mode switcher). A panel of the active perspective resolves its
+    /// collection variants through the perspective's profile_override (when
+    /// set): switching perspective re-points which variants / default view mode
+    /// every collection panel offers, not just which queries run.
+    async fn collection_render_expr(&self, block_id: &EntityUri) -> Result<RenderExpr> {
+        let profile_override = self.active_perspective_profile_override(block_id).await?;
+        Ok(Self::collection_render_from_profile(
+            self.engine.profile_resolver().as_ref(),
+            block_id,
+            profile_override.as_ref(),
+        ))
     }
 
     /// Resolve collection-level render expression from entity profile variants.
@@ -183,8 +225,25 @@ impl<'a> BlockDomain<'a> {
     pub(crate) fn collection_render_from_profile(
         resolver: &dyn crate::entity_profile::ProfileResolving,
         entity_uri: &holon_api::EntityUri,
+        profile_override: Option<&holon_api::EntityName>,
     ) -> RenderExpr {
-        let variants = resolver.resolve_collection_variants();
+        let variants = match profile_override {
+            Some(name) => match resolver.resolve_collection_variants_named(name) {
+                Some(variants) => variants,
+                None => {
+                    // Disclosed degraded mode: the perspective points at a
+                    // profile that is not (yet) in the cache. Fall back to the
+                    // default collection variants, loudly.
+                    tracing::warn!(
+                        "[collection_render_from_profile] perspective profile_override {name:?} \
+                         not found in profile cache for {entity_uri} — falling back to default \
+                         `collection` variants"
+                    );
+                    resolver.resolve_collection_variants()
+                }
+            },
+            None => resolver.resolve_collection_variants(),
+        };
 
         tracing::info!(
             "[collection_render_from_profile] entity_uri={entity_uri}, variants_count={}, \
@@ -294,7 +353,7 @@ impl<'a> BlockDomain<'a> {
 
     // ALLOW(fallback): pre-existing comment-only — outer-wrap path when inner expr
     // isn't a VMS
-    /// Fallback for when the inner expression isn't a `view_mode_switcher`:
+    /// Used when the inner expression isn't a `view_mode_switcher`:
     /// wrap with a 2-mode (result, source) switcher. The `#qsrc` URI fragment
     /// keeps the wrap's state separate from any inner per-entity state.
     pub(crate) fn wrap_with_outer_switcher(
@@ -342,6 +401,193 @@ impl<'a> BlockDomain<'a> {
     /// property-only changes (e.g. `task_state` cycling) are picked up by the
     /// data matview and forwarded as `UiEvent::Data` without requiring a
     /// structural re-render.
+    /// Render the ROOT display slot: resolve which perspective the slot shows
+    /// via a query over data (the `active_perspective` pointer property on the
+    /// root-layout block — the degenerate slot query) and synthesize the
+    /// layout from the resolved perspective's panels.
+    ///
+    /// The returned stream watches the root-layout row itself, so consumers
+    /// keep the leaf-stream shape; the structural re-render on pointer writes
+    /// comes from `watch_ui`'s structural matview (which watches the root row).
+    ///
+    /// A vault without a root-layout block (some test vaults) renders as a
+    /// plain leaf — disclosed via `warn!`. A pointer to a missing/broken
+    /// perspective fails loud (surfaces as a red error node).
+    async fn render_root_slot(
+        &self,
+        block_id: &EntityUri,
+    ) -> Result<(RenderExpr, RowChangeStream)> {
+        let Some((active, blocks)) = self.load_perspective_blocks(block_id).await? else {
+            tracing::warn!(
+                "[render_root_slot] no {block_id} block in this vault — rendering the root slot \
+                 as a plain leaf (no layout to resolve)"
+            );
+            return self.render_leaf_block(block_id).await;
+        };
+
+        let spec = holon_api::perspective::PerspectiveSpec::parse(&active, &blocks)
+            .with_context(|| format!("root slot: resolving active perspective for {block_id}"))?;
+        let render_expr = spec.layout_expr().with_context(|| {
+            format!("root slot: synthesizing layout for perspective {}", spec.id)
+        })?;
+
+        let sql = format!(
+            "SELECT * FROM {table} WHERE id = $block_id",
+            table = crate::storage::BLOCK_READ_TABLE,
+        );
+        let mut params = HashMap::new();
+        params.insert("block_id".to_string(), Value::String(block_id.to_string()));
+        let change_stream = self.engine.query_and_watch(sql, params, None).await?;
+
+        Ok((render_expr, change_stream))
+    }
+
+    /// Run the ROOT slot-resolution query and load the block set it needs:
+    /// the active perspective id (COALESCE precedence, see below) plus the
+    /// root-layout row and the active perspective's two-level subtree
+    /// (panels + their source children). Returns `None` when the vault has
+    /// no root-layout block.
+    async fn load_perspective_blocks(
+        &self,
+        root_id: &EntityUri,
+    ) -> Result<Option<(EntityUri, Vec<holon_api::Block>)>> {
+        let root_sql = format!(
+            "SELECT * FROM {table} WHERE id = $id",
+            table = crate::storage::BLOCK_READ_TABLE,
+        );
+        let mut params = HashMap::new();
+        params.insert("id".to_string(), Value::String(root_id.to_string()));
+        let root_rows = self.engine.execute_query(root_sql, params, None).await?;
+        let Some(root_row) = root_rows.into_iter().next() else {
+            return Ok(None);
+        };
+        let root_block = holon_api::Block::try_from(root_row)
+            .with_context(|| format!("root slot: parsing {root_id} row"))?;
+
+        // Slot precedence resolved IN the query (C8 ruling): COALESCE(local
+        // override, synced choice, default). The local arm reads the
+        // local-only `local_ui_state` table (never replicated block tables —
+        // ADR 0025); the synced arm is the `active_perspective` block
+        // property; the default is the root-layout block itself. A local
+        // override wins until cleared.
+        let active_sql = format!(
+            "SELECT COALESCE( (SELECT value FROM {local} WHERE scope_block_id = $id AND key = \
+             '{key}'), json_extract(b.properties, '$.{key}'), b.id) AS active FROM {table} b \
+             WHERE b.id = $id",
+            local = crate::storage::local_state::LOCAL_UI_STATE_TABLE,
+            key = holon_api::perspective::ACTIVE_PERSPECTIVE_PROPERTY,
+            table = crate::storage::BLOCK_READ_TABLE,
+        );
+        let mut params = HashMap::new();
+        params.insert("id".to_string(), Value::String(root_id.to_string()));
+        let active_rows = self.engine.execute_query(active_sql, params, None).await?;
+        let active_raw = active_rows
+            .first()
+            .and_then(|r| r.get("active"))
+            .and_then(|v| v.as_string())
+            .ok_or_else(|| {
+                anyhow::anyhow!("root slot: active-perspective COALESCE returned no value")
+            })?
+            .to_string();
+        let active = EntityUri::parse(&active_raw).map_err(|e| {
+            anyhow::anyhow!("root slot: active perspective {active_raw:?} is not a valid id: {e}")
+        })?;
+
+        let closure_sql = format!(
+            "SELECT * FROM {table} WHERE id = $p OR parent_id = $p OR parent_id IN (SELECT id \
+             FROM {table} WHERE parent_id = $p)",
+            table = crate::storage::BLOCK_READ_TABLE,
+        );
+        let mut params = HashMap::new();
+        params.insert("p".to_string(), Value::String(active.to_string()));
+        let rows = self.engine.execute_query(closure_sql, params, None).await?;
+
+        let mut blocks = vec![root_block];
+        for row in rows {
+            let block = holon_api::Block::try_from(row)
+                .with_context(|| format!("root slot: parsing perspective subtree of {active}"))?;
+            if blocks.iter().all(|b| b.id != block.id) {
+                blocks.push(block);
+            }
+        }
+        Ok(Some((active, blocks)))
+    }
+
+    /// The active perspective's `profile_override`, when `block_id` is one of
+    /// its panels. `None` for every other block, for vaults without a
+    /// root-layout, and for perspectives that declare no override. A broken
+    /// active perspective is NOT swallowed here — it propagates so the panel
+    /// render fails as loudly as the root slot does.
+    async fn active_perspective_profile_override(
+        &self,
+        block_id: &EntityUri,
+    ) -> Result<Option<holon_api::EntityName>> {
+        let root_id = holon_api::root_layout_block_uri();
+        let Some((active, blocks)) = self.load_perspective_blocks(&root_id).await? else {
+            return Ok(None);
+        };
+        let spec = holon_api::perspective::PerspectiveSpec::parse(&active, &blocks).with_context(
+            || format!("panel {block_id}: resolving active perspective for profile override"),
+        )?;
+        if spec.profile_override.is_some() && spec.panels.iter().any(|p| &p.id == block_id) {
+            Ok(spec.profile_override)
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Whether a region's navigation cursor currently rests on `block_id`.
+    async fn is_focus_root(&self, block_id: &EntityUri) -> Result<bool> {
+        let sql = "SELECT fr.root_id FROM focus_roots fr JOIN navigation_cursor nc ON nc.region = \
+                   fr.region AND nc.history_id = fr.history_id WHERE fr.root_id = $block_id"
+            .to_string();
+        let mut params = HashMap::new();
+        params.insert("block_id".to_string(), Value::String(block_id.to_string()));
+
+        let rows = self
+            .engine
+            .execute_query(sql, params, None)
+            .await
+            .with_context(|| format!("resolving whether {block_id} is a region's focus root"))?;
+
+        Ok(!rows.is_empty())
+    }
+
+    /// Render a focus root that authors no query source: its subtree, through
+    /// the profile's collection view.
+    ///
+    /// The walk descends through plain blocks and stops at `Page` children —
+    /// a page owns a file and renders as its own root, so it contributes one
+    /// row here and no descendants.
+    async fn render_region_root(
+        &self,
+        block_id: &EntityUri,
+    ) -> Result<(RenderExpr, RowChangeStream)> {
+        let sql = format!(
+            "WITH RECURSIVE subtree AS ( \
+               SELECT b.id AS node_id, 0 AS depth, CAST(b.id AS TEXT) AS visited \
+               FROM {table} b WHERE b.id = $block_id \
+               UNION ALL \
+               SELECT child.id, subtree.depth + 1, subtree.visited || ',' || CAST(child.id AS TEXT) \
+               FROM subtree \
+               JOIN {table} child ON child.parent_id = subtree.node_id \
+               LEFT JOIN block_tags pt ON pt.block_id = subtree.node_id AND pt.tag = 'Page' \
+               WHERE subtree.depth < {MAX_ROOT_SUBTREE_DEPTH} \
+                 AND ',' || subtree.visited || ',' NOT LIKE '%,' || CAST(child.id AS TEXT) || ',%' \
+                 AND (subtree.depth = 0 OR pt.block_id IS NULL) \
+             ) \
+             SELECT d.* FROM subtree JOIN {table} d ON d.id = subtree.node_id",
+            table = crate::storage::BLOCK_READ_TABLE,
+        );
+        let mut params = HashMap::new();
+        params.insert("block_id".to_string(), Value::String(block_id.to_string()));
+
+        let change_stream = self.engine.query_and_watch(sql, params, None).await?;
+        let render_expr = self.collection_render_expr(block_id).await?;
+
+        Ok((render_expr, change_stream))
+    }
+
     async fn render_leaf_block(
         &self,
         block_id: &EntityUri,
@@ -423,6 +669,79 @@ pub(crate) fn default_table_expr() -> holon_api::render_types::RenderExpr {
     }
 }
 
+/// The render-DSL marker a composed panel render uses to stand in for the
+/// block's profile-derived default collection view (see `render_entity`).
+const COLLECTION_VIEW_MARKER: &str = "collection_view";
+
+/// True if `expr` embeds a `collection_view()` marker anywhere in its tree.
+///
+/// Public so reference/oracle code (the PBT `RefTaskStateToggle` cap) can run
+/// the SAME marker-substitution the prod render pipeline does before
+/// interpreting a composed panel expr — a replicated copy is what let the ref
+/// silently diverge (`collection_view()` has no shadow builder, so an
+/// un-substituted marker interprets to an empty VM and the oracle sees zero
+/// `state_toggle` widgets).
+pub fn contains_collection_view(expr: &holon_api::render_types::RenderExpr) -> bool {
+    use holon_api::render_types::RenderExpr as RE;
+    match expr {
+        RE::FunctionCall { name, args } => {
+            name == COLLECTION_VIEW_MARKER
+                || args.iter().any(|a| contains_collection_view(&a.value))
+        }
+        RE::Array { items } => items.iter().any(contains_collection_view),
+        RE::Object { fields } => fields.values().any(contains_collection_view),
+        RE::BinaryOp { left, right, .. } => {
+            contains_collection_view(left) || contains_collection_view(right)
+        }
+        RE::LiveBlock { .. } | RE::ColumnRef { .. } | RE::Literal { .. } => false,
+    }
+}
+
+/// Replace every `collection_view()` marker node in `expr` with `replacement`
+/// (the block's profile-derived default collection view), recursing through the
+/// whole render tree.
+///
+/// Public for the same reason as [`contains_collection_view`]: the PBT oracle
+/// reuses this exact substitution so its interpreted panel tree matches prod.
+pub fn substitute_collection_view(
+    expr: holon_api::render_types::RenderExpr,
+    replacement: &holon_api::render_types::RenderExpr,
+) -> holon_api::render_types::RenderExpr {
+    use holon_api::render_types::Arg;
+    use holon_api::render_types::RenderExpr as RE;
+    match expr {
+        RE::FunctionCall { name, .. } if name == COLLECTION_VIEW_MARKER => replacement.clone(),
+        RE::FunctionCall { name, args } => RE::FunctionCall {
+            name,
+            args: args
+                .into_iter()
+                .map(|a| Arg {
+                    name: a.name,
+                    value: substitute_collection_view(a.value, replacement),
+                })
+                .collect(),
+        },
+        RE::Array { items } => RE::Array {
+            items: items
+                .into_iter()
+                .map(|i| substitute_collection_view(i, replacement))
+                .collect(),
+        },
+        RE::Object { fields } => RE::Object {
+            fields: fields
+                .into_iter()
+                .map(|(k, v)| (k, substitute_collection_view(v, replacement)))
+                .collect(),
+        },
+        RE::BinaryOp { op, left, right } => RE::BinaryOp {
+            op,
+            left: Box::new(substitute_collection_view(*left, replacement)),
+            right: Box::new(substitute_collection_view(*right, replacement)),
+        },
+        leaf @ (RE::LiveBlock { .. } | RE::ColumnRef { .. } | RE::Literal { .. }) => leaf,
+    }
+}
+
 fn collection_icon_for(name: &str) -> &'static str {
     match name {
         "table_view" | "table" => "table",
@@ -456,9 +775,11 @@ pub(crate) fn view_mode_switcher_from_variants(
         "view_mode_switcher_from_variants requires at least one variant"
     );
 
-    // Single variant → unwrap; no switcher needed.
+    // Single variant → unwrap; no switcher needed. `virtual_parent: true` is
+    // left UNRESOLVED (bug 2A) — the frontend resolves it from the query's
+    // focus-root row, not this container `entity_uri`.
     if variants.len() == 1 {
-        return resolve_virtual_parent(variants[0].render.clone(), &entity_uri.to_string());
+        return variants[0].render.clone();
     }
 
     let default_mode = variants
@@ -506,7 +827,8 @@ pub(crate) fn view_mode_switcher_from_variants(
     for variant in variants {
         args.push(Arg {
             name: Some(format!("mode_{}", variant.name)),
-            value: resolve_virtual_parent(variant.render.clone(), &entity_uri.to_string()),
+            // `virtual_parent: true` left UNRESOLVED (bug 2A) — see note above.
+            value: variant.render.clone(),
         });
     }
 

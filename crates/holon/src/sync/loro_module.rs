@@ -38,12 +38,24 @@ use crate::sync::LoroSyncControllerHandle;
 pub struct LoroConfig {
     /// Root directory for Loro document storage
     pub storage_dir: PathBuf,
+    /// Peer id this session's global doc is minted under. `None` = the
+    /// env/random fallback. Injected by `SessionConfig::loro_peer_id` so two
+    /// sessions in one process (the two-instance sharing PBT) never collide.
+    pub peer_id: Option<u64>,
 }
 
 impl LoroConfig {
     pub fn new(storage_dir: PathBuf) -> Self {
         let storage_dir = std::fs::canonicalize(&storage_dir).unwrap_or(storage_dir);
-        Self { storage_dir }
+        Self {
+            storage_dir,
+            peer_id: None,
+        }
+    }
+
+    pub fn with_peer_id(mut self, peer_id: Option<u64>) -> Self {
+        self.peer_id = peer_id;
+        self
     }
 }
 
@@ -62,7 +74,9 @@ impl Module for LoroModule {
         // Register LoroDocumentStore
         injector.provide::<LoroDocumentStore>(Provider::root(|resolver| {
             let config = resolver.resolve::<LoroConfig>();
-            Shared::new(LoroDocumentStore::new(config.storage_dir.clone()))
+            Shared::new(
+                LoroDocumentStore::new(config.storage_dir.clone()).with_peer_id(config.peer_id),
+            )
         }));
 
         // Register LoroBlocksDataSource
@@ -228,7 +242,9 @@ impl Module for LoroModule {
                         .get_global_doc()
                         .await
                         .expect("[LoroModule] get_global_doc for watermark advance");
-                    collab.doc().oplog_frontiers()
+                    collab
+                        .with_read(|doc| Ok(doc.oplog_frontiers()))
+                        .expect("[LoroModule] read global doc for watermark advance")
                 };
                 *projection.last_synced().lock().unwrap() = frontiers;
             }
@@ -263,6 +279,13 @@ impl Module for LoroModule {
                     .get_global_doc()
                     .await
                     .expect("[LoroModule] get_global_doc for share rehydration");
+                // Lock-exempt for now: `rehydrate_shared_trees` is async, so it
+                // cannot run inside the doc's synchronous read guard. It runs
+                // once at boot before the sync controller starts, with no
+                // concurrent writer — sealing it needs the function split into
+                // guarded reads around its awaits (follow-up).
+                // ALLOW(loro_doc_escape): async consumer, boot-only, no
+                // concurrent writer.
                 let doc_arc = collab.doc();
                 let doc = &*doc_arc;
                 match rehydrate_shared_trees(&backend, doc).await {
@@ -287,7 +310,16 @@ impl Module for LoroModule {
                 .0
                 .clone();
 
-            match controller.start(block_live).await {
+            // Boot ordering: hold the reconcile loop until the org initial
+            // scan has released the write path. `SyncGate` is opened by
+            // `post_ready` on EVERY scan-completion path (success, per-file
+            // degradation, fail-loud stall), so the loop always eventually
+            // runs. Required, not optional: the only wiring that registers
+            // LoroModule registers the gate alongside it, so a missing gate is
+            // a wiring bug and must not degrade into an ungated projector.
+            let gate = resolver.resolve::<holon_core::SyncGate>();
+
+            match controller.start_gated(block_live, &gate).await {
                 Ok(handle) => Shared::new(handle),
                 Err(e) => {
                     error!("[LoroModule] Failed to start LoroSyncController: {}", e);
@@ -341,13 +373,10 @@ fn register_subtree_share(injector: &Injector) {
         let key = resolver.resolve::<Arc<SecretKey>>();
         Shared::new(Arc::new(IrohAdvertiser::new_with_key((**key).clone())))
     }));
-    injector.provide::<Arc<crate::sync::degraded_signal_bus::DegradedSignalBus>>(Provider::root(
-        |_| {
-            Shared::new(Arc::new(
-                crate::sync::degraded_signal_bus::DegradedSignalBus::new(),
-            ))
-        },
-    ));
+    // `Arc<DegradedSignalBus>` is NOT registered here. Disclosure must exist in
+    // every container, not only the Loro one, so the composition root
+    // (`holon-app`'s `add_frontend`) owns it; resolving it below therefore also
+    // asserts this module was configured by a root that provides it.
     injector.provide::<Arc<crate::sync::shared_snapshot_store::SharedSnapshotStore>>(
         Provider::root(|resolver| {
             let config = resolver.resolve::<LoroConfig>();

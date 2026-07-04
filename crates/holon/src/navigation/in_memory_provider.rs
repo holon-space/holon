@@ -169,6 +169,19 @@ impl OperationProvider for InMemoryNavigationProvider {
             Ok(NavigationOp::GoBack) => self.go_back(&region_key),
             Ok(NavigationOp::GoForward) => self.go_forward(&region_key),
             Ok(NavigationOp::GoHome) => self.focus(&region_key, None),
+            // Tab activate addresses a `navigation_history` row id; a Loro-only
+            // session has no such table (like `close`), so switching among the
+            // single-open history is a coherent no-op.
+            Ok(NavigationOp::Activate) => Ok(OperationResult::irreversible(vec![])),
+            // Loro-only sessions have no multi-open set: open the block as the
+            // region's (single) focus, matching the pre-tabs behavior.
+            Ok(NavigationOp::OpenTab) => {
+                let block_id = params.get("block_id").and_then(|v| match v {
+                    Value::String(s) => Some(s.clone()),
+                    _ => None,
+                });
+                self.focus(&region_key, block_id)
+            }
             // Pin soft-close is Turso-only (it edits `navigation_history` rows);
             // a Loro-only session has no such table, matching the pre-enum
             // behavior of rejecting `close` here.

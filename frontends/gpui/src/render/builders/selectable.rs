@@ -73,6 +73,22 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
                 }),
         )
         .into_any_element();
+    // Arms `inv-frontend-bounds-rendered/expected-size-satisfied` on live
+    // windowed runs: an interaction region bound to a real row must be
+    // clickable, i.e. non-degenerate on both axes. Scoped to `row_id.is_some()`
+    // — a selectable with no backing row (an empty-state / placeholder sidebar
+    // item, `selectable(row(...))` over an empty data row) has nothing to size
+    // to and may legitimately collapse; sizing it would be checking the
+    // instrument, not the widget. Only non-degeneracy, not "the wrapper equals
+    // its child": the shipped profile gives the bullet `mt: 12`, and child
+    // margins are invisible to `BoundsRegistry`, so a tighter bound cannot tell
+    // a margin from a wrapper that contributed layout. The equality half of the
+    // tracked-widget contract is proven by `tests/tracked_layout_neutrality`.
+    let expected_size = if row_id.is_some() {
+        holon_frontend::size_expectation::SizeBounds::non_degenerate()
+    } else {
+        holon_frontend::size_expectation::SizeBounds::collapsible()
+    };
     crate::geometry::tracked(
         el_id,
         inner,
@@ -82,5 +98,6 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
         true,
         None,
     )
+    .with_expected_size(expected_size)
     .into_any_element()
 }

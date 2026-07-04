@@ -1,5 +1,10 @@
 //! Transition: set up a query watch (post-startup).
 //!
+//! @pbt rung dispatch
+//!   `register_watch` compiles + registers the query watcher directly (no
+//!   UI gesture for registering a watch).
+//! @pbt covers watch-register — query watch registration + CDC subscription
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:519-532`
 //! (generator), `state_machine.rs:3160` (precondition),
 //! `state_machine.rs:2203-2215` (ref-state apply),
@@ -8,38 +13,37 @@
 
 use holon_api::QueryLanguage;
 use holon_pbt_core::TransitionFactory;
-use holon_pbt_core::TransitionImpl;
 use holon_pbt_core::TransitionRef;
+use holon_pbt_core::capabilities::RefLifecycle;
+use holon_pbt_core::capabilities::RefWatchesMut;
 use holon_pbt_core::capabilities::SutWatchRegister;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::check;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
 use crate::pbt::query::TestQuery;
 use crate::pbt::query::WatchSpec;
-use crate::pbt::reference_state::ReferenceState;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::REACTIVE_BASE;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::docs_tolerance;
-use crate::pbt::validation::Reason;
-use crate::pbt::validation::check;
 
 /// Set up a new query watch.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I watch {query} as {query_id} in language {language}")]
 pub struct SetupWatch {
     pub query_id: String,
     pub query: TestQuery,
     pub language: QueryLanguage,
 }
 
-impl TransitionFactory<ReferenceState> for SetupWatch {
+impl<R: RefLifecycle + RefWatchesMut<WatchSpec = WatchSpec>> TransitionFactory<R> for SetupWatch {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        vec![::holon_pbt_core::composition::CapId::of::<
-            dyn ::holon_pbt_core::capabilities::SutWatchRegister,
-        >()]
+        Self::declared_caps()
     }
 
     type Reason = Reason;
@@ -49,7 +53,7 @@ impl TransitionFactory<ReferenceState> for SetupWatch {
         // (see loro_block_query_source.rs:77). Gate it out of {Loro} slices.
         ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Turso)
     }
-    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // Create a dummy instance to validate preconditions (no query/language needed
         // yet); if they fail, the generator is disabled entirely (no weight=0
         // fallback).
@@ -80,12 +84,12 @@ impl TransitionFactory<ReferenceState> for SetupWatch {
     }
 }
 
-impl TransitionRef<ReferenceState> for SetupWatch {
+impl<R: RefLifecycle + RefWatchesMut<WatchSpec = WatchSpec>> TransitionRef<R> for SetupWatch {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(state.action.app_started, Reason::AppNotStarted),
+            check(state.app_started(), Reason::AppNotStarted),
             check(state.is_properly_setup(), Reason::NotProperlySetup),
         ];
 
@@ -95,9 +99,9 @@ impl TransitionRef<ReferenceState> for SetupWatch {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
-        state.mcp.active_watches.insert(
-            self.query_id.clone(),
+    fn apply_to_ref(&self, state: &mut R) {
+        state.insert_watch(
+            &self.query_id,
             WatchSpec {
                 query: self.query.clone(),
                 language: self.language,
@@ -106,23 +110,20 @@ impl TransitionRef<ReferenceState> for SetupWatch {
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutWatchRegister> TransitionImpl<ReferenceState, S> for SetupWatch {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
+crate::cap_transition! {
+    SetupWatch: SutWatchRegister,
+    where R: [ RefLifecycle + RefWatchesMut ],
+    |me, _state, sut| {
         // Compile the integration-test-local `TestQuery` at the boundary: the
         // `SutWatchRegister` cap (pbt-core) cannot name `TestQuery`, so it takes
         // the already-compiled `(source, lang)` — exactly what `E2ESut`'s old
         // `apply_setup_watch` did internally before this decomposition.
-        let (source, lang) = self.query.compile_for(self.language);
-        sut.register_watch(&self.query_id, &source, lang).await;
+        let (source, lang) = me.query.compile_for(me.language);
+        sut.register_watch(&me.query_id, &source, lang).await;
     }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for SetupWatch {
-    fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
-        let blocks = state.domain.block_state.blocks.len();
-        let _docs = state.files.documents.len();
+    sql_budget: |_me, state| {
+        let blocks = state.block_count();
+        let _docs = state.document_count();
         // reactive base (5) + view existence check (2) + turso internal check (1)
         //   + initial matview data read (1) = 9 reads, 0 writes, 1 DDL.
         // Pending CDC events from prior transitions drain during SetupWatch,

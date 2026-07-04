@@ -44,14 +44,15 @@ Operations are fire-and-forget. Effects are observed through reactive CDC stream
 
 Both owned data (Loro CRDT) and third-party data flow into the same Turso cache. The UI queries this single unified surface using PRQL, GQL, or raw SQL. Rendering is specified separately in Rhai-based render expressions.
 
-For the full architecture, see [ARCHITECTURE.md](ARCHITECTURE.md).
+For the full architecture, see [docs/Architecture.md](docs/Architecture.md).
 
 ## Crate Structure
 
 ```
 crates/
 ├── holon/                    # Main orchestration: Turso cache, CDC, query engine
-├── holon-api/                # Shared types, operations, change descriptors
+├── holon-api/                # Shared types, operations, change descriptors, session capability traits
+├── holon-app/                # Wiring crate: DI assembly naming concrete backends
 ├── holon-core/               # Core traits: DataSource, CrudOperations, BlockOperations
 ├── holon-engine/             # Standalone Petri-net engine CLI (YAML nets, WSJF ranking)
 ├── holon-frontend/           # Platform-agnostic ViewModel layer (MVVM)
@@ -64,15 +65,17 @@ crates/
 └── holon-integration-tests/  # Cross-crate integration & property-based tests
 
 frontends/
-├── gpui/       # GPUI frontend (primary)
-├── flutter/    # Flutter frontend with FFI bridge
-├── mcp/        # MCP server frontend (stdio + HTTP)
-├── ply/        # Ply frontend
-├── tui/        # Terminal UI frontend
-├── blinc/      # Native Rust GUI (blinc-app)
-├── dioxus/     # Dioxus frontend
-└── waterui/    # WaterUI frontend
+├── gpui/         # GPUI frontend (primary)
+├── mcp/          # MCP server frontend (stdio + HTTP)
+├── tui/          # Terminal UI frontend
+├── dioxus/       # Dioxus frontend
+├── dioxus-web/   # Dioxus web frontend (wasm32, trunk build)
+├── holon-worker/ # Holon backend as a Web Worker (wasm32-wasip1-threads)
+└── waterui/      # WaterUI frontend
 ```
+
+Archived prototypes (Flutter, Blinc) are not in the tree; they live on the
+`frontends/flutter` and `frontends/blinc` bookmarks.
 
 ## Key Concepts
 
@@ -94,6 +97,8 @@ list(#{item_template: render_block()})
 
 Org files are bidirectionally synced: edit in Emacs/Vim/any editor, changes appear in Holon; edit in Holon, changes are written back to disk. The `OrgSyncController` handles echo suppression to prevent sync loops.
 
+> **⚠️ Vault + file syncers:** see [Vault directory & third-party file sync](#vault-directory--third-party-file-sync-important).
+
 ### Petri-Net Engine & WSJF Ranking
 
 Tasks are materialized into a Petri Net model with typed tokens (Person, Organization, Document, Monetary, Knowledge, Resource). The engine computes WSJF (Weighted Shortest Job First) rankings using prototype blocks with Rhai-evaluated scoring expressions. See [VISION_PETRI_NET.md](VISION_PETRI_NET.md).
@@ -111,7 +116,6 @@ Intelligence resides in the data structure, not in the AI model. The substitutio
 ### Prerequisites
 
 - Rust (see `rust-toolchain.toml` for the exact version)
-- For Flutter frontend: Flutter SDK + Dart
 
 ### Build
 
@@ -141,16 +145,26 @@ cargo run -p holon-mcp
 cargo run -p holon-engine -- --help
 ```
 
+### Vault directory & third-party file sync (important)
+
+Do **not** place a Holon vault (`HOLON_VAULT_ROOT`) under Syncthing, iCloud
+Drive, Dropbox, or any byte-level file syncer while Loro CRDT sync is enabled.
+Holon converges devices through Loro/P2P; a second, block-unaware syncer
+writing the same files makes foreign echoes indistinguishable from user edits
+(duplicated edits, sibling-order churn, conflict-copy files ingested as
+duplicate documents). One vault, one syncer: Holon. See
+[docs/Architecture/Model.md](docs/Architecture/Model.md), invariant 11.
+
 ## Vision Documents
 
 | Document | Contents |
-|----------|----------|
-| [VISION.md](VISION.md) | Technical vision & phased roadmap |
-| [VISION_LONG_TERM.md](VISION_LONG_TERM.md) | Philosophical foundation: Integral Theory, flow psychology, the Holon promise |
-| [VISION_AI.md](VISION_AI.md) | Three AI roles (Watcher, Integrator, Guide), trust ladder, privacy model |
-| [VISION_PETRI_NET.md](VISION_PETRI_NET.md) | Petri-Net primitives, Digital Twins, WSJF sorting |
-| [VISION_UI.md](VISION_UI.md) | UI/UX design system: three modes (Capture, Orient, Flow), color palette, micro-interactions |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Full technical architecture: traits, data flow, CDC, entity types |
+| ---------- | ---------- |
+| [docs/Vision.md](docs/Vision.md) | Technical vision & phased roadmap |
+| [docs/Vision/LongTerm.md](docs/Vision/LongTerm.md) | Philosophical foundation: Integral Theory, flow psychology, the Holon promise |
+| [docs/Vision/AI.md](docs/Vision/AI.md) | Three AI roles (Watcher, Integrator, Guide), trust ladder, privacy model |
+| [docs/Vision/PetriNet.md](docs/Vision/PetriNet.md) | Petri-Net primitives, Digital Twins, WSJF sorting |
+| [docs/Vision/UI.md](docs/Vision/UI.md) | UI/UX design system: three modes (Capture, Orient, Flow), color palette, micro-interactions |
+| [docs/Architecture.md](docs/Architecture.md) | Full technical architecture: traits, data flow, CDC, entity types (details in [docs/Architecture/](docs/Architecture/)) |
 
 ## Core Dependencies
 

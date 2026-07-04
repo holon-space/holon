@@ -21,6 +21,10 @@ use crate::Change;
 use crate::StorageEntity;
 use crate::Value;
 
+pub mod group_by;
+pub mod home_by;
+pub mod supervision;
+
 /// Pull `_rowid` (set by `process_cdc_event`) out of a row's data, if present.
 fn extract_rowid(data: &StorageEntity) -> Option<String> {
     match data.get("_rowid")? {
@@ -271,8 +275,37 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
         for change in changes {
             match change {
                 Change::Created { data, .. } | Change::Updated { data, .. } => {
-                    let id = (self.id_fn)(&data).expect("id_fn failed on CDC row");
-                    let parsed = (self.parse_fn)(&data).expect("parse_fn failed on CDC row");
+                    // A single un-keyable / un-parseable CDC row must NOT kill the
+                    // whole live feed. This runs on the detached `subscribe` actor
+                    // task, so an `.expect()` panic here unwinds ONLY that task —
+                    // tokio swallows it, the CDC stream is never drained again, and
+                    // every downstream mirror (org write-back, link indexer, the
+                    // ViewModel) silently freezes with no banner (BugFunnel row 24:
+                    // "feed DIES silently mid-session, app looks healthy"). That is
+                    // the "silently degrades to look fine" anti-pattern this repo
+                    // forbids. Fail LOUD (ERROR — captured by `inv-no-observed-errors`
+                    // and visible in prod logs) and DROP just this row, keeping the
+                    // feed alive for every subsequent good row (disclosed degradation).
+                    let id = match (self.id_fn)(&data) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            tracing::error!(
+                                "LiveData: id_fn failed on a CDC row — DROPPING this row \
+                                 and keeping the feed alive (degraded): {e:#}; row={data:?}"
+                            );
+                            continue;
+                        }
+                    };
+                    let parsed = match (self.parse_fn)(&data) {
+                        Ok(parsed) => parsed,
+                        Err(e) => {
+                            tracing::error!(
+                                "LiveData: parse_fn failed on CDC row id={id} — DROPPING \
+                                 this row and keeping the feed alive (degraded): {e:#}"
+                            );
+                            continue;
+                        }
+                    };
                     if let Some(rowid) = extract_rowid(&data) {
                         rowid_map.insert(rowid, id.clone());
                     }
@@ -293,7 +326,15 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
                     }
                 }
                 Change::FieldsChanged { entity_id, .. } => {
-                    panic!("LiveData: unexpected FieldsChanged for {entity_id}");
+                    // FieldsChanged is never produced for LiveData-backed matviews;
+                    // its arrival signals an upstream defect. Surface it LOUDLY, but
+                    // do not `panic!` — this actor is detached, so a panic here would
+                    // silently kill the whole feed (see the Created/Updated arm above,
+                    // BugFunnel row 24) instead of just flagging the bad change.
+                    tracing::error!(
+                        "LiveData: unexpected FieldsChanged for {entity_id} — ignoring \
+                         this change and keeping the feed alive (upstream defect)"
+                    );
                 }
             }
         }
@@ -347,10 +388,56 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
                 };
                 batches_seen += 1;
                 let seq = batch.metadata.seq;
+                // The actor outlives every interaction, so its own span is a
+                // root. Applying a batch belongs to the interaction that WROTE
+                // it: parent to the context the batch carried across the CDC
+                // hop, so the `stage="rows"` event below joins that trace.
+                let apply_span = tracing::info_span!(
+                    parent: None,
+                    "live_data.apply_batch",
+                    source = source_name,
+                    seq,
+                );
+                if let Some(span_ctx) = batch
+                    .metadata
+                    .trace_context
+                    .as_ref()
+                    .and_then(|ctx| ctx.to_span_context())
+                {
+                    use opentelemetry::trace::TraceContextExt;
+                    use tracing_opentelemetry::OpenTelemetrySpanExt;
+                    let trace_id = span_ctx.trace_id();
+                    // The actor has no error channel, so a failed re-parent is
+                    // disclosed rather than propagated: the batch still applies,
+                    // but its span stays a root and the write that caused it
+                    // becomes untraceable.
+                    if let Err(e) = apply_span.set_parent(
+                        opentelemetry::Context::new().with_remote_span_context(span_ctx),
+                    ) {
+                        tracing::warn!(
+                            source = source_name,
+                            seq,
+                            %trace_id,
+                            error = %e,
+                            "LiveData: could not re-parent apply span to the writing trace — this \
+                             batch stays a disconnected trace root"
+                        );
+                    }
+                }
+                let _apply_guard = apply_span.enter();
                 let changes: Vec<Change<StorageEntity>> =
                     batch.inner.items.into_iter().map(Into::into).collect();
                 let change_count = changes.len();
+                // Entities this batch makes visible, each tagged with the
+                // observable it is — feeds the e2e interaction-latency
+                // correlator AFTER apply below.
+                let touched = crate::latency_e2e::touched_entities(source_name, &changes);
+                let t_rows = std::time::Instant::now();
                 live.apply_changes(changes);
+                crate::latency_e2e::rows_delivered(
+                    source_name,
+                    touched.iter().map(|(id, obs)| (id.as_str(), *obs)),
+                );
                 if seq > 0 {
                     live.last_consumed_seq.store(seq, Ordering::SeqCst);
                     live.seq_advanced.notify_waiters();
@@ -361,6 +448,21 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
                     changes = change_count,
                     "LiveData batch applied"
                 );
+                // Latency stage (projection->rows): a CDC batch from the matview
+                // lands and the reactive mirror applies it — the point at which a
+                // projected change becomes visible to the view model / widgets
+                // (final GPU paint excluded). Greppable via target="holon_latency".
+                if change_count > 0 {
+                    tracing::info!(
+                        target: "holon_latency",
+                        stage = "rows",
+                        source = source_name,
+                        rows = change_count,
+                        seq,
+                        ms = t_rows.elapsed().as_millis() as u64,
+                        "holon_latency",
+                    );
+                }
             }
         });
     }
@@ -427,6 +529,122 @@ mod tests {
 
         let items = live.read();
         assert_eq!(**items.get("c").unwrap(), "new");
+    }
+
+    /// BugFunnel row 24 (apply-level): a single un-parseable CDC row must NOT
+    /// abort the batch — the good row in the same batch still lands, and the
+    /// row dropped is disclosed via an ERROR log. Before the fix
+    /// `apply_changes` `.expect()`-panicked on the bad row, which (on the
+    /// detached `subscribe` actor) silently killed the whole live feed.
+    #[test]
+    fn apply_changes_drops_unparseable_row_keeps_feed_alive() {
+        let live: Arc<LiveData<String>> = LiveData::new(
+            vec![],
+            |row| Ok(row.get("id").unwrap().as_string().unwrap().to_string()),
+            |row| {
+                let content = row.get("content").unwrap().as_string().unwrap();
+                if content == "POISON" {
+                    anyhow::bail!("poison row rejected by parse_fn");
+                }
+                Ok(content.to_string())
+            },
+        );
+
+        let local = || crate::ChangeOrigin::Local {
+            operation_id: None,
+            trace_id: None,
+        };
+        live.apply_changes(vec![
+            Change::Created {
+                data: make_row("bad", "POISON"),
+                origin: local(),
+            },
+            Change::Created {
+                data: make_row("good", "fine"),
+                origin: local(),
+            },
+        ]);
+
+        let items = live.read();
+        assert!(
+            items.get("bad").is_none(),
+            "the un-parseable row must be dropped, not inserted"
+        );
+        assert_eq!(
+            **items.get("good").unwrap(),
+            "fine",
+            "the good row in the same batch must still land (feed stays alive)"
+        );
+    }
+
+    /// BugFunnel row 24 (actor-level): the `subscribe` background actor must
+    /// survive a poison row and keep draining the stream. Before the fix the
+    /// `apply_changes` panic unwound the actor task (swallowed by tokio), the
+    /// CDC stream was never drained again, and every downstream mirror froze
+    /// silently — "feed DIES silently mid-session, app looks healthy".
+    #[tokio::test]
+    async fn subscribe_actor_survives_unparseable_row() {
+        let live: Arc<LiveData<String>> = LiveData::new(
+            vec![],
+            |row| Ok(row.get("id").unwrap().as_string().unwrap().to_string()),
+            |row| {
+                let content = row.get("content").unwrap().as_string().unwrap();
+                if content == "POISON" {
+                    anyhow::bail!("poison row rejected by parse_fn");
+                }
+                Ok(content.to_string())
+            },
+        );
+
+        let local = || crate::ChangeOrigin::Local {
+            operation_id: None,
+            trace_id: None,
+        };
+        let batch = |seq: u64, change: Change<StorageEntity>| crate::streaming::WithMetadata {
+            inner: crate::streaming::Batch {
+                items: vec![change],
+            },
+            metadata: crate::streaming::BatchMetadata {
+                seq,
+                ..Default::default()
+            },
+        };
+
+        // Poison batch FIRST (would have killed the pre-fix actor), then a good
+        // batch that must still be delivered.
+        let stream = tokio_stream::iter(vec![
+            batch(
+                1,
+                Change::Created {
+                    data: make_row("bad", "POISON"),
+                    origin: local(),
+                },
+            ),
+            batch(
+                2,
+                Change::Created {
+                    data: make_row("good", "fine"),
+                    origin: local(),
+                },
+            ),
+        ]);
+
+        live.subscribe("test_feed", stream);
+
+        let landed = live
+            .wait_until(
+                |m| m.contains_key("good"),
+                std::time::Duration::from_secs(5),
+            )
+            .await;
+        assert!(
+            landed,
+            "the actor must survive the poison row and deliver the subsequent good row"
+        );
+        assert!(
+            live.read().get("bad").is_none(),
+            "the poison row must have been dropped"
+        );
     }
 
     #[test]

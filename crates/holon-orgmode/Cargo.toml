@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+# `workspace-hack` is the cargo-hakari feature-unification crate: every
+# member depends on it and no member references it in source, by design.
+[package.metadata.cargo-machete]
+ignored = ["workspace-hack"]
+
 [features]
 default = []
 di = []
@@ -15,22 +20,15 @@ anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 futures.workspace = true
-futures-signals.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 tokio = { workspace = true, features = ["full"] }
-tokio-stream.workspace = true
 tracing.workspace = true
-tracing-opentelemetry.workspace = true
 uuid.workspace = true
-holon-macros.workspace = true
 holon-api.workspace = true
 holon-filesystem.workspace = true
 fluxdi.workspace = true
 ignore.workspace = true
-percent-encoding = "2.3"
-hex.workspace = true
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]
@@ -39,3 +37,4 @@ proptest.workspace = true
 proptest-state-machine.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tracing-subscriber.workspace = true

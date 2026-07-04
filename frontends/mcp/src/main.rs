@@ -16,12 +16,13 @@ mod telemetry;
 use holon_mcp::server::DebugServices;
 use holon_mcp::server::HolonMcpServer;
 
-/// Create a default EnvFilter that suppresses noisy HTTP client and
-/// OpenTelemetry logs
+/// The subscriber filter: `RUST_LOG` when set, else a default that suppresses
+/// noisy HTTP client and OpenTelemetry logs. Built by the shared
+/// `env_filter_with_default`, which also applies the `holon_latency` directive.
 fn default_env_filter() -> EnvFilter {
     // Some crates use dashes in target names, others use underscores - filter both
     // variants
-    EnvFilter::new(
+    holon_frontend::logging::env_filter_with_default(
         "info,reqwest=warn,hyper=warn,hyper_util=warn,h2=warn,tower=warn,opentelemetry=warn,\
          opentelemetry_sdk=warn,opentelemetry_http=warn,opentelemetry_otlp=warn,\
          opentelemetry-sdk=warn,opentelemetry-http=warn,opentelemetry-otlp=warn,holon=debug",
@@ -148,8 +149,9 @@ fn parse_args() -> Result<Config> {
 async fn run_stdio_server(
     engine: std::sync::Arc<holon::api::backend_engine::BackendEngine>,
     debug: std::sync::Arc<DebugServices>,
+    type_registry: Option<std::sync::Arc<holon_profiles::TypeRegistry>>,
 ) -> Result<()> {
-    let server = HolonMcpServer::with_type_registry(Some(engine), None, debug, None);
+    let server = HolonMcpServer::with_type_registry(Some(engine), type_registry, debug, None);
     use rmcp::transport::stdio;
     let running = server.serve(stdio()).await?;
 
@@ -185,6 +187,7 @@ async fn run_stdio_server(
 async fn run_http_server_standalone(
     engine: std::sync::Arc<holon::api::backend_engine::BackendEngine>,
     debug: std::sync::Arc<DebugServices>,
+    type_registry: Option<std::sync::Arc<holon_profiles::TypeRegistry>>,
     bind_address: SocketAddr,
 ) -> Result<()> {
     use tokio_util::sync::CancellationToken;
@@ -204,8 +207,15 @@ async fn run_http_server_standalone(
     tracing::info!("MCP endpoint: http://{}/mcp", bind_address);
 
     // Use the shared run_http_server from di module
-    holon_mcp::di::run_http_server(Some(engine), debug, None, bind_address, cancellation_token)
-        .await
+    holon_mcp::di::run_http_server(
+        Some(engine),
+        debug,
+        None,
+        type_registry,
+        bind_address,
+        cancellation_token,
+    )
+    .await
 }
 
 #[tokio::main]
@@ -242,8 +252,7 @@ async fn main() -> Result<()> {
                 })?;
 
             // Configure log level - use default filter if RUST_LOG not set
-            let log_level =
-                EnvFilter::try_from_default_env().unwrap_or_else(|_| default_env_filter());
+            let log_level = default_env_filter();
 
             // Build subscriber with all layers
             let registry = tracing_subscriber::registry();
@@ -310,8 +319,7 @@ async fn main() -> Result<()> {
         }
         TransportMode::Http { .. } => {
             // In HTTP mode, normal stderr logging is fine
-            let log_level =
-                EnvFilter::try_from_default_env().unwrap_or_else(|_| default_env_filter());
+            let log_level = default_env_filter();
 
             // Build subscriber with all layers
             let registry = tracing_subscriber::registry();
@@ -365,7 +373,8 @@ async fn main() -> Result<()> {
             token_for_signal.cancel();
         });
         let debug = Arc::new(DebugServices::default());
-        holon_mcp::di::run_http_server(None, debug, None, bind_address, cancellation_token).await?;
+        holon_mcp::di::run_http_server(None, debug, None, None, bind_address, cancellation_token)
+            .await?;
         return Ok(());
     }
 
@@ -448,10 +457,14 @@ async fn main() -> Result<()> {
                         .ok()
                         .map(|ops| ops.shared_doc_store());
                     if let Some(store) = loro_doc_store {
-                        debug.loro_doc_store.set(store).ok(); // ALLOW(ok): OnceLock already set
+                        debug.loro_doc_store.set(store).ok(); // ALLOW(ok):
+                        // OnceLock already
+                        // set
                     }
                     if let Some(root) = orgmode_root {
-                        debug.orgmode_root.set(root).ok(); // ALLOW(ok): OnceLock already set
+                        debug.orgmode_root.set(root).ok(); // ALLOW(ok):
+                        // OnceLock already
+                        // set
                     }
 
                     Ok(())
@@ -477,6 +490,10 @@ async fn main() -> Result<()> {
     // engine is registered in the container.
     let engine = injector.resolve::<holon::api::backend_engine::BackendEngine>();
     let debug = injector.resolve::<DebugServices>();
+    // The live entity registry the link classifier reads. Without it every
+    // `[[<entity>:<id>]]` an agent writes through `dense_patch` degrades to an
+    // unknown-scheme link and loses its `block_links` row.
+    let type_registry = Some(injector.resolve::<holon_profiles::TypeRegistry>());
 
     // Shutdown flush: spawn a task that awaits Ctrl+C and flushes any
     // in-flight shared-doc saves before the process exits. The 150ms
@@ -510,11 +527,11 @@ async fn main() -> Result<()> {
     // Run server based on transport mode
     match config.transport_mode {
         TransportMode::Stdio => {
-            run_stdio_server(engine, debug).await?;
+            run_stdio_server(engine, debug, type_registry).await?;
         }
         TransportMode::Http { bind_address } => {
             tracing::info!("Starting Holon MCP server in HTTP mode on {}", bind_address);
-            run_http_server_standalone(engine, debug, bind_address).await?;
+            run_http_server_standalone(engine, debug, type_registry, bind_address).await?;
         }
     }
 

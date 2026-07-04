@@ -1,0 +1,85 @@
+Finding 3 — a virtual (creation-slot) block cannot be indented before it is
+persisted, and Enter in an EMPTY creation slot creates no block. Both refusals
+are silent, and the MCP driver reports one of them as executed.
+
+Environment: throwaway vault, sandboxed launch on port 8710, binary from main
+e3cc10fe. Creation slot id: block:__virtual:<page-id>.
+
+REPRODUCTION A — Enter in an empty slot does nothing
+  1. Click the creation slot ("Type here"). Type nothing.
+  2. Send Enter.
+  3. Count children of the page.
+
+  before: rows[1]{n}  n = 4
+  keystroke reply: {"keystrokes_sent":1,"keystrokes_handled":1,"dropped":0}
+  after:  rows[1]{n}  n = 4
+
+  The keystroke is reported handled; no block is created. There is no way to
+  make an empty block from the slot.
+
+REPRODUCTION B — Tab in a slot holding uncommitted text does not indent
+  1. Click the creation slot, type "Draft text" (do NOT press Enter).
+  2. Send the tab chord against the slot id.
+
+  reply: {"status":"executed","keys":["tab"],
+          "entity_id":"block:__virtual:aaaa1111-0000-4000-8000-000000000001",
+          "matched":[{"action":"indent","registry":"structural","context":null}]}
+
+  observed after: the slot's editable_text is still at x=376.0 — identical to
+  its unindented siblings; an indented row measures x=396.0 in this layout
+  (verified on the real nested child block, which sits at 396.0). No SQL row
+  exists for the text. Nothing moved.
+
+  NOTE the driver reply says "executed" and names `indent` for an action that
+  provably did not run. Same surface and same class as the cmd+enter finding
+  already in this ledger (2026-08-08): send_key_chord reports what MATCHED,
+  not what DISPATCHED, so any windowed PBT asserting on that reply asserts on
+  a lie.
+
+CONTROL — the slot itself is healthy
+  With text in the slot, Enter commits normally:
+    Alpha first block                        block:aaaa1111-…-00000000000a
+    Alpha block with a page link …           block:aaaa1111-…-00000000000b
+    Alpha block with a block link …          block:aaaa1111-…-00000000000c
+    Alpha block with an external link …      block:aaaa1111-…-00000000000d
+    ViDraft textrtual draft                  block:a1b6c0b4-baf4-4a86-9fb2-de45c41e26e1   <- committed
+  So the refusals are specific to (empty Enter) and (structural ops), not to
+  the slot generally.
+
+INCIDENTAL OBSERVATIONS from the same probe, both worth their own attention:
+
+  (i) Uncommitted slot text SURVIVES a full page navigation. Text typed into
+      the slot, then a navigation to another page and back, was still present
+      in the slot afterwards — the second typing burst interleaved with it at
+      the caret, producing "ViDraft textrtual draft" from "Virtual draft" +
+      "Draft text". So the slot carries real unpersisted user state across
+      navigation, with no indication that it is unsaved.
+
+  (ii) describe_ui reports the focused creation slot as  editable_text ""
+      while the screen visibly shows its typed content. The creation slot's
+      live buffer is not exposed to the introspection surface, so a driver
+      cannot read what the user has typed but not yet committed.
+
+MECHANISM (code read, not modified) — these refusals are DELIBERATE gates:
+  frontends/gpui/src/views/editor_view.rs:1391-1396   tab swallowed
+      if RowOrigin::from_id(&row_id).is_creation_placeholder() {
+          cx.stop_propagation(); return; }        // "nothing to indent"
+  frontends/gpui/src/views/editor_view.rs:1409-1414  shift+tab swallowed
+  frontends/gpui/src/views/editor_view.rs:1369-1372  backspace-at-0 swallowed
+  frontends/gpui/src/views/editor_view.rs:1267-1301  Enter routes ONLY to
+      ctrl.commit_creation_slot(&live_text)
+  crates/holon-frontend/src/view_event_handler.rs:233-235
+      if new_value.is_empty() { return PopupResult::NotActive; }
+      <- this is exactly why Enter on an empty slot creates nothing
+  crates/holon-frontend/src/editor_view_model.rs:806-810
+      assert!(!RowOrigin::from_id(target_id).is_creation_placeholder(),
+              "structural {key:?} dispatched against creation-slot id …")
+      <- structural ops on a virtual id are unrepresentable at the op layer,
+         not merely failing in SQL. The GPUI swallows exist to keep this
+         assert unreachable.
+  Dioxus mirrors the same gating: frontends/dioxus-web/src/editor.rs:273, :291.
+
+READING: the behaviour is designed, the DEFECT is that it is invisible — the
+user presses Tab and receives no signal at all. Whether virtual blocks SHOULD
+support indent/Enter-empty is a design question, recorded separately for a
+ruling; this row documents only the current behaviour and its silence.

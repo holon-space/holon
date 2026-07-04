@@ -1,7 +1,0 @@
-# Seeds for failure cases proptest has generated in the past. It is
-# automatically read and these particular cases re-run before any
-# novel cases are generated.
-#
-# It is recommended to check this file in to source control so that
-# everyone who runs the test benefits from these saved cases.
-cc 79cb33d73e8915a712f6cbbdea9568e10e13785a9768bb1ba6b10cf2ab013c38 # shrinks to (initial_state, transitions, seen_counter) = (EditorPureRef { blocks: {"block:child0": PureBlock { parent: Some("block:root"), content: "hello", sort_key: "b", is_text: true }, "block:root": PureBlock { parent: None, content: "", sort_key: "a", is_text: false }}, root_id: "block:root", editor: PureEditor { block_id: Some("block:child0"), text: "hello", cursor: 0 }, focus_main: Some("block:child0"), focus_cursor_main: Some(CapCursor { line: 0, column: 0 }), next_id: 1, last_transition_kind: None }, [SplitBlock(SplitBlock { block_id: "block:child0", position: 5 }), TypeChars(TypeChars { text: "a" })], None)

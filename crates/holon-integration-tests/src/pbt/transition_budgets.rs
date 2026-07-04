@@ -13,8 +13,17 @@ use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+// Budget formulas + inputs live in holon-pbt-core (Phase 1a Step 1); re-exported
+// so existing `crate::pbt::transition_budgets::…` import sites keep resolving.
+pub use holon_pbt_core::budget::{
+    CACHE_EVENT_READS, CLICK_JITTER_TOLERANCE, ExpectedSql, JOURNAL_READS, MutationKind,
+    NAV_DML_READS, NAV_RENDER_FAN_READS, OPEN_TAB_ACTIVATE_CLICK_RESOLVE_READS,
+    OPEN_TAB_INSERT_CLICK_RESOLVE_READS, PIN_BLOCK_CLICK_RESOLVE_READS, REACTIVE_BASE,
+    READS_PER_WATCH, SqlBudget, cdc_tolerance, docs_tolerance, expected_sql_for_kind,
+};
+use holon_pbt_core::types::Mutation;
+
 use super::reference_state::ReferenceState;
-use super::types::Mutation;
 use crate::test_tracing::TransitionMetrics;
 
 // ── SQL count model ───────────────────────────────────────────────
@@ -60,55 +69,6 @@ use crate::test_tracing::TransitionMetrics;
 // "query" spans during post-startup transitions. Only user watches from
 // SetupWatch contribute.
 
-pub(crate) const REACTIVE_BASE: usize = 5;
-pub(crate) const JOURNAL_READS: usize = 2;
-pub(crate) const NAV_DML_READS: usize = 5;
-pub(crate) const CACHE_EVENT_READS: usize = 3;
-pub(crate) const READS_PER_WATCH: usize = 2;
-
-// First navigation to a root renders it for the first time: each watch
-// matview takes `ensure_view`'s create path (2 sqlite_master existence
-// checks, one before and one under the DDL mutex, + the initial view
-// SELECT). Measured on the minimal WriteOrgFile×2 → StartApp →
-// NavigateFocus capture: 6 new views ⇒ ~18 reads + 6 CREATEs. Revisits hit
-// the known-views cache and get no allowance. The duplicate render-pass
-// reads (watch_ui trigger storm re-rendering 2-3× per focus change) ride
-// on the tolerance until the trigger coalescing lands.
-pub(crate) const FIRST_VISIT_VIEW_READS: usize = 18;
-pub(crate) const FIRST_VISIT_VIEW_DDL: usize = 6;
-
-/// Per-variant budget files share this tolerance helper. Mirrors the
-/// inline computation at the top of `expected_sql` — base jitter (4)
-/// plus extra matview checks (~2 reads per extra doc) for restarts
-/// reusing matviews via `ensure_view`.
-pub(crate) fn docs_tolerance(state: &ReferenceState) -> usize {
-    let docs = state.files.documents.len();
-    4 + if docs > 1 { (docs - 1) * 2 } else { 0 }
-}
-
-/// Expected SQL counts for a transition, computed from current state.
-#[derive(Debug)]
-pub struct ExpectedSql {
-    /// Expected number of SQL reads (via turso query())
-    pub reads: usize,
-    /// Expected number of SQL writes (via turso execute())
-    pub writes: usize,
-    /// Expected number of DDL statements
-    pub ddl: usize,
-    /// Tolerance: actual may exceed expected by this many (for async race
-    /// margins)
-    pub tolerance: usize,
-}
-
-/// Per-transition SQL budget. Separated from the behaviour trait
-/// (`holon_pbt_core::TransitionImpl`) because the budget is an
-/// integration-test concern that has no meaning for the layout /
-/// editor-pure PBTs — those slices never touch SQL. Each transition
-/// variant implements this; the `E2ETransition` enum dispatches it.
-pub trait SqlBudget {
-    fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql;
-}
-
 /// Compute expected SQL counts for a transition given the current reference
 /// state.
 ///
@@ -128,131 +88,112 @@ pub fn expected_sql(
     transition.expected_sql(ref_state)
 }
 
-/// Mutation kind discriminant — avoids constructing dummy Mutation values.
-pub(crate) enum MutationKind {
-    Create,
-    Update,
-    Delete,
-    Move,
-    RestartApp,
+// ── Complexity class (derived from the formula above) ─────────────
+
+/// A synthetic reference state used only to probe a budget formula's
+/// state-sensitivity.
+///
+/// # Every QUANTITY moves together; only the booleans are enumerated
+/// One `scale` field answers every `usize` accessor, and that is the whole
+/// safety property: it is structurally impossible to leave one quantity pinned
+/// at a constant while the others grow.
+///
+/// This is not cosmetic. A formula whose state-dependent term is GATED by a
+/// quantity — `joins * (join.reads - REACTIVE_BASE)` in `DeleteBackward` — has
+/// that entire term multiplied away when the gate is pinned at 0, and reports
+/// `(5, 0, 0)` at every state size. Pinning a `usize` does not "select a
+/// branch", it ERASES the arm that would have revealed the dependency, and the
+/// transition is then misclassified `Constant` and admitted into the trend
+/// check's teeth.
+///
+/// INVARIANT FOR THE NEXT EDITOR: if `RefSqlCardinality` gains a `usize`
+/// accessor, answer it from `scale`. Never return a literal — a literal here is
+/// the defect above, reintroduced. Booleans are the only members that may hold
+/// a fixed value, and only because [`declared_complexity_class`] enumerates
+/// every combination of them rather than trusting one.
+struct CardinalityProbe {
+    scale: usize,
+    first_visit: bool,
+    open_tab_activated: bool,
+    content_writes_sql: bool,
 }
 
-impl MutationKind {
-    fn from_mutation(m: &Mutation) -> Self {
-        match m {
-            Mutation::Create { .. } => Self::Create,
-            Mutation::Update { .. } => Self::Update,
-            Mutation::Delete { .. } => Self::Delete,
-            Mutation::Move { .. } => Self::Move,
-            Mutation::RestartApp => Self::RestartApp,
+impl holon_pbt_core::capabilities::RefSqlCardinality for CardinalityProbe {
+    fn block_count(&self) -> usize {
+        self.scale
+    }
+    fn document_count(&self) -> usize {
+        self.scale
+    }
+    fn active_watch_count(&self) -> usize {
+        self.scale
+    }
+    /// A `usize` EVENT COUNT, and therefore scaled like every other quantity —
+    /// see the type's invariant. It gates `DeleteBackward`'s O(state) merge
+    /// arm.
+    fn last_backspace_joins(&self) -> usize {
+        self.scale
+    }
+    fn last_navigate_first_visit(&self) -> bool {
+        self.first_visit
+    }
+    fn last_open_tab_activated(&self) -> bool {
+        self.open_tab_activated
+    }
+    fn content_writes_reach_sql(&self) -> bool {
+        self.content_writes_sql
+    }
+}
+
+/// The complexity class a transition's OWN budget formula claims, derived by
+/// evaluating it at a small and a large state.
+///
+/// The formulas in `transitions/*` are the single declaration surface: one that
+/// ignores every cardinality accessor already asserts "this transition's cost
+/// does not depend on how much is in the store". A second, hand-maintained
+/// class table could only drift away from it.
+///
+/// `tolerance` is deliberately NOT compared — it is async-race slack that
+/// legitimately widens with the corpus, not claimed cost.
+///
+/// # Constant is the claim that must be EARNED
+/// The verdict is `Constant` only if the formula is state-blind under EVERY
+/// boolean combination. A transition that forks on a boolean gets each arm
+/// evaluated, so an arm that reads cardinality is caught instead of being
+/// hidden behind whichever arm the probe happened to pick. Any single
+/// combination that varies with `scale` decides `StateDependent` — the
+/// conservative direction, since a wrongly-`StateDependent` kind merely sits
+/// out of the trend check while a wrongly-`Constant` one reds the gate on arm
+/// mix.
+pub fn declared_complexity_class(
+    transition: &crate::pbt::transitions::E2ETransition,
+) -> crate::pbt::complexity_trend::ComplexityClass {
+    use crate::pbt::complexity_trend::ComplexityClass;
+    // Small must stay > 0: several formulas divide or subtract on a cardinality,
+    // and a 0-sized "state" is not a state any run ever reaches.
+    const SMALL: usize = 1;
+    const LARGE: usize = 64;
+    for first_visit in [false, true] {
+        for open_tab_activated in [false, true] {
+            for content_writes_sql in [false, true] {
+                let at = |scale| {
+                    transition.expected_sql(&CardinalityProbe {
+                        scale,
+                        first_visit,
+                        open_tab_activated,
+                        content_writes_sql,
+                    })
+                };
+                let small = at(SMALL);
+                let large = at(LARGE);
+                if (small.reads, small.writes, small.ddl) != (large.reads, large.writes, large.ddl)
+                {
+                    return ComplexityClass::StateDependent;
+                }
+            }
         }
     }
-}
-
-/// Expected SQL for a specific mutation type.
-///
-/// ## Read breakdown (from HOLON_PERF_DETAIL=1 analysis, 2026-04-05):
-///
-/// **Create** (external, via org file write — no operation journal):
-///   reactive base (5) + cache events (3) = 8 reads
-///   + per-watch: matview existence + data read (READS_PER_WATCH)
-///   + per-watch: block_with_path + render source load (2)
-///   Observed: 8 (0 watches), 14 (1 watch)
-///
-/// **Update** (UI dispatch — has operation journal):
-///   reactive base (5) + journal (4) + parent chain walk (4)
-///   + block content fetch (1) + name IS NULL (1) + properties IS NOT NULL (1)
-///   = 16 reads
-///   + per-watch: matview existence + data read (READS_PER_WATCH)
-///   + per-watch: block_with_path + render source load (2)
-///   Observed: 16 (0 watches), 18 (1 watch)
-///
-/// **Delete**: like Update + doc_uri lookup (1)
-///   = 17 + watches × (READS_PER_WATCH + 2)
-///
-/// ## CDC cascade tolerance
-///
-/// When a mutation triggers org sync, the org file gets re-written, which
-/// triggers file watcher → re-parse → CDC events. Each cascade cycle adds:
-///   - name IS NULL checks (1-2 per event)
-///   - property lookups (1-2 per affected block)
-///
-/// After the recursive CTE fix for find_document_uri, parent chain walks no
-/// longer scale with block count (O(1) instead of O(depth)). The remaining CDC
-/// overhead is mostly constant per mutation.
-pub(crate) fn cdc_tolerance(blocks: usize, docs: usize) -> usize {
-    // Empirical after CTE fix: CDC overhead is much flatter for single-doc.
-    // Multi-doc amplifies heavily: org sync re-writes ALL documents, each
-    // triggering CDC events with name IS NULL polls + property lookups.
-    // The cross-doc cost scales with blocks × (docs-1).
-    if docs > 1 {
-        4 + blocks / 2 + (docs - 1) * blocks / 3
-    } else {
-        4 + blocks / 3
-    }
-}
-
-pub(crate) fn expected_sql_for_kind(
-    kind: MutationKind,
-    watches: usize,
-    blocks: usize,
-    docs: usize,
-) -> ExpectedSql {
-    let tol = cdc_tolerance(blocks, docs);
-    match kind {
-        // Create goes through external mutation (org file write), no operation journal.
-        // reactive base (5) + cache events (3) + find_document_uri CTE (2) + properties (2)
-        // = 12 reads observed.
-        // Loro outbound reconcile adds: post-update row read (1) + find_document_uri (2)
-        //   + cache event reads (3) + properties merge (1) = 7.
-        // Per-watch: matview existence + data read + block_with_path + render source load = 4.
-        MutationKind::Create => ExpectedSql {
-            reads: REACTIVE_BASE
-                + CACHE_EVENT_READS
-                + 2
-                + 2
-                + 1
-                + 2
-                + CACHE_EVENT_READS
-                + 1
-                + watches * (READS_PER_WATCH + 2),
-            writes: 2 + watches.min(2),
-            ddl: 0,
-            tolerance: tol,
-        },
-        // Update (external path): reactive base (5) + find_document_uri CTE (2)
-        //   + name IS NULL (1) + properties IS NOT NULL (1) + per-block properties (2)
-        //   = 11 reads observed.
-        // Update (UI path): adds journal (4) + block content fetch (1) = 16 reads.
-        // Per-watch: matview existence + data read = 2.
-        MutationKind::Update => ExpectedSql {
-            reads: REACTIVE_BASE + JOURNAL_READS + 2 + 1 + 1 + 1 + 2 + watches * READS_PER_WATCH,
-            writes: 3,
-            ddl: 0,
-            tolerance: tol,
-        },
-        // Delete: like Update + doc_uri extra CTE (1).
-        MutationKind::Delete => ExpectedSql {
-            reads: REACTIVE_BASE + JOURNAL_READS + 3 + 1 + 1 + 1 + 2 + watches * READS_PER_WATCH,
-            writes: 3,
-            ddl: 0,
-            tolerance: tol,
-        },
-        // Move: 2× find_document_uri CTE (2) + content fetch (1) + name IS NULL (1)
-        //   + properties IS NOT NULL (1) + per-block properties (2).
-        MutationKind::Move => ExpectedSql {
-            reads: REACTIVE_BASE + JOURNAL_READS + 2 + 1 + 1 + 1 + 2 + watches * READS_PER_WATCH,
-            writes: 3,
-            ddl: 0,
-            tolerance: tol,
-        },
-        MutationKind::RestartApp => ExpectedSql {
-            reads: REACTIVE_BASE + 4,
-            writes: 2,
-            ddl: 0,
-            tolerance: 3,
-        },
-    }
+    ComplexityClass::Constant
 }
 
 /// Expected SQL for a mutation via its `Mutation` value.
@@ -262,7 +203,14 @@ pub(crate) fn expected_mutation_sql(
     blocks: usize,
     docs: usize,
 ) -> ExpectedSql {
-    expected_sql_for_kind(MutationKind::from_mutation(mutation), watches, blocks, docs)
+    let kind = match mutation {
+        Mutation::Create { .. } => MutationKind::Create,
+        Mutation::Update { .. } => MutationKind::Update,
+        Mutation::Delete { .. } => MutationKind::Delete,
+        Mutation::Move { .. } => MutationKind::Move,
+        Mutation::RestartApp => MutationKind::RestartApp,
+    };
+    expected_sql_for_kind(kind, watches, blocks, docs)
 }
 
 // ── Transition key ────────────────────────────────────────────────
@@ -295,6 +243,11 @@ pub fn transition_key(transition: &crate::pbt::transitions::E2ETransition) -> St
 pub enum Violation {
     Warning(String),
     Error(String),
+    /// A breach of a PINNED ceiling — a budget measured and fixed at the
+    /// observed maximum. Unlike [`Violation::Error`] this fails the run whether
+    /// or not `HOLON_PERF_BUDGET` enforces, so the pinned number is a real
+    /// upper limit rather than a logged note.
+    PinnedError(String),
 }
 
 // ── Generic NFR metric model (C2) ─────────────────────────────────
@@ -310,6 +263,7 @@ pub enum Violation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Metric {
     SqlReads,
+    SqlReadRepeat,
     SqlWrites,
     SqlDdl,
     MaxQueryMs,
@@ -326,6 +280,7 @@ impl Metric {
     pub fn key(self) -> &'static str {
         match self {
             Metric::SqlReads => "sql_reads",
+            Metric::SqlReadRepeat => "sql_read_repeat",
             Metric::SqlWrites => "sql_writes",
             Metric::SqlDdl => "sql_ddl",
             Metric::MaxQueryMs => "max_query_ms",
@@ -342,6 +297,52 @@ impl Metric {
 pub enum Severity {
     Warn,
     Error,
+    /// See [`Violation::PinnedError`].
+    Pinned,
+}
+
+/// Transitions whose SQL-read ceiling is PINNED at a measured maximum and
+/// therefore enforced unconditionally.
+///
+/// The click-driven navigation family: both reach navigation through the
+/// rendered widget tree, so both pay a click-resolve cost — but each is
+/// budgeted by its OWN measured constant, since a shared one would have to sit
+/// at the larger and leave the cheaper transition slack to hide in. Every other
+/// transition keeps the catalog-wide `HOLON_PERF_BUDGET` opt-in.
+fn sql_reads_pinned(transition: &crate::pbt::transitions::E2ETransition) -> bool {
+    use crate::pbt::transitions::E2ETransition as TV;
+    matches!(transition, TV::PinBlock(_) | TV::OpenTabViaModifierClick(_))
+}
+
+/// Redundancy ratchet: the largest number of times ONE read binding-set may
+/// re-execute inside a single transition window.
+///
+/// Budgets are checked against the DEDUPLICATED read count, so the
+/// re-execution defect (task #15) no longer inflates them — this is the
+/// separate ceiling that keeps the defect from growing while it is unfixed.
+///
+/// Measured 2026-08-06 over 2063 transition samples / 2860 duplicate-read
+/// rows: max 54 (`SimulateRestart`, the block-hydrate select under
+/// `org.ingest_file`), then 36, 32, 26, 26, 24; 99.7% of rows sit at ≤14.
+/// The ceiling is 64 rather than 54 because that top decile is ten rows
+/// concentrated in the two full-reprojection transitions — a max drawn from
+/// ten observations is not characterized, and a ratchet that reds on sampling
+/// noise gets disarmed instead of fixed.
+///
+/// RATCHET DOWN as #15 progresses, NEVER UP. A breach means the re-execution
+/// defect grew; the fix is the new consumer, never this number.
+pub const MAX_READ_REPEAT_PER_BINDING: usize = 64;
+
+/// Violation messages quote the offending statement; the `sql` span attribute
+/// is already head…tail-fingerprinted (~440 chars), which is far more than a
+/// one-line failure needs to identify it.
+fn short_sql(sql: &str) -> String {
+    const KEEP: usize = 90;
+    let chars: Vec<char> = sql.chars().collect();
+    if chars.len() <= KEEP {
+        return sql.to_string();
+    }
+    format!("{}…", chars[..KEEP].iter().collect::<String>())
 }
 
 /// One metric's observed value for a transition, its absolute hard cap, and
@@ -369,22 +370,68 @@ pub fn build_samples(
     let mut samples = Vec::new();
 
     let reads_limit = expected.reads + expected.tolerance;
+    let dedup_reads = metrics.dedup_read_count();
+    let raw_reads = metrics.sql_read_count;
+    // PINNED ceilings compare RAW reads; every other budget compares dedup.
+    //
+    // The pins exist to catch identical-binding redundancy GROWTH — entry 14's
+    // defect is literally "41 redundant re-snapshots of two `watch_view`
+    // SELECTs" — so measuring them after dedup would subtract exactly the thing
+    // being pinned. Their values were also measured on raw reads and are not
+    // re-derived here.
+    let pinned = sql_reads_pinned(transition);
     samples.push(MetricSample {
         metric: Metric::SqlReads,
-        actual: metrics.sql_read_count as f64,
+        actual: if pinned { raw_reads } else { dedup_reads } as f64,
         limit: reads_limit as f64,
-        severity: Severity::Error,
-        message: format!(
-            "{key}.sql_reads: {actual} exceeds expected {expected} + tolerance {tol} = {limit} \
-             (watches={w}, docs={d})",
-            actual = metrics.sql_read_count,
-            expected = expected.reads,
-            tol = expected.tolerance,
-            limit = reads_limit,
-            w = ref_state.mcp.active_watches.len(),
-            d = ref_state.files.documents.len(),
-        ),
+        severity: if pinned {
+            Severity::Pinned
+        } else {
+            Severity::Error
+        },
+        // The pinned arm keeps the historical wording verbatim up to the
+        // `(watches=…)` tail — `docs/Testing/KeystoneKnownReds.md` matches
+        // `pinblock-unrendered-target` on that prefix.
+        message: if pinned {
+            format!(
+                "{key}.sql_reads: {raw_reads} exceeds expected {expected} + tolerance {tol} = \
+                 {limit} (watches={w}, docs={d}) [PINNED ceilings gate RAW reads; dedup was \
+                 {dedup_reads}]",
+                expected = expected.reads,
+                tol = expected.tolerance,
+                limit = reads_limit,
+                w = ref_state.mcp.active_watches.len(),
+                d = ref_state.files.documents.len(),
+            )
+        } else {
+            format!(
+                "{key}.sql_reads: {dedup_reads} dedup (raw {raw_reads}, {excess} redundant \
+                 re-executions) exceeds expected {expected} + tolerance {tol} = {limit} \
+                 (watches={w}, docs={d})",
+                excess = metrics.redundant_read_excess(),
+                expected = expected.reads,
+                tol = expected.tolerance,
+                limit = reads_limit,
+                w = ref_state.mcp.active_watches.len(),
+                d = ref_state.files.documents.len(),
+            )
+        },
     });
+
+    if let Some((sql, repeats)) = metrics.worst_read_repeat() {
+        samples.push(MetricSample {
+            metric: Metric::SqlReadRepeat,
+            actual: repeats as f64,
+            limit: MAX_READ_REPEAT_PER_BINDING as f64,
+            severity: Severity::Error,
+            message: format!(
+                "{key}.sql_read_repeat: one binding-set of `{sql}` re-executed {repeats}x, \
+                 over the redundancy ratchet {MAX_READ_REPEAT_PER_BINDING} — the re-execution \
+                 defect GREW; find the new consumer, do not raise the ratchet",
+                sql = short_sql(sql),
+            ),
+        });
+    }
 
     let writes_limit = expected.writes + expected.tolerance;
     samples.push(MetricSample {
@@ -504,6 +551,7 @@ pub fn evaluate(samples: &[MetricSample]) -> Vec<Violation> {
         .map(|s| match s.severity {
             Severity::Warn => Violation::Warning(s.message.clone()),
             Severity::Error => Violation::Error(s.message.clone()),
+            Severity::Pinned => Violation::PinnedError(s.message.clone()),
         })
         .collect()
 }
@@ -726,7 +774,7 @@ pub fn max_rss_delta_bytes(transition: &crate::pbt::transitions::E2ETransition) 
         // wiring guard rejects the flipped consolidator (no matviews/CDC/spans of a
         // full boot, but a fresh backend + DI allocations); budget alongside StartApp.
         "EpochFlipRejected" => 1500 * MB,
-        "BulkExternalAdd" | "CreateDocument" => 200 * MB,
+        "BulkExternalAdd" | "CreateDocument" | "DeleteDocument" => 200 * MB,
         "SimulateRestart" => 80 * MB,
         "ApplyMutation" => 50 * MB,
         "SetupWatch" => 15 * MB,
@@ -913,5 +961,88 @@ mod tests {
         let json = serde_json::to_string_pretty(&map).unwrap();
         let parsed = parse_baseline(&json);
         assert_eq!(parsed, map);
+    }
+}
+
+#[cfg(test)]
+mod complexity_class_tests {
+    use holon_api::EntityUri;
+
+    use super::declared_complexity_class;
+    use crate::pbt::complexity_trend::ComplexityClass;
+    use crate::pbt::transitions::ClickBlock;
+    use crate::pbt::transitions::DeleteBackward;
+    use crate::pbt::transitions::E2ETransition;
+    use crate::pbt::transitions::InstantiateTemplate;
+    use crate::pbt::transitions::Nothing;
+    use crate::pbt::transitions::PinBlock;
+
+    fn uri(s: &str) -> EntityUri {
+        EntityUri::parse(s).expect("probe uri")
+    }
+
+    /// The probe must DISCRIMINATE in BOTH directions. A derivation that
+    /// answered `StateDependent` for everything would leave
+    /// `inv-complexity-class-trend` with no teeth in production and no test
+    /// would notice; one that answers `Constant` too eagerly admits an O(state)
+    /// transition into the teeth, which is the defect this test now pins.
+    #[test]
+    fn the_probe_separates_state_blind_from_state_reading_formulas() {
+        // ── must be Constant: reads are a sum of constants under every boolean
+        // combination. (Their TOLERANCE may read `docs` — that is race slack,
+        // deliberately excluded from the comparison.)
+        for (name, t) in [
+            (
+                "ClickBlock",
+                E2ETransition::ClickBlock(ClickBlock {
+                    region: holon_api::Region::Main,
+                    block_id: uri("block:x"),
+                }),
+            ),
+            (
+                "PinBlock",
+                E2ETransition::PinBlock(PinBlock {
+                    region: holon_api::Region::RightSidebar,
+                    block_id: uri("block:x"),
+                }),
+            ),
+        ] {
+            assert_eq!(
+                declared_complexity_class(&t),
+                ComplexityClass::Constant,
+                "{name} is state-blind and must stay inside the trend check's teeth",
+            );
+        }
+
+        // ── must be StateDependent: the formula reads a cardinality.
+        //
+        // `DeleteBackward` is the REGRESSION PIN for the probe-fixed-multiplier
+        // defect. Its merge arm is `joins * (join.reads - REACTIVE_BASE)`, so a
+        // probe that pinned `last_backspace_joins` at 0 multiplied the whole
+        // O(state) term away and reported `Constant` — admitting a transition
+        // whose two arms differ >4x (join arm reads=28 vs REACTIVE_BASE=5) into
+        // a check whose slack is x1.5+2. It would then have RED on arm mix
+        // rather than on a trend.
+        for (name, t) in [
+            (
+                "DeleteBackward",
+                E2ETransition::DeleteBackward(DeleteBackward { count: 1 }),
+            ),
+            (
+                "InstantiateTemplate",
+                E2ETransition::InstantiateTemplate(InstantiateTemplate {
+                    parent_id: uri("block:parent"),
+                    date: "2026-08-12".to_string(),
+                    mood: "focused".to_string(),
+                }),
+            ),
+            ("Nothing", E2ETransition::Nothing(Nothing)),
+        ] {
+            assert_eq!(
+                declared_complexity_class(&t),
+                ComplexityClass::StateDependent,
+                "{name} reads a cardinality and must be OUT of the trend check's teeth",
+            );
+        }
     }
 }

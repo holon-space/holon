@@ -1,5 +1,9 @@
 //! `ComponentSet` — the single source of truth for a PBT run (ADR 0009).
 //!
+//! @pbt kind cap-plumbing
+//! @pbt covers all-slices — the subsystem lattice (Wiring + projections) the
+//!   bisection shrinker walks; membership only, providers live in the CapMap.
+//!
 //! A `ComponentSet` is a [`Wiring`] (ADR 0007: storage/sync adapters + actors)
 //! extended with the set of **observable projections** that are checked against
 //! the reference oracle and can be toggled as bisection nodes. From it we

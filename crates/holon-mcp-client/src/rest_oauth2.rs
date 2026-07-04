@@ -1,0 +1,639 @@
+//! Generic OAuth2 (refresh-token grant) auth arm for the `rest` transport.
+//!
+//! This is a *second* auth mode for `transport: rest`, orthogonal to the static
+//! header the transport already supports. It is deliberately generic — nothing
+//! here is Google-specific; a sidecar wires it up entirely from YAML
+//! ([`RestOAuth2Config`]) plus environment/keychain/file references.
+//!
+//! Flow: a long-lived **refresh token** (obtained once, out of band, by the
+//! user's consent flow) is exchanged at the provider's `token_url` for a
+//! short-lived **access token** via the OAuth2 refresh-token grant
+//! (RFC 6749 §6). The access token is cached in memory with its expiry and
+//! attached as `Authorization: Bearer <token>` on every request. It is
+//! refreshed proactively at ~90% of its lifetime, and once more on a 401.
+//!
+//! # Security invariants (audited)
+//!
+//! - **Access tokens never touch disk.** Only the long-lived refresh token
+//!   lives in a file (written by the user's bootstrap helper, never by Holon);
+//!   the access token exists only in this process's memory.
+//! - **No token or secret is ever logged.** [`OAuth2TokenProvider`]'s [`Debug`]
+//!   redacts every credential; error messages redact token-request URLs' query
+//!   strings and never include the request body (which carries the refresh
+//!   token + client secret) or a success response body (which carries the
+//!   access token).
+//! - **Credential files must be private.** A refresh-token (or client-secret)
+//!   file that is group/world-accessible is *refused loudly* at startup — a
+//!   readable secret is a compromised secret.
+//! - **Fail loud, never fake.** A missing env var / absent credential file
+//!   surfaces as the typed [`UnresolvedVar`] ("not configured yet" → the
+//!   integration is disclosed-skipped), while a *misconfigured* credential (bad
+//!   perms, unreadable, empty, non-JSON token response, refresh failure) is a
+//!   hard error with an actionable message. Nothing silently degrades.
+
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
+
+use serde::Deserialize;
+use serde::Serialize;
+use tokio::sync::Mutex;
+use tracing::warn;
+
+use crate::integration_config::UnresolvedVar;
+use crate::integration_config::VarLookup;
+
+/// OAuth2 refresh-token-grant configuration, as declared under
+/// `transport.rest.auth.oauth2` in a sidecar.
+///
+/// Secrets are never inlined: `client_id`/`client_secret` are referenced by env
+/// name (`*_env`) or by file path (`*_file`), and the long-lived refresh token
+/// lives in `refresh_token_file` (which the user's bootstrap helper writes with
+/// mode 0600). `scopes` is informational only (the refresh grant does not send
+/// scopes; they document what the refresh token was consented for).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestOAuth2Config {
+    /// The provider's OAuth2 token endpoint (e.g.
+    /// `https://oauth2.googleapis.com/token`). POSTed to for the refresh grant.
+    pub token_url: String,
+    /// Env var holding the OAuth client id. Exactly one of `client_id_env` /
+    /// `client_id_file` must be set.
+    #[serde(default)]
+    pub client_id_env: Option<String>,
+    /// File holding the OAuth client id (contents trimmed).
+    #[serde(default)]
+    pub client_id_file: Option<String>,
+    /// Env var holding the OAuth client secret. Exactly one of
+    /// `client_secret_env` / `client_secret_file` must be set.
+    #[serde(default)]
+    pub client_secret_env: Option<String>,
+    /// File holding the OAuth client secret. Enforced to be mode 0600.
+    #[serde(default)]
+    pub client_secret_file: Option<String>,
+    /// Path to the long-lived refresh token. Written by the user's one-time
+    /// bootstrap helper (never by Holon), enforced to be mode 0600. A leading
+    /// `~/` is expanded to the user's home directory.
+    pub refresh_token_file: String,
+    /// Informational: the scopes the refresh token was consented for. Not sent
+    /// on the refresh grant; documents intent and aids the setup docs.
+    #[serde(default)]
+    pub scopes: Vec<String>,
+}
+
+/// The parsed subset of an OAuth2 token-endpoint response we rely on.
+///
+/// A refresh grant returns a fresh `access_token` (+ its `expires_in`); it does
+/// NOT return a new refresh token (the long-lived one is reused), so we
+/// deliberately ignore any other fields.
+#[derive(Debug, Deserialize)]
+struct TokenResponse {
+    access_token: String,
+    /// Seconds until the access token expires. Defaults to a conservative one
+    /// hour if the provider omits it (rare) so we never treat a token as
+    /// eternal.
+    #[serde(default = "default_expires_in")]
+    expires_in: u64,
+}
+
+fn default_expires_in() -> u64 {
+    3600
+}
+
+/// A cached access token plus the two instants that govern its reuse.
+struct CachedToken {
+    access_token: String,
+    /// Proactive-refresh point: ~90% of the lifetime. Past this we refresh even
+    /// though the token may still be technically valid.
+    refresh_after: Instant,
+}
+
+/// Holds the resolved OAuth2 credentials and an in-memory access-token cache,
+/// serving fresh `Bearer` tokens behind a mutex. One provider is shared (via
+/// `Arc`) across every call of a `rest` integration, so all calls share one
+/// cache and one refresh.
+pub struct OAuth2TokenProvider {
+    token_url: String,
+    client_id: String,
+    client_secret: String,
+    refresh_token: String,
+    scopes: Vec<String>,
+    client: reqwest::Client,
+    cached: Mutex<Option<CachedToken>>,
+}
+
+impl std::fmt::Debug for OAuth2TokenProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Redact EVERY credential. Only non-secret shape is printed.
+        f.debug_struct("OAuth2TokenProvider")
+            .field("token_url", &redact_url(&self.token_url))
+            .field("scopes", &self.scopes)
+            .field("client_id", &"<redacted>")
+            .field("client_secret", &"<redacted>")
+            .field("refresh_token", &"<redacted>")
+            .finish()
+    }
+}
+
+impl OAuth2TokenProvider {
+    /// Resolve credentials and build the provider. All I/O and permission
+    /// checks happen here (at startup), so a misconfiguration fails before the
+    /// first request.
+    ///
+    /// Returns [`UnresolvedVar`] (a disclosed skip) when the integration is
+    /// simply *not configured yet* (an env ref is unset, or the refresh-token
+    /// file does not exist). Every other problem — an ambiguous/absent
+    /// env-vs-file choice, a group/world-readable credential file, an
+    /// unreadable or empty file — is a hard error with an actionable
+    /// message.
+    pub fn from_config(cfg: &RestOAuth2Config, lookup: &VarLookup<'_>) -> anyhow::Result<Self> {
+        if cfg.token_url.trim().is_empty() {
+            anyhow::bail!("oauth2.token_url must not be empty");
+        }
+        let client_id = resolve_secret(
+            "client_id",
+            cfg.client_id_env.as_deref(),
+            cfg.client_id_file.as_deref(),
+            lookup,
+            /* enforce_private_file */ false,
+        )?;
+        let client_secret = resolve_secret(
+            "client_secret",
+            cfg.client_secret_env.as_deref(),
+            cfg.client_secret_file.as_deref(),
+            lookup,
+            /* enforce_private_file */ true,
+        )?;
+        let refresh_token = read_refresh_token(&cfg.refresh_token_file)?;
+
+        Ok(Self {
+            token_url: cfg.token_url.clone(),
+            client_id,
+            client_secret,
+            refresh_token,
+            scopes: cfg.scopes.clone(),
+            client: reqwest::Client::new(),
+            cached: Mutex::new(None),
+        })
+    }
+
+    /// Build with a caller-supplied HTTP client (tests point it at a mock).
+    #[cfg(test)]
+    fn with_client_for_test(
+        token_url: String,
+        client_id: String,
+        client_secret: String,
+        refresh_token: String,
+        client: reqwest::Client,
+    ) -> Self {
+        Self {
+            token_url,
+            client_id,
+            client_secret,
+            refresh_token,
+            scopes: Vec::new(),
+            client,
+            cached: Mutex::new(None),
+        }
+    }
+
+    /// A valid access token: the cached one while it is still within ~90% of
+    /// its lifetime, otherwise a freshly refreshed one.
+    pub async fn access_token(&self) -> anyhow::Result<String> {
+        let mut guard = self.cached.lock().await;
+        if let Some(tok) = guard.as_ref()
+            && Instant::now() < tok.refresh_after
+        {
+            return Ok(tok.access_token.clone());
+        }
+        let fresh = self.do_refresh().await?;
+        let access = fresh.access_token.clone();
+        *guard = Some(fresh);
+        Ok(access)
+    }
+
+    /// Force a refresh regardless of cache state (used on a 401 to recover from
+    /// a token the server rejected before we thought it expired).
+    pub async fn force_refresh(&self) -> anyhow::Result<String> {
+        let mut guard = self.cached.lock().await;
+        let fresh = self.do_refresh().await?;
+        let access = fresh.access_token.clone();
+        *guard = Some(fresh);
+        Ok(access)
+    }
+
+    /// POST the refresh-token grant and parse the response into a cache entry.
+    ///
+    /// Redaction: the request BODY (refresh token + client secret) is never
+    /// logged; the URL is stripped of any query string; a non-2xx body is
+    /// surfaced only via its safe OAuth `error`/`error_description` fields; a
+    /// 2xx body is never echoed (it carries the access token).
+    async fn do_refresh(&self) -> anyhow::Result<CachedToken> {
+        let form = [
+            ("grant_type", "refresh_token"),
+            ("refresh_token", self.refresh_token.as_str()),
+            ("client_id", self.client_id.as_str()),
+            ("client_secret", self.client_secret.as_str()),
+        ];
+        let resp = self
+            .client
+            .post(&self.token_url)
+            .form(&form)
+            .send()
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "oauth2 token refresh POST to {} failed: {}",
+                    redact_url(&self.token_url),
+                    // `without_url` strips the URL (and thus any query) from the
+                    // reqwest error before it reaches a log.
+                    e.without_url()
+                )
+            })?;
+        let status = resp.status();
+        let body = resp.text().await.map_err(|e| {
+            anyhow::anyhow!(
+                "oauth2 token refresh: reading response from {} failed: {}",
+                redact_url(&self.token_url),
+                e.without_url()
+            )
+        })?;
+
+        if !status.is_success() {
+            anyhow::bail!(
+                "oauth2 token refresh to {} returned HTTP {}: {}",
+                redact_url(&self.token_url),
+                status,
+                redact_token_error_body(&body)
+            );
+        }
+
+        let parsed: TokenResponse = serde_json::from_str(&body).map_err(|e| {
+            // Never echo the body — a success-shaped body would carry the token.
+            anyhow::anyhow!(
+                "oauth2 token refresh to {} returned an unexpected/non-JSON response (body \
+                 redacted): {e}. Check token_url and that the refresh token is still valid.",
+                redact_url(&self.token_url)
+            )
+        })?;
+
+        if parsed.access_token.is_empty() {
+            anyhow::bail!(
+                "oauth2 token refresh to {} returned an empty access_token",
+                redact_url(&self.token_url)
+            );
+        }
+
+        // Refresh proactively at 90% of the lifetime so a request never rides an
+        // about-to-expire token.
+        let lifetime = Duration::from_secs(parsed.expires_in.max(1));
+        let refresh_after = Instant::now() + lifetime.mul_f64(0.9);
+        Ok(CachedToken {
+            access_token: parsed.access_token,
+            refresh_after,
+        })
+    }
+}
+
+/// Build a shared provider (`Arc`) from config — the shape the transport holds.
+pub fn build_provider(
+    cfg: &RestOAuth2Config,
+    lookup: &VarLookup<'_>,
+) -> anyhow::Result<Arc<OAuth2TokenProvider>> {
+    Ok(Arc::new(OAuth2TokenProvider::from_config(cfg, lookup)?))
+}
+
+// ---------------------------------------------------------------------------
+// Credential resolution helpers
+// ---------------------------------------------------------------------------
+
+/// Resolve a credential from exactly one of an env reference or a file path.
+///
+/// - env set, value present   → value
+/// - env set, value absent    → `UnresolvedVar` (disclosed skip: not
+///   configured)
+/// - file set, absent         → `UnresolvedVar` (disclosed skip: not
+///   provisioned)
+/// - file set, present        → contents (trimmed); 0600-enforced when
+///   `enforce_private_file`
+/// - neither / both set       → hard error (structural config mistake)
+fn resolve_secret(
+    field: &str,
+    env_name: Option<&str>,
+    file_path: Option<&str>,
+    lookup: &VarLookup<'_>,
+    enforce_private_file: bool,
+) -> anyhow::Result<String> {
+    match (env_name, file_path) {
+        (Some(_), Some(_)) => {
+            anyhow::bail!("oauth2: set only one of `{field}_env` or `{field}_file`, not both")
+        }
+        (None, None) => anyhow::bail!("oauth2: one of `{field}_env` or `{field}_file` must be set"),
+        (Some(env), None) => lookup(env).ok_or_else(|| {
+            anyhow::Error::new(UnresolvedVar {
+                var: env.to_string(),
+            })
+        }),
+        (None, Some(path)) => read_credential_file(path, enforce_private_file),
+    }
+}
+
+/// Read the long-lived refresh token from its file. Absent file → not
+/// provisioned yet (disclosed skip); present file → 0600-enforced, trimmed,
+/// non-empty.
+fn read_refresh_token(path: &str) -> anyhow::Result<String> {
+    read_credential_file(path, /* enforce_private_file */ true).map_err(|e| {
+        // Enrich the "not provisioned" case with the bootstrap pointer while
+        // preserving the typed UnresolvedVar so the caller still disclosed-skips.
+        if e.downcast_ref::<UnresolvedVar>().is_some() {
+            anyhow::Error::new(UnresolvedVar {
+                var: format!(
+                    "refresh token file {} (run scripts/gcal-oauth-bootstrap.sh to create it)",
+                    expand_tilde(path).display()
+                ),
+            })
+        } else {
+            e
+        }
+    })
+}
+
+/// Read a credential file's trimmed contents.
+///
+/// Absent file → [`UnresolvedVar`] (a disclosed skip; the integration is simply
+/// not provisioned yet). Present but group/world-accessible → hard refusal.
+/// Present but unreadable/empty → hard error.
+fn read_credential_file(path: &str, enforce_private_file: bool) -> anyhow::Result<String> {
+    let expanded = expand_tilde(path);
+    if !expanded.exists() {
+        return Err(anyhow::Error::new(UnresolvedVar {
+            var: format!("credential file {}", expanded.display()),
+        }));
+    }
+    if enforce_private_file {
+        assert_file_private(&expanded)?;
+    }
+    let contents = std::fs::read_to_string(&expanded).map_err(|e| {
+        anyhow::anyhow!(
+            "oauth2: failed to read credential file {}: {e}",
+            expanded.display()
+        )
+    })?;
+    let trimmed = contents.trim().to_string();
+    if trimmed.is_empty() {
+        anyhow::bail!("oauth2: credential file {} is empty", expanded.display());
+    }
+    Ok(trimmed)
+}
+
+/// Refuse a credential file that is readable/writable/executable by group or
+/// other. A secret the rest of the machine can read is a compromised secret, so
+/// this is a hard, loud refusal rather than a warning.
+#[cfg(unix)]
+fn assert_file_private(path: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = std::fs::metadata(path).map_err(|e| {
+        anyhow::anyhow!(
+            "oauth2: cannot stat credential file {}: {e}",
+            path.display()
+        )
+    })?;
+    let mode = meta.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        anyhow::bail!(
+            "oauth2: credential file {} is group/world-accessible (mode {:o}); it must be private. \
+             Run: chmod 600 {}",
+            path.display(),
+            mode,
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+/// On non-Unix we cannot verify POSIX permissions, so we refuse rather than
+/// silently skip the security control.
+#[cfg(not(unix))]
+fn assert_file_private(path: &Path) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "oauth2: refusing to read credential file {} on a non-Unix platform where its private \
+         (0600) permissions cannot be verified",
+        path.display()
+    )
+}
+
+/// Expand a leading `~/` to `$HOME`. Any other path is returned unchanged.
+fn expand_tilde(path: &str) -> PathBuf {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+        warn!("oauth2: cannot expand '~' in '{path}' — $HOME is unset; using the literal path");
+    }
+    PathBuf::from(path)
+}
+
+/// Strip any query string from a URL so it is safe to log.
+pub(crate) fn redact_url(url: &str) -> String {
+    match url.split_once('?') {
+        Some((base, _)) => format!("{base}?<redacted>"),
+        None => url.to_string(),
+    }
+}
+
+/// Surface only the safe, standard OAuth error fields from a non-2xx token
+/// response; never echo the raw body (which may not conform and could contain
+/// unexpected material).
+fn redact_token_error_body(body: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(v) => {
+            let err = v.get("error").and_then(|e| e.as_str());
+            let desc = v.get("error_description").and_then(|e| e.as_str());
+            match (err, desc) {
+                (Some(e), Some(d)) => format!("error={e}, error_description={d}"),
+                (Some(e), None) => format!("error={e}"),
+                _ => "<redacted non-standard error body>".to_string(),
+            }
+        }
+        Err(_) => "<redacted non-JSON error body>".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redact_url_strips_query() {
+        assert_eq!(
+            redact_url("https://oauth2.googleapis.com/token?client_secret=abc"),
+            "https://oauth2.googleapis.com/token?<redacted>"
+        );
+        assert_eq!(
+            redact_url("https://oauth2.googleapis.com/token"),
+            "https://oauth2.googleapis.com/token"
+        );
+    }
+
+    #[test]
+    fn redact_token_error_body_keeps_only_safe_fields() {
+        let body = r#"{"error":"invalid_grant","error_description":"Token has been expired"}"#;
+        let red = redact_token_error_body(body);
+        assert!(red.contains("invalid_grant"));
+        assert!(red.contains("expired"));
+        // A body with a token-shaped field must not be echoed verbatim.
+        let sneaky = r#"{"access_token":"ya29.SECRET","foo":"bar"}"#;
+        let red = redact_token_error_body(sneaky);
+        assert!(!red.contains("SECRET"), "redaction leaked a token: {red}");
+    }
+
+    #[test]
+    fn debug_impl_redacts_all_credentials() {
+        let p = OAuth2TokenProvider::with_client_for_test(
+            "https://example.com/token".into(),
+            "my-client-id".into(),
+            "my-client-secret".into(),
+            "my-refresh-token".into(),
+            reqwest::Client::new(),
+        );
+        let dbg = format!("{p:?}");
+        assert!(!dbg.contains("my-client-id"), "{dbg}");
+        assert!(!dbg.contains("my-client-secret"), "{dbg}");
+        assert!(!dbg.contains("my-refresh-token"), "{dbg}");
+    }
+
+    #[test]
+    fn resolve_secret_missing_env_is_unresolved_var() {
+        let err = resolve_secret(
+            "client_id",
+            Some("HOLON_TEST_UNSET_OAUTH_CLIENT_ID"),
+            None,
+            &|_| None,
+            false,
+        )
+        .unwrap_err();
+        let uv = err
+            .downcast_ref::<UnresolvedVar>()
+            .expect("missing env must surface as UnresolvedVar (disclosed skip)");
+        assert_eq!(uv.var, "HOLON_TEST_UNSET_OAUTH_CLIENT_ID");
+    }
+
+    #[test]
+    fn resolve_secret_both_sources_is_hard_error() {
+        let err =
+            resolve_secret("client_id", Some("X"), Some("/tmp/y"), &|_| None, false).unwrap_err();
+        assert!(err.downcast_ref::<UnresolvedVar>().is_none());
+        assert!(err.to_string().contains("only one of"));
+    }
+
+    #[test]
+    fn resolve_secret_neither_source_is_hard_error() {
+        let err = resolve_secret("client_id", None, None, &|_| None, false).unwrap_err();
+        assert!(err.downcast_ref::<UnresolvedVar>().is_none());
+        assert!(err.to_string().contains("must be set"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn world_readable_credential_file_is_refused() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("refresh-token");
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(b"1//refresh").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let err = read_credential_file(path.to_str().unwrap(), true).unwrap_err();
+        assert!(
+            err.downcast_ref::<UnresolvedVar>().is_none(),
+            "a bad-perms file is a HARD error, not a disclosed skip"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("group/world-accessible"), "{msg}");
+        assert!(msg.contains("chmod 600"), "{msg}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mode_0600_credential_file_is_accepted() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("refresh-token");
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(b"  1//refresh\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let got = read_credential_file(path.to_str().unwrap(), true).unwrap();
+        assert_eq!(got, "1//refresh", "contents trimmed");
+    }
+
+    #[cfg(unix)]
+    fn write_file(mode: u32, contents: &[u8]) -> (tempfile::TempDir, String) {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cred");
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(contents).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        (dir, path.to_str().unwrap().to_string())
+    }
+
+    // The `client_secret_file` variant flows through resolve_secret with
+    // enforce_private_file=true, so it enforces 0600 exactly like
+    // refresh_token_file — a group/world-readable secret file is refused loudly.
+    #[cfg(unix)]
+    #[test]
+    fn client_secret_file_variant_enforces_0600() {
+        let (_dir, path) = write_file(0o644, b"GOCSPX-secret");
+        let err = resolve_secret("client_secret", None, Some(&path), &|_| None, true)
+            .expect_err("world-readable client_secret file must be refused");
+        assert!(
+            err.downcast_ref::<UnresolvedVar>().is_none(),
+            "must be a hard error"
+        );
+        assert!(err.to_string().contains("group/world-accessible"), "{err}");
+
+        let (_dir, path) = write_file(0o600, b"GOCSPX-secret\n");
+        let got = resolve_secret("client_secret", None, Some(&path), &|_| None, true).unwrap();
+        assert_eq!(got, "GOCSPX-secret");
+    }
+
+    // `client_id_file` is NOT perm-checked: the OAuth client id is not secret, so
+    // a world-readable client-id file is accepted (deliberate asymmetry — we do
+    // not over-restrict a non-secret). Martin's file is 0600 regardless.
+    #[cfg(unix)]
+    #[test]
+    fn client_id_file_variant_does_not_enforce_0600() {
+        let (_dir, path) = write_file(0o644, b"1234.apps.googleusercontent.com\n");
+        let got = resolve_secret("client_id", None, Some(&path), &|_| None, false)
+            .expect("client_id file need not be 0600");
+        assert_eq!(got, "1234.apps.googleusercontent.com");
+    }
+
+    #[test]
+    fn absent_credential_file_is_disclosed_skip() {
+        let err = read_credential_file("/nonexistent/holon/refresh-token", true).unwrap_err();
+        assert!(
+            err.downcast_ref::<UnresolvedVar>().is_some(),
+            "an absent (not-yet-provisioned) file must be a disclosed skip"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn empty_credential_file_is_hard_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("refresh-token");
+        std::fs::File::create(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let err = read_credential_file(path.to_str().unwrap(), true).unwrap_err();
+        assert!(err.downcast_ref::<UnresolvedVar>().is_none());
+        assert!(err.to_string().contains("is empty"));
+    }
+}

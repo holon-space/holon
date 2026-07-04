@@ -40,6 +40,13 @@ struct State {
     files: BTreeMap<PathBuf, FileEntry>,
     dirs: BTreeSet<PathBuf>,
     clock: u64,
+    /// Append-only log of every path this adapter was ASKED to create or
+    /// write, normalized. Distinct from `files`/`dirs`, which hold only what
+    /// currently exists: a containment check must see the target of a write
+    /// that was later removed or overwritten.
+    write_targets: Vec<PathBuf>,
+    /// Armed by [`InMemoryFileSystem::fail_next_write_commit`].
+    fail_next_write_commit: bool,
 }
 
 pub struct InMemoryFileSystem {
@@ -61,6 +68,8 @@ impl InMemoryFileSystem {
                 files: BTreeMap::new(),
                 dirs: BTreeSet::new(),
                 clock: 0,
+                write_targets: Vec::new(),
+                fail_next_write_commit: false,
             }),
             tx,
         }
@@ -79,11 +88,26 @@ impl InMemoryFileSystem {
         self.lock().clock
     }
 
+    /// Every path this adapter was asked to write or create, normalized and in
+    /// call order. Feeds the containment invariant: a write ATTEMPT that
+    /// escaped the vault root is a defect even when the write itself failed.
+    pub fn write_targets(&self) -> Vec<PathBuf> {
+        self.lock().write_targets.clone()
+    }
+
+    /// Fail the NEXT `write` after its temp copy exists but before that copy
+    /// replaces the target — the crash window an in-place write would tear in.
+    /// The target must come out of it holding its complete previous bytes.
+    pub fn fail_next_write_commit(&self) {
+        self.lock().fail_next_write_commit = true;
+    }
+
     /// Synchronous `create_dir_all` for non-async construction contexts
     /// (the trait method delegates here).
     pub fn mkdir_all(&self, path: &Path) {
         let path = normalize(path);
         let mut st = self.lock();
+        st.write_targets.push(path.clone());
         let mut cur = PathBuf::new();
         for comp in path.components() {
             cur.push(comp.as_os_str());
@@ -92,8 +116,8 @@ impl InMemoryFileSystem {
     }
 
     /// Remove a file, emitting a `Remove` change. Errors if absent.
-    /// (Not on the `FileSystem` trait — no production code path removes
-    /// org files; tests simulating external deletion use this directly.)
+    /// Synchronous core the trait's `remove` delegates to; pre-existing
+    /// callers simulating external deletion use it directly.
     pub fn remove_file(&self, path: &Path) -> std::io::Result<()> {
         let path = normalize(path);
         let seq = {
@@ -107,6 +131,53 @@ impl InMemoryFileSystem {
         let _ = self.tx.send(FileChange {
             path,
             kind: FileChangeKind::Remove,
+            seq,
+        });
+        Ok(())
+    }
+
+    /// Atomically move `from` to `to`, emitting ONE `Rename { from }` change on
+    /// `to` — the in-memory analog of the paired atomic rename the
+    /// `NotifyWatcher` reconstructs on real disk. Errors if `from` is absent or
+    /// `to`'s parent directory does not exist (parity with `std::fs::rename`).
+    /// The two paths are the ONLY event this move produces: no `Remove(from)` +
+    /// `Create(to)` pair, so `FileSyncController::on_file_renamed` re-homes the
+    /// document without the delete-then-create window a `mv` used to open.
+    pub fn rename_file(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        let from = normalize(from);
+        let to = normalize(to);
+        let seq = {
+            let mut st = self.lock();
+            match to.parent() {
+                Some(parent) if st.dirs.contains(parent) => {}
+                Some(parent) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!(
+                            "Parent directory does not exist (in-memory): {}",
+                            parent.display()
+                        ),
+                    ));
+                }
+                None => return Err(not_found(&to)),
+            }
+            let Some(entry) = st.files.remove(&from) else {
+                return Err(not_found(&from));
+            };
+            st.clock += 1;
+            let tick = st.clock;
+            st.files.insert(
+                to.clone(),
+                FileEntry {
+                    bytes: entry.bytes,
+                    mtime_tick: tick,
+                },
+            );
+            tick
+        };
+        let _ = self.tx.send(FileChange {
+            path: to,
+            kind: FileChangeKind::Rename { from },
             seq,
         });
         Ok(())
@@ -153,8 +224,10 @@ impl FileSystem for InMemoryFileSystem {
 
     async fn write(&self, path: &Path, contents: &[u8]) -> std::io::Result<()> {
         let path = normalize(path);
+        let temp = crate::fs_port::atomic_temp_path(&path)?;
         let (kind, tick) = {
             let mut st = self.lock();
+            st.write_targets.push(path.clone());
             match path.parent() {
                 Some(parent) if st.dirs.contains(parent) => {}
                 Some(parent) => {
@@ -170,19 +243,32 @@ impl FileSystem for InMemoryFileSystem {
             }
             st.clock += 1;
             let tick = st.clock;
-            let kind = if st.files.contains_key(&path) {
-                FileChangeKind::Modify
-            } else {
-                FileChangeKind::Create
-            };
+            // The temp side of the real adapter's temp+rename, so a test can
+            // fail the replacement at the commit boundary and see the target
+            // still hold its complete previous bytes (ADR 0030 D3.1).
             st.files.insert(
-                path.clone(),
+                temp.clone(),
                 FileEntry {
                     bytes: contents.to_vec(),
                     mtime_tick: tick,
                 },
             );
-            (kind, tick)
+            if st.fail_next_write_commit {
+                st.fail_next_write_commit = false;
+                st.files.remove(&temp);
+                return Err(std::io::Error::other(format!(
+                    "injected failure between temp write and rename (in-memory): {}",
+                    path.display()
+                )));
+            }
+            let entry = st.files.remove(&temp).expect("temp entry just inserted");
+            st.files.insert(path.clone(), entry);
+            // `Create`, not `Modify`, whether or not the target existed: an
+            // atomic replacement reaches the real watcher as the `To` half of a
+            // rename, which `RenamePairing` classifies as a Create. A double
+            // that emits a shape the production adapter never produces cannot
+            // be trusted to prove anything about the watcher.
+            (FileChangeKind::Create, tick)
         };
         // The "close" hook: the full content is committed before anyone is
         // notified. send only errors when there are no subscribers — fine.
@@ -192,6 +278,17 @@ impl FileSystem for InMemoryFileSystem {
             seq: tick,
         });
         Ok(())
+    }
+
+    async fn remove(&self, path: &Path) -> std::io::Result<()> {
+        // Emits `FileChangeKind::Remove` on the same broadcast channel as
+        // `write` — the in-memory analog of the `notify` deletion event, so
+        // the org watcher's `on_file_changed` runs for the removed path.
+        self.remove_file(path)
+    }
+
+    async fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        self.rename_file(from, to)
     }
 
     async fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
@@ -206,12 +303,6 @@ impl FileSystem for InMemoryFileSystem {
             return Ok(ScannedEntries::default());
         }
         Ok(ScannedEntries {
-            directories: st
-                .dirs
-                .iter()
-                .filter(|d| d.starts_with(&root) && **d != root)
-                .cloned()
-                .collect(),
             files: st
                 .files
                 .keys()
@@ -288,7 +379,39 @@ mod tests {
         fs.write(Path::new("/holon-virtual/vault/a.org"), b"* B")
             .await
             .unwrap();
-        assert_eq!(rx.try_recv().unwrap().kind, FileChangeKind::Modify);
+        // Replacing an existing file announces a Create, matching the shape the
+        // production watcher derives from the rename that replacement performs.
+        assert_eq!(rx.try_recv().unwrap().kind, FileChangeKind::Create);
+    }
+
+    /// ADR 0030 D3.1 as the double must uphold it: a replacement that dies at
+    /// the commit boundary leaves the complete previous bytes visible, emits
+    /// no change, and leaves no temp behind.
+    #[tokio::test]
+    async fn a_failed_write_commit_leaves_the_previous_bytes_visible() {
+        let fs = InMemoryFileSystem::new();
+        let page = Path::new("/holon-virtual/vault/page.org");
+        fs.create_dir_all(Path::new("/holon-virtual/vault"))
+            .await
+            .unwrap();
+        fs.write(page, b"* Old complete").await.unwrap();
+        let mut rx = fs.subscribe();
+
+        fs.fail_next_write_commit();
+        let err = fs.write(page, b"* New complete").await.unwrap_err();
+        assert!(err.to_string().contains("temp write and rename"), "{err}");
+
+        assert_eq!(fs.read_to_string(page).await.unwrap(), "* Old complete");
+        assert!(rx.try_recv().is_err(), "a failed write announced a change");
+        let scanned = fs
+            .scan_directory(Path::new("/holon-virtual/vault"))
+            .await
+            .unwrap();
+        assert_eq!(scanned.files, vec![page.to_path_buf()]);
+
+        // Only the NEXT write fails; the double is not left permanently armed.
+        fs.write(page, b"* New complete").await.unwrap();
+        assert_eq!(fs.read_to_string(page).await.unwrap(), "* New complete");
     }
 
     #[tokio::test]
@@ -306,7 +429,7 @@ mod tests {
 
         let scanned = fs.scan_directory(Path::new("/r")).await.unwrap();
         assert_eq!(scanned.files.len(), 3);
-        assert!(scanned.directories.contains(&PathBuf::from("/r/sub")));
+        assert!(scanned.files.contains(&PathBuf::from("/r/sub/b.org")));
 
         let meta_a = fs.metadata(Path::new("/r/a.org")).await.unwrap();
         let meta_b = fs.metadata(Path::new("/r/sub/b.org")).await.unwrap();

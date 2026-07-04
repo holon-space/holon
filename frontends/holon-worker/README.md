@@ -85,6 +85,24 @@ accidentally descends into it.
 
 ## Upgrading Turso
 
+The `turso_core` rev in `Cargo.toml` must equal the root workspace's `[patch]`
+turso rev — this package is its own workspace, so it cannot inherit it, and
+`scripts/check-out-of-workspace-patch-revs.sh` (run by the `web-worker-smoke`
+CI job) fails the build if the two drift. Bump both together.
+
+Expect the bump to re-break the wasm build in two recurring ways, neither of
+them a holon bug:
+
+* **tokio `full` on wasm.** Turso's `workspace-hack` (cargo-hakari) declares
+  `tokio = { features = ["full"] }` unconditionally, so it drags `net`/`fs`
+  into the wasm build and trips tokio's `compile_error!`. Neutralized by
+  `patches/turso-workspace-hack` — verify that patch still applies after a bump
+  (`cargo update -p 'git+…turso.git?rev=<new>#workspace-hack@0.1.0'` if cargo
+  reports "patch … was not used in the crate graph").
+* **32-bit `isize`.** `wasm32` has a 32-bit `isize`; turso's DBSP weights are
+  `isize`. Constants like `-(1 << 60)` are compile-time overflows there and
+  must be fixed fork-side.
+
 The vendored `src/turso_browser_shim.rs` is a copy of
 `bindings/javascript/src/browser.rs` from the Turso repo. Original
 upstream commit: `84b440e70eae8f0943e57f0535007e164cb9e294`.

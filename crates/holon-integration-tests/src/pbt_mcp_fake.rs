@@ -229,6 +229,7 @@ impl PbtMcpIntegration {
                     },
                 ],
                 sync: Some(SyncConfig {
+                    project: Default::default(),
                     list_tool: None,
                     extract_path: None,
                     list_params: HashMap::new(),
@@ -245,6 +246,8 @@ impl PbtMcpIntegration {
         let sidecar = McpSidecar {
             entity_prefix: Some("pbt_".to_string()),
             entities,
+            writes: Default::default(),
+            once_only: Default::default(),
             tools: HashMap::new(),
             views: vec![],
         };
@@ -273,7 +276,8 @@ impl PbtMcpIntegration {
         let token_store: Arc<dyn SyncTokenStore> = Arc::new(InMemorySyncTokenStore::new());
 
         let sync_engine = Arc::new(McpSyncEngine::new(
-            client_peer,
+            Arc::new(client_peer.clone()),
+            Some(client_peer),
             strategies,
             caches,
             token_store,
@@ -292,7 +296,12 @@ impl PbtMcpIntegration {
         // Spawn serialized sync-event consumer + notification forwarder
         let engine_for_listener = sync_engine.clone();
         let (sync_event_tx, sync_event_rx) = tokio::sync::mpsc::unbounded_channel();
-        holon_mcp_client::spawn_sync_event_loop(sync_event_rx, engine_for_listener);
+        holon_mcp_client::spawn_sync_event_loop(
+            sync_event_rx,
+            engine_for_listener,
+            holon_mcp_client::SyncGate::opened(),
+            holon_mcp_client::SyncLoopTuning::test(),
+        );
         tokio::spawn(async move {
             let mut update_rx = update_rx;
             while let Some(uri) = update_rx.0.recv().await {

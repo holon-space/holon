@@ -1,3 +1,11 @@
+//! @c4 component
+//! @c4 layer Core
+//! Pattern: Strategy
+//! @c4 uses holon-api "shared value & operation types" "Rust"
+//! @c4 uses holon-core "core datasource traits" "Rust"
+//! @c4 uses holon-engine "Petri-net engine" "Rust"
+//! @c4 uses holon-macros "entity/operation derive macros" "Rust"
+//!
 //! EntityProfile system: per-entity, per-row render + operation resolution.
 //!
 //! Each entity (e.g., "block") can have a profile that defines:
@@ -13,8 +21,10 @@
 //! and compiles on-demand during resolution. Compilation is fast for small
 //! expressions (<1µs each).
 
+pub mod trust;
 pub mod type_registry;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -33,6 +43,12 @@ use holon_api::render_types::RenderExpr;
 use holon_api::render_types::RenderVariant;
 use holon_api::row_id;
 use rhai::Engine as RhaiEngine;
+pub use trust::OriginClass;
+pub use trust::TrustDecision;
+pub use trust::TrustPolicy;
+pub use trust::TrustPolicyParseError;
+pub use trust::TrustRule;
+pub use type_registry::TableName;
 pub use type_registry::TypeRegistry;
 pub use type_registry::create_default_registry;
 pub use type_registry::type_profiles_from_registry;
@@ -44,6 +60,11 @@ const UI_STATE_VARIABLES: &[&str] = &[
     "is_focused",
     "is_expanded",
     "view_mode",
+    // Render-context flag set by tree-builder `rules:` overrides (e.g.
+    // `role: "page_title"`); merged into ui_state by `pick_active_variant`.
+    // Classifying it as data would drop the variant at resolve time (rows
+    // have no `role` column).
+    "role",
     // Container-query inputs: refined per subtree during render interpretation.
     "available_width_px",
     "available_height_px",
@@ -60,6 +81,106 @@ const UI_STATE_VARIABLES: &[&str] = &[
 
 /// Map of entity name → live collection for Rhai lookup functions.
 pub type LiveEntities = HashMap<EntityName, Arc<LiveData<StorageEntity>>>;
+
+/// A live entity backing the bundled `block` profile's lookup-dependent
+/// computed fields (`has_query_source`, `is_program`): source blocks of a
+/// fixed language set, keyed by `parent_id`.
+///
+/// The single seat for both storage arms — a Turso session feeds it from a CDC
+/// matview over [`sql_predicate`](Self::sql_predicate), a Loro-only session
+/// from a block snapshot via
+/// [`live_data_from_blocks`](Self::live_data_from_blocks), and the PBT oracle
+/// mirrors it the same way — so a language added here reaches every one of
+/// them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveEntitySpec {
+    /// `query_source(id)` — "does block `id` own a query-source child?"
+    QuerySource,
+    /// `rule_sibling(parent_id)` — "does that block own a rule-head child?"
+    /// The retired `action` language counts: its trigger must stay hidden
+    /// while it surfaces its deprecation.
+    RuleSibling,
+}
+
+impl LiveEntitySpec {
+    pub const ALL: &'static [LiveEntitySpec] = &[Self::QuerySource, Self::RuleSibling];
+
+    /// The Rhai lookup function's name.
+    pub fn entity_name(self) -> EntityName {
+        match self {
+            Self::QuerySource => EntityName::new("query_source"),
+            Self::RuleSibling => EntityName::new("rule_sibling"),
+        }
+    }
+
+    /// The source languages whose blocks populate this entity — the one
+    /// definition both the SQL predicate and [`matches`](Self::matches) derive
+    /// from.
+    pub fn languages(self) -> Vec<holon_api::SourceLanguage> {
+        use holon_api::SourceLanguage;
+        match self {
+            Self::QuerySource => holon_api::QueryLanguage::ALL
+                .iter()
+                .copied()
+                .map(SourceLanguage::Query)
+                .collect(),
+            Self::RuleSibling => vec![SourceLanguage::HolonRule, SourceLanguage::LegacyAction],
+        }
+    }
+
+    pub fn matches(self, language: &holon_api::SourceLanguage) -> bool {
+        self.languages().contains(language)
+    }
+
+    /// The `WHERE` clause selecting this entity's rows out of a block table —
+    /// a plain filtered read, no self-join and no chained matview.
+    pub fn sql_predicate(self) -> String {
+        let langs: Vec<String> = self.languages().iter().map(|l| format!("'{l}'")).collect();
+        format!(
+            "content_type = 'source' AND source_language IN ({})",
+            langs.join(", ")
+        )
+    }
+
+    /// Build this entity's collection from an in-memory block set — the
+    /// CDC-free counterpart of the matview, projected to the same three
+    /// columns and keyed by `parent_id`.
+    pub fn live_data_from_blocks<'a>(
+        self,
+        blocks: impl IntoIterator<Item = &'a holon_api::block::Block>,
+    ) -> Arc<LiveData<StorageEntity>> {
+        let rows: Vec<StorageEntity> = blocks
+            .into_iter()
+            .filter(|b| b.content_type == holon_api::ContentType::Source)
+            .filter_map(|b| b.source_language.as_ref().map(|lang| (b, lang)))
+            .filter(|(_, lang)| self.matches(lang))
+            .map(|(b, lang)| {
+                HashMap::from([
+                    (Arc::from("id"), Value::String(b.id.as_str().to_string())),
+                    (
+                        Arc::from("parent_id"),
+                        Value::String(b.parent_id.as_str().to_string()),
+                    ),
+                    (
+                        Arc::from("source_language"),
+                        Value::String(lang.to_string()),
+                    ),
+                ])
+            })
+            .collect();
+
+        LiveData::new(
+            rows,
+            |row| {
+                row.get("parent_id")
+                    .and_then(|v| v.as_string())
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| anyhow::anyhow!("source-block row missing 'parent_id'"))
+            },
+            |row| Ok(row.clone()),
+        )
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Core types — moved to holon-api (storage de-leak Stage 10); re-exported so
@@ -146,7 +267,63 @@ impl ParsedProfile {
             variants,
             computed_fields,
             virtual_child: self.virtual_child,
+            // A YAML/org-source profile parsed standalone has no TypeDefinition,
+            // so no declared schema is known here — every missing required column
+            // is treated as expected heterogeneity (silent). The block profile's
+            // declared columns come from the type-def base it merges into (see
+            // `profile_from_type_def` + `build_cache_from_source` merge order).
+            declared_columns: BTreeSet::new(),
         })
+    }
+}
+
+/// Build a render profile for a VALUE-shaped row — a row that carries no
+/// entity-shaped `id`, so there is no entity to resolve a profile by.
+///
+/// Value rows are a LEGITIMATE display case (Martin ruling 2026-07-11), not an
+/// error and not "degraded": they arise from aggregate queries
+/// (`SELECT date('now') AS name`), rule-trigger results, and future table
+/// rows. They render as a plain value row — their columns, shown directly —
+/// with no warning marker. Loudness is reserved for a genuine CONTRACT
+/// violation (a widget that DECLARES it needs entity rows being fed a value
+/// row), which is surfaced at the resolver's entity-expecting seam, not here.
+fn value_row_profile(row: &HashMap<String, Value>) -> RenderProfile {
+    // Present the row's columns plainly, sorted for determinism. Internal
+    // matview bookkeeping columns (leading `_`, e.g. `_rowid`) are hidden —
+    // they are not user data. If every column is internal, fall back to
+    // showing them so the row is never blank.
+    let mut visible: Vec<(&String, &Value)> =
+        row.iter().filter(|(k, _)| !k.starts_with('_')).collect();
+    if visible.is_empty() {
+        visible = row.iter().collect();
+    }
+    visible.sort_by(|a, b| a.0.cmp(b.0));
+    let text = visible
+        .iter()
+        .map(|(k, v)| format!("{k}: {}", value_display(v)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    RenderProfile {
+        name: "value-row".to_string(),
+        render: RenderExpr::Literal {
+            value: Value::String(text),
+        },
+        operations: vec![],
+        variants: vec![],
+    }
+}
+
+/// Compact one-line display of a cell value for the degraded-row marker.
+fn value_display(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Integer(i) => i.to_string(),
+        Value::Float(f) => f.to_string(),
+        Value::Boolean(b) => b.to_string(),
+        Value::DateTime(s) => s.clone(),
+        Value::Json(s) => s.clone(),
+        Value::Null => "null".to_string(),
+        other => format!("{other:?}"),
     }
 }
 
@@ -359,14 +536,30 @@ pub fn profile_variants_to_stored(
 ) -> Result<Vec<StoredVariant>> {
     let mut variants = Vec::new();
     for pv in profile_variants {
-        let (condition_src, data_condition, ui_condition) = if let Some(ref compiled) = pv.condition
-        {
-            let src = compiled.source.clone();
-            let (dc, uc) = split_condition(&src)
-                .with_context(|| format!("in condition of variant '{}'", pv.name))?;
-            (src, dc, uc)
-        } else {
-            (String::new(), None, Predicate::Always)
+        let (condition_src, condition_required, data_condition, ui_condition) =
+            if let Some(ref compiled) = pv.condition {
+                let src = compiled.source.clone();
+                let (dc, uc) = split_condition(&src)
+                    .with_context(|| format!("in condition of variant '{}'", pv.name))?;
+                // The full condition's required columns come straight off its
+                // already-compiled AST. The data-only subset is a different
+                // string (UI conjuncts stripped), so derive its required set by
+                // compiling it once here (compile-only; it is a subset of the
+                // parent that already compiled).
+                (src, compiled.required_columns.clone(), dc, uc)
+            } else {
+                (String::new(), BTreeSet::new(), None, Predicate::Always)
+            };
+
+        let data_condition_required = match &data_condition {
+            Some(dc) => {
+                CompiledExpr::compile(&RhaiEngine::new(), dc.as_str())
+                    .map_err(|e| {
+                        anyhow::anyhow!("compiling data condition of variant '{}': {e}", pv.name)
+                    })?
+                    .required_columns
+            }
+            None => BTreeSet::new(),
         };
 
         let profile = Arc::new(StoredProfile {
@@ -378,7 +571,9 @@ pub fn profile_variants_to_stored(
             name: pv.name.clone(),
             priority: pv.priority,
             condition_source: condition_src,
+            condition_required,
             data_condition,
+            data_condition_required,
             ui_condition,
             profile,
         });
@@ -406,11 +601,36 @@ pub fn profile_from_type_def(type_def: &holon_api::TypeDefinition) -> Option<Ent
         .map(|(name, expr)| (name.to_string(), expr.clone()))
         .collect();
 
+    // Declared schema = the TypeDefinition's persistent field names. This is the
+    // O1 contract for type-aware binding: a required column MISSING from a row
+    // is a real projection gap (LOUD) iff it is one of these declared columns;
+    // otherwise (an optional property flattened from `properties`, or a UI-state
+    // variable) it is expected heterogeneity and stays silent.
+    //
+    // Only PERSISTENT fields — `persistent_fields()` excludes `Computed`-lifetime
+    // entries, which are the profile's OWN computed fields (is_program,
+    // is_rule_head, …) registered into the TypeDefinition. Those are NOT columns
+    // the projection carries; classifying them as declared would turn every
+    // unbound-sibling propagation into a false LOUD.
+    //
+    // NOTE: `#[edge_field]` columns (e.g. block `tags`/`requires`) are marked
+    // skip-serialization by the Entity derive, so they are NOT in `fields` and
+    // are therefore currently classified as optional (silent). This is a known
+    // v1 narrowing (see BugFunnel). The persistent columns present here
+    // (e.g. `source_language`, `content_type`) already surface the real
+    // projection gaps observed at boot.
+    let declared_columns: BTreeSet<String> = type_def
+        .persistent_fields()
+        .iter()
+        .map(|f| f.name.clone())
+        .collect();
+
     Some(EntityProfile {
         entity_name: holon_api::EntityName::new(&type_def.name),
         variants,
         computed_fields,
         virtual_child: None,
+        declared_columns,
     })
 }
 
@@ -485,6 +705,16 @@ fn topo_sort_computed_fields(
 // Entity lookup registration for Rhai
 // ---------------------------------------------------------------------------
 
+/// Build a Rhai engine carrying the entity-lookup functions.
+///
+/// The single seat: the production [`ProfileResolver`] and the PBT oracle both
+/// evaluate the same profile expressions, so both build their engine here.
+pub fn build_lookup_engine(live_entities: &LiveEntities) -> RhaiEngine {
+    let mut engine = RhaiEngine::new();
+    register_entity_lookups(&mut engine, live_entities);
+    engine
+}
+
 /// Register per-entity lookup functions on a Rhai engine.
 ///
 /// For each entry in `live_entities`, registers a function named after the
@@ -504,6 +734,152 @@ fn register_entity_lookups(engine: &mut RhaiEngine, live_entities: &LiveEntities
             }
         });
     }
+}
+
+/// Rhai standard-library functions that may appear as a bare (non-method) call
+/// in a computed field and must NOT be mistaken for an entity lookup. Two
+/// sources feed this: functions a `StandardPackage` engine resolves free-form
+/// (`len(x)`, `keys(m)`, `type_of(x)`, `abs(n)`, …) and OPERATORS that Rhai
+/// lowers to identifier-named calls (`x in xs` → `contains`).
+///
+/// This tracks Rhai's `StandardPackage`; the eval engine
+/// (`rhai::Engine::new()`) carries exactly it plus the `LiveEntitySpec`
+/// lookups. Rhai gates its function enumeration (`gen_fn_signatures`) behind
+/// the `metadata` feature, which we do not enable (it embeds signature strings
+/// into every binary), so this list is the maintained mirror. It is generous on
+/// purpose: over-listing only risks missing an unregistered lookup whose name
+/// collides with a stdlib function — implausible for entity lookups
+/// (`document`, `rule_sibling`). If a future bundled field uses a stdlib
+/// function not listed here, the boot guard fails LOUD (never a silent brick)
+/// with a message that names the fix: add it here.
+const RHAI_STDLIB_FREE_FNS: &[&str] = &[
+    // Language / core
+    "is_def_var",
+    "is_def_fn",
+    "is_shared",
+    "type_of",
+    "print",
+    "debug",
+    "eval",
+    "call",
+    "curry",
+    "tag",
+    "set_tag",
+    "hash",
+    // Collections & strings, free form (method form is excluded by the AST walk)
+    "len",
+    "keys",
+    "values",
+    "contains",
+    "index_of",
+    "get",
+    "range",
+    "chars",
+    "split",
+    "chop",
+    "clear",
+    "pop",
+    "push",
+    "shift",
+    "unshift",
+    "insert",
+    "remove",
+    "reverse",
+    "truncate",
+    "extract",
+    "splice",
+    "pad",
+    "dedup",
+    "sort",
+    "filter",
+    "map",
+    "reduce",
+    "reduce_rev",
+    "some",
+    "all",
+    "find",
+    "find_map",
+    "for_each",
+    "retain",
+    "drain",
+    "sub_string",
+    "starts_with",
+    "ends_with",
+    "trim",
+    "replace",
+    "bytes",
+    "append",
+    "mixin",
+    "fill_with",
+    // Numbers & conversion
+    "abs",
+    "sign",
+    "sqrt",
+    "exp",
+    "ln",
+    "log",
+    "pow",
+    "floor",
+    "ceiling",
+    "round",
+    "int",
+    "fraction",
+    "min",
+    "max",
+    "parse_int",
+    "parse_float",
+    "to_int",
+    "to_float",
+    "to_decimal",
+    "to_string",
+    "to_debug",
+    "to_char",
+    "to_upper",
+    "to_lower",
+    "is_odd",
+    "is_even",
+    "is_zero",
+    "is_nan",
+    "is_finite",
+    "is_infinite",
+];
+
+/// Prove every entity-lookup function this profile's computed fields call is
+/// one the engine will resolve — either a registered `LiveEntitySpec` lookup
+/// (wired identically by both storage arms via [`register_entity_lookups`]) or
+/// a Rhai standard-library function ([`RHAI_STDLIB_FREE_FNS`]).
+///
+/// Rhai resolves functions at CALL time, so an unregistered lookup compiles
+/// cleanly, then errors at eval and lands as `()` in the scope — a silent
+/// per-field degrade at WARN that inverts every condition the field feeds. This
+/// makes that unrepresentable past boot: an unresolvable call is a loud error
+/// naming the offending field and function, raised while the bundled profiles
+/// load, before any row is ever rendered.
+pub fn validate_lookups_registered(profile: &ParsedProfile) -> Result<()> {
+    let registered: BTreeSet<String> = LiveEntitySpec::ALL
+        .iter()
+        .map(|spec| spec.entity_name().as_str().replace('-', "_"))
+        .collect();
+    let engine = holon_api::unoptimized_engine();
+    for (field, source) in &profile.computed {
+        let compiled = CompiledExpr::compile(&engine, source.as_str())
+            .map_err(|e| anyhow::anyhow!("computed field '{field}' failed to compile: {e}"))?;
+        for called in holon_api::referenced_functions(&compiled.ast) {
+            if RHAI_STDLIB_FREE_FNS.contains(&called.as_str()) || registered.contains(&called) {
+                continue;
+            }
+            anyhow::bail!(
+                "profile '{}' computed field '{field}' calls `{called}`, which the eval engine \
+                 will not resolve: it is neither a registered entity lookup (registered: \
+                 {registered:?}) nor a listed Rhai stdlib function. Rhai resolves calls at eval \
+                 time, so it compiles, then errors and silently degrades the field to () at WARN. \
+                 If `{called}` is an entity lookup, register it via LiveEntitySpec; if it is a \
+                 Rhai stdlib function used free-form, add it to RHAI_STDLIB_FREE_FNS.",
+                profile.entity_name,
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Convert a StorageEntity (HashMap<String, Value>) to a Rhai map.
@@ -622,9 +998,7 @@ impl ProfileResolver {
 
     /// Build a Rhai engine with entity lookup functions pre-registered.
     fn build_rhai_engine(live_entities: &LiveEntities) -> RhaiEngine {
-        let mut engine = RhaiEngine::new();
-        register_entity_lookups(&mut engine, live_entities);
-        engine
+        build_lookup_engine(live_entities)
     }
 
     /// Replace the live entities used for Rhai lookup functions.
@@ -757,6 +1131,7 @@ impl ProfileResolver {
             variants: filtered_variants,
             computed_fields: profile.computed_fields.clone(),
             virtual_child: profile.virtual_child.clone(),
+            declared_columns: profile.declared_columns.clone(),
         }
     }
 }
@@ -776,7 +1151,29 @@ impl ProfileResolving for ProfileResolver {
     ) -> (Arc<RenderProfile>, HashMap<String, holon_api::Value>) {
         let cache = self.cache_signal.get_cloned();
 
-        let entity_uri = row_id(row).expect("No id found");
+        // A row either carries an entity-shaped `id` or it does not — BOTH are
+        // representable, legal inputs. Id-less rows arise legitimately from
+        // rule-trigger / aggregate queries (e.g. `SELECT date('now') AS name`,
+        // dogfood 2026-07-10) that are pointed at the enriched watch path.
+        // A value row (no entity `id`) is a LEGITIMATE display case — an
+        // aggregate / rule-trigger result — NOT an error. It cannot be resolved
+        // to an entity profile, so it renders plainly as a value row. Logged at
+        // debug (not warn): this is an expected shape, not a degradation. The
+        // loud path is `resolve_entity_required`, taken by callers that DECLARE
+        // they need an entity row. (Historically this `panic!`ed and killed the
+        // render/resolve worker, blanking the page with a silent -32603.)
+        let entity_uri = match row_id(row) {
+            Ok(uri) => uri,
+            Err(e) => {
+                tracing::debug!(
+                    error = %e,
+                    "profile resolver: value-shaped row (no entity `id`) — rendering as a \
+                     plain value row (aggregate / rule-trigger result); entity resolution \
+                     not attempted"
+                );
+                return (Arc::new(value_row_profile(row)), HashMap::new());
+            }
+        };
         let entity_name_str = entity_uri.scheme();
         let entity_name = EntityName::new(entity_name_str);
 
@@ -821,6 +1218,29 @@ impl ProfileResolving for ProfileResolver {
         (self.materialize(&stored, row), computed)
     }
 
+    fn resolve_computed_only(
+        &self,
+        row: &HashMap<String, holon_api::Value>,
+    ) -> HashMap<String, holon_api::Value> {
+        // Mirror the short-circuits of `resolve_with_computed` (value rows and
+        // unregistered entities carry no computed fields) but SKIP variant
+        // resolution — the enrichment boundary wants only computed fields, and
+        // resolving here evaluated UI-bearing variant conditions against
+        // UI-less storage rows (spurious eval errors). See
+        // `EntityProfile::compute_fields_only`.
+        let entity_uri = match row_id(row) {
+            Ok(uri) => uri,
+            Err(_) => return HashMap::new(),
+        };
+        let cache = self.cache_signal.get_cloned();
+        let entity_profile = match cache.get(&EntityName::new(entity_uri.scheme())) {
+            Some(profile) => profile.clone(),
+            None => return HashMap::new(),
+        };
+        let engine = self.rhai_engine.read().unwrap().clone();
+        entity_profile.compute_fields_only(row, &engine)
+    }
+
     fn resolve_batch(&self, rows: &[HashMap<String, holon_api::Value>]) -> Vec<Arc<RenderProfile>> {
         rows.iter()
             .map(|row| ProfileResolving::resolve(self, row))
@@ -832,7 +1252,29 @@ impl ProfileResolving for ProfileResolver {
         row: &HashMap<String, holon_api::Value>,
     ) -> (Arc<RenderProfile>, HashMap<String, holon_api::Value>) {
         let cache = self.cache_signal.get_cloned();
-        let entity_uri = row_id(row).expect("No id found");
+        // A row either carries an entity-shaped `id` or it does not — BOTH are
+        // representable, legal inputs. Id-less rows arise legitimately from
+        // rule-trigger / aggregate queries (e.g. `SELECT date('now') AS name`,
+        // dogfood 2026-07-10) that are pointed at the enriched watch path.
+        // A value row (no entity `id`) is a LEGITIMATE display case — an
+        // aggregate / rule-trigger result — NOT an error. It cannot be resolved
+        // to an entity profile, so it renders plainly as a value row. Logged at
+        // debug (not warn): this is an expected shape, not a degradation. The
+        // loud path is `resolve_entity_required`, taken by callers that DECLARE
+        // they need an entity row. (Historically this `panic!`ed and killed the
+        // render/resolve worker, blanking the page with a silent -32603.)
+        let entity_uri = match row_id(row) {
+            Ok(uri) => uri,
+            Err(e) => {
+                tracing::debug!(
+                    error = %e,
+                    "profile resolver: value-shaped row (no entity `id`) — rendering as a \
+                     plain value row (aggregate / rule-trigger result); entity resolution \
+                     not attempted"
+                );
+                return (Arc::new(value_row_profile(row)), HashMap::new());
+            }
+        };
         let entity_name_str = entity_uri.scheme();
         let entity_name = EntityName::new(entity_name_str);
 
@@ -900,22 +1342,26 @@ impl ProfileResolving for ProfileResolver {
     }
 
     fn resolve_collection_variants(&self) -> Vec<RenderVariant> {
-        let cache = self.cache_signal.get_cloned();
-        let collection_name = EntityName::new("collection");
-        let Some(collection_profile) = cache.get(&collection_name) else {
-            return Vec::new();
-        };
+        self.resolve_collection_variants_named(&EntityName::new("collection"))
+            .unwrap_or_default()
+    }
 
-        collection_profile
-            .variants
-            .iter()
-            .map(|v| RenderVariant {
-                name: v.name.clone(),
-                render: v.profile.render.clone(),
-                operations: Vec::new(),
-                condition: v.ui_condition.clone(),
-            })
-            .collect()
+    fn resolve_collection_variants_named(&self, name: &EntityName) -> Option<Vec<RenderVariant>> {
+        let cache = self.cache_signal.get_cloned();
+        let profile = cache.get(name)?;
+
+        Some(
+            profile
+                .variants
+                .iter()
+                .map(|v| RenderVariant {
+                    name: v.name.clone(),
+                    render: v.profile.render.clone(),
+                    operations: Vec::new(),
+                    condition: v.ui_condition.clone(),
+                })
+                .collect(),
+        )
     }
 
     fn virtual_child_config(&self, entity_name: &str) -> Option<VirtualChildConfig> {
@@ -942,6 +1388,40 @@ pub fn is_profile_block_by_source_language(source_language: Option<&str>) -> boo
 mod tests {
     use super::*;
 
+    /// Walk a parsed render tree and collect every string-literal value (the
+    /// text a `text("…")` / label arg carries), so a test can assert none was
+    /// corrupted into mojibake on the parse path.
+    fn collect_string_literals(expr: &RenderExpr, out: &mut Vec<String>) {
+        use holon_api::Value;
+        match expr {
+            RenderExpr::Literal { value } => {
+                if let Value::String(s) = value {
+                    out.push(s.clone());
+                }
+            }
+            RenderExpr::FunctionCall { args, .. } => {
+                for a in args {
+                    collect_string_literals(&a.value, out);
+                }
+            }
+            RenderExpr::Array { items } => {
+                for it in items {
+                    collect_string_literals(it, out);
+                }
+            }
+            RenderExpr::Object { fields } => {
+                for v in fields.values() {
+                    collect_string_literals(v, out);
+                }
+            }
+            RenderExpr::BinaryOp { left, right, .. } => {
+                collect_string_literals(left, out);
+                collect_string_literals(right, out);
+            }
+            RenderExpr::LiveBlock { .. } | RenderExpr::ColumnRef { .. } => {}
+        }
+    }
+
     fn init_render_dsl() {
         holon_api::render_dsl::register_widget_names(&[
             "table",
@@ -966,6 +1446,37 @@ mod tests {
             "focusable",
             "live_query",
         ]);
+    }
+
+    /// Bug-4 (PERCEPTION): the `rule_card` variant used a literal em-dash
+    /// (`—`, U+2014) as the "last fired" placeholder. The DSL parse preserves
+    /// it intact, but the live GPUI render/capture path surfaced only its
+    /// first UTF-8 byte (0xE2 → `â`) — mojibake. The placeholders are now
+    /// plain ASCII; guard that the real `rule_card` render carries no byte
+    /// that would re-open the mojibake (0xE2 is the lead byte of the
+    /// em/en-dash family that regressed).
+    #[test]
+    fn rule_card_render_has_no_mojibake_bytes() {
+        init_render_dsl();
+        let profile = parse_entity_profile(BLOCK_PROFILE_YAML).unwrap();
+        let rule_card = profile
+            .variants
+            .iter()
+            .find(|v| v.name == "rule_card")
+            .expect("block profile defines a rule_card variant");
+        let mut lits = Vec::new();
+        collect_string_literals(&rule_card.profile.render, &mut lits);
+        assert!(
+            lits.iter().any(|s| s.contains("last fired")),
+            "sanity: rule_card carries the 'last fired' placeholder text node: {lits:?}"
+        );
+        for s in &lits {
+            assert!(
+                !s.as_bytes().contains(&0xE2),
+                "rule_card text node contains a multibyte char (0xE2 lead byte) that mangles on \
+                 the live render path — keep placeholders ASCII: {s:?}"
+            );
+        }
     }
 
     #[test]
@@ -1146,6 +1657,58 @@ variants:
         );
         let resolved = profile.resolve(&row, &RhaiEngine::new()).unwrap();
         assert_eq!(resolved.name, "default");
+    }
+
+    /// The `bullet_shape` computed field (block_profile.yaml) picks the ringed
+    /// `orgmode` glyph for a collapsed block (which always has hidden children)
+    /// and the plain `circle` dot otherwise. A missing `collapsed` column
+    /// leaves the field unbound, so `icon`'s `"circle"` default takes over
+    /// — the dot.
+    #[test]
+    fn bullet_shape_ring_when_collapsed_else_dot() {
+        let profile = make_test_profile(
+            r#"
+entity_name: block
+computed:
+  bullet_shape: 'if collapsed != () && collapsed != 0 { "orgmode" } else { "circle" }'
+variants:
+  - name: default
+    render: 'row(col("content"))'
+"#,
+        );
+        let engine = RhaiEngine::new();
+
+        let row = |collapsed: Option<i64>| {
+            let mut r = HashMap::new();
+            r.insert("id".to_string(), Value::String("block:x".to_string()));
+            if let Some(c) = collapsed {
+                r.insert("collapsed".to_string(), Value::Integer(c));
+            }
+            r
+        };
+
+        assert_eq!(
+            profile
+                .compute_fields_only(&row(Some(1)), &engine)
+                .get("bullet_shape"),
+            Some(&Value::String("orgmode".to_string())),
+            "collapsed block → ringed orgmode bullet"
+        );
+        assert_eq!(
+            profile
+                .compute_fields_only(&row(Some(0)), &engine)
+                .get("bullet_shape"),
+            Some(&Value::String("circle".to_string())),
+            "expanded/leaf block → plain circle dot"
+        );
+        // Absent `collapsed`: the field is unbound (not a "orgmode"), so the
+        // icon name falls back to its default dot.
+        let out = profile.compute_fields_only(&row(None), &engine);
+        assert_ne!(
+            out.get("bullet_shape"),
+            Some(&Value::String("orgmode".to_string())),
+            "missing collapsed must never yield the ring"
+        );
     }
 
     #[test]
@@ -1377,5 +1940,439 @@ variants:
         let (data, ui) = split_condition("task_state != () && priority > 0").unwrap();
         assert_eq!(data.as_deref(), Some("task_state != () && priority > 0"));
         assert_eq!(ui, Predicate::Always);
+    }
+
+    // -----------------------------------------------------------------------
+    // ADR 0024 WP3 — program marking / rule-card render variant.
+    //
+    // These resolve the REAL block_profile.yaml (not a hand-built fixture) so a
+    // regression in `is_program` / the variant precedence fails here.
+    // -----------------------------------------------------------------------
+
+    const BLOCK_PROFILE_YAML: &str =
+        include_str!("../../../assets/default/types/block_profile.yaml");
+    const PERSON_PROFILE_YAML: &str =
+        include_str!("../../../assets/default/types/person_profile.yaml");
+    const COLLECTION_PROFILE_YAML: &str =
+        include_str!("../../../assets/default/types/collection_profile.yaml");
+
+    /// Every lookup function a SHIPPED computed field calls must be one the
+    /// engine registers — otherwise the field errors at eval and silently
+    /// degrades to () at WARN (the gap #44's verifier named). This is the same
+    /// check the boot path runs; a red here means a bundled profile references
+    /// an unregistered lookup.
+    #[test]
+    fn bundled_profiles_only_call_registered_lookups() {
+        for (name, yaml) in [
+            ("block", BLOCK_PROFILE_YAML),
+            ("person", PERSON_PROFILE_YAML),
+            ("collection", COLLECTION_PROFILE_YAML),
+        ] {
+            let profile = parse_profile_yaml(yaml).expect("bundled profile parses");
+            validate_lookups_registered(&profile).unwrap_or_else(|e| {
+                panic!("bundled profile '{name}' has an unregistered lookup: {e:#}")
+            });
+        }
+    }
+
+    /// The check FIRES: a computed field calling a function that is neither a
+    /// Rhai builtin nor a registered lookup fails loud, naming both the field
+    /// and the function — the boot guard, not a render-time WARN.
+    #[test]
+    fn validate_flags_an_unregistered_lookup() {
+        let profile: ParsedProfile = serde_yaml::from_str(
+            "entity_name: block\ncomputed:\n  bad: 'ghost_lookup(id) != ()'\n",
+        )
+        .unwrap();
+        let err = validate_lookups_registered(&profile)
+            .expect_err("an unregistered lookup must fail loud");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("ghost_lookup"), "names the function: {msg}");
+        assert!(msg.contains("bad"), "names the field: {msg}");
+    }
+
+    /// The registered lookups (`query_source`, `rule_sibling`) and the builtin
+    /// `is_def_var` all pass — the check is not over-eager.
+    #[test]
+    fn validate_accepts_registered_lookups_and_builtins() {
+        let profile: ParsedProfile = serde_yaml::from_str(
+            "entity_name: block\ncomputed:\n  ok: 'is_def_var(\"x\") && query_source(id) != () && rule_sibling(parent_id) == ()'\n",
+        )
+        .unwrap();
+        validate_lookups_registered(&profile).expect("registered lookups + builtins are accepted");
+    }
+
+    /// Regression pin (do not narrow `RHAI_STDLIB_FREE_FNS`): a computed field
+    /// using the two most natural Rhai stdlib forms — the `in` operator, which
+    /// lowers to a `contains` call, and free-form `len(tags)` — must NOT be
+    /// flagged as an unregistered lookup. A narrowing that re-bricked boot on
+    /// `x in tags` reds here.
+    #[test]
+    fn validate_does_not_flag_rhai_stdlib_free_functions() {
+        let profile: ParsedProfile = serde_yaml::from_str(
+            "entity_name: block\ncomputed:\n  ok: '(\"x\" in tags) && len(tags) > 0 && type_of(tags) == \"array\"'\n",
+        )
+        .unwrap();
+        // Prove the `in`→contains lowering + free `len`/`type_of` are actually
+        // present in the analysed AST (else the test would pass vacuously).
+        let compiled =
+            CompiledExpr::compile(&holon_api::unoptimized_engine(), &profile.computed["ok"])
+                .unwrap();
+        let called = holon_api::referenced_functions(&compiled.ast);
+        assert!(
+            called.contains("contains"),
+            "`in` lowers to contains: {called:?}"
+        );
+        assert!(called.contains("len"), "free len present: {called:?}");
+        validate_lookups_registered(&profile)
+            .expect("Rhai stdlib free functions must never be flagged as unregistered lookups");
+    }
+
+    /// Rhai engine with the DB-backed lookups the block profile's computed
+    /// fields call. `rule_sibling(parent_id)` returns a non-unit row iff
+    /// `parent_id` names a headline that owns a rule head — i.e. the caller
+    /// is that rule's trigger sibling (WP3 clause b). `query_source` is
+    /// stubbed empty (no block in these rows has query-source children).
+    fn engine_with_rule_parent(rule_parent: &'static str) -> RhaiEngine {
+        let mut engine = RhaiEngine::new();
+        engine.register_fn("rule_sibling", move |parent_id: String| -> rhai::Dynamic {
+            if parent_id == rule_parent {
+                rhai::Dynamic::from(rhai::Map::new())
+            } else {
+                rhai::Dynamic::UNIT
+            }
+        });
+        engine.register_fn("query_source", |_: String| -> rhai::Dynamic {
+            rhai::Dynamic::UNIT
+        });
+        engine
+    }
+
+    fn source_row(id: &str, parent: &str, lang: &str) -> HashMap<String, holon_api::Value> {
+        use holon_api::Value;
+        let mut row = HashMap::new();
+        row.insert("id".into(), Value::String(id.into()));
+        row.insert("parent_id".into(), Value::String(parent.into()));
+        row.insert("content_type".into(), Value::String("source".into()));
+        row.insert("source_language".into(), Value::String(lang.into()));
+        row.insert("content".into(), Value::String("<source body>".into()));
+        row
+    }
+
+    fn variant_for(row: &HashMap<String, holon_api::Value>, engine: &RhaiEngine) -> String {
+        parse_entity_profile(BLOCK_PROFILE_YAML)
+            .unwrap()
+            .resolve(row, engine)
+            .expect("a variant (or default) must resolve")
+            .name
+            .clone()
+    }
+
+    #[test]
+    fn rule_head_renders_rule_card() {
+        // A `holon_rule` head is program → routed to the rule card, never a query.
+        let engine = engine_with_rule_parent("block:journal-auto-create");
+        let row = source_row("block:rule", "block:journal-auto-create", "holon_rule");
+        assert_eq!(variant_for(&row, &engine), "rule_card");
+    }
+
+    #[test]
+    fn trigger_sibling_renders_rule_card_not_query_result() {
+        // The `holon_sql` trigger sibling of a rule is program via the discovery
+        // join (clause b). Priority 0 wins over the `holon_source` spacer that its
+        // language would otherwise match — it renders the card, NOT a query result
+        // and NOT a hidden spacer.
+        let engine = engine_with_rule_parent("block:journal-auto-create");
+        let row = source_row("block:trigger", "block:journal-auto-create", "holon_sql");
+        let variant = variant_for(&row, &engine);
+        assert_eq!(variant, "rule_card");
+        assert_ne!(variant, "source");
+    }
+
+    #[test]
+    fn normal_holon_query_source_is_not_program() {
+        // A holon_prql query source with NO rule sibling stays hidden machinery
+        // (the `holon_source` spacer) — it must NOT be diverted to the rule card.
+        let engine = engine_with_rule_parent("block:journal-auto-create");
+        let row = source_row("block:q", "block:journals", "holon_prql");
+        let variant = variant_for(&row, &engine);
+        assert_ne!(variant, "rule_card");
+        assert_eq!(variant, "holon_source");
+    }
+
+    #[test]
+    fn plain_source_block_still_renders_query_result() {
+        // A non-holon source block (not machinery, not a rule) still renders as a
+        // query result — the `source` variant, gated on `!is_program`. No regression.
+        let engine = engine_with_rule_parent("block:journal-auto-create");
+        let row = source_row("block:py", "block:page", "python");
+        assert_eq!(variant_for(&row, &engine), "source");
+    }
+
+    #[test]
+    fn legacy_action_head_surfaces_deprecation_on_card() {
+        // A retired `action`-language head is still program (rule card) and the
+        // deprecation is surfaced: `is_legacy_rule` is true so the card's `if_col`
+        // renders its loud error line.
+        let engine = engine_with_rule_parent("block:journal-auto-create");
+        let row = source_row("block:legacy", "block:journal-auto-create", "action");
+        let (profile, computed) = parse_entity_profile(BLOCK_PROFILE_YAML)
+            .unwrap()
+            .resolve_with_computed(&row, &engine);
+        assert_eq!(profile.expect("variant resolves").name, "rule_card");
+        assert_eq!(
+            computed.get("is_program"),
+            Some(&holon_api::Value::Boolean(true))
+        );
+        assert_eq!(
+            computed.get("is_legacy_rule"),
+            Some(&holon_api::Value::Boolean(true))
+        );
+    }
+
+    /// Regression (dogfood 2026-07-10, Martin ruling 2026-07-11): a
+    /// rule-trigger / aggregate query row that carries NO entity-shaped
+    /// `id` (e.g. `SELECT date('now','localtime') AS name`) used to panic
+    /// the profile resolver and blank the whole page with a silent -32603.
+    /// It must now render as a plain VALUE row (its columns, shown
+    /// directly) — NOT a "⚠ unresolved" warning, since a value row is a
+    /// legitimate display case.
+    #[test]
+    fn value_row_renders_plainly_instead_of_panicking() {
+        let mut row: HashMap<String, Value> = HashMap::new();
+        row.insert("_rowid".to_string(), Value::Integer(1));
+        row.insert("name".to_string(), Value::String("2026-07-10".to_string()));
+
+        let profile = value_row_profile(&row);
+        assert_eq!(profile.name, "value-row");
+        let RenderExpr::Literal {
+            value: Value::String(text),
+        } = &profile.render
+        else {
+            panic!(
+                "value-row profile must render a string literal, got {:?}",
+                profile.render
+            );
+        };
+        // The user column is shown plainly, no warning marker, and the internal
+        // `_rowid` bookkeeping column is hidden.
+        assert!(
+            !text.contains("unresolved"),
+            "value row must NOT carry a degraded/unresolved marker: {text}"
+        );
+        assert!(
+            text.contains("name: 2026-07-10"),
+            "row data missing: {text}"
+        );
+        assert!(
+            !text.contains("_rowid"),
+            "internal column must be hidden: {text}"
+        );
+    }
+
+    /// The CONTRACT seam: a caller that DECLARES it needs an entity row
+    /// (`resolve_entity_required`) must FAIL LOUD when handed a value row,
+    /// rather than silently rendering it.
+    #[test]
+    fn entity_required_resolution_fails_loud_on_value_row() {
+        use holon_api::ProfileResolving;
+
+        // Minimal resolver exercising the trait's DEFAULT `resolve_entity_required`
+        // (the contract seam). Entity rows resolve to a dummy profile; the value
+        // branch bails before ever calling `resolve_with_computed`.
+        struct MockResolver;
+        impl ProfileResolving for MockResolver {
+            fn resolve(&self, _: &HashMap<String, Value>) -> Arc<RenderProfile> {
+                Arc::new(RenderProfile {
+                    name: "mock".to_string(),
+                    render: RenderExpr::Literal { value: Value::Null },
+                    operations: vec![],
+                    variants: vec![],
+                })
+            }
+            fn resolve_with_computed(
+                &self,
+                row: &HashMap<String, Value>,
+            ) -> (Arc<RenderProfile>, HashMap<String, Value>) {
+                (self.resolve(row), HashMap::new())
+            }
+            fn resolve_batch(&self, rows: &[HashMap<String, Value>]) -> Vec<Arc<RenderProfile>> {
+                rows.iter().map(|r| self.resolve(r)).collect()
+            }
+        }
+
+        let resolver = MockResolver;
+        let mut value_row: HashMap<String, Value> = HashMap::new();
+        value_row.insert("name".to_string(), Value::String("2026-07-10".to_string()));
+
+        let err = resolver
+            .resolve_entity_required(&value_row)
+            .expect_err("entity-required resolution must reject a value row");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("requires an ENTITY row") && msg.contains("VALUE row"),
+            "contract error must name the violation: {msg}"
+        );
+
+        // An entity-shaped row passes the contract gate.
+        let mut entity_row: HashMap<String, Value> = HashMap::new();
+        entity_row.insert("id".to_string(), Value::String("block:abc".to_string()));
+        assert!(
+            resolver.resolve_entity_required(&entity_row).is_ok(),
+            "entity row must satisfy the entity-required contract"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Type-aware binding — the boot-flood fix. These use the REAL block
+    // EntityProfile built from the TypeDefinition (so `declared_columns` is
+    // populated), exercising the classification that silences the
+    // task_state-class flood while surfacing declared-column projection gaps.
+    // -----------------------------------------------------------------------
+
+    /// The block `EntityProfile` with `declared_columns` populated (the prod
+    /// shape, not the YAML-only `parse_entity_profile` fixture).
+    fn block_profile_with_schema() -> EntityProfile {
+        let registry = crate::type_registry::create_default_registry().unwrap();
+        crate::type_registry::type_profiles_from_registry(&registry)
+            .into_iter()
+            .find(|p| p.entity_name.as_str() == "block")
+            .expect("block profile must exist in the default registry")
+    }
+
+    #[test]
+    fn declared_columns_separate_columns_from_optional_properties() {
+        let profile = block_profile_with_schema();
+        // Declared persistent columns → LOUD when missing.
+        for col in ["content_type", "source_language", "content", "parent_id"] {
+            assert!(
+                profile.declared_columns.contains(col),
+                "'{col}' must be a declared block column"
+            );
+        }
+        // task_state is an optional PROPERTY (flattened from `properties`), not a
+        // declared column → structurally-absent → silent.
+        assert!(
+            !profile.declared_columns.contains("task_state"),
+            "task_state is a property, must NOT be a declared column (else the \
+             dominant boot flood would become loud noise)"
+        );
+    }
+
+    #[test]
+    fn computed_fields_carry_the_required_columns_that_drive_classification() {
+        let profile = block_profile_with_schema();
+        let required = |name: &str| {
+            profile
+                .computed_fields
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, e)| e.required_columns.clone())
+                .unwrap_or_else(|| panic!("computed field '{name}' missing"))
+        };
+        assert!(required("is_task").contains("task_state"));
+        assert!(required("is_page_row").contains("tags"));
+        assert!(required("is_legacy_rule").contains("source_language"));
+    }
+
+    /// The synthetic creation-slot row is a PROJECTION of the entity like any
+    /// other: it must carry the declared schema, or every computed field over a
+    /// column the YAML `virtual_child:` block happens not to set reports a
+    /// projection gap it cannot possibly have (the row is built in-process).
+    #[test]
+    fn creation_slot_defaults_cover_every_declared_column() {
+        let profile = block_profile_with_schema();
+        let declared = profile.declared_columns.clone();
+        let config = profile
+            .virtual_child
+            .expect("block declares a virtual_child creation slot");
+        let missing: Vec<&String> = declared
+            .iter()
+            .filter(|c| !config.defaults.contains_key(*c))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "creation-slot row would omit declared block columns {missing:?}"
+        );
+    }
+
+    /// The widening must not depend on WHICH source a profile came from.
+    /// `build_cache_from_source` inserts org-sourced profiles directly (no
+    /// type-registry seat on that path), so the guarantee has to hold at the
+    /// cache funnel itself.
+    #[test]
+    fn org_sourced_profile_reaching_the_cache_is_widened() {
+        let profile = EntityProfile {
+            entity_name: EntityName::new("widget"),
+            variants: vec![],
+            computed_fields: vec![],
+            virtual_child: Some(holon_api::entity_profile::VirtualChildConfig {
+                defaults: HashMap::from([(
+                    "content".to_string(),
+                    holon_api::Value::String(String::new()),
+                )]),
+            }),
+            declared_columns: ["collapsed", "source_language"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        };
+        let mut row: holon_api::entity::StorageEntity = HashMap::new();
+        row.insert(
+            "id".into(),
+            holon_api::Value::String("block:widget".to_string()),
+        );
+        let source = LiveData::new(
+            vec![row],
+            |_| Ok("widget".to_string()),
+            move |_| Ok(profile.clone()),
+        );
+
+        let cache = ProfileResolver::build_cache_from_source(
+            &source,
+            &holon_api::UiInfo::permissive(),
+            &[],
+        );
+        let defaults = cache
+            .get("widget")
+            .expect("org-sourced profile is cached")
+            .virtual_child
+            .as_ref()
+            .expect("virtual_child survives caching")
+            .defaults
+            .clone();
+        for col in ["collapsed", "source_language"] {
+            assert!(
+                defaults.contains_key(col),
+                "org-sourced creation slot omits declared column '{col}'"
+            );
+        }
+    }
+
+    #[test]
+    fn heterogeneous_plain_block_row_produces_no_error_and_typed_nulls() {
+        // The boot-flood row shape: a plain block missing task_state AND tags.
+        // Type-aware binding must yield is_task=Null / is_page_row=Null WITHOUT
+        // any Rhai "Variable not found", and the dependent embedded_page
+        // condition must NOT type-error (the Seat-B cascade) — it just resolves
+        // to a non-embedded variant.
+        let profile = block_profile_with_schema();
+        let engine = RhaiEngine::new();
+        let mut row: HashMap<String, Value> = HashMap::new();
+        row.insert("id".into(), Value::String("block:plain".into()));
+        row.insert("parent_id".into(), Value::String("block:root".into()));
+        row.insert("content".into(), Value::String("hello".into()));
+        row.insert("content_type".into(), Value::String("text".into()));
+        row.insert("source_language".into(), Value::Null);
+
+        let (resolved, computed) = profile.resolve_with_computed(&row, &engine);
+        // Unbound computed fields surface as Null (row shape preserved), not errors.
+        assert_eq!(computed.get("is_task"), Some(&Value::Null));
+        assert_eq!(computed.get("is_page_row"), Some(&Value::Null));
+        // A variant still resolves (no panic, no cascade abort); embedded_page —
+        // which ANDs the unbound is_page_row — is NOT selected.
+        let name = resolved.expect("a variant must resolve").name.clone();
+        assert_ne!(name, "embedded_page");
+        assert_ne!(name, "embedded_page_expanded");
     }
 }

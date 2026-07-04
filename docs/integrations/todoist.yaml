@@ -1,3 +1,8 @@
+# Sidecar-format generation. The app runs its own bundled copy of this file
+# unless an INSTALLED copy declares the generation the running build understands
+# (crates/holon-mcp-client/src/bundled_sidecars.rs).
+schema_version: 1
+
 # Todoist integration config (generic holon-mcp-client form).
 #
 # This is the "fully converted" target: a single file consumed by
@@ -66,18 +71,26 @@ entities:
         request_param: cursor
         response_field: nextCursor
 
+# `effect:` classifies each tool for the write-policy gate (leases/read-write
+# ruling). No top-level `writes:` key ⇒ writes disabled ⇒ every non-read tool is
+# still denied loud today; the classifications are the parse-time contract that
+# increments 3–4 build on.
 tools:
   complete-tasks:
     entity: todoist_tasks
+    effect: idempotent            # completing an already-set task is a no-op
     affected_fields: [completed]
     triggered_by:
       - from: completed
         provides: [ids]
+    # DEPRECATED and IGNORED: syntax-checked at load, then unused. Guards are
+    # relational (ADR 0031 P6=A); this is parameter-shaped. Add no new ones.
     precondition: "completed == false"
     undo:
       reversible: false
   update-tasks:
     entity: todoist_tasks
+    effect: idempotent            # set-field: same params → same state
     affected_fields: [content, description, priority, dueString, labels]
     undo:
       tool: update-tasks
@@ -85,20 +98,24 @@ tools:
   add-tasks:
     entity: todoist_tasks
     display_name: Create Task
+    effect: once_only             # create-without-key: no natural dedup
     undo:
       reversible: false
   delete-object:
     entity: todoist_tasks
     display_name: Delete
+    effect: once_only             # destructive external effect
     undo:
       reversible: false
   add-projects:
     entity: todoist_projects
     display_name: Create Project
+    effect: once_only
     undo:
       reversible: false
   update-projects:
     entity: todoist_projects
+    effect: idempotent
     affected_fields: [name, color, isFavorite, viewStyle]
     undo:
       tool: update-projects
@@ -114,9 +131,12 @@ tools:
   add-sections:
     entity: todoist_projects
     display_name: Create Section
+    effect: once_only
   add-comments:
     entity: todoist_tasks
     display_name: Add Comment
+    effect: once_only
   manage-assignments:
     entity: todoist_tasks
+    effect: idempotent
     affected_fields: [responsibleUid]

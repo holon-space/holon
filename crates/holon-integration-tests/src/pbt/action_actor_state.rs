@@ -5,8 +5,17 @@
 //! the undo/redo snapshot stacks. Per ADR 0004 this state must vanish when the
 //! action engine isn't wired — isolating it here lets a reduced wiring drop
 //! the fragment instead of carrying dead state.
+//!
+//! @pbt kind ref
+//! @pbt covers action-actor-state — lifecycle flag, `next_doc_id` allocator,
+//!   last-transition tag (Markov weighting), and the undo/redo `BlockState`
+//!   snapshot stacks. FIDELITY: `next_doc_id`/`next_id` are monotonic across
+//!   undo/redo by design (prod never reuses a burned id, see
+//! `pop_undo_to_redo`).
 
-use super::reference_state::BlockState;
+use holon_api::entity_uri::EntityUri;
+
+use super::block_state::BlockState;
 
 /// Action-engine actor state extracted from `ReferenceState` (ADR 0004 Phase
 /// 4).
@@ -38,6 +47,14 @@ impl ActionActorState {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         }
+    }
+
+    /// Generate a synthetic `block:ref-doc-N` URI for a new document and bump
+    /// the counter.
+    pub fn next_synthetic_doc_uri(&mut self) -> EntityUri {
+        let uri = EntityUri::block(&format!("ref-doc-{}", self.next_doc_id));
+        self.next_doc_id += 1;
+        uri
     }
 }
 

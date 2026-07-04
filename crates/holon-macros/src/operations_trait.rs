@@ -1,3 +1,12 @@
+use holon_pattern::arcs::ArcEmit;
+use holon_pattern::arcs::ArcPlace;
+use holon_pattern::arcs::TransitionArcs;
+use holon_pattern::pattern::BuiltinRef;
+use holon_pattern::pattern::Guard;
+use holon_pattern::pattern::OpGuard;
+use holon_pattern::pattern::PathSegment;
+use holon_pattern::pattern::Pattern;
+use holon_pattern::pattern::Subject;
 use proc_macro2::TokenStream;
 use quote::format_ident;
 use quote::quote;
@@ -6,6 +15,7 @@ use syn::ItemTrait;
 use syn::Meta;
 use syn::Pat;
 use syn::Type;
+use syn::punctuated::Punctuated;
 
 pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
     // Parse provider_name from attribute: #[operations_trait(provider_name =
@@ -61,11 +71,6 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
     // Result/UnknownOperationError live there, and every other crate (including
     // holon) reaches them via holon_core::.
     let is_internal = pkg_name == "holon-core";
-    let crate_path = if is_internal {
-        quote! { crate }
-    } else {
-        quote! { holon_core }
-    };
 
     // Determine the Operation type path - Operation is now in holon-api
     // All crates should use holon_api::Operation
@@ -74,8 +79,6 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
     // OperationResult is re-exported from holon_core for external crates
     let operation_result_path = if pkg_name == "holon-core" {
         quote! { crate::OperationResult }
-    } else if pkg_name == "holon" {
-        quote! { holon_core::OperationResult }
     } else {
         quote! { holon_core::OperationResult }
     };
@@ -83,8 +86,6 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
     // UndoAction is still needed for extracting undo from OperationResult
     let undo_action_path = if pkg_name == "holon-core" {
         quote! { crate::UndoAction }
-    } else if pkg_name == "holon" {
-        quote! { holon_core::UndoAction }
     } else {
         quote! { holon_core::UndoAction }
     };
@@ -184,19 +185,33 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                 description.clone()
             };
 
-            // Extract and generate precondition if present
-            let precondition_field =
-                if let Some(precondition_tokens) = extract_require_precondition(&method.attrs) {
-                    let precondition_closure =
-                        generate_precondition_closure(method, &precondition_tokens, &crate_path);
-                    quote! {
-                        precondition: Some(#precondition_closure),
-                    }
-                } else {
-                    quote! {
-                        precondition: None,
-                    }
-                };
+            // The declared guard (ADR 0031): `#[require("…")]` literals are
+            // parsed HERE, at expansion time, and emitted as the declarative
+            // `OpGuard` value. A parse error is a compile error.
+            let guard_field = match extract_require_guard(&method.attrs) {
+                Ok(guard) => {
+                    let expr = op_guard_tokens(&guard);
+                    quote! { guard: #expr, }
+                }
+                Err(err) => {
+                    let err = err.to_compile_error();
+                    quote! { guard: { #err }, }
+                }
+            };
+
+            // The declared transition arcs (ADR 0031 Increment 2): the
+            // `#[reads]`/`#[emits]` place literals are parsed HERE, at
+            // expansion time, so an unknown relation is a compile error.
+            let arcs_field = match extract_transition_arcs(&method.attrs) {
+                Ok(arcs) => {
+                    let expr = transition_arcs_tokens(&arcs);
+                    quote! { arcs: #expr, }
+                }
+                Err(err) => {
+                    let err = err.to_compile_error();
+                    quote! { arcs: { #err }, }
+                }
+            };
 
             // Extract affected fields from #[operation(affects = [...])] attribute
             let affected_fields = extract_affected_fields(&method.attrs);
@@ -235,6 +250,18 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                     .collect();
                 quote! { vec![#(#mapping_exprs),*] }
             };
+
+            // Extract UI menu exposure from #[menu_exposure(...)]. Absent ⇒
+            // fail-closed `NotListed { ProviderDefault }` — a macro-generated
+            // provider op stays invisible to the slash menu until it opts in.
+            let menu_exposure_expr = menu_exposure_tokens(extract_menu_exposure(&method.attrs));
+
+            // Extract sharing/audience boundary behavior from
+            // #[boundary_behavior(...)]. Absent ⇒ fail-closed `Unclassified`
+            // (ADR 0028 C3) — the boundary correspondence-lock rejects that for
+            // structural ops.
+            let boundary_behavior_expr =
+                boundary_behavior_tokens(extract_boundary_behavior(&method.attrs));
 
             // Construct entity_name: if provider_name is set, use
             // "{provider_name}.{operation_name}", otherwise use passed entity_name
@@ -277,9 +304,13 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                         ],
                         affected_fields: #affected_fields_expr,
                         param_mappings: #param_mappings_expr,
+                        menu_exposure: #menu_exposure_expr,
+                        boundary_behavior: #boundary_behavior_expr,
+                        target_scope: holon_api::TargetScope::Block,
                         trigger: None,
                         bound_params: ::std::collections::HashMap::new(),
-                        #precondition_field
+                        #guard_field
+                        #arcs_field
                     }
                 }
             }
@@ -922,6 +953,9 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
 
         // Generated operations module
         #[doc(hidden)]
+        // Descriptor/dispatch fns mirror the widest trait method, so their arity
+        // is the trait's — not something a caller can restructure here.
+        #[allow(clippy::too_many_arguments)]
         pub mod #operations_module_name {
             use super::*;
             use holon_api::StorageEntity;
@@ -1059,34 +1093,6 @@ pub fn extract_doc_comments(attrs: &[syn::Attribute]) -> String {
     docs.join(" ")
 }
 
-/// Extract require precondition tokens from attributes
-fn extract_require_precondition(attrs: &[syn::Attribute]) -> Option<proc_macro2::TokenStream> {
-    let mut preconditions = Vec::new();
-
-    for attr in attrs {
-        let is_require = attr.path().is_ident("require")
-            || (attr.path().segments.len() == 2
-                && attr.path().segments[0].ident == "holon_macros"
-                && attr.path().segments[1].ident == "require");
-
-        if is_require && let Meta::List(meta_list) = &attr.meta {
-            preconditions.push(meta_list.tokens.clone());
-        }
-    }
-
-    if preconditions.is_empty() {
-        None
-    } else if preconditions.len() == 1 {
-        Some(preconditions[0].clone())
-    } else {
-        let mut combined = preconditions[0].clone();
-        for prec in preconditions.iter().skip(1) {
-            combined = quote! { (#combined) && (#prec) };
-        }
-        Some(combined)
-    }
-}
-
 use crate::attr_parser::ParsedEnumFrom;
 use crate::attr_parser::ParsedParamMapping;
 use crate::attr_parser::{self};
@@ -1099,173 +1105,331 @@ fn extract_enum_from(attrs: &[syn::Attribute]) -> Option<ParsedEnumFrom> {
     attr_parser::extract_enum_from(attrs)
 }
 
-/// Generate precondition closure code for a method
-fn generate_precondition_closure(
-    method: &syn::TraitItemFn,
-    precondition_tokens: &proc_macro2::TokenStream,
-    _crate_path: &proc_macro2::TokenStream, /* ALLOW(unused_param): kept for symmetry with
-                                             * sibling generators */
-) -> proc_macro2::TokenStream {
-    let mut param_declarations = Vec::new();
+/// rustfmt's `format_strings` mangles long literals, and a corrupted guard that
+/// still parses is worse than a broken build (ADR 0031 P2). Guards compose by
+/// named sub-pattern instead.
+const MAX_GUARD_LITERAL_LEN: usize = 80;
 
-    for arg in method.sig.inputs.iter().skip(1) {
-        if let FnArg::Typed(pat_type) = arg {
-            let param_name_ident = match &*pat_type.pat {
-                Pat::Ident(pat_ident) => pat_ident.ident.clone(),
-                _ => {
-                    let name_str = extract_param_name(&pat_type.pat);
-                    syn::Ident::new(&name_str, proc_macro2::Span::call_site())
-                }
+/// Parse every `#[require("…")]` on a method into the declared [`OpGuard`].
+///
+/// ADR 0031 P2: the literal is parsed HERE, at expansion time, so a parse error
+/// is a compile error. P6=A: the guard is RELATIONAL — a predicate over the
+/// state the op touches. Parameter validity belongs in typed params, never in a
+/// guard, so there is no parameter subject to bind.
+///
+/// Several `#[require]`s conjoin, which is also the composition escape hatch
+/// for the length lint.
+fn extract_require_guard(attrs: &[syn::Attribute]) -> syn::Result<OpGuard> {
+    let mut bodies = Vec::new();
+    let mut sources: Vec<String> = Vec::new();
+
+    for attr in attrs {
+        let is_require = attr.path().is_ident("require")
+            || (attr.path().segments.len() == 2
+                && attr.path().segments[0].ident == "holon_macros"
+                && attr.path().segments[1].ident == "require");
+        if !is_require {
+            continue;
+        }
+        let Meta::List(meta_list) = &attr.meta else {
+            return Err(syn::Error::new_spanned(
+                attr,
+                "#[require] takes one guard string: #[require(\"has_tag(\\\"Page\\\")\")]",
+            ));
+        };
+        let lit: syn::LitStr = syn::parse2(meta_list.tokens.clone()).map_err(|_| {
+            syn::Error::new_spanned(
+                &meta_list.tokens,
+                "#[require] takes a guard STRING literal parsed by the Pattern parser (ADR 0031 \
+                 P2), not a Rust expression",
+            )
+        })?;
+        let text = lit.value();
+        if text.len() > MAX_GUARD_LITERAL_LEN {
+            return Err(syn::Error::new_spanned(
+                &lit,
+                format!(
+                    "guard literal is {} characters, over the {MAX_GUARD_LITERAL_LEN}-character \
+                     limit — rustfmt mangles long literals and a corrupted guard may still parse. \
+                     Split it across several #[require(\"…\")] attributes (they conjoin).",
+                    text.len()
+                ),
+            ));
+        }
+        let body = holon_pattern::pattern::parse_guard_body(&text)
+            .map_err(|e| syn::Error::new_spanned(&lit, format!("invalid guard: {e}")))?;
+        bodies.push(body);
+        sources.push(text);
+    }
+
+    if bodies.is_empty() {
+        return Ok(OpGuard::None);
+    }
+    let body = if bodies.len() == 1 {
+        bodies.pop().expect("len == 1")
+    } else {
+        Pattern::And(bodies)
+    };
+    // Subject inference (and the mixed-subject rejection) is the parser's, so
+    // the `#[require]` surface and the `when:` sugar yield identical guards.
+    let guard = Guard::from_body(body).map_err(|e| {
+        syn::Error::new_spanned(
+            attrs
+                .first()
+                .expect("bodies non-empty ⇒ an attribute exists"),
+            format!("invalid guard: {e}"),
+        )
+    })?;
+    // Several `#[require]`s conjoin, so the quoted source must be the joined
+    // text — quoting one literal would misdescribe what actually refused.
+    Ok(OpGuard::Declared {
+        guard,
+        source: sources.join(" and "),
+    })
+}
+
+/// Emit the parsed guard as a literal constructor expression. The macro's
+/// output is plain, serializable data (ADR 0031's dual-consumer requirement) —
+/// no closure, nothing to run at construction time.
+fn op_guard_tokens(guard: &OpGuard) -> proc_macro2::TokenStream {
+    match guard {
+        OpGuard::None => quote! { holon_api::pattern::OpGuard::None },
+        OpGuard::Declared { guard, source } => {
+            let subject = match guard.subject {
+                Subject::Clock => quote! { holon_api::pattern::Subject::Clock },
+                Subject::Block => quote! { holon_api::pattern::Subject::Block },
             };
-            let param_name_str = param_wire_name(&param_name_ident.to_string());
-            let (type_str, is_required) = infer_type(&pat_type.ty);
-            let is_optional = !is_required;
-            let type_str_cleaned = type_str.replace(" ", "");
+            let body = pattern_tokens(&guard.body);
+            quote! {
+                holon_api::pattern::OpGuard::Declared {
+                    guard: holon_api::pattern::Guard { subject: #subject, body: #body },
+                    source: #source.to_string(),
+                }
+            }
+        }
+    }
+}
 
-            let is_ref_type = matches!(&*pat_type.ty, syn::Type::Reference(_));
+/// Exclusion reasons are prose, so rustfmt's `format_strings` can rewrap them.
+/// Prose cannot silently change meaning the way a guard can, but a reason long
+/// enough to wrap is a reason that is explaining a design problem instead of
+/// naming an authority.
+const MAX_ARC_REASON_LEN: usize = 80;
 
-            let type_conversion = if type_str_cleaned == "String" || type_str_cleaned == "&str" {
-                if is_optional {
-                    quote! {
-                        let #param_name_ident: Option<String> = match params.get(#param_name_str) {
-                            None => None,
-                            Some(any_val) => match any_val.downcast_ref::<holon_api::Value>()
-                                .ok_or_else(|| format!("Parameter '{}' is not a Value", #param_name_str))? {
-                                holon_api::Value::Null => None,
-                                v => Some(v.as_string().map(|s| s.to_string())
-                                    .ok_or_else(|| format!("Invalid type for optional parameter '{}' (expected String)", #param_name_str))?),
-                            },
-                        };
-                    }
-                } else {
-                    quote! {
-                        let #param_name_ident: String = params.get(#param_name_str)
-                            .and_then(|any_val| {
-                                any_val.downcast_ref::<holon_api::Value>()
-                                    .and_then(|v| v.as_string().map(|s| s.to_string()))
-                            })
-                            .ok_or_else(|| format!("Missing or invalid parameter '{}' (expected String)", #param_name_str))?;
-                    }
-                }
-            } else if type_str_cleaned == "bool" {
-                if is_optional {
-                    quote! {
-                        let #param_name_ident: Option<bool> = match params.get(#param_name_str) {
-                            None => None,
-                            Some(any_val) => match any_val.downcast_ref::<holon_api::Value>()
-                                .ok_or_else(|| format!("Parameter '{}' is not a Value", #param_name_str))? {
-                                holon_api::Value::Null => None,
-                                v => Some(v.as_bool()
-                                    .ok_or_else(|| format!("Invalid type for optional parameter '{}' (expected bool)", #param_name_str))?),
-                            },
-                        };
-                    }
-                } else {
-                    quote! {
-                        let #param_name_ident: bool = params.get(#param_name_str)
-                            .and_then(|any_val| {
-                                any_val.downcast_ref::<holon_api::Value>()
-                                    .and_then(|v| v.as_bool())
-                            })
-                            .ok_or_else(|| format!("Missing or invalid parameter '{}' (expected bool)", #param_name_str))?;
-                    }
-                }
-            } else if type_str_cleaned.starts_with("i64") {
-                if is_optional {
-                    quote! {
-                        let #param_name_ident: Option<i64> = match params.get(#param_name_str) {
-                            None => None,
-                            Some(any_val) => match any_val.downcast_ref::<holon_api::Value>()
-                                .ok_or_else(|| format!("Parameter '{}' is not a Value", #param_name_str))? {
-                                holon_api::Value::Null => None,
-                                v => Some(v.as_i64()
-                                    .ok_or_else(|| format!("Invalid type for optional parameter '{}' (expected i64)", #param_name_str))?),
-                            },
-                        };
-                    }
-                } else {
-                    quote! {
-                        let #param_name_ident: i64 = params.get(#param_name_str)
-                            .and_then(|any_val| {
-                                any_val.downcast_ref::<holon_api::Value>()
-                                    .and_then(|v| v.as_i64())
-                            })
-                            .ok_or_else(|| format!("Missing or invalid parameter '{}' (expected i64)", #param_name_str))?;
-                    }
-                }
-            } else if type_str_cleaned.starts_with("i32") {
-                if is_optional {
-                    quote! {
-                        let #param_name_ident: Option<i32> = match params.get(#param_name_str) {
-                            None => None,
-                            Some(any_val) => match any_val.downcast_ref::<holon_api::Value>()
-                                .ok_or_else(|| format!("Parameter '{}' is not a Value", #param_name_str))? {
-                                holon_api::Value::Null => None,
-                                v => Some(v.as_i64().map(|i| i as i32)
-                                    .ok_or_else(|| format!("Invalid type for optional parameter '{}' (expected i32)", #param_name_str))?),
-                            },
-                        };
-                    }
-                } else {
-                    quote! {
-                        let #param_name_ident: i32 = params.get(#param_name_str)
-                            .and_then(|any_val| {
-                                any_val.downcast_ref::<holon_api::Value>()
-                                    .and_then(|v| v.as_i64().map(|i| i as i32))
-                            })
-                            .ok_or_else(|| format!("Missing or invalid parameter '{}' (expected i32)", #param_name_str))?;
-                    }
-                }
-            } else if is_optional && type_str_cleaned.contains("DateTime") {
-                quote! {
-                    let #param_name_ident: Option<chrono::DateTime<chrono::Utc>> = match params.get(#param_name_str) {
-                        None => None,
-                        Some(any_val) => match any_val.downcast_ref::<holon_api::Value>()
-                            .ok_or_else(|| format!("Parameter '{}' is not a Value", #param_name_str))? {
-                            holon_api::Value::Null => None,
-                            v => Some(v.as_datetime()
-                                .ok_or_else(|| format!("Invalid type for optional parameter '{}' (expected DateTime)", #param_name_str))?),
-                        },
-                    };
-                }
-            } else {
-                if is_optional {
-                    quote! {
-                        let #param_name_ident: Option<holon_api::Value> = params.get(#param_name_str)
-                            .and_then(|any_val| {
-                                any_val.downcast_ref::<holon_api::Value>().cloned()
-                            });
-                    }
-                } else {
-                    quote! {
-                        let #param_name_ident: holon_api::Value = params.get(#param_name_str)
-                            .and_then(|any_val| {
-                                any_val.downcast_ref::<holon_api::Value>().cloned()
-                            })
-                            .ok_or_else(|| format!("Missing parameter '{}' (expected Value)", #param_name_str))?;
-                    }
-                }
-            };
+/// One item inside `#[emits(...)]`: a place literal, or `excluded(place,
+/// reason)`.
+enum ParsedEmit {
+    Writes(syn::LitStr),
+    Excluded(syn::LitStr, syn::LitStr),
+}
 
-            param_declarations.push(type_conversion);
+impl syn::parse::Parse for ParsedEmit {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        if input.peek(syn::LitStr) {
+            return Ok(ParsedEmit::Writes(input.parse()?));
+        }
+        let keyword: syn::Ident = input.parse().map_err(|_| {
+            input.error(
+                "#[emits] takes place STRING literals, or excluded(\"relation.field\", \"why\")",
+            )
+        })?;
+        if keyword != "excluded" {
+            return Err(syn::Error::new_spanned(
+                &keyword,
+                format!("unknown #[emits] form {keyword}; the only form is excluded(…)"),
+            ));
+        }
+        let inner;
+        syn::parenthesized!(inner in input);
+        let place: syn::LitStr = inner.parse()?;
+        inner.parse::<syn::Token![,]>().map_err(|_| {
+            syn::Error::new_spanned(
+                &place,
+                "excluded(…) requires a REASON: silence about a written place is the red this \
+                 declaration exists to prevent",
+            )
+        })?;
+        let reason: syn::LitStr = inner.parse()?;
+        Ok(ParsedEmit::Excluded(place, reason))
+    }
+}
 
-            if is_ref_type && (type_str_cleaned == "String" || type_str_cleaned == "&str") {
-                // String handling for references
+/// Parse one `relation.field` literal into an [`ArcPlace`], reporting a parse
+/// failure at the literal's own span (the `#[require]` precedent).
+fn parse_arc_place(lit: &syn::LitStr) -> syn::Result<ArcPlace> {
+    ArcPlace::parse(&lit.value())
+        .map_err(|e| syn::Error::new_spanned(lit, format!("invalid arc place: {e}")))
+}
+
+/// Attribute-path match that accepts both the bare and the `holon_macros::`
+/// qualified spelling, as `#[require]` does.
+fn attr_is(attr: &syn::Attribute, name: &str) -> bool {
+    attr.path().is_ident(name)
+        || (attr.path().segments.len() == 2
+            && attr.path().segments[0].ident == "holon_macros"
+            && attr.path().segments[1].ident == name)
+}
+
+/// Parse every `#[reads(...)]` / `#[emits(...)]` on a method into the declared
+/// [`TransitionArcs`] (ADR 0031 Increment 2).
+///
+/// Places are parsed HERE, at expansion time, so an unknown relation is a
+/// compile error pointing at the literal. Absent both attributes the op is
+/// [`TransitionArcs::Undeclared`] — "not simulatable", never "writes nothing".
+fn extract_transition_arcs(attrs: &[syn::Attribute]) -> syn::Result<TransitionArcs> {
+    let mut reads: Vec<ArcPlace> = Vec::new();
+    let mut emits: Vec<ArcEmit> = Vec::new();
+    let mut saw_reads = false;
+    let mut saw_emits = false;
+
+    for attr in attrs {
+        let is_reads = attr_is(attr, "reads");
+        let is_emits = attr_is(attr, "emits");
+        if !is_reads && !is_emits {
+            continue;
+        }
+        let Meta::List(meta_list) = &attr.meta else {
+            return Err(syn::Error::new_spanned(
+                attr,
+                "#[reads]/#[emits] take a parenthesized list of \"relation.field\" literals",
+            ));
+        };
+        if is_reads {
+            saw_reads = true;
+            let lits = meta_list
+                .parse_args_with(Punctuated::<syn::LitStr, syn::Token![,]>::parse_terminated)?;
+            for lit in &lits {
+                reads.push(parse_arc_place(lit)?);
+            }
+        } else {
+            saw_emits = true;
+            let items = meta_list
+                .parse_args_with(Punctuated::<ParsedEmit, syn::Token![,]>::parse_terminated)?;
+            for item in &items {
+                match item {
+                    ParsedEmit::Writes(lit) => emits.push(ArcEmit::Writes(parse_arc_place(lit)?)),
+                    ParsedEmit::Excluded(place, reason) => {
+                        let text = reason.value();
+                        if text.len() > MAX_ARC_REASON_LEN {
+                            return Err(syn::Error::new_spanned(
+                                reason,
+                                format!(
+                                    "exclusion reason is {} characters, over the \
+                                     {MAX_ARC_REASON_LEN}-character limit — name the authority \
+                                     that owns the place, do not explain the design here",
+                                    text.len()
+                                ),
+                            ));
+                        }
+                        emits.push(ArcEmit::Excluded {
+                            place: parse_arc_place(place)?,
+                            reason: text,
+                        });
+                    }
+                }
             }
         }
     }
 
-    quote! {
-        {
-            use std::sync::Arc;
-            use std::any::Any;
-            use std::collections::HashMap;
+    if !saw_reads && !saw_emits {
+        return Ok(TransitionArcs::Undeclared);
+    }
+    if !saw_emits {
+        return Err(syn::Error::new_spanned(
+            attrs
+                .iter()
+                .find(|a| attr_is(a, "reads"))
+                .expect("saw_reads ⇒ a #[reads] attribute exists"),
+            "an op that declares #[reads] must also declare #[emits] — declaring inputs while \
+             staying silent about outputs is exactly what Undeclared already says. Write \
+             #[emits()] for a genuinely read-only op.",
+        ));
+    }
+    Ok(TransitionArcs::Declared { reads, emits })
+}
 
-            Arc::new(Box::new(move |params: &HashMap<String, Box<dyn Any + Send + Sync>>| -> std::result::Result<bool, String> {
-                #(#param_declarations)*
-                Ok(#precondition_tokens)
-            }) as Box<holon_api::PreconditionChecker>)
+/// Emit the parsed arcs as a literal constructor expression — plain
+/// serializable data, for the same dual-consumer reason as the guard.
+fn transition_arcs_tokens(arcs: &TransitionArcs) -> proc_macro2::TokenStream {
+    match arcs {
+        TransitionArcs::Undeclared => quote! { holon_api::arcs::TransitionArcs::Undeclared },
+        TransitionArcs::Declared { reads, emits } => {
+            let read_exprs = reads.iter().map(arc_place_tokens);
+            let emit_exprs = emits.iter().map(|e| match e {
+                ArcEmit::Writes(place) => {
+                    let place = arc_place_tokens(place);
+                    quote! { holon_api::arcs::ArcEmit::Writes(#place) }
+                }
+                ArcEmit::Excluded { place, reason } => {
+                    let place = arc_place_tokens(place);
+                    quote! {
+                        holon_api::arcs::ArcEmit::Excluded {
+                            place: #place,
+                            reason: #reason.to_string(),
+                        }
+                    }
+                }
+            });
+            quote! {
+                holon_api::arcs::TransitionArcs::Declared {
+                    reads: vec![#(#read_exprs),*],
+                    emits: vec![#(#emit_exprs),*],
+                }
+            }
         }
+    }
+}
+
+fn arc_place_tokens(place: &ArcPlace) -> proc_macro2::TokenStream {
+    let relation = place.relation.as_str();
+    let field = &place.field;
+    quote! {
+        holon_api::arcs::ArcPlace::new(#relation, #field)
+    }
+}
+
+fn pattern_tokens(pattern: &Pattern) -> proc_macro2::TokenStream {
+    match pattern {
+        Pattern::HasTag(tag) => quote! { holon_api::pattern::Pattern::HasTag(#tag.to_string()) },
+        Pattern::BlockExists(path) => {
+            let segs = path.segments.iter().map(|s| match s {
+                PathSegment::Lit(l) => {
+                    quote! { holon_api::pattern::PathSegment::Lit(#l.to_string()) }
+                }
+                PathSegment::Builtin(BuiltinRef::Today) => quote! {
+                    holon_api::pattern::PathSegment::Builtin(
+                        holon_api::pattern::BuiltinRef::Today,
+                    )
+                },
+            });
+            quote! {
+                holon_api::pattern::Pattern::BlockExists(holon_api::pattern::PathPattern {
+                    segments: vec![#(#segs),*],
+                })
+            }
+        }
+        Pattern::Parent(inner) => {
+            let inner = pattern_tokens(inner);
+            quote! { holon_api::pattern::Pattern::Parent(Box::new(#inner)) }
+        }
+        Pattern::Not(inner) => {
+            let inner = pattern_tokens(inner);
+            quote! { holon_api::pattern::Pattern::Not(Box::new(#inner)) }
+        }
+        Pattern::And(ps) => {
+            let ps = ps.iter().map(pattern_tokens);
+            quote! { holon_api::pattern::Pattern::And(vec![#(#ps),*]) }
+        }
+        Pattern::Or(ps) => {
+            let ps = ps.iter().map(pattern_tokens);
+            quote! { holon_api::pattern::Pattern::Or(vec![#(#ps),*]) }
+        }
+        // The guard-string grammar has no field syntax, and the parser is the
+        // only producer of the patterns reaching here.
+        Pattern::Field { .. } => unreachable!(
+            "Pattern::Field is unreachable from a #[require] guard string: the grammar is \
+             not/and/or over block_exists, has_tag and parent"
+        ),
     }
 }
 
@@ -1427,4 +1591,148 @@ fn infer_type_hint_from_rust_type(rust_type_str: &str) -> proc_macro2::TokenStre
 
 fn extract_affected_fields(attrs: &[syn::Attribute]) -> Vec<String> {
     attr_parser::extract_affected_fields(attrs)
+}
+
+fn extract_menu_exposure(attrs: &[syn::Attribute]) -> Option<String> {
+    attr_parser::extract_menu_exposure(attrs)
+}
+
+fn extract_boundary_behavior(attrs: &[syn::Attribute]) -> Option<String> {
+    attr_parser::extract_boundary_behavior(attrs)
+}
+
+/// Map a `#[boundary_behavior(<variant>)]` marker (or its absence) to the
+/// `holon_api::BoundaryBehavior` construction tokens. Absent / unknown ⇒ the
+/// fail-closed `Unclassified` behaviour (any boundary interaction rejected
+/// loudly until an op deliberately classifies itself). ADR 0028 C3.
+fn boundary_behavior_tokens(variant: Option<String>) -> proc_macro2::TokenStream {
+    match variant.as_deref() {
+        Some("private_only") => quote! { holon_api::BoundaryBehavior::PrivateOnly },
+        Some("crossing_widens") => quote! {
+            holon_api::BoundaryBehavior::Crossing { widens_audience: true }
+        },
+        Some("crossing_same_audience") => quote! {
+            holon_api::BoundaryBehavior::Crossing { widens_audience: false }
+        },
+        Some("forbidden_at_page_boundary") => {
+            quote! { holon_api::BoundaryBehavior::ForbiddenAtPageBoundary }
+        }
+        Some("policy_edit") => quote! { holon_api::BoundaryBehavior::PolicyEdit },
+        Some("identity_op") => quote! { holon_api::BoundaryBehavior::IdentityOp },
+        // A PRESENT attr with an unknown variant is a typo, not an omission —
+        // erroring here keeps fail-closed from silently absorbing misspellings.
+        Some(unknown) => {
+            let msg = format!(
+                "unknown boundary_behavior variant `{unknown}` (expected one of: \
+                 private_only, crossing_widens, crossing_same_audience, \
+                 forbidden_at_page_boundary, policy_edit, identity_op)"
+            );
+            quote! { compile_error!(#msg) }
+        }
+        None => quote! { holon_api::BoundaryBehavior::Unclassified },
+    }
+}
+
+/// Map a `#[menu_exposure(<variant>)]` marker (or its absence) to the
+/// `holon_api::MenuExposure` construction tokens. Absent / unknown ⇒ the
+/// fail-closed `ProviderDefault` surface (invisible to the menu until an op
+/// deliberately declares `listed`).
+fn menu_exposure_tokens(variant: Option<String>) -> proc_macro2::TokenStream {
+    match variant.as_deref() {
+        Some("listed") => quote! {
+            holon_api::MenuExposure::Listed {
+                surfaces: holon_api::SurfaceSet { slash_menu: true, action_bar: false },
+            }
+        },
+        Some("keyboard_gesture") => quote! {
+            holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::KeyboardGesture,
+            }
+        },
+        Some("pointer_gesture") => quote! {
+            holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::PointerGesture,
+            }
+        },
+        Some("navigation") => quote! {
+            holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::Navigation,
+            }
+        },
+        Some("external") => quote! {
+            holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::External,
+            }
+        },
+        Some("internal") => quote! {
+            holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::Internal,
+            }
+        },
+        _ => quote! {
+            holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::ProviderDefault,
+            }
+        },
+    }
+}
+
+#[cfg(test)]
+mod arc_attribute_tests {
+    use super::*;
+
+    fn arcs_of(attrs: Vec<syn::Attribute>) -> syn::Result<TransitionArcs> {
+        extract_transition_arcs(&attrs)
+    }
+
+    /// A typo'd place is a COMPILE ERROR at the literal, not a declaration that
+    /// is silently true forever. This is the macro-side half of the closed
+    /// field list; `holon-pattern` owns the vocabulary itself.
+    #[test]
+    fn an_unknown_field_is_a_macro_error_naming_the_place() {
+        let err = arcs_of(vec![
+            syn::parse_quote!(#[emits("block.totally_bogus_field_xyz")]),
+        ])
+        .expect_err("an unknown place must not expand");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("totally_bogus_field_xyz") && msg.contains("has no place"),
+            "the error must name the offending place: {msg}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_relation_is_a_macro_error() {
+        let err = arcs_of(vec![syn::parse_quote!(#[reads("document.title")])])
+            .expect_err("an unknown relation must not expand");
+        assert!(err.to_string().contains("unknown arc relation"));
+    }
+
+    /// Declaring inputs while staying silent about outputs is what `Undeclared`
+    /// already says, so the half-declaration is refused.
+    #[test]
+    fn reads_without_emits_is_refused() {
+        let err = arcs_of(vec![syn::parse_quote!(#[reads("block.content")])])
+            .expect_err("reads alone must not expand");
+        assert!(err.to_string().contains("must also declare #[emits]"));
+    }
+
+    /// An exclusion without a reason is silence wearing a declaration's
+    /// clothes.
+    #[test]
+    fn excluded_without_a_reason_is_refused() {
+        let err = arcs_of(vec![
+            syn::parse_quote!(#[emits(excluded("block.sort_key"))]),
+        ])
+        .expect_err("a reasonless exclusion must not expand");
+        assert!(err.to_string().contains("requires a REASON"));
+    }
+
+    #[test]
+    fn absent_attributes_yield_undeclared() {
+        assert_eq!(
+            arcs_of(vec![syn::parse_quote!(#[doc = "unrelated"])]).expect("no arc attrs"),
+            TransitionArcs::Undeclared
+        );
+    }
 }

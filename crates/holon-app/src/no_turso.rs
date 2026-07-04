@@ -73,12 +73,15 @@ pub fn from_block_query_source(
     let ui_watcher = Arc::new(holon::api::loro_ui_watcher::LoroUiWatcher::new(
         block_query.clone(),
     )) as Arc<dyn holon::api::UiWatcher>;
-    let profiles = holon::api::loro_ui_watcher::build_turso_free_profile_resolver();
+    let profiles =
+        holon::api::loro_ui_watcher::build_turso_free_profile_resolver(block_query.clone());
     FrontendSession::from_parts(SessionParts::with_capabilities(
         None,
         block_query,
         operation_engine,
         ui_watcher,
         profiles,
+        // No type registry in the Turso-free wiring: built-in schemes only.
+        holon_api::link_parser::LinkTargetClassifier::default(),
     ))
 }

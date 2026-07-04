@@ -5,8 +5,11 @@
 //! the `properties` JSON field.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 // Import Block for use in extension traits (not re-exported to avoid FRB issues)
+use holon_api::MarkClass;
+use holon_api::MarkSpan;
 use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
 use holon_api::types::ContentType;
@@ -34,6 +37,24 @@ pub mod org_props {
     pub const SCHEDULED: &str = "scheduled";
     pub const DEADLINE: &str = "deadline";
     pub const ORG_PROPERTIES: &str = "org_properties";
+    /// JSON array of the `:PROPERTIES:` drawer keys in the order the author
+    /// wrote them, recorded at parse and replayed by the renderer. Underscore
+    /// prefix keeps it out of the drawer it describes.
+    pub const DRAWER_ORDER: &str = "_drawer_order";
+    /// A doc-root's FILE-LEVEL `:PROPERTIES:` drawer (org 9.0+, org-roam's
+    /// identity carrier) as a JSON object in the order the author wrote it,
+    /// `ID` included. Present only on a doc-root whose file had one, and its
+    /// presence is what makes the renderer emit the drawer back.
+    ///
+    /// Deliberately NOT `_`-prefixed, unlike [`DRAWER_ORDER`]: `_` keys are
+    /// dropped by `drawer_properties()` and so never reach the store, and a
+    /// drawer that survives only until the first write-back is the very bug
+    /// this carrier exists to fix.
+    pub const FILE_PROPERTIES: &str = "file_properties";
+    /// `"t"` on a doc-root whose file carried a `#+ID:` keyword. It is what
+    /// keeps a file that declares its identity BOTH ways (drawer `:ID:` and
+    /// `#+ID:`, in agreement) from losing one of the two on write-back.
+    pub const FILE_ID_KEYWORD: &str = "file_id_keyword";
 }
 
 // =============================================================================
@@ -121,8 +142,13 @@ impl BlockResolver for HashMapBlockResolver {
     }
 }
 
-/// Default active keywords when file doesn't specify custom TODO config
-pub const DEFAULT_ACTIVE_KEYWORDS: &[&str] = &["TODO", "DOING"];
+/// Default active keywords when file doesn't specify custom TODO config.
+///
+/// Includes the LogSeq dialect keywords `LATER` (TODO-family, not started)
+/// and `NOW` (DOING-family, in progress) so foreign LogSeq vaults — which
+/// carry no `#+TODO:` header — parse their headline keywords as task states
+/// rather than title text (ForeignVaultCompat §4).
+pub const DEFAULT_ACTIVE_KEYWORDS: &[&str] = &["TODO", "DOING", "LATER", "NOW"];
 
 /// Default done keywords when file doesn't specify custom TODO config
 pub const DEFAULT_DONE_KEYWORDS: &[&str] = &["DONE", "CANCELLED", "CLOSED"];
@@ -164,12 +190,11 @@ fn format_properties_drawer(properties_json: &str) -> String {
         result.push_str(&format!(":ID: {}\n", value_str));
     }
 
-    // Render other properties (excluding ID which we already rendered).
-    // Sort by key for deterministic output — serde_json::Map uses IndexMap
-    // (preserve_order feature enabled by transitive dependency).
-    let mut sorted_props: Vec<_> = props.iter().filter(|(k, _)| k.as_str() != "ID").collect();
-    sorted_props.sort_by_key(|(a, _)| *a);
-    for (key, value) in sorted_props {
+    // Render other properties (excluding ID which we already rendered) in the
+    // JSON's own key order — serde_json::Map is an IndexMap (preserve_order
+    // enabled by a transitive dependency), and the renderer built that order
+    // from the author's drawer.
+    for (key, value) in props.iter().filter(|(k, _)| k.as_str() != "ID") {
         let value_str = match value {
             serde_json::Value::String(s) => s.clone(),
             _ => value.to_string(),
@@ -180,16 +205,55 @@ fn format_properties_drawer(properties_json: &str) -> String {
     result
 }
 
-/// Format planning lines (SCHEDULED/DEADLINE)
+/// Format a properties drawer with the `:ID:` line omitted (dense projection).
+/// Returns an empty string when no non-ID properties remain, so a block whose
+/// only drawer content was its `:ID:` renders with no drawer at all.
+fn format_properties_drawer_without_id(properties_json: &str) -> String {
+    let props: serde_json::Map<String, serde_json::Value> = serde_json::from_str(properties_json)
+        .unwrap_or_else(|e| {
+            panic!(
+                "malformed org_properties JSON {properties_json:?}: {e} — dense render must not \
+                 silently drop drawer properties"
+            )
+        });
+
+    let drawer_props: Vec<_> = props.iter().filter(|(k, _)| k.as_str() != "ID").collect();
+    if drawer_props.is_empty() {
+        return String::new();
+    }
+
+    let mut result = String::from(":PROPERTIES:\n");
+    for (key, value) in drawer_props {
+        let value_str = match value {
+            serde_json::Value::String(s) => s.clone(),
+            _ => value.to_string(),
+        };
+        result.push_str(&format!(":{}: {}\n", key, value_str));
+    }
+    result.push_str(":END:");
+    result
+}
+
+/// Format the planning line (SCHEDULED/DEADLINE).
+///
+/// Both keywords MUST share one line: orgize's `planning_node` parser reads
+/// `(keyword, timestamp)` pairs back to back with no intervening newline,
+/// then consumes a single end-of-line — a second keyword on its OWN line
+/// isn't part of the same `PLANNING` node, so it (and everything meant to
+/// follow it, e.g. the `:PROPERTIES:` drawer) gets swallowed into the
+/// section body as plain text instead of being parsed structurally.
 fn format_planning(scheduled: Option<&str>, deadline: Option<&str>) -> String {
-    let mut result = String::new();
+    let mut parts = Vec::new();
     if let Some(sched) = scheduled {
-        result.push_str(&format!("SCHEDULED: {}\n", sched.trim()));
+        parts.push(format!("SCHEDULED: {}", sched.trim()));
     }
     if let Some(dead) = deadline {
-        result.push_str(&format!("DEADLINE: {}\n", dead.trim()));
+        parts.push(format!("DEADLINE: {}", dead.trim()));
     }
-    result
+    if parts.is_empty() {
+        return String::new();
+    }
+    parts.join(" ") + "\n"
 }
 
 /// Format header arguments with Value types as Org Mode inline parameters.
@@ -244,6 +308,13 @@ pub trait OrgDocumentExt {
     /// Set the org file title (#+TITLE value)
     fn set_file_title(&mut self, title: Option<String>);
 
+    /// The file-level `:PROPERTIES:` drawer, keys in the order the author
+    /// wrote them and `ID` included. `None` when the file had no such drawer.
+    fn file_drawer(&self) -> Option<serde_json::Map<String, serde_json::Value>>;
+
+    /// Set (or clear) the file-level `:PROPERTIES:` drawer.
+    fn set_file_drawer(&mut self, drawer: Option<serde_json::Map<String, serde_json::Value>>);
+
     /// Get the TODO keywords as TaskState objects.
     fn todo_keywords(&self) -> Option<Vec<TaskState>>;
 
@@ -268,6 +339,32 @@ impl OrgDocumentExt for Block {
             self.set_property(org_props::TITLE, t);
         } else {
             self.properties.remove(org_props::TITLE);
+        }
+    }
+
+    fn file_drawer(&self) -> Option<serde_json::Map<String, serde_json::Value>> {
+        let value = self.get_property(org_props::FILE_PROPERTIES)?;
+        let json = value.as_string()?.to_string();
+        Some(serde_json::from_str(&json).unwrap_or_else(|e| {
+            panic!(
+                "malformed {} {json:?}: {e} — we wrote it, so a parse failure means the \
+                 file-level drawer carrier was corrupted in transit, and rendering on would \
+                 delete the author's drawer",
+                org_props::FILE_PROPERTIES
+            )
+        }))
+    }
+
+    fn set_file_drawer(&mut self, drawer: Option<serde_json::Map<String, serde_json::Value>>) {
+        match drawer {
+            Some(d) => self.set_property(
+                org_props::FILE_PROPERTIES,
+                serde_json::to_string(&d)
+                    .expect("a file-level drawer is a string map — always serializable"),
+            ),
+            None => {
+                self.properties.remove(org_props::FILE_PROPERTIES);
+            }
         }
     }
 
@@ -351,18 +448,109 @@ impl OrgDocumentExt for Block {
 
 /// Renders the file-level org header (#+TITLE, #+TODO) from a document block's
 /// properties.
+/// Trim whole BLANK (whitespace-only) lines off both ends of a body, keeping
+/// every surviving line's own indentation.
+///
+/// `str::trim` cannot do this: it also eats the FIRST content line's leading
+/// spaces, so an indented body came back with line 1 flush-left and every
+/// later line still indented. Both the renderer and the parser go through
+/// here so the two ends agree and `render(parse(render(x))) == render(x)`.
+pub(crate) fn trim_blank_lines(s: &str) -> &str {
+    let mut start = 0usize;
+    let mut end = s.len();
+    loop {
+        match s[start..end].find('\n') {
+            Some(i) if s[start..start + i].trim().is_empty() => start += i + 1,
+            _ => break,
+        }
+    }
+    loop {
+        match s[start..end].rfind('\n') {
+            Some(i) => {
+                let nl = start + i;
+                if s[nl + 1..end].trim().is_empty() {
+                    end = nl;
+                } else {
+                    break;
+                }
+            }
+            None => break,
+        }
+    }
+    if s[start..end].trim().is_empty() {
+        ""
+    } else {
+        &s[start..end]
+    }
+}
+
 pub fn render_document_header(doc_block: &Block) -> String {
     let mut result = String::new();
+
+    // A hand-authored FILE-LEVEL `:PROPERTIES:` drawer goes first and verbatim:
+    // org-mode (and orgize's `document_node`) only recognize it as the file's
+    // own drawer when it is the first element of the file, so any other
+    // placement would silently demote it to body text on the next read.
+    let file_drawer = doc_block.file_drawer();
+    let drawer_carries_id = match &file_drawer {
+        Some(drawer) => {
+            let mut carries_id = false;
+            result.push_str(":PROPERTIES:\n");
+            for (key, value) in drawer {
+                let authored = match value {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                // The `:ID:` line is re-derived from the block's CURRENT
+                // identity rather than replayed, so the drawer and the document
+                // can never drift apart across a rename or a promotion.
+                //
+                // An EMPTY `:ID:` is NOT the identity carrier and must not be
+                // filled in — `EntityUri::id()` of a name-chain document is its
+                // PATH, so substituting there would write the file's own path
+                // into the drawer as if the author had chosen it. This mirrors
+                // the parser's `drawer_id`, which rejects an empty value for the
+                // same reason; the two guards must agree or write-back invents
+                // an identity the parse will not accept back.
+                let rendered = if key.eq_ignore_ascii_case("ID") && !authored.is_empty() {
+                    carries_id = true;
+                    doc_block.id.id().to_string()
+                } else {
+                    authored
+                };
+                // The space after the key is REQUIRED, empty value or not:
+                // orgize's `node_property_node` matches `space1` between key and
+                // value, so `:KEY:` with nothing after it does not parse as a
+                // property — and one unparsable line makes the WHOLE drawer fail
+                // to parse and decay into body text. The trailing space on an
+                // empty value is the cost of the drawer surviving re-ingest.
+                result.push_str(&format!(":{key}: {rendered}\n"));
+            }
+            result.push_str(":END:\n");
+            carries_id
+        }
+        None => false,
+    };
 
     // Document identity. Files identified by a stable `block:<uuid>` get a
     // `#+ID:` directive so the id travels with the file (rename-safe).
     // Files still using the transient path-derived `file:` URI render
     // without `#+ID:` — they keep name-chain identity until promoted.
-    if doc_block.id.is_block() {
+    //
+    // A drawer that already carries `:ID:` IS the identity carrier, so no
+    // `#+ID:` is added beside it — the file keeps the single carrier its author
+    // chose instead of growing a second one on every write-back. A file that
+    // authored BOTH (in agreement — the parser rejects disagreement) keeps both.
+    let authored_id_keyword = doc_block.get_property(org_props::FILE_ID_KEYWORD).is_some();
+    if doc_block.id.is_block() && (!drawer_carries_id || authored_id_keyword) {
         result.push_str(&format!("#+ID: {}\n", doc_block.id.id()));
     }
 
-    // File title
+    // File title. A doc-root with no `file_title` — including one PROMOTED from
+    // an inline `:Page:`-tagged headline — deliberately renders none: its name
+    // is carried by its own filename (the page path is built from
+    // `block.title()`), and emitting a synthetic `#+TITLE:` would break
+    // `parse(render(doc)) == doc` for every title-less file.
     if let Some(title) = doc_block.file_title() {
         result.push_str(&format!("#+TITLE: {}\n", title));
     }
@@ -432,7 +620,9 @@ pub trait OrgBlockExt {
     /// Get the body text (content after first line)
     fn body(&self) -> Option<String>;
 
-    /// Set content from title and body
+    /// Replace content with `title` + `body`, both plain literals. Any
+    /// existing marks are dropped: their spans indexed the old content, and
+    /// keeping them would project styling onto unrelated characters.
     fn set_title_and_body(&mut self, title: String, body: Option<String>);
 
     /// Get the task state (TODO keyword)
@@ -529,6 +719,7 @@ impl OrgBlockExt for Block {
         } else {
             self.content = title;
         }
+        self.marks = None;
         self.updated_at = holon_api::clock::now_millis();
     }
 
@@ -556,10 +747,7 @@ impl OrgBlockExt for Block {
 
     fn set_task_state(&mut self, state: Option<TaskState>) {
         if let Some(s) = state {
-            let category = match s.category {
-                StateCategory::Active => "active",
-                StateCategory::Done => "done",
-            };
+            let category = s.category.as_str();
             self.set_property(
                 org_props::TASK_STATE,
                 holon_api::Value::String(s.keyword.clone()),
@@ -579,7 +767,8 @@ impl OrgBlockExt for Block {
     fn priority(&self) -> Option<Priority> {
         self.get_property(org_props::PRIORITY)
             .and_then(|v| v.as_i64())
-            .and_then(|i| Priority::from_int(i as i32).ok()) // ALLOW(ok): boundary parse
+            .and_then(|i| Priority::from_int(i as i32).ok()) // ALLOW(ok):
+        // boundary parse
     }
 
     fn set_priority(&mut self, priority: Option<Priority>) {
@@ -671,6 +860,8 @@ impl OrgBlockExt for Block {
             "priority",
             "tags",
             "requires",
+            "advice_suppressed",
+            "contributes_to",
             "scheduled",
             "deadline",
             "org_properties",
@@ -680,6 +871,8 @@ impl OrgBlockExt for Block {
             "SCHEDULED",
             "DEADLINE",
             "ID",
+            "COLLAPSED",
+            "WIDGET_ONLY",
             "_source_header_args",
             "_source_results",
         ];
@@ -726,13 +919,68 @@ impl OrgBlockExt for Block {
         // (added at parse boundary); strip the scheme on the way out so the
         // org file keeps bare slugs (per docs/Reference/ORG_SYNTAX.md). Joined with
         // spaces (org-edna convention).
+        //
+        // Rendered under the canonical `:REQUIRES:` drawer key (owner ruling
+        // 2026-07-16). `:BLOCKED-BY:` is accepted as an input alias by the parser
+        // and converges to `:REQUIRES:` on write-back — both name the SAME
+        // `block_requires` edge (there is no distinct `BlockedBy` EdgeField; see
+        // block_requires.sql and crates/holon-api/src/edge_field.rs).
         if !self.requires.is_empty() {
-            let bare: Vec<String> = self
+            // Sort the bare slugs: this edge is a SET of blockers (order is not
+            // semantic), and the junction hydration (`json_group_array` over
+            // `block_requires`, no ORDER BY) does not guarantee insertion order.
+            // A sorted canonical form makes the org round-trip deterministic
+            // through the store regardless of aggregation order.
+            let mut bare: Vec<String> = self
                 .requires
                 .iter()
                 .map(|uri| uri.id().to_string())
                 .collect();
+            bare.sort();
             result.insert("REQUIRES".to_string(), bare.join(" "));
+        }
+
+        // `advice_suppressed` mirrors `requires`: a typed edge field on Block
+        // (hydrated from the advice_suppressed junction) reconstructed into the
+        // `:ADVICE_SUPPRESSED:` drawer with the scheme stripped (bare slugs).
+        // See ADR 0021.
+        if !self.advice_suppressed.is_empty() {
+            let bare: Vec<String> = self
+                .advice_suppressed
+                .iter()
+                .map(|uri| uri.id().to_string())
+                .collect();
+            result.insert("ADVICE_SUPPRESSED".to_string(), bare.join(" "));
+        }
+
+        // `contributes_to` mirrors `requires` — a typed edge field rebuilt into
+        // its drawer with the scheme stripped, sorted so the round-trip is
+        // deterministic through the store's unordered junction hydration. The
+        // key is lowercase kebab-case: Compass keys are lowercase by convention
+        // so they can never collide with org's own UPPER-CASE typed keys
+        // (docs/Reference/CompassConventions.md).
+        if !self.contributes_to.is_empty() {
+            let mut bare: Vec<String> = self
+                .contributes_to
+                .iter()
+                .map(|uri| uri.id().to_string())
+                .collect();
+            bare.sort();
+            result.insert("contributes-to".to_string(), bare.join(" "));
+        }
+
+        // `collapsed` is document state (Martin ruling 2026-07-11), written
+        // only when folded — matches `requires`/`advice_suppressed`'s
+        // only-if-non-empty convention so a never-collapsed file's drawer
+        // stays exactly as before this field existed.
+        if self.collapsed {
+            result.insert("COLLAPSED".to_string(), "t".to_string());
+        }
+
+        // `widget_only` follows `collapsed`'s only-when-set convention so a
+        // file that never uses widget-only rendering keeps its drawer verbatim.
+        if self.widget_only {
+            result.insert("WIDGET_ONLY".to_string(), "t".to_string());
         }
 
         result
@@ -760,6 +1008,24 @@ impl OrgBlockExt for Block {
     }
 }
 
+/// How a headline block's stable identity is emitted.
+///
+/// The canonical org file carries identity in the `:PROPERTIES:/:ID:/:END:`
+/// drawer. A DENSE projection (agent-facing, projection-only — see
+/// `crate::dense`) instead compresses that three-line scaffolding to a single
+/// trailing headline token `{#<alias>}`, where `<alias>` is a short per-query
+/// handle. This enum is the ONE branch point between the two forms so the
+/// headline-building logic stays a single implementation.
+pub(crate) enum HeadlineIdentity<'a> {
+    /// Canonical: `:ID:` inside the properties drawer.
+    Drawer,
+    /// Dense projection: trailing `{#alias}` token, `:ID:` line suppressed.
+    /// `gap` renders a `^` inside the token (`{#alias^}`) meaning one or more
+    /// unselected ancestors were elided above this block — its rendered parent
+    /// is NOT its true parent. Display-only (see `crate::dense`).
+    DenseToken { alias: &'a str, gap: bool },
+}
+
 impl ToOrg for Block {
     fn to_org(&self) -> String {
         // Source blocks render as #+BEGIN_SRC ... #+END_SRC
@@ -772,102 +1038,440 @@ impl ToOrg for Block {
             return format!("[[file:{}]]\n", self.content);
         }
 
-        // Rich text: re-emit org delimiters from the mark set before
-        // splitting into title + body lines. When marks=None, content is
-        // already raw org text (no marks to project) — emit as-is. The
-        // local override `with_marks_rendered` shadows accessors that read
-        // self.content for the duration of this method.
-        let with_marks_rendered: Option<String> = self
-            .marks
-            .as_ref()
-            .filter(|m| !m.is_empty())
-            .map(|m| crate::inline_marks::render_inline_marks(&self.content, m));
-        let title_str = match with_marks_rendered.as_ref() {
-            Some(rendered) => rendered.lines().next().unwrap_or("").trim_end().to_string(),
-            None => self.org_title(),
-        };
-        let body_str: Option<String> = match with_marks_rendered.as_ref() {
-            Some(rendered) => {
-                let lines: Vec<&str> = rendered.lines().collect();
-                if lines.len() > 1 {
-                    Some(lines[1..].join("\n"))
-                } else {
-                    None
-                }
+        render_headline_block(self, HeadlineIdentity::Drawer)
+    }
+}
+
+/// The org bytes for a block's `content` + `marks`, quoting every literal span
+/// org would otherwise eat as emphasis so the bytes parse back to what the
+/// store holds (`__default__` stays `__default__` instead of returning as
+/// `default`). Marked blocks included: the literal gaps between marks are
+/// exposed to the same loss.
+///
+/// Degradation ladder, worst outcome last, ordered by what each rung
+/// SACRIFICES — and the order is dictated by [`MarkClass`], not by convenience:
+///
+/// 1. everything intact;
+/// 2. STYLING marks dropped — bold on a word is recoverable annoyance;
+/// 3. PROTECTIVE marks dropped too. Safe only because the check still demands
+///    the ORIGINAL content back: if un-sealing a span would let it be
+///    reinterpreted, the quoting pass re-seals it with `=…=` and the check
+///    proves it; if it cannot, this rung is refused;
+/// 4. EVERY mark dropped, including data-bearing ones. Link targets are lost —
+///    they exist nowhere but the mark — so this rung is a last resort, but it
+///    always represents the content and always settles.
+///
+/// Two conditions gate every rung, and neither is optional:
+///
+/// - **Content**: the emission must re-parse to `expected_reparse(content,
+///   ORIGINAL marks)`. Re-deriving the expectation from each rung's reduced
+///   mark set would make degradations self-justifying — dropping a `Verbatim`
+///   also drops the reason its span must stay literal.
+/// - **Settlement**: the emission must be a FIXED POINT — re-parsing and
+///   re-rendering it must give the same bytes. Non-settling output is the
+///   echo-loop condition: write-back rewrites the file, the watcher re-ingests,
+///   and the two never agree. That is worse than any amount of lost formatting,
+///   so it binds even on the rung that has already given up on the content.
+///
+/// Nothing here returns `Err`: `ToOrg::to_org` and the `FileFormatAdapter`
+/// render methods are `-> String`, and this runs inside the org-sync select
+/// loop where an unwind stops write-back vault-wide until restart. Threading
+/// `Result` to a write-back gate is the follow-up.
+pub fn render_block_content(block: &Block) -> String {
+    render_block_content_checked(block).0
+}
+
+/// What [`render_block_content`] had to give up. `ContentUnpreserved` is the
+/// one outcome a caller must never treat as routine: the emitted bytes do NOT
+/// re-parse to the stored content. It is also the hook a write-back gate needs
+/// to quarantine the file instead of writing it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RenderFidelity {
+    Exact,
+    StylingDropped,
+    ProtectiveDropped,
+    AllMarksDropped,
+    ContentUnpreserved,
+}
+
+/// The mark subsets this ladder will emit, most-valuable first, paired with
+/// what giving up on each one costs.
+fn ladder(marks: &[MarkSpan]) -> Vec<(Vec<MarkSpan>, RenderFidelity, DegradeReason, &'static str)> {
+    let keep = |classes: &[MarkClass]| -> Vec<MarkSpan> {
+        marks
+            .iter()
+            .filter(|m| classes.contains(&m.mark.class()))
+            .cloned()
+            .collect()
+    };
+    vec![
+        (
+            marks.to_vec(),
+            RenderFidelity::Exact,
+            DegradeReason::StylingDropped,
+            "nothing",
+        ),
+        (
+            keep(&[MarkClass::Protective, MarkClass::DataBearing]),
+            RenderFidelity::StylingDropped,
+            DegradeReason::StylingDropped,
+            "styling",
+        ),
+        (
+            keep(&[MarkClass::DataBearing]),
+            RenderFidelity::ProtectiveDropped,
+            DegradeReason::ProtectiveDropped,
+            "styling and protective",
+        ),
+        (
+            Vec::new(),
+            RenderFidelity::AllMarksDropped,
+            DegradeReason::AllMarksDropped,
+            "EVERY mark, link targets included",
+        ),
+    ]
+}
+
+/// The emission the NEXT write-back cycle would produce for `(content, marks)`,
+/// judged on the content contract alone.
+///
+/// Deliberately does not apply the settlement check that
+/// [`render_block_content_checked`] layers on top: that check calls this, and
+/// making it recursive would not terminate. One level is all a fixed-point test
+/// needs — "would the next cycle emit these same bytes".
+fn contract_only_emission(content: &str, marks: &[MarkSpan]) -> Option<String> {
+    let contract = crate::inline_marks::expected_reparse(content, marks);
+    ladder(marks)
+        .into_iter()
+        // "This rung cannot represent the block" is the ladder's normal control
+        // flow, not a failure: the next rung is tried, and the reason is
+        // reported by the caller that actually degrades.
+        .find_map(|(retained, ..)| {
+            match crate::inline_marks::render_expecting(content, &retained, &contract) {
+                Ok(bytes) => Some(bytes),
+                Err(_) => None,
             }
-            None => self.body(),
+        })
+        .or_else(|| {
+            crate::inline_marks::render_candidates(content, marks)
+                .into_iter()
+                .next()
+        })
+}
+
+/// True when re-ingesting `bytes` and rendering them again reproduces `bytes`.
+fn is_fixed_point(bytes: &str) -> bool {
+    let (content, marks) = crate::inline_marks::extract_inline_marks(bytes);
+    contract_only_emission(&content, &marks).as_deref() == Some(bytes)
+}
+
+/// [`render_block_content`] with the rung it landed on.
+pub fn render_block_content_checked(block: &Block) -> (String, RenderFidelity) {
+    let marks = block.marks.as_deref().unwrap_or(&[]);
+    let contract = crate::inline_marks::expected_reparse(&block.content, marks);
+    let rungs = ladder(marks);
+
+    // Pass 1 — both conditions. The first rung that keeps the content AND
+    // settles wins, so nothing is sacrificed that did not have to be.
+    let mut why_not = None;
+    for (retained, fidelity, reason, what) in &rungs {
+        let bytes = match crate::inline_marks::render_expecting(&block.content, retained, &contract)
+        {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                why_not.get_or_insert(e);
+                continue;
+            }
         };
+        if !is_fixed_point(&bytes) {
+            continue;
+        }
+        if *fidelity != RenderFidelity::Exact {
+            disclose_degraded_render(
+                block,
+                *reason,
+                format_args!(
+                    "DROPPING {what} ({} mark(s)) — the content bytes survive: {}",
+                    marks.len() - retained.len(),
+                    why_not
+                        .as_ref()
+                        .map(|e| e.to_string())
+                        .unwrap_or_else(|| "unrepresentable with more marks".to_string())
+                ),
+            );
+        }
+        return (bytes.clone(), *fidelity);
+    }
 
-        // Text blocks (headlines) render with stars, TODO, etc.
-        let mut result = String::new();
+    // Pass 2 — the content is already unrepresentable, so settlement is the
+    // only thing left worth protecting. Emitting churn on top of a corrupted
+    // block turns one bad write into an endless argument between write-back and
+    // the file watcher.
+    for (retained, ..) in &rungs {
+        for candidate in crate::inline_marks::render_candidates(&block.content, retained) {
+            if is_fixed_point(&candidate) {
+                disclose_degraded_render(
+                    block,
+                    DegradeReason::Unrepresentable,
+                    format_args!(
+                        "org cannot represent this block's content with its marks; writing the \
+                         closest form that at least STOPS CHANGING, so write-back does not loop: \
+                         {}",
+                        why_not.as_ref().map(|e| e.to_string()).unwrap_or_default()
+                    ),
+                );
+                return (candidate, RenderFidelity::ContentUnpreserved);
+            }
+        }
+    }
 
-        // Headline level (stars)
-        result.push_str(&"*".repeat(self.level() as usize));
+    // Unreached in every shape measured so far — the marks-free rung represents
+    // any content and settles. Kept because "measured so far" is not a proof,
+    // and a silent non-settling emission is exactly what this ladder exists to
+    // prevent.
+    disclose_degraded_render(
+        block,
+        DegradeReason::Unrepresentable,
+        format_args!("NO emission of this block settles; write-back may loop on it"),
+    );
+    (
+        crate::inline_marks::render_inline_marks(&block.content, marks),
+        RenderFidelity::ContentUnpreserved,
+    )
+}
+
+/// Why a block degraded. Keyed alongside the block id so a block that later
+/// degrades for a DIFFERENT reason gets its own loud first report instead of
+/// being silenced by an earlier, unrelated one.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum DegradeReason {
+    StylingDropped,
+    ProtectiveDropped,
+    AllMarksDropped,
+    Unrepresentable,
+}
+
+impl DegradeReason {
+    /// The rung's name, emitted as a structured field so a reader can tell
+    /// WHICH branch of the ladder fired without re-deriving it from the prose.
+    fn rung(self) -> &'static str {
+        match self {
+            Self::StylingDropped => "StylingDropped",
+            Self::ProtectiveDropped => "ProtectiveDropped",
+            Self::AllMarksDropped => "AllMarksDropped",
+            Self::Unrepresentable => "Unrepresentable",
+        }
+    }
+
+    /// True when the emitted bytes still re-parse to the stored content, i.e.
+    /// only marks were given up.
+    fn content_survives(self) -> bool {
+        match self {
+            Self::StylingDropped | Self::ProtectiveDropped | Self::AllMarksDropped => true,
+            Self::Unrepresentable => false,
+        }
+    }
+}
+
+/// Loud once per (block, reason) per process, quiet after. A block whose marks
+/// cross is re-rendered on every write-back pass, so an unconditional emission
+/// would bury the log — but each distinct first occurrence must be visible.
+///
+/// Severity follows the error-handling priority order: a rung that keeps every
+/// content byte is a disclosed degraded mode (priority 2) and emits WARN, while
+/// a rung that cannot preserve the bytes is a real failure (priority 3) and
+/// emits ERROR. The split matters because ERROR is what the keystone's
+/// `inv-no-observed-errors` treats as a swallowed problem.
+fn disclose_degraded_render(block: &Block, reason: DegradeReason, detail: std::fmt::Arguments) {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<HashSet<(String, DegradeReason)>>> =
+        std::sync::OnceLock::new();
+    let first = SEEN
+        .get_or_init(|| std::sync::Mutex::new(HashSet::new()))
+        .lock()
+        .expect("degraded-render disclosure set poisoned")
+        .insert((block.id.as_str().to_string(), reason));
+    if !first {
+        tracing::debug!(
+            block = block.id.as_str(),
+            rung = reason.rung(),
+            "org render still degraded: {detail}"
+        );
+    } else if reason.content_survives() {
+        tracing::warn!(
+            block = block.id.as_str(),
+            rung = reason.rung(),
+            "org render is DEGRADED for this block: {detail}"
+        );
+    } else {
+        tracing::error!(
+            block = block.id.as_str(),
+            rung = reason.rung(),
+            "org render is DEGRADED for this block: {detail}"
+        );
+    }
+}
+
+/// Render a text/headline `Block` to org. `identity` selects the canonical
+/// drawer form or the dense trailing-token form (`crate::dense`). Callers MUST
+/// have already dispatched Source/Image content types (this only handles the
+/// headline case). Free function (not an inherent method) because `Block` is
+/// defined in `holon-api`.
+pub(crate) fn render_headline_block(block: &Block, identity: HeadlineIdentity) -> String {
+    let emitted: String = render_block_content(block);
+    let title_str = emitted.lines().next().unwrap_or("").trim_end().to_string();
+    let body_str: Option<String> = {
+        let lines: Vec<&str> = emitted.lines().collect();
+        if lines.len() > 1 {
+            Some(lines[1..].join("\n"))
+        } else {
+            None
+        }
+    };
+
+    // Text blocks (headlines) render with stars, TODO, etc.
+    let mut result = String::new();
+
+    // Headline level (stars)
+    result.push_str(&"*".repeat(block.level() as usize));
+    result.push(' ');
+
+    // TODO keyword
+    if let Some(ref todo) = block.task_state() {
+        result.push_str(&todo.to_string());
         result.push(' ');
+    }
 
-        // TODO keyword
-        if let Some(ref todo) = self.task_state() {
-            result.push_str(&todo.to_string());
+    // Priority
+    if let Some(priority) = block.priority() {
+        result.push_str(&format!("[#{}] ", priority.to_letter()));
+    }
+
+    // Title
+    result.push_str(&title_str);
+
+    // Tags
+    let tags = block.tags();
+    if !tags.is_empty() {
+        let formatted_tags = tags.to_org();
+        if !formatted_tags.is_empty() {
             result.push(' ');
+            result.push_str(&formatted_tags);
         }
+    }
 
-        // Priority
-        if let Some(priority) = self.priority() {
-            result.push_str(&format!("[#{}] ", priority.to_letter()));
-        }
+    // Dense identity: the `:ID:` drawer scaffolding is compressed to a
+    // trailing `{#alias}` token on the headline line itself; `^` flags an
+    // elided-ancestor gap.
+    if let HeadlineIdentity::DenseToken { alias, gap } = identity {
+        let flag = if gap { "^" } else { "" };
+        result.push_str(&format!(" {{#{}{}}}", alias, flag));
+    }
 
-        // Title
-        result.push_str(&title_str);
+    result.push('\n');
 
-        // Tags
-        let tags = self.tags();
-        if !tags.is_empty() {
-            let formatted_tags = tags.to_org();
-            if !formatted_tags.is_empty() {
-                result.push(' ');
-                result.push_str(&formatted_tags);
-            }
-        }
+    // Planning (SCHEDULED/DEADLINE) — org syntax requires this line
+    // directly after the headline, before any drawer (Emacs/LogSeq won't
+    // parse it in a :PROPERTIES: drawer's wake).
+    let sched_str = block.scheduled().map(|t| t.to_string());
+    let dead_str = block.deadline().map(|t| t.to_string());
+    let planning = format_planning(sched_str.as_deref(), dead_str.as_deref());
+    if !planning.is_empty() {
+        result.push_str(&planning);
+    }
 
-        result.push('\n');
-
-        // Properties drawer
-        if let Some(props_json) = self.org_properties() {
-            let props_drawer = format_properties_drawer(&props_json);
-            if !props_drawer.is_empty() {
-                result.push_str(&props_drawer);
-                result.push('\n');
-            }
-        }
-
-        // Planning (SCHEDULED/DEADLINE)
-        let sched_str = self.scheduled().map(|t| t.to_string());
-        let dead_str = self.deadline().map(|t| t.to_string());
-        let planning = format_planning(sched_str.as_deref(), dead_str.as_deref());
-        if !planning.is_empty() {
-            result.push_str(&planning);
-        }
-
-        // Body text (source blocks are child Block entities, rendered via tree
-        // traversal)
-        if let Some(body) = body_str {
-            let trimmed_body = body.trim();
-            if !trimmed_body.is_empty() {
-                result.push_str(trimmed_body);
-                if !trimmed_body.ends_with('\n') {
-                    result.push('\n');
-                }
-                result.push('\n');
-            }
-        }
-
-        // Ensure result ends with newline if non-empty
-        if !result.is_empty() && !result.ends_with('\n') {
+    // Properties drawer. In dense mode the `:ID:` line is dropped (identity
+    // moved to the trailing token); any OTHER drawer properties are still
+    // emitted, and a drawer that held only `:ID:` collapses to nothing.
+    if let Some(props_json) = block.org_properties() {
+        let props_drawer = match identity {
+            HeadlineIdentity::Drawer => format_properties_drawer(&props_json),
+            HeadlineIdentity::DenseToken { .. } => format_properties_drawer_without_id(&props_json),
+        };
+        if !props_drawer.is_empty() {
+            result.push_str(&props_drawer);
             result.push('\n');
         }
-
-        result
     }
+
+    // Body text (source blocks are child Block entities, rendered via tree
+    // traversal)
+    // A blank line after the body is emitted only when it is load-bearing —
+    // i.e. when the body's last line starts a list item, which would otherwise
+    // swallow a following `#+BEGIN_SRC` child into the list and LOSE the block
+    // on re-parse. For every other body the blank line is presentational,
+    // `trim_blank_lines` drops it on the way back in, and emitting it makes the
+    // renderer permanently unequal to any hand-authored file (the echo-loop
+    // `inv-org-render-fixed-point` reports forever).
+    if let Some(body) = body_str {
+        let trimmed_body = trim_blank_lines(&body);
+        if !trimmed_body.is_empty() {
+            result.push_str(trimmed_body);
+            if !trimmed_body.ends_with('\n') {
+                result.push('\n');
+            }
+            if body_needs_list_terminator(trimmed_body) {
+                result.push('\n');
+            }
+        }
+    }
+
+    // Ensure result ends with newline if non-empty
+    if !result.is_empty() && !result.ends_with('\n') {
+        result.push('\n');
+    }
+
+    result
+}
+
+/// Does this body need a trailing blank line to close an open list?
+///
+/// An org list item runs until a blank line or a heading, absorbing anything
+/// else that follows — including a `#+BEGIN_SRC` child, which then parses as
+/// list content and is silently LOST (the parser's `SOURCE_BLOCK` sweep over
+/// section children never sees it). A heading at column 0 terminates a list on
+/// its own, which is why only the source-block case is at risk.
+///
+/// Deliberately generous: emitting a blank line that org did not strictly need
+/// costs one byte of render-vs-disk churn, while omitting a needed one loses a
+/// block. Ambiguous shapes therefore resolve to `true`.
+fn body_needs_list_terminator(body: &str) -> bool {
+    let Some(last) = body.lines().rev().find(|l| !l.trim().is_empty()) else {
+        return false;
+    };
+    let trimmed = last.trim_start();
+    let is_indented = trimmed.len() != last.len();
+
+    let bullet_rest = trimmed
+        .strip_prefix('-')
+        .or_else(|| trimmed.strip_prefix('+'))
+        // `*` is a bullet only when indented — at column 0 it is a heading.
+        .or_else(|| is_indented.then(|| trimmed.strip_prefix('*')).flatten());
+    if let Some(rest) = bullet_rest {
+        return rest.is_empty() || rest.starts_with([' ', '\t']);
+    }
+
+    // Ordered counters: digits, or a single letter when org's alphabetical
+    // lists are in play, followed by `.` or `)`.
+    let digits = trimmed.chars().take_while(char::is_ascii_digit).count();
+    let counter_len = if digits > 0 {
+        digits
+    } else if trimmed
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic())
+    {
+        1
+    } else {
+        return false;
+    };
+    let after_counter = &trimmed[counter_len..];
+    let Some(rest) = after_counter
+        .strip_prefix('.')
+        .or_else(|| after_counter.strip_prefix(')'))
+    else {
+        return false;
+    };
+    rest.is_empty() || rest.starts_with([' ', '\t'])
 }
 
 /// Render a source-type Block as Org Mode #+BEGIN_SRC ... #+END_SRC
@@ -912,6 +1516,15 @@ fn source_block_to_org(block: &Block) -> String {
         result.push_str(k);
         result.push(' ');
         result.push_str(v);
+    }
+
+    // Tags: a Source block has no headline to carry `:tag:` notation, so route
+    // them through a `:TAGS <space-joined>` header arg (symmetric with the
+    // `:REQUIRES`/`:ADVICE_SUPPRESSED` edge-field lift). Without this a tag on a
+    // rule/source block is destroyed on org re-ingest.
+    if !block.tags.is_empty() {
+        result.push_str(" :TAGS ");
+        result.push_str(&block.tags.to_vec().join(" "));
     }
 
     result.push('\n');
@@ -1256,6 +1869,40 @@ mod tests {
             "deadline dropped from to_org: {org:?}"
         );
         assert!(org.contains("2026-02-01"), "deadline date missing: {org:?}");
+    }
+
+    /// Org syntax requires SCHEDULED/DEADLINE directly after the headline,
+    /// before any drawer — Emacs/LogSeq won't parse a planning line that
+    /// follows :PROPERTIES:. Regression: writeback used to emit the drawer
+    /// first.
+    #[test]
+    fn to_org_planning_lines_precede_properties_drawer() {
+        let mut block = Block::new_text(
+            EntityUri::block("id1"),
+            EntityUri::block("parent1"),
+            "Planned task",
+        );
+        block.set_level(1);
+        block.set_scheduled(Some(Timestamp::parse("<2026-01-15 Thu>").unwrap()));
+        block.set_deadline(Some(Timestamp::parse("<2026-02-01 Sun>").unwrap()));
+        block.set_org_properties(Some(r#"{"ID":"id1"}"#.to_string()));
+
+        let org = block.to_org();
+        let scheduled_pos = org.find("SCHEDULED:").expect("SCHEDULED line missing");
+        let drawer_pos = org.find(":PROPERTIES:").expect("drawer missing");
+        assert!(
+            scheduled_pos < drawer_pos,
+            "planning line must precede the properties drawer: {org:?}"
+        );
+
+        // The headline itself must be the immediately preceding line — no
+        // blank line or drawer between it and SCHEDULED.
+        let headline_end = org.find('\n').expect("headline newline missing");
+        assert_eq!(
+            headline_end + 1,
+            scheduled_pos,
+            "planning line must come directly after the headline: {org:?}"
+        );
     }
 
     #[test]

@@ -17,6 +17,7 @@
 //! they differ only in which SUT/driver is plugged in.
 
 pub mod assert;
+pub mod assert_steps;
 pub mod gherkin;
 pub mod json;
 pub mod matchers;
@@ -40,29 +41,14 @@ pub enum FixtureStep {
 }
 
 /// Bridge that lets the generic runner evaluate an [`Assertion`] against the
-/// SUT's capability traits. `E2ESut` implements it directly (it owns the
-/// capabilities); the `declare_pbt_slice!` wrapper SUT delegates to its inner
-/// `E2ESut`.
+/// SUT's capability traits. `ComposedSut` implements it by dispatching through
+/// its `CapMap` (`evaluate_assertion_caps`).
 pub trait FixtureAssertable {
     fn evaluate_assert(
         &self,
         assertion: &Assertion,
         ref_state: &crate::pbt::ReferenceState,
     ) -> Result<(), String>;
-}
-
-/// The inner `E2ESut` carries the capability impls, so it evaluates assertions
-/// directly. The `declare_pbt_slice!` wrapper SUT delegates here. The real-GPUI
-/// replay drives `E2ESut<Full>` as `S` directly, so it uses this impl too.
-impl FixtureAssertable for crate::pbt::E2ESut {
-    fn evaluate_assert(
-        &self,
-        assertion: &Assertion,
-        ref_state: &crate::pbt::ReferenceState,
-    ) -> Result<(), String> {
-        self.runtime
-            .block_on(assert::evaluate_assertion(assertion, ref_state, self))
-    }
 }
 
 /// A named, self-contained transition sequence to replay from a fresh init.

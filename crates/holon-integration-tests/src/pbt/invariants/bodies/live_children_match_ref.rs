@@ -1,5 +1,12 @@
 //! `inv-live-children-match-ref`.
 //!
+//! @pbt oracle correspondence
+//! @pbt covers sibling-order — SQL projection sort_key order vs ref document
+//!   order, per parent, non-seed blocks only
+//! @pbt slips-if-removed org-ingested block whose Loro fractional index
+//!   never reaches SQL sort_key (stuck at default "A0") silently mis-sorts
+//!   against moved siblings; UI shows wrong order, nothing else observes it
+//!
 //! Per-parent sibling-order equality between the SQL projection and the
 //! reference model. For every parent of a non-seed block, the projection's
 //! `sorted_children` (ordered by `sort_key`, the authoritative fractional
@@ -25,8 +32,7 @@ use holon_pbt_core::capabilities::SutSqlProjection;
 use holon_pbt_core::invariant::Invariant;
 use holon_pbt_core::invariant::InvariantId;
 use holon_pbt_core::invariant::InvariantResult;
-
-use crate::pbt::invariants::block_compare::compare_sibling_order;
+use holon_pbt_core::sibling_order::compare_sibling_order;
 
 pub struct InvLiveChildrenMatchRef;
 
@@ -68,40 +74,16 @@ where
                 .filter(|c| non_seed.contains(c))
                 .collect();
 
-            // Shared exemption rule: render-artifact groups may reorder
-            // relative to the ref, but membership must match.
+            // Exact per-parent order equality against the reference. The
+            // reference now reproduces the store's true post-round-trip
+            // sibling order, so no render-artifact exemption is applied.
             if let Err(msg) = compare_sibling_order(
                 "inv-live-children-match-ref",
                 parent,
                 &ref_children,
                 &sql_children,
-                |c| ref_.is_order_exempt_sibling(c),
             ) {
                 return InvariantResult::Fail(msg);
-            }
-
-            // Even where the ref's order is exempt, the two SUT stores must
-            // agree WITH EACH OTHER: SQL `sort_key` derives from the Loro
-            // fractional index, so a Loro-vs-SQL order disagreement is a
-            // projection bug regardless of the ref exemption. `None` ⇒ Loro
-            // not wired / parent absent: nothing to cross-check.
-            if let Some(loro_raw) = sut.loro_children_of(parent.as_str()).await {
-                let non_seed_strs: BTreeSet<String> =
-                    non_seed.iter().map(|id| id.to_string()).collect();
-                let loro_children: Vec<String> = loro_raw
-                    .into_iter()
-                    .filter(|c| non_seed_strs.contains(c))
-                    .collect();
-                let sql_children_strs: Vec<String> =
-                    sql_children.iter().map(|c| c.to_string()).collect();
-                if loro_children != sql_children_strs {
-                    return InvariantResult::Fail(format!(
-                        "[inv-live-children-match-ref] Loro and SQL disagree on sibling order \
-                         under parent {parent} (no exemption applies — sort_key derives from the \
-                         Loro fractional index).\n  loro (fractional-index order): \
-                         {loro_children:?}\n  sql (ORDER BY sort_key): {sql_children_strs:?}"
-                    ));
-                }
             }
         }
 

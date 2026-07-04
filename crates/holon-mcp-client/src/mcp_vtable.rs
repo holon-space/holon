@@ -7,20 +7,26 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::mpsc;
 
 use futures::stream::StreamExt;
 use futures::stream::TryStreamExt;
 use rmcp::model::CallToolRequestParam;
 use serde::Deserialize;
 use serde::Serialize;
+use tracing::debug;
 use tracing::info;
+use tracing::warn;
 use turso_core::Connection as CoreConnection;
 use turso_core::LimboError;
 use turso_core::Value;
+use turso_core::foreign::FdwChange;
 use turso_core::foreign::ForeignCursor;
 use turso_core::foreign::ForeignDataWrapper;
 use turso_core::foreign::KeyColumn;
 use turso_core::foreign::PushedConstraint;
+use turso_core::foreign::StreamingForeignData;
 use turso_ext::ConstraintOp;
 
 use crate::mcp_call_surface::McpCallSurface;
@@ -28,6 +34,31 @@ use crate::mcp_call_surface::McpCallSurface;
 // ============================================================================
 // YAML sidecar config types
 // ============================================================================
+
+/// What a source honestly promises about a fetch — the property that decides
+/// which maintenance mechanism is SOUND for an entity, declared rather than
+/// inferred (RULED 2026-08-06).
+///
+/// The one thing a fetch response cannot tell you is what it did NOT return,
+/// and every mechanism below differs only in how much absence it may read as
+/// deletion. Guessing has exactly one failure mode, and it is silent mass data
+/// loss, so the author states it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FetchContract {
+    /// Every fetch returns the ENTIRE collection. Absence is deletion, so a
+    /// full REFRESH is sound and its sweep retracts what vanished.
+    Snapshot,
+    /// Every fetch returns the entire collection WITHIN a scope the fetch
+    /// itself chose (here: the `enumerate_from` watermark). Absence carries no
+    /// information — an unreturned row may be deleted or merely out of scope —
+    /// so the live path may only UPSERT, and deletions are reconciled by a
+    /// (scoped) REFRESH.
+    ScopedSnapshot,
+    /// The provider sends upserts AND tombstones, so absence never has to be
+    /// interpreted at all. No claude-history entity offers this today.
+    Delta,
+}
 
 /// Virtual table configuration for an entity in the YAML sidecar.
 ///
@@ -40,6 +71,12 @@ use crate::mcp_call_surface::McpCallSurface;
 /// Exactly one of `search_tool` or `list_resource` must be set.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct VtableConfig {
+    /// What this entity's source promises about a fetch. Required before the
+    /// table may be subscribed to for streaming push: without it the driver
+    /// would have to guess how much absence means, which is the one guess with
+    /// a silent-data-loss failure mode.
+    #[serde(default)]
+    pub fetch_contract: Option<FetchContract>,
     /// MCP tool name for search/list queries (tool-based mode).
     #[serde(default)]
     pub search_tool: Option<String>,
@@ -377,6 +414,48 @@ fn parse_constraint_op(s: &str) -> Option<ConstraintOp> {
 // McpForeignDataWrapper
 // ============================================================================
 
+/// One parent's fan-out result: its index in the parent batch, the key
+/// bindings used, and the child rows fetched for it.
+type FetchedChildRows = (
+    usize,
+    HashMap<String, String>,
+    Vec<serde_json::Map<String, serde_json::Value>>,
+);
+
+/// Live subscription state shared between the wrapper and every cursor it
+/// opens. The push path is stateless beyond this: it holds no snapshot of the
+/// mirror, because it never needs to know what the mirror used to contain.
+#[derive(Debug, Default)]
+struct StreamState {
+    sender: Option<mpsc::Sender<FdwChange>>,
+    /// Constraints the subscription was opened with — replayed on every
+    /// re-fetch so the pushed rows stay predicate-scoped like the mirror.
+    constraints: Vec<PushedConstraint>,
+}
+
+/// Canonical, total, injective-per-type rendering of a row's identity values.
+/// `Value` is neither `Hash` nor `Eq`, so within-scan duplicate detection keys
+/// on this instead; the type tag and the length prefix keep `Text("1")` and
+/// `Integer(1)`, and `["a", "b"]` and `["a|b"]`, distinct.
+fn identity_key(row: &[Value], identity_columns: &[u32]) -> String {
+    use turso_core::Numeric;
+    let mut key = String::new();
+    for idx in identity_columns {
+        let v = &row[*idx as usize];
+        match v {
+            Value::Null => key.push_str("N;"),
+            Value::Numeric(Numeric::Integer(i)) => key.push_str(&format!("I{i};")),
+            Value::Numeric(Numeric::Float(f)) => key.push_str(&format!("F{};", f.to_bits())),
+            Value::Text(t) => {
+                let s = t.as_str();
+                key.push_str(&format!("S{}:{s};", s.len()));
+            }
+            Value::Blob(b) => key.push_str(&format!("B{}:{};", b.len(), hex_encode(b))),
+        }
+    }
+    key
+}
+
 /// A [`ForeignDataWrapper`] that queries an MCP server via tool calls.
 ///
 /// Constructed from the YAML sidecar `vtable:` config and the live MCP peer.
@@ -385,6 +464,8 @@ fn parse_constraint_op(s: &str) -> Option<ConstraintOp> {
 pub struct McpForeignDataWrapper {
     /// Live connection to the MCP server.
     peer: Arc<dyn McpCallSurface>,
+    /// SQL table name — the handle the engine's push path is keyed by.
+    table_name: String,
     /// How to fetch data — tool call or resource read.
     fetch_mode: FetchMode,
     /// CREATE TABLE DDL for schema declaration.
@@ -399,6 +480,16 @@ pub struct McpForeignDataWrapper {
     /// ID column name (e.g., "id") and scheme prefix (e.g., "cc_session").
     /// When set, the ID column value is prefixed: `{scheme}:{raw_value}`.
     id_scheme: Option<(String, String)>,
+    /// Row identity for incremental matview maintenance — the indices of the
+    /// declared identity columns. `None` is the engine-sanctioned opt-out: the
+    /// entity declared no identity, so matviews over it keep snapshot
+    /// semantics and no mirror is built.
+    identity_columns: Option<Vec<u32>>,
+    /// What the source promises about a fetch (see [`FetchContract`]).
+    /// `None` = undeclared, which forbids streaming push.
+    fetch_contract: Option<FetchContract>,
+    /// Subscription shared with every cursor this wrapper opens.
+    stream: Arc<Mutex<StreamState>>,
     /// If set, fetched rows are written to this cache table via INSERT OR
     /// REPLACE.
     cache_table: Option<String>,
@@ -498,6 +589,11 @@ impl McpForeignDataWrapper {
     ///
     /// `id_scheme` is `Some((id_column, scheme_prefix))` to prefix ID values
     /// with `{scheme_prefix}:{raw}` (matching McpSyncEngine's convention).
+    /// `identity_columns` names the schema columns forming the row identity
+    /// (see `EntityConfig::identity_columns`); empty means the entity declares
+    /// none, which downgrades the table to snapshot semantics with a warning.
+    /// It is NOT `id_scheme`'s column: scheme-prefixing is a value convention,
+    /// identity is a declaration, and the two coincide only by accident.
     /// `cache_table` is the name of the local BTree table to write through to.
     /// `entity_prefix` is needed to resolve `enumerate_from` entity references
     /// to actual SQL table names (e.g. `"cc_"` + `"session"` → `"cc_session"`).
@@ -511,6 +607,7 @@ impl McpForeignDataWrapper {
         vtable_config: &VtableConfig,
         peer: Arc<dyn McpCallSurface>,
         id_scheme: Option<(String, String)>,
+        identity_columns: &[String],
         cache_table: Option<String>,
         runtime: tokio::runtime::Handle,
         entity_prefix: Option<&str>,
@@ -608,14 +705,48 @@ impl McpForeignDataWrapper {
             panic!("VtableConfig must have either search_tool or list_resource");
         };
 
+        let identity_columns = if identity_columns.is_empty() {
+            warn!(
+                "[McpForeignDataWrapper] table '{table_name}' declares no row identity (no \
+                 primary_key column, no id_column, no 'id' column among {column_names:?}) — it \
+                 falls back to snapshot semantics and CANNOT be maintained incrementally: \
+                 matviews over it only update on REFRESH"
+            );
+            None
+        } else {
+            Some(
+                identity_columns
+                    .iter()
+                    .map(|id_col| {
+                        let idx = column_names
+                            .iter()
+                            .position(|c| c == id_col)
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "[McpForeignDataWrapper] table '{table_name}' declares id \
+                                     column '{id_col}' which is not among its schema columns \
+                                     {column_names:?}; a row identity that names no column cannot \
+                                     be maintained"
+                                )
+                            });
+                        idx as u32
+                    })
+                    .collect(),
+            )
+        };
+
         Self {
             peer,
+            table_name: table_name.to_string(),
             fetch_mode,
             schema_sql,
             key_columns,
             column_to_param,
             column_names,
             id_scheme,
+            identity_columns,
+            fetch_contract: vtable_config.fetch_contract,
+            stream: Arc::new(Mutex::new(StreamState::default())),
             cache_table,
             column_configs: vtable_config.columns.clone(),
             max_fan_out: vtable_config.max_fan_out,
@@ -627,6 +758,10 @@ impl McpForeignDataWrapper {
 impl ForeignDataWrapper for McpForeignDataWrapper {
     fn key_columns(&self) -> &[KeyColumn] {
         &self.key_columns
+    }
+
+    fn identity_columns(&self) -> Option<&[u32]> {
+        self.identity_columns.as_deref()
     }
 
     fn schema_sql(&self) -> String {
@@ -651,10 +786,184 @@ impl ForeignDataWrapper for McpForeignDataWrapper {
             runtime: self.runtime.clone(),
             conn,
             writeback,
+            fan_out_groups: Vec::new(),
             rows: Vec::new(),
             index: 0,
             started: false,
         }))
+    }
+}
+
+impl McpForeignDataWrapper {
+    /// Subscribe to row-level changes. Inherent so callers holding the concrete
+    /// wrapper need no trait import; [`StreamingForeignData`] delegates here.
+    pub fn subscribe(
+        &self,
+        constraints: &[PushedConstraint],
+    ) -> Result<mpsc::Receiver<FdwChange>, LimboError> {
+        if self.identity_columns.is_none() {
+            return Err(LimboError::ExtensionError(format!(
+                "[McpForeignDataWrapper] table '{}' declares no row identity, so a subscription \
+                 to it cannot be maintained incrementally: a change could never be matched to \
+                 the row it replaces. Mark the entity's key column primary_key, or use REFRESH.",
+                self.table_name
+            )));
+        }
+        if self.fetch_contract.is_none() {
+            return Err(LimboError::ExtensionError(format!(
+                "[McpForeignDataWrapper] table '{}' declares no `fetch_contract`, so what its \
+                 source promises about a fetch is unknown — and that is precisely what decides \
+                 whether a row missing from a re-fetch was deleted or merely out of scope. \
+                 Declare `vtable.fetch_contract` (snapshot | scoped_snapshot | delta) on the \
+                 entity.",
+                self.table_name
+            )));
+        }
+        let (tx, rx) = mpsc::channel();
+        let mut state = self.stream.lock().unwrap();
+        if state.sender.is_some() {
+            return Err(LimboError::ExtensionError(format!(
+                "[McpForeignDataWrapper] table '{}' already has a subscriber; a second \
+                 subscription would orphan the first receiver, leaving its mirror permanently \
+                 and silently stale",
+                self.table_name
+            )));
+        }
+        state.sender = Some(tx);
+        state.constraints = constraints.to_vec();
+        Ok(rx)
+    }
+
+    /// The declared identity columns by name, as the engine names them in its
+    /// own identity errors.
+    fn identity_column_list(&self) -> String {
+        self.identity_columns
+            .iter()
+            .flatten()
+            .map(|i| self.column_names[*i as usize].as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    fn identity_values(&self, row: &[Value], identity: &[u32]) -> String {
+        identity
+            .iter()
+            .map(|i| format!("{:?}", row[*i as usize]))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// Translate one `resources/updated` notification into `FdwChange`s and
+    /// hand them to the subscriber. Returns the number of upserts emitted.
+    ///
+    /// UPSERT-ONLY, and it never retracts (RULED 2026-08-06). An MCP
+    /// notification carries a URI and nothing else, so the re-fetch is the only
+    /// source of truth available — and the re-fetch is watermark-SCOPED, which
+    /// means it structurally cannot witness a deletion: a row absent from a
+    /// scoped scan may be gone, or may simply belong to a parent the scope
+    /// excluded, and nothing in the response distinguishes those. The driver
+    /// therefore says only what it can prove: these rows exist, with these
+    /// values.
+    ///
+    /// Convergence comes from the engine, not from a diff here: mirror upserts
+    /// are identity-keyed and value-guarded, so re-pushing an unchanged row is
+    /// a zero-delta no-op. Deletions are reconciled by a full REFRESH /
+    /// `full_sync`, which sweeps with the guards a driver-side diff would have
+    /// had to re-derive. `uri` is diagnostic only.
+    pub fn push_resource_update(
+        &self,
+        conn: &Arc<CoreConnection>,
+        uri: &str,
+    ) -> Result<usize, LimboError> {
+        let identity = self.identity_columns.as_deref().ok_or_else(|| {
+            LimboError::ExtensionError(format!(
+                "[McpForeignDataWrapper] table '{}' declares no row identity; a resource update \
+                 cannot be turned into identity-keyed upserts",
+                self.table_name
+            ))
+        })?;
+
+        let constraints = self.stream.lock().unwrap().constraints.clone();
+
+        debug!(
+            "[McpForeignDataWrapper] re-fetching '{}' after resources/updated for {uri}",
+            self.table_name
+        );
+        let mut cursor = self.open_cursor(conn.clone())?;
+        let mut seen: HashMap<String, Vec<Value>> = HashMap::new();
+        let mut upserts: Vec<FdwChange> = Vec::new();
+        if cursor.filter(&constraints)? {
+            loop {
+                let row = (0..self.column_names.len())
+                    .map(|i| cursor.column(i))
+                    .collect::<Result<Vec<Value>, LimboError>>()?;
+                // Guards run before anything is staged, mirroring the engine's
+                // REFRESH guard: a driver that pushes what REFRESH would refuse
+                // creates an inconsistency the engine cannot catch.
+                if identity.iter().any(|i| row[*i as usize] == Value::Null) {
+                    return Err(LimboError::Constraint(format!(
+                        "foreign table '{}' returned a row whose declared identity ({}) is NULL; \
+                         a NULL identity cannot be matched across scans and is not supported",
+                        self.table_name,
+                        self.identity_column_list()
+                    )));
+                }
+                let key = identity_key(&row, identity);
+                if seen.contains_key(&key) {
+                    return Err(LimboError::Constraint(format!(
+                        "foreign table '{}' returned more than one row with the same identity \
+                         ({} = {}); a declared identity must identify a row uniquely within a scan",
+                        self.table_name,
+                        self.identity_column_list(),
+                        self.identity_values(&row, identity)
+                    )));
+                }
+                seen.insert(key, row.clone());
+                upserts.push(FdwChange {
+                    values: row,
+                    weight: 1,
+                });
+                if !cursor.next()? {
+                    break;
+                }
+            }
+        }
+
+        let count = upserts.len();
+        if count > 0 {
+            let state = self.stream.lock().unwrap();
+            let sender = state.sender.clone().ok_or_else(|| {
+                LimboError::ExtensionError(format!(
+                    "[McpForeignDataWrapper] table '{}' has {count} pending changes but no \
+                     subscriber; the update would be lost",
+                    self.table_name
+                ))
+            })?;
+            for change in upserts {
+                sender.send(change).map_err(|e| {
+                    LimboError::ExtensionError(format!(
+                        "[McpForeignDataWrapper] table '{}' lost its subscriber mid-batch, {count} \
+                         changes are unapplied: {e}",
+                        self.table_name
+                    ))
+                })?;
+            }
+        }
+
+        debug!(
+            "[McpForeignDataWrapper] '{}' upserted {count} row(s) over identity {identity:?}",
+            self.table_name
+        );
+        Ok(count)
+    }
+}
+
+impl StreamingForeignData for McpForeignDataWrapper {
+    fn subscribe(
+        &self,
+        constraints: &[PushedConstraint],
+    ) -> Result<mpsc::Receiver<FdwChange>, LimboError> {
+        McpForeignDataWrapper::subscribe(self, constraints)
     }
 }
 
@@ -736,6 +1045,10 @@ struct McpCursor {
     /// Database connection for enumeration enumeration queries.
     conn: Arc<CoreConnection>,
     writeback: Option<WritebackTarget>,
+    /// Which parents the last `filter()` actually fetched, in row order:
+    /// (enumeration param map, record count). Scopes per-parent stale-row
+    /// deletion in the write-through cache.
+    fan_out_groups: Vec<(HashMap<String, String>, usize)>,
     rows: Vec<Vec<Value>>,
     index: usize,
     started: bool,
@@ -1041,9 +1354,6 @@ const FAN_OUT_CONCURRENCY: usize = 4;
 
 impl ForeignCursor for McpCursor {
     fn filter(&mut self, constraints: &[PushedConstraint]) -> Result<bool, LimboError> {
-        // Per-parent record counts from enumeration fan-out, in writeback row
-        // order: (enumeration param map, record count). Drives per-parent
-        // stale-row deletion after writeback.
         let mut fan_out_groups: Vec<(HashMap<String, String>, usize)> = Vec::new();
         let records = match &self.fetch_mode {
             FetchMode::Tool {
@@ -1079,23 +1389,20 @@ impl ForeignCursor for McpCursor {
                         // then re-sorted by parent index so writeback ordering
                         // stays deterministic.
                         let this = &*self;
-                        let mut fetched: Vec<(
-                            usize,
-                            HashMap<String, String>,
-                            Vec<serde_json::Map<String, serde_json::Value>>,
-                        )> = tokio::task::block_in_place(|| {
-                            this.runtime.block_on(async {
-                                futures::stream::iter(parent_rows.into_iter().enumerate().map(
-                                    |(idx, row)| {
-                                        let mut p = params.clone();
-                                        for (tool_param, value) in &row {
-                                            p.insert(
-                                                tool_param.clone(),
-                                                serde_json::Value::String(value.clone()),
-                                            );
-                                        }
-                                        async move {
-                                            let mut records = this
+                        let mut fetched: Vec<FetchedChildRows> =
+                            tokio::task::block_in_place(|| {
+                                this.runtime.block_on(async {
+                                    futures::stream::iter(parent_rows.into_iter().enumerate().map(
+                                        |(idx, row)| {
+                                            let mut p = params.clone();
+                                            for (tool_param, value) in &row {
+                                                p.insert(
+                                                    tool_param.clone(),
+                                                    serde_json::Value::String(value.clone()),
+                                                );
+                                            }
+                                            async move {
+                                                let mut records = this
                                                 .call_tool_paginated_async(
                                                     search_tool,
                                                     extract_path.as_deref(),
@@ -1109,16 +1416,16 @@ impl ForeignCursor for McpCursor {
                                                          failed for bindings {row:?}: {e}"
                                                     ))
                                                 })?;
-                                            stamp_call_params(&mut records, &p);
-                                            Ok::<_, LimboError>((idx, row, records))
-                                        }
-                                    },
-                                ))
-                                .buffer_unordered(FAN_OUT_CONCURRENCY)
-                                .try_collect::<Vec<_>>()
-                                .await
-                            })
-                        })?;
+                                                stamp_call_params(&mut records, &p);
+                                                Ok::<_, LimboError>((idx, row, records))
+                                            }
+                                        },
+                                    ))
+                                    .buffer_unordered(FAN_OUT_CONCURRENCY)
+                                    .try_collect::<Vec<_>>()
+                                    .await
+                                })
+                            })?;
                         fetched.sort_by_key(|(idx, _, _)| *idx);
                         let mut all = Vec::new();
                         for (_, row, records) in fetched {
@@ -1154,46 +1461,43 @@ impl ForeignCursor for McpCursor {
                             return Ok(false);
                         }
                         let this = &*self;
-                        let mut fetched: Vec<(
-                            usize,
-                            HashMap<String, String>,
-                            Vec<serde_json::Map<String, serde_json::Value>>,
-                        )> = tokio::task::block_in_place(|| {
-                            this.runtime.block_on(async {
-                                futures::stream::iter(parent_rows.into_iter().enumerate().map(
-                                    |(idx, row)| {
-                                        let mut p = params.clone();
-                                        for (param_name, value) in &row {
-                                            p.insert(param_name.clone(), value.clone());
-                                        }
-                                        async move {
-                                            let uri =
-                                                crate::mcp_sync_strategy::expand_uri_template(
-                                                    template, &p,
-                                                )
-                                                .map_err(|e| {
-                                                    LimboError::ExtensionError(format!(
-                                                        "URI template param missing: {e}"
-                                                    ))
-                                                })?;
-                                            let records = this
-                                                .fetch_via_resource_async(&uri)
-                                                .await
-                                                .map_err(|e| {
-                                                    LimboError::ExtensionError(format!(
-                                                        "[McpCursor] fetch_via_resource failed \
+                        let mut fetched: Vec<FetchedChildRows> =
+                            tokio::task::block_in_place(|| {
+                                this.runtime.block_on(async {
+                                    futures::stream::iter(parent_rows.into_iter().enumerate().map(
+                                        |(idx, row)| {
+                                            let mut p = params.clone();
+                                            for (param_name, value) in &row {
+                                                p.insert(param_name.clone(), value.clone());
+                                            }
+                                            async move {
+                                                let uri =
+                                                    crate::mcp_sync_strategy::expand_uri_template(
+                                                        template, &p,
+                                                    )
+                                                    .map_err(|e| {
+                                                        LimboError::ExtensionError(format!(
+                                                            "URI template param missing: {e}"
+                                                        ))
+                                                    })?;
+                                                let records = this
+                                                    .fetch_via_resource_async(&uri)
+                                                    .await
+                                                    .map_err(|e| {
+                                                        LimboError::ExtensionError(format!(
+                                                            "[McpCursor] fetch_via_resource failed \
                                                          for bindings {row:?}: {e}"
-                                                    ))
-                                                })?;
-                                            Ok::<_, LimboError>((idx, row, records))
-                                        }
-                                    },
-                                ))
-                                .buffer_unordered(FAN_OUT_CONCURRENCY)
-                                .try_collect::<Vec<_>>()
-                                .await
-                            })
-                        })?;
+                                                        ))
+                                                    })?;
+                                                Ok::<_, LimboError>((idx, row, records))
+                                            }
+                                        },
+                                    ))
+                                    .buffer_unordered(FAN_OUT_CONCURRENCY)
+                                    .try_collect::<Vec<_>>()
+                                    .await
+                                })
+                            })?;
                         fetched.sort_by_key(|(idx, _, _)| *idx);
                         let mut all = Vec::new();
                         for (_, row, records) in fetched {
@@ -1255,10 +1559,12 @@ impl ForeignCursor for McpCursor {
             self.fetch_mode
         );
 
+        self.fan_out_groups = fan_out_groups;
+
         if let Some(ref wb) = self.writeback {
             wb.write_rows(&self.rows)?;
-            if !fan_out_groups.is_empty() {
-                self.delete_stale_children(wb, &fan_out_groups)?;
+            if !self.fan_out_groups.is_empty() {
+                self.delete_stale_children(wb, &self.fan_out_groups)?;
             }
         }
 

@@ -4,10 +4,13 @@
 //! reused by other test harnesses (e.g. Flutter FFI PBT).
 
 pub mod action_actor_state;
+pub mod advice_expectation;
 pub mod bisect_driver;
+pub mod block_state;
+pub mod clock_state;
+pub mod complexity_trend;
 pub mod composed;
 pub mod convergence;
-pub mod correspondence;
 pub mod driver_input;
 pub mod file_adapter_state;
 pub mod fixtures;
@@ -16,34 +19,48 @@ pub mod generators;
 pub mod invariant_mode_override;
 pub mod invariants;
 pub mod layout_bridge;
-pub mod local_caps;
+pub mod live_self_check;
 pub mod loro_slice;
 pub mod loro_sync;
 pub mod mcp_server_actor_state;
 pub mod memory_slice;
 pub mod op_write_cap;
 pub mod panic_diag;
-pub mod peer_ops;
+// `PeerRefState` + the new `LoroRefExt` co-located to `holon-loro-testing`
+// (RefStateSplit Inc 5, docs/Plans/RefStateSplit-2026-07-12.md §3); re-exported
+// as `peer_ref_state` so existing `super::peer_ref_state::PeerRefState` call
+// sites keep resolving unchanged.
+// `peer_ops` co-located to `holon-loro-testing` (Phase-1a Step 4); re-exported
+// here so central `crate::pbt::peer_ops::*` / `super::peer_ops::*` call sites
+// (reference_state, state_machine, shadow_mesh, …) keep resolving unchanged.
+pub use holon_loro_testing::peer_ops;
+pub use holon_loro_testing::ref_ext as peer_ref_state;
 pub mod query;
 pub mod query_ast;
-pub mod reference_capabilities;
+pub mod ref_caps;
+// `reference_capabilities` split into `ref_caps/` (RefStateSplit Increment 2,
+// docs/Plans/RefStateSplit-2026-07-12.md §3); this alias keeps the existing
+// `crate::pbt::reference_capabilities::reference_state_ref_caps` call sites
+// resolving unchanged.
+pub use ref_caps as reference_capabilities;
 pub mod reference_domain_state;
 pub mod reference_state;
-pub mod retry;
-pub mod shadow_mesh;
-pub mod slice;
+pub mod run_result;
+// `shadow_mesh` co-located to `holon-loro-testing` (RefStateSplit Inc 5);
+// re-exported so `super::shadow_mesh::ShadowMesh` /
+// `crate::pbt::shadow_mesh::*` call sites (state_machine, reference_state,
+// ref_caps/peers) keep resolving.
+pub use holon_loro_testing::shadow_mesh;
+pub mod sharing_state;
 pub mod sql_loro_slice;
 pub mod sql_slice;
 pub mod state_machine;
 pub mod stepper;
-pub mod sut;
-pub mod sut_capabilities;
-mod sut_check_invariants;
-mod sut_handle;
-mod sut_keybindings;
-pub mod sut_loro;
+// `sut_loro` (the `LoroSut`) co-located to `holon-loro-testing`; re-exported so
+// central `crate::pbt::sut_loro::LoroSut` (composed::builder) resolves
+// unchanged.
+pub use holon_loro_testing::sut_loro;
 mod sut_metrics;
-mod sut_render;
 mod sut_row_parsing;
 #[cfg(feature = "otel-testing")]
 pub mod transition_budgets;
@@ -53,24 +70,21 @@ pub mod types;
 pub mod ui_actor_state;
 pub mod ui_harness;
 pub mod ui_interaction;
-pub mod validation;
+pub mod ui_types;
+pub mod undo_redo_density;
 pub mod value_fn_invariants;
+pub mod vm_snapshot;
 pub mod window_slice;
-
-/// Whether `id` is a ref-side SYNTHETIC placeholder the SUT replaces with a
-/// real UUID. Only split suffixes are: `reference_state.rs::split_block`
-/// mints `block::split-N` (note the double colon) and the SUT later binds it
-/// to a freshly-minted UUID. Bulk ids (`block:bulk-N-i`) are NOT synthetic —
-/// `bulk_external_add` writes them deterministically on BOTH sides, so they
-/// appear verbatim in `block_raw`/CDC. Single source of truth — substring
-/// sniffs like `contains(":split-")` false-positived on legitimately named
-/// blocks (e.g. the gherkin fixture's `block:split-target-block`).
-pub fn is_synthetic_ref_id(id: &holon_api::EntityUri) -> bool {
-    id.as_str().starts_with("block::split-")
-}
 
 pub use action_actor_state::ActionActorState;
 pub use file_adapter_state::FileAdapterState;
+/// Whether `id` is a ref-side SYNTHETIC placeholder the SUT replaces with a
+/// real UUID. Single source of truth lifted to the pbt-core floor (co-location
+/// Phase 2) so co-located store arms (`holon-turso-testing`) can filter
+/// synthetic ids without reaching into this crate; re-exported here for the
+/// many central call sites (`test_environment`, `frontend_slice`, `harness`,
+/// `builder`).
+pub use holon_pbt_core::observables::is_synthetic_ref_id;
 pub use mcp_server_actor_state::MCPServerActorState;
 // The phased entry points (the ready-context struct + the driver-sync run/replay
 // functions) are deliberately NOT re-exported
@@ -84,7 +98,6 @@ pub use reference_state::ReferenceState;
 pub use state_machine::ReferenceMachine;
 pub use state_machine::fresh_reference_state;
 pub use state_machine::storage_selector_for_wiring;
-pub use sut::E2ESut;
 pub use transitions::E2ETransition;
 pub use types::*;
 pub use ui_actor_state::UIActorState;
@@ -99,4 +112,5 @@ pub use ui_harness::spawn_quit_on_pbt_finish;
 pub use ui_harness::standard_pbt_config;
 pub use ui_harness::try_start_embedded_mcp;
 pub use ui_harness::wait_for_geometry_ready;
+pub use ui_harness::wait_for_mcp_listener;
 pub use ui_interaction::UiInteraction;

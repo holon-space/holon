@@ -163,19 +163,27 @@ pub fn find_click_intent_oneshot(
 /// nested block, then walks it here. The `OperationWiring` info is identical
 /// across both representations, so the resulting `OperationIntent` matches
 /// what GPUI would dispatch on a real click.
+///
+/// `modifiers` selects WHICH click wiring is returned: `ClickModifiers::none()`
+/// is the primary click, `ClickModifiers::shift()` the `shift_action:` wiring,
+/// and so on. A node binding only a modifier action yields `None` for a
+/// primary click (and vice versa) — the same discrimination the GPUI
+/// `selectable` handler performs on its `HashMap<ClickModifiers, _>`.
 pub fn find_click_intent_in_view_model(
     root: &crate::view_model::ViewModel,
     entity_id: &EntityUri,
+    modifiers: holon_api::ClickModifiers,
 ) -> Option<crate::operations::OperationIntent> {
     fn walk(
         node: &crate::view_model::ViewModel,
         entity_id: &EntityUri,
+        modifiers: holon_api::ClickModifiers,
     ) -> Option<crate::operations::OperationIntent> {
         if node.entity_id().as_ref() == Some(entity_id) {
             if let Some(op) = node
                 .operations
                 .iter()
-                .find(|ow| ow.descriptor.is_click_triggered())
+                .find(|ow| ow.descriptor.click_modifiers() == Some(modifiers))
             {
                 return Some(crate::operations::OperationIntent::new(
                     op.descriptor.entity_name.clone(),
@@ -185,13 +193,13 @@ pub fn find_click_intent_in_view_model(
             }
         }
         for child in node.children() {
-            if let Some(intent) = walk(child, entity_id) {
+            if let Some(intent) = walk(child, entity_id, modifiers) {
                 return Some(intent);
             }
         }
         None
     }
-    walk(root, entity_id)
+    walk(root, entity_id, modifiers)
 }
 
 /// Region-scoped variant: only walk the subtree rooted at the clicked region's
@@ -237,13 +245,97 @@ fn find_region_panel<'a>(
     find_panel(root, &panel_id)
 }
 
+/// True if `region`'s panel is rendered in `root` at all.
+///
+/// Distinguishes "the layout has not been rendered yet" from "the panel is
+/// there but empty" — the two states every region-scoped lookup collapses into
+/// a bare `None`. A frontend that has not yet resolved its layout answers
+/// `false` for every region.
+pub fn region_panel_present(root: &crate::view_model::ViewModel, region: &str) -> bool {
+    find_region_panel(root, region).is_some()
+}
+
 pub fn find_click_intent_in_region(
     root: &crate::view_model::ViewModel,
     entity_id: &EntityUri,
     region: &str,
+    modifiers: holon_api::ClickModifiers,
 ) -> Option<crate::operations::OperationIntent> {
     let panel = find_region_panel(root, region)?;
-    find_click_intent_in_view_model(panel, entity_id)
+    find_click_intent_in_view_model(panel, entity_id, modifiers)
+}
+
+/// Name why [`find_click_intent_in_region`] resolved nothing for `entity_id`.
+///
+/// The bare `None` conflates three structurally different states — no region
+/// panel, the entity absent from the panel, and the entity present but binding
+/// no click wiring for these `modifiers`. Only the second is a readiness race
+/// worth polling; a caller that guesses sends the investigation the wrong way.
+pub fn click_intent_miss_reason(
+    root: &crate::view_model::ViewModel,
+    entity_id: &EntityUri,
+    region: &str,
+    modifiers: holon_api::ClickModifiers,
+) -> String {
+    fn collect_matches<'a>(
+        node: &'a crate::view_model::ViewModel,
+        entity_id: &EntityUri,
+        out: &mut Vec<&'a crate::view_model::ViewModel>,
+    ) {
+        if node.entity_id().as_ref() == Some(entity_id) {
+            out.push(node);
+        }
+        for child in node.children() {
+            collect_matches(child, entity_id, out);
+        }
+    }
+
+    fn collect_ids(node: &crate::view_model::ViewModel, out: &mut Vec<String>) {
+        if let Some(id) = node.entity_id() {
+            out.push(id.to_string());
+        }
+        for child in node.children() {
+            collect_ids(child, out);
+        }
+    }
+
+    let Some(panel) = find_region_panel(root, region) else {
+        return format!("region {region} renders no panel in the resolved tree at all");
+    };
+
+    let mut matched = Vec::new();
+    collect_matches(panel, entity_id, &mut matched);
+    if matched.is_empty() {
+        let mut ids = Vec::new();
+        collect_ids(panel, &mut ids);
+        ids.sort();
+        ids.dedup();
+        return format!(
+            "{entity_id} renders NO node in region {region} — the panel is not showing this \
+             entity at all. It renders {} distinct entities: [{}]",
+            ids.len(),
+            ids.join(", ")
+        );
+    }
+
+    let bound: Vec<String> = matched
+        .iter()
+        .flat_map(|n| n.operations.iter())
+        .map(|ow| {
+            format!(
+                "{}.{} @ {:?}",
+                ow.descriptor.entity_name,
+                ow.descriptor.name,
+                ow.descriptor.click_modifiers()
+            )
+        })
+        .collect();
+    format!(
+        "{entity_id} DOES render {} node(s) in region {region}, but none binds a click wiring for \
+         modifiers {modifiers:?} — the row is there, the action is not. Bound operations: [{}]",
+        matched.len(),
+        bound.join(", ")
+    )
 }
 
 /// Resolve the intent a click on `entity_id`'s `state_toggle` glyph dispatches,
@@ -302,6 +394,122 @@ pub fn state_toggle_cycle_intent(
 
     let panel = find_region_panel(root, region)?;
     walk(panel, entity_id)
+}
+
+/// The task keyword `entity_id`'s rendered `state_toggle` shows, or `None` when
+/// the row renders no toggle node at all.
+///
+/// An EMPTY string is the plain-row rendering, not an absent one: the widget
+/// collapses to a zero-width spacer and paints no glyph when `current` is empty
+/// (see `frontends/gpui/src/render/builders/state_toggle.rs`). So "the task
+/// affordance is on screen" is `Some(non-empty)`, and a test that only asked
+/// whether the node exists would pass on every plain block.
+pub fn state_toggle_current(
+    root: &crate::view_model::ViewModel,
+    entity_id: &EntityUri,
+    region: &str,
+) -> Option<String> {
+    use crate::view_model::ViewKind;
+
+    fn walk(node: &crate::view_model::ViewModel, entity_id: &EntityUri) -> Option<String> {
+        if let ViewKind::StateToggle { current, .. } = &node.kind {
+            if node.entity_id().as_ref() == Some(entity_id) {
+                return Some(current.clone());
+            }
+        }
+        node.children().iter().find_map(|c| walk(c, entity_id))
+    }
+
+    let panel = find_region_panel(root, region)?;
+    walk(panel, entity_id)
+}
+
+/// Name why [`state_toggle_cycle_intent`] resolved nothing for `entity_id`.
+///
+/// That function returns a bare `None` for four structurally different states —
+/// no region panel, the entity absent from the region, the entity present but
+/// rendering no `state_toggle`, and the glyph present but binding no
+/// `set_field` op to dispatch. Only the third is "not a task row"; a driver
+/// that guesses sends every investigation down the wrong path.
+pub fn state_toggle_miss_reason(
+    root: &crate::view_model::ViewModel,
+    entity_id: &EntityUri,
+    region: &str,
+) -> String {
+    use crate::view_model::ViewKind;
+
+    fn collect_matches<'a>(
+        node: &'a crate::view_model::ViewModel,
+        entity_id: &EntityUri,
+        out: &mut Vec<&'a crate::view_model::ViewModel>,
+    ) {
+        if node.entity_id().as_ref() == Some(entity_id) {
+            out.push(node);
+        }
+        for child in node.children() {
+            collect_matches(child, entity_id, out);
+        }
+    }
+
+    fn collect_ids(node: &crate::view_model::ViewModel, out: &mut Vec<String>) {
+        if let Some(id) = node.entity_id() {
+            out.push(id.to_string());
+        }
+        for child in node.children() {
+            collect_ids(child, out);
+        }
+    }
+
+    let Some(panel) = find_region_panel(root, region) else {
+        return format!("region {region} renders no panel in the resolved tree at all");
+    };
+
+    let mut matched = Vec::new();
+    collect_matches(panel, entity_id, &mut matched);
+    if matched.is_empty() {
+        let mut ids = Vec::new();
+        collect_ids(panel, &mut ids);
+        ids.sort();
+        ids.dedup();
+        return format!(
+            "{entity_id} renders NO node in region {region} — the panel is not showing this \
+             block. It renders {} distinct entities: [{}]",
+            ids.len(),
+            ids.join(", ")
+        );
+    }
+
+    let kinds: Vec<&str> = matched
+        .iter()
+        .filter_map(|n| n.widget_name())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let Some(toggle) = matched
+        .iter()
+        .find(|n| matches!(n.kind, ViewKind::StateToggle { .. }))
+    else {
+        return format!(
+            "{entity_id} renders {} node(s) in region {region} but NONE is a state_toggle — the \
+             row is there, its glyph is not. Rendered as: [{}]",
+            matched.len(),
+            kinds.join(", ")
+        );
+    };
+
+    let ViewKind::StateToggle { field, .. } = &toggle.kind else {
+        unreachable!("matched on StateToggle above")
+    };
+    let ops: Vec<&str> = toggle
+        .operations
+        .iter()
+        .map(|ow| ow.descriptor.name.as_str())
+        .collect();
+    format!(
+        "{entity_id} DOES render a state_toggle on field `{field}` in region {region}, but no \
+         set_field op is wired to it — clicking the glyph would dispatch nothing. Bound ops: [{}]",
+        ops.join(", ")
+    )
 }
 
 /// True if `entity_id` is rendered anywhere within `region`'s panel subtree.
@@ -363,7 +571,7 @@ pub fn bubble_input_oneshot(
     input: &WidgetInput,
 ) -> Option<InputAction> {
     match dfs_and_bubble(root, entity_id, input) {
-        DfsResult::Handled(action) => Some(action),
+        DfsResult::Handled(action) => Some(*action),
         _ => None,
     }
 }
@@ -374,7 +582,7 @@ enum DfsResult {
     /// Entity found but no ancestor handled the input.
     Found,
     /// Entity found and input was handled.
-    Handled(InputAction),
+    Handled(Box<InputAction>),
 }
 
 /// Recursive DFS that bubbles on the way back up.
@@ -388,7 +596,7 @@ fn dfs_and_bubble(
 ) -> DfsResult {
     if resolve_entity_id(node).as_ref() == Some(entity_id) {
         if let Some(action) = try_handle_node(node, entity_id, input) {
-            return DfsResult::Handled(action);
+            return DfsResult::Handled(Box::new(action));
         }
         return DfsResult::Found;
     }
@@ -398,7 +606,7 @@ fn dfs_and_bubble(
             DfsResult::Handled(action) => return DfsResult::Handled(action),
             DfsResult::Found => {
                 if let Some(action) = try_handle_node(node, entity_id, input) {
-                    return DfsResult::Handled(action);
+                    return DfsResult::Handled(Box::new(action));
                 }
                 return DfsResult::Found;
             }
@@ -493,6 +701,12 @@ struct CachedFocusPath {
     focus_path: FocusPath,
 }
 
+impl Default for InputRouter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InputRouter {
     pub fn new() -> Self {
         Self {
@@ -540,6 +754,12 @@ impl InputRouter {
     /// Diagnostic: describe the current root tree.
     pub fn has_root(&self) -> bool {
         self.root.read().unwrap().is_some()
+    }
+
+    /// The root tree a frontend last published, for callers that must hand a
+    /// real `root_tree` to a `UserDriver` verb rather than fabricate one.
+    pub fn root_tree(&self) -> Option<Arc<ReactiveViewModel>> {
+        self.root.read().unwrap().clone()
     }
 
     /// Diagnostic: describe the current root tree.
@@ -1002,7 +1222,7 @@ fn collect_tree_structure(
             None => continue,
         };
 
-        while stack.last().map_or(false, |(d, _)| *d >= depth) {
+        while stack.last().is_some_and(|(d, _)| *d >= depth) {
             stack.pop();
         }
 
@@ -1137,7 +1357,24 @@ mod tests {
                 trigger: Some(Trigger::KeyChord {
                     chord: KeyChord::new(&[crate::input::Key::Cmd, crate::input::Key::Enter]),
                 }),
-                ..Default::default()
+                entity_short_name: String::new(),
+                id_column: "id".to_string(),
+                display_name: String::new(),
+                description: String::new(),
+                required_params: vec![],
+                affected_fields: vec![],
+                param_mappings: vec![],
+                bound_params: Default::default(),
+                target_scope: holon_api::TargetScope::Block,
+                boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
+                menu_exposure: holon_api::MenuExposure::Listed {
+                    surfaces: holon_api::SurfaceSet {
+                        slash_menu: true,
+                        action_bar: false,
+                    },
+                },
+                guard: holon_api::pattern::OpGuard::None,
+                arcs: holon_api::arcs::TransitionArcs::Undeclared,
             },
         });
 
@@ -1161,6 +1398,96 @@ mod tests {
         // Unmatched chord returns None
         let unmatched = WidgetInput::chord(&[crate::input::Key::Cmd, crate::input::Key::Char('z')]);
         assert!(fp.bubble_input(&uri("entity-1"), &unmatched).is_none());
+    }
+
+    /// Cmd+Enter on a focused-but-not-editing block must resolve to
+    /// `cycle_task_state` via the key chord routing. This tests the
+    /// headless routing path — the GPUI frontend must also wire
+    /// `capture_action(Enter)` in `render_entity_view` (dogfood Risk 2).
+    #[test]
+    fn cmd_enter_routes_to_cycle_task_state_non_editing() {
+        use holon_api::render_types::OperationDescriptor;
+        use holon_api::render_types::OperationWiring;
+        use holon_api::render_types::Trigger;
+
+        // Simulate a block rendered through the default (non-editing)
+        // profile, with operations joined from key_bindings.
+        let mut vm = make_row("entity-2");
+        vm.operations = vec![
+            // The state_toggle builder hardcodes set_field on click;
+            // cycle_task_state is key-chord-only (Cmd+Enter).
+            OperationWiring {
+                modified_param: "id".into(),
+                descriptor: OperationDescriptor {
+                    name: "set_field".into(),
+                    entity_name: "block".into(),
+                    trigger: None,
+                    entity_short_name: String::new(),
+                    id_column: "id".to_string(),
+                    display_name: String::new(),
+                    description: String::new(),
+                    required_params: vec![],
+                    affected_fields: vec![],
+                    param_mappings: vec![],
+                    bound_params: Default::default(),
+                    target_scope: holon_api::TargetScope::Block,
+                    boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
+                    menu_exposure: holon_api::MenuExposure::NotListed {
+                        surface: holon_api::NonMenuSurface::Test,
+                    },
+                    guard: holon_api::pattern::OpGuard::None,
+                    arcs: holon_api::arcs::TransitionArcs::Undeclared,
+                },
+            },
+            OperationWiring {
+                modified_param: "id".into(),
+                descriptor: OperationDescriptor {
+                    name: "cycle_task_state".into(),
+                    entity_name: "block".into(),
+                    trigger: Some(Trigger::KeyChord {
+                        chord: KeyChord::new(&[crate::input::Key::Cmd, crate::input::Key::Enter]),
+                    }),
+                    entity_short_name: String::new(),
+                    id_column: "id".to_string(),
+                    display_name: String::new(),
+                    description: String::new(),
+                    required_params: vec![],
+                    affected_fields: vec![],
+                    param_mappings: vec![],
+                    bound_params: Default::default(),
+                    target_scope: holon_api::TargetScope::Block,
+                    boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
+                    menu_exposure: holon_api::MenuExposure::Listed {
+                        surfaces: holon_api::SurfaceSet {
+                            slash_menu: true,
+                            action_bar: false,
+                        },
+                    },
+                    guard: holon_api::pattern::OpGuard::None,
+                    arcs: holon_api::arcs::TransitionArcs::Undeclared,
+                },
+            },
+        ];
+
+        let tree = Arc::new(column(vec![vm]));
+        let fp = build_focus_path(&tree, &uri("entity-2")).expect("entity-2 not found");
+
+        let input = WidgetInput::chord(&[crate::input::Key::Cmd, crate::input::Key::Enter]);
+        match fp.bubble_input(&uri("entity-2"), &input) {
+            Some(InputAction::ExecuteOperation {
+                entity_name,
+                operation,
+                ..
+            }) => {
+                assert_eq!(entity_name, "block");
+                assert_eq!(operation.name, "cycle_task_state");
+            }
+            other => panic!("Cmd+Enter should resolve to cycle_task_state, got {other:?}"),
+        }
+
+        // click on state_toggle (no key chord) must NOT resolve to
+        // cycle_task_state — the click intent is separate.
+        assert!(find_click_intent_oneshot(&tree, &uri("entity-2")).is_none());
     }
 
     #[test]
@@ -1259,7 +1586,20 @@ mod tests {
                     ("region".into(), Value::String("main".into())),
                     ("block_id".into(), Value::String("block:page-foo".into())),
                 ]),
-                ..Default::default()
+                entity_short_name: String::new(),
+                id_column: "id".to_string(),
+                display_name: String::new(),
+                description: String::new(),
+                required_params: vec![],
+                affected_fields: vec![],
+                param_mappings: vec![],
+                target_scope: holon_api::TargetScope::Block,
+                boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::Test,
+                },
+                guard: holon_api::pattern::OpGuard::None,
+                arcs: holon_api::arcs::TransitionArcs::Undeclared,
             },
         });
 
@@ -1314,7 +1654,20 @@ mod tests {
                     ("region".into(), Value::String("main".into())),
                     ("block_id".into(), Value::String("block:foo".into())),
                 ]),
-                ..Default::default()
+                entity_short_name: String::new(),
+                id_column: "id".to_string(),
+                display_name: String::new(),
+                description: String::new(),
+                required_params: vec![],
+                affected_fields: vec![],
+                param_mappings: vec![],
+                target_scope: holon_api::TargetScope::Block,
+                boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::Test,
+                },
+                guard: holon_api::pattern::OpGuard::None,
+                arcs: holon_api::arcs::TransitionArcs::Undeclared,
             },
         });
 
@@ -1336,8 +1689,13 @@ mod tests {
         let root = ViewModel::layout("columns", vec![left_panel, main_panel]);
 
         // LeftSidebar click on block:foo → fires the bound nav.focus.
-        let left_intent = find_click_intent_in_region(&root, &uri("block:foo"), "left_sidebar")
-            .expect("left_sidebar click on block:foo should yield an intent");
+        let left_intent = find_click_intent_in_region(
+            &root,
+            &uri("block:foo"),
+            "left_sidebar",
+            holon_api::ClickModifiers::none(),
+        )
+        .expect("left_sidebar click on block:foo should yield an intent");
         assert_eq!(left_intent.entity_name.as_str(), "navigation");
         assert_eq!(left_intent.op_name, "focus");
 
@@ -1345,14 +1703,36 @@ mod tests {
         // panel's subtree. Returns None; production would fall through to
         // editor_focus.
         assert!(
-            find_click_intent_in_region(&root, &uri("block:foo"), "main").is_none(),
+            find_click_intent_in_region(
+                &root,
+                &uri("block:foo"),
+                "main",
+                holon_api::ClickModifiers::none()
+            )
+            .is_none(),
             "Main click on block:foo must NOT pick up the LeftSidebar's bound action"
         );
 
         // Unknown region → None (defensive).
-        assert!(find_click_intent_in_region(&root, &uri("block:foo"), "bogus_region").is_none());
+        assert!(
+            find_click_intent_in_region(
+                &root,
+                &uri("block:foo"),
+                "bogus_region",
+                holon_api::ClickModifiers::none()
+            )
+            .is_none()
+        );
 
         // Entity not in any panel's subtree → None.
-        assert!(find_click_intent_in_region(&root, &uri("block:never"), "left_sidebar").is_none());
+        assert!(
+            find_click_intent_in_region(
+                &root,
+                &uri("block:never"),
+                "left_sidebar",
+                holon_api::ClickModifiers::none()
+            )
+            .is_none()
+        );
     }
 }

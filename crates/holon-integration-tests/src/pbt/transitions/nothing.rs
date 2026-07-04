@@ -1,29 +1,34 @@
 //! Transition: no-op transition for search space exploration.
 //!
+//! @pbt rung dispatch
+//!   no-op: `apply_to_sut` does nothing (search-space filler, no SUT effect).
+//! @pbt covers search-space-exploration — no-op interleaving for schedule
+//! diversity
+//!
 //! Mirrors the legacy logic from `state_machine.rs:3075` (precondition),
 //! `state_machine.rs:1736` (ref-state apply), and
 //! `transition_budgets.rs:108-113` (expected SQL).
 
 use holon_pbt_core::TransitionFactory;
 use holon_pbt_core::TransitionRef;
+use holon_pbt_core::validation::Reason;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::reference_state::ReferenceState;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
-use crate::pbt::validation::Reason;
 
 /// No-op transition: does nothing to either the reference model or SUT.
 /// Enables the PBT to explore the search space without making progress,
 /// useful for validating invariants in a stable state.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("nothing happens")]
 pub struct Nothing;
 
-impl TransitionFactory<ReferenceState> for Nothing {
+impl<R> TransitionFactory<R> for Nothing {
     type Reason = Reason;
-    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         Nothing.preconditions(state).map(|_| {
             let strat = Just(Nothing).boxed();
             (1, strat)
@@ -31,14 +36,14 @@ impl TransitionFactory<ReferenceState> for Nothing {
     }
 }
 
-impl TransitionRef<ReferenceState> for Nothing {
+impl<R> TransitionRef<R> for Nothing {
     type Reason = Reason;
 
-    fn preconditions(&self, _: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, _: &R) -> Validated<(), Reason> {
         Validated::Good(())
     }
 
-    fn apply_to_ref(&self, _: &mut ReferenceState) {
+    fn apply_to_ref(&self, _: &mut R) {
         // No-op: reference state is unchanged
     }
 }
@@ -51,10 +56,15 @@ crate::cap_transition! {
 }
 
 #[cfg(feature = "otel-testing")]
+use holon_pbt_core::capabilities::RefSqlCardinality;
+#[cfg(feature = "otel-testing")]
 impl crate::pbt::transition_budgets::SqlBudget for Nothing {
-    fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
+    fn expected_sql<R: RefSqlCardinality>(&self, state: &R) -> ExpectedSql {
+        // A no-op still absorbs the shared CDC drain: 210 samples, 0 at d=1
+        // (n=209) and exactly 3 at d=3 (n=1). Tolerance stays 0 — nothing else
+        // may land in a transition that does nothing.
         ExpectedSql {
-            reads: 0,
+            reads: holon_pbt_core::budget::cdc_drain_floor(state.document_count()),
             writes: 0,
             ddl: 0,
             tolerance: 0,

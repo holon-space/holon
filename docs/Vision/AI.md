@@ -65,6 +65,8 @@ The Integrator's most important function is not automatic linking — it is **pr
 3. The user confirms or rejects in 1-2 seconds (System 1 recognitional judgment)
 4. Confirmed edges become permanent structure in the knowledge graph; rejected proposals are discarded
 
+**Evidential provenance on every edge and derived fact** *(influence: LifeOS memory curation)*: each AI-derived item carries its evidential status — `explicit` (user said it), `inferred` (strongly implied by user behavior), `deduced` (AI reasoning across items). Provenance is displayed at confirmation time and stored on the edge, so later consumers (the Guide, search ranking, other proposals) can weight explicit facts above deductions, and a wrong deduction can be traced and demoted without eroding trust in confirmed structure.
+
 This is not a UX concession on the way to full automation — the confirmation moment is where cognitive value is created. The human evaluates whether a proposed connection holds within their personal ontology. This judgment is fast, pattern-based, and cognitively rich (Kahneman's System 1), not effortful deliberation. Automating it away would remove the thinking, not just the friction.
 
 **Orient Mode Confirmation Stream**: A dedicated section in Orient mode presents pending link proposals for rapid triage. The UI is optimized for speed: show the two entities, the proposed relationship type, and relevant context — confirm/reject with a single keystroke. Batch review of 20-30 proposals should take under a minute.
@@ -100,6 +102,8 @@ This is not a UX concession on the way to full automation — the confirmation m
 - Shadow Work prompts (see below)
 - Velocity and capacity analysis
 - Growth tracking
+
+**Onboarding: interview before inference** *(influence: LifeOS)*: The Guide does not start with cold pattern detection. It bootstraps through a structured conversational interview that captures the Compass layer (see [LongTerm.md](LongTerm.md) §The Compass Layer): mission, goals with metrics, current vs ideal state per life dimension, and self-known challenges — then enriches from sources the user already has (existing notes, exports, a CV) rather than making them retype their life. LifeOS validated this flow end-to-end: interview first, external-source merge second, dashboard seeded with real data from day one. Two properties matter: every write is guarded against clobbering earlier answers, and a partial interview is a valid state — the Guide works with what it has and the interview is re-runnable to go deeper.
 
 ---
 
@@ -167,6 +171,7 @@ AI earns autonomy through demonstrated competence. Users progress through levels
 - Easy undo for any AI action
 - Learn from corrections
 - User can demote AI at any time
+- **Declined is a legitimate state, never a defect** *(influence: LifeOS Doctor)*: when the user declines a capability or AI feature, the system records the decision and goes silent about it — no nagging, no re-prompting, no treating the decline as something to fix. A declined feature is a valid way to run Holon.
 
 **Per-Feature Trust**:
 Trust levels are tracked per feature, not globally. The Watcher might be at Level 3 (proven reliable) while The Guide is still at Level 1 (user hasn't engaged much).

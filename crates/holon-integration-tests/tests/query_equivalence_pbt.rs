@@ -13,6 +13,11 @@
 //!
 //! Run: `cargo test -p holon-integration-tests --features pbt --test
 //! query_equivalence_pbt`
+//!
+//! @pbt kind harness
+//! @pbt covers testquery-equivalence — TestQuery vs production query
+//! equivalence for LAYOUT queries @pbt overlaps general_e2e_composed_pbt —
+//! kept: distinct oracle, isolation
 
 #![cfg(feature = "pbt")]
 
@@ -151,7 +156,11 @@ fn reference_ids(query: &TestQuery, blocks: &BTreeMap<EntityUri, Block>) -> BTre
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 24, ..ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig {
+        cases: 24,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
 
     #[test]
     fn all_blocks_matches_across_languages(forest in forest_strategy()) {

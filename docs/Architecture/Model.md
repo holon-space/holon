@@ -25,7 +25,7 @@ The read path is **one incremental computation**:
 | 1 | **Replicas** | org files, Loro store, external APIs, UI editor | Every replica has a base; inbound intent = `diff(base, current)`. No replica writes another replica. |
 | 2 | **Consolidator** | one per vault, epoch-pinned (Loro when enabled; Turso-LWW in SqlOnly) | The only merger. Monopolist of order: it mints every fractional index. Text merges via the CRDT merge *function*; structure via the tree CRDT (store present) or AST 3-way (absent). |
 | 3 | **Projection** | Turso | Exactly one writer per mode; verbatim and total; never re-merges; ephemeral by contract. |
-| 4 | **Reactive pipeline** | matviews → CDC → `LiveData<Block>` / cells | Convergent state, not an event log; recovery is resync (`Replace`), not acks. |
+| 4 | **Reactive pipeline** | matviews → CDC → `LiveData<Block>` / cells | Convergent state, not an event log; recovery is resync (`Replace`), not acks. Every derived holder = live recompute at quiescence — the derived-data contract, [Reactivity.md](Reactivity.md). |
 | 5 | **UI** | ViewModel `Mutable`s + `Cell`s | Displays fields and captures intent; owns no entity values. Structural ops are commit points. |
 
 ## Four orthogonal mode axes
@@ -37,7 +37,7 @@ concepts separate even where the config isn't:
 | Axis | Values |
 |------|--------|
 | Storage backend | Loro store on / off |
-| File adapter | org / none (`crates/holon-markdown` exists but is unwired — no crate depends on it; markdown is not a selectable adapter today) |
+| File adapter | org / none (a `crates/holon-markdown` was implemented then removed 2026-07-06 as unwired dead code — org is the sole selectable adapter; re-addable from git history) |
 | Merge fidelity (per field) | op-CRDT ≻ base-3-way ≻ LWW |
 | Transport | Iroh P2P on / off |
 
@@ -70,7 +70,13 @@ for any field is: op-fidelity (store) → base-limited 3-way (transient) → LWW
 
 1. One base per replica, diffed against — never against the cache.
 2. One consolidator per sibling-set owns order; sinks store its fi verbatim.
-3. Intent carries `after_sibling`, never an order key.
+3. Intent carries `after_sibling`, never an order key — enforced at the
+   intent boundary by the closed `BlockWriteField` vocabulary
+   (`holon-api::block_write_field`): a block `set_field` over
+   `sort_key`/`after_block_id` is a loud `Err` in `OperationDispatcher`
+   and in `LoroBlockOperations::execute_operation`, in both modes; the
+   frontend intent constructor (`OperationIntent::set_field`) asserts the
+   same. Reorders dispatch `move_block { id, parent_id, after_block_id }`.
 4. Exactly one writer per store; the projection is total.
 5. Sinks never re-merge.
 6. Causality is inherited (scalar base now; Loro/git DAG if P2P topology ever
@@ -103,6 +109,27 @@ for any field is: op-fidelity (store) → base-limited 3-way (transient) → LWW
     device re-ingests the other's projections as fresh intent: duplicated ops
     with wrong attribution, order oscillation, and `.sync-conflict` files
     ingested as duplicate-ID documents.
+
+    **Disclosed exception — shared/mounted subtrees (share write-back):** a
+    shared subtree is exactly the inverse setup of the failure above, and turns
+    it into the design. The subtree lives in its OWN shared `LoroDoc` that
+    converges across devices over iroh (invariant 11's sanctioned P2P channel).
+    For that subtree, **Loro is truth and the on-disk org file is a one-way
+    projection SINK** — rendered FROM the shared doc, never re-ingested as
+    fresh global intent (Inc 3 marks the file so the file-sync controller
+    suppresses its ingest). This is the deliberate carve-out from "org files
+    are truth": for a mounted subtree the org file is a materialized view, and
+    convergence still travels only through Loro/P2P, never through the file.
+
+    The mount node is projected as a **Page** so the subtree owns a dedicated
+    file, and there is a deliberate **Loro↔SQL shape difference at the mount
+    boundary** the keystone oracles are taught to MAP (never skip): the mount
+    id ≡ the shared page's id — when a PAGE `P` is shared the mount adopts `P`'s
+    identity and `P`'s node FOLDS onto the mount in the SQL/org projection
+    (P's children reparent to the mount, P's own row is dropped) while `P`
+    stays uncollapsed in the shared Loro doc. When a plain BLOCK is shared the
+    mount is a synthetic container page. A mount page never sits under a
+    non-page (Amendment A: it bubbles to the nearest page ancestor).
 12. **Every field write resolves a cell backing** — content and scalars do so
     in both modes: `LoroTextCellBacking`/`LoroMetaCellBacking<T>` in Full,
     `LwwTextCellBacking`/`LwwScalarBacking<T>` in SqlOnly (via
@@ -113,6 +140,34 @@ for any field is: op-fidelity (store) → base-limited 3-way (transient) → LWW
     (`id`/`depth`/`content_type`/`source_name`, `_expected_*` watermarks —
     routed to SQL), and the unseeded-vault content case. Per-backing status
     lives in [Storage §Cells](Storage.md).
+
+## Page identity: name-chains derive only through page ancestors
+
+A page's identity — and the on-disk file it materializes to — is its
+**name-chain**: the titles of its page ancestors walked to the vault root
+(`Projects > Optimize RAG` → `Projects/Optimize RAG.org`). The chain is built
+by walking parent links and taking each ancestor's title as a path segment.
+
+**Pages nest only under pages. A `:Page:`-tagged heading under a non-page
+(plain) heading is refused at ingest** — a non-page ancestor contributes no
+name-chain segment, so the page's identity and file path cannot be derived
+through it. The refusal is topology-first and loud (it names the offending
+non-page ancestor and tells the author to either tag that ancestor `:Page:` or
+unnest the page), never a silent coercion to a plausible-but-colliding path and
+never a fake data-loss message.
+
+**This is a deliberate contract, not a limitation to be "fixed"** (Martin ruled
+Option A, 2026-08-09; keep-the-refusal, for identity-model simplicity — the
+earlier interim ruling 2026-07-13 in
+`docs/Proposals/PageHierarchy-2026-07-13.md` is now ratified). A future change
+must not silently legalize the topology; the refusal is pinned by
+`non_page_ancestor_fails_loud` (`crates/holon-filesystem/src/sync_ports.rs`) and
+by the controller-level `name_chain_error_propagation.rs`
+(`crates/holon-orgmode/tests/`).
+
+Refusal code sites: `DocumentManager::name_chain` and
+`FileSyncController::authoritative_name_chain` (both in
+`crates/holon-filesystem/src/`).
 
 ## Cell vs Mutable (the UI state cut)
 

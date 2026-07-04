@@ -146,6 +146,17 @@ Holon operates in three modes that match how humans actually work:
 
 ## The Trust Architecture
 
+> **Influence — LifeOS**: Several patterns in this section and in [AI.md](AI.md) were validated by LifeOS, a file-and-hook-based personal life OS Martin runs daily. LifeOS is effectively a working prototype of Holon's Phases 4-6 (Guide, Watcher dashboard, whole-life integration) built from markdown, deterministic hooks, and an LLM. Where it succeeded, we adopt the pattern; where it pays maintenance tax (derived-data divergence between redundant file projections), it empirically confirms Holon's "one canonical location, multiple projections" bet.
+
+### The Compass Layer: Intention as Data
+
+The Watcher "detects when reality diverges from intention" — which requires intention to exist as data, not as a vibe in the user's head. LifeOS demonstrates the minimal viable schema (it calls this layer TELOS); Holon adopts the concept as the **Compass layer**:
+
+- **Mission** (durable north stars) → **Problems** (external, in the world) → **Goals** (measurable, ISC-bearing) → **Strategies** (repeatable approaches) → **Challenges** (internal patterns, about the user)
+- **Current state** and **ideal state** captured per life dimension (health, relationships, money, rhythms, ...) — the *gap between them is computable* and becomes the standing agenda.
+
+This is the normative reference every AI role needs: the Watcher checks incoming reality against goals, the Integrator ranks context by goal relevance, and the Guide reads challenges to recognize avoidance patterns. In the entity graph, Compass items are ordinary typed entities (a Goal is a token; soft "contributes-to" edges connect tasks → strategies → goals → missions, alongside the existing hard `requires` edge — the output and input arc directions of a Petri-net transition), so "show everything that advances goal X" is a plain graph query.
+
 ### Problem 1: "What Should I Do?" Anxiety
 
 **Current state**: Check Todoist, then JIRA, then email, then calendar, mentally synthesizing priorities.
@@ -161,6 +172,7 @@ Holon operates in three modes that match how humans actually work:
 │  • 2-hour focus block available before next meeting             │
 │  • All dependencies resolved as of 9am                          │
 │  • Aligns with Q1 priority: "Ship v2.0"                         │
+│  • Advances Compass goal: "Ship a marketable v2.0"              │
 │                                                                 │
 │  Context you might need: ────────────────────────────────────   │
 │  • [Notes from security review] (3 days ago)                    │

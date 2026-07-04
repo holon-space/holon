@@ -1,18 +1,14 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::sync::Arc;
 
 use serde::Deserialize;
 use serde::Serialize;
 
 use crate::Value;
+use crate::arcs::TransitionArcs;
+use crate::pattern::OpGuard;
 use crate::predicate::Predicate;
 use crate::types::EntityName;
-
-/// flutter_rust_bridge:ignore
-pub type PreconditionChecker = dyn Fn(&HashMap<String, Box<dyn std::any::Any + Send + Sync>>) -> Result<bool, String>
-    + Send
-    + Sync;
 
 /// Specification for a named view in multi-view rendering.
 /// flutter_rust_bridge:non_opaque
@@ -102,7 +98,7 @@ pub struct RenderProfile {
 
 // ALLOW(compatibility): RowProfile is a deprecated alias still used by
 // serialized fixtures
-/// Backward compatibility alias.
+/// Deprecated alias retained for serialized fixtures.
 pub type RowProfile = RenderProfile;
 
 /// Modifier keys held during a mouse click.
@@ -198,11 +194,164 @@ pub enum Trigger {
     Click { modifiers: ClickModifiers },
 }
 
+/// Where an operation surfaces in the UI — declared AT the descriptor so a new
+/// op cannot ship without deciding its discoverability. This is the
+/// parse-don't-validate replacement for the implicit "any op in the profile is
+/// a menu candidate" rule: the correspondence test asserts the rendered slash
+/// menu == exactly the `Listed` ops resolvable in context, so a regression like
+/// "the menu silently collapsed to one entry" (GPUI dogfood 2026-07-20, bug b)
+/// fails a compile-checked oracle instead of shipping.
+///
+/// `OperationDescriptor` deliberately has NO `Default`, so every construction
+/// site MUST classify explicitly — a forgotten classification is a compile
+/// error, not a silent default.
+/// flutter_rust_bridge:non_opaque
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MenuExposure {
+    /// Appears in the slash command menu whenever its params resolve from the
+    /// editor context (indent, outdent, move_up, move_down, delete, convert…).
+    ///
+    /// Carries a `SurfaceSet` so ONE exposure axis drives both the slash menu
+    /// and the (future) mobile action bar — single source of truth, no parallel
+    /// enum. Today every `Listed` op is `slash_menu: true, action_bar: false`,
+    /// preserving exact current behaviour (slash-only, invisible to the
+    /// not-yet-existent action bar).
+    Listed { surfaces: SurfaceSet },
+    /// Not a bare menu op — surfaced only through a dedicated picker whose
+    /// entries are data-driven (e.g. per-template rows for
+    /// `instantiate_template`).
+    PickerBacked { picker: PickerKind },
+    /// Deliberately absent from the slash menu: reachable via another surface
+    /// only (keyboard/pointer gesture, navigation, sync, or an internal
+    /// read-only planner step).
+    NotListed { surface: NonMenuSurface },
+}
+
+/// Which UI surfaces a `Listed` op is reachable from. One exposure axis drives
+/// both the slash menu and the (future) mobile action bar, so an op's
+/// discoverability lives in a single place instead of two parallel enums.
+/// flutter_rust_bridge:non_opaque
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SurfaceSet {
+    /// Surfaces in the slash command menu.
+    pub slash_menu: bool,
+    /// Surfaces in the mobile action bar (not yet rendered).
+    pub action_bar: bool,
+}
+
+/// How narrowly an operation targets — the sort key for the future action bar.
+///
+/// Derive order is narrowness order: `Block < Page < Global`. `Block`-acting
+/// ops (cycle-state, indent/outdent, move, delete, embed, convert-to-page) act
+/// on a single block; `Page`-level ops (share, rename-page, page settings) act
+/// on a page; app/global ops act on the whole app.
+/// flutter_rust_bridge:non_opaque
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetScope {
+    Block,
+    Page,
+    Global,
+}
+
+/// A dedicated picker that surfaces an op outside the flat command list.
+/// flutter_rust_bridge:non_opaque
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PickerKind {
+    /// The template-instantiation picker (per-template `Template: <name>`
+    /// rows).
+    Template,
+}
+
+/// The non-menu surface an op is reachable from when it is `NotListed`.
+/// flutter_rust_bridge:non_opaque
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NonMenuSurface {
+    /// Keyboard chord / typed-text editing gesture (split_block, type_chars…).
+    KeyboardGesture,
+    /// Pointer gesture (drag/drop, click-to-focus, expand/collapse toggle).
+    PointerGesture,
+    /// Navigation / view switching.
+    Navigation,
+    /// External sync, data ingest, or system/harness op.
+    External,
+    /// A read-only planner or internal compound step — not a user-facing op
+    /// (e.g. `block_to_page_plan`, the read half of `convert_block_to_page`).
+    Internal,
+    /// A provider CRUD op not surfaced in the block slash menu — the default
+    /// for macro-generated provider ops (todoist, etc.) that do not opt in via
+    /// `#[menu_exposure(...)]`. Fail-closed: invisible until deliberately
+    /// Listed.
+    ProviderDefault,
+    /// A test-only synthetic descriptor.
+    Test,
+}
+
+/// How a structural operation interacts with sharing/audience boundaries
+/// (ADR 0028). Declared AT the descriptor — a sibling to [`MenuExposure`] — so
+/// a new structural op cannot ship without deciding whether it can cross a
+/// container boundary, widen an audience, mutate the sharing policy overlay, or
+/// change a block's identity binding.
+///
+/// Parse-don't-validate: the boundary machinery (H2 crossing log, D1 confirm,
+/// H3 directional alignment) reads this typed classification instead of
+/// re-deriving per-op behaviour from op-name matches scattered across call
+/// sites.
+///
+/// There is deliberately **no `Default`**. The `#[operations_trait]` macro
+/// emits [`BoundaryBehavior::Unclassified`] when `#[boundary_behavior(...)]` is
+/// absent; the exhaustiveness correspondence-lock
+/// (`crates/holon-app/tests/boundary_behavior_correspondence.rs`) then
+/// guarantees no *structural* op ships with it. `Unclassified`'s RUNTIME
+/// meaning is fail-closed: the op works in purely private contexts, but the
+/// moment it would touch a shared container or generate a crossing it is
+/// REJECTED loudly with the op name in the message (silently defaulting to
+/// `PrivateOnly` would be fail-open in disguise — a genuinely-crossing op
+/// mishandled as non-crossing). flutter_rust_bridge:non_opaque
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BoundaryBehavior {
+    /// Never crosses a container/audience boundary — a within-container content
+    /// or structural mutation (set_field, create, delete, cycle_task_state, tag
+    /// edits, sibling reorder).
+    PrivateOnly,
+    /// A reparent that can move a block across container boundaries — modelled
+    /// as a delete-in-source + create-in-target pair that enters the H2
+    /// crossing log. `widens_audience` is the conservative static upper
+    /// bound: `true` marks the op as *potentially* broadening the audience
+    /// so the D1 explicit-confirm path gates it. Marking a widening op
+    /// `false` would be the leak (H3 — never over-approximate the
+    /// audience).
+    Crossing { widens_audience: bool },
+    /// Forbidden at a page boundary (ADR 0028 D1): e.g. outdenting a page-child
+    /// past its owning page. Rejected loudly at the boundary rather than
+    /// silently re-homed into a different audience.
+    ForbiddenAtPageBoundary,
+    /// Mutates the sharing policy overlay itself (grant / revoke / lease).
+    /// Enters the H2 log alongside crossings under one arbitration rule
+    /// (review A1).
+    PolicyEdit,
+    /// Changes a block's identity binding (rename / alias / merge). Review
+    /// C3/H6: identity ops can silently move content between audiences via
+    /// selector rebinding, so they are classified and tracked, not treated as
+    /// inert content edits.
+    IdentityOp,
+    /// Fail-closed default, emitted by the macro when
+    /// `#[boundary_behavior(...)]` is absent. Runtime meaning: any boundary
+    /// interaction is REJECTED loudly (op name in the message). The
+    /// exhaustiveness lock guarantees no structural op ships with this — it
+    /// is the backstop for ops added outside the lock's set.
+    Unclassified,
+}
+
 /// Complete metadata for an operation
 ///
 /// Generated by #[operations_trait] macro.
 /// flutter_rust_bridge:non_opaque
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 /// @c4 code
 pub struct OperationDescriptor {
     // Entity and table identification
@@ -224,6 +373,26 @@ pub struct OperationDescriptor {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub param_mappings: Vec<ParamMapping>,
 
+    /// Where this op surfaces in the UI. Non-defaultable (no `Default` on the
+    /// struct) so every construction site classifies explicitly — the
+    /// registry↔menu correspondence oracle reads this instead of assuming
+    /// "every profile op is a menu candidate".
+    pub menu_exposure: MenuExposure,
+
+    /// How this op interacts with sharing/audience boundaries (ADR 0028).
+    /// Non-defaultable (no `Default` on the struct) so every construction site
+    /// classifies explicitly — the boundary correspondence-lock reads this.
+    /// Absent `#[boundary_behavior(...)]` on a macro op yields the fail-closed
+    /// `Unclassified`, which the exhaustiveness test rejects for structural
+    /// ops.
+    pub boundary_behavior: BoundaryBehavior,
+
+    /// How narrowly this op targets (block / page / global). Non-defaultable
+    /// (no `Default` on the struct) so every construction site classifies
+    /// explicitly — a forgotten scope is a compile error, not a silent default.
+    /// The future action bar sorts its ops by this narrowness key.
+    pub target_scope: TargetScope,
+
     /// Input that invokes this operation when bound to a widget.
     ///
     /// `KeyChord` is populated at ViewModel construction time from the
@@ -243,47 +412,31 @@ pub struct OperationDescriptor {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub bound_params: HashMap<String, Value>,
 
-    /// flutter_rust_bridge:opaque
-    #[serde(skip_serializing, skip_deserializing)]
-    pub precondition: Option<Arc<Box<PreconditionChecker>>>,
+    /// The op's declared precondition (ADR 0031). Non-defaultable: an op that
+    /// declares nothing carries [`OpGuard::None`], which is a stated fact, not
+    /// an absence.
+    ///
+    /// Ordinary serializable data — the ADR's HARD dual-consumer requirement
+    /// ("loadable by BOTH the in-memory engine and the real dispatcher"), which
+    /// a closure could never satisfy. The certificate is
+    /// `crates/holon-api/tests/descriptor_guard_roundtrip.rs`.
+    pub guard: OpGuard,
+
+    /// What this op READS and what it EMITS (ADR 0031 Increment 2).
+    /// Non-defaultable: an op that declares nothing carries
+    /// [`TransitionArcs::Undeclared`], whose runtime meaning is "not
+    /// simulatable — refuse", never "writes nothing".
+    ///
+    /// Ordinary serializable data for the same dual-consumer reason as
+    /// [`OperationDescriptor::guard`]. The certificate is
+    /// `crates/holon-api/tests/descriptor_arcs_roundtrip.rs`.
+    pub arcs: TransitionArcs,
 }
 
-// Manual PartialEq: `precondition` is a `dyn Fn` which can't implement
-// PartialEq.
-impl PartialEq for OperationDescriptor {
-    fn eq(&self, other: &Self) -> bool {
-        self.entity_name == other.entity_name
-            && self.entity_short_name == other.entity_short_name
-            && self.id_column == other.id_column
-            && self.name == other.name
-            && self.display_name == other.display_name
-            && self.description == other.description
-            && self.required_params == other.required_params
-            && self.affected_fields == other.affected_fields
-            && self.param_mappings == other.param_mappings
-            && self.trigger == other.trigger
-            && self.bound_params == other.bound_params
-    }
-}
-
-impl Default for OperationDescriptor {
-    fn default() -> Self {
-        Self {
-            entity_name: EntityName::new("unknown"),
-            entity_short_name: String::new(),
-            id_column: "id".to_string(),
-            name: String::new(),
-            display_name: String::new(),
-            description: String::new(),
-            required_params: Vec::new(),
-            affected_fields: Vec::new(),
-            param_mappings: Vec::new(),
-            trigger: None,
-            bound_params: HashMap::new(),
-            precondition: None,
-        }
-    }
-}
+// NOTE: `OperationDescriptor` intentionally has NO `Default`. `menu_exposure`
+// is non-defaultable — every construction site must classify its UI surface, so
+// a forgotten classification is a compile error rather than an op that silently
+// vanishes from (or leaks into) the slash menu.
 
 impl OperationDescriptor {
     /// Convert to an OperationWiring with default widget type.
@@ -320,28 +473,6 @@ impl OperationDescriptor {
     /// Returns true if this op is invoked by shift+click on the bound widget.
     pub fn is_shift_click_triggered(&self) -> bool {
         self.click_modifiers() == Some(ClickModifiers::shift())
-    }
-}
-
-impl std::fmt::Debug for OperationDescriptor {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OperationDescriptor")
-            .field("entity_name", &self.entity_name)
-            .field("entity_short_name", &self.entity_short_name)
-            .field("id_column", &self.id_column)
-            .field("name", &self.name)
-            .field("display_name", &self.display_name)
-            .field("description", &self.description)
-            .field("required_params", &self.required_params)
-            .field("affected_fields", &self.affected_fields)
-            .field("param_mappings", &self.param_mappings)
-            .field("trigger", &self.trigger)
-            .field("bound_params", &self.bound_params)
-            .field(
-                "precondition",
-                &self.precondition.as_ref().map(|_| "<closure>"),
-            )
-            .finish()
     }
 }
 
@@ -464,8 +595,8 @@ impl TypeHint {
                     .map(|v| v.trim().to_string())
                     .collect();
                 // ALLOW(compatibility): legacy enum:foo,bar form predates the structured
-                // Value::String list Convert string values to Value::String for
-                // backward compatibility
+                // Value::String list; convert string values to Value::String for
+                // the legacy callers
                 let values: Vec<Value> = string_values.into_iter().map(Value::String).collect();
                 TypeHint::OneOf { values }
             }

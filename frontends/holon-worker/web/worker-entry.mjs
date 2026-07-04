@@ -116,6 +116,14 @@ const { napiModule: __napiModule } = __emnapiInstantiateNapiModuleSync(__wasmFil
     return importObject
   },
   beforeInit({ instance }) {
+    // Initialize the main thread's WASI thread-pointer / pthread state BEFORE
+    // any napi registration touches thread-local destructors. napi builds this
+    // crate as a wasm library, so crt1-reactor's `_initialize` (which would run
+    // `__wasi_init_tp()`) is never exported/called (rust-lang/rust#146843).
+    // Without this, the main thread's pthread key subsystem is uninitialized
+    // and the first thread-local-destructor registration deadlocks in
+    // `pthread_key_create`. See holon_init_main_thread() in src/lib.rs.
+    instance.exports.holon_init_main_thread()
     for (const name of Object.keys(instance.exports)) {
       if (name.startsWith('__napi_register__')) {
         instance.exports[name]()
@@ -158,6 +166,30 @@ self.addEventListener('message', async (e) => {
       case 'engineInit':
         value = mod.engineInit(args[0]) ?? null
         break
+      case 'engineResetStorage': {
+        // B2: clear local data. Tear the engine down first (Rust releases the
+        // Turso OPFS file handles), THEN close the sync-access handles and
+        // delete the files. Deleting while sync handles are open throws
+        // NoModificationAllowedError, so ordering is load-bearing. args = [dbPath].
+        const dbPath = args[0]
+        mod.engineResetStorage()
+        for (const f of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+          await opfs.unregisterFile(f)
+        }
+        const root = await navigator.storage.getDirectory()
+        for (const f of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+          try {
+            await root.removeEntry(f)
+          } catch (e) {
+            // NotFoundError is fine (file may not exist); anything else — e.g.
+            // NoModificationAllowedError — means a handle is still open, which
+            // is a real bug we must surface, not swallow.
+            if (e && e.name !== 'NotFoundError') throw e
+          }
+        }
+        value = null
+        break
+      }
       case 'engineExecuteSql':
         value = Number(mod.engineExecuteSql(args[0]))
         break

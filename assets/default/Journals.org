@@ -1,17 +1,15 @@
 * Journals
-#+BEGIN_SRC holon_prql :id journals::src::0
-from block
-filter parent_id == 'block:journals'
-filter name != null
-sort {-name}
+#+BEGIN_SRC holon_sql :id journals::src::0
+SELECT * FROM journal_feed ORDER BY content DESC
 #+END_SRC
 #+BEGIN_SRC render :id journals::render::0
-list(#{sortkey: "-name", item_template: selectable(row(icon("calendar"), spacer(6), text(col("name"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})})})
+list(#{sortkey: "-content", item_template: column(render_entity(), divider())})
 #+END_SRC
 ** Journal Auto-Create
-#+BEGIN_SRC holon_sql :id journals::trigger::0
-SELECT date('now', 'localtime') as name
-#+END_SRC
-#+BEGIN_SRC action :id journals::action::0
-block.create(#{parent_id: "block:journals", name: col("name")})
+#+BEGIN_SRC holon_rule :id journals::action::0
+name: daily_journal
+when: 'not block_exists("Journals/{today}")'
+emit:
+  place: page(journals)
+  name: "{today}"
 #+END_SRC

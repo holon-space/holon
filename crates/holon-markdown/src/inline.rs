@@ -1,185 +1,299 @@
-//! Inline Obsidian syntax extracted into sidecar metadata.
+//! Syntax-neutral inline scanner for the markdown flavors (Obsidian + LogSeq).
 //!
-//! Like wikilinks, the source spans are left **verbatim** in `block.content`
-//! (so round-trips are lossless regardless of the dialect), and the parsed
-//! values are projected into per-feature sidecar properties only when the
-//! matching switch is on. Each extractor here is independent of the others:
+//! Produces a `(content, marks, tags)` triple from one block's raw inline text:
+//! `content` is the display text with delimiters stripped, `marks` are
+//! `MarkSpan`s over **Unicode-scalar offsets** into `content` (matching Loro's
+//! `LoroText::mark` API and the SQL `marks` column), and `tags` are the
+//! `#tag` / `#[[multi word]]` names hoisted to the block's tag edge field.
 //!
-//! - `==text==` highlights → `highlights`
-//! - `%%inline%%` / `%%\n…\n%%` comments → `comments`
-//! - `#tag`, `#area/sub` inline tags → `inline_tags`
-//!
-//! Extraction is best-effort lightweight scanning (it does not skip code
-//! spans), which is fine for advisory metadata — the authoritative text is
-//! always the preserved content.
+//! Parse, don't validate: the scanner is total. Anything it does not recognize
+//! is emitted verbatim into `content` (never dropped) — the fail-loud
+//! disclosure for *whole-block* unsupported constructs (callouts, embeds,
+//! queries) happens one layer up in the block parsers.
 
-use std::collections::HashSet;
+use holon_api::EntityUri;
+use holon_api::inline_mark::EntityRef;
+use holon_api::inline_mark::InlineMark;
+use holon_api::inline_mark::MarkSpan;
 
-/// `==highlighted==` spans, in order, without the `==` delimiters. Empty
-/// spans (`====`) are ignored; matching does not cross a line.
-pub fn extract_highlights(text: &str) -> Vec<String> {
-    extract_paired(text, "==", false)
+/// Result of scanning one block's inline text.
+pub struct InlineParse {
+    pub content: String,
+    pub marks: Vec<MarkSpan>,
+    /// `#tag` / `#[[multi word]]` names, in first-seen order.
+    pub tags: Vec<String>,
 }
 
-/// `%%comment%%` spans, in order, without the `%%` delimiters. A comment may
-/// span multiple lines (Obsidian's block-comment form).
-pub fn extract_comments(text: &str) -> Vec<String> {
-    extract_paired(text, "%%", true)
+struct Scanner {
+    src: Vec<char>,
+    i: usize,
+    out: String,
+    /// Char length of `out` so far (marks index into this space).
+    out_len: usize,
+    marks: Vec<MarkSpan>,
+    tags: Vec<String>,
 }
 
-/// `#tag` inline tags, deduped in first-occurrence order, without the `#`.
-/// When `nested` is true a `/` continues the tag (`#area/sub` is one tag);
-/// otherwise the tag stops at the `/`. A tag must contain a letter and is
-/// never purely numeric, matching Obsidian's rule that `#123` is not a tag.
-pub fn extract_inline_tags(text: &str, nested: bool) -> Vec<String> {
-    let bytes = text.as_bytes();
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] != b'#' || (i > 0 && !bytes[i - 1].is_ascii_whitespace()) {
-            i += 1;
-            continue;
+impl Scanner {
+    fn push_str(&mut self, s: &str) {
+        for c in s.chars() {
+            self.out.push(c);
+            self.out_len += 1;
         }
-        let start = i + 1;
-        let mut j = start;
-        while j < bytes.len() && is_tag_char(bytes[j], nested) {
-            j += 1;
-        }
-        let tag = text[start..j].trim_end_matches('/');
-        if is_valid_tag(tag) && seen.insert(tag.to_string()) {
-            out.push(tag.to_string());
-        }
-        i = j.max(i + 1);
     }
-    out
-}
 
-fn extract_paired(text: &str, delim: &str, allow_newline: bool) -> Vec<String> {
-    let dlen = delim.len();
-    let bytes = text.as_bytes();
-    let dbytes = delim.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i + dlen <= bytes.len() {
-        if &bytes[i..i + dlen] != dbytes {
-            i += 1;
-            continue;
+    /// Find the char index of the next occurrence of `needle` at or after
+    /// `from`.
+    fn find(&self, needle: &[char], from: usize) -> Option<usize> {
+        if needle.is_empty() || from + needle.len() > self.src.len() {
+            return None;
         }
-        let inner_start = i + dlen;
-        let mut j = inner_start;
-        let mut close = None;
-        while j + dlen <= bytes.len() {
-            if !allow_newline && bytes[j] == b'\n' {
-                break;
-            }
-            if &bytes[j..j + dlen] == dbytes {
-                close = Some(j);
-                break;
+        let mut j = from;
+        while j + needle.len() <= self.src.len() {
+            if self.src[j..j + needle.len()] == *needle {
+                return Some(j);
             }
             j += 1;
         }
-        match close {
-            Some(end) => {
-                let inner = &text[inner_start..end];
+        None
+    }
+
+    fn starts_with(&self, needle: &[char]) -> bool {
+        self.i + needle.len() <= self.src.len()
+            && self.src[self.i..self.i + needle.len()] == *needle
+    }
+
+    /// Emit `label` as content and record a mark of `mark` over its range.
+    fn emit_marked(&mut self, label: &str, mark: InlineMark) {
+        let start = self.out_len;
+        self.push_str(label);
+        let end = self.out_len;
+        if end > start {
+            self.marks.push(MarkSpan::new(start, end, mark));
+        }
+    }
+
+    /// A `#tag` is a tag only at a word boundary (start of block or after
+    /// whitespace / an opening bracket), never mid-word (`C#`, `foo#bar`).
+    fn at_tag_boundary(&self) -> bool {
+        if self.i == 0 {
+            return true;
+        }
+        let prev = self.src[self.i - 1];
+        prev.is_whitespace() || prev == '(' || prev == '['
+    }
+}
+
+/// Delimiter pairs for symmetric inline emphasis, longest-first so `**` wins
+/// over `*` and `~~` over a lone `~`.
+/// One symmetric emphasis delimiter and the mark it opens.
+type EmphasisPair = (&'static str, fn() -> InlineMark);
+
+const EMPHASIS: &[EmphasisPair] = &[
+    ("**", || InlineMark::Bold),
+    ("__", || InlineMark::Bold),
+    ("~~", || InlineMark::Strike),
+    ("==", || InlineMark::Underline), // highlight → Underline (spike; O3 open question)
+    ("*", || InlineMark::Italic),
+    ("_", || InlineMark::Italic),
+    ("`", || InlineMark::Code),
+];
+
+/// Scan one block's inline text.
+pub fn scan_inline(text: &str) -> InlineParse {
+    let mut s = Scanner {
+        src: text.chars().collect(),
+        i: 0,
+        out: String::new(),
+        out_len: 0,
+        marks: Vec::new(),
+        tags: Vec::new(),
+    };
+
+    while s.i < s.src.len() {
+        // --- Embed `![[...]]` / `![alt](url)` : keep verbatim, no mark. The
+        //     whole-block opaque path handles standalone embeds; inline we
+        //     preserve the exact source so nothing is lost.
+        if s.starts_with(&['!', '[', '[']) {
+            s.push_str("![[");
+            s.i += 3;
+            continue;
+        }
+
+        // --- Wikilink `[[target]]` / `[[target|alias]]` / `[[target#h]]`
+        if s.starts_with(&['[', '[']) {
+            if let Some(close) = s.find(&[']', ']'], s.i + 2) {
+                let inner: String = s.src[s.i + 2..close].iter().collect();
+                let (target, label) = split_wikilink(&inner);
+                let uri = wikilink_target(&target);
+                s.emit_marked(
+                    &label,
+                    InlineMark::Link {
+                        target: uri,
+                        label: label.clone(),
+                    },
+                );
+                s.i = close + 2;
+                continue;
+            }
+        }
+
+        // --- Block ref `((uuid))`
+        if s.starts_with(&['(', '(']) {
+            if let Some(close) = s.find(&[')', ')'], s.i + 2) {
+                let inner: String = s.src[s.i + 2..close].iter().collect();
+                let inner = inner.trim().to_string();
                 if !inner.is_empty() {
-                    out.push(inner.to_string());
+                    let target = EntityRef::from_uri(&EntityUri::block(&inner));
+                    let label = format!("(({inner}))");
+                    s.emit_marked(
+                        &label,
+                        InlineMark::Link {
+                            target,
+                            label: label.clone(),
+                        },
+                    );
+                    s.i = close + 2;
+                    continue;
                 }
-                i = end + dlen;
             }
-            None => i += 1,
+        }
+
+        // --- Markdown link `[text](url)`
+        if s.starts_with(&['[']) && !s.starts_with(&['[', '[']) {
+            if let Some(rbrack) = s.find(&[']'], s.i + 1) {
+                if rbrack + 1 < s.src.len() && s.src[rbrack + 1] == '(' {
+                    if let Some(rparen) = s.find(&[')'], rbrack + 2) {
+                        let label: String = s.src[s.i + 1..rbrack].iter().collect();
+                        let url: String = s.src[rbrack + 2..rparen].iter().collect();
+                        let target = md_link_target(&url);
+                        s.emit_marked(
+                            &label,
+                            InlineMark::Link {
+                                target,
+                                label: label.clone(),
+                            },
+                        );
+                        s.i = rparen + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // --- Tag `#[[multi word]]` or `#tag`
+        if s.src[s.i] == '#' && s.at_tag_boundary() {
+            if s.i + 2 < s.src.len() && s.src[s.i + 1] == '[' && s.src[s.i + 2] == '[' {
+                if let Some(close) = s.find(&[']', ']'], s.i + 3) {
+                    let name: String = s.src[s.i + 3..close].iter().collect();
+                    if !name.trim().is_empty() {
+                        push_tag(&mut s.tags, name.trim());
+                        // Preserve the literal source so the display text is lossless.
+                        let lit: String = s.src[s.i..close + 2].iter().collect();
+                        s.push_str(&lit);
+                        s.i = close + 2;
+                        continue;
+                    }
+                }
+            }
+            // bare `#tag`
+            let mut j = s.i + 1;
+            while j < s.src.len() && is_tag_char(s.src[j]) {
+                j += 1;
+            }
+            let name: String = s.src[s.i + 1..j].iter().collect();
+            if is_valid_tag(&name) {
+                push_tag(&mut s.tags, &name);
+                let lit: String = s.src[s.i..j].iter().collect();
+                s.push_str(&lit);
+                s.i = j;
+                continue;
+            }
+        }
+
+        // --- Emphasis / code
+        let mut matched = false;
+        for (delim, mk) in EMPHASIS {
+            let dch: Vec<char> = delim.chars().collect();
+            if s.starts_with(&dch) {
+                if let Some(close) = s.find(&dch, s.i + dch.len()) {
+                    let inner: String = s.src[s.i + dch.len()..close].iter().collect();
+                    if !inner.is_empty() {
+                        s.emit_marked(&inner, mk());
+                        s.i = close + dch.len();
+                        matched = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if matched {
+            continue;
+        }
+
+        // --- Plain char
+        s.out.push(s.src[s.i]);
+        s.out_len += 1;
+        s.i += 1;
+    }
+
+    InlineParse {
+        content: s.out,
+        marks: s.marks,
+        tags: s.tags,
+    }
+}
+
+fn split_wikilink(inner: &str) -> (String, String) {
+    // `target|alias` (Obsidian/LogSeq alias). Label defaults to target, minus
+    // any `#heading` / `#^block` anchor, which is a resolution hint not display.
+    if let Some((t, a)) = inner.split_once('|') {
+        (t.trim().to_string(), a.trim().to_string())
+    } else {
+        let label = inner.split('#').next().unwrap_or(inner).trim().to_string();
+        let label = if label.is_empty() {
+            inner.trim().to_string()
+        } else {
+            label
+        };
+        (inner.trim().to_string(), label)
+    }
+}
+
+fn wikilink_target(target: &str) -> EntityRef {
+    // Strip anchor for the name; dangling by default (lazy page-create,
+    // links-ruling).
+    let name = target.split('#').next().unwrap_or(target).trim();
+    EntityRef::Name {
+        name: name.to_string(),
+    }
+}
+
+fn md_link_target(url: &str) -> EntityRef {
+    let u = url.trim();
+    if u.starts_with("http://") || u.starts_with("https://") || u.starts_with("mailto:") {
+        EntityRef::External { url: u.to_string() }
+    } else {
+        // A relative markdown link into the vault — treat as a dangling name ref.
+        let name = u.trim_end_matches(".md").trim_end_matches(".org");
+        EntityRef::Name {
+            name: name.to_string(),
         }
     }
-    out
 }
 
-fn is_tag_char(b: u8, nested: bool) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || (nested && b == b'/')
+fn is_tag_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '-' || c == '/'
 }
 
-fn is_valid_tag(tag: &str) -> bool {
-    !tag.is_empty()
-        && tag.bytes().any(|b| b.is_ascii_alphabetic())
-        && tag.bytes().any(|b| !b.is_ascii_digit())
+fn is_valid_tag(name: &str) -> bool {
+    // Obsidian rule: non-empty and contains at least one non-numeric char.
+    !name.is_empty() && name.chars().any(|c| !c.is_ascii_digit())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn highlights_extracted_in_order() {
-        assert_eq!(
-            extract_highlights("a ==first== then ==second== end"),
-            vec!["first".to_string(), "second".to_string()]
-        );
-    }
-
-    #[test]
-    fn highlight_does_not_cross_newline() {
-        assert!(extract_highlights("==open\nclose==").is_empty());
-    }
-
-    #[test]
-    fn empty_highlight_ignored() {
-        assert!(extract_highlights("==== nothing").is_empty());
-    }
-
-    #[test]
-    fn inline_comment_extracted() {
-        assert_eq!(
-            extract_comments("visible %%hidden%% text"),
-            vec!["hidden".to_string()]
-        );
-    }
-
-    #[test]
-    fn block_comment_spans_lines() {
-        assert_eq!(
-            extract_comments("before %%\nblock\ncomment\n%% after"),
-            vec!["\nblock\ncomment\n".to_string()]
-        );
-    }
-
-    #[test]
-    fn flat_tags_extracted() {
-        assert_eq!(
-            extract_inline_tags("see #project and #urgent here", false),
-            vec!["project".to_string(), "urgent".to_string()]
-        );
-    }
-
-    #[test]
-    fn nested_tag_depends_on_switch() {
-        assert_eq!(
-            extract_inline_tags("#area/sub", false),
-            vec!["area".to_string()]
-        );
-        assert_eq!(
-            extract_inline_tags("#area/sub", true),
-            vec!["area/sub".to_string()]
-        );
-    }
-
-    #[test]
-    fn hash_in_word_is_not_a_tag() {
-        assert!(extract_inline_tags("color#fff and C#", false).is_empty());
-    }
-
-    #[test]
-    fn purely_numeric_is_not_a_tag() {
-        assert!(extract_inline_tags("issue #123 closed", false).is_empty());
-        assert_eq!(
-            extract_inline_tags("#v2 release", false),
-            vec!["v2".to_string()]
-        );
-    }
-
-    #[test]
-    fn tags_deduped_in_order() {
-        assert_eq!(
-            extract_inline_tags("#a #b #a", false),
-            vec!["a".to_string(), "b".to_string()]
-        );
+fn push_tag(tags: &mut Vec<String>, name: &str) {
+    let n = name.to_string();
+    if !tags.contains(&n) {
+        tags.push(n);
     }
 }

@@ -1,0 +1,112 @@
+dogfood-explorer 2026-08-08 — four smaller findings, evidence verbatim
+======================================================================
+App: main e1ba76e6, throwaway vault, loro=false.
+
+-----------------------------------------------------------------------
+1. Blank / empty links are Unrepresentable — an ERROR on EVERY render
+-----------------------------------------------------------------------
+Notes.org authored with, verbatim:
+    * blank [[ ]] link
+    * empty [[]] link
+
+GOOD: they do NOT vanish. SQL keeps them byte-for-byte
+    "blank [[ ]] link"   marks=null
+    "empty [[]] link"    marks=null
+and the file is stable — 10 sha samples over 10 s plus a forced re-ingest, all
+identical. No write-back loop was actually observed.
+
+BAD: the org renderer classifies both as unrepresentable and says so at ERROR,
+on every render, including a clean cold boot with no user action at all:
+
+  2026-08-08T08:05:03.665617Z ERROR holon_org_format::models: org render is
+    DEGRADED for this block: NO emission of this block settles; write-back may
+    loop on it block="block:ingest-blank-link" rung="Unrepresentable"
+  2026-08-08T08:05:03.666562Z ERROR holon_org_format::models: org render is
+    DEGRADED for this block: NO emission of this block settles; write-back may
+    loop on it block="block:ingest-empty-link" rung="Unrepresentable"
+
+The disclosure is honest and the data is safe, but a user typing "[[ ]]" puts
+their vault into a permanently ERROR-logging state, and any gate asserting
+inv-no-observed-errors reds on ordinary content.
+
+-----------------------------------------------------------------------
+2. Linked references renders zero rows, then disappears for good
+-----------------------------------------------------------------------
+On the Journals page, focused in main, with three real backlinks:
+
+  $ SELECT bl.target_id, bl.content FROM backlinks bl
+      JOIN focus_roots fr ON bl.target_id = fr.root_id
+      JOIN navigation_cursor nc ON nc.region = fr.region
+                               AND nc.history_id = fr.history_id
+      WHERE fr.region = 'main'
+  rows[3]
+    ingest link to Journals here | block:journals
+    padded Journals link         | block:journals
+    see Journals now             | block:journals
+
+That is the main panel's own backlinks query, verbatim from
+block:default-main-panel::render::0. The UI shows the "Linked references"
+accordion header and NO rows beneath it
+(shots/03-journals-backlinks.png). describe_ui renders the region as
+`divider` then `(empty)`.
+
+Clicking the accordion header then removes the entire section — header
+included — and it does NOT come back after navigating to another page and back
+(shots/04-backlinks-expanded.png, shots/05-backlinks-renav.png). There is no
+remaining affordance to reopen it short of an app restart.
+
+-----------------------------------------------------------------------
+3. ADR 0028 D1 outdent refusal: correct, but ERROR-logged and silent to the user
+-----------------------------------------------------------------------
+shift+tab on a direct child of a page. Structure correctly unchanged, no crash,
+no spam (5 log lines total for the whole gesture), and the latency correlator
+retires the sample properly:
+
+  DEBUG holon_latency: stage="e2e_retired" action=outdent waited_ms=1
+        reason="op refused or failed — no write, nothing to measure"
+
+But the refusal itself is logged at ERROR:
+
+  ERROR holon_frontend::reactive: dispatch_intent_awaitable: block.outdent:
+    Operation 'outdent' on entity 'block' failed: Cannot outdent a direct child
+    of a page: block block:49f0614c-… would escape its page container
+    (ADR 0028 D1). Move it elsewhere instead.
+
+and nothing at all appears in the UI — no toast, no shake, no disabled cue. The
+message is excellent; the user never sees it, and a designed refusal on a very
+common keystroke is recorded as an engine error.
+
+-----------------------------------------------------------------------
+4. MCP integration sync fails loudly at boot and then every poll
+-----------------------------------------------------------------------
+With docs/integrations/*.yaml copied into {config_dir}/integrations as the
+loader requires:
+
+  07:50:57 WARN holon_mcp_client::mcp_integration: initial sync failed
+    error=Batch transaction failed: Database error: Failed to execute statement:
+    datatype mismatch
+  07:55:56 WARN poll_resync{entity=jp_posts}: poll resync failed
+    error=Batch transaction failed: Database error: Failed to execute statement:
+    datatype mismatch
+  08:00:56 WARN poll_resync{entity=jp_posts}: … (repeats ~every 60 s, forever)
+
+The failure is disclosed (good) but never recovers and never backs off. The
+error carries no column or row context, so it is not actionable from the log.
+
+Related, cosmetic: after the restart the sidebar "Integrations" section renders
+one BLANK bullet row, while its backing query returns real data —
+  SELECT provider_name, updated_at FROM sync_states ORDER BY provider_name ASC
+  rows[1]  orgmode | 2026-08-08 08:05:03
+Before the restart the same row rendered as "orgmode  2026-08-08 0…".
+
+-----------------------------------------------------------------------
+5. join_block merges into the previous SIBLING, not the previous VISIBLE block
+-----------------------------------------------------------------------
+Outline:  Alpha one
+            Beta two        (child, expanded and visible)
+          Gamma three
+Backspace at offset 0 of "Gamma three" produced "Alpha oneGamma three" —
+it joined into Alpha, jumping over the visible "Beta two". Every comparable
+outliner (LogSeq, Roam, Obsidian, Workflowy) joins with the previous VISIBLE
+line, i.e. Beta. Data is correct and undo restores it cleanly
+(`restore_split`); the surprise is purely in which block the text lands in.

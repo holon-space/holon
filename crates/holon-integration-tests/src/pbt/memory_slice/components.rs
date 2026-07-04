@@ -1,5 +1,9 @@
 //! The SUT components of the memory-wide slice. Each is a [`CapProvider`] that
 //! contributes one or more capabilities to a composed `CapMap`.
+//!
+//! @pbt kind sut-arm
+//! @pbt covers memory-slice — in-memory store arm: no projection, no CDC, no
+//!   async settle; exists purely for speed (microseconds/case)
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -211,10 +215,12 @@ impl SutBlockTreeWrite for MemoryBackendComponent {
         self.move_block(id, parent, Some(next)).await;
     }
 
-    /// `ReferenceState::split_block`: original keeps
-    /// `content[..pos].trim_end()`, a new `:split-N` sibling gets
-    /// `content[pos..].trim_start()`, placed right after the original. `N`
-    /// mirrors the oracle's `next_id` (`set_next_split_id`).
+    /// `ReferenceState::split_block`: the id follows the text. The original
+    /// keeps `content[..pos].trim_end()` and a new `:split-N` sibling holding
+    /// `content[pos..].trim_start()` lands right after it — except at `pos ==
+    /// 0`, where the original keeps the whole text and the `:split-N` sibling
+    /// is the EMPTY one, landing right BEFORE it. `N` mirrors the oracle's
+    /// `next_id` (`set_next_split_id`).
     async fn apply_split_block(&self, id: &EntityUri, position: usize) {
         let block = self.block(id).await;
         let parent = block.parent_id.clone();
@@ -225,9 +231,21 @@ impl SutBlockTreeWrite for MemoryBackendComponent {
         );
         let before = content[..position].trim_end().to_string();
         let after = content[position..].trim_start().to_string();
+        let at_start = position == 0;
+        let (kept, minted) = if at_start {
+            (after, before)
+        } else {
+            (before, after)
+        };
+        // Read the anchor BEFORE the create so it names a pre-split sibling.
+        let anchor = if at_start {
+            self.prev_sibling(id).await
+        } else {
+            Some(id.clone())
+        };
 
         self.backend
-            .update_block(id.as_str(), BlockContent::text(&before))
+            .update_block(id.as_str(), BlockContent::text(&kept))
             .await
             .unwrap_or_else(|e| panic!("apply_split_block: update original failed: {e}"));
 
@@ -238,18 +256,18 @@ impl SutBlockTreeWrite for MemoryBackendComponent {
         self.backend
             .create_block(
                 parent.clone(),
-                BlockContent::text(&after),
+                BlockContent::text(&minted),
                 Some(new_id.clone()),
             )
             .await
             .unwrap_or_else(|e| panic!("apply_split_block: create new block failed: {e}"));
         // `create_block` appends to the end of the parent's children; relocate to
-        // immediately after the original to match the oracle's ordering. Skip for a
+        // the oracle's slot (`anchor` == None means first child). Skip for a
         // virtual (`no_parent`/sentinel) parent — `MemoryBackend::move_block` rejects
         // a virtual target, and top-level sibling order is not invariant-checked
         // (the new block keeps the original's `no_parent` parent either way).
         if !parent.is_no_parent() && !parent.is_sentinel() {
-            self.move_block(&new_id, parent, Some(id.clone())).await;
+            self.move_block(&new_id, parent, anchor).await;
         }
     }
 
@@ -318,8 +336,15 @@ struct EditorCell {
 /// Minimal interface = no faked methods.
 #[async_trait::async_trait(?Send)]
 pub trait EditorCommitTarget {
-    /// Write `content` as block `id`'s text content into the canonical store.
-    async fn commit_block_content(&self, id: &str, content: &str) -> Result<(), ApiError>;
+    /// Write `content` (and its org-lens-derived `marks`, replacing any
+    /// previous mark set — `None` clears) as block `id`'s text content into
+    /// the canonical store.
+    async fn commit_block_content(
+        &self,
+        id: &str,
+        content: &str,
+        marks: Option<&[holon_api::MarkSpan]>,
+    ) -> Result<(), ApiError>;
 }
 
 /// Adapts a [`CoreOperations`] store (Loro/memory) to [`EditorCommitTarget`]
@@ -328,8 +353,20 @@ pub struct CoreOpsCommit(pub Arc<dyn CoreOperations>);
 
 #[async_trait::async_trait(?Send)]
 impl EditorCommitTarget for CoreOpsCommit {
-    async fn commit_block_content(&self, id: &str, content: &str) -> Result<(), ApiError> {
-        self.0.update_block(id, BlockContent::text(content)).await
+    async fn commit_block_content(
+        &self,
+        id: &str,
+        content: &str,
+        marks: Option<&[holon_api::MarkSpan]>,
+    ) -> Result<(), ApiError> {
+        let block_content = match marks {
+            Some(m) => BlockContent::RichText {
+                text: content.to_string(),
+                marks: m.to_vec(),
+            },
+            None => BlockContent::text(content),
+        };
+        self.0.update_block(id, block_content).await
     }
 }
 
@@ -339,17 +376,39 @@ impl EditorCommitTarget for CoreOpsCommit {
 /// in `block_raw` where the block invariants read.
 #[async_trait::async_trait(?Send)]
 impl EditorCommitTarget for BackendEngine {
-    async fn commit_block_content(&self, id: &str, content: &str) -> Result<(), ApiError> {
+    async fn commit_block_content(
+        &self,
+        id: &str,
+        content: &str,
+        marks: Option<&[holon_api::MarkSpan]>,
+    ) -> Result<(), ApiError> {
+        let entity: holon_api::types::EntityName = "block".to_string().into();
         let mut params: StorageEntity = HashMap::new();
         params.insert("id".into(), Value::String(id.to_string()));
         params.insert("field".into(), Value::String("content".to_string()));
         params.insert("value".into(), Value::String(content.to_string()));
-        let entity = "block".to_string().into();
-        self.execute_operation(&entity, "set_field", params)
+        self.execute_operation(&entity, "set_field", params, holon_api::OpOrigin::User)
             .await
             .map(|_| ())
             .map_err(|e| ApiError::InternalError {
                 message: format!("editor commit set_field failed: {e}"),
+            })?;
+        // Marks half of the org lens: replace the block's mark set alongside
+        // its content (Null clears), matching the `marks IS NOT NULL` column
+        // discriminator and the Loro `write_field(marks)` route.
+        let marks_value = match marks {
+            Some(m) => Value::String(holon_api::marks_to_json(m)),
+            None => Value::Null,
+        };
+        let mut params: StorageEntity = HashMap::new();
+        params.insert("id".into(), Value::String(id.to_string()));
+        params.insert("field".into(), Value::String("marks".to_string()));
+        params.insert("value".into(), marks_value);
+        self.execute_operation(&entity, "set_field", params, holon_api::OpOrigin::User)
+            .await
+            .map(|_| ())
+            .map_err(|e| ApiError::InternalError {
+                message: format!("editor commit set_field(marks) failed: {e}"),
             })
     }
 }
@@ -458,9 +517,9 @@ impl InMemEditorComponent {
     /// later-stage concern (non-Text editing).
     async fn commit(&self) {
         if let Some((id, text)) = self.take_commit() {
-            let normalized = normalize_content_for_org_roundtrip(&text, ContentType::Text);
+            let (normalized, marks) = normalize_content_for_org_roundtrip(&text, ContentType::Text);
             self.commit_target
-                .commit_block_content(id.as_str(), &normalized)
+                .commit_block_content(id.as_str(), &normalized, marks.as_deref())
                 .await
                 .expect(
                     "InMemEditorComponent commit: commit_block_content into shared store must not \

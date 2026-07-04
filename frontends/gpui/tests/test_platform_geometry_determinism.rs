@@ -181,6 +181,7 @@ fn boot_and_snapshot(runtime: &Arc<tokio::runtime::Runtime>) -> Snap {
                 nav,
                 bounds.clone(),
                 Some(debug_services.clone()),
+                None,
                 "Holon-TestPlatform-Determinism",
                 cx,
             )
@@ -236,6 +237,16 @@ fn test_platform_geometry_is_real_and_deterministic() {
     // One shared runtime across boots; backends are created sequentially on it.
     let runtime = Arc::new(tokio::runtime::Runtime::new().expect("tokio runtime"));
 
+    // Warm-up boot, discarded. The TestPlatform text system returns a 1px
+    // placeholder the FIRST time a glyph is measured (cold process-global glyph
+    // cache) and the real advance width only once warm, and a content-width
+    // `text` label is never remeasured within a boot — so the very first boot
+    // records cold 1px labels while every later boot (warm cache) records the
+    // real widths. The settle loop watches element COUNT, not bounds, so it
+    // cannot wait this out. This is orthogonal to the layout-determinism the
+    // test asserts; discard one boot so all *measured* boots share a warm cache.
+    let _ = boot_and_snapshot(&runtime);
+
     let snaps: Vec<Snap> = (0..BOOTS).map(|_| boot_and_snapshot(&runtime)).collect();
 
     // (1) REAL: every boot produced non-degenerate geometry.
@@ -289,3 +300,7 @@ fn test_platform_geometry_is_real_and_deterministic() {
         first.distinct_entities
     );
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;

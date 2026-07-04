@@ -1,8 +1,12 @@
 # RULES
 - Whenever there's a bug in the UI, always check if the E2E test in crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs (the ONE composed keystone PBT) can reproduce it.
 - If the E2E test doesn't reproduce the issue think about how prod and E2E test can be made more similar, so that the E2E test can reproduce it.
+- Every bug discovered OUTSIDE an automated test (dogfooding, agent exploration, user report) MUST be triaged with the `bug-gap-triage` skill (.claude/skills/bug-gap-triage/SKILL.md) and appended to docs/Testing/BugFunnel.md before/alongside the fix. Latency above the SLO (p95 interaction→projection-visible < 200ms) counts as such a bug.
+- Every NEW feature or behavior change follows the `holon-feature` skill (.claude/skills/holon-feature/SKILL.md): a red-for-the-right-reason keystone (headless) or GPUI (windowed) PBT BEFORE implementation, green after, the red log in the PR. Implementing without a covering PBT is a rare exception that MUST be escalated to Martin BEFORE landing.
+- `dogfood-explorer` is the FINAL quality gate — it should catch ~90% of bugs before Martin does. A dogfood-found bug sends the feature BACK: first enhance the PBTs to catch it (red-for-the-right-reason as proof), then fix, then re-run dogfood. See the `holon-feature` skill.
 - **NEVER** swallow errors!! Use `Result` and enrich the error message with information.
 - **ALWAYS** `tee` before filtering output
+- Before writing ANY org blocks into the vault (/Users/martin/Workspaces/pkm/holon-pkm) — task tracking, progress notes, handoffs — load the `holon-handoff` skill first and follow its structuring rules (imperative titles, details as child blocks, parent state derives from children). Never write vault org structure from memory.
 
 ## Error Handling Philosophy: Fail Loud, Never Fake
 
@@ -32,6 +36,20 @@ Based on: https://www.harudagondi.space/blog/parse-dont-validate-and-type-driven
 - Be suspicious of `match str.as_str() { ... }` scattered across multiple files — it's a sign that a string should be an enum
 - Be suspicious of `.ok()` or `_ => default` on parse results — this silently swallows invalid data. Fail loudly at the boundary instead.
 
+# VCS: how PRs get "merged" (linear history, no GitHub merges)
+
+We never merge PRs through the GitHub UI (no merge commits, no squash-merges).
+Instead:
+1. Incorporate the PR branch's changes into the linear integration chain
+   (stacked-workstreams weave onto `integration`, gates green), then land so
+   `main` advances along the straight line.
+2. Re-point the PR's bookmark to the corresponding rev IN the landed linear
+   chain (`jj bookmark set <name> -r <rev-in-chain> --allow-backwards` if
+   needed) and push BOTH `main` and the updated bookmark.
+3. GitHub then sees the PR's head as reachable from `main` and marks the PR
+   merged on its own — we keep a clean linear history AND GitHub's PR
+   bookkeeping.
+
 # `holon` MCP
 
 Every frontend automatically launches an MCP server which is available to you as `holon`.
@@ -44,6 +62,28 @@ See [docs/Reference/ORG_SYNTAX.md](docs/Reference/ORG_SYNTAX.md) — org files s
 # Architecture
 Mental model (load first): [docs/Architecture/Model.md](docs/Architecture/Model.md) — five layers, mode axes, invariants 1–12.
 See [docs/Architecture.md](docs/Architecture.md) (details in docs/Architecture/)
+
+# Project tracking (10,000 & 50,000-foot view)
+The **birds-eye view** — strategy, roadmap, gates, and the parking lot of
+deferred / cross-session open topics — lives in the Holon PKM vault, NOT in this
+repo:
+`/Users/martin/Workspaces/pkm/holon-pkm/Projects/Holon/` (org files, one per
+topic; `README.org` indexes them; `Now.org` is the G1 critical path).
+This repo's `docs/` holds the **ground-level detail** (ADRs, architecture,
+plans); the vault holds the altitude view and points back to those docs.
+When you defer a decision or surface a cross-session open topic, record it in
+the vault as a topic-doc headline with a slug `:ID:` (see
+`Display Placement & Resurfacing.org` for the pattern) — not only in-repo.
+Note (measured 2026-08-11, ratified by Martin): underscored identifiers
+round-trip byte-stable — the old "mangles underscored identifiers" claim is
+refuted. The REAL round-trip hazards: `_`-prefixed property KEYS are silently
+erased from disk on write-back (crates/holon-org-format/src/models.rs:886,908),
+and an empty property value drops its key entirely. Authored drawer order
+SURVIVES the store on BOTH production write legs — the Loro projection writer
+and the org-ingest param builder: the `_drawer_order` carrier persists in the
+stored properties bag and the renderer replays it. Pinned by
+crates/holon-app/tests/org_store_org_round_trip.rs. See
+docs/Reference/CompassConventions.md.
 
 # Development
 See [DEVELOPMENT.md](DEVELOPMENT.md) — testing (nextest, coverage) and log analysis scripts.

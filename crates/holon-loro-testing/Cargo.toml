@@ -1,0 +1,42 @@
+[package]
+name = "holon-loro-testing"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# `workspace-hack` is the cargo-hakari feature-unification crate: every
+# member depends on it and no member references it in source, by design.
+[package.metadata.cargo-machete]
+ignored = ["workspace-hack"]
+
+[lib]
+name = "holon_loro_testing"
+path = "src/lib.rs"
+
+[features]
+# Gates the per-transition SQL-budget (`SqlBudget`) impls, mirroring the
+# integration-test crate's `otel-testing`. integration-tests propagates its own
+# `otel-testing` into this crate so the budgets compile in the keystone build.
+otel-testing = []
+
+[dependencies]
+# `test-helpers` exposes `holon::sync::multi_peer` (gated `#[cfg(any(test,
+# feature = "test-helpers"))]` in holon-loro) — the peer-mesh primitives LoroSut
+# and peer_ops drive. Required for this crate to compile STANDALONE; without it,
+# a full-workspace build only linked because integration-tests happened to enable
+# the same feature on the shared `holon` rlib.
+holon = { workspace = true, features = ["test-helpers", "testing"] }
+holon-api = { workspace = true }
+holon-loro = { workspace = true }
+loro = { workspace = true }
+holon-pbt-core = { path = "../holon-pbt-core" }
+holon-macros = { workspace = true }
+async-trait = { workspace = true }
+proptest = { workspace = true }
+validated = "1.0"
+tokio = { workspace = true, features = ["sync", "time"] }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }

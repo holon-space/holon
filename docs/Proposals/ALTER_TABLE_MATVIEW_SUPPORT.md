@@ -1,5 +1,17 @@
 # ALTER TABLE Support for Materialized Views
 
+## Status (2026-07-15)
+
+**OPEN (fork-side design only).** No implementation exists. The design
+describes a drop-rewrite-recreate strategy for ADD COLUMN, RENAME TABLE,
+RENAME COLUMN, and DROP COLUMN operations when materialized views depend on
+the altered table.
+
+Still open:
+- ADD COLUMN first, then RENAME TABLE/COLUMN, then DROP COLUMN
+- AST rewriter for view SQL during rename
+- Transactional safety (drop+alter+recreate as one transaction)
+
 ## Current Behavior
 
 `core/translate/alter.rs:405-414` rejects ALL ALTER TABLE operations if any materialized view depends on the table:

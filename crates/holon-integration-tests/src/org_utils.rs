@@ -1,22 +1,10 @@
 //! Org file serialization utilities
 
-use holon_api::ContentType;
 use holon_api::EntityUri;
-use holon_api::Value;
 use holon_api::block::Block;
+use holon_orgmode::OrgRenderer;
 use holon_orgmode::models::OrgBlockExt;
-
-/// Internal properties that Loro/Org adds but reference model doesn't track
-pub const INTERNAL_PROPS: &[&str] = &[
-    "sequence",
-    "level",
-    "ID",
-    "id",
-    "created_at",
-    "updated_at",
-    "document_id",
-    "todo_keywords",
-];
+use holon_orgmode::models::ToOrg;
 
 /// Extract the first :ID: property value from org content.
 ///
@@ -78,139 +66,18 @@ pub fn serialize_block_recursive(
     result: &mut String,
     level: usize,
 ) {
-    if block.content_type == ContentType::Source {
-        let language = block
-            .source_language
-            .as_ref()
-            .map(|l| l.to_string())
-            .unwrap_or_else(|| "text".to_string());
-        result.push_str(&format!("#+BEGIN_SRC {} :id {}", language, block.id.id()));
-        // Mirror production's source_block_to_org: render extra properties as
-        // `:key value` header args so source blocks survive a round-trip with
-        // their custom properties intact.
-        let mut extra_props: Vec<(&String, &Value)> = block
-            .properties
-            .iter()
-            .filter(|(k, _)| {
-                k.as_str() != "ID"
-                    && k.as_str() != "id"
-                    && !INTERNAL_PROPS.contains(&k.as_str())
-                    && !matches!(
-                        k.as_str(),
-                        "task_state" | "priority" | "tags" | "scheduled" | "deadline"
-                    )
-            })
-            .collect();
-        extra_props.sort_by_key(|(a, _)| *a);
-        for (k, v) in extra_props {
-            let value_str = match v {
-                Value::String(s) => s.clone(),
-                Value::Integer(i) => i.to_string(),
-                Value::Float(f) => f.to_string(),
-                Value::Boolean(b) => b.to_string(),
-                Value::DateTime(s) => s.clone(),
-                Value::Json(s) => s.clone(),
-                Value::Array(_) => "[array]".to_string(),
-                Value::Object(_) => "[object]".to_string(),
-                Value::Null => "".to_string(),
-            };
-            result.push_str(&format!(" :{} {}", k, value_str));
-        }
-        result.push('\n');
-        result.push_str(&block.content);
-        if !block.content.ends_with('\n') {
-            result.push('\n');
-        }
-        result.push_str("#+END_SRC\n");
-        return;
-    }
-
-    let mut headline = String::new();
-    headline.push_str(&"*".repeat(level));
-    headline.push(' ');
-
-    if let Some(ref task_state) = block.task_state() {
-        headline.push_str(task_state.keyword.as_str());
-        headline.push(' ');
-    }
-
-    if let Some(priority) = block.priority() {
-        headline.push_str(&format!("[#{}] ", priority.to_letter()));
-    }
-
-    // Only the first line is the org headline; subsequent lines are body
-    // text that must come AFTER the :PROPERTIES: drawer (otherwise the parser
-    // sees the drawer as part of the body and the :ID: tag is lost).
-    let mut content_lines = block.content.lines();
-    let title = content_lines.next().unwrap_or("").trim_end();
-    let body: Vec<&str> = content_lines.collect();
-
-    headline.push_str(title);
-
-    let tags = block.tags();
-    if !tags.is_empty() {
-        headline.push_str(&format!(" {}", tags.to_org()));
-    }
-
-    result.push_str(&headline);
-    result.push('\n');
-
-    if block.scheduled().is_some() || block.deadline().is_some() {
-        if let Some(ref scheduled) = block.scheduled() {
-            result.push_str(&format!("SCHEDULED: {}\n", scheduled));
-        }
-        if let Some(ref deadline) = block.deadline() {
-            result.push_str(&format!("DEADLINE: {}\n", deadline));
-        }
-    }
-
-    result.push_str(":PROPERTIES:\n");
-    result.push_str(&format!(":ID: {}\n", block.id.id()));
-
-    // `:REQUIRES:` — the org-edna dependency edge field. Production's
-    // `OrgRenderer` emits it from `block.requires` (bare slugs, space-joined,
-    // scheme stripped); this serializer must match or a file reconstructed from
-    // blocks (e.g. BulkExternalAdd) silently drops the drawer and the next
-    // re-scan clears the `block_requires` junction.
-    if !block.requires.is_empty() {
-        let bare: Vec<String> = block
-            .requires
-            .iter()
-            .map(|uri| uri.id().to_string())
-            .collect();
-        result.push_str(&format!(":REQUIRES: {}\n", bare.join(" ")));
-    }
-
-    for (k, v) in &block.properties {
-        if k != "ID" && k != "id" && !INTERNAL_PROPS.contains(&k.as_str()) {
-            if matches!(
-                k.as_str(),
-                "task_state" | "priority" | "tags" | "scheduled" | "deadline"
-            ) {
-                continue;
-            }
-            let value_str = match v {
-                Value::String(s) => s.clone(),
-                Value::Integer(i) => i.to_string(),
-                Value::Float(f) => f.to_string(),
-                Value::Boolean(b) => b.to_string(),
-                Value::DateTime(s) => s.clone(),
-                Value::Json(s) => s.clone(),
-                Value::Array(_) => "[array]".to_string(),
-                Value::Object(_) => "[object]".to_string(),
-                Value::Null => "".to_string(),
-            };
-            result.push_str(&format!(":{}: {}\n", k, value_str));
-        }
-    }
-    result.push_str(":END:\n");
-
-    if !body.is_empty() {
-        for line in &body {
-            result.push_str(line);
-            result.push('\n');
-        }
-    }
+    // HARNESS-OWNED: only the tree walk (level → depth, sibling order, child
+    // recursion). Every byte for the block itself comes from production's own
+    // entry point — `OrgRenderer::prepare_block_for_org` → `Block::to_org` —
+    // the same pair `OrgRenderer::render_entity_tree` uses. Re-deriving any of
+    // it here (drawer, headline, source header args) is what let harness-only
+    // keys such as `_drawer_order` reach disk and made the expected file
+    // disagree with what write-back actually writes.
+    let mut prepared = block.clone();
+    // No owning document in hand here, so no vocabulary is known — the same
+    // `None` production's document-less render path passes.
+    OrgRenderer::prepare_block_for_org(&mut prepared, level - 1, None);
+    result.push_str(&prepared.to_org());
 
     let mut children: Vec<&&Block> = all_blocks
         .iter()
@@ -295,16 +162,20 @@ pub fn assign_reference_sequences_canonical(blocks: &mut [Block]) {
             .map(|b| {
                 (
                     b.id.to_string(),
-                    b.content_type.sibling_order_group(),
+                    b.content_type.parse_order_rank(),
                     b.sequence(),
                 )
             })
             .collect();
-        // Match production OrgRenderer sorting: section content (Source/Image)
-        // first, then sequence, then ID — via the one domain rule (ADR 0005).
-        children.sort_by(|(a_id, a_grp, a_seq), (b_id, b_grp, b_seq)| {
-            a_grp
-                .cmp(b_grp)
+        // Reproduce the store's post-round-trip sibling order: the renderer
+        // hoists section content (Source/Image) ahead of headings (Text), and
+        // the org parser additionally re-emits all Source blocks before all
+        // Image blocks (source loop precedes image loop in `process_headlines`).
+        // So the finer `parse_order_rank` (Source < Image < Text) is the primary
+        // key — NOT the coarse `sibling_order_group` — then sequence, then ID.
+        children.sort_by(|(a_id, a_rank, a_seq), (b_id, b_rank, b_seq)| {
+            a_rank
+                .cmp(b_rank)
                 .then_with(|| a_seq.cmp(b_seq))
                 .then_with(|| a_id.cmp(b_id))
         });

@@ -22,7 +22,7 @@ servers:
     toolNamesPrefix: ""
     transport:
       type: streamableHttp
-      url: "http://127.0.0.1:8521/mcp"
+      url: "http://127.0.0.1:8528/mcp"
       timeoutMs: 30000
     restartOnFailure: true
     restartDelayMs: 3000

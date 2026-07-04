@@ -1,1 +1,0 @@
-UPDATE navigation_cursor SET history_id = $new_id WHERE region = $region

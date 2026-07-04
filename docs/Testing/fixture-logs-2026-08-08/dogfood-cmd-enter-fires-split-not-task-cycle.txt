@@ -1,0 +1,58 @@
+dogfood-explorer 2026-08-08 — cmd+enter dispatches split_block, never cycle_task_state
+=======================================================================================
+App: target/debug/holon-gpui at main e1ba76e6, MCP port 8710, throwaway vault,
+loro=false (the shipped SqlOnly default). Driven through the embedded MCP.
+
+`list_keybindings` / `send_key_chord` both advertise the binding:
+    {"action":"cycle_task_state","chord":["cmd","enter"],"registry":"structural"}
+
+ISOLATING PROBE (lane-logs/dogfood-2026-08-08-chord-probe.log), one chord on one
+block ("Beta two" = block:361d42dd-5669-48bc-aa26-bef9137f978a):
+
+  == sending cmd+enter on Beta two
+  {"status":"executed","keys":["cmd","enter"],
+   "entity_id":"block:361d42dd-5669-48bc-aa26-bef9137f978a",
+   "matched":[{"action":"cycle_task_state","registry":"structural","context":null}]}
+
+  == operations dispatched since mark
+     2 execute_operation: entity=block, op=split_block
+
+The MCP reports the chord matched `cycle_task_state` and executed. NO
+cycle_task_state ever reaches the dispatcher (`grep cycle_task_state` over the
+whole session log finds only the agent-origin `execute_operation` control below).
+What actually ran is `split_block`, twice — the `cmd` modifier is dropped and the
+`enter` key falls through to its own structural binding.
+
+USER-VISIBLE DAMAGE — a junk empty block appears in the document:
+  BEFORE: Beta two  parent=block:49f0614c…  sort_key="80"
+  AFTER : Beta two  parent=block:49f0614c…  sort_key="80"
+          ""        parent=block:49f0614c…  sort_key="8180"   <-- new, empty
+  task_state on Beta two: absent before AND after.
+
+A second stray empty block (block:20465ff6…, sort_key 837E80) came from an
+earlier cmd+enter in the same session. Both persist across an app restart and
+render as extra "Type here" rows in the outline.
+
+CONTROL — the operation itself is sound; only the chord path is broken:
+  $ execute_operation block/cycle_task_state {"id":"block:49f0614c-…"}
+  Operation 'cycle_task_state' on entity 'block' executed successfully
+  properties -> {"task_state":"TODO","task_state_category":"active",…}
+  disk       -> "* TODO Alpha one"
+
+CONTROL — non-cmd chords on the same path DO dispatch correctly:
+  tab       -> indent      (parent_id changed, e2e 18ms)
+  shift+tab -> outdent     (parent_id changed, e2e 17ms)
+  backspace -> join_block  (contents merged, e2e 32ms)
+  enter     -> split_block (both halves written, marks remapped, e2e 25ms)
+
+CONTROL — cmd+z DOES work: it dispatched `restore_join`, correctly undoing the
+stray split that the broken cmd+enter had just created. So the defect is not
+"cmd chords are dead"; it is that cmd+enter resolves to Enter's structural
+binding while REPORTING the cycle_task_state match.
+
+DISCLOSED SCOPE: observed through the MCP `send_key_chord` surface
+(GpuiUserDriver), which is the sanctioned proxy for windowed input after the
+2026-08-07 driver-parity fixes. Whether a hardware cmd+enter behaves identically
+was not established. Either way one of the two is wrong, and the driver's
+"executed" report is false in this build — any windowed PBT asserting on it is
+asserting on a lie.

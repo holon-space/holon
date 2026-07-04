@@ -1,0 +1,25 @@
+# A vtable entity with a perfectly good row identity whose `live_query` reads
+# its `_fdw` table directly, but which never declares what its source promises
+# about a fetch. The mirror behind that view is maintained from re-fetches, and
+# how much of a re-fetch's absence means "deleted" is not inferable — so connect
+# must refuse rather than let a later maintainer guess.
+transport:
+  child_process:
+    command: /bin/false
+entity_prefix: "mock_"
+entities:
+  note:
+    short_name: note
+    profile_variants:
+      - name: default
+        render: >-
+          live_query(#{
+            sql: "SELECT title, body FROM mock_note_fdw ORDER BY title",
+            item_template: row(text(col("title")))
+          })
+    schema:
+      - { name: title, sql_type: TEXT, primary_key: true }
+      - { name: body, sql_type: TEXT }
+    vtable:
+      list_resource: mock://items
+tools: {}

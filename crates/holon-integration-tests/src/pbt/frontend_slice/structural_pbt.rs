@@ -46,6 +46,7 @@ use std::time::Duration;
 
 use holon_api::Block;
 use holon_api::EntityUri;
+use holon_api::PAGE_TAG;
 use holon_api::Region;
 use holon_orgmode::OrgBlockExt;
 use holon_pbt_core::ComponentSet;
@@ -59,6 +60,7 @@ use holon_pbt_core::capabilities::SutQueryResults;
 use holon_pbt_core::capabilities::SutSqlProjection;
 use holon_pbt_core::composition::CapMap;
 use holon_pbt_core::composition::CapProvider;
+use holon_pbt_core::types::CycleTarget;
 use holon_pbt_core::weighted_arm;
 use proptest::prelude::Just;
 use proptest::strategy::BoxedStrategy;
@@ -85,7 +87,8 @@ use crate::pbt::composed::subsystem_seed::run_with_seeded_ref;
 // consume it: page_root/SETTLE/WIDE_TREE_ORG/structural_ref{,_wired}/wide_ref/
 // boot_and_seed_wide/full_headless_cap_set/wide_e2e_ref/WideE2E{,Machine}.
 use crate::pbt::composed::wide_e2e::{
-    SETTLE, WIDE_TREE_ORG, boot_and_seed_wide, frontend_wired, page_root, structural_ref,
+    SETTLE, WIDE_TREE_ORG, boot_and_seed_wide, folder_journal_page, frontend_wired, page_root,
+    seed_folder_companion, seed_folder_companion_subdir, structural_ref, subdir_journal_page,
     wide_e2e_ref, wide_ref,
 };
 use crate::pbt::frontend_slice::components::HeadlessFrontendComponent;
@@ -96,6 +99,7 @@ use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::sql_slice::SqlProjectionComponent;
 use crate::pbt::transitions::CreateDocument;
 use crate::pbt::transitions::DeleteBackward;
+use crate::pbt::transitions::DeleteDocument;
 use crate::pbt::transitions::E2ETransition;
 use crate::pbt::transitions::FocusEditableText;
 use crate::pbt::transitions::Indent;
@@ -111,7 +115,6 @@ use crate::pbt::transitions::SimulateRestart;
 use crate::pbt::transitions::SplitBlock;
 use crate::pbt::transitions::ToggleState;
 use crate::pbt::transitions::TypeChars;
-use crate::pbt::transitions::toggle_state::CycleTarget;
 
 /// The structural slice's transition alphabet — `Split` (the id-minting
 /// transition that drives the reconcile loop, the point of C2.0) + `Join`, each
@@ -266,6 +269,12 @@ async fn boot_and_seed(resolver: &IdResolver) -> (CapMap, BTreeSet<EntityUri>) {
     seeder
         .create_block(&page_root(), &EntityUri::no_parent(), "structural-page")
         .await;
+    // The oracle models `structural-page` as a genuine page doc-root
+    // (`set_page(true)` → tag `Page`); the raw `create` op above never derives
+    // the Page tag for a `no_parent` root. Tag it through the production
+    // element-wise `add_tag` op so the SUT's `is_page()` matches the oracle
+    // (legal: the page-under-non-page guard exempts `no_parent` roots).
+    seeder.add_tag(&page_root(), PAGE_TAG).await;
     seeder.create_block(&ids.parent, &page_root(), PARENT).await;
     seeder.create_block(&ids.c1, &page_root(), C1).await;
     seeder.create_block(&ids.c2, &page_root(), C2).await;
@@ -316,6 +325,7 @@ prop_state_machine! {
     #![proptest_config(proptest::test_runner::Config {
         cases: 24,
         max_shrink_iters: 200,
+        failure_persistence: None,
         .. proptest::test_runner::Config::default()
     })]
     #[test]
@@ -401,6 +411,11 @@ fn wide_aggregate(state: &ReferenceState) -> BoxedStrategy<E2ETransition> {
     // (doc-uri-minting generalization) — the doc-uri case the old E2ESut
     // `block_tree_post_action` CreateDocument arm handled.
     arm!(CreateDocument, E2ETransition::CreateDocument);
+    // Inverse of SR-1: `DeleteDocument` removes a `CreateDocument`-minted org file
+    // via the production `FileSystem::remove` seam (the watcher observes the
+    // deletion). Its generator self-gates on a synthetic `doc_<n>.org`
+    // existing, so it only fires after a create landed.
+    arm!(DeleteDocument, E2ETransition::DeleteDocument);
     // Nav-history transitions folded from the nav slice (toward deleting it). The
     // wide boot's nav-history is aligned in `structural_ref_wired`
     // ([journals#1, page#2], next=3), and the probe proved the
@@ -597,6 +612,14 @@ fn editor_ref() -> ReferenceState {
         b.set_sequence(i as i64);
     }
 
+    // Model the boot-fired journal day-page so it enters `all_block_ids` — the
+    // ref-known universe the `inv-viewmodel-entity-ids-subset-of-data` phantom
+    // check subtracts. `boot_and_seed_editor` pins the keystone boot clock, so the
+    // SUT's auto-created day-page id matches `keystone_boot_journal_id`; without
+    // this seed it renders in the journals feed as an unknown (phantom) id — the
+    // midnight-rollover class fixed for the org-link-marks twin in c21a8a00.
+    crate::pbt::composed::wide_e2e::seed_boot_journal(&mut state);
+
     // Mirror the SUT boot sequence EXACTLY so every invariant aligns: navigate
     // focus to the page root (this BLURS any open editor and sets the nav
     // matview to the page — the SUT's `NavigateFocus(page)`), then open the
@@ -628,11 +651,18 @@ async fn boot_and_seed_editor(
     resolver: &IdResolver,
     ref_state: &ReferenceState,
 ) -> (CapMap, BTreeSet<EntityUri>) {
+    // Pin the boot clock to the fixed keystone day so the boot auto-create rule
+    // mints a DETERMINISTIC journal day-page id (`keystone_boot_journal_id`), not
+    // one keyed on the host's real date. The plain `new_with_loro` boot uses the
+    // OS `SystemClock`, whose date-dependent day-page `editor_ref` never modeled →
+    // a date-dependent `inv-viewmodel-entity-ids-subset-of-data` phantom
+    // (midnight-rollover class, mirrors c21a8a00).
     let comp = Arc::new(
-        HeadlessFrontendComponent::new_with_loro(
+        HeadlessFrontendComponent::new_with_clock(
             &[("structural-page.org", WIDE_TREE_ORG)],
             Duration::from_millis(300),
             true,
+            crate::pbt::frontend_slice::components::keystone_boot_clock(),
         )
         .await,
     );
@@ -664,6 +694,25 @@ async fn boot_and_seed_editor(
     let tree: BTreeSet<EntityUri> = [ids.parent.clone(), ids.c1.clone(), ids.c2.clone()]
         .into_iter()
         .collect();
+
+    // The boot journal auto-create fires ASYNC off the clock CDC; the 300ms boot
+    // settle can return before the day-page lands. Await it (fail loud on timeout)
+    // so the scaffold snapshot below deterministically captures it and the
+    // widget-tree phantom check sees a settled, ref-known block.
+    let journal_id = crate::pbt::frontend_slice::components::keystone_boot_journal_id();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        tokio::time::sleep(SETTLE).await;
+        if sut_ids(&caps).await.contains(&journal_id) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "[editor-boot] boot journal {journal_id} did not fire within budget"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
     let booted = sut_ids(&caps).await;
     let scaffold: BTreeSet<EntityUri> = booted.difference(&tree).cloned().collect();
 
@@ -721,6 +770,589 @@ mod teeth {
             .expect("drop ReferenceState off the async executor");
     }
 
+    /// **Companion cold-boot page-authority GREEN-lock (dogfood 2026-07-12,
+    /// Fork A).** Deterministic boot (no transitions) of a
+    /// folder-page-duplication vault through the REAL keystone boot
+    /// (`boot_and_seed_wide`): a top-level page- file `2026-07-10.org` (a
+    /// `Page` doc-root) whose id is ALSO inlined as a plain, untagged
+    /// heading in the `Journals.org` COMPANION, ingested LAST. Asserts the
+    /// companion boot stays clean — no swallowed ERROR
+    /// (`inv-no-observed-errors`) and no `Page`-tag demotion
+    /// (`inv-sidebar-page-tag-preserved`, non-vacuously) — locking the foreign-
+    /// page protection at the real keystone boot layer.
+    ///
+    /// SCOPE NOTE — this flat top-level shape is a GREEN regression LOCK, not a
+    /// RED→GREEN reproduction. The deterministic RED-catch of the demotion
+    /// oracle lives in the invariant's own fixture triad
+    /// (`composed::invariants::sidebar_page_tag_preserved::tests::catches_demoted_page`).
+    /// The real ingest FAILURE reproduces only with a SUBDIR page-file
+    /// (`Journals/2026-07-10.org`), where the page nests under the `journals`
+    /// folder-page and the Loro `create_in_tree` of the already-rooted id
+    /// times out + quarantines — but the subdir ALSO trips a SEPARATE
+    /// nested-page Pages-sidebar render PANIC
+    /// (`holon-frontend/src/row_origin.rs` "disjoint root rows") at boot,
+    /// so it cannot boot green with the tag-authority fix alone. Both the
+    /// subdir keystone reproduction and the render panic are covered in the
+    /// Fork-A report / BugFunnel. Runs a REDUCED registry (the two
+    /// Fork-A oracles) since the companion is intentionally lossy on org round-
+    /// trip (`inv-org-render-fixed-point` — Fork B's writeback-oracle work).
+    /// Seeds the topology directly (env-independent), not via
+    /// `folder_companion_enabled`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn folder_companion_cold_boot_preserves_page_authority() {
+        use holon_pbt_core::composition::CapInvariant;
+
+        use crate::pbt::composed::invariants::observed_errors;
+        use crate::pbt::composed::invariants::sidebar_page_tag_preserved;
+
+        let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
+        // Minimal proven-green base (no forward-edge) + the companion topology.
+        let mut oracle = frontend_wired(structural_ref());
+        seed_folder_companion(&mut oracle);
+        assert!(
+            oracle
+                .domain
+                .block_state
+                .blocks
+                .contains_key(&folder_journal_page()),
+            "topology precondition: the date page must be seeded into the oracle"
+        );
+
+        let (caps, _handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
+        tokio::time::sleep(SETTLE).await;
+
+        let mut resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
+        drop_ref_off_thread(oracle);
+        inject_scaffold_seed(&mut resolved, &scaffold_ids);
+        let registry: Vec<Box<dyn CapInvariant>> =
+            vec![observed_errors::wire(), sidebar_page_tag_preserved::wire()];
+        let report = run_with_seeded_ref(&registry, &caps, resolved).await;
+
+        let failures = report.failures();
+        // The companion must ingest CLEANLY — no quarantine / no swallowed ERROR.
+        assert!(
+            !failures
+                .iter()
+                .any(|(id, _)| *id == "inv-no-observed-errors"),
+            "folder-companion cold boot must not quarantine the companion ingest (foreign-page \
+             protection missing?); failures: {failures:?}",
+        );
+        // The page-file's `Page` tag must SURVIVE the companion reconcile.
+        assert!(
+            !failures
+                .iter()
+                .any(|(id, _)| *id == "inv-sidebar-page-tag-preserved"),
+            "folder-companion cold boot must not demote the page-file's Page tag; failures: \
+             {failures:?}",
+        );
+        // Non-vacuity: the sidebar page-tag oracle actually ran over the seeded page.
+        assert!(
+            report
+                .ran_ids()
+                .iter()
+                .any(|id| *id == "inv-sidebar-page-tag-preserved"),
+            "inv-sidebar-page-tag-preserved must select + run over the seeded page (ran: {:?})",
+            report.ran_ids(),
+        );
+    }
+
+    /// **BugFunnel row 137 PERSISTED REGRESSION SEED — the SUBDIR fileless
+    /// journals topology converges with zero loss on the composed keystone.**
+    ///
+    /// The real row-137 shape (distinct from the flat top-level
+    /// `folder_companion_cold_boot_preserves_page_authority` above, which is
+    /// Fork A's page-tag closure): `Journals.org` inlines a `:Page:`-tagged
+    /// date heading (`* 2026-07-11 :Page:`) with body text, and there is NO
+    /// `Journals/2026-07-11.org` on disk — the date page is FILELESS. Booted
+    /// through the REAL keystone boot (`boot_and_seed_wide`, subdir closure
+    /// keyed on `seed_folder_companion_subdir`). After settle, four things
+    /// must hold, and this test asserts all of them GREEN and NON-INERT:
+    ///
+    /// 1. `inv-every-page-has-its-own-file` — the fileless date page is
+    ///    MATERIALIZED into its own subdir file `Journals/2026-07-11.org`
+    ///    (`#+ID: journal-2026-07-11`). PRE-B2 this was RED: the page owned no
+    ///    file and its body lived only in the store (the row-137 loss).
+    /// 2. `inv-companion-has-no-child-page-headings` — `Journals.org`
+    ///    DE-INLINES the child-page heading (the `get_blocks` CTE excludes the
+    ///    `Page`-tagged child, and the ADR-0025 sibling-grounded union guard
+    ///    admits the de-inline because the child now survives in its own file).
+    ///    PRE-B1' this was RED: the per-file guard refused the de-inline as
+    ///    apparent block loss.
+    /// 3. `inv-no-page-under-non-page` — the topology is legal (date →
+    ///    `journals` (a page at `no_parent`) → root, all pages).
+    /// 4. `inv-org-render-fixed-point` + `inv-no-observed-errors` — the whole
+    ///    thing stabilizes (disk == render(SQL)) with no swallowed ERROR /
+    ///    quarantine.
+    ///
+    /// This is the deterministic, env-independent (not via
+    /// `folder_companion_enabled`) composed-keystone reproduction the
+    /// plan's §5 item 4 / §7 item 4 calls for. The date `2026-07-11` is off
+    /// the fixed keystone boot clock (`2026-01-15`) so the auto-create rule
+    /// never touches it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn folder_companion_subdir_fileless_materializes_and_deinlines() {
+        use holon_pbt_core::composition::CapInvariant;
+
+        use crate::pbt::composed::invariants::companion_has_no_child_page_headings;
+        use crate::pbt::composed::invariants::every_page_has_its_own_file;
+        use crate::pbt::composed::invariants::no_page_under_non_page;
+        use crate::pbt::composed::invariants::observed_errors;
+        use crate::pbt::composed::invariants::org_render_fixed_point;
+        use crate::pbt::composed::invariants::sidebar_page_tag_preserved;
+
+        let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
+        let mut oracle = frontend_wired(structural_ref());
+        seed_folder_companion_subdir(&mut oracle);
+        assert!(
+            oracle
+                .domain
+                .block_state
+                .blocks
+                .contains_key(&subdir_journal_page()),
+            "topology precondition: the fileless subdir date page must be seeded"
+        );
+
+        let (caps, _handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
+        tokio::time::sleep(SETTLE).await;
+
+        let mut resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
+        drop_ref_off_thread(oracle);
+        inject_scaffold_seed(&mut resolved, &scaffold_ids);
+        let registry: Vec<Box<dyn CapInvariant>> = vec![
+            observed_errors::wire(),
+            sidebar_page_tag_preserved::wire(),
+            org_render_fixed_point::wire(),
+            companion_has_no_child_page_headings::wire(),
+            every_page_has_its_own_file::wire(),
+            no_page_under_non_page::wire(),
+        ];
+        let report = run_with_seeded_ref(&registry, &caps, resolved).await;
+
+        assert!(
+            report.failures().is_empty(),
+            "the subdir fileless journals topology must converge with zero loss (materialize + \
+             de-inline + legal topology + fixed point): {:?}",
+            report.failures(),
+        );
+        // Non-inert: the two Fork-B oracles must actually select + run over the
+        // seeded fileless page (else this would pass vacuously — the row-137 trap).
+        for id in [
+            "inv-every-page-has-its-own-file",
+            "inv-companion-has-no-child-page-headings",
+        ] {
+            assert!(
+                report.ran_ids().iter().any(|r| *r == id),
+                "{id} must select + run over the seeded subdir journals topology (ran: {:?})",
+                report.ran_ids(),
+            );
+        }
+    }
+
+    /// Boot a frontend over the given org files and return its composed CapMap
+    /// (the caps the Fork B companion/materialization oracles select on),
+    /// settled.
+    async fn boot_companion_topology(
+        files: &[(&str, &str)],
+    ) -> (CapMap, Arc<HeadlessFrontendComponent>) {
+        use holon_pbt_core::capabilities::SutSqlProjection;
+        let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
+        let comp =
+            Arc::new(HeadlessFrontendComponent::new(files, Duration::from_millis(600)).await);
+        let engine = comp.engine();
+        let mut caps = CapMap::new();
+        comp.clone().register(&mut caps);
+        caps.insert(comp.clone() as Arc<dyn SutSqlProjection>);
+        caps.replace(Arc::new(OpDispatchWriter::with_resolver(
+            engine.clone(),
+            resolver.clone(),
+        )) as Arc<dyn SutBlockTreeWrite>);
+        tokio::time::sleep(SETTLE).await;
+        (caps, comp)
+    }
+
+    /// A minimal oracle that models `child-note` as a `Page` doc-root owning
+    /// `child-note.org` (mirrors `wide_e2e::seed_folder_companion`), so
+    /// `is_page_block(child-note)` drives the ref-consuming Fork B oracles. The
+    /// SUT-only oracles (`inv-every-page-has-its-own-file`, fixed-point) ignore
+    /// the ref; the base `structural_ref` blocks this topology doesn't boot
+    /// are inert because these tests run no full block-id-set compare.
+    fn child_note_page_oracle() -> crate::pbt::reference_state::Resolved<ReferenceState> {
+        let mut oracle = structural_ref();
+        let page = EntityUri::block("child-note");
+        let mut page_block = Block::new_text(page.clone(), EntityUri::no_parent(), "child-note");
+        page_block.set_page(true);
+        oracle
+            .domain
+            .block_state
+            .blocks
+            .insert(page.clone(), page_block);
+        oracle
+            .domain
+            .block_state
+            .block_documents
+            .insert(page.clone(), EntityUri::no_parent());
+        oracle
+            .files
+            .documents
+            .insert(page.clone(), "child-note.org".to_string());
+        let resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
+        drop_ref_off_thread(oracle);
+        resolved
+    }
+
+    /// GREEN regression lock: the companion writeback de-inlines an OWNED child
+    /// page LOSSLESSLY. `child-note.org` is a bare page-file (`#+ID:
+    /// child-note`); `my-notes.org` inlines its id as a heading. After
+    /// settle, `my-notes.org` converges to the bare `#+ID: my-notes` shell
+    /// (the `get_blocks` CTE excludes the `Page`-tagged child) while
+    /// `child-note` survives in its own file — no guard veto (the store
+    /// authority homes the absent child to that file, so its absence here
+    /// grounds as a move), no loss. This documents that the de-inline works
+    /// when the page owns a file.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn folder_companion_deinlines_owned_child_page() {
+        use holon_pbt_core::composition::CapInvariant;
+
+        use crate::pbt::composed::invariants::companion_has_no_child_page_headings;
+        use crate::pbt::composed::invariants::observed_errors;
+        use crate::pbt::composed::invariants::org_render_fixed_point;
+        use crate::pbt::composed::invariants::sidebar_page_tag_preserved;
+
+        const CHILD_PAGE_ORG: &str = "#+ID: child-note\n";
+        const COMPANION_ORG: &str =
+            "#+ID: my-notes\n* child-note\n:PROPERTIES:\n:ID: child-note\n:END:\n";
+
+        let (caps, _comp) = boot_companion_topology(&[
+            ("child-note.org", CHILD_PAGE_ORG),
+            ("my-notes.org", COMPANION_ORG),
+        ])
+        .await;
+        let resolved = child_note_page_oracle();
+        let registry: Vec<Box<dyn CapInvariant>> = vec![
+            observed_errors::wire(),
+            sidebar_page_tag_preserved::wire(),
+            org_render_fixed_point::wire(),
+            companion_has_no_child_page_headings::wire(),
+        ];
+        let report = run_with_seeded_ref(&registry, &caps, resolved).await;
+        assert!(
+            report.failures().is_empty(),
+            "owned-page de-inline must be lossless + fixed-point green: {:?}",
+            report.failures(),
+        );
+        assert!(
+            report
+                .ran_ids()
+                .iter()
+                .any(|id| *id == "inv-companion-has-no-child-page-headings"),
+            "companion oracle must select + run (ran: {:?})",
+            report.ran_ids(),
+        );
+    }
+
+    /// **Fork B B0 (RED-first): a FILELESS page must be MATERIALIZED into its
+    /// own file.** `my-notes.org` inlines `child-note` as a `Page`-tagged
+    /// heading (`* child-note :Page:`) with body text, and there is NO
+    /// `child-note.org`. After settle, `child-note` is a `Page` in the
+    /// store, correctly de-inlined from the companion (`my-notes.org` →
+    /// bare `#+ID: my-notes`) — but it owns NO file on disk, so its content
+    /// ("body text") exists only in the store and vanishes on any
+    /// store-rebuild-from-disk: silent loss.
+    ///
+    /// This is the real Fork B bug (the owned case above already works). The
+    /// writeback must MATERIALIZE `child-note` into its own file
+    /// (`inv-every-page-has-its-own-file`). Fork B B2 (materialization via the
+    /// `DocumentManager` name-chain path + a boot sweep) makes it green.
+    ///
+    /// **Scope (B2 only):** this asserts ONLY `child_has_file` — the fileless
+    /// page gets materialized into its own `#+ID: child-note` file. The
+    /// companion's *convergence* (de-inline + fixed point) is B1''s job
+    /// (the block-driven writeback path has no loss guard yet, so
+    /// `my-notes.org` may still carry the inline heading until B1' lands
+    /// the union guard) and is tested separately.
+    ///
+    /// Non-reserved names dodge the reserved-`Journals` programmatic seed.
+    /// EMPIRICAL (2026-07-12): child-note is a fileless child of the `my-notes`
+    /// companion, so its `name_chain` is `["my-notes", "child-note"]` and B2
+    /// materializes it at the NESTED path `my-notes/child-note.org`. Headless
+    /// this materializes WITHOUT panic (the `row_origin.rs` "disjoint root
+    /// rows" fix, coordinator #47, landed on this integration line); the
+    /// recursive `scan_directory` in `disk_org_file_ids` surfaces the
+    /// nested file.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fileless_page_writeback_materializes() {
+        // Companion inlines child-note as a Page-tagged heading; NO child-note.org.
+        // The heading text is DELIBERATELY distinct from the `:ID:`. When they
+        // matched (`* child-note` / `:ID: child-note`) a file containing only
+        // `#+ID: child-note` satisfied every text assertion, which masked the
+        // BugFunnel 2026-07-30 loss of the page's own title and body.
+        const COMPANION_ORG: &str = "#+ID: my-notes\n* Child Note :Page:\n:PROPERTIES:\n:ID: \
+                                     child-note\n:END:\nbody text that must not vanish\n";
+
+        let (_caps, comp) = boot_companion_topology(&[("my-notes.org", COMPANION_ORG)]).await;
+
+        // Materialization check via DISK TRUTH (not the boot-tracked snapshot,
+        // which cannot see a file materialized after boot): after settle + the B2
+        // boot sweep, `child-note` must own a file — some `.org` on disk whose
+        // `#+ID:` is `child-note`.
+        let disk_ids = comp.disk_org_file_ids().await;
+        assert!(
+            disk_ids.iter().any(|id| id == "child-note"),
+            "the fileless page `child-note` must be materialized into its own `child-note.org` (a \
+             `#+ID: child-note` file), but no file owns it; on-disk file ids = {disk_ids:?}",
+        );
+        // Owning a file is not enough — the page's own name and body must be IN
+        // it. A header-only stub is the BugFunnel 2026-07-30 loss.
+        let contents = comp.disk_org_contents().await;
+        let all_text = contents
+            .iter()
+            .map(|(_, c)| c.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let named_on_disk = contents
+            .iter()
+            .any(|(p, _)| p.to_string_lossy().contains("Child Note"));
+        assert!(
+            named_on_disk && all_text.contains("body text that must not vanish"),
+            "the materialized page must carry its own name (in its filename) AND its body, not \
+             just an `#+ID:` header; disk = {contents:#?}",
+        );
+    }
+
+    /// **Ingest-born page (BugFunnel 2026-07-30 data loss).** The sibling
+    /// `fileless_page_writeback_materializes` above uses a bare `#+ID:` file
+    /// whose heading text IS the child's id. Martin's clean-room repro differs
+    /// on three axes a real vault always has: a `#+TITLE:` line, root body
+    /// text before the first headline, and a child whose `:ID:`
+    /// (`tagged-child`) is NOT its heading text (`Tagged Child`). In that
+    /// shape the first boot PRUNES the `:Page:`-tagged child out of its
+    /// parent file and materializes NOTHING — the child's body exists in no
+    /// file on disk.
+    ///
+    /// The oracle is disk truth over the WHOLE vault (recursive scan, so a
+    /// nested `Tagged Root/Tagged Child.org` counts as materialized): the
+    /// child's body text must survive SOMEWHERE, and `tagged-child` must own
+    /// a file. The untagged control in the same vault pins the tag as the
+    /// trigger rather than the file shape.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ingest_born_page_materializes_before_parent_prune() {
+        const TAGGED_ORG: &str = "#+TITLE: Tagged Root\n#+ID: tagged-root\n\nRoot body.\n\n* \
+                                  Tagged Child :Page:\n:PROPERTIES:\n:ID: \
+                                  tagged-child\n:END:\nChild body.\n";
+        const UNTAGGED_ORG: &str = "#+TITLE: Untagged Root\n#+ID: untagged-root\n\nRoot \
+                                    body.\n\n* Untagged Child\n:PROPERTIES:\n:ID: \
+                                    untagged-child\n:END:\nChild body.\n";
+
+        let (_caps, comp) =
+            boot_companion_topology(&[("Tagged.org", TAGGED_ORG), ("Untagged.org", UNTAGGED_ORG)])
+                .await;
+
+        let contents = comp.disk_org_contents().await;
+        let all_text = contents
+            .iter()
+            .map(|(_, c)| c.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Control: the untagged child is never at risk — if this fails the
+        // vault-shape itself broke, not the page promotion.
+        assert!(
+            all_text.contains("Untagged Child"),
+            "control: an UNTAGGED child heading must survive write-back; disk = {contents:#?}",
+        );
+
+        // The bug: the tagged child's body must exist in some file on disk.
+        // The page's NAME travels in its filename (the page path is built from
+        // the block's title, which is how every page file is named); its BODY
+        // must be inside some file. Both were destroyed before the fix.
+        let named_on_disk = contents
+            .iter()
+            .any(|(p, _)| p.to_string_lossy().contains("Tagged Child"));
+        assert!(
+            named_on_disk && all_text.contains("Child body."),
+            "the `:Page:`-tagged child's name AND body must survive the first boot — they were \
+             pruned from the parent and written to no file; disk = {contents:#?}",
+        );
+        // The pre-first-headline root body of BOTH files (the same defect one
+        // level up: a doc-root's own content was never rendered).
+        assert_eq!(
+            all_text.matches("Root body.").count(),
+            2,
+            "both files' pre-first-headline root bodies must survive write-back; disk = \
+             {contents:#?}",
+        );
+        let disk_ids = comp.disk_org_file_ids().await;
+        assert!(
+            disk_ids.iter().any(|id| id == "tagged-child"),
+            "inv-every-page-has-its-own-file: the ingest-born page `tagged-child` must own a \
+             file; on-disk file ids = {disk_ids:?}",
+        );
+    }
+
+    /// LORO TWIN. The Loro-ON twin of
+    /// `ingest_born_page_materializes_before_parent_prune`.
+    /// The repro ran the real GPUI app, which boots the CRDT layer; the
+    /// Turso-only twin above passes, so this pins whether the storage axis is
+    /// what the headless harness was missing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ingest_born_page_materializes_before_parent_prune_loro() {
+        const TAGGED_ORG: &str = "#+TITLE: Tagged Root\n#+ID: tagged-root\n\nRoot body.\n\n* \
+                                  Tagged Child :Page:\n:PROPERTIES:\n:ID: \
+                                  tagged-child\n:END:\nChild body.\n";
+        const UNTAGGED_ORG: &str = "#+TITLE: Untagged Root\n#+ID: untagged-root\n\nRoot \
+                                    body.\n\n* Untagged Child\n:PROPERTIES:\n:ID: \
+                                    untagged-child\n:END:\nChild body.\n";
+
+        let comp = HeadlessFrontendComponent::new_with_loro(
+            &[("Tagged.org", TAGGED_ORG), ("Untagged.org", UNTAGGED_ORG)],
+            Duration::from_millis(600),
+            true,
+        )
+        .await;
+        tokio::time::sleep(SETTLE).await;
+
+        let contents = comp.disk_org_contents().await;
+        let all_text = contents
+            .iter()
+            .map(|(_, c)| c.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            all_text.contains("Untagged Child"),
+            "control: an UNTAGGED child heading must survive write-back; disk = {contents:#?}",
+        );
+        // The page's NAME travels in its filename (the page path is built from
+        // the block's title, which is how every page file is named); its BODY
+        // must be inside some file. Both were destroyed before the fix.
+        let named_on_disk = contents
+            .iter()
+            .any(|(p, _)| p.to_string_lossy().contains("Tagged Child"));
+        assert!(
+            named_on_disk && all_text.contains("Child body."),
+            "the `:Page:`-tagged child's name AND body must survive the first boot — they were \
+             pruned from the parent and written to no file; disk = {contents:#?}",
+        );
+        // DISCLOSED HARNESS GAP: the secondary root-body loss is not asserted
+        // on this wiring. The real Loro-backed app DOES keep the root body (the
+        // clean-room repro against `holon-gpui` writes `#+TITLE: Tagged Root` +
+        // `Root body.` back), and the Turso rung above asserts it — but this
+        // headless Loro component reads its doc-root through a seam that never
+        // sees the synced content, so asserting here would fail on a harness
+        // divergence rather than a product defect. Tracked as a fidelity
+        // follow-up; the PRIMARY loss this test exists for — the `:Page:`-tagged
+        // child — is asserted above and fixed on both wirings.
+        let disk_ids = comp.disk_org_file_ids().await;
+        assert!(
+            disk_ids.iter().any(|id| id == "tagged-child"),
+            "inv-every-page-has-its-own-file: the ingest-born page `tagged-child` must own a \
+             file; on-disk file ids = {disk_ids:?}",
+        );
+    }
+
+    /// **Fork B B2 echo gate (RULED DONE criterion).** After the B2 boot sweep
+    /// materializes the fileless `child-note` into `child-note.org`,
+    /// re-triggering the production watcher over that own-written file must
+    /// be IDEMPOTENT: the `last_projection` seed suppresses the echo, so
+    /// the file stays written EXACTLY ONCE (no duplicate `child-note` file)
+    /// and the page is NOT re-minted under a new id (the `block_raw` id-set
+    /// is unchanged across the pump). A missing `last_projection` seed
+    /// would re-ingest our own write and could mint a second page / rewrite
+    /// the file in a loop — this test locks that closed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fileless_page_materialization_is_echo_stable() {
+        // The heading text is DELIBERATELY distinct from the `:ID:`. When they
+        // matched (`* child-note` / `:ID: child-note`) a file containing only
+        // `#+ID: child-note` satisfied every text assertion, which masked the
+        // BugFunnel 2026-07-30 loss of the page's own title and body.
+        const COMPANION_ORG: &str = "#+ID: my-notes\n* Child Note :Page:\n:PROPERTIES:\n:ID: \
+                                     child-note\n:END:\nbody text that must not vanish\n";
+
+        let (_caps, comp) = boot_companion_topology(&[("my-notes.org", COMPANION_ORG)]).await;
+
+        // Precondition: B2 materialized exactly one `child-note` file. Discover its
+        // path (NESTED — `my-notes/child-note.org` — since child-note is a fileless
+        // child of the `my-notes` companion), don't assume a flat name.
+        let child_paths: Vec<_> = comp
+            .disk_org_files()
+            .await
+            .into_iter()
+            .filter(|(_, id)| id.as_deref() == Some("child-note"))
+            .map(|(p, _)| p)
+            .collect();
+        assert_eq!(
+            child_paths.len(),
+            1,
+            "B2 must materialize `child-note` into exactly one file; found {child_paths:?}",
+        );
+        let store_before = comp.store_block_ids().await;
+
+        // Pump the watcher over the B2-written file — the echo path.
+        comp.pump_watcher_over_disk_path(&child_paths[0]).await;
+
+        // Exactly-once: still one `child-note` file, no duplicate materialized.
+        let child_after: Vec<_> = comp
+            .disk_org_files()
+            .await
+            .into_iter()
+            .filter(|(_, id)| id.as_deref() == Some("child-note"))
+            .map(|(p, _)| p)
+            .collect();
+        assert_eq!(
+            child_after.len(),
+            1,
+            "after the watcher pump `child-note` must remain exactly one file (echo suppressed); \
+             found {child_after:?}",
+        );
+        // No re-mint: the block_raw id-set is unchanged (child-note not re-created
+        // under a fresh id, nothing dropped).
+        let store_after = comp.store_block_ids().await;
+        assert_eq!(
+            store_before, store_after,
+            "re-ingesting the materialized page must be id-stable (no re-mint / no loss); \
+             before={store_before:?} after={store_after:?}",
+        );
+    }
+
+    /// **Copy-on-write default layout (F4 stale-seed remedy).** The bundled
+    /// default layout (`block:__default__`) is a VIRTUAL seed doc: it is seeded
+    /// into the store on boot but must NOT be auto-materialized to a vault
+    /// `.org` file. The Fork B B2 fileless-page sweep (a92d7eb7, 2026-07-12)
+    /// used to write `__default__.org`, pinning Martin's vault to a stale
+    /// Jul-12 seed (the F4 backlinks-invisible saga). The seed doc now
+    /// stays virtual until a user edit materializes it (copy-on-write); the
+    /// runtime page write-back — not the boot sweep — owns that first file.
+    ///
+    /// Guards BOTH materialization sites: `materialize_missing_page_files` (B2
+    /// boot sweep) skips `is_seed_layout_doc`, and
+    /// `materialize_page_identity_file` skips it while `boot_seeding`.
+    /// Booting over an unrelated companion, the default layout must reach
+    /// the STORE (seeded, virtual) yet own NO file on disk.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn seed_default_layout_is_virtual_not_materialized_on_boot() {
+        let (_caps, comp) =
+            boot_companion_topology(&[("notes.org", "#+ID: notes\n* hello\n")]).await;
+
+        // Seeded into the store (virtual layout is present)...
+        let store_ids = comp.store_block_ids().await;
+        assert!(
+            store_ids.iter().any(|id| id.contains("__default__")),
+            "the default layout must be SEEDED into the store (virtual), even though it owns no              file; store ids = {store_ids:?}",
+        );
+
+        // ...but NOT written to disk (copy-on-write: no auto-materialization).
+        let default_on_disk =
+            comp.disk_org_files().await.into_iter().any(|(path, _)| {
+                path.file_name().and_then(|n| n.to_str()) == Some("__default__.org")
+            });
+        assert!(
+            !default_on_disk,
+            "the virtual seed layout must NOT be materialized to `__default__.org` on boot \
+             (copy-on-write; F4 stale-seed pin) — on-disk org files = {:?}",
+            comp.disk_org_files().await,
+        );
+    }
+
     /// **Increment-3 fresh-drive + ORG-SEED probe — the full catalog is green
     /// over `compose_sut(frontend)`.** The store-only
     /// seed left the working tree absent from the org files `SutOrgRead`
@@ -745,10 +1377,18 @@ mod teeth {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         // File name = page content: the doc/page title the viewmodel renders comes
         // from the filename, and the oracle's page block content is "structural-page".
+        // Pin the boot clock to the fixed keystone day so the boot auto-create rule
+        // mints a DETERMINISTIC journal day-page id (`keystone_boot_journal_id`), not
+        // one keyed on the host's real date — the plain `new` (SystemClock) boot
+        // date-hashes today's day-page, which `structural_ref` never modeled → a
+        // date-dependent `inv-viewmodel-entity-ids-subset-of-data` phantom
+        // (midnight-rollover class, mirrors the org-link-marks twin in c21a8a00).
         let comp = Arc::new(
-            HeadlessFrontendComponent::new(
+            HeadlessFrontendComponent::new_with_clock(
                 &[("structural-page.org", TREE_ORG)],
                 Duration::from_millis(300),
+                false,
+                crate::pbt::frontend_slice::components::keystone_boot_clock(),
             )
             .await,
         );
@@ -776,10 +1416,34 @@ mod teeth {
         let tree: BTreeSet<EntityUri> = [ids.parent.clone(), ids.c1.clone(), ids.c2.clone()]
             .into_iter()
             .collect();
+
+        // The boot journal auto-create fires ASYNC off the clock CDC; the 300ms boot
+        // settle can return before the day-page lands. Await it (fail loud on timeout)
+        // so the scaffold snapshot below deterministically captures it.
+        let journal_id = crate::pbt::frontend_slice::components::keystone_boot_journal_id();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            tokio::time::sleep(SETTLE).await;
+            if sut_ids(&caps).await.contains(&journal_id) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "[org-seed] boot journal {journal_id} did not fire within budget"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
         let booted = sut_ids(&caps).await;
         let scaffold: BTreeSet<EntityUri> = booted.difference(&tree).cloned().collect();
 
-        let oracle = structural_ref();
+        let mut oracle = structural_ref();
+        // Model the boot-fired journal day-page in the oracle's block_state so it
+        // enters `all_block_ids` — the ref-known universe the phantom check
+        // subtracts. `inject_scaffold_seed` (below) only touches `block_documents`,
+        // so WITHOUT this the auto-created day-page renders as an unknown (phantom)
+        // entity id. The pinned keystone clock makes the SUT's day-page id match.
+        crate::pbt::composed::wide_e2e::seed_boot_journal(&mut oracle);
         NavigateFocus {
             region: Region::Main,
             block_id: page_root(),
@@ -810,6 +1474,643 @@ mod teeth {
             report.failures().is_empty(),
             "org-seed fresh-drive: the FULL catalog must be green over compose_sut(frontend): {:?}",
             report.failures()
+        );
+    }
+
+    /// **Org-ingest MARKS gate (dogfood 2026-07-10 link-destruction class).**
+    /// Boot the composed headless SUT from an org file whose `c2` headline
+    /// carries a `[[Linked Page]]` wiki link, and run the full catalog
+    /// against a reference whose `c2` holds the org-lens `(content, marks)`
+    /// fixed point. The SUT ingest must persist `block.marks` through
+    /// `build_block_params` into the stores — with the ingest
+    /// drop reinstated (marks param omitted), `inv-blocks-match-ref` goes RED
+    /// on `marks: None` vs `Some(Link)`. Non-vacuity: the ref block's marks
+    /// are asserted `Some` before the catalog runs, so this can never
+    /// silently degrade into the plain-text org-seed probe above.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn org_ingest_link_marks_survive_full_catalog() {
+        use holon_pbt_core::capabilities::SutFocus;
+        use holon_pbt_core::capabilities::SutQueryResults;
+        use holon_pbt_core::capabilities::SutSqlProjection;
+        use holon_pbt_core::composition::CapProvider;
+
+        const TREE_ORG: &str = "#+ID: structural-page\n* parent\n:PROPERTIES:\n:ID: \
+                                parent\n:END:\n* c1\n:PROPERTIES:\n:ID: c1\n:END:\n* See [[Linked \
+                                Page]] here\n:PROPERTIES:\n:ID: c2\n:END:\n";
+        const C2_RAW: &str = "See [[Linked Page]] here";
+
+        let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
+        // Pin the boot clock to the fixed keystone day (2026-01-15) so the boot
+        // auto-create rule mints a DETERMINISTIC journal day-page id
+        // (`keystone_boot_journal_id`) — not one keyed on the host's real date.
+        // The plain `new` boot uses the OS `SystemClock`, whose date-dependent
+        // day-page the structural oracle never modeled → a date-dependent
+        // `inv-viewmodel-entity-ids-subset-of-data` phantom (the day-page renders
+        // in the journals feed but is unknown to the ref). Mirrors the
+        // `full_headless_static_catalog_probe` recipe: pinned clock + awaited +
+        // `seed_boot_journal`d day-page.
+        let comp = Arc::new(
+            HeadlessFrontendComponent::new_with_clock(
+                &[("structural-page.org", TREE_ORG)],
+                Duration::from_millis(300),
+                false,
+                crate::pbt::frontend_slice::components::keystone_boot_clock(),
+            )
+            .await,
+        );
+        let engine = comp.engine();
+        let mut caps = CapMap::new();
+        comp.clone().register(&mut caps);
+        caps.insert(comp.clone() as Arc<dyn SutSqlProjection>);
+        caps.insert(comp.clone() as Arc<dyn SutFocus>);
+        caps.insert(comp.clone() as Arc<dyn SutQueryResults>);
+        caps.replace(Arc::new(OpDispatchWriter::with_resolver(
+            engine.clone(),
+            resolver.clone(),
+        )) as Arc<dyn SutBlockTreeWrite>);
+
+        let ids = fixed_ids();
+        let tree: BTreeSet<EntityUri> = [ids.parent.clone(), ids.c1.clone(), ids.c2.clone()]
+            .into_iter()
+            .collect();
+
+        // The boot journal auto-create fires ASYNC off the clock CDC; the 300ms
+        // boot settle can return before the day-page lands. Await it (fail loud
+        // on timeout) so the scaffold snapshot below deterministically captures
+        // it and the widget-tree phantom check sees a settled, ref-known block.
+        let journal_id = crate::pbt::frontend_slice::components::keystone_boot_journal_id();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            tokio::time::sleep(SETTLE).await;
+            if sut_ids(&caps).await.contains(&journal_id) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "[org-link-marks] boot journal {journal_id} did not fire within budget"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        let booted = sut_ids(&caps).await;
+        let scaffold: BTreeSet<EntityUri> = booted.difference(&tree).cloned().collect();
+
+        let mut oracle = structural_ref();
+        // Model the boot-fired journal day-page in the oracle's block_state so
+        // it enters `all_block_ids` — the ref-known universe the phantom check
+        // subtracts. `inject_scaffold_seed` (below) only touches `block_documents`,
+        // so WITHOUT this the auto-created day-page renders as an unknown
+        // (phantom) entity id. Mirrors `frontend_wired`'s seed for the composed
+        // keystone; the pinned keystone clock makes the SUT's day-page id match.
+        crate::pbt::composed::wide_e2e::seed_boot_journal(&mut oracle);
+        // c2 on disk spells a wiki link: the reference holds the org-lens fixed
+        // point — label-stripped content + the extracted Link mark.
+        let (c2_content, c2_marks) = crate::pbt::types::normalize_content_for_org_roundtrip(
+            C2_RAW,
+            holon_api::ContentType::Text,
+        );
+        assert!(
+            c2_marks.as_ref().is_some_and(|m| !m.is_empty()),
+            "non-vacuity: the org lens must extract a Link mark from {C2_RAW:?}, got {c2_marks:?}"
+        );
+        assert_eq!(c2_content, "See Linked Page here");
+        let ref_c2_marks = c2_marks.clone();
+        {
+            let b = oracle
+                .domain
+                .block_state
+                .blocks
+                .get_mut(&ids.c2)
+                .expect("seed block c2 present");
+            b.content = c2_content;
+            b.marks = c2_marks;
+        }
+
+        NavigateFocus {
+            region: Region::Main,
+            block_id: page_root(),
+        }
+        .apply_to_sut(&oracle, &mut caps)
+        .await;
+        tokio::time::sleep(SETTLE).await;
+
+        let mut resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
+        drop_ref_off_thread(oracle);
+        inject_scaffold_seed(&mut resolved, &scaffold);
+
+        let report = run_with_seeded_ref(&composed_invariant_catalog(), &caps, resolved).await;
+        for (id, msg) in report.failures() {
+            eprintln!("[org-link-marks] FAIL {id}: {msg}");
+        }
+        assert!(
+            report.ran_ids().contains(&"inv-blocks-match-ref/block_raw")
+                || report.ran_ids().contains(&"inv-blocks-match-ref/matview")
+                || report.ran_ids().contains(&"inv-blocks-match-ref/org"),
+            "block invariants must SELECT (ran: {:?})",
+            report.ran_ids()
+        );
+        assert!(
+            report.failures().is_empty(),
+            "org-ingested [[Linked Page]] must survive as block.marks in every store: {:?}",
+            report.failures()
+        );
+
+        // Links increment 2 — keystone-machinery consistency arm: the SUT's
+        // block_links junction must equal the links DERIVED FROM THE
+        // REFERENCE's marks (shared oracle: holon_api::derive_block_links).
+        // `Linked Page` names no existing page, so the row is DANGLING
+        // (resolved_id NULL — lazy page creation, no placeholder) and the
+        // backlinks matview stays empty.
+        let expected: Vec<(String, String)> = holon_api::derive_block_links(
+            ref_c2_marks
+                .as_ref()
+                .expect("ref c2 marks asserted Some above"),
+        )
+        .into_iter()
+        .map(|l| (l.target, l.kind.as_str().to_string()))
+        .collect();
+        assert!(
+            !expected.is_empty(),
+            "non-vacuity: ref marks must derive at least one link"
+        );
+        let rows = engine
+            .db_handle()
+            .query(
+                "SELECT target, kind, resolved_id FROM block_links WHERE source_block_id = \
+                 'block:c2' ORDER BY target, kind",
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("block_links query");
+        let actual: Vec<(String, String)> = rows
+            .iter()
+            .map(|r| {
+                assert!(
+                    matches!(r.get("resolved_id"), None | Some(holon_api::Value::Null)),
+                    "no page named 'Linked Page' exists — the link must stay dangling, got {r:?}"
+                );
+                (
+                    r.get("target")
+                        .and_then(|v| v.as_string())
+                        .expect("target")
+                        .to_string(),
+                    r.get("kind")
+                        .and_then(|v| v.as_string())
+                        .expect("kind")
+                        .to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            actual, expected,
+            "SUT block_links must equal the reference-derived link set"
+        );
+        let backlink_rows = engine
+            .db_handle()
+            .query("SELECT id FROM backlinks", std::collections::HashMap::new())
+            .await
+            .expect("backlinks query");
+        assert!(
+            backlink_rows.is_empty(),
+            "dangling links must not surface in the backlinks matview: {backlink_rows:?}"
+        );
+    }
+
+    /// **F1a entity-URI links.** Boot the composed headless SUT from an org
+    /// file whose `c2` headline carries `[[t-widget:abc123][Widget]]` — a
+    /// scheme-shaped target whose scheme is a REGISTERED entity, not a page
+    /// name. Three assertions, one per F1a invariant:
+    ///
+    /// - `inv-entity-link-round-trips-org`: the org lens keeps the target as an
+    ///   `EntityRef::Scheme` URI and re-renders the literal byte-for-byte.
+    /// - `inv-link-kind-matches-target-scheme`: the junction row is `kind =
+    ///   'entity'` with `resolved_id` = the full URI.
+    /// - `inv-entity-link-backlink-visible`: the `backlinks` matview carries
+    ///   the source block under `target_id = 't-widget:abc123'`.
+    ///
+    /// Uses a MULTI-WORD entity a YAML sidecar declares, registered BEFORE the
+    /// boot scan. A single-word built-in like `person` cannot discriminate at
+    /// this boundary: the registry is keyed by SQL table name (underscored)
+    /// while a scheme is hyphenated, and for one-word names the two spellings
+    /// coincide — `person:alice` passes whether or not the fold exists.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn org_ingest_entity_link_resolves_and_backlinks() {
+        use holon_pbt_core::capabilities::SutFocus;
+        use holon_pbt_core::capabilities::SutQueryResults;
+        use holon_pbt_core::capabilities::SutSqlProjection;
+        use holon_pbt_core::composition::CapProvider;
+
+        const TREE_ORG: &str = "#+ID: structural-page\n* parent\n:PROPERTIES:\n:ID: \
+                                parent\n:END:\n* c1\n:PROPERTIES:\n:ID: c1\n:END:\n* See \
+                                [[t-widget:abc123][Widget]] here\n:PROPERTIES:\n:ID: \
+                                c2\n:END:\n";
+        const C2_RAW: &str = "See [[t-widget:abc123][Widget]] here";
+        const ENTITY_URI: &str = "t-widget:abc123";
+        const SIDECAR_YAML: &str = "entities:\n  t_widget:\n    id_column: id\n    schema:\n      \
+                                    - name: id\n        sql_type: TEXT\n        primary_key: true\n";
+
+        let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
+        let comp = Arc::new(
+            HeadlessFrontendComponent::new_with_clock_and_sidecar(
+                &[("structural-page.org", TREE_ORG)],
+                Duration::from_millis(300),
+                false,
+                crate::pbt::frontend_slice::components::keystone_boot_clock(),
+                SIDECAR_YAML,
+            )
+            .await,
+        );
+        let engine = comp.engine();
+        let mut caps = CapMap::new();
+        comp.clone().register(&mut caps);
+        caps.insert(comp.clone() as Arc<dyn SutSqlProjection>);
+        caps.insert(comp.clone() as Arc<dyn SutFocus>);
+        caps.insert(comp.clone() as Arc<dyn SutQueryResults>);
+        caps.replace(Arc::new(OpDispatchWriter::with_resolver(
+            engine.clone(),
+            resolver.clone(),
+        )) as Arc<dyn SutBlockTreeWrite>);
+
+        let journal_id = crate::pbt::frontend_slice::components::keystone_boot_journal_id();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            tokio::time::sleep(SETTLE).await;
+            if sut_ids(&caps).await.contains(&journal_id) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "[entity-link] boot journal {journal_id} did not fire within budget"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // (1) Org round-trip: the link target survives as a schemed URI and the
+        // literal re-renders byte-for-byte.
+        // The org lens here is the IO-free reference one, so the sidecar's
+        // scheme must be handed to it explicitly — `with_schemes` adds the
+        // scheme without adding a registry or any IO.
+        let (c2_content, c2_marks) = crate::pbt::types::normalize_content_for_org_roundtrip_with(
+            C2_RAW,
+            holon_api::ContentType::Text,
+            &holon_api::link_parser::LinkTargetClassifier::with_schemes(["t-widget"]),
+        );
+        assert_eq!(c2_content, "See Widget here");
+        let marks = c2_marks.as_ref().expect("entity link must extract a mark");
+        let target = marks
+            .iter()
+            .find_map(|m| match &m.mark {
+                holon_api::InlineMark::Link { target, .. } => Some(target.clone()),
+                _ => None,
+            })
+            .expect("non-vacuity: the org lens must extract a Link mark");
+        assert_eq!(
+            target,
+            holon_api::EntityRef::Scheme {
+                raw: ENTITY_URI.to_string()
+            },
+            "a registered scheme must classify as a resolved entity URI, not a page name"
+        );
+        assert_eq!(
+            holon_orgmode::inline_marks::render_inline_marks(&c2_content, marks),
+            C2_RAW,
+            "entity link must re-render byte-stably"
+        );
+
+        // (2) The junction row carries the entity kind and the full URI.
+        let rows = engine
+            .db_handle()
+            .query(
+                "SELECT target, kind, resolved_id FROM block_links WHERE source_block_id = \
+                 'block:c2'",
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("block_links query");
+        let entity_rows: Vec<_> = rows
+            .iter()
+            .filter(|r| r.get("target").and_then(|v| v.as_string()) == Some(ENTITY_URI))
+            .collect();
+        assert_eq!(
+            entity_rows.len(),
+            1,
+            "exactly one block_links row for {ENTITY_URI}, got {rows:?}"
+        );
+        assert_eq!(
+            entity_rows[0].get("kind").and_then(|v| v.as_string()),
+            Some("entity"),
+            "entity-URI target must be stored as kind='entity': {entity_rows:?}"
+        );
+        assert_eq!(
+            entity_rows[0]
+                .get("resolved_id")
+                .and_then(|v| v.as_string()),
+            Some(ENTITY_URI),
+            "an entity link resolves at parse time — resolved_id is the full URI: {entity_rows:?}"
+        );
+
+        // (3) The source block is visible from the entity through `backlinks`.
+        let backlink_rows = engine
+            .db_handle()
+            .query(
+                // `backlinks` projects the SOURCE block's columns alongside
+                // `target_id`, so the source id is plain `id`.
+                &format!("SELECT id FROM backlinks WHERE target_id = '{ENTITY_URI}'"),
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("backlinks query");
+        let sources: Vec<String> = backlink_rows
+            .iter()
+            .filter_map(|r| r.get("id").and_then(|v| v.as_string()).map(str::to_string))
+            .collect();
+        assert_eq!(
+            sources,
+            vec!["block:c2".to_string()],
+            "the linking block must appear in `backlinks` under the entity URI"
+        );
+    }
+
+    /// The `[[<entity>:<id>]]` chain for an entity a SIDECAR declares, driven
+    /// through the UI intent boundary (`block.create`) rather than org ingest.
+    ///
+    /// Deliberately uses a MULTI-WORD entity (`t_widget` → `t-widget:`): the
+    /// registry is keyed by SQL table name (underscored) while a scheme is
+    /// hyphenated, so a single-word built-in like `person` cannot tell a
+    /// working join from a broken one. Registration happens AFTER boot, so
+    /// this also pins the live-registry behavior — an entity installed at
+    /// runtime resolves its links with no re-wiring.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sidecar_entity_link_resolves_through_the_intent_boundary() {
+        use holon_pbt_core::capabilities::SutFocus;
+        use holon_pbt_core::capabilities::SutQueryResults;
+        use holon_pbt_core::capabilities::SutSqlProjection;
+        use holon_pbt_core::composition::CapProvider;
+
+        const SIDECAR_YAML: &str = r#"
+entities:
+  t_widget:
+    id_column: id
+    schema:
+      - name: id
+        sql_type: TEXT
+        primary_key: true
+"#;
+        const ENTITY_URI: &str = "t-widget:abc123";
+
+        let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
+        let comp = Arc::new(
+            HeadlessFrontendComponent::new_with_clock(
+                &[(
+                    "structural-page.org",
+                    "#+ID: structural-page\n* parent\n:PROPERTIES:\n:ID: parent\n:END:\n",
+                )],
+                Duration::from_millis(300),
+                false,
+                crate::pbt::frontend_slice::components::keystone_boot_clock(),
+            )
+            .await,
+        );
+        let engine = comp.engine();
+        let mut caps = CapMap::new();
+        comp.clone().register(&mut caps);
+        caps.insert(comp.clone() as Arc<dyn SutSqlProjection>);
+        caps.insert(comp.clone() as Arc<dyn SutFocus>);
+        caps.insert(comp.clone() as Arc<dyn SutQueryResults>);
+        caps.replace(Arc::new(OpDispatchWriter::with_resolver(
+            engine.clone(),
+            resolver.clone(),
+        )) as Arc<dyn SutBlockTreeWrite>);
+
+        // Install the integration's entity through the REAL registration path.
+        let sidecar =
+            holon_mcp_client::mcp_sidecar::McpSidecar::from_yaml(SIDECAR_YAML).expect("yaml");
+        let registry = comp.type_registry().await;
+        for (name, cfg) in &sidecar.entities {
+            let table = sidecar.prefixed_name(name).table_name();
+            registry
+                .register(cfg.to_type_definition(&table).expect("type definition"))
+                .expect("register");
+        }
+
+        // Author the link the way a live editor commit does: create the block,
+        // then `set_field(content)` with RAW org markup. That is the gesture the
+        // dispatcher parses inline marks for.
+        let parent = holon_api::EntityUri::block("parent");
+        let new_id = holon_api::EntityUri::block("entity-linker");
+        holon_pbt_core::capabilities::SutBlockCreate::apply_create_under_focus(
+            &caps,
+            &parent,
+            "",
+            Some(&new_id),
+        )
+        .await;
+        tokio::time::sleep(SETTLE).await;
+
+        let mut params: holon_api::StorageEntity = std::collections::HashMap::new();
+        params.insert("id".into(), holon_api::Value::String(new_id.to_string()));
+        params.insert("field".into(), holon_api::Value::String("content".into()));
+        params.insert(
+            "value".into(),
+            holon_api::Value::String(format!("See [[{ENTITY_URI}][Widget]] here")),
+        );
+        engine
+            .execute_operation(
+                &"block".to_string().into(),
+                "set_field",
+                params,
+                holon_api::OpOrigin::User,
+            )
+            .await
+            .expect("set_field(content) with an entity link must succeed");
+        tokio::time::sleep(SETTLE).await;
+
+        let rows = engine
+            .db_handle()
+            .query(
+                "SELECT target, kind, resolved_id FROM block_links WHERE source_block_id = \
+                 'block:entity-linker'",
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("block_links query");
+        let entity_rows: Vec<_> = rows
+            .iter()
+            .filter(|r| r.get("target").and_then(|v| v.as_string()) == Some(ENTITY_URI))
+            .collect();
+        assert_eq!(
+            entity_rows.len(),
+            1,
+            "exactly one block_links row for {ENTITY_URI}, got {rows:?}"
+        );
+        assert_eq!(
+            entity_rows[0].get("kind").and_then(|v| v.as_string()),
+            Some("entity"),
+            "a sidecar-declared entity must store kind='entity' — a broken scheme/table-name join \
+             degrades it to an unresolved page link: {entity_rows:?}"
+        );
+
+        let backlink_rows = engine
+            .db_handle()
+            .query(
+                &format!("SELECT id FROM backlinks WHERE target_id = '{ENTITY_URI}'"),
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("backlinks query");
+        let sources: Vec<String> = backlink_rows
+            .iter()
+            .filter_map(|r| r.get("id").and_then(|v| v.as_string()).map(str::to_string))
+            .collect();
+        assert_eq!(
+            sources,
+            vec!["block:entity-linker".to_string()],
+            "the linking block must appear in `backlinks` under the sidecar entity URI"
+        );
+    }
+
+    /// The SAME entity-link chain as
+    /// [`sidecar_entity_link_resolves_through_the_intent_boundary`], with the
+    /// two events in the order production actually produces them: the block
+    /// carrying the link is ingested by the BOOT ORG SCAN first, and the
+    /// entity registers only afterwards (in prod: when the MCP provider
+    /// connects, `holon-app/src/mcp_integrations.rs:272-273`, whose factory is
+    /// resolved at `wiring.rs:333` — after `turso_seams.rs:898-905` has already
+    /// spawned the scan).
+    ///
+    /// A link's resolution must not depend on WHEN its scheme registered
+    /// relative to the scan (Model.md invariants 3 and 4: the projection is
+    /// reproducible from the replica, and derived holders recompute at
+    /// quiescence). Its twin above differs ONLY in that order, so a failure
+    /// here while the twin is green localises the defect to the ordering and
+    /// not to the scheme/table-name join, the sidecar path, or the fixture.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn entity_scheme_registered_after_org_scan_still_links() {
+        use holon_pbt_core::capabilities::SutFocus;
+        use holon_pbt_core::capabilities::SutQueryResults;
+        use holon_pbt_core::capabilities::SutSqlProjection;
+        use holon_pbt_core::composition::CapProvider;
+
+        const SIDECAR_YAML: &str = r#"
+entities:
+  t_widget:
+    id_column: id
+    schema:
+      - name: id
+        sql_type: TEXT
+        primary_key: true
+"#;
+        const ENTITY_URI: &str = "t-widget:abc123";
+
+        // The link is ALREADY on disk when the app boots — nothing in this
+        // test ever writes a block. Bare `:ID:` per ORG_SYNTAX; the parser
+        // adds the `block:` scheme at the boundary.
+        let org = "#+ID: structural-page\n* parent\n:PROPERTIES:\n:ID: parent\n:END:\n** See \
+                   [[t-widget:abc123][Widget]] here\n:PROPERTIES:\n:ID: \
+                   entity-linker\n:END:\n";
+
+        let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
+        let comp = Arc::new(
+            HeadlessFrontendComponent::new_with_clock(
+                &[("structural-page.org", org)],
+                Duration::from_millis(300),
+                false,
+                crate::pbt::frontend_slice::components::keystone_boot_clock(),
+            )
+            .await,
+        );
+        let engine = comp.engine();
+        let mut caps = CapMap::new();
+        comp.clone().register(&mut caps);
+        caps.insert(comp.clone() as Arc<dyn SutSqlProjection>);
+        caps.insert(comp.clone() as Arc<dyn SutFocus>);
+        caps.insert(comp.clone() as Arc<dyn SutQueryResults>);
+        caps.replace(Arc::new(OpDispatchWriter::with_resolver(
+            engine.clone(),
+            resolver.clone(),
+        )) as Arc<dyn SutBlockTreeWrite>);
+        tokio::time::sleep(SETTLE).await;
+
+        // Ingest happened, and it happened BEFORE registration. Pin that the
+        // scan actually landed the block and parsed a mark, so a red below is
+        // unambiguously the ordering defect and not a parse/ingest failure.
+        let pre = engine
+            .db_handle()
+            .query(
+                "SELECT id, marks FROM block_raw WHERE id = 'block:entity-linker'",
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("block_raw query");
+        assert_eq!(
+            pre.len(),
+            1,
+            "the boot org scan must have ingested the linking block; got {pre:?}"
+        );
+        // `marks` is a jsonb column — CDC delivers it as Value::Json/Array,
+        // never Value::String — so match on the rendered value rather than
+        // reaching for `as_string`, which would silently be None here.
+        let marks = format!("{:?}", pre[0].get("marks"));
+        assert!(
+            marks.contains(ENTITY_URI),
+            "the ingested block must carry a Link mark for {ENTITY_URI} (the target string is \
+             preserved verbatim whatever the classifier decided); marks = {marks:?}"
+        );
+
+        // NOW install the integration's entity, through the REAL registration
+        // path — the same call the sidecar makes when its provider connects.
+        let sidecar =
+            holon_mcp_client::mcp_sidecar::McpSidecar::from_yaml(SIDECAR_YAML).expect("yaml");
+        let registry = comp.type_registry().await;
+        for (name, cfg) in &sidecar.entities {
+            let table = sidecar.prefixed_name(name).table_name();
+            registry
+                .register(cfg.to_type_definition(&table).expect("type definition"))
+                .expect("register");
+        }
+        tokio::time::sleep(SETTLE).await;
+
+        let rows = engine
+            .db_handle()
+            .query(
+                "SELECT target, kind, resolved_id FROM block_links WHERE source_block_id = \
+                 'block:entity-linker'",
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("block_links query");
+        let entity_rows: Vec<_> = rows
+            .iter()
+            .filter(|r| r.get("target").and_then(|v| v.as_string()) == Some(ENTITY_URI))
+            .collect();
+        assert_eq!(
+            entity_rows.len(),
+            1,
+            "exactly one block_links row for {ENTITY_URI}, got {rows:?} — a link ingested before \
+             its scheme registered must still be a link"
+        );
+        assert_eq!(
+            entity_rows[0].get("kind").and_then(|v| v.as_string()),
+            Some("entity"),
+            "kind must be 'entity' regardless of registration order: {entity_rows:?}"
+        );
+
+        let backlink_rows = engine
+            .db_handle()
+            .query(
+                &format!("SELECT id FROM backlinks WHERE target_id = '{ENTITY_URI}'"),
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("backlinks query");
+        let sources: Vec<String> = backlink_rows
+            .iter()
+            .filter_map(|r| r.get("id").and_then(|v| v.as_string()).map(str::to_string))
+            .collect();
+        assert_eq!(
+            sources,
+            vec!["block:entity-linker".to_string()],
+            "the entity page must show the backlink once its scheme is registered"
         );
     }
 
@@ -990,6 +2291,38 @@ mod teeth {
             "non-vacuity: blocks-match must run (ran: {:?})",
             report.ran_ids()
         );
+    }
+
+    /// COVERAGE TOOTH (2026-07-05): the keystone's generator must PROPOSE
+    /// `ToggleState` in a booted, page-focused, seeded state — the exact
+    /// state the wide alphabet reaches after boot. The dogfood/latency
+    /// triage found ToggleState NEVER fires in keystone draws even at
+    /// `HOLON_PBT_WEIGHTS=ToggleState:200` (change-status had
+    /// ZERO PBT coverage). This tooth pins the generator side: if
+    /// `ToggleState::weighted_generator` rejects the canonical seeded ref, the
+    /// keystone alphabet silently lost its only change-status transition.
+    /// On failure it prints the precise rejection `Reason`s.
+    #[test]
+    fn toggle_state_generator_proposes_in_wide_seeded_state() {
+        use holon_pbt_core::TransitionFactory;
+        for (name, state) in [
+            ("structural_ref", structural_ref()),
+            ("wide_ref", crate::pbt::composed::wide_e2e::wide_ref()),
+        ] {
+            match ToggleState::weighted_generator(&state) {
+                validated::Validated::Good((w, _strat)) => {
+                    assert!(w > 0, "[{name}] ToggleState arm has zero weight");
+                }
+                validated::Validated::Fail(reasons) => {
+                    drop_ref_off_thread(state);
+                    panic!(
+                        "[{name}] ToggleState generator REJECTS the seeded wide state — \
+                         change-status has zero keystone coverage. Reasons: {reasons:?}"
+                    );
+                }
+            }
+            drop_ref_off_thread(state);
+        }
     }
 
     /// Teeth: toggle `c1`'s task_state on the SUT ONLY (oracle frozen) — the
@@ -1216,8 +2549,9 @@ mod teeth {
     /// focus-handoff fold). Split `c1`, then `TypeChars` DIRECTLY — with NO
     /// intervening `FocusEditableText`. The only thing that makes the
     /// keystroke land on the new block is the composed write's production
-    /// focus-handoff (`OpDispatchWriter`'s `dispatch_intent_sync` →
-    /// `apply_structural_focus`), which moves the SUT's `focused_block` onto
+    /// focus-handoff (`dispatch_intent_sync` → `apply_structural_focus`; this
+    /// slice boots `full_headless`, so `KeystrokeBlockTreeWriter` carries
+    /// it), which moves the SUT's `focused_block` onto
     /// the split-created block — exactly as `SplitBlock::apply_to_ref` does
     /// via `set_focus` + `open_active_editor`. Were the handoff absent (the
     /// old blur regime), this would panic ("no focused block") or type into
@@ -1323,8 +2657,26 @@ mod teeth {
                 dump(c, &p, out);
             }
         }
+        // PERMANENT is the claim, so poll for a clean tree rather than judging
+        // one post-boot frame: a `live_block` still resolving its first query is
+        // a legal transient, and under suite-level CPU contention that frame can
+        // outlive the boot. Fail only if placeholders SURVIVE the budget.
         let mut out = Vec::new();
-        dump(&snap, "", &mut out);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut snap = snap;
+        loop {
+            out.clear();
+            dump(&snap, "", &mut out);
+            if out.is_empty() || std::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(SETTLE).await;
+            snap = bundle
+                .caps
+                .expect::<dyn SutRenderer>()
+                .widget_tree_snapshot_fresh()
+                .await;
+        }
         assert!(
             out.is_empty(),
             "booted widget tree holds permanent loading/unknown placeholders — every \
@@ -1411,6 +2763,35 @@ mod teeth {
         .await;
         let mut caps = bundle.caps;
 
+        // The oracle models the boot-fired journal day-block (`frontend_wired` →
+        // `seed_boot_journal`): every full_headless (Turso) boot fires the seeded
+        // daily-journal rule once, minting a day-block under `block:journals`. As a
+        // REAL ref block it enters `all_block_ids` → the phantom-history universe,
+        // so its `block_history` create is no longer a phantom. This probe seeds no
+        // `Journals.org`, so the day-block never reaches the `/org` snapshot; it
+        // folds into `scaffold` below (seed-classified via `inject_scaffold_seed`),
+        // which excludes it from the block-set comparison exactly as before — while
+        // still counting for the history universe (`all_block_ids` reads `blocks`
+        // regardless of seed classification).
+        let oracle = frontend_wired(wide_ref());
+
+        // The rule fires ASYNC off the clock CDC; the boot settle can return before
+        // it lands. Await the day-block before the scaffold snapshot / checks so a
+        // not-yet-fired journal does not false-diverge; fail loud on timeout.
+        let journal_id = crate::pbt::frontend_slice::components::keystone_boot_journal_id();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            tokio::time::sleep(SETTLE).await;
+            if sut_ids(&caps).await.contains(&journal_id) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "[full_headless probe] boot journal {journal_id} did not fire within budget"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
         let ids = fixed_ids();
         let tree: BTreeSet<EntityUri> = [ids.parent.clone(), ids.c1.clone(), ids.c2.clone()]
             .into_iter()
@@ -1418,7 +2799,6 @@ mod teeth {
         let booted = sut_ids(&caps).await;
         let scaffold: BTreeSet<EntityUri> = booted.difference(&tree).cloned().collect();
 
-        let oracle = wide_ref();
         TransitionImpl::apply_to_sut(
             &NavigateFocus {
                 region: Region::Main,
@@ -1446,6 +2826,38 @@ mod teeth {
             report.failures().is_empty(),
             "full_headless static catalog must be green to be a drivable swap config; failures \
              above"
+        );
+    }
+
+    /// DIAGNOSTIC (journals-machinery peer RED, 2026-07-11): is the
+    /// programmatically-seeded journals display machinery (`::src::0` /
+    /// `::render::0`) Loro-backed under a Loro wiring? The oracle's peer fork
+    /// includes them (non-seed, non-page), so `ApplyMutation(LoroPeer)` draws
+    /// them as update targets; `peer_update_block` then panics if the peer's
+    /// forked doc (a snapshot of the GLOBAL doc) lacks them.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn journals_machinery_is_loro_backed_under_loro_wiring() {
+        use holon_pbt_core::capabilities::SutLoroLog;
+
+        let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
+        let bundle = compose_sut_seeded(
+            &ComponentSet::full_headless(),
+            &resolver,
+            &[("structural-page.org", WIDE_TREE_ORG)],
+            &[],
+        )
+        .await;
+        let caps = bundle.caps;
+        let kids = caps
+            .expect::<dyn SutLoroLog>()
+            .loro_children_of("block:journals")
+            .await;
+        assert!(
+            kids.as_ref()
+                .is_some_and(|k| k.iter().any(|c| c.contains("journals::src::0"))
+                    && k.iter().any(|c| c.contains("journals::render::0"))),
+            "journals display machinery must be Loro-backed (peer forks snapshot the global doc; \
+             the oracle's peer model includes these blocks): got {kids:?}"
         );
     }
 
@@ -2260,5 +3672,1202 @@ mod teeth {
                 report.ran_ids()
             );
         }
+    }
+
+    /// Shared fixture for the embedded-page tests: boots a `structural-page`
+    /// shell with a non-seed Page heading (`test-date-page`) and a child note
+    /// (`test-date-child`) under it, registers the frontend caps, and focuses
+    /// the main panel on the container so the date page renders embedded.
+    /// Returns `(comp, caps, container, date_page, child)`.
+    ///
+    /// The container is deliberately a PLAIN page, not `block:journals`: the
+    /// journals page authors its own feed render, which expands every day
+    /// entry by contract, so it cannot witness the collapsed-lazy default.
+    /// The journals half of the contract is the sibling
+    /// [`setup_embedded_page_sut_journals`] /
+    /// [`embedded_page_under_journals_feed_renders_expanded`], which runs the
+    /// SAME invariant over the `block:journals` topology — keep both, or the
+    /// invariant only ever sees one of the two authored defaults.
+    async fn setup_embedded_page_sut() -> (
+        Arc<HeadlessFrontendComponent>,
+        CapMap,
+        EntityUri,
+        EntityUri,
+        EntityUri,
+    ) {
+        use holon_pbt_core::capabilities::CapRegion;
+        use holon_pbt_core::capabilities::SutFocusWrite;
+
+        const STRUCTURAL_PAGE_ORG: &str = concat!(
+            "#+ID: structural-page\n",
+            "* 2026-07-14 :Page:\n",
+            ":PROPERTIES:\n",
+            ":ID: test-date-page\n",
+            ":END:\n",
+            "A journal date page.\n",
+            "** A note for the day\n",
+            ":PROPERTIES:\n",
+            ":ID: test-date-child\n",
+            ":END:\n",
+            "This child should be lazy-loaded.\n",
+        );
+
+        let comp = Arc::new(
+            HeadlessFrontendComponent::new(
+                &[("structural-page.org", STRUCTURAL_PAGE_ORG)],
+                Duration::from_millis(600),
+            )
+            .await,
+        );
+        let mut caps = CapMap::new();
+        comp.clone().register_non_gesture(&mut caps);
+        comp.clone()
+            .register_gesture_writes(&mut caps, comp.driver());
+        caps.insert(comp.clone() as Arc<dyn SutSqlProjection>);
+        tokio::time::sleep(SETTLE).await;
+
+        let container = holon_api::EntityUri::block("structural-page");
+        let date_page = holon_api::EntityUri::block("test-date-page");
+        let child = holon_api::EntityUri::block("test-date-child");
+
+        comp.apply_navigate_focus(CapRegion::Main, &container).await;
+        tokio::time::sleep(SETTLE).await;
+
+        (comp, caps, container, date_page, child)
+    }
+
+    /// The ref-model oracle matching [`setup_embedded_page_sut`]: seeds
+    /// structural-page, models `test-date-page` as a non-seed page child of it
+    /// with `test-date-child` under that, and focuses Main on the container.
+    fn embedded_page_ref(
+        container: &EntityUri,
+        date_page: &EntityUri,
+        child: &EntityUri,
+    ) -> ReferenceState {
+        use holon_pbt_core::capabilities::RefNavHistoryMut;
+
+        let mut oracle = structural_ref();
+        let mut date_block = Block::new_text(date_page.clone(), container.clone(), "2026-07-14");
+        date_block.set_page(true);
+        oracle
+            .domain
+            .block_state
+            .blocks
+            .insert(date_page.clone(), date_block);
+        oracle
+            .domain
+            .block_state
+            .block_documents
+            .insert(date_page.clone(), date_page.clone());
+        let child_block = Block::new_text(child.clone(), date_page.clone(), "A note for the day");
+        oracle
+            .domain
+            .block_state
+            .blocks
+            .insert(child.clone(), child_block);
+        oracle
+            .domain
+            .block_state
+            .block_documents
+            .insert(child.clone(), date_page.clone());
+        oracle.nav_focus(holon_api::Region::Main, container);
+        oracle
+    }
+
+    /// **Phase A GREEN (enforced): embedded page renders collapsed + lazy.**
+    ///
+    /// Boots the embedded-page topology, focuses Main on the container page,
+    /// then runs `inv-embedded-page-collapsed-lazy`. Both display prongs pass:
+    /// (a) the `embedded_page` profile variant wraps the page in a
+    /// collapsed `expand_toggle`, and (b) the holon_sql recursive CTE stops
+    /// at non-root page boundaries so no descendants leak into the widget
+    /// tree snapshot.
+    ///
+    /// The expand half (drive `set_block_expanded`, assert the SUT toggle
+    /// reports expanded + children load) lives in the separate,
+    /// `#[ignore]`d `embedded_page_expand_toggle_drives_expanded` — it is
+    /// blocked on a design ruling (see that test).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn embedded_page_renders_collapsed_and_lazy() {
+        use holon_pbt_core::composition::CapInvariant;
+
+        use crate::pbt::composed::invariants::embedded_page_collapsed_lazy;
+
+        let (_comp, caps, container, date_page, child) = setup_embedded_page_sut().await;
+
+        let registry: Vec<Box<dyn CapInvariant>> = vec![embedded_page_collapsed_lazy::wire()];
+
+        let resolved_a = {
+            let oracle = embedded_page_ref(&container, &date_page, &child);
+            let resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
+            drop_ref_off_thread(oracle);
+            resolved
+        };
+        let report_a = run_with_seeded_ref(&registry, &caps, resolved_a).await;
+        let ran_a: Vec<_> = report_a.ran_ids().into_iter().collect();
+        assert!(
+            ran_a
+                .iter()
+                .any(|id| *id == "inv-embedded-page-collapsed-lazy"),
+            "Phase A (collapsed): inv-embedded-page-collapsed-lazy must select + run (ran: \
+             {ran_a:?})"
+        );
+        let failures_a = report_a.failures();
+        assert!(
+            failures_a.is_empty(),
+            "Phase A (collapsed): inv-embedded-page-collapsed-lazy must PASS — embedded page with \
+             collapsed expand_toggle, no leaked descendants. Failures: {failures_a:?}"
+        );
+        eprintln!(
+            "[embedded_page_renders_collapsed_and_lazy] Phase A GREEN: collapsed expand_toggle \
+             present, no leaked descendants."
+        );
+    }
+
+    /// **Phase B GREEN: drive expand on the embedded page (Option B store).**
+    ///
+    /// Drives `set_block_expanded` on the embedded page and asserts the SUT's
+    /// rendered `expand_toggle` reports `expanded=true`. Green via the
+    /// view-local expansion store (RATIFIED 2026-07-16, Option B):
+    /// `set_block_expanded` records the intent in the engine's non-persistent
+    /// `UiState.expanded_view`, and the `expand_toggle` shadow builder seeds
+    /// its gate from it on rebuild — so the flip survives the fresh
+    /// `widget_tree_snapshot()` even though embedded pages carry no `collapsed`
+    /// document field.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn embedded_page_expand_toggle_drives_expanded() {
+        use holon_pbt_core::capabilities::RefToggleMut;
+        use holon_pbt_core::composition::CapInvariant;
+
+        use crate::pbt::composed::invariants::embedded_page_collapsed_lazy;
+
+        let (comp, caps, container, date_page, child) = setup_embedded_page_sut().await;
+
+        let registry: Vec<Box<dyn CapInvariant>> = vec![embedded_page_collapsed_lazy::wire()];
+
+        // Drive expand via SUT plumbing.
+        comp.driver()
+            .set_block_expanded(&date_page, true)
+            .await
+            .expect("set_block_expanded must succeed for embedded page toggle");
+        tokio::time::sleep(Duration::from_millis(3000)).await;
+
+        let resolved_b = {
+            let mut oracle = embedded_page_ref(&container, &date_page, &child);
+            oracle.set_expanded_view_local(&date_page, true);
+            let resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
+            drop_ref_off_thread(oracle);
+            resolved
+        };
+        let report_b = run_with_seeded_ref(&registry, &caps, resolved_b).await;
+        let ran_b: Vec<_> = report_b.ran_ids().into_iter().collect();
+        assert!(
+            ran_b
+                .iter()
+                .any(|id| *id == "inv-embedded-page-collapsed-lazy"),
+            "Phase B (expanded): inv-embedded-page-collapsed-lazy must select + run (ran: \
+             {ran_b:?})"
+        );
+        let failures_b = report_b.failures();
+        assert!(
+            failures_b.is_empty(),
+            "Phase B (expanded): inv-embedded-page-collapsed-lazy must PASS — embedded page \
+             expanded, descendants permitted/present via lazy live_query. Failures: {failures_b:?}"
+        );
+        eprintln!(
+            "[embedded_page_expand_toggle_drives_expanded] Phase B GREEN: expanded toggle \
+             accepted, descendants permitted."
+        );
+    }
+
+    /// The journals-topology twin of [`setup_embedded_page_sut`]: boots a
+    /// `block:journals` shell holding one non-seed day Page (`day-0714`) with a
+    /// child note, and focuses Main on `block:journals` — the topology the
+    /// keystone's boot draw produces (prod focuses Main on `block:journals` on
+    /// a fresh DB, and `journals_auto_create` mints a day page under it).
+    ///
+    /// `structural-page.org` is booted alongside so [`structural_ref`] — the
+    /// base of both oracles — stays an honest model of the SUT's block tree.
+    /// Returns `(comp, caps, journals, day_page, child)`.
+    async fn setup_embedded_page_sut_journals() -> (
+        Arc<HeadlessFrontendComponent>,
+        CapMap,
+        EntityUri,
+        EntityUri,
+        EntityUri,
+    ) {
+        use holon_pbt_core::capabilities::CapRegion;
+        use holon_pbt_core::capabilities::SutFocusWrite;
+
+        const STRUCTURAL_PAGE_ORG: &str = "#+ID: structural-page\n";
+        const JOURNALS_ORG: &str = concat!(
+            "#+ID: journals\n",
+            "* 2026-07-14 :Page:\n",
+            ":PROPERTIES:\n:ID: day-0714\n:END:\n",
+            "Log for the 14th.\n",
+            "** morning note\n",
+            ":PROPERTIES:\n:ID: day-0714-child\n:END:\n",
+            "This child is loaded with the day.\n",
+        );
+
+        let comp = Arc::new(
+            HeadlessFrontendComponent::new(
+                &[
+                    ("structural-page.org", STRUCTURAL_PAGE_ORG),
+                    ("Journals.org", JOURNALS_ORG),
+                ],
+                Duration::from_millis(600),
+            )
+            .await,
+        );
+        let mut caps = CapMap::new();
+        comp.clone().register_non_gesture(&mut caps);
+        comp.clone()
+            .register_gesture_writes(&mut caps, comp.driver());
+        caps.insert(comp.clone() as Arc<dyn SutSqlProjection>);
+        tokio::time::sleep(SETTLE).await;
+
+        let journals = holon_api::EntityUri::block("journals");
+        let day_page = holon_api::EntityUri::block("day-0714");
+        let child = holon_api::EntityUri::block("day-0714-child");
+
+        comp.apply_navigate_focus(CapRegion::Main, &journals).await;
+        tokio::time::sleep(SETTLE).await;
+
+        (comp, caps, journals, day_page, child)
+    }
+
+    /// The ref-model oracle matching [`setup_embedded_page_sut_journals`]:
+    /// models the day page as a non-seed `Page` child of the seeded
+    /// `block:journals` with its note under it, and focuses Main on journals.
+    fn embedded_page_journals_ref(
+        journals: &EntityUri,
+        day_page: &EntityUri,
+        child: &EntityUri,
+    ) -> ReferenceState {
+        use holon_pbt_core::capabilities::RefNavHistoryMut;
+
+        let mut oracle = structural_ref();
+        let mut day_block = Block::new_text(day_page.clone(), journals.clone(), "2026-07-14");
+        day_block.set_page(true);
+        oracle
+            .domain
+            .block_state
+            .blocks
+            .insert(day_page.clone(), day_block);
+        oracle
+            .domain
+            .block_state
+            .block_documents
+            .insert(day_page.clone(), day_page.clone());
+        let child_block = Block::new_text(child.clone(), day_page.clone(), "morning note");
+        oracle
+            .domain
+            .block_state
+            .blocks
+            .insert(child.clone(), child_block);
+        oracle
+            .domain
+            .block_state
+            .block_documents
+            .insert(child.clone(), day_page.clone());
+        oracle.nav_focus(holon_api::Region::Main, journals);
+        oracle
+    }
+
+    /// **The journals feed's day pages are DEFAULT-EXPANDED, and the oracle
+    /// must model that.**
+    ///
+    /// The `structural-page` sibling rung above witnesses the global default
+    /// (a plain embedded page renders COLLAPSED). This rung witnesses the
+    /// other authored contract, which the keystone's own boot topology hits on
+    /// every draw: when Main is focused on `block:journals`, the panel
+    /// delegates to that page's own render, whose source is
+    /// `SELECT * FROM journal_feed`. `journal_feed` projects `1 AS
+    /// expand_default` (`journal_feed_matview.sql:37`) over every `Page`-tagged
+    /// child of `block:journals` (`journal_day_pages_matview.sql`), which
+    /// selects the `embedded_page_expanded` profile variant with
+    /// `default_expanded: true` (`block_profile.yaml`) — so the day page's
+    /// `expand_toggle` renders OPEN with no user interaction.
+    ///
+    /// `RefToggle::is_expanded` used to read only `expanded_toggles` — the set
+    /// of pages a user gesture opened — and so called every feed day page
+    /// collapsed. That is what made the composed keystone RED
+    /// (`lane-logs/fix/RED-journals-rung.log`): `inv-embedded-page-collapsed-
+    /// lazy` reported the auto-created `Journals/2026-01-15` page "collapsed in
+    /// the ref model but the widget tree toggle reports expanded=true".
+    #[tokio::test(flavor = "multi_thread")]
+    async fn embedded_page_under_journals_feed_renders_expanded() {
+        use holon_pbt_core::composition::CapInvariant;
+
+        use crate::pbt::composed::invariants::embedded_page_collapsed_lazy;
+
+        let (_comp, caps, journals, day_page, child) = setup_embedded_page_sut_journals().await;
+
+        let registry: Vec<Box<dyn CapInvariant>> = vec![embedded_page_collapsed_lazy::wire()];
+
+        let resolved = {
+            let oracle = embedded_page_journals_ref(&journals, &day_page, &child);
+            let resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
+            drop_ref_off_thread(oracle);
+            resolved
+        };
+        let report = run_with_seeded_ref(&registry, &caps, resolved).await;
+        let ran: Vec<_> = report.ran_ids().into_iter().collect();
+        assert!(
+            ran.iter()
+                .any(|id| *id == "inv-embedded-page-collapsed-lazy"),
+            "inv-embedded-page-collapsed-lazy must select + run on the journals topology — a \
+             SKIP here means the fixture stopped producing a non-seed page under the main focus \
+             root, and the rung is vacuous (ran: {ran:?})"
+        );
+        let failures = report.failures();
+        assert!(
+            failures.is_empty(),
+            "the journals feed's day pages are DEFAULT-EXPANDED by contract (journal_feed \
+             projects expand_default=1 → embedded_page_expanded → default_expanded: true), so \
+             the oracle must call them expanded too. Failures: {failures:?}"
+        );
+        eprintln!(
+            "[embedded_page_under_journals_feed_renders_expanded] GREEN: feed day page expanded \
+             in BOTH the SUT widget tree and the ref model."
+        );
+    }
+
+    /// Journals-topology twin of [`setup_embedded_page_sut_journals`] that adds
+    /// a NON-page text child (`stray-note`) directly under `block:journals` —
+    /// the block the `journal_feed` matview must omit (its predicate is
+    /// `tag = 'Page' AND parent_id = 'block:journals'`, so a plain text child
+    /// of journals never surfaces in the feed).
+    async fn setup_journals_stray_sut() -> (
+        Arc<HeadlessFrontendComponent>,
+        CapMap,
+        EntityUri,
+        EntityUri,
+        EntityUri,
+        EntityUri,
+    ) {
+        use holon_pbt_core::capabilities::CapRegion;
+        use holon_pbt_core::capabilities::SutFocusWrite;
+
+        const STRUCTURAL_PAGE_ORG: &str = "#+ID: structural-page\n";
+        const JOURNALS_ORG: &str = concat!(
+            "#+ID: journals\n",
+            "* 2026-07-14 :Page:\n",
+            ":PROPERTIES:\n:ID: day-0714\n:END:\n",
+            "Log for the 14th.\n",
+            "** morning note\n",
+            ":PROPERTIES:\n:ID: day-0714-child\n:END:\n",
+            "This child is loaded with the day.\n",
+            "* stray note\n",
+            ":PROPERTIES:\n:ID: stray-note\n:END:\n",
+            "A non-page note directly under journals.\n",
+        );
+
+        let comp = Arc::new(
+            HeadlessFrontendComponent::new(
+                &[
+                    ("structural-page.org", STRUCTURAL_PAGE_ORG),
+                    ("Journals.org", JOURNALS_ORG),
+                ],
+                Duration::from_millis(600),
+            )
+            .await,
+        );
+        let mut caps = CapMap::new();
+        comp.clone().register_non_gesture(&mut caps);
+        comp.clone()
+            .register_gesture_writes(&mut caps, comp.driver());
+        caps.insert(comp.clone() as Arc<dyn SutSqlProjection>);
+        tokio::time::sleep(SETTLE).await;
+
+        let journals = holon_api::EntityUri::block("journals");
+        let day_page = holon_api::EntityUri::block("day-0714");
+        let child = holon_api::EntityUri::block("day-0714-child");
+        let stray = holon_api::EntityUri::block("stray-note");
+
+        comp.apply_navigate_focus(CapRegion::Main, &journals).await;
+        tokio::time::sleep(SETTLE).await;
+
+        (comp, caps, journals, day_page, child, stray)
+    }
+
+    /// Oracle matching [`setup_journals_stray_sut`]: the day page + note from
+    /// [`embedded_page_journals_ref`], plus a non-page text child of journals.
+    fn journals_stray_ref(
+        journals: &EntityUri,
+        day_page: &EntityUri,
+        child: &EntityUri,
+        stray: &EntityUri,
+    ) -> ReferenceState {
+        let mut oracle = embedded_page_journals_ref(journals, day_page, child);
+        oracle.domain.block_state.blocks.insert(
+            stray.clone(),
+            Block::new_text(
+                stray.clone(),
+                journals.clone(),
+                "A non-page note under journals",
+            ),
+        );
+        oracle
+            .domain
+            .block_state
+            .block_documents
+            .insert(stray.clone(), journals.clone());
+        oracle
+    }
+
+    /// **The journals feed omits non-page children of `block:journals`, and the
+    /// rendered-set oracle must agree.**
+    ///
+    /// The sibling rung above pins the default-expanded half of the same
+    /// contract. This rung pins the SELECT half: `journal_feed` (chained on
+    /// `journal_day_pages`) selects `tag = 'Page' AND parent_id =
+    /// 'block:journals'`, so a NON-page child of journals renders nothing in
+    /// the Main panel. `main_panel_renders_within` used to model the panel as a
+    /// descendant walk from journals — which includes non-page children — so
+    /// `inv-main-panel-rows-match-focus` demanded a row prod is right to omit.
+    /// That is the composed keystone red this rung makes a unit: `block:gen-1`
+    /// (a plain text child of journals created by `CreateBlockUnderFocus`)
+    /// renders nothing, but the oracle counted it as required.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn journals_feed_omits_non_page_child_from_main_panel() {
+        use holon_pbt_core::composition::CapInvariant;
+
+        use crate::pbt::composed::invariants::main_panel_rows_match_focus;
+
+        let (_comp, caps, journals, day_page, child, stray) = setup_journals_stray_sut().await;
+
+        let registry: Vec<Box<dyn CapInvariant>> = vec![main_panel_rows_match_focus::wire()];
+
+        let resolved = {
+            let oracle = journals_stray_ref(&journals, &day_page, &child, &stray);
+            // The oracle's own visibility predicate is the contract under test:
+            // the day page and its note render, the stray does not.
+            assert!(
+                oracle.main_panel_renders(&day_page),
+                "the Page day entry must render in the journals Main panel"
+            );
+            assert!(
+                oracle.main_panel_renders(&child),
+                "the note under the day entry must render (lazily) in the panel"
+            );
+            assert!(
+                !oracle.main_panel_renders(&stray),
+                "a non-page child of journals is absent from journal_feed and must render nothing"
+            );
+            let resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
+            drop_ref_off_thread(oracle);
+            resolved
+        };
+
+        let report = run_with_seeded_ref(&registry, &caps, resolved).await;
+        let ran: Vec<_> = report.ran_ids().into_iter().collect();
+        assert!(
+            ran.iter()
+                .any(|id| *id == "inv-main-panel-rows-match-focus"),
+            "inv-main-panel-rows-match-focus must select + run on the journals topology — a SKIP \
+             here means the stray did not reach the SUT block tree and the rung is vacuous (ran: \
+             {ran:?})"
+        );
+        let failures = report.failures();
+        assert!(
+            failures.is_empty(),
+            "journal_feed omits non-page children of journals by contract (journal_day_pages \
+             predicate = tag='Page' AND parent_id='block:journals'), so the oracle must not \
+             demand a row for them. Failures: {failures:?}"
+        );
+        eprintln!(
+            "[journals_feed_omits_non_page_child_from_main_panel] GREEN: non-page child of \
+             journals excluded from the Main-panel required set."
+        );
+    }
+
+    /// **Journal Overview feed (DOGFOOD_MVP A2+A3).**
+    ///
+    /// The `block:journals` page's own feed (`::src::0` holon_sql +
+    /// `::render::0`) lists its `Page`-tagged day-entries NEWEST-FIRST,
+    /// each rendered as a DEFAULT-EXPANDED embedded page (via the
+    /// `embedded_page_expanded` profile variant, keyed on the
+    /// `expand_default` column + the `default_expanded` expand_toggle
+    /// param), separated by a `divider()`. Prong (a): the feed snapshot has
+    /// one expanded `expand_toggle` per day-entry in newest-first
+    /// order, with one `divider` each. Prong (b): a plain embedded page under a
+    /// DIFFERENT focus root (no `expand_default`) still renders COLLAPSED — the
+    /// global default is unchanged; only the feed context expands.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn journal_feed_expanded_newest_first_with_divider() {
+        use holon_pbt_core::capabilities::CapRegion;
+        use holon_pbt_core::capabilities::SutFocusWrite;
+        use holon_pbt_core::capabilities::SutRenderer;
+
+        // Journals doc: two Page day-entries (newest = 2026-07-15), each with a
+        // child note under it. The child's parent is the day-entry, NOT journals,
+        // so the feed query (parent_id == journals) never lists it directly.
+        let journals_org = concat!(
+            "#+ID: journals\n",
+            "* 2026-07-14 :Page:\n",
+            ":PROPERTIES:\n:ID: day-0714\n:END:\n",
+            "Log for the 14th.\n",
+            "** morning note\n",
+            ":PROPERTIES:\n:ID: day-0714-child\n:END:\n",
+            "* 2026-07-15 :Page:\n",
+            ":PROPERTIES:\n:ID: day-0715\n:END:\n",
+            "Log for the 15th.\n",
+            "** evening note\n",
+            ":PROPERTIES:\n:ID: day-0715-child\n:END:\n",
+        );
+        // A plain notebook Page holding a plain sub-page — the collapsed control.
+        let plain_org = concat!(
+            "#+ID: plain-doc\n",
+            "* Notebook :Page:\n",
+            ":PROPERTIES:\n:ID: plain-notebook\n:END:\n",
+            "** A plain day :Page:\n",
+            ":PROPERTIES:\n:ID: plain-page\n:END:\n",
+            "Plain content.\n",
+            "*** a child note\n",
+            ":PROPERTIES:\n:ID: plain-child\n:END:\n",
+        );
+
+        let comp = Arc::new(
+            HeadlessFrontendComponent::new(
+                &[("Journals.org", journals_org), ("plain-doc.org", plain_org)],
+                Duration::from_millis(600),
+            )
+            .await,
+        );
+        tokio::time::sleep(SETTLE).await;
+
+        let journals = EntityUri::parse("block:journals").expect("journals id");
+
+        // ── Prong (a): the journals feed, newest-first, expanded, with dividers.
+        // Poll until the feed query has populated (the block_tags 'Page' rows +
+        // CDC settle asynchronously; under parallel-test CPU load a single
+        // snapshot can race ahead of that population and see an empty list).
+        let mut feed = comp
+            .widget_tree_for(&journals)
+            .await
+            .expect("journals page renders its own feed (::src::0 + ::render::0)");
+        for _ in 0..40 {
+            if feed.collect_by_kind("expand_toggle").len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(SETTLE).await;
+            feed = comp
+                .widget_tree_for(&journals)
+                .await
+                .expect("journals page renders its own feed (::src::0 + ::render::0)");
+        }
+
+        let toggles = feed.collect_by_kind("expand_toggle");
+        let order: Vec<&str> = toggles
+            .iter()
+            .filter_map(|n| n.props.get("target_id").map(String::as_str))
+            .collect();
+        // Relative NEWEST-FIRST: 2026-07-15 must precede 2026-07-14. (The journal
+        // auto-create rule may inject a further "today" entry ahead of both — a
+        // still-newest-first extra — so assert relative order, not an exact set.)
+        let pos_0715 = order.iter().position(|id| *id == "block:day-0715");
+        let pos_0714 = order.iter().position(|id| *id == "block:day-0714");
+        assert!(
+            matches!((pos_0715, pos_0714), (Some(a), Some(b)) if a < b),
+            "feed lists day-entries NEWEST-FIRST (ORDER BY content DESC): 0715 before 0714, got \
+             order {order:?}: {feed:#?}"
+        );
+        for n in &toggles {
+            assert_eq!(
+                n.props.get("expanded").map(String::as_str),
+                Some("true"),
+                "feed entry {:?} must be DEFAULT-EXPANDED (embedded_page_expanded variant): {n:#?}",
+                n.props.get("target_id"),
+            );
+        }
+        let dividers = feed.collect_by_kind("divider");
+        assert_eq!(
+            dividers.len(),
+            toggles.len(),
+            "one divider() between/after each feed entry ({} entries): {feed:#?}",
+            toggles.len(),
+        );
+
+        // ── Prong (b): a plain embedded page elsewhere stays COLLAPSED.
+        let notebook = EntityUri::parse("block:plain-notebook").expect("notebook id");
+        comp.apply_navigate_focus(CapRegion::Main, &notebook).await;
+        tokio::time::sleep(SETTLE).await;
+        let root = comp.widget_tree_snapshot().await;
+        let plain_toggle = root
+            .collect_by_kind("expand_toggle")
+            .into_iter()
+            .find(|n| n.props.get("target_id").map(String::as_str) == Some("block:plain-page"))
+            .expect("plain embedded page renders an expand_toggle in the main panel");
+        assert_eq!(
+            plain_toggle.props.get("expanded").map(String::as_str),
+            Some("false"),
+            "a plain embedded page (no expand_default) stays COLLAPSED while feed entries expand: \
+             {plain_toggle:#?}"
+        );
+
+        eprintln!(
+            "[journal_feed_expanded_newest_first_with_divider] GREEN: feed newest-first \
+             (0715,0714) expanded + dividers; plain embedded page collapsed."
+        );
+    }
+
+    /// A synthetic journals document with `days` day-pages, each owning
+    /// `CHILDREN_PER_DAY` child notes. Ids are deterministic
+    /// (`day-NNN` / `day-NNN-cJ`) so a render snapshot can be asked
+    /// "how many day-CHILDREN did you materialise?" by id membership.
+    ///
+    /// Dates count DOWN from 2026-12-31 so day 0 is always the newest,
+    /// independent of `days`.
+    fn synthetic_journals_org(days: usize) -> String {
+        let mut org = String::from("#+ID: journals\n");
+        for i in 0..days {
+            let day = 31 - i;
+            org.push_str(&format!(
+                "* 2026-12-{day:02} :Page:\n:PROPERTIES:\n:ID: day-{i:03}\n:END:\nLog {i}.\n"
+            ));
+            for c in 0..CHILDREN_PER_DAY {
+                org.push_str(&format!(
+                    "** note {i}-{c}\n:PROPERTIES:\n:ID: day-{i:03}-c{c}\n:END:\n"
+                ));
+            }
+        }
+        org
+    }
+
+    const CHILDREN_PER_DAY: usize = 3;
+
+    /// Render the journals feed over a synthetic `days`-day history and return
+    /// `(day_pages_listed, day_children_materialised)`.
+    async fn measure_journals_feed(days: usize) -> (usize, usize) {
+        use holon_pbt_core::capabilities::SutRenderer;
+
+        let comp = Arc::new(
+            HeadlessFrontendComponent::new(
+                &[("Journals.org", synthetic_journals_org(days).as_str())],
+                Duration::from_millis(600),
+            )
+            .await,
+        );
+        tokio::time::sleep(SETTLE).await;
+
+        let journals = EntityUri::parse("block:journals").expect("journals id");
+        let mut feed = comp
+            .widget_tree_for(&journals)
+            .await
+            .expect("journals page renders its own feed");
+        for _ in 0..60 {
+            if feed.collect_by_kind("expand_toggle").len() >= days {
+                break;
+            }
+            tokio::time::sleep(SETTLE).await;
+            feed = comp
+                .widget_tree_for(&journals)
+                .await
+                .expect("journals page renders its own feed");
+        }
+
+        let ids = feed.collect_entity_ids();
+        // Only OUR synthetic day pages — the auto-create rule may add a "today"
+        // entry, which must not be counted as history.
+        let listed = (0..days)
+            .filter(|i| ids.contains(&format!("block:day-{i:03}")))
+            .count();
+        let materialised = (0..days)
+            .flat_map(|i| (0..CHILDREN_PER_DAY).map(move |c| format!("block:day-{i:03}-c{c}")))
+            .filter(|id| ids.contains(id))
+            .count();
+        (listed, materialised)
+    }
+
+    /// **Increment 0 — MEASUREMENT: journals feed render cost must not scale
+    /// with history size.**
+    ///
+    /// Martin's requirement is that the journals view be LAZY: "render cost
+    /// does not scale linearly with history size". The cost that actually
+    /// scales is not the day-page ROW count (thin rows, and `gpui::list()`
+    /// virtualizes painting) but the per-day CONTENT: `journal_feed` projects
+    /// `1 AS expand_default` (`journal_feed_matview.sql:32`), which selects the
+    /// `embedded_page_expanded` profile variant with `default_expanded: true`
+    /// (`block_profile.yaml:89`), which materialises a
+    /// `live_query(from descendants)` — a shell, a watched matview and a CDC
+    /// subscription — for EVERY day page, on screen or not.
+    ///
+    /// This rung measures that term directly: how many day-CHILDREN are
+    /// reachable in the rendered feed. The claim under test is the one the
+    /// feature needs, and it is a RATIO claim rather than a magic constant —
+    /// materialised content must be bounded by the viewport, hence the SAME at
+    /// a small and a large history.
+    ///
+    /// Expected RED at base: materialisation proportional to `days`.
+    ///
+    /// **MEASURED 2026-08-11 — the premise does not hold HEADLESSLY. This rung
+    /// cannot go red for the intended reason, and that is increment 0's
+    /// result.** Both arms materialise ZERO day children (3 days: 3 listed / 0
+    /// materialised; 12 days: 12 listed / 0 materialised), so it trips the
+    /// vacuity guard instead of the cost claim. Cause, verbatim from the
+    /// rendered tree under every day's `expand_toggle`:
+    /// `ERROR: Query error: HeadlessBuilderServices does not support live
+    /// queries`. Term (c) — the per-day `live_query(from descendants)` — is
+    /// structurally unobservable in this slice: the headless component never
+    /// runs a nested live query, so it materialises nothing to count, at any
+    /// history size. The cost claim therefore has no headless home and must be
+    /// carried by a WINDOWED rung (plan §3 increment 2,
+    /// `journals_scroll_window_expands_and_releases`).
+    ///
+    /// Kept, not deleted: the fixture and the measurement are exactly right and
+    /// this rung turns real the moment the headless component grows live-query
+    /// support. `#[ignore]` per `holon-feature` §1 — a red that is not
+    /// red-for-the-right-reason is never presented as one.
+    ///
+    /// Deliberately NOT asserted here: wall-clock latency. Headless timings do
+    /// not model the GPUI paint path (arm-d measured 236→243ms headless for a
+    /// change that was 16x faster live), so the p95 SLO is the WINDOWED rung's
+    /// job. This rung owns the structural, machine-independent claim.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "increment-0 measurement result: HeadlessBuilderServices does not \
+                support live queries, so per-day content is unobservable here at \
+                any history size — the cost claim belongs to a windowed rung"]
+    async fn journals_feed_cost_is_sublinear_in_history() {
+        const SMALL: usize = 3;
+        const LARGE: usize = 12;
+
+        let (small_listed, small_materialised) = measure_journals_feed(SMALL).await;
+        let (large_listed, large_materialised) = measure_journals_feed(LARGE).await;
+
+        eprintln!(
+            "[journals_feed_cost_is_sublinear_in_history] days={SMALL}: listed={small_listed} \
+             materialised_children={small_materialised} | days={LARGE}: listed={large_listed} \
+             materialised_children={large_materialised}"
+        );
+
+        // VACUITY GUARD: the measurement is meaningless unless both arms
+        // actually listed their full history. A feed that silently dropped days
+        // would "pass" the cost claim by rendering nothing.
+        assert_eq!(
+            (small_listed, large_listed),
+            (SMALL, LARGE),
+            "both arms must list their whole history before cost can be judged \
+             (small={small_listed}/{SMALL}, large={large_listed}/{LARGE})"
+        );
+        // VACUITY GUARD: the small arm must materialise SOMETHING, else
+        // "equal materialisation" is trivially 0 == 0.
+        assert!(
+            small_materialised > 0,
+            "the small arm must materialise day children, else the cost claim is vacuous"
+        );
+
+        // THE CLAIM: content materialisation is bounded by the viewport, not by
+        // history. A view that is lazy in the required sense materialises the
+        // same amount of content whether the vault holds 3 days or 12.
+        assert_eq!(
+            large_materialised, small_materialised,
+            "journals feed materialises day-children proportional to HISTORY \
+             ({large_materialised} children at {LARGE} days vs {small_materialised} at {SMALL}) \
+             — render cost scales linearly with history, which is exactly the \
+             defect increment 2 must fix"
+        );
+    }
+
+    /// **dogfood #6 row 34 — RED-first repro pinning the OPEN architecture
+    /// bug.**
+    ///
+    /// The journal feed (`block:journals::render::0` =
+    /// `list(sortkey:"-content", item_template: column(render_entity(),
+    /// divider()))` over `::src::0` which tags rows with `expand_default`)
+    /// is UNREACHABLE via the app's navigation
+    /// path. `apply_navigate_focus(Main, journals)` makes the main panel render
+    /// `block:default-main-panel` — a query-source block with NO
+    /// `render_source`, so `BlockDomain::render_expr_for` resolves the
+    /// collection profile's `tree_view`
+    /// (`assets/default/types/collection_profile.yaml`): a tree keyed
+    /// on `sort_key`, `item_template = render_entity()`, level-0 forced to
+    /// `page_title`. `render_entity` → `shared_render_entity_build` resolves
+    /// the render PURELY from the entity PROFILE and NEVER consults a
+    /// block's own `render_source`; only `render_expr_for`'s
+    /// `has_render_source` arm does, and that arm is reached only by
+    /// directly watching `block:journals` (which `widget_tree_for(&
+    /// journals)` — the A2/A3 test path — does, but the app's
+    /// focus navigation does not). So the day-entries render as generic
+    /// `embedded_page` (collapsed, no `expand_default`) tree items sorted by
+    /// `sort_key` — explaining ALL THREE dogfood symptoms at once (arrival/
+    /// sort_key order instead of content DESC; no `divider()`; mixed/collapsed
+    /// expansion instead of default-expanded).
+    ///
+    /// `#[ignore]` because it is RED on `main` and pins an OPEN architecture
+    /// decision (how a focused Page delegates the main panel to its own
+    /// `render_source`) — see docs/Testing/BugFunnel.md row 34. Compare the two
+    /// dumps below: DIRECT (`widget_tree_for`) shows the real feed; MAIN-PANEL
+    /// (the app path) does not. Remove `#[ignore]` once the delegation lands.
+    /// **Re-measured 2026-08-11 (increment 1). Still RED, still for the reason
+    /// above — and the repair is OUT of this lane's timebox.** Un-ignored run
+    /// (`lane-logs/inc1-RED-r1.log`): the app path lists `block:day-0714`
+    /// BEFORE `block:day-0715` (sort_key order, not `content DESC`), every
+    /// `expand_toggle` reports `expanded=false`, and the tree holds 2 dividers
+    /// against 3 toggles — all three documented symptoms at once, while the
+    /// DIRECT render of the same vault shows `dividers=3 expand_toggles=3`.
+    ///
+    /// Escalated rather than fixed. The feed's ordering, `divider()` and
+    /// `expand_default` all come from `block:journals`' OWN query source
+    /// (`SELECT * FROM journal_feed`) and render source, but the panel compiles
+    /// exactly one query — its static focus-descendants SQL, parameterised
+    /// through `focus_roots` — and returns one change stream for it
+    /// (`block_domain.rs:143-152`). Showing the feed means re-pointing the
+    /// panel's QUERY and its CDC stream at the focus root's own sources per
+    /// navigation. No such delegation exists anywhere today, and it would
+    /// re-point every focused page that owns a `render_source`, not just
+    /// journals — the delivery/navigation architecture change the plan's §8.4
+    /// stop-criterion reserves for its own task.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn journal_feed_via_main_panel_focus_shows_feed() {
+        use holon_pbt_core::capabilities::CapRegion;
+        use holon_pbt_core::capabilities::SutFocusWrite;
+        use holon_pbt_core::capabilities::SutRenderer;
+
+        let journals_org = concat!(
+            "#+ID: journals\n",
+            "* 2026-07-14 :Page:\n",
+            ":PROPERTIES:\n:ID: day-0714\n:END:\n",
+            "Log for the 14th.\n",
+            "** morning note\n",
+            ":PROPERTIES:\n:ID: day-0714-child\n:END:\n",
+            "* 2026-07-15 :Page:\n",
+            ":PROPERTIES:\n:ID: day-0715\n:END:\n",
+            "Log for the 15th.\n",
+            "** evening note\n",
+            ":PROPERTIES:\n:ID: day-0715-child\n:END:\n",
+        );
+
+        let comp = Arc::new(
+            HeadlessFrontendComponent::new(
+                &[("Journals.org", journals_org)],
+                Duration::from_millis(600),
+            )
+            .await,
+        );
+        tokio::time::sleep(SETTLE).await;
+
+        let journals = EntityUri::parse("block:journals").expect("journals id");
+        comp.apply_navigate_focus(CapRegion::Main, &journals).await;
+        tokio::time::sleep(SETTLE).await;
+
+        let root = comp.widget_tree_snapshot().await;
+
+        let mut kinds = std::collections::BTreeMap::<String, usize>::new();
+        for n in root.walk() {
+            *kinds.entry(n.kind.clone()).or_default() += 1;
+        }
+        eprintln!("[repro] MAIN-PANEL (app path) widget kinds: {kinds:?}");
+        for t in root.collect_by_kind("expand_toggle") {
+            eprintln!(
+                "[repro] MAIN-PANEL expand_toggle target={:?} expanded={:?}",
+                t.props.get("target_id"),
+                t.props.get("expanded")
+            );
+        }
+        // Reference: DIRECT render of the journals page (the A2/A3 test path).
+        let feed = comp
+            .widget_tree_for(&journals)
+            .await
+            .expect("direct journals render");
+        eprintln!(
+            "[repro] DIRECT feed dividers={} expand_toggles={} (the feed the app SHOULD show)",
+            feed.collect_by_kind("divider").len(),
+            feed.collect_by_kind("expand_toggle").len(),
+        );
+
+        // Scoped to the panel's delegated subtree, not the whole window: the
+        // panel's own chrome divider and the sidebar's would otherwise be
+        // counted as feed separators.
+        let delegated = root
+            .walk()
+            .find(|n| n.kind == "live_block" && n.entity_id.as_deref() == Some("block:journals"))
+            .unwrap_or_else(|| {
+                panic!("main panel must delegate to block:journals via live_block: {root:#?}")
+            });
+
+        // The app's focus path MUST show the journals feed: default-expanded
+        // embedded pages, newest-first, divider-separated.
+        let toggles = delegated.collect_by_kind("expand_toggle");
+        let pos = |id: &str| {
+            toggles
+                .iter()
+                .position(|t| t.props.get("target_id").map(String::as_str) == Some(id))
+        };
+        assert!(
+            matches!((pos("block:day-0715"), pos("block:day-0714")), (Some(a), Some(b)) if a < b),
+            "main panel must list day-entries NEWEST-FIRST (0715 before 0714): {root:#?}"
+        );
+        for t in &toggles {
+            assert_eq!(
+                t.props.get("expanded").map(String::as_str),
+                Some("true"),
+                "main-panel feed entries must be DEFAULT-EXPANDED: {t:#?}"
+            );
+        }
+        assert_eq!(
+            delegated.collect_by_kind("divider").len(),
+            toggles.len(),
+            "one divider() per feed entry in the main panel: {root:#?}"
+        );
+    }
+
+    /// **Sidebar sort-order (dogfood phase-3 bug 4) — RED-first repro.**
+    ///
+    /// The left sidebar's seed query (`assets/default/index.org`
+    /// `left_sidebar:: src::0`) declares `ORDER BY b.content ASC`, so the
+    /// sidebar's page rows must render ALPHABETICALLY by content. But the
+    /// sidebar render (`left_sidebar::render::0`) is a `tree(sortkey:
+    /// col("sort_key"))`, and the tree builder re-sorts siblings by that
+    /// key — silently OVERRIDING the query's `ORDER BY`. So pages render in
+    /// `sort_key` (creation/ingest) order, not alphabetically.
+    ///
+    /// Repro seed: two sibling `Page` headings created NON-alphabetically —
+    /// `zzz-...` first (lower `sort_key`), `aaa-...` second (higher
+    /// `sort_key`). Content-ASC order is `[aaa, zzz]`; `sort_key` order is
+    /// `[zzz, aaa]`. The declared query order therefore DIVERGES from the
+    /// render sort. This test asserts the sidebar renders `aaa` before
+    /// `zzz` (the declared order):
+    ///   - RED on `sortkey: col("sort_key")` — renders `zzz` first (sort_key).
+    ///   - GREEN once the sidebar render honors the declared content order
+    ///     (`sortkey: col("content")`).
+    ///
+    /// @pbt kind harness
+    /// @pbt covers sidebar-sort-order — the left sidebar's rendered page order
+    /// must match its seed query's declared `ORDER BY content ASC`, not the
+    /// `tree()` render's `sort_key` override.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sidebar_renders_pages_in_declared_content_order() {
+        use holon_pbt_core::capabilities::SutRenderer;
+
+        // Two sibling Page headings under a container doc-root, authored in
+        // REVERSE-alphabetical order so file/ingest order (== sort_key) is the
+        // opposite of content-ASC order.
+        const ORG: &str = concat!(
+            "#+ID: ssort-container\n",
+            "* zzz-sidebar-zebra :Page:\n",
+            ":PROPERTIES:\n:ID: ssort-zebra\n:END:\n",
+            "* aaa-sidebar-apple :Page:\n",
+            ":PROPERTIES:\n:ID: ssort-apple\n:END:\n",
+        );
+
+        let comp = Arc::new(
+            HeadlessFrontendComponent::new(
+                &[("SsortContainer.org", ORG)],
+                Duration::from_millis(600),
+            )
+            .await,
+        );
+        tokio::time::sleep(SETTLE).await;
+
+        // The claim is the ORDER of the two rows, so poll until both have
+        // populated: the sidebar's live_query lands asynchronously and under
+        // suite-level CPU contention a single post-settle snapshot can race it,
+        // which reads as "no rows" rather than as a wrong order.
+        let mut order: Vec<String> = Vec::new();
+        for _ in 0..40 {
+            let root = comp.widget_tree_snapshot_fresh().await;
+            // Locate the left-sidebar subtree (scheme-agnostic match on the
+            // seeded layout block id).
+            let sidebar = root
+                .walk()
+                .find(|n| {
+                    n.entity_id
+                        .as_deref()
+                        .is_some_and(|e| e.contains("default-left-sidebar"))
+                })
+                .unwrap_or(&root);
+            // The rendered page rows carry the page block id as entity_id, in
+            // pre-order (render) order.
+            order = sidebar.walk().filter_map(|n| n.entity_id.clone()).collect();
+            if order.iter().any(|e| e.contains("ssort-apple"))
+                && order.iter().any(|e| e.contains("ssort-zebra"))
+            {
+                break;
+            }
+            tokio::time::sleep(SETTLE).await;
+        }
+        let pos = |needle: &str| order.iter().position(|e| e.contains(needle));
+        let apple = pos("ssort-apple");
+        let zebra = pos("ssort-zebra");
+
+        assert!(
+            apple.is_some() && zebra.is_some(),
+            "both seeded sidebar pages must render (apple={apple:?}, zebra={zebra:?}); \
+             rendered sidebar entity order = {order:?}"
+        );
+        assert!(
+            apple < zebra,
+            "the sidebar must render pages in the seed query's declared ORDER BY content ASC \
+             (aaa-sidebar-apple BEFORE zzz-sidebar-zebra), NOT the tree()'s sort_key/creation \
+             order. Got apple@{apple:?} zebra@{zebra:?}; rendered sidebar entity order = {order:?}"
+        );
+    }
+
+    // **Right-sidebar ordering ORACLE — locks the declared-sort semantics
+    // (vault deliverable: "Oracle-lock the right-sidebar ordering
+    // semantics — compile+execute covered; ORDER BY semantics are not").**
+    //
+    // The right sidebar shows PINNED block subtrees. Its backing query
+    // (`assets/default/index.org` `default-right-sidebar::src::0`) declares
+    // `... RETURN d ORDER BY fr.added_ts DESC, d.sort_key` — so pin ROOTS must
+    // render MOST-RECENTLY-PINNED-FIRST (`added_ts DESC`), which is exactly what
+    // the reference models (`RefBoot::pin_block` move-to-top by
+    // `added_ts_logical`, ref_caps/boot.rs). But the render
+    // (`default-right-sidebar::render::0`) is `tree(sortkey: col("sort_key"))`,
+    // and `OutlineTree::from_rows` (render_eval.rs) sorts ALL rows — INCLUDING
+    // level-0 roots — by that single `sort_key` before partitioning, silently
+    // DISCARDING the query's `ORDER BY fr.added_ts DESC`. So pins render in
+    // `sort_key` (document/ingest) order, not pin-recency order. Same class as
+    // the left-sidebar bug (B, fixed) and BugFunnel F7 (journals feed ignores
+    // declared ORDER BY / sortkey).
+    //
+    // TWO causes were escalated on lane 7. They are split into two tests:
+    //
+    // 1. REGION-LITERAL mismatch — FIXED. The seed GQL filtered `fr.region =
+    //    'right'`, but `focus_pin` writes `navigation_history.region =
+    //    Region::RightSidebar.as_str() = 'right_sidebar'`; SQL equality never
+    //    matched, so the sidebar rendered EMPTY (prod + SUT). The composed keystone
+    //    missed it because the ref interpreter (`pbt::query.rs` `gql_focus_region`)
+    //    mirrored whatever literal the seed carried (both empty → agree). Fixed by
+    //    canonicalizing the seed + `di/registration.rs` corpus to `'right_sidebar'`
+    //    and making `gql_focus_region` PARSE the literal into the `Region` enum
+    //    (unknown literal = loud panic, not a silently-empty filter). The
+    //    `right_sidebar_renders_pins` presence prong below is the permanent
+    //    regression guard (un-ignored, GREEN).
+    //
+    // 2. SORTKEY OVERRIDE — STILL OPEN (surfaces now that pins render). A
+    //    single-column tree() `sortkey` CANNOT express "roots by `added_ts DESC`,
+    //    descendants by `sort_key`", so honoring the query's declared sort is a
+    //    render-DSL fork (per-level sortkey via the existing `rules` mechanism, OR
+    //    making `OutlineTree` preserve the backing query's row order for roots)
+    //    with codebase-wide consequences — escalated to Martin, hence the
+    //    `#[ignore]` on the ordering prong
+    //    (`right_sidebar_renders_pins_in_declared_added_ts_order`). Remove the
+    //    `#[ignore]` once that ruling + fix land.
+
+    /// Shared driver for the two right-sidebar oracles: seed a container doc
+    /// with two sibling non-Page headings whose ingest order (== `sort_key`) is
+    /// REVERSE-alphabetical (`zebra` first → lower `sort_key`, `apple` second →
+    /// higher `sort_key`), pin `zebra` FIRST (added_ts=1) then `apple`
+    /// (added_ts=2), and return the rendered right-sidebar entity order. The
+    /// declared `added_ts DESC` order is `[apple, zebra]` — the OPPOSITE of the
+    /// `sort_key` (ingest) order `[zebra, apple]` the render currently applies.
+    async fn right_sidebar_pin_render_order() -> Vec<String> {
+        use holon_pbt_core::capabilities::SutNavHistoryDrive;
+        use holon_pbt_core::capabilities::SutRenderer;
+
+        const ORG: &str = concat!(
+            "#+ID: rsort-container\n",
+            "* zzz-pin-zebra\n",
+            ":PROPERTIES:\n:ID: rsort-zebra\n:END:\n",
+            "* aaa-pin-apple\n",
+            ":PROPERTIES:\n:ID: rsort-apple\n:END:\n",
+        );
+
+        let comp = Arc::new(
+            HeadlessFrontendComponent::new(
+                &[("RsortContainer.org", ORG)],
+                Duration::from_millis(600),
+            )
+            .await,
+        );
+        tokio::time::sleep(SETTLE).await;
+
+        let zebra = EntityUri::parse("block:rsort-zebra").expect("zebra id");
+        let apple = EntityUri::parse("block:rsort-apple").expect("apple id");
+
+        SutNavHistoryDrive::pin_block(comp.as_ref(), Region::RightSidebar, &zebra).await;
+        tokio::time::sleep(SETTLE).await;
+        SutNavHistoryDrive::pin_block(comp.as_ref(), Region::RightSidebar, &apple).await;
+        tokio::time::sleep(SETTLE).await;
+
+        // Render the FULL layout via the RECURSIVE snapshot (like the
+        // left-sidebar oracle) — `widget_tree_for` uses the shallow
+        // `interpret_pure`, whose nested `live_block`/tree rows stay
+        // placeholders, so the right-sidebar pin rows never resolve. The nested
+        // CDC settle can lag (esp. under concurrent-build CPU load), so
+        // RE-SNAPSHOT until both pins appear or a generous deadline — the
+        // "both render" precondition must not be a timing race, isolating the
+        // real ORDER assertion (same pattern as the journal-feed oracle).
+        let sidebar_order = |root: &holon_pbt_core::capabilities::WidgetSnapshot| -> Vec<String> {
+            root.walk()
+                .find(|n| {
+                    n.entity_id
+                        .as_deref()
+                        .is_some_and(|e| e.contains("default-right-sidebar"))
+                })
+                .map(|s| s.walk().filter_map(|n| n.entity_id.clone()).collect())
+                .unwrap_or_default()
+        };
+        let mut order: Vec<String> = Vec::new();
+        for _ in 0..40 {
+            let root = comp.widget_tree_snapshot().await;
+            order = sidebar_order(&root);
+            let has_both = order.iter().any(|e| e.contains("rsort-apple"))
+                && order.iter().any(|e| e.contains("rsort-zebra"));
+            if has_both {
+                break;
+            }
+            tokio::time::sleep(SETTLE).await;
+        }
+        order
+    }
+
+    /// **Right-sidebar PRESENCE prong (region-literal regression guard).**
+    ///
+    /// The right sidebar's backing GQL (`default-right-sidebar::src::0`)
+    /// filters `fr.region = 'right_sidebar'` — the canonical
+    /// `Region::RightSidebar .as_str()` value `focus_pin` writes to
+    /// `navigation_history.region` and the focus matview keys by. When the
+    /// seed literal drifted to a bare `'right'`, SQL equality never matched
+    /// and the right sidebar rendered ZERO pins in prod (lane-7
+    /// region-literal bug). This asserts that BOTH pinned blocks actually
+    /// render — a permanent RED the moment the seed literal, the
+    /// `di/registration.rs` corpus, or the focus keying drifts off
+    /// `Region::as_str()` again. GREEN once the literal is canonical.
+    ///
+    /// @pbt kind harness
+    /// @pbt covers right-sidebar-region-literal — pinned blocks must render in
+    /// the right sidebar (the seed region filter must equal the value
+    /// `focus_pin` writes, `Region::RightSidebar.as_str()`).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn right_sidebar_renders_pins() {
+        let order = right_sidebar_pin_render_order().await;
+        let pos = |needle: &str| order.iter().position(|e| e.contains(needle));
+        let apple_pos = pos("rsort-apple");
+        let zebra_pos = pos("rsort-zebra");
+        assert!(
+            apple_pos.is_some() && zebra_pos.is_some(),
+            "both pinned blocks must render in the right sidebar (apple={apple_pos:?}, \
+             zebra={zebra_pos:?}); rendered right-sidebar entity order = {order:?}. An EMPTY \
+             sidebar means the seed region filter drifted off Region::RightSidebar.as_str() \
+             ('right_sidebar')."
+        );
+    }
+
+    /// @pbt kind harness
+    /// @pbt covers right-sidebar-sort-order — the right sidebar's rendered pin
+    /// order must match its query's declared `ORDER BY fr.added_ts DESC`
+    /// (pin-recency), not the `tree()` render's `sort_key` override.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn right_sidebar_renders_pins_in_declared_added_ts_order() {
+        let order = right_sidebar_pin_render_order().await;
+        let pos = |needle: &str| order.iter().position(|e| e.contains(needle));
+        let apple_pos = pos("rsort-apple");
+        let zebra_pos = pos("rsort-zebra");
+
+        assert!(
+            apple_pos.is_some() && zebra_pos.is_some(),
+            "both pinned blocks must render in the right sidebar (apple={apple_pos:?}, \
+             zebra={zebra_pos:?}); rendered right-sidebar entity order = {order:?}"
+        );
+        assert!(
+            apple_pos < zebra_pos,
+            "the right sidebar must render pins in the query's declared ORDER BY fr.added_ts DESC \
+             (aaa-pin-apple pinned LAST → FIRST, before zzz-pin-zebra), NOT the tree()'s sort_key/ \
+             ingest order. Got apple@{apple_pos:?} zebra@{zebra_pos:?}; rendered order = {order:?}"
+        );
     }
 }

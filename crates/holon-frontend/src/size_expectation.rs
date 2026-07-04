@@ -229,6 +229,18 @@ impl SizeBounds {
         }
     }
 
+    /// "A user can aim at this" — an interaction wrapper must be laid out with
+    /// real extent on both axes. A degenerate rect is unclickable AND its
+    /// centre resolves onto whatever is painted at the clip edge, so a driver
+    /// aiming here silently drives a neighbour instead.
+    ///
+    /// Deliberately 1px rather than a platform tap-target size: the defect
+    /// class is total collapse, and a larger floor would encode theme
+    /// decisions the geometry layer has no business asserting.
+    pub fn non_degenerate() -> Self {
+        Self::at_least(1.0, 1.0)
+    }
+
     /// "I'm allowed to collapse to nothing" — the live_block / spacer
     /// case. Same as [`Default`], named for clarity at call sites.
     pub fn collapsible() -> Self {
@@ -396,23 +408,13 @@ mod tests {
     use super::*;
 
     /// Test EvalCtx with hand-picked observations.
+    #[derive(Default)]
     struct TestCtx {
         self_w: Option<f32>,
         self_h: Option<f32>,
         children_h: Vec<f32>,
         child_count: usize,
         viewport_y: Option<f32>,
-    }
-    impl Default for TestCtx {
-        fn default() -> Self {
-            Self {
-                self_w: None,
-                self_h: None,
-                children_h: vec![],
-                child_count: 0,
-                viewport_y: None,
-            }
-        }
     }
     impl EvalCtx for TestCtx {
         fn self_observed(&self, a: Axis) -> Option<f32> {

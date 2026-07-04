@@ -21,8 +21,16 @@ Operations flow without blocking the UI:
 ```
 User Action → Operation Dispatch → External/Internal System
                                                           ↓
-UI <- futures-signals ← CDC Stream ← QueryableCache ← Sync Provider
+Frontend ← Signal<ViewModel> ← ReactiveEngine ← UiEvent ← Turso IVM (CDC)
 ```
+
+The read path is a persistent-node reactive cache: `ReactiveEngine`
+(`crates/holon-frontend/src/reactive.rs`) replaced the earlier
+`CdcAccumulator` + `BlockWatchRegistry` + `AppState` trio. Each watched block
+or live query owns a `ReactiveRenderedRows` that IS the cache, accumulator, and
+`Signal<ViewModel>` source; `ReactiveViewModel`
+(`crates/holon-frontend/src/reactive_view_model.rs`) is the persistent-node
+shared-VM boundary consumed by every frontend.
 
 - Operations are fire-and-forget
 - Effects are observed through sync
@@ -84,7 +92,6 @@ crates/
 ├── holon-mcp-client/            # Reusable MCP client → OperationProvider bridge
 ├── holon-orgmode/               # Org-mode file watching, DI wiring, sync controller
 ├── holon-org-format/            # Pure org-mode parsing, rendering, diffing (no disk I/O)
-├── holon-markdown/              # Obsidian-style Markdown parsing + FileFormatAdapter
 ├── holon-filesystem/            # FileSystem + FileChangeSource ports and adapters
 ├── holon-pbt-core/              # Cross-PBT transition traits shared between PBT crates
 ├── holon-layout-testing/        # Shared layout-testing primitives for UI PBTs
@@ -217,7 +224,12 @@ pub struct OperationDescriptor {
     pub param_mappings: Vec<ParamMapping>,
     pub trigger: Option<Trigger>,
     pub bound_params: HashMap<String, Value>,
-    pub precondition: Option<Arc<Box<PreconditionChecker>>>,
+    /// The declared precondition (ADR 0031). Non-defaultable: an op that
+    /// declares nothing carries `OpGuard::None`, a stated fact rather than an
+    /// absence. Plain serializable data — a relational guard from the Pattern
+    /// AST, parsed by `#[require("…")]` at macro-expansion time, never a
+    /// closure.
+    pub guard: OpGuard,
 }
 ```
 
@@ -238,6 +250,7 @@ Detailed documentation lives in `docs/Architecture/`:
 | [integrations.md](Architecture/Integrations.md) | External System Pattern, MCP Client, Dependency Injection, Frontend Architecture |
 | [schema.md](Architecture/Schema.md) | Table/view-level schema reference: module registry, block base table + junctions + hydration matview, hierarchy, navigation, sync/operations/links/identity, graph EAV |
 | [engine.md](Architecture/Engine.md) | Standalone Petri-Net Engine, Fractional Indexing, Platform Support |
+| [simulation.md](Architecture/Simulation.md) | Hypothetical state: search / alternatives / preview regimes, twin-only search, use-case gallery, PN reification guards |
 | [sync.md](Architecture/Sync.md) | Loro CRDT, CollaborativeDoc, LoroBackend, sync wiring (LiveData<Block> + direct cache feeds), P2P, Consistency Model |
 | [replication.md](Architecture/Replication.md) | Target replication model: capability profiles, per-component base + 3-way merge, single-owner ordering, consolidator/sink roles, two transports |
 | [archlint.md](Architecture/Archlint.md) | Architecture linter (ast-grep YAML + ripgrep smells + dylint cdylib), Claude Code PostToolUse hook, ALLOW protocol, cargo arch-test wrapper |

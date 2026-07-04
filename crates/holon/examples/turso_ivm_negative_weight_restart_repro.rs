@@ -25,15 +25,22 @@ use turso_core::UnixIO;
 fn open_db(path: &str) -> (Arc<Database>, turso::Connection) {
     let io = Arc::new(UnixIO::new().expect("UnixIO"));
     let opts = DatabaseOpts::default().with_views(true);
-    let db = Database::open_file_with_flags(io, path, OpenFlags::default(), opts, None)
-        .expect("open database");
+    let db = Database::open_file_with_flags(
+        io,
+        path,
+        OpenFlags::default(),
+        opts,
+        None,
+        Arc::new(turso_core::SqliteDialect),
+    )
+    .expect("open database");
     let conn_core = db.connect().expect("connect");
     let config = turso_sdk_kit::rsapi::TursoDatabaseConfig {
         path: String::new(),
         experimental_features: None,
         async_io: false,
         encryption: None,
-        vfs: None,
+        vfs: turso_sdk_kit::IoBackend::Default,
         io: None,
         db_file: None,
     };

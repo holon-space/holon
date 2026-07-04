@@ -1,5 +1,11 @@
 //! [`GpuiWindowComponent`] — the windowed `SutLayout` provider.
 //!
+//! @pbt kind sut-arm
+//! @pbt covers window-slice — live gpui window `BoundsRegistry` read through
+//! the   `GeometryProvider` port; supplies the real element-geometry
+//! `SutLayout`   cap the headless frontend arm cannot (E4 of the E2ESut
+//! dissolution).
+//!
 //! Holds a `Box<dyn GeometryProvider>` (a live window's `BoundsRegistry` clone,
 //! a `Send` handle) and realizes the geometry caps by reading it — the same
 //! logic `E2ESut`'s `SutLayout` impl uses (it too reads an injected
@@ -32,7 +38,7 @@ use holon_pbt_core::capabilities::WidgetSnapshot;
 use holon_pbt_core::composition::CapMap;
 use holon_pbt_core::composition::CapProvider;
 
-use crate::pbt::sut_capabilities::view_model_to_snapshot;
+use crate::pbt::vm_snapshot::view_model_to_snapshot;
 
 /// A composed-slice component providing windowed [`SutLayout`] geometry over a
 /// live window's `BoundsRegistry` (via the abstract [`GeometryProvider`] port).
@@ -83,6 +89,7 @@ impl SutLayout for GpuiWindowComponent {
                     expected_size_violation,
                     is_error_widget: info.widget_type.as_ref() == "error",
                     focused: info.focused,
+                    styled_runs: info.styled_runs.as_deref().map(<[_]>::to_vec),
                 }
             })
             .collect()
@@ -669,9 +676,9 @@ impl SutFrontendEmissions for GpuiFrontendEngineComponent {
             let live_ids: Vec<&String> = live_sibs.iter().collect();
             if live_ids != want_ids {
                 prop_diffs.push(format!(
-                    "  ORDER under parent {parent}: live renders {live_ids:?} but sort_key \
-                     order is {want_ids:?} — the reactive collection is not ordering by sort_key \
-                     (the fractional-index authority)"
+                    "  ORDER under parent {parent}: live renders {live_ids:?} but sort_key order \
+                     is {want_ids:?} — the reactive collection is not ordering by sort_key (the \
+                     fractional-index authority)"
                 ));
             }
         }
@@ -712,6 +719,12 @@ impl SutRenderer for GpuiFrontendEngineComponent {
         // blocks) is present and `inv-displayed-text/viewmodel` can compare it.
         let vm = self.engine.snapshot(&root_uri);
         view_model_to_snapshot(&vm)
+    }
+
+    /// No internal caching here — each `widget_tree_snapshot` is a fresh
+    /// `engine.snapshot`, so the fresh variant is a plain forward.
+    async fn widget_tree_snapshot_fresh(&self) -> WidgetSnapshot {
+        self.widget_tree_snapshot().await
     }
 
     async fn widget_tree_for(&self, block_id: &EntityUri) -> Option<WidgetSnapshot> {

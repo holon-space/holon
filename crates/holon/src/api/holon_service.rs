@@ -12,6 +12,7 @@ use anyhow::Context;
 use anyhow::Result;
 use holon_api::EntityName;
 use holon_api::EntityUri;
+use holon_api::HistoryStore;
 use holon_api::OperationDescriptor;
 use holon_api::QueryContext;
 use holon_api::QueryLanguage;
@@ -57,11 +58,25 @@ pub struct ColumnDef {
 /// introspection, etc.
 pub struct HolonService {
     engine: Arc<BackendEngine>,
+    /// The provenance origin stamped on operations dispatched through this
+    /// facade. A human frontend/web-worker session uses [`OpOrigin::User`]; the
+    /// embedded MCP server constructs the facade with [`OpOrigin::Agent`] so
+    /// agent-driven ops carry their session/tool-call identity (C2a).
+    origin: holon_api::OpOrigin,
 }
 
 impl HolonService {
+    /// A human-session facade (UI / web-worker): ops are stamped
+    /// [`OpOrigin::User`].
     pub fn new(engine: Arc<BackendEngine>) -> Self {
-        Self { engine }
+        Self::new_with_origin(engine, holon_api::OpOrigin::User)
+    }
+
+    /// A facade whose dispatched ops carry `origin` (e.g. the MCP server passes
+    /// an [`OpOrigin::Agent`] carrying the driving agent's session/tool-call
+    /// id).
+    pub fn new_with_origin(engine: Arc<BackendEngine>, origin: holon_api::OpOrigin) -> Self {
+        Self { engine, origin }
     }
 
     pub fn engine(&self) -> &Arc<BackendEngine> {
@@ -71,25 +86,32 @@ impl HolonService {
     // ── Query operations ──────────────────────────────────────────────
 
     /// Build a `QueryContext` from explicit context_id / context_parent_id.
+    ///
+    /// `None` context_id means "no filter" → `Ok(None)` (the caller queries
+    /// unscoped). A context_id whose path cannot be resolved is an `Err` (#45),
+    /// surfaced as a visible degraded banner — never a fabricated `/{id}` path
+    /// that would silently mis-scope descendants.
     pub async fn build_context(
         &self,
         context_id: Option<&str>,
         context_parent_id: Option<&str>,
-    ) -> Option<QueryContext> {
-        let id = context_id?;
+    ) -> Result<Option<QueryContext>> {
+        let Some(id) = context_id else {
+            return Ok(None);
+        };
         let uri = EntityUri::parse(id).expect("context_id is not a valid EntityUri");
         let path = self
             .engine
             .blocks()
             .lookup_block_path(&uri)
             .await
-            .unwrap_or_else(|_| format!("/{}", id));
-        Some(QueryContext::for_block_with_path(
+            .with_context(|| format!("cannot build query context for block '{id}'"))?;
+        Ok(Some(QueryContext::for_block_with_path(
             &uri,
             context_parent_id
                 .map(|s| EntityUri::parse(s).expect("context_parent_id is not a valid EntityUri")),
             path,
-        ))
+        )))
     }
 
     /// Compile a query (PRQL / GQL / SQL) to its final SQL form without
@@ -151,6 +173,33 @@ impl HolonService {
         })
     }
 
+    // ── History / provenance (C2b, ADR 0024 P8) ───────────────────────
+
+    /// Query the op/effect history relation (`block_history`) through the typed
+    /// [`HistoryStore`] accessor. The relation is a disclosed ephemeral cache;
+    /// raw SQL over `block_history` via [`Self::execute_raw_sql`] is equally
+    /// sanctioned (Martin's ruling 2026-07-11) — this is the thin typed
+    /// surface.
+    pub async fn query_history(
+        &self,
+        filter: &holon_api::HistoryQuery,
+    ) -> Result<Vec<holon_api::HistoryEvent>> {
+        self.history_store().query(filter).await
+    }
+
+    /// Count events matching `filter` — the "postponed N times" primitive.
+    pub async fn count_history(&self, filter: &holon_api::HistoryQuery) -> Result<u64> {
+        self.history_store().count(filter).await
+    }
+
+    /// The typed history accessor over this engine's db handle. The store
+    /// computes its own honest rebuild fidelity (`HistoryFidelity::Partial`);
+    /// for reads it is disclosure only. The `block_history` table is boot-owned
+    /// by `HistorySchemaModule`, so the accessor never lazily creates it.
+    fn history_store(&self) -> crate::api::TursoHistoryStore {
+        crate::api::TursoHistoryStore::new(self.engine.db_handle().clone())
+    }
+
     /// Compile and start watching a query for CDC changes.
     /// Returns the initial-data stream.
     pub async fn query_and_watch(
@@ -169,16 +218,19 @@ impl HolonService {
 
     // ── Operation dispatch ────────────────────────────────────────────
 
-    /// Execute an operation on an entity, returning the optional response
-    /// value.
+    /// Execute an operation on an entity, returning its response value and
+    /// whether its effect is proven to have landed.
     pub async fn execute_operation(
         &self,
         entity_name: &EntityName,
         op_name: &str,
         params: StorageEntity,
-    ) -> Result<Option<Value>> {
+    ) -> Result<holon_api::OpOutcome> {
+        // HolonService is a session facade (human web-worker/UI, or the MCP
+        // server acting for an agent); its configured `origin` states which.
+        // Rule/sync/ingest ops do not route through it.
         self.engine
-            .execute_operation(entity_name, op_name, params)
+            .execute_operation(entity_name, op_name, params, self.origin.clone())
             .await
             .context(format!(
                 "Failed to execute operation '{}' on entity '{}'",
@@ -193,11 +245,11 @@ impl HolonService {
 
     // ── Undo / Redo ───────────────────────────────────────────────────
 
-    pub async fn undo(&self) -> Result<bool> {
+    pub async fn undo(&self) -> Result<holon_api::UndoOutcome> {
         self.engine.undo().await
     }
 
-    pub async fn redo(&self) -> Result<bool> {
+    pub async fn redo(&self) -> Result<holon_api::UndoOutcome> {
         self.engine.redo().await
     }
 

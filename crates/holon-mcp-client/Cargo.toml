@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+# `workspace-hack` is the cargo-hakari feature-unification crate: every
+# member depends on it and no member references it in source, by design.
+[package.metadata.cargo-machete]
+ignored = ["workspace-hack"]
+
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
@@ -18,17 +23,17 @@ tracing.workspace = true
 rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", tag = "rmcp-v0.12.0", features = ["client", "transport-streamable-http-client-reqwest", "transport-child-process", "auth"] }
 
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots"] }
+roxmltree = "0.20"
 chrono.workspace = true
 holon-api.workspace = true
 holon-core.workspace = true
 holon-profiles.workspace = true
 holon-turso.workspace = true
 holon-macros.workspace = true
-turso.workspace = true
 turso_core.workspace = true
 turso_ext.workspace = true
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util"] }
 tempfile.workspace = true

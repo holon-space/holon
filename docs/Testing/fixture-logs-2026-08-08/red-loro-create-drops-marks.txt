@@ -1,0 +1,264 @@
+### PRESERVED EVIDENCE — task #23-successor (template-instance marks), 2026-08-08
+### source: lane-logs/red-loro-create-drops-marks.log (gitignored), verbatim and COMPLETE
+### signature: marks: sut=None ref=Some([...Bold]) / first-divergent-layer: store/CRDT
+###
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.pathfinder_simd
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.psm
+warning: workspace (manifest) generated 2 warnings
+   Compiling holon-loro v0.1.0 (/Users/martin/Workspaces/pkm/holon/.claude/worktrees/agent-a53e6a7328cf365e6/crates/holon-loro)
+   Compiling holon-sharing v0.1.0 (/Users/martin/Workspaces/pkm/holon/.claude/worktrees/agent-a53e6a7328cf365e6/crates/holon-sharing)
+   Compiling holon v0.1.0 (/Users/martin/Workspaces/pkm/holon/.claude/worktrees/agent-a53e6a7328cf365e6/crates/holon)
+   Compiling holon-app v0.1.0 (/Users/martin/Workspaces/pkm/holon/.claude/worktrees/agent-a53e6a7328cf365e6/crates/holon-app)
+   Compiling holon-loro-testing v0.1.0 (/Users/martin/Workspaces/pkm/holon/.claude/worktrees/agent-a53e6a7328cf365e6/crates/holon-loro-testing)
+   Compiling holon-mcp v0.1.0 (/Users/martin/Workspaces/pkm/holon/.claude/worktrees/agent-a53e6a7328cf365e6/frontends/mcp)
+   Compiling holon-integration-tests v0.1.0 (/Users/martin/Workspaces/pkm/holon/.claude/worktrees/agent-a53e6a7328cf365e6/crates/holon-integration-tests)
+warning: unused import: `crate::pbt::composed::harness::BurnedPairs`
+  --> crates/holon-integration-tests/src/pbt/composed/wide_e2e.rs:55:5
+   |
+55 | use crate::pbt::composed::harness::BurnedPairs;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `holon_pbt_core::capabilities::EntityUri`
+  --> crates/holon-integration-tests/src/pbt/invariants/bodies/every_page_has_its_own_file.rs:43:5
+   |
+43 | use holon_pbt_core::capabilities::EntityUri;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `holon_api::EntityRef`
+  --> crates/holon-integration-tests/src/pbt/invariants/bodies/undo_redo_reference_heal.rs:81:5
+   |
+81 | use holon_api::EntityRef;
+   |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::collections::HashSet`
+  --> crates/holon-integration-tests/src/pbt/reference_state.rs:24:5
+   |
+24 | use std::collections::HashSet;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `holon_orgmode::models::OrgBlockExt`
+    --> crates/holon-integration-tests/src/pbt/reference_state.rs:1592:13
+     |
+1592 |         use holon_orgmode::models::OrgBlockExt;
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `seed_ref` is never used
+  --> crates/holon-integration-tests/src/pbt/composed/subsystem_seed.rs:81:15
+   |
+81 | pub(crate) fn seed_ref(blocks: Vec<Block>) -> ReferenceState {
+   |               ^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `seed_ref_with_editor` is never used
+   --> crates/holon-integration-tests/src/pbt/composed/subsystem_seed.rs:102:15
+    |
+102 | pub(crate) fn seed_ref_with_editor(
+    |               ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `ref_non_seed_ids` is never used
+   --> crates/holon-integration-tests/src/pbt/composed/subsystem_seed.rs:115:15
+    |
+115 | pub(crate) fn ref_non_seed_ids(state: &ReferenceState) -> BTreeSet<EntityUri> {
+    |               ^^^^^^^^^^^^^^^^
+
+warning: function `assert_ref_seeded` is never used
+   --> crates/holon-integration-tests/src/pbt/composed/subsystem_seed.rs:140:15
+    |
+140 | pub(crate) fn assert_ref_seeded(state: &ReferenceState, expected: &[EntityUri]) {
+    |               ^^^^^^^^^^^^^^^^^
+
+warning: `holon-integration-tests` (lib) generated 9 warnings (run `cargo fix --lib -p holon-integration-tests` to apply 5 suggestions)
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `holon-integration-tests` (test "hand_authored_regressions") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 13.60s
+     Running tests/hand_authored_regressions.rs (target/debug/deps/hand_authored_regressions-e56e09603302aa1d)
+
+running 9 tests
+
+thread 'invalid_pinned_wiring_is_loud' (475692347) panicked at crates/holon-integration-tests/tests/hand_authored_regressions.rs:125:13:
+<inline>: initial_state carries an INVALID wiring manifest Wiring { storage_adapters: {}, sync_adapters: {}, actors: {} }: wiring has no storage adapter (nothing to display/persist) — `init_state` only ever draws valid manifests, so this case could not have come from a real run
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'mistyped_initial_state_key_is_loud' (475692348) panicked at crates/holon-integration-tests/tests/hand_authored_regressions.rs:235:9:
+hand-authored regression "<inline>":1: unknown top-level key "initail_state" — a mistyped key is SILENTLY DROPPED by serde, so this case would replay something other than what it names. Known keys: ["name", "description", "environment", "initial_state", "transitions"]
+  line: {"name": "n", "transitions": [], "initail_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}}
+test absent_initial_state_parses_as_none ... ok
+
+thread 'unknown_initial_state_field_is_loud' (475692352) panicked at crates/holon-integration-tests/tests/hand_authored_regressions.rs:227:9:
+hand-authored regression "<inline>":1 failed to parse: unknown field `seed`, expected `wiring` at line 1 column 135
+  line: {"name": "n", "transitions": [], "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}, "seed": 7}}
+test recorded_env_flag_mismatch_is_reported ... ok
+
+thread 'nested_unknown_wiring_field_is_loud' (475692349) panicked at crates/holon-integration-tests/tests/hand_authored_regressions.rs:245:5:
+assertion `left == right` failed: hand-authored regression "<inline>":1: `initial_state` does not round-trip — the authored JSON and the parsed value differ, so replaying this case would start from a DIFFERENT state than the run it pins
+  left: Object {"wiring": Object {"storage_adapters": Array [String("Turso")], "sync_adapters": Array [], "actors": Array [], "peers": Array [String("x")]}}
+ right: Object {"wiring": Object {"storage_adapters": Array [String("Turso")], "sync_adapters": Array [], "actors": Array []}}
+[hand-authored regression] running case "watch-rows-template-child-parent" (3 transitions)
+test mistyped_initial_state_key_is_loud - should panic ... ok
+test nested_unknown_wiring_field_is_loud - should panic ... ok
+test invalid_pinned_wiring_is_loud - should panic ... ok
+test unknown_initial_state_field_is_loud - should panic ... ok
+
+Running a test case with 3 transitions.
+[wide-e2e wiring] drawn: storage={Loro, Org, Markdown, Turso} sync={Todoist} actors={MCPServer, ActionEngine} -> booted storage={Loro, Org, Markdown, Turso} projections={ViewModel, EditorState}
+
+Running a test case with 5 transitions.
+[wide-e2e wiring] drawn: storage={Loro, Org, Markdown, Turso} sync={Todoist} actors={MCPServer, ActionEngine} -> booted storage={Loro, Org, Markdown, Turso} projections={ViewModel, EditorState}
+test pinned_initial_state_round_trips_and_rebuilds_the_draw ... ok
+[RESEED-ORACLE] case summary: incremental=4 full=8 [coldboot=8] steady_leaks=0
+[2m2026-08-08T03:50:00.677648Z[0m [33m WARN[0m [2mholon_api::computed[0m[2m:[0m type-aware binding: DECLARED column absent from row — a computed field / condition requires it but the projection did not carry it. This is a real projection gap (NOT the expected heterogeneity of an optional property). Warned once per (context, column) this process. [3mcontext[0m[2m=[0m"bullet_shape" [3mcolumn[0m[2m=[0m"collapsed"
+[2m2026-08-08T03:50:00.677721Z[0m [33m WARN[0m [2mholon_api::computed[0m[2m:[0m type-aware binding: DECLARED column absent from row — a computed field / condition requires it but the projection did not carry it. This is a real projection gap (NOT the expected heterogeneity of an optional property). Warned once per (context, column) this process. [3mcontext[0m[2m=[0m"is_image" [3mcolumn[0m[2m=[0m"content_type"
+[2m2026-08-08T03:50:00.677738Z[0m [33m WARN[0m [2mholon_api::computed[0m[2m:[0m type-aware binding: DECLARED column absent from row — a computed field / condition requires it but the projection did not carry it. This is a real projection gap (NOT the expected heterogeneity of an optional property). Warned once per (context, column) this process. [3mcontext[0m[2m=[0m"is_legacy_rule" [3mcolumn[0m[2m=[0m"source_language"
+[2m2026-08-08T03:50:00.677758Z[0m [33m WARN[0m [2mholon_api::computed[0m[2m:[0m type-aware binding: DECLARED column absent from row — a computed field / condition requires it but the projection did not carry it. This is a real projection gap (NOT the expected heterogeneity of an optional property). Warned once per (context, column) this process. [3mcontext[0m[2m=[0m"is_source" [3mcolumn[0m[2m=[0m"content_type"
+[2m2026-08-08T03:50:00.677773Z[0m [33m WARN[0m [2mholon_api::computed[0m[2m:[0m type-aware binding: DECLARED column absent from row — a computed field / condition requires it but the projection did not carry it. This is a real projection gap (NOT the expected heterogeneity of an optional property). Warned once per (context, column) this process. [3mcontext[0m[2m=[0m"is_holon_source" [3mcolumn[0m[2m=[0m"source_language"
+[2m2026-08-08T03:50:00.677788Z[0m [33m WARN[0m [2mholon_api::computed[0m[2m:[0m type-aware binding: DECLARED column absent from row — a computed field / condition requires it but the projection did not carry it. This is a real projection gap (NOT the expected heterogeneity of an optional property). Warned once per (context, column) this process. [3mcontext[0m[2m=[0m"is_rule_head" [3mcolumn[0m[2m=[0m"source_language"
+[2m2026-08-08T03:50:00.677802Z[0m [33m WARN[0m [2mholon_api::computed[0m[2m:[0m type-aware binding: DECLARED column absent from row — a computed field / condition requires it but the projection did not carry it. This is a real projection gap (NOT the expected heterogeneity of an optional property). Warned once per (context, column) this process. [3mcontext[0m[2m=[0m"is_program" [3mcolumn[0m[2m=[0m"parent_id"
+[2m2026-08-08T03:50:00.677819Z[0m [33m WARN[0m [2mholon_api::computed[0m[2m:[0m type-aware binding: DECLARED column absent from row — a computed field / condition requires it but the projection did not carry it. This is a real projection gap (NOT the expected heterogeneity of an optional property). Warned once per (context, column) this process. [3mcontext[0m[2m=[0m"is_widget_only" [3mcolumn[0m[2m=[0m"widget_only"
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+
+Applying transition 1/3: CreateBlockUnderFocus(CreateBlockUnderFocus { content: "host", id: Some(EntityUri("block:tpl-host")) })
+
+Applying transition 1/5: CreateBlockUnderFocus(CreateBlockUnderFocus { content: "origin", id: Some(EntityUri("block:echoorigin")) })
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+[inv-sql-budget] CreateBlockUnderFocus: reads=18 (dedup 10)/22 writes=1/2 ddl=0/0 tol=41 max_q=9ms wall=152ms spans=52 rss=+0.3MB (cum=+0.3MB) state=b28/d3/w0/r5 apply=0ms check=0ms settle=0ms pre_inv16=0ms live_mirrors=0ms assert_quiet=0ms drain_cdc=0ms inv10_drain=0ms files_stable=0ms mark_proc=0ms×0
+[inv-sql-budget N+1] CreateBlockUnderFocus: 3 distinct SQL texts fired multiple times:
+  6x (2 distinct bindings — fan-out) [REDUNDANT x4/binding]: SELECT b.id, b.parent_id, b.sort_key, b.content, b.content_type, b.source_language, b.source_name, b.properties, b.marks, b.collapsed, b.widget_only, b.completed, b.block_type, b.created_at, b.updated …#a27bde55e1223532… roup_array(required_id) FROM block_requires WHERE block_id = b.id), '[]') AS requires, COALESCE((SELECT json_group_array(lesson_id) FROM advice_suppressed WHERE anchor_id = b.id), '[]') AS advice_suppressed FROM block_raw b WHERE b.id = $id origins=5
+         2x origin=<unknown-parent> ▸ org.on_block_feed ▸ org.on_block_changed
+         1x origin=<unknown-parent> ▸ home.locate
+         1x origin=<unknown-parent> ▸ home.locate ▸ home.resolve_doc
+         1x origin=home.locate
+         1x origin=home.locate ▸ home.resolve_doc
+  4x (identical bindings — redundant) [REDUNDANT x4/binding]: SELECT id, parent_id, content, content_type, source_language, properties, marks FROM block_raw WHERE id != 'sentinel:no_parent' origin=<no-parent>
+  2x (identical bindings — redundant) [REDUNDANT x2/binding]: WITH RECURSIVE descendants(id, depth_acc) AS ( SELECT b.id, 0 FROM block_raw b LEFT JOIN block_tags bt ON bt.block_id = b.id AND bt.tag = 'Page' WHERE b.parent_id = $doc_id AND bt.block_id IS NULL UNI …#840c61fefd18e627… k_raw b JOIN descendants d ON b.parent_id = d.id LEFT JOIN block_tags bt ON bt.block_id = b.id AND bt.tag = 'Page' WHERE bt.block_id IS NULL AND d.depth_acc < 100 ) SELECT b.id, b.parent_id FROM block_raw b JOIN descendants d ON d.id = b.id origin=<unknown-parent> ▸ org.on_block_feed ▸ org.on_block_changed
+
+Applying transition 2/3: InstantiateTemplate(InstantiateTemplate { parent_id: EntityUri("block:tpl-host"), date: "aaa", mood: "aaa" })
+[inv-sql-budget] CreateBlockUnderFocus: reads=18 (dedup 10)/22 writes=1/2 ddl=0/0 tol=41 max_q=10ms wall=154ms spans=53 rss=+0.2MB (cum=+0.2MB) state=b28/d3/w0/r5 apply=0ms check=0ms settle=0ms pre_inv16=0ms live_mirrors=0ms assert_quiet=0ms drain_cdc=0ms inv10_drain=0ms files_stable=0ms mark_proc=0ms×0
+[inv-sql-budget N+1] CreateBlockUnderFocus: 3 distinct SQL texts fired multiple times:
+  6x (2 distinct bindings — fan-out) [REDUNDANT x4/binding]: SELECT b.id, b.parent_id, b.sort_key, b.content, b.content_type, b.source_language, b.source_name, b.properties, b.marks, b.collapsed, b.widget_only, b.completed, b.block_type, b.created_at, b.updated …#a27bde55e1223532… roup_array(required_id) FROM block_requires WHERE block_id = b.id), '[]') AS requires, COALESCE((SELECT json_group_array(lesson_id) FROM advice_suppressed WHERE anchor_id = b.id), '[]') AS advice_suppressed FROM block_raw b WHERE b.id = $id origins=4
+         2x origin=home.locate
+         2x origin=home.locate ▸ home.resolve_doc
+         1x origin=<unknown-parent> ▸ org.on_block_feed ▸ org.on_block_changed
+         1x origin=org.on_block_feed ▸ org.on_block_changed
+  4x (identical bindings — redundant) [REDUNDANT x4/binding]: SELECT id, parent_id, content, content_type, source_language, properties, marks FROM block_raw WHERE id != 'sentinel:no_parent' origin=<no-parent>
+  2x (identical bindings — redundant) [REDUNDANT x2/binding]: WITH RECURSIVE descendants(id, depth_acc) AS ( SELECT b.id, 0 FROM block_raw b LEFT JOIN block_tags bt ON bt.block_id = b.id AND bt.tag = 'Page' WHERE b.parent_id = $doc_id AND bt.block_id IS NULL UNI …#840c61fefd18e627… k_raw b JOIN descendants d ON b.parent_id = d.id LEFT JOIN block_tags bt ON bt.block_id = b.id AND bt.tag = 'Page' WHERE bt.block_id IS NULL AND d.depth_acc < 100 ) SELECT b.id, b.parent_id FROM block_raw b JOIN descendants d ON d.id = b.id origins=2
+         1x origin=<unknown-parent> ▸ org.on_block_feed ▸ org.on_block_changed
+         1x origin=org.on_block_feed ▸ org.on_block_changed
+
+Applying transition 2/5: CreateBlockUnderFocus(CreateBlockUnderFocus { content: "child", id: Some(EntityUri("block:echochild")) })
+[2m2026-08-08T03:50:02.046101Z[0m [33m WARN[0m [2mholon_filesystem::file_sync_controller[0m[2m:[0m [FileSyncController] write-back SKIPPED: the holder's membership does not match the authority's, so this render would project a partially-folded document over disk. The diff that resolves it is already in flight and will re-trigger the render. (Further skips of this document log at debug until it settles.) [3mdoc[0m[2m=[0mblock:structural-page [3mdifference[0m[2m=[0mblock:d6fa49d4-b277-50ee-8566-6406d6741a5c@block:21515cbe-4edd-56ad-bbc5-5b9f46cb0795 [3mheld[0m[2m=[0m5 [3mauthority[0m[2m=[0m6
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+[inv-sql-budget] InstantiateTemplate: reads=51 (dedup 27)/42 writes=5/6 ddl=0/0 tol=2 max_q=12ms wall=127ms spans=156 rss=+0.9MB (cum=+2.2MB) state=b32/d3/w0/r7 apply=0ms check=0ms settle=0ms pre_inv16=0ms live_mirrors=0ms assert_quiet=0ms drain_cdc=0ms inv10_drain=0ms files_stable=0ms mark_proc=0ms×0
+[inv-sql-budget N+1] InstantiateTemplate: 6 distinct SQL texts fired multiple times:
+  17x (6 distinct bindings — fan-out) [REDUNDANT x5/binding]: SELECT b.id, b.parent_id, b.sort_key, b.content, b.content_type, b.source_language, b.source_name, b.properties, b.marks, b.collapsed, b.widget_only, b.completed, b.block_type, b.created_at, b.updated …#a27bde55e1223532… roup_array(required_id) FROM block_requires WHERE block_id = b.id), '[]') AS requires, COALESCE((SELECT json_group_array(lesson_id) FROM advice_suppressed WHERE anchor_id = b.id), '[]') AS advice_suppressed FROM block_raw b WHERE b.id = $id origins=6
+         4x origin=<unknown-parent> ▸ home.locate ▸ home.resolve_doc
+         4x origin=home.locate
+         4x origin=home.locate ▸ home.resolve_doc
+         2x origin=<unknown-parent> ▸ home.locate
+         2x origin=<unknown-parent> ▸ org.on_block_feed ▸ org.on_block_changed
+         1x origin=<unknown-parent> ▸ org.on_block_feed
+  13x (4 distinct bindings — fan-out) [REDUNDANT x4/binding]: WITH RECURSIVE descendants(id, depth_acc) AS ( SELECT b.id, 0 FROM block_raw b LEFT JOIN block_tags bt ON bt.block_id = b.id AND bt.tag = 'Page' WHERE b.parent_id = $doc_id AND bt.block_id IS NULL UNI …#3aa0b08aa7372ff2…  WHERE block_id = b.id), '[]') AS requires, COALESCE((SELECT json_group_array(lesson_id) FROM advice_suppressed WHERE anchor_id = b.id), '[]') AS advice_suppressed FROM block_raw b JOIN descendants d ON d.id = b.id ORDER BY b.sort_key, b.id origins=2
+         9x origin=<no-parent>
+         4x origin=<unknown-parent>
+  5x (5 distinct bindings — fan-out) [LEGITIMATE]: INSERT INTO undo_log (id, seq, state_json) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET seq = excluded.seq, state_json = excluded.state_json origin=backend.execute_operation
+  4x (identical bindings — redundant) [REDUNDANT x4/binding]: UPDATE operation SET status = $new_status WHERE status = $old_status origin=backend.execute_operation ▸ dispatcher.execute_operation
+  4x (4 distinct bindings — fan-out) [LEGITIMATE]: INSERT INTO operation (operation, inverse, status, created_at, display_name, entity_name, op_name)
+                          VALUES ($operation, $inverse, $status, $created_at, $display_name, $entity_name, $op_name)
+                          RETURNING id origin=backend.execute_operation ▸ dispatcher.execute_operation
+  2x (identical bindings — redundant) [REDUNDANT x2/binding]: WITH RECURSIVE descendants(id, depth_acc) AS ( SELECT b.id, 0 FROM block_raw b LEFT JOIN block_tags bt ON bt.block_id = b.id AND bt.tag = 'Page' WHERE b.parent_id = $doc_id AND bt.block_id IS NULL UNI …#840c61fefd18e627… k_raw b JOIN descendants d ON b.parent_id = d.id LEFT JOIN block_tags bt ON bt.block_id = b.id AND bt.tag = 'Page' WHERE bt.block_id IS NULL AND d.depth_acc < 100 ) SELECT b.id, b.parent_id FROM block_raw b JOIN descendants d ON d.id = b.id origin=<unknown-parent> ▸ org.on_block_feed ▸ org.on_block_changed
+
+thread 'hand_authored_keystone_regressions' (475692346) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:855:13:
+reconciled composed sequence diverged from the oracle: [("inv-blocks-match-ref/org", "[inv-blocks-match-ref/org] fields diverge from reference\n  inv-blocks-match-ref/org: 11 blocks, reference: 11 blocks\n  only in inv-blocks-match-ref/org (0): []\n  only in reference (0): []\n  field deltas (1):\n    block:d6fa49d4-b277-50ee-8566-6406d6741a5c: marks: sut=None ref=Some([MarkSpan { start: 0, end: 3, mark: Bold }])\n"), ("inv-blocks-match-ref/loro", "[inv-blocks-match-ref/loro] fields diverge from reference\n  inv-blocks-match-ref/loro: 13 blocks, reference: 13 blocks\n  only in inv-blocks-match-ref/loro (0): []\n  only in reference (0): []\n  field deltas (1):\n    block:d6fa49d4-b277-50ee-8566-6406d6741a5c: marks: sut=None ref=Some([MarkSpan { start: 0, end: 3, mark: Bold }])\n"), ("inv-blocks-match-ref/block_raw", "[inv-blocks-match-ref/block_raw] block block:d6fa49d4-b277-50ee-8566-6406d6741a5c diverges from reference on Marks\n  inv-blocks-match-ref/block_raw: Block {\n    id: EntityUri(\"block:d6fa49d4-b277-50ee-8566-6406d6741a5c\"),\n    parent_id: EntityUri(\"block:21515cbe-4edd-56ad-bbc5-5b9f46cb0795\"),\n    tags: Tags(\n        {},\n    ),\n    requires: [],\n    advice_suppressed: [],\n    content: \"see aaa now\",\n    content_type: Text,\n    source_language: None,\n    source_name: None,\n    properties: {},\n    marks: None,\n    collapsed: false,\n    widget_only: false,\n    created_at: 0,\n    updated_at: 0,\n}\n  reference: Block {\n    id: EntityUri(\"block:d6fa49d4-b277-50ee-8566-6406d6741a5c\"),\n    parent_id: EntityUri(\"block:21515cbe-4edd-56ad-bbc5-5b9f46cb0795\"),\n    tags: Tags(\n        {},\n    ),\n    requires: [],\n    advice_suppressed: [],\n    content: \"see aaa now\",\n    content_type: Text,\n    source_language: None,\n    source_name: None,\n    properties: {},\n    marks: Some(\n        [\n            MarkSpan {\n                start: 0,\n                end: 3,\n                mark: Bold,\n            },\n        ],\n    ),\n    collapsed: false,\n    widget_only: false,\n    created_at: 0,\n    updated_at: 0,\n}"), ("inv-blocks-match-ref/matview", "[inv-blocks-match-ref/matview] fields diverge from reference\n  inv-blocks-match-ref/matview: 13 blocks, reference: 13 blocks\n  only in inv-blocks-match-ref/matview (0): []\n  only in reference (0): []\n  field deltas (1):\n    block:d6fa49d4-b277-50ee-8566-6406d6741a5c: marks: sut=None ref=Some([MarkSpan { start: 0, end: 3, mark: Bold }])\n")]
+authority: block-CRUD=Loro(LoroBlockOperations, via EditorState); projection-sinks=Sql(block_raw,matview); org-writeback=on
+first-divergent-layer: store/CRDT (inv-blocks-match-ref/loro); nothing below it
+  ↳ wiring: crates/holon-loro-testing/src/invariants/loro_blocks_match_ref.rs
+test hand_authored_keystone_regressions ... FAILED
+[inv-sql-budget] CreateBlockUnderFocus: reads=18 (dedup 10)/22 writes=1/2 ddl=0/0 tol=42 max_q=10ms wall=155ms spans=54 rss=+1.1MB (cum=+2.3MB) state=b29/d3/w0/r6 apply=0ms check=0ms settle=0ms pre_inv16=0ms live_mirrors=0ms assert_quiet=0ms drain_cdc=0ms inv10_drain=0ms files_stable=0ms mark_proc=0ms×0
+[inv-sql-budget N+1] CreateBlockUnderFocus: 3 distinct SQL texts fired multiple times:
+  6x (2 distinct bindings — fan-out) [REDUNDANT x4/binding]: SELECT b.id, b.parent_id, b.sort_key, b.content, b.content_type, b.source_language, b.source_name, b.properties, b.marks, b.collapsed, b.widget_only, b.completed, b.block_type, b.created_at, b.updated …#a27bde55e1223532… roup_array(required_id) FROM block_requires WHERE block_id = b.id), '[]') AS requires, COALESCE((SELECT json_group_array(lesson_id) FROM advice_suppressed WHERE anchor_id = b.id), '[]') AS advice_suppressed FROM block_raw b WHERE b.id = $id origins=6
+         1x origin=<unknown-parent> ▸ home.locate
+         1x origin=<unknown-parent> ▸ home.locate ▸ home.resolve_doc
+         1x origin=<unknown-parent> ▸ org.on_block_feed ▸ org.on_block_changed
+         1x origin=home.locate
+         1x origin=home.locate ▸ home.resolve_doc
+         1x origin=org.on_block_feed ▸ org.on_block_changed
+  4x (identical bindings — redundant) [REDUNDANT x4/binding]: SELECT id, parent_id, content, content_type, source_language, properties, marks FROM block_raw WHERE id != 'sentinel:no_parent' origin=<no-parent>
+  2x (identical bindings — redundant) [REDUNDANT x2/binding]: WITH RECURSIVE descendants(id, depth_acc) AS ( SELECT b.id, 0 FROM block_raw b LEFT JOIN block_tags bt ON bt.block_id = b.id AND bt.tag = 'Page' WHERE b.parent_id = $doc_id AND bt.block_id IS NULL UNI …#840c61fefd18e627… k_raw b JOIN descendants d ON b.parent_id = d.id LEFT JOIN block_tags bt ON bt.block_id = b.id AND bt.tag = 'Page' WHERE bt.block_id IS NULL AND d.depth_acc < 100 ) SELECT b.id, b.parent_id FROM block_raw b JOIN descendants d ON d.id = b.id origins=2
+         1x origin=<unknown-parent> ▸ org.on_block_feed ▸ org.on_block_changed
+         1x origin=org.on_block_feed ▸ org.on_block_changed
+
+Applying transition 3/5: Indent(Indent { block_id: EntityUri("block:echochild") })
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+[inv-sql-budget] Indent: reads=16 (dedup 14)/14 writes=1/3 ddl=0/0 tol=42 max_q=10ms wall=62ms spans=46 rss=+0.1MB (cum=-7.1MB) state=b29/d3/w0/r6 apply=0ms check=0ms settle=0ms pre_inv16=0ms live_mirrors=0ms assert_quiet=0ms drain_cdc=0ms inv10_drain=0ms files_stable=0ms mark_proc=0ms×0
+[inv-sql-budget N+1] Indent: 2 distinct SQL texts fired multiple times:
+  4x (3 distinct bindings — fan-out) [REDUNDANT x2/binding]: SELECT b.id, b.parent_id, b.sort_key, b.content, b.content_type, b.source_language, b.source_name, b.properties, b.marks, b.collapsed, b.widget_only, b.completed, b.block_type, b.created_at, b.updated …#a27bde55e1223532… roup_array(required_id) FROM block_requires WHERE block_id = b.id), '[]') AS requires, COALESCE((SELECT json_group_array(lesson_id) FROM advice_suppressed WHERE anchor_id = b.id), '[]') AS advice_suppressed FROM block_raw b WHERE b.id = $id origins=3
+         2x origin=home.locate ▸ home.resolve_doc
+         1x origin=home.locate
+         1x origin=org.on_block_feed ▸ org.on_block_changed
+  3x (2 distinct bindings — fan-out) [REDUNDANT x2/binding]: SELECT * FROM "block" WHERE "id" = $id LIMIT 1 origin=backend.execute_operation ▸ dispatcher.execute_operation
+
+Applying transition 4/5: ToggleState(ToggleState { block_id: EntityUri("block:echochild"), new_state: Doing })
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+[inv-sql-budget] ToggleState: reads=29 (dedup 15)/26 writes=2/3 ddl=0/0 tol=37 max_q=11ms wall=96ms spans=88 rss=+0.1MB (cum=-7.0MB) state=b29/d3/w0/r6 apply=0ms check=0ms settle=0ms pre_inv16=0ms live_mirrors=0ms assert_quiet=0ms drain_cdc=0ms inv10_drain=0ms files_stable=0ms mark_proc=0ms×0
+[inv-sql-budget N+1] ToggleState: 10 distinct SQL texts fired multiple times:
+  8x (3 distinct bindings — fan-out) [REDUNDANT x4/binding]: SELECT b.id, b.parent_id, b.sort_key, b.content, b.content_type, b.source_language, b.source_name, b.properties, b.marks, b.collapsed, b.widget_only, b.completed, b.block_type, b.created_at, b.updated …#a27bde55e1223532… roup_array(required_id) FROM block_requires WHERE block_id = b.id), '[]') AS requires, COALESCE((SELECT json_group_array(lesson_id) FROM advice_suppressed WHERE anchor_id = b.id), '[]') AS advice_suppressed FROM block_raw b WHERE b.id = $id origins=5
+         2x origin=<unknown-parent> ▸ home.locate ▸ home.resolve_doc
+         2x origin=home.locate ▸ home.resolve_doc
+         2x origin=org.on_block_feed ▸ org.on_block_changed
+         1x origin=<unknown-parent> ▸ home.locate
+         1x origin=home.locate
+  4x (identical bindings — redundant) [REDUNDANT x4/binding]: SELECT json_extract(properties, '$.task_state') AS task_state FROM block_raw WHERE id = 'block:echochild' origin=<no-parent>
+  2x (identical bindings — redundant) [REDUNDANT x2/binding]: SELECT properties FROM block_raw WHERE id = 'block:echochild' origins=2
+         1x origin=<no-parent>
+         1x origin=<unknown-parent>
+  2x (2 distinct bindings — fan-out) [LEGITIMATE]: INSERT INTO undo_log (id, seq, state_json) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET seq = excluded.seq, state_json = excluded.state_json origin=backend.execute_operation
+  2x (identical bindings — redundant) [REDUNDANT x2/binding]: WITH RECURSIVE descendants(id, depth_acc) AS ( SELECT b.id, 0 FROM block_raw b LEFT JOIN block_tags bt ON bt.block_id = b.id AND bt.tag = 'Page' WHERE b.parent_id = $doc_id AND bt.block_id IS NULL UNI …#840c61fefd18e627… k_raw b JOIN descendants d ON b.parent_id = d.id LEFT JOIN block_tags bt ON bt.block_id = b.id AND bt.tag = 'Page' WHERE bt.block_id IS NULL AND d.depth_acc < 100 ) SELECT b.id, b.parent_id FROM block_raw b JOIN descendants d ON d.id = b.id origin=org.on_block_feed ▸ org.on_block_changed
+  2x (identical bindings — redundant) [REDUNDANT x2/binding]: SELECT *, rowid AS _rowid FROM watch_view_fbf85d2c596d5ec0 origin=query_and_watch ▸ query_view ▸ query_view_ordered
+  2x (identical bindings — redundant) [REDUNDANT x2/binding]: SELECT *, rowid AS _rowid FROM watch_view_2461b8bb02a77f76 origin=query_and_watch ▸ query_view ▸ query_view_ordered
+  2x (identical bindings — redundant) [REDUNDANT x2/binding]: UPDATE operation SET status = $new_status WHERE status = $old_status origin=backend.execute_operation ▸ dispatcher.execute_operation
+  2x (identical bindings — redundant) [REDUNDANT x2/binding]: SELECT "properties" FROM block_raw WHERE id = 'block:echochild' origins=2
+         1x origin=<no-parent>
+         1x origin=<unknown-parent>
+  2x (2 distinct bindings — fan-out) [LEGITIMATE]: INSERT INTO operation (operation, inverse, status, created_at, display_name, entity_name, op_name)
+                          VALUES ($operation, $inverse, $status, $created_at, $display_name, $entity_name, $op_name)
+                          RETURNING id origin=backend.execute_operation ▸ dispatcher.execute_operation
+
+Applying transition 5/5: BlockToPage(BlockToPage { origin_id: EntityUri("block:echoorigin") })
+[2m2026-08-08T03:50:03.263881Z[0m [33m WARN[0m [2mholon_filesystem::file_sync_controller[0m[2m:[0m [FileSyncController] write-back SKIPPED: the holder's membership does not match the authority's, so this render would project a partially-folded document over disk. The diff that resolves it is already in flight and will re-trigger the render. (Further skips of this document log at debug until it settles.) [3mdoc[0m[2m=[0mblock:cb60abcd-b317-9ce7-f3c8-5ec082157557 [3mdifference[0m[2m=[0mblock:echochild@block:cb60abcd-b317-9ce7-f3c8-5ec082157557 [3mheld[0m[2m=[0m0 [3mauthority[0m[2m=[0m1
+[inv-matview-consistent-with-recompute] SKIP view trust_proposals: defining SELECT carries a ?/$ placeholder (context-param, Inc 4)
+[inv-sql-budget] BlockToPage: reads=53 (dedup 33)/42 writes=1/6 ddl=0/0 tol=24 max_q=10ms wall=97ms spans=122 rss=+0.5MB (cum=-6.4MB) state=b30/d3/w0/r7 apply=0ms check=0ms settle=0ms pre_inv16=0ms live_mirrors=0ms assert_quiet=0ms drain_cdc=0ms inv10_drain=0ms files_stable=0ms mark_proc=0ms×0
+[inv-sql-budget N+1] BlockToPage: 6 distinct SQL texts fired multiple times:
+  16x (4 distinct bindings — fan-out) [REDUNDANT x9/binding]: SELECT b.id, b.parent_id, b.sort_key, b.content, b.content_type, b.source_language, b.source_name, b.properties, b.marks, b.collapsed, b.widget_only, b.completed, b.block_type, b.created_at, b.updated …#a27bde55e1223532… roup_array(required_id) FROM block_requires WHERE block_id = b.id), '[]') AS requires, COALESCE((SELECT json_group_array(lesson_id) FROM advice_suppressed WHERE anchor_id = b.id), '[]') AS advice_suppressed FROM block_raw b WHERE b.id = $id origins=5
+         6x origin=org.on_block_feed ▸ org.on_block_changed
+         4x origin=<unknown-parent> ▸ org.on_block_feed ▸ org.on_block_changed
+         3x origin=<unknown-parent> ▸ home.locate
+         2x origin=<unknown-parent> ▸ home.locate ▸ home.resolve_doc
+         1x origin=home.locate
+  5x (identical bindings — redundant) [REDUNDANT x5/binding]: UPDATE operation SET status = $new_status WHERE status = $old_status origin=backend.execute_operation ▸ dispatcher.execute_operation
+  5x (5 distinct bindings — fan-out) [LEGITIMATE]: INSERT INTO operation (operation, inverse, status, created_at, display_name, entity_name, op_name)
+                          VALUES ($operation, $inverse, $status, $created_at, $display_name, $entity_name, $op_name)
+                          RETURNING id origin=backend.execute_operation ▸ dispatcher.execute_operation
+  4x (2 distinct bindings — fan-out) [REDUNDANT x3/binding]: WITH RECURSIVE descendants(id, depth_acc) AS ( SELECT b.id, 0 FROM block_raw b LEFT JOIN block_tags bt ON bt.block_id = b.id AND bt.tag = 'Page' WHERE b.parent_id = $doc_id AND bt.block_id IS NULL UNI …#840c61fefd18e627… k_raw b JOIN descendants d ON b.parent_id = d.id LEFT JOIN block_tags bt ON bt.block_id = b.id AND bt.tag = 'Page' WHERE bt.block_id IS NULL AND d.depth_acc < 100 ) SELECT b.id, b.parent_id FROM block_raw b JOIN descendants d ON d.id = b.id origins=2
+         3x origin=org.on_block_feed ▸ org.on_block_changed
+         1x origin=<unknown-parent> ▸ org.on_block_feed ▸ org.on_block_changed
+  3x (2 distinct bindings — fan-out) [REDUNDANT x2/binding]: SELECT * FROM "block" WHERE "id" = $id LIMIT 1 origin=backend.execute_operation ▸ dispatcher.execute_operation
+  2x (identical bindings — redundant) [REDUNDANT x2/binding]: SELECT 1 FROM block_tags WHERE block_id = 'block:structural-page' AND tag = 'Page' LIMIT 1 origin=backend.execute_operation ▸ dispatcher.execute_operation
+[engagement summary] inv-active-watches-match-ref=6/6 inv-advice-matview-matches-ref/matview=6/6 inv-advice-rows-woven=6/6 inv-audience-never-over-approximates=6/6 inv-block-content/block_raw=6/6 inv-block-content/sql=6/6 inv-block-parent/block_raw=6/6 inv-blocks-match-ref/block_raw=6/6 inv-blocks-match-ref/loro=6/6 inv-blocks-match-ref/matview=6/6 inv-blocks-match-ref/org=6/6 inv-companion-has-no-child-page-headings=6/6 inv-display-placement-canonical-inert=0/6 inv-displayed-text/viewmodel=6/6 inv-editable-text-has-draggable=6/6 inv-editor-caret/mirror=3/6 inv-editor-text/mirror=3/6 inv-embedded-page-collapsed-lazy=1/6 inv-every-page-has-its-own-file=6/6 inv-focus-roots=6/6 inv-history-no-phantom-rows/block_history=6/6 inv-history-records-all-creates/block_history=6/6 inv-live-children-match-ref=6/6 inv-loro-children-match-ref=6/6 inv-loro-no-errors=6/6 inv-main-panel-rows-match-focus=6/6 inv-mark-bounds-within-content=6/6 inv-matview-consistent-with-recompute=6/6 inv-matview-consistent-with-ref/root_layout=6/6 inv-navigation-focus=6/6 inv-no-errors=6/6 inv-no-observed-errors=6/6 inv-no-orphan-blocks=6/6 inv-no-page-under-non-page=6/6 inv-no-parent-cycles=6/6 inv-no-steady-reseed-leak=6/6 inv-no-write-outside-vault-root=6/6 inv-org-render-fixed-point=6/6 inv-pair-view-selection-current-view=6/6 inv-settle-budget=6/6 inv-sidebar-page-tag-preserved=6/6 inv-source-language-iff-source=6/6 inv-sql-budget=6/6 inv-task-state-storage-coherence=6/6 inv-undo-redo-reference-heal=0/6 inv-viewmodel-decompiled-rows-match-query=0/6 inv-viewmodel-editable-text-triggers=6/6 inv-viewmodel-entity-ids-subset-of-data=6/6 inv-viewmodel-no-error-widgets=6/6 inv-viewmodel-root-matches-render-expr=6/6 inv-viewmodel-snapshot=6/6 inv-viewmodel-state-toggle-correct=6/6 inv-viewmodel-tree-virtual-slots=6/6 inv-watch-rows-match-ref=6/6
+test echo_loop_block_to_page_child_render_leak_parked ... ok
+
+failures:
+
+failures:
+    hand_authored_keystone_regressions
+
+test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.62s
+
+error: test failed, to rerun pass `-p holon-integration-tests --test hand_authored_regressions`

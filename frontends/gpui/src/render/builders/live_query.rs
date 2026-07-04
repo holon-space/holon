@@ -14,6 +14,79 @@ use crate::views::ReactiveShell;
 /// during a transitional structural rebuild before the engine has filled
 /// in `query` / `render_expr`).
 pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
+    render_placed(node, ctx, ctx.placement)
+}
+
+/// The same shell, forced CONTENT-HEIGHT — for a parent that is content-sized
+/// and therefore has no definite height for a percentage to resolve against
+/// (`column::render`'s `flex_col`, the shipped left sidebar). Under the `Panel`
+/// shape the shell claims `size_full` plus `height: relative(1.0)`, which in
+/// such a parent resolves to 0 px and takes every row with it. `Nested` sizes
+/// the shell to its content and leaves the scroll to the enclosing panel.
+///
+/// The counterpart of [`accordion::render_bounded`](super::accordion), which
+/// solves the same hazard the other way round: it HAS a definite height to give
+/// its region, so it pins one and keeps the greedy shell.
+pub(crate) fn render_content_height(
+    node: &ReactiveViewModel,
+    ctx: &GpuiRenderContext,
+) -> AnyElement {
+    render_placed(
+        node,
+        ctx,
+        crate::views::reactive_shell::ShellPlacement::Nested,
+    )
+}
+
+/// The `blocks_with_paths` path of `id` — what a context-dependent query
+/// matches its `$context_path_prefix` against. An unresolvable path is an
+/// `Err`, painted by the caller as a visible degraded banner: there is no
+/// silent-empty context (no `for_block` sentinel), because a
+/// fabricated-or-absent prefix is exactly the six-round chevron class (#27).
+///
+/// Blocking, on a joined-immediately thread so `block_on` stays legal wherever
+/// the synchronous render pass runs. Only reached on an entity-cache MISS.
+fn resolve_block_path(
+    services: &std::sync::Arc<dyn holon_frontend::reactive::BuilderServices>,
+    id: &holon_api::EntityUri,
+) -> Result<String, String> {
+    // A services impl can watch queries without offering the path lookup
+    // (`query_engine()` defaults to `None`). That is a degraded mode for a
+    // context-dependent query, so it fails loud rather than binding an
+    // unfiltered/empty context that would silently return the wrong rows.
+    let Some(engine) = services.query_engine() else {
+        return Err(format!(
+            "live_query({id}): no query engine to resolve the context path prefix — `from \
+             descendants` under this block cannot be scoped"
+        ));
+    };
+    let rt = services.runtime_handle();
+    std::thread::scope(|s| {
+        s.spawn(|| rt.block_on(engine.lookup_block_path(id)))
+            .join()
+            .unwrap()
+    })
+    .map_err(|e| format!("live_query({id}): context path prefix lookup failed: {e:#}"))
+}
+
+/// The visible-failure element: what a builder paints when it cannot build.
+/// Mirrors `builders::error::render`, reached without a `ViewModel` detour.
+fn error_element(message: &str, ctx: &GpuiRenderContext) -> AnyElement {
+    div()
+        .p_2()
+        .rounded(px(4.0))
+        .bg(tc(ctx, |t| t.secondary))
+        .text_color(tc(ctx, |t| t.danger))
+        .text_sm()
+        .child(message.to_string())
+        .into_any_element()
+}
+
+fn render_placed(
+    node: &ReactiveViewModel,
+    ctx: &GpuiRenderContext,
+    placement: crate::views::reactive_shell::ShellPlacement,
+) -> AnyElement {
     let slot = node.slot.as_ref().expect("live_query requires a slot");
     let query = node.prop_str("query");
     let query_lang = node.prop_str("query_lang");
@@ -33,43 +106,79 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
             let bounds = ctx.bounds_registry.clone();
             let ancestors = ctx.live_block_ancestors.clone();
 
-            let entity = ctx.local.get_or_create_typed(cache_key, || {
-                let query_context = query_context_id.as_ref().map(|id| {
-                    // ALLOW(entity_uri_from_raw): render-spec live_query node props
-                    let uri = holon_api::EntityUri::from_raw(id);
-                    holon_frontend::QueryContext {
-                        current_block_id: Some(uri.clone()),
-                        context_parent_id: Some(uri),
-                        context_path_prefix: None,
+            // Resolving the context's path prefix costs a blocking matview
+            // read, so it happens only on a cache MISS — and before the entry
+            // is created, so a failure can paint instead of having to produce
+            // an entity. `from descendants` matches on that prefix; if it cannot
+            // be resolved the builder paints a degraded banner rather than
+            // opening the embedded page onto silently-empty rows.
+            let cached = ctx.local.get_typed::<ReactiveShell>(&cache_key);
+            let query_context = match cached {
+                Some(_) => None,
+                None => {
+                    let resolved = query_context_id.as_ref().map(|id| {
+                        // ALLOW(entity_uri_from_raw): render-spec live_query node props
+                        let uri = holon_api::EntityUri::from_raw(id);
+                        resolve_block_path(&services, &uri).map(|path| {
+                            holon_frontend::QueryContext::for_block_with_path(
+                                &uri,
+                                Some(uri.clone()),
+                                path,
+                            )
+                        })
+                    });
+                    match resolved.transpose() {
+                        Ok(ctxt) => ctxt,
+                        Err(msg) => return error_element(&msg, ctx),
                     }
-                });
-                let (watch_key, live_block) =
-                    services.watch_query_live(query, lang, re, query_context, services.clone());
-                let render_ctx = holon_frontend::RenderContext::default();
-                ctx.with_gpui(|_window, cx| {
-                    cx.new(|cx| {
-                        // The shell's `block_id` is the engine's query-watcher
-                        // key, so its Drop releases the query watcher via
-                        // `unwatch` — the same lifecycle live blocks get.
-                        ReactiveShell::new_for_block(
-                            watch_key.to_string(),
-                            render_ctx,
-                            services,
-                            live_block,
-                            nav,
-                            bounds,
-                            ancestors,
-                            cx,
-                        )
+                }
+            };
+
+            let entity = cached.unwrap_or_else(|| {
+                ctx.local.get_or_create_typed(cache_key, || {
+                    let (watch_key, live_block) =
+                        services.watch_query_live(query, lang, re, query_context, services.clone());
+                    let render_ctx = holon_frontend::RenderContext::default();
+                    ctx.with_gpui(|_window, cx| {
+                        cx.new(|cx| {
+                            // The `LiveBlock` carries a `WatchGuard` for the
+                            // engine's query-watcher key; the shell holds it, so
+                            // dropping the shell releases the query watcher —
+                            // the same RAII lifecycle live blocks get.
+                            ReactiveShell::new_for_block(
+                                watch_key.to_string(),
+                                render_ctx,
+                                services,
+                                live_block,
+                                nav,
+                                bounds,
+                                ancestors,
+                                placement,
+                                cx,
+                            )
+                        })
                     })
                 })
             });
 
-            let mut s = StyleRefinement::default();
-            s.flex_grow = Some(1.0);
-            s.size.width = Some(gpui::relative(1.0).into());
-            s.size.height = Some(gpui::relative(1.0).into());
-            return AnyView::from(entity).cached(s).into_any_element();
+            // `cached` needs an explicit size — it lays the view out in its own
+            // pass, so an `auto` height reports 0 to the parent no matter what
+            // the shell renders. So caching is only available where there IS a
+            // definite panel height to fill; a content-sized parent gets the
+            // uncached view, whose own content decides its height.
+            return match placement {
+                crate::views::reactive_shell::ShellPlacement::Panel => {
+                    let mut s = StyleRefinement::default();
+                    s.flex_grow = Some(1.0);
+                    s.size.width = Some(gpui::relative(1.0).into());
+                    s.size.height = Some(gpui::relative(1.0).into());
+                    AnyView::from(entity).cached(s).into_any_element()
+                }
+                crate::views::reactive_shell::ShellPlacement::Nested => div()
+                    .w_full()
+                    .child(AnyView::from(entity))
+                    .into_any_element(),
+            };
         }
     }
 

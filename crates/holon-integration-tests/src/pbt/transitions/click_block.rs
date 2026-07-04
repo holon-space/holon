@@ -1,5 +1,10 @@
 //! Transition: click on a focusable rendered block to focus it.
 //!
+//! @pbt rung input-pipeline
+//!   `apply_click_block_to_sut`: wait_for_bounds + click_entity +
+//!   wait_for_engine_focus through the production UserDriver.
+//! @pbt covers click-to-focus — pointer click -> find_click_intent -> focus
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:628-670`
 //! (generator), `state_machine.rs:3175-3180` (precondition),
 //! `state_machine.rs:2277-2315` (ref-state apply),
@@ -8,20 +13,25 @@
 
 use std::time::Duration;
 
-use holon_api::ContentType;
 use holon_api::EntityUri;
 use holon_api::Region;
 use holon_pbt_core::TransitionFactory;
-use holon_pbt_core::TransitionImpl;
 use holon_pbt_core::TransitionRef;
+use holon_pbt_core::capabilities::CapRegion;
+use holon_pbt_core::capabilities::RefBlockTree;
+use holon_pbt_core::capabilities::RefFocus;
+use holon_pbt_core::capabilities::RefLayoutMutate;
+use holon_pbt_core::capabilities::RefLifecycle;
+use holon_pbt_core::capabilities::RefNavHistory;
 use holon_pbt_core::capabilities::SutBlockInteract;
 use holon_pbt_core::capabilities::SutDriver;
 use holon_pbt_core::capabilities::SutLayout;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::check;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::reference_state::ReferenceState;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
 #[cfg(feature = "otel-testing")]
@@ -32,8 +42,6 @@ use crate::pbt::transition_budgets::NAV_DML_READS;
 use crate::pbt::transition_budgets::REACTIVE_BASE;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::docs_tolerance;
-use crate::pbt::validation::Reason;
-use crate::pbt::validation::check;
 
 // ── Capability-bound free function (Phase C) ──────────────────────
 
@@ -72,22 +80,23 @@ pub async fn apply_click_block_to_sut<S: SutLayout + SutDriver>(
 
 /// Click on a rendered block to focus it. When clicking in LeftSidebar,
 /// also pushes a navigation-history entry for Region::Main.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("I click block {block_id} in region {region}")]
 pub struct ClickBlock {
     pub region: Region,
     pub block_id: EntityUri,
 }
 
-impl TransitionFactory<ReferenceState> for ClickBlock {
+impl<R: RefLifecycle + RefBlockTree + RefFocus + RefNavHistory + RefLayoutMutate>
+    TransitionFactory<R> for ClickBlock
+{
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        vec![::holon_pbt_core::composition::CapId::of::<
-            dyn ::holon_pbt_core::capabilities::SutBlockInteract,
-        >()]
+        Self::declared_caps()
     }
 
     type Reason = Reason;
-    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
-        let main_unfocused = state.current_focus(Region::Main).is_none();
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+        let main_unfocused = state.current_focus(CapRegion::Main).is_none();
         let mut arms: Vec<(u32, BoxedStrategy<ClickBlock>)> = Vec::new();
 
         // LeftSidebar candidates: the ref-predicted set of sidebar entities
@@ -118,7 +127,7 @@ impl TransitionFactory<ReferenceState> for ClickBlock {
         if !main_candidates.is_empty() {
             arms.push((
                 3,
-                proptest::sample::select(main_candidates)
+                super::select_bias::select_with_edge_bias(main_candidates)
                     .prop_map(|block_id| ClickBlock {
                         region: Region::Main,
                         block_id,
@@ -139,36 +148,38 @@ impl TransitionFactory<ReferenceState> for ClickBlock {
     }
 }
 
-impl TransitionRef<ReferenceState> for ClickBlock {
+impl<R: RefLifecycle + RefBlockTree + RefFocus + RefNavHistory + RefLayoutMutate> TransitionRef<R>
+    for ClickBlock
+{
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         // Visibility / rendered-set membership is no longer a precondition.
         // The driver's wait-for-bounds with scroll-into-view (sut.rs)
         // covers "must be reachable on screen"; a real bug surfaces as
         // the wait timeout, not as a precondition rejection. `is_focusable`
         // / `!is_page` / `!layout_blocks` stay ref-state model facts.
-        let block = state.domain.block_state.blocks.get(&self.block_id);
+        let block_exists = state.block_content(&self.block_id).is_some();
         let mut checks: Vec<Validated<(), Reason>> = vec![
-            check(state.action.app_started, Reason::AppNotStarted),
-            check(block.is_some(), Reason::FocusedBlockMissing),
+            check(state.app_started(), Reason::AppNotStarted),
+            check(block_exists, Reason::FocusedBlockMissing),
         ];
-        if let Some(b) = block {
+        if block_exists {
             checks.push(check(
-                b.content_type == ContentType::Text,
+                state.is_text_block(&self.block_id),
                 Reason::FocusedNotText,
             ));
         }
         checks.push(check(
-            !state.domain.layout_blocks.contains(&self.block_id),
+            !state.is_layout_block(&self.block_id),
             Reason::FocusedInLayoutBlocks,
         ));
         checks.push(check(
-            state.domain.layout_blocks.is_focusable(&self.block_id),
+            state.is_focusable(&self.block_id),
             Reason::FocusedNotFocusable,
         ));
         checks.push(check(
-            block.is_some_and(|b| !b.is_page()),
+            block_exists && !state.is_page_block(&self.block_id),
             Reason::FocusedIsPage,
         ));
         checks
@@ -177,92 +188,21 @@ impl TransitionRef<ReferenceState> for ClickBlock {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
-        use crate::pbt::reference_state::OpenPinEntry;
-        // A real click anywhere outside the active editor blurs it, and the
-        // editor's `on_blur` → `set_field("content")` commits pending text
-        // (real-editor runs only — `blur_active_editor` carries the gate).
-        // Same-block clicks don't blur (the driver skips click-when-focused),
-        // so leave those untouched.
-        if state
-            .ui
-            .tab
-            .active_editor
-            .as_ref()
-            .is_some_and(|e| e.block_id != self.block_id)
-        {
-            state.blur_active_editor();
-        }
-        // The default LeftSidebar wraps each doc in a `selectable` whose
-        // bound action is `navigation.focus(region: "main", block_id: col("id"))`.
-        // Clicking it dispatches that intent, which the production
-        // navigation provider maps to a navigation-history push for
-        // region=Main. Mirror that here so `focus_roots` / `current_focus`
-        // checks line up with the real backend after the click.
-        //
-        // Other regions (Main, RightSidebar), AND sidebar clicks on
-        // entities the default sidebar PRQL does NOT render (so prod
-        // has no selectable bound), fall through to editor focus.
-        if state.predicts_navigation_focus(&self.block_id, self.region) {
-            let history = state
-                .ui
-                .tab
-                .navigation_history
-                .entry(Region::Main)
-                .or_default();
-            history.entries.truncate(history.cursor + 1);
-            history.entries.push(Some(self.block_id.clone()));
-            history.cursor = history.entries.len() - 1;
-
-            // Same close-then-insert as NavigateFocus — see navigate_focus.rs
-            // for rationale.
-            let history_id = state.ui.tab.next_history_id;
-            state.ui.tab.next_history_id += 1;
-            let added_ts_logical = state.ui.user.next_pin_ts;
-            state.ui.user.next_pin_ts += 1;
-            let pins = state.ui.user.open_pins.entry(Region::Main).or_default();
-            pins.clear();
-            pins.push(OpenPinEntry {
-                history_id,
-                block_id: Some(self.block_id.clone()),
-                added_ts_logical,
-            });
-
-            state.ui.tab.focused_entity_id.remove(&Region::Main);
-            state.ui.tab.focused_cursor.remove(&Region::Main);
-            state.ui.tab.focused_block = Some(self.block_id.clone());
-        } else {
-            // Clicking sets editor focus but does NOT change the navigation cursor.
-            // The user is still viewing the same document; only the focused editor
-            // changes. Arrow keys will now navigate among the clicked block's siblings.
-            // The global `focused_block` mirror also follows the click — production
-            // GPUI's `render_entity` / `rendered_text` click handlers call
-            // `services.set_focus(Some(id))` directly (focus is in-memory state,
-            // ADR 0010; no `editor_focus` dispatch).
-            state.ui.tab.focused_block = Some(self.block_id.clone());
-            state
-                .ui
-                .tab
-                .focused_entity_id
-                .insert(self.region, self.block_id.clone());
-            state.ui.tab.focused_cursor.insert(
-                self.region,
-                crate::pbt::reference_state::CursorPosition::start(),
-            );
-        }
+    fn apply_to_ref(&self, state: &mut R) {
+        // The whole click-focus reference effect (blur-other-editor, sidebar
+        // nav-focus push vs. editor focus) lives in
+        // `RefLayoutMutate::apply_click_focus`.
+        state.apply_click_focus(self.region, &self.block_id);
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutBlockInteract> TransitionImpl<ReferenceState, S> for ClickBlock {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.click_block(self.region, &self.block_id).await;
+crate::cap_transition! {
+    ClickBlock: SutBlockInteract,
+    where R: [ RefLifecycle + RefBlockTree + RefFocus + RefNavHistory + RefLayoutMutate ],
+    |me, _state, sut| {
+        sut.click_block(me.region, &me.block_id).await;
     }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for ClickBlock {
-    fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
+    sql_budget: |_me, state| {
         ExpectedSql {
             reads: REACTIVE_BASE + JOURNAL_READS + NAV_DML_READS + 10,
             writes: 0,

@@ -23,7 +23,21 @@ mod capability_pair;
 mod capmap;
 mod entity;
 mod operations_trait;
+mod step_vocabulary;
 mod widget_builder;
+
+/// Derive the Gherkin step vocabulary of an annotated struct from one
+/// `#[step_template("…")]` phrasing. Placeholder names are checked against the
+/// real fields at compile time; a field the template does not name must carry
+/// `#[step_default]` / `#[step_default(expr)]`.
+#[proc_macro_derive(StepVocabulary, attributes(step_template, step_default))]
+pub fn derive_step_vocabulary(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    match step_vocabulary::expand(input) {
+        Ok(tokens) => TokenStream::from(tokens),
+        Err(e) => TokenStream::from(e.to_compile_error()),
+    }
+}
 
 #[proc_macro_derive(
     Entity,
@@ -252,6 +266,39 @@ pub fn enum_from(_: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
+/// Pass-through attribute for `#[menu_exposure(...)]` — declares where a
+/// macro-generated operation surfaces in the UI. Parsed by
+/// `extract_menu_exposure()` in the operations_trait macro to fill the
+/// non-defaultable `OperationDescriptor::menu_exposure` field.
+///
+/// Accepted forms (absent ⇒ `NotListed { ProviderDefault }`, fail-closed):
+/// `#[menu_exposure(listed)]`, `#[menu_exposure(keyboard_gesture)]`,
+/// `#[menu_exposure(pointer_gesture)]`, `#[menu_exposure(navigation)]`,
+/// `#[menu_exposure(external)]`, `#[menu_exposure(internal)]`.
+#[proc_macro_attribute]
+pub fn menu_exposure(_: TokenStream, item: TokenStream) -> TokenStream {
+    // Pass through unchanged - this just allows Rust to accept the attribute
+    item
+}
+
+/// Pass-through attribute for `#[boundary_behavior(...)]` — declares how a
+/// macro-generated structural operation interacts with sharing/audience
+/// boundaries (ADR 0028). Parsed by `extract_boundary_behavior()` in the
+/// operations_trait macro to fill the non-defaultable
+/// `OperationDescriptor::boundary_behavior` field.
+///
+/// Accepted forms (absent ⇒ fail-closed `Unclassified` — any boundary
+/// interaction rejected loudly): `#[boundary_behavior(private_only)]`,
+/// `#[boundary_behavior(crossing_widens)]`,
+/// `#[boundary_behavior(crossing_same_audience)]`,
+/// `#[boundary_behavior(forbidden_at_page_boundary)]`,
+/// `#[boundary_behavior(policy_edit)]`, `#[boundary_behavior(identity_op)]`.
+#[proc_macro_attribute]
+pub fn boundary_behavior(_: TokenStream, item: TokenStream) -> TokenStream {
+    // Pass through unchanged - this just allows Rust to accept the attribute
+    item
+}
+
 /// Generate an OperationDescriptor for a standalone async function
 ///
 /// This macro generates a const `OPERATION_NAME_OP: OperationDescriptor` for a
@@ -352,15 +399,31 @@ pub fn operation(_: TokenStream, item: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-/// No-op proc macro for #[require(...)] attribute
-/// This allows the attribute to be recognized by Rust's parser
-/// The actual processing is done by the operations_trait macro
+/// No-op proc macro for `#[require("<guard>")]`, so Rust's parser accepts the
+/// attribute. `operations_trait` does the real work: it parses the guard string
+/// with the Pattern parser at expansion time (ADR 0031 P2).
 #[proc_macro_attribute]
 pub fn require(_: TokenStream, item: TokenStream) -> TokenStream {
     // Just return the item unchanged - the operations_trait macro will process the
     // require attributes This is a no-op macro that just passes through the
     // item We clone the token stream to ensure proper span preservation for
     // rust-analyzer
+    item
+}
+
+/// No-op proc macro for `#[reads("relation.field", …)]`, so Rust's parser
+/// accepts the attribute. `operations_trait` parses the place literals at
+/// expansion time into `TransitionArcs` (ADR 0031 Increment 2).
+#[proc_macro_attribute]
+pub fn reads(_: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
+/// No-op proc macro for `#[emits("relation.field", …)]` and
+/// `#[emits(excluded("relation.field", "why"))]`, so Rust's parser accepts the
+/// attribute. `operations_trait` does the real work.
+#[proc_macro_attribute]
+pub fn emits(_: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 

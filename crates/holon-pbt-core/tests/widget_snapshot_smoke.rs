@@ -89,6 +89,9 @@ impl RefBlockTree for ToyRef {
     ) -> bool {
         false
     }
+    fn main_panel_renders(&self, _: &EntityUri) -> bool {
+        false
+    }
     fn is_layout_block(&self, _: &EntityUri) -> bool {
         false
     }
@@ -122,6 +125,9 @@ impl SutRenderer for ToySut {
         None
     }
     async fn widget_tree_snapshot(&self) -> WidgetSnapshot {
+        self.root.clone()
+    }
+    async fn widget_tree_snapshot_fresh(&self) -> WidgetSnapshot {
         self.root.clone()
     }
     async fn root_data_row_ids(&self) -> std::collections::BTreeSet<EntityUri> {

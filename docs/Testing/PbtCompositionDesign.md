@@ -1,3 +1,14 @@
+> **⚠️ SUPERSEDED / PARTIALLY STALE (2026-07-05).** This document predates the completion
+> of the γ-composition PBT endgame. The `E2ESut` monolith, the `declare_pbt_slice!` /
+> `component_pbt!` macros, the standalone slice binaries, and the deleted `Sut*` capability
+> twins referenced below were REMOVED on the `w1-pbt-endgame` branch. The live mechanism is
+> the ONE composed keystone
+> [`crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs)
+> plus the cfg(test) lib slice tests (`just pbt-lib-slices`). For the current architecture see
+> [`docs/Architecture/Model.md`](../Architecture/Model.md). Kept for historical context.
+
+---
+
 <!-- Authoritative design (2026-06-14). SUPERSEDES docs/Testing/PbtSlicing.md
      and docs/Testing/PbtSlicing_Trivialization_Handoff.md. -->
 
@@ -480,7 +491,9 @@ capability, = `wiring.has_actor(UI)`). Consequently:
   field set by the real-editor driver harness (`phased.rs`), which builds the ref
   state directly. No process-global env; deterministic and capture/replay-faithful
   via the construction path. `fixture::CAPTURE_ENV_FLAGS` shrinks to
-  `["PBT_MUTABLE_TEXT"]`.
+  `["PBT_MUTABLE_TEXT"]` — plus `"HOLON_FOLDER_COMPANION_SEED"` (2026-07-26),
+  which `wide_e2e_ref_for` consults to seed extra blocks into the reference
+  state, so a capture and a replay disagreeing on it start from different states.
 
 **Open question (shrink quality).** The `content` plant's greedy shrink retains the
 causally-irrelevant `EditorState` (lands at `{BlockTree, EditorState}`, not the

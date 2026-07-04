@@ -50,19 +50,19 @@ pub struct StaticParam {
     pub default: Option<&'static str>,
 }
 
-/// Check whether `name` is a template/expression arg according to widget metas.
-///
-/// Replaces the hardcoded `is_template_arg()` in render_eval.rs.
-///
-/// flutter_rust_bridge:ignore
-pub fn is_template_arg_from_metas(metas: &[&WidgetMeta], name: &str) -> bool {
-    for meta in metas {
-        for param in meta.params {
-            if param.name == name && (param.type_hint == "Expr" || param.type_hint == "Collection")
-            {
-                return true;
-            }
-        }
+impl WidgetMeta {
+    /// How this widget classifies the named arg, or `None` when it declares no
+    /// param under that name. `Some(true)` = the arg must stay an unevaluated
+    /// template; `Some(false)` = it is a scalar to evaluate against the row.
+    ///
+    /// Templateness is a PER-WIDGET property: `header` is a template for
+    /// `expand_toggle` and could be a plain string elsewhere. Widgets that
+    /// declare no params at all (`raw fn`) answer `None` and leave the caller
+    /// on the global `is_template_arg` allowlist.
+    pub fn classifies_as_template(&self, name: &str) -> Option<bool> {
+        self.params
+            .iter()
+            .find(|p| p.name == name)
+            .map(|p| p.type_hint == "Expr" || p.type_hint == "Collection")
     }
-    false
 }

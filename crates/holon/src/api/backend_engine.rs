@@ -17,6 +17,7 @@ use crate::api::operation_engine::DispatchingOperationEngine;
 use crate::api::operation_engine::OperationEngine as _;
 use crate::storage::DbHandle;
 use crate::storage::SqlTransformer;
+use crate::storage::sql_utils::rewrite_named_params;
 use crate::storage::sql_utils::value_to_sql_literal;
 use crate::storage::turso::RowChange;
 use crate::storage::turso::RowChangeStream;
@@ -67,6 +68,26 @@ pub struct BackendEngine {
         Arc<std::sync::RwLock<crate::storage::graph_schema::GraphSchemaRegistry>>,
     /// Cached GQL graph schema, rebuilt from registry on mutation.
     graph_schema_cache: Arc<std::sync::RwLock<gql_transform::resolver::GraphSchema>>,
+    /// Advice-rule compilation/runtime status (ADR 0022). Written by the advice
+    /// reconciler task, read by the UI watcher so a broken rule renders its
+    /// error in place. Empty until an advice reconciler is installed (see
+    /// `create_initialized_engine`).
+    advice_status: holon_advice::AdviceRuleStatusHandle,
+    /// Reactive-rule (ADR 0024 WP3) compilation/runtime status. Written by the
+    /// action watcher (deprecation / parse / compile / exec outcomes), read by
+    /// the render path and MCP so a broken or deprecated rule surfaces its
+    /// error in place. Empty until action watchers run.
+    rule_status: crate::api::rule_status::RuleStatusHandle,
+    /// Keeps the advice reconciler's background tasks alive (mirrors how the
+    /// profile watcher / `advice reconciler` stay alive by being held on
+    /// the engine). `None` in configs that never install one (tests,
+    /// no-advice sessions).
+    _advice_reconciler: Option<Arc<crate::sync::AdviceReconcilerHandle>>,
+    /// Keeps the clock scheduler's ticking task alive (ADR 0024 P5,
+    /// time-as-data). `None` until installed in
+    /// `create_initialized_engine`; the boot guard there fails loud if it
+    /// stays `None`.
+    _clock_scheduler: Option<Arc<crate::sync::clock_scheduler::ClockSchedulerHandle>>,
 }
 
 impl BackendEngine {
@@ -88,7 +109,19 @@ impl BackendEngine {
         let ddl_mutex = Arc::new(tokio::sync::Mutex::new(()));
         let matview_manager = crate::sync::MatviewManager::new(db_handle.clone(), ddl_mutex);
         let graph_schema = graph_schema_registry.clone().build();
-        let op_engine = DispatchingOperationEngine::new(dispatcher.clone());
+        // Wire the op/effect history relation (C2b): a Turso-backed, disclosed
+        // ephemeral cache over this engine's db handle. The store computes its
+        // own honest rebuild fidelity (`HistoryFidelity::Partial`) — no caller
+        // asserts it. Org-standalone (no-Turso) wirings get
+        // `DegradedHistoryStore` instead.
+        let history = Arc::new(crate::api::history_store::TursoHistoryStore::new(
+            db_handle.clone(),
+        ));
+        let op_engine = DispatchingOperationEngine::new(dispatcher.clone())
+            .with_history_store(history)
+            .with_template_source(Arc::new(
+                crate::api::template_source::TursoTemplateSource::new(db_handle.clone()),
+            ));
         Ok(Self {
             db_handle,
             dispatcher,
@@ -99,7 +132,45 @@ impl BackendEngine {
             sql_transformers,
             graph_schema_registry: Arc::new(std::sync::RwLock::new(graph_schema_registry)),
             graph_schema_cache: Arc::new(std::sync::RwLock::new(graph_schema)),
+            advice_status: holon_advice::AdviceRuleStatusHandle::new(),
+            rule_status: crate::api::rule_status::RuleStatusHandle::new(),
+            _advice_reconciler: None,
+            _clock_scheduler: None,
         })
+    }
+
+    /// The reactive-rule status map (ADR 0024 WP3) — the action watcher writes
+    /// deprecation / parse / compile / exec outcomes; the render path reads it.
+    pub fn rule_status(&self) -> &crate::api::rule_status::RuleStatusHandle {
+        &self.rule_status
+    }
+
+    /// The advice-rule status map (ADR 0022) — read by the UI watcher to
+    /// replace a broken rule block's render with its error.
+    pub fn advice_status(&self) -> &holon_advice::AdviceRuleStatusHandle {
+        &self.advice_status
+    }
+
+    /// Install the advice reconciler: share the status handle the reconciler
+    /// writes to and hold its keep-alive handle. Called once during engine
+    /// initialization.
+    pub fn install_advice_reconciler(
+        &mut self,
+        status: holon_advice::AdviceRuleStatusHandle,
+        handle: crate::sync::AdviceReconcilerHandle,
+    ) {
+        self.advice_status = status;
+        self._advice_reconciler = Some(Arc::new(handle));
+    }
+
+    /// Install the clock scheduler (ADR 0024 P5): hold its keep-alive handle so
+    /// the day-rollover ticking task survives. Called once during engine
+    /// initialization.
+    pub fn install_clock_scheduler(
+        &mut self,
+        handle: crate::sync::clock_scheduler::ClockSchedulerHandle,
+    ) {
+        self._clock_scheduler = Some(Arc::new(handle));
     }
 
     /// Apply all registered SQL-level transformers to a SQL string.
@@ -190,6 +261,19 @@ impl BackendEngine {
         BlockDomain::new(self)
     }
 
+    /// Local, non-syncing UI state (the `local_ui_state` table). Per-device
+    /// view choices live here, never on replicated block tables (ADR 0025);
+    /// slot queries COALESCE these overrides over the synced choice. Lost on
+    /// DB rebuild — disclosed (C2b ephemeral-cache doctrine).
+    pub fn local_state(&self) -> crate::storage::local_state::LocalStateStore {
+        crate::storage::local_state::LocalStateStore::new(self.db_handle.clone())
+    }
+
+    /// Ensure the local-UI-state table exists. Called once during DI init.
+    pub async fn ensure_local_state(&self) -> Result<()> {
+        crate::storage::local_state::ensure_local_ui_state(&self.db_handle).await
+    }
+
     /// Pre-create materialized views for the given SQL queries.
     ///
     /// This should be called during initialization, BEFORE any data loading or
@@ -228,6 +312,24 @@ impl BackendEngine {
         Ok(self.apply_sql_transforms(&raw_sql))
     }
 
+    /// The rendered sort-key spec (`col` / `-col`) implied by the query's
+    /// trailing `ORDER BY`, or `None` when it declares no order.
+    ///
+    /// Only derivable here: the matview body cannot carry the clause (Turso
+    /// IVM rejects a Sort node) and the frontend never sees compiled SQL.
+    /// Context/parameter binding is irrelevant — an `ORDER BY` term is a
+    /// column, never a placeholder.
+    pub fn query_ordering_spec(
+        &self,
+        query: &str,
+        language: QueryLanguage,
+    ) -> Result<Option<String>> {
+        let sql = self.compile_to_sql(query, language)?;
+        Ok(crate::sync::trailing_order_by(&sql)
+            .as_deref()
+            .and_then(crate::sync::order_by_sort_spec))
+    }
+
     /// Compile a PRQL query to raw SQL (no transforms applied).
     fn compile_prql_to_raw_sql(&self, prql: &str) -> Result<String> {
         let full_prql = format!("{}\n{}", PRQL_STDLIB, prql);
@@ -257,6 +359,8 @@ impl BackendEngine {
             .graph_schema_cache
             .read()
             .expect("graph_schema_cache poisoned");
+        crate::storage::graph_schema::validate_referenced_edges(&schema, &query)
+            .map_err(|e| anyhow::anyhow!("GQL edge validation error: {e}"))?;
         let sql = gql_transform::transform(&query, &schema)
             .map_err(|e| anyhow::anyhow!("GQL transform error: {:?}", e))?;
         Ok(Self::gql_params_to_dollar(&sql))
@@ -314,41 +418,12 @@ impl BackendEngine {
     /// - Numbers: literal
     /// - Null: NULL
     /// - Bool: 1/0
+    ///
+    /// Shares its placeholder scanner with the execute path's
+    /// `bind_parameters`, so the two cannot come to recognize different
+    /// placeholder styles for the same query.
     fn inline_parameters(sql: &str, params: &HashMap<String, Value>) -> String {
-        let mut result = String::with_capacity(sql.len());
-        let mut chars = sql.chars().peekable();
-
-        while let Some(ch) = chars.next() {
-            if ch == '$' {
-                if let Some(&next_ch) = chars.peek() {
-                    if next_ch.is_alphanumeric() || next_ch == '_' {
-                        let mut param_name = String::new();
-                        while let Some(&next_ch) = chars.peek() {
-                            if next_ch.is_alphanumeric() || next_ch == '_' {
-                                param_name.push(chars.next().unwrap());
-                            } else {
-                                break;
-                            }
-                        }
-
-                        if let Some(value) = params.get(&param_name) {
-                            result.push_str(&value_to_sql_literal(value));
-                        } else {
-                            result.push('$');
-                            result.push_str(&param_name);
-                        }
-                    } else {
-                        result.push('$');
-                    }
-                } else {
-                    result.push('$');
-                }
-            } else {
-                result.push(ch);
-            }
-        }
-
-        result
+        rewrite_named_params(sql, &mut |name| params.get(name).map(value_to_sql_literal))
     }
 
     /// Compute a deterministic view name for a given SQL query and parameters.
@@ -357,16 +432,29 @@ impl BackendEngine {
     /// allowing us to create the view first and then query it for initial
     /// data. Bind context parameters to the parameter map
     ///
-    /// Adds `$context_id`, `$context_parent_id`, and `$context_path_prefix`
-    /// parameters based on QueryContext. None values are bound as
-    /// Value::Null.
+    /// Adds `$context_id`, `$context_local_id`, `$context_parent_id`, and
+    /// `$context_path_prefix` parameters based on QueryContext. Absent id
+    /// values are bound as Value::Null; the path prefix is the context's
+    /// PathContext (empty string when `Unfiltered`).
+    ///
+    /// `$context_local_id` is the same id with its URI scheme stripped
+    /// (`cc-session:abc` -> `abc`). Connector mirrors store the entity's own
+    /// key scheme-qualified but every foreign key verbatim, so a child
+    /// table joins against the local part. Stripping happens HERE, off the
+    /// parsed `EntityUri`, so no query has to re-derive it with a `substr`
+    /// and a hand-counted offset.
     fn bind_context_params(&self, params: &mut HashMap<String, Value>, context: &QueryContext) {
         match &context.current_block_id {
             Some(id) => {
                 params.insert("context_id".into(), Value::String(id.as_str().to_string()));
+                params.insert(
+                    "context_local_id".into(),
+                    Value::String(id.id().to_string()),
+                );
             }
             None => {
                 params.insert("context_id".into(), Value::Null);
+                params.insert("context_local_id".into(), Value::Null);
             }
         }
         match &context.context_parent_id {
@@ -380,19 +468,14 @@ impl BackendEngine {
                 params.insert("context_parent_id".into(), Value::Null);
             }
         }
-        match &context.context_path_prefix {
-            Some(prefix) => {
-                params.insert("context_path_prefix".into(), Value::String(prefix.clone()));
-            }
-            None => {
-                // No path prefix means descendants queries won't match anything
-                // This is intentional - use for_block_with_path() to enable descendants
-                params.insert(
-                    "context_path_prefix".into(),
-                    Value::String("__NO_PATH__/".to_string()),
-                );
-            }
-        }
+        // `Unfiltered` binds an empty prefix so `text.starts_with` matches every
+        // row; `Under(prefix)` binds the resolved subtree prefix. The former
+        // "no prefix" `None` — which bound a zero-row sentinel — is gone: an
+        // unresolvable path never reaches here, it is an `Err` at resolution.
+        params.insert(
+            "context_path_prefix".into(),
+            Value::String(context.path_context.prefix_literal().to_string()),
+        );
     }
 
     /// Execute a SQL query and return the result set
@@ -524,6 +607,14 @@ impl BackendEngine {
         let view_name = self.matview_manager.ensure_view(&sql_with_params).await?;
         let cdc_stream = self.matview_manager.subscribe_cdc(&view_name).await?;
 
+        // The snapshot read deliberately does NOT re-apply the ORDER BY that
+        // `ensure_view` stripped. Its row order becomes the order of the
+        // initial `Created` events on the CDC stream, and that arrival order is
+        // load-bearing downstream: re-applying the clause here breaks the left
+        // sidebar's nested live_block watch, which then never streams its
+        // selectable (keystone `inv` SutFocusWrite::apply_navigate_focus).
+        // Honouring a query's declared order is the render layer's job, over a
+        // flat collection, not the stream's.
         let mut data = None;
         for attempt in 0..10 {
             match self.matview_manager.query_view(&view_name).await {
@@ -534,7 +625,8 @@ impl BackendEngine {
                 Err(e) => {
                     let err_str = format!("{:?}", e);
                     let is_retryable = err_str.contains("no such table")
-                        || err_str.contains("Database schema changed");
+                        || err_str.contains("Database schema changed")
+                        || err_str.contains("database is locked");
                     if is_retryable && attempt < 9 {
                         tracing::debug!(
                             "[query_and_watch] Retryable error (attempt {}): {}",
@@ -656,7 +748,8 @@ impl BackendEngine {
         entity_name: &EntityName,
         op_name: &str,
         params: StorageEntity,
-    ) -> Result<Option<Value>> {
+        origin: holon_api::OpOrigin,
+    ) -> Result<holon_api::OpOutcome> {
         use tracing::Instrument;
         use tracing::info;
 
@@ -666,31 +759,139 @@ impl BackendEngine {
             tracing::Level::INFO,
             "backend.execute_operation",
             "operation.entity" = entity_name.to_string(),
-            "operation.name" = op_name
+            "operation.name" = op_name,
+            "operation.origin" = origin.tag()
         );
 
         async {
             info!(
-                "[BackendEngine] execute_operation: entity={}, op={}, params={:?}",
-                entity_name, op_name, params
+                "[BackendEngine] execute_operation: entity={}, op={}, origin={}, params={:?}",
+                entity_name,
+                op_name,
+                origin.tag(),
+                params
             );
 
             // Dispatch + undo-stack bookkeeping live in the shared op engine
             // (over the same dispatcher). Span context propagates via the
             // tracing-opentelemetry bridge.
             self.op_engine
-                .execute_operation(entity_name, op_name, params)
+                .execute_operation(entity_name, op_name, params, origin)
                 .await
         }
         .instrument(span)
         .await
     }
 
+    /// Replace the in-memory undo engine with a persistent one backed by the
+    /// replica DB: the `undo_log` snapshot table plus a live-state reader for
+    /// precondition (staleness) verification. Called once during DI init while
+    /// the engine is still owned (before it is shared behind `Arc`).
+    pub async fn enable_undo_persistence(&mut self) -> Result<()> {
+        use crate::api::undo_persistence::SqlUndoStateReader;
+        use crate::api::undo_persistence::SqlUndoStore;
+        use crate::api::undo_persistence::ensure_undo_log;
+        ensure_undo_log(&self.db_handle).await?;
+        let reader = Arc::new(SqlUndoStateReader::new(
+            self.db_handle.clone(),
+            crate::storage::BLOCK_WRITE_TABLE,
+        ));
+        let store = Arc::new(SqlUndoStore::new(self.db_handle.clone()));
+        let history = Arc::new(crate::api::history_store::TursoHistoryStore::new(
+            self.db_handle.clone(),
+        ));
+        self.op_engine = crate::api::operation_engine::DispatchingOperationEngine::new_persistent(
+            self.dispatcher.clone(),
+            reader,
+            store,
+        )
+        .await?
+        .with_history_store(history)
+        .with_template_source(Arc::new(
+            crate::api::template_source::TursoTemplateSource::new(self.db_handle.clone()),
+        ))
+        .with_task_vocabulary_source(Arc::new(
+            crate::api::task_vocabulary_source::SqlTaskVocabularySource::new(
+                self.db_handle.clone(),
+                crate::storage::BLOCK_WRITE_TABLE,
+            ),
+        ));
+        Ok(())
+    }
+
+    /// Follow `id` through the merge redirects to the identity that currently
+    /// holds it. An id nobody merged away resolves to itself, so every caller
+    /// can route through this unconditionally.
+    ///
+    /// This is the ONE resolution seam: a lookup that misses consults
+    /// `block_redirects` here rather than each reader re-implementing the
+    /// chain walk. Fails loud on a cycle instead of spinning — `merge_blocks`
+    /// refuses to create one, so reaching it means the table was corrupted.
+    pub async fn resolve_block_id(
+        &self,
+        id: &holon_api::EntityUri,
+    ) -> Result<holon_api::EntityUri> {
+        let mut current = id.to_string();
+        let mut chain = vec![current.clone()];
+        loop {
+            let mut params = std::collections::HashMap::new();
+            params.insert("from_id".to_string(), Value::String(current.clone()));
+            let rows = self
+                .db_handle
+                .query(
+                    "SELECT to_id FROM block_redirects WHERE from_id = $from_id",
+                    params,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("resolve_block_id({id}): {e}"))?;
+            let Some(next) = rows
+                .first()
+                .and_then(|r| r.get("to_id"))
+                .and_then(|v| v.as_string())
+                .map(str::to_string)
+            else {
+                break;
+            };
+            if chain.contains(&next) {
+                anyhow::bail!(
+                    "block_redirects holds a cycle reached from {id}: {} -> {next}",
+                    chain.join(" -> ")
+                );
+            }
+            chain.push(next.clone());
+            current = next;
+        }
+
+        // A redirect whose terminal no longer exists (the survivor was deleted
+        // after the merge) must NOT come back as if it named a live block —
+        // that is the silent-wrong-answer case. Disclose the whole chain so the
+        // stranding is obvious. Only checked when a redirect was actually
+        // followed; an unmerged id missing is the caller's own lookup to miss.
+        if chain.len() > 1 {
+            let mut params = std::collections::HashMap::new();
+            params.insert("id".to_string(), Value::String(current.clone()));
+            let rows = self
+                .db_handle
+                .query("SELECT id FROM block_raw WHERE id = $id", params)
+                .await
+                .map_err(|e| anyhow::anyhow!("resolve_block_id({id}) terminal check: {e}"))?;
+            if rows.is_empty() {
+                anyhow::bail!(
+                    "merge redirect {} ends at '{current}', which no longer exists — the merge \
+                     survivor was deleted, stranding every id merged into it",
+                    chain.join(" -> ")
+                );
+            }
+        }
+        // ALLOW(entity_uri_from_raw): id read back from a block_redirects row
+        Ok(holon_api::EntityUri::from_raw(&current))
+    }
+
     /// Undo the last operation.
     ///
     /// Delegates to the shared op engine. Returns true if an operation was
     /// undone, false if the undo stack is empty.
-    pub async fn undo(&self) -> Result<bool> {
+    pub async fn undo(&self) -> Result<holon_api::UndoOutcome> {
         self.op_engine.undo().await
     }
 
@@ -698,7 +899,7 @@ impl BackendEngine {
     ///
     /// Delegates to the shared op engine. Returns true if an operation was
     /// redone, false if the redo stack is empty.
-    pub async fn redo(&self) -> Result<bool> {
+    pub async fn redo(&self) -> Result<holon_api::UndoOutcome> {
         self.op_engine.redo().await
     }
 
@@ -710,6 +911,27 @@ impl BackendEngine {
     /// Check if redo is available
     pub async fn can_redo(&self) -> bool {
         self.op_engine.can_redo().await
+    }
+
+    /// Open a composite-undo group (Inc1): buffer subsequent User-origin ops
+    /// into ONE undo entry until [`end_undo_group`](Self::end_undo_group).
+    /// Delegates to the shared op engine. See
+    /// [`DispatchingOperationEngine::begin_undo_group`].
+    pub async fn begin_undo_group(&self) {
+        self.op_engine.begin_undo_group().await
+    }
+
+    /// Close the innermost composite-undo group, materializing the buffered
+    /// sub-ops into one composite entry. Delegates to the shared op engine.
+    pub async fn end_undo_group(&self) -> Result<()> {
+        self.op_engine.end_undo_group().await
+    }
+
+    /// Test-only: push a hand-crafted [`holon_core::UndoEntry`] onto the shared
+    /// engine's stack to exercise composite-inverse replay paths.
+    #[cfg(test)]
+    pub(crate) async fn push_undo_entry_for_test(&self, entry: holon_core::UndoEntry) {
+        self.op_engine.push_undo_entry_for_test(entry).await;
     }
 
     /// Register a custom OperationProvider
@@ -863,6 +1085,44 @@ mod tests {
         assert!(sql.to_uppercase().contains("FROM"));
     }
 
+    /// The frontend never sees compiled SQL, so a `sort {-x}` sidecar's order
+    /// can only reach the rendered collection through this derivation.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ordering_spec_carries_a_prql_sort_to_the_render_layer() {
+        let engine = create_test_engine().await.unwrap();
+
+        assert_eq!(
+            engine
+                .query_ordering_spec(
+                    "from block | select {id, content} | sort {-content}",
+                    QueryLanguage::HolonPrql
+                )
+                .expect("PRQL compile")
+                .as_deref(),
+            Some("-content")
+        );
+        assert_eq!(
+            engine
+                .query_ordering_spec(
+                    "from block | select {id, content} | sort content",
+                    QueryLanguage::HolonPrql
+                )
+                .expect("PRQL compile")
+                .as_deref(),
+            Some("content")
+        );
+        assert_eq!(
+            engine
+                .query_ordering_spec(
+                    "from block | select {id, content}",
+                    QueryLanguage::HolonPrql
+                )
+                .expect("PRQL compile"),
+            None,
+            "a query that declares no order must not impose one"
+        );
+    }
+
     /// Validates the H1 hypothesis from HANDOFF_DATA_CDC_SCOPE_LEAK.md:
     /// `from children` PRQL must produce SQL with `parent_id = 'block:test-1'`
     /// after `bind_context_params` + `inline_parameters`.
@@ -893,6 +1153,31 @@ mod tests {
         assert!(
             inlined.to_lowercase().contains("parent_id"),
             "expected parent_id predicate, got:\n{inlined}"
+        );
+    }
+
+    /// `$context_local_id` is the same id with its scheme stripped, so a
+    /// connector's child table (whose foreign keys are the provider's raw ids)
+    /// can join without a hand-counted `substr` offset.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn context_local_id_is_the_context_id_without_its_scheme() {
+        let engine = create_test_engine().await.unwrap();
+        let context = QueryContext::for_block(
+            &EntityUri::parse("cc-session:5969a71e").expect("valid entity URI"),
+            None,
+        );
+        let mut params = HashMap::new();
+        engine.bind_context_params(&mut params, &context);
+
+        let inlined = BackendEngine::inline_parameters(
+            "SELECT 1 FROM cc_message WHERE session_id = $context_local_id AND owner = \
+             $context_id",
+            &params,
+        );
+        assert_eq!(
+            inlined,
+            "SELECT 1 FROM cc_message WHERE session_id = '5969a71e' AND owner = \
+             'cc-session:5969a71e'"
         );
     }
 
@@ -1105,7 +1390,12 @@ mod tests {
         params.insert("value".into(), Value::Boolean(true));
 
         let result = engine
-            .execute_operation(&EntityName::new("test_item"), "set_field", params)
+            .execute_operation(
+                &EntityName::new("test_item"),
+                "set_field",
+                params,
+                holon_api::OpOrigin::User,
+            )
             .await;
         assert!(result.is_ok(), "Operation should succeed: {:?}", result);
 
@@ -1138,6 +1428,7 @@ mod tests {
                 &EntityName::Named("block".to_string()),
                 "nonexistent",
                 params,
+                holon_api::OpOrigin::User,
             )
             .await;
 
@@ -1174,5 +1465,72 @@ mod tests {
         // Verify we get OperationDescriptor objects with proper properties
         assert!(ops.iter().all(|op| op.entity_name == "block"));
         assert!(ops.iter().any(|op| !op.name.is_empty()));
+    }
+
+    /// Ruling C / #41: a root (no-filter) context must bind an UNFILTERED path
+    /// predicate — an empty prefix that `text.starts_with` matches on every row
+    /// — NEVER the `__NO_PATH__/` sentinel that silently matched zero rows (the
+    /// six-round nested-page chevron class, #27). The sentinel must be
+    /// unrepresentable after the PathContext split.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn root_context_binds_unfiltered_path_prefix_not_sentinel() {
+        let engine = create_test_engine().await.unwrap();
+        let mut params = HashMap::new();
+        engine.bind_context_params(&mut params, &QueryContext::root());
+        assert_eq!(
+            params.get("context_path_prefix"),
+            Some(&Value::String(String::new())),
+            "root/unfiltered context must bind an empty prefix (matches every row)"
+        );
+        for v in params.values() {
+            if let Value::String(s) = v {
+                assert!(
+                    !s.contains("__NO_PATH__"),
+                    "the __NO_PATH__ sentinel leaked into a bound param: {s:?}"
+                );
+            }
+        }
+    }
+
+    /// Ruling C / #41: the actual `from descendants` SQL, bound under a root
+    /// (unfiltered) context, must carry NO `__NO_PATH__/` sentinel. The
+    /// sentinel made the path predicate match zero rows (silent-empty); an
+    /// empty prefix makes `text.starts_with` match every row instead. This
+    /// is the compile- seam enforcement the chevron hunt lacked
+    /// (`block_with_path` is not populated in the unit test engine, so this
+    /// asserts on the bound query text rather than a live matview row set).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn descendants_under_root_binds_no_sentinel_predicate() {
+        let engine = create_test_engine().await.unwrap();
+        let raw_sql = engine
+            .compile_to_sql("from descendants", QueryLanguage::HolonPrql)
+            .expect("PRQL compile");
+        let mut params = HashMap::new();
+        engine.bind_context_params(&mut params, &QueryContext::root());
+        let inlined = BackendEngine::inline_parameters(&raw_sql, &params);
+
+        assert!(
+            !inlined.contains("__NO_PATH__"),
+            "root descendants query must not carry the silent-empty sentinel, got:\n{inlined}"
+        );
+        let lowered = inlined.to_lowercase();
+        assert!(
+            lowered.contains("path") && lowered.contains("like"),
+            "expected a `path LIKE …` descendants predicate, got:\n{inlined}"
+        );
+    }
+
+    /// #45: a missing block's path lookup must FAIL LOUD, never fabricate
+    /// `/{id}`. A fabricated path silently mis-scopes descendants queries onto
+    /// a path that no other block shares.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lookup_block_path_errs_on_missing_block_not_fabricated() {
+        let engine = create_test_engine().await.unwrap();
+        let missing = EntityUri::block("does-not-exist-9f3a");
+        let result = engine.blocks().lookup_block_path(&missing).await;
+        assert!(
+            result.is_err(),
+            "missing-block path lookup must Err (fail loud), got fabricated: {result:?}"
+        );
     }
 }

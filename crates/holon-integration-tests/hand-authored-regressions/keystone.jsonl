@@ -1,0 +1,602 @@
+# Hand-authored keystone regressions. One JSON object per line (JSONL).
+# Blank lines and lines starting with '#' are ignored.
+# Schema: the canonical `Fixture<E2ETransition>` (holon-pbt-core) serde shape —
+#   {"name": <slug>, "description": <provenance>,
+#    "initial_state": {"wiring": {"storage_adapters": [...], "sync_adapters": [...], "actors": [...]}},
+#    "transitions": [<E2ETransition>, ...]}
+# `initial_state` is OPTIONAL and pins the DRAWN WIRING of the run being reproduced.
+# `WideE2EMachine::init_state` draws exactly one value — a wiring manifest — and maps it
+# through `wide_e2e_ref_for`, so the manifest IS the generated starting ReferenceState.
+# Copy it verbatim from the failing case's `[pbt-telemetry] {... "wiring": {...} ...}` line
+# or its `[wide-e2e wiring] drawn:` line. Omit the field to replay over the fixed
+# `wide_e2e_ref()` (the `full_headless` wiring) exactly as before.
+# `wide_e2e_ref_for` also reads env: HOLON_FOLDER_COMPANION_SEED seeds extra blocks and
+# PBT_MUTABLE_TEXT changes editor semantics. Record them in the optional `environment` field
+# ({"env_flags": {...}}) if you author under either; the driver compares it against the live env
+# and PANICS on a mismatch. Omit it under the default (both unset) — the common case.
+# ONLY these top-level keys are accepted: name, description, environment, initial_state,
+# transitions. Anything else is a loud parse failure — serde would otherwise SILENTLY DROP a
+# mistyped key (`initail_state`) and replay the wrong base.
+# Each transition is the production `E2ETransition` enum in serde's external-tag form:
+#   {"CreateBlockUnderFocus": {"content": "...", "id": "block:..."}}
+#   {"BlockToPage": {"origin_id": "block:..."}}
+# Replayed by tests/hand_authored_regressions.rs. `HOLON_HAND_AUTHORED_SIDECAR=<path>` swaps
+# this file out (A/B probes without editing the committed one); `HOLON_HAND_AUTHORED_CASE=<name>`
+# runs one case in isolation (the driver stops at the first red, so an earlier red masks later
+# cases without it).
+#
+# --- liveness smoke: a clean create must stay GREEN -----------------------------------------
+# Proves the harness is not rigged to always panic: a bread-and-butter create the random
+# keystone runs constantly. Runs first; must pass before the red case below is reached.
+{"name": "create-block-smoke", "description": "harness liveness: a lone clean create under the focused page passes the full invariant catalog", "transitions": [{"CreateBlockUnderFocus": {"content": "clean smoke", "id": "block:smoke0"}}]}
+#
+# --- liveness smoke for the `initial_state` seam -------------------------------------------
+# The same create, but replayed over a PINNED non-default draw (storage={Turso} sync={} actors={},
+# the real 2026-07-25 land-gate draw) instead of full_headless. Proves the seam boots the pinned
+# wiring end-to-end rather than silently falling back: the run log's `[wide-e2e wiring] drawn:`
+# line reads `storage={Turso} ... projections={ViewModel, EditorState}`, not the full_headless set.
+{"name": "create-block-smoke-pinned-turso-draw", "description": "initial_state seam liveness: a clean create replayed over the PINNED storage={Turso} draw, proving a case can carry its own generated starting state instead of always replaying from wide_e2e_ref()", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"CreateBlockUnderFocus": {"content": "clean smoke", "id": "block:smoke0"}}]}
+#
+# --- editor same-seq trailing-whitespace echo (EditorBufferOwnership Inc 4) -----------------
+# Repro of the SqlOnly editor "typed trailing space vanishes ~100ms later" P1. Create a block
+# "foo", open its editor, type ONE trailing space. The cell-free editor VM stamps write_seq on
+# `set_field("foo ")`; the SQL provider trims trailing whitespace on store and echoes "foo" back
+# carrying the SAME write_seq. `evaluate_data_sync_echo` MUST recognise this as the editor's own
+# canonicalization (`AdoptBaseline`) and KEEP the typed "foo " buffer, not Converge to "foo".
+# GREEN with the guard's trim-shape discriminator present; RED (buffer regresses to "foo",
+# `inv-editor-text/mirror` mismatch on block:echo0) on a throwaway revert of that discriminator.
+{"name": "editor-trailing-space-echo-adopts-baseline", "description": "Inc4 echo lock: same-seq trailing-ws echo must keep the typed buffer (AdoptBaseline), not regress it (Converge)", "transitions": [{"CreateBlockUnderFocus": {"content": "foo", "id": "block:echo0"}}, {"FocusEditableText": {"block_id": "block:echo0"}}, {"TypeChars": {"text": " "}}]}
+
+# --- block-to-page on '/'-containing content (dogfood 2026-07-20, bug a1) -------------------
+# Repro: create a block whose content contains a trailing '/', then convert it to a page.
+# The planner (PageId::for_path) splits the origin content on '/', so a trailing '/' yields an
+# empty path segment and fails loud ("... has an empty segment ..."). The keystone's reference
+# oracle mirrors that same content-as-path assumption, so this case goes RED on the unfixed base.
+# Becomes the permanent regression lock: green once content is treated as a single leaf page name.
+# RETIRED 2026-07-22 (row-28 lane): the '/'-content target of this case is FIXED. The backend
+# sanitize (land 866977e85e) strips a trailing '/' from the page title; the keystone oracle now
+# MIRRORS it (transitions/block_to_page.rs::sanitize_page_leaf, used by plan_new_page for the page
+# id and by reference_state::apply_block_to_page for the page content), so a BlockToPage on
+# trailing-'/' content reconciles born-equal on both sides (proved: the page block is "Slashy block"
+# on both, and the harness.rs:603 synthetic/real id-reconcile now balances). This case can NO LONGER
+# run to green here for an UNRELATED reason: replayed standalone (not generated), it also surfaces a
+# hand-authored-replay-only org/loro divergence on the boot-fired journal day-page ("2026-01-15" under
+# block:journals) + a __document_root__ sentinel that the SUT org snapshot does not read in the direct
+# test_sequential path (the GENERATED keystone reads it fine — inv-blocks-match-ref/org is green there).
+# That residual is a hand-authored-replay harness gap, NOT the '/'-content bug, and is tracked in
+# docs/Testing/BugFunnel.md. Re-enable once the replay path materialises/reads the boot-journal file.
+# {"name": "block-to-page-slash-content-empty-segment", "description": "dogfood 2026-07-20 bug (a1): convert_block_to_page planner treats origin content as a /-split page path; trailing/embedded '/' -> empty-segment fail-loud", "transitions": [{"CreateBlockUnderFocus": {"content": "Slashy block/", "id": "block:slashy"}}, {"BlockToPage": {"origin_id": "block:slashy"}}]}
+#
+# --- mark-bounds coverage note (dogfood 2026-07-20, journal-click SIGABRT) --------------------
+# The mark-outlives-content corruption (a persisted link mark whose span exceeds its block
+# content -> `scalar_range_to_bytes` aborts EVERY render) is NOT reachable via a hand-authored
+# create+convert here: the SUT trims content on every write (`SqlOperationProvider::trimmed_content`),
+# so `convert_block_to_page` derives its full-span link mark from ALREADY-TRIMMED content, and the
+# harness applies plan+apply atomically (no shrink window). A trailing-space create instead trips
+# the ref/SUT content-trim asymmetry (`inv-block-content/*`, `inv-displayed-text/*`) — a separate
+# reference-model bug, not this one. The mark-bounds invariant (`inv-mark-bounds-within-content`)
+# DOES engage on the slash convert case above (3/3) and on every backend-bearing slice; its teeth
+# are proven by the unit catch test in
+# `pbt::composed::invariants::mark_bounds_within_content::tests`. A keystone RED needs a
+# fault-injection transition that writes a mark span decoupled from a shorter content (or a
+# store-divergence create) — tracked as a coverage follow-up.
+
+
+# --- external-write-while-focused: dirty-buffer preservation lock (EBO seam, vault row-292) ---
+# Focus -> Type (dirty) -> ExternalWriteWhileFocused. The random generator almost never lands the
+# dirty-editor window at a step where this transition is sampled, so a deterministic hand-authored
+# case is the only way to exercise it. NOTE: hand-authored replay drives transitions directly and
+# BYPASSES the HOLON_PBT_EXTERNAL_RACES generator gate (the gate is generator-only); preconditions
+# (app_started + active_editor_dirty + has_document_uri) are the only admission checks, and the
+# create/focus/type prefix establishes the dirty editor, so the case runs with the flag UNSET.
+{"name": "external-write-while-focused-preserves-dirty-buffer", "description": "EBO seam / vault row-292: an external sibling-add re-ingest landing while a focused block has a DIRTY editor buffer must NOT clobber that buffer (inv-editor-text/mirror = no silent data loss) nor duplicate blocks (inv-live-children-match-ref). Prefix mirrors the green echo case: create wwf0 under the structural-page focus root, focus it, type DIRTY. Then an external write adds a sibling to the SAME doc mid-focus.", "transitions": [{"CreateBlockUnderFocus": {"content": "wwf-focus", "id": "block:wwf0"}}, {"FocusEditableText": {"block_id": "block:wwf0"}}, {"TypeChars": {"text": "DIRTY"}}, {"ExternalWriteWhileFocused": {"doc_uri": "block:structural-page", "blocks": [{"id": "block:wwf-ext0", "parent_id": "block:structural-page", "content": "external sibling", "content_type": "text", "source_language": null, "source_name": null, "created_at": 0, "updated_at": 0}]}}]}
+#
+# --- ref-doc-0 remap gap: born-equal create-under-focus (BugFunnel 2026-07-22, keystone tolerated red) ---
+# Deterministic repro of the ref-doc-0 remap gap. CreateDocument mints the ORACLE's synthetic
+# `block:ref-doc-0`; the SUT writes an empty doc_0.org whose watcher mints a REAL uuid, so the two
+# id-spaces differ (per-tick reconcile maps ref-doc-0 -> uuid). NavigateFocus focuses the ORACLE's
+# `block:ref-doc-0`. CreateBlockUnderFocus with an EXPLICIT id (`id: Some(...)`, born-equal path)
+# dispatches `block.create{parent_id: <focus-root>}` DIRECTLY (components.rs create_block_with_id),
+# and create_block_under_focus.rs passes the UNREMAPPED oracle focus-root `block:ref-doc-0` as the
+# parent -> SUT Loro has no such block -> "parent block not found: block:ref-doc-0" hard failure.
+# The `id: None` slot path dodges this (commit_creation_slot re-resolves the parent from the SUT's
+# own live rows), which is why the earlier hand-authored case was green. GREEN once the SUT
+# create-under-focus resolves the focus-root parent through the id resolver (remap TOTAL, fail-loud
+# on an unmapped synthetic). NB: the BugFunnel row's phantom signature was WRONG — the live
+# manifestation is this hard create failure, not an inv-viewmodel-entity-ids-subset-of-data phantom.
+# NB: uses a SINGLE CreateDocument. A 2nd CreateDocument confounds this lock with a SEPARATE
+# doc-ingest history under-recording (harness.rs:300 counts each ref-doc-N->uuid remap as a UI
+# create that must record >=1 block_history op_group, but the 2nd doc's watcher-ingest records
+# none) -> inv-history-records-all-creates fires BEFORE CreateBlockUnderFocus even runs, masking
+# the parent-resolution bug. One doc keeps the born-equal create reachable. (2nd-doc issue parked.)
+{"name": "ref-doc-0-remap-born-equal-create-under-focus", "description": "BugFunnel 2026-07-22 ref-doc-0 remap gap: born-equal (id:Some) CreateBlockUnderFocus under a CreateDocument-minted synthetic doc dispatches block.create with the UNREMAPPED oracle focus-root parent -> SUT parent-not-found. Green once the focus-root parent is resolved through the id resolver.", "transitions": [{"CreateDocument": {"file_name": "doc_0.org"}}, {"NavigateFocus": {"region": "main", "block_id": "block:ref-doc-0"}}, {"CreateBlockUnderFocus": {"content": "a", "id": "block:gen-13"}}]}
+#
+# --- ref-doc-0 remap gap FACET 2: undo over-reverts a file-ingested doc (BugFunnel 2026-07-22) ---
+# The ORIGINAL BugFunnel phantom (inv-viewmodel-entity-ids-subset-of-data), an ORACLE-side undo bug.
+# CreateBlockUnderFocus(g0) is a USER-origin block.create -> pushes an oracle undo snapshot S0 taken
+# BEFORE g0 (so S0 has NO docs) and is undoable in prod. CreateDocument writes doc_0.org whose
+# watcher-ingest mints the doc page: in the ORACLE `insert_document` adds it to the SNAPSHOTTED
+# block_state.blocks (+ files.documents, which is NOT snapshotted); in the SUT it is an INGEST-origin
+# create that (operation_engine.rs:1220 "only User-origin ops push undo entries") is NOT on the undo
+# stack. UndoLastMutation pops S0 -> the ORACLE block_state loses the doc block, but PROD's
+# engine.undo() only reverts g0 and KEEPS the file-ingested doc. So the SUT still renders the doc
+# (sidebar page list) while the resolved oracle no longer knows it -> phantom entity id. Fix is
+# ORACLE-side & prod-faithful: file-ingested doc pages (tracked in files.documents) must survive
+# undo like next_doc_id already does (reference_state.rs:1863) -> re-materialise dropped doc roots
+# after pop_undo_to_redo. GREEN once the oracle undo stops over-reverting file docs.
+{"name": "ref-doc-0-undo-over-reverts-file-ingested-doc", "description": "BugFunnel 2026-07-22 ref-doc-0 FACET 2 (the original subset-of-data phantom): a USER-origin CreateBlockUnderFocus snapshots pre-doc state; a CreateDocument file-ingest (INGEST-origin, not undoable in prod) adds the doc; UndoLastMutation restores the pre-doc oracle snapshot, dropping the doc oracle-side while prod KEEPS it -> the SUT-rendered doc is a phantom against the resolved oracle. Oracle-side undo over-reverts file-ingested docs.", "transitions": [{"CreateBlockUnderFocus": {"content": "g", "id": "block:gen-0"}}, {"CreateDocument": {"file_name": "doc_0.org"}}, {"UndoLastMutation": null}]}
+#
+# --- R3 slot-create history: creation-slot commit must record a block_history op_group (BugFunnel 236/240) ---
+# A single id:None CreateBlockUnderFocus drives the PRODUCTION creation-slot gesture
+# (commit_creation_slot -> handle_text_sync -> block.create, mint-when-absent). The slot mints a real
+# uuid != the oracle synthetic block::create-0, so harness.rs:300 counts it as one UI create that MUST
+# record >=1 block_history op_group. RED (pre-fix): inv-history-records-all-creates fires
+# "block_history has 0 distinct op_group(s) but the oracle drove 1 UI create(s)". No CreateDocument, so
+# the doc-ingest under-recording confound (2nd-doc issue) is excluded.
+{"name": "slot-create-records-history-op-group", "description": "R3 (Martin ruling Option A): the creation-slot commit path must emit the same block_history provenance as every other create. A single id:None CreateBlockUnderFocus (production slot gesture) records >=1 op_group (inv-history-records-all-creates enforces). UndoLastMutation then reverts the user's CONTENT write and leaves the empty block standing: under ruling C (2026-08-08) + sub-ruling B (2026-08-09) the gesture is an authority-only empty birth (OpOrigin::Rule, no undo entry) plus an undo-visible content write, so there is no user create for undo to pop. The reaper collects the emptied block when focus leaves; the reference models no reaper, so it persists in the prediction.", "transitions": [{"CreateBlockUnderFocus": {"content": "a", "id": null}}, {"UndoLastMutation": null}]}
+#
+# --- R3b watcher-ingest history: doc-ingest creates must record a block_history op_group ---
+# TWO user CreateDocument gestures each write a NEW empty org file; the FileSyncController watcher
+# ingests each and mints a doc-page block via the ordering authority (create_in_tree), NOT through
+# DispatchingOperationEngine. Pre-fix that recorded 0 op_groups for the doc creates, so the C2 floor
+# (harness.rs:300 counts each ref-doc-N->uuid remap as a UI create demanding >=1) went short: RED
+# "block_history has 1 distinct op_group(s) but the oracle drove 2 UI create(s)". FIXED (R3b): the
+# ingest doc-page create records one OpOrigin::Ingest op_group when genuinely-new + runtime
+# (!in_initial_scan). Recording-only (ingest creates are not on the undo stack — separate item).
+{"name": "doc-ingest-records-history-op-group", "description": "R3b: watcher-ingested doc-page creates record block_history provenance like engine-routed creates. Two user CreateDocument gestures record >=2 op_groups; inv-history-records-all-creates enforces (lower bound).", "transitions": [{"CreateDocument": {"file_name": "doc_0.org"}}, {"CreateDocument": {"file_name": "doc_1.org"}}]}
+#
+# --- ref-doc remap gap FACET 3: born-equal (WriteOrgFile-pinned) create-under-focus (blocks EXTERNAL_RACES flip) ---
+# The armed-race keystone red. A WriteOrgFile-minted doc pins `#+ID: block:ref-doc-0` into the file
+# (write_org_file.rs:232 — so production's FileSyncController ingests the SAME synthetic id the oracle
+# minted instead of a fresh uuid). The SUT therefore holds a REAL `block:ref-doc-0` page, and the
+# per-tick reconcile classifies it BORN-EQUAL (harness.rs:616) and SELF-MAPS ref-doc-0 -> ref-doc-0.
+# NavigateFocus focuses the ORACLE `block:ref-doc-0`; a born-equal CreateBlockUnderFocus (id:Some)
+# resolves the focus-root parent through the resolver -> ref-doc-0 (the self-mapped identity, a GENUINE
+# SUT block). apply_create_under_focus's remap-totality assert (components.rs:2869) rejects ANY
+# `block:ref-doc-` resolved parent as "an unmapped synthetic whose real id was never reconciled" and
+# panics -- a FALSE POSITIVE: the born-equal doc IS a real SUT parent, the create must dispatch.
+# RED (pre-fix): "[SutBlockCreate::apply_create_under_focus] remap-totality violation: focus-root parent
+# block:ref-doc-0 is an unmapped CreateDocument-minted synthetic doc id". GREEN once the guard refuses
+# only the identity-FALLTHROUGH case (no resolver entry) and admits born-equal self-maps (resolver holds
+# ref-doc-0 -> ref-doc-0, and the SUT has the block). Distinct from FACET 1 (CreateDocument fresh-uuid,
+# above) which resolves ref-doc-0 -> a real uuid and is already green.
+{"name": "ref-doc-born-equal-create-under-focus", "description": "ref-doc remap gap FACET 3 (blocks the HOLON_PBT_EXTERNAL_RACES default-on flip): a WriteOrgFile-minted doc pins #+ID: block:ref-doc-0, so the SUT ingests a REAL ref-doc-0 page and the reconcile self-maps ref-doc-0 -> ref-doc-0 (born-equal). A born-equal CreateBlockUnderFocus under the focused doc resolves its focus-root parent to block:ref-doc-0 (a genuine SUT block), but apply_create_under_focus's remap-totality assert rejects every block:ref-doc- resolved parent as an unmapped synthetic and panics. GREEN once the guard admits born-equal self-maps (resolver entry present) and refuses only identity fallthrough.", "transitions": [{"WriteOrgFile": {"filename": "born.org", "blocks": [], "keyword_set": null}}, {"NavigateFocus": {"region": "main", "block_id": "block:ref-doc-0"}}, {"CreateBlockUnderFocus": {"content": "a", "id": "block:gen-1"}}]}
+
+#
+# --- main-panel prune-delta after re-parent + navigate (sweep signature 2026-07-25) --------
+# Indent re-parents block:mp1 under block:mp0, then NavigateFocus moves the Main focus root off
+# block:structural-page to the freshly created doc, so structural-page's whole subtree must
+# DEPART the main panel. The focus_descendants recursive-CTE matview's prune delta (dropping the
+# departed rows) lands a frame AFTER the frozen per-tick cached widget snapshot, so a one-shot
+# read judged a mid-prune frame and reported stale rows.
+# GREEN with the bounded-wait-for-stable re-sample in
+# invariants/bodies/main_panel_rows_match_focus.rs; the teeth are unchanged -- a stale row that
+# never heals still fails after the 5s budget.
+{"name": "main-panel-prune-delta-after-reparent-navigate", "description": "Keystone sweep signature (2026-07-25, 12 hits across 5 sweeps): inv-main-panel-rows-match-focus fired on a mid-prune frame. Indent re-parents block:mp1 under block:mp0, then NavigateFocus moves the Main focus root off block:structural-page entirely, so its whole subtree must DEPART the main panel. The focus_descendants recursive-CTE matview's prune delta lands a frame AFTER the frozen per-tick cached widget snapshot (sweep showed NavigateFocus ddl=0/6 -> watch view REUSED, so this is a prune delta, not view creation), and the one-shot read judged that mid-prune frame. Locks the settle contract: the panel must converge to the focus-root subtree within the bounded wait. Not a prod bug -- the invariant was asserting instantaneity the derived-data contract never promised.", "transitions": [{"CreateBlockUnderFocus": {"content": "mp0", "id": "block:mp0"}}, {"CreateBlockUnderFocus": {"content": "mp1", "id": "block:mp1"}}, {"Indent": {"block_id": "block:mp1"}}, {"CreateDocument": {"file_name": "doc_0.org"}}, {"NavigateFocus": {"region": "main", "block_id": "block:ref-doc-0"}}]}
+#
+# --- main-panel STALE rows after split + outdent + focus-root switch (sweep signature 2026-07-25) --
+# Distinct from the GREEN prune-delta case above: there the violation healed within the bounded
+# wait. Here the observed sweep's violation PERSISTED the full 5s across live re-renders, and the
+# stale ids were blocks FRESHLY BORN under the departed root (SplitBlock products), nested three
+# levels deep, one of them re-parented by Outdent right before the navigate.
+# Storage is exonerated for this shape: crates/holon-turso/tests/chained_matview_cdc_repro.rs
+# rungs 8/9/10 show the dynamic-anchor recursive matview converges AND emits a balanced CDC
+# delta (all old-root rows deleted, new-root rows created, one batch) across a focus-root switch.
+#
+#
+# --- F3 split-id-no-pairing: >=4 splits, the "3 of 4 mapped" discriminator ---
+# GREEN, and does NOT reproduce the corpus signature — kept as a shape lock, not as the repro.
+# The corpus signature is `oracle-only id block::split-3 has no SUT pairing ... Mapped:
+# [block::split-0, block::split-1, block::split-2]`, which reads as "the 4th of 4 splits". Decoding the
+# whole shrink refutes that: as the shrinker removed earlier splits the Mapped list shrank to
+# [split-0, split-1], then [split-0], while the UNPAIRED id stayed `split-3` — and the FULLY minimized
+# panic is `split-0` with `Mapped: []`, i.e. ONE split whose synthetic was never paired at all. So the
+# discriminator is not a count. `block::split-N` is minted off `block_state.next_id`, which several
+# transitions bump (`apply_content_mutation` bumps it unconditionally), so N does not index splits.
+# Four splits of ONE host at descending positions, with the corpus wiring pinned; both this and the
+# default full_headless draw are green, so plan candidate #1 (an N-bounded per-tick reconcile) is
+# REFUTED at this shape and the family stays open pending a full-depth soak.
+{"name": "four-splits-one-tick-all-pair", "description": "F3 split-id-no-pairing (task #62) discriminator: four SplitBlock ops on one host must each reconcile their synthetic block::split-N to a real SUT id. The corpus red mapped only split-0..2 and left split-3 unpaired. Wiring pinned to the corpus draw {Loro, Org, Turso} — the failing run was NOT full_headless, and a multi-storage draw is what makes the message's own second hypothesis (an adapter holding a resolver that is not the runner's shared one) reachable. GREEN means the per-tick reconcile is not N-bounded at this shape.", "initial_state": {"wiring": {"storage_adapters": ["Loro", "Org", "Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"CreateBlockUnderFocus": {"content": "abcdefghijklmnop", "id": "block:sp-host"}}, {"FocusEditableText": {"block_id": "block:sp-host"}}, {"SplitBlock": {"block_id": "block:sp-host", "position": 8}}, {"SplitBlock": {"block_id": "block:sp-host", "position": 6}}, {"SplitBlock": {"block_id": "block:sp-host", "position": 4}}, {"SplitBlock": {"block_id": "block:sp-host", "position": 2}}]}
+{"name": "main-panel-stale-rows-after-split-outdent-focus-switch", "description": "GREEN, and does NOT reproduce the sweep signature -- kept as a settle-contract lock for a DEEPER shape than main-panel-prune-delta-after-reparent-navigate: blocks born by SplitBlock three levels under the Main focus root, one re-parented by Outdent, must all depart the panel within the bounded wait after NavigateFocus moves the focus root. Authored 2026-07-25 while chasing the persisted-seed inv-main-panel-rows-match-focus red; the real red needs a generated initial_state + wiring draw that this fixed-base harness cannot express, so this case locks the contract but is not the repro.", "transitions": [{"CreateBlockUnderFocus": {"content": "n0", "id": "block:n0"}}, {"Indent": {"block_id": "block:n0"}}, {"CreateBlockUnderFocus": {"content": "abcdef", "id": "block:n1"}}, {"Indent": {"block_id": "block:n1"}}, {"Indent": {"block_id": "block:n1"}}, {"FocusEditableText": {"block_id": "block:n1"}}, {"SplitBlock": {"block_id": "block:n1", "position": 2}}, {"SplitBlock": {"block_id": "block:n1", "position": 1}}, {"Outdent": {"block_id": "block:n1"}}, {"CreateDocument": {"file_name": "doc_0.org"}}, {"NavigateFocus": {"region": "main", "block_id": "block:ref-doc-0"}}]}
+#
+# --- watch matview retains an outdent INTERMEDIATE row (sweeps 1+2, 2026-07-25) ---------
+# Verbatim minimized transition list from a keystone sweep. INTERMITTENTLY RED on
+# inv-matview-consistent-with-recompute (13 rows vs 12 on recompute). It is a RATE, not a pin —
+# a single green run of this suite is weak evidence. Red-for-the-right-reason lock on the open
+# IVM watch-matview retract-miss (a row retained at the OLD parent after Outdent re-parents).
+#
+# 2026-07-26 initial_state probe, 9 isolated runs per arm (HOLON_HAND_AUTHORED_CASE +
+# HOLON_HAND_AUTHORED_SIDECAR), run TWICE by independent measurers: 0/9 vs 2/9, then 1/9 vs 1/9
+# (unpinned full_headless vs initial_state pinned to storage={Turso} sync={} actors={}). NO wiring
+# effect is demonstrated at that sample size (one-sided Fisher exact p = 0.235 for the more
+# favourable pair). Both arms reproduce the same signature (watch_view_… matview 13 / recompute 12,
+# `bulk-3-5 @ parent bulk-3-0` retained), so the red is the timing race, not the draw.
+# The pin is left OFF because it is not shown to help — NOT because it keeps the gate green: this
+# case is ~1-in-9 flaky in `just hand-authored` either way (pre-existing, tracked as the open
+# inv-matview-consistent-with-recompute red).
+# Transition 8 was re-targeted from `block::split-11` to `block:c1` when the position-0 split
+# started leaving the text on the ORIGINAL id: split-11 is now the EMPTY block transition 7
+# inserts, and c1 is the block that carries the bytes offset 2 refers to. Same tree, same intent.
+{"name": "watch-matview-retains-outdent-intermediate-row", "description": "INTERMITTENTLY RED (~1 run in 3) on inv-matview-consistent-with-recompute -- a rate, not a pin. Verbatim minimized transition list from a keystone sweep (2026-07-25) whose red was inv-matview-consistent-with-recompute on watch_view_120528275324bee4 (matview 13 rows / recompute 12): the IVM recursive watch matview retained `bulk-3-5 @ parent bulk-3-0`, the INTERMEDIATE state between Outdent(bulk-3-5) and Outdent(bulk-3-4) (whose sibling-adoption re-homes bulk-3-5 onto its own just-moved parent). Replaying the transitions alone is green because the sweep's case also carried a GENERATED initial_state and a random wiring draw, neither of which the hand-authored harness reproduces -- that is the harness gap this entry documents. Storage rungs 8-13 in crates/holon-turso/tests/chained_matview_cdc_repro.rs model the shape synthetically and are also green.", "transitions": [{"SplitBlock": {"block_id": "block:parent", "position": 4}}, {"SplitBlock": {"block_id": "block:c1", "position": 2}}, {"CreateDocument": {"file_name": "doc_0.org"}}, {"SplitBlock": {"block_id": "block:c2", "position": 1}}, {"BulkExternalAdd": {"doc_uri": "block:ref-doc-0", "blocks": [{"id": "block:bulk-3-0", "parent_id": "block:ref-doc-0", "content": "r imkbCh ", "content_type": "text", "source_language": null, "source_name": null, "created_at": 1784986703473, "updated_at": 1784986703473}, {"id": "block:bulk-3-1", "parent_id": "block:ref-doc-0", "content": "fg_tqz", "content_type": "text", "source_language": null, "source_name": null, "created_at": 1784986703473, "updated_at": 1784986703473}, {"id": "block:bulk-3-2", "parent_id": "block:ref-doc-0", "content": "*  Gi7f59", "content_type": "text", "source_language": null, "source_name": null, "created_at": 1784986703473, "updated_at": 1784986703473}, {"id": "block:bulk-3-3", "parent_id": "block:bulk-3-2", "content": "S7s9G 8 9JRwU30B ", "content_type": "text", "source_language": null, "source_name": null, "created_at": 1784986703473, "updated_at": 1784986703473}, {"id": "block:bulk-3-4", "parent_id": "block:bulk-3-0", "content": "#+ bVUa8pD pN C", "content_type": "text", "source_language": null, "source_name": null, "created_at": 1784986703473, "updated_at": 1784986703473}, {"id": "block:bulk-3-5", "parent_id": "block:bulk-3-4", "content": "k lw9 G", "content_type": "text", "source_language": null, "source_name": null, "created_at": 1784986703473, "updated_at": 1784986703473}, {"id": "block:bulk-3-6", "parent_id": "block:bulk-3-1", "content": "OxfGVqDrNbNEq0Q bc", "content_type": "text", "source_language": null, "source_name": null, "created_at": 1784986703473, "updated_at": 1784986703473}, {"id": "block:bulk-3-7", "parent_id": "block:bulk-3-1", "content": "zE5R2W1f8   k Ji7w4", "content_type": "text", "source_language": null, "source_name": null, "created_at": 1784986703473, "updated_at": 1784986703473}]}}, {"Indent": {"block_id": "block::split-0"}}, {"SplitBlock": {"block_id": "block:c1", "position": 0}}, {"SplitBlock": {"block_id": "block:c1", "position": 2}}, {"SplitBlock": {"block_id": "block::split-0", "position": 2}}, {"NavigateHome": {"region": "main"}}, {"NavigateFocus": {"region": "main", "block_id": "block:ref-doc-0"}}, {"SplitBlock": {"block_id": "block:bulk-3-6", "position": 6}}, {"SplitBlock": {"block_id": "block:bulk-3-7", "position": 16}}, {"Outdent": {"block_id": "block:bulk-3-5"}}, {"SplitBlock": {"block_id": "block:bulk-3-7", "position": 6}}, {"Outdent": {"block_id": "block:bulk-3-4"}}]}
+#
+# --- land-gate 2026-07-25 shrunk repro (A/B probe, see report) ---------------------------
+{"name": "land23-bulk-outdent-deletedoc-editor-mirror-phantom-history", "description": "Shrunk minimal failing input from the 2026-07-25 land gate (just keystone-full 16) at the integration tip: CreateDocument doc_0.org -> BulkExternalAdd 8 blocks under block:ref-doc-0 -> NavigateFocus main ref-doc-0 -> Outdent block:bulk-3-5 -> DeleteDocument doc_0.org. Land-gate signatures: inv-editor-text/mirror (SUT MutableText empty vs reference content) and inv-history-no-phantom-rows/block_history (bulk-3-4/bulk-3-5 phantom rows). NOTE: the originating draw was wiring storage={Turso} sync={} actors={}, whereas this harness replays under full_headless.", "transitions": [{"CreateDocument": {"file_name": "doc_0.org"}}, {"BulkExternalAdd": {"doc_uri": "block:ref-doc-0", "blocks": [{"id": "block:bulk-3-0", "parent_id": "block:ref-doc-0", "content": "r imkbCh ", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1784978975343, "updated_at": 1784978975343}, {"id": "block:bulk-3-1", "parent_id": "block:ref-doc-0", "content": "fg_tqz", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1784978975343, "updated_at": 1784978975343}, {"id": "block:bulk-3-2", "parent_id": "block:ref-doc-0", "content": "*  Gi7f59", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1784978975343, "updated_at": 1784978975343}, {"id": "block:bulk-3-3", "parent_id": "block:bulk-3-2", "content": "S7s9G 8 9JRwU30B ", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1784978975343, "updated_at": 1784978975343}, {"id": "block:bulk-3-4", "parent_id": "block:bulk-3-0", "content": "#+ bVUa8pD pN C", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1784978975343, "updated_at": 1784978975343}, {"id": "block:bulk-3-5", "parent_id": "block:bulk-3-4", "content": "k lw9 G", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1784978975343, "updated_at": 1784978975343}, {"id": "block:bulk-3-6", "parent_id": "block:bulk-3-1", "content": "OxfGVqDrNbNEq0Q bc", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1784978975343, "updated_at": 1784978975343}, {"id": "block:bulk-3-7", "parent_id": "block:bulk-3-1", "content": "zE5R2W1f8   k Ji7w4", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1784978975343, "updated_at": 1784978975343}]}}, {"NavigateFocus": {"region": "main", "block_id": "block:ref-doc-0"}}, {"Outdent": {"block_id": "block:bulk-3-5"}}, {"DeleteDocument": {"file_name": "doc_0.org"}}]}
+#
+# --- undo->redo referential round trip (observability, 2026-07-26) -------------------------
+# Locks the OBSERVE-mode reporting path of `inv-undo-redo-reference-heal` over a completed
+# round trip. SplitBlock mints tail U1; PinBlock writes an open `navigation_history` row
+# naming U1 (pins are NOT undoable, so the reference outlives the undo); Undo deletes U1 --
+# the pin dangles, which is CORRECT and the invariant stays silent because the block is
+# genuinely gone; Redo re-executes the forward op and mints a FRESH uuid U2, so the block is
+# back under a NEW identity and the pin is now permanently dead.
+# PARKED as a comment, NOT active: on the Redo tick this shape ALSO trips the pre-existing
+# `inv-focus-roots` (OBSERVED twice, 2026-07-26) — the oracle resolves the pin's synthetic
+# label through the RE-POINTED resolver and therefore predicts the healed id U2, while prod's
+# navigation_history still holds U1. That red is independent of this invariant's mode, so
+# activating the line would turn `just hand-authored` deterministically red on a signal this
+# lane does not own. The executable form (both teeth halves, enforce mode) lives in
+# tests/undo_redo_reference_heal.rs; uncomment here once the pin oracle stops predicting
+# healing prod does not perform.
+# {"name": "undo-redo-pin-reference-not-healed", "description": "Observe-mode lock for inv-undo-redo-reference-heal: a pin written against a split tail's pre-undo identity is NOT re-pointed by the redo, so it dangles permanently. Behaviour is Martin-ruled to stay (2026-07-25, monotonic id minting); this case exists to keep the MEASUREMENT path alive. Teeth (enforce mode, both halves) live in tests/undo_redo_reference_heal.rs.", "transitions": [{"SplitBlock": {"block_id": "block:c1", "position": 0}}, {"PinBlock": {"region": "right_sidebar", "block_id": "block::split-0"}}, {"UndoLastMutation": null}, {"Redo": null}]}
+#
+# --- page-id rename collision (interim policy, 2026-07-26) -----------------------
+# The deterministic witness for the page-identity defect the keystone could not previously
+# REACH. Page ids are blake3(path) (`PageId::for_path`), so a collision is only reachable
+# temporally: a path must be freed (a rename) and then re-minted (a lazy page-create).
+# `RenamePage` + `CreatePageAtFreedPath` close that generator gap.
+#
+# Sequence: a `pagea` block with one child is converted to a page under the seed page
+# `structural-page` (id = H("structural-page/pagea") = block:a6bbdb1d-...); that page is
+# renamed to `Renamed` — the id correctly does NOT re-mint, so the path is now free while
+# its hash stays occupied; then the freed path is re-created through the production lazy
+# page-create op.
+#
+# INTERIM identity policy (plan §5, RULED 2026-07-26): re-creating a page at a FREED path
+# whose derived id is still held by the renamed page is REFUSED FAIL-LOUD — production's
+# `create` returns `IdentityCollision` instead of letting `ON CONFLICT(id) DO UPDATE`
+# clobber the renamed page. So the RULED interim end-state of this replay is:
+#   * transition 6 (CreatePageAtFreedPath) errors visibly; the SUT driver tolerates the
+#     `IdentityCollision` and applies NOTHING (the reference models the refusal identically);
+#   * NOTHING is clobbered — exactly ONE page survives, titled `Renamed`, with its child;
+#   * `inv-every-page-has-its-own-file` stays GREEN because the page rename now removes the
+#     old `structural-page/pagea.org` (the D3 double-home fix), so no softening is needed.
+# END-STATE (plan §5): a recreate at a freed path will instead mint a unique id and bind the
+# NAME to it (two distinct pages); when that lands, flip transition 6's expectation to a
+# second page and single-source the mint rule oracle-side.
+{"name": "page-id-rename-collision", "description": "Interim identity policy (plan \u00a75): rename A->B then re-create A is REFUSED fail-loud (IdentityCollision) instead of the ON CONFLICT DO UPDATE clobbering the renamed page. Exactly one page survives, titled Renamed; nothing is clobbered. The D3 fix removes the old org file so the page is not double-homed. End-state = unique-mint + name binding.", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"CreateBlockUnderFocus": {"content": "pagea", "id": "block:pgorigin"}}, {"CreateBlockUnderFocus": {"content": "child", "id": "block:pgchild"}}, {"Indent": {"block_id": "block:pgchild"}}, {"BlockToPage": {"origin_id": "block:pgorigin"}}, {"RenamePage": {"page_id": "block:a6bbdb1d-4e3d-e3d3-2c8d-c38a0efb5458", "new_title": "Renamed"}}, {"CreatePageAtFreedPath": {"path": "structural-page/pagea"}}]}
+#
+# --- D2 CLOSED: renaming an org FILE re-homes the doc atomically (Rename port, 2026-07-27) ---
+# A user renames `A.org` -> `B.org`. Per the file-move spec a page's title FOLLOWS its
+# file name. The FileChange port now carries an ATOMIC `Rename { from }` kind
+# (change_source.rs); the in-memory fs's `rename` emits it, the org sync loop routes it to
+# `FileSyncController::on_file_renamed`, which re-homes the doc in ONE step: migrate the
+# per-file tracking state old->new, re-point the alias, RETITLE the doc-root page to the
+# new file stem, and reconcile the moved bytes -- with NO delete-then-create window. So the
+# two former entanglements are gone:
+#   1. No Remove(A) half fires, so `on_file_deleted`'s cascade-over-delete (the D3 guard
+#      cannot close it when the title has not yet followed) never triggers.
+#   2. The old file does not linger, so the doc is not double-homed -- inv-every-page-has-
+#      its-own-file and inv-blocks-match-ref/org stay GREEN with NO softening.
+# The reference (`RefDocumentsMut::rename_document`) and the SUT
+# (`SutAppLifecycle::rename_document` -> `FileSystem::rename`) now share the atomic path,
+# so the retitle (inv-displayed-text/viewmodel, inv-block-content/block_raw) converges.
+# The generator arm stays env-gated OFF (HOLON_PBT_DOC_RENAME) so the RANDOM composed
+# alphabet is unchanged; this DETERMINISTIC replay is the un-parked witness (gated by
+# `preconditions` alone). Enable the random rung with HOLON_PBT_DOC_RENAME=1.
+{"name": "doc-file-rename-title-followed", "description": "D2 CLOSED by the atomic Rename port: a user mv of doc_seed.org -> moved_a.org is delivered as ONE FileChangeKind::Rename{from}, routed to FileSyncController::on_file_renamed. The doc keeps its #+ID (no re-mint), is re-homed to moved_a.org with NO delete-then-create window (so on_file_deleted never cascade-over-deletes it), and its page is retitled to the new file stem moved_a. No old file lingers, so the doc is not double-homed. All invariants un-softened.", "transitions": [{"WriteOrgFile": {"filename": "doc_seed.org", "blocks": [], "keyword_set": null}}, {"RenameDocument": {"old_file_name": "doc_seed.org", "new_file_name": "moved_a.org"}}]}
+#
+# --- D4: journal auto-create autonomously re-mints and CLOBBERS a renamed page ---
+# NOT expressible as a keystone.jsonl case: AdvanceDay's `SutClockAdvance` cap is
+# intentionally UNREGISTERED in every composed wiring (builder.rs: "AdvanceDay stays
+# dormant"), so a RenamePage+AdvanceDay replay panics "capability SutClockAdvance ...
+# absent from the CapMap" before it can tick the clock. The clock-driven journal-rule
+# re-fire is only reachable in the DEDICATED directed harness (the ADR 0024 6
+# AdvanceDay capstone), so the red-for-the-right-reason witness lives there:
+#   crates/holon-integration-tests/src/pbt/frontend_slice/components.rs
+#     ::tests::journal_autocreate_reraise_clobbers_renamed_journal_page  (#[ignore])
+#   run: cargo test -p holon-integration-tests --features pbt --lib \
+#          journal_autocreate_reraise_clobbers -- --ignored --nocapture
+# Mechanism: block_exists("Journals/{today}") compiles to a NAME match
+# (pattern.rs::block_exists_sql), so renaming the boot journal frees the name. Rolling
+# the clock forward a day and back re-fires the rule for the boot day, whose name no
+# longer resolves; the action re-creates it at the SAME deterministic id
+# PageId::for_path("Journals/2026-01-15"), so block.create lands on ON CONFLICT(id) DO
+# UPDATE and clobbers the renamed title back to the date. Observed 2026-07-26:
+#   after rename:  title="Renamed"     page_tag=true
+#   after re-tick: title="2026-01-15"  page_tag=true   <- title clobbered
+# NB the Page tag is PRESERVED (the re-mint re-pages the row `place: page(journals)`),
+# so the clobber is TITLE-ONLY -- the page-tag-drop half of the hypothesis does NOT
+# reproduce. See docs report / the directed test for how to lift this into the keystone
+# (register SutClockAdvance in full_headless + model re-fired journals in the oracle).
+# InstantiateTemplate wiring follow-up (2026-07-27): the transition is now LIVE in the
+# composed keystone (registered on the frontend arm; the storage-only branch it used to
+# sit on is unreachable once a ViewModel projection is present). This case replays it +
+# the landed composite undo over full_headless — one undo pops the WHOLE instantiation.
+#
+# --- F4 watch-rows-cdc-parent: template DEFINITION child reported the doc-root sentinel ---
+# Minimized out of a live 16-case full-depth run (2026-08-05) to just [InstantiateTemplate, SetupWatch].
+# `block:tpl-c1` is the template DEFINITION child the driver seeds under `block:tpl`. The oracle used to
+# parent BOTH definition blocks at `no_parent` purely to make `seed_block_ids` classify them as SEED and
+# drop them from the block-comparison invariants. `inv-watch-rows-match-ref` applies NO seed filter — an
+# AllBlocks watch returns every block — so the shortcut leaked out as `expected=__document_root__` against
+# prod's structurally-correct `actual_ui_model=block:tpl`. Fixed per Martin's ruling by resolving the REAL
+# parent (`seed_template_definition` seeds the child UNDER the root and forces only its `block_documents`
+# entry to `no_parent`), NOT by treating the sentinel as a wildcard — a wildcard would also have hidden a
+# genuinely wrong parent. The watch must carry `parent_id` or the invariant's parent arm is not exercised.
+{"name": "watch-rows-template-child-parent", "description": "F4 watch-rows-cdc-parent (task #76): a template-definition child must report its REAL parent to a parent_id-carrying AllBlocks watch. RED pre-fix with `CDC parent_id mismatch for block:tpl-c1 ... actual_ui_model=Some(\"block:tpl\") expected=Some(\"__document_root__\")` — the oracle parented template definitions at no_parent to win seed exclusion, and the watch invariant applies no seed filter. GREEN once parent truthfulness and seed classification are separated.", "transitions": [{"CreateBlockUnderFocus": {"content": "host", "id": "block:tpl-host"}}, {"InstantiateTemplate": {"parent_id": "block:tpl-host", "date": "aaa", "mood": "aaa"}}, {"SetupWatch": {"query_id": "query-tplparent", "query": {"table": "Blocks", "columns": ["id", "content", "content_type", "source_language", "source_name", "parent_id"], "predicates": [], "source": "AllBlocks"}, "language": "holon_prql"}}]}
+{"name": "instantiate-template-undo-removes-whole-instantiation", "description": "InstantiateTemplate wiring follow-up (2026-07-27, BugFunnel silent-vacuity row): the transition is now a LIVE keystone transition. Replays [CreateBlockUnderFocus host, InstantiateTemplate under host, UndoLastMutation] over full_headless: one UndoLastMutation pops the whole instantiation (instance root + child) via the landed composite push_undo_snapshot, leaving only the host block — GREEN. Was the Inc0 red-for-the-right-reason (one undo left the instance root a phantom) before composite undo landed.", "transitions": [{"CreateBlockUnderFocus": {"content": "host", "id": "block:cu-host"}}, {"InstantiateTemplate": {"parent_id": "block:cu-host", "date": "abc", "mood": "xyz"}}, {"UndoLastMutation": null}]}
+#
+# --- split-id family: a minted split tail must reach the SUT under its REAL id -------------
+# The oracle labels a split tail `block::split-N` (scheme `block:` + local part `:split-N`).
+# Every SUT-facing site must resolve that label through the shared per-tick reconcile map;
+# a site that skips it drives the raw label into production, where it reads as a mangled id.
+{"name": "peer-edit-on-split-tail-resolves-real-id", "description": "RED before the fix with `peer_update_block: block :split-0 not found` (crates/holon-loro-testing/src/peer_ops.rs:72). The reference peer mirror stores each block's BARE local id (`b.id.id()`), which for a split tail is `:split-0`, while the SUT peer fork holds the real minted uuid. `LoroSut::resolve_stable_id` is the designed bridge, but the composed builder constructed `LoroSut` with a FRESH EMPTY map instead of the shared reconcile resolver, so the synthetic label fell through identity and was driven verbatim into the peer LoroDoc.", "transitions": [{"SplitBlock": {"block_id": "block:c1", "position": 1}}, {"AddPeer": null}, {"PeerEdit": {"peer_idx": 0, "op": {"Update": {"stable_id": ":split-0", "content": "peer edits the split tail"}}}}]}
+# The Create arm of the same hole, which failed SILENTLY rather than panicking: an
+# unresolvable parent was demoted to `None`, so the block was created at the PEER ROOT
+# and the divergence only became observable after the merge.
+{"name": "peer-create-under-split-tail-keeps-its-parent", "description": "RED before the fix on inv-blocks-match-ref: `PeerEditOp::Create` passed `parent_stable_id` straight to `peer_create_block` while Update/Delete resolved theirs, and `peer_create_block` did `parent_stable_id.and_then(find_node_by_stable_id)` — so the unresolved oracle label `:split-0` silently became `None` and the block was created at the peer root. The oracle's merge (`merge_peer_blocks_into_primary`) records the created block's parent as `block::split-0`, which the invariant remaps to the real uuid, so post-merge the SUT's peer-root parent diverges from the oracle's split-tail parent. Now the parent resolves like Update/Delete does, and an unresolvable Some(parent) fails loud instead of being demoted.", "transitions": [{"SplitBlock": {"block_id": "block:c1", "position": 1}}, {"AddPeer": null}, {"PeerEdit": {"peer_idx": 0, "op": {"Create": {"parent_stable_id": ":split-0", "content": "child of the split tail", "stable_id": "peer-under-split"}}}}, {"MergeFromPeer": {"peer_idx": 0}}]}
+# RED, UNFIXED, QUARANTINED in the `hand-authored` recipe's default skip list.
+# Keystone signature: `[toggle_state] click #1 failed for block:parent:
+# cycle_state_toggle: ... renders NO node in region main`. Un-quarantine when the
+# render drop is fixed (delete the name from the justfile skip line).
+# The away-hop is LOAD-BEARING: the identical sequence WITHOUT the NavigateHome
+# passes. Do not "simplify" it away.
+{"name": "main-panel-drops-refocused-split-block", "description": "INTERMITTENTLY RED (~4 hits / 7 runs), a RATE not a pin -- run it several times before concluding anything. Verbatim shrunk keystone case from the 2026-07-27 overnight soak (armA-run01/02 at base 68f4d452), minus the one un-authorable step: the original hopped away via NavigateFocus to a BlockToPage-MINTED page whose id is random per run, so NavigateHome stands in for it. CONFIRMED PROD RENDER DROP, not an identity bug and not mere latency: after the away-and-back refocus, block:parent renders NO node in region main -- while its siblings block:c1/block:c2 and the page itself render fine -- yet inv-blocks-match-ref/block_raw passes 15/15, so the block genuinely EXISTS in the SUT under the focus root with that exact id. inv-main-panel-rows-match-focus ALSO passes 15/15, which means that invariant does not read the resolved ViewModel: the rows are right while the render omits one. The 2s driver poll never surfaces it (the panel is otherwise fully materialised), so this is a lost update on panel rebuild, not a slow projection. Reproduces at BOTH the soak base 68f4d452 (2/3) and chain tip 341246b2 (2/4) -- it was never fixed; it merely stopped being DRAWN at tip because 0d3b44563c63 widened the keystone alphabet and thereby changed every seed's draw. Root cause (which layer drops the row on rebuild) NOT yet identified.", "initial_state": {"wiring": {"storage_adapters": ["Org", "Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"RenamePage": {"page_id": "block:61133fe7-d4d5-ab1c-24e4-110da5f42293", "new_title": "Moved"}}, {"SplitBlock": {"block_id": "block:c1", "position": 2}}, {"SplitBlock": {"block_id": "block:parent", "position": 1}}, {"SplitBlock": {"block_id": "block::split-1", "position": 0}}, {"SplitBlock": {"block_id": "block::split-2", "position": 3}}, {"CreateBlockUnderFocus": {"content": "ka", "id": null}}, {"SplitBlock": {"block_id": "block:c2", "position": 0}}, {"SplitBlock": {"block_id": "block::split-2", "position": 0}}, {"BlockToPage": {"origin_id": "block:journals::auto-create"}}, {"SplitBlock": {"block_id": "block::split-4", "position": 0}}, {"SplitBlock": {"block_id": "block::split-6", "position": 0}}, {"NavigateHome": {"region": "main"}}, {"NavigateFocus": {"region": "main", "block_id": "block:structural-page"}}, {"ToggleState": {"block_id": "block:parent", "new_state": "TODO"}}]}
+#
+# --- journal convert-link marks survive an External whole-doc rewrite (task #76) -------------
+# Locks BOTH org known reds against the harness's own lossy org serializer. See the case
+# description for the bisect evidence and the exact byte diff.
+{"name": "journals-external-rewrite-strips-convert-link-marks", "description": "Deterministic lock for the two org known reds (org-blocks-ref-diverge #76, org-render-echo-loop #66). Verbatim minimal failing input from a keystone shrink, wiring pinned to the failing draw {Loro,Turso}. Transition 9 converts the boot journal auto-create heading to a page, so its origin gains a full-span [[block:P][Journal Auto-Create]] link MARK; the final transition is an External ApplyMutation, whose SutSeamMutate arm rewrites every tracked doc file from a block snapshot. RED before the fix: that harness serializer rendered block.content RAW and never projected block.marks, so the rewrite stripped the link from Journals.org on disk (318 bytes) while the store, the reference and prod's SQL render all kept it (366 bytes) -- inv-org-render-fixed-point reported a PERSISTED render!=disk echo-loop and inv-blocks-match-ref/org a marks divergence. GREEN once serialize_block_recursive projects marks through render_inline_marks exactly as production's render_headline_block does. Bisected: prefixes of 9/15/18/21 transitions are all GREEN (2/2 each) -- only the External rewrite turns it red (2/2), which is what pins the defect to the rewrite path and not to the convert.", "initial_state": {"wiring": {"storage_adapters": ["Loro", "Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"SplitBlock": {"block_id": "block:c1", "position": 0}}, {"CreateBlockUnderFocus": {"content": "gul", "id": "block:gen-1"}}, {"SplitBlock": {"block_id": "block:parent", "position": 0}}, {"SplitBlock": {"block_id": "block::split-0", "position": 0}}, {"SplitBlock": {"block_id": "block:gen-1", "position": 3}}, {"SplitBlock": {"block_id": "block::split-2", "position": 0}}, {"SplitBlock": {"block_id": "block::split-3", "position": 0}}, {"UndoLastMutation": null}, {"BlockToPage": {"origin_id": "block:journals::auto-create"}}, {"CreateBlockUnderFocus": {"content": "a", "id": null}}, {"SplitBlock": {"block_id": "block::split-0", "position": 0}}, {"SplitBlock": {"block_id": "block:c2", "position": 1}}, {"CreateBlockUnderFocus": {"content": "a", "id": null}}, {"CreateBlockUnderFocus": {"content": "a", "id": null}}, {"BulkExternalAdd": {"doc_uri": "block:61133fe7-d4d5-ab1c-24e4-110da5f42293", "blocks": [{"id": "block:bulk-13-0", "parent_id": "block:61133fe7-d4d5-ab1c-24e4-110da5f42293", "content": "\u00df t\u00f1\ud83d\ude00", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:bulk-13-1", "parent_id": "block:bulk-13-0", "content": "YzyxG qdTes7", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:bulk-13-2", "parent_id": "block:61133fe7-d4d5-ab1c-24e4-110da5f42293", "content": "\u20ac\u00e9\u00e9it", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:bulk-13-3", "parent_id": "block:bulk-13-0", "content": "Vgr7s 1K2 LB7 1X", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:bulk-13-4", "parent_id": "block:bulk-13-2", "content": "al_lrs", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:bulk-13-5", "parent_id": "block:bulk-13-2", "content": "YmT0ZD0i yr", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:bulk-13-6", "parent_id": "block:bulk-13-1", "content": "\u20ac\u65e5\u00f1\u20ac\u00e9", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}]}}, {"Indent": {"block_id": "block:c1"}}, {"SplitBlock": {"block_id": "block::split-0", "position": 0}}, {"Outdent": {"block_id": "block:c1"}}, {"CreateBlockUnderFocus": {"content": "a", "id": null}}, {"CreateBlockUnderFocus": {"content": "a", "id": null}}, {"SplitBlock": {"block_id": "block:gen-1", "position": 0}}, {"ApplyMutation": {"event": {"source": "External", "mutation": {"Update": {"id": "block::create-22", "fields": {"effort": "A"}}}}}}]}
+#
+# --- INVESTIGATION REPRO (2026-08-01, UNRATIFIED): `_drawer_order` leaks into projections -----
+# NOT a registered known red. Authored by the 2026-08-01 keystone-regression investigation as the
+# deterministic lock for the divergence attributed to 1752b829c5 (#88, drawer-order write-back).
+# The TRANSITIONS ARE INCIDENTAL: the divergence is already present in the SEEDED state (the
+# keystone shrank to `transitions: []`). All that matters is the PINNED frontend draw, which makes
+# `wide_e2e_ref_for` seed the forward-edge corpus and `boot_and_seed_wide` ingest
+# FORWARD_EDGE_ORG. `fe-blocked` is the only corpus block whose `:PROPERTIES:` drawer carries a
+# non-`:ID:` key (`:REQUIRES: fe-target`), so the parser records
+# `_drawer_order = "[\"REQUIRES\"]"` into its properties bag; that property persists into
+# `block_raw.properties`, the `block` matview and the org lens, while the oracle models only
+# `{sequence}`. NOTE: `create-block-smoke-pinned-turso-draw` above pins the SAME draw and so goes
+# red FIRST, masking this case -- run it with
+# HOLON_HAND_AUTHORED_CASE=org-drawer-order-property-leaks-into-projections.
+{"name": "org-drawer-order-property-leaks-into-projections", "description": "UNRATIFIED investigation repro (2026-08-01). Pinned storage={Turso} frontend draw seeds the forward-edge corpus and ingests forward-edge-page.org. fe-blocked's :REQUIRES: drawer key makes the org parser (crates/holon-org-format/src/parser.rs, the drawer_order block after the property loop) persist `_drawer_order` into block.properties; the property reaches block_raw.properties, the block matview and the org lens, while the reference models only {sequence}. Fires inv-blocks-match-ref/{org,block_raw,matview}. The block_raw arm's `requires: []` in the failure dump is NOT a lost edge: that arm compares the {Content,Properties,Marks} SUBSET and block_raw carries no junction columns by design (see SutBackend::block_raw_snapshot doc + compare_block_raw_subset). Transitions are incidental; the seed alone is red.", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"CreateBlockUnderFocus": {"content": "drawer order probe", "id": "block:dorder0"}}]}
+
+# Modifier-click generation (2026-08-02). The keystone drives PinBlock as a REAL
+# shift+click on the block's bullet, so this one-transition case guards the whole
+# modifier path: block_profile.yaml's `shift_action: focus_pin(...)` ->
+# is_template_arg -> selectable's per-modifier wiring -> the modifier-keyed intent
+# lookup in focus_path -> navigation.focus_pin -> the focus_roots projection the pin
+# invariants read. Break any link in that chain and this case goes red on its own.
+{"name": "shift-click-bullet-pins-block-to-right-sidebar", "description": "Teeth for the modifier-click dispatch path. Drove out a shipped defect: block_profile.yaml passed region: \"right\" to focus_pin, which Region::from_str rejects (it accepts only main/left_sidebar/right_sidebar), so the shipped shift+click-to-pin gesture failed at the navigation provider. Undetectable before the keystone generated modifier-carrying clicks.", "transitions": [{"PinBlock": {"region": "right_sidebar", "block_id": "block:c1"}}]}
+
+# Indent whose new parent is a DE-INLINED sibling page is a cross-FILE move. The
+# source file's write-back must drop the moved block, but writeback_sibling_grounding
+# only reads a sibling file reachable from an ABSENT block's own id: gen-1 is not a
+# page (name_chain -> empty -> Ok(None)) and the destination page was never in the
+# source file, so nothing grounds the drop and ADR 0025 vetoes a LEGITIMATE move.
+# Journals.org keeps a stale "* s" copy of gen-1, which is why inv-blocks-match-ref/org
+# sees gen-1 under TWO parents and render != disk persists.
+# Distilled from the 2026-08-02 `just pbt general 48` shrink. The shrink reached this
+# state via NavigateBack, whose target depends on nav HISTORY; replayed standalone it
+# focused elsewhere, gen-1 was born under a different parent, and the case was VACUOUSLY
+# green. NavigateFocus pins the precondition directly: gen-1 must be born under
+# block:journals so its previous sibling IS the de-inlined day page. If a future change
+# makes this case green, FIRST confirm gen-1 still lands under block:journals — a green
+# here is only meaningful if that still holds.
+{"name": "indent-onto-deinlined-sibling-page-vetoes-writeback", "description": "Pre-existing keystone red, reproduced 2026-08-02 in 3 transitions: Indent(block:gen-1) re-parents a plain block onto its previous sibling, the seeded de-inlined daily journal page block:61133fe7 (2026-01-15), which lives in its OWN org file. The store performs the move correctly (the SQL render of Journals.org rightly omits gen-1), but veto_ungrounded_removals refuses that write with UNGROUNDED WRITE-BACK REMOVAL and quarantines Journals.org, so the stale on-disk copy survives. Root cause: writeback_sibling_grounding (file_sync_controller.rs:4897) resolves doc_id_to_path(block.id), which is Ok(None) for a NON-page block (name_chain returns an empty chain, sync_ports.rs:206-220), so the destination file is never read and a legitimate cross-file move is misread as data loss. Fires inv-blocks-match-ref/org (10 SUT blocks vs 9 ref, gen-1 under BOTH block:journals and block:61133fe7), inv-org-render-fixed-point (render != disk persisted 5s) and inv-no-observed-errors. INTERMITTENT on the unfixed tree — 4 RED / 4 GREEN in 8 serial runs (2026-08-03), because the veto only happens when the queued Upsert for gen-1 (which still carries the PRE-move parent) is rendered after the Indent has landed in the store. Judge any change to the write-back grounding over ~20 runs; a single green proves nothing here.", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": ["MCPServer"]}}, "transitions": [{"NavigateFocus": {"region": "main", "block_id": "block:journals"}}, {"CreateBlockUnderFocus": {"content": "s", "id": "block:gen-1"}}, {"Indent": {"block_id": "block:gen-1"}}]}
+
+# Open-in-tab via cmd+click (rung 2). These guard the SECOND modifier path:
+# index.org's sidebar `cmd_action: navigation_open_tab(...)` -> is_template_arg ->
+# selectable's per-modifier wiring -> the modifier-keyed intent lookup -> the
+# navigation provider -> focus_roots + navigation_cursor. They also lock the
+# open-set/rendered-root SPLIT: `open_tab` appends an open row WITHOUT closing the
+# others, but the main panel joins navigation_cursor, so only the cursor's subtree
+# renders. inv-focus-roots judges the open set; inv-main-panel-rows-match-focus
+# judges the rendered one. If the panel ever rendered a background tab's subtree,
+# the first case reds on the main-panel invariant.
+{"name": "cmd-click-sidebar-opens-second-tab", "description": "Two cmd+clicks on two sidebar pages leave TWO open main rows (insertion order, neither closed) while the panel renders only the LAST one's subtree — the cursor's. Proves open_tab appends rather than replacing, and that a background tab stays unrendered.", "transitions": [{"CreateDocument": {"file_name": "doc_0.org"}}, {"CreateDocument": {"file_name": "doc_1.org"}}, {"OpenTabViaModifierClick": {"block_id": "block:ref-doc-0"}}, {"OpenTabViaModifierClick": {"block_id": "block:ref-doc-1"}}]}
+{"name": "cmd-click-same-row-twice-activates", "description": "The activate branch of provider.rs::open_tab: a second cmd+click on an ALREADY-open row must move the cursor only — no second navigation_history row, no reorder. If the ref model minted a row here (or prod inserted a duplicate) inv-focus-roots would diverge on the open set.", "transitions": [{"CreateDocument": {"file_name": "doc_0.org"}}, {"OpenTabViaModifierClick": {"block_id": "block:ref-doc-0"}}, {"OpenTabViaModifierClick": {"block_id": "block:ref-doc-0"}}]}
+{"name": "embedded-page-toggle-not-demanded-under-background-tab", "description": "Regression guard for the SIXTH open-set/rendered-root consumer (found by adversarial verification of rung 2). inv-embedded-page-collapsed-lazy used to build its focus-root set from expected_focus_root_rows — the region's OPEN SET — and then hard-fail when a non-seed page under any of those roots had no expand_toggle in the main panel. Once open_tab can leave a BACKGROUND tab open, that demanded a toggle for a page the panel structurally cannot contain (the main-panel query joins navigation_cursor, so only the cursor's subtree renders). BlockToPage mints the embedded page under block:parent; the trailing OpenTabViaModifierClick moves the cursor to ref-doc-0 and leaves structural-page open-but-unrendered. Without the fix the invariant fails naming TWO roots. Wiring is pinned to Turso because the affordance prong needs the ViewModel projection.", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"BlockToPage": {"origin_id": "block:parent"}}, {"CreateDocument": {"file_name": "doc_0.org"}}, {"OpenTabViaModifierClick": {"block_id": "block:ref-doc-0"}}]}
+{"name": "pin-survives-cmd-click-open-tab", "description": "Pin/tab interaction tripwire. get_open_history_id.sql's dedup matches (region, block_id, closed_at IS NULL) and does NOT exclude pin rows — only the region split (pins->right_sidebar, tabs->main) keeps a tab from activating a pin. This case pins block:c1 to the right sidebar and then opens a main tab, asserting the pin row survives untouched. NOTE: the originally-specified form (pin and cmd-click the SAME block) is unconstructible — PinBlock requires a non-page block and sidebar rows are pages, so a block can never be both; this is the nearest reachable guard. If the dedup ever loses its region key, inv-focus-roots reds on the right_sidebar arm.", "transitions": [{"CreateDocument": {"file_name": "doc_0.org"}}, {"PinBlock": {"region": "right_sidebar", "block_id": "block:c1"}}, {"OpenTabViaModifierClick": {"block_id": "block:ref-doc-0"}}]}
+{"name": "watch-bearing-click-nav-sql-budget", "description": "Coverage guard for the PINNED click-nav SQL ceilings (PIN_BLOCK_CLICK_RESOLVE_READS / OPEN_TAB_CLICK_RESOLVE_READS) under ACTIVE USER WATCHES. The whole 2026-08-03 measurement corpus was drawn at watches=0, so the watch-bearing regime was an unsampled hole in a hard budget. Two SetupWatch calls before both click transitions turn it into a permanently sampled state, and two rather than one so the per-watch COST IS A SLOPE, not a single point: measured, PinBlock and OpenTabViaModifierClick do 17 and 21 reads at watches=0, 1 and 2 alike — a user watch costs these transitions NOTHING, because neither mutates a block, so no CDC fires and no watch re-evaluates. That is why the budget carries no `watches * READS_PER_WATCH` term (the document-mutating siblings do). If a watch ever starts costing reads here, this case reds with a PINNED violation naming the exact counts.", "transitions": [{"CreateDocument": {"file_name": "doc_0.org"}}, {"SetupWatch": {"query_id": "query-budgetwatch-a", "query": {"table": "Blocks", "columns": ["id"], "predicates": [], "source": "AllBlocks"}, "language": "holon_sql"}}, {"SetupWatch": {"query_id": "query-budgetwatch-b", "query": {"table": "Blocks", "columns": ["id"], "predicates": [], "source": "AllBlocks"}, "language": "holon_prql"}}, {"PinBlock": {"region": "right_sidebar", "block_id": "block:c1"}}, {"OpenTabViaModifierClick": {"block_id": "block:ref-doc-0"}}]}
+#
+# --- dotted page titles collide onto ONE file (BugFunnel 2026-08-02) --------------
+# `VaultPath::page_file_from_name_chain` derived the page file with
+# `Path::with_extension("org")`, which REPLACES the segment after the last dot instead of
+# appending. Two sibling pages titled `citrix-STX` and `citrix-STX.BROWSER_AGENT` (the real
+# live-vault shape) therefore both derived `…/citrix-STX.org`: whichever page materialized
+# second found the path occupied, took the do-not-clobber early return, and stayed FILELESS.
+# The generator cannot reach this — every page title the keystone draws (`TITLE_POOL`,
+# `BlockToPage` contents) is dotless, so an append and a replace are indistinguishable.
+# RED (pre-fix) on `inv-every-page-has-its-own-file`: "page `…` owns NO file".
+{"name": "page-renamed-to-a-dotted-title-rehomes", "description": "A page RENAMED to a dotted title must re-home onto the file that title names. This is the rename half of the truncation: the write-back moves the page from `pagea.org` to `<new-title>.org` and removes the old file, so a truncating derivation both mis-files the page and mis-computes which old file to delete. Same opening as `page-id-rename-collision` (the minted id is H(\"structural-page/pagea\")), only the new title carries dots.", "transitions": [{"CreateBlockUnderFocus": {"content": "pagea", "id": "block:pgorigin"}}, {"CreateBlockUnderFocus": {"content": "child", "id": "block:pgchild"}}, {"Indent": {"block_id": "block:pgchild"}}, {"BlockToPage": {"origin_id": "block:pgorigin"}}, {"RenamePage": {"page_id": "block:a6bbdb1d-4e3d-e3d3-2c8d-c38a0efb5458", "new_title": "citrix-STX.BROWSER_AGENT"}}]}
+{"name": "dotted-page-title-owns-its-own-file", "description": "Two sibling pages whose titles differ only after a dot must own two DIFFERENT files. `with_extension(\"org\")` truncated the dotted title onto the dotless one's path, leaving one page fileless (and, in a real vault, silently overwritten). Derivation must APPEND `.org` to the title, never replace at its last dot.", "transitions": [{"CreateBlockUnderFocus": {"content": "citrix-STX", "id": "block:dotless-page"}}, {"CreateBlockUnderFocus": {"content": "citrix-STX.BROWSER_AGENT", "id": "block:dotted-page"}}, {"BlockToPage": {"origin_id": "block:dotless-page"}}, {"BlockToPage": {"origin_id": "block:dotted-page"}}]}
+
+# --- F2 org-blocks-ref-diverge: oracle undo over-reverts file-ingested CONTENT blocks ---
+# The CONTENT-BLOCK half of `ref-doc-0-undo-over-reverts-file-ingested-doc` above, which closed only the
+# file-ingested doc ROOT page. Same mechanism, one level down: CreateBlockUnderFocus is USER-origin and
+# pushes oracle undo snapshot S0 (taken BEFORE the file exists). WriteOrgFile is an EXTERNAL file write
+# whose watcher re-ingest is INGEST-origin in prod (operation_engine.rs:1220 — only User-origin ops push
+# undo entries), so prod's engine.undo() leaves its blocks alone; the oracle's `seed_org_file` writes them
+# into the SNAPSHOTTED block_state. UndoLastMutation restores S0 -> the oracle drops the file's content
+# blocks while prod KEEPS them, so they read as SPURIOUS on the SUT side in
+# inv-blocks-match-ref/{org,block_raw,matview} with only_in_ref EMPTY.
+# `rematerialize_file_ingested_docs` re-adds the doc page (files.documents lives outside the snapshot) but
+# explicitly leaves the children undone -> the doc root matches and only its content blocks diverge,
+# exactly the decoded 2026-07-31 payload (33 vs 31 blocks, both extras parented to block:ref-doc-2).
+{"name": "undo-over-reverts-file-ingested-content-blocks", "description": "F2 org-blocks-ref-diverge (task #76): a USER-origin CreateBlockUnderFocus snapshots pre-file oracle state; a WriteOrgFile external write is INGEST-origin (not undoable in prod); UndoLastMutation restores the pre-file oracle snapshot, dropping the file's CONTENT blocks oracle-side while prod KEEPS them -> spurious-on-SUT in inv-blocks-match-ref/{org,block_raw,matview} with only_in_ref empty. Oracle-side undo over-reverts file-ingested content blocks; the doc-root-only fix left this half open.", "transitions": [{"CreateBlockUnderFocus": {"content": "g", "id": "block:gen-0"}}, {"WriteOrgFile": {"filename": "doc_2.org", "blocks": [{"id": "block:ext-a", "parent_id": "block:gen-placeholder", "content": "external alpha", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 0, "updated_at": 0}, {"id": "block:ext-b", "parent_id": "block:gen-placeholder", "content": "external beta", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 0, "updated_at": 0}], "keyword_set": null}}, {"UndoLastMutation": null}]}
+
+#
+# --- task #30: outdent of a direct page child under the SqlOnly (no-Loro) draw ---------------
+# `block:c1` is a DIRECT CHILD of the seed page `block:structural-page`, so ADR 0028 D1 makes
+# the op engine refuse the outdent ("would escape its page container"). That refusal is the
+# CORRECT production behaviour and `outdent_apply_to_ref` models it as a no-op — but under a
+# Loro-less draw the composed builder installs `OpDispatchWriter` as `SutBlockTreeWrite`, and
+# its `execute` turned EVERY dispatch error into a panic, aborting the whole 64-case keystone
+# run at roughly case 13. Its keystroke twin already treated exactly this refusal as a no-op.
+# Pinning storage={Turso} reproduces the abort in ONE transition.
+{"name": "outdent-page-child-refusal-sqlonly", "description": "task #30: the ADR 0028 D1 page-boundary refusal must be a MODELLED NO-OP at the SqlOnly dispatch floor, not a run-aborting panic. Red before the fix: 'block/outdent operation failed: ... would escape its page container' at op_write_cap.rs OpDispatchWriter::execute.", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"Outdent": {"block_id": "block:c1"}}]}
+#
+# ── known-reds entry 14: PinBlock read elevation = target beyond depth-20 cap ──
+# Measurement lane (task #7, 2026-08-04) + verifier round. GREEN control runs;
+# RED twin stays commented until the candidate set honours the depth-20 cap.
+# Discriminator is NESTING DEPTH, not panel width: depth 12 -> 17 reads, 21 -> 89, 22 -> 101;
+# a 40-block FLAT panel renders fully and pins its 40th row for 17 reads.
+{"name": "pinblock-target-below-depth-cap-costs-17-reads", "description": "Known-reds entry 14 CONTROL half (GREEN, runs unquarantined). A 12-deep chain sits wholly under the main-panel query's depth-20 recursion cap, so the panel renders every row and PinBlock on the deepest block (dep-11) is a bullet a user could really shift-click: 17 reads, sub-300ms wall, pin dispatches. This is the regime the PINNED 17-read ceiling encodes. Its quarantined twin below crosses the cap and costs 91 reads / 2.2s.", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"CreateDocument": {"file_name": "doc_0.org"}}, {"BulkExternalAdd": {"doc_uri": "block:ref-doc-0", "blocks": [{"id": "block:dep-0", "parent_id": "block:ref-doc-0", "content": "depth block 0", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:dep-1", "parent_id": "block:dep-0", "content": "depth block 1", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:dep-2", "parent_id": "block:dep-1", "content": "depth block 2", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:dep-3", "parent_id": "block:dep-2", "content": "depth block 3", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:dep-4", "parent_id": "block:dep-3", "content": "depth block 4", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:dep-5", "parent_id": "block:dep-4", "content": "depth block 5", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:dep-6", "parent_id": "block:dep-5", "content": "depth block 6", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:dep-7", "parent_id": "block:dep-6", "content": "depth block 7", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:dep-8", "parent_id": "block:dep-7", "content": "depth block 8", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:dep-9", "parent_id": "block:dep-8", "content": "depth block 9", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:dep-10", "parent_id": "block:dep-9", "content": "depth block 10", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:dep-11", "parent_id": "block:dep-10", "content": "depth block 11", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}]}}, {"NavigateFocus": {"region": "main", "block_id": "block:ref-doc-0"}}, {"PinBlock": {"region": "right_sidebar", "block_id": "block:dep-11"}}]}
+# {"name": "pinblock-target-beyond-depth-20-cap-burns-poll-deadline", "description": "QUARANTINED (RED) \u2014 known-reds entry 14, root-caused 2026-08-04. A 24-deep chain: the compiled main-panel matview truncates its recursion at nesting depth 20 (`WHERE _vl2.depth < 20 ... AND _vl2.depth <= 20`, see crates/holon/tests/turso_storage_repros/tabs_main_panel_delivery.rs:130), so dep-0..dep-19 render and dep-20.. do not. `main_editable_descendants()` applies NO depth filter and still offers dep-23, so the generator picks a bullet no user could shift-click. `click_entity_with_modifiers` (user_driver.rs:719) then spins its full 2s poll deadline -- 41 redundant re-snapshots of two watch_view SELECTs -- dispatches NO pin, and reds three invariants from that ONE cause: PINNED PinBlock.sql_reads (91 vs 17), inv-focus-roots (right_sidebar pin missing) and inv-main-panel-rows-match-focus (dep-20..23 truncated). The discriminator is DEPTH, not size: at this same 24-block state target dep-5 costs 17 reads / 272ms vs dep-23 at 91 reads / 2200ms; depth 21 -> 89 and depth 22 -> 101; and a 40-block FLAT panel renders all 40 rows and pins the 40th for 17 reads. Un-comment once the candidate set honours the same depth cap the panel query applies. NOTE this state also independently trips inv-main-panel-rows-match-focus, which must be settled too.", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"CreateDocument": {"file_name": "doc_0.org"}}, {"BulkExternalAdd": {"doc_uri": "block:ref-doc-0", "blocks": [{"id": "block:dep-0", "parent_id": "block:ref-doc-0", "content": "depth block 0", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:dep-1", "parent_id": "block:dep-0", "content": "depth block 1", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:dep-2", "parent_id": "block:dep-1", "content": "depth block 2", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:dep-3", "parent_id": "block:dep-2", "content": "depth block 3", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:dep-4", "parent_id": "block:dep-3", "content": "depth block 4", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:dep-5", "parent_id": "block:dep-4", "content": "depth block 5", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:dep-6", "parent_id": "block:dep-5", "content": "depth block 6", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:dep-7", "parent_id": "block:dep-6", "content": "depth block 7", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:dep-8", "parent_id": "block:dep-7", "content": "depth block 8", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:dep-9", "parent_id": "block:dep-8", "content": "depth block 9", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:dep-10", "parent_id": "block:dep-9", "content": "depth block 10", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:dep-11", "parent_id": "block:dep-10", "content": "depth block 11", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:dep-12", "parent_id": "block:dep-11", "content": "depth block 12", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:dep-13", "parent_id": "block:dep-12", "content": "depth block 13", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:dep-14", "parent_id": "block:dep-13", "content": "depth block 14", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:dep-15", "parent_id": "block:dep-14", "content": "depth block 15", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:dep-16", "parent_id": "block:dep-15", "content": "depth block 16", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:dep-17", "parent_id": "block:dep-16", "content": "depth block 17", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:dep-18", "parent_id": "block:dep-17", "content": "depth block 18", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:dep-19", "parent_id": "block:dep-18", "content": "depth block 19", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:dep-20", "parent_id": "block:dep-19", "content": "depth block 20", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:dep-21", "parent_id": "block:dep-20", "content": "depth block 21", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:dep-22", "parent_id": "block:dep-21", "content": "depth block 22", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}, {"id": "block:dep-23", "parent_id": "block:dep-22", "content": "depth block 23", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1785280251381, "updated_at": 1785280251381}]}}, {"NavigateFocus": {"region": "main", "block_id": "block:ref-doc-0"}}, {"PinBlock": {"region": "right_sidebar", "block_id": "block:dep-23"}}]}
+#
+# --- a template instance inherits the definition child's marks (task #23-successor) ---------
+# ONE InstantiateTemplate is the whole reproduction. `DirectUserDriver::instantiate_template`
+# seeds the definition child `see {{date}} now` with `see` BOLD and `{{date}} now` ITALIC (the
+# shared fixture crates/holon-integration-tests/src/template_fixture.rs), and prod's `plan_instantiation`
+# carries that mark onto the instance (`remap_marks`, unit-tested in
+# crates/holon-api/src/template_instantiation.rs). The reference minted the instance child via
+# `Block::new_text` — marks None — so inv-blocks-match-ref/{org,block_raw,matview} reported
+# `marks: sut=Some([MarkSpan { start: 0, end: 3, mark: Bold }]) ref=None`. ORACLE gap, not a prod
+# bug: the SUT is right. Red log: lane-logs/probe1.log (worktree agent-a53e6a7328cf365e6);
+# originally surfaced by the 64-case composed run at
+# .claude/worktrees/agent-aa73d6025c345f27f/lane-logs/keystone-green-64.log:1817 once the
+# outdent abort (d1642fc2) stopped masking it.
+{"name": "template-instance-inherits-definition-marks", "description": "A single InstantiateTemplate on the Turso-only draw: the instance child must carry the definition child's marks, remapped across {{date}} substitution. Bold 0..3 precedes the slot (identity); Italic 4..16 spans the slot AND the text after it, so it must stretch over the substituted value and shift its end (date=krtvhl, 6 scalars for an 8-scalar slot => Italic 4..14). RED before the oracle fix with marks sut=Some([Bold 0..3]) ref=None on the instance child; RED again with a hardcoded ref expectation once the crossing span was added (sut=Some([Bold 0..3, Italic 4..14]) ref=Some([Bold 0..3]), lane-logs/t8-a-red-crossing-mark.txt); GREEN once the reference COMPUTES the remap (template_fixture::instantiate).", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": ["MCPServer"]}}, "transitions": [{"InstantiateTemplate": {"parent_id": "block:c1", "date": "krtvhl", "mood": "abcdef"}}]}
+# --- padded raw link literal in bulk-created content ------------------------------------
+# Minimized from the 64-case composed run at
+# .claude/worktrees/agent-a53e6a7328cf365e6/lane-logs/keystone-64.log:597 (case 9, the first
+# red of the clean run); the drawn content for block:bulk-3-4 was the raw literal [[wJZ9  ]].
+{"name": "padded-raw-link-literal-renders-without-a-degraded-error", "description": "One bulk-created block whose content is the RAW link literal \"[[wJZ9  ]]\" with marks null -- the state every non-org write path (bulk add, MCP, editor cell) stores when a user types a link with a stray space. RED on inv-no-observed-errors with `[ERROR] holon_org_format::models:1289 org render is DEGRADED ... rung=\"Unrepresentable\"`: adoption trims the target (strip_link, inline_marks.rs:572), so the emitted raw bytes re-render as [[wJZ9]] and the ladder's immediate-fixed-point test read that one-step normalization as `NO emission of this block settles`. GREEN once render_candidates emits the ADOPTED form, which costs only the padding adoption was already taking and settles on the first cycle. Whitespace is the only discriminator -- [[wJZ9]] was Exact all along.", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": ["MCPServer"]}}, "transitions": [{"CreateDocument": {"file_name": "doc_0.org"}}, {"BulkExternalAdd": {"doc_uri": "block:ref-doc-0", "blocks": [{"id": "block:bulk-3-0", "parent_id": "block:ref-doc-0", "content": "r imkbCh", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1786161835974, "updated_at": 1786161835974}, {"id": "block:bulk-3-4", "parent_id": "block:bulk-3-0", "content": "[[wJZ9  ]]", "content_type": "text", "source_language": null, "source_name": null, "properties": {}, "marks": null, "collapsed": false, "created_at": 1786161835975, "updated_at": 1786161835975}]}}, {"NavigateFocus": {"region": "main", "block_id": "block:ref-doc-0"}}]}
+#
+# --- splitting a marked block keeps BOTH halves rich under the Loro CRUD authority (task #8) --
+# Nothing covered the marks half of `BlockOperations::split_block` (crates/holon-core/src/traits.rs):
+# the new right-half block is created with `BlockContent::RichText { text, marks }` when marks fell
+# right of the cursor, and under the Loro-wired draw that create runs through the cell registry
+# (Peritext). The marked block is the template instance from the row above (`see krtvhl now`,
+# Bold 0..3 + Italic 4..14 — the only mark-carrying block the keystone can mint through production
+# ops); splitting at 6 straddles the Italic span. Default (omitted) wiring = full_headless =
+# `Wiring::full()`, so Loro is the CRDT authority.
+# Mutation-proved (prod is already fixed): withholding the RichText arm reds THIS row at
+# transition 2/2 on the right half (marks sut=None ref=Some([Italic 0..8])) while the
+# template row above stays GREEN — see lane-logs/t8-b-mutation-red-full.txt and
+# lane-logs/t8-b-mutation-isolation.txt.
+# NOTE (task #8, measured): the split's OTHER create route — the `!wrote_create_via_cell`
+# fallback — IS reached by the composed keystone, but only in SqlOnly-wired draws (8/8 reaches
+# on `SqlBlockOperations`, whose create honours the marks param, and always with right_marks==0),
+# never on `LoroBlockOperations`. A Loro-only draw carries neither `SutBlockTreeWrite` nor
+# `SutTemplateInstantiate`, so no draw both mints a marked block and splits it there.
+{"name": "split-of-a-marked-block-keeps-the-right-half-rich-under-loro", "description": "Instantiate the canned template under block:c1, then split its rich instance child (`see krtvhl now`, Bold 0..3 + Italic 4..14) at position 6 under the full_headless (Loro+Turso) wiring. `split_content_marks` partitions the spans and the right half's marks must reach the CRDT authority with the new block's create. Both halves must match the reference: left `see kr` keeps Bold 0..3 and the truncated Italic, right `tvhl now` carries Italic 0..8. RED when split_block's create withholds the RichText marks: right half marks sut=None ref=Some([Italic 0..8]).", "transitions": [{"InstantiateTemplate": {"parent_id": "block:c1", "date": "krtvhl", "mood": "abcdef"}}, {"SplitBlock": {"block_id": "block:0a50d900-c497-53b3-aba8-ef3018423f34", "position": 6}}]}
+#
+# --- a wiki link AUTHORED IN THE UI is adopted at the write boundary (dogfood 2026-08-08 P1-2) ---
+# The creation slot commits the whole typed line through `block.create`, and that is the path
+# the dogfood caught: the block was BORN carrying `[[...]]` verbatim with `marks = NULL` and no
+# junction row, and only the NEXT boot's file re-ingest adopted it, rewriting the user's stored
+# characters with no action of theirs.
+# The set_field twin (keystrokes into an already-created block) is deliberately NOT a row here:
+# it is covered by `crates/holon/tests/live_edit_link_marks.rs`, and as a keystone row it trips
+# two model gaps unrelated to this fix — the reference's editor BUFFER keeps raw markup where the
+# SUT's `MutableText` holds the adopted label (the 2026-07-31 ORACLE row, still open), and the
+# per-keystroke `TypeChars` SQL budget does not scale with the typed length. Both are named in
+# the lane report.
+# The target is DANGLING on purpose (no such page exists in the seeded vault): a link whose
+# target page EXISTS is additionally rewritten to the resolved `[[block:<id>][Label]]` form by
+# the writeback, and the reference does not model link RESOLUTION — that oracle gap is named in
+# the lane report, and pinning it here would assert a divergence that is not this fix's subject.
+# RED before the fix (lane-logs/t12-keystone-RED.log): the reference did not run the org lens on
+# CreateBlockUnderFocus content, so `inv-blocks-match-ref/org` read
+#   block:wl0: content: sut="see Wiki Target Page now" ref="see [[Wiki Target Page]] now";
+#              marks: sut=Some([Link{Name{"Wiki Target Page"}}]) ref=None
+# — the model gap that made every link case inexpressible as a hand-authored row (BugFunnel
+# 2026-07-31 ORACLE row). The oracle is fixed FIRST (model states the spec: UI-authored text and
+# ingest converge on ONE representation), then the create boundary is fixed to reach it without
+# a file round-trip.
+{"name": "wiki-link-created-in-the-ui-is-adopted-at-the-write-boundary", "description": "dogfood 2026-08-08 P1-2: a block born from the creation slot with a typed `[[Wiki Target Page]]` must store the STRIPPED label plus a Link mark, like ingest — not raw markup with NULL marks that the next boot silently rewrites.", "transitions": [{"CreateBlockUnderFocus": {"content": "see [[Wiki Target Page]] now", "id": "block:wl0"}}]}
+#
+# --- a wiki link typed to a page that EXISTS reaches an org fixed point (task #21, re-ruled #32) ---
+# The twin of the row above with a RESOLVING target: `Journals` is a seeded page, so the link
+# resolves in `block_links` while the stores keep the authored `Name` target.
+# Task #21 read that as "the resolved form is the disk truth" and taught BOTH disk-view organs
+# the upgrade (SutOrgRender applied `resolve_link_marks`, the ref applied a resolved-link lens),
+# which turned the case green over these bytes:
+#   inv-org-render-fixed-point (RED, lane-logs/t21-probe-RED-1.log): "render != disk PERSISTED
+#     for 5s ... a real echo-loop / oscillation", disk `* see [[block:journals][Journals]] now`
+#     vs rendered-from-SQL `* see [[Journals]] now`.
+#   inv-blocks-match-ref/org (RED, same log): block:wl1 marks sut=Some([Link{Scheme
+#     "block:journals"}]) ref=Some([Link{Name "Journals"}]).
+# Martin's ruling (B), 2026-08-08 (task #32), moved the fixed point instead of the oracles:
+# write-back emits the AUTHORED bytes, so disk, stores and reference all hold `[[Journals]]`
+# and the #21 harness additions are reverted. THE ROW STAYS, ITS MEANING FLIPS -- it now pins
+# that the authored form is what settles. Same transitions, same invariants; only the byte the
+# fixed point converges on changed, which is exactly what a regression row should notice.
+{"name": "wiki-link-to-an-existing-page-reaches-an-org-fixed-point", "description": "task #21, re-ruled by #32 (B): a wiki link typed to a page that EXISTS must reach an org render/disk fixed point on the AUTHORED bytes -- `[[Journals]]` on disk, `Name` marks in every store, resolution only in the block_links junction. Nothing may substitute the resolved id at write-back.", "transitions": [{"CreateBlockUnderFocus": {"content": "see [[Journals]] now", "id": "block:wl1"}}]}
+#
+# --- birth-then-chord loses the caret (task #58; keystone-smoke red ~1 run in 3) ---------------
+# The reference's chord-click model and the SUT's driver must decide "no click happened" from the
+# SAME state. The SUT skips its click-time caret seed when `engine.focused_block() == entity`
+# (user_driver.rs `click_entity_with_modifiers` / `send_key_chord`); the ref used to skip only
+# when the block was its ACTIVE EDITOR. #36's creation-slot birth seats focus AND a caret seed at
+# 0 without mounting a ref editor -- a focus-without-editor state that had never existed -- so a
+# chord op on the newborn re-seeded the ref caret to end-of-text while the SUT's Tab adopted the
+# armed 0. TWO transitions are the whole bug: the `id: null` arm drives the birth gesture, the
+# Indent is the first chord op on the newborn. RED at main 4d8b58b7 with `inv-editor-caret/mirror
+# ... reference model cursor_byte=1, SUT tracked caret=0`; GREEN once the two predicates are one.
+# The random keystone finds this only ~1 run in 3, which is why it is pinned here.
+{"name": "birth-then-chord-loses-the-caret", "description": "task #58: after the creation-slot birth gesture (id:null) seats focus in the newborn WITHOUT opening a reference editor, the first chord op on that newborn must NOT re-seed the reference caret to end-of-text -- the SUT's click is skipped (already focused) and its caret stays at the birth-armed 0. Pins model_chord_click_focus against the user_driver.rs skip predicate it mirrors.", "initial_state": {"wiring": {"storage_adapters": ["Loro", "Turso"], "sync_adapters": [], "actors": ["MCPServer", "ActionEngine"]}}, "transitions": [{"CreateBlockUnderFocus": {"content": "a", "id": null}}, {"Indent": {"block_id": "block::create-0"}}]}
+#
+# --- Enter on the block a caret-0 split just created, in the SHIPPED SqlOnly default ----------
+# Keystone-found (2026-08-09 SqlOnly typing-coverage lane), NOVEL. Position-0 semantics are fixed
+# by `BlockOperations::split_block` and mirrored by `ReferenceState::split_block`: the id follows
+# the TEXT, so the ORIGINAL block keeps the whole text and the newly minted EMPTY block is inserted
+# directly ABOVE it. `split_block`'s focus response seats the caret at offset 0 of the text-bearing
+# block -- the original -- so the next Enter repeats the shape in place, stacking a second empty
+# block above the same id.
+# The chord (not a second `SplitBlock` op) is load-bearing: the op alone is GREEN here -- the
+# defect needs the editor buffer the keystroke path opens on the block the caret landed in.
+# Pinned to storage={Turso} (no Loro) because it is the cell-free editor sink that breaks.
+{"name": "split-at-caret-zero-then-enter-sqlonly", "description": "SqlOnly caret-0 split followed by Enter on the block the caret landed in: the caret stays in the text-bearing ORIGINAL block while each Enter inserts a fresh empty block above it, and every inserted block must render its own main-panel row. Red signatures include inv-displayed-text/viewmodel, inv-block-content/{sql,block_raw}, inv-blocks-match-ref/{org,block_raw,matview}, inv-block-parent/block_raw and inv-main-panel-rows-match-focus.", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"SplitBlock": {"block_id": "block:parent", "position": 0}}, {"PressKey": {"chord": ["enter"]}}]}
+#
+# --- A caret-0 split leaves the link (and its backlink) on the block that still shows it --------
+# Ruling #66 (id follows the text). The observable is IDENTITY, not content: the block carrying a
+# `[[Wiki Target Page]]` link is split at caret 0, and the Link MARK -- from which the block_links
+# junction row backing the page's backlink is derived -- must stay on the ORIGINAL id, because that
+# is the id the text is still in. Under the pre-ruling semantics the mark rode the text onto a
+# freshly minted id and every reference to the original resolved to an empty block.
+#
+# --- The caret follows the text at a caret-0 split, into an ALREADY-OPEN editor ----------------
+# Keystone-shrunk (2026-08-10 keystone-smoke, 2 transitions) while landing ruling #66. Because the
+# id now follows the text, a position-0 split's focus response names the block whose editor is
+# ALREADY open -- so no editor mounts, and the seed that carries "caret 0" was never applied: the
+# caret stayed at end-of-text and the next keystroke APPENDED instead of prepending.
+# RED signature: `[inv-editor-caret/mirror] Caret mismatch on block:parent: reference model
+# cursor_byte=0, SUT tracked caret=6`.
+{"name": "caret-zero-split-reseats-the-caret-in-the-already-open-editor", "description": "task #66 focus handoff: a position-0 split names the ALREADY-focused block in its focus response, so the caret must be re-seated to offset 0 rather than left at end-of-text. `apply_structural_focus` re-notifies focus even when unchanged (GPUI re-seats from its focus subscription) and the headless mirror adopts the armed seed at settle. Red before the fix on inv-editor-caret/mirror: reference cursor_byte=0, SUT tracked caret=6.", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"FocusEditableText": {"block_id": "block:parent"}}, {"SplitBlock": {"block_id": "block:parent", "position": 0}}]}
+{"name": "caret-zero-split-keeps-the-link-on-the-original-id", "description": "task #66: splitting a linking block at caret 0 must leave BOTH the text and its Link mark on the pre-split id -- so backlinks, marks and :ID:-addressed references keep resolving to the block a reader still sees the link in -- while the minted id takes the empty block inserted above. Red before the fix on inv-blocks-match-ref/{block_raw,matview,org} and inv-block-content/{sql,block_raw}: content AND marks sat on the minted uuid with the pre-split id left empty and unlinked.", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"CreateBlockUnderFocus": {"content": "see [[Wiki Target Page]] now", "id": "block:wl66"}}, {"SplitBlock": {"block_id": "block:wl66", "position": 0}}]}
+# task #64 live-promotion corpus (rounds 1-4; incl. the verifier's own probe shapes)
+{"name": "task64-promotion-loro-arm", "description": "Task #64 — typing the space after a leading TODO promotes the block to a task in the Loro/Full arm.", "initial_state": {"wiring": {"storage_adapters": ["Loro", "Org", "Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"CreateBlockUnderFocus": {"content": "", "id": "block:promo-loro"}}, {"FocusEditableText": {"block_id": "block:promo-loro"}}, {"TypeChars": {"text": "TODO milk"}}]}
+{"name": "task64-promotion-sqlonly-arm", "description": "Task #64 — the same gesture under the SHIPPED DEFAULT (SqlOnly, crdt.enabled=false). A green in only one mode would be the mode-fork trap.", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"CreateBlockUnderFocus": {"content": "", "id": "block:promo-sql"}}, {"FocusEditableText": {"block_id": "block:promo-sql"}}, {"TypeChars": {"text": "TODO milk"}}]}
+{"name": "task64-second-keyword-draw-sqlonly", "description": "Task #64 — two consecutive keyword TypeChars draws on one focused block (generator-reachable). The second must NOT re-promote: the block is already a task, so the text lands verbatim as `TODO x`. Red before the fix with content `x` — the typed keyword deleted.", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"CreateBlockUnderFocus": {"content": "", "id": "block:promo-2nd-sql"}}, {"FocusEditableText": {"block_id": "block:promo-2nd-sql"}}, {"TypeChars": {"text": "TODO "}}, {"TypeChars": {"text": "TODO x"}}]}
+{"name": "task64-second-keyword-draw-loro", "description": "Task #64 — Loro/Full twin of task64-second-keyword-draw-sqlonly.", "initial_state": {"wiring": {"storage_adapters": ["Loro", "Org", "Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"CreateBlockUnderFocus": {"content": "", "id": "block:promo-2nd-loro"}}, {"FocusEditableText": {"block_id": "block:promo-2nd-loro"}}, {"TypeChars": {"text": "TODO "}}, {"TypeChars": {"text": "TODO x"}}]}
+{"name": "task64-promotion-double-space", "description": "Task #64 — `TODO  milk`. The promotion consumes the FIRST space only (it fires on that keystroke, when the text is still `TODO `); the second space is ordinary content. Pins the caret arithmetic against a one-shot model that would trim both.", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"CreateBlockUnderFocus": {"content": "", "id": "block:promo-dbl-space"}}, {"FocusEditableText": {"block_id": "block:promo-dbl-space"}}, {"TypeChars": {"text": "TODO  milk"}}]}
+{"name": "task64-promotion-second-keyword-inline", "description": "Task #64 — `TODO DONE x`. The first keyword promotes; DONE is then ordinary text in a block that is already a task, so the content ends as `DONE x`.", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"CreateBlockUnderFocus": {"content": "", "id": "block:promo-two-kw"}}, {"FocusEditableText": {"block_id": "block:promo-two-kw"}}, {"TypeChars": {"text": "TODO DONE x"}}]}
+{"name": "task64-promotion-prepend-midtext", "description": "Task #64 — the prepend gesture: caret to offset 0 of existing text, then `TODO `. Promotes (the block is not yet a task) and the caret follows the surviving text.", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"CreateBlockUnderFocus": {"content": "milk", "id": "block:promo-prepend"}}, {"FocusEditableText": {"block_id": "block:promo-prepend"}}, {"MoveCursor": {"byte_position": 0}}, {"TypeChars": {"text": "TODO "}}]}
+{"name": "task64-already-tasked-retype", "description": "Task #64 — re-typing a keyword at the head of a block that is ALREADY a task. Promotion is one-shot, so nothing is re-labelled and the text lands verbatim; the trigger must know the block's task state or it proposes a promotion the engine refuses.", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"CreateBlockUnderFocus": {"content": "", "id": "block:promo-retype"}}, {"FocusEditableText": {"block_id": "block:promo-retype"}}, {"TypeChars": {"text": "TODO milk"}}, {"MoveCursor": {"byte_position": 0}}, {"TypeChars": {"text": "TODO "}}]}
+{"name": "task64-toggle-under-open-editor-sqlonly", "description": "Task #64 — ToggleState via the non-editor widget AFTER the editor is open, then type a keyword. The block is already a task by the time the keystroke lands, so `TODO y` is text and must survive verbatim.", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"CreateBlockUnderFocus": {"content": "", "id": "block:stale-a"}}, {"FocusEditableText": {"block_id": "block:stale-a"}}, {"ToggleState": {"block_id": "block:stale-a", "new_state": "TODO"}}, {"TypeChars": {"text": "TODO y"}}]}
+{"name": "task64-toggle-under-open-editor-loro", "description": "Task #64 — Loro/Full twin of task64-toggle-under-open-editor-sqlonly.", "initial_state": {"wiring": {"storage_adapters": ["Loro", "Org", "Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"CreateBlockUnderFocus": {"content": "", "id": "block:stale-b"}}, {"FocusEditableText": {"block_id": "block:stale-b"}}, {"ToggleState": {"block_id": "block:stale-b", "new_state": "TODO"}}, {"TypeChars": {"text": "TODO y"}}]}
+{"name": "task64-mount-on-existing-task", "description": "Task #64 — the control: the block is a task BEFORE the editor opens. Distinguishes a mount-time seed from a per-keystroke read; both make this one green, only the read makes the toggle-under-open-editor pair green.", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"CreateBlockUnderFocus": {"content": "", "id": "block:stale-c"}}, {"ToggleState": {"block_id": "block:stale-c", "new_state": "TODO"}}, {"FocusEditableText": {"block_id": "block:stale-c"}}, {"TypeChars": {"text": "TODO y"}}]}
+# task #68 document-vocabulary corpus: the OVER-APPROXIMATING read gate
+{"name": "task68-uppercase-nonkeyword-commits-verbatim-sqlonly", "description": "Task #68 — the read gate is vocabulary-free, so an ASCII-uppercase leading token PROPOSES a promotion the authority then refuses. `OKAY fine` must land verbatim: the view model strips optimistically and the refusal payload's verbatim content is what un-strips it. Losing this is the over-approximation eating a keystroke.", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"CreateBlockUnderFocus": {"content": "", "id": "block:vocab-okay-sql"}}, {"FocusEditableText": {"block_id": "block:vocab-okay-sql"}}, {"TypeChars": {"text": "OKAY fine"}}]}
+{"name": "task68-uppercase-nonkeyword-commits-verbatim-loro", "description": "Task #68 — Loro/Full twin of task68-uppercase-nonkeyword-commits-verbatim-sqlonly. The cell-attached editor takes the same refusal path through the CRDT.", "initial_state": {"wiring": {"storage_adapters": ["Loro", "Org", "Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"CreateBlockUnderFocus": {"content": "", "id": "block:vocab-okay-loro"}}, {"FocusEditableText": {"block_id": "block:vocab-okay-loro"}}, {"TypeChars": {"text": "OKAY fine"}}]}
+{"name": "task68-undeclared-keyword-stays-text", "description": "Task #68 — `NEXT` is a real org task keyword but this document declares no `#+TODO:` line, so the DEFAULT vocabulary governs and NEXT is not in it. The gate proposes, the authority refuses, and `NEXT call bank` stays plain text with no task_state — the store agreeing with what the parser will read back.", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"CreateBlockUnderFocus": {"content": "", "id": "block:vocab-next-sql"}}, {"FocusEditableText": {"block_id": "block:vocab-next-sql"}}, {"TypeChars": {"text": "NEXT call bank"}}]}
+{"name": "task68-uppercase-token-then-refused-then-typing-continues", "description": "Task #68 — a refused over-approximated proposal must not poison the keystrokes after it: type `OKAY ` (refused, un-stripped) and keep typing. The buffer the un-strip restored is the one the next commit diffs against, so the block ends as `OKAY then more`.", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"CreateBlockUnderFocus": {"content": "", "id": "block:vocab-cont-sql"}}, {"FocusEditableText": {"block_id": "block:vocab-cont-sql"}}, {"TypeChars": {"text": "OKAY "}}, {"TypeChars": {"text": "OKAY then more"}}]}
+#
+# --- DeleteBackward at caret 0 is a block MERGE, not a keystroke ----------------------------
+# The 2026-08-11 keystone minimal counterexample, verbatim. `SplitBlock{position:2}` leaves the
+# editor on the NEW tail with the caret at 0, so `DeleteBackward{count:1}` does NOT delete a
+# character -- it joins the tail back into its predecessor (block count drops by one, writes=5).
+# The `inv-sql-budget` expectation for DeleteBackward was a STATE-BLIND constant modelling only
+# the in-buffer backspace (reads REACTIVE_BASE=5, writes 0), so the merge red-lined it:
+#   `DeleteBackward.sql_reads: 22 dedup (raw 28, 6 redundant) exceeds 5 + tol 5 = 10`.
+# Deterministic: byte-identical assertion 4/4 runs across three revisions (70880807, cdcf59bf,
+# 91d3d0f6), independent of the drawn wiring -- an ORACLE defect, never a regression.
+# GREEN means the budget reads its state and charges the merge branch a Delete + an Update.
+# The 6 redundant re-executions inside the merge are REAL and stay visible in the raw count
+# (task #15 redundant-read roster); only the dedup count is under the ceiling.
+{"name": "delete-backward-merges-previous-block-budget", "description": "ORACLE red-first pin (2026-08-11 triage): DeleteBackward with the caret at offset 0 merges the block into its previous sibling, which legitimately writes -- the state-blind keystroke budget (reads 5, writes 0) cannot describe it. Wiring pinned to the counterexample's drawn manifest storage={Turso} sync={} actors={}.", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"SplitBlock": {"block_id": "block:parent", "position": 2}}, {"DeleteBackward": {"count": 1}}]}

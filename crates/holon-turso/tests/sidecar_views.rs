@@ -129,3 +129,110 @@ async fn session_status_view_creates_and_tracks_writes() {
         .expect("reconcile");
     assert!(!recreated, "unchanged SQL must not recreate the view");
 }
+
+// ---------------------------------------------------------------------------
+// Google Calendar `gcal_upcoming` chained views
+// ---------------------------------------------------------------------------
+
+/// The exact chained SELECTs shipped in docs/integrations/gcal.yaml (`views:`
+/// entries `upcoming_flagged` + `upcoming`). Keep in sync with the YAML. Two
+/// chained views because Turso IVM drops every row when strftime('now') sits in
+/// a WHERE — but strftime IN THE SELECT projection works. The column is
+/// `end_time` (not `end`) because END is a SQL keyword and the cache-table DDL
+/// builder does not quote identifiers.
+const GCAL_UPCOMING_FLAGGED_SQL: &str = "SELECT id, calendar_id, summary, start, end_time, all_day, location, status, updated, \
+     iif(start >= strftime('%Y-%m-%dT%H:%M:%S', 'now') \
+         AND start < strftime('%Y-%m-%dT%H:%M:%S', 'now', '+7 days'), 1, 0) AS is_upcoming \
+     FROM gcal_event";
+
+const GCAL_UPCOMING_SQL: &str = "SELECT id, calendar_id, summary, start, end_time, all_day, location, status, updated \
+     FROM gcal_upcoming_flagged WHERE is_upcoming = 1";
+
+async fn setup_gcal() -> DbHandle {
+    let (_backend, handle) = TursoBackend::new_in_memory().await.expect("in-memory db");
+    std::mem::forget(_backend);
+    handle
+        .execute_ddl(
+            "CREATE TABLE gcal_event (id TEXT PRIMARY KEY, calendar_id TEXT, summary TEXT, \
+             start TEXT, end_time TEXT, all_day INTEGER, location TEXT, status TEXT, updated TEXT)",
+        )
+        .await
+        .expect("create gcal_event cache table");
+    handle
+}
+
+/// Insert an event whose `start` is computed relative to `now` via strftime, so
+/// the test anchors deterministically inside/outside the +7d window.
+async fn insert_event(handle: &DbHandle, id: &str, summary: &str, start_modifier: &str) {
+    let sql = format!(
+        "INSERT INTO gcal_event (id, summary, start, end_time, all_day, status) \
+         VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%S','now','{start_modifier}'), '', 0, 'confirmed')"
+    );
+    handle
+        .execute(
+            &sql,
+            vec![
+                turso::Value::Text(id.into()),
+                turso::Value::Text(summary.into()),
+            ],
+        )
+        .await
+        .expect("insert event");
+}
+
+async fn read_upcoming(handle: &DbHandle) -> Vec<String> {
+    let rows = handle
+        .query(
+            "SELECT summary FROM gcal_upcoming ORDER BY start",
+            HashMap::new(),
+        )
+        .await
+        .expect("query gcal_upcoming");
+    rows.iter()
+        .map(|r| match r.get("summary") {
+            Some(holon_api::Value::String(s)) => s.clone(),
+            other => panic!("summary: unexpected value {other:?}"),
+        })
+        .collect()
+}
+
+/// gcal_upcoming filters to events starting within now..+7d, and IVM keeps it
+/// correct as new events are written.
+#[tokio::test]
+async fn gcal_upcoming_view_creates_and_tracks_writes() {
+    let handle = setup_gcal().await;
+
+    // Two inside the window, two outside.
+    insert_event(&handle, "e_past", "yesterday", "-1 day").await;
+    insert_event(&handle, "e_soon", "in 3 days", "+3 days").await;
+    insert_event(&handle, "e_far", "in 30 days", "+30 days").await;
+
+    let created = reconcile_named_view(&handle, "gcal_upcoming_flagged", GCAL_UPCOMING_FLAGGED_SQL)
+        .await
+        .expect("flagged view DDL must succeed — shipped views: SQL");
+    assert!(created, "first reconcile must create the flagged view");
+    let created = reconcile_named_view(&handle, "gcal_upcoming", GCAL_UPCOMING_SQL)
+        .await
+        .expect("upcoming view DDL must succeed — shipped views: SQL");
+    assert!(created, "first reconcile must create the upcoming view");
+
+    assert_eq!(
+        read_upcoming(&handle).await,
+        vec!["in 3 days".to_string()],
+        "only the event starting within now..+7d is upcoming"
+    );
+
+    // A newly-synced event inside the window shows up (IVM tracks the write).
+    insert_event(&handle, "e_tomorrow", "tomorrow", "+1 day").await;
+    assert_eq!(
+        read_upcoming(&handle).await,
+        vec!["tomorrow".to_string(), "in 3 days".to_string()],
+        "IVM must add the new in-window event, ordered by start"
+    );
+
+    // Reconcile again with identical SQL: no-op.
+    let recreated = reconcile_named_view(&handle, "gcal_upcoming", GCAL_UPCOMING_SQL)
+        .await
+        .expect("reconcile");
+    assert!(!recreated, "unchanged SQL must not recreate the view");
+}

@@ -9,9 +9,12 @@
     "build": "bash scripts/build.sh",
     "serve": "node scripts/serve.mjs"
   },
+  "dependencies": {
+    "@napi-rs/wasm-runtime": "1.1.3"
+  },
   "devDependencies": {
     "@emnapi/core": "^1.11.1",
-    "@napi-rs/cli": "^3.1.5"
+    "@napi-rs/cli": "~3.7.4"
   },
   "napi": {
     "binaryName": "holon_worker",

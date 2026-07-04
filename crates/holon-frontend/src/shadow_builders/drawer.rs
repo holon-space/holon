@@ -5,26 +5,25 @@ use crate::view_model::DrawerMode;
 
 pub const DEFAULT_DRAWER_WIDTH: f32 = 260.0;
 
-/// A collapsible drawer wrapping a single child.
-///
-/// ```text
-/// drawer(col("id"), live_block())
-/// drawer("sidebar-id", live_block("sidebar-id"), #{mode: "overlay"})
-/// ```
-///
-/// Positional args:
-/// - `0`: block id (usually `col("id")` resolved against the current row, or a
-///   literal string for hard-coded layout) — identifies which block's
-///   collapse/expand state this drawer controls.
-/// - `1`: the child render expression.
-///
-/// Named args:
-/// - `mode`: `"shrink"` (default) or `"overlay"`. Shrink drawers push siblings
-///   aside when open; overlay drawers float above siblings without affecting
-///   their size.
-/// - `width`: drawer width in logical pixels (default `DEFAULT_DRAWER_WIDTH`).
-///   Overlay drawers use this as their panel width but claim 0px in flow
-///   layout.
+// A collapsible drawer wrapping a single child.
+//
+// ```text
+// drawer(col("id"), live_block())
+// drawer("sidebar-id", live_block("sidebar-id"), #{mode: "overlay"})
+// ```
+//
+// Positional args:
+// - `0`: block id (usually `col("id")` resolved against the current row, or a
+//   literal string for hard-coded layout) — identifies which block's
+//   collapse/expand state this drawer controls.
+// - `1`: the child render expression.
+//
+// Named args:
+// - `mode`: `"shrink"` (default) or `"overlay"`. Shrink drawers push siblings
+//   aside when open; overlay drawers float above siblings without affecting
+//   their size.
+// - `width`: drawer width in logical pixels (default `DEFAULT_DRAWER_WIDTH`).
+//   Overlay drawers use this as their panel width but claim 0px in flow layout.
 holon_macros::widget_builder! {
     raw fn drawer(ba: BA<'_>) -> ViewModel {
         let block_id = ba

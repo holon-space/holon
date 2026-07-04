@@ -1,5 +1,13 @@
 //! [`DriverInputComponent`] — a driver-agnostic SUT input/focus provider.
 //!
+//! @pbt kind sut-component
+//! @pbt gen NOT a generator — no input distribution lives here; every gesture
+//!   (click/drag/arrow/slash/keystroke) forwards verbatim to the production
+//!   `UserDriver`. Which ids, regions, keys, and step-counts are exercised is
+//!   decided entirely by the block-interaction / arrow-navigate transition
+//!   generators upstream. `resolver` remaps oracle ids to SUT-minted ids
+//!   (headless composed only) so a gesture never drives a ghost block.
+//!
 //! Wraps any production [`UserDriver`] and provides the gesture caps
 //! ([`SutDriver`] focus-read, plus [`SutBlockInteract`] + [`SutArrowNavigate`]
 //! input when a driver is installed) by forwarding to it — it NEVER
@@ -141,6 +149,32 @@ impl DriverInputComponent {
             geometry: Some(geometry),
             headless: false,
             resolver: None,
+        }
+    }
+
+    /// Like [`Self::with_input`] but SHARES the composed runner's
+    /// [`IdResolver`], so the single-shot bounds precheck resolves an
+    /// oracle-space synthetic id (`block::split-N`, `block:ref-doc-N`) to the
+    /// SUT-minted real id BEFORE looking up its geometry. The windowed
+    /// `overlay_windowed_caps` build uses this: a real id-minting backend
+    /// (a split mints a fresh uuid) means the fixed-id assumption
+    /// [`Self::with_input`] encodes is FALSE — without the shared resolver a
+    /// gesture targeting a just-split block prechecks the unmapped synthetic
+    /// and false-fails `no registered bounds` even though the row rendered
+    /// under its real id.
+    pub fn with_input_resolved(
+        engine: Arc<ReactiveEngine>,
+        driver: Arc<dyn UserDriver>,
+        geometry: Box<dyn GeometryProvider>,
+        resolver: IdResolver,
+    ) -> Self {
+        Self {
+            engine,
+            forced_engine_focus: None,
+            driver: Some(driver),
+            geometry: Some(geometry),
+            headless: false,
+            resolver: Some(resolver),
         }
     }
 
@@ -345,10 +379,23 @@ impl SutDriver for DriverInputComponent {
         }
     }
 
-    /// The windowed slice uses fixed shared ids (no synthetic ref-doc URIs to
-    /// remap), so the id passes through unchanged.
+    /// Resolve a REFERENCE id into SUT id space through the SAME shared
+    /// pairing map every other id-taking method on this component uses
+    /// ([`Self::resolve`]), so a focus comparison and a click cannot disagree
+    /// about what a ref id means.
+    ///
+    /// This used to pass the id through unchanged, on the premise that "the
+    /// windowed slice uses fixed shared ids (no synthetic ref-doc URIs to
+    /// remap)". That premise died with the creation-slot gesture: the gesture
+    /// arm mints a synthetic `block::create-N` in the oracle and a uuid in the
+    /// SUT, and the birth now moves the reference's focus ONTO that synthetic
+    /// id — so `inv-focus-matches-ref` began comparing an unresolved synthetic
+    /// against the real uuid and reporting `resolved: block::create-0`, its own
+    /// echo. Draw-dependent, not intermittent: only draws whose last
+    /// focus-setting transition is the `id: None` arm can hit it, which is why
+    /// it showed in 1 of 3 full-suite runs and never in isolation.
     fn resolve_ref_block_id(&self, id: &EntityUri) -> EntityUri {
-        id.clone()
+        self.resolve(id)
     }
 }
 
@@ -413,6 +460,19 @@ impl SutBlockInteract for DriverInputComponent {
             .unwrap_or_else(|e| {
                 panic!("[ExpandToggle] set_block_expanded({block_id}, true) failed: {e:#}")
             });
+    }
+
+    async fn scroll_over(&self, element_id: &str, delta_y: f32) {
+        // Windowed wheel: forward to the production `UserDriver`, which
+        // synthesizes a real scroll-wheel event at the element's centre. The
+        // element id may be a block URI (`block:default-main-panel`) or a raw
+        // geometry handle (the sticky-footer id); parse leniently.
+        let uri = holon_api::EntityUri::parse(element_id)
+            .unwrap_or_else(|_| holon_api::EntityUri::block(element_id));
+        self.driver()
+            .scroll_entity(&uri, 0.0, delta_y)
+            .await
+            .unwrap_or_else(|e| panic!("[WheelScroll] scroll_entity({element_id}) failed: {e:#}"));
     }
 
     async fn collapse_toggle(&self, block_id: &EntityUri) {

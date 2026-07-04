@@ -1,7 +1,11 @@
+pub mod block_to_page_plan;
+pub mod merge_blocks_plan;
 pub mod operation_log;
 pub mod queryable_cache;
 pub mod sql_block_operations;
 pub mod sql_operation_provider;
+pub mod task_keyword_cycle;
+pub mod task_keyword_promotion;
 pub mod traits;
 
 // Re-export DynamicEntity from holon_api (single source of truth)

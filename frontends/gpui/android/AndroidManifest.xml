@@ -6,9 +6,21 @@
 
     <application
         android:label="Holon"
-        android:hasCode="false"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:hasCode="true"
         android:debuggable="true">
 
+        <!-- ESCALATION PATH (do NOT implement here without on-device evidence):
+             classes.dex now ships dev.gpui.mobile.GpuiTextInputView, which the
+             GPUI runtime loads via find_app_class to host the platform IME on a
+             plain NativeActivity. If on-device testing shows the class loads but
+             the soft keyboard still never surfaces under NativeActivity, the next
+             step is to launch the fork's dev.gpui.mobile.GpuiActivity (a
+             NativeActivity subclass) instead of android.app.NativeActivity below.
+             That pulls in androidx (splashscreen, media) + more Gpui* classes, so
+             it requires vendoring those and an androidx-capable dex/resource build.
+             Out of scope for this lane. -->
         <activity
             android:name="android.app.NativeActivity"
             android:exported="true"

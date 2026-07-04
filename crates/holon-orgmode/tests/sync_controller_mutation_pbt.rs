@@ -44,7 +44,73 @@ use holon_orgmode::models::OrgDocumentExt;
 use holon_orgmode::org_renderer::OrgRenderer;
 use holon_orgmode::parser::parse_org_file;
 use proptest::prelude::*;
+use tracing::field::Field;
+use tracing::field::Visit;
+use tracing_subscriber::Layer;
+use tracing_subscriber::layer::Context;
+use tracing_subscriber::layer::SubscriberExt;
 use uuid::Uuid;
+
+// ============================================================================
+// WARN-level tracing capture
+// ============================================================================
+
+/// Collects WARN events so a test can assert on a disclosure the SUT emits.
+/// Same shape as `name_chain_error_propagation`'s ERROR capture — a disclosure
+/// nothing asserts on is a disclosure that can be deleted by accident.
+#[derive(Clone, Default)]
+struct WarnCapture(Arc<Mutex<Vec<String>>>);
+
+impl WarnCapture {
+    /// The one capture for this whole test binary, installed as the GLOBAL
+    /// subscriber on first use.
+    ///
+    /// A per-test `set_default` cannot work here: it is thread-local while
+    /// tracing's callsite state is process-global, so whichever of the 20-odd
+    /// sibling tests reaches a callsite first decides whether this thread ever
+    /// sees it — the capture came up empty in roughly half of all parallel
+    /// runs. Sharing one global buffer costs only unrelated WARNs landing in
+    /// it, which no assertion here is sensitive to (each looks for its own
+    /// substring).
+    fn global() -> Self {
+        static CAP: std::sync::OnceLock<WarnCapture> = std::sync::OnceLock::new();
+        CAP.get_or_init(|| {
+            let cap = WarnCapture::default();
+            tracing::subscriber::set_global_default(
+                tracing_subscriber::registry().with(cap.clone()),
+            )
+            .expect("no other global tracing subscriber may be installed in this test binary");
+            cap
+        })
+        .clone()
+    }
+
+    fn warns(&self) -> Vec<String> {
+        self.0.lock().unwrap().clone()
+    }
+
+    fn clear(&self) {
+        self.0.lock().unwrap().clear();
+    }
+}
+
+struct WarnVisitor<'a>(&'a mut String);
+impl Visit for WarnVisitor<'_> {
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        use std::fmt::Write;
+        let _ = write!(self.0, "{}={:?} ", field.name(), value);
+    }
+}
+
+impl<S: tracing::Subscriber> Layer<S> for WarnCapture {
+    fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+        if *event.metadata().level() == tracing::Level::WARN {
+            let mut buf = String::new();
+            event.record(&mut WarnVisitor(&mut buf));
+            self.0.lock().unwrap().push(buf);
+        }
+    }
+}
 
 // ============================================================================
 // Mock infrastructure
@@ -52,13 +118,22 @@ use uuid::Uuid;
 
 struct InMemoryBlockStore {
     blocks: RwLock<HashMap<String, Vec<Block>>>,
+    /// Count of `delete_in_tree`/`apply_delete` removals — lets a test assert a
+    /// cascade-delete did (or did NOT) run, independent of any later re-ingest
+    /// that could restore a block's id from the org file bytes.
+    delete_count: std::sync::atomic::AtomicUsize,
 }
 
 impl InMemoryBlockStore {
     fn new() -> Self {
         Self {
             blocks: RwLock::new(HashMap::new()),
+            delete_count: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    fn delete_count(&self) -> usize {
+        self.delete_count.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn seed_blocks(&self, doc_id: &str, blocks: Vec<Block>) {
@@ -75,6 +150,22 @@ impl InMemoryBlockStore {
             .get(doc_id)
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// Direct children of `parent_id` — like the real
+    /// `SqlBlockOperations::children`, which filters the authority by
+    /// `parent_id` regardless of which document the block belongs to.
+    /// `on_file_changed`'s post-create wait loop polls this for NESTED
+    /// parents too, so a doc-bucket read is not enough.
+    fn children_of(&self, parent_id: &EntityUri) -> Vec<EntityUri> {
+        self.blocks
+            .read()
+            .unwrap()
+            .values()
+            .flat_map(|v| v.iter())
+            .filter(|b| b.parent_id == *parent_id)
+            .map(|b| b.id.clone())
+            .collect()
     }
 
     fn apply_create(&self, block: Block) {
@@ -94,19 +185,52 @@ impl InMemoryBlockStore {
 
     fn apply_update(&self, block: Block) {
         let mut store = self.blocks.write().unwrap();
-        for blocks in store.values_mut() {
-            if let Some(existing) = blocks.iter_mut().find(|b| b.id == block.id) {
-                *existing = block;
-                return;
-            }
+        let Some(cur_key) = store
+            .iter()
+            .find(|(_, v)| v.iter().any(|b| b.id == block.id))
+            .map(|(k, _)| k.clone())
+        else {
+            return;
+        };
+        // Prod SQL derives doc membership from the parent chain (recursive
+        // CTE), so an update whose parent now lives under a different doc key
+        // must follow it — an in-place replace would strand the block under a
+        // stale doc bucket. Same target-key derivation as `apply_create`.
+        let target_key = store
+            .keys()
+            .find(|k| {
+                k.as_str() == block.parent_id.as_str()
+                    || store[*k].iter().any(|b| b.id == block.parent_id)
+            })
+            .cloned()
+            .unwrap_or_else(|| block.parent_id.to_string());
+        if cur_key == target_key {
+            // Same bucket: replace in place, preserving sibling order.
+            let blocks = store.get_mut(&cur_key).expect("cur_key just found");
+            let existing = blocks
+                .iter_mut()
+                .find(|b| b.id == block.id)
+                .expect("block just found under cur_key");
+            *existing = block;
+        } else {
+            store
+                .get_mut(&cur_key)
+                .expect("cur_key just found")
+                .retain(|b| b.id != block.id);
+            store.entry(target_key).or_default().push(block);
         }
     }
 
     fn apply_delete(&self, block_id: &str) {
         let mut store = self.blocks.write().unwrap();
+        let mut removed = 0usize;
         for blocks in store.values_mut() {
+            let before = blocks.len();
             blocks.retain(|b| b.id.as_str() != block_id);
+            removed += before - blocks.len();
         }
+        self.delete_count
+            .fetch_add(removed, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Create-or-update: replace the block in place if it already exists under
@@ -124,12 +248,59 @@ impl InMemoryBlockStore {
             self.apply_create(block);
         }
     }
+
+    /// Upsert from an org write-seam params map, mirroring SQL UPDATE
+    /// semantics: an edge-field param the controller stripped as unchanged
+    /// (`strip_unchanged_edge_fields`) leaves the existing junction values
+    /// untouched — a wholesale struct replace would silently clear them.
+    fn upsert_from_params(&self, params: &holon_api::StorageEntity) {
+        let mut block = block_from_params(params);
+        let existing = {
+            let store = self.blocks.read().unwrap();
+            store
+                .values()
+                .flat_map(|v| v.iter())
+                .find(|b| b.id == block.id)
+                .cloned()
+        };
+        if let Some(existing) = existing {
+            if params.get("tags").is_none() {
+                block.set_tags(existing.tags.clone());
+            }
+            if params.get("requires").is_none() {
+                block.requires = existing.requires.clone();
+            }
+            if params.get("advice_suppressed").is_none() {
+                block.advice_suppressed = existing.advice_suppressed.clone();
+            }
+        }
+        self.apply_upsert(block);
+    }
 }
 
 #[async_trait]
 impl BlockReader for InMemoryBlockStore {
     async fn get_blocks(&self, doc_id: &EntityUri) -> Result<Vec<Block>> {
         Ok(self.get_all_blocks(doc_id.as_str()))
+    }
+
+    /// Same membership source as `get_blocks`, shape only — the two can never
+    /// disagree about who belongs to the document.
+    async fn doc_block_topology(&self, doc_id: &EntityUri) -> Result<Vec<(EntityUri, EntityUri)>> {
+        Ok(self
+            .get_all_blocks(doc_id.as_str())
+            .into_iter()
+            .map(|b| (b.id, b.parent_id))
+            .collect())
+    }
+
+    async fn get_block_authoritative(&self, id: &EntityUri) -> Result<Option<Block>> {
+        let store = self.blocks.read().unwrap();
+        Ok(store
+            .values()
+            .flat_map(|v| v.iter())
+            .find(|b| b.id == *id)
+            .cloned())
     }
 
     async fn iter_documents_with_blocks(&self) -> anyhow::Result<Vec<(EntityUri, Vec<Block>)>> {
@@ -205,8 +376,44 @@ fn block_from_params(params: &holon_api::StorageEntity) -> Block {
             block.set_priority(Some(priority));
         }
     }
-    if let Some(t) = params.get("tags").and_then(|v| v.as_string()) {
-        block.set_tags(Tags::from_csv(t));
+    // `build_block_params` emits edge fields as typed `Value::Array` params
+    // (routed to junctions by the SQL provider; the legacy CSV shape is gone).
+    match params.get("tags") {
+        Some(Value::Array(arr)) => {
+            let tags: Vec<String> = arr
+                .iter()
+                .map(|v| {
+                    v.as_string()
+                        .map(str::to_string)
+                        .expect("tags array element must be a string")
+                })
+                .collect();
+            block.set_tags(Tags::from(tags));
+        }
+        Some(other) => panic!("tags param must be an Array, got {other:?}"),
+        None => {}
+    }
+    let uri_array = |key: &str| -> Option<Vec<EntityUri>> {
+        match params.get(key) {
+            Some(Value::Array(arr)) => Some(
+                arr.iter()
+                    .map(|v| {
+                        // ALLOW(entity_uri_from_raw): edge params carry full URIs
+                        EntityUri::from_raw(
+                            v.as_string().expect("edge array element must be a string"),
+                        )
+                    })
+                    .collect(),
+            ),
+            Some(other) => panic!("{key} param must be an Array, got {other:?}"),
+            None => None,
+        }
+    };
+    if let Some(r) = uri_array("requires") {
+        block.requires = r;
+    }
+    if let Some(a) = uri_array("advice_suppressed") {
+        block.advice_suppressed = a;
     }
     if let Some(s) = params.get("scheduled").and_then(|v| v.as_string()) {
         if let Ok(ts) = Timestamp::parse(s) {
@@ -241,12 +448,18 @@ fn block_from_params(params: &holon_api::StorageEntity) -> Block {
         "task_state",
         "priority",
         "tags",
+        "requires",
+        "advice_suppressed",
         "scheduled",
         "deadline",
         "ID",
+        // Positional intent, not a field: prod strips it before the row write
+        // (`update_in_tree` removes POSITION_AFTER_BLOCK_ID_PARAM); it must
+        // never land in `block.properties`.
+        "after_block_id",
     ];
     for (k, v) in params {
-        if !STANDARD_KEYS.contains(&k.as_ref()) {
+        if !STANDARD_KEYS.contains(&k.as_ref()) && !k.starts_with("_routing_") {
             if let Some(s) = v.as_string() {
                 block.set_property(k.as_ref(), Value::String(s.to_string()));
             }
@@ -308,7 +521,8 @@ impl DocumentManager for MockDocumentManager {
         // build_block_params silently drops on the way to SQL. The new flow
         // round-trips through (params → SQL-shaped row → Block::try_from)
         // so a dropped param surfaces as a missing field on read-back.
-        let params = holon_orgmode::block_params::build_block_params(doc, &doc.parent_id, &doc.id);
+        let params =
+            holon_orgmode::block_params::build_block_params(doc, &doc.parent_id, &doc.id, None);
         let row = simulate_sql_round_trip(doc, params);
         let reconstructed = Block::try_from(row)
             .map_err(|e| anyhow::anyhow!("simulated SQL round-trip failed: {e}"))?;
@@ -331,29 +545,11 @@ fn simulate_sql_round_trip(
     doc: &Block,
     params: holon_api::StorageEntity,
 ) -> holon_api::StorageEntity {
-    // Matches BLOCKS_KNOWN_COLUMNS in
-    // crates/holon/src/core/sql_operation_provider.rs. Kept in sync by
-    // convention; if the production list changes, this list must change too —
-    // the PBT is the canary.
-    const BLOCKS_KNOWN_COLUMNS: &[&str] = &[
-        "id",
-        "parent_id",
-        "depth",
-        "sort_key",
-        "content",
-        "content_type",
-        "source_language",
-        "source_name",
-        "properties",
-        "marks",
-        "collapsed",
-        "completed",
-        "block_type",
-        "created_at",
-        "updated_at",
-        "_change_origin",
-    ];
-    const EDGE_FIELDS: &[&str] = &["tags", "requires"];
+    // Both partitions come from the ONE schema declaration, the same source
+    // `SqlOperationProvider::blocks_known_columns` and the junction registry
+    // derive from — so this mirror cannot drift from the provider it models.
+    let known_columns = holon_api::schema::BLOCK.columns();
+    let edge_fields = holon_api::schema::BLOCK.edge_sets();
 
     let mut row = holon_api::StorageEntity::new();
     let mut extras: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
@@ -376,7 +572,7 @@ fn simulate_sql_round_trip(
         {
             continue;
         }
-        if BLOCKS_KNOWN_COLUMNS.contains(&key.as_ref()) || EDGE_FIELDS.contains(&key.as_ref()) {
+        if known_columns.contains(&key.as_ref()) || edge_fields.contains(&key.as_ref()) {
             row.insert(key, value);
         } else {
             extras.insert(key.to_string(), value_to_serde_json(&value));
@@ -412,7 +608,10 @@ fn value_to_serde_json(v: &Value) -> serde_json::Value {
     }
 }
 
-const POSITION_AFTER_BLOCK_ID_PARAM: &str = "_after_block_id";
+// Mirror of the prod constant (holon-api/src/entity.rs) — a stale
+// "_after_block_id" copy here let the positional param leak into simulated rows
+// undetected.
+const POSITION_AFTER_BLOCK_ID_PARAM: &str = holon_api::entity::POSITION_AFTER_BLOCK_ID_PARAM;
 
 // ============================================================================
 // Stub BlockOrdering for tests
@@ -470,15 +669,15 @@ impl BlockOrdering for StubBlockOrdering {
         unimplemented!("stub BlockOrdering: only place() is exercised by this test")
     }
 
-    async fn children(&self, _: &EntityUri) -> BlockOrderingResult<Vec<EntityUri>> {
-        // Return empty so the misalignment check treats all blocks as misaligned
-        // (they'll call place() once each). Tests that assert place() call count
-        // should reflect this.
-        Ok(vec![])
+    async fn children(&self, parent_id: &EntityUri) -> BlockOrderingResult<Vec<EntityUri>> {
+        // Authority-backed like the real `SqlBlockOperations::children`:
+        // `on_file_changed`'s post-create wait loop polls this until every
+        // created block is visible, then hands the total order to `place_all`.
+        Ok(self.store.children_of(parent_id))
     }
 
     async fn update_in_tree(&self, params: holon_api::StorageEntity) -> BlockOrderingResult<()> {
-        self.store.apply_upsert(block_from_params(&params));
+        self.store.upsert_from_params(&params);
         Ok(())
     }
 
@@ -585,6 +784,44 @@ fn assert_blocks_equivalent(expected: &[Block], actual: &[Block], context: &str)
 // Test fixture
 // ============================================================================
 
+/// Drive one block edit the way production does: the holder is seeded from the
+/// authority (production seeds it from the block feed's initial snapshot), then
+/// the edit is applied at the position the authority already gives the block.
+async fn write_back(fixture: &mut TestFixture, doc: &EntityUri, block: &Block) -> Result<bool> {
+    fixture.controller.seed_holder_from_authority(doc).await?;
+    let authoritative = fixture.store.get_blocks(doc).await?;
+    let prev = authoritative
+        .iter()
+        .take_while(|b| b.id != block.id)
+        .filter(|b| b.parent_id == block.parent_id)
+        .last()
+        .map(|b| b.id.clone());
+    fixture
+        .controller
+        .on_block_changed(
+            doc,
+            &holon_filesystem::BlockDelta::Upsert {
+                block: block.clone(),
+                prev,
+            },
+        )
+        .await
+}
+
+/// Deliver the RETRACTION half of a re-home, the way the feed does.
+///
+/// `home_by` fans one `Remove`@old-doc + one `Upsert`@new-doc per moved member,
+/// so the old document's file is written by its retractions — not by a stale
+/// edit that happens to still be routed there. Deliberately does NOT re-seed:
+/// the holder must carry over from the previous call, or the retraction has
+/// nothing to retract from.
+async fn retract(fixture: &mut TestFixture, doc: &EntityUri, id: &EntityUri) -> Result<bool> {
+    fixture
+        .controller
+        .on_block_changed(doc, &holon_filesystem::BlockDelta::Remove(id.clone()))
+        .await
+}
+
 struct TestFixture {
     store: Arc<InMemoryBlockStore>,
     controller: FileSyncController,
@@ -689,10 +926,6 @@ impl TestFixture {
         self.store
             .seed_blocks(self.doc_id.as_str(), blocks.to_vec());
     }
-
-    fn get_stored_blocks(&self) -> Vec<Block> {
-        self.store.get_all_blocks(self.doc_id.as_str())
-    }
 }
 
 // ============================================================================
@@ -723,11 +956,21 @@ fn valid_timestamp() -> impl Strategy<Value = String> {
     ]
 }
 
-/// Filename- and Page-title-safe path segment: ASCII alphanumerics only, no
-/// spaces or path separators. Used as both the directory name and the
-/// matching Page title (which `path_to_name_chain` derives from the path).
+/// Filename- and Page-title-safe path segment. Used as both the directory name
+/// and the matching Page title (which `path_to_name_chain` derives from the
+/// path).
+///
+/// Spaces and non-ASCII letters are generated deliberately: real vaults have
+/// folders like `Agentic DPL`, and a space is what turned a path-shaped id into
+/// an invalid RFC 3986 URI (the boot panic that motivated deleting the
+/// `Directory` entity). The alphabet excludes `/` and guarantees a
+/// non-whitespace first and last char, so segments stay filename-safe and
+/// round-trip through `path_to_name_chain` as Page titles unchanged.
 fn path_segment() -> impl Strategy<Value = String> {
-    "[a-zA-Z][a-zA-Z0-9]{0,15}"
+    prop_oneof![
+        "[a-zA-Z][a-zA-Z0-9 ]{0,14}[a-zA-Z0-9]",
+        "[a-zA-Zäöüéñ][a-zA-Z0-9äöüéñ ]{0,14}[a-zA-Z0-9äöüéñ]",
+    ]
 }
 
 /// 1..=3 segment directory chain ending at the `.org` file stem. Segments
@@ -1248,6 +1491,14 @@ fn generate_baseline_blocks(doc_id: &EntityUri, variant: u8) -> Vec<Block> {
 }
 
 /// Render blocks → parse to get a stable round-tripped baseline.
+///
+/// The parse carries an injected `#+ID: <doc_id>` directive: without it the
+/// parser derives a path-based `file:test.org` document identity and parents
+/// every top-level headline to THAT, so the returned baseline would no longer
+/// be renderable against `doc_id` (the WP-F dangling-parent projection
+/// assertion in `OrgRenderer::render_entitys` fails loud on the mismatch).
+/// Prod vault files carry `#+ID:` — the writeback path even force-persists it
+/// (`needs_id_writeback`) — so the directive is the faithful fixture shape.
 fn stabilize_blocks(
     blocks: &[Block],
     doc_id: &EntityUri,
@@ -1255,6 +1506,7 @@ fn stabilize_blocks(
 ) -> Vec<Block> {
     let file_path = root_dir.join("test.org");
     let org_text = OrgRenderer::render_entitys(blocks, &file_path, doc_id);
+    let org_text = format!("#+ID: {}\n{}", doc_id.id(), org_text);
     let parse_result = parse_org_file(&file_path, &org_text, &EntityUri::no_parent(), root_dir)
         .expect("stabilize: parse must succeed");
     parse_result.blocks
@@ -1267,6 +1519,7 @@ fn stabilize_blocks(
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 100,
+        failure_persistence: None,
         ..ProptestConfig::default()
     })]
 
@@ -1312,11 +1565,9 @@ proptest! {
             fixture.seed_blocks(&mutated);
 
             // on_block_changed → file write
-            fixture
-                .controller
-                .on_block_changed(&fixture.doc_id)
-                .await
-                .unwrap();
+            let doc_id = fixture.doc_id.clone();
+            let changed = mutated[block_idx].clone();
+            write_back(&mut fixture, &doc_id, &changed).await.unwrap();
 
             // Parse written file
             let file_content = tokio::fs::read_to_string(&fixture.file_path())
@@ -1344,6 +1595,7 @@ proptest! {
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 100,
+        failure_persistence: None,
         ..ProptestConfig::default()
     })]
 
@@ -1463,8 +1715,12 @@ proptest! {
             )
             .unwrap();
 
-            // The store should match what the final file on disk parses to
-            let stored = fixture.get_stored_blocks();
+            // The store should match what the final file on disk parses to.
+            // Read under the RESOLVED leaf doc id (the page-chain walk above
+            // ends with `expected_parent` = leaf): when `pre_seed_doc == false`
+            // and the file carries no `#+ID:`, the controller mints its own
+            // document id — `fixture.doc_id` never appears in the store.
+            let stored = fixture.store.get_all_blocks(expected_parent.as_str());
             assert_blocks_equivalent(&expected_parse.blocks, &stored, "file_change_to_blocks");
 
             Ok::<(), TestCaseError>(())
@@ -1551,6 +1807,7 @@ fn format_todo_line(states: &[TaskState]) -> String {
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 50,
+        failure_persistence: None,
         ..ProptestConfig::default()
     })]
 
@@ -1756,44 +2013,49 @@ mod find_foreign_blocks_tests {
 mod ordering_replay_tests {
     use super::*;
 
-    /// A configurable stub that returns specific live children for given
-    /// parents, and records every `place()` call for assertion.
-    struct ConfigurableOrderingStub {
-        /// Maps parent_id → ordered list of child ids representing the LIVE
-        /// order.
-        live_order: std::collections::HashMap<String, Vec<String>>,
-        pub calls: Mutex<Vec<(EntityUri, String, Option<String>)>>,
+    /// Ordering stub whose `children()` reads the shared block store — like the
+    /// real `SqlBlockOperations::children`, which reads the authority directly
+    /// so `on_file_changed`'s post-create wait loop sees freshly-created blocks
+    /// (a static children list makes that loop time out and bail loud). Records
+    /// every `place_all()` call for assertion. SqlOnly (no upstream
+    /// consolidator) → the controller routes order intent through `place_all`.
+    struct RecordingOrderingStub {
+        /// (parent, ordered_ids) per `place_all` call.
+        pub place_all_calls: Mutex<Vec<(EntityUri, Vec<EntityUri>)>>,
         /// Block sink — the controller's only write target now the command bus
         /// is gone; tests assert against this same store.
         store: Arc<InMemoryBlockStore>,
     }
 
-    impl ConfigurableOrderingStub {
-        fn new(
-            live_order: std::collections::HashMap<String, Vec<String>>,
-            store: Arc<InMemoryBlockStore>,
-        ) -> Self {
+    impl RecordingOrderingStub {
+        fn new(store: Arc<InMemoryBlockStore>) -> Self {
             Self {
-                live_order,
-                calls: Mutex::new(Vec::new()),
+                place_all_calls: Mutex::new(Vec::new()),
                 store,
             }
         }
     }
 
     #[async_trait]
-    impl BlockOrdering for ConfigurableOrderingStub {
+    impl BlockOrdering for RecordingOrderingStub {
         async fn place(
             &self,
-            uri: &EntityUri,
-            parent_id: &EntityUri,
-            after_id: Option<&EntityUri>,
+            _: &EntityUri,
+            _: &EntityUri,
+            _: Option<&EntityUri>,
         ) -> BlockOrderingResult<()> {
-            self.calls.lock().unwrap().push((
-                uri.clone(),
-                parent_id.as_str().to_string(),
-                after_id.map(|u| u.as_str().to_string()),
-            ));
+            unimplemented!("RecordingOrderingStub: SqlOnly ingest routes order through place_all")
+        }
+
+        async fn place_all(
+            &self,
+            parent_id: &EntityUri,
+            ordered_ids: &[EntityUri],
+        ) -> BlockOrderingResult<()> {
+            self.place_all_calls
+                .lock()
+                .unwrap()
+                .push((parent_id.clone(), ordered_ids.to_vec()));
             Ok(())
         }
 
@@ -1802,30 +2064,26 @@ mod ordering_replay_tests {
         }
 
         async fn next_sibling(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
-            unimplemented!("ConfigurableOrderingStub: only place() and children() are used")
+            unimplemented!("RecordingOrderingStub: only place_all() and children() are used")
         }
 
         async fn first_child(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
-            unimplemented!("ConfigurableOrderingStub: only place() and children() are used")
+            unimplemented!("RecordingOrderingStub: only place_all() and children() are used")
         }
 
         async fn last_child(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
-            unimplemented!("ConfigurableOrderingStub: only place() and children() are used")
+            unimplemented!("RecordingOrderingStub: only place_all() and children() are used")
         }
 
         async fn children(&self, parent_id: &EntityUri) -> BlockOrderingResult<Vec<EntityUri>> {
-            Ok(self
-                .live_order
-                .get(parent_id.as_str())
-                .map(|ids| ids.iter().map(|s| EntityUri::from_raw(s)).collect())
-                .unwrap_or_default())
+            Ok(self.store.children_of(parent_id))
         }
 
         async fn update_in_tree(
             &self,
             params: holon_api::StorageEntity,
         ) -> BlockOrderingResult<()> {
-            self.store.apply_upsert(block_from_params(&params));
+            self.store.upsert_from_params(&params);
             Ok(())
         }
 
@@ -1842,30 +2100,13 @@ mod ordering_replay_tests {
         }
     }
 
-    fn build_controller_with_live_order(
+    fn build_recording_controller(
         temp_dir: &std::path::Path,
-        live_order: std::collections::HashMap<String, Vec<String>>,
-    ) -> (
-        Arc<InMemoryBlockStore>,
-        Arc<MockDocumentManager>,
-        FileSyncController,
-        Arc<ConfigurableOrderingStub>,
-        EntityUri,
-        PathBuf,
-    ) {
-        build_controller_with_live_order_and_doc_id(temp_dir, live_order, EntityUri::block_random())
-    }
-
-    fn build_controller_with_live_order_and_doc_id(
-        temp_dir: &std::path::Path,
-        live_order: std::collections::HashMap<String, Vec<String>>,
         doc_id: EntityUri,
     ) -> (
         Arc<InMemoryBlockStore>,
-        Arc<MockDocumentManager>,
         FileSyncController,
-        Arc<ConfigurableOrderingStub>,
-        EntityUri,
+        Arc<RecordingOrderingStub>,
         PathBuf,
     ) {
         let store = Arc::new(InMemoryBlockStore::new());
@@ -1874,7 +2115,7 @@ mod ordering_replay_tests {
         // The ordering stub is the controller's only block sink (no command
         // bus). Share the store so the dispatched create/update/delete intents
         // land where the test asserts.
-        let ordering = Arc::new(ConfigurableOrderingStub::new(live_order, store.clone()));
+        let ordering = Arc::new(RecordingOrderingStub::new(store.clone()));
 
         let root_dir = temp_dir.to_path_buf();
         let controller = new_org_sync_controller(
@@ -1892,37 +2133,34 @@ mod ordering_replay_tests {
         doc_manager.add_document(doc);
 
         let file_path = root_dir.join(format!("{doc_name}.org"));
-        (store, doc_manager, controller, ordering, doc_id, file_path)
+        (store, controller, ordering, file_path)
     }
 
-    /// Test 7a: file order matches live order → place() is never called.
+    /// Test 7a: SqlOnly ingest hands the order owner the file's TOTAL sibling
+    /// order via `place_all` on EVERY `on_file_changed` — including an
+    /// update-only pass whose disk order already matches the live order.
+    ///
+    /// This replaced the old per-block skip-if-aligned replay: incremental
+    /// `place` can't converge a full reorder against a mutating store (the
+    /// `inv-live-children-match-ref` divergence), so the SQL order owner now
+    /// mints one fresh, gap-free key sequence per parent over its text
+    /// children in document order (total by construction, idempotent when
+    /// already aligned). See the `Consolidator::Store` branch of
+    /// `on_file_changed` and `BlockOrdering::place_all`.
     #[tokio::test]
-    async fn ordering_replay_skips_place_when_order_matches() {
+    async fn ordering_replay_hands_owner_total_order_even_when_aligned() {
         let temp_dir = tempfile::tempdir().unwrap();
 
-        // Disk org file has two children: alpha then beta.
-        let _org_content = "\
-* alpha
-* beta
-";
-
-        // Live order also has alpha before beta.
-        // The controller uses the block's bare id (UUID) for the children list.
-        // Use a single-block org file with a stable :ID: property so the parser
+        // Single-block org file with a stable :ID: property so the parser
         // reuses the same block UUID across both on_file_changed calls.
-        // Both controllers use the same doc_id so the live_order key matches.
         let stable_block_uuid = uuid::Uuid::new_v4().to_string();
         let single_block_org =
             format!("* only block\n:PROPERTIES:\n:ID: {stable_block_uuid}\n:END:\n");
         let doc_id = EntityUri::block_random();
 
-        // First pass: empty live_order → place() will be called (one block).
-        let (store, _doc_mgr, mut controller, _ordering_first, _, file_path) =
-            build_controller_with_live_order_and_doc_id(
-                temp_dir.path(),
-                std::collections::HashMap::new(),
-                doc_id.clone(),
-            );
+        // First pass: CREATE path.
+        let (store, mut controller, ordering_first, file_path) =
+            build_recording_controller(temp_dir.path(), doc_id.clone());
 
         controller.initialize().await.expect("initialize");
         tokio::fs::write(&file_path, &single_block_org)
@@ -1941,19 +2179,19 @@ mod ordering_replay_tests {
             1,
             "should have one block after first parse"
         );
-        let block_id = stored_blocks[0].id.id().to_string();
+        let block_uri = stored_blocks[0].id.clone();
+        let first_calls = ordering_first.place_all_calls.lock().unwrap().clone();
+        assert_eq!(
+            first_calls,
+            vec![(doc_id.clone(), vec![block_uri.clone()])],
+            "create pass: order owner must receive the file's total order"
+        );
 
-        // Second pass: live_order already contains the parsed block → disk order
-        // matches live order → place() must NOT be called.
-        let mut live_order = std::collections::HashMap::new();
-        live_order.insert(doc_id.id().to_string(), vec![block_id.clone()]);
-        let (store2, _doc_mgr2, mut controller2, ordering_second, _, file_path2) =
-            build_controller_with_live_order_and_doc_id(
-                temp_dir.path(),
-                live_order,
-                doc_id.clone(),
-            );
-        // Pre-seed the store so the parse sees an existing block → UPDATE path.
+        // Second pass: UPDATE path (store pre-seeded, no creates), disk order
+        // trivially matches live order — place_all is STILL called with the
+        // total order (idempotent re-key), by design.
+        let (store2, mut controller2, ordering_second, file_path2) =
+            build_recording_controller(temp_dir.path(), doc_id.clone());
         store2.seed_blocks(doc_id.as_str(), vec![stored_blocks[0].clone()]);
 
         controller2.initialize().await.expect("initialize2");
@@ -1966,69 +2204,1945 @@ mod ordering_replay_tests {
             .await
             .expect("second on_file_changed");
 
-        let place_calls = ordering_second.calls.lock().unwrap().clone();
-        assert!(
-            place_calls.is_empty(),
-            "place() must not be called when disk order matches live order; got {place_calls:?}"
+        let second_calls = ordering_second.place_all_calls.lock().unwrap().clone();
+        assert_eq!(
+            second_calls,
+            vec![(doc_id.clone(), vec![block_uri])],
+            "update pass: total-order re-key must run even when already aligned"
         );
     }
 
-    /// Test 7b: file reorders one block → exactly one place() call.
+    /// Test 7b: a freshly-created block reaches the order owner in document
+    /// order — one `place_all` for its parent containing it.
     #[tokio::test]
     async fn ordering_replay_calls_place_for_misaligned_block() {
         let temp_dir = tempfile::tempdir().unwrap();
 
-        // Org file has block B then block A (B is first on disk).
-        // Live order has A then B (A is first in live DB).
-        // The replay should call place() exactly once — for B (first on disk but
-        // second in live) — to move it before A.
-        //
-        // Since we don't control what IDs the parser assigns, we use a
-        // single-block file where the live order lists a DIFFERENT block as the
-        // only child. From the parser's perspective the block is NOT in the live
-        // children list → current_idx = None → misaligned → place() called.
-
         let single_block_org = "\
 * the block
 ";
-
-        let dummy_other_id = "some-other-block-id".to_string();
-        let mut live_order = std::collections::HashMap::new();
-        // Live order for the doc: a different block is listed → our parsed block
-        // is not in the list → current_idx = None → misaligned.
-        live_order.insert(
-            EntityUri::no_parent().id().to_string(),
-            vec![dummy_other_id],
-        );
-
-        // We need the doc_id for the live_order key. Build a controller first
-        // to learn the doc_id, then rebuild with the right live_order.
-        let (_store, _doc_mgr, _ctrl, _ordering_probe, doc_id, _file_path) =
-            build_controller_with_live_order(temp_dir.path(), std::collections::HashMap::new());
-
-        // Build the real controller with a live_order that doesn't include our block.
-        let dummy_other_id2 = "some-other-block-id".to_string();
-        let mut live_order2 = std::collections::HashMap::new();
-        live_order2.insert(doc_id.id().to_string(), vec![dummy_other_id2]);
-        let (_store2, _doc_mgr2, mut controller, ordering, _doc_id2, file_path2) =
-            build_controller_with_live_order(temp_dir.path(), live_order2);
+        let doc_id = EntityUri::block_random();
+        let (store, mut controller, ordering, file_path) =
+            build_recording_controller(temp_dir.path(), doc_id.clone());
 
         controller.initialize().await.expect("initialize");
-        tokio::fs::write(&file_path2, single_block_org)
+        tokio::fs::write(&file_path, single_block_org)
             .await
             .unwrap();
         // Canonicalize after writing (macOS: /var → /private/var symlink).
-        let canonical_path2 = file_path2.canonicalize().expect("canonicalize file_path2");
+        let canonical_path = file_path.canonicalize().expect("canonicalize file_path");
         controller
-            .on_file_changed(&canonical_path2)
+            .on_file_changed(&canonical_path)
             .await
             .expect("on_file_changed");
 
-        let place_calls = ordering.calls.lock().unwrap().clone();
+        let stored_blocks = store.get_all_blocks(doc_id.as_str());
+        assert_eq!(stored_blocks.len(), 1, "one block ingested");
+        let place_all_calls = ordering.place_all_calls.lock().unwrap().clone();
         assert_eq!(
-            place_calls.len(),
+            place_all_calls,
+            vec![(doc_id, vec![stored_blocks[0].id.clone()])],
+            "exactly one total-order hand-off expected for the new block"
+        );
+    }
+}
+
+// ============================================================================
+// Test 8: cold-boot fast-path must be Loro-aware (WP-D / I2)
+//
+// Regression guard for the 2026-07-06 reset hole: on cold boot the fast path
+// skipped org ingest whenever the on-disk hash equalled the SQL-persisted
+// `file.content_hash` — a SQL-ONLY check. After a reset (fresh empty `.loro`
+// but SQL kept the matching hash) it wrongly decided "already ingested" and
+// skipped, leaving the Loro tree empty and SQL/Loro silently diverged.
+//
+// The fix requires the content present in EVERY active store: skip only when
+// the SQL hash matches AND (when Loro is active) the doc's root block is in the
+// Loro tree. These tests inject the Loro-presence signal through
+// `BlockOrdering::in_tree` (the exact seam the fix consults) and assert the
+// skip decision flips on it.
+// ============================================================================
+#[cfg(test)]
+mod fast_path_loro_presence_tests {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering as AtomicOrdering;
+
+    use super::*;
+
+    /// BlockReader that round-trips `file.content_hash` across a simulated
+    /// reboot: `persist_file_hash` captures into a shared map,
+    /// `load_file_hashes` serves it back — so a second controller's
+    /// `initialize()` arms the fast path with the hash the first boot
+    /// stamped (no hand-computed hash, no coupling to the renderer version
+    /// or consolidator tag).
+    struct HashCapturingReader {
+        inner: Arc<InMemoryBlockStore>,
+        hashes: Arc<Mutex<HashMap<String, String>>>,
+    }
+
+    #[async_trait]
+    impl BlockReader for HashCapturingReader {
+        async fn get_blocks(&self, doc_id: &EntityUri) -> Result<Vec<Block>> {
+            self.inner.get_blocks(doc_id).await
+        }
+        async fn doc_block_topology(
+            &self,
+            doc_id: &EntityUri,
+        ) -> Result<Vec<(EntityUri, EntityUri)>> {
+            self.inner.doc_block_topology(doc_id).await
+        }
+        async fn get_block_authoritative(&self, id: &EntityUri) -> Result<Option<Block>> {
+            self.inner.get_block_authoritative(id).await
+        }
+        async fn iter_documents_with_blocks(&self) -> Result<Vec<(EntityUri, Vec<Block>)>> {
+            self.inner.iter_documents_with_blocks().await
+        }
+        async fn load_file_hashes(&self) -> Result<Vec<(EntityUri, String)>> {
+            Ok(self
+                .hashes
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| (EntityUri::parse(k).expect("stored file uri"), v.clone()))
+                .collect())
+        }
+        async fn persist_file_hash(&self, uri: &EntityUri, hash: &str) -> Result<()> {
+            self.hashes
+                .lock()
+                .unwrap()
+                .insert(uri.as_str().to_string(), hash.to_string());
+            Ok(())
+        }
+    }
+
+    /// Ordering stub whose `in_tree` answer is injectable, and which counts
+    /// every mutating call. A non-zero count means `on_file_changed` did NOT
+    /// take the fast-path skip — it ran the ingest. `create_in_tree` keeps the
+    /// default (`Ok(false)` → SqlOnly) so content-block creates route through
+    /// `update_in_tree` (no downstream projection needed).
+    struct PresenceOrdering {
+        store: Arc<InMemoryBlockStore>,
+        root_in_tree: AtomicBool,
+        mutations: AtomicUsize,
+        /// parent uri → child ids in insertion order. Populated by
+        /// `update_in_tree` so the ingest's post-create `children()` wait loop
+        /// (which polls until every just-created block is visible to the
+        /// ordering layer) observes the blocks this ingest wrote.
+        child_order: Mutex<HashMap<String, Vec<String>>>,
+    }
+
+    impl PresenceOrdering {
+        fn new(store: Arc<InMemoryBlockStore>, root_in_tree: bool) -> Self {
+            Self {
+                store,
+                root_in_tree: AtomicBool::new(root_in_tree),
+                mutations: AtomicUsize::new(0),
+                child_order: Mutex::new(HashMap::new()),
+            }
+        }
+        fn bump(&self) {
+            self.mutations.fetch_add(1, AtomicOrdering::SeqCst);
+        }
+        fn mutation_count(&self) -> usize {
+            self.mutations.load(AtomicOrdering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl BlockOrdering for PresenceOrdering {
+        async fn place(
+            &self,
+            _: &EntityUri,
+            _: &EntityUri,
+            _: Option<&EntityUri>,
+        ) -> BlockOrderingResult<()> {
+            self.bump();
+            Ok(())
+        }
+        async fn prev_sibling(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
+            Ok(None)
+        }
+        async fn next_sibling(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
+            Ok(None)
+        }
+        async fn first_child(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
+            Ok(None)
+        }
+        async fn last_child(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
+            Ok(None)
+        }
+        async fn children(&self, parent_id: &EntityUri) -> BlockOrderingResult<Vec<EntityUri>> {
+            Ok(self
+                .child_order
+                .lock()
+                .unwrap()
+                .get(parent_id.as_str())
+                .map(|ids| ids.iter().map(|s| EntityUri::from_raw(s)).collect())
+                .unwrap_or_default())
+        }
+        async fn in_tree(&self, _: &EntityUri) -> BlockOrderingResult<Option<bool>> {
+            Ok(Some(self.root_in_tree.load(AtomicOrdering::SeqCst)))
+        }
+        async fn update_in_tree(
+            &self,
+            params: holon_api::StorageEntity,
+        ) -> BlockOrderingResult<()> {
+            self.bump();
+            let block = block_from_params(&params);
+            {
+                let mut order = self.child_order.lock().unwrap();
+                let siblings = order
+                    .entry(block.parent_id.as_str().to_string())
+                    .or_default();
+                let child = block.id.as_str().to_string();
+                if !siblings.contains(&child) {
+                    siblings.push(child);
+                }
+            }
+            self.store.apply_upsert(block);
+            Ok(())
+        }
+        async fn delete_in_tree(
+            &self,
+            params: holon_api::StorageEntity,
+        ) -> BlockOrderingResult<()> {
+            self.bump();
+            let id = params
+                .get("id")
+                .and_then(|v| v.as_string())
+                .expect("delete_in_tree: missing id");
+            self.store.apply_delete(id);
+            Ok(())
+        }
+    }
+
+    /// Boot 1: fresh vault, empty hash cache → full ingest, stamps the hash.
+    /// Returns the shared hash map, the shared doc manager, and the canonical
+    /// on-disk (now renderer-canonical) file path.
+    async fn boot_once_and_stamp_hash(
+        root_dir: &std::path::Path,
+    ) -> (
+        Arc<Mutex<HashMap<String, String>>>,
+        Arc<MockDocumentManager>,
+        PathBuf,
+        EntityUri,
+    ) {
+        let hashes = Arc::new(Mutex::new(HashMap::new()));
+        let store = Arc::new(InMemoryBlockStore::new());
+        let reader = Arc::new(HashCapturingReader {
+            inner: store.clone(),
+            hashes: hashes.clone(),
+        });
+        let doc_manager = Arc::new(MockDocumentManager::new());
+        let ordering = Arc::new(PresenceOrdering::new(store.clone(), true));
+
+        let doc_id = EntityUri::block_random();
+        let mut doc = Block::new_text(
+            doc_id.clone(),
+            EntityUri::no_parent(),
+            "reset-doc".to_string(),
+        );
+        doc.set_page(true);
+        doc_manager.add_document(doc);
+
+        let mut controller = new_org_sync_controller(
+            reader,
+            doc_manager.clone(),
+            root_dir.to_path_buf(),
+            ordering.clone(),
+            Arc::new(holon_filesystem::RealFileSystem),
+        );
+
+        let stable_block_uuid = uuid::Uuid::new_v4().to_string();
+        let file_path = root_dir.join("reset-doc.org");
+        let initial_org = format!("* only block\n:PROPERTIES:\n:ID: {stable_block_uuid}\n:END:\n");
+        tokio::fs::write(&file_path, &initial_org).await.unwrap();
+        let canonical = file_path.canonicalize().expect("canonicalize");
+
+        controller.initialize().await.expect("initialize boot 1");
+        controller
+            .on_file_changed(&canonical)
+            .await
+            .expect("boot 1 on_file_changed");
+
+        assert!(
+            !hashes.lock().unwrap().is_empty(),
+            "boot 1 must stamp file.content_hash so the fast path can arm on boot 2"
+        );
+        (hashes, doc_manager, canonical, doc_id)
+    }
+
+    /// Boot 2: reuse the stamped hash so the fast path is armed, then vary only
+    /// the Loro presence signal. Returns how many block mutations the ingest
+    /// performed (0 = fast path skipped).
+    async fn boot_again_with_loro_presence(
+        root_dir: &std::path::Path,
+        hashes: Arc<Mutex<HashMap<String, String>>>,
+        doc_manager: Arc<MockDocumentManager>,
+        canonical: &std::path::Path,
+        loro_has_root: bool,
+    ) -> usize {
+        let store = Arc::new(InMemoryBlockStore::new());
+        let reader = Arc::new(HashCapturingReader {
+            inner: store.clone(),
+            hashes,
+        });
+        let ordering = Arc::new(PresenceOrdering::new(store.clone(), loro_has_root));
+        let mut controller = new_org_sync_controller(
+            reader,
+            doc_manager,
+            root_dir.to_path_buf(),
+            ordering.clone(),
+            Arc::new(holon_filesystem::RealFileSystem),
+        );
+
+        controller.initialize().await.expect("initialize boot 2");
+        controller
+            .on_file_changed(canonical)
+            .await
+            .expect("boot 2 on_file_changed");
+        ordering.mutation_count()
+    }
+
+    /// The bug: SQL hash matches but the Loro tree is empty (reset) → the fast
+    /// path MUST NOT skip; ingest must run to repopulate Loro.
+    #[tokio::test]
+    async fn fast_path_reingests_when_loro_tree_empty() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (hashes, doc_manager, canonical, _doc_id) =
+            boot_once_and_stamp_hash(temp_dir.path()).await;
+
+        let mutations = boot_again_with_loro_presence(
+            temp_dir.path(),
+            hashes,
+            doc_manager,
+            &canonical,
+            /* loro_has_root = */ false,
+        )
+        .await;
+
+        assert!(
+            mutations > 0,
+            "fast path skipped ingest despite an empty Loro tree — SQL and Loro would stay \
+             silently diverged (the WP-D / I2 regression)"
+        );
+    }
+
+    /// Control: SQL hash matches AND the Loro tree holds the doc root → the
+    /// fast path is still allowed to skip (no cold-boot perf regression).
+    #[tokio::test]
+    async fn fast_path_still_skips_when_content_present_in_all_stores() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (hashes, doc_manager, canonical, _doc_id) =
+            boot_once_and_stamp_hash(temp_dir.path()).await;
+
+        let mutations = boot_again_with_loro_presence(
+            temp_dir.path(),
+            hashes,
+            doc_manager,
+            &canonical,
+            /* loro_has_root = */ true,
+        )
+        .await;
+
+        assert_eq!(
+            mutations, 0,
+            "fast path should skip when content is present in every active store"
+        );
+    }
+}
+
+// ============================================================================
+// Test 8: initial-scan batched feed barrier (boot ingest latency, Options 0+1)
+// ============================================================================
+
+#[cfg(test)]
+mod initial_scan_batched_barrier_tests {
+    use std::path::Path;
+
+    use super::*;
+
+    /// Ordering stub whose `children()` reads the shared block store (like the
+    /// real `SqlBlockOperations::children`, which reads the authority directly
+    /// so the scan's `place` loop sees freshly-created blocks) — so wait B
+    /// resolves immediately instead of hanging. SqlOnly by default (no
+    /// upstream consolidator), so creates flow through `update_in_tree`
+    /// into the store.
+    struct ScanOrderingStub {
+        store: Arc<InMemoryBlockStore>,
+    }
+
+    #[async_trait]
+    impl BlockOrdering for ScanOrderingStub {
+        async fn place(
+            &self,
+            _: &EntityUri,
+            _: &EntityUri,
+            _: Option<&EntityUri>,
+        ) -> BlockOrderingResult<()> {
+            Ok(())
+        }
+
+        async fn place_all(&self, _: &EntityUri, _: &[EntityUri]) -> BlockOrderingResult<()> {
+            Ok(())
+        }
+
+        async fn prev_sibling(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
+            Ok(None)
+        }
+        async fn next_sibling(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
+            Ok(None)
+        }
+        async fn first_child(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
+            Ok(None)
+        }
+        async fn last_child(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
+            Ok(None)
+        }
+
+        async fn children(&self, parent_id: &EntityUri) -> BlockOrderingResult<Vec<EntityUri>> {
+            Ok(self.store.children_of(parent_id))
+        }
+
+        async fn update_in_tree(
+            &self,
+            params: holon_api::StorageEntity,
+        ) -> BlockOrderingResult<()> {
+            self.store.upsert_from_params(&params);
+            Ok(())
+        }
+
+        async fn delete_in_tree(
+            &self,
+            params: holon_api::StorageEntity,
+        ) -> BlockOrderingResult<()> {
+            let id = params
+                .get("id")
+                .and_then(|v| v.as_string())
+                .expect("delete_in_tree: missing id");
+            self.store.apply_delete(id);
+            Ok(())
+        }
+    }
+
+    /// A BlockReader that delegates reads to the shared store but whose feed
+    /// NEVER converges — models a stalled projection/CDC. Drives the
+    /// `finish_initial_scan` fail-loud path. `blocks_in_feed_count` reports 0
+    /// (no progress ever) so the progress-grounded barrier declares a stall
+    /// after ONE no-progress window.
+    struct StallingReader {
+        store: Arc<InMemoryBlockStore>,
+    }
+
+    #[async_trait]
+    impl BlockReader for StallingReader {
+        async fn get_blocks(&self, doc_id: &EntityUri) -> Result<Vec<Block>> {
+            self.store.get_blocks(doc_id).await
+        }
+        async fn doc_block_topology(
+            &self,
+            doc_id: &EntityUri,
+        ) -> Result<Vec<(EntityUri, EntityUri)>> {
+            self.store.doc_block_topology(doc_id).await
+        }
+        async fn get_block_authoritative(&self, id: &EntityUri) -> Result<Option<Block>> {
+            self.store.get_block_authoritative(id).await
+        }
+        async fn iter_documents_with_blocks(&self) -> Result<Vec<(EntityUri, Vec<Block>)>> {
+            self.store.iter_documents_with_blocks().await
+        }
+        async fn wait_for_blocks_in_feed(&self, _: &[String], _: u64) -> bool {
+            false // feed never converges
+        }
+        async fn blocks_in_feed_count(&self, _: &[String]) -> usize {
+            0 // and never makes progress
+        }
+    }
+
+    /// A BlockReader whose feed converges SLOWLY: every
+    /// `wait_for_blocks_in_feed` slice "times out" (returns false) but
+    /// releases another chunk of ids, so `blocks_in_feed_count` keeps
+    /// rising. Models a healthy projection under cold-boot load — exactly
+    /// the condition where the old fixed wall-clock budget expired early
+    /// (real vault 2026-07-12). The progress-grounded barrier must keep
+    /// waiting to completion; the pre-fix single fixed-budget wait fails on
+    /// the first slice. Deterministic: progress is per-CALL, not
+    /// per-elapsed-time, so the test is not tuned to timing.
+    struct SlowFeedReader {
+        store: Arc<InMemoryBlockStore>,
+        released: std::sync::atomic::AtomicUsize,
+        chunk: usize,
+    }
+
+    #[async_trait]
+    impl BlockReader for SlowFeedReader {
+        async fn get_blocks(&self, doc_id: &EntityUri) -> Result<Vec<Block>> {
+            self.store.get_blocks(doc_id).await
+        }
+        async fn doc_block_topology(
+            &self,
+            doc_id: &EntityUri,
+        ) -> Result<Vec<(EntityUri, EntityUri)>> {
+            self.store.doc_block_topology(doc_id).await
+        }
+        async fn get_block_authoritative(&self, id: &EntityUri) -> Result<Option<Block>> {
+            self.store.get_block_authoritative(id).await
+        }
+        async fn iter_documents_with_blocks(&self) -> Result<Vec<(EntityUri, Vec<Block>)>> {
+            self.store.iter_documents_with_blocks().await
+        }
+        async fn wait_for_blocks_in_feed(&self, ids: &[String], _: u64) -> bool {
+            let now = self
+                .released
+                .fetch_add(self.chunk, std::sync::atomic::Ordering::SeqCst)
+                + self.chunk;
+            now >= ids.len()
+        }
+        async fn blocks_in_feed_count(&self, ids: &[String]) -> usize {
+            self.released
+                .load(std::sync::atomic::Ordering::SeqCst)
+                .min(ids.len())
+        }
+    }
+
+    fn build_scan_controller(
+        root: &Path,
+        reader: Arc<dyn BlockReader>,
+        store: Arc<InMemoryBlockStore>,
+    ) -> FileSyncController {
+        build_scan_controller_with_docs(root, reader, store, Arc::new(MockDocumentManager::new()))
+    }
+
+    fn build_scan_controller_with_docs(
+        root: &Path,
+        reader: Arc<dyn BlockReader>,
+        store: Arc<InMemoryBlockStore>,
+        doc_manager: Arc<MockDocumentManager>,
+    ) -> FileSyncController {
+        let ordering = Arc::new(ScanOrderingStub { store });
+        new_org_sync_controller(
+            reader,
+            doc_manager,
+            root.to_path_buf(),
+            ordering,
+            Arc::new(holon_filesystem::RealFileSystem),
+        )
+    }
+
+    fn org_file(idx: usize, blocks: usize) -> String {
+        let mut s = format!("#+ID: file-{idx}\n\n");
+        for j in 0..blocks {
+            s.push_str(&format!(
+                "* Block {idx}-{j}\n:PROPERTIES:\n:ID: p{idx}_{j}\n:END:\nBody {idx}-{j}.\n\n"
+            ));
+        }
+        s
+    }
+
+    /// Batched barrier ingests every file's blocks correctly and `place_all`
+    /// order is preserved — the end-of-scan convergence wait succeeds and the
+    /// scan flag is cleared. Proves the batched path does not drop blocks.
+    #[tokio::test]
+    async fn initial_scan_batched_barrier_ingests_all_files() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(InMemoryBlockStore::new());
+        let mut controller = build_scan_controller(temp_dir.path(), store.clone(), store.clone());
+        controller.initialize().await.expect("initialize");
+
+        const FILES: usize = 12;
+        const BLOCKS: usize = 5;
+        let mut paths = Vec::new();
+        for i in 0..FILES {
+            let p = temp_dir.path().join(format!("page-{i}.org"));
+            tokio::fs::write(&p, org_file(i, BLOCKS)).await.unwrap();
+            paths.push(p.canonicalize().expect("canonicalize"));
+        }
+
+        // Drive the initial scan exactly as `run_file_sync_controller` does.
+        controller.begin_initial_scan();
+        assert!(controller.in_initial_scan(), "flag on during scan");
+        for p in &paths {
+            controller
+                .on_file_changed(p)
+                .await
+                .unwrap_or_else(|e| panic!("on_file_changed {}: {e:#}", p.display()));
+        }
+        controller
+            .finish_initial_scan(30_000)
+            .await
+            .expect("finish_initial_scan should converge (in-memory feed = true)");
+
+        // Steady-state guard: flag cleared after finish.
+        assert!(
+            !controller.in_initial_scan(),
+            "scan flag must be off after finish_initial_scan"
+        );
+
+        // Every file's every block landed in block_raw (the store).
+        for i in 0..FILES {
+            let doc_blocks = store.get_all_blocks(&format!("block:file-{i}"));
+            let ids: BTreeSet<String> = doc_blocks.iter().map(|b| b.id.id().to_string()).collect();
+            for j in 0..BLOCKS {
+                assert!(
+                    ids.contains(&format!("p{i}_{j}")),
+                    "file {i}: block p{i}_{j} missing after batched scan; got {ids:?}"
+                );
+            }
+        }
+    }
+
+    /// A stalled feed makes the SINGLE end-of-scan convergence wait fail loud —
+    /// never a silent continue. The per-file ingest still succeeds (block_raw
+    /// is synchronous; the count-check passes), so the failure surfaces
+    /// only at `finish_initial_scan`, which is where
+    /// `run_file_sync_controller` routes it into `signal_error`.
+    #[tokio::test]
+    async fn initial_scan_feed_stall_fails_loud() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(InMemoryBlockStore::new());
+        let reader = Arc::new(StallingReader {
+            store: store.clone(),
+        });
+        let mut controller = build_scan_controller(temp_dir.path(), reader, store.clone());
+        controller.initialize().await.expect("initialize");
+
+        let p = temp_dir.path().join("page-0.org");
+        tokio::fs::write(&p, org_file(0, 3)).await.unwrap();
+        let p = p.canonicalize().expect("canonicalize");
+
+        controller.begin_initial_scan();
+        controller
+            .on_file_changed(&p)
+            .await
+            .expect("per-file ingest succeeds (block_raw synchronous)");
+
+        let err = controller
+            .finish_initial_scan(200)
+            .await
+            .expect_err("finish_initial_scan must bail loud when the feed never converges");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("did not converge"),
+            "expected a fail-loud convergence error, got: {msg}"
+        );
+        // Even on failure the flag is cleared (take()), so no leak into runtime.
+        assert!(!controller.in_initial_scan());
+    }
+
+    /// The scan flag never leaks into steady-state: it is on between begin and
+    /// finish and off afterwards, even with an empty vault.
+    #[tokio::test]
+    async fn scan_flag_off_after_finish() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(InMemoryBlockStore::new());
+        let mut controller = build_scan_controller(temp_dir.path(), store.clone(), store.clone());
+        controller.initialize().await.expect("initialize");
+
+        assert!(!controller.in_initial_scan(), "off before begin");
+        controller.begin_initial_scan();
+        assert!(controller.in_initial_scan(), "on after begin");
+        controller
+            .finish_initial_scan(30_000)
+            .await
+            .expect("empty scan converges trivially");
+        assert!(!controller.in_initial_scan(), "off after finish");
+    }
+
+    /// Real-vault cold-boot escape (2026-07-12, Martin's vault): a
+    /// folder-companion file (`Journals.org`, `#+ID: journals`) inlines OTHER
+    /// page-files' doc-roots as headings TOGETHER WITH their child blocks. The
+    /// pre-fix ingest (a) re-parented/updated those children into the
+    /// companion's document — stealing them from the owning page-file — and
+    /// (b) counted the whole inlined subtree in the post-ingest `get_blocks`
+    /// gate, which the Page-boundary doc walk can structurally NEVER return
+    /// ("expected 22 blocks, cache has 5"), so the file failed ingest forever,
+    /// was quarantined from write-back, and every retry flooded the log.
+    ///
+    /// With file-authority extended to the whole inlined subtree: ingest
+    /// succeeds, the owner's blocks are untouched (stale companion copies do
+    /// NOT clobber them), the companion doc holds exactly its own blocks, and
+    /// the file on disk is left byte-identical (write-back deferred, no
+    /// de-inline from this path).
+    #[tokio::test]
+    async fn companion_inlining_foreign_page_subtree_ingests_clean() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(InMemoryBlockStore::new());
+        let doc_manager = Arc::new(MockDocumentManager::new());
+
+        // Pre-existing page-file document `block:d1` (as the scan would have
+        // created from `Journals/2026-07-10.org`) with two children.
+        let d1 = EntityUri::from_raw("block:d1");
+        let mut page = Block::new_text(d1.clone(), EntityUri::no_parent(), "2026-07-10");
+        page.set_page(true);
+        doc_manager.add_document(page);
+        let c1 = Block::new_text(EntityUri::from_raw("block:c1"), d1.clone(), "entry one");
+        let c2 = Block::new_text(EntityUri::from_raw("block:c2"), d1.clone(), "entry two");
+        store.seed_blocks("block:d1", vec![c1, c2]);
+
+        let mut controller = build_scan_controller_with_docs(
+            temp_dir.path(),
+            store.clone(),
+            store.clone(),
+            doc_manager,
+        );
+        controller.initialize().await.expect("initialize");
+
+        // Companion file: two own blocks + the foreign page root inlined as a
+        // heading with STALE copies of its children.
+        let companion = "#+ID: journals\n\n* Own block A\n:PROPERTIES:\n:ID: own-a\n:END:\n\n* \
+                         2026-07-10\n:PROPERTIES:\n:ID: d1\n:END:\n\n** entry one \
+                         STALE\n:PROPERTIES:\n:ID: c1\n:END:\n\n** entry two \
+                         STALE\n:PROPERTIES:\n:ID: c2\n:END:\n\n* Own block B\n:PROPERTIES:\n:ID: \
+                         own-b\n:END:\n";
+        let p = temp_dir.path().join("Journals.org");
+        tokio::fs::write(&p, companion).await.unwrap();
+        let p = p.canonicalize().expect("canonicalize");
+
+        controller.begin_initial_scan();
+        controller
+            .on_file_changed(&p)
+            .await
+            .expect("companion ingest must succeed — the inlined foreign subtree is skipped");
+        controller
+            .finish_initial_scan(30_000)
+            .await
+            .expect("scan converges");
+
+        // Owner authoritative: the page-file's blocks are untouched — the
+        // companion's stale copies did not clobber content or re-parent.
+        let owner_blocks = store.get_all_blocks("block:d1");
+        let contents: BTreeSet<String> = owner_blocks.iter().map(|b| b.content.clone()).collect();
+        assert!(
+            contents.contains("entry one") && contents.contains("entry two"),
+            "owner page-file blocks must survive un-clobbered, got {contents:?}"
+        );
+
+        // Companion doc holds exactly its own blocks.
+        let journal_blocks = store.get_all_blocks("block:journals");
+        let ids: BTreeSet<String> = journal_blocks
+            .iter()
+            .map(|b| b.id.id().to_string())
+            .collect();
+        assert!(
+            ids.contains("own-a") && ids.contains("own-b"),
+            "companion's own blocks must land, got {ids:?}"
+        );
+        assert!(
+            !ids.contains("c1") && !ids.contains("c2") && !ids.contains("d1"),
+            "foreign page subtree must NOT be stolen into the companion doc, got {ids:?}"
+        );
+
+        // Disk byte-identical: this ingest never de-inlines the user's file.
+        let disk_after = tokio::fs::read_to_string(&p).await.unwrap();
+        assert_eq!(disk_after, companion, "companion file must be left as-is");
+
+        // No quarantine: a subsequent external change ingests fine too.
+        controller
+            .on_file_changed(&p)
+            .await
+            .expect("re-ingest of the unchanged companion stays clean");
+    }
+
+    /// Scaled cold boot: hundreds of files (thousands of blocks) over a feed
+    /// that is HEALTHY but SLOW — every wait slice "times out" while ids keep
+    /// landing. The old fixed wall-clock budget (`wait_for_blocks_in_feed(ids,
+    /// budget)` once) fails on the first slice; the progress-grounded barrier
+    /// must ride the progress to completion. Progress is per-call, not
+    /// per-elapsed-time, so the test is deterministic and the fix cannot be
+    /// "tuned" to its timing.
+    #[tokio::test]
+    async fn scaled_cold_boot_slow_feed_converges_via_progress() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(InMemoryBlockStore::new());
+        let reader = Arc::new(SlowFeedReader {
+            store: store.clone(),
+            released: std::sync::atomic::AtomicUsize::new(0),
+            chunk: 37, // ids released per wait slice; many slices needed
+        });
+        let mut controller = build_scan_controller(temp_dir.path(), reader, store.clone());
+        controller.initialize().await.expect("initialize");
+
+        const FILES: usize = 250;
+        const BLOCKS: usize = 5;
+        let mut paths = Vec::new();
+        for i in 0..FILES {
+            let p = temp_dir.path().join(format!("page-{i}.org"));
+            tokio::fs::write(&p, org_file(i, BLOCKS)).await.unwrap();
+            paths.push(p.canonicalize().expect("canonicalize"));
+        }
+
+        controller.begin_initial_scan();
+        for p in &paths {
+            controller
+                .on_file_changed(p)
+                .await
+                .unwrap_or_else(|e| panic!("on_file_changed {}: {e:#}", p.display()));
+        }
+        // Small stall window: irrelevant to a feed that keeps progressing.
+        controller
+            .finish_initial_scan(50)
+            .await
+            .expect("a slow-but-progressing feed must converge, not time out");
+
+        for i in 0..FILES {
+            let doc_blocks = store.get_all_blocks(&format!("block:file-{i}"));
+            assert_eq!(
+                doc_blocks.len(),
+                BLOCKS,
+                "file {i}: all blocks must land at scale"
+            );
+        }
+    }
+}
+
+// ============================================================================
+// Atomic file-rename port (Rename lane, 2026-07-27)
+// ============================================================================
+//
+// A user `mv A.org B.org` inside the vault. The pre-atomic pipeline saw this as
+// Remove(A) + Create(B): the Remove half (or a poll tick that finds A gone)
+// routes to `on_file_deleted`, whose D3 guard CANNOT tell a rename from a
+// delete when the page title has not yet followed the file (its authoritative
+// title-chain still points at A), so it cascade-deletes the very doc the move
+// re-homed. The atomic `on_file_renamed(from, to)` carries BOTH paths in one
+// call and re-homes the doc WITHOUT any delete window.
+//
+// Driven at the `FileSyncController` boundary (real controller, in-memory store
+// + doc manager, real on-disk files) — the level the parked keystone.jsonl case
+// could not reach without the atomic port. The doc-root Page lives in the mock
+// `DocumentManager` (as it lives in `block_raw` in prod); child blocks land in
+// the store. The cascade's observable here is the CHILD deletion; the atomic
+// path's observables are child survival + the doc-root retitled in the store.
+mod atomic_rename_tests {
+    use super::*;
+
+    /// Write `test.org` (`#+ID:` + one child) and ingest it so the store +
+    /// `last_projection` are established.
+    async fn seed_and_ingest(fx: &mut TestFixture, child: &Block) {
+        fx.ensure_parent_dirs().await;
+        let baseline = vec![child.clone()];
+        fx.seed_blocks(&baseline);
+        let org_children = OrgRenderer::render_entitys(&baseline, &fx.file_path(), &fx.doc_id);
+        let org = format!("#+ID: {}\n{}", fx.doc_id.id(), org_children);
+        tokio::fs::write(&fx.file_path(), org.as_bytes())
+            .await
+            .expect("write test.org");
+        fx.controller
+            .on_file_changed(&fx.file_path())
+            .await
+            .expect("initial ingest of test.org");
+    }
+
+    /// The POLL-backstop path is safety-netted too. When the destination is
+    /// ingested (Create half) and the source's disappearance is discovered by
+    /// `poll_tracked_files` (rather than an explicit Remove event), the
+    /// resulting `on_file_deleted` for the source must NOT cascade-delete the
+    /// re-homed doc — the id-based reunification finds the doc alive at the new
+    /// path and re-homes instead. (Before the refutation fix this poll path
+    /// cascade-deleted the live doc.)
+    #[tokio::test]
+    async fn nonatomic_rename_via_poll_is_rescued_by_reunification() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut fx = TestFixture::new(temp.path());
+        let child = Block::new_text(
+            EntityUri::block_random(),
+            fx.doc_id.clone(),
+            "child body".to_string(),
+        );
+        seed_and_ingest(&mut fx, &child).await;
+
+        assert!(
+            BlockReader::get_block_authoritative(&*fx.store, &child.id)
+                .await
+                .unwrap()
+                .is_some(),
+            "precondition: child block ingested into the store"
+        );
+
+        let old = fx.file_path();
+        let moved = fx.root_dir.join("moved.org");
+        tokio::fs::rename(&old, &moved).await.unwrap();
+
+        // Create(B) half, then a poll tick discovers A gone → on_file_deleted(A).
+        fx.controller.on_file_changed(&moved).await.unwrap();
+        fx.controller.poll_tracked_files().await.unwrap();
+
+        assert_eq!(
+            fx.store.delete_count(),
+            0,
+            "the poll-discovered disappearance of the renamed-away source must be rescued by \
+             id-based reunification — NOT cascade-deleted"
+        );
+        assert!(
+            BlockReader::get_block_authoritative(&*fx.store, &child.id)
+                .await
+                .unwrap()
+                .is_some(),
+            "child block survives a poll-discovered rename"
+        );
+    }
+
+    /// The atomic port: the SAME `mv`, one `on_file_renamed` call, keeps the
+    /// child intact (NO cascade), and retitles the doc-root to the new file
+    /// stem (file-move spec D2). A poll tick after the rename must NOT
+    /// cascade-delete.
+    #[tokio::test]
+    async fn atomic_rename_keeps_blocks_alive_and_retitles() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut fx = TestFixture::new(temp.path());
+        let child = Block::new_text(
+            EntityUri::block_random(),
+            fx.doc_id.clone(),
+            "child body".to_string(),
+        );
+        seed_and_ingest(&mut fx, &child).await;
+        let doc_id = fx.doc_id.clone();
+
+        let old = fx.file_path();
+        let moved = fx.root_dir.join("moved.org");
+        tokio::fs::rename(&old, &moved).await.unwrap();
+
+        // Atomic path — one call carrying both sides, no delete window.
+        fx.controller.on_file_renamed(&old, &moved).await.unwrap();
+        // A poll tick must be a no-op: the old path was re-homed, not left
+        // dangling in the tracked set.
+        fx.controller.poll_tracked_files().await.unwrap();
+
+        // Child survives — the anti-cascade property, the core fix.
+        assert!(
+            BlockReader::get_block_authoritative(&*fx.store, &child.id)
+                .await
+                .unwrap()
+                .is_some(),
+            "child block must survive an atomic rename (no cascade window)"
+        );
+
+        // Doc-root retitled to the new file stem — the file-move spec (D2). The
+        // retitle went through the same org->block write seam prod uses; the
+        // Page-tag preservation is prod's `update_in_tree` (minimal params)
+        // contract, exercised by `idonly_title_heal.rs` — not re-asserted here
+        // where the doc-root lives in the mock DocumentManager, not the store.
+        let doc_after = BlockReader::get_block_authoritative(&*fx.store, &doc_id)
+            .await
+            .unwrap()
+            .expect("atomic rename must materialize the retitled doc-root (id stable, no re-mint)");
+        assert_eq!(
+            doc_after.content, "moved",
+            "page title must follow the new file name (file-move spec D2)"
+        );
+    }
+
+    /// REFUTATION RED (verifier 2026-07-27): the atomic port's fallback. When
+    /// the watcher's pairing degrades to a bare `Remove` + `Create` (a
+    /// byte-syncer / lock-file interposed between the two rename halves, or the
+    /// pair timed out), the stray `Remove` reaches `on_file_deleted` for a path
+    /// whose `#+ID` NOW LIVES at the moved file. The title-based D3 guard
+    /// cannot fire (the title has not followed the rename), so today the
+    /// live doc is cascade-deleted. The id-based reunification safety net
+    /// must re-home instead: NO cascade (delete_count == 0), child + doc
+    /// survive, retitled.
+    #[tokio::test]
+    async fn rename_fallback_remove_does_not_cascade_a_live_doc() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut fx = TestFixture::new(temp.path());
+        let child = Block::new_text(
+            EntityUri::block_random(),
+            fx.doc_id.clone(),
+            "child body".to_string(),
+        );
+        seed_and_ingest(&mut fx, &child).await;
+        let doc_id = fx.doc_id.clone();
+
+        let old = fx.file_path();
+        let moved = fx.root_dir.join("moved.org");
+        tokio::fs::rename(&old, &moved).await.unwrap();
+
+        // Fallback ordering: the moved file's `Create` is processed first (so
+        // its `#+ID` is now tracked at `moved`), THEN the stray `Remove` of the
+        // old path arrives — the exact sequence a flush-then-create fallback
+        // hands the controller.
+        fx.controller.on_file_changed(&moved).await.unwrap();
+        fx.controller.on_file_changed(&old).await.unwrap();
+
+        assert_eq!(
+            fx.store.delete_count(),
+            0,
+            "a stray Remove of a renamed-away file must NOT cascade-delete a doc whose #+ID now              lives at another tracked path — the id-based reunification safety net must re-home"
+        );
+        assert!(
+            BlockReader::get_block_authoritative(&*fx.store, &child.id)
+                .await
+                .unwrap()
+                .is_some(),
+            "child block must survive the rename fallback"
+        );
+        let doc_after = BlockReader::get_block_authoritative(&*fx.store, &doc_id)
+            .await
+            .unwrap()
+            .expect("doc-root must stay alive through the rename fallback");
+        assert_eq!(
+            doc_after.content, "moved",
+            "reunification re-homes AND retitles to the new file stem"
+        );
+    }
+
+    /// ENVIRONMENT-PARITY RUNG (BugFunnel 2026-07-27). The composed keystone
+    /// enters BELOW `NotifyWatcher` (on `InMemoryFileSystem`), so
+    /// `RenamePairing` and the bridge's kind->`FileEvent` routing are
+    /// structurally UNTRAVERSED — the prod-only layer where the adversarial
+    /// verifier found the cascade-delete-on-interposition defect. This rung
+    /// closes that parity gap: it drives SYNTHETIC notify-shaped signals
+    /// through the REAL `RenamePairing::classify` -> the REAL bridge
+    /// routing (`classify_change_to_event`, the same fn the production
+    /// `OrgFileWatcher` uses) -> `FileEvent` -> the controller. Sequence:
+    /// From -> interposing byte-syncer write -> To. With the relevance-gate
+    /// + timeout-only flush the interposer does not disturb the pending, so
+    /// the pair collapses to a SINGLE atomic `Rename` — no `Remove`, no
+    /// cascade. (Full composed-keystone integration of a notify-shaped
+    /// source remains open parity work.)
+    #[tokio::test]
+    async fn notify_shaped_interposed_rename_traverses_pairing_and_routing_no_cascade() {
+        use std::path::Path;
+        use std::time::Instant;
+
+        use holon_filesystem::FileChange;
+        use holon_filesystem::RawFsSignal;
+        use holon_filesystem::RenamePairing;
+        use holon_orgmode::FileEvent;
+        use holon_orgmode::classify_change_to_event;
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut fx = TestFixture::new(temp.path());
+        let child = Block::new_text(
+            EntityUri::block_random(),
+            fx.doc_id.clone(),
+            "child body".to_string(),
+        );
+        seed_and_ingest(&mut fx, &child).await;
+        let doc_id = fx.doc_id.clone();
+
+        let old = fx.file_path();
+        let moved = fx.root_dir.join("moved.org");
+        tokio::fs::rename(&old, &moved).await.unwrap();
+
+        // (1) REAL pairing state machine over synthetic notify-shaped signals.
+        let mut pairing = RenamePairing::new();
+        let now = Instant::now();
+        let rel = |p: &Path| p.extension().is_some_and(|e| e == "org");
+        let mut emissions = Vec::new();
+        emissions.extend(pairing.classify(&RawFsSignal::RenameFrom(old.clone()), now, &rel));
+        emissions.extend(pairing.classify(
+            &RawFsSignal::Create(fx.root_dir.join(".syncthing.tmp")),
+            now,
+            &rel,
+        ));
+        emissions.extend(pairing.classify(&RawFsSignal::RenameTo(moved.clone()), now, &rel));
+
+        // (2) REAL bridge routing (classify_change_to_event) -> FileEvent, then
+        // (3) the sync-loop dispatch onto the controller.
+        for (seq, (path, kind)) in emissions.into_iter().enumerate() {
+            let change = FileChange {
+                path,
+                kind,
+                seq: seq as u64,
+            };
+            match classify_change_to_event(change, &rel) {
+                Some(FileEvent::Renamed { from, to }) => {
+                    fx.controller.on_file_renamed(&from, &to).await.unwrap()
+                }
+                Some(FileEvent::Changed(p)) => fx.controller.on_file_changed(&p).await.unwrap(),
+                None => {}
+            }
+        }
+
+        assert_eq!(
+            fx.store.delete_count(),
+            0,
+            "an interposed rename must pair into a single atomic Rename through the REAL pairing \
+             + routing — no cascade reaches the controller"
+        );
+        assert!(
+            BlockReader::get_block_authoritative(&*fx.store, &child.id)
+                .await
+                .unwrap()
+                .is_some(),
+            "child survives the interposed rename"
+        );
+        let doc_after = BlockReader::get_block_authoritative(&*fx.store, &doc_id)
+            .await
+            .unwrap()
+            .expect("doc-root alive");
+        assert_eq!(doc_after.content, "moved", "retitled to the new file stem");
+    }
+}
+
+// ============================================================================
+// Residual write-back hole: an INTERMEDIATE-ancestor convert re-homes a DEEP
+// descendant whose own parent_id/tags never change, so the block-driven
+// write-back cheap path (file_sync_controller.rs render_with_cache:3855 gate +
+// :3872 authority re-check) cannot see that the descendant left this document.
+//
+// Documented at ~/.claude/plans/stale-delta-redesign-options-2026-08-04.md
+// §2.3. The gate and the authority re-check both compare the block's OWN
+// parent_id / tags against the doc's cached copy — neither verifies the block
+// still BELONGS to `doc_id`. When an intermediate ancestor (not X's direct
+// parent) gains the `Page` tag via `convert_block_to_page`, X re-homes to the
+// new page's document while X.parent_id and X.tags stay identical. A queued
+// delta for X, routed to the OLD document before the convert (T1), drains at T2
+// on the cheap path and re-renders X into the OLD file — an edit meant for the
+// new page lands in the wrong file. reseeded=false, so the removal veto is
+// skipped and last_projection is stamped over the divergence.
+//
+// Topology: P_a (page, file `test.org`) owns  A > M > N > X  (M is an
+// INTERMEDIATE, non-leaf ancestor of X; N sits between them). `convert_block_to
+// _page` on M mints page P_m under P_a, re-homes M's direct child N under P_m,
+// and X follows as N's child WITHOUT its own parent_id changing.
+mod intermediate_ancestor_writeback_hole {
+    use super::*;
+
+    fn text_block(id: &str, parent: &EntityUri, content: &str, level: i64, seq: i64) -> Block {
+        let uri = EntityUri::block(id);
+        let mut b = Block::new_text(uri.clone(), parent.clone(), content);
+        b.set_level(level);
+        b.set_sequence(seq);
+        b.set_property("ID", Value::String(id.to_string()));
+        b
+    }
+
+    /// Build `P_a { A > M > N > X }`, warm the controller's per-doc cache so X
+    /// is cached under `P_a`, then apply the `convert_block_to_page(M)`
+    /// EFFECT to the authority: N and X move into P_m's bucket (N.parent =
+    /// P_m, X.parent = N UNCHANGED), P_m becomes a page in both the block
+    /// authority and the doc manager, and P_m's file is materialized on
+    /// disk. Returns the ids and the EDITED X block whose (stale,
+    /// routed-to-P_a) delta the caller then drains.
+    async fn build_and_convert(fixture: &mut TestFixture) -> (EntityUri, EntityUri, Block) {
+        let p_a = fixture.doc_id.clone(); // fixture pre-seeds "test" page at doc_id
+        let a = text_block("la-a", &p_a, "la-a-outer", 1, 0);
+        let m = text_block("la-m", &a.id, "la-m-middle", 2, 0);
+        let n = text_block("la-n", &m.id, "la-n-inner", 3, 0);
+        let x = text_block("la-x", &n.id, "la-x-leaf", 4, 0);
+
+        fixture.seed_blocks(&[a.clone(), m.clone(), n.clone(), x.clone()]);
+        fixture
+            .controller
+            .initialize()
+            .await
+            .expect("initialize must succeed");
+
+        // WARM: a first block delta for X reseeds P_a's cache to {A,M,N,X} and
+        // writes `test.org` = A>M>N>X (X legitimately belongs to P_a here).
+        write_back(fixture, &p_a, &x)
+            .await
+            .expect("warm write must succeed");
+
+        // --- convert_block_to_page(M) EFFECT on the AUTHORITATIVE store ---
+        // P_a bucket keeps A and M (M becomes a link to P_m, modeled as a plain
+        // block that stays put — the point is N and X LEAVE). P_m bucket gains a
+        // Page block, N (re-parented to P_m), and X (parent UNCHANGED = N).
+        let p_m = EntityUri::block("la-pm");
+        let mut pm_page = Block::new_text(p_m.clone(), p_a.clone(), "Pm");
+        pm_page.set_page(true);
+        pm_page.set_property("ID", Value::String("la-pm".to_string()));
+
+        let n_moved = text_block("la-n", &p_m, "la-n-inner", 1, 0); // parent M -> P_m
+        // X's OWN parent_id (N) and tags are IDENTICAL to the cached copy; only
+        // the content carries the queued edit. This is the crux of the hole.
+        let x_edited = text_block("la-x", &n.id, "la-x-EDITED-after-rehome", 2, 0);
+
+        fixture
+            .store
+            .seed_blocks(p_a.as_str(), vec![a.clone(), m.clone()]);
+        fixture.store.seed_blocks(
+            p_m.as_str(),
+            vec![pm_page.clone(), n_moved.clone(), x_edited.clone()],
+        );
+        fixture.doc_manager.add_document(pm_page);
+
+        // Materialize P_m's identity file on disk (prod's convert does this).
+        let pm_path = fixture.root_dir.join("test").join("Pm.org");
+        tokio::fs::create_dir_all(pm_path.parent().unwrap())
+            .await
+            .unwrap();
+        let pm_body = OrgRenderer::render_entitys(&[n_moved, x_edited.clone()], &pm_path, &p_m);
+        tokio::fs::write(&pm_path, format!("#+ID: la-pm\n{pm_body}"))
+            .await
+            .unwrap();
+
+        (p_a, p_m, x_edited)
+    }
+
+    /// RED: after the convert, draining X's stale (routed-to-P_a) edit delta
+    /// takes the cheap path and re-renders X's EDITED content into
+    /// `test.org` — the OLD document's file — even though X now belongs to
+    /// P_m. The file that P_a owns must not carry X's subtree after the
+    /// re-home; it does → the hole is real.
+    #[tokio::test]
+    async fn convert_leaks_deep_descendant_edit_into_old_doc() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut fixture = TestFixture::new(temp_dir.path());
+        let (p_a, p_m, x_edited) = build_and_convert(&mut fixture).await;
+
+        // Drain X's queued delta, routed to the OLD doc P_a (stale T1 routing).
+        write_back(&mut fixture, &p_a, &x_edited)
+            .await
+            .expect("stale delta drain returned an unexpected error");
+
+        // …then the retractions the same re-home fans at P_a. These are what
+        // legitimately rewrite the old file; the stale edit above is gate-
+        // skipped because the holder it would render disagrees with the
+        // authority about who still belongs to P_a.
+        let _ = p_m;
+        retract(&mut fixture, &p_a, &EntityUri::block("la-n"))
+            .await
+            .expect("retraction of N at the old doc");
+        retract(&mut fixture, &p_a, &EntityUri::block("la-x"))
+            .await
+            .expect("retraction of X at the old doc");
+
+        let test_org = tokio::fs::read_to_string(fixture.file_path())
+            .await
+            .unwrap();
+
+        assert!(
+            !test_org.contains("la-x"),
+            "WRITE-BACK HOLE: P_a's file `test.org` still renders re-homed descendant \
+             `la-x` (it belongs to P_m now). An edit routed to the OLD document leaked \
+             into the OLD file via the cheap path (reseed skipped). On-disk `test.org`:\n{test_org}"
+        );
+    }
+
+    /// The §2.3 property itself: X lives in EXACTLY ONE file, and the old
+    /// document's file never carries it at ANY observed point.
+    ///
+    /// This used to assert the bug first — drain the stale delta, require the
+    /// leak to be present, then watch a later reseed heal it. The holder
+    /// removes the leak entirely, so "observe it, then heal it" no longer
+    /// describes anything the system does. What survives is the property that
+    /// mattered all along, now checked after EVERY step rather than only at
+    /// the end: a transient leak is still data in the wrong file, so a window
+    /// in which `test.org` carries X would fail here even if the final state
+    /// were correct.
+    #[tokio::test]
+    async fn rehomed_descendant_lives_in_exactly_one_file_throughout() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut fixture = TestFixture::new(temp_dir.path());
+        let (p_a, p_m, x_edited) = build_and_convert(&mut fixture).await;
+        let pm_path = fixture.root_dir.join("test").join("Pm.org");
+
+        let warm = tokio::fs::read_to_string(fixture.file_path())
+            .await
+            .unwrap();
+
+        // 1. The stale X edit — routed to the OLD document — drains. The gate skips it
+        //    (holder ≠ authority), so no write happens at all, which is a STRONGER
+        //    outcome than the old "render without X": the wrong file is never even
+        //    opened.
+        write_back(&mut fixture, &p_a, &x_edited)
+            .await
+            .expect("stale delta drain must succeed");
+        assert_eq!(
+            tokio::fs::read_to_string(fixture.file_path())
+                .await
+                .unwrap(),
+            warm,
+            "a stale edit routed to the OLD document must not write it AT ALL — the holder it \
+             would render disagrees with the authority, and rendering that disagreement is the \
+             defect. Byte-equality with the pre-drain file is the check: 'the render happened to \
+             omit X' would also satisfy a weaker contains-assertion."
+        );
+
+        // 2. The retractions the re-home fans at the OLD document. After the last one
+        //    the holder agrees with the authority and the file is written exactly once.
+        retract(&mut fixture, &p_a, &EntityUri::block("la-n"))
+            .await
+            .expect("retraction of N at the old doc");
+        retract(&mut fixture, &p_a, &EntityUri::block("la-x"))
+            .await
+            .expect("retraction of X at the old doc (grounded as a move, not vetoed)");
+        let _ = p_m;
+
+        // 3. At quiescence: exactly one file owns X, and it is P_m's.
+        let test_org = tokio::fs::read_to_string(fixture.file_path())
+            .await
+            .unwrap();
+        let pm_file = tokio::fs::read_to_string(&pm_path).await.unwrap();
+        assert!(
+            !test_org.contains("la-x"),
+            "at quiescence the old document's file must not own X. test.org:\n{test_org}"
+        );
+        assert!(
+            pm_file.contains("la-x"),
+            "at quiescence X must live in P_m's file. Pm.org:\n{pm_file}"
+        );
+        // The blocks that DID stay behind must still be there — "X is gone"
+        // must not be satisfied by an empty file.
+        assert!(
+            test_org.contains("la-a") && test_org.contains("la-m"),
+            "the old document must keep the blocks that never left it. test.org:\n{test_org}"
+        );
+    }
+
+    // ── The seam the holder and the renderer share ──────────────────────
+    //
+    // `DocOrder::document_order` EXCLUDES a member the document root cannot
+    // reach, and `OrgRenderer::render_walk` PANICS on a slice containing one.
+    // Each side was pinned by its own test and nothing crossed between them,
+    // which is how the two contracts came to contradict each other. These two
+    // tests are that crossing: real holder → real renderer → real removal
+    // guard → real disk, in both arms the exclusion can land in.
+
+    /// Arm 1 — the orphan genuinely re-homed. The render omits it and the
+    /// unconditional veto grounds its absence against the AUTHORITY as a move,
+    /// so the old file is written correctly and immediately.
+    #[tokio::test]
+    async fn an_excluded_orphan_that_moved_is_grounded_and_the_write_lands() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut fixture = TestFixture::new(temp_dir.path());
+        let (p_a, _p_m, x_edited) = build_and_convert(&mut fixture).await;
+
+        let before = tokio::fs::read_to_string(fixture.file_path())
+            .await
+            .unwrap();
+        assert!(
+            before.contains("la-n") && before.contains("la-x"),
+            "precondition: the warm write put N and X on disk. test.org:\n{before}"
+        );
+
+        let _ = x_edited;
+        // The re-home's retractions at the OLD document. After them the holder
+        // equals the authority, so the gate passes and the guard — not the
+        // gate — is what judges the two absences.
+        retract(&mut fixture, &p_a, &EntityUri::block("la-n"))
+            .await
+            .expect("retraction of N at the old doc");
+        let wrote = retract(&mut fixture, &p_a, &EntityUri::block("la-x"))
+            .await
+            .expect("a grounded move must not veto the write");
+        assert!(wrote, "the write must actually land, not report 'no file'");
+
+        let after = tokio::fs::read_to_string(fixture.file_path())
+            .await
+            .unwrap();
+        assert!(
+            !after.contains("la-n") && !after.contains("la-x"),
+            "both departed blocks must be gone from the old file — their absence grounds as a \
+             move against the authority. test.org:\n{after}"
+        );
+        assert!(
+            after.contains("la-a") && after.contains("la-m"),
+            "the blocks that stayed must survive the write. test.org:\n{after}"
+        );
+    }
+
+    /// Arm 2 — the teeth. The holder AGREES with the authority (so the
+    /// fold-completeness gate passes and hands the decision to the guard), yet
+    /// a block still on disk is in NEITHER: nothing can prove where it went, so
+    /// the write is REFUSED and disk keeps its last good content.
+    ///
+    /// This is the division of labour the gate introduced, and it is why the
+    /// two must be tested apart: a holder that merely LAGS its authority is a
+    /// transient the gate absorbs, while an authority that has lost a block
+    /// disk still holds is loss — and only the guard may judge that. Without
+    /// this arm, "the render omitted a block" would be indistinguishable from
+    /// silent deletion.
+    #[tokio::test]
+    async fn an_excluded_orphan_the_authority_still_owns_blocks_the_write() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut fixture = TestFixture::new(temp_dir.path());
+        let (p_a, _p_m, x_edited) = build_and_convert(&mut fixture).await;
+        let _ = x_edited;
+
+        // The ONLY difference from arm 1: X is nowhere in the authority. In arm
+        // 1 the authority placed X under P_m, and THAT verdict is what grounded
+        // its absence as a move. Here nothing can prove where it went — while
+        // it is still on disk.
+        let p_m = EntityUri::block("la-pm");
+        let mut pm_page = Block::new_text(p_m.clone(), p_a.clone(), "Pm");
+        pm_page.set_page(true);
+        pm_page.set_property("ID", Value::String("la-pm".to_string()));
+        let n_moved = text_block("la-n", &p_m, "la-n-inner", 1, 0);
+        fixture
+            .store
+            .seed_blocks(p_m.as_str(), vec![pm_page, n_moved]);
+
+        let last_good = tokio::fs::read_to_string(fixture.file_path())
+            .await
+            .unwrap();
+
+        // Holder := the authority's own view of P_a ({A, M}) — so the gate
+        // PASSES and cannot be what refuses this write. Then N's retraction
+        // drains, which is sanctioned. X's never does: X is simply gone from
+        // the authority while disk still carries it.
+        fixture
+            .controller
+            .seed_holder_from_authority(&p_a)
+            .await
+            .expect("seed the holder from the authority");
+        let result = retract(&mut fixture, &p_a, &EntityUri::block("la-n")).await;
+        assert!(
+            result.is_err(),
+            "an ungrounded drop must REFUSE the write (ADR 0025), not silently delete. \
+             Got: {result:?}"
+        );
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(
+            err.contains("UNGROUNDED WRITE-BACK REMOVAL"),
+            "the refusal must name the removal guard, so the reader is not sent hunting a \
+             render bug. Error was: {err}"
+        );
+
+        let after = tokio::fs::read_to_string(fixture.file_path())
+            .await
+            .unwrap();
+        assert_eq!(
+            after, last_good,
+            "a refused write must leave disk byte-identical to its last good content"
+        );
+        assert!(
+            after.contains("la-x"),
+            "the block the guard protected must still be on disk. test.org:\n{after}"
+        );
+    }
+
+    /// The exclusion must be AUDIBLE. A holder silently dropping members is
+    /// the failure mode the whole guard exists to make impossible, so the WARN
+    /// naming the orphans is part of the contract, not decoration.
+    ///
+    /// Reaching the exclusion now takes a deliberately awkward fixture, and
+    /// that is worth stating: the fold-completeness gate only renders when the
+    /// holder equals the authority's membership, and a real store derives that
+    /// membership by walking DOWN the parent chain — so every member it reports
+    /// is root-reachable and no orphan can survive into a render. The exclusion
+    /// is therefore a backstop against a store that disagrees, which is exactly
+    /// what this in-memory double (bucket-based membership, no parent walk) is.
+    /// If it ever stops being reachable here too, the honest move is to delete
+    /// it and let the renderer's dangling-parent panic stand alone — not to
+    /// keep an untested branch.
+    #[tokio::test]
+    async fn excluding_an_orphan_warns_and_names_it() {
+        let cap = WarnCapture::global();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut fixture = TestFixture::new(temp_dir.path());
+        let (p_a, _p_m, _x_edited) = build_and_convert(&mut fixture).await;
+
+        // P_a's bucket claims X while N — X's parent — has left for P_m. The
+        // holder seeds to exactly that set, so the gate passes and the renderer
+        // is handed a slice it cannot nest.
+        let a = text_block("la-a", &p_a, "la-a-outer", 1, 0);
+        let m = text_block("la-m", &a.id, "la-m-middle", 2, 0);
+        let orphan_x = text_block("la-x", &EntityUri::block("la-n"), "la-x-leaf", 4, 0);
+        fixture
+            .store
+            .seed_blocks(p_a.as_str(), vec![a, m, orphan_x]);
+        fixture
+            .controller
+            .seed_holder_from_authority(&p_a)
+            .await
+            .expect("seed the holder from the authority");
+        cap.clear();
+
+        let m_touched = text_block("la-m", &EntityUri::block("la-a"), "la-m-EDITED", 2, 0);
+        write_back(&mut fixture, &p_a, &m_touched)
+            .await
+            .expect("edit drain");
+
+        // Scoped to THIS document's id. The capture is process-global, and the
+        // sibling tests in this module run the same topology under their own
+        // freshly-minted document roots — an unscoped match would let their
+        // WARN satisfy this assertion.
+        let warns: Vec<String> = cap
+            .warns()
+            .into_iter()
+            .filter(|w| w.contains(p_a.as_str()))
+            .collect();
+        assert!(
+            warns
+                .iter()
+                .any(|w| w.contains("unreachable from the document root")),
+            "excluding a holder member must WARN — a silent exclusion is indistinguishable \
+             from the data loss the removal guard exists to catch. Captured: {warns:?}"
+        );
+        assert!(
+            warns
+                .iter()
+                .any(|w| w.contains("unreachable from the document root") && w.contains("la-x")),
+            "the WARN must NAME the excluded member, or it cannot be acted on. \
+             Captured: {warns:?}"
+        );
+    }
+
+    // ── The fold-completeness gate ──────────────────────────────────────
+    //
+    // The holder folds a lagging feed one member at a time, so a render
+    // triggered by the first diff of a burst sees a PARTIAL document. Rendering
+    // it projected an empty file over a populated one, the guard vetoed, and
+    // the veto quarantined the file permanently — one transient fold killed a
+    // document's write-back for the session. The gate renders only when the
+    // holder's membership equals the authority's.
+
+    /// A partially-folded holder must not be rendered. This is the measured
+    /// defect in miniature: only the page root has folded, so the render would
+    /// be empty.
+    #[tokio::test]
+    async fn a_partial_fold_is_skipped_not_rendered() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut fixture = TestFixture::new(temp_dir.path());
+        let (p_a, _p_m, _x) = build_and_convert(&mut fixture).await;
+        let before = tokio::fs::read_to_string(fixture.file_path())
+            .await
+            .unwrap();
+
+        // Reset, then fold ONE of P_a's two members — the state every burst
+        // passes through.
+        fixture.controller.reset_holder();
+        let a = text_block("la-a", &p_a, "la-a-outer", 1, 0);
+        fixture
+            .controller
+            .on_block_changed(
+                &p_a,
+                &holon_filesystem::BlockDelta::Upsert {
+                    block: a,
+                    prev: None,
+                },
+            )
+            .await
+            .expect("a partial fold must not error — it must simply not write");
+
+        assert_eq!(
+            tokio::fs::read_to_string(fixture.file_path())
+                .await
+                .unwrap(),
+            before,
+            "a holder holding 1 of 2 members must leave disk untouched. Byte-equality, not a \
+             contains-check: the failure this pins wrote a SHORTER file, which any \
+             'still has la-a' assertion would have passed."
+        );
+    }
+
+    /// The other direction of the equality. The holder still holds a block the
+    /// authority has dropped; rendering it would put the deleted block BACK on
+    /// disk (the resurrection flicker).
+    #[tokio::test]
+    async fn a_stale_superset_holder_is_skipped_so_a_deleted_block_is_not_resurrected() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut fixture = TestFixture::new(temp_dir.path());
+        let (p_a, _p_m, _x) = build_and_convert(&mut fixture).await;
+
+        // Authority: P_a keeps only A. Holder: still A and M.
+        let a = text_block("la-a", &p_a, "la-a-outer", 1, 0);
+        fixture.store.seed_blocks(p_a.as_str(), vec![a.clone()]);
+        fixture
+            .controller
+            .seed_holder_from_authority(&p_a)
+            .await
+            .expect("seed");
+        let m_stale = text_block("la-m", &a.id, "la-m-middle", 2, 0);
+        fixture.controller.apply_block_delta(
+            &p_a,
+            &holon_filesystem::BlockDelta::Upsert {
+                block: m_stale,
+                prev: None,
+            },
+        );
+
+        fixture
+            .controller
+            .on_block_changed(
+                &p_a,
+                &holon_filesystem::BlockDelta::Upsert {
+                    block: a,
+                    prev: None,
+                },
+            )
+            .await
+            .expect("a stale superset must not error");
+
+        let on_disk = tokio::fs::read_to_string(fixture.file_path())
+            .await
+            .unwrap();
+        assert!(
+            !on_disk.contains("la-m-middle") || on_disk.contains("la-n"),
+            "a holder holding a block the authority dropped must not be rendered — doing so \
+             writes the deleted block back to disk. test.org:\n{on_disk}"
+        );
+    }
+
+    /// ∅ == ∅ is equality. A page that genuinely has no children must still
+    /// render its header-only file — the gate must not read "nothing to
+    /// render" as "not ready yet".
+    #[tokio::test]
+    async fn a_childless_document_is_complete_and_renders() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut fixture = TestFixture::new(temp_dir.path());
+        let p_a = fixture.doc_id.clone();
+        let only = text_block("la-only", &p_a, "la-only-child", 1, 0);
+        fixture.seed_blocks(&[only.clone()]);
+        fixture.controller.initialize().await.expect("initialize");
+        write_back(&mut fixture, &p_a, &only)
+            .await
+            .expect("warm write");
+
+        // The child leaves: the authority reports an empty document.
+        fixture.store.seed_blocks(p_a.as_str(), vec![]);
+        fixture
+            .controller
+            .seed_holder_from_authority(&p_a)
+            .await
+            .expect("seed");
+        let wrote = retract(&mut fixture, &p_a, &only.id)
+            .await
+            .expect("an emptied document is complete, not incomplete");
+
+        assert!(wrote, "a childless document must still be written");
+        let on_disk = tokio::fs::read_to_string(fixture.file_path())
+            .await
+            .unwrap();
+        assert!(
+            !on_disk.contains("la-only"),
+            "the departed child must be gone — its retraction sanctioned the removal. \
+             test.org:\n{on_disk}"
+        );
+    }
+
+    /// A veto-caused quarantine must LIFT once a later render passes the guard
+    /// fully grounded. Before the reorder this was unreachable:
+    /// `is_quarantined` returned before the guard ran, so a file
+    /// quarantined by one transient render never got to prove itself again.
+    #[tokio::test]
+    async fn a_veto_caused_quarantine_clears_on_the_next_grounded_render() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut fixture = TestFixture::new(temp_dir.path());
+        let (p_a, _p_m, _x) = build_and_convert(&mut fixture).await;
+
+        // 1. Provoke the veto: X is gone from the authority but still on disk.
+        let p_m = EntityUri::block("la-pm");
+        let mut pm_page = Block::new_text(p_m.clone(), p_a.clone(), "Pm");
+        pm_page.set_page(true);
+        pm_page.set_property("ID", Value::String("la-pm".to_string()));
+        fixture.store.seed_blocks(
+            p_m.as_str(),
+            vec![pm_page, text_block("la-n", &p_m, "n", 1, 0)],
+        );
+        fixture
+            .controller
+            .seed_holder_from_authority(&p_a)
+            .await
+            .expect("seed");
+        retract(&mut fixture, &p_a, &EntityUri::block("la-n"))
+            .await
+            .expect_err("the ungrounded drop of X must veto and quarantine");
+
+        // 2. X comes back to the authority under P_a — the drop that vetoed is no
+        //    longer a drop at all, so the very next render is grounded.
+        let a = text_block("la-a", &p_a, "la-a-outer", 1, 0);
+        let m = text_block("la-m", &a.id, "la-m-middle", 2, 0);
+        let n = text_block("la-n", &m.id, "la-n-inner", 3, 0);
+        let x = text_block("la-x", &n.id, "la-x-leaf", 4, 0);
+        fixture
+            .store
+            .seed_blocks(p_a.as_str(), vec![a, m, n, x.clone()]);
+        fixture
+            .controller
+            .seed_holder_from_authority(&p_a)
+            .await
+            .expect("seed");
+
+        let wrote = write_back(&mut fixture, &p_a, &x)
+            .await
+            .expect("a fully-grounded render must lift the quarantine, not be skipped by it");
+        assert!(wrote, "the write must land once the quarantine is lifted");
+        let on_disk = tokio::fs::read_to_string(fixture.file_path())
+            .await
+            .unwrap();
+        assert!(
+            on_disk.contains("la-x"),
+            "the lifted quarantine must let the render actually reach disk. test.org:\n{on_disk}"
+        );
+    }
+
+    /// A holder that has permanently stopped converging must ESCALATE, not idle
+    /// silently. `LiveData::apply_changes` drops unparseable CDC rows to keep
+    /// the feed alive, so a member can be missing forever — and a gate that
+    /// skipped forever without saying so would be exactly the silent
+    /// degradation the fail-loud rule forbids.
+    #[tokio::test]
+    async fn a_permanently_incomplete_holder_escalates_to_degraded() {
+        #[derive(Default)]
+        struct Recorder(std::sync::Mutex<Vec<String>>);
+        impl holon_filesystem::WritebackDisclosure for Recorder {
+            fn writeback_degraded(&self, detail: &str) {
+                self.0.lock().unwrap().push(detail.to_string());
+            }
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut fixture = TestFixture::new(temp_dir.path());
+        let p_a = fixture.doc_id.clone();
+        let a = text_block("la-a", &p_a, "la-a-outer", 1, 0);
+        let ghost = text_block("la-ghost", &p_a, "never-folded", 1, 1);
+        fixture.seed_blocks(&[a.clone(), ghost]);
+
+        let recorder = Arc::new(Recorder::default());
+        fixture.controller = fixture
+            .controller
+            .with_writeback_disclosure(recorder.clone());
+        fixture.controller.initialize().await.expect("initialize");
+
+        // `la-ghost` is in the authority and NEVER folds — the dropped-CDC-row
+        // shape. Every edit to A is genuinely blocked by its absence.
+        for i in 0..(GATE_SKIPS_BEFORE_DEGRADED_FOR_TEST + 2) {
+            let edit = text_block("la-a", &p_a, &format!("la-a-edit-{i}"), 1, 0);
+            fixture
+                .controller
+                .on_block_changed(
+                    &p_a,
+                    &holon_filesystem::BlockDelta::Upsert {
+                        block: edit,
+                        prev: None,
+                    },
+                )
+                .await
+                .expect("a skipped render is not an error");
+        }
+
+        let raised = recorder.0.lock().unwrap().clone();
+        assert_eq!(
+            raised.len(),
             1,
-            "exactly one place() call expected for the misaligned block; got {place_calls:?}"
+            "a stalled fold must disclose EXACTLY once — a banner re-raised per event is the \
+             storm the once-per-episode latch exists to prevent. Raised: {raised:?}"
+        );
+        assert!(
+            raised[0].contains("la-ghost") && raised[0].contains("STOP REACHING DISK"),
+            "the disclosure must name the member that never folded and say plainly what the \
+             user loses. Raised: {raised:?}"
+        );
+    }
+
+    /// Mirror of the constant in `file_sync_controller.rs`. If the two drift,
+    /// the escalation test above stops proving the threshold it names.
+    const GATE_SKIPS_BEFORE_DEGRADED_FOR_TEST: u32 = 8;
+
+    /// A SECOND permanent stall, on a DIFFERENT difference, must disclose
+    /// again. The banner names the difference it was raised for, so a latch
+    /// that outlives its own episode leaves the user reading about members
+    /// that have long since folded while a fresh set of edits silently stops
+    /// reaching disk — the same silent-unwritten-edits failure the first
+    /// disclosure exists to prevent, one episode later.
+    ///
+    /// Convergence is what ends an episode; a difference that merely CHANGES
+    /// never converged, so the gate cannot treat the first banner as still
+    /// speaking for it.
+    #[tokio::test]
+    async fn a_second_stall_episode_with_a_new_difference_discloses_again() {
+        #[derive(Default)]
+        struct Recorder(std::sync::Mutex<Vec<String>>);
+        impl holon_filesystem::WritebackDisclosure for Recorder {
+            fn writeback_degraded(&self, detail: &str) {
+                self.0.lock().unwrap().push(detail.to_string());
+            }
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut fixture = TestFixture::new(temp_dir.path());
+        let p_a = fixture.doc_id.clone();
+        let a = text_block("ep-a", &p_a, "ep-a-outer", 1, 0);
+        // TWO never-folded members, so folding one changes the difference
+        // without converging — the only way to reach a second episode at all.
+        let ghost_a = text_block("ep-ghost-a", &p_a, "ep-ghost-a", 1, 1);
+        let ghost_b = text_block("ep-ghost-b", &p_a, "ep-ghost-b", 1, 2);
+        fixture.seed_blocks(&[a, ghost_a.clone(), ghost_b]);
+
+        let recorder = Arc::new(Recorder::default());
+        fixture.controller = fixture
+            .controller
+            .with_writeback_disclosure(recorder.clone());
+        fixture.controller.initialize().await.expect("initialize");
+
+        let edit = |i: u32| holon_filesystem::BlockDelta::Upsert {
+            block: text_block("ep-a", &p_a, &format!("ep-a-edit-{i}"), 1, 0),
+            prev: None,
+        };
+
+        // Episode 1: difference is {ghost-a, ghost-b} throughout.
+        for i in 0..(GATE_SKIPS_BEFORE_DEGRADED_FOR_TEST + 2) {
+            fixture
+                .controller
+                .on_block_changed(&p_a, &edit(i))
+                .await
+                .expect("a skipped render is not an error");
+        }
+        let after_first = recorder.0.lock().unwrap().clone();
+        assert_eq!(
+            after_first.len(),
+            1,
+            "the first episode must disclose exactly once before the second one starts, or this \
+             test is measuring the wrong thing. Raised: {after_first:?}"
+        );
+
+        // ghost-a folds. The holder is still short of ghost-b and never
+        // converges, so this is a NEW episode, not a resolution.
+        fixture
+            .controller
+            .on_block_changed(
+                &p_a,
+                &holon_filesystem::BlockDelta::Upsert {
+                    block: ghost_a,
+                    prev: None,
+                },
+            )
+            .await
+            .expect("a partial fold is not an error");
+
+        // Episode 2: difference is {ghost-b}, and edits keep being refused.
+        for i in 100..(100 + GATE_SKIPS_BEFORE_DEGRADED_FOR_TEST + 2) {
+            fixture
+                .controller
+                .on_block_changed(&p_a, &edit(i))
+                .await
+                .expect("a skipped render is not an error");
+        }
+
+        let raised = recorder.0.lock().unwrap().clone();
+        assert_eq!(
+            raised.len(),
+            2,
+            "a second permanent stall must raise its own banner — a latch that outlives its \
+             episode hides unlimited unwritten edits behind a message about members that already \
+             folded. Raised: {raised:?}"
+        );
+        assert!(
+            raised[1].contains("ep-ghost-b") && !raised[1].contains("ep-ghost-a"),
+            "the second banner must name the difference that is blocking NOW, not the one the \
+             first banner was raised for. Raised: {raised:?}"
+        );
+    }
+
+    /// A fold that STOPS must hand the document to the authority-sourced
+    /// recovery pass, not wait forever.
+    ///
+    /// Captured in production: a panicking fold worker
+    /// (`loro_backend.rs` `missing STABLE_ID metadata`) drops a document's feed
+    /// deltas, so its holder is stuck one-member-short while the authority has
+    /// four. The gate then skipped every render and disk stayed at the 15-byte
+    /// identity header the page pre-flight had written, with the full 488-byte
+    /// document owed — silently, forever. The escalation cannot catch this: it
+    /// only counts skips that blocked NEW content, and a stalled fold is
+    /// precisely the case where no new content ever arrives.
+    ///
+    /// `Ok(false)` is the contract this asserts: `di.rs` reads it as "this doc
+    /// needs the bulk pass", which renders from the authority and does not need
+    /// the fold at all.
+    #[tokio::test]
+    async fn a_fold_that_stops_converging_asks_for_an_authority_resync() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut fixture = TestFixture::new(temp_dir.path());
+        let p_a = fixture.doc_id.clone();
+        let a = text_block("st-a", &p_a, "st-a-outer", 1, 0);
+        // `st-ghost` is in the authority and its delta never arrives — the
+        // dropped-fold shape.
+        let ghost = text_block("st-ghost", &p_a, "st-ghost-never-folds", 1, 1);
+        fixture.seed_blocks(&[a.clone(), ghost]);
+        fixture.controller.initialize().await.expect("initialize");
+
+        // Re-deliver the SAME block: no new content, exactly as a stalled fold
+        // looks from the controller's side.
+        let delta = holon_filesystem::BlockDelta::Upsert {
+            block: a,
+            prev: None,
+        };
+        let mut verdicts = Vec::new();
+        for _ in 0..(GATE_SKIPS_BEFORE_DEGRADED_FOR_TEST + 2) {
+            verdicts.push(
+                fixture
+                    .controller
+                    .on_block_changed(&p_a, &delta)
+                    .await
+                    .expect("a stalled fold is not an error"),
+            );
+        }
+
+        assert!(
+            verdicts.contains(&false),
+            "a fold that stops converging must eventually report `false` so the authority-sourced \
+             recovery pass runs — otherwise the file stays stale for the life of the process with \
+             nothing said. Verdicts: {verdicts:?}"
+        );
+        assert_eq!(
+            verdicts.iter().filter(|v| !**v).count(),
+            1,
+            "the re-sync must be asked for ONCE per episode; re-arming the debounced bulk pass on \
+             every subsequent event would turn one stalled document into a permanent full-vault \
+             re-render loop. Verdicts: {verdicts:?}"
+        );
+    }
+
+    /// The captured production mechanism, in miniature: the holder holds the
+    /// RIGHT ID SET but one member still carries its pre-move parent.
+    ///
+    /// Membership equality passes; the member is unreachable from the root;
+    /// `document_order` excludes it; the render omits a block that genuinely
+    /// belongs to this file; and the guard — correctly — vetoes. That chain was
+    /// 55% of runs of the `journals-external-rewrite-strips-convert-link-marks`
+    /// keystone case. Comparing `(id, parent)` pairs is what stops it at the
+    /// gate, so this test fails the moment the gate goes back to comparing ids.
+    #[tokio::test]
+    async fn a_stale_parent_in_the_holder_skips_the_render() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut fixture = TestFixture::new(temp_dir.path());
+        let p_a = fixture.doc_id.clone();
+
+        // Authority: A, and C directly under the document root.
+        let a = text_block("sp-a", &p_a, "sp-a-outer", 1, 0);
+        let c_authoritative = text_block("sp-c", &p_a, "sp-c-moved-to-root", 1, 1);
+        fixture.seed_blocks(&[a.clone(), c_authoritative.clone()]);
+        fixture.controller.initialize().await.expect("initialize");
+        write_back(&mut fixture, &p_a, &a)
+            .await
+            .expect("warm write");
+        let before = tokio::fs::read_to_string(fixture.file_path())
+            .await
+            .unwrap();
+
+        // Holder: the SAME two ids, but C still parented under A — the state a
+        // re-home leaves behind until C's own upsert folds.
+        let c_stale = text_block("sp-c", &a.id, "sp-c-moved-to-root", 2, 0);
+        fixture
+            .controller
+            .seed_holder_from_authority(&p_a)
+            .await
+            .expect("seed");
+        fixture.controller.apply_block_delta(
+            &p_a,
+            &holon_filesystem::BlockDelta::Upsert {
+                block: c_stale,
+                prev: None,
+            },
+        );
+
+        let wrote = fixture
+            .controller
+            .on_block_changed(
+                &p_a,
+                &holon_filesystem::BlockDelta::Upsert {
+                    block: a,
+                    prev: None,
+                },
+            )
+            .await
+            .expect("a stale parent is a fold to wait for, never an error");
+
+        assert!(wrote, "the doc still resolves to a file");
+        assert_eq!(
+            tokio::fs::read_to_string(fixture.file_path())
+                .await
+                .unwrap(),
+            before,
+            "a holder whose member carries a stale parent must not be rendered — byte-equality, \
+             because the failure this pins wrote a file that was missing that member entirely"
         );
     }
 }

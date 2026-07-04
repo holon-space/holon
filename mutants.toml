@@ -1,6 +1,9 @@
 # NOTE: `jobs` and `timeout` are NOT valid config keys in cargo-mutants 27.x —
 # they are CLI-only flags. Pass `--jobs 4 --timeout 600` on the command line.
-test_package = ["holon-integration-tests"]
+# The arc declaration surface is killed by holon-pattern's own unit tests and
+# by holon-api's serde certificate; listing only holon-integration-tests would
+# report those mutants as survivors when the killers simply never ran.
+test_package = ["holon-integration-tests", "holon-pattern", "holon-api"]
 test_tool = "nextest"
 minimum_test_timeout = 120
 exclude_globs = [
@@ -13,4 +16,12 @@ exclude_globs = [
 examine_globs = [
   "crates/holon-frontend/src/editor_caret.rs",
   "crates/holon-frontend/src/headless_editor_mirror.rs",
+  # ADR 0031 Increment 2: the arc declaration surface. Its accessors decide
+  # what every oracle compares against, so a mutant that makes
+  # `written_places` return everything (or nothing) must be caught by a test
+  # rather than by review. `guard_world.rs` belongs here too but cannot be
+  # added yet — its killers live in the `holon` package, whose baseline suite
+  # is not green (the unowned e2e_backend_engine_test reds), and cargo-mutants
+  # requires a green baseline.
+  "crates/holon-pattern/src/arcs.rs",
 ]

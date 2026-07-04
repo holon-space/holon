@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+# `workspace-hack` is the cargo-hakari feature-unification crate: every
+# member depends on it and no member references it in source, by design.
+[package.metadata.cargo-machete]
+# Enabled by the `test-helpers` feature (`dep:proptest-state-machine`).
+ignored = ["proptest-state-machine", "workspace-hack"]
+
 [features]
 default = ["iroh-sync"]
 iroh-sync = ["dep:iroh", "dep:base64"]
@@ -15,14 +21,21 @@ async-trait.workspace = true
 base64 = { version = "0.22", optional = true }
 blake3.workspace = true
 chrono.workspace = true
+# Owner-identity key (ADR 0028 D1/OQ4). ed25519-dalek is already resolved
+# (=3.0.0-pre.1, patched at the workspace root) via iroh, so this direct dep
+# adds no lock churn. Available unconditionally — the owner key must sign
+# rosters even on builds without the `iroh-sync` transport.
+ed25519-dalek = "=3.0.0-pre.1"
 futures.workspace = true
 futures-signals.workspace = true
+hex.workspace = true
 holon-api.workspace = true
 holon-core.workspace = true
 holon-filesystem.workspace = true
 holon-macros.workspace = true
 iroh = { workspace = true, features = ["default"], optional = true }
 loro.workspace = true
+parking_lot.workspace = true
 proptest = { workspace = true, optional = true }
 proptest-state-machine = { workspace = true, optional = true }
 rand.workspace = true
@@ -39,6 +52,13 @@ proptest.workspace = true
 proptest-state-machine.workspace = true
 serial_test.workspace = true
 tempfile.workspace = true
+
+# Owner-identity secret storage (ADR 0028 C1/D1): macOS Keychain Services.
+# Already resolved (=3.7.0) elsewhere in the graph, so no lock churn. Other
+# platforms fall back to the fail-loud `UnavailableKeychainStore` — no keychain
+# crate is pulled in for them.
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3.7"
 
 # Disable iroh for Android - it pulls in OpenSSL which is complex to build for Android
 [target.'cfg(target_os = "android")'.dependencies]

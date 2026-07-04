@@ -38,7 +38,7 @@ use holon_pbt_core::capabilities::WidgetSnapshot;
 use holon_pbt_core::composition::CapMap;
 use holon_pbt_core::composition::CapProvider;
 
-use crate::pbt::sut_capabilities::view_model_to_snapshot;
+use crate::pbt::vm_snapshot::view_model_to_snapshot;
 
 /// A composition component wrapping a real no-Turso block-query frontend. Owns
 /// the DI injector, `FrontendSession`, `ReactiveEngine`, and the seeded
@@ -164,6 +164,11 @@ impl SutRenderer for BlockQueryFrontendComponent {
         let services = self.services();
         let vm = holon_frontend::interpret_pure(&render_expr, &data_rows, &*services).snapshot();
         view_model_to_snapshot(&vm)
+    }
+
+    /// No internal caching — plain forward to `widget_tree_snapshot`.
+    async fn widget_tree_snapshot_fresh(&self) -> WidgetSnapshot {
+        self.widget_tree_snapshot().await
     }
 
     async fn root_data_row_ids(&self) -> std::collections::BTreeSet<EntityUri> {

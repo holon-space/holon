@@ -10,6 +10,7 @@
 //! lives here (in `holon-core`) so future format crates can implement it
 //! without taking a dependency on `holon-orgmode`.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::Result;
@@ -31,6 +32,22 @@ pub struct FileFormatParseResult {
     /// the next write — the controller uses this hint to decide whether
     /// re-rendering after parse is required to persist freshly assigned IDs.
     pub blocks_needing_ids: Vec<String>,
+}
+
+/// The ungrounded-drop verdict a write-back guard produces — DATA, distinct
+/// from a real parse/IO failure (which is `Err`). `dropped` is one `id:
+/// excerpt` per source block grounded by neither the surviving union nor a
+/// sanctioned removal; `source_block_count` is the total non-empty block count
+/// of `source`, reported alongside so a veto can say how much of the file the
+/// drop covers.
+#[derive(Debug, Clone, Default)]
+pub struct WritebackDropVerdict {
+    /// One `id: excerpt` per ungrounded (dropped) source block; empty =
+    /// lossless.
+    pub dropped: Vec<String>,
+    /// Non-empty block count parsed from `source` (the file about to be
+    /// overwritten) — context for how much of the file a drop covers.
+    pub source_block_count: usize,
 }
 
 /// Pluggable parse + render adapter for a single vault file format.
@@ -88,11 +105,21 @@ pub trait FileFormatAdapter: Send + Sync {
     /// can route the op to the owning document regardless of where `parent_id`
     /// points. Format-specific because the param shape encodes the format's
     /// structured fields (org drawer properties, task state, scheduling, …).
+    ///
+    /// `previous` is the block as the file PREVIOUSLY declared it, and is what
+    /// makes the file authoritative for the block's user-visible property set:
+    /// a property key `previous` declared and `block` no longer does is emitted
+    /// as `Value::Null`, the writer's removal sentinel, so the store-side merge
+    /// clears it instead of keeping it alive forever. `None` for a create, and
+    /// for any caller that is NOT reconciling a file against its own prior
+    /// state — such a write names no authority over peer keys and must keep the
+    /// insert-only merge.
     fn build_block_params(
         &self,
         block: &Block,
         parent_id: &EntityUri,
         document_uri: &EntityUri,
+        previous: Option<&Block>,
     ) -> StorageEntity;
 
     /// Decide whether two blocks differ in a way that warrants re-emitting an
@@ -110,4 +137,35 @@ pub trait FileFormatAdapter: Send + Sync {
     /// and returns whether it changed; the controller persists via
     /// `update_metadata` only when `true`.
     fn sync_document_metadata(&self, parsed: &Block, persisted: &mut Block) -> bool;
+
+    /// Which blocks a write-back would SILENTLY drop from disk (BugFunnel row
+    /// 28, P0 data-loss class; ADR 0025 op-grounding) — as DATA, not an error.
+    /// Real parse/IO defects are still `Err`, never folded into the verdict.
+    ///
+    /// `source` is the on-disk file about to be overwritten, `rendered` is the
+    /// projection about to be written over it. A block present in `source` but
+    /// absent from `rendered` is GROUNDED — and therefore not loss — when it is
+    /// present in any `sibling_renders` entry (the file that block now lives
+    /// in, folded into the surviving union) OR its id is in
+    /// `sanctioned_removals` (the triggering delta's `Remove` set, or an
+    /// authority-proven move). A block grounded by neither is loss: the
+    /// caller refuses the write and quarantines the file so no write-back
+    /// path rewrites the truncated state.
+    ///
+    /// EVERY write-back boundary — ingest re-project and block-driven alike —
+    /// assembles that grounding from the same authority
+    /// (`FileSyncController::writeback_drops`), so no boundary can accidentally
+    /// ground against the file's own projection alone. A LEGAL canonical
+    /// reformat and a 3-way text merge both drop nothing — the anchor is block
+    /// preservation, not byte equality. `root` is the vault root used for
+    /// stable file-id derivation while parsing.
+    fn writeback_drops(
+        &self,
+        path: &Path,
+        source: &str,
+        rendered: &str,
+        sibling_renders: &[(&Path, &str)],
+        sanctioned_removals: &HashSet<String>,
+        root: &Path,
+    ) -> Result<WritebackDropVerdict>;
 }

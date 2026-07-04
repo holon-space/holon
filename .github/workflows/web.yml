@@ -1,0 +1,141 @@
+name: Deploy Holon web app + observability to Pages
+
+# Builds the full static site and deploys it atomically:
+#   /       holon-dioxus-web (Trunk) + worker wasm + coi-serviceworker
+#   /obs/   observability report (via the reusable _build-obs.yml)
+#
+# The worker runs on wasm32-wasip1-threads, which needs SharedArrayBuffer →
+# cross-origin isolation (COOP/COEP headers). GitHub Pages cannot set those
+# headers, so `build-pages.mjs` injects `coi-serviceworker`, which patches them
+# client-side via a service worker (one-time reload on first visit).
+#
+# This is the AUTHORITATIVE deploy. GitHub Pages deploys atomically, so
+# `pages.yml` (obs-only) would overwrite the app — retire it after this
+# workflow has run.
+#
+# release-official worker build is ~15 min, so don't run on every push to main.
+
+on:
+  workflow_dispatch: {}
+  push:
+    tags: ["v*.*.*"]
+
+env:
+  RUST_VERSION: nightly-2026-07-17
+
+permissions:
+  contents: read
+  actions: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build-web:
+    name: Build dioxus-web + worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Rust toolchain + wasm targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: wasm32-unknown-unknown, wasm32-wasip1-threads
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: web-app
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install trunk
+        run: cargo install trunk --locked
+
+      # The worker + dioxus-web are their own cargo workspaces and hand-mirror
+      # the root's fork pins. Fail fast on a stale mirror (a lagging rev shows
+      # up as an opaque API-drift compile error thousands of lines deep).
+      - name: Assert out-of-workspace patch revs match the root
+        run: bash scripts/check-out-of-workspace-patch-revs.sh
+
+      # release-official (opt-z + LTO) produces the ~12 MB worker.
+      # `copyArtifact` errors harmlessly; the real wasm lands under target/.
+      - name: Build worker wasm (release-official)
+        working-directory: frontends/holon-worker
+        run: |
+          npm install
+          EMNAPI_LINK_DIR="$(pwd)/node_modules/emnapi/lib/wasm32-wasi-threads" \
+            ./node_modules/.bin/napi build \
+            --features browser --profile release-official --platform \
+            --target wasm32-wasip1-threads --no-js \
+            --manifest-path ./Cargo.toml --output-dir . || true
+          ls -lh target/wasm32-wasip1-threads/release-official/holon_worker.wasm
+
+      - name: Build dioxus-web bundle (release)
+        working-directory: frontends/dioxus-web
+        run: trunk build --release
+
+      # Bake bare imports + coi-serviceworker into a flat static tree.
+      - name: Assemble static site
+        working-directory: frontends/dioxus-web
+        run: |
+          WORKER_WASM="../holon-worker/target/wasm32-wasip1-threads/"
+          WORKER_WASM="${WORKER_WASM}release-official/holon_worker.wasm"
+          node build-pages.mjs --out site --worker-wasm "$WORKER_WASM"
+
+      - name: Upload web artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-site
+          path: frontends/dioxus-web/site
+          retention-days: 1
+
+  build-obs:
+    uses: ./.github/workflows/_build-obs.yml
+
+  assemble:
+    name: Merge / and /obs/
+    needs: [build-web, build-obs]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download web app
+        uses: actions/download-artifact@v4
+        with:
+          name: web-site
+          path: site
+
+      - name: Download obs report
+        uses: actions/download-artifact@v4
+        with:
+          name: obs-site
+          path: site/obs
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    name: Deploy
+    needs: assemble
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,159 @@
+task #13 — navigate e2e samples close on their OWN focus_roots delivery
+Red-for-the-right-reason log, then green. Correlator unit surface,
+crates/holon-api/src/latency_e2e.rs.
+==============================================================================
+
+MECHANISM (read off the code, confirmed by the reds below)
+
+  1. The `focus_roots` matview projects `(region, root_id, added_ts,
+     history_id)` — crates/holon-turso/sql/schema/matview_focus_roots.sql.
+     There is NO `id` column and no `parent_id`.
+  2. `LiveData::subscribe` built its delivery list by reading `id` and
+     `parent_id` off every changed row. For a focus_roots batch BOTH are
+     absent, so the batch produced ZERO delivery pairs and `rows_delivered`
+     early-returned on `deliveries.is_empty()`. A navigation's own delivery
+     reached the correlator as nothing at all.
+  3. The navigate entry therefore stayed pending. Any later edit ANYWHERE
+     under that page delivers the child's `parent_id = page_id` as a tokenless
+     block-row entry, which close rule 2 (newest-per-target) accepted — closing
+     the navigate and billing it every millisecond since the click.
+
+That is exactly the dogfood observation (11982ms for a navigation visible in
+~100ms) and the 2026-08-07 latency-attribution FINDING 2 clock-bleed.
+
+FIX: `Observable` (BlockRow(Option<WriteSeq>) | FocusRoot) is carried on BOTH
+ends — what an interaction waits to see, and what a batch delivered. Matching
+is scoped per (target, kind); a delivery of the wrong kind neither closes nor
+supersedes an entry. `touched_entities` reads a focus_roots batch by its own
+`root_id` column, keyed on the mirror's source name (not on the presence of a
+`root_id` column — `blocks_with_paths` has one meaning "root ancestor").
+
+------------------------------------------------------------------------------
+RED — `cargo test -p holon-api --lib latency_e2e`, with Observable plumbed
+through the API but the correlation still id-only and the extraction still
+block-row-only (i.e. today's behaviour, expressed in the new vocabulary).
+
+  test result: FAILED. 17 passed; 3 failed
+
+  ---- a_block_row_delivery_never_closes_a_pending_navigate ----
+  panicked at crates/holon-api/src/latency_e2e.rs:867:
+  a block row is not evidence the navigation rendered: [("navigate", 12000)]
+
+      ^ THE BUG ITSELF: a pending navigate, plus a child-row edit 12s later,
+        closes the navigate with ms=12000. This is the false-banner value.
+
+  ---- a_focus_roots_batch_delivers_its_root_id ----
+  panicked at crates/holon-api/src/latency_e2e.rs:941:
+  assertion `left == right` failed: the navigation's own delivery must reach
+  the correlator
+    left: []
+   right: [("block:page", FocusRoot)]
+
+      ^ THE OTHER HALF: the navigate's own delivery is invisible — an empty
+        delivery list, which is why the entry was still open to be stolen.
+
+  ---- navigate_and_a_write_on_the_same_id_close_independently ----
+  panicked at crates/holon-api/src/latency_e2e.rs:905:
+  assertion `left == right` failed: the block row must not consume the navigate
+  as a superseded entry
+    left: 0
+   right: 1
+
+      ^ id-only supersession also DROPPED a pending navigate when a write on
+        the same page closed — a second silent-loss path.
+
+------------------------------------------------------------------------------
+GREEN — same command after the fix.
+
+  test result: ok. 21 passed; 0 failed; 0 ignored
+
+  16/16 task-#10 pins green and behaviourally unchanged (phantom-steal,
+  sticky-token, retire-on-refusal, expiry disclosure, repeat emission,
+  projection-visible stage lock). Only their navigate FIXTURES moved from a
+  block-row delivery to a focus-root delivery, because that is now what a
+  navigation's delivery is.
+
+  Renamed, not deleted: `navigation_closes_on_page_child_row` ->
+  `navigation_closes_on_its_own_focus_root_delivery`. The old name asserted the
+  defect (a page's child row closes the navigate) as intended behaviour.
+
+  New pins:
+    navigation_closes_on_its_own_focus_root_delivery
+    a_block_row_delivery_never_closes_a_pending_navigate
+    navigate_and_a_write_on_the_same_id_close_independently
+    a_navigation_that_delivers_nothing_expires_loudly
+    a_focus_roots_batch_delivers_its_root_id
+    a_block_batch_with_a_root_id_column_is_still_block_rows
+
+  Full holon-api lib suite: 455 passed; 0 failed.
+
+------------------------------------------------------------------------------
+POST-VERIFICATION AMENDMENTS — two remaining silent-failure shapes, closed.
+
+(A) `Change::FieldsChanged` on the focus_roots mirror returned None SILENTLY
+    while a missing `root_id` errored loudly — the just-fixed shape, one mirror
+    narrower. DECIDED FROM THE MIRROR'S SEMANTICS, not handled speculatively:
+    `focus_roots` is `navigation_history WHERE closed_at IS NULL`, so its rows
+    are INSERTED and REMOVED, never partially patched, and a FieldsChanged
+    carries the matview's rowid (the matview has no `id` column) rather than a
+    block id — the delivered entity could not be named even if we chose to
+    guess. So it is NOT treated as a delivery; it WARNs naming the change kind
+    (`stage="e2e_delivery_unreadable" change="fields_changed"`, plus the
+    entity_id and the field names). `Deleted` stays silent BY DESIGN and now
+    says why in the doc comment: a delete means a root was CLOSED, and the
+    navigation that replaced it arrives as its own Created row in the same batch.
+
+(B) "Expires loudly" was pinned only on `prune_expired`'s RETURN VALUE — a change
+    that dropped the `warn!` would have kept every pin green while the app went
+    silent again. The disclosure now has ONE emission site (`disclose_expired`,
+    used by both prune callers) and a pin that asserts the real `tracing` event.
+
+  New pins:
+    a_focus_roots_fields_changed_is_disclosed_not_silently_dropped
+    an_expiry_emits_a_warn_a_subscriber_can_see
+
+  MUTATION-PROVEN (both, so neither is vacuous):
+    - `disclose_expired` returns before its `warn!`
+      -> an_expiry_emits_a_warn_a_subscriber_can_see FAILED
+         "the expiry must emit a holon_latency event"
+    - the FieldsChanged arm returns before its `warn!` (the pre-amendment silence)
+      -> a_focus_roots_fields_changed_is_disclosed_not_silently_dropped FAILED
+         "the unexpected change kind must be disclosed, not dropped"
+         (sibling a_focus_roots_batch_delivers_its_root_id stayed ok — the pin
+          isolates the disclosure, not the extraction)
+
+  HARNESS NOTE: both emission pins assert at the EMISSION layer via a scoped
+  `tracing_subscriber` capture layer (extracted from the task-#10 pin
+  `emitted_e2e_event_closes_at_projection_visible_stage`, which now shares it;
+  its retry loop and assertions are unchanged). No `SpanCollector::global()`
+  touch is needed here — that requirement belongs to the ERROR-capture harness,
+  which reads a process-global collector; this layer IS the subscriber, installed
+  for the closure's duration, and it registers `holon_latency` callsites as
+  `Interest::always()` + rebuilds the interest cache to defeat the `never`-cache
+  a sibling test can leave behind.
+
+  Correlator module 23/23; full holon-api lib suite 457 passed; 0 failed.
+
+------------------------------------------------------------------------------
+WARM SWITCHES — the decision, per the 2026-08-07 row that left it open.
+
+A navigation whose focus root does not change delivers no CDC batch at all, so
+it has no observable. It is NOT given a substitute close condition: it expires
+loudly as `stage="e2e_expired" action=navigate block=… waited_ms=…`. Pinned by
+`a_navigation_that_delivers_nothing_expires_loudly`. Measuring a warm switch
+needs a signal the pipeline does not emit today (a render/paint-side observable
+for navigation); borrowing an unrelated batch's clock is precisely what this
+lane removes. The 2026-08-07 warm-switch row stays OPEN as a feature request,
+now with the alternative it must NOT take written down.
+
+IDLE REAPER — `rows_delivered` now prunes before matching, so an expiry is
+disclosed on the next delivered batch instead of waiting for the next dispatch
+(the dogfood probes saw waited_ms≈56000 disclosures). A fully idle app still
+runs no reaper: with the observable split a lingering navigate entry is inert
+(only a focus-root delivery for the SAME page can close it, and newest-wins
+supersedes it), so the residual is disclosure LATENCY, not a wrong sample.
+
+NOT ADDRESSED (still open, unchanged by this lane): the secondary finding that
+one 21-character type burst emitted ~14 `e2e action=set_field` lines for one
+block from several subscribe_actor spans, so a p95 computed off this stream
+double-counts single deliveries.

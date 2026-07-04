@@ -206,6 +206,7 @@ async fn exercise_entity(
         vtable,
         peer.clone(),
         None,
+        &entity.identity_columns(),
         None,
         tokio::runtime::Handle::current(),
         Some(prefix),
@@ -459,8 +460,15 @@ fn execute_sql(conn: &Arc<CoreConnection>, sql: &str) -> Result<()> {
 fn open_memory_conn() -> Arc<CoreConnection> {
     let io = Arc::new(MemoryIO::new());
     let opts = DatabaseOpts::default().with_views(true);
-    let db = Database::open_file_with_flags(io, ":memory:", OpenFlags::default(), opts, None)
-        .expect("open in-memory database");
+    let db = Database::open_file_with_flags(
+        io,
+        ":memory:",
+        OpenFlags::default(),
+        opts,
+        None,
+        Arc::new(turso_core::SqliteDialect),
+    )
+    .expect("open in-memory database");
     db.connect().expect("connect")
 }
 

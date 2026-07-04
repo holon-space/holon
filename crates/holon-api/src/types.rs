@@ -183,6 +183,27 @@ impl ContentType {
             ContentType::Text => 1,
         }
     }
+
+    /// Finer sibling-ordering rank that the render→parse round trip actually
+    /// realises. The renderer hoists section content (`Source`/`Image`) ahead
+    /// of headings (`Text`) via [`Self::sibling_order_group`], but the org
+    /// parser additionally re-emits **all `Source` blocks before all `Image`
+    /// blocks** (the source loop precedes the image loop in
+    /// `process_headlines`). So the post-round-trip kind order is `Source <
+    /// Image < Text`.
+    ///
+    /// This is DISTINCT from [`Self::sibling_order_group`] on purpose: the
+    /// renderer relies on the coarse grouping (both section-content kinds share
+    /// group 0, insertion order preserved within the group), while a reference
+    /// model that must reproduce the *stored* order after a round trip needs
+    /// this finer rank as its primary sort key.
+    pub fn parse_order_rank(self) -> u8 {
+        match self {
+            ContentType::Source => 0,
+            ContentType::Image => 1,
+            ContentType::Text => 2,
+        }
+    }
 }
 
 impl fmt::Display for ContentType {
@@ -308,6 +329,16 @@ pub enum NavigationOp {
     GoForward,
     /// Return to the navigation root (clears focus).
     GoHome,
+    /// Set a region's cursor to an already-open `navigation_history` row
+    /// (tab switch). Unlike `Focus` it inserts no row, closes no row, and does
+    /// not reorder the open set — it moves ONLY the cursor, so the open tabs
+    /// keep their stable insertion order and per-tab scroll survives.
+    Activate,
+    /// Open a block as an ADDITIONAL open tab in a region (modifier-click).
+    /// Unlike `Focus` (replace-on-focus) it does NOT close the region's other
+    /// open rows; if the block is already open it just activates that tab
+    /// (no duplicate). The sole multi-open producer (ADR-0026 tab model, Q2).
+    OpenTab,
 }
 
 impl NavigationOp {
@@ -318,6 +349,8 @@ impl NavigationOp {
         NavigationOp::GoBack,
         NavigationOp::GoForward,
         NavigationOp::GoHome,
+        NavigationOp::Activate,
+        NavigationOp::OpenTab,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -328,6 +361,8 @@ impl NavigationOp {
             NavigationOp::GoBack => "go_back",
             NavigationOp::GoForward => "go_forward",
             NavigationOp::GoHome => "go_home",
+            NavigationOp::Activate => "activate",
+            NavigationOp::OpenTab => "open_tab",
         }
     }
 }
@@ -349,6 +384,8 @@ impl FromStr for NavigationOp {
             "go_back" => Ok(NavigationOp::GoBack),
             "go_forward" => Ok(NavigationOp::GoForward),
             "go_home" => Ok(NavigationOp::GoHome),
+            "activate" => Ok(NavigationOp::Activate),
+            "open_tab" => Ok(NavigationOp::OpenTab),
             other => anyhow::bail!("Not a navigation op: {other:?}"),
         }
     }
@@ -365,6 +402,14 @@ impl FromStr for NavigationOp {
 pub enum SourceLanguage {
     Query(QueryLanguage),
     Render,
+    /// A reactive rule block (ADR 0024). Its content is a program (the effect
+    /// DSL), never display content — the renderer routes it to the rule card.
+    HolonRule,
+    /// The retired `action` language. Parses to a *typed* deprecation sentinel
+    /// (never folded into `Other`) so a legacy `action` block fails loud on the
+    /// rule card — "legacy 'action' language; rename to holon_rule" — instead
+    /// of silently becoming an inert unknown source. See ADR 0024 WP3.
+    LegacyAction,
     Other(String),
 }
 
@@ -379,6 +424,22 @@ impl SourceLanguage {
     pub fn is_prql(&self) -> bool {
         matches!(self, SourceLanguage::Query(QueryLanguage::HolonPrql))
     }
+
+    /// True for a rule head — the current `holon_rule` language or the retired
+    /// `action` language. Both mark a block as program (routed to the rule
+    /// card).
+    pub fn is_rule(&self) -> bool {
+        matches!(
+            self,
+            SourceLanguage::HolonRule | SourceLanguage::LegacyAction
+        )
+    }
+
+    /// True only for the retired `action` language — a rule that must surface a
+    /// loud deprecation status rather than execute silently.
+    pub fn is_legacy(&self) -> bool {
+        matches!(self, SourceLanguage::LegacyAction)
+    }
 }
 
 impl fmt::Display for SourceLanguage {
@@ -386,6 +447,8 @@ impl fmt::Display for SourceLanguage {
         match self {
             SourceLanguage::Query(q) => write!(f, "{q}"),
             SourceLanguage::Render => write!(f, "render"),
+            SourceLanguage::HolonRule => write!(f, "holon_rule"),
+            SourceLanguage::LegacyAction => write!(f, "action"),
             SourceLanguage::Other(s) => write!(f, "{s}"),
         }
     }
@@ -397,6 +460,12 @@ impl FromStr for SourceLanguage {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s.eq_ignore_ascii_case("render") {
             return Ok(SourceLanguage::Render);
+        }
+        if s.eq_ignore_ascii_case("holon_rule") {
+            return Ok(SourceLanguage::HolonRule);
+        }
+        if s.eq_ignore_ascii_case("action") {
+            return Ok(SourceLanguage::LegacyAction);
         }
         match QueryLanguage::from_str(s) {
             Ok(q) => Ok(SourceLanguage::Query(q)),
@@ -447,6 +516,19 @@ impl TryFrom<Value> for SourceLanguage {
 pub enum StateCategory {
     Active,
     Done,
+}
+
+impl StateCategory {
+    /// Canonical stored spelling of the `task_state_category` sidecar
+    /// property ("active" / "done"). One source of truth for every writer
+    /// (org parse boundary, Loro `set_state`, SQL `cycle_task_state`) so the
+    /// stored strings can never drift apart.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Done => "done",
+        }
+    }
 }
 
 /// Well-known done keywords (everything after `|` in org `#+TODO:` config).
@@ -501,6 +583,14 @@ impl TaskState {
         Self::new(keyword, category)
     }
 
+    /// The `task_state_category` sidecar value for a BARE keyword write
+    /// arriving at a storage boundary (widget click intent, `set_state`,
+    /// `cycle_task_state`) — i.e. one with no org `#+TODO:` config in hand.
+    /// Uses the default done-keyword list, exactly like [`Self::from_keyword`].
+    pub fn category_str_for_keyword(keyword: &str) -> &'static str {
+        Self::from_keyword(keyword).category.as_str()
+    }
+
     pub fn is_done(&self) -> bool {
         self.category == StateCategory::Done
     }
@@ -509,8 +599,14 @@ impl TaskState {
         !self.is_done()
     }
 
+    /// Whether this state is in the DOING (in-progress) family. Drives the
+    /// half-filled progress glyph. `NOW` is LogSeq's in-progress keyword
+    /// (its flow is LATER -> NOW -> DONE), so it maps to the same family as
+    /// the native `DOING` (ForeignVaultCompat §4). The source keyword is
+    /// preserved on `self.keyword`, so this family check never loses the
+    /// original spelling on write-back.
     pub fn is_doing(&self) -> bool {
-        self.keyword == "DOING"
+        matches!(self.keyword.as_str(), "DOING" | "NOW")
     }
 }
 
@@ -1064,6 +1160,33 @@ mod tests {
         );
         assert_eq!(SourceLanguage::Render.to_string(), "render");
         assert_eq!(SourceLanguage::Other("rust".into()).to_string(), "rust");
+    }
+
+    #[test]
+    fn source_language_rule_and_legacy() {
+        // holon_rule parses to the typed rule variant and round-trips.
+        assert_eq!(
+            "holon_rule".parse::<SourceLanguage>().unwrap(),
+            SourceLanguage::HolonRule
+        );
+        assert_eq!(SourceLanguage::HolonRule.to_string(), "holon_rule");
+        assert!(SourceLanguage::HolonRule.is_rule());
+        assert!(!SourceLanguage::HolonRule.is_legacy());
+
+        // The retired `action` language parses to a typed deprecation sentinel —
+        // NOT Other("action") — so it fails loud, never silently inert.
+        let action = "action".parse::<SourceLanguage>().unwrap();
+        assert_eq!(action, SourceLanguage::LegacyAction);
+        assert_ne!(action, SourceLanguage::Other("action".into()));
+        assert_eq!(action.to_string(), "action");
+        assert!(action.is_rule());
+        assert!(action.is_legacy());
+
+        // Round-trip through serde string form.
+        for lang in [SourceLanguage::HolonRule, SourceLanguage::LegacyAction] {
+            let s = lang.to_string();
+            assert_eq!(s.parse::<SourceLanguage>().unwrap(), lang);
+        }
     }
 
     #[test]

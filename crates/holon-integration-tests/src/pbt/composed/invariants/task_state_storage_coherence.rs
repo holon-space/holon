@@ -2,21 +2,26 @@
 //! between the **SQL projection** (`SutSqlProjection::block_task_state`, a
 //! `json_extract(properties,'$.task_state')` read) and the **Loro projection**
 //! (`SutLoroTaskState::loro_task_state_of`, the same `properties["task_state"]`
-//! scalar off the live CRDT tree). No reference side — both truths come from
-//! the SUT, so this catches a Loro↔SQL desync at the data layer before any
-//! render bug surfaces. It selects only in a slice that wires **both** caps
+//! scalar off the live CRDT tree). Since F4 both SUT reads are cross-checked
+//! against the reference `task_state` (`RefTaskState`, declared in `Needs`), so
+//! a divergence in EITHER store is attributed against the known-good truth —
+//! this catches a Loro↔SQL desync at the data layer before any render bug
+//! surfaces. It selects only in a slice that wires **both** caps
 //! (the combined SQL+Loro slice), the only non-redundant consumer of
 //! `SutLoroTaskState`.
 
 use std::marker::PhantomData;
 
 use holon_pbt_core::RunMode;
+use holon_pbt_core::capabilities::RefTaskState;
 use holon_pbt_core::capabilities::SutLoroTaskState;
 use holon_pbt_core::capabilities::SutSqlProjection;
+use holon_pbt_core::composition::Attribution;
 use holon_pbt_core::composition::BridgedInvariant;
 use holon_pbt_core::composition::CapId;
 use holon_pbt_core::composition::CapInvariant;
 use holon_pbt_core::composition::CapMap;
+use holon_pbt_core::composition::Layer;
 use holon_pbt_core::composition::Needs;
 
 use crate::pbt::invariants::bodies::task_state_storage_coherence::InvTaskStateStorageCoherence;
@@ -31,8 +36,11 @@ pub fn wire() -> Box<dyn CapInvariant> {
                 CapId::of::<dyn SutLoroTaskState>(),
             ],
             sut_absent: Vec::new(),
-            ref_present: Vec::new(),
+            // Re-anchored to the ref (F4): the body now compares both SUT stores
+            // to `RefTaskState`, so the ref cap is a real selection dependency.
+            ref_present: vec![CapId::of::<dyn RefTaskState>()],
         },
+        Attribution::at(Layer::StoreCrdt, file!()),
     ))
 }
 
@@ -48,17 +56,18 @@ mod tests {
         let b = uri("block:b");
         let sut = task_state_maps(
             vec![(a.clone(), "TODO"), (b.clone(), "DONE")],
-            vec![(a, "TODO"), (b, "DONE")],
+            vec![(a.clone(), "TODO"), (b.clone(), "DONE")],
         );
+        let ref_ = ref_task_state(vec![(a, "TODO"), (b, "DONE")]);
 
-        let report = run_selected(&composed_invariant_catalog(), &sut, &CapMap::new()).await;
+        let report = run_selected(&composed_invariant_catalog(), &sut, &ref_).await;
 
         assert!(
             report
                 .ran_ids()
                 .contains(&"inv-task-state-storage-coherence"),
-            "wiring SutSqlProjection + SutLoroTaskState must select the coherence invariant; \
-             ran={:?}",
+            "wiring SutSqlProjection + SutLoroTaskState (+ ref RefTaskState) must select the \
+             coherence invariant; ran={:?}",
             report.ran_ids(),
         );
         assert!(
@@ -96,9 +105,12 @@ mod tests {
     #[tokio::test]
     async fn task_state_coherence_catches_sql_loro_divergence() {
         let a = uri("block:a");
-        let sut = task_state_maps(vec![(a.clone(), "TODO")], vec![(a, "DONE")]);
+        // Ref says TODO; SQL agrees, Loro says DONE — the Loro store diverges
+        // from the canonical task_state, which the ref anchor catches.
+        let sut = task_state_maps(vec![(a.clone(), "TODO")], vec![(a.clone(), "DONE")]);
+        let ref_ = ref_task_state(vec![(a, "TODO")]);
 
-        let report = run_selected(&composed_invariant_catalog(), &sut, &CapMap::new()).await;
+        let report = run_selected(&composed_invariant_catalog(), &sut, &ref_).await;
 
         let failures = report.failures();
         assert!(
@@ -136,6 +148,7 @@ mod real_sut_teeth {
     use holon_pbt_core::TransitionImpl;
     use holon_pbt_core::capabilities::SutLoroTaskState;
     use holon_pbt_core::capabilities::SutSqlProjection;
+    use holon_pbt_core::types::CycleTarget;
 
     use crate::pbt::composed::seed_primitives::fixed_ids;
     use crate::pbt::composed::wide_e2e::SETTLE;
@@ -143,7 +156,6 @@ mod real_sut_teeth {
     use crate::pbt::composed::wide_e2e::wide_e2e_ref;
     use crate::pbt::op_write_cap::IdResolver;
     use crate::pbt::transitions::ToggleState;
-    use crate::pbt::transitions::toggle_state::CycleTarget;
 
     /// A real `ToggleState(c1 → TODO)` over the composed `full_headless` CapMap
     /// must land in BOTH stores. Before the toggle both read `None` (plain

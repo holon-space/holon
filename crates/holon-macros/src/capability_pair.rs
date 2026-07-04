@@ -105,12 +105,15 @@ use crate::capmap::capmap_adapter_impl;
 /// - `id`: an optional explicit invariant-id string, for preserving a
 ///   pre-existing (externally-referenced) `inv-*` id instead of the derived
 ///   `inv-pair-<stem>-<method>` one.
+/// - `layer`: REQUIRED — the `Layer` variant this pair observes. Without it the
+///   derived invariant would be unattributed for the first-divergent verdict.
 #[derive(Default)]
 struct CompareOpts {
     with: Option<syn::Path>,
     sut: Option<Ident>,
     ref_: Option<Ident>,
     id: Option<LitStr>,
+    layer: Option<Ident>,
 }
 
 enum Role {
@@ -200,9 +203,19 @@ pub fn capability_pair_impl(mut decl: ItemTrait) -> TokenStream {
                 sf.sig.asyncness = Some(syn::token::Async(Span::call_site()));
                 sut_methods.push(sf);
 
-                compare_invariants.push(build_compare_invariant(
-                    &stem, &sut_ident, &ref_ident, &sut_name, &ref_name, opts.with, opts.id,
-                ));
+                let layer = opts
+                    .layer
+                    .expect("`#[compare(layer = ..)]` presence is enforced in `extract_role`");
+                compare_invariants.push(build_compare_invariant(CompareSpec {
+                    stem: &stem,
+                    sut_method: &sut_ident,
+                    ref_method: &ref_ident,
+                    sut_name: &sut_name,
+                    ref_name: &ref_name,
+                    with: opts.with,
+                    id_override: opts.id,
+                    layer: &layer,
+                }));
             }
             Role::RefOnly => {
                 let mut rf = f.clone();
@@ -254,14 +267,24 @@ fn extract_role(f: &TraitItemFn) -> syn::Result<(Role, Vec<Attribute>)> {
                         opts.ref_ = Some(meta.value()?.parse()?);
                     } else if meta.path.is_ident("id") {
                         opts.id = Some(meta.value()?.parse()?);
+                    } else if meta.path.is_ident("layer") {
+                        opts.layer = Some(meta.value()?.parse()?);
                     } else {
                         return Err(meta.error(
                             "capability_pair: unknown `#[compare(..)]` key (expected `with` / \
-                             `sut` / `ref` / `id`)",
+                             `sut` / `ref` / `id` / `layer`)",
                         ));
                     }
                     Ok(())
                 })?;
+            }
+            if opts.layer.is_none() {
+                return Err(syn::Error::new_spanned(
+                    attr,
+                    "capability_pair: `#[compare(..)]` requires `layer = <Layer variant>` (e.g. \
+                     `layer = ViewModel`) — the derived invariant must be attributed to a \
+                     pipeline layer for the first-divergent verdict",
+                ));
             }
             set_role(&mut role, Role::Compare(opts), attr)?;
         } else if path.is_ident("ref_only") {
@@ -338,6 +361,19 @@ fn make_trait(
     t
 }
 
+/// Inputs to [`build_compare_invariant`]. Five of them are `&Ident`, so they
+/// travel by name rather than as a positional argument list.
+struct CompareSpec<'a> {
+    stem: &'a Ident,
+    sut_method: &'a Ident,
+    ref_method: &'a Ident,
+    sut_name: &'a Ident,
+    ref_name: &'a Ident,
+    with: Option<syn::Path>,
+    id_override: Option<LitStr>,
+    layer: &'a Ident,
+}
+
 /// Emit the auto-derived comparison invariant for one `#[compare]` method:
 /// a unit-struct `Invariant` body + a `BridgedInvariant` constructor whose
 /// `Needs` requires both the SUT and reference caps to be present.
@@ -366,15 +402,18 @@ fn make_trait(
 ///
 /// When `with` is `None`, the two values are compared with plain `==` and the
 /// macro synthesizes the divergence message.
-fn build_compare_invariant(
-    stem: &Ident,
-    sut_method: &Ident,
-    ref_method: &Ident,
-    sut_name: &Ident,
-    ref_name: &Ident,
-    with: Option<syn::Path>,
-    id_override: Option<LitStr>,
-) -> TokenStream {
+fn build_compare_invariant(spec: CompareSpec<'_>) -> TokenStream {
+    let CompareSpec {
+        stem,
+        sut_method,
+        ref_method,
+        sut_name,
+        ref_name,
+        with,
+        id_override,
+        layer,
+    } = spec;
+
     let stem_snake = pascal_to_snake(&stem.to_string());
     let method_snake = sut_method.to_string();
     let id_str = match &id_override {
@@ -461,6 +500,12 @@ fn build_compare_invariant(
                         ::holon_pbt_core::composition::CapId::of::<dyn #ref_name>(),
                     ],
                 },
+                // `file!()` expands in the generated ctor, which lands in the
+                // file that invoked `capability_pair!` — the wire site.
+                ::holon_pbt_core::composition::Attribution::at(
+                    ::holon_pbt_core::attribution::Layer::#layer,
+                    file!(),
+                ),
             ))
         }
     }

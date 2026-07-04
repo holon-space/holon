@@ -1,0 +1,121 @@
+# Latency RATCHET ceilings — per-rung interaction -> visible latency, in ms.
+#
+# WHAT IS MEASURED — two stages, and why both
+# `e2e.<op>` is the `stage=e2e` event from crates/holon-api/src/latency_e2e.rs:
+# interaction -> projection-visible, the exact quantity the runtime
+# `holon_oracles` latency-slo oracle judges, so gate and oracle cannot disagree.
+# It is deliberately NOT GPU frame-present (a backgrounded window defers
+# presents indefinitely, which would turn OS scheduling into false violations —
+# see that module's "SLO endpoint" disclosure).
+#
+# `total.<Transition>` is the harness's `stage=action_total`: the same
+# action -> visible-rows wall time, but measured by the replay harness per
+# transition instead of by the prod correlator.
+#
+# Both exist because the prod correlator's sample count is DATA-DEPENDENT: it
+# closes an entry only when a delivered CDC batch carries a row for the target,
+# so an interaction that produces no delta never yields a sample. Navigation is
+# the sharp case — a warm document switch re-shows an already-materialized page,
+# delivers no rows, and is therefore invisible to `e2e` (measured: 24 replayed
+# NavigateFocus transitions produce ONE `e2e.navigate` sample). A ratchet cannot
+# rest on a rung whose sample count moves, so navigation is gated on
+# `total.NavigateFocus`, which is emitted once per transition by construction.
+#
+# Consequence worth knowing: the runtime latency-slo oracle inherits the same
+# blind spot, so it observes only the cold-navigation tail, not every switch.
+#
+# ── WHICH STATISTIC IS GATED, AND WHY IT IS p50 ─────────────────────────────
+# Every gated rung below is a p50. This is the central design decision and it
+# was forced by measurement, not preference.
+#
+# `measure_latency.py` derives percentiles by linear interpolation, so at the
+# sample counts a replay can afford, p95 is largely a restatement of the largest
+# sample: at n=12 it is 0.55*v[10] + 0.45*v[11] — the max carries ~45% of the
+# weight. An earlier p95-gated version of this file therefore FLAPPED: three
+# back-to-back runs on an unmodified tree exited 0 / 1 / 0, the red one caused
+# by a single slow navigate (p50 275.5, max 689, p95 533.9 against a 440
+# ceiling).
+#
+# Raising every rung to n >= 20 (see the corpus header) fixed the weighting but
+# not the volatility. Measured spread across three runs of the SAME unmodified
+# tree under two contending workspace builds:
+#
+#            statistic   spread (worst/best)
+#            p50         1.07x - 1.52x
+#            p95         1.34x - 3.35x     <- total.SplitBlock: 119.2 .. 399.0
+#
+# A statistic that moves 3.35x on identical code cannot carry a ratchet at any
+# margin that is not decoration. p50 moves far less, so it can. p95 is still
+# PRINTED in the report tables above the gate — it is useful to read, it is just
+# not something to fail a build on, and NO p95 rung is gated here.
+#
+# What this costs: a regression that only fattens the tail (p95 up, p50 flat)
+# does not red this gate. That is a real and accepted blind spot, and the
+# honest trade — the alternative is a gate people learn to re-run until green,
+# which detects nothing at all.
+#
+# CEILINGS ARE NOT THE SLO
+# The project SLO is p95 < 200ms and stays the documented target, asserted at
+# runtime by the oracle. These ceilings are a REGRESSION RATCHET: each is the
+# worst p50 observed over the calibration runs times 1.6. A ceiling may only
+# ever move DOWN. Raising one requires an explicit ruling and a BugFunnel row
+# explaining what regressed and why it was accepted.
+#
+# MEASURED SENSITIVITY (not a derived claim — see lane sensitivity sweeps)
+# Replaying real run logs with every duration scaled by a uniform factor puts
+# the crossover BETWEEN 1.6x AND 1.8x: 1.2x/1.4x/1.6x pass, 1.8x and 2.0x fail,
+# consistently across three different base runs. How many of the three gated
+# rungs go red at 1.8x depends on which run is used as the base (2 of 3 or 3 of
+# 3), because a ceiling set from the WORST observed p50 leaves more headroom on
+# a fast run. So: this gate reliably catches a uniform regression of ~1.8x or
+# worse, and may or may not catch one between 1.6x and 1.8x. It is a tripwire
+# against gross regression, not a benchmark, and it cannot see a 10% drift.
+#
+# HOW TO RE-RATCHET
+# Run `just latency-gate` at least THREE times WHILE other builds are running
+# (that is normal load on this machine), take the WORST p50 per rung, and set
+# the ceiling to that worst p50 * 1.6, rounded up. Never ratchet from a single
+# quiet run: a ceiling set that way turns every busy run red, which trains
+# people to ignore the gate — the failure mode that matters more than a few ms
+# of sensitivity.
+#
+# Format: `<e2e|total>.<p50|p95>.<action> = ms` for a GATED rung, or
+# `report.<e2e|total>.<p50|p95>.<action>` (no value) for a REPORT-ONLY rung that
+# is measured and printed but can never fail the build. `#` comments and blank
+# lines ignored. A malformed line is a hard error (a typo'd rung name that
+# silently vanished would make the gate pass vacuously). p95 rungs are accepted
+# by the parser but none are defined here, deliberately — see above.
+
+# ── GATED rungs ──────────────────────────────────────────────────────────────
+# Basis: calibration runs under contending workspace builds; ceiling = worst
+# observed p50 * 1.6. Measured p50 spread on unmodified code for these three is
+# 1.08x - 1.32x, comfortably inside the margin.
+
+total.p50.NavigateFocus = 374   # worst p50 233.5 (runs: 233.5 225.0 219.0)
+total.p50.TypeChars     = 219   # worst p50 136.5 (runs: 136.5 123.5 125.0)
+e2e.p50.set_field       =  40   # worst p50  25.0 (runs:  25.0  16.5  18.0)
+
+# `e2e.navigate` is deliberately absent — see the correlator blind spot above.
+
+# ── REPORT-ONLY rungs: the two SplitBlock rungs ──────────────────────────────
+# These are NOT gated, and the reason is a measurement problem, not a decision
+# that split latency does not matter.
+#
+# On unmodified code, under the contention this file itself calls normal (one
+# `cargo check --features pbt` running), the SplitBlock p50 varies by 2.45x -
+# 2.59x run to run. No honest wall-clock ceiling exists at that spread: any
+# ceiling loose enough to stop flapping is loose enough to miss a real 2x
+# regression, which is decoration.
+#
+# The spread is also not simple noise. The distribution is BIMODAL — a verifier
+# run measured p50 280.5 / p95 457.2 / max 651.0 on the same corpus that
+# elsewhere measures p50 ~115, i.e. a distinct SLOW MODE rather than a uniformly
+# stretched distribution. Something in the split path is contention-sensitive in
+# a way the other three rungs are not.
+#
+# So the SplitBlock latency ceiling is BLOCKED ON attributing that slow mode,
+# not abandoned. Once the mode is explained (and, if it is a defect, fixed),
+# these two rungs should be re-measured and gated like the others. Until then
+# they are printed every run so the number stays in front of people.
+report.total.p50.SplitBlock
+report.e2e.p50.split_block

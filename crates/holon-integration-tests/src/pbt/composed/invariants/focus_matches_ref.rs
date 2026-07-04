@@ -19,9 +19,11 @@ use holon_pbt_core::RunMode;
 use holon_pbt_core::capabilities::RefEditorMirror;
 use holon_pbt_core::capabilities::RefGlobalFocus;
 use holon_pbt_core::capabilities::SutDriver;
+use holon_pbt_core::composition::Attribution;
 use holon_pbt_core::composition::BridgedInvariant;
 use holon_pbt_core::composition::CapId;
 use holon_pbt_core::composition::CapInvariant;
+use holon_pbt_core::composition::Layer;
 use holon_pbt_core::composition::Needs;
 
 use crate::pbt::invariants::bodies::focus_matches_ref::InvFocusMatchesRef;
@@ -38,5 +40,6 @@ pub fn wire() -> Box<dyn CapInvariant> {
                 CapId::of::<dyn RefEditorMirror>(),
             ],
         },
+        Attribution::at(Layer::Render, file!()),
     ))
 }

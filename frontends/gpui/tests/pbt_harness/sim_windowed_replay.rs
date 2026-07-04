@@ -13,12 +13,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use gpui::HeadlessAppContext;
 use gpui::InputEvent;
 use gpui::Keystroke;
 use gpui::MouseButton;
 use gpui::Pixels;
 use gpui::Point;
-use gpui::TestApp;
 use holon_api::EntityUri;
 use holon_api::KeyChord;
 use holon_api::Region;
@@ -34,7 +34,7 @@ use holon_gpui::geometry::BoundsRegistry;
 /// One sim pump cycle: real tokio time for backend watchers, drain gpui
 /// tasks (test builds draw dirty windows inside flush_effects), fire fake
 /// timers, drain again, promote staged bounds.
-fn pump_cycle(app: &TestApp, bounds: &BoundsRegistry) {
+fn pump_cycle(app: &HeadlessAppContext, bounds: &BoundsRegistry) {
     // Real wall-clock pause: the backend's multi-thread tokio runtime
     // advances on its own worker threads — no block_on needed (and driver
     // methods may already be inside a tokio context where block_on panics).
@@ -50,10 +50,10 @@ fn pump_cycle(app: &TestApp, bounds: &BoundsRegistry) {
 // ---------------------------------------------------------------------------
 
 /// Direct-dispatch UserDriver for TestPlatform. Holds a raw pointer to a
-/// harness-owned `TestApp`. SAFETY: the owner outlives all SimUserDriver
-/// instances; all access is from one thread.
+/// harness-owned `HeadlessAppContext`. SAFETY: the owner outlives all
+/// SimUserDriver instances; all access is from one thread.
 pub(crate) struct SimUserDriver {
-    app_ptr: *const TestApp,
+    app_ptr: *const HeadlessAppContext,
     window: gpui::AnyWindowHandle,
     bounds: BoundsRegistry,
     engine: Arc<ReactiveEngine>,
@@ -70,14 +70,14 @@ unsafe impl Send for SimUserDriver {}
 
 impl SimUserDriver {
     /// Construct a driver over an already-launched, settled window. SAFETY: the
-    /// caller must keep the `TestApp` `app_ptr` points at alive and untouched
-    /// for the driver's lifetime, and use the driver only from the gpui
-    /// thread (the same contract `with_windowed_wide_sut` upholds). Used by
-    /// the windowed composition slice (`gpui_window_slice`) and the
+    /// caller must keep the `HeadlessAppContext` `app_ptr` points at alive and
+    /// untouched for the driver's lifetime, and use the driver only from the
+    /// gpui thread (the same contract `with_windowed_wide_sut` upholds). Used
+    /// by the windowed composition slice (`gpui_window_slice`) and the
     /// composed windowed harness.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        app_ptr: *const TestApp,
+        app_ptr: *const HeadlessAppContext,
         window: gpui::AnyWindowHandle,
         bounds: BoundsRegistry,
         engine: Arc<ReactiveEngine>,
@@ -98,7 +98,7 @@ impl SimUserDriver {
     /// state MUST settle before the next one: advance tokio so backend
     /// signals deliver → drain gpui tasks → promote staged bounds.
     fn update_and_settle<R>(&self, f: impl FnOnce(&mut gpui::App) -> R) -> R {
-        let app = unsafe { &mut *(self.app_ptr as *mut TestApp) };
+        let app = unsafe { &mut *(self.app_ptr as *mut HeadlessAppContext) };
         let r = app.update(|cx| f(cx));
         // Release &mut, then advance tokio + pump gpui + flush bounds.
         let app = unsafe { &*self.app_ptr };
@@ -138,6 +138,33 @@ impl SimUserDriver {
         self.bounds
             .find_by_entity_id_visible(entity_id)
             .map(|info| info.center())
+    }
+
+    /// Mirror `GpuiUserDriver::text_center`: the center of the entity's TEXT
+    /// element, where a caret-seating click has to land.
+    ///
+    /// `bounds_center_f32`'s first key, `render-entity-{id}`, records no
+    /// bounds, so resolution falls through to `selectable-{id}` — a 16x24
+    /// bullet drag handle whose click never seats a caret. The text element is
+    /// what a user aims at, exists focused (`editable_text`) and unfocused
+    /// (`rendered_text`), and sits inside the focus wrapper, so the click
+    /// reaches both handlers.
+    fn text_center(&self, entity_id: &EntityUri) -> Option<(f32, f32)> {
+        self.pump();
+        let eid = entity_id.as_str();
+        let elements = self.bounds.all_elements();
+        ["editable_text", "rendered_text"]
+            .into_iter()
+            .find_map(|want| {
+                elements
+                    .iter()
+                    .find(|(_, i)| {
+                        i.entity_id.as_deref() == Some(eid)
+                            && i.widget_type.as_ref() == want
+                            && i.has_visible_area()
+                    })
+                    .map(|(_, i)| i.center())
+            })
     }
 
     fn mouse_point(&self, entity_id: &EntityUri) -> Option<Point<Pixels>> {
@@ -369,11 +396,30 @@ impl UserDriver for SimUserDriver {
         Ok(true)
     }
 
-    async fn click_entity(&self, entity_id: &EntityUri, _: &str) -> Result<(), anyhow::Error> {
-        let Some(pos) = self.mouse_point(entity_id) else {
+    /// A main-panel click is a caret-seating gesture, so it aims at the row's
+    /// text (`text_center`); sidebar rows navigate instead and keep the alias
+    /// chain. Falls back to the alias chain when the entity renders no text
+    /// element (page shells, non-block handles).
+    async fn click_entity(&self, entity_id: &EntityUri, region: &str) -> Result<(), anyhow::Error> {
+        let is_main = region
+            .parse::<Region>()
+            // ALLOW(unwrap_or): an unparseable region is the same "no sidebar
+            // scoping" case `GpuiUserDriver::require_click_center` treats as main.
+            .map(|r| r == Region::Main)
+            .unwrap_or(true);
+        let center = if is_main {
+            self.text_center(entity_id)
+        } else {
+            None
+        }
+        .or_else(|| self.bounds_center_f32(entity_id));
+        let Some((cx, cy)) = center else {
             anyhow::bail!("entity {entity_id} not in bounds");
         };
-        self.raw_click(pos);
+        self.raw_click(Point {
+            x: Pixels::from(cx),
+            y: Pixels::from(cy),
+        });
         Ok(())
     }
 
@@ -396,6 +442,36 @@ impl UserDriver for SimUserDriver {
             x: Pixels::from(cx),
             y: Pixels::from(cy),
         });
+        Ok(())
+    }
+
+    /// The trait default clicks the block ROW (which only focuses), never
+    /// reaching the `state_toggle` glyph's `on_mouse_down`, so `task_state`
+    /// never cycles — the windowed `toggle_state never landed` defect. The
+    /// window's `state_toggle` elements register with NO `entity_id` and 0x0
+    /// bounds, so they cannot be geometry-hit-tested by block. Resolve +
+    /// dispatch the SAME `set_field` cycle intent the widget's `on_mouse_down`
+    /// builds — off the resolved view tree, exactly as headless
+    /// `ReactiveEngineDriver::cycle_state_toggle` does (the `StateToggle` NODE
+    /// carries the block `entity_id`). Then pump so the projection the caller's
+    /// landing-poll reads reflects the write.
+    async fn cycle_state_toggle(
+        &self,
+        entity_id: &EntityUri,
+        region: &str,
+    ) -> Result<(), anyhow::Error> {
+        let root = holon_api::root_layout_block_uri();
+        let resolved = self.engine.snapshot_resolved(&root);
+        let intent =
+            holon_frontend::focus_path::state_toggle_cycle_intent(&resolved, entity_id, region)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "cycle_state_toggle: no state_toggle node for {entity_id} in region \
+                         {region} (target rendered no task toggle — not a visible task row?)"
+                    )
+                })?;
+        self.engine.dispatch_intent_sync(intent).await?;
+        self.pump();
         Ok(())
     }
 
@@ -492,6 +568,19 @@ impl UserDriver for SimUserDriver {
         self.update_and_settle(|cx| {
             self.window
                 .update(cx, |_, window, cx| {
+                    // Move the pointer to the target first, mirroring
+                    // `GpuiUserDriver::scroll_at`: gpui recomputes the scroll
+                    // hit-test from the window's tracked mouse position, so the
+                    // move keeps the wheel landing on the intended viewport.
+                    window.dispatch_event(
+                        gpui::MouseMoveEvent {
+                            position: point,
+                            pressed_button: None,
+                            modifiers: Default::default(),
+                        }
+                        .to_platform_input(),
+                        cx,
+                    );
                     window.dispatch_event(
                         gpui::ScrollWheelEvent {
                             position: point,

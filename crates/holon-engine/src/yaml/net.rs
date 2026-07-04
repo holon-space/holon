@@ -142,6 +142,48 @@ impl YamlNet {
     }
 }
 
+impl TransitionDef for YamlTransition {
+    fn id(&self) -> &str {
+        &self.name
+    }
+    fn inputs(&self) -> &[InputArc] {
+        &self.inputs
+    }
+    fn outputs(&self) -> &[OutputArc] {
+        &self.outputs
+    }
+    fn creates(&self) -> &[CreateArc] {
+        &self.creates
+    }
+    fn duration_minutes(&self) -> f64 {
+        self.duration
+    }
+}
+
+impl NetDef for YamlNet {
+    type Transition = YamlTransition;
+
+    fn transitions(&self) -> Box<dyn Iterator<Item = &YamlTransition> + '_> {
+        Box::new(self.transitions.iter())
+    }
+
+    fn transition(&self, id: &str) -> Option<&YamlTransition> {
+        self.transitions.iter().find(|t| t.name == id)
+    }
+
+    fn objective_expr(&self) -> &CompiledExpr {
+        &self.compiled_objective
+    }
+
+    fn constraints(&self) -> &[CompiledExpr] {
+        &self.compiled_constraints
+    }
+
+    fn discount_rate(&self) -> f64 {
+        self.objective_def.discount_rate
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,47 +261,5 @@ transitions:
                 "'{key}' should parse as a comparison"
             );
         }
-    }
-}
-
-impl TransitionDef for YamlTransition {
-    fn id(&self) -> &str {
-        &self.name
-    }
-    fn inputs(&self) -> &[InputArc] {
-        &self.inputs
-    }
-    fn outputs(&self) -> &[OutputArc] {
-        &self.outputs
-    }
-    fn creates(&self) -> &[CreateArc] {
-        &self.creates
-    }
-    fn duration_minutes(&self) -> f64 {
-        self.duration
-    }
-}
-
-impl NetDef for YamlNet {
-    type Transition = YamlTransition;
-
-    fn transitions(&self) -> Box<dyn Iterator<Item = &YamlTransition> + '_> {
-        Box::new(self.transitions.iter())
-    }
-
-    fn transition(&self, id: &str) -> Option<&YamlTransition> {
-        self.transitions.iter().find(|t| t.name == id)
-    }
-
-    fn objective_expr(&self) -> &CompiledExpr {
-        &self.compiled_objective
-    }
-
-    fn constraints(&self) -> &[CompiledExpr] {
-        &self.compiled_constraints
-    }
-
-    fn discount_rate(&self) -> f64 {
-        self.objective_def.discount_rate
     }
 }

@@ -13,7 +13,7 @@ use holon_api::render_eval::column_ref_name;
 use holon_api::render_eval::eval_binary_op;
 use holon_api::render_eval::eval_to_value;
 use holon_api::render_eval::resolve_args;
-use holon_api::render_eval::resolve_args_with;
+use holon_api::render_eval::resolve_args_for_widget;
 use holon_api::render_types::OperationWiring;
 use holon_api::render_types::RenderExpr;
 use holon_api::widget_spec::DataRow;
@@ -71,7 +71,7 @@ where
 // the same `RenderInterpreter` under a disjoint name space: a given name
 // is either a widget builder or a value function, never both.
 //
-// Arg evaluation (`resolve_args_with`) dispatches `FunctionCall` nodes
+// Arg evaluation (`resolve_args_for_widget`) dispatches `FunctionCall` nodes
 // into the value-fn registry via a short-lived `ValueFnBinding` that
 // carries `&services` and `&ctx` — the slice of interpreter state a
 // value fn needs.
@@ -104,7 +104,7 @@ where
 
 /// Short-lived `ValueFnLookup` that captures the services + ctx a
 /// value-fn needs. Constructed fresh at the top of `interpret()` and
-/// passed to `resolve_args_with`.
+/// passed to `resolve_args_for_widget`.
 struct ValueFnBinding<'a> {
     fns: &'a HashMap<String, Arc<dyn ValueFn>>,
     services: &'a dyn BuilderServices,
@@ -149,6 +149,11 @@ pub struct RenderInterpreter<W: 'static> {
     /// `ops_of(uri)`). Dispatched during arg evaluation — see
     /// `ValueFnBinding` above.
     value_fns: HashMap<String, Arc<dyn ValueFn>>,
+    /// Declared params per widget, keyed by DSL name. Drives per-widget
+    /// template-vs-scalar arg classification; a widget absent here (or one
+    /// declaring no params) is judged by the global `is_template_arg`
+    /// allowlist instead.
+    widget_metas: HashMap<String, &'static holon_api::WidgetMeta>,
     annotator: Option<AnnotatorFn<W>>,
 }
 
@@ -161,13 +166,26 @@ impl<W> std::fmt::Debug for RenderInterpreter<W> {
     }
 }
 
+impl<W> Default for RenderInterpreter<W> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<W> RenderInterpreter<W> {
     pub fn new() -> Self {
         Self {
             builders: HashMap::new(),
             value_fns: HashMap::new(),
+            widget_metas: HashMap::new(),
             annotator: None,
         }
+    }
+
+    /// Bind the macro-generated `WIDGET_META` of every registered builder so
+    /// arg classification can consult the widget's own param list.
+    pub fn set_widget_metas(&mut self, metas: Vec<&'static holon_api::WidgetMeta>) {
+        self.widget_metas = metas.into_iter().map(|m| (m.name.to_string(), m)).collect();
     }
 
     pub fn register(&mut self, name: impl Into<String>, builder: impl Builder<W> + 'static) {
@@ -237,7 +255,7 @@ impl<W> RenderInterpreter<W> {
 
         match expr {
             RenderExpr::FunctionCall { name, args } => {
-                // Bind the value-fn registry so `resolve_args_with` can
+                // Bind the value-fn registry so `resolve_args_for_widget` can
                 // dispatch `FunctionCall` arg expressions (e.g.
                 // `collection: focus_chain()`) through it.
                 let binding = ValueFnBinding {
@@ -245,7 +263,12 @@ impl<W> RenderInterpreter<W> {
                     services,
                     ctx,
                 };
-                let resolved = resolve_args_with(args, ctx.row(), &binding);
+                let resolved = resolve_args_for_widget(
+                    args,
+                    ctx.row(),
+                    &binding,
+                    self.widget_metas.get(name.as_str()).copied(),
+                );
                 // `live_block(id, #{role: "page_title", ...})` — second
                 // positional Object arg becomes ctx.flags for the resolved
                 // block's variant dispatch. AST stays shape-stable; flags
@@ -279,7 +302,7 @@ impl<W> RenderInterpreter<W> {
                 self.dispatch("column", &args, ctx, services, &interpret_fn)
             }
             RenderExpr::Object { fields } => {
-                let exprs: Vec<_> = fields.iter().map(|(_, e)| e.clone()).collect();
+                let exprs: Vec<_> = fields.values().cloned().collect();
                 let args = ResolvedArgs::from_positional_exprs(exprs);
                 self.dispatch("column", &args, ctx, services, &interpret_fn)
             }
@@ -427,6 +450,40 @@ pub fn shared_col_build<W>(ba: &BuilderArgs<'_, W>) -> Vec<W> {
         .collect()
 }
 
+/// The hierarchy inputs a tree/outline build needs, lifted out of the caller's
+/// args before the build runs.
+///
+/// Passing these explicitly is what lets a widget declare them as typed
+/// `Expr` params: the helper never asks the untyped arg bag for a name, so
+/// templateness is decided by the calling widget, not by a global allowlist.
+#[derive(Clone, Copy)]
+pub struct TreeInputs<'a> {
+    /// Interpreted once per row to produce that row's node.
+    pub item_template: &'a RenderExpr,
+    /// Row column holding each row's parent id.
+    pub parent_id_col: &'a str,
+    /// Row column each sibling bucket is sorted by.
+    pub sort_col: &'a str,
+}
+
+impl<'a> TreeInputs<'a> {
+    /// Build from the widget's `item_template` / `parent_id` / `sortkey`
+    /// expressions. The two column args are authored as `col("x")`; anything
+    /// else (absent, or a non-column expression) means the conventional
+    /// column name.
+    pub fn new(
+        item_template: &'a RenderExpr,
+        parent_id: Option<&'a RenderExpr>,
+        sortkey: Option<&'a RenderExpr>,
+    ) -> Self {
+        Self {
+            item_template,
+            parent_id_col: parent_id.and_then(column_ref_name).unwrap_or("parent_id"),
+            sort_col: sortkey.and_then(column_ref_name).unwrap_or("sort_key"),
+        }
+    }
+}
+
 /// `tree` builder: interprets rows as a hierarchical tree using `parent_id` and
 /// `sortkey`.
 ///
@@ -438,32 +495,18 @@ pub fn shared_col_build<W>(ba: &BuilderArgs<'_, W>) -> Vec<W> {
 /// (show_bullet, show_chevron, ...).
 pub fn shared_tree_build<W: WithEntity>(
     ba: &BuilderArgs<'_, W>,
+    inputs: &TreeInputs<'_>,
 ) -> Vec<(W, usize, HashMap<String, holon_api::Value>)> {
-    let template = ba
-        .args
-        .get_template("item_template")
-        .or(ba.args.get_template("item"));
-
-    let Some(tmpl) = template else {
-        return vec![];
-    };
+    let TreeInputs {
+        item_template: tmpl,
+        parent_id_col,
+        sort_col,
+    } = *inputs;
 
     let rows = &ba.ctx.data_rows;
     if rows.is_empty() {
         return vec![((ba.interpret)(tmpl, ba.ctx), 0, HashMap::new())];
     }
-
-    let parent_id_col = ba
-        .args
-        .get_template("parent_id")
-        .and_then(column_ref_name)
-        .unwrap_or("parent_id");
-    let sort_col = ba
-        .args
-        .get_template("sortkey")
-        .or(ba.args.get_template("sort_key"))
-        .and_then(column_ref_name)
-        .unwrap_or("sort_key");
 
     // Optional `rules:` arg — see `crate::row_pipeline::parse_rules_arg`.
     // Tree's positional context injects `level` and `depth` (synonyms) so
@@ -471,7 +514,14 @@ pub fn shared_tree_build<W: WithEntity>(
     // for deeply-nested rows.
     let rules = crate::row_pipeline::parse_rules_arg(ba.args.named.get("rules"));
 
-    let tree = OutlineTree::from_rows(rows, parent_id_col, sort_col);
+    // RULING C1': roots may sort by a per-level ROOT key the render declares
+    // through the SAME rules mechanism as the level-0 role/bullet overrides (a
+    // `sortkey` inside a level-0 rule), so a tree honors its backing query's
+    // top-level `ORDER BY` (which the CDC pipeline's `HashMap` accumulator
+    // drops the row order of) for roots while child buckets keep `sort_col`.
+    // `None` = no declared root key = pre-C1' behavior.
+    let root_sort_key = crate::row_pipeline::extract_root_sort_key(&rules);
+    let tree = OutlineTree::from_rows(rows, parent_id_col, sort_col, root_sort_key.as_deref());
     tree.walk_depth_first(|resolved_row, depth| {
         // Tree adjusts `ctx.depth` before the pipeline applies, so child
         // builders see the cumulative depth (parent's + tree's own).
@@ -560,7 +610,15 @@ pub struct LiveQueryResult<W> {
 ///
 /// Returns `Ok(LiveQueryResult)` on success or `Err(message)` for the frontend
 /// to render as error text.
-pub fn shared_live_query_build<W>(ba: &BuilderArgs<'_, W>) -> Result<LiveQueryResult<W>, String> {
+///
+/// `item_template` is the expression each result row is rendered through,
+/// supplied by the calling widget (`None` → `table()`). Passing it in rather
+/// than reading it off the arg bag keeps the name-to-templateness decision
+/// with the widget that declares the param.
+pub fn shared_live_query_build<W>(
+    ba: &BuilderArgs<'_, W>,
+    item_template: Option<&RenderExpr>,
+) -> Result<LiveQueryResult<W>, String> {
     use holon_api::QueryLanguage;
 
     if ba.ctx.query_depth >= MAX_QUERY_DEPTH {
@@ -604,7 +662,9 @@ pub fn shared_live_query_build<W>(ba: &BuilderArgs<'_, W>) -> Result<LiveQueryRe
         crate::QueryContext {
             current_block_id: Some(uri.clone()),
             context_parent_id: Some(uri),
-            context_path_prefix: None,
+            // Validation-only context (the watch is started and immediately
+            // dropped); descendants scoping is irrelevant here, so unfiltered.
+            path_context: crate::PathContext::Unfiltered,
         }
     });
 
@@ -619,17 +679,14 @@ pub fn shared_live_query_build<W>(ba: &BuilderArgs<'_, W>) -> Result<LiveQueryRe
     let deeper_ctx = ba.ctx.deeper_query();
 
     // The render expression for interpreting query results comes from the
-    // builder args (e.g., item_template), not from the query itself.
-    // Default to table() when no template is specified.
-    let live_query_render_expr = ba
-        .args
-        .get_template("item_template")
-        .or(ba.args.get_template("item"))
-        .cloned()
-        .unwrap_or_else(|| holon_api::render_types::RenderExpr::FunctionCall {
+    // caller's item template, not from the query itself. Default to table()
+    // when no template is specified.
+    let live_query_render_expr = item_template.cloned().unwrap_or_else(|| {
+        holon_api::render_types::RenderExpr::FunctionCall {
             name: "table".to_string(),
             args: vec![],
-        });
+        }
+    });
 
     // Resolve `virtual_parent: true` → `virtual_parent: "<context_id>"`.
     // The DSL author opts into virtual children by writing `virtual_parent: true`
@@ -742,6 +799,9 @@ fn pick_active_variant(
     }
 
     // Get block ID for UI state lookup
+    // Point-free form would drop the archlint baseline entry for this
+    // `EntityUri::from_raw` call site.
+    #[allow(clippy::redundant_closure)]
     let block_id = ctx
         .row()
         .get("id")

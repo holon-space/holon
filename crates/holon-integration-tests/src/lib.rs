@@ -12,6 +12,8 @@
 //! @c4 uses holon-mcp-client "MCP client providers" "Rust"
 //! @c4 uses holon-orgmode "org-mode sync I/O" "Rust"
 //! @c4 uses holon-pbt-core "PBT transition traits" "Rust"
+//! @c4 uses holon-loro "Loro CRDT backend & P2P sync" "Rust"
+//! @c4 uses holon-profiles "entity profile resolution" "Rust"
 //!
 //! Shared test infrastructure for Holon integration tests
 //!
@@ -20,7 +22,15 @@
 
 pub mod assertions;
 pub mod debug_pause;
+
+/// `cap_transition!` now lives in `holon-pbt-core` (shared with the
+/// per-subsystem companion PBT crates). Re-exported at this crate root so the
+/// many `crate::cap_transition!` call sites in `pbt::transitions::*` keep
+/// resolving.
+pub use holon_pbt_core::cap_transition;
 pub mod fake_mcp_module;
+pub mod faults;
+pub mod libtest_list;
 /// `display_assertions` moved to `holon-layout-testing`. Re-exported here
 /// so call sites inside this crate can keep using
 /// `crate::display_assertions::*`. Only available with the `pbt` feature
@@ -28,6 +38,8 @@ pub mod fake_mcp_module;
 /// dep tree.
 #[cfg(feature = "pbt")]
 pub use holon_layout_testing::display_assertions;
+#[cfg(feature = "pbt")]
+pub mod mcp_user_driver;
 pub mod mutation_driver;
 pub mod org_utils;
 #[cfg(feature = "pbt")]
@@ -35,6 +47,7 @@ pub mod pbt;
 pub mod pbt_mcp_fake;
 pub mod polling;
 pub mod screenshot_overlay;
+pub mod template_fixture;
 pub mod test_environment;
 #[cfg(feature = "otel-testing")]
 pub mod test_tracing;
@@ -56,10 +69,15 @@ pub use holon_layout_testing::display_assertions::assert_display_trees_match;
 pub use holon_layout_testing::display_assertions::is_ordered_subset;
 #[cfg(feature = "pbt")]
 pub use holon_layout_testing::display_assertions::tree_diff;
+#[cfg(feature = "pbt")]
+pub use mcp_user_driver::DEFAULT_MCP_PORT;
+#[cfg(feature = "pbt")]
+pub use mcp_user_driver::McpUserDriver;
+#[cfg(feature = "pbt")]
+pub use mcp_user_driver::mcp_base_url_from_env;
 pub use mutation_driver::DirectUserDriver;
 pub use mutation_driver::ReactiveEngineDriver;
 pub use mutation_driver::UserDriver;
-pub use org_utils::INTERNAL_PROPS;
 pub use org_utils::assign_reference_sequences;
 pub use org_utils::assign_reference_sequences_canonical;
 pub use org_utils::extract_first_block_id;
@@ -76,7 +94,6 @@ pub use screenshot_overlay::DEFAULT_OVERLAY_ALPHA;
 pub use screenshot_overlay::Overlay;
 pub use screenshot_overlay::Phase;
 pub use screenshot_overlay::Verdict;
-pub use test_environment::LoroCorruptionType;
 pub use test_environment::TestContext;
 pub use test_environment::TestContextBuilder;
 pub use test_environment::TestEnvironment;

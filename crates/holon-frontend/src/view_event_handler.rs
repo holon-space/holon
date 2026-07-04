@@ -81,6 +81,26 @@ impl ViewEventHandler {
         self.services = Some(services);
     }
 
+    /// Re-baseline the change-tracking value to an authority re-seed.
+    ///
+    /// When the frontend absolutely re-seeds the visible buffer from the
+    /// backend authority (`EditorView::converge_input`: focus-gain reload,
+    /// data-sync convergence, unfocused render backstop), the editor is NOT
+    /// dirty — it merely mirrors stored state. The blur commit decision in
+    /// [`Self::handle_text_sync`] compares the live value against
+    /// `original_value`; leaving that baseline at a stale (possibly
+    /// mark-reconstructed) form makes a subsequent blur diff the re-seeded
+    /// (stripped) buffer as "changed" and fire a spurious identical-content
+    /// `set_field("content")` (BugFunnel 2026-07-13 defect (a); that write
+    /// then nulls live link marks and pollutes the undo stack). Re-baselining
+    /// to the seeded value makes an unmodified editor never commit.
+    ///
+    /// This is a pure baseline update: it dispatches nothing and is not a
+    /// local write, so it must NOT advance any write-seq high-water mark.
+    pub fn set_baseline(&mut self, value: String) {
+        self.original_value = value;
+    }
+
     /// Declare whether a per-keystroke Loro content writer is active for this
     /// editor (see [`Self::loro_content_writer`]). The GPUI/TUI frontends call
     /// this with `true` once `BuilderServices::editable_text` resolves a
@@ -108,14 +128,29 @@ impl ViewEventHandler {
             } => match action.as_str() {
                 "command_menu" => {
                     if !self.popup.is_active() {
-                        let provider = Arc::new(
-                            CommandProvider::new(
-                                self.operations.clone(),
-                                self.context_params.clone(),
-                            )
-                            .with_prefix_start(prefix_start),
-                        );
-                        let signal = self.popup.activate(provider, &filter_text);
+                        // Enumerate templates once per menu-open so the picker
+                        // offers a per-template entry for each vault template.
+                        let templates = self
+                            .services
+                            .as_ref()
+                            .map(|s| s.list_templates())
+                            .unwrap_or_default();
+                        let mut provider = CommandProvider::new(
+                            self.operations.clone(),
+                            self.context_params.clone(),
+                        )
+                        .with_prefix_start(prefix_start)
+                        .with_templates(templates);
+                        // Resolve the picked block's REAL content/parent at
+                        // execute time (not from the id-only context_params).
+                        if let Some(services) = self.services.as_ref() {
+                            provider = provider.with_resolver(Arc::new(
+                                crate::command_provider::ServicesBlockResolver::new(
+                                    services.clone(),
+                                ),
+                            ));
+                        }
+                        let signal = self.popup.activate(Arc::new(provider), &filter_text);
                         HandleResult::Activated { signal }
                     } else {
                         // `filter_text` is the text between the matched "/"
@@ -161,9 +196,9 @@ impl ViewEventHandler {
     /// Handle Tier 3 text sync (blur). If the value changed and we have a
     /// set_field operation, return Execute with the appropriate params.
     ///
-    /// Virtual entities (`virtual:{entity_type}:{parent_id}`) are materialized
-    /// via `{entity_type}.create` instead of `set_field`. After creation, the
-    /// CDC delivers the real entity and a new virtual row appears at the end.
+    /// Every id reaching here is a real block: a creation affordance mounts no
+    /// editor and is born before it can receive input (see
+    /// [`crate::creation_slot`]), so there is no materialize-on-edit case.
     ///
     /// **Phase 2 (Loro single-writer):** for `content` on real (non-virtual)
     /// entities, when a Loro content writer is active the per-keystroke
@@ -189,21 +224,6 @@ impl ViewEventHandler {
             .and_then(|v| v.as_string())
             .expect("ViewEventHandler context_params missing 'id'")
             .to_string();
-
-        if let Some((entity_type, parent_id)) = parse_virtual_id(&id) {
-            if new_value.is_empty() {
-                return PopupResult::NotActive;
-            }
-            let mut params = HashMap::new();
-            params.insert("parent_id".into(), Value::String(parent_id));
-            params.insert("content".into(), Value::String(new_value));
-            return PopupResult::Execute {
-                entity_name: EntityName::Named(entity_type),
-                op_name: "create".to_string(),
-                params,
-                strip_prefix_start: None,
-            };
-        }
 
         if self.field == "content" && self.loro_content_writer {
             return PopupResult::NotActive;
@@ -240,25 +260,6 @@ impl ViewEventHandler {
     pub fn is_overlay_active(&self) -> bool {
         self.popup.is_active()
     }
-}
-
-/// Parse a virtual entity ID of the form `<entity>:__virtual:<parent_local>`.
-///
-/// The marker lives in the **local** part of the URI (not the scheme), so
-/// `EntityUri::scheme()` returns the real entity type and the profile resolver
-/// finds the right profile. We detect "this is a creation slot" by looking
-/// for the `:__virtual:` infix.
-///
-/// Example: `block:__virtual:default-main-panel`
-/// → entity_type = `"block"`, parent_id = `"block:default-main-panel"`.
-///
-/// Returns `(entity_type, parent_id)` or `None` if the ID isn't virtual.
-fn parse_virtual_id(id: &str) -> Option<(String, String)> {
-    let (scheme, parent_local) = id.split_once(":__virtual:")?;
-    if scheme.is_empty() || parent_local.is_empty() {
-        return None;
-    }
-    Some((scheme.to_string(), format!("{scheme}:{parent_local}")))
 }
 
 /// Result of handling a ViewEvent.

@@ -55,10 +55,17 @@ use crate::entity_profile::ProfileResolving;
 /// `collection` variants (tree/table/board) so `collection_render_from_profile`
 /// resolves a real `view_mode_switcher`, minus user-defined profile overrides.
 ///
+/// Its entity lookups (`query_source`, `rule_sibling`) come from `source`
+/// instead of the Turso CDC matviews — without them every lookup-dependent
+/// computed field (`has_query_source`, `is_program`) would sit at `Null` in a
+/// Loro-only session.
+///
 /// Must be called from within a Tokio runtime:
 /// `ProfileResolver::with_type_profiles` spawns a background actor that watches
-/// the (empty) profile source.
-pub fn build_turso_free_profile_resolver() -> Arc<dyn ProfileResolving> {
+/// the (empty) profile source, and the entity refresh below spawns its own.
+pub fn build_turso_free_profile_resolver(
+    source: Arc<dyn BlockQuerySource>,
+) -> Arc<dyn ProfileResolving> {
     let type_registry = holon_profiles::create_default_registry().expect("default TypeRegistry");
     let type_profiles = holon_profiles::type_profiles_from_registry(&type_registry);
 
@@ -68,13 +75,92 @@ pub fn build_turso_free_profile_resolver() -> Arc<dyn ProfileResolving> {
         |_| anyhow::bail!("no-Turso session has no user profile source"),
     );
 
-    Arc::new(ProfileResolver::with_type_profiles(
+    let resolver = Arc::new(ProfileResolver::with_type_profiles(
         empty_profiles,
         holon_api::UiInfo::default(),
         LiveEntities::new(),
         HashMap::new(),
         type_profiles,
-    ))
+    ));
+    spawn_live_entity_refresh(source, Arc::downgrade(&resolver));
+    resolver
+}
+
+/// Keep a Turso-free resolver's entity lookups in step with the Loro tree.
+///
+/// The Turso arm keeps these live off CDC; a no-Turso session has no CDC, so
+/// liveness is poll-based exactly like [`loro_watch_ui`] itself — a session
+/// boots before its content is loaded, so a one-shot read would answer "no
+/// query source" forever. The task holds only a `Weak`, so it ends when the
+/// session drops its resolver.
+fn spawn_live_entity_refresh(
+    source: Arc<dyn BlockQuerySource>,
+    resolver: std::sync::Weak<ProfileResolver>,
+) {
+    tokio::spawn(async move {
+        let mut previous: Option<SourceBlockKey> = None;
+        let mut polled_version: Option<u64> = None;
+        loop {
+            let Some(resolver) = resolver.upgrade() else {
+                return;
+            };
+            // Two gates, cheapest first: the substrate's own version skips the
+            // whole tree walk while the doc is idle, the key skips the engine
+            // rebuild when the walk found nothing the lookups read.
+            let version = source.change_version();
+            if version.is_none() || version != polled_version {
+                match source.snapshot().await {
+                    Ok(snapshot) => {
+                        let current = source_block_key(&snapshot);
+                        if previous.as_ref() != Some(&current) {
+                            let entities = holon_profiles::LiveEntitySpec::ALL
+                                .iter()
+                                .map(|spec| {
+                                    (
+                                        spec.entity_name(),
+                                        spec.live_data_from_blocks(snapshot.iter_blocks()),
+                                    )
+                                })
+                                .collect();
+                            resolver.set_live_entities(entities);
+                            previous = Some(current);
+                        }
+                        polled_version = version;
+                    }
+                    Err(e) => tracing::error!(
+                        "[LoroLiveEntities] snapshot failed; entity lookups are stale: {e:#}"
+                    ),
+                }
+            }
+            drop(resolver);
+            tokio::time::sleep(LORO_WATCH_POLL).await;
+        }
+    });
+}
+
+/// Every source block's id, parent, content type and language — sorted.
+type SourceBlockKey = Vec<(String, String, String, String)>;
+
+/// Exactly what the lookups read:
+/// [`LiveEntitySpec`](holon_profiles::LiveEntitySpec) selects on `content_type`
+/// AND `source_language`, and keys on `parent_id`, so two snapshots agreeing
+/// here cannot disagree on any lookup. The refresh above rebuilds only when
+/// this changes.
+fn source_block_key(snapshot: &holon_core::storage::BlockSnapshot) -> SourceBlockKey {
+    let mut key: SourceBlockKey = snapshot
+        .iter_blocks()
+        .filter_map(|b| b.source_language.as_ref().map(|lang| (b, lang)))
+        .map(|(b, lang)| {
+            (
+                b.id.as_str().to_string(),
+                b.parent_id.as_str().to_string(),
+                b.content_type.to_string(),
+                lang.to_string(),
+            )
+        })
+        .collect();
+    key.sort();
+    key
 }
 
 /// How often the Loro watcher re-snapshots to detect tree changes. The
@@ -97,13 +183,14 @@ const LORO_WATCH_POLL: std::time::Duration = std::time::Duration::from_millis(25
 pub async fn loro_watch_ui(
     source: Arc<dyn BlockQuerySource>,
     block_id: EntityUri,
+    advice_status: holon_advice::AdviceRuleStatusHandle,
 ) -> Result<WatchHandle> {
     let (output_tx, output_rx) = mpsc::channel(64);
     let (command_tx, _command_rx) = mpsc::channel(16);
     let mut aborts = ActorAbortGuard::new();
 
     let task = tokio::spawn(async move {
-        run_watch_loop(source, block_id, output_tx).await;
+        run_watch_loop(source, block_id, advice_status, output_tx).await;
     });
     aborts.push(task.abort_handle());
 
@@ -117,18 +204,38 @@ pub async fn loro_watch_ui(
 /// dispatches through the capability with no backend branch.
 pub struct LoroUiWatcher {
     source: Arc<dyn BlockQuerySource>,
+    /// Advice-rule status surface (ADR 0022). Empty in a no-Turso session (no
+    /// advice reconciler synthesizes matviews there), but wired for parity
+    /// with the Turso watcher so a rule block's error would render in place
+    /// if one is ever recorded.
+    advice_status: holon_advice::AdviceRuleStatusHandle,
 }
 
 impl LoroUiWatcher {
     pub fn new(source: Arc<dyn BlockQuerySource>) -> Self {
-        Self { source }
+        Self {
+            source,
+            advice_status: holon_advice::AdviceRuleStatusHandle::new(),
+        }
+    }
+
+    /// Wire a shared advice-rule status handle (the reader side of ADR 0022's
+    /// surface).
+    pub fn with_advice_status(mut self, status: holon_advice::AdviceRuleStatusHandle) -> Self {
+        self.advice_status = status;
+        self
     }
 }
 
 #[async_trait::async_trait]
 impl crate::api::ui_watcher::UiWatcher for LoroUiWatcher {
     async fn watch_ui(self: Arc<Self>, block_id: EntityUri) -> Result<WatchHandle> {
-        loro_watch_ui(Arc::clone(&self.source), block_id).await
+        loro_watch_ui(
+            Arc::clone(&self.source),
+            block_id,
+            self.advice_status.clone(),
+        )
+        .await
     }
 }
 
@@ -144,6 +251,7 @@ fn local_origin() -> ChangeOrigin {
 async fn run_watch_loop(
     source: Arc<dyn BlockQuerySource>,
     block_id: EntityUri,
+    advice_status: holon_advice::AdviceRuleStatusHandle,
     output_tx: mpsc::Sender<UiEvent>,
 ) {
     let mut generation: u64 = 0;
@@ -157,12 +265,20 @@ async fn run_watch_loop(
         // through the same diff path, so the watcher recovers automatically
         // when the underlying block is fixed (matches the Turso watcher's
         // error-recovery semantics) — it never silently stalls.
-        let (expr, ordered) = match render_state(&source, &block_id).await {
-            Ok(state) => state,
-            Err(e) => {
-                tracing::warn!("[LoroWatcher] render of '{block_id}' failed: {e}");
-                (error_render_expr(&format!("{e}")), Vec::new())
-            }
+        // Advice-rule status surface (ADR 0022): a NON-Active rule block renders its
+        // error in place. Inert in a no-Turso session (the map is empty there).
+        let (expr, ordered) = match advice_status.get(block_id.as_str()) {
+            Some(status) if !status.is_active() => (
+                error_render_expr(&format!("advice rule: {status}")),
+                Vec::new(),
+            ),
+            _ => match render_state(&source, &block_id).await {
+                Ok(state) => state,
+                Err(e) => {
+                    tracing::warn!("[LoroWatcher] render of '{block_id}' failed: {e}");
+                    (error_render_expr(&format!("{e:#}")), Vec::new())
+                }
+            },
         };
 
         let structure_changed = prev_expr.as_ref() != Some(&expr);
@@ -305,6 +421,13 @@ fn derive_render_expr(
     snapshot: &holon_core::storage::BlockSnapshot,
     block_id: &EntityUri,
 ) -> RenderExpr {
+    // ROOT display slot: resolved via a query over data (the
+    // active-perspective pointer is the degenerate slot query) — the no-Turso
+    // counterpart of `BlockDomain::render_root_slot`.
+    if *block_id == holon_api::root_layout_block_uri() {
+        return derive_root_slot_expr(snapshot, block_id);
+    }
+
     let children = snapshot.children_ordered(block_id);
 
     let query_child = children.iter().find_map(|child| {
@@ -325,6 +448,54 @@ fn derive_render_expr(
 
     // No query engine in this wiring → offer only the `source` view mode.
     BlockDomain::source_editor_expr(&query_src.content, query_language)
+}
+
+/// Resolve the ROOT display slot from the snapshot: follow the
+/// active-perspective pointer on the root-layout block and synthesize the
+/// layout from the resolved perspective's panels. The poll loop re-derives on
+/// every Loro change, so a pointer `set_field` (or a panel edit) re-fires
+/// this naturally.
+///
+/// A snapshot without a root-layout block renders as a leaf (mirrors the
+/// Turso arm's disclosed fallback); a broken pointer/perspective fails loud
+/// as a red `error(...)` node.
+fn derive_root_slot_expr(
+    snapshot: &holon_core::storage::BlockSnapshot,
+    root_id: &EntityUri,
+) -> RenderExpr {
+    use holon_api::perspective;
+
+    let Some(root_block) = snapshot.block_by_id(root_id) else {
+        tracing::warn!(
+            "[derive_root_slot_expr] no {root_id} block in this snapshot — rendering the root \
+             slot as a plain leaf (no layout to resolve)"
+        );
+        return RenderExpr::FunctionCall {
+            name: "render_entity".to_string(),
+            args: Vec::new(),
+        };
+    };
+
+    let active =
+        match perspective::active_perspective_id(root_id, std::slice::from_ref(&root_block)) {
+            Ok(active) => active,
+            Err(e) => return error_render_expr(&format!("root slot: {e:#}")),
+        };
+
+    let mut blocks = vec![root_block];
+    if let Some(persp) = snapshot.block_by_id(&active)
+        && active != *root_id
+    {
+        blocks.push(persp);
+    }
+    blocks.extend(snapshot.descendants_ordered(&active));
+
+    match perspective::resolve_active_perspective(root_id, &blocks)
+        .and_then(|spec| spec.layout_expr())
+    {
+        Ok(expr) => expr,
+        Err(e) => error_render_expr(&format!("root slot: {e:#}")),
+    }
 }
 
 /// Convert a [`Block`] into the row map the reactive engine consumes.
@@ -407,7 +578,13 @@ mod tests {
         let source: Arc<dyn BlockQuerySource> =
             Arc::new(LoroBlockQuerySource::new(Arc::new(backend)));
 
-        let mut handle = loro_watch_ui(source, root.id.clone()).await.unwrap();
+        let mut handle = loro_watch_ui(
+            source,
+            root.id.clone(),
+            holon_advice::AdviceRuleStatusHandle::new(),
+        )
+        .await
+        .unwrap();
 
         // First event: the source-only degradation — a bare `source_editor`
         // showing the query text, not a tree/table/board switcher.
@@ -511,7 +688,13 @@ mod tests {
 
         let source: Arc<dyn BlockQuerySource> =
             Arc::new(LoroBlockQuerySource::new(backend.clone()));
-        let mut handle = loro_watch_ui(source, root.id.clone()).await.unwrap();
+        let mut handle = loro_watch_ui(
+            source,
+            root.id.clone(),
+            holon_advice::AdviceRuleStatusHandle::new(),
+        )
+        .await
+        .unwrap();
 
         // Fold the watcher's generation-gated Structure/Data deltas into a live
         // id set, exactly as `ReactiveRowSet` does, until `want` holds.
@@ -605,12 +788,112 @@ mod tests {
     /// rather than degrading to bare `table()`.
     #[tokio::test]
     async fn turso_free_resolver_has_collection_variants() {
-        let resolver = build_turso_free_profile_resolver();
+        let source = Arc::new(holon_core::storage::from_sync(|| {
+            Ok(holon_core::storage::BlockSnapshot::from_ordered(
+                Vec::new(),
+                Vec::new(),
+            ))
+        })) as Arc<dyn BlockQuerySource>;
+        let resolver = build_turso_free_profile_resolver(source);
         let variants = resolver.resolve_collection_variants();
         assert!(
             !variants.is_empty(),
             "Turso-free resolver must seed the built-in collection variants (tree/table/board); \
              got none — render would degrade to table()"
         );
+    }
+
+    // ── Root display slot resolution (no-Turso arm) ────────────────────────
+
+    use holon_core::storage::BlockSnapshot;
+
+    fn snap_block(id: &str, parent: &EntityUri) -> holon_api::Block {
+        holon_api::Block::new_text(EntityUri::block(id), parent.clone(), id)
+    }
+
+    fn sql_source(id: &str, parent: &str, query: &str) -> holon_api::Block {
+        let mut b =
+            holon_api::Block::new_text(EntityUri::block(id), EntityUri::block(parent), query);
+        b.source_language = Some(holon_api::SourceLanguage::Query(
+            holon_api::QueryLanguage::HolonSql,
+        ));
+        b
+    }
+
+    fn expr_debug(expr: &RenderExpr) -> String {
+        format!("{expr:?}")
+    }
+
+    /// Default (no pointer): the root slot resolves to the root-layout block's
+    /// own panels — the degenerate perspective — and synthesizes the columns
+    /// layout from them.
+    #[test]
+    fn root_slot_default_synthesizes_layout_from_root_children() {
+        let root_uri = holon_api::root_layout_block_uri();
+        let root = holon_api::Block::new_text(root_uri.clone(), EntityUri::no_parent(), "layout");
+        let main = snap_block("default-main-panel", &root_uri);
+        let src = sql_source("main-src", "default-main-panel", "SELECT 1");
+        let snapshot = BlockSnapshot::from_ordered(vec![root, main, src], vec![]);
+
+        let expr = derive_render_expr(&snapshot, &root_uri);
+        let dbg = expr_debug(&expr);
+        assert!(
+            dbg.contains("if_space") && dbg.contains("block:default-main-panel"),
+            "expected synthesized layout with the main panel, got: {dbg}"
+        );
+    }
+
+    /// Pointer set: the slot resolves the pointed-to perspective's panels
+    /// instead of the root-layout's own children — switching is pure data.
+    #[test]
+    fn root_slot_follows_active_perspective_pointer() {
+        let root_uri = holon_api::root_layout_block_uri();
+        let mut root =
+            holon_api::Block::new_text(root_uri.clone(), EntityUri::no_parent(), "layout");
+        holon_api::perspective::set_active_perspective(&mut root, &EntityUri::block("tasks"));
+
+        let old_main = snap_block("default-main-panel", &root_uri);
+        let old_src = sql_source("old-src", "default-main-panel", "SELECT 1");
+
+        let tasks =
+            holon_api::Block::new_text(EntityUri::block("tasks"), EntityUri::no_parent(), "Tasks");
+        let tasks_main = snap_block("tasks-main-panel", &EntityUri::block("tasks"));
+        let tasks_src = sql_source("tasks-src", "tasks-main-panel", "SELECT 2");
+
+        let snapshot = BlockSnapshot::from_ordered(
+            vec![root, old_main, old_src, tasks, tasks_main, tasks_src],
+            vec![],
+        );
+
+        let expr = derive_render_expr(&snapshot, &root_uri);
+        let dbg = expr_debug(&expr);
+        assert!(
+            dbg.contains("block:tasks-main-panel"),
+            "expected the pointed-to perspective's panel, got: {dbg}"
+        );
+        assert!(
+            !dbg.contains("block:default-main-panel"),
+            "root-layout's own panels must NOT render when the pointer targets another \
+             perspective, got: {dbg}"
+        );
+    }
+
+    /// A dangling pointer fails loud as a visible error node, never a silent
+    /// fallback to the default layout.
+    #[test]
+    fn root_slot_dangling_pointer_renders_error_node() {
+        let root_uri = holon_api::root_layout_block_uri();
+        let mut root =
+            holon_api::Block::new_text(root_uri.clone(), EntityUri::no_parent(), "layout");
+        holon_api::perspective::set_active_perspective(&mut root, &EntityUri::block("gone"));
+        let main = snap_block("default-main-panel", &root_uri);
+        let src = sql_source("main-src", "default-main-panel", "SELECT 1");
+        let snapshot = BlockSnapshot::from_ordered(vec![root, main, src], vec![]);
+
+        let expr = derive_render_expr(&snapshot, &root_uri);
+        let RenderExpr::FunctionCall { name, .. } = &expr else {
+            panic!("expected error FunctionCall, got: {expr:?}");
+        };
+        assert_eq!(name, "error", "dangling pointer must render loud: {expr:?}");
     }
 }

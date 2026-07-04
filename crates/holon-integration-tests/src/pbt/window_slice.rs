@@ -3,6 +3,17 @@
 //! headless `frontend_slice` cannot: [`SutLayout`] geometry (real element
 //! bounds), backed by a live gpui window's [`BoundsRegistry`].
 //!
+//! @pbt kind slice-mod
+//! @pbt covers window-slice — component + builders + seed for the windowed arm.
+//!
+//! ## Input contract
+//!
+//! Geometry resolves WHERE an interaction lands; the interaction itself is a
+//! gpui-internal event. OS-level input synthesis is deliberately out of scope
+//! (it needs foreground focus and fights the user for the pointer) — that layer
+//! is dogfooding's to cover. See docs/Testing/Testing.md, "Windowed PBT input
+//! contract".
+//!
 //! ## The Send / `!Send` split (the key E4 design point)
 //!
 //! The gpui `TestApp` that owns the window is `!Send`/single-threaded and must

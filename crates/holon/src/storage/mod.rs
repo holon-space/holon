@@ -14,8 +14,8 @@ pub use holon_turso::sql_utils;
 pub use holon_turso::turso;
 pub use holon_turso::turso_actor_stats;
 
+pub mod local_state;
 pub mod sync_token_store;
-pub mod turso_block_link_indexer;
 pub mod turso_sink_reader;
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -43,5 +43,4 @@ pub use turso::DatabasePhase;
 pub use turso::DbCommand;
 pub use turso::DbHandle;
 pub use turso::priority;
-pub use turso_block_link_indexer::TursoBlockLinkIndexer;
 pub use turso_sink_reader::TursoSinkReader;

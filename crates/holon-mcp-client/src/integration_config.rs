@@ -1,27 +1,45 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::path::PathBuf;
 
 use anyhow::Context;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::bundled_sidecars::BundledSidecar;
+use crate::bundled_sidecars::SIDECAR_SCHEMA_VERSION;
+use crate::bundled_sidecars::bundled_sidecar;
 use crate::mcp_integration::AuthMode;
 use crate::mcp_integration::McpIntegrationConfig;
 use crate::mcp_integration::McpTransport;
 use crate::mcp_sidecar::EntityConfig;
 use crate::mcp_sidecar::McpSidecar;
 use crate::mcp_sidecar::ToolConfig;
+use crate::rest_oauth2::RestOAuth2Config;
+use crate::rest_transport::RestAuth;
 
 /// Transport configuration as declared in the YAML file.
 ///
-/// Exactly one of `child_process` or `http` must be set.
+/// Exactly one of the variants must be set. Two of them reach a server that
+/// *speaks MCP* (`child_process` = stdio, `http` = MCP-over-Streamable-HTTP);
+/// the third, `rest`, reaches a plain HTTP/JSON API *directly* via a
+/// UTCP-manual-style description (see [`RestTransport`]). All three plug into
+/// the same connector engine behind the
+/// [`crate::mcp_call_surface::McpCallSurface`] seam — one engine, plural
+/// transports.
+///
+/// Note on naming: `http` here is historical and means *MCP over HTTP*, not a
+/// generic REST call. The direct-API transport is `rest`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct TransportConfig {
     pub child_process: Option<ChildProcessTransport>,
     pub http: Option<HttpTransport>,
+    pub rest: Option<RestTransport>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChildProcessTransport {
     pub command: String,
     #[serde(default)]
@@ -31,8 +49,122 @@ pub struct ChildProcessTransport {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct HttpTransport {
     pub uri: String,
+}
+
+/// Direct HTTP-API transport (UTCP-manual style). Describes a plain JSON API by
+/// its base URL and a set of named `calls`, each a GET endpoint. A
+/// [`crate::rest_transport::RestCallSurface`] serves these calls behind the
+/// same [`McpCallSurface`](crate::mcp_call_surface::McpCallSurface) seam the
+/// MCP transports use, so the rest of the connector engine is unchanged.
+///
+/// Read-only for now: only `GET` methods are accepted (write/mutation and lease
+/// semantics are out of scope).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestTransport {
+    /// Base URL; may be `${VAR}`-expanded. No trailing slash required.
+    pub base_url: String,
+    /// Optional auth header sent on every request. NEVER inline a secret —
+    /// reference an env/keychain name via `${VAR}` in `value`.
+    #[serde(default)]
+    pub auth: Option<RestAuthConfig>,
+    /// Named endpoints, keyed by the tool name referenced from
+    /// `sync.list_tool`.
+    pub calls: HashMap<String, RestCallConfig>,
+    /// Default poll cadence for sync entities that declare no per-entity
+    /// `sync.interval`. REST has no subscription freshness, so every sync
+    /// entity polls; this sets the transport-wide default (per-entity
+    /// `sync.interval` still overrides it, and an unset value falls to the
+    /// 300s built-in). Accepts an integer (seconds) or a humantime-style
+    /// string (`"5m"`).
+    #[serde(default)]
+    pub poll_interval: Option<crate::mcp_sidecar::SyncInterval>,
+}
+
+/// Auth for the `rest` transport. Exactly one arm must be set:
+///
+/// - a **static header** — `{ header: Authorization, value: "Bearer ${TOKEN}"
+///   }` (back-compatible), or
+/// - **OAuth2** — `{ oauth2: { token_url, client_id_env, …, refresh_token_file
+///   } }` (refresh-token grant; see [`RestOAuth2Config`]).
+///
+/// Modeled as optional fields (rather than a serde-tagged enum) so both shapes
+/// parse cleanly under `deny_unknown_fields` and a mistake yields a precise
+/// error at [`RestAuthConfig::resolve`] rather than a "did not match any
+/// variant".
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestAuthConfig {
+    /// Static-header arm: the header name (e.g. `Authorization`).
+    #[serde(default)]
+    pub header: Option<String>,
+    /// Static-header arm: the header value; `${VAR}`-expanded at startup. Keep
+    /// the secret out of YAML.
+    #[serde(default)]
+    pub value: Option<String>,
+    /// OAuth2 arm: refresh-token-grant configuration.
+    #[serde(default)]
+    pub oauth2: Option<RestOAuth2Config>,
+}
+
+impl RestAuthConfig {
+    /// Resolve into the runtime [`RestAuth`], expanding `${VAR}` in a static
+    /// value and building the OAuth2 provider (reading credential files,
+    /// running the 0600 checks) for the OAuth2 arm. Fails loud on an
+    /// ambiguous or empty arm; surfaces [`UnresolvedVar`] when an OAuth2
+    /// integration is simply not configured yet (disclosed skip).
+    fn resolve(self, lookup: &VarLookup<'_>) -> anyhow::Result<RestAuth> {
+        match (self.header, self.value, self.oauth2) {
+            (Some(header), Some(value), None) => Ok(RestAuth::Static {
+                header,
+                value: expand_vars(&value, lookup)?,
+            }),
+            (None, None, Some(oauth2)) => {
+                let provider = crate::rest_oauth2::build_provider(&oauth2, lookup)?;
+                Ok(RestAuth::OAuth2(provider))
+            }
+            (None, None, None) => anyhow::bail!(
+                "transport.rest.auth is empty — set either a static `{{ header, value }}` or an \
+                 `oauth2` block"
+            ),
+            _ => anyhow::bail!(
+                "transport.rest.auth must set EXACTLY ONE of a static `{{ header, value }}` pair \
+                 or an `oauth2` block (not a mix)"
+            ),
+        }
+    }
+}
+
+/// A single GET endpoint. `path` and `query` values may contain `{arg}`
+/// placeholders filled from the tool-call arguments at request time.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestCallConfig {
+    /// HTTP method. Only `GET` is supported today (fails loud otherwise).
+    pub method: String,
+    /// Path appended to `base_url`, e.g. `/posts` or `/users/{id}/posts`.
+    pub path: String,
+    /// Query parameters; values may be literals or `{arg}` placeholders.
+    #[serde(default)]
+    pub query: HashMap<String, String>,
+    /// Response body codec: `json` (default), `atom`, or `rss`. `atom`/`rss`
+    /// decode a syndication feed into the same record shape as JSON.
+    #[serde(default)]
+    pub format: crate::rest_transport::ResponseFormat,
+    /// If set, a non-object JSON body is wrapped as `{ result_key: <body> }` so
+    /// a `sync.extract_path` can select it (bare-array responses → object). For
+    /// `atom`/`rss` the decoded entry array is wrapped under this key (default
+    /// `entries`).
+    #[serde(default)]
+    pub result_key: Option<String>,
+    /// Optional response-token pagination (`json` only): follow a continuation
+    /// token (e.g. `nextPageToken`) across pages, bounded fail-loud by
+    /// `max_pages`.
+    #[serde(default)]
+    pub pagination: Option<crate::rest_transport::Pagination>,
 }
 
 /// Authentication configuration (only meaningful for HTTP transport).
@@ -52,6 +184,12 @@ pub struct AuthConfig {
 /// The provider name is derived from the filename (stem without `.yaml`).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct IntegrationFileConfig {
+    /// Sidecar-format generation this file was authored against. Absent in
+    /// every file written before the format was versioned, which is precisely
+    /// the population that cannot be trusted to still match the engine — see
+    /// [`crate::bundled_sidecars`].
+    #[serde(default)]
+    pub schema_version: Option<u32>,
     pub transport: TransportConfig,
     #[serde(default)]
     pub auth: Option<AuthConfig>,
@@ -60,6 +198,16 @@ pub struct IntegrationFileConfig {
     pub entity_prefix: Option<String>,
     #[serde(default)]
     pub entities: HashMap<String, EntityConfig>,
+    /// Master write switch (leases/read-write ruling). Absent = disabled. Flows
+    /// through into the [`McpSidecar`] so the dispatch chokepoint can enforce
+    /// it.
+    #[serde(default)]
+    pub writes: crate::mcp_sidecar::WritesPolicy,
+    /// Writer designation for `once_only` effects (leases/read-write ruling,
+    /// increment 4). Absent = confirm_manually. Flows through into the
+    /// [`McpSidecar`] so the dispatch chokepoint can select the policy.
+    #[serde(default)]
+    pub once_only: crate::mcp_sidecar::OnceOnlyAuthorization,
     #[serde(default)]
     pub tools: HashMap<String, ToolConfig>,
     /// Sidecar-declared derived views (see
@@ -146,8 +294,35 @@ impl IntegrationFileConfig {
             McpTransport::Http {
                 uri: expand_vars(&http.uri, lookup)?,
             }
+        } else if let Some(rest) = self.transport.rest {
+            let auth = match rest.auth {
+                Some(a) => a.resolve(lookup)?,
+                None => RestAuth::None,
+            };
+            let mut calls = HashMap::with_capacity(rest.calls.len());
+            for (name, c) in rest.calls {
+                calls.insert(
+                    name,
+                    crate::rest_transport::RestCall {
+                        method: c.method,
+                        path: c.path,
+                        query: c.query,
+                        format: c.format,
+                        result_key: c.result_key,
+                        pagination: c.pagination,
+                    },
+                );
+            }
+            McpTransport::Rest {
+                manual: crate::rest_transport::RestManual {
+                    base_url: expand_vars(&rest.base_url, lookup)?,
+                    auth,
+                    calls,
+                },
+                poll_interval: rest.poll_interval,
+            }
         } else {
-            anyhow::bail!("TransportConfig must have either child_process or http set");
+            anyhow::bail!("TransportConfig must set exactly one of child_process, http, or rest");
         };
 
         let auth_mode = match self.auth {
@@ -162,6 +337,8 @@ impl IntegrationFileConfig {
         let sidecar = McpSidecar {
             entity_prefix: self.entity_prefix,
             entities: self.entities,
+            writes: self.writes,
+            once_only: self.once_only,
             tools: self.tools,
             views: self.views,
         };
@@ -204,20 +381,43 @@ fn expand_vars(input: &str, lookup: &VarLookup<'_>) -> anyhow::Result<String> {
     Ok(out)
 }
 
-/// Scan a directory for `*.yaml` provider config files and return `(name,
-/// config)` pairs.
+/// An installed sidecar that was NOT used, and why. Carried out of the loader
+/// as data so the caller cannot forget to disclose it — a supersede that only
+/// logged would be the same silent-staleness defect in a new place.
+#[derive(Debug, Clone)]
+pub struct SupersededSidecar {
+    pub provider: String,
+    pub installed_path: PathBuf,
+    /// Repo-relative path of the sidecar that was used instead.
+    pub bundled_source: &'static str,
+    /// Why the installed file could not be honored, in the reader's terms.
+    pub incompatibility: String,
+}
+
+/// What a scan of the integrations directory yielded.
+#[derive(Debug)]
+pub struct LoadedIntegrations {
+    pub configs: Vec<(String, IntegrationFileConfig)>,
+    pub superseded: Vec<SupersededSidecar>,
+}
+
+/// Scan a directory for `*.yaml` provider config files.
 ///
 /// The provider name is the file stem (e.g., `claude-history.yaml` ->
-/// `"claude-history"`).
+/// `"claude-history"`), and the file's PRESENCE is what enables that provider.
 ///
-/// A missing integrations directory means "no integrations configured" and
-/// returns `Ok(vec![])` (disclosed via a debug log). Files without a
-/// `.yaml`/`.yml` extension are skipped. Anything else fails loud: a YAML file
-/// that cannot be read or parsed is a hard error enriched with the file path —
-/// a malformed integration config must never be silently ignored.
-pub fn load_integration_configs(
-    dir: &Path,
-) -> anyhow::Result<Vec<(String, IntegrationFileConfig)>> {
+/// For a provider this build ships (see [`crate::bundled_sidecars`]) the
+/// installed file supplies content only when it declares this build's
+/// [`SIDECAR_SCHEMA_VERSION`]; otherwise the bundled sidecar is used and the
+/// installed one is reported in [`LoadedIntegrations::superseded`]. That is
+/// what keeps a copy taken before a format requirement landed from silently
+/// outranking the sidecar the engine was built against.
+///
+/// A missing integrations directory means "no integrations configured".
+/// Files without a `.yaml`/`.yml` extension are skipped. A YAML file for a
+/// provider this build does NOT ship is a hard error when it cannot be read or
+/// parsed — there is nothing to fall back to, so it must never be skipped.
+pub fn load_integration_configs(dir: &Path) -> anyhow::Result<LoadedIntegrations> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -226,7 +426,10 @@ pub fn load_integration_configs(
                  integrations configured",
                 dir.display()
             );
-            return Ok(vec![]);
+            return Ok(LoadedIntegrations {
+                configs: Vec::new(),
+                superseded: Vec::new(),
+            });
         }
         Err(e) => {
             return Err(anyhow::Error::new(e).context(format!(
@@ -237,6 +440,7 @@ pub fn load_integration_configs(
     };
 
     let mut configs = Vec::new();
+    let mut superseded = Vec::new();
     for entry in entries {
         let entry = entry
             .with_context(|| format!("Failed to read directory entry in '{}'", dir.display()))?;
@@ -260,18 +464,72 @@ pub fn load_integration_configs(
         let content = std::fs::read_to_string(&path)
             .with_context(|| format!("Failed to read integration config '{}'", path.display()))?;
 
-        let config = serde_yaml::from_str::<IntegrationFileConfig>(&content)
-            .with_context(|| format!("Failed to parse integration config '{}'", path.display()))?;
+        let Some(bundled) = bundled_sidecar(&name) else {
+            let config =
+                serde_yaml::from_str::<IntegrationFileConfig>(&content).with_context(|| {
+                    format!("Failed to parse integration config '{}'", path.display())
+                })?;
+            tracing::info!(
+                "[load_integration_configs] Loaded provider '{}' from '{}'",
+                name,
+                path.display()
+            );
+            configs.push((name, config));
+            continue;
+        };
 
-        tracing::info!(
-            "[load_integration_configs] Loaded provider '{}' from '{}'",
-            name,
-            path.display()
-        );
-        configs.push((name, config));
+        // Byte-identical to what we ship: the same file, not an override.
+        // Nothing drifted, so nothing to log and nothing to disclose.
+        if content == bundled.yaml {
+            configs.push((name, parse_bundled(bundled)?));
+            continue;
+        }
+
+        let incompatibility = match serde_yaml::from_str::<IntegrationFileConfig>(&content) {
+            Ok(config) if config.schema_version == Some(SIDECAR_SCHEMA_VERSION) => {
+                tracing::info!(
+                    "[load_integration_configs] Provider '{}' is OVERRIDDEN by '{}' \
+                     (schema_version {SIDECAR_SCHEMA_VERSION}); the sidecar bundled at '{}' is \
+                     not used",
+                    name,
+                    path.display(),
+                    bundled.source_path
+                );
+                configs.push((name, config));
+                continue;
+            }
+            Ok(config) => format!(
+                "it declares schema_version {} but this build's sidecar format is schema_version \
+                 {SIDECAR_SCHEMA_VERSION}",
+                match config.schema_version {
+                    Some(v) => v.to_string(),
+                    None => "none".to_string(),
+                }
+            ),
+            Err(e) => format!(
+                "it does not parse against this build's sidecar format, so no schema_version \
+                 could be established: {e}"
+            ),
+        };
+
+        superseded.push(SupersededSidecar {
+            provider: name.clone(),
+            installed_path: path,
+            bundled_source: bundled.source_path,
+            incompatibility,
+        });
+        configs.push((name, parse_bundled(bundled)?));
     }
 
-    Ok(configs)
+    Ok(LoadedIntegrations {
+        configs,
+        superseded,
+    })
+}
+
+fn parse_bundled(bundled: &'static BundledSidecar) -> anyhow::Result<IntegrationFileConfig> {
+    serde_yaml::from_str::<IntegrationFileConfig>(bundled.yaml)
+        .with_context(|| format!("Bundled sidecar '{}' does not parse", bundled.source_path))
 }
 
 #[cfg(test)]
@@ -445,9 +703,9 @@ entities: {}
         // Non-yaml file (should be skipped)
         std::fs::write(dir.path().join("readme.txt"), "ignore me").unwrap();
 
-        let configs = load_integration_configs(dir.path()).unwrap();
-        assert_eq!(configs.len(), 1);
-        assert_eq!(configs[0].0, "test-provider");
+        let loaded = load_integration_configs(dir.path()).unwrap();
+        assert_eq!(loaded.configs.len(), 1);
+        assert_eq!(loaded.configs[0].0, "test-provider");
     }
 
     #[test]
@@ -467,8 +725,8 @@ entities: {}
 
     #[test]
     fn load_configs_missing_directory() {
-        let configs = load_integration_configs(Path::new("/nonexistent/path")).unwrap();
-        assert!(configs.is_empty());
+        let loaded = load_integration_configs(Path::new("/nonexistent/path")).unwrap();
+        assert!(loaded.configs.is_empty());
     }
 
     #[test]

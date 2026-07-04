@@ -163,9 +163,7 @@ async fn merge_entities_rewrites_aliases_and_deletes_a() {
     // Inverse is restore_canonical_after_merge with full snapshot.
     let inverse = match result.undo {
         holon_core::traits::UndoAction::Undo(op) => op,
-        holon_core::traits::UndoAction::Irreversible => {
-            panic!("merge_entities must be reversible")
-        }
+        other => panic!("merge_entities must be reversible, got {other:?}"),
     };
     assert_eq!(inverse.entity_name.as_str(), ENTITY_NAME);
     assert_eq!(inverse.op_name, "restore_canonical_after_merge");
@@ -440,6 +438,7 @@ proptest! {
     #![proptest_config(ProptestConfig {
         cases: 12,
         max_shrink_iters: 32,
+        failure_persistence: None,
         .. ProptestConfig::default()
     })]
 

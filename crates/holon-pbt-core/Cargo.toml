@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+# `workspace-hack` is the cargo-hakari feature-unification crate: every
+# member depends on it and no member references it in source, by design.
+[package.metadata.cargo-machete]
+ignored = ["workspace-hack"]
+
 [lib]
 name = "holon_pbt_core"
 path = "src/lib.rs"
@@ -12,10 +17,14 @@ path = "src/lib.rs"
 async-trait = { workspace = true }
 holon-api = { workspace = true }
 holon-macros = { workspace = true }
+holon-org-format = { workspace = true }
 proptest = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 validated = "1.0"
+nonempty-collections = "1"
+tokio = { workspace = true, features = ["time"] }
+futures = { workspace = true }
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]

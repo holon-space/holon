@@ -1,0 +1,54 @@
+Finding 1 — breadcrumb renders a red error bar whenever the caret sits in the
+creation slot ("Type here" / virtual to-create block).
+
+Environment: throwaway vault, sandboxed launch on port 8710 (Martin's live
+instance on 8520 untouched), binary built from main e3cc10fe.
+Seed: two hand-authored org pages; the page "Alpha Page" holds 5 blocks.
+
+REPRODUCTION (3 steps)
+  1. Navigate to any page in the main panel.
+  2. Click the trailing creation slot (the greyed "Type here" row).
+     Its row id is  block:__virtual:<page-id>  (RowOrigin::CreationPlaceholder).
+  3. Read the breadcrumb bar under the tab strip.
+
+OBSERVED — verbatim from the rendered UI (screenshot 02-virtual-focused.png):
+
+  Breadcrumb unavailable: breadcrumb: block block:__virtual:aaaa1111-0000-4000-8000-000000000001 has no path in block_with_path
+
+  Rendered in red (0xd9534f) across the full window width, replacing the normal
+  breadcrumb trail. It persists for as long as the caret stays in the slot.
+
+CONTROL (same session, same page)
+  Clicking a REAL block (block:aaaa1111-…-00000000000e, a nested child) renders
+  the ordinary breadcrumb with no error. So the error is specific to the
+  creation-slot row id, not to breadcrumbs generally.
+
+SIDE EFFECT worth noting — the error bar is a LAYOUT-SHIFTING element: while it
+is displayed every row in the sidebar and main panel moves down by 28px. During
+this very triage session that shift silently invalidated previously-measured
+click coordinates and produced two false observations before it was noticed.
+Anything that drives this app by coordinates must re-measure after any action
+that can seat the caret in a creation slot.
+
+MECHANISM (code read, not modified)
+  frontends/gpui/src/lib.rs:851-869
+      every focus change re-resolves the trail straight from
+      engine.ui_state().focused_block() — no RowOrigin::is_creation_placeholder
+      guard, so the virtual id is passed to the query verbatim.
+  frontends/gpui/src/breadcrumb.rs:64-85
+      resolve_breadcrumb spawns qe.breadcrumb_trail(&block_id), maps Err→String.
+  crates/holon/src/api/query_engine.rs:134-143
+      SELECT path FROM block_with_path WHERE id = '<id>'
+      missing row  ->  anyhow!("breadcrumb: block {block_id} has no path in
+      block_with_path").  A creation placeholder has no SQL row by construction
+      (crates/holon-frontend/src/row_origin.rs:36-40), so this is unavoidable.
+  frontends/gpui/src/breadcrumb.rs:104-107 (error stored) and :158-172 (render):
+      .child(format!("Breadcrumb unavailable: {err}"))
+
+  Note the doubled noun in the message ("breadcrumb: block block:__virtual:…")
+  — the query layer prefixes "breadcrumb: " and the id already carries its
+  "block:" scheme.
+
+READING: the fail-loud path is behaving exactly as written; what is wrong is
+that focusing the primary creation affordance is a completely normal state,
+not an error, so the bar cries wolf on the app's most common interaction.
