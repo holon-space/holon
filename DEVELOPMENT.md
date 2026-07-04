@@ -147,6 +147,41 @@ The summary shows coverage by file with columns:
 cargo llvm-cov clean --workspace
 ```
 
+## UI Action Latency
+
+Measure end-to-end latency of a UI action (indent / outdent / cycle task state /
+split / ...) — from the moment the action is dispatched until its result becomes
+VISIBLE (the reactive row batch is applied). Instrumentation lives under the
+`holon_latency` tracing target and is zero-cost unless that target is enabled.
+
+```bash
+just measure-latency            # 16 random cases (default)
+just measure-latency 40         # more cases -> tighter p95/max
+```
+
+This drives the REAL pipeline through the headless composed keystone
+(`general_e2e_composed_pbt`): `dispatch -> Loro commit -> LoroProjection resample
+-> Turso/matview CDC -> reactive rows`. It measures everything EXCEPT final GPU
+paint (headless — no window). Output is a per-action `count / p50 / p95 / max /
+mean` table plus per-stage cost (dispatch, projection, CDC rows) and a dominator
+line. Raw log: `/tmp/holon-latency.log`.
+
+Each stage emits one greppable line under `target="holon_latency"`:
+
+| stage          | emitted at                              | key fields                    |
+|----------------|-----------------------------------------|-------------------------------|
+| `dispatch`     | `ReactiveEngine::dispatch_intent_sync`  | `action`, `block`, `ms`       |
+| `projection`   | `LoroProjection::project` (per commit)  | `ops`, `blocks`, `snapshot_ms`, `ms` |
+| `rows`         | `LiveData::subscribe` (CDC batch apply) | `source`, `rows`, `seq`, `ms` |
+| `action_total` | composed harness `apply` (per action)   | `action`, `total_ms`          |
+
+To run against a custom log (e.g. the live app with `RUST_LOG=holon_latency=debug`):
+
+```bash
+python3 scripts/measure_latency.py /path/to/log
+some-command | python3 scripts/measure_latency.py -
+```
+
 ## Log Analysis
 
 The application logs to `/tmp/holon.log` using the `tracing` crate (format: `timestamp LEVEL module: [Component] message`).

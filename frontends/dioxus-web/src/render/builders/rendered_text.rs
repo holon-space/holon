@@ -36,9 +36,12 @@ fn RenderedTextNode(content: String, row_id: Option<String>) -> Element {
         "white-space: pre-wrap; word-break: break-word; min-height: 1.4em; padding: 1px 2px; cursor: text;"
     };
 
+    let dom_entity_id = entity_id.clone().unwrap_or_default();
     rsx! {
         div {
             "data-role": "rendered-text",
+            // Consumed by editor::focus_ring for cross-block caret nav.
+            "data-entity-id": "{dom_entity_id}",
             style: "{style}",
             onclick: move |_| {
                 let Some(eid) = entity_id.clone() else {

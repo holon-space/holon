@@ -22,7 +22,6 @@ use holon_api::{
     ApiError, Block, BlockContent, Change, ChangeOrigin, ContentType, SourceBlock, StreamPosition,
     Tags, Value,
 };
-use holon_core::fractional_index::default_sort_key;
 use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -841,7 +840,7 @@ pub fn snapshot_blocks_from_doc_settled(
     let tree = doc.get_tree(TREE_NAME);
     let mut blocks: HashMap<String, SnapshotBlock> = HashMap::new();
     let mut settled = true;
-    let mut sibling_keys: HashMap<Option<loro::TreeID>, HashMap<loro::TreeID, String>> =
+    let mut sibling_keys: HashMap<Option<loro::TreeID>, HashMap<loro::TreeID, Option<String>>> =
         HashMap::new();
     for node in tree.get_nodes(false) {
         if matches!(
@@ -869,7 +868,15 @@ pub fn snapshot_blocks_from_doc_settled(
         // Computed per sibling group so concurrently-created siblings whose
         // peers minted the SAME fi still project DISTINCT keys in Loro's true
         // child order (see `effective_sibling_sort_keys`).
-        let sort_key = sibling_keys
+        //
+        // A live node with no fractional index (inner `None`) or one absent from
+        // its parent's child list (outer `None`) is an ordering-invariant
+        // violation (ADR 0005). We MUST NOT fake a `default_sort_key()` ("A0")
+        // here: that is the exact historical fi-corruption shape and a fail-loud
+        // violation (CLAUDE.md "never fake"). Instead disclose the degraded node
+        // loudly and withhold it (like the missing-meta skip above), marking the
+        // snapshot unsettled so the caller withholds deletes.
+        let key_opt = sibling_keys
             .entry(parent_tid)
             .or_insert_with(|| {
                 let siblings = match parent_tid {
@@ -880,8 +887,19 @@ pub fn snapshot_blocks_from_doc_settled(
                 siblings.into_iter().zip(keys).collect()
             })
             .get(&node.id)
-            .cloned()
-            .unwrap_or_else(default_sort_key);
+            .cloned();
+        let Some(Some(sort_key)) = key_opt else {
+            tracing::error!(
+                block_id = %block.id,
+                ?parent_tid,
+                node = ?node.id,
+                "loro projection: live node has no fractional index (ADR 0005 \
+                 ordering-invariant violation); withholding from snapshot rather \
+                 than faking an A0 sort key"
+            );
+            settled = false;
+            continue;
+        };
         if std::env::var("HOLON_LORO_DUP_DEBUG").is_ok()
             && let Some(prev) = blocks.get(&block.id.to_string())
         {
@@ -907,20 +925,34 @@ pub fn snapshot_blocks_from_doc_settled(
 /// `.<position>` suffix in child order; `.` (0x2E) sorts below every fi hex
 /// char, so a suffixed key keeps its place relative to every distinctly-keyed
 /// sibling (ties share the exact fi string as a common prefix).
-fn effective_sibling_sort_keys(tree: &loro::LoroTree, siblings: &[loro::TreeID]) -> Vec<String> {
-    let fis: Vec<String> = siblings
+fn effective_sibling_sort_keys(
+    tree: &loro::LoroTree,
+    siblings: &[loro::TreeID],
+) -> Vec<Option<String>> {
+    // `None` marks a sibling with no fractional index — a live-node ordering
+    // invariant violation (ADR 0005). It is propagated (never defaulted to
+    // "A0") so the caller can withhold that node and fail loud.
+    let fis: Vec<Option<String>> = siblings
         .iter()
-        .map(|&tid| tree.fractional_index(tid).unwrap_or_else(default_sort_key))
+        .map(|&tid| tree.fractional_index(tid))
         .collect();
     fis.iter()
         .enumerate()
         .map(|(i, fi)| {
-            let tied = fis.iter().filter(|f| *f == fi).count() > 1;
+            let fi = fi.as_ref()?;
+            let tied = fis
+                .iter()
+                .filter(|f| f.as_deref() == Some(fi.as_str()))
+                .count()
+                > 1;
             if tied {
-                let run_pos = fis[..i].iter().filter(|f| *f == fi).count();
-                format!("{fi}.{run_pos:06x}")
+                let run_pos = fis[..i]
+                    .iter()
+                    .filter(|f| f.as_deref() == Some(fi.as_str()))
+                    .count();
+                Some(format!("{fi}.{run_pos:06x}"))
             } else {
-                fi.clone()
+                Some(fi.clone())
             }
         })
         .collect()
@@ -2344,7 +2376,7 @@ impl LoroBackend {
                 Ok(siblings
                     .iter()
                     .position(|t| *t == tree_id)
-                    .map(|i| keys[i].clone()))
+                    .and_then(|i| keys[i].clone()))
             })
             .map_err(|e| ApiError::InternalError {
                 message: format!("block_sort_key({id}): {e}"),

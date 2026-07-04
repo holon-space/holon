@@ -31,19 +31,12 @@ pub mod reference_domain_state;
 pub mod reference_state;
 pub mod retry;
 pub mod shadow_mesh;
-pub mod slice;
 pub mod sql_loro_slice;
 pub mod sql_slice;
 pub mod state_machine;
 pub mod stepper;
-pub mod sut;
-pub mod sut_capabilities;
-mod sut_check_invariants;
-mod sut_handle;
-mod sut_keybindings;
 pub mod sut_loro;
 mod sut_metrics;
-mod sut_render;
 mod sut_row_parsing;
 #[cfg(feature = "otel-testing")]
 pub mod transition_budgets;
@@ -55,6 +48,7 @@ pub mod ui_harness;
 pub mod ui_interaction;
 pub mod validation;
 pub mod value_fn_invariants;
+pub mod vm_snapshot;
 pub mod window_slice;
 
 /// Whether `id` is a ref-side SYNTHETIC placeholder the SUT replaces with a
@@ -82,7 +76,6 @@ pub use query::{TestQuery, WatchSpec};
 pub use reference_domain_state::ReferenceDomainState;
 pub use reference_state::ReferenceState;
 pub use state_machine::{ReferenceMachine, fresh_reference_state, storage_selector_for_wiring};
-pub use sut::E2ESut;
 pub use transitions::E2ETransition;
 pub use types::*;
 pub use ui_actor_state::{UIActorState, UITabState, UIUserState};

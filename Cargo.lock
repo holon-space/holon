@@ -4181,7 +4181,7 @@ dependencies = [
 [[package]]
 name = "gpui-mobile"
 version = "0.1.0"
-source = "git+https://github.com/holon-space/gpui-mobile.git?branch=holon#fa778004e88b85f6f4e1a31b5da5bd8d0c7fd0f2"
+source = "git+https://github.com/holon-space/gpui-mobile.git?branch=holon#f4cb261d864c01f1fbb860ade337dd3acbeeefad"
 dependencies = [
  "android-activity",
  "android_logger 0.15.1",
@@ -5110,25 +5110,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "holon-markdown"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "holon-api",
- "holon-core",
- "markdown",
- "proptest 1.10.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "serde",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "tracing",
- "uuid",
- "workspace-hack 0.1.0",
-]
-
-[[package]]
 name = "holon-mcp"
 version = "0.1.0"
 dependencies = [
@@ -5276,7 +5257,9 @@ dependencies = [
  "holon-api",
  "holon-core",
  "holon-engine",
+ "holon-expr",
  "rhai",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -14868,9 +14851,10 @@ dependencies = [
  "bytemuck",
  "byteorder",
  "cc",
+ "chrono",
  "clap",
  "clap_builder",
- "collections",
+ "core-graphics 0.24.0",
  "crossbeam-epoch",
  "crossbeam-utils",
  "crypto-common 0.1.7",
@@ -14880,30 +14864,26 @@ dependencies = [
  "either",
  "errno",
  "fastbloom",
+ "fastrand 2.3.0",
  "form_urlencoded",
- "futures-channel",
  "futures-executor",
  "futures-io",
- "futures-lite 2.6.1",
- "futures-sink",
- "futures-util",
  "getrandom 0.2.17",
  "getrandom 0.3.4",
- "gpui",
  "h2",
- "half",
  "hashbrown 0.16.1",
- "http_client",
  "hyper",
  "hyper-rustls",
  "hyper-util",
+ "icu_locale_core",
+ "icu_normalizer",
+ "icu_properties",
+ "icu_provider",
  "image",
- "indexmap 2.13.0",
  "instant",
- "io-surface",
- "itertools 0.12.1",
  "itertools 0.13.0",
  "libc",
+ "litemap",
  "lock_api",
  "log",
  "loro_fractional_index",
@@ -14923,8 +14903,10 @@ dependencies = [
  "opentelemetry",
  "opentelemetry_sdk",
  "parking_lot 0.12.5",
+ "percent-encoding",
  "portable-atomic",
  "postcard",
+ "potential_utf",
  "ppv-lite86",
  "proc-macro2",
  "rand 0.8.5",
@@ -14933,11 +14915,9 @@ dependencies = [
  "rand_core 0.6.4",
  "regex",
  "regex-automata 0.4.14",
- "regex-syntax 0.8.10",
  "reqwest 0.12.28",
  "reqwest 0.13.2",
  "rmcp",
- "rustc-hash 1.1.0",
  "rustix 1.1.4",
  "rustls",
  "rustls-webpki",
@@ -14949,35 +14929,38 @@ dependencies = [
  "serde_json",
  "similar",
  "slab",
- "slotmap",
  "smallvec",
- "spin 0.10.0",
+ "stable_deref_trait",
  "subtle",
  "syn 2.0.117",
  "textwrap",
  "thiserror 2.0.18",
  "time",
+ "tinystr",
  "tokio",
  "tokio-rustls",
  "tokio-stream",
  "tokio-util",
- "toml_datetime 1.0.0+spec-1.1.0",
- "toml_parser",
- "toml_writer",
  "tower 0.5.3",
  "tower-http",
  "tracing",
  "tracing-core",
  "tracing-log",
  "tracing-subscriber",
- "ttf-parser",
  "twox-hash",
  "typenum",
  "url",
  "uuid",
- "winnow 0.7.15",
+ "vergen",
+ "vergen-gitcl",
+ "vergen-lib 9.1.0",
+ "writeable",
+ "yoke",
  "zerocopy",
+ "zerofrom",
  "zeroize",
+ "zerotrie",
+ "zerovec",
 ]
 
 [[package]]

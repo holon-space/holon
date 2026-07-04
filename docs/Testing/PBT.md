@@ -54,7 +54,7 @@ Over time the reusable pieces (generators, reference state, invariants, driver t
 
 | File | Driver | Slice |
 |---|---|---|
-| `crates/holon-integration-tests/tests/general_e2e_pbt.rs` | `ReactiveEngineDriver` | Full stack: Loro + Turso + OrgFile + frontend logic (no real UI) |
+| `crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs` | `ReactiveEngineDriver` | Full stack: Loro + Turso + OrgFile + frontend logic (no real UI) |
 | `frontends/gpui/tests/gpui_ui_pbt.rs` | `GpuiUserDriver` | Same harness inside a real GPUI window with `BoundsRegistry` + xcap screenshots |
 | `frontends/tui/tests/tui_ui_pbt.rs` | `TuiUserDriver` | Same harness inside the TUI frontend |
 | `crates/holon-integration-tests/tests/cross_frontend_pbt.rs` | Multiple | Cross-frontend convergence |
@@ -80,7 +80,6 @@ These exist but each invented its own generators and (where applicable) referenc
 - `crates/holon-org-format` — ~72
 - `crates/holon-core` — ~47
 - `frontends/gpui` — ~44
-- `crates/holon-markdown` — ~39
 
 A large fraction of these pin internal seams whose contracts are covered combinatorially by PBTs. They are candidates for deletion as the narrow-PBT layer fills in.
 
@@ -103,13 +102,13 @@ Existing narrow PBTs migrate onto `holon-pbt-core` so generators don't drift. Th
 |---|---|---|---|
 | T0 | ms | Boundary/parser proptest in each crate (Unicode, BOM, CRLF, malformed SQL, …) | Pin pathological inputs PBT generators rarely synthesize |
 | T1 | seconds | Narrow PBTs sharing `holon-pbt-core` (see below) | Daily-driver discovery; failures name the subsystem |
-| T2 | minutes | `general_e2e_pbt` (headless full stack) | Integration bumper |
+| T2 | minutes | `general_e2e_composed_pbt` (headless full stack) | Integration bumper |
 | T3 | slow | `gpui_ui_pbt`, `tui_ui_pbt`, `cross_frontend_pbt` (real UI) | UI/render correctness, cross-frontend convergence |
 | T4 | offline replay | `turso-sql-replay` + `crates/holon-turso/sql/regressions/*.sql` | Frozen regression gates for upstream bugs |
 
 ### Six narrow PBTs to add (T1)
 
-These cover bug classes that today only surface after minutes in `general_e2e_pbt`.
+These cover bug classes that today only surface after minutes in `general_e2e_composed_pbt`.
 
 1. **BlockCellRegistry routing PBT** — generate cell-write sequences (content/parent/tags/sort_key/marks) against an in-memory Loro + SQL pair, assert projection convergence + EventOrigin routing.
 2. **SqlOperationProvider + event-bus PBT** — generate operation streams, assert SQL state + `Event::routing_doc_uri` round-trip + inbound-runtime gate behaviour. No Loro, no OrgFile.

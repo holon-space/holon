@@ -442,6 +442,19 @@ pub enum StateCategory {
     Done,
 }
 
+impl StateCategory {
+    /// Canonical stored spelling of the `task_state_category` sidecar
+    /// property ("active" / "done"). One source of truth for every writer
+    /// (org parse boundary, Loro `set_state`, SQL `cycle_task_state`) so the
+    /// stored strings can never drift apart.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Done => "done",
+        }
+    }
+}
+
 /// Well-known done keywords (everything after `|` in org `#+TODO:` config).
 const DEFAULT_DONE_KEYWORDS: &[&str] = &["DONE", "CANCELLED", "CLOSED"];
 
@@ -492,6 +505,14 @@ impl TaskState {
             StateCategory::Active
         };
         Self::new(keyword, category)
+    }
+
+    /// The `task_state_category` sidecar value for a BARE keyword write
+    /// arriving at a storage boundary (widget click intent, `set_state`,
+    /// `cycle_task_state`) — i.e. one with no org `#+TODO:` config in hand.
+    /// Uses the default done-keyword list, exactly like [`Self::from_keyword`].
+    pub fn category_str_for_keyword(keyword: &str) -> &'static str {
+        Self::from_keyword(keyword).category.as_str()
     }
 
     pub fn is_done(&self) -> bool {

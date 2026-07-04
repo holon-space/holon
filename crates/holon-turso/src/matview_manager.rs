@@ -81,12 +81,93 @@ pub async fn reconcile_named_view(
             .await?;
     }
 
-    db_handle.execute_ddl(&create_sql).await?;
-    tracing::info!(
-        "[reconcile_named_view] View '{}' created/updated",
-        view_name
+    // Idempotent-or-recovering create. The `sqlite_master` probe above only sees
+    // rows of `type='view'`; a crash mid-DDL can leave the matview's backing
+    // table and/or its `__turso_internal_dbsp_state_*` tables behind WITHOUT a
+    // committed view row. A plain `CREATE MATERIALIZED VIEW` then dies with
+    // "table <name> already exists" and the app boot-loops (on Android the only
+    // escape was `pm clear` = user data loss). Recover instead: clean the
+    // orphaned DBSP state, `CREATE ... IF NOT EXISTS`, and on a residual
+    // collision drop the orphaned backing objects and retry ONCE. This is
+    // data-safe: a matview is a pure projection over its base tables (e.g.
+    // `block` over `block_raw`), which are never touched here, so the source of
+    // truth survives. If the retry still fails we surface a clear error rather
+    // than looping forever.
+    cleanup_orphaned_dbsp_state(db_handle, view_name).await?;
+    let create_idempotent = format!(
+        "CREATE MATERIALIZED VIEW IF NOT EXISTS {} AS {}",
+        view_name, select_sql
     );
-    Ok(true)
+    match db_handle.execute_ddl(&create_idempotent).await {
+        Ok(()) => {
+            tracing::info!(
+                "[reconcile_named_view] View '{}' created/updated",
+                view_name
+            );
+            Ok(true)
+        }
+        Err(e) if e.to_string().contains("already exists") => {
+            tracing::warn!(
+                "[reconcile_named_view] View '{view_name}' collided with orphaned \
+                 backing objects left by a prior crash ({e}); dropping the derived \
+                 matview + orphaned DBSP state and recreating (base tables are \
+                 untouched — no data loss)"
+            );
+            db_handle
+                .execute_ddl(&format!("DROP VIEW IF EXISTS {}", view_name))
+                .await?;
+            db_handle
+                .execute_ddl(&format!("DROP TABLE IF EXISTS {}", view_name))
+                .await?;
+            cleanup_orphaned_dbsp_state(db_handle, view_name).await?;
+            db_handle
+                .execute_ddl(&create_idempotent)
+                .await
+                .map_err(|e2| {
+                    anyhow::anyhow!(
+                        "reconcile_named_view: matview '{view_name}' could not be \
+                         (re)created even after clearing orphaned backing objects \
+                         left by a prior crash: {e2}. The schema is genuinely \
+                         incompatible; failing loudly instead of boot-looping. Base \
+                         tables are intact — inspect the DB rather than clearing \
+                         user data."
+                    )
+                })?;
+            tracing::info!(
+                "[reconcile_named_view] View '{}' recovered and recreated",
+                view_name
+            );
+            Ok(true)
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Drop the `__turso_internal_dbsp_state_v*_{view_name}` tables left orphaned by
+/// a crash mid-DDL. These are Turso IVM internal state, NOT user data — the
+/// matview is rebuilt from its base tables on recreate. Mirrors
+/// [`MatviewManager::cleanup_orphaned_dbsp_tables`] but as a free function so
+/// the boot-time [`reconcile_named_view`] (which has no `MatviewManager`) can
+/// share the recovery path.
+async fn cleanup_orphaned_dbsp_state(db_handle: &DbHandle, view_name: &str) -> Result<()> {
+    let pattern = format!("__turso_internal_dbsp_state_v%_{}", view_name);
+    let check_sql = format!(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '{}'",
+        pattern
+    );
+    let orphaned = db_handle.query(&check_sql, HashMap::new()).await?;
+    for row in orphaned {
+        if let Some(Value::String(table_name)) = row.get("name") {
+            tracing::debug!(
+                "[reconcile_named_view] Cleaning orphaned DBSP state table: {}",
+                table_name
+            );
+            db_handle
+                .execute_ddl(&format!("DROP TABLE IF EXISTS {}", table_name))
+                .await?;
+        }
+    }
+    Ok(())
 }
 
 // MatviewHook (the FDW-primed callback) is a storage-agnostic trait; it lives
@@ -271,10 +352,26 @@ impl MatviewManager {
                                 }
                             }
                             Err(broadcast::error::RecvError::Lagged(n)) => {
-                                tracing::warn!(
-                                    "[MatviewManager] CDC demux lagged by {} messages",
-                                    n
+                                // A broadcast lag means the demux missed `n` CDC
+                                // batches — across ALL views, since the channel
+                                // is shared. Every subscriber's incremental
+                                // state is now potentially wrong (lost rows /
+                                // ghost rows), exactly like the try_send Full
+                                // case above but for every open stream. Warn-and-
+                                // continue would silently corrupt them. Force-
+                                // close every subscriber stream (drop the senders)
+                                // so each consumer sees end-of-stream and must
+                                // resubscribe via watch(), re-querying initial
+                                // rows to recover a consistent baseline.
+                                tracing::error!(
+                                    "[MatviewManager] CDC demux lagged by {} messages; \
+                                     closing all {} subscriber stream(s) (delivering a \
+                                     partial delta stream would corrupt incremental \
+                                     consumers)",
+                                    n,
+                                    subscribers.values().map(|s| s.len()).sum::<usize>()
                                 );
+                                subscribers.clear();
                             }
                             Err(broadcast::error::RecvError::Closed) => {
                                 break;
@@ -412,10 +509,50 @@ impl MatviewManager {
             requires
         );
 
-        self.db_handle
-            .execute_ddl_with_deps(&create_view_sql, provides, requires, priority::DDL_MATVIEW)
-            .await
-            .context("Failed to create materialized view")?;
+        let mut last_error = None;
+        let mut created = false;
+        for attempt in 0..3 {
+            match self
+                .db_handle
+                .execute_ddl_with_deps(
+                    &create_view_sql,
+                    provides.clone(),
+                    requires.clone(),
+                    priority::DDL_MATVIEW,
+                )
+                .await
+            {
+                Ok(_) => {
+                    created = true;
+                    break;
+                }
+                Err(e) => {
+                    let err_str = format!("{:?}", e);
+                    let is_retryable = err_str.contains("database is locked")
+                        || err_str.contains("Database schema changed");
+                    if is_retryable && attempt < 2 {
+                        tracing::debug!(
+                            "[MatviewManager] ensure_view: retry {} for view {}: {}",
+                            attempt + 1,
+                            view_name,
+                            err_str
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(50 * (1 << attempt)))
+                            .await;
+                        last_error = Some(e);
+                    } else {
+                        last_error = Some(e);
+                        break;
+                    }
+                }
+            }
+        }
+        if !created {
+            let e = last_error.expect("loop exits without success only after recording an error");
+            return Err(e).with_context(|| {
+                format!("Failed to create materialized view {view_name}: {create_view_sql}")
+            });
+        }
 
         self.ddl_creates.fetch_add(1, Ordering::Relaxed);
         self.mark_view_known(&view_name).await;
@@ -667,5 +804,83 @@ mod tests {
         let v1 = "CREATE MATERIALIZED VIEW foo AS SELECT id FROM block";
         let v2 = "CREATE MATERIALIZED VIEW foo AS SELECT id, content FROM block";
         assert_ne!(normalize_view_sql(v1), normalize_view_sql(v2));
+    }
+
+    /// Boot-time idempotency + crash recovery for `reconcile_named_view`.
+    ///
+    /// 1. First reconcile creates the matview.
+    /// 2. A second reconcile with the SAME SELECT is a no-op (`Ok(false)`) — the
+    ///    happy path every restart takes; it must never error with "already
+    ///    exists" (the stale-DB boot-loop bug).
+    /// 3. With an orphaned `__turso_internal_dbsp_state_*` table injected (the
+    ///    residue a crash mid-DDL leaves behind) a definition change still
+    ///    reconciles cleanly instead of boot-looping. The base table `src` — the
+    ///    source of truth — is never dropped.
+    #[tokio::test]
+    async fn reconcile_named_view_is_idempotent_and_recovers_from_orphaned_state() {
+        use crate::turso::TursoBackend;
+
+        let (_backend, handle) = TursoBackend::new_in_memory()
+            .await
+            .expect("in-memory backend");
+        handle
+            .execute_ddl("CREATE TABLE IF NOT EXISTS src (id TEXT PRIMARY KEY, v TEXT)")
+            .await
+            .expect("create base table");
+        handle
+            .transition_to_ready()
+            .await
+            .expect("transition to ready");
+
+        // 1. First boot creates the view.
+        let created = reconcile_named_view(&handle, "src_view", "SELECT id, v FROM src")
+            .await
+            .expect("first reconcile");
+        assert!(created, "first reconcile should create the view");
+
+        // 2. Second boot with identical SELECT is a no-op — the regression guard
+        //    against "table src_view already exists" boot-looping on restart.
+        let created_again = reconcile_named_view(&handle, "src_view", "SELECT id, v FROM src")
+            .await
+            .expect("second reconcile must not error on an existing matview");
+        assert!(!created_again, "identical reconcile should be a no-op");
+
+        // 3. Simulate the crash residue: a leftover object occupying the
+        //    matview's NAME with no committed `type='view'` row (what makes a
+        //    plain `CREATE MATERIALIZED VIEW` die with "already exists" and
+        //    boot-loop). A plain table standing on the name reproduces the
+        //    collision; `reconcile_named_view` must recover, not fail.
+        handle
+            .execute_ddl("CREATE TABLE IF NOT EXISTS orphan_view (id TEXT)")
+            .await
+            .expect("inject orphaned backing table on the matview name");
+        let recovered = reconcile_named_view(&handle, "orphan_view", "SELECT id FROM src")
+            .await
+            .expect("reconcile must recover from a name collision left by a crash");
+        assert!(recovered, "collision recovery should (re)create the view");
+        let as_view = handle
+            .query(
+                "SELECT name FROM sqlite_master WHERE type='view' AND name='orphan_view'",
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("query view presence after recovery");
+        assert_eq!(as_view.len(), 1, "orphan_view must now be a real matview");
+
+        // Base table survived the whole dance — no user data loss.
+        let rows = handle
+            .query(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='src'",
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("query base table presence");
+        assert_eq!(
+            rows.len(),
+            1,
+            "base table `src` must survive matview recovery"
+        );
+
+        handle.shutdown().await.expect("shutdown");
     }
 }

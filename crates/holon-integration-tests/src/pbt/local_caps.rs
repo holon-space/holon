@@ -81,6 +81,12 @@ pub trait SutAppLifecycle {
     );
     async fn simulate_restart(&self);
     async fn create_document(&self, file_name: &str);
+    /// Inverse of `create_document`: remove the org file from disk through the
+    /// production `FileSystem::remove` seam and wait for the page block to
+    /// disappear from the block set — panicking on timeout (a timeout means
+    /// prod never deletes blocks on file removal, a bug this transition
+    /// exists to surface).
+    async fn delete_document(&self, file_name: &str);
     async fn concurrent_schema_init(&self);
     /// Spec 0008 §4.2(b): with the app already running, attempt a SECOND
     /// in-process boot over the SAME vault/db/config paths but with the

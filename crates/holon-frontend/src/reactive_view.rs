@@ -129,22 +129,25 @@ impl VirtualChildRowProvider {
     fn new(inner: Arc<dyn ReactiveRowProvider>, slot: &VirtualChildSlot) -> Self {
         use holon_api::Value;
 
-        // Must match `parse_virtual_id` (view_event_handler.rs) and
-        // `virtual_child_row` — the `:__virtual:` infix is what the editor's
-        // submit handler recognises to materialize a real entity on first edit.
-        let virtual_id = format!(
-            "{}:__virtual:{}",
-            slot.parent_id.scheme(),
-            slot.parent_id.id()
-        );
+        // The synthetic `:__virtual:` id the editor's submit handler recognises
+        // (`RowOrigin::from_id` in `view_event_handler`) to materialize a real
+        // entity on first edit. Single source: `RowOrigin::creation_placeholder_id`.
+        let virtual_id = crate::row_origin::RowOrigin::creation_placeholder_id(&slot.parent_id);
         let mut row = std::collections::HashMap::new();
         row.insert("id".to_string(), Value::String(virtual_id));
         row.insert(
             "parent_id".to_string(),
             Value::String(slot.parent_id.as_str().to_string()),
         );
-        // sort_key MAX so it appears last in trees
-        row.insert("sort_key".to_string(), Value::Float(f64::MAX));
+        // Max-scalar string sentinel so the slot sorts last: `sort_value`
+        // passes strings through, and U+10FFFF sorts lexicographically after
+        // every FractionalIndex hex key and zero-padded numeric encoding
+        // (a float would encode via IEEE bits to a leading-'1' decimal that
+        // sorts BEFORE hex keys).
+        row.insert(
+            "sort_key".to_string(),
+            Value::String("\u{10FFFF}".to_string()),
+        );
         for (k, v) in &slot.defaults {
             row.insert(k.clone(), v.clone());
         }
@@ -198,6 +201,136 @@ impl ReactiveRowProvider for VirtualChildRowProvider {
     }
 }
 
+/// Derive a display-placed occurrence's `DataRow` from the canonical block's
+/// live row. Keeps the `id` column = the canonical id (so `view_event_handler`
+/// routes edits to canonical — ADR 0015 rule 3), overrides `parent_id` to the
+/// display-local anchor (display-only placement — rule 1), and stamps a sentinel
+/// `sort_key` so the occurrence sorts last (mirrors the creation-slot
+/// convention). Content and every other field are copied from the live source,
+/// so the placed row tracks the canonical block by construction.
+// Proven by `tests::placed_row_provider_injects_live_second_occurrence`; wired
+// into the collection provider assembly in Increment B step-6 (removes this allow).
+#[allow(dead_code)]
+fn placed_occurrence_row(
+    source: &Arc<holon_api::widget_spec::DataRow>,
+    anchor: &EntityUri,
+) -> Arc<holon_api::widget_spec::DataRow> {
+    use holon_api::Value;
+    let mut row = (**source).clone();
+    row.insert(
+        "parent_id".to_string(),
+        Value::String(anchor.as_str().to_string()),
+    );
+    row.insert(
+        "sort_key".to_string(),
+        Value::String("\u{10FFFF}".to_string()),
+    );
+    Arc::new(row)
+}
+
+/// Injects a display-placed SECOND occurrence of an existing block as a suffix
+/// under an anchor collection (ADR 0015 P2, Increment B). Same wrapper shape as
+/// [`VirtualChildRowProvider`], but where the creation slot appends a **static**
+/// synthetic row, this appends a **live** row DERIVED FROM the canonical block's
+/// own row cell (`ReactiveRowSet::row_mutable`). A write to the canonical block
+/// re-emits the suffix, so the two occurrences stay converged **by
+/// construction** — the shared-cell model (ADR 0015 §1a), no copy and no
+/// reconciliation.
+///
+/// Increment B "smallest first step": with a bare-`EntityUri` suffix key this is
+/// safe only when the anchor collection does **not** already contain the placed
+/// id (no driver-key collision). The `(EntityUri, Occurrence)` item-key widening
+/// (step 3) is what unlocks the same-collection case.
+// Proven by `tests::placed_row_provider_injects_live_second_occurrence`; wired
+// into the collection provider assembly in Increment B step-6 (removes this allow).
+#[allow(dead_code)]
+pub(crate) struct PlacedRowProvider {
+    inner: Arc<dyn ReactiveRowProvider>,
+    /// The canonical block being display-placed; the placed row's `id` stays
+    /// this, so edits route to canonical.
+    placed_id: EntityUri,
+    /// Display-local anchor = the placed row's `parent_id` (never merged).
+    anchor: EntityUri,
+    /// The canonical block's LIVE row cell (from `row_mutable` on its own query
+    /// rowset). Sole content source for the placed occurrence.
+    source: futures_signals::signal::ReadOnlyMutable<Arc<holon_api::widget_spec::DataRow>>,
+}
+
+impl PlacedRowProvider {
+    #[allow(dead_code)]
+    pub(crate) fn new(
+        inner: Arc<dyn ReactiveRowProvider>,
+        placed_id: EntityUri,
+        anchor: EntityUri,
+        source: futures_signals::signal::ReadOnlyMutable<Arc<holon_api::widget_spec::DataRow>>,
+    ) -> Self {
+        Self {
+            inner,
+            placed_id,
+            anchor,
+            source,
+        }
+    }
+}
+
+impl ReactiveRowProvider for PlacedRowProvider {
+    fn rows_snapshot(&self) -> Vec<Arc<holon_api::widget_spec::DataRow>> {
+        let mut rows = self.inner.rows_snapshot();
+        rows.push(placed_occurrence_row(
+            &self.source.get_cloned(),
+            &self.anchor,
+        ));
+        rows
+    }
+
+    fn rows_signal_vec(
+        &self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn futures_signals::signal_vec::SignalVec<Item = Arc<holon_api::widget_spec::DataRow>>
+                + Send,
+        >,
+    > {
+        use futures_signals::signal::SignalExt;
+        use futures_signals::signal_vec::SignalVecExt;
+        let anchor = self.anchor.clone();
+        // LIVE suffix: re-derive whenever the canonical row cell changes.
+        let suffix = self
+            .source
+            .signal_cloned()
+            .map(move |src| vec![placed_occurrence_row(&src, &anchor)])
+            .to_signal_vec();
+        Box::pin(self.inner.rows_signal_vec().chain(suffix))
+    }
+
+    fn keyed_rows_signal_vec(
+        &self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn futures_signals::signal_vec::SignalVec<
+                    Item = (EntityUri, Arc<holon_api::widget_spec::DataRow>),
+                > + Send,
+        >,
+    > {
+        use futures_signals::signal::SignalExt;
+        use futures_signals::signal_vec::SignalVecExt;
+        let anchor = self.anchor.clone();
+        // Bare-id suffix key (smallest-first-step). Step 3 widens the item key to
+        // `(EntityUri, Occurrence)` to unlock the same-collection case.
+        let key = self.placed_id.clone();
+        let suffix = self
+            .source
+            .signal_cloned()
+            .map(move |src| vec![(key.clone(), placed_occurrence_row(&src, &anchor))])
+            .to_signal_vec();
+        Box::pin(self.inner.keyed_rows_signal_vec().chain(suffix))
+    }
+
+    fn cache_identity(&self) -> u64 {
+        self.inner.cache_identity()
+    }
+}
+
 /// Configuration for creating a collection ReactiveView.
 pub struct CollectionConfig {
     pub layout: CollectionVariant,
@@ -212,10 +345,11 @@ pub struct CollectionConfig {
     /// into the row's `ctx.flags`. Empty = no overrides applied. See
     /// `crate::row_pipeline` for the per-row pipeline.
     ///
-    /// Streaming rules currently see only the row's own columns —
-    /// position/count/is_first/is_last are NOT injected (the driver
-    /// receives rows incrementally via VecDiff and the collection size
-    /// shifts with each event).
+    /// Streaming rules see the row's own columns plus, on the TREE driver,
+    /// the `level`/`depth` positional keys (computed from the rowset's
+    /// parent chain). position/count/is_first/is_last are NOT injected
+    /// (the driver receives rows incrementally via VecDiff and the
+    /// collection size shifts with each event).
     pub rules: Vec<holon_api::render_types::RuleSpec>,
 }
 
@@ -847,38 +981,75 @@ impl ReactiveView {
             })
         };
 
+        // Interprets a row at a known tree depth. Injects the same `level` /
+        // `depth` positional keys as the static tree path so rules like
+        // `eq("level", 0)` fire on the streaming path too; the returned
+        // override map is threaded into the TreeItem wrapper by MutableTree.
+        // The virtual creation-slot row skips rules to mirror the static
+        // path, which appends the slot after rule evaluation.
         let interpret_row: Arc<
-            dyn Fn(Arc<holon_api::widget_spec::DataRow>) -> Arc<ReactiveViewModel> + Send + Sync,
+            dyn Fn(
+                    Arc<holon_api::widget_spec::DataRow>,
+                    usize,
+                ) -> (Arc<ReactiveViewModel>, HashMap<String, holon_api::Value>)
+                + Send
+                + Sync,
         > = {
             let svc = services.clone();
             let space = space_handle.clone();
             let nif = node_interpret_fn;
             let ds = data_source.clone();
             let rules = config_rules;
-            Arc::new(move |row: Arc<holon_api::widget_spec::DataRow>| {
-                let parent_space = space.get_cloned();
-                let handle =
-                    holon_api::data_row_entity_uri(&row).and_then(|uri| ds.row_mutable(&uri));
-                let ctx = row_render_context(row.clone(), handle, svc.as_ref(), parent_space);
-                // FU-6: apply `rules:` per-row. Streaming has no count/is_last,
-                // so positional is empty — predicates can still match on row
-                // columns (e.g. `eq("status", "done")`). For position-aware
-                // rules, use the static arm or a dedicated streaming-position
-                // tracker (future work).
-                let positional = std::collections::HashMap::new();
-                let svc_for_interpret = svc.clone();
-                let (mut node, _) = crate::row_pipeline::apply_rules_and_interpret_with_ctx(
-                    ctx,
-                    &tmpl,
-                    &rules,
-                    &row,
-                    positional,
-                    move |expr, c| svc_for_interpret.interpret(expr, c),
-                );
-                node.interpret_fn = Some(nif.clone());
-                Arc::new(node)
-            })
+            Arc::new(
+                move |row: Arc<holon_api::widget_spec::DataRow>, depth: usize| {
+                    let parent_space = space.get_cloned();
+                    let handle =
+                        holon_api::data_row_entity_uri(&row).and_then(|uri| ds.row_mutable(&uri));
+                    let ctx = row_render_context(row.clone(), handle, svc.as_ref(), parent_space);
+                    let is_virtual =
+                        crate::row_origin::RowOrigin::from_row(&row).is_creation_placeholder();
+                    let active_rules: &[holon_api::render_types::RuleSpec] =
+                        if is_virtual { &[] } else { &rules };
+                    let positional = HashMap::from([
+                        ("level".to_string(), holon_api::Value::Integer(depth as i64)),
+                        ("depth".to_string(), holon_api::Value::Integer(depth as i64)),
+                    ]);
+                    let svc_for_interpret = svc.clone();
+                    let (mut node, overrides) =
+                        crate::row_pipeline::apply_rules_and_interpret_with_ctx(
+                            ctx,
+                            &tmpl,
+                            active_rules,
+                            &row,
+                            positional,
+                            move |expr, c| svc_for_interpret.interpret(expr, c),
+                        );
+                    node.interpret_fn = Some(nif.clone());
+                    (Arc::new(node), overrides)
+                },
+            )
         };
+
+        // Depth computed the same way `MutableTree::insert` resolves
+        // parenthood: walk stated parents while they are present in the
+        // rowset. Bounded so a transient parent cycle can't hang the driver.
+        fn rowset_depth(
+            row_map: &HashMap<EntityUri, Arc<holon_api::widget_spec::DataRow>>,
+            row: &holon_api::widget_spec::DataRow,
+        ) -> usize {
+            let mut depth = 0usize;
+            let mut cur = holon_api::widget_spec::data_row_parent_id(row);
+            while depth <= row_map.len() {
+                match cur.as_ref().and_then(|p| row_map.get(p)) {
+                    Some(parent_row) => {
+                        depth += 1;
+                        cur = holon_api::widget_spec::data_row_parent_id(parent_row);
+                    }
+                    None => break,
+                }
+            }
+            depth
+        }
 
         let get_sort_key: Arc<dyn Fn(&holon_api::widget_spec::DataRow) -> String + Send + Sync> = {
             Arc::new(move |row: &holon_api::widget_spec::DataRow| -> String {
@@ -899,18 +1070,54 @@ impl ReactiveView {
                 let mut tree = tree.lock().unwrap();
                 let mut key_index = key_index.lock().unwrap();
                 let mut row_map = row_map.lock().unwrap();
+                // Adopted orphans changed depth, so their interpreted widgets
+                // (depth-dependent rule outcomes baked in) are stale —
+                // re-interpret them at their post-adoption depth.
+                let reinterpret_adopted = |tree: &mut crate::mutable_tree::MutableTree,
+                                           row_map: &HashMap<
+                    EntityUri,
+                    Arc<holon_api::widget_spec::DataRow>,
+                >,
+                                           adopted: Vec<EntityUri>,
+                                           interpret_row: &dyn Fn(
+                    Arc<holon_api::widget_spec::DataRow>,
+                    usize,
+                ) -> (
+                    Arc<ReactiveViewModel>,
+                    HashMap<String, holon_api::Value>,
+                ),
+                                           get_sort_key: &dyn Fn(
+                    &holon_api::widget_spec::DataRow,
+                ) -> String| {
+                    for id in adopted {
+                        let Some(row) = row_map.get(&id).cloned() else {
+                            continue;
+                        };
+                        let parent = extract_parent_id(&row);
+                        let sk = get_sort_key(&row);
+                        let depth = rowset_depth(row_map, &row);
+                        let (w, ov) = interpret_row(row, depth);
+                        tree.update(&id, parent, sk, w, ov);
+                    }
+                };
                 match diff {
                     VecDiff::Replace { values } => {
                         row_map.clear();
                         *key_index = values.iter().map(|(k, _)| k.clone()).collect();
+                        // Fill row_map first: rowset_depth needs the FULL
+                        // rowset to resolve parent chains regardless of row
+                        // arrival order within the batch.
+                        for (k, row) in &values {
+                            row_map.insert(k.clone(), row.clone());
+                        }
                         let entries: Vec<_> = values
                             .into_iter()
                             .map(|(k, row)| {
-                                row_map.insert(k.clone(), row.clone());
                                 let parent = extract_parent_id(&row);
                                 let sk = get_sort_key(&row);
-                                let w = interpret_row(row);
-                                (k, parent, sk, w)
+                                let depth = rowset_depth(&row_map, &row);
+                                let (w, ov) = interpret_row(row, depth);
+                                (k, parent, sk, w, ov)
                             })
                             .collect();
                         tree.rebuild(entries);
@@ -923,8 +1130,16 @@ impl ReactiveView {
                         key_index.insert(index, key.clone());
                         let parent = extract_parent_id(&row);
                         let sk = get_sort_key(&row);
-                        let w = interpret_row(row);
-                        tree.insert(key, parent, sk, w);
+                        let depth = rowset_depth(&row_map, &row);
+                        let (w, ov) = interpret_row(row, depth);
+                        let adopted = tree.insert(key, parent, sk, w, ov);
+                        reinterpret_adopted(
+                            &mut tree,
+                            &row_map,
+                            adopted,
+                            interpret_row.as_ref(),
+                            get_sort_key.as_ref(),
+                        );
                     }
                     VecDiff::UpdateAt {
                         index: _,
@@ -933,8 +1148,9 @@ impl ReactiveView {
                         row_map.insert(key.clone(), row.clone());
                         let parent = extract_parent_id(&row);
                         let sk = get_sort_key(&row);
-                        let w = interpret_row(row);
-                        tree.update(&key, parent, sk, w);
+                        let depth = rowset_depth(&row_map, &row);
+                        let (w, ov) = interpret_row(row, depth);
+                        tree.update(&key, parent, sk, w, ov);
                     }
                     VecDiff::RemoveAt { index } => {
                         let key = key_index.remove(index);
@@ -946,8 +1162,16 @@ impl ReactiveView {
                         key_index.push(key.clone());
                         let parent = extract_parent_id(&row);
                         let sk = get_sort_key(&row);
-                        let w = interpret_row(row);
-                        tree.insert(key, parent, sk, w);
+                        let depth = rowset_depth(&row_map, &row);
+                        let (w, ov) = interpret_row(row, depth);
+                        let adopted = tree.insert(key, parent, sk, w, ov);
+                        reinterpret_adopted(
+                            &mut tree,
+                            &row_map,
+                            adopted,
+                            interpret_row.as_ref(),
+                            get_sort_key.as_ref(),
+                        );
                     }
                     VecDiff::Pop {} => {
                         if let Some(key) = key_index.pop() {
@@ -1012,6 +1236,7 @@ impl ReactiveView {
                                 Option<EntityUri>,
                                 String,
                                 Arc<ReactiveViewModel>,
+                                HashMap<String, holon_api::Value>,
                             )> = {
                                 let rm = row_map.lock().unwrap();
                                 affected
@@ -1020,16 +1245,17 @@ impl ReactiveView {
                                         rm.get(uri).cloned().map(|row| {
                                             let parent = extract_parent_id(&row);
                                             let sk = get_sort_key(&row);
-                                            let w = interpret_row(row);
-                                            (uri.clone(), parent, sk, w)
+                                            let depth = rowset_depth(&rm, &row);
+                                            let (w, ov) = interpret_row(row, depth);
+                                            (uri.clone(), parent, sk, w, ov)
                                         })
                                     })
                                     .collect()
                             };
                             if !updates.is_empty() {
                                 let mut t = tree.lock().unwrap();
-                                for (id, parent, sk, w) in updates {
-                                    t.update(&id, parent, sk, w);
+                                for (id, parent, sk, w, ov) in updates {
+                                    t.update(&id, parent, sk, w, ov);
                                 }
                             }
                             last_focus = new_focus;
@@ -1783,6 +2009,97 @@ mod tests {
         }
     }
 
+    /// Simulate production sibling-key minting. Each position applies a
+    /// `gen_key_between` against the current neighbours — exactly the call
+    /// production makes when a real child is inserted between two siblings.
+    /// Repeated insertions at the same slot grow longer hex keys ("7F80", …),
+    /// tail insertions mint after-keys, giving a diverse, prod-faithful set.
+    fn mint_fractional_keys(positions: &[usize]) -> Vec<String> {
+        use holon_core::fractional_index::gen_key_between;
+        let mut keys: Vec<String> = Vec::new();
+        for &raw_pos in positions {
+            let pos = raw_pos % (keys.len() + 1);
+            let prev = if pos == 0 {
+                None
+            } else {
+                Some(keys[pos - 1].as_str())
+            };
+            let next = keys.get(pos).map(|s| s.as_str());
+            let k = gen_key_between(prev, next).expect("gen_key_between mints a valid key"); // ALLOW(order_minting): test-only reproduction of the order owner's sibling-key minting to prove the virtual-slot sort contract
+            keys.insert(pos, k);
+        }
+        keys
+    }
+
+    proptest::proptest! {
+        /// Sort-order contract between the virtual-child creation slot and real
+        /// `FractionalIndex` sibling keys.
+        ///
+        /// `VirtualChildRowProvider` appends its creation row with
+        /// `sort_key = Value::Float(f64::MAX)` intending "sorts last". But the
+        /// tree driver (`get_sort_key` → `mutable_tree::SortedChild`) orders
+        /// siblings by the *string* produced by
+        /// `holon_api::render_eval::sort_value`, which encodes a float via its
+        /// IEEE-754 bits as a 20-digit decimal (f64::MAX → "18442240474082181119",
+        /// leading '1'). Real rows carry raw hex `FractionalIndex` strings
+        /// ("A0", "7F80", "80", …) whose leading bytes are '2'..'F'. Since
+        /// '1' < '2'..'F' lexicographically, the virtual row sorts FIRST, not
+        /// last — the creation slot jumps to the top of every child list.
+        ///
+        /// This test asserts the intended contract (virtual sorts AFTER any
+        /// real key) and is RED until the sentinel-key fix lands.
+        /// See devlog/2026-07-05-011500-gpui-dogfood-triage.md issue #4.
+        #[test]
+        fn virtual_child_sort_key_sorts_after_any_fractional_index_key(
+            positions in proptest::collection::vec(0usize..8usize, 1..40),
+        ) {
+            use holon_api::render_eval::sort_value;
+
+            // Pull the virtual row's sort_key from an ACTUAL constructed
+            // provider so the test tracks the real production value (not a
+            // hand-copied f64::MAX), then encode it through the SAME code path
+            // the tree driver uses (`get_sort_key` → `sort_value`).
+            let slot = VirtualChildSlot {
+                defaults: HashMap::new(),
+                parent_id: EntityUri::block("parent-under-test"),
+            };
+            let inner: Arc<dyn ReactiveRowProvider> = Arc::new(ReactiveRowSet::new());
+            let provider = VirtualChildRowProvider::new(inner, &slot);
+            let virtual_encoded = sort_value(provider.virtual_row.get("sort_key"));
+
+            let mut keys = mint_fractional_keys(&positions);
+            // Always include the column default and an after-chain (highest keys
+            // production mints), the hardest case for "sorts last" to satisfy.
+            keys.push(holon_core::fractional_index::default_sort_key());
+            let mut hi = holon_core::fractional_index::default_sort_key();
+            for _ in 0..5 {
+                hi = holon_core::fractional_index::gen_key_after(&hi).expect("gen_key_after mints a valid key"); // ALLOW(order_minting): test-only reproduction of the order owner's after-key minting to prove the virtual-slot sort contract
+                keys.push(hi.clone());
+            }
+
+            for k in &keys {
+                // SortedChild::cmp orders by `sort_key.cmp(other.sort_key)` first;
+                // the id tiebreak only fires on equal keys, which never happens
+                // here — so this String cmp IS the decisive sibling comparison.
+                let real_encoded = sort_value(Some(&Value::String(k.clone())));
+                let ord = virtual_encoded.cmp(&real_encoded);
+                proptest::prop_assert_eq!(
+                    ord,
+                    std::cmp::Ordering::Greater,
+                    "virtual creation-slot sort_key {:?} must sort AFTER real \
+                     FractionalIndex key {:?} (encoded {:?}), but it sorts {:?}. \
+                     f64::MAX encodes to a leading-'1' decimal that loses the \
+                     lexicographic race against hex keys — the virtual row jumps \
+                     to the TOP of the child list. RED until the sentinel fix lands.",
+                    virtual_encoded,
+                    k,
+                    real_encoded,
+                    ord
+                );
+            }
+        }
+    }
+
     /// Reproducer: a single CDC field update on one row should NOT produce a
     /// full `VecDiff::Replace` with all N rows. The flat driver converts
     /// fine-grained diffs to `to_signal_cloned()` which collapses every
@@ -1889,5 +2206,125 @@ mod tests {
         );
 
         view.stop();
+    }
+
+    /// Increment B smallest-first-step (also validates Increment G's premise): a
+    /// [`PlacedRowProvider`] injects a LIVE second occurrence of block `L` under an
+    /// anchor collection that does not contain `L`, DERIVED FROM `L`'s own row cell
+    /// — so a write to the canonical block propagates to the placed occurrence with
+    /// no copy (the shared-cell model, ADR 0015 §1a). Proves the wrapper-injection
+    /// mechanism and the data half of the identity reframe without touching the
+    /// store.
+    #[tokio::test]
+    async fn placed_row_provider_injects_live_second_occurrence() {
+        use futures::StreamExt;
+        use futures_signals::signal::{Mutable, SignalExt};
+        use futures_signals::signal_vec::SignalVecExt;
+
+        // A minimal anchor-collection provider holding ONE unrelated row (it does
+        // NOT contain L → the bare-id suffix key cannot collide yet).
+        struct MockProvider(Vec<Arc<DataRow>>);
+        impl ReactiveRowProvider for MockProvider {
+            fn rows_snapshot(&self) -> Vec<Arc<DataRow>> {
+                self.0.clone()
+            }
+            fn rows_signal_vec(
+                &self,
+            ) -> std::pin::Pin<
+                Box<dyn futures_signals::signal_vec::SignalVec<Item = Arc<DataRow>> + Send>,
+            > {
+                Box::pin(futures_signals::signal_vec::always(self.0.clone()))
+            }
+            fn keyed_rows_signal_vec(
+                &self,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn futures_signals::signal_vec::SignalVec<Item = (EntityUri, Arc<DataRow>)>
+                        + Send,
+                >,
+            > {
+                let keyed: Vec<_> = self
+                    .0
+                    .iter()
+                    .map(|r| {
+                        (
+                            holon_api::data_row_entity_uri(r).expect("row has id"),
+                            r.clone(),
+                        )
+                    })
+                    .collect();
+                Box::pin(futures_signals::signal_vec::always(keyed))
+            }
+            fn cache_identity(&self) -> u64 {
+                0
+            }
+        }
+
+        let anchor = EntityUri::block("panel-b");
+        let inner: Arc<dyn ReactiveRowProvider> =
+            Arc::new(MockProvider(vec![Arc::new(make_row("other", "other"))]));
+
+        let l = EntityUri::block("c1");
+        // L's canonical live row cell — what `ReactiveRowSet::row_mutable` hands out.
+        let source = Mutable::new(Arc::new(make_row("c1", "c1")));
+
+        let placed = PlacedRowProvider::new(inner, l.clone(), anchor.clone(), source.read_only());
+
+        // ── Structure: snapshot = anchor row + one placed occurrence of L ──
+        let snap = placed.rows_snapshot();
+        assert_eq!(snap.len(), 2, "anchor row + placed occurrence");
+        let placed_row = &snap[1];
+        assert_eq!(
+            holon_api::data_row_entity_uri(placed_row).as_ref(),
+            Some(&l),
+            "placed row id stays canonical L → edits route to canonical (ADR 0015 rule 3)"
+        );
+        assert_eq!(
+            placed_row.get("parent_id").and_then(|v| v.as_string()),
+            Some("block:panel-b"),
+            "placed row parent_id = display-local anchor (rule 1, never merged)"
+        );
+        assert_eq!(
+            placed_row.get("content").and_then(|v| v.as_string()),
+            Some("c1"),
+            "placed occurrence shows canonical content"
+        );
+
+        // ── Liveness (SIGNAL): a write to the canonical cell re-emits the suffix,
+        //    so the render pipeline sees the placed occurrence update — the
+        //    shared-cell dividend, no `converge_input` reconciliation. ──
+        let l_content = |v: &Vec<(EntityUri, Arc<DataRow>)>| {
+            v.iter().find(|(k, _)| k == &l).and_then(|(_, r)| {
+                r.get("content")
+                    .and_then(|c| c.as_string())
+                    .map(str::to_string)
+            })
+        };
+        let mut stream = placed
+            .keyed_rows_signal_vec()
+            .to_signal_cloned()
+            .to_stream();
+
+        let initial = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .expect("initial emission within 2s")
+            .expect("stream open");
+        assert_eq!(
+            l_content(&initial).as_deref(),
+            Some("c1"),
+            "initial placed content mirrors canonical"
+        );
+
+        source.set(Arc::new(make_row("c1", "c1-edited")));
+
+        let updated = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .expect("re-emission after canonical write within 2s")
+            .expect("stream open");
+        assert_eq!(
+            l_content(&updated).as_deref(),
+            Some("c1-edited"),
+            "placed occurrence tracks the canonical block's live cell (converged by construction)"
+        );
     }
 }

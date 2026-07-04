@@ -13,6 +13,7 @@ pub mod action_dsl;
 pub mod auth;
 pub mod block;
 pub mod block_mutation;
+pub mod block_write_field;
 pub mod capability;
 pub mod change_set;
 pub mod clock;
@@ -78,6 +79,7 @@ pub use block::{
 };
 
 // Re-export the intent ChangeSet vocabulary (block-sync rework, Phase 2)
+pub use block_write_field::{BlockWriteField, BlockWriteFieldError, PropertyKey};
 pub use change_set::{agrees_with_ops, source_op_names, ChangeOp, ChangeSet, Provenance};
 pub use clock::{Clock, SystemClock, TestClock};
 

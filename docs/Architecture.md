@@ -20,8 +20,16 @@ Operations flow without blocking the UI:
 ```
 User Action → Operation Dispatch → External/Internal System
                                                           ↓
-UI <- futures-signals ← CDC Stream ← QueryableCache ← Sync Provider
+Frontend ← Signal<ViewModel> ← ReactiveEngine ← UiEvent ← Turso IVM (CDC)
 ```
+
+The read path is a persistent-node reactive cache: `ReactiveEngine`
+(`crates/holon-frontend/src/reactive.rs`) replaced the earlier
+`CdcAccumulator` + `BlockWatchRegistry` + `AppState` trio. Each watched block
+or live query owns a `ReactiveRenderedRows` that IS the cache, accumulator, and
+`Signal<ViewModel>` source; `ReactiveViewModel`
+(`crates/holon-frontend/src/reactive_view_model.rs`) is the persistent-node
+shared-VM boundary consumed by every frontend.
 
 - Operations are fire-and-forget
 - Effects are observed through sync
@@ -82,7 +90,6 @@ crates/
 ├── holon-mcp-client/            # Reusable MCP client → OperationProvider bridge
 ├── holon-orgmode/               # Org-mode file watching, DI wiring, sync controller
 ├── holon-org-format/            # Pure org-mode parsing, rendering, diffing (no disk I/O)
-├── holon-markdown/              # Obsidian-style Markdown parsing + FileFormatAdapter
 ├── holon-filesystem/            # FileSystem + FileChangeSource ports and adapters
 ├── holon-pbt-core/              # Cross-PBT transition traits shared between PBT crates
 ├── holon-layout-testing/        # Shared layout-testing primitives for UI PBTs

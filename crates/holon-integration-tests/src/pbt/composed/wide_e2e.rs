@@ -1045,6 +1045,77 @@ mod tests {
         );
     }
 
+    /// iOS-PARITY SUBSTRATE PIN (2026-07-06). The iOS GPUI app boots through
+    /// `GpuiModule` → `HolonFrontendModule::configure` → `add_frontend`
+    /// (frontends/gpui/src/di.rs, mobile.rs). Its ONLY material config delta vs a
+    /// desktop boot is `holon_config.crdt.enabled = Some(true)`
+    /// (frontends/gpui/src/mobile.rs ~L35), which makes `add_frontend`
+    /// (holon-app/src/wiring.rs L148-184) register `LoroModule` AND the Loro
+    /// `CrudAuthority(LoroBlockOperations)` — Loro owns block CRUD, SQL mirrors it.
+    ///
+    /// The composed keystone (`compose_sut(full_headless)`) boots the SAME substrate:
+    /// `full_headless()` carries `Projection::EditorState`, so the builder's frontend
+    /// arm calls `HeadlessFrontendComponent::new_with_loro(.., loro_enabled=true)`
+    /// (builder.rs L279), which sets `crdt.enabled = Some(true)` and boots through
+    /// `holon_app::new_from_config_with_di` → `add_frontend` — the exact same DI seam
+    /// and `crdt_enabled()` branch the iOS app hits. So both register the Loro
+    /// `CrudAuthority`.
+    ///
+    /// Audited parity table (knob | iOS app | keystone | match):
+    ///   crdt.enabled           | Some(true)          | Some(true) via EditorState | YES
+    ///   CrudAuthority          | Loro (add_frontend) | Loro (add_frontend)        | YES
+    ///   storage backend        | Turso + Loro        | Turso + Loro               | YES
+    ///   config seam            | add_frontend        | add_frontend               | YES (same fn)
+    ///   locked_keys            | empty               | empty                      | YES
+    ///   Actor::UI / MCP actor  | present (window/MCP)| absent (headless)          | by-design (full_headless drops UI)
+    ///   db_path / vault root   | app sandbox         | tempdir                    | immaterial (path only)
+    ///
+    /// This pin fails loud if a future edit drops `EditorState` from `full_headless`
+    /// (silently disabling the Loro authority substrate → the keystone would stop
+    /// exercising what iOS runs) OR if the builder stops registering the Loro
+    /// peer-mesh authority surface (`SutLoro`), which is present ONLY when the frontend
+    /// booted its live Loro authority doc (builder.rs L328/L367/L489). Its presence is
+    /// the observable proof that the CRDT/Loro-authority substrate is LIVE.
+    #[test]
+    fn keystone_boots_ios_crdt_loro_authority_substrate() {
+        use holon_pbt_core::capabilities::SutLoro;
+
+        // The config the keystone boots MUST carry EditorState — that projection is
+        // exactly what drives `crdt.enabled = Some(true)` in the frontend arm, the iOS
+        // material knob. (ViewModel + Turso pin the frontend/Turso half.)
+        let set = ComponentSet::full_headless();
+        assert!(
+            set.has_projection(Projection::EditorState),
+            "full_headless dropped EditorState — the keystone would boot the frontend arm \
+             with crdt.enabled=Some(false), losing the Loro CrudAuthority substrate the iOS \
+             app forces via crdt.enabled=Some(true). iOS parity broken."
+        );
+        assert!(
+            set.has_projection(Projection::ViewModel) && set.has_storage(StorageAdapter::Turso),
+            "full_headless must keep the Turso-backed frontend (ViewModel) arm — the iOS app \
+             boots a real FrontendSession over Turso with Loro on."
+        );
+
+        // Boot the real SUT and prove the Loro authority surface is live.
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("build multi-thread runtime");
+        let has_loro_authority = rt.block_on(async {
+            let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
+            let sut = compose_sut(&set, &resolver).await;
+            sut.caps.get::<dyn SutLoro>().is_some()
+        });
+        drop(rt);
+        assert!(
+            has_loro_authority,
+            "compose_sut(full_headless) did NOT register the Loro peer-mesh authority cap \
+             (SutLoro) — the frontend arm booted WITHOUT a live Loro authority doc, so the \
+             keystone is NOT exercising the CRDT/Loro-authority substrate the iOS app runs \
+             (crdt.enabled=Some(true) → CrudAuthority(Loro)). iOS parity broken."
+        );
+    }
+
     /// COUNT FLOOR — belt against silent catalog deletion: the shared catalog has at least its
     /// current size. Rename-proof (counts entries, not ids). Update N when an invariant is
     /// DELIBERATELY removed from the catalog.

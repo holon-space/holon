@@ -87,6 +87,7 @@ mod create_directory;
 mod create_document;
 mod create_stale_loro;
 pub mod delete_backward;
+mod delete_document;
 mod drag_drop_block;
 mod emit_mcp_data;
 mod epoch_flip_rejected;
@@ -142,6 +143,7 @@ pub use create_directory::CreateDirectory;
 pub use create_document::CreateDocument;
 pub use create_stale_loro::CreateStaleLoro;
 pub use delete_backward::DeleteBackward;
+pub use delete_document::DeleteDocument;
 pub use drag_drop_block::DragDropBlock;
 pub use emit_mcp_data::EmitMcpData;
 pub use epoch_flip_rejected::EpochFlipRejected;
@@ -233,6 +235,7 @@ crate::declare_e2e_transitions! {
         WriteOrgFile(WriteOrgFile),
         CreateDirectory(CreateDirectory),
         DeleteBackward(DeleteBackward),
+        DeleteDocument(DeleteDocument),
         DragDropBlock(DragDropBlock),
         EmitMcpData(EmitMcpData),
         EpochFlipRejected(EpochFlipRejected),
@@ -542,6 +545,7 @@ mod required_caps_guard {
         // AppLifecycle (test-local)
         one!(ConcurrentSchemaInit, lc::SutAppLifecycle);
         one!(CreateDocument, lc::SutAppLifecycle);
+        one!(DeleteDocument, lc::SutAppLifecycle);
         one!(EpochFlipRejected, lc::SutAppLifecycle);
         one!(SimulateRestart, lc::SutAppLifecycle);
         one!(StartApp, lc::SutAppLifecycle);

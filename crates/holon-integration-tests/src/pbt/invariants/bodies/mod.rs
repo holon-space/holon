@@ -19,6 +19,7 @@ pub mod live_children_match_ref;
 pub mod live_tree_matches_fresh;
 pub mod loro_children_match_ref;
 pub mod loro_no_errors;
+pub mod main_panel_rows_match_focus;
 // `navigation_focus` moved to `capability_pair!`'s `compare_navigation_focus`
 // in holon-pbt-core (auto-derived `inv-navigation-focus`); body file deleted.
 pub mod no_errors;

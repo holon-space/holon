@@ -15,8 +15,6 @@ use holon_api::entity_uri::EntityUri;
 use holon_api::{ContentType, SourceLanguage, Value};
 use holon_orgmode::OrgBlockExt;
 
-use super::types::Mutation;
-
 /// Snapshot SQL for the `block` MATVIEW — the canonical projection that carries
 /// the junction edge fields (`tags`/`requires`) as `json_group_array` columns.
 /// Backs the `inv-blocks-match-ref/matview` reader (`SutBackend::live_block_snapshot`).
@@ -170,48 +168,4 @@ pub(super) fn parse_block_row(row: &holon_core::storage::types::StorageEntity) -
     }
 
     Some(block)
-}
-
-/// Fields that are SQL columns on `block` rather than entries in the
-/// `properties` JSON column. When an External mutation's `fields` map contains
-/// one of these, the expected effect lands in a column — not in `properties` —
-/// so it's excluded from the post-mutation property spot-check.
-const BLOCK_SQL_COLUMNS: &[&str] = &[
-    "id",
-    "parent_id",
-    "name",
-    "content",
-    "content_type",
-    "source_language",
-    "source_name",
-    "collapsed",
-    "completed",
-    "block_type",
-    "created_at",
-    "updated_at",
-];
-
-/// Extract the subset of a mutation's `fields` that should land in the DB
-/// row's `properties` JSON column (i.e. custom properties and org drawer
-/// props like `task_state`, `effort`, `column-order`, …).
-pub(super) fn mutation_expected_properties(mutation: &Mutation) -> HashMap<String, Value> {
-    let fields = match mutation {
-        Mutation::Create { fields, .. } | Mutation::Update { fields, .. } => fields,
-        _ => return HashMap::new(),
-    };
-    fields
-        .iter()
-        .filter(|(k, _)| !BLOCK_SQL_COLUMNS.contains(&k.as_str()))
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect()
-}
-
-/// Parse a `properties` column value into a flat map, handling the two
-/// shapes Turso may return (raw JSON string or already-parsed Object).
-pub(super) fn row_properties_to_map(props_val: &Value) -> HashMap<String, Value> {
-    match props_val {
-        Value::String(s) => serde_json::from_str::<HashMap<String, Value>>(s).unwrap_or_default(),
-        Value::Object(m) => m.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-        _ => HashMap::new(),
-    }
 }

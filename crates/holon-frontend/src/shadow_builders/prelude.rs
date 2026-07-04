@@ -65,7 +65,7 @@ pub(crate) fn virtual_child_row(
     slot: &crate::reactive_view::VirtualChildSlot,
 ) -> Arc<holon_api::widget_spec::DataRow> {
     let parent_uri = &slot.parent_id;
-    let virtual_key = format!("{}:__virtual:{}", parent_uri.scheme(), parent_uri.id());
+    let virtual_key = crate::row_origin::RowOrigin::creation_placeholder_id(parent_uri);
     let mut row = std::collections::HashMap::new();
     row.insert("id".to_string(), Value::String(virtual_key));
     row.insert(

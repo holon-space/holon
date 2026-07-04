@@ -917,9 +917,52 @@ impl ReactiveRegistry {
 struct WatcherState {
     task: tokio::task::JoinHandle<()>,
     command_tx: tokio::sync::mpsc::Sender<holon_api::WatcherCommand>,
-    /// Number of active consumers (ReactiveShell instances) watching this block.
-    /// When refcount drops to 0, the watcher is eligible for cleanup.
+    /// Number of live [`WatchGuard`]s pinning this watcher. Read-only paths
+    /// ([`ReactiveEngine::ensure_watching`]) never touch this — a watcher
+    /// started by a read alone sits at 0 (warm cache) and is only reclaimed
+    /// once an acquired count drops back to 0.
     refcount: usize,
+}
+
+// ── WatchGuard ───────────────────────────────────────────────────────────
+
+/// RAII pin on a block/query watcher.
+///
+/// Acquired via [`ReactiveEngine::acquire_watch`], or carried inside the
+/// [`LiveBlock`] returned by [`ReactiveEngine::watch_live`] /
+/// [`ReactiveEngine::watch_query_live`]. Dropping the last guard for a key
+/// aborts the watcher task and releases its reactive state. Long-lived
+/// subscribers (shells, views) hold the guard for as long as they consume
+/// the watch; one-shot readers must NOT acquire one — they use the
+/// non-counting [`ReactiveEngine::ensure_watching`] read path instead.
+#[must_use = "dropping the guard releases the watcher; hold it for the lifetime of the subscription"]
+pub struct WatchGuard {
+    key: EntityUri,
+    services: Arc<dyn BuilderServices>,
+}
+
+impl WatchGuard {
+    fn new(key: EntityUri, services: Arc<dyn BuilderServices>) -> Self {
+        Self { key, services }
+    }
+
+    /// The watcher key this guard pins (a block URI, or a synthetic
+    /// `query:<hash>` key for query watchers).
+    pub fn key(&self) -> &EntityUri {
+        &self.key
+    }
+}
+
+impl std::fmt::Debug for WatchGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("WatchGuard").field(&self.key).finish()
+    }
+}
+
+impl Drop for WatchGuard {
+    fn drop(&mut self) {
+        self.services.unwatch(&self.key);
+    }
 }
 
 // ── UiState ──────────────────────────────────────────────────────────────
@@ -970,6 +1013,14 @@ pub struct UiState {
     /// is how the initial caret reaches a backend-driven mount in-process,
     /// replacing the old `editor_cursor` round-trip.
     pending_caret_seed: Mutable<Option<(EntityUri, usize)>>,
+    /// SPIKE (Phase 1b — display-placement de-risk): which *occurrence* of
+    /// `focused_block` holds focus. `None` = the block's canonical occurrence
+    /// (every existing `set_focus` path leaves this `None`, so behaviour is
+    /// unchanged — this is deliberately ADDITIVE). `Some(n)` = a display-placed
+    /// occurrence. This proves the focus authority can carry `(id, occurrence)`
+    /// WITHOUT widening `focused_block`'s type (which would ripple through ~10
+    /// readers + all four frontends — ADR 0010's reserved graduation).
+    focused_occurrence: Mutable<Option<u32>>,
 }
 
 impl UiState {
@@ -979,7 +1030,21 @@ impl UiState {
             viewport_generation: Mutable::new(0),
             viewport: Mutable::new(None),
             pending_caret_seed: Mutable::new(None),
+            focused_occurrence: Mutable::new(None),
         }
+    }
+
+    /// SPIKE: set the focused occurrence alongside the focused block. `None`
+    /// restores canonical focus. Additive — no effect on `focused_block`.
+    pub(crate) fn set_focus_occurrence(&self, occ: Option<u32>) {
+        if self.focused_occurrence.get_cloned() != occ {
+            self.focused_occurrence.set(occ);
+        }
+    }
+
+    /// SPIKE: read the currently focused occurrence (`None` = canonical).
+    pub(crate) fn focused_occurrence(&self) -> Option<u32> {
+        self.focused_occurrence.get_cloned()
     }
 
     /// Get a signal that fires when the viewport changes. Include in reactive
@@ -1355,7 +1420,7 @@ impl ReactiveEngine {
         block_id: &EntityUri,
         services: Arc<dyn BuilderServices>,
     ) -> LiveBlock {
-        let results = self.ensure_watching(block_id);
+        let (results, watch_guard) = self.acquire_watch(block_id, services.clone());
 
         // Interpret the initial tree from current snapshot.
         // If render_expr is Loading (watcher hasn't delivered yet), return a
@@ -1403,6 +1468,7 @@ impl ReactiveEngine {
         LiveBlock {
             tree,
             structural_changes: structural_stream,
+            watch_guard: Some(watch_guard),
         }
     }
 
@@ -1495,18 +1561,73 @@ impl ReactiveEngine {
     }
 
     /// Get the ReactiveRenderedRows for a block, ensuring a watcher is running.
-    /// Used by the interpreter's live_block builder and by tests.
+    ///
+    /// **Non-counting read path**: starts the watcher if absent but does NOT
+    /// pin it. The refcount tracks live [`WatchGuard`]s only, so one-shot
+    /// readers (`snapshot_reactive`, `get_block_data`, `await_ready`, MCP /
+    /// PBT / TUI snapshots) can call this arbitrarily often without leaking
+    /// the watcher. A watcher started by a read alone stays warm at
+    /// refcount 0 until a guard cycle reclaims it. Long-lived subscribers
+    /// must pin the watcher via [`Self::acquire_watch`] (or hold the
+    /// [`LiveBlock`] from [`Self::watch_live`], which carries the guard).
     pub fn ensure_watching(&self, block_id: &EntityUri) -> Arc<ReactiveRenderedRows> {
         let results = self.registry.get_or_create(block_id);
-
         let mut watchers = self.watchers.lock().unwrap();
-        if let Some(state) = watchers.get_mut(block_id) {
-            state.refcount += 1;
-            return results;
+        if !watchers.contains_key(block_id) {
+            let state = self.spawn_block_watcher(block_id, results.clone(), 0);
+            watchers.insert(block_id.clone(), state);
         }
+        results
+    }
 
+    /// Counting acquisition: ensure the watcher is running AND pin it with an
+    /// RAII [`WatchGuard`]. Dropping the last guard aborts the watcher task
+    /// and releases the block's reactive state. `services` must resolve
+    /// [`BuilderServices::unwatch`] to this engine — it is what the guard's
+    /// `Drop` calls.
+    pub fn acquire_watch(
+        &self,
+        block_id: &EntityUri,
+        services: Arc<dyn BuilderServices>,
+    ) -> (Arc<ReactiveRenderedRows>, WatchGuard) {
+        let results = self.registry.get_or_create(block_id);
+        let mut watchers = self.watchers.lock().unwrap();
+        match watchers.get_mut(block_id) {
+            Some(state) => state.refcount += 1,
+            None => {
+                let state = self.spawn_block_watcher(block_id, results.clone(), 1);
+                watchers.insert(block_id.clone(), state);
+            }
+        }
+        drop(watchers);
+        (results, WatchGuard::new(block_id.clone(), services))
+    }
+
+    /// Test/diagnostic introspection: the number of live [`WatchGuard`]s
+    /// pinning `block_id`'s watcher (`Some(0)` = read-warmed, unpinned;
+    /// `None` = no watcher running).
+    pub fn watcher_refcount(&self, block_id: &EntityUri) -> Option<usize> {
+        self.watchers
+            .lock()
+            .unwrap()
+            .get(block_id)
+            .map(|s| s.refcount)
+    }
+
+    /// Test/diagnostic introspection: how many watcher tasks are running.
+    pub fn active_watcher_count(&self) -> usize {
+        self.watchers.lock().unwrap().len()
+    }
+
+    /// Spawn the CDC watcher task for `block_id`, feeding `reactive`.
+    /// Callers hold the `watchers` lock and insert the returned state.
+    fn spawn_block_watcher(
+        &self,
+        block_id: &EntityUri,
+        reactive: Arc<ReactiveRenderedRows>,
+        refcount: usize,
+    ) -> WatcherState {
         let session = self.session.clone();
-        let reactive = results.clone();
         let bid = block_id.clone();
 
         let (proxy_cmd_tx, mut proxy_cmd_rx) =
@@ -1696,16 +1817,11 @@ impl ReactiveEngine {
             }
         });
 
-        watchers.insert(
-            block_id.clone(),
-            WatcherState {
-                task,
-                command_tx: proxy_cmd_tx,
-                refcount: 1,
-            },
-        );
-
-        results
+        WatcherState {
+            task,
+            command_tx: proxy_cmd_tx,
+            refcount,
+        }
     }
 
     /// Watch a live query with per-row collection reactivity.
@@ -1724,6 +1840,9 @@ impl ReactiveEngine {
         services: Arc<dyn BuilderServices>,
     ) -> (EntityUri, LiveBlock) {
         let (key, results) = self.ensure_query_watching(query, lang, render_expr, query_context);
+        // `ensure_query_watching` counted +1 for this call; the guard owns
+        // that count and releases it on drop.
+        let watch_guard = WatchGuard::new(key.clone(), services.clone());
 
         let (expr, rows) = results.snapshot();
         let ctx = RenderContext {
@@ -1754,13 +1873,15 @@ impl ReactiveEngine {
             LiveBlock {
                 tree,
                 structural_changes: structural_stream,
+                watch_guard: Some(watch_guard),
             },
         )
     }
 
     /// Ensure a query watcher is running and return its watcher key plus
-    /// ReactiveRenderedRows. Reuse bumps the watcher refcount — every caller
-    /// owes a matching [`Self::unwatch`] with the returned key.
+    /// ReactiveRenderedRows. Every call counts +1 on the watcher refcount;
+    /// [`Self::watch_query_live`] (the only caller) wraps that count in a
+    /// [`WatchGuard`] whose drop releases it.
     fn ensure_query_watching(
         &self,
         query: String,
@@ -1831,16 +1952,30 @@ impl ReactiveEngine {
             .map_err(|_| anyhow::anyhow!("Watcher channel closed"))
     }
 
-    /// Decrement the refcount for a block's watcher. When the last consumer
-    /// drops, the watcher task is aborted and reactive state is released.
+    /// Release one [`WatchGuard`]'s pin on a block's watcher. When the last
+    /// guard drops, the watcher task is aborted and reactive state is
+    /// released. Called by `WatchGuard::drop` — do not call manually; pair
+    /// every count with a guard from [`Self::acquire_watch`] instead.
     pub fn unwatch(&self, block_id: &EntityUri) {
         let mut watchers = self.watchers.lock().unwrap();
         let should_remove = match watchers.get_mut(block_id) {
             Some(state) => {
+                debug_assert!(
+                    state.refcount > 0,
+                    "unwatch({block_id}) without a matching acquire_watch — guard bookkeeping bug"
+                );
                 state.refcount = state.refcount.saturating_sub(1);
                 state.refcount == 0
             }
-            None => false,
+            None => {
+                // A guard outliving its (already reclaimed) watcher is a
+                // bookkeeping bug — surface it, don't silently ignore.
+                tracing::error!(
+                    %block_id,
+                    "unwatch for a block with no active watcher (guard/acquire mismatch)"
+                );
+                false
+            }
         };
         if should_remove {
             if let Some(state) = watchers.remove(block_id) {
@@ -1888,6 +2023,21 @@ impl ReactiveEngine {
     /// Access the tokio runtime handle.
     pub fn runtime_handle(&self) -> &tokio::runtime::Handle {
         &self.runtime_handle
+    }
+
+    /// SPIKE (Phase 1b): which occurrence of the focused block holds focus
+    /// (`None` = canonical). The headless editor mirror keys its cursor map by
+    /// `(block_id, occurrence)` so two display occurrences of one block get
+    /// independent carets while edits still resolve to the canonical block.
+    pub fn focused_occurrence(&self) -> Option<u32> {
+        self.ui_state.focused_occurrence()
+    }
+
+    /// SPIKE (Phase 1b): set the focused occurrence (`None` = canonical).
+    /// Additive to `set_focus`; leaves `focused_block` untouched. `pub` so the
+    /// integration-tests crate's end-to-end occurrence test can drive it.
+    pub fn set_focus_occurrence(&self, occ: Option<u32>) {
+        self.ui_state.set_focus_occurrence(occ);
     }
 }
 
@@ -2071,6 +2221,19 @@ impl BuilderServices for ReactiveEngine {
         let session = self.session.clone();
         let (focused_block, caret_seed) = self.ui_state.focus_handles();
         Box::pin(async move {
+            // Latency stage (dispatch->op-applied): a user action enters the
+            // pipeline here. `block` is the entity the op targets; `action` the
+            // op name (split_block, indent, outdent, cycle_state, ...). The push
+            // pipeline (Loro commit -> projection -> CDC rows) runs downstream and
+            // is measured by the `projection`/`rows` stages. Greppable via
+            // target="holon_latency".
+            let block = intent
+                .params
+                .get("id")
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| intent.entity_name.as_str().to_string());
+            let t_dispatch = std::time::Instant::now();
             let response = session
                 .execute_operation(&intent.entity_name, &intent.op_name, intent.params)
                 .await
@@ -2080,6 +2243,14 @@ impl BuilderServices for ReactiveEngine {
                         intent.entity_name, intent.op_name
                     )
                 })?;
+            tracing::debug!(
+                target: "holon_latency",
+                stage = "dispatch",
+                action = %intent.op_name,
+                block = %block,
+                ms = t_dispatch.elapsed().as_millis() as u64,
+                "holon_latency",
+            );
             // Same in-process structural-focus projection as `dispatch_intent`.
             apply_structural_focus(&focused_block, &caret_seed, &intent.op_name, &response);
             Ok(())
@@ -2592,6 +2763,11 @@ pub struct LiveBlock {
     /// Emits a new tree when the render expression changes (structural rebuild).
     /// Data-only changes do NOT emit — they update the existing tree in-place.
     pub structural_changes: Pin<Box<dyn futures::Stream<Item = ReactiveViewModel> + Send>>,
+    /// RAII pin on the underlying watcher — dropping it (with the LiveBlock,
+    /// or after `take()`ing it out) releases the engine's watcher when this
+    /// was the last consumer. `None` only for stub/test constructors that
+    /// don't own a real engine watcher (e.g. layout-testing fixtures).
+    pub watch_guard: Option<WatchGuard>,
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────

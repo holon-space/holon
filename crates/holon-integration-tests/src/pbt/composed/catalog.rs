@@ -71,6 +71,10 @@ pub fn composed_invariant_catalog() -> Vec<Box<dyn CapInvariant>> {
         invariants::frontend_engine::wire(),
         invariants::frontend_root_not_error::wire(),
         invariants::live_tree_matches_fresh::wire(),
+        // No-stale-rows-after-navigation (2026-07-05, cross-frontend prod bug):
+        // main-panel rendered ref-known blocks must be in Main's current
+        // focus-root subtree. Needs SutRenderer + RefViewSelection/RefLayout/RefFocus.
+        invariants::main_panel_rows_match_focus::wire(),
         // Auto-derived by `capability_pair! { pub trait ViewSelection … }` in
         // holon-pbt-core (the `#[compare] fn current_view` method).
         holon_pbt_core::capabilities::inv_pair_view_selection_current_view(),

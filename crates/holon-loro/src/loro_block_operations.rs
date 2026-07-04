@@ -256,8 +256,28 @@ impl CrudOperations<Block> for LoroBlockOperations {
                     .map_err(|e| format!("set_field(\"parent_id\") for {id}: {e}"))?;
             }
             _ => {
-                // Store in properties
+                // Store in properties. A bare `task_state` keyword write gets
+                // its `task_state_category` sidecar derived and written in the
+                // SAME commit — the pair invariant `Block::set_task_state`
+                // establishes at the org parse boundary (see
+                // `TaskState::category_str_for_keyword`); without this every
+                // UI cycle dropped/staled the category.
                 let mut props = HashMap::new();
+                if field == "task_state" {
+                    let category = match &value {
+                        Value::Null => Value::Null,
+                        Value::String(kw) => Value::String(
+                            holon_api::TaskState::category_str_for_keyword(kw).to_string(),
+                        ),
+                        other => {
+                            return Err(format!(
+                                "set_field('task_state'): expected String or Null, got {other:?}"
+                            )
+                            .into());
+                        }
+                    };
+                    props.insert("task_state_category".to_string(), category);
+                }
                 props.insert(field.to_string(), value);
                 backend
                     .update_block_properties(id, &props)
@@ -493,6 +513,9 @@ impl TaskOperations<Block> for LoroBlockOperations {
         // all read/write `properties["task_state"]`. Writing `"TODO"` here stored a stray
         // property the cycle never read back, so `cycle_task_state` (read `task_state`, write
         // `TODO`) was a no-op in Loro mode — Cmd+Enter never advanced the keyword.
+        // `set_field("task_state")` pairs the `task_state_category` sidecar in
+        // the same commit (see its properties branch), so this delegate keeps
+        // the pair invariant.
         self.set_field(id, "task_state", Value::String(state)).await
     }
 
@@ -700,6 +723,23 @@ impl OperationProvider for LoroBlockOperations {
             return Err(format!("Expected entity_name 'block', got '{}'", entity_name).into());
         }
 
+        // Intent boundary (Model.md invariant 3): `execute_operation` is the
+        // provider surface intents arrive on (dispatcher, MCP, and
+        // no-dispatcher configs that hold this provider directly). Parse the
+        // `set_field` field into the closed `BlockWriteField` vocabulary —
+        // order keys and storage-internal fields fail loud instead of being
+        // silently discarded downstream. Internal callers (move_block's
+        // depth write, the task-state convenience setters) call the
+        // `CrudOperations::set_field` method directly and are unaffected.
+        if op_name == "set_field" {
+            let field = params
+                .get("field")
+                .and_then(|v| v.as_string())
+                .ok_or("block set_field: missing 'field' parameter")?;
+            holon_api::BlockWriteField::parse(field)
+                .map_err(|e| format!("intent boundary: {e}"))?;
+        }
+
         // Try CRUD operations
         tracing::debug!("[LoroBlockOperations::execute_operation] Trying CRUD operations");
         match __operations_crud_operations::dispatch_operation::<_, Block>(self, op_name, &params)
@@ -764,5 +804,42 @@ impl OperationProvider for LoroBlockOperations {
 
         // Try task operations
         __operations_task_operations::dispatch_operation::<_, Block>(self, op_name, &params).await
+    }
+}
+
+#[cfg(test)]
+mod intent_boundary_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn ops_over_temp_store() -> (LoroBlockOperations, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(RwLock::new(LoroDocumentStore::new(
+            dir.path().to_path_buf(),
+        )));
+        (LoroBlockOperations::new(store), dir)
+    }
+
+    /// Model.md invariant 3 at the provider surface: a `set_field` intent
+    /// carrying an order key is rejected before any CRUD dispatch — the
+    /// guard fires even in configs where no `OperationDispatcher` sits in
+    /// front of this provider (no-Turso sessions, wasm).
+    #[tokio::test]
+    async fn execute_operation_rejects_set_field_over_order_keys() {
+        let (ops, _dir) = ops_over_temp_store();
+        for field in ["sort_key", "after_block_id"] {
+            let mut params: StorageEntity = HashMap::new();
+            params.insert("id".into(), Value::String("block:a".into()));
+            params.insert("field".into(), Value::String(field.into()));
+            params.insert("value".into(), Value::String("A5".into()));
+            let err = ops
+                .execute_operation(&EntityName::new("block"), "set_field", params)
+                .await
+                .expect_err("set_field over an order key must be rejected at the boundary");
+            assert!(
+                err.to_string().contains("order key"),
+                "rejection must name the invariant, got: {err}"
+            );
+        }
     }
 }

@@ -150,7 +150,7 @@ async fn run_watch_loop(
             Ok(state) => state,
             Err(e) => {
                 tracing::warn!("[LoroWatcher] render of '{block_id}' failed: {e}");
-                (error_render_expr(&format!("{e}")), Vec::new())
+                (error_render_expr(&format!("{e:#}")), Vec::new())
             }
         };
 

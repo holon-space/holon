@@ -45,6 +45,21 @@ See [docs/Reference/ORG_SYNTAX.md](docs/Reference/ORG_SYNTAX.md) — org files s
 Mental model (load first): [docs/Architecture/Model.md](docs/Architecture/Model.md) — five layers, mode axes, invariants 1–12.
 See [docs/Architecture.md](docs/Architecture.md) (details in docs/Architecture/)
 
+# Project tracking (10,000 & 50,000-foot view)
+The **birds-eye view** — strategy, roadmap, gates, and the parking lot of
+deferred / cross-session open topics — lives in the Holon PKM vault, NOT in this
+repo:
+`/Users/martin/Workspaces/pkm/holon-pkm/Projects/Holon/` (org files, one per
+topic; `README.org` indexes them; `Now.org` is the G1 critical path).
+This repo's `docs/` holds the **ground-level detail** (ADRs, architecture,
+plans); the vault holds the altitude view and points back to those docs.
+When you defer a decision or surface a cross-session open topic, record it in
+the vault as a topic-doc headline with a slug `:ID:` (see
+`Display Placement & Resurfacing.org` for the pattern) — not only in-repo.
+Note: the vault's org round-trip currently mangles underscored identifiers
+(a known lossy-render bug), so keep exact type/file names in the repo docs and
+phrase the vault entries around them.
+
 # Development
 See [DEVELOPMENT.md](DEVELOPMENT.md) — testing (nextest, coverage) and log analysis scripts.
 

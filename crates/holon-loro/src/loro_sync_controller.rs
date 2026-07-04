@@ -472,6 +472,19 @@ impl LoroProjection {
                 after.len(),
                 before.len(),
             );
+            // Latency stage (commit->projection): the full-document DFS snapshot
+            // + diff cost of one Loro commit's projection pass. `snapshot_ms` is
+            // the O(blocks) snapshot+base-read portion; `ms` the whole pass incl.
+            // the consolidator SQL write. Greppable via target="holon_latency".
+            tracing::debug!(
+                target: "holon_latency",
+                stage = "projection",
+                ops = op_count,
+                blocks = after.len(),
+                snapshot_ms = snapshot_ms as u64,
+                ms = t0.elapsed().as_millis() as u64,
+                "holon_latency",
+            );
         }
 
         // Advance the Phase-3 base to the just-projected Loro snapshot. Only on
@@ -871,6 +884,22 @@ fn block_diff_params(old: &SnapshotBlock, new: &SnapshotBlock) -> holon_api::Sto
             }
             params.entry(k.as_str().into()).or_insert_with(|| v.clone());
         }
+        // Emit the `Value::Null` REMOVAL sentinel for every key present in
+        // `old` but absent from `new` — mirror the `marks` / `source_language`
+        // clear handling above (`Some -> None` => Null). Iterating only
+        // `new.properties` could not represent a deletion, so a property
+        // removed in Loro left the stale value in SQL's `properties` JSON
+        // forever (the base advances to `after`, so it is never re-diffed —
+        // one-shot silent data loss). `prepare_update` removes the key on this
+        // sentinel; without it the merge only ever inserts.
+        for k in old.properties.keys() {
+            if EdgeField::is_edge_column(k) {
+                continue;
+            }
+            if !new.properties.contains_key(k) {
+                params.entry(k.as_str().into()).or_insert(Value::Null);
+            }
+        }
     }
     if old.marks != new.marks {
         // `None` → emit Value::Null so prepare_update writes `marks = NULL`.
@@ -1032,6 +1061,60 @@ mod marks_outbound_tests {
             Some(&Value::Null),
             "cleared source_language must emit a Null sentinel (else the clear is \
              dropped from SQL and the update decodes to zero typed ops): {params:?}"
+        );
+    }
+
+    fn block_with_props(props: &[(&str, &str)]) -> SnapshotBlock {
+        let mut b = Block::new_text(
+            EntityUri::block("b1"),
+            EntityUri::no_parent(),
+            "q".to_string(),
+        );
+        for (k, v) in props {
+            b.set_property(*k, Value::String((*v).to_string()));
+        }
+        SnapshotBlock {
+            block: b,
+            sort_key: "A0".to_string(),
+        }
+    }
+
+    /// Regression for the P0 silent data-loss bug: a property present in `old`
+    /// but absent from `new` (deleted in Loro) must emit the `Value::Null`
+    /// REMOVAL sentinel so `prepare_update` clears the key from SQL's
+    /// `properties` JSON. Iterating only `new.properties` dropped deletions —
+    /// the stale value lived in SQL forever (mirror of the source_language fix).
+    #[test]
+    fn block_diff_params_emits_null_when_property_removed() {
+        let old = block_with_props(&[("foo", "bar"), ("keep", "me")]);
+        let new = block_with_props(&[("keep", "me")]);
+        assert!(
+            blocks_differ(&old, &new),
+            "blocks_differ must see the property removal"
+        );
+        let params = block_diff_params(&old, &new);
+        assert_eq!(
+            params.get("foo"),
+            Some(&Value::Null),
+            "removed property must emit a Null sentinel (else SQL keeps the \
+             stale value forever): {params:?}"
+        );
+    }
+
+    /// The removal update must also round-trip through the typed intent
+    /// vocabulary (no `agrees_with_ops` divergence): the Null decodes to a
+    /// SetField, so source `update:1` re-encodes to `update:1`.
+    #[test]
+    fn property_removal_update_agrees_with_ops() {
+        use holon_api::{ChangeSet, Provenance, agrees_with_ops};
+        let old = block_with_props(&[("foo", "bar")]);
+        let new = block_with_props(&[]);
+        let ops = vec![("update".to_string(), block_diff_params(&old, &new))];
+        let cs = ChangeSet::from_ops(&ops, Provenance::default());
+        assert!(
+            agrees_with_ops(&cs, &ops).is_ok(),
+            "property removal must round-trip: {:?}",
+            agrees_with_ops(&cs, &ops)
         );
     }
 

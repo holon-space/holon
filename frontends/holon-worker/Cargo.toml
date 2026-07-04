@@ -45,6 +45,11 @@ anyhow = "1"
 fluxdi = { git = "https://github.com/holon-space/fluxdi", branch = "dev", features = ["thread-safe", "async-factory", "lifecycle", "dynamic", "eager-resolution"] }
 parking_lot = "0.12"
 tracing = "0.1"
+# Worker-side log sink: without a subscriber every tracing event —
+# including dispatch_intent_chain ERRORs — was silently dropped, making
+# failed ops look like successes from the page. fmt→stderr surfaces them
+# in the worker console (visible via /web/index.html or DevTools).
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "ansi"] }
 serde_json = "1"
 futures = { version = "0.3", default-features = false, features = ["alloc"] }
 

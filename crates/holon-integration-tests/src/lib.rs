@@ -12,6 +12,8 @@
 //! @c4 uses holon-mcp-client "MCP client providers" "Rust"
 //! @c4 uses holon-orgmode "org-mode sync I/O" "Rust"
 //! @c4 uses holon-pbt-core "PBT transition traits" "Rust"
+//! @c4 uses holon-loro "Loro CRDT backend & P2P sync" "Rust"
+//! @c4 uses holon-profiles "entity profile resolution" "Rust"
 //!
 //! Shared test infrastructure for Holon integration tests
 //!
@@ -27,6 +29,8 @@ pub mod fake_mcp_module;
 /// that pulls `holon-layout-testing` into the dep tree.
 #[cfg(feature = "pbt")]
 pub use holon_layout_testing::display_assertions;
+#[cfg(feature = "pbt")]
+pub mod mcp_user_driver;
 pub mod mutation_driver;
 pub mod org_utils;
 #[cfg(feature = "pbt")]
@@ -46,6 +50,8 @@ pub use holon_layout_testing::display_assertions::{
     DiffableTree, OrderedSubsetResult, TreeDiff, assert_display_trees_match, is_ordered_subset,
     tree_diff,
 };
+#[cfg(feature = "pbt")]
+pub use mcp_user_driver::{DEFAULT_MCP_PORT, McpUserDriver, mcp_base_url_from_env};
 pub use mutation_driver::{DirectUserDriver, ReactiveEngineDriver, UserDriver};
 pub use org_utils::{
     INTERNAL_PROPS, assign_reference_sequences, assign_reference_sequences_canonical,

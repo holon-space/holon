@@ -184,6 +184,7 @@ pub trait SutHandle:
     + crate::pbt::transitions::apply_mutation::SutApplyMutation
     + crate::pbt::local_caps::SutFixtureFs
     + crate::pbt::local_caps::SutAppLifecycle
+    + crate::pbt::transitions::start_app::SutBootWatches
 {
 }
 
@@ -210,6 +211,7 @@ impl<T> SutHandle for T where
         + crate::pbt::transitions::apply_mutation::SutApplyMutation
         + crate::pbt::local_caps::SutFixtureFs
         + crate::pbt::local_caps::SutAppLifecycle
+        + crate::pbt::transitions::start_app::SutBootWatches
 {
 }
 

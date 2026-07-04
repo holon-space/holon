@@ -122,6 +122,18 @@ fn extended_content_arm() -> BoxedStrategy<String> {
             2 => format!("#+ {tail}"),
             _ => format!(":PROPERTIES:{tail}"),
         }),
+        // snake_case identifiers with mid-word underscores — the single
+        // biggest content class in a code-heavy PKM (`focused_block`,
+        // `sort_key`, `keyed_rows_signal_vec`). orgize parses a mid-word `_`
+        // (preceded by a word char, so it can't open org UNDERLINE) as a bare
+        // SUBSCRIPT, and the mark-extraction round-trip used to destroy the
+        // surrounding characters (`focused_block` → `focusedloc`) — a silent
+        // vault-corrupting data-loss bug. This arm de-vacuums the org
+        // round-trip's inline-mark path (the default ASCII generators never
+        // emit `_`). See handoff 2026-07-06 (org round-trip mangles content)
+        // + the `bare_underscore_identifiers_survive_round_trip` regression in
+        // holon-org-format/src/inline_marks.rs.
+        2 => "[a-z]{1,6}(_[a-z]{1,6}){1,4}",
     ]
     .boxed()
 }

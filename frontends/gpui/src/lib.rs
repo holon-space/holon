@@ -71,6 +71,10 @@ struct AppModel {
     /// triggering a full tree rebuild. Present iff the current root is a
     /// Reactive variant (i.e. a streaming container like `columns`).
     root_view: Option<Arc<holon_frontend::ReactiveView>>,
+    /// Last observed navigation focus. Used to auto-close overlay-mode
+    /// (phone) drawers when navigation focus changes — see
+    /// [`AppModel::close_overlay_drawers_on_nav`].
+    last_focused_block: Option<holon_api::EntityUri>,
 }
 
 /// Extract the root `ReactiveView` from a `ReactiveViewModel`, if its top
@@ -132,6 +136,33 @@ impl AppModel {
         self.view_model =
             resolved_view_model(&self.root_vm, &self.engine, &self.root_live_blocks, cx);
         self.nav.set_root(self.root_vm.clone());
+    }
+
+    /// When navigation focus changes, auto-close any OPEN overlay-mode drawers
+    /// (the phone left/right sidebars). Shrink-mode (desktop) sidebars are left
+    /// alone — keeping them open after navigation is the correct desktop UX.
+    /// Gated on [`DrawerMode::Overlay`], NOT `cfg(feature = "mobile")`, so a
+    /// narrow desktop window (which also gets overlay drawers via `if_space`)
+    /// behaves identically. Returns true iff at least one drawer was closed.
+    ///
+    /// Note: keyed on a *change* of focus, so re-selecting the already-focused
+    /// page does not re-close the drawer (an accepted edge case).
+    fn close_overlay_drawers_on_nav(&mut self) -> bool {
+        let focused = self.engine.ui_state().focused_block();
+        if focused == self.last_focused_block {
+            return false;
+        }
+        self.last_focused_block = focused;
+        let mut closed = false;
+        for (bid, mode) in self.view_model.collect_drawers() {
+            if matches!(mode, holon_frontend::view_model::DrawerMode::Overlay)
+                && self.session.drawer_open(&bid, mode)
+            {
+                self.session.set_widget_open(&bid, false);
+                closed = true;
+            }
+        }
+        closed
     }
 
     /// Re-point this window's root view at a *different* SUT — a fresh
@@ -303,10 +334,15 @@ fn modal_overlay(
         .flex()
         .items_center()
         .justify_center()
+        // Inset so the panel keeps a margin on narrow (phone) viewports; the
+        // panel is `w_full` capped at 640px, so this padding is what stops it
+        // from touching the screen edges on mobile.
+        .p(px(16.0))
         .child(
             div()
                 .id(SharedString::from(format!("{id}-panel")))
-                .w(px(640.0))
+                .w_full()
+                .max_w(px(640.0))
                 .max_h(px(720.0))
                 .overflow_y_scroll()
                 .bg(panel_bg)
@@ -382,6 +418,10 @@ pub struct HolonApp {
     /// so the render pass can build overlays without a double-read through
     /// `app_model.read(cx).share_ui.read(cx)`.
     pub share_ui: Entity<share_ui::ShareUiState>,
+    /// Name of the theme currently applied to the `gpui_component` global.
+    /// Compared against the session's selected theme on every render so a
+    /// theme change (settings dropdown, or any other path) re-applies live.
+    applied_theme: String,
 }
 
 impl Render for HolonApp {
@@ -397,6 +437,22 @@ impl Render for HolonApp {
         {
             self.safe_area_top = crate::mobile::safe_area_top_px();
             self.safe_area_bottom = crate::mobile::safe_area_bottom_px();
+        }
+        // Live theme application. The gpui_component `Theme` global is seeded
+        // once at launch; the settings dropdown only persists the pref and
+        // calls `window.refresh()`. Re-apply here whenever the selected theme
+        // differs from what's applied, so a theme switch repaints immediately
+        // (and the correct theme is applied on the first frame). Must run
+        // before `cx.theme()` is read below.
+        let desired_theme = self
+            .session
+            .ui_settings()
+            .theme
+            .clone()
+            .unwrap_or_else(|| "holonLight".to_string());
+        if desired_theme != self.applied_theme {
+            apply_holon_theme(&self.session, cx);
+            self.applied_theme = desired_theme;
         }
         let (view_model, shadow_ctx, services, show_settings, show_widget_gallery) = {
             let model = self.app_model.read(cx);
@@ -659,27 +715,30 @@ impl Render for HolonApp {
                                 });
                             })
                     })
-                    .when(cfg!(debug_assertions), |this| {
-                        this.child(
-                            div()
-                                .id("inspector-toggle")
-                                .cursor_pointer()
-                                .text_size(px(15.0))
-                                .px(px(6.0))
-                                .py(px(4.0))
-                                .rounded(px(4.0))
-                                .hover(|s| s.bg(gpui::rgba(0x00000010)))
-                                .child("🔎")
-                                .on_mouse_down(MouseButton::Left, |_, window, cx| {
-                                    #[cfg(debug_assertions)]
-                                    window.toggle_inspector(cx);
-                                    #[cfg(not(debug_assertions))]
-                                    {
-                                        let _ = (window, cx);
-                                    }
-                                }),
-                        )
-                    }),
+                    .when(
+                        cfg!(all(debug_assertions, not(feature = "mobile"))),
+                        |this| {
+                            this.child(
+                                div()
+                                    .id("inspector-toggle")
+                                    .cursor_pointer()
+                                    .text_size(px(15.0))
+                                    .px(px(6.0))
+                                    .py(px(4.0))
+                                    .rounded(px(4.0))
+                                    .hover(|s| s.bg(gpui::rgba(0x00000010)))
+                                    .child("🔎")
+                                    .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                                        #[cfg(debug_assertions)]
+                                        window.toggle_inspector(cx);
+                                        #[cfg(not(debug_assertions))]
+                                        {
+                                            let _ = (window, cx);
+                                        }
+                                    }),
+                            )
+                        },
+                    ),
             );
 
         // Page-level chord pump. Cross-block navigation (MoveUp/MoveDown
@@ -1043,6 +1102,14 @@ fn spawn_root_layout_signal(
                         m.reconcile_root_live_blocks(cx);
                         m.view_model =
                             resolved_view_model(&m.root_vm, &m.engine, &m.root_live_blocks, cx);
+                        // Auto-close phone overlay sidebars when navigation
+                        // focus changed (e.g. a page tap in the drawer), then
+                        // re-resolve so the closed state renders this frame.
+                        if m.close_overlay_drawers_on_nav() {
+                            m.reconcile_root_live_blocks(cx);
+                            m.view_model =
+                                resolved_view_model(&m.root_vm, &m.engine, &m.root_live_blocks, cx);
+                        }
                         m.nav.set_root(m.root_vm.clone());
                         cx.notify();
                     });
@@ -1261,6 +1328,7 @@ fn launch_holon_window_impl(
                 share_ui: share_ui_entity.clone(),
                 root_live_blocks: std::collections::HashMap::new(),
                 root_view: initial_root_view,
+                last_focused_block: None,
             };
             // Initial reconciliation — create root LiveBlockView entities.
             // Each LiveBlockView manages its own child entities (editors, live queries).
@@ -1313,6 +1381,7 @@ fn launch_holon_window_impl(
                 safe_area_top: 0.0,
                 safe_area_bottom: 0.0,
                 share_ui: share_ui_entity,
+                applied_theme: String::new(),
             }
         });
         let any_view: AnyView = view.into();
@@ -1972,7 +2041,11 @@ fn load_theme_def(session: &FrontendSession) -> holon_frontend::theme::ThemeDef 
         .map(|h| std::path::PathBuf::from(h).join(".config/holon/themes"));
     let registry = ThemeRegistry::load(user_dir.as_deref());
     let ui = session.ui_settings();
-    let name = ui.theme.as_deref().unwrap_or("holonDark");
+    // Default must match the preferences schema default ("holonLight",
+    // preferences.rs) so the settings UI and the renderer agree on a fresh
+    // install (no `ui.theme` set) — otherwise the modal shows Light while the
+    // renderer applies Dark.
+    let name = ui.theme.as_deref().unwrap_or("holonLight");
     registry.get(name).cloned().unwrap_or_else(|| {
         tracing::warn!("Theme '{name}' not found, using holonDark");
         registry

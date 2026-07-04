@@ -130,7 +130,7 @@ impl EditorView {
                 move |this, entity, event, _window, cx| match event {
                     InputEvent::Focus => {
                         #[cfg(feature = "mobile")]
-                        gpui_mobile::show_keyboard();
+                        crate::mobile::editor_focus_gained();
 
                         // Promote this block to be the UiState.focused_block.
                         // Without this, clicking inside an editable_text gives the
@@ -156,7 +156,7 @@ impl EditorView {
                     }
                     InputEvent::Blur => {
                         #[cfg(feature = "mobile")]
-                        gpui_mobile::hide_keyboard();
+                        crate::mobile::editor_focus_lost(cx);
 
                         let value = entity.read(cx).value().to_string();
                         let action = ctrl.lock().unwrap().on_blur(&value);
@@ -499,9 +499,21 @@ impl EditorView {
     /// freshly-focused editor (e.g. click-to-edit) before any keystroke,
     /// without clobbering text a continuously-focused user is mid-typing.
     pub fn focus_arrived(&self, is_focused: bool) -> bool {
-        let just = is_focused && !self.prev_focused.get();
+        self.focus_transition(is_focused).0
+    }
+
+    /// Render-path focus-edge detector. Returns `(just_focused, just_blurred)`
+    /// — the false→true and true→false window-focus transitions since the last
+    /// call. On iOS/Android the gpui focus-change events never reach the
+    /// editor's `InputEvent::Focus`/`Blur` subscription, so this render-path
+    /// edge is the *only* reliable focus signal on mobile; the soft-keyboard
+    /// raise/hide is driven from it (see `editable_text` builder).
+    pub fn focus_transition(&self, is_focused: bool) -> (bool, bool) {
+        let prev = self.prev_focused.get();
+        let just_focused = is_focused && !prev;
+        let just_blurred = !is_focused && prev;
         self.prev_focused.set(is_focused);
-        just
+        (just_focused, just_blurred)
     }
 
     /// The single convergence entry point: set this editor's `InputState`

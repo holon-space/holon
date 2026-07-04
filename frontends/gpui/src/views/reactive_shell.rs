@@ -93,6 +93,11 @@ pub struct ReactiveShell {
     /// is already on the chain (cycle prevention across GPUI's async
     /// render boundary).
     live_block_ancestors: LiveBlockAncestors,
+    /// RAII pin on the engine watcher this shell consumes (block mode /
+    /// live-query mode; `None` in collection mode). Dropping the shell drops
+    /// the guard, which releases the watcher when this was the last
+    /// consumer — replaces the old manual `Drop → services.unwatch` path.
+    _watch_guard: Option<holon_frontend::WatchGuard>,
 }
 
 impl ReactiveShell {
@@ -135,6 +140,7 @@ impl ReactiveShell {
         let holon_frontend::LiveBlock {
             tree,
             structural_changes,
+            watch_guard,
         } = live_block;
 
         // Subscribe to structural changes (render_expr or ui_state changed).
@@ -204,6 +210,7 @@ impl ReactiveShell {
             collection_subs: Vec::new(),
             render_probe_last: std::cell::Cell::new(usize::MAX),
             live_block_ancestors,
+            _watch_guard: watch_guard,
         };
         view.subscribe_inner_collections(cx);
         cx.notify();
@@ -262,6 +269,7 @@ impl ReactiveShell {
             collection_subs: Vec::new(),
             render_probe_last: std::cell::Cell::new(usize::MAX),
             live_block_ancestors,
+            _watch_guard: None,
         }
     }
 
@@ -843,17 +851,6 @@ impl Render for ReactiveShell {
             .w_full()
             .h_full()
             .into_any_element()
-    }
-}
-
-impl Drop for ReactiveShell {
-    fn drop(&mut self) {
-        if let Some(ref block_id) = self.block_id {
-            // ALLOW(entity_uri_from_raw): render-spec ReactiveShell.block_id (parsed in Drop to unwatch)
-            let uri = EntityUri::from_raw(block_id);
-            tracing::debug!("[ReactiveShell] Dropping shell for '{block_id}', unwatching");
-            self.services.unwatch(&uri);
-        }
     }
 }
 

@@ -54,6 +54,12 @@ const UPDATE_BOOKKEEPING_FIELDS: &[&str] = &["id", "updated_at"];
 /// [`ChangeOp::Relocate`] rather than a [`ChangeOp::SetField`].
 /// `after_block_id` joins preemptively: any future update carrying it
 /// would otherwise leak as `SetField`.
+///
+/// Note: `sort_key` appearing here does NOT mean intent may carry one —
+/// a block `set_field("sort_key")` intent is rejected at the boundary by
+/// [`crate::BlockWriteField`] (Model.md invariant 3). The `sort_key`
+/// updates this decoder sees are the ordering authority's own minted
+/// writes flowing through the op bus ("until the Phase 5 flip").
 const RELOCATE_FIELDS: &[&str] = &["parent_id", "sort_key", "after_block_id"];
 
 /// Create params injected by the storage boundary, never domain content.

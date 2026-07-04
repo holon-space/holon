@@ -1163,6 +1163,7 @@ mod tests {
             UndoLastMutation,
             ToggleState,
             CreateDocument,
+            DeleteDocument,
             SimulateRestart,
             StartApp,
             ConcurrentSchemaInit,
@@ -1188,7 +1189,7 @@ mod tests {
         eprintln!("\n=== SWAP PROBE: full_headless cap-feasibility ===");
         eprintln!("CAP-FEASIBLE ({}): {:?}", feasible.len(), feasible);
         eprintln!(
-            "CAP-INFEASIBLE ({}, stay on E2ESut): {:?}",
+            "CAP-INFEASIBLE ({}): {:?}",
             infeasible.len(),
             infeasible.keys().collect::<Vec<_>>()
         );

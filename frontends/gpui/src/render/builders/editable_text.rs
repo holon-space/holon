@@ -81,8 +81,26 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
             let view = entity.read(cx);
             let input = view.input_entity().clone();
             let is_focused = input.focus_handle(cx).is_focused(window);
-            // `just_focused` is the false→true window-focus edge (e.g. click-to-edit).
-            let just_focused = view.focus_arrived(is_focused);
+            // `just_focused` is the false→true window-focus edge (e.g. click-to-edit);
+            // `just_blurred` is the true→false edge.
+            let (just_focused, just_blurred) = view.focus_transition(is_focused);
+            // On iOS/Android the platform focus-change events never reach the
+            // editor's `InputEvent::Focus`/`Blur` subscription (confirmed via
+            // MCP-driven clicks: the field focuses — caret renders — but no
+            // `InputEvent` fires), so the soft keyboard was never raised on
+            // focus. Drive it from the render-path focus edge, which is the
+            // reliable mobile focus signal. `editor_focus_gained/lost` are
+            // no-ops off `feature = "mobile"`.
+            #[cfg(feature = "mobile")]
+            {
+                if just_focused {
+                    crate::mobile::editor_focus_gained();
+                } else if just_blurred {
+                    crate::mobile::editor_focus_lost(cx);
+                }
+            }
+            #[cfg(not(feature = "mobile"))]
+            let _ = just_blurred;
             (input, is_focused, just_focused)
         };
         // Reconcile a stale `InputState` to the authority when the user cannot

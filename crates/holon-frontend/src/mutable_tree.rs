@@ -58,6 +58,9 @@ struct TreeNode {
     depth: usize,
     /// The raw widget (before TreeItem wrapping).
     widget: Arc<ReactiveViewModel>,
+    /// Rule-override props (`role`, `show_bullet`, `show_chevron`, …) merged
+    /// into the TreeItem wrapper — streaming twin of `flat_tree_items`.
+    overrides: HashMap<String, Value>,
 }
 
 /// Incremental tree that maintains a DFS-ordered `MutableVec`.
@@ -65,8 +68,8 @@ struct TreeNode {
 /// # Usage
 /// ```ignore
 /// let tree = MutableTree::new(collection_items.clone());
-/// tree.insert("a", None, "0.0".into(), widget_a);
-/// tree.insert("b", Some("a"), "0.0".into(), widget_b);
+/// tree.insert("a", None, "0.0".into(), widget_a, HashMap::new());
+/// tree.insert("b", Some("a"), "0.0".into(), widget_b, HashMap::new());
 /// // collection_items now has [TreeItem(a, depth=0), TreeItem(b, depth=1)]
 /// ```
 pub struct MutableTree {
@@ -114,13 +117,19 @@ impl MutableTree {
     }
 
     /// Insert a new node. If `parent_id` references a non-existent node, treats as root.
+    ///
+    /// Returns the ids of previously-stranded nodes (and their descendants)
+    /// this insert adopted — their depth changed, so the caller must
+    /// re-interpret their rows (depth-dependent `rules:` outcomes are baked
+    /// into the widget at interpret time).
     pub fn insert(
         &mut self,
         id: EntityUri,
         parent_id: Option<EntityUri>,
         sort_key: String,
         widget: Arc<ReactiveViewModel>,
-    ) {
+        overrides: HashMap<String, Value>,
+    ) -> Vec<EntityUri> {
         // Treat as root if parent doesn't exist in the tree (yet) — but
         // remember the stated parent so `adopt_orphans` can pull this node
         // under it once the real parent arrives.
@@ -142,6 +151,7 @@ impl MutableTree {
                 sort_key: sort_key.clone(),
                 depth,
                 widget: widget.clone(),
+                overrides: overrides.clone(),
             },
         );
 
@@ -162,7 +172,7 @@ impl MutableTree {
             .children
             .get(&Some(id.clone()))
             .map_or(false, |c| !c.is_empty());
-        let wrapped = wrap_tree_item(&widget, depth, has_children);
+        let wrapped = wrap_tree_item(&widget, depth, has_children, &overrides);
 
         self.flat_insert(pos, id.clone());
         self.flat.lock_mut().insert_cloned(pos, Arc::new(wrapped));
@@ -176,13 +186,16 @@ impl MutableTree {
         // Adopt any nodes that arrived earlier stating `id` as their parent but
         // were stranded as roots. Common case (in-order / no orphans) is a
         // cheap no-op; only an actual out-of-order arrival triggers the reflow.
-        self.adopt_orphans(&id);
+        self.adopt_orphans(&id)
     }
 
     /// Re-parent root nodes whose stated parent is `parent` (now present) under
     /// it, then reflow. Recurses so a chain of out-of-order arrivals
     /// (grandchild before child before parent) fully resolves.
-    fn adopt_orphans(&mut self, parent: &EntityUri) {
+    ///
+    /// Returns every node whose depth changed (adopted roots + their whole
+    /// subtrees) so the driver can re-interpret their rows.
+    fn adopt_orphans(&mut self, parent: &EntityUri) -> Vec<EntityUri> {
         let orphans: Vec<EntityUri> = match self.children.get(&None) {
             Some(roots) => roots
                 .iter()
@@ -197,7 +210,7 @@ impl MutableTree {
             None => Vec::new(),
         };
         if orphans.is_empty() {
-            return;
+            return Vec::new();
         }
         for orphan in &orphans {
             let sort_key = self.nodes[orphan].sort_key.clone();
@@ -222,6 +235,11 @@ impl MutableTree {
             self.adopt_orphans(orphan);
         }
         self.reflow();
+        // Post-restructure DFS over the adopted roots covers everything the
+        // recursion pulled in, plus descendants that were already attached.
+        let mut affected = Vec::new();
+        self.walk_dfs_into(&orphans, &mut affected);
+        affected
     }
 
     /// Recompute depths + DFS `flat_order` from the current `nodes`/`children`
@@ -248,7 +266,12 @@ impl MutableTree {
                     .children
                     .get(&Some(id.clone()))
                     .map_or(false, |c| !c.is_empty());
-                Arc::new(wrap_tree_item(&node.widget, node.depth, has_children))
+                Arc::new(wrap_tree_item(
+                    &node.widget,
+                    node.depth,
+                    has_children,
+                    &node.overrides,
+                ))
             })
             .collect();
         self.flat.lock_mut().replace_cloned(items);
@@ -262,6 +285,7 @@ impl MutableTree {
         parent_id: Option<EntityUri>,
         sort_key: String,
         widget: Arc<ReactiveViewModel>,
+        overrides: HashMap<String, Value>,
     ) {
         let Some(old) = self.nodes.get(id) else {
             panic!("MutableTree::update on unknown node {id}");
@@ -308,16 +332,18 @@ impl MutableTree {
             node.stated_parent = stated_parent;
             node.sort_key = sort_key;
             node.widget = widget;
+            node.overrides = overrides;
             self.reflow();
         } else {
             let pos = self.pos_of(id).expect("node in flat_index");
             let node = self.nodes.get_mut(id).expect("node in nodes map");
             node.widget = widget;
+            node.overrides = overrides;
             let has_children = self
                 .children
                 .get(&Some(id.clone()))
                 .map_or(false, |c| !c.is_empty());
-            let wrapped = wrap_tree_item(&node.widget, node.depth, has_children);
+            let wrapped = wrap_tree_item(&node.widget, node.depth, has_children, &node.overrides);
             self.flat.lock_mut().set_cloned(pos, Arc::new(wrapped));
         }
     }
@@ -368,7 +394,13 @@ impl MutableTree {
     /// Rebuild from scratch. Emits a single `VecDiff::Replace`.
     pub fn rebuild(
         &mut self,
-        entries: Vec<(EntityUri, Option<EntityUri>, String, Arc<ReactiveViewModel>)>,
+        entries: Vec<(
+            EntityUri,
+            Option<EntityUri>,
+            String,
+            Arc<ReactiveViewModel>,
+            HashMap<String, Value>,
+        )>,
     ) {
         self.nodes.clear();
         self.children.clear();
@@ -376,9 +408,9 @@ impl MutableTree {
         self.flat_index.clear();
 
         let all_ids: std::collections::HashSet<&EntityUri> =
-            entries.iter().map(|(id, _, _, _)| id).collect();
+            entries.iter().map(|(id, _, _, _, _)| id).collect();
 
-        for (id, parent_id, sort_key, widget) in &entries {
+        for (id, parent_id, sort_key, widget, overrides) in &entries {
             let effective_parent = parent_id
                 .as_ref()
                 .filter(|pid| all_ids.contains(pid))
@@ -392,6 +424,7 @@ impl MutableTree {
                     sort_key: sort_key.clone(),
                     depth: 0,
                     widget: widget.clone(),
+                    overrides: overrides.clone(),
                 },
             );
 
@@ -541,21 +574,27 @@ impl MutableTree {
             .children
             .get(&Some(id.clone()))
             .map_or(false, |c| !c.is_empty());
-        let wrapped = wrap_tree_item(&node.widget, node.depth, has_children);
+        let wrapped = wrap_tree_item(&node.widget, node.depth, has_children, &node.overrides);
         self.flat.lock_mut().set_cloned(pos, Arc::new(wrapped));
     }
 }
 
 // TODO: The ReactiveViewModel wrapping seems to be a separate concern. Move to a different/new file?
 /// Wrap a widget in a TreeItem with the given depth and has_children flag.
+/// Rule overrides are merged last, mirroring the static path's
+/// `flat_tree_items` (shadow_builders/tree.rs).
 fn wrap_tree_item(
     widget: &Arc<ReactiveViewModel>,
     depth: usize,
     has_children: bool,
+    overrides: &HashMap<String, Value>,
 ) -> ReactiveViewModel {
     let mut props = std::collections::HashMap::new();
     props.insert("depth".to_string(), Value::Integer(depth as i64));
     props.insert("has_children".to_string(), Value::Boolean(has_children));
+    for (k, v) in overrides {
+        props.insert(k.clone(), v.clone());
+    }
     ReactiveViewModel {
         children: vec![widget.clone()],
         data: futures_signals::signal::Mutable::new(widget.entity()).read_only(),
@@ -595,8 +634,8 @@ mod tests {
     #[test]
     fn insert_root_nodes() {
         let (mut tree, flat) = make_tree();
-        tree.insert(eu("a"), None, "0.0".into(), widget("A"));
-        tree.insert(eu("b"), None, "1.0".into(), widget("B"));
+        tree.insert(eu("a"), None, "0.0".into(), widget("A"), HashMap::new());
+        tree.insert(eu("b"), None, "1.0".into(), widget("B"), HashMap::new());
 
         assert_eq!(tree.flat_ids(), vec![eu("a"), eu("b")]);
         assert_eq!(flat.lock_ref().len(), 2);
@@ -605,8 +644,20 @@ mod tests {
     #[test]
     fn insert_child_computes_depth() {
         let (mut tree, _) = make_tree();
-        tree.insert(eu("root"), None, "0.0".into(), widget("Root"));
-        tree.insert(eu("child"), Some(eu("root")), "0.0".into(), widget("Child"));
+        tree.insert(
+            eu("root"),
+            None,
+            "0.0".into(),
+            widget("Root"),
+            HashMap::new(),
+        );
+        tree.insert(
+            eu("child"),
+            Some(eu("root")),
+            "0.0".into(),
+            widget("Child"),
+            HashMap::new(),
+        );
 
         let snap = tree.flat_snapshot();
         assert_eq!(snap[0], (eu("root"), 0, true));
@@ -616,9 +667,21 @@ mod tests {
     #[test]
     fn insert_grandchild() {
         let (mut tree, _) = make_tree();
-        tree.insert(eu("a"), None, "0.0".into(), widget("A"));
-        tree.insert(eu("b"), Some(eu("a")), "0.0".into(), widget("B"));
-        tree.insert(eu("c"), Some(eu("b")), "0.0".into(), widget("C"));
+        tree.insert(eu("a"), None, "0.0".into(), widget("A"), HashMap::new());
+        tree.insert(
+            eu("b"),
+            Some(eu("a")),
+            "0.0".into(),
+            widget("B"),
+            HashMap::new(),
+        );
+        tree.insert(
+            eu("c"),
+            Some(eu("b")),
+            "0.0".into(),
+            widget("C"),
+            HashMap::new(),
+        );
 
         let snap = tree.flat_snapshot();
         assert_eq!(snap.len(), 3);
@@ -640,10 +703,22 @@ mod tests {
     fn child_before_parent_is_reparented() {
         let (mut tree, _) = make_tree();
         // Children arrive first (parent "p" not yet present → would be roots).
-        tree.insert(eu("c1"), Some(eu("p")), "10".into(), widget("C1"));
-        tree.insert(eu("c2"), Some(eu("p")), "20".into(), widget("C2"));
+        tree.insert(
+            eu("c1"),
+            Some(eu("p")),
+            "10".into(),
+            widget("C1"),
+            HashMap::new(),
+        );
+        tree.insert(
+            eu("c2"),
+            Some(eu("p")),
+            "20".into(),
+            widget("C2"),
+            HashMap::new(),
+        );
         // Parent arrives last.
-        tree.insert(eu("p"), None, "00".into(), widget("P"));
+        tree.insert(eu("p"), None, "00".into(), widget("P"), HashMap::new());
 
         let snap = tree.flat_snapshot();
         assert_eq!(
@@ -661,9 +736,21 @@ mod tests {
     #[test]
     fn transitive_reparent_on_late_ancestor() {
         let (mut tree, _) = make_tree();
-        tree.insert(eu("gc"), Some(eu("c")), "0".into(), widget("GC"));
-        tree.insert(eu("c"), Some(eu("p")), "0".into(), widget("C"));
-        tree.insert(eu("p"), None, "0".into(), widget("P"));
+        tree.insert(
+            eu("gc"),
+            Some(eu("c")),
+            "0".into(),
+            widget("GC"),
+            HashMap::new(),
+        );
+        tree.insert(
+            eu("c"),
+            Some(eu("p")),
+            "0".into(),
+            widget("C"),
+            HashMap::new(),
+        );
+        tree.insert(eu("p"), None, "0".into(), widget("P"), HashMap::new());
 
         let snap = tree.flat_snapshot();
         assert_eq!(tree.flat_ids(), vec![eu("p"), eu("c"), eu("gc")]);
@@ -675,10 +762,34 @@ mod tests {
     #[test]
     fn siblings_sorted_by_sort_key() {
         let (mut tree, _) = make_tree();
-        tree.insert(eu("root"), None, "0.0".into(), widget("Root"));
-        tree.insert(eu("c"), Some(eu("root")), "2.0".into(), widget("C"));
-        tree.insert(eu("a"), Some(eu("root")), "0.0".into(), widget("A"));
-        tree.insert(eu("b"), Some(eu("root")), "1.0".into(), widget("B"));
+        tree.insert(
+            eu("root"),
+            None,
+            "0.0".into(),
+            widget("Root"),
+            HashMap::new(),
+        );
+        tree.insert(
+            eu("c"),
+            Some(eu("root")),
+            "2.0".into(),
+            widget("C"),
+            HashMap::new(),
+        );
+        tree.insert(
+            eu("a"),
+            Some(eu("root")),
+            "0.0".into(),
+            widget("A"),
+            HashMap::new(),
+        );
+        tree.insert(
+            eu("b"),
+            Some(eu("root")),
+            "1.0".into(),
+            widget("B"),
+            HashMap::new(),
+        );
 
         assert_eq!(tree.flat_ids(), vec![eu("root"), eu("a"), eu("b"), eu("c")]);
     }
@@ -686,12 +797,42 @@ mod tests {
     #[test]
     fn insert_between_siblings_with_children() {
         let (mut tree, _) = make_tree();
-        tree.insert(eu("root"), None, "0.0".into(), widget("Root"));
-        tree.insert(eu("s1"), Some(eu("root")), "0.0".into(), widget("S1"));
-        tree.insert(eu("s1c"), Some(eu("s1")), "0.0".into(), widget("S1-child"));
-        tree.insert(eu("s3"), Some(eu("root")), "2.0".into(), widget("S3"));
+        tree.insert(
+            eu("root"),
+            None,
+            "0.0".into(),
+            widget("Root"),
+            HashMap::new(),
+        );
+        tree.insert(
+            eu("s1"),
+            Some(eu("root")),
+            "0.0".into(),
+            widget("S1"),
+            HashMap::new(),
+        );
+        tree.insert(
+            eu("s1c"),
+            Some(eu("s1")),
+            "0.0".into(),
+            widget("S1-child"),
+            HashMap::new(),
+        );
+        tree.insert(
+            eu("s3"),
+            Some(eu("root")),
+            "2.0".into(),
+            widget("S3"),
+            HashMap::new(),
+        );
         // Insert s2 between s1 and s3
-        tree.insert(eu("s2"), Some(eu("root")), "1.0".into(), widget("S2"));
+        tree.insert(
+            eu("s2"),
+            Some(eu("root")),
+            "1.0".into(),
+            widget("S2"),
+            HashMap::new(),
+        );
 
         assert_eq!(
             tree.flat_ids(),
@@ -702,9 +843,9 @@ mod tests {
     #[test]
     fn update_data_only() {
         let (mut tree, flat) = make_tree();
-        tree.insert(eu("a"), None, "0.0".into(), widget("old"));
+        tree.insert(eu("a"), None, "0.0".into(), widget("old"), HashMap::new());
 
-        tree.update(&eu("a"), None, "0.0".into(), widget("new"));
+        tree.update(&eu("a"), None, "0.0".into(), widget("new"), HashMap::new());
 
         assert_eq!(tree.flat_ids(), vec![eu("a")]);
         assert_eq!(flat.lock_ref().len(), 1);
@@ -713,12 +854,24 @@ mod tests {
     #[test]
     fn update_reparent() {
         let (mut tree, _) = make_tree();
-        tree.insert(eu("a"), None, "0.0".into(), widget("A"));
-        tree.insert(eu("b"), None, "1.0".into(), widget("B"));
-        tree.insert(eu("c"), Some(eu("a")), "0.0".into(), widget("C"));
+        tree.insert(eu("a"), None, "0.0".into(), widget("A"), HashMap::new());
+        tree.insert(eu("b"), None, "1.0".into(), widget("B"), HashMap::new());
+        tree.insert(
+            eu("c"),
+            Some(eu("a")),
+            "0.0".into(),
+            widget("C"),
+            HashMap::new(),
+        );
 
         // Move c from under a to under b
-        tree.update(&eu("c"), Some(eu("b")), "0.0".into(), widget("C"));
+        tree.update(
+            &eu("c"),
+            Some(eu("b")),
+            "0.0".into(),
+            widget("C"),
+            HashMap::new(),
+        );
 
         let snap = tree.flat_snapshot();
         assert_eq!(snap[0], (eu("a"), 0, false)); // a lost its child
@@ -732,13 +885,31 @@ mod tests {
     #[test]
     fn update_reparent_moves_subtree() {
         let (mut tree, flat) = make_tree();
-        tree.insert(eu("a"), None, "0.0".into(), widget("A"));
-        tree.insert(eu("b"), None, "1.0".into(), widget("B"));
-        tree.insert(eu("c"), Some(eu("a")), "0.0".into(), widget("C"));
-        tree.insert(eu("gc"), Some(eu("c")), "0.0".into(), widget("GC"));
+        tree.insert(eu("a"), None, "0.0".into(), widget("A"), HashMap::new());
+        tree.insert(eu("b"), None, "1.0".into(), widget("B"), HashMap::new());
+        tree.insert(
+            eu("c"),
+            Some(eu("a")),
+            "0.0".into(),
+            widget("C"),
+            HashMap::new(),
+        );
+        tree.insert(
+            eu("gc"),
+            Some(eu("c")),
+            "0.0".into(),
+            widget("GC"),
+            HashMap::new(),
+        );
 
         // Indent c (with its child gc) from under a to under b.
-        tree.update(&eu("c"), Some(eu("b")), "0.0".into(), widget("C"));
+        tree.update(
+            &eu("c"),
+            Some(eu("b")),
+            "0.0".into(),
+            widget("C"),
+            HashMap::new(),
+        );
 
         let snap = tree.flat_snapshot();
         assert_eq!(snap[0], (eu("a"), 0, false));
@@ -752,12 +923,18 @@ mod tests {
     #[test]
     fn update_sort_key_moves_subtree() {
         let (mut tree, _) = make_tree();
-        tree.insert(eu("a"), None, "0.0".into(), widget("A"));
-        tree.insert(eu("ac"), Some(eu("a")), "0.0".into(), widget("AC"));
-        tree.insert(eu("b"), None, "1.0".into(), widget("B"));
+        tree.insert(eu("a"), None, "0.0".into(), widget("A"), HashMap::new());
+        tree.insert(
+            eu("ac"),
+            Some(eu("a")),
+            "0.0".into(),
+            widget("AC"),
+            HashMap::new(),
+        );
+        tree.insert(eu("b"), None, "1.0".into(), widget("B"), HashMap::new());
 
         // Move a (with child ac) after b.
-        tree.update(&eu("a"), None, "2.0".into(), widget("A"));
+        tree.update(&eu("a"), None, "2.0".into(), widget("A"), HashMap::new());
 
         assert_eq!(tree.flat_ids(), vec![eu("b"), eu("a"), eu("ac")]);
     }
@@ -767,11 +944,23 @@ mod tests {
     #[test]
     fn update_parent_inside_own_subtree_renders_as_root() {
         let (mut tree, _) = make_tree();
-        tree.insert(eu("a"), None, "0.0".into(), widget("A"));
-        tree.insert(eu("b"), Some(eu("a")), "0.0".into(), widget("B"));
+        tree.insert(eu("a"), None, "0.0".into(), widget("A"), HashMap::new());
+        tree.insert(
+            eu("b"),
+            Some(eu("a")),
+            "0.0".into(),
+            widget("B"),
+            HashMap::new(),
+        );
 
         // Concurrent-move transient: a claims b (its own child) as parent.
-        tree.update(&eu("a"), Some(eu("b")), "0.0".into(), widget("A"));
+        tree.update(
+            &eu("a"),
+            Some(eu("b")),
+            "0.0".into(),
+            widget("A"),
+            HashMap::new(),
+        );
 
         assert_eq!(tree.flat_ids(), vec![eu("a"), eu("b")]);
     }
@@ -779,8 +968,8 @@ mod tests {
     #[test]
     fn remove_leaf() {
         let (mut tree, flat) = make_tree();
-        tree.insert(eu("a"), None, "0.0".into(), widget("A"));
-        tree.insert(eu("b"), None, "1.0".into(), widget("B"));
+        tree.insert(eu("a"), None, "0.0".into(), widget("A"), HashMap::new());
+        tree.insert(eu("b"), None, "1.0".into(), widget("B"), HashMap::new());
 
         tree.remove(&eu("a"));
 
@@ -791,15 +980,34 @@ mod tests {
     #[test]
     fn remove_subtree() {
         let (mut tree, _) = make_tree();
-        tree.insert(eu("root"), None, "0.0".into(), widget("Root"));
-        tree.insert(eu("child"), Some(eu("root")), "0.0".into(), widget("Child"));
+        tree.insert(
+            eu("root"),
+            None,
+            "0.0".into(),
+            widget("Root"),
+            HashMap::new(),
+        );
+        tree.insert(
+            eu("child"),
+            Some(eu("root")),
+            "0.0".into(),
+            widget("Child"),
+            HashMap::new(),
+        );
         tree.insert(
             eu("grandchild"),
             Some(eu("child")),
             "0.0".into(),
             widget("GC"),
+            HashMap::new(),
         );
-        tree.insert(eu("other"), None, "1.0".into(), widget("Other"));
+        tree.insert(
+            eu("other"),
+            None,
+            "1.0".into(),
+            widget("Other"),
+            HashMap::new(),
+        );
 
         tree.remove(&eu("root"));
 
@@ -809,12 +1017,19 @@ mod tests {
     #[test]
     fn remove_updates_parent_has_children() {
         let (mut tree, _) = make_tree();
-        tree.insert(eu("parent"), None, "0.0".into(), widget("Parent"));
+        tree.insert(
+            eu("parent"),
+            None,
+            "0.0".into(),
+            widget("Parent"),
+            HashMap::new(),
+        );
         tree.insert(
             eu("child"),
             Some(eu("parent")),
             "0.0".into(),
             widget("Child"),
+            HashMap::new(),
         );
 
         assert!(tree.flat_snapshot()[0].2); // has_children = true
@@ -827,12 +1042,18 @@ mod tests {
     #[test]
     fn rebuild_from_scratch() {
         let (mut tree, flat) = make_tree();
-        tree.insert(eu("old"), None, "0.0".into(), widget("Old"));
+        tree.insert(eu("old"), None, "0.0".into(), widget("Old"), HashMap::new());
 
         tree.rebuild(vec![
-            (eu("a"), None, "0.0".into(), widget("A")),
-            (eu("b"), Some(eu("a")), "0.0".into(), widget("B")),
-            (eu("c"), None, "1.0".into(), widget("C")),
+            (eu("a"), None, "0.0".into(), widget("A"), HashMap::new()),
+            (
+                eu("b"),
+                Some(eu("a")),
+                "0.0".into(),
+                widget("B"),
+                HashMap::new(),
+            ),
+            (eu("c"), None, "1.0".into(), widget("C"), HashMap::new()),
         ]);
 
         assert_eq!(tree.flat_ids(), vec![eu("a"), eu("b"), eu("c")]);
@@ -848,8 +1069,20 @@ mod tests {
     fn rebuild_ignores_missing_parents() {
         let (mut tree, _) = make_tree();
         tree.rebuild(vec![
-            (eu("a"), Some(eu("nonexistent")), "0.0".into(), widget("A")),
-            (eu("b"), Some(eu("a")), "0.0".into(), widget("B")),
+            (
+                eu("a"),
+                Some(eu("nonexistent")),
+                "0.0".into(),
+                widget("A"),
+                HashMap::new(),
+            ),
+            (
+                eu("b"),
+                Some(eu("a")),
+                "0.0".into(),
+                widget("B"),
+                HashMap::new(),
+            ),
         ]);
 
         let snap = tree.flat_snapshot();

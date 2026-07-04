@@ -270,7 +270,7 @@ async fn render_and_forward(
             tracing::warn!("[UiWatcher] render_entity('{}') failed: {}", block_id, e);
             let _ = tx
                 .send(UiEvent::Structure {
-                    render_expr: error_render_expr(&format!("{e}")),
+                    render_expr: error_render_expr(&format!("{e:#}")),
                     candidates: Vec::new(),
                     generation,
                 })

@@ -2,6 +2,12 @@
 
 set dotenv-load
 
+# GPUI/blinc builds link libfontconfig on Linux; RUST_FONTCONFIG_DLOPEN=on makes the
+# fontconfig -sys build script dlopen it at runtime instead of static-linking (needed
+# for fresh clones/CI/jj workspaces). Previously lived in an untracked .env; tracked
+# here so every checkout inherits it. `export` puts it in recipes' environment.
+export RUST_FONTCONFIG_DLOPEN := "on"
+
 # List available recipes
 default:
     @just --list
@@ -135,69 +141,30 @@ pbt-layout-override cases='64' *FLAGS:
         -p holon-integration-tests --features pbt --test general_e2e_composed_pbt \
         -- --nocapture {{FLAGS}} 2>&1 | tee /tmp/pbt-layout-override.log
 
-# --- Predefined slices (ADR 0009: declare_pbt_slice! / component_pbt!) --------
-# Slices are discovered from source — no hardcoded list. Each `test_fn:` in
-# crates/holon-integration-tests/tests/ is one runnable slice; the file stem may
-# differ from the slice name (one file can declare several slices), so slices are
-# run by exact test-fn name. `pbt` is a default feature of holon-integration-tests.
-
-_slice_dir := "crates/holon-integration-tests/tests"
-
-# Discover every predefined slice with the ComponentSet/Wiring it composes.
-pbt-list:
+# Measure end-to-end UI action latency (indent / outdent / cycle-state / split / ...).
+# Drives the REAL pipeline (dispatch -> Loro commit -> LoroProjection resample ->
+# Turso/matview CDC -> reactive rows) through the headless composed keystone with the
+# `holon_latency` tracing target enabled, then prints a per-action count/p50/p95/max
+# table plus per-stage cost. Measures everything EXCEPT final GPU paint. HOLON_OTEL_FILTER=off
+# silences the OTel span layer so its recording cost doesn't distort the numbers.
+measure-latency cases='16' *FLAGS:
     #!/usr/bin/env bash
     set -euo pipefail
-    cd {{justfile_directory()}}
-    printf '%-32s %-22s %s\n' SLICE COMPOSITION FILE
-    printf '%-32s %-22s %s\n' '-----' '-----------' '----'
-    rg -lU 'test_fn:' {{_slice_dir}} --type rust | sort | while read -r f; do
-        rg -UoN 'test_fn:\s*([A-Za-z0-9_]+)\s*,\s*(?:wiring|set):\s*([^,\n]+)' \
-           -r '$1|$2' "$f" \
-        | sed -E 's/holon_pbt_core:://; s/Wiring:://; s/ComponentSet:://' \
-        | while IFS='|' read -r name comp; do
-            printf '%-32s %-22s %s\n' "$name" "$comp" "$(basename "$f")"
-          done
-    done
+    RUST_LOG="holon_latency=debug" HOLON_OTEL_FILTER=off PROPTEST_CASES={{cases}} \
+        cargo test -p holon-integration-tests --features pbt \
+        --test general_e2e_composed_pbt -- --nocapture {{FLAGS}} \
+        > /tmp/holon-latency.log 2>&1 || true
+    echo "raw log: /tmp/holon-latency.log ($(grep -c holon_latency /tmp/holon-latency.log || true) events)"
+    python3 scripts/measure_latency.py /tmp/holon-latency.log
 
-# Run one predefined slice by exact name; e.g. `just pbt-slice storage_consistency_pbt 64`.
-pbt-slice name cases='64' *FLAGS:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    cd {{justfile_directory()}}
-    file=$(rg -lU 'test_fn:\s*{{name}}\b' {{_slice_dir}} --type rust | head -1 || true)
-    if [ -z "${file:-}" ]; then
-        echo "Unknown slice '{{name}}'. Available:" >&2
-        just pbt-list >&2
-        exit 1
-    fi
-    stem=$(basename "$file" .rs)
-    echo ">>> slice {{name}}  (binary: $stem, cases: {{cases}})"
-    PROPTEST_CASES={{cases}} cargo test -p holon-integration-tests \
-        --test "$stem" -- --exact {{name}} --nocapture {{FLAGS}} \
-        2>&1 | tee "/tmp/pbt-slice-{{name}}.log"
-
-# Run every discovered slice sequentially; continues on failure, summary at end.
-pbt-slices cases='32':
-    #!/usr/bin/env bash
-    set -uo pipefail
-    cd {{justfile_directory()}}
-    slices=$(rg -UoN 'test_fn:\s*([A-Za-z0-9_]+)' -r '$1' {{_slice_dir}} --type rust | sort -u)
-    echo "Discovered $(echo "$slices" | wc -l | tr -d ' ') slices."
-    failed=""
-    count=0
-    while read -r s; do
-        [ -z "$s" ] && continue
-        count=$((count + 1))
-        echo ""
-        echo "=== $s ==="
-        just pbt-slice "$s" {{cases}} || failed="$failed $s"
-    done <<< "$slices"
-    echo ""
-    if [ -n "$failed" ]; then
-        echo "Failed slices:$failed"
-        exit 1
-    fi
-    echo "All $count slices passed."
+# --- Lib slices (composed catch triads + slice component tests) ---------------
+# The declare_pbt_slice!/component_pbt! standalone slice binaries were retired
+# (§8.10: coverage lives in the ONE composed keystone). What remains are the
+# cfg(test) lib slice tests (catch triads, component integration tests) —
+# nextest's default filter EXCLUDES lib targets, so run them explicitly:
+pbt-lib-slices:
+    cargo nextest run -p holon-integration-tests --lib --features pbt \
+        2>&1 | tee /tmp/pbt-lib-slices.log
 
 # --- Mutation Testing -------------------------------------------------------
 

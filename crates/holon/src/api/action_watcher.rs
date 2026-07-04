@@ -22,8 +22,9 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use holon_api::InterpValue;
 use holon_api::action_dsl::parse_action_dsl;
-use holon_api::render_eval::{CORE_VALUE_FN_LOOKUP, resolve_args_with};
+use holon_api::render_eval::{CORE_VALUE_FN_LOOKUP, eval_to_interp};
 use holon_api::{EntityName, Value};
 use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
@@ -175,6 +176,31 @@ async fn run_pair_watcher_inner(
 
     let entity_name = EntityName::new(&parsed_action.entity);
 
+    // A trigger query with no table references (e.g. the journal auto-create
+    // `SELECT date('now','localtime')`) is a *constant/time* trigger, not a
+    // data-reactive one. It cannot back a CDC materialized view — Turso rejects
+    // `CREATE MATERIALIZED VIEW … AS <tableless select>` with "No tables to
+    // populate from" — and watching it for row *changes* is meaningless anyway
+    // (no data dependency). Evaluate it once at startup and fire the action for
+    // each row. (Re-firing time triggers on day-rollover is a separate future
+    // concern; the matview watch never delivered it — it failed at boot.)
+    let is_tableless = crate::storage::parse_sql(&sql)
+        .map(|stmts| crate::storage::extract_table_refs(&stmts).is_empty())
+        .unwrap_or(false);
+
+    if is_tableless {
+        let rows = engine
+            .execute_query(sql, HashMap::new(), None)
+            .await
+            .with_context(|| {
+                format!("Failed to evaluate one-shot trigger query for action {action_id}")
+            })?;
+        for data in &rows {
+            fire_action(&engine, &entity_name, &parsed_action, &action_id, data).await;
+        }
+        return Ok(());
+    }
+
     let mut row_stream = engine
         .query_and_watch(sql, HashMap::new(), None)
         .await
@@ -183,33 +209,55 @@ async fn run_pair_watcher_inner(
     while let Some(batch) = row_stream.next().await {
         for item in batch.inner.items {
             if let Change::Created { data, .. } = item.change {
-                let resolved =
-                    resolve_args_with(&parsed_action.params, &data, &CORE_VALUE_FN_LOOKUP);
-
-                let params: StorageEntity = resolved
-                    .named
-                    .into_iter()
-                    .map(|(k, v)| (k.into(), v))
-                    .collect();
-
-                info!(
-                    "[action_watcher] executing {}.{} with params={params:?}",
-                    parsed_action.entity, parsed_action.operation
-                );
-
-                if let Err(e) = engine
-                    .execute_operation(&entity_name, &parsed_action.operation, params)
-                    .await
-                {
-                    tracing::error!(
-                        "[action_watcher] execute_operation failed for action {action_id}: {e:#}"
-                    );
-                }
+                fire_action(&engine, &entity_name, &parsed_action, &action_id, &data).await;
             }
         }
     }
 
     Ok(())
+}
+
+/// Resolve an action's params against a produced row and dispatch the operation.
+/// Shared by the reactive (`query_and_watch`) and one-shot (tableless-trigger)
+/// paths. Execution failures are logged loudly (fail-loud) but do not abort the
+/// watcher — one bad row must not tear down the whole action.
+async fn fire_action(
+    engine: &BackendEngine,
+    entity_name: &EntityName,
+    parsed_action: &holon_api::action_dsl::ParsedAction,
+    action_id: &str,
+    data: &StorageEntity,
+) {
+    // Action params are all named, plain values (never render templates or
+    // row-producing collections), so evaluate each directly. Routing through the
+    // render-oriented `resolve_args_with` would divert any param whose name
+    // collides with a render-template key (`parent_id`, `sortkey`, `action`, …
+    // see `is_template_arg`) into an unevaluated `templates` bucket the op never
+    // sees — which silently dropped `block.create`'s `parent_id` and broke
+    // journal auto-create ("parent_id is required for block creation").
+    let params: StorageEntity = parsed_action
+        .params
+        .iter()
+        .filter_map(|arg| {
+            let name = arg.name.as_ref()?;
+            match eval_to_interp(&arg.value, data, &CORE_VALUE_FN_LOOKUP) {
+                InterpValue::Value(v) => Some((name.clone().into(), v)),
+                InterpValue::Rows(_) => None,
+            }
+        })
+        .collect();
+
+    info!(
+        "[action_watcher] executing {}.{} with params={params:?}",
+        parsed_action.entity, parsed_action.operation
+    );
+
+    if let Err(e) = engine
+        .execute_operation(entity_name, &parsed_action.operation, params)
+        .await
+    {
+        tracing::error!("[action_watcher] execute_operation failed for action {action_id}: {e:#}");
+    }
 }
 
 fn extract_string(row: &StorageEntity, key: &str) -> Option<String> {

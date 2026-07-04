@@ -510,7 +510,8 @@ impl BackendEngine {
                 Err(e) => {
                     let err_str = format!("{:?}", e);
                     let is_retryable = err_str.contains("no such table")
-                        || err_str.contains("Database schema changed");
+                        || err_str.contains("Database schema changed")
+                        || err_str.contains("database is locked");
                     if is_retryable && attempt < 9 {
                         tracing::debug!(
                             "[query_and_watch] Retryable error (attempt {}): {}",

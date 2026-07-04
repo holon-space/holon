@@ -40,10 +40,10 @@ use crate::pbt::query::TestQuery;
 use crate::pbt::transitions::toggle_state::{CycleTarget, cycle_click_count};
 use crate::pbt::types::{Mutation, MutationEvent};
 
-use crate::pbt::sut_capabilities::view_model_to_snapshot;
 use crate::pbt::sut_row_parsing::{
     BLOCK_MATVIEW_SNAPSHOT_SQL, BLOCK_RAW_SNAPSHOT_SQL, parse_block_rows,
 };
+use crate::pbt::vm_snapshot::view_model_to_snapshot;
 
 /// A composition component wrapping a real headless frontend stack. Owns the
 /// `TempDir`, `FrontendSession`, and `ReactiveEngine` so background tasks and
@@ -70,8 +70,9 @@ pub struct HeadlessFrontendComponent {
     /// component has registered (E1: `SutWatch` over the PRODUCTION reactive
     /// watch surface). Production keys query watches by content hash, so the
     /// component tracks the test's `query_id` against the engine key it got back
-    /// from [`ReactiveEngine::watch_query_live`] — the only bookkeeping needed.
-    watches: Mutex<Vec<(String, EntityUri)>>,
+    /// from [`ReactiveEngine::watch_query_live`], plus the `WatchGuard` that
+    /// keeps the query watcher alive (dropping the entry releases it).
+    watches: Mutex<Vec<(String, EntityUri, holon_frontend::WatchGuard)>>,
     /// The in-memory org FS, its root, and the tracked org file paths — retained
     /// so the component can provide `SutOrgRead` by parsing the on-disk org files
     /// back into blocks (E1: org block-equivalence over the PRODUCTION
@@ -455,13 +456,17 @@ impl HeadlessFrontendComponent {
     /// pre-compiled at the transition boundary.
     fn register_watch_compiled(&self, query_id: &str, source: String, lang: QueryLanguage) {
         let services: Arc<dyn BuilderServices> = self.reactive.clone();
-        let (key, _live) =
+        let (key, mut live) =
             self.reactive
                 .watch_query_live(source, lang, table_expr(), None, services);
+        let guard = live
+            .watch_guard
+            .take()
+            .expect("watch_query_live must return a WatchGuard");
         self.watches
             .lock()
             .expect("watches lock")
-            .push((query_id.to_string(), key));
+            .push((query_id.to_string(), key, guard));
     }
 
     /// Resolve a ready (non-loading) reactive watch for `uri`, polling the
@@ -990,7 +995,7 @@ impl SutWatch for HeadlessFrontendComponent {
             .lock()
             .expect("watches lock")
             .iter()
-            .map(|(qid, _)| qid.clone())
+            .map(|(qid, _, _)| qid.clone())
             .collect();
         ids.sort();
         ids
@@ -1002,8 +1007,8 @@ impl SutWatch for HeadlessFrontendComponent {
             .lock()
             .expect("watches lock")
             .iter()
-            .find(|(qid, _)| qid == query_id)
-            .map(|(_, key)| key.clone());
+            .find(|(qid, _, _)| qid == query_id)
+            .map(|(_, key, _)| key.clone());
         let Some(key) = key else {
             return Vec::new();
         };
@@ -1502,13 +1507,12 @@ impl SutWatchRegister for HeadlessFrontendComponent {
     }
 
     async fn unregister_watch(&self, query_id: &str) {
-        // Drop the tracked watch entry; the production reactive watch surface
-        // reclaims the underlying watcher when its last `ReactiveRenderedRows`
-        // handle is released.
+        // Drop the tracked watch entry; dropping its `WatchGuard` releases
+        // the underlying query watcher when this was the last consumer.
         self.watches
             .lock()
             .expect("watches lock")
-            .retain(|(id, _)| id != query_id);
+            .retain(|(id, _, _)| id != query_id);
     }
 }
 
@@ -1641,6 +1645,7 @@ impl HeadlessFrontendComponent {
     ) {
         let id = self.resolve_id(block_id);
         let click_count = self.toggle_click_count(&id, new_state).await;
+        let mut current = self.block_task_state(&id).await.unwrap_or_default();
         for n in 0..click_count {
             // Click the `state_toggle` GLYPH (not a plain row click, which would
             // just focus): `cycle_state_toggle` targets the widget's own
@@ -1652,10 +1657,45 @@ impl HeadlessFrontendComponent {
                 .unwrap_or_else(|e| {
                     panic!("[toggle_state] click #{} failed for {id}: {e:#}", n + 1)
                 });
-            // Let CDC propagate so the widget's `current` prop (and its registered
-            // bounds) stay warm for the next click.
-            tokio::task::yield_now().await;
-            tokio::task::yield_now().await;
+            // WAIT until the projection shows THIS click landed before the
+            // next one, RE-CLICKING while the resolved view is stale. Each
+            // click's intent computes `next` from the resolved view's
+            // `current` prop; while that view still serves the pre-click
+            // value, a click re-dispatches the SAME keyword — a no-op write
+            // that can never advance the cycle (the stale-read double
+            // dispatch `inv-viewmodel-state-toggle-correct` caught when
+            // ToggleState first fired in the keystone: DOING != DONE, and
+            // the pure block_raw-settle variant of this loop then hung on a
+            // no-op click). Stale re-clicks are idempotent (same value), and
+            // the first click after the view refreshes advances exactly one
+            // step — a user hammering an unresponsive toggle sees the same.
+            // The generator excludes no-op toggles, so every landed click
+            // changes `task_state`.
+            let overall = tokio::time::Instant::now() + Duration::from_secs(10);
+            'landing: loop {
+                let attempt_deadline =
+                    (tokio::time::Instant::now() + Duration::from_millis(500)).min(overall);
+                while tokio::time::Instant::now() < attempt_deadline {
+                    let now_state = self.block_task_state(&id).await.unwrap_or_default();
+                    if now_state != current {
+                        current = now_state;
+                        break 'landing;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                assert!(
+                    tokio::time::Instant::now() < overall,
+                    "[toggle_state] click #{} never landed for {id} \
+                     (task_state still {current:?} after 10s of re-clicks)",
+                    n + 1
+                );
+                driver
+                    .cycle_state_toggle(&id, "main")
+                    .await
+                    .unwrap_or_else(|e| {
+                        panic!("[toggle_state] re-click #{} failed for {id}: {e:#}", n + 1)
+                    });
+            }
         }
     }
 }
@@ -1950,6 +1990,56 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
                 docs.push((doc_id, file_path.clone()));
             }
         }
+    }
+
+    async fn delete_document(&self, file_name: &str) {
+        use holon_filesystem::FileSystem;
+        let file_path = self.org_root.join(file_name);
+        FileSystem::remove(self.org_fs.as_ref(), &file_path)
+            .await
+            .unwrap_or_else(|e| {
+                panic!("[SutAppLifecycle::delete_document] remove {file_name} failed: {e:#}")
+            });
+
+        // Inverse of `create_document`'s poll: wait for the page block whose
+        // title is the file stem to VANISH from `block_raw`. The removal went
+        // through the bare fs port — the harness analog of the user deleting
+        // the file OUTSIDE Holon (the scenario the prod bug was observed in) —
+        // and the in-memory fs emitted a `Remove` change, so the production
+        // `FileSyncController::on_file_deleted` cascade ran for the vanished
+        // path. Fail loud on timeout — it means that cascade regressed and
+        // blocks linger after an external deletion.
+        let stem = std::path::Path::new(file_name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(file_name)
+            .to_string();
+        let timeout = Duration::from_secs(5);
+        let start = std::time::Instant::now();
+        loop {
+            if !self
+                .all_blocks()
+                .await
+                .into_iter()
+                .any(|b| b.title() == stem)
+            {
+                break;
+            }
+            assert!(
+                start.elapsed() < timeout,
+                "[SutAppLifecycle::delete_document] timeout: the doc block (title {stem:?}) is \
+                 still in the block set 5s after removing {file_name} — prod is not deleting \
+                 blocks when an org file is deleted outside Holon (regression of \
+                 FileSyncController::on_file_deleted's cascade)"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // Untrack the doc so later file-seam lookups don't resolve a dead path.
+        self.documents
+            .lock()
+            .expect("documents lock")
+            .retain(|(_, p)| *p != file_path);
     }
 
     async fn concurrent_schema_init(&self) {
@@ -2477,6 +2567,75 @@ mod tests {
             Some("c1X"),
             "[editor-probe] typing 'X' at end-of-text must commit 'c1X' to block_raw.content — \
              the headless editor edit did not sync to the block projection the invariant reads"
+        );
+    }
+
+    /// SPIKE (Phase 1b) END-TO-END: with focus on a DISPLAY occurrence
+    /// (`focused_occurrence = Some(1)`), a typed char must STILL commit to the
+    /// block's CANONICAL `block_raw.content`. Proves `editable_text(&block_uri)`
+    /// resolves by the canonical id regardless of occurrence (write → canonical
+    /// home) — the runtime companion to the mirror unit test
+    /// `occurrence_keyed_cursors_are_independent`, which covers caret isolation.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spike_display_occurrence_write_routes_to_canonical() {
+        const TREE_ORG: &str = "#+ID: structural-page\n\
+            * parent\n:PROPERTIES:\n:ID: parent\n:END:\n\
+            * c1\n:PROPERTIES:\n:ID: c1\n:END:\n";
+        let comp = HeadlessFrontendComponent::new_with_loro(
+            &[("structural-page.org", TREE_ORG)],
+            Duration::from_millis(300),
+            true,
+        )
+        .await;
+
+        let page = EntityUri::block("structural-page");
+        comp.apply_navigate_focus(CapRegion::Main, &page).await;
+
+        let c1 = EntityUri::block("c1");
+        let c1_sql = format!(
+            "SELECT content FROM block_raw WHERE id = '{}'",
+            c1.as_str().replace('\'', "''")
+        );
+
+        // 1) Canonical occurrence (None): open the editor and type 'A' → "c1A".
+        comp.apply_focus_editable_text(&c1).await;
+        assert_eq!(
+            comp.reactive.focused_occurrence(),
+            None,
+            "[spike-1b] focus starts at the canonical occurrence"
+        );
+        comp.apply_type_chars("A").await;
+
+        // 2) Switch focus to a DISPLAY occurrence and re-open the editor there.
+        //    `set_focus_occurrence` is additive — it does NOT touch
+        //    `focused_block`, and the production focus path leaves it intact.
+        comp.reactive.set_focus_occurrence(Some(1));
+        comp.apply_focus_editable_text(&c1).await;
+        assert_eq!(
+            comp.reactive.focused_block().as_ref(),
+            Some(&c1),
+            "[spike-1b] block still focused"
+        );
+        assert_eq!(
+            comp.reactive.focused_occurrence(),
+            Some(1),
+            "[spike-1b] occurrence persists across the production focus path"
+        );
+        comp.apply_type_chars("B").await;
+
+        // Both writes landed on the CANONICAL block, despite focus being on the
+        // display occurrence — editable_text resolves by block id, not occurrence.
+        let after = comp
+            .sql_query(&c1_sql)
+            .await
+            .into_iter()
+            .next()
+            .and_then(|r| HeadlessFrontendComponent::cell(&r, "content"));
+        assert_eq!(
+            after.as_deref(),
+            Some("c1AB"),
+            "[spike-1b] typing at display occurrence Some(1) must commit to CANONICAL \
+             c1 content (write → canonical home); got {after:?}"
         );
     }
 

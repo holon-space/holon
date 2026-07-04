@@ -25,7 +25,7 @@ How to use it:
 
 | Context | Crate(s) | A block is called… | Identity is… |
 |---|---|---|---|
-| **Authoring / Format** | `holon-org-format`, `holon-orgmode`, `holon-markdown` | headline / heading / drawer / fence / frontmatter | **bare id** on disk |
+| **Authoring / Format** | `holon-org-format`, `holon-orgmode` | headline / heading / drawer / fence / frontmatter | **bare id** on disk |
 | **CRDT of record** | `holon-loro` | LoroTree **node** + meta `LoroMap` | `STABLE_ID` meta key |
 | **P2P transport** | `holon-loro` (Iroh) | version-vector delta bytes | per-share `stable_peer_id` |
 | **Read projection** | `holon-turso` | **row** (`block` matview / `block_raw`) | `id` column |
