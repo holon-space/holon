@@ -4,7 +4,7 @@
 use holon_loro::LoroBackend;
 use holon_pbt_core::composition::{CapMap, Config};
 
-use super::components::LoroBackendComponent;
+use holon_loro_testing::LoroBackendComponent;
 
 /// Build the Loro-storage composed SUT — a real `LoroBackend` CRDT exposed as
 /// `SutBackend` + `SutLoroLog`. The same `composed_invariant_catalog()` the

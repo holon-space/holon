@@ -427,6 +427,17 @@ fn process_headlines(
                     // ALLOW(entity_uri_from_raw): org drawer REQUIRES value: bare slug promoted at parse boundary
                     .map(|s| EntityUri::from_raw(s))
                     .collect();
+            } else if key.eq_ignore_ascii_case("ADVICE_SUPPRESSED") {
+                // `:ADVICE_SUPPRESSED:` is the authored advice-suppression
+                // exclusion set (ADR 0021): identical bare-ID grammar to
+                // REQUIRES, pulled into block.advice_suppressed so the SQL edge
+                // partition routes it to the advice_suppressed junction.
+                block.advice_suppressed = value
+                    .split(|c: char| c == ',' || c.is_whitespace())
+                    .filter(|s| !s.is_empty())
+                    // ALLOW(entity_uri_from_raw): org drawer ADVICE_SUPPRESSED value: bare slug promoted at parse boundary
+                    .map(|s| EntityUri::from_raw(s))
+                    .collect();
             } else {
                 block.set_property(key, holon_api::Value::String(value.to_string()));
             }
@@ -498,6 +509,29 @@ fn process_headlines(
                 for (k, v) in source_block.header_args {
                     if KNOWN_HEADER_ARGS.contains(&k.as_str()) {
                         standard_args.insert(k, v);
+                    } else if k.eq_ignore_ascii_case("REQUIRES") {
+                        // `:REQUIRES <bare>` is an edge-typed header arg emitted by
+                        // `source_block_to_org` via `drawer_properties()`. Lift it
+                        // into the typed `block.requires` edge field so it round-trips
+                        // as an edge (not a raw string property), symmetric with the
+                        // headline path above.
+                        if let Some(s) = v.as_string() {
+                            src_block.requires = s
+                                .split(|c: char| c == ',' || c.is_whitespace())
+                                .filter(|s| !s.is_empty())
+                                // ALLOW(entity_uri_from_raw): org src-block REQUIRES header arg: bare slug promoted at parse boundary
+                                .map(EntityUri::from_raw)
+                                .collect();
+                        }
+                    } else if k.eq_ignore_ascii_case("ADVICE_SUPPRESSED") {
+                        if let Some(s) = v.as_string() {
+                            src_block.advice_suppressed = s
+                                .split(|c: char| c == ',' || c.is_whitespace())
+                                .filter(|s| !s.is_empty())
+                                // ALLOW(entity_uri_from_raw): org src-block ADVICE_SUPPRESSED header arg: bare slug promoted at parse boundary
+                                .map(EntityUri::from_raw)
+                                .collect();
+                        }
                     } else if let Some(s) = v.as_string() {
                         src_block.set_property(&k, holon_api::Value::String(s.to_string()));
                     }
@@ -910,12 +944,94 @@ mod tests {
     }
 
     #[test]
+    fn test_source_block_requires_survives_org_roundtrip() {
+        // A source block carrying a typed `requires` edge must round-trip
+        // through org render -> re-parse. The renderer emits `requires` via
+        // `drawer_properties()` as a `:REQUIRES <bare>` header arg on the
+        // #+BEGIN_SRC line; the parser must lift that back into the typed
+        // `block.requires` edge field, symmetric with the headline path.
+        // (Regression: forced-weight keystone red on inv-blocks-match-ref/org.)
+        let mut src = Block {
+            id: EntityUri::block("lessons_for_tasks::src::0"),
+            parent_id: EntityUri::block("lessons_for_tasks"),
+            content: "select 1".to_string(),
+            content_type: ContentType::Source,
+            source_language: Some("holon_prql".parse::<SourceLanguage>().unwrap()),
+            requires: vec![EntityUri::parse("block:lessons_for_tasks::rule::0").unwrap()],
+            ..Block::default()
+        };
+        src.set_sequence(0);
+
+        use crate::models::ToOrg;
+        let org = format!(
+            "* Rule\n:PROPERTIES:\n:ID: lessons_for_tasks\n:END:\n{}",
+            src.to_org()
+        );
+        let result = parse_test_org(&org);
+
+        let parsed = result
+            .blocks
+            .iter()
+            .find(|b| b.content_type == ContentType::Source)
+            .expect("source block must survive re-parse");
+        assert_eq!(
+            parsed.requires,
+            vec![EntityUri::parse("block:lessons_for_tasks::rule::0").unwrap()],
+            "source-block `requires` edge must survive the org round-trip as a typed edge"
+        );
+        assert!(
+            !parsed.properties.contains_key("REQUIRES"),
+            "`REQUIRES` must NOT leak into properties as a raw string; found: {:?}",
+            parsed.properties
+        );
+    }
+
+    #[test]
     fn test_parse_requires_preserves_existing_block_uris() {
         let content = "* TODO Task\n:PROPERTIES:\n:ID: t2\n:REQUIRES: block:foo\n:END:\n";
         let result = parse_test_org(content);
 
         let h = result.blocks.iter().find(|b| b.id.id() == "t2").unwrap();
         assert_eq!(h.requires, vec![EntityUri::parse("block:foo").unwrap()]);
+    }
+
+    #[test]
+    fn test_advice_suppressed_drawer_round_trips_byte_identically() {
+        // The `:ADVICE_SUPPRESSED:` drawer (ADR 0021) parses into the typed
+        // `block.advice_suppressed` edge field (bare slugs promoted to
+        // `block:` URIs at the boundary) and renders back to the same bare
+        // space-separated list — a byte-identical round-trip.
+        use crate::org_renderer::OrgRenderer;
+
+        let content = "* TODO Task\n:PROPERTIES:\n:ADVICE_SUPPRESSED: id1 id2\n:ID: a1\n:END:\n";
+        let path = PathBuf::from("/test/file.org");
+        let root = PathBuf::from("/test");
+        let file_id = generate_file_id(&path, &root);
+
+        let result = parse_org_file(&path, content, &EntityUri::no_parent(), &root).unwrap();
+        let h = result.blocks.iter().find(|b| b.id.id() == "a1").unwrap();
+        assert_eq!(
+            h.advice_suppressed,
+            vec![
+                EntityUri::parse("block:id1").unwrap(),
+                EntityUri::parse("block:id2").unwrap(),
+            ],
+            "bare slugs must normalise to block: URIs in the typed field"
+        );
+
+        let rendered = OrgRenderer::render_entitys(&result.blocks, &path, &file_id);
+        assert!(
+            rendered.contains(":ADVICE_SUPPRESSED: id1 id2"),
+            "renderer must emit the bare space-joined list, got:\n{rendered}"
+        );
+
+        // Re-parse the rendered text: the typed field must be identical.
+        let result2 = parse_org_file(&path, &rendered, &EntityUri::no_parent(), &root).unwrap();
+        let h2 = result2.blocks.iter().find(|b| b.id.id() == "a1").unwrap();
+        assert_eq!(
+            h2.advice_suppressed, h.advice_suppressed,
+            "advice_suppressed must survive render → re-parse unchanged"
+        );
     }
 
     #[test]

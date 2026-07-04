@@ -27,8 +27,12 @@ logs/security/
 # dora code context index
 .dora/
 
-# Claude Code
-.claude/
+# Claude Code — ignore local state but TRACK skills (they are repo deliverables;
+# a bare `.claude/` silently dropped new SKILL.md files from commits)
+.claude/*
+!.claude/skills/
+!.claude/logseq.json
+.claude/worktrees/
 .claude-flow/
 
 # IDE

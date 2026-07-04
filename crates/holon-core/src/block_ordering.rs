@@ -113,6 +113,7 @@ pub trait BlockOrdering: Send + Sync {
         _: &std::collections::HashMap<String, holon_api::Value>,
         _: &Tags,
         _: &[EntityUri],
+        _: &[EntityUri],
     ) -> Result<bool> {
         Ok(false)
     }
@@ -190,17 +191,6 @@ pub trait BlockOrdering: Send + Sync {
     /// assertions instead of computing order from a `Block`'s
     /// `sort_key` / `sequence` field — those are encoding-specific.
     async fn children(&self, parent_id: &EntityUri) -> Result<Vec<EntityUri>>;
-
-    /// Project the authoritative order key (Loro fractional index) to the
-    /// SQL `sort_key` sink for `ids`. A block created but never repositioned
-    /// emits no Loro mov delta, so the outbound projector never writes its fi
-    /// to SQL and it keeps the default `"A0"`, mis-sorting against moved
-    /// siblings (real fi). The org-scan reconciler calls this after its place
-    /// loop so freshly-created-but-unmoved blocks get a real `sort_key`.
-    /// Default + SqlOnly: no-op (SQL itself owns `sort_key` there).
-    async fn project_sort_keys(&self, _: &[EntityUri]) -> Result<()> {
-        Ok(())
-    }
 }
 
 /// Order-key minting — the store-owner's exclusive right to synthesize a
@@ -336,6 +326,7 @@ mod default_contract_tests {
                     BlockContent::text("x"),
                     &std::collections::HashMap::new(),
                     &Tags::default(),
+                    &[],
                     &[],
                 )
                 .await

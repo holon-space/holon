@@ -1,3 +1,4 @@
+use crate::arc::AttrInit;
 use crate::guard::RhaiEvaluator;
 use crate::value::Value;
 use crate::yaml::history::{AttrChange, CreatedToken, Event};
@@ -178,10 +179,14 @@ impl Engine {
                 .eval_postcond(&create_arc.id_expr, &create_maps, &binding.placeholders)?
                 .to_string();
             let mut attrs = BTreeMap::new();
-            for (attr, expr) in &create_arc.attrs {
-                let val = self
-                    .evaluator
-                    .eval_postcond(expr, &rhai_maps, &binding.placeholders)?;
+            for (attr, init) in &create_arc.attrs {
+                let val = match init {
+                    AttrInit::Literal(v) => v.clone(),
+                    AttrInit::Expr(expr) => {
+                        self.evaluator
+                            .eval_postcond(expr, &rhai_maps, &binding.placeholders)?
+                    }
+                };
                 attrs.insert(attr.clone(), val);
             }
             marking.create_token(new_id.clone(), create_arc.token_type.clone(), attrs.clone());
@@ -205,9 +210,25 @@ impl Engine {
             }
         }
 
-        // Advance clock
+        // Advance clock. `duration` ultimately comes from stored task data /
+        // YAML nets, so BOTH chrono steps must be checked: `Duration::minutes`
+        // panics beyond ~1.5e14 minutes and `DateTime + TimeDelta` panics on
+        // date overflow long before that. Out-of-range values return `Err`.
         let duration = transition.duration_minutes();
-        marking.set_clock(time + chrono::Duration::minutes(duration as i64));
+        let delta = chrono::Duration::try_minutes(duration as i64).ok_or_else(|| {
+            format!(
+                "transition '{}': duration {duration} minutes overflows chrono::Duration",
+                binding.transition_id
+            )
+        })?;
+        let new_clock = time.checked_add_signed(delta).ok_or_else(|| {
+            format!(
+                "transition '{}': advancing clock {time} by {duration} minutes \
+                 overflows the representable datetime range",
+                binding.transition_id
+            )
+        })?;
+        marking.set_clock(new_clock);
 
         Ok(Event {
             step,

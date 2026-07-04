@@ -202,8 +202,8 @@ mod tests {
         }
         fn keyed_rows_signal_vec(
             &self,
-        ) -> Pin<Box<dyn SignalVec<Item = (holon_api::EntityUri, Arc<DataRow>)> + Send>> {
-            Box::pin(MutableVec::<(holon_api::EntityUri, Arc<DataRow>)>::new().signal_vec_cloned())
+        ) -> Pin<Box<dyn SignalVec<Item = (holon_api::RowKey, Arc<DataRow>)> + Send>> {
+            Box::pin(MutableVec::<(holon_api::RowKey, Arc<DataRow>)>::new().signal_vec_cloned())
         }
         fn cache_identity(&self) -> u64 {
             holon_api::ptr_identity(self)

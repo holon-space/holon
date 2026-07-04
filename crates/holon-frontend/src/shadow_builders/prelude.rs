@@ -62,18 +62,18 @@ pub(crate) fn virtual_child_slot_from_arg(
 /// `sort_key: MAX` keeps the row sorted last; the `defaults` HashMap from the
 /// entity profile fills in the rest of the columns.
 pub(crate) fn virtual_child_row(
-    slot: &crate::reactive_view::VirtualChildSlot,
+    parent: &holon_api::EntityUri,
+    defaults: &std::collections::HashMap<String, holon_api::Value>,
 ) -> Arc<holon_api::widget_spec::DataRow> {
-    let parent_uri = &slot.parent_id;
-    let virtual_key = format!("{}:__virtual:{}", parent_uri.scheme(), parent_uri.id());
+    let virtual_key = crate::row_origin::RowOrigin::creation_placeholder_id(parent);
     let mut row = std::collections::HashMap::new();
     row.insert("id".to_string(), Value::String(virtual_key));
     row.insert(
         "parent_id".to_string(),
-        Value::String(slot.parent_id.as_str().to_string()),
+        Value::String(parent.as_str().to_string()),
     );
     row.insert("sort_key".to_string(), Value::Float(f64::MAX));
-    for (k, v) in &slot.defaults {
+    for (k, v) in defaults {
         row.insert(k.clone(), v.clone());
     }
     Arc::new(row)
@@ -88,7 +88,52 @@ pub(crate) fn interpret_virtual_child(
     template: &holon_api::render_types::RenderExpr,
 ) -> Option<ViewModel> {
     let slot = virtual_child_slot_from_arg(ba)?;
-    let row = virtual_child_row(&slot);
+    // Bug 2A: parent the creation slot at the query's focus root (resolved from
+    // the rendered rows), not the static container `slot.parent_id`. `None`
+    // (empty / not-yet-resolvable) → no slot rather than a silent mis-parent.
+    let parent = crate::row_origin::resolve_creation_parent(&ba.ctx.data_rows, &slot.parent_id)?;
+    let row = virtual_child_row(&parent, &slot.defaults);
     let row_ctx = ba.ctx.with_row(row);
     Some((ba.interpret)(template, &row_ctx))
+}
+
+/// Weave the session-level advice sidecar (ADR 0022) into a static collection's
+/// items on the PURE/snapshot path — the read side of the sidecar the reactive
+/// weaver / composed settle populate (`crate::advice_weaver`).
+///
+/// For each item whose id is an anchor with woven advice, the advice rows are
+/// interpreted through the READ-ONLY advice template (never the editable
+/// `item_template`) and appended as DIRECT children of the anchor item, each
+/// stamped with its `Occurrence::Placed(for_placement(lesson, anchor))`
+/// coordinate. Appending under the anchor item (not as flat siblings) is what
+/// makes the woven rows show up under `node.children` where the keystone
+/// snapshot invariant (`inv-advice-rows-woven`) reads them. A byte-for-byte
+/// no-op when the sidecar has no entry for the anchor (the common case).
+pub(crate) fn weave_advice_into_items(ba: &BA<'_>, items: Vec<ViewModel>) -> Vec<ViewModel> {
+    items
+        .into_iter()
+        .map(|item| weave_advice_into_item(ba, item))
+        .collect()
+}
+
+fn weave_advice_into_item(ba: &BA<'_>, mut item: ViewModel) -> ViewModel {
+    let Some(anchor_id) = item.row_id() else {
+        return item;
+    };
+    let Ok(anchor) = holon_api::EntityUri::parse(&anchor_id) else {
+        return item;
+    };
+    let advice_rows = ba.services.advice_children(&anchor);
+    if advice_rows.is_empty() {
+        return item;
+    }
+    let template = crate::reactive_view::advice_readonly_template();
+    for row in advice_rows {
+        let occurrence = crate::advice_weaver::advice_row_occurrence(&row);
+        let row_ctx = ba.ctx.with_row(row);
+        let mut vm = (ba.interpret)(&template, &row_ctx);
+        vm.occurrence = occurrence;
+        item.children.push(Arc::new(vm));
+    }
+    item
 }

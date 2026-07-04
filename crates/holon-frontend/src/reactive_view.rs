@@ -113,56 +113,225 @@ pub struct VirtualChildSlot {
     pub parent_id: holon_api::EntityUri,
 }
 
-/// Wraps a `ReactiveRowProvider` and appends a virtual DataRow at the end.
-///
-/// The virtual row is built from `VirtualChildSlot::defaults` plus a
-/// synthetic `block:virtual:{parent_id}` ID. It appears as a normal row
-/// to the collection driver and is rendered via `render_entity()` through
-/// the entity profile pipeline.
-struct VirtualChildRowProvider {
-    inner: Arc<dyn ReactiveRowProvider>,
-    virtual_row: Arc<holon_api::widget_spec::DataRow>,
-    virtual_key: holon_api::EntityUri,
+/// Where an [`AppendedRowsProvider`]'s suffix row comes from — the only thing
+/// that varies between the empty-collection creation slot and a display-placed
+/// occurrence.
+enum SuffixSource {
+    /// The empty-collection creation slot, parented to the query's focus root
+    /// (bug 2A). The parent is NOT static — it is resolved at render time from
+    /// `inner`'s rows via `row_origin::resolve_creation_parent`, so a new block
+    /// created at the bottom of a panel is parented to the focused block
+    /// (`fr.root_id`), not the panel container. Re-emits whenever the rowset
+    /// changes (focus navigation arrives as a Data event, not a Structure
+    /// rebuild, so the slot's parent MUST track it). Emits nothing while the
+    /// rowset is not yet resolvable (transient-empty on first load).
+    CreationSlot {
+        defaults: std::collections::HashMap<String, holon_api::Value>,
+        container: holon_api::EntityUri,
+        inner: Arc<dyn ReactiveRowProvider>,
+    },
+    /// A LIVE row derived from a canonical block's row cell (ADR 0015 P2 display
+    /// placement). The `id` stays the canonical id → edits route to canonical;
+    /// `anchor` is the display-local `parent_id`. Re-emits whenever `source`
+    /// changes, so the placed occurrence stays converged with the canonical block
+    /// by construction (ADR 0015 §1a shared cell). `occurrence` is the display
+    /// coordinate that rides the row-identity key (never the `id` string —
+    /// ADR 0015 rule 4), so a same-collection second occurrence keys distinctly.
+    LiveCell {
+        key: holon_api::EntityUri,
+        occurrence: holon_api::OccurrenceId,
+        anchor: EntityUri,
+        source: futures_signals::signal::ReadOnlyMutable<Arc<holon_api::widget_spec::DataRow>>,
+    },
 }
 
-impl VirtualChildRowProvider {
-    fn new(inner: Arc<dyn ReactiveRowProvider>, slot: &VirtualChildSlot) -> Self {
-        use holon_api::Value;
+/// Build the keyed synthetic creation-slot row for a resolved parent. The
+/// `:__virtual:` id makes `RowOrigin::from_id` yield `CreationPlaceholder` so
+/// the editor's submit handler materializes a real entity under `parent`.
+fn creation_slot_keyed_row(
+    parent: &holon_api::EntityUri,
+    defaults: &std::collections::HashMap<String, holon_api::Value>,
+) -> (holon_api::RowKey, Arc<holon_api::widget_spec::DataRow>) {
+    use holon_api::Value;
+    let virtual_id = crate::row_origin::RowOrigin::creation_placeholder_id(parent);
+    let mut row = std::collections::HashMap::new();
+    row.insert("id".to_string(), Value::String(virtual_id));
+    row.insert(
+        "parent_id".to_string(),
+        Value::String(parent.as_str().to_string()),
+    );
+    // Max-scalar string sentinel so the slot sorts last (see `Static` note).
+    row.insert(
+        "sort_key".to_string(),
+        Value::String("\u{10FFFF}".to_string()),
+    );
+    for (k, v) in defaults {
+        row.insert(k.clone(), v.clone());
+    }
+    let key =
+        holon_api::data_row_entity_uri(&row).expect("creation-slot row carries an 'id' column");
+    ((key, holon_api::Occurrence::Canonical), Arc::new(row))
+}
 
-        // Must match `parse_virtual_id` (view_event_handler.rs) and
-        // `virtual_child_row` — the `:__virtual:` infix is what the editor's
-        // submit handler recognises to materialize a real entity on first edit.
-        let virtual_id = format!(
-            "{}:__virtual:{}",
-            slot.parent_id.scheme(),
-            slot.parent_id.id()
-        );
-        let mut row = std::collections::HashMap::new();
-        row.insert("id".to_string(), Value::String(virtual_id));
-        row.insert(
-            "parent_id".to_string(),
-            Value::String(slot.parent_id.as_str().to_string()),
-        );
-        // sort_key MAX so it appears last in trees
-        row.insert("sort_key".to_string(), Value::Float(f64::MAX));
-        for (k, v) in &slot.defaults {
-            row.insert(k.clone(), v.clone());
+impl SuffixSource {
+    /// The current suffix row(s), keyed — for a synchronous snapshot.
+    fn current_keyed(&self) -> Vec<(holon_api::RowKey, Arc<holon_api::widget_spec::DataRow>)> {
+        match self {
+            SuffixSource::CreationSlot {
+                defaults,
+                container,
+                inner,
+            } => {
+                match crate::row_origin::resolve_creation_parent(&inner.rows_snapshot(), container)
+                {
+                    Some(parent) => vec![creation_slot_keyed_row(&parent, defaults)],
+                    None => vec![],
+                }
+            }
+            SuffixSource::LiveCell {
+                key,
+                occurrence,
+                anchor,
+                source,
+            } => vec![(
+                (
+                    key.clone(),
+                    holon_api::Occurrence::Placed(occurrence.clone()),
+                ),
+                placed_occurrence_row(&source.get_cloned(), anchor),
+            )],
         }
+    }
 
-        let virtual_key =
-            holon_api::data_row_entity_uri(&row).expect("virtual child row carries an 'id' column");
-        Self {
-            inner,
-            virtual_row: Arc::new(row),
-            virtual_key,
+    /// The live keyed suffix signal — `always` for `Static`, cell-derived for
+    /// `LiveCell`.
+    fn keyed_signal_vec(
+        &self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn futures_signals::signal_vec::SignalVec<
+                    Item = (holon_api::RowKey, Arc<holon_api::widget_spec::DataRow>),
+                > + Send,
+        >,
+    > {
+        use futures_signals::signal::SignalExt;
+        use futures_signals::signal_vec::SignalVecExt;
+        match self {
+            SuffixSource::CreationSlot {
+                defaults,
+                container,
+                inner,
+            } => {
+                let defaults = defaults.clone();
+                let container = container.clone();
+                Box::pin(
+                    inner
+                        .rows_signal_vec()
+                        .to_signal_cloned()
+                        .map(move |rows| {
+                            match crate::row_origin::resolve_creation_parent(&rows, &container) {
+                                Some(parent) => {
+                                    vec![creation_slot_keyed_row(&parent, &defaults)]
+                                }
+                                None => vec![],
+                            }
+                        })
+                        .to_signal_vec(),
+                )
+            }
+            SuffixSource::LiveCell {
+                key,
+                occurrence,
+                anchor,
+                source,
+            } => {
+                let row_key = (
+                    key.clone(),
+                    holon_api::Occurrence::Placed(occurrence.clone()),
+                );
+                let anchor = anchor.clone();
+                Box::pin(
+                    source
+                        .signal_cloned()
+                        .map(move |src| {
+                            vec![(row_key.clone(), placed_occurrence_row(&src, &anchor))]
+                        })
+                        .to_signal_vec(),
+                )
+            }
         }
     }
 }
 
-impl ReactiveRowProvider for VirtualChildRowProvider {
+/// ONE injector for every "append row(s) after a collection's real rows" case:
+/// the empty-collection creation slot (`SuffixSource::Static`, formerly
+/// `VirtualChildRowProvider`) AND a display-placed second occurrence
+/// (`SuffixSource::LiveCell`, formerly `PlacedRowProvider`). A provider-wrapper
+/// that `.chain()`s a keyed suffix onto `inner`; only the suffix's shape varies.
+///
+/// The behavior that forks — submit-to-create vs edit-canonical — is dispatched
+/// by `RowOrigin` off the row's `id` column (`view_event_handler`), NOT here, so
+/// this single type honors ADR 0015 §5 ("shared render path, separate type": the
+/// verbs stay in `RowOrigin`, the render path is shared).
+struct AppendedRowsProvider {
+    inner: Arc<dyn ReactiveRowProvider>,
+    suffix: SuffixSource,
+}
+
+impl AppendedRowsProvider {
+    /// The empty-collection creation slot. Its `:__virtual:` id makes the
+    /// editor's submit handler (`RowOrigin::from_id`) materialize a real entity
+    /// on first edit. The parent is resolved reactively from `inner`'s rows
+    /// (`SuffixSource::CreationSlot`) — the query's focus root, NOT the static
+    /// container id `slot.parent_id` (bug 2A). `slot.parent_id` is threaded on
+    /// only as the container hint used to recognise the flat `from children`
+    /// shape; the max-scalar `sort_key` that keeps the slot last is applied in
+    /// `creation_slot_keyed_row`.
+    fn creation_slot(inner: Arc<dyn ReactiveRowProvider>, slot: &VirtualChildSlot) -> Self {
+        Self {
+            inner: inner.clone(),
+            suffix: SuffixSource::CreationSlot {
+                defaults: slot.defaults.clone(),
+                container: slot.parent_id.clone(),
+                inner,
+            },
+        }
+    }
+
+    /// A display-placed second occurrence of `placed_id` under `anchor`, tracking
+    /// the canonical block's live row cell. Formerly `PlacedRowProvider::new`.
+    ///
+    /// The suffix keys `(placed_id, Occurrence::Placed(occ))` where `occ` is
+    /// minted deterministically from `(placed_id, anchor)` — so the occurrence
+    /// coordinate lives in the row-identity key (ADR 0015 rule 4: never an
+    /// id-infix) and a same-collection second occurrence of `placed_id` no
+    /// longer collides with the canonical row under the widened driver keyspace.
+    // Wired into collection assembly in Increment B step-6; proven by
+    // `tests::appended_rows_provider_injects_live_second_occurrence`.
+    #[allow(dead_code)]
+    pub(crate) fn placement(
+        inner: Arc<dyn ReactiveRowProvider>,
+        placed_id: EntityUri,
+        anchor: EntityUri,
+        source: futures_signals::signal::ReadOnlyMutable<Arc<holon_api::widget_spec::DataRow>>,
+    ) -> Self {
+        let occurrence = holon_api::OccurrenceId::for_placement(&placed_id, &anchor);
+        Self {
+            inner,
+            suffix: SuffixSource::LiveCell {
+                key: placed_id,
+                occurrence,
+                anchor,
+                source,
+            },
+        }
+    }
+}
+
+impl ReactiveRowProvider for AppendedRowsProvider {
     fn rows_snapshot(&self) -> Vec<Arc<holon_api::widget_spec::DataRow>> {
         let mut rows = self.inner.rows_snapshot();
-        rows.push(self.virtual_row.clone());
+        rows.extend(self.suffix.current_keyed().into_iter().map(|(_, r)| r));
         rows
     }
 
@@ -174,8 +343,8 @@ impl ReactiveRowProvider for VirtualChildRowProvider {
                 + Send,
         >,
     > {
-        use futures_signals::signal_vec::{always, SignalVecExt};
-        let suffix = always(vec![self.virtual_row.clone()]);
+        use futures_signals::signal_vec::SignalVecExt;
+        let suffix = self.suffix.keyed_signal_vec().map(|(_, r)| r);
         Box::pin(self.inner.rows_signal_vec().chain(suffix))
     }
 
@@ -184,18 +353,97 @@ impl ReactiveRowProvider for VirtualChildRowProvider {
     ) -> std::pin::Pin<
         Box<
             dyn futures_signals::signal_vec::SignalVec<
-                    Item = (holon_api::EntityUri, Arc<holon_api::widget_spec::DataRow>),
+                    Item = (holon_api::RowKey, Arc<holon_api::widget_spec::DataRow>),
                 > + Send,
         >,
     > {
-        use futures_signals::signal_vec::{always, SignalVecExt};
-        let suffix = always(vec![(self.virtual_key.clone(), self.virtual_row.clone())]);
-        Box::pin(self.inner.keyed_rows_signal_vec().chain(suffix))
+        use futures_signals::signal_vec::SignalVecExt;
+        Box::pin(
+            self.inner
+                .keyed_rows_signal_vec()
+                .chain(self.suffix.keyed_signal_vec()),
+        )
     }
 
     fn cache_identity(&self) -> u64 {
         self.inner.cache_identity()
     }
+}
+
+/// Derive a display-placed occurrence's `DataRow` from the canonical block's
+/// live row. Keeps the `id` column = the canonical id (so `view_event_handler`
+/// routes edits to canonical — ADR 0015 rule 3), overrides `parent_id` to the
+/// display-local anchor (display-only placement — rule 1), and stamps a sentinel
+/// `sort_key` so the occurrence sorts last (mirrors the creation-slot
+/// convention). Content and every other field are copied from the live source,
+/// so the placed row tracks the canonical block by construction. Used by
+/// `SuffixSource::LiveCell`.
+fn placed_occurrence_row(
+    source: &Arc<holon_api::widget_spec::DataRow>,
+    anchor: &EntityUri,
+) -> Arc<holon_api::widget_spec::DataRow> {
+    use holon_api::Value;
+    let mut row = (**source).clone();
+    row.insert(
+        "parent_id".to_string(),
+        Value::String(anchor.as_str().to_string()),
+    );
+    row.insert(
+        "sort_key".to_string(),
+        Value::String("\u{10FFFF}".to_string()),
+    );
+    Arc::new(row)
+}
+
+/// The READ-ONLY template a woven advice row (`Occurrence::Placed`) renders as
+/// (ADR 0021 v1 read-only children). Deliberately NOT the collection's
+/// `item_template`: an advice row is a display-only relevance suggestion, never
+/// an editable block. Built as a plain `RenderExpr` tree (no Rhai) — note the
+/// `navigation.focus` / `dismiss_advice` names must be the resolved dot/verb
+/// forms the interpreter expects, since we bypass parse-time aliasing.
+///
+/// Shape: `selectable(row(text(col("content")), op_button("dismiss_advice")),
+/// action: navigation.focus(block_id: col("id")))`.
+/// - `text(col("content"))` — read-only lesson content (NO `editable_text`).
+/// - `op_button("dismiss_advice")` — the dismiss affordance; GPUI maps the op
+///   name to an icon. The synthesized row carries `target_id`/`anchor_id`
+///   columns so dispatch can bind `dismiss_advice`'s `anchor_id` + `lesson_id`.
+/// - `selectable(action: navigation.focus)` — click-through to the canonical
+///   lesson (`col("id")` is the canonical lesson id).
+pub(crate) fn advice_readonly_template() -> holon_api::render_types::RenderExpr {
+    use holon_api::render_types::{Arg, RenderExpr};
+    use holon_api::Value;
+    fn call(name: &str, args: Vec<Arg>) -> RenderExpr {
+        RenderExpr::FunctionCall {
+            name: name.to_string(),
+            args,
+        }
+    }
+    fn col(name: &str) -> RenderExpr {
+        RenderExpr::ColumnRef {
+            name: name.to_string(),
+        }
+    }
+    fn pos(value: RenderExpr) -> Arg {
+        Arg { name: None, value }
+    }
+    fn named(name: &str, value: RenderExpr) -> Arg {
+        Arg {
+            name: Some(name.to_string()),
+            value,
+        }
+    }
+    fn lit(s: &str) -> RenderExpr {
+        RenderExpr::Literal {
+            value: Value::String(s.to_string()),
+        }
+    }
+
+    let content = call("text", vec![pos(col("content"))]);
+    let dismiss = call("op_button", vec![pos(lit("dismiss_advice"))]);
+    let inner = call("row", vec![pos(content), pos(dismiss)]);
+    let action = call("navigation.focus", vec![named("block_id", col("id"))]);
+    call("selectable", vec![pos(inner), named("action", action)])
 }
 
 /// Configuration for creating a collection ReactiveView.
@@ -212,10 +460,11 @@ pub struct CollectionConfig {
     /// into the row's `ctx.flags`. Empty = no overrides applied. See
     /// `crate::row_pipeline` for the per-row pipeline.
     ///
-    /// Streaming rules currently see only the row's own columns —
-    /// position/count/is_first/is_last are NOT injected (the driver
-    /// receives rows incrementally via VecDiff and the collection size
-    /// shifts with each event).
+    /// Streaming rules see the row's own columns plus, on the TREE driver,
+    /// the `level`/`depth` positional keys (computed from the rowset's
+    /// parent chain). position/count/is_first/is_last are NOT injected
+    /// (the driver receives rows incrementally via VecDiff and the
+    /// collection size shifts with each event).
     pub rules: Vec<holon_api::render_types::RuleSpec>,
 }
 
@@ -721,8 +970,17 @@ impl ReactiveView {
                 virtual_child,
                 ..
             } => {
+                // Advice weave (ADR 0022) is NOT wired here: it lives in the
+                // session-level sidecar (`crate::advice_weaver`) that the pure
+                // interpret path reads synchronously via
+                // `BuilderServices::advice_children`, so it is observable on the
+                // snapshot/MCP path — not only on this streaming driver. See the
+                // static collection builders (`shadow_builders::weave_advice`).
                 let effective_source: Arc<dyn ReactiveRowProvider> = match virtual_child {
-                    Some(slot) => Arc::new(VirtualChildRowProvider::new(data_source.clone(), slot)),
+                    Some(slot) => Arc::new(AppendedRowsProvider::creation_slot(
+                        data_source.clone(),
+                        slot,
+                    )),
                     None => data_source.clone(),
                 };
                 let is_tree = layout.is_hierarchical();
@@ -798,8 +1056,8 @@ impl ReactiveView {
         // currently in the tree so the focus driver can re-interpret affected
         // rows without going back to the backend.
         let tree = Arc::new(Mutex::new(MutableTree::new(self.items.clone())));
-        let key_index: Arc<Mutex<Vec<EntityUri>>> = Arc::new(Mutex::new(Vec::new()));
-        let row_map: Arc<Mutex<HashMap<EntityUri, Arc<holon_api::widget_spec::DataRow>>>> =
+        let key_index: Arc<Mutex<Vec<holon_api::RowKey>>> = Arc::new(Mutex::new(Vec::new()));
+        let row_map: Arc<Mutex<HashMap<holon_api::RowKey, Arc<holon_api::widget_spec::DataRow>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         // Capture the focus signal before `services` is moved into the
         // interpret closures below.
@@ -847,38 +1105,116 @@ impl ReactiveView {
             })
         };
 
+        // Interprets a row at a known tree depth. Injects the same `level` /
+        // `depth` positional keys as the static tree path so rules like
+        // `eq("level", 0)` fire on the streaming path too; the returned
+        // override map is threaded into the TreeItem wrapper by MutableTree.
+        // The virtual creation-slot row skips rules to mirror the static
+        // path, which appends the slot after rule evaluation.
+        // `occurrence` rides in as node metadata (ADR 0015 rule 4), NOT in the
+        // id string — it is the display coordinate the row's identity key
+        // carries, stamped onto the node so GPUI can suffix its per-row keys.
+        // `Canonical` for every real row.
         let interpret_row: Arc<
-            dyn Fn(Arc<holon_api::widget_spec::DataRow>) -> Arc<ReactiveViewModel> + Send + Sync,
+            dyn Fn(
+                    Arc<holon_api::widget_spec::DataRow>,
+                    usize,
+                    holon_api::Occurrence,
+                ) -> (Arc<ReactiveViewModel>, HashMap<String, holon_api::Value>)
+                + Send
+                + Sync,
         > = {
             let svc = services.clone();
             let space = space_handle.clone();
             let nif = node_interpret_fn;
             let ds = data_source.clone();
             let rules = config_rules;
-            Arc::new(move |row: Arc<holon_api::widget_spec::DataRow>| {
-                let parent_space = space.get_cloned();
-                let handle =
-                    holon_api::data_row_entity_uri(&row).and_then(|uri| ds.row_mutable(&uri));
-                let ctx = row_render_context(row.clone(), handle, svc.as_ref(), parent_space);
-                // FU-6: apply `rules:` per-row. Streaming has no count/is_last,
-                // so positional is empty — predicates can still match on row
-                // columns (e.g. `eq("status", "done")`). For position-aware
-                // rules, use the static arm or a dedicated streaming-position
-                // tracker (future work).
-                let positional = std::collections::HashMap::new();
-                let svc_for_interpret = svc.clone();
-                let (mut node, _) = crate::row_pipeline::apply_rules_and_interpret_with_ctx(
-                    ctx,
-                    &tmpl,
-                    &rules,
-                    &row,
-                    positional,
-                    move |expr, c| svc_for_interpret.interpret(expr, c),
-                );
-                node.interpret_fn = Some(nif.clone());
-                Arc::new(node)
-            })
+            let advice_tmpl = advice_readonly_template();
+            Arc::new(
+                move |row: Arc<holon_api::widget_spec::DataRow>,
+                      depth: usize,
+                      occurrence: holon_api::Occurrence| {
+                    let parent_space = space.get_cloned();
+                    let handle =
+                        holon_api::data_row_entity_uri(&row).and_then(|uri| ds.row_mutable(&uri));
+                    let ctx = row_render_context(row.clone(), handle, svc.as_ref(), parent_space);
+                    let is_virtual =
+                        crate::row_origin::RowOrigin::from_row(&row).is_creation_placeholder();
+                    // A woven advice row (ADR 0022) rides `Occurrence::Placed`
+                    // in its identity key. It renders READ-ONLY (ADR 0021 v1) —
+                    // the dismiss/click template, never the collection's editable
+                    // `item_template` — and skips rules (like the virtual slot).
+                    let is_advice = occurrence != holon_api::Occurrence::Canonical;
+                    let template = if is_advice { &advice_tmpl } else { &tmpl };
+                    let active_rules: &[holon_api::render_types::RuleSpec] =
+                        if is_virtual || is_advice { &[] } else { &rules };
+                    let positional = HashMap::from([
+                        ("level".to_string(), holon_api::Value::Integer(depth as i64)),
+                        ("depth".to_string(), holon_api::Value::Integer(depth as i64)),
+                    ]);
+                    let svc_for_interpret = svc.clone();
+                    let (mut node, overrides) =
+                        crate::row_pipeline::apply_rules_and_interpret_with_ctx(
+                            ctx,
+                            template,
+                            active_rules,
+                            &row,
+                            positional,
+                            move |expr, c| svc_for_interpret.interpret(expr, c),
+                        );
+                    node.interpret_fn = Some(nif.clone());
+                    node.occurrence = occurrence;
+                    (Arc::new(node), overrides)
+                },
+            )
         };
+
+        // Depth computed the same way `MutableTree::insert` resolves
+        // parenthood: walk stated parents while they are present in the
+        // rowset. Bounded so a transient parent cycle can't hang the driver.
+        // A stated parent always references a CANONICAL row (a display-placed
+        // occurrence is never itself a parent target), so parent lookups key the
+        // canonical occurrence.
+        fn rowset_depth(
+            row_map: &HashMap<holon_api::RowKey, Arc<holon_api::widget_spec::DataRow>>,
+            row: &holon_api::widget_spec::DataRow,
+        ) -> usize {
+            let mut depth = 0usize;
+            let mut cur = holon_api::widget_spec::data_row_parent_id(row);
+            while depth <= row_map.len() {
+                let parent_key = cur
+                    .as_ref()
+                    .map(|p| (p.clone(), holon_api::Occurrence::Canonical));
+                match parent_key.and_then(|k| row_map.get(&k)) {
+                    Some(parent_row) => {
+                        depth += 1;
+                        cur = holon_api::widget_spec::data_row_parent_id(parent_row);
+                    }
+                    None => break,
+                }
+            }
+            // WP-F projection assertion (free — the loop above already counts the
+            // walk): a chain longer than the rowset can only repeat a row, i.e. a
+            // parent CYCLE. Previously this was swallowed by the `depth <= len`
+            // bound and returned a bogus depth. The self-parented `sentinel:no_parent`
+            // FK anchor never reaches this projection (filtered from the `block`
+            // matview), so it cannot trip a false cycle. This closure returns
+            // `usize` with no `Result` on the path → per the fail-loud directive a
+            // `panic!` is used.
+            if depth > row_map.len() {
+                panic!(
+                    "{}",
+                    holon_api::ProjectionInvariantViolated {
+                        detail: format!(
+                            "rowset depth walk for row {:?} exceeded the {}-row set — parent cycle",
+                            holon_api::widget_spec::data_row_parent_id(row),
+                            row_map.len()
+                        ),
+                    }
+                );
+            }
+            depth
+        }
 
         let get_sort_key: Arc<dyn Fn(&holon_api::widget_spec::DataRow) -> String + Send + Sync> = {
             Arc::new(move |row: &holon_api::widget_spec::DataRow| -> String {
@@ -899,18 +1235,59 @@ impl ReactiveView {
                 let mut tree = tree.lock().unwrap();
                 let mut key_index = key_index.lock().unwrap();
                 let mut row_map = row_map.lock().unwrap();
+                // Adopted orphans changed depth, so their interpreted widgets
+                // (depth-dependent rule outcomes baked in) are stale —
+                // re-interpret them at their post-adoption depth.
+                // A row's stated parent is always canonical (see `rowset_depth`).
+                let parent_key = |row: &holon_api::widget_spec::DataRow| {
+                    extract_parent_id(row).map(|p| (p, holon_api::Occurrence::Canonical))
+                };
+                let reinterpret_adopted = |tree: &mut crate::mutable_tree::MutableTree,
+                                           row_map: &HashMap<
+                    holon_api::RowKey,
+                    Arc<holon_api::widget_spec::DataRow>,
+                >,
+                                           adopted: Vec<holon_api::RowKey>,
+                                           interpret_row: &dyn Fn(
+                    Arc<holon_api::widget_spec::DataRow>,
+                    usize,
+                    holon_api::Occurrence,
+                ) -> (
+                    Arc<ReactiveViewModel>,
+                    HashMap<String, holon_api::Value>,
+                ),
+                                           get_sort_key: &dyn Fn(
+                    &holon_api::widget_spec::DataRow,
+                ) -> String| {
+                    for id in adopted {
+                        let Some(row) = row_map.get(&id).cloned() else {
+                            continue;
+                        };
+                        let parent = parent_key(&row);
+                        let sk = get_sort_key(&row);
+                        let depth = rowset_depth(row_map, &row);
+                        let (w, ov) = interpret_row(row, depth, id.1.clone());
+                        tree.update(&id, parent, sk, w, ov);
+                    }
+                };
                 match diff {
                     VecDiff::Replace { values } => {
                         row_map.clear();
                         *key_index = values.iter().map(|(k, _)| k.clone()).collect();
+                        // Fill row_map first: rowset_depth needs the FULL
+                        // rowset to resolve parent chains regardless of row
+                        // arrival order within the batch.
+                        for (k, row) in &values {
+                            row_map.insert(k.clone(), row.clone());
+                        }
                         let entries: Vec<_> = values
                             .into_iter()
                             .map(|(k, row)| {
-                                row_map.insert(k.clone(), row.clone());
-                                let parent = extract_parent_id(&row);
+                                let parent = parent_key(&row);
                                 let sk = get_sort_key(&row);
-                                let w = interpret_row(row);
-                                (k, parent, sk, w)
+                                let depth = rowset_depth(&row_map, &row);
+                                let (w, ov) = interpret_row(row, depth, k.1.clone());
+                                (k, parent, sk, w, ov)
                             })
                             .collect();
                         tree.rebuild(entries);
@@ -921,20 +1298,29 @@ impl ReactiveView {
                     } => {
                         row_map.insert(key.clone(), row.clone());
                         key_index.insert(index, key.clone());
-                        let parent = extract_parent_id(&row);
+                        let parent = parent_key(&row);
                         let sk = get_sort_key(&row);
-                        let w = interpret_row(row);
-                        tree.insert(key, parent, sk, w);
+                        let depth = rowset_depth(&row_map, &row);
+                        let (w, ov) = interpret_row(row, depth, key.1.clone());
+                        let adopted = tree.insert(key, parent, sk, w, ov);
+                        reinterpret_adopted(
+                            &mut tree,
+                            &row_map,
+                            adopted,
+                            interpret_row.as_ref(),
+                            get_sort_key.as_ref(),
+                        );
                     }
                     VecDiff::UpdateAt {
                         index: _,
                         value: (key, row),
                     } => {
                         row_map.insert(key.clone(), row.clone());
-                        let parent = extract_parent_id(&row);
+                        let parent = parent_key(&row);
                         let sk = get_sort_key(&row);
-                        let w = interpret_row(row);
-                        tree.update(&key, parent, sk, w);
+                        let depth = rowset_depth(&row_map, &row);
+                        let (w, ov) = interpret_row(row, depth, key.1.clone());
+                        tree.update(&key, parent, sk, w, ov);
                     }
                     VecDiff::RemoveAt { index } => {
                         let key = key_index.remove(index);
@@ -944,10 +1330,18 @@ impl ReactiveView {
                     VecDiff::Push { value: (key, row) } => {
                         row_map.insert(key.clone(), row.clone());
                         key_index.push(key.clone());
-                        let parent = extract_parent_id(&row);
+                        let parent = parent_key(&row);
                         let sk = get_sort_key(&row);
-                        let w = interpret_row(row);
-                        tree.insert(key, parent, sk, w);
+                        let depth = rowset_depth(&row_map, &row);
+                        let (w, ov) = interpret_row(row, depth, key.1.clone());
+                        let adopted = tree.insert(key, parent, sk, w, ov);
+                        reinterpret_adopted(
+                            &mut tree,
+                            &row_map,
+                            adopted,
+                            interpret_row.as_ref(),
+                            get_sort_key.as_ref(),
+                        );
                     }
                     VecDiff::Pop {} => {
                         if let Some(key) = key_index.pop() {
@@ -993,11 +1387,15 @@ impl ReactiveView {
                             // canonical `EntityUri`s and the row_map is keyed
                             // by the same canonical id, so a bare-vs-schemed
                             // mismatch can't drop the lookup.
-                            let mut affected: Vec<EntityUri> = Vec::new();
+                            // Focus is still a bare `EntityUri` in this
+                            // increment (Increment C widens it), so it flips
+                            // only the CANONICAL occurrence of a block.
+                            let mut affected: Vec<holon_api::RowKey> = Vec::new();
                             for opt in [last_focus.as_ref(), new_focus.as_ref()] {
                                 if let Some(uri) = opt {
-                                    if !affected.contains(uri) {
-                                        affected.push(uri.clone());
+                                    let key = (uri.clone(), holon_api::Occurrence::Canonical);
+                                    if !affected.contains(&key) {
+                                        affected.push(key);
                                     }
                                 }
                             }
@@ -1008,28 +1406,31 @@ impl ReactiveView {
                             // row_map; we take row_map then tree, but the
                             // row_map lock is released first).
                             let updates: Vec<(
-                                EntityUri,
-                                Option<EntityUri>,
+                                holon_api::RowKey,
+                                Option<holon_api::RowKey>,
                                 String,
                                 Arc<ReactiveViewModel>,
+                                HashMap<String, holon_api::Value>,
                             )> = {
                                 let rm = row_map.lock().unwrap();
                                 affected
                                     .iter()
-                                    .filter_map(|uri| {
-                                        rm.get(uri).cloned().map(|row| {
-                                            let parent = extract_parent_id(&row);
+                                    .filter_map(|key| {
+                                        rm.get(key).cloned().map(|row| {
+                                            let parent = extract_parent_id(&row)
+                                                .map(|p| (p, holon_api::Occurrence::Canonical));
                                             let sk = get_sort_key(&row);
-                                            let w = interpret_row(row);
-                                            (uri.clone(), parent, sk, w)
+                                            let depth = rowset_depth(&rm, &row);
+                                            let (w, ov) = interpret_row(row, depth, key.1.clone());
+                                            (key.clone(), parent, sk, w, ov)
                                         })
                                     })
                                     .collect()
                             };
                             if !updates.is_empty() {
                                 let mut t = tree.lock().unwrap();
-                                for (id, parent, sk, w) in updates {
-                                    t.update(&id, parent, sk, w);
+                                for (id, parent, sk, w, ov) in updates {
+                                    t.update(&id, parent, sk, w, ov);
                                 }
                             }
                             last_focus = new_focus;
@@ -1078,8 +1479,11 @@ impl ReactiveView {
         let target = self.items.clone();
         let space_handle = space.clone();
 
-        // Shared entries for the two concurrent drivers.
-        let entries: Arc<Mutex<Vec<(EntityUri, Arc<holon_api::widget_spec::DataRow>)>>> =
+        // Shared entries for the two concurrent drivers. Keyed by the widened
+        // `RowKey`; the tie-break in `full_rebuild` compares the whole key. The
+        // flat driver renders canonical rows only (display placement targets the
+        // tree path first), so nodes keep the default `Canonical` occurrence.
+        let entries: Arc<Mutex<Vec<(holon_api::RowKey, Arc<holon_api::widget_spec::DataRow>)>>> =
             Arc::new(Mutex::new(Vec::new()));
 
         // Self-interpretation closure: captures services + space, recomputes
@@ -1125,31 +1529,42 @@ impl ReactiveView {
         // can read row columns without going back through context. Builders
         // that don't read `data` are unaffected — `with_entity` just sets a
         // ReadOnlyMutable cell that's never observed.
+        let advice_tmpl = advice_readonly_template();
         let interpret_and_attach = {
             let svc = services.clone();
             let nif = node_interpret_fn.clone();
             let ds = data_source.clone();
             let rules = config_rules;
+            let advice_tmpl = advice_tmpl.clone();
             move |tmpl: &RenderExpr,
                   row: Arc<holon_api::widget_spec::DataRow>,
-                  child_space: Option<AvailableSpace>|
+                  child_space: Option<AvailableSpace>,
+                  occurrence: holon_api::Occurrence|
                   -> Arc<ReactiveViewModel> {
                 let handle =
                     holon_api::data_row_entity_uri(&row).and_then(|uri| ds.row_mutable(&uri));
                 let ctx = row_render_context(row.clone(), handle, svc.as_ref(), child_space);
+                // A woven advice row (`Occurrence::Placed`) renders READ-ONLY
+                // (ADR 0021/0022): the dismiss/click template, never the
+                // collection's editable `item_template`, and skips rules.
+                let is_advice = occurrence != holon_api::Occurrence::Canonical;
+                let template = if is_advice { &advice_tmpl } else { tmpl };
+                let active_rules: &[holon_api::render_types::RuleSpec] =
+                    if is_advice { &[] } else { &rules };
                 // FU-6: rules: per-row. Streaming has no count/is_last so the
                 // positional context is empty (column-only predicates fire).
                 let positional = std::collections::HashMap::new();
                 let svc_for_interpret = svc.clone();
                 let (mut node, _) = crate::row_pipeline::apply_rules_and_interpret_with_ctx(
                     ctx,
-                    tmpl,
-                    &rules,
+                    template,
+                    active_rules,
                     &row,
                     positional,
                     move |expr, c| svc_for_interpret.interpret(expr, c),
                 );
                 node.interpret_fn = Some(nif.clone());
+                node.occurrence = occurrence;
                 Arc::new(node)
             }
         };
@@ -1179,7 +1594,7 @@ impl ReactiveView {
                 };
                 let items: Vec<Arc<ReactiveViewModel>> = lock
                     .iter()
-                    .map(|(_, row)| interpret(&tmpl, row.clone(), child_space))
+                    .map(|(k, row)| interpret(&tmpl, row.clone(), child_space, k.1.clone()))
                     .collect();
                 tracing::trace!(
                     "[ReactiveView::flat_driver] rebuilt, len={}, child_space={:?}",
@@ -1211,6 +1626,7 @@ impl ReactiveView {
                         index,
                         value: (key, row),
                     } => {
+                        let occ = key.1.clone();
                         entries.lock().unwrap()[index] = (key, row.clone());
                         if has_sort || csf.is_some() {
                             // Sort key may have changed → reorder.
@@ -1226,13 +1642,14 @@ impl ReactiveView {
                             let parent_space = space.get_cloned();
                             target
                                 .lock_mut()
-                                .set_cloned(index, interpret(&tmpl, row, parent_space));
+                                .set_cloned(index, interpret(&tmpl, row, parent_space, occ));
                         }
                     }
                     VecDiff::InsertAt {
                         index,
                         value: (key, row),
                     } => {
+                        let occ = key.1.clone();
                         entries.lock().unwrap().insert(index, (key, row.clone()));
                         if has_sort || csf.is_some() {
                             rebuild();
@@ -1240,7 +1657,7 @@ impl ReactiveView {
                             let parent_space = space.get_cloned();
                             target
                                 .lock_mut()
-                                .insert_cloned(index, interpret(&tmpl, row, parent_space));
+                                .insert_cloned(index, interpret(&tmpl, row, parent_space, occ));
                         }
                     }
                     VecDiff::RemoveAt { index } => {
@@ -1252,6 +1669,7 @@ impl ReactiveView {
                         }
                     }
                     VecDiff::Push { value: (key, row) } => {
+                        let occ = key.1.clone();
                         entries.lock().unwrap().push((key, row.clone()));
                         if has_sort || csf.is_some() {
                             rebuild();
@@ -1259,7 +1677,7 @@ impl ReactiveView {
                             let parent_space = space.get_cloned();
                             target
                                 .lock_mut()
-                                .push_cloned(interpret(&tmpl, row, parent_space));
+                                .push_cloned(interpret(&tmpl, row, parent_space, occ));
                         }
                     }
                     VecDiff::Pop {} => {
@@ -1416,7 +1834,7 @@ impl ReactiveView {
 
         // Per-row entry tracking. Mirrors flat_driver's `entries` shape so
         // we can rebuild lanes deterministically on every event.
-        let entries: Arc<Mutex<Vec<(EntityUri, Arc<holon_api::widget_spec::DataRow>)>>> =
+        let entries: Arc<Mutex<Vec<(holon_api::RowKey, Arc<holon_api::widget_spec::DataRow>)>>> =
             Arc::new(Mutex::new(Vec::new()));
 
         let lane_field_for_partition = lane_field.clone();
@@ -1772,6 +2190,49 @@ mod tests {
         row
     }
 
+    /// A minimal `ReactiveRowProvider` returning a fixed row set — for tests
+    /// that need `inner` to hold specific rows (e.g. so the creation slot can
+    /// resolve its focus-root parent).
+    struct FixedRows(Vec<Arc<DataRow>>);
+    impl ReactiveRowProvider for FixedRows {
+        fn rows_snapshot(&self) -> Vec<Arc<DataRow>> {
+            self.0.clone()
+        }
+        fn rows_signal_vec(
+            &self,
+        ) -> std::pin::Pin<
+            Box<dyn futures_signals::signal_vec::SignalVec<Item = Arc<DataRow>> + Send>,
+        > {
+            Box::pin(futures_signals::signal_vec::always(self.0.clone()))
+        }
+        fn keyed_rows_signal_vec(
+            &self,
+        ) -> std::pin::Pin<
+            Box<
+                dyn futures_signals::signal_vec::SignalVec<Item = (holon_api::RowKey, Arc<DataRow>)>
+                    + Send,
+            >,
+        > {
+            let keyed: Vec<_> = self
+                .0
+                .iter()
+                .map(|r| {
+                    (
+                        (
+                            holon_api::data_row_entity_uri(r).expect("row has id"),
+                            holon_api::Occurrence::Canonical,
+                        ),
+                        r.clone(),
+                    )
+                })
+                .collect();
+            Box::pin(futures_signals::signal_vec::always(keyed))
+        }
+        fn cache_identity(&self) -> u64 {
+            0
+        }
+    }
+
     fn enriched(row: DataRow) -> EnrichedRow {
         EnrichedRow::from_raw(row, |_| HashMap::new())
     }
@@ -1780,6 +2241,117 @@ mod tests {
         ChangeOrigin::Remote {
             operation_id: None,
             trace_id: None,
+        }
+    }
+
+    /// Simulate production sibling-key minting. Each position applies a
+    /// `gen_key_between` against the current neighbours — exactly the call
+    /// production makes when a real child is inserted between two siblings.
+    /// Repeated insertions at the same slot grow longer hex keys ("7F80", …),
+    /// tail insertions mint after-keys, giving a diverse, prod-faithful set.
+    fn mint_fractional_keys(positions: &[usize]) -> Vec<String> {
+        use holon_core::fractional_index::gen_key_between;
+        let mut keys: Vec<String> = Vec::new();
+        for &raw_pos in positions {
+            let pos = raw_pos % (keys.len() + 1);
+            let prev = if pos == 0 {
+                None
+            } else {
+                Some(keys[pos - 1].as_str())
+            };
+            let next = keys.get(pos).map(|s| s.as_str());
+            let k = gen_key_between(prev, next).expect("gen_key_between mints a valid key"); // ALLOW(order_minting): test-only reproduction of the order owner's sibling-key minting to prove the virtual-slot sort contract
+            keys.insert(pos, k);
+        }
+        keys
+    }
+
+    proptest::proptest! {
+        /// Sort-order contract between the virtual-child creation slot and real
+        /// `FractionalIndex` sibling keys.
+        ///
+        /// `AppendedRowsProvider` (creation-slot case) appends its creation row
+        /// with a sentinel `sort_key` intending "sorts last". But the
+        /// tree driver (`get_sort_key` → `mutable_tree::SortedChild`) orders
+        /// siblings by the *string* produced by
+        /// `holon_api::render_eval::sort_value`, which encodes a float via its
+        /// IEEE-754 bits as a 20-digit decimal (f64::MAX → "18442240474082181119",
+        /// leading '1'). Real rows carry raw hex `FractionalIndex` strings
+        /// ("A0", "7F80", "80", …) whose leading bytes are '2'..'F'. Since
+        /// '1' < '2'..'F' lexicographically, the virtual row sorts FIRST, not
+        /// last — the creation slot jumps to the top of every child list.
+        ///
+        /// This test asserts the intended contract (virtual sorts AFTER any
+        /// real key) and is RED until the sentinel-key fix lands.
+        /// See devlog/2026-07-05-011500-gpui-dogfood-triage.md issue #4.
+        #[test]
+        fn virtual_child_sort_key_sorts_after_any_fractional_index_key(
+            positions in proptest::collection::vec(0usize..8usize, 1..40),
+        ) {
+            use holon_api::render_eval::sort_value;
+
+            // Pull the virtual row's sort_key from an ACTUAL constructed
+            // provider so the test tracks the real production value (not a
+            // hand-copied f64::MAX), then encode it through the SAME code path
+            // the tree driver uses (`get_sort_key` → `sort_value`).
+            let slot = VirtualChildSlot {
+                defaults: HashMap::new(),
+                parent_id: EntityUri::block("parent-under-test"),
+            };
+            // The creation slot resolves its parent from `inner`'s rows (bug 2A):
+            // seed one row that is a direct child of the container so the flat
+            // shape resolves and a slot row is produced. (An empty inner is
+            // not-yet-resolvable → no slot — see `row_origin` tests.)
+            let mut child = HashMap::new();
+            child.insert("id".to_string(), Value::String("block:seed".to_string()));
+            child.insert(
+                "parent_id".to_string(),
+                Value::String("block:parent-under-test".to_string()),
+            );
+            let inner: Arc<dyn ReactiveRowProvider> =
+                Arc::new(FixedRows(vec![Arc::new(child)]));
+            let provider = AppendedRowsProvider::creation_slot(inner, &slot);
+            // The creation slot's row is appended after inner's rows; it is the
+            // one whose id parses to a `CreationPlaceholder`.
+            let snap = provider.rows_snapshot();
+            let slot_row = snap
+                .iter()
+                .find(|r| {
+                    crate::row_origin::RowOrigin::from_row(r).is_creation_placeholder()
+                })
+                .expect("creation slot row present");
+            let virtual_encoded = sort_value(slot_row.get("sort_key"));
+
+            let mut keys = mint_fractional_keys(&positions);
+            // Always include the column default and an after-chain (highest keys
+            // production mints), the hardest case for "sorts last" to satisfy.
+            keys.push(holon_core::fractional_index::default_sort_key());
+            let mut hi = holon_core::fractional_index::default_sort_key();
+            for _ in 0..5 {
+                hi = holon_core::fractional_index::gen_key_after(&hi).expect("gen_key_after mints a valid key"); // ALLOW(order_minting): test-only reproduction of the order owner's after-key minting to prove the virtual-slot sort contract
+                keys.push(hi.clone());
+            }
+
+            for k in &keys {
+                // SortedChild::cmp orders by `sort_key.cmp(other.sort_key)` first;
+                // the id tiebreak only fires on equal keys, which never happens
+                // here — so this String cmp IS the decisive sibling comparison.
+                let real_encoded = sort_value(Some(&Value::String(k.clone())));
+                let ord = virtual_encoded.cmp(&real_encoded);
+                proptest::prop_assert_eq!(
+                    ord,
+                    std::cmp::Ordering::Greater,
+                    "virtual creation-slot sort_key {:?} must sort AFTER real \
+                     FractionalIndex key {:?} (encoded {:?}), but it sorts {:?}. \
+                     f64::MAX encodes to a leading-'1' decimal that loses the \
+                     lexicographic race against hex keys — the virtual row jumps \
+                     to the TOP of the child list. RED until the sentinel fix lands.",
+                    virtual_encoded,
+                    k,
+                    real_encoded,
+                    ord
+                );
+            }
         }
     }
 
@@ -1889,5 +2461,234 @@ mod tests {
         );
 
         view.stop();
+    }
+
+    /// Increment B smallest-first-step (also validates Increment G's premise): the
+    /// [`AppendedRowsProvider::placement`] (`LiveCell`) case injects a LIVE second
+    /// occurrence of block `L` under an anchor collection that does not contain
+    /// `L`, DERIVED FROM `L`'s own row cell
+    /// — so a write to the canonical block propagates to the placed occurrence with
+    /// no copy (the shared-cell model, ADR 0015 §1a). Proves the wrapper-injection
+    /// mechanism and the data half of the identity reframe without touching the
+    /// store.
+    /// The read-only advice template (ADR 0021 v1): a `Placed` advice row must
+    /// interpret to a selectable (click-through) row of read-only content + a
+    /// `dismiss_advice` op_button — and MUST NOT contain an `editable_text` /
+    /// `render_entity` (the collection's normal editable path).
+    #[test]
+    fn advice_readonly_template_interprets_without_editable_and_with_dismiss() {
+        let services: Arc<dyn crate::reactive::BuilderServices> =
+            Arc::new(StubBuilderServices::new());
+
+        // A synthesized advice row carries the columns the template binds:
+        // id (lesson, click-through target), content, target_id/anchor_id
+        // (dismiss dispatch), parent_id (anchor placement).
+        let mut row = DataRow::new();
+        row.insert("id".into(), Value::String("block:lessonA".into()));
+        row.insert("content".into(), Value::String("a woven lesson".into()));
+        row.insert("target_id".into(), Value::String("block:lessonA".into()));
+        row.insert("anchor_id".into(), Value::String("block:task1".into()));
+        row.insert("parent_id".into(), Value::String("block:task1".into()));
+        let row = Arc::new(row);
+
+        let expr = advice_readonly_template();
+        let ctx = crate::RenderContext::default().with_row(row);
+        let node = services.interpret(&expr, &ctx);
+
+        // Collect every widget name + find the op_button / selectable nodes.
+        fn walk<'a>(
+            n: &'a ReactiveViewModel,
+            names: &mut Vec<String>,
+            out: &mut Vec<&'a ReactiveViewModel>,
+        ) {
+            if let Some(name) = n.widget_name() {
+                names.push(name);
+            }
+            out.push(n);
+            for c in &n.children {
+                walk(c, names, out);
+            }
+        }
+        let mut names = Vec::new();
+        let mut nodes = Vec::new();
+        walk(&node, &mut names, &mut nodes);
+
+        assert!(
+            names.iter().any(|n| n == "selectable"),
+            "has selectable: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "op_button"),
+            "has op_button: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "text"),
+            "has read-only text: {names:?}"
+        );
+        assert!(
+            !names
+                .iter()
+                .any(|n| n == "editable_text" || n == "render_entity"),
+            "read-only: NO editable_text / render_entity, got {names:?}"
+        );
+
+        // The op_button carries the dismiss op name.
+        let dismiss = nodes
+            .iter()
+            .find(|n| n.widget_name().as_deref() == Some("op_button"))
+            .expect("op_button node present");
+        assert_eq!(
+            dismiss
+                .props
+                .lock_ref()
+                .get("op_name")
+                .and_then(|v| v.as_string()),
+            Some("dismiss_advice"),
+            "op_button dispatches dismiss_advice"
+        );
+
+        // The selectable carries the click-through navigation.focus action
+        // bound to the canonical lesson id.
+        let selectable = nodes
+            .iter()
+            .find(|n| n.widget_name().as_deref() == Some("selectable"))
+            .expect("selectable node present");
+        let nav = selectable
+            .operations
+            .iter()
+            .find(|w| w.descriptor.entity_name.as_str() == "navigation")
+            .expect("selectable has a navigation action");
+        assert_eq!(
+            nav.descriptor.name, "focus",
+            "click-through = navigation.focus"
+        );
+        assert_eq!(
+            nav.descriptor
+                .bound_params
+                .get("block_id")
+                .and_then(|v| v.as_string()),
+            Some("block:lessonA"),
+            "click-through targets the CANONICAL lesson id"
+        );
+    }
+
+    #[tokio::test]
+    async fn appended_rows_provider_injects_live_second_occurrence() {
+        use futures::StreamExt;
+        use futures_signals::signal::{Mutable, SignalExt};
+        use futures_signals::signal_vec::SignalVecExt;
+
+        // A minimal anchor-collection provider holding ONE unrelated row (it does
+        // NOT contain L → the bare-id suffix key cannot collide yet).
+        struct MockProvider(Vec<Arc<DataRow>>);
+        impl ReactiveRowProvider for MockProvider {
+            fn rows_snapshot(&self) -> Vec<Arc<DataRow>> {
+                self.0.clone()
+            }
+            fn rows_signal_vec(
+                &self,
+            ) -> std::pin::Pin<
+                Box<dyn futures_signals::signal_vec::SignalVec<Item = Arc<DataRow>> + Send>,
+            > {
+                Box::pin(futures_signals::signal_vec::always(self.0.clone()))
+            }
+            fn keyed_rows_signal_vec(
+                &self,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn futures_signals::signal_vec::SignalVec<
+                            Item = (holon_api::RowKey, Arc<DataRow>),
+                        > + Send,
+                >,
+            > {
+                let keyed: Vec<_> = self
+                    .0
+                    .iter()
+                    .map(|r| {
+                        (
+                            (
+                                holon_api::data_row_entity_uri(r).expect("row has id"),
+                                holon_api::Occurrence::Canonical,
+                            ),
+                            r.clone(),
+                        )
+                    })
+                    .collect();
+                Box::pin(futures_signals::signal_vec::always(keyed))
+            }
+            fn cache_identity(&self) -> u64 {
+                0
+            }
+        }
+
+        let anchor = EntityUri::block("panel-b");
+        let inner: Arc<dyn ReactiveRowProvider> =
+            Arc::new(MockProvider(vec![Arc::new(make_row("other", "other"))]));
+
+        let l = EntityUri::block("c1");
+        // L's canonical live row cell — what `ReactiveRowSet::row_mutable` hands out.
+        let source = Mutable::new(Arc::new(make_row("c1", "c1")));
+
+        let placed =
+            AppendedRowsProvider::placement(inner, l.clone(), anchor.clone(), source.read_only());
+
+        // ── Structure: snapshot = anchor row + one placed occurrence of L ──
+        let snap = placed.rows_snapshot();
+        assert_eq!(snap.len(), 2, "anchor row + placed occurrence");
+        let placed_row = &snap[1];
+        assert_eq!(
+            holon_api::data_row_entity_uri(placed_row).as_ref(),
+            Some(&l),
+            "placed row id stays canonical L → edits route to canonical (ADR 0015 rule 3)"
+        );
+        assert_eq!(
+            placed_row.get("parent_id").and_then(|v| v.as_string()),
+            Some("block:panel-b"),
+            "placed row parent_id = display-local anchor (rule 1, never merged)"
+        );
+        assert_eq!(
+            placed_row.get("content").and_then(|v| v.as_string()),
+            Some("c1"),
+            "placed occurrence shows canonical content"
+        );
+
+        // ── Liveness (SIGNAL): a write to the canonical cell re-emits the suffix,
+        //    so the render pipeline sees the placed occurrence update — the
+        //    shared-cell dividend, no `converge_input` reconciliation. ──
+        // The placed occurrence keys `(l, Placed(occ))`, so match on the entity
+        // part of the widened key.
+        let l_content = |v: &Vec<(holon_api::RowKey, Arc<DataRow>)>| {
+            v.iter().find(|((id, _), _)| id == &l).and_then(|(_, r)| {
+                r.get("content")
+                    .and_then(|c| c.as_string())
+                    .map(str::to_string)
+            })
+        };
+        let mut stream = placed
+            .keyed_rows_signal_vec()
+            .to_signal_cloned()
+            .to_stream();
+
+        let initial = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .expect("initial emission within 2s")
+            .expect("stream open");
+        assert_eq!(
+            l_content(&initial).as_deref(),
+            Some("c1"),
+            "initial placed content mirrors canonical"
+        );
+
+        source.set(Arc::new(make_row("c1", "c1-edited")));
+
+        let updated = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .expect("re-emission after canonical write within 2s")
+            .expect("stream open");
+        assert_eq!(
+            l_content(&updated).as_deref(),
+            Some("c1-edited"),
+            "placed occurrence tracks the canonical block's live cell (converged by construction)"
+        );
     }
 }

@@ -540,10 +540,18 @@ impl BlockOrdering for SqlBlockOperations {
         properties: &HashMap<String, Value>,
         tags: &Tags,
         requires: &[EntityUri],
+        advice_suppressed: &[EntityUri],
     ) -> Result<bool> {
         self.cell_registry
             .create_entity(
-                parent_id, after_id, new_id, content, properties, tags, requires,
+                parent_id,
+                after_id,
+                new_id,
+                content,
+                properties,
+                tags,
+                requires,
+                advice_suppressed,
             )
             .await
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })
@@ -712,42 +720,6 @@ impl BlockOrdering for SqlBlockOperations {
 
     fn consolidator(&self) -> Consolidator {
         self.caps.consolidator()
-    }
-
-    /// Loro mode → read each block's live fractional index from the Loro tree
-    /// and write it to SQL `sort_key` via the standard `set_field` path. This
-    /// closes the projection-totality gap: a block created but never repositioned emits no
-    /// Loro mov delta, so the outbound projector never writes its fi and it
-    /// keeps the default `"A0"`. The write goes through
-    /// `SqlOperationProvider::set_field` (→ `prepare_update`) rather than a raw
-    /// `UPDATE block_raw`, so the `properties` column is read-merged and
-    /// re-canonicalised (`properties_to_canonical_json`) — a bare single-column
-    /// raw update desyncs the matview's `properties` projection
-    /// (the `props_check` invariant's "Value::Object serialization bug").
-    /// SqlOnly mode → no-op (SQL owns `sort_key`; `live_sort_key` returns
-    /// `None`).
-    async fn project_sort_keys(&self, ids: &[EntityUri]) -> Result<()> {
-        let entity = EntityName::new(Block::entity_name());
-        for id in ids {
-            let fi = match self
-                .cell_registry
-                .live_sort_key(id.as_str())
-                .await
-                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                    format!("project_sort_keys: live_sort_key({id}): {e:#}").into()
-                })? {
-                Some(fi) => fi,
-                None => return Ok(()), // SqlOnly — SQL already owns sort_key
-            };
-            let mut params: StorageEntity = HashMap::new();
-            params.insert("id".into(), Value::String(id.as_str().to_string()));
-            params.insert("field".into(), Value::String("sort_key".to_string()));
-            params.insert("value".into(), Value::String(fi));
-            self.sql_ops
-                .execute_operation(&entity, "set_field", params)
-                .await?;
-        }
-        Ok(())
     }
 
     async fn prev_sibling(&self, id: &EntityUri) -> Result<Option<EntityUri>> {

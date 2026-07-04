@@ -86,6 +86,7 @@ pub async fn seed_default_layout(
                 &block.properties,
                 &block.tags,
                 &block.requires,
+                &block.advice_suppressed,
             )
             .await
             .map_err(|e| anyhow::anyhow!("seed create_in_tree({}): {e:#}", block.id))?;

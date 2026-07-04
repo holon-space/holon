@@ -56,6 +56,23 @@ impl SchemaModule for CoreSchemaModule {
         }
         tracing::debug!("[CoreSchemaModule] block_raw table + index created");
 
+        // Seed the self-parented `sentinel:no_parent` row so root blocks
+        // (parent_id = 'sentinel:no_parent') satisfy the block_raw parent FK.
+        // Self-reference is legal because the FK is DEFERRABLE INITIALLY
+        // DEFERRED (checked at COMMIT, when the row itself is present).
+        // Idempotent: re-running bootstrap must not duplicate or error.
+        db_handle
+            .execute(
+                // Schema bootstrap seeding the FK anchor row, not a block
+                // mutation — writes only the sentinel, never a real block.
+                // ALLOW(sole_block_writer): sentinel-only FK anchor seed.
+                "INSERT OR IGNORE INTO block_raw (id, parent_id) \
+                 VALUES ('sentinel:no_parent', 'sentinel:no_parent')",
+                vec![],
+            )
+            .await?;
+        tracing::debug!("[CoreSchemaModule] sentinel:no_parent row seeded");
+
         for stmt in sql_statements(include_str!("../sql/schema/directories.sql")) {
             db_handle.execute_ddl(stmt).await?;
         }
@@ -90,6 +107,7 @@ impl SchemaModule for BlockSchemaModule {
         vec![
             Resource::schema("block_requires"),
             Resource::schema("block_tags"),
+            Resource::schema("advice_suppressed"),
         ]
     }
 
@@ -115,6 +133,9 @@ impl SchemaModule for BlockSchemaModule {
         db_handle
             .execute_ddl("DROP TABLE IF EXISTS block_tags")
             .await?;
+        db_handle
+            .execute_ddl("DROP TABLE IF EXISTS advice_suppressed")
+            .await?;
 
         for stmt in sql_statements(include_str!("../sql/schema/block_requires.sql")) {
             db_handle.execute_ddl(stmt).await?;
@@ -125,6 +146,11 @@ impl SchemaModule for BlockSchemaModule {
             db_handle.execute_ddl(stmt).await?;
         }
         tracing::debug!("[BlockSchemaModule] block_tags table created");
+
+        for stmt in sql_statements(include_str!("../sql/schema/advice_suppressed.sql")) {
+            db_handle.execute_ddl(stmt).await?;
+        }
+        tracing::debug!("[BlockSchemaModule] advice_suppressed table created");
 
         tracing::info!("[BlockSchemaModule] Junction tables ready");
         Ok(())
@@ -146,18 +172,104 @@ impl SchemaModule for BlockSchemaModule {
                 source_col: "block_id".to_string(),
                 target_col: "tag".to_string(),
             },
+            EdgeFieldDescriptor {
+                entity: "block".to_string(),
+                field: "advice_suppressed".to_string(),
+                join_table: "advice_suppressed".to_string(),
+                source_col: "anchor_id".to_string(),
+                target_col: "lesson_id".to_string(),
+            },
         ]
     }
 }
 
+/// All columns of `block_raw`, projected verbatim into the `block` matview so
+/// downstream readers (block_with_path, block_requirement_edges, GQL/PRQL
+/// watch_view_*) see the same row shape they always did.
+const BLOCK_RAW_COLUMNS: &[&str] = &[
+    "id",
+    "parent_id",
+    "depth",
+    "sort_key",
+    "content",
+    "content_type",
+    "source_language",
+    "source_name",
+    "properties",
+    "marks",
+    "collapsed",
+    "completed",
+    "block_type",
+    "created_at",
+    "updated_at",
+    "_change_origin",
+];
+
+/// The `block` entity's edge-field descriptors — the single registry both the
+/// junction DDL (`BlockSchemaModule::edge_fields`) and the matview synthesis
+/// below derive from.
+fn block_edge_fields() -> Vec<EdgeFieldDescriptor> {
+    BlockSchemaModule
+        .edge_fields()
+        .into_iter()
+        .filter(|d| d.entity == "block")
+        .collect()
+}
+
+/// Name of the per-junction aggregation matview for one edge field.
+fn edge_agg_view_name(descriptor: &EdgeFieldDescriptor) -> String {
+    format!("{}_agg", descriptor.join_table)
+}
+
+/// SELECT for the per-junction aggregation matview: one row per source id with
+/// the target values as a JSON array. Aggregating each junction SEPARATELY is
+/// what prevents the fan-out (see `block_matview_select`).
+fn edge_agg_view_select(descriptor: &EdgeFieldDescriptor) -> String {
+    format!(
+        "SELECT {src} AS source_id, json_group_array({tgt}) AS vals FROM {jt} GROUP BY {src}",
+        src = descriptor.source_col,
+        tgt = descriptor.target_col,
+        jt = descriptor.join_table,
+    )
+}
+
+/// SELECT for the `block` matview: `block_raw` LEFT JOINed against the
+/// per-junction agg matviews (at most ONE row each per block), `'[]'` when a
+/// block has no junction rows.
+///
+/// This chained shape replaces the previous single view that GROUP BYed over
+/// the LEFT-JOIN cross-product of all junctions at once — plain-SQL semantics
+/// fan out there: a block with 3 tags and 1 requires row yielded
+/// `requires = ["R","R","R"]` (masked for `tags` because sets dedup at parse,
+/// corrupting `requires`/`advice_suppressed`). Both the bug and this fix are
+/// pinned under IVM by
+/// `holon-advice/tests/matview_build.rs::probe_multi_junction_fanout_fix_shapes`.
+fn block_matview_select(descriptors: &[EdgeFieldDescriptor]) -> String {
+    let mut columns: Vec<String> = BLOCK_RAW_COLUMNS.iter().map(|c| format!("b.{c}")).collect();
+    let mut joins = Vec::new();
+    for d in descriptors {
+        let agg = edge_agg_view_name(d);
+        columns.push(format!("COALESCE({agg}.vals, '[]') AS {}", d.field));
+        joins.push(format!("LEFT OUTER JOIN {agg} ON {agg}.source_id = b.id"));
+    }
+    // Exclude the self-parented `sentinel:no_parent` FK-anchor row — it exists
+    // only to satisfy the block_raw parent FK and must never surface as a real
+    // block in any projection reading through the `block` matview.
+    format!(
+        "SELECT {} FROM block_raw b {} WHERE b.id != 'sentinel:no_parent'",
+        columns.join(", "),
+        joins.join(" ")
+    )
+}
+
 /// `block` matview schema module.
 ///
-/// Hydrates `block_raw` rows with `tags` + `requires` JSON arrays from the
-/// junction tables. Every consumer that wants a hydrated block row reads
-/// from this matview; raw structural reads/writes target `block_raw`. The
-/// dual-LEFT + json_group_array + GROUP BY shape is the one verified by
-/// the chained-matview preflight in
-/// `bigdata/turso/bugs/holon_block_hydration_repro.sql`.
+/// Hydrates `block_raw` rows with the edge-typed fields (`tags`, `requires`,
+/// `advice_suppressed`) as JSON arrays. Every consumer that wants a hydrated
+/// block row reads from this matview; raw structural reads/writes target
+/// `block_raw`. The DDL is synthesized from the `EdgeFieldDescriptor` registry:
+/// one aggregation matview per junction, then `block` chained on top of them
+/// (matview-on-matview, same pattern as `block_requirement_edges`).
 pub struct BlockMatviewSchemaModule;
 
 #[async_trait]
@@ -167,26 +279,42 @@ impl SchemaModule for BlockMatviewSchemaModule {
     }
 
     fn provides(&self) -> Vec<Resource> {
-        vec![Resource::schema("block")]
+        let mut provides: Vec<Resource> = block_edge_fields()
+            .iter()
+            .map(|d| Resource::schema(edge_agg_view_name(d)))
+            .collect();
+        provides.push(Resource::schema("block"));
+        provides
     }
 
     fn requires(&self) -> Vec<Resource> {
-        vec![
-            Resource::schema("block_raw"),
-            Resource::schema("block_requires"),
-            Resource::schema("block_tags"),
-        ]
+        let mut requires = vec![Resource::schema("block_raw")];
+        requires.extend(
+            block_edge_fields()
+                .iter()
+                .map(|d| Resource::schema(d.join_table.clone())),
+        );
+        requires
     }
 
     async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
-        tracing::info!("[BlockMatviewSchemaModule] Reconciling block matview");
-        let created = reconcile_named_view(
-            db_handle,
-            "block",
-            include_str!("../sql/schema/block_matview.sql"),
-        )
-        .await
-        .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+        tracing::info!("[BlockMatviewSchemaModule] Reconciling block matview chain");
+        let descriptors = block_edge_fields();
+        assert!(
+            !descriptors.is_empty(),
+            "block edge-field registry must not be empty"
+        );
+        // Dependency order: the per-junction agg matviews first, then the
+        // `block` matview that chains on them.
+        for d in &descriptors {
+            let name = edge_agg_view_name(d);
+            reconcile_named_view(db_handle, &name, &edge_agg_view_select(d))
+                .await
+                .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+        }
+        let created = reconcile_named_view(db_handle, "block", &block_matview_select(&descriptors))
+            .await
+            .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
         if created {
             tracing::info!("[BlockMatviewSchemaModule] block matview created/updated");
         } else {

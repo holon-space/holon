@@ -1,6 +1,6 @@
 # ADR 0004: Domain / Adapter / Actor split
 
-**Status:** Proposed (2026-05-27)
+**Status:** Accepted (2026-05-27; shipped. Note: production binaries still do not consume a `Wiring` — PBT-only, per ADR 0012.)
 **Deciders:** Martin
 **Context:** Componentization for Turso-optional builds and PBT subset wiring
 
@@ -101,7 +101,7 @@ A component that **reads one adapter and writes to another** (e.g., the Loro→T
 - Are pure functions of one adapter's state into another adapter's mutations — they own no state of their own beyond a cursor.
 - Have their own round-trip invariant: `read_via_target(domain) ≅ read_via_source(domain)` post-quiescence.
 
-The Loro→Turso write-through, the Org→Block parse, and the Markdown→Block parse are bridges. (`crates/holon-markdown/` already implements the Markdown side — `parse_markdown_file` parser, frontmatter, renderer, wikilink — so it is no longer future work.)
+The Loro→Turso write-through, the Org→Block parse, and the Markdown→Block parse are bridges. (a `crates/holon-markdown/` implemented the Markdown side — parser, frontmatter, renderer, wikilink — but was removed 2026-07-06 as unwired dead code with zero prod dependents; the Markdown bridge is future work again, re-addable from git history.)
 <!--
 We're just trying to get rid of direct coupling between Loro and Turso.
 We previously had an event bus to do this but the ergonomics were suboptimal.

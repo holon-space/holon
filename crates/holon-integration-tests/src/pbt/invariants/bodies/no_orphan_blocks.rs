@@ -11,9 +11,8 @@
 //! keystone run with the arm converted to a hard failure — and removed
 //! (2026-07-04). Sibling self-check of [`super::no_parent_cycles`].
 
-use std::collections::HashSet;
-
-use holon_pbt_core::capabilities::{EntityUri, SutBackend};
+use holon_oracles::checks::{ParentRow, find_orphans};
+use holon_pbt_core::capabilities::SutBackend;
 use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
 
 pub struct InvNoOrphanBlocks;
@@ -33,21 +32,21 @@ where
 
     async fn check(&self, _: &R, sut: &S) -> InvariantResult {
         // Full matview snapshot (incl. seed/layout blocks — their roots are
-        // sentinels skipped below).
-        let matview = sut.live_block_snapshot().await;
-        let all_ids: HashSet<&EntityUri> = matview.iter().map(|b| &b.id).collect();
-        for block in &matview {
-            if block.parent_id.is_no_parent() || block.parent_id.is_sentinel() {
-                continue;
-            }
-            if !all_ids.contains(&block.parent_id) {
-                return InvariantResult::Fail(format!(
-                    "[inv-no-orphan-blocks] orphan block: {} has invalid parent {} \
-                     (parent not present in the matview snapshot)",
-                    block.id, block.parent_id
-                ));
-            }
+        // sentinels the shared check skips). The check body lives in
+        // `holon_oracles::checks` — shared with the live debug-build oracle,
+        // one implementation, no drift.
+        let rows: Vec<ParentRow> = sut
+            .live_block_snapshot()
+            .await
+            .into_iter()
+            .map(|b| ParentRow {
+                id: b.id,
+                parent_id: b.parent_id,
+            })
+            .collect();
+        match find_orphans(&rows).into_iter().next() {
+            Some(message) => InvariantResult::Fail(message),
+            None => InvariantResult::Ok,
         }
-        InvariantResult::Ok
     }
 }

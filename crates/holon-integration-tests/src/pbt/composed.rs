@@ -37,6 +37,9 @@ pub mod invariants;
 #[cfg(all(feature = "otel-testing", any(test, feature = "pbt")))]
 pub mod span_metrics;
 
+/// Process-global ERROR-event + panic capture surface for `inv-no-observed-errors`.
+pub mod observed_errors;
+
 /// The generic composed-SUT `StateMachineTest` harness (E3 increment 3). Available
 /// under the `pbt` feature (not just `cfg(test)`) so the **macro repoint** can drive a
 /// `ComposedSut`-backed StateMachineTest from a `tests/` INTEGRATION test (which links
@@ -66,6 +69,20 @@ pub mod seed_primitives;
 /// `ComposedSut<WideE2E>`. Single source of truth (the lib slices `use` these).
 #[cfg(any(test, feature = "pbt"))]
 pub mod wide_e2e;
+
+/// The out-of-process LIVE-MCP rung of the composed keystone: [`live_mcp::LiveMcpE2E`]
+/// drives the SAME `WideE2EMachine` transitions + invariant catalog against a REAL
+/// Holon app over its embedded MCP server (per-case `reset_vault`). `pbt`-gated like
+/// its `wide_e2e` sibling so the `tests/` integration test can drive
+/// `ComposedSut<LiveMcpE2E>`.
+#[cfg(any(test, feature = "pbt"))]
+pub mod live_mcp;
+/// Scale-soak vault seeder (env-gated). Inflates the `WideE2E` SUT boot with extra
+/// synthetic org doc files so the keystone can be driven against a 5–10k-block vault,
+/// quantifying the projection/CDC/consolidator latency cliff. Zero-cost (empty seed,
+/// keystone `SETTLE`) when `HOLON_SOAK_SEED_BLOCKS` is unset.
+#[cfg(any(test, feature = "pbt"))]
+pub mod soak_seed;
 
 /// The single-sourced E4 windowed composition-path check
 /// ([`windowed::run_windowed_composed_check`]). `pbt`-gated like the windowed

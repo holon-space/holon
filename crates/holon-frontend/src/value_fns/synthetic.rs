@@ -42,11 +42,11 @@ impl ReactiveRowProvider for SyntheticRows {
 
     fn keyed_rows_signal_vec(
         &self,
-    ) -> Pin<Box<dyn SignalVec<Item = (holon_api::EntityUri, Arc<DataRow>)> + Send>> {
+    ) -> Pin<Box<dyn SignalVec<Item = (holon_api::RowKey, Arc<DataRow>)> + Send>> {
         Box::pin(self.rows.signal_vec_cloned().map(|row| {
             let id = holon_api::data_row_entity_uri(&row)
                 .unwrap_or_else(|| holon_api::EntityUri::block(""));
-            (id, row)
+            ((id, holon_api::Occurrence::Canonical), row)
         }))
     }
 

@@ -1,3 +1,14 @@
+> **⚠️ SUPERSEDED / PARTIALLY STALE (2026-07-05).** This document predates the completion
+> of the γ-composition PBT endgame. The `E2ESut` monolith, the `declare_pbt_slice!` /
+> `component_pbt!` macros, the standalone slice binaries, and the deleted `Sut*` capability
+> twins referenced below were REMOVED on the `w1-pbt-endgame` branch. The live mechanism is
+> the ONE composed keystone
+> [`crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs)
+> plus the cfg(test) lib slice tests (`just pbt-lib-slices`). For the current architecture see
+> [`docs/Architecture/Model.md`](../Architecture/Model.md). Kept for historical context.
+
+---
+
 # PBT Composition — Work Backlog
 
 Sliced tasks for extending the γ composition (`docs/Testing/PbtCompositionDesign.md`).

@@ -196,6 +196,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "anes"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b46cbb362ab8752921c97e041f5e366ee6297bd428a31275b9fcf1e380f7299"
+
+[[package]]
 name = "annotate-snippets"
 version = "0.11.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -266,9 +272,9 @@ dependencies = [
 
 [[package]]
 name = "antithesis_sdk"
-version = "0.2.8"
+version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "18dbd97a5b6c21cc9176891cf715f7f0c273caf3959897f43b9bd1231939e675"
+checksum = "08410fcac93669a476c006cd6c4512ac1e2b30fd117231a5d55d8a2c76599b82"
 dependencies = [
  "libc",
  "libloading",
@@ -291,6 +297,15 @@ name = "append-only-bytes"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac436601d6bdde674a0d7fb593e829ffe7b3387c351b356dd20e2d40f5bf3ee5"
+
+[[package]]
+name = "approx"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cab112f0a86d568ea0e627cc1d6be74a1e9cd55214684db5561995f6dad897c6"
+dependencies = [
+ "num-traits",
+]
 
 [[package]]
 name = "ar_archive_writer"
@@ -338,6 +353,26 @@ checksum = "36f5e3dca4e09a6f340a61a0e9c7b61e030c69fc27bf29d73218f7e5e3b7638f"
 dependencies = [
  "unicode-width 0.1.14",
  "yansi",
+]
+
+[[package]]
+name = "aristo"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fcdeefa800110050103e2459a2f8dbdbd560ad046e30f1f87e24ce19c2cb8bde"
+dependencies = [
+ "aristo-macros",
+]
+
+[[package]]
+name = "aristo-macros"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d64a66d21a80182b35b1741997a6d2456911f54b7eb1918aa4e2382fc205268d"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -991,7 +1026,7 @@ dependencies = [
  "bitflags 2.11.0",
  "cexpr",
  "clang-sys",
- "itertools 0.12.1",
+ "itertools 0.11.0",
  "lazy_static",
  "lazycell",
  "log",
@@ -1091,6 +1126,9 @@ name = "bitflags"
 version = "2.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "843867be96c8daad0d758b57df9392b6d8d271134fce549de6ce169ff98a92af"
+dependencies = [
+ "serde_core",
+]
 
 [[package]]
 name = "bitmaps"
@@ -1336,6 +1374,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "cast"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
+
+[[package]]
 name = "cbc"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1458,6 +1502,33 @@ dependencies = [
  "stacker",
  "unicode-ident",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "ciborium"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42e69ffd6f0917f5c029256a24d0161db17cea3997d185db0d35926308770f0e"
+dependencies = [
+ "ciborium-io",
+ "ciborium-ll",
+ "serde",
+]
+
+[[package]]
+name = "ciborium-io"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05afea1e0a06c9be33d539b876f1ce3692f4afea2cb41f740e7743225ed1c757"
+
+[[package]]
+name = "ciborium-ll"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57663b653d948a338bfb3eeba9bb2fd5fcfaecb9e199e87e1eda4d9e8b240fd9"
+dependencies = [
+ "ciborium-io",
+ "half",
 ]
 
 [[package]]
@@ -1679,6 +1750,66 @@ dependencies = [
 ]
 
 [[package]]
+name = "codspeed"
+version = "4.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57af92d1db7f6871b7e82c79cd87f2501db66f36b0eab924be6ea83dd6b2f3f3"
+dependencies = [
+ "anyhow",
+ "cc",
+ "colored",
+ "getrandom 0.2.17",
+ "glob",
+ "libc",
+ "nix 0.31.2",
+ "serde",
+ "serde_json",
+ "statrs",
+]
+
+[[package]]
+name = "codspeed-criterion-compat"
+version = "4.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d31ae2e9ab23c29fa13bdfa06d012524176f5c0f4e25ec262cd829d947ebc5e"
+dependencies = [
+ "clap",
+ "codspeed",
+ "codspeed-criterion-compat-walltime",
+ "colored",
+ "futures",
+ "regex",
+]
+
+[[package]]
+name = "codspeed-criterion-compat-walltime"
+version = "4.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc8605e40bab5114dcb0f76268e18880082b5798dec10757b5b58d2c3bbc7a1c"
+dependencies = [
+ "anes",
+ "cast",
+ "ciborium",
+ "clap",
+ "codspeed",
+ "criterion-plot",
+ "futures",
+ "is-terminal",
+ "itertools 0.10.5",
+ "num-traits",
+ "once_cell",
+ "oorandom",
+ "plotters",
+ "rayon",
+ "regex",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "tinytemplate",
+ "walkdir",
+]
+
+[[package]]
 name = "collections"
 version = "0.1.0"
 source = "git+https://github.com/holon-space/zed.git?branch=holon#e4cf5b1570923b93fdec76bcfd3db207fad373ff"
@@ -1734,6 +1865,16 @@ checksum = "0ff31f4fe290e780fe3bbec6b2eb9dbfdccd1630e79a104c221d99243de81493"
 dependencies = [
  "clap",
  "colorchoice",
+]
+
+[[package]]
+name = "colored"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "117725a109d387c937a1533ce01b450cbde6b88abceea8473c4d7a85853cda3c"
+dependencies = [
+ "lazy_static",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -1803,6 +1944,7 @@ dependencies = [
  "encode_unicode",
  "libc",
  "once_cell",
+ "unicode-width 0.2.2",
  "windows-sys 0.59.0",
 ]
 
@@ -2203,6 +2345,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "criterion"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2b12d017a929603d80db1831cd3a24082f8137ce19c69e6447f54f5fc8d692f"
+dependencies = [
+ "anes",
+ "cast",
+ "ciborium",
+ "clap",
+ "criterion-plot",
+ "futures",
+ "is-terminal",
+ "itertools 0.10.5",
+ "num-traits",
+ "once_cell",
+ "oorandom",
+ "plotters",
+ "rayon",
+ "regex",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "tinytemplate",
+ "walkdir",
+]
+
+[[package]]
+name = "criterion-plot"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b50826342786a51a89e2da3a28f1c32b06e387201bc2d19791f622c673706b1"
+dependencies = [
+ "cast",
+ "itertools 0.10.5",
+]
+
+[[package]]
 name = "critical-section"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2242,16 +2421,6 @@ version = "0.3.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0f58bbc28f91df819d0aa2a2c00cd19754769c2fad90579b3592b1c9ba7a3115"
 dependencies = [
- "crossbeam-utils",
-]
-
-[[package]]
-name = "crossbeam-skiplist"
-version = "0.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df29de440c58ca2cc6e587ec3d22347551a32435fbde9d2bff64e78a9ffa151b"
-dependencies = [
- "crossbeam-epoch",
  "crossbeam-utils",
 ]
 
@@ -2518,11 +2687,22 @@ dependencies = [
 
 [[package]]
 name = "deranged"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c9e6a11ca8224451684bc0d7d5a7adbf8f2fd6887261a1cfc3c0432f9d4068e"
+dependencies = [
+ "powerfmt",
+ "serde",
+]
+
+[[package]]
+name = "deranged"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
 dependencies = [
  "powerfmt",
+ "serde_core",
 ]
 
 [[package]]
@@ -3120,6 +3300,8 @@ version = "0.11.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b2daee4ea451f429a58296525ddf28b45a3b64f1acf6587e2067437bb11e218d"
 dependencies = [
+ "anstream",
+ "anstyle",
  "env_filter 1.0.0",
  "log",
 ]
@@ -3168,7 +3350,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3241,6 +3423,18 @@ dependencies = [
  "indenter",
  "once_cell",
 ]
+
+[[package]]
+name = "fallible-iterator"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649"
+
+[[package]]
+name = "fallible-streaming-iterator"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
 
 [[package]]
 name = "fastbloom"
@@ -3772,8 +3966,8 @@ dependencies = [
  "libc",
  "log",
  "rustversion",
- "windows-link 0.2.1",
- "windows-result 0.4.1",
+ "windows-link 0.1.3",
+ "windows-result 0.3.4",
 ]
 
 [[package]]
@@ -4181,7 +4375,7 @@ dependencies = [
 [[package]]
 name = "gpui-mobile"
 version = "0.1.0"
-source = "git+https://github.com/holon-space/gpui-mobile.git?branch=holon#fa778004e88b85f6f4e1a31b5da5bd8d0c7fd0f2"
+source = "git+https://github.com/holon-space/gpui-mobile.git?branch=holon#f4cb261d864c01f1fbb860ade337dd3acbeeefad"
 dependencies = [
  "android-activity",
  "android_logger 0.15.1",
@@ -4536,6 +4730,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hashlink"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7382cf6263419f2d8df38c55d7da83da5c18aef87fc7a7fc1fb1e344edfe14c1"
+dependencies = [
+ "hashbrown 0.15.5",
+]
+
+[[package]]
 name = "hdrhistogram"
 version = "7.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4697,6 +4900,7 @@ dependencies = [
  "getrandom 0.3.4",
  "gql-parser",
  "gql-transform",
+ "holon-advice",
  "holon-api",
  "holon-block-roundtrip-testing",
  "holon-core",
@@ -4741,6 +4945,23 @@ dependencies = [
  "uuid",
  "wasm-bindgen-futures",
  "web-time",
+ "workspace-hack 0.1.0",
+]
+
+[[package]]
+name = "holon-advice"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "holon-api",
+ "holon-turso",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "turso",
  "workspace-hack 0.1.0",
 ]
 
@@ -4874,6 +5095,7 @@ dependencies = [
  "holon-core",
  "holon-macros",
  "ignore",
+ "indexmap 2.13.0",
  "notify 8.2.0",
  "percent-encoding",
  "serde",
@@ -4896,15 +5118,18 @@ dependencies = [
  "blinc_theme",
  "chrono",
  "clap",
+ "console-subscriber",
  "ctrlc",
  "dhat",
  "fluxdi",
  "futures",
  "futures-signals",
+ "holon-advice",
  "holon-api",
  "holon-core",
  "holon-filesystem",
  "holon-macros",
+ "holon-oracles",
  "holon-pbt-core",
  "libc",
  "memory-stats",
@@ -4955,6 +5180,8 @@ dependencies = [
  "holon-layout-testing",
  "holon-macros",
  "holon-mcp",
+ "holon-oracles",
+ "holon-orgmode",
  "holon-pbt-core",
  "insta",
  "io-surface",
@@ -4963,6 +5190,7 @@ dependencies = [
  "proptest-state-machine",
  "serde_json",
  "subsecond",
+ "tempfile",
  "tokio",
  "tokio-util",
  "toml 0.8.23",
@@ -4988,6 +5216,7 @@ dependencies = [
  "futures-signals",
  "gherkin",
  "holon",
+ "holon-advice",
  "holon-api",
  "holon-app",
  "holon-block-roundtrip-testing",
@@ -4996,10 +5225,13 @@ dependencies = [
  "holon-frontend",
  "holon-layout-testing",
  "holon-loro",
+ "holon-loro-testing",
  "holon-macros",
  "holon-mcp",
  "holon-mcp-client",
+ "holon-oracles",
  "holon-orgmode",
+ "holon-orgmode-testing",
  "holon-pbt-core",
  "holon-profiles",
  "holon-turso",
@@ -5083,6 +5315,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "holon-loro-testing"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "holon",
+ "holon-api",
+ "holon-loro",
+ "holon-pbt-core",
+ "proptest 1.10.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "workspace-hack 0.1.0",
+]
+
+[[package]]
 name = "holon-macros"
 version = "0.1.0"
 dependencies = [
@@ -5106,25 +5351,6 @@ dependencies = [
  "holon-core",
  "holon-macros",
  "tokio",
- "workspace-hack 0.1.0",
-]
-
-[[package]]
-name = "holon-markdown"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "holon-api",
- "holon-core",
- "markdown",
- "proptest 1.10.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "serde",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "tracing",
- "uuid",
  "workspace-hack 0.1.0",
 ]
 
@@ -5200,6 +5426,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "holon-oracles"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "holon-api",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "workspace-hack 0.1.0",
+]
+
+[[package]]
 name = "holon-org-format"
 version = "0.1.0"
 dependencies = [
@@ -5254,16 +5493,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "holon-orgmode-testing"
+version = "0.1.0"
+dependencies = [
+ "holon-api",
+ "holon-orgmode",
+ "workspace-hack 0.1.0",
+]
+
+[[package]]
 name = "holon-pbt-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures",
  "holon-api",
  "holon-macros",
+ "nonempty-collections",
  "proptest 1.10.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "proptest-state-machine",
  "serde",
  "serde_json",
+ "tokio",
  "validated",
  "workspace-hack 0.1.0",
 ]
@@ -5276,7 +5527,9 @@ dependencies = [
  "holon-api",
  "holon-core",
  "holon-engine",
+ "holon-expr",
  "rhai",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -5553,9 +5806,11 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "socket2 0.6.3",
+ "system-configuration",
  "tokio",
  "tower-service",
  "tracing",
+ "windows-registry",
 ]
 
 [[package]]
@@ -5570,7 +5825,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -5867,6 +6122,7 @@ checksum = "bd070e393353796e801d209ad339e89596eb4c8d430d18ede6a1cced8fafbd99"
 dependencies = [
  "autocfg",
  "hashbrown 0.12.3",
+ "serde",
 ]
 
 [[package]]
@@ -6184,7 +6440,7 @@ dependencies = [
  "libc",
  "socket2 0.6.3",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6242,7 +6498,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6256,6 +6512,15 @@ name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
+
+[[package]]
+name = "itertools"
+version = "0.10.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0fd2260e829bddf4cb6ea802289de2f86d6a7a690192fbe91b3f46e0f2c8473"
+dependencies = [
+ "either",
+]
 
 [[package]]
 name = "itertools"
@@ -6618,6 +6883,17 @@ dependencies = [
  "bindgen 0.72.1",
  "cc",
  "system-deps",
+]
+
+[[package]]
+name = "libsqlite3-sys"
+version = "0.35.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "133c182a6a2c87864fe97778797e46c7e999672690dc9fa3ee8e241aa4a9c13f"
+dependencies = [
+ "cc",
+ "pkg-config",
+ "vcpkg",
 ]
 
 [[package]]
@@ -7832,6 +8108,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
+ "serde",
  "windows-sys 0.61.2",
 ]
 
@@ -7990,7 +8267,7 @@ version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "51e219e79014df21a225b1860a479e2dcd7cbd9130f4defd4bd0e191ea31d67d"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.21.7",
  "chrono",
  "getrandom 0.2.17",
  "http",
@@ -8415,6 +8692,12 @@ dependencies = [
  "zeroize",
  "zvariant",
 ]
+
+[[package]]
+name = "oorandom"
+version = "11.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
 name = "opaque-debug"
@@ -9036,6 +9319,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "plotters"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5aeb6f403d7a4911efb1e33402027fc44f29b5bf6def3effcc22d7bb75f2b747"
+dependencies = [
+ "num-traits",
+ "plotters-backend",
+ "plotters-svg",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
+name = "plotters-backend"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df42e13c12958a16b3f7f4386b9ab1f3e7933914ecea48da7139435263a4172a"
+
+[[package]]
+name = "plotters-svg"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "51bae2ac328883f7acdfea3d66a7c35751187f870bc81f94563733a154d7a670"
+dependencies = [
+ "plotters-backend",
+]
+
+[[package]]
 name = "png"
 version = "0.17.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9450,7 +9761,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.11.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -9463,7 +9774,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27c6023962132f4b30eb4c172c91ce92d933da334c59c23cddee82358ddafb0b"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.11.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -9669,7 +9980,7 @@ dependencies = [
  "once_cell",
  "socket2 0.6.3",
  "tracing",
- "windows-sys 0.60.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -10345,6 +10656,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
 
 [[package]]
+name = "rusqlite"
+version = "0.37.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "165ca6e57b20e1351573e3729b958bc62f0e48025386970b6e4d29e7a7e71f3f"
+dependencies = [
+ "bitflags 2.11.0",
+ "fallible-iterator",
+ "fallible-streaming-iterator",
+ "hashlink",
+ "libsqlite3-sys",
+ "smallvec",
+]
+
+[[package]]
 name = "rust-embed"
 version = "8.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10480,7 +10805,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -10493,7 +10818,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -10552,7 +10877,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -10761,7 +11086,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b55fb86dfd3a2f5f76ea78310a88f96c4ea21a3031f8d212443d56123fd0521"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -11505,6 +11830,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
+ "windows-sys 0.52.0",
  "windows-sys 0.59.0",
 ]
 
@@ -11534,6 +11860,16 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
+
+[[package]]
+name = "statrs"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a3fe7c28c6512e766b0874335db33c94ad7b8f9054228ae1c2abd47ce7d335e"
+dependencies = [
+ "approx",
+ "num-traits",
+]
 
 [[package]]
 name = "stillwater"
@@ -11916,6 +12252,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "system-configuration"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a13f3d0daba03132c0aa9767f98351b3488edc2c100cda2d2ec2b04f3d8d3c8b"
+dependencies = [
+ "bitflags 2.11.0",
+ "core-foundation 0.9.4",
+ "system-configuration-sys",
+]
+
+[[package]]
+name = "system-configuration-sys"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e1d1b10ced5ca923a1fcb8d03e96b8d3268065d724548c0211415ff6ac6bac4"
+dependencies = [
+ "core-foundation-sys",
+ "libc",
+]
+
+[[package]]
 name = "system-deps"
 version = "7.0.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11998,7 +12355,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -12129,7 +12486,7 @@ version = "0.3.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "743bd48c283afc0388f9b8827b976905fb217ad9e647fae3a379a9283c4def2c"
 dependencies = [
- "deranged",
+ "deranged 0.5.8",
  "itoa",
  "js-sys",
  "libc",
@@ -12201,6 +12558,16 @@ dependencies = [
  "displaydoc",
  "serde_core",
  "zerovec",
+]
+
+[[package]]
+name = "tinytemplate"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be4d6b5f19ff7664e8c98d03e2139cb510db9b0a60b55f8e8709b689d939b6bc"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -12805,26 +13172,25 @@ dependencies = [
 
 [[package]]
 name = "turso"
-version = "0.7.0-pre.6"
-source = "git+https://github.com/nightscape/turso.git?branch=holon#73d59b0255393f1337101a16918328e361f37823"
+version = "0.7.0-pre.14"
 dependencies = [
  "thiserror 2.0.18",
  "turso_core",
  "turso_sdk_kit",
  "turso_sync_sdk_kit",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?branch=holon)",
+ "workspace-hack 0.1.1",
 ]
 
 [[package]]
 name = "turso_core"
-version = "0.7.0-pre.6"
-source = "git+https://github.com/nightscape/turso.git?branch=holon#73d59b0255393f1337101a16918328e361f37823"
+version = "0.7.0-pre.14"
 dependencies = [
  "aegis",
  "aes-gcm",
  "allocator-api2 0.4.0",
  "antithesis_sdk",
  "arc-swap",
+ "aristo",
  "bigdecimal",
  "bitflags 2.11.0",
  "branches",
@@ -12834,7 +13200,8 @@ dependencies = [
  "cfg_block",
  "chrono",
  "crc32c",
- "crossbeam-skiplist",
+ "crossbeam-epoch",
+ "crossbeam-utils",
  "either",
  "fastbloom",
  "hex",
@@ -12876,35 +13243,32 @@ dependencies = [
  "uncased",
  "uuid",
  "windows-sys 0.61.2",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?branch=holon)",
+ "workspace-hack 0.1.1",
 ]
 
 [[package]]
 name = "turso_ext"
-version = "0.7.0-pre.6"
-source = "git+https://github.com/nightscape/turso.git?branch=holon#73d59b0255393f1337101a16918328e361f37823"
+version = "0.7.0-pre.14"
 dependencies = [
  "chrono",
  "getrandom 0.4.2",
  "turso_macros",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?branch=holon)",
+ "workspace-hack 0.1.1",
 ]
 
 [[package]]
 name = "turso_macros"
-version = "0.7.0-pre.6"
-source = "git+https://github.com/nightscape/turso.git?branch=holon#73d59b0255393f1337101a16918328e361f37823"
+version = "0.7.0-pre.14"
 dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?branch=holon)",
+ "workspace-hack 0.1.1",
 ]
 
 [[package]]
 name = "turso_parser"
-version = "0.7.0-pre.6"
-source = "git+https://github.com/nightscape/turso.git?branch=holon#73d59b0255393f1337101a16918328e361f37823"
+version = "0.7.0-pre.14"
 dependencies = [
  "bitflags 2.11.0",
  "memchr",
@@ -12913,13 +13277,12 @@ dependencies = [
  "strum_macros 0.26.4",
  "thiserror 2.0.18",
  "turso_macros",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?branch=holon)",
+ "workspace-hack 0.1.1",
 ]
 
 [[package]]
 name = "turso_sdk_kit"
-version = "0.7.0-pre.6"
-source = "git+https://github.com/nightscape/turso.git?branch=holon#73d59b0255393f1337101a16918328e361f37823"
+version = "0.7.0-pre.14"
 dependencies = [
  "bindgen 0.69.5",
  "env_logger 0.11.9",
@@ -12930,24 +13293,22 @@ dependencies = [
  "turso_core",
  "turso_ext",
  "turso_sdk_kit_macros",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?branch=holon)",
+ "workspace-hack 0.1.1",
 ]
 
 [[package]]
 name = "turso_sdk_kit_macros"
-version = "0.7.0-pre.6"
-source = "git+https://github.com/nightscape/turso.git?branch=holon#73d59b0255393f1337101a16918328e361f37823"
+version = "0.7.0-pre.14"
 dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?branch=holon)",
+ "workspace-hack 0.1.1",
 ]
 
 [[package]]
 name = "turso_sync_engine"
-version = "0.7.0-pre.6"
-source = "git+https://github.com/nightscape/turso.git?branch=holon#73d59b0255393f1337101a16918328e361f37823"
+version = "0.7.0-pre.14"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -12963,13 +13324,12 @@ dependencies = [
  "turso_core",
  "turso_parser",
  "uuid",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?branch=holon)",
+ "workspace-hack 0.1.1",
 ]
 
 [[package]]
 name = "turso_sync_sdk_kit"
-version = "0.7.0-pre.6"
-source = "git+https://github.com/nightscape/turso.git?branch=holon#73d59b0255393f1337101a16918328e361f37823"
+version = "0.7.0-pre.14"
 dependencies = [
  "bindgen 0.69.5",
  "env_logger 0.11.9",
@@ -12980,7 +13340,7 @@ dependencies = [
  "turso_sdk_kit",
  "turso_sdk_kit_macros",
  "turso_sync_engine",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?branch=holon)",
+ "workspace-hack 0.1.1",
 ]
 
 [[package]]
@@ -13365,6 +13725,12 @@ dependencies = [
  "sval_ref",
  "sval_serde",
 ]
+
+[[package]]
+name = "vcpkg"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "vergen"
@@ -14091,7 +14457,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -14853,7 +15219,7 @@ dependencies = [
  "serde",
  "thiserror 2.0.18",
  "windows 0.62.2",
- "windows-core 0.62.2",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -14868,9 +15234,10 @@ dependencies = [
  "bytemuck",
  "byteorder",
  "cc",
+ "chrono",
  "clap",
  "clap_builder",
- "collections",
+ "core-graphics 0.24.0",
  "crossbeam-epoch",
  "crossbeam-utils",
  "crypto-common 0.1.7",
@@ -14880,30 +15247,26 @@ dependencies = [
  "either",
  "errno",
  "fastbloom",
+ "fastrand 2.3.0",
  "form_urlencoded",
- "futures-channel",
  "futures-executor",
  "futures-io",
- "futures-lite 2.6.1",
- "futures-sink",
- "futures-util",
  "getrandom 0.2.17",
  "getrandom 0.3.4",
- "gpui",
  "h2",
- "half",
  "hashbrown 0.16.1",
- "http_client",
  "hyper",
  "hyper-rustls",
  "hyper-util",
+ "icu_locale_core",
+ "icu_normalizer",
+ "icu_properties",
+ "icu_provider",
  "image",
- "indexmap 2.13.0",
  "instant",
- "io-surface",
- "itertools 0.12.1",
  "itertools 0.13.0",
  "libc",
+ "litemap",
  "lock_api",
  "log",
  "loro_fractional_index",
@@ -14923,8 +15286,10 @@ dependencies = [
  "opentelemetry",
  "opentelemetry_sdk",
  "parking_lot 0.12.5",
+ "percent-encoding",
  "portable-atomic",
  "postcard",
+ "potential_utf",
  "ppv-lite86",
  "proc-macro2",
  "rand 0.8.5",
@@ -14933,11 +15298,9 @@ dependencies = [
  "rand_core 0.6.4",
  "regex",
  "regex-automata 0.4.14",
- "regex-syntax 0.8.10",
  "reqwest 0.12.28",
  "reqwest 0.13.2",
  "rmcp",
- "rustc-hash 1.1.0",
  "rustix 1.1.4",
  "rustls",
  "rustls-webpki",
@@ -14949,35 +15312,38 @@ dependencies = [
  "serde_json",
  "similar",
  "slab",
- "slotmap",
  "smallvec",
- "spin 0.10.0",
+ "stable_deref_trait",
  "subtle",
  "syn 2.0.117",
  "textwrap",
  "thiserror 2.0.18",
  "time",
+ "tinystr",
  "tokio",
  "tokio-rustls",
  "tokio-stream",
  "tokio-util",
- "toml_datetime 1.0.0+spec-1.1.0",
- "toml_parser",
- "toml_writer",
  "tower 0.5.3",
  "tower-http",
  "tracing",
  "tracing-core",
  "tracing-log",
  "tracing-subscriber",
- "ttf-parser",
  "twox-hash",
  "typenum",
  "url",
  "uuid",
- "winnow 0.7.15",
+ "vergen",
+ "vergen-gitcl",
+ "vergen-lib 9.1.0",
+ "writeable",
+ "yoke",
  "zerocopy",
+ "zerofrom",
  "zeroize",
+ "zerotrie",
+ "zerovec",
 ]
 
 [[package]]
@@ -14988,8 +15354,85 @@ checksum = "beffa227304dbaea3ad6a06ac674f9bc83a3dec3b7f63eeb442de37e7cb6bb01"
 
 [[package]]
 name = "workspace-hack"
-version = "0.1.0"
-source = "git+https://github.com/nightscape/turso.git?branch=holon#73d59b0255393f1337101a16918328e361f37823"
+version = "0.1.1"
+dependencies = [
+ "aho-corasick",
+ "anstream",
+ "bitflags 2.11.0",
+ "bytemuck",
+ "cc",
+ "chrono",
+ "clap",
+ "clap_builder",
+ "codspeed-criterion-compat",
+ "codspeed-criterion-compat-walltime",
+ "console 0.15.11",
+ "criterion",
+ "crossbeam-deque",
+ "crossbeam-utils",
+ "crypto-common 0.1.7",
+ "darling 0.20.11",
+ "darling_core 0.20.11",
+ "deranged 0.4.0",
+ "either",
+ "env_logger 0.11.9",
+ "form_urlencoded",
+ "futures",
+ "futures-channel",
+ "futures-core",
+ "futures-sink",
+ "futures-task",
+ "futures-util",
+ "getrandom 0.2.17",
+ "getrandom 0.3.4",
+ "hashbrown 0.15.5",
+ "hyper",
+ "hyper-util",
+ "idna",
+ "indexmap 1.9.3",
+ "libc",
+ "linux-raw-sys 0.9.4",
+ "lock_api",
+ "log",
+ "memchr",
+ "miette",
+ "miniz_oxide",
+ "mio",
+ "nu-ansi-term",
+ "num-traits",
+ "once_cell",
+ "parking_lot 0.12.5",
+ "percent-encoding",
+ "prettyplease",
+ "rand 0.8.5",
+ "rand_chacha 0.9.0",
+ "rand_core 0.6.4",
+ "rand_core 0.9.5",
+ "regex",
+ "regex-automata 0.4.14",
+ "regex-syntax 0.8.10",
+ "rusqlite",
+ "rustix 0.38.44",
+ "rustix 1.1.4",
+ "serde",
+ "serde_core",
+ "serde_json",
+ "similar",
+ "smallvec",
+ "stable_deref_trait",
+ "syn 2.0.117",
+ "sync_wrapper",
+ "time",
+ "tokio",
+ "tower 0.5.3",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "winapi",
+ "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "write16"

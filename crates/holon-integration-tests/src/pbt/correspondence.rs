@@ -58,7 +58,7 @@ use holon_pbt_core::RunMode;
 use holon_pbt_core::composition::{CapInvariant, CapMap, Needs};
 use holon_pbt_core::invariant::{InvariantId, InvariantResult};
 
-use crate::pbt::retry::retry_until_ok;
+use holon_pbt_core::retry::retry_until_ok;
 
 /// A logical observable: one named reference projection with an owned value
 /// type. `NAME` is the invariant-id family stem: each store emits

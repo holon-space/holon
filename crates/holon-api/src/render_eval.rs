@@ -19,7 +19,13 @@ pub fn column_ref_name(expr: &RenderExpr) -> Option<&str> {
 }
 
 pub fn sort_key_column(args: &ResolvedArgs) -> Option<&str> {
-    match args.get_template("sort_key") {
+    // Both spellings are accepted template args (see `is_template_arg`);
+    // profiles/index.org write `sortkey:`, so ignoring it here silently
+    // fell back to `data_row_sort_key`.
+    match args
+        .get_template("sortkey")
+        .or_else(|| args.get_template("sort_key"))
+    {
         Some(RenderExpr::ColumnRef { name }) => Some(name.as_str()),
         _ => None,
     }

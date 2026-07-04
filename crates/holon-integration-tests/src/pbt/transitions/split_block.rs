@@ -127,8 +127,7 @@ pub async fn apply_split_block_input_pipeline_to_sut<S: SutLayout + SutDriver>(
         .unwrap_or_else(|e| panic!("[SplitBlock] enter failed: {e}"));
 }
 
-use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::validation::{Reason, check};
+use holon_pbt_core::validation::{Reason, check};
 use holon_pbt_core::{TransitionFactory, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
@@ -300,11 +299,13 @@ crate::cap_transition! {
 }
 
 #[cfg(feature = "otel-testing")]
+use holon_pbt_core::capabilities::RefSqlCardinality;
+#[cfg(feature = "otel-testing")]
 impl crate::pbt::transition_budgets::SqlBudget for SplitBlock {
-    fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
-        let watches = state.mcp.active_watches.len();
-        let blocks = state.domain.block_state.blocks.len();
-        let docs = state.files.documents.len();
+    fn expected_sql<R: RefSqlCardinality>(&self, state: &R) -> ExpectedSql {
+        let watches = state.active_watch_count();
+        let blocks = state.block_count();
+        let docs = state.document_count();
         let update = expected_sql_for_kind(MutationKind::Update, watches, blocks, docs);
         let create = expected_sql_for_kind(MutationKind::Create, watches, blocks, docs);
         ExpectedSql {

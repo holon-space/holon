@@ -37,7 +37,7 @@ concepts separate even where the config isn't:
 | Axis | Values |
 |------|--------|
 | Storage backend | Loro store on / off |
-| File adapter | org / none (`crates/holon-markdown` exists but is unwired — no crate depends on it; markdown is not a selectable adapter today) |
+| File adapter | org / none (a `crates/holon-markdown` was implemented then removed 2026-07-06 as unwired dead code — org is the sole selectable adapter; re-addable from git history) |
 | Merge fidelity (per field) | op-CRDT ≻ base-3-way ≻ LWW |
 | Transport | Iroh P2P on / off |
 
@@ -70,7 +70,13 @@ for any field is: op-fidelity (store) → base-limited 3-way (transient) → LWW
 
 1. One base per replica, diffed against — never against the cache.
 2. One consolidator per sibling-set owns order; sinks store its fi verbatim.
-3. Intent carries `after_sibling`, never an order key.
+3. Intent carries `after_sibling`, never an order key — enforced at the
+   intent boundary by the closed `BlockWriteField` vocabulary
+   (`holon-api::block_write_field`): a block `set_field` over
+   `sort_key`/`after_block_id` is a loud `Err` in `OperationDispatcher`
+   and in `LoroBlockOperations::execute_operation`, in both modes; the
+   frontend intent constructor (`OperationIntent::set_field`) asserts the
+   same. Reorders dispatch `move_block { id, parent_id, after_block_id }`.
 4. Exactly one writer per store; the projection is total.
 5. Sinks never re-merge.
 6. Causality is inherited (scalar base now; Loro/git DAG if P2P topology ever

@@ -1,0 +1,199 @@
+# Developer-experience CI gates that guard rough edges CI previously missed:
+#   * mobile-check     — holon-gpui `--features mobile` bitrotted for weeks unnoticed.
+#   * latency-gate     — a p95 UI-action-latency regression gate on the headless keystone.
+#   * web-worker-smoke — asserts the dioxus-web Web Worker boots with zero ERRORs.
+#
+# Split out from ci.yml so these newer/heavier gates can be tuned without touching the
+# main pipeline. Triggers mirror ci.yml (Rust/frontend paths + manual dispatch).
+name: DevEx Gates
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "frontends/**"
+      - "crates/**"
+      - "scripts/measure_latency.py"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/devex-gates.yml"
+  pull_request:
+    branches: [main, master]
+    paths:
+      - "frontends/**"
+      - "crates/**"
+      - "scripts/measure_latency.py"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/devex-gates.yml"
+  workflow_dispatch:
+
+env:
+  RUST_VERSION: stable
+  # GPUI links libfontconfig on Linux; dlopen it at runtime instead of static-linking
+  # so no -dev headers are strictly required at build time (mirrors the justfile).
+  RUST_FONTCONFIG_DLOPEN: "on"
+
+jobs:
+  # -- 1. Mobile feature rot guard -------------------------------------------
+  # Plain host `cargo check` of holon-gpui with the `mobile` feature. No emulator,
+  # no cross-target: compiles OUR mobile-gated Rust (src/mobile.rs + the mobile arms
+  # of lib.rs/main.rs/editor_view.rs) which is what silently bitrotted. See DISCLOSURE
+  # in the PR notes re: the gpui-mobile git dep on a Linux host.
+  mobile-check:
+    name: Mobile feature check (host)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-mobile-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-mobile-
+            ${{ runner.os }}-cargo-
+
+      - name: Install GPUI Linux build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake pkg-config \
+            libfontconfig1-dev libwayland-dev libxkbcommon-dev \
+            libxcb1-dev libx11-dev libasound2-dev libudev-dev libssl-dev
+
+      - name: cargo check (holon-gpui, mobile feature)
+        run: cargo check -p holon-gpui --no-default-features --features mobile --lib
+
+  # -- 2. Latency p95 gate ---------------------------------------------------
+  # Drives the REAL pipeline through the headless composed keystone with the
+  # holon_latency tracing target on, then fails if the worst per-action end-to-end
+  # p95 exceeds a generous threshold. Small doc sizes => catches a gross regression,
+  # not micro-fluctuations. Mirrors the `just measure-latency` recipe.
+  latency-gate:
+    name: UI action latency p95 gate
+    runs-on: ubuntu-latest
+    env:
+      P95_THRESHOLD_MS: "2000"
+      PROPTEST_CASES: "4"
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-latency-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-latency-
+            ${{ runner.os }}-cargo-
+
+      - name: Install GPUI Linux build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake pkg-config \
+            libfontconfig1-dev libwayland-dev libxkbcommon-dev \
+            libxcb1-dev libx11-dev libasound2-dev libudev-dev libssl-dev
+
+      - name: Run headless keystone with latency tracing
+        run: |
+          set -o pipefail
+          RUST_LOG="holon_latency=debug" HOLON_OTEL_FILTER=off \
+            cargo test -p holon-integration-tests --features pbt \
+            --test general_e2e_composed_pbt -- --nocapture \
+            2>&1 | tee holon-latency.log
+
+      - name: Enforce p95 threshold
+        run: |
+          python3 scripts/measure_latency.py holon-latency.log \
+            --fail-over-p95 "${P95_THRESHOLD_MS}"
+
+  # -- 3. Web worker "zero ERRORs" smoke -------------------------------------
+  # Boots the dioxus-web frontend (Dioxus main thread + holon-worker Web Worker) in a
+  # real Chromium via Playwright and asserts the console has no ERROR-level lines.
+  # Requires building the worker wasm (napi, wasi-threads) AND the Trunk bundle first;
+  # serve.mjs only serves. See DISCLOSURE — this job is UNVERIFIED in CI.
+  web-worker-smoke:
+    name: Web worker zero-ERROR smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: wasm32-wasip1-threads
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-web-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-web-
+            ${{ runner.os }}-cargo-
+
+      - name: Install Trunk
+        run: cargo install trunk --locked
+
+      - name: Build holon-worker wasm (dev)
+        working-directory: frontends/holon-worker
+        run: |
+          npm install
+          EMNAPI_LINK_DIR="$(pwd)/node_modules/emnapi/lib/wasm32-wasi-threads" \
+            ./node_modules/.bin/napi build \
+            --features browser --profile dev --platform \
+            --target wasm32-wasip1-threads --no-js \
+            --manifest-path ./Cargo.toml --output-dir . || true
+          # napi copyArtifact errors harmlessly (looks for dev/ not debug/); the wasm
+          # lands under target/. Fail loudly if it was NOT produced.
+          if [ -z "$(find ../../target/wasm32-wasip1-threads -name 'holon_worker*.wasm' 2>/dev/null | head -1)" ]; then
+            echo "ERROR: holon-worker wasm not produced"
+            exit 1
+          fi
+
+      - name: Build dioxus-web bundle + install JS deps
+        working-directory: frontends/dioxus-web
+        run: |
+          npm install
+          npx playwright install --with-deps chromium
+          trunk build
+
+      - name: Run worker smoke test
+        working-directory: frontends/dioxus-web
+        env:
+          CI: "true"
+        run: npx playwright test

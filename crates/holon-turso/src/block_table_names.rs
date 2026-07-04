@@ -2,8 +2,8 @@
 //!
 //! Reads target the `block` matview (hydrates tags + requires from
 //! the junction tables); writes target the underlying `block_raw`
-//! table. The matview DDL lives in `sql/schema/block_matview.sql` and
-//! is owned by `BlockMatviewSchemaModule`.
+//! table. The matview DDL is synthesized by `BlockMatviewSchemaModule`
+//! (`schema_modules.rs`) from the `EdgeFieldDescriptor` registry.
 //!
 //! NOT for use in: static `.sql` files (matview DDLs, FK clauses).
 //! Those are referenced via `include_str!` and don't substitute the

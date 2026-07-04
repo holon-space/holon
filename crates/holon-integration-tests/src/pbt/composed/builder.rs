@@ -41,7 +41,6 @@ use crate::mutation_driver::DirectUserDriver;
 use crate::pbt::driver_input::DriverInputComponent;
 use crate::pbt::frontend_slice::components::HeadlessFrontendComponent;
 use crate::pbt::is_synthetic_ref_id;
-use crate::pbt::loro_slice::components::LoroBackendComponent;
 use crate::pbt::memory_slice::components::{
     CoreOpsCommit, EditorCommitTarget, InMemEditorComponent,
 };
@@ -49,7 +48,8 @@ use crate::pbt::op_write_cap::IdResolver;
 use crate::pbt::sql_slice::SqlProjectionComponent;
 use crate::pbt::sql_slice::builders::new_sql_engine_with_structural_ops;
 use crate::pbt::sut_loro::LoroSut;
-use crate::pbt::types::DocUriMap;
+use holon_loro_testing::LoroBackendComponent;
+use holon_pbt_core::types::DocUriMap;
 
 /// The booted-frontend ids present BEFORE any working tree is seeded — captured so
 /// the harness can seed-inject them into the oracle (they filter out of the
@@ -319,6 +319,16 @@ async fn compose_sut_seeded_impl(
         if has_editor {
             caps.insert(comp.clone() as Arc<dyn SutEditorMirrorRead>);
         }
+        // `SutFixtureFs` (write_org_file into the session's watched org_root) —
+        // admits `WriteOrgFile` into the composed alphabet. This is the ONLY
+        // transition that can mint an advice-rule block (ADR 0022 step 4), so
+        // without this cap the two advice keystone invariants are structurally
+        // vacuous (no rule ever enters the reference; empty-vs-empty stays
+        // green). The four other `SutFixtureFs` transitions (CreateDirectory /
+        // GitInit / JjGitInit / CreateStaleLoro) are `!app_started`-gated and
+        // the composed oracle boots pre-started, so they stay honestly
+        // unreachable (their cap methods fail loud if that ever changes).
+        caps.insert(comp.clone() as Arc<dyn holon_pbt_core::capabilities::SutFixtureFs>);
         // Edge-field write cap (`tags` / `requires` on an existing block) — hosted
         // only when a Loro authority doc is present (`loro_doc_store()` is `Some`
         // iff Loro is on for this build). Routes through the production
@@ -373,7 +383,15 @@ async fn compose_sut_seeded_impl(
         // without it (don't silently degrade to a no-op quiescence wait). Validated by
         // the A0 probe `headless_loro_sync_controller_resolves_after_boot`.
         if has_editor {
-            for _ in 0..40 {
+            // Scale-soak: a 5-10k-block org ingest delays controller resolution far past
+            // the 2s default; scale the poll budget with `HOLON_SOAK_SETTLE_MS` (never
+            // below the 2s default) so the fail-loud assert below stays meaningful.
+            let boot_poll_ms: u64 = std::env::var("HOLON_SOAK_SETTLE_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(2_000)
+                .max(2_000);
+            for _ in 0..(boot_poll_ms / 50) {
                 frontend_sync_handle = comp.loro_sync_handle();
                 if frontend_sync_handle.is_some() {
                     break;
@@ -382,8 +400,8 @@ async fn compose_sut_seeded_impl(
             }
             assert!(
                 frontend_sync_handle.is_some(),
-                "compose_sut full mode: LoroSyncControllerHandle never resolved within 2s \
-                 of headless boot — peer deltas would not project to Turso. See the A0 probe."
+                "compose_sut full mode: LoroSyncControllerHandle never resolved within the boot \
+                 poll budget (>=2s, HOLON_SOAK_SETTLE_MS-scaled) of headless boot — peer deltas would not project to Turso. See the A0 probe."
             );
         }
         scaffold_ids = booted_scaffold_ids(&caps).await;
@@ -639,10 +657,8 @@ mod tests {
     async fn compose_sut_loro_arm_drives_peer_transitions() {
         use crate::pbt::reference_state::ReferenceState;
         use crate::pbt::state_machine::fresh_reference_state;
-        use crate::pbt::transitions::{
-            AddPeer, E2ETransition, MergeFromPeer, PeerEdit, PeerEditOp,
-        };
-        use holon_pbt_core::TransitionImpl;
+        use crate::pbt::transitions::{AddPeer, E2ETransition, MergeFromPeer, PeerEdit};
+        use holon_pbt_core::{TransitionImpl, capabilities::PeerEditOp};
 
         /// Drop a `ReferenceState` (owns an `Arc<tokio::Runtime>`) off the async
         /// executor — dropping it inside a `#[tokio::test]` context panics.
@@ -707,10 +723,8 @@ mod tests {
     async fn compose_sut_full_headless_peer_mesh_projects_to_turso() {
         use crate::pbt::reference_state::ReferenceState;
         use crate::pbt::state_machine::fresh_reference_state;
-        use crate::pbt::transitions::{
-            AddPeer, E2ETransition, MergeFromPeer, PeerEdit, PeerEditOp,
-        };
-        use holon_pbt_core::TransitionImpl;
+        use crate::pbt::transitions::{AddPeer, E2ETransition, MergeFromPeer, PeerEdit};
+        use holon_pbt_core::{TransitionImpl, capabilities::PeerEditOp};
 
         fn drop_ref_off_thread(state: ReferenceState) {
             std::thread::spawn(move || drop(state))
@@ -884,7 +898,7 @@ mod tests {
         // The mutate arm (ToggleState) — headless `set_field task_state` via the engine.
         assert!(
             sut.caps
-                .get::<dyn crate::pbt::local_caps::SutMutate>()
+                .get::<dyn holon_pbt_core::capabilities::SutMutate>()
                 .is_some()
         );
         assert!(sut.engine.is_some());
@@ -1163,6 +1177,7 @@ mod tests {
             UndoLastMutation,
             ToggleState,
             CreateDocument,
+            DeleteDocument,
             SimulateRestart,
             StartApp,
             ConcurrentSchemaInit,
@@ -1188,7 +1203,7 @@ mod tests {
         eprintln!("\n=== SWAP PROBE: full_headless cap-feasibility ===");
         eprintln!("CAP-FEASIBLE ({}): {:?}", feasible.len(), feasible);
         eprintln!(
-            "CAP-INFEASIBLE ({}, stay on E2ESut): {:?}",
+            "CAP-INFEASIBLE ({}): {:?}",
             infeasible.len(),
             infeasible.keys().collect::<Vec<_>>()
         );

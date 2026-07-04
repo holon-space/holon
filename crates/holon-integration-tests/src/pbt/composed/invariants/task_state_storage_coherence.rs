@@ -130,7 +130,7 @@ mod real_sut_teeth {
     use crate::pbt::composed::wide_e2e::{SETTLE, boot_and_seed_wide, wide_e2e_ref};
     use crate::pbt::op_write_cap::IdResolver;
     use crate::pbt::transitions::ToggleState;
-    use crate::pbt::transitions::toggle_state::CycleTarget;
+    use holon_pbt_core::types::CycleTarget;
 
     /// A real `ToggleState(c1 → TODO)` over the composed `full_headless` CapMap must
     /// land in BOTH stores. Before the toggle both read `None` (plain seed block);

@@ -126,6 +126,17 @@ impl BlockReader for LoroBlockReader {
         Ok(out)
     }
 
+    async fn get_block_authoritative(&self, id: &EntityUri) -> AnyhowResult<Option<Block>> {
+        // The Loro tree is the write authority (no matview/`block_raw` split);
+        // a direct node read is the authoritative O(1) point lookup used by the
+        // org-writeback incremental cache's per-edit refresh.
+        match self.backend.get_block(id.as_str()).await {
+            Ok(block) => Ok(Some(block)),
+            Err(holon_api::ApiError::BlockNotFound { .. }) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     async fn iter_documents_with_blocks(&self) -> AnyhowResult<Vec<(EntityUri, Vec<Block>)>> {
         // The implicit root document: top-level blocks live directly under the
         // tree root (`no_parent`), excluding any Page roots which are returned
@@ -374,6 +385,7 @@ impl BlockOrdering for LoroBlockOrdering {
         _: &HashMap<String, Value>,
         _: &Tags,
         _: &[EntityUri],
+        _: &[EntityUri],
     ) -> BlockOrderingResult<bool> {
         Ok(false)
     }
@@ -428,6 +440,12 @@ impl BlockOrdering for LoroBlockOrdering {
             Some(v) => Some(parse_string_list(&v).map_err(|e| boxed(format!("'requires': {e}")))?),
             None => None,
         };
+        let advice_suppressed = match params.remove("advice_suppressed") {
+            Some(v) => Some(
+                parse_string_list(&v).map_err(|e| boxed(format!("'advice_suppressed': {e}")))?,
+            ),
+            None => None,
+        };
         // Everything remaining is a property.
         let properties = params;
 
@@ -477,6 +495,22 @@ impl BlockOrdering for LoroBlockOrdering {
                 .collect::<Result<_, _>>()?;
             self.backend
                 .set_block_requires(&id, &requires)
+                .await
+                .map_err(boxed)?;
+        }
+        if let Some(advice_suppressed) = advice_suppressed {
+            let advice_suppressed: Vec<EntityUri> = advice_suppressed
+                .into_iter()
+                .map(|r| {
+                    EntityUri::parse_owned(r).map_err(|e| {
+                        boxed(format!(
+                            "update_in_tree: invalid 'advice_suppressed' URI: {e}"
+                        ))
+                    })
+                })
+                .collect::<Result<_, _>>()?;
+            self.backend
+                .set_block_advice_suppressed(&id, &advice_suppressed)
                 .await
                 .map_err(boxed)?;
         }
@@ -531,11 +565,6 @@ impl BlockOrdering for LoroBlockOrdering {
 
     fn consolidator(&self) -> Consolidator {
         Consolidator::Store
-    }
-
-    /// Loro owns the order key; there is no SQL `sort_key` sink to project to.
-    async fn project_sort_keys(&self, _: &[EntityUri]) -> BlockOrderingResult<()> {
-        Ok(())
     }
 }
 

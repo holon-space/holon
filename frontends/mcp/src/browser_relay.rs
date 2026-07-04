@@ -252,8 +252,10 @@ impl ServerHandler for BrowserRelayServer {
         _: Option<PaginatedRequestParam>,
         _: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
-        let tools =
-            (HolonMcpServer::tool_router_ui() + HolonMcpServer::tool_router_backend()).list_all();
+        let router = HolonMcpServer::tool_router_ui() + HolonMcpServer::tool_router_backend();
+        #[cfg(debug_assertions)]
+        let router = router + HolonMcpServer::tool_router_reset();
+        let tools = router.list_all();
         async move { Ok(ListToolsResult::with_all_items(tools)) }
     }
 

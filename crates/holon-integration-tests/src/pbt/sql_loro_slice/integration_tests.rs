@@ -15,10 +15,10 @@ use holon_api::repository::{CoreOperations, Lifecycle};
 use holon_loro::LoroBackend;
 
 use crate::pbt::composed::fixtures::*;
-use crate::pbt::loro_slice::components::LoroBackendComponent;
 use crate::pbt::sql_loro_slice::builders::sql_loro_wide;
 use crate::pbt::sql_slice::builders::new_sql_engine;
 use crate::pbt::sql_slice::components::SqlProjectionComponent;
+use holon_loro_testing::LoroBackendComponent;
 
 fn task_state_props(state: &str) -> HashMap<String, Value> {
     let mut props = HashMap::new();

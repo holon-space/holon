@@ -12,8 +12,8 @@ use std::pin::Pin;
 
 use holon_api::Block;
 use holon_pbt_core::capabilities::{
-    EntityUri, RefBackend, RefBlockTree, RefEditorMirror, RefLayout, SutBackend,
-    SutEditorMirrorRead, SutLoroLog, SutOrgRead, SutRenderer, SutSqlProjection,
+    EntityUri, RefAdvice, RefBackend, RefBlockTree, RefEditorMirror, RefLayout, SutAdviceMatview,
+    SutBackend, SutEditorMirrorRead, SutLoroLog, SutOrgRead, SutRenderer, SutSqlProjection,
 };
 use holon_pbt_core::composition::{CapId, CapMap, Needs};
 use holon_pbt_core::invariant::InvariantResult;
@@ -90,6 +90,8 @@ pub fn non_seed_blocks() -> Correspondence<NonSeedBlocks> {
             // enabled on the variant; strict otherwise — seeds materialize
             // into the Loro store, so a non-seed divergence is a real bug.
             StoreProjection {
+                // BLOCKED on Phase 1a: part of the shared cross-store correspondence
+                // registry; splitting the /loro arm out fragments it. Stays central.
                 id: "inv-blocks-match-ref/loro",
                 store: "loro",
                 needs: Needs {
@@ -750,6 +752,127 @@ fn compare_no_ghost_rows(
     ))
 }
 
+// ─── Observable: advice matviews (`inv-advice-matview-matches-ref`) ──────────
+
+/// One (matview name, rows) pair. Rows are `(anchor_id, lesson_id,
+/// shared_tag_count)` — the pre-suppression, un-capped matview contract.
+type AdviceMatview = (String, Vec<(String, String, u32)>);
+
+/// The synthesized advice matviews (ADR 0022 step-6), SQL-level twin of the
+/// snapshot-level `inv-advice-rows-woven`. The reference projects the single
+/// active rule's expected matview name ([`RefAdvice::advice_matview_name`]) + its
+/// full un-suppressed, un-capped rows ([`RefAdvice::advice_matview_rows`]); the
+/// SUT projects every `advice_rule_%` materialized view actually present in
+/// `sqlite_master` with its rows. Suppression and top-K are read-time and belong
+/// to the snapshot invariant ONLY — this twin is the raw matview contract.
+///
+/// Driver-ladder localization: this twin flips GREEN the moment step-6 synthesis
+/// creates the matview, even while `inv-advice-rows-woven` stays RED because the
+/// renderer has not yet woven the rows. Until synthesis lands the SUT observes no
+/// such matview (empty), so a reference that expects one drives the RED.
+pub struct AdviceMatviews;
+
+impl Observable for AdviceMatviews {
+    type Value = Vec<AdviceMatview>;
+    const NAME: &'static str = "advice-matview-matches-ref";
+}
+
+pub fn advice_matviews() -> Correspondence<AdviceMatviews> {
+    Correspondence {
+        ref_project: ref_advice_matviews,
+        stores: vec![StoreProjection {
+            id: "inv-advice-matview-matches-ref/matview",
+            store: "matview",
+            needs: Needs {
+                sut_present: vec![CapId::of::<dyn SutAdviceMatview>()],
+                sut_absent: Vec::new(),
+                ref_present: vec![CapId::of::<dyn RefAdvice>()],
+            },
+            extract: extract_advice_matviews,
+            compare: NamedCompare {
+                name: "compare_advice_matviews",
+                f: compare_advice_matviews,
+            },
+            converge: Converge::None,
+        }],
+    }
+}
+
+fn ref_advice_matviews(refs: &CapMap) -> Extraction<Vec<AdviceMatview>> {
+    // ≤1 active rule (v1). `Some(name)` ⇒ exactly one expected matview carrying
+    // the rule's rows; `None` ⇒ no advice matview may exist.
+    match RefAdvice::advice_matview_name(refs) {
+        None => Extraction::Value(Vec::new()),
+        Some(name) => Extraction::Value(vec![(name, RefAdvice::advice_matview_rows(refs))]),
+    }
+}
+
+fn extract_advice_matviews<'a>(
+    sut: &'a CapMap,
+    _: &'a CapMap,
+) -> Pin<Box<dyn Future<Output = Extraction<Vec<AdviceMatview>>> + 'a>> {
+    Box::pin(async move { Extraction::Value(SutAdviceMatview::advice_matviews(sut).await) })
+}
+
+/// Order-free multiset equality of a matview's rows.
+fn sorted_rows(mut rows: Vec<(String, String, u32)>) -> Vec<(String, String, u32)> {
+    rows.sort();
+    rows
+}
+
+fn compare_advice_matviews(
+    sut: &Vec<AdviceMatview>,
+    ref_: &Vec<AdviceMatview>,
+) -> Result<(), String> {
+    match ref_.as_slice() {
+        // No active rule ⇒ no advice matview may exist.
+        [] => {
+            if sut.is_empty() {
+                return Ok(());
+            }
+            let names: Vec<&String> = sut.iter().map(|(n, _)| n).collect();
+            Err(format!(
+                "[inv-advice-matview-matches-ref/matview] no active advice rule, but the SUT \
+                 has advice_rule_% matviews {names:?} (ghost matviews — synthesis left a view \
+                 behind after the rule was deleted/deactivated)"
+            ))
+        }
+        [(name, expected_rows)] => {
+            if sut.len() != 1 {
+                let names: Vec<&String> = sut.iter().map(|(n, _)| n).collect();
+                return Err(format!(
+                    "[inv-advice-matview-matches-ref/matview] expected exactly one advice matview \
+                     '{name}', but the SUT has {} ({names:?}) — pre-step-6 synthesis has created \
+                     none (EXPECTED RED), or created more than one",
+                    sut.len(),
+                ));
+            }
+            let (sut_name, sut_rows) = &sut[0];
+            if sut_name != name {
+                return Err(format!(
+                    "[inv-advice-matview-matches-ref/matview] advice matview name diverges: \
+                     reference expects '{name}', SUT has '{sut_name}'"
+                ));
+            }
+            let want = sorted_rows(expected_rows.clone());
+            let got = sorted_rows(sut_rows.clone());
+            if want != got {
+                return Err(format!(
+                    "[inv-advice-matview-matches-ref/matview] advice matview '{name}' rows diverge \
+                     (pre-suppression, un-capped):\n  reference: {want:?}\n  SUT:       {got:?}"
+                ));
+            }
+            Ok(())
+        }
+        // v1 guarantees ≤1 active rule → ref side never yields >1 matview.
+        _ => Err(format!(
+            "[inv-advice-matview-matches-ref/matview] reference produced {} matviews; v1 \
+             guarantees at most one active rule (harness bug)",
+            ref_.len(),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::pbt::composed::fixtures::*;
@@ -970,5 +1093,65 @@ mod tests {
                 .any(|(id, _)| *id == "inv-editor-text/mirror"),
             "text agrees, so only the caret invariant fires; failures={failures:?}",
         );
+    }
+
+    // ── Pure comparator tests for the advice-matview twin ────────────────────
+
+    use super::{AdviceMatview, compare_advice_matviews};
+
+    fn mv(name: &str, rows: &[(&str, &str, u32)]) -> AdviceMatview {
+        (
+            name.to_string(),
+            rows.iter()
+                .map(|(a, l, n)| (a.to_string(), l.to_string(), *n))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn advice_no_rule_no_matview_agrees() {
+        assert!(compare_advice_matviews(&Vec::new(), &Vec::new()).is_ok());
+    }
+
+    #[test]
+    fn advice_no_rule_but_ghost_matview_fails() {
+        let sut = vec![mv("advice_rule_x", &[])];
+        assert!(compare_advice_matviews(&sut, &Vec::new()).is_err());
+    }
+
+    #[test]
+    fn advice_rule_but_absent_matview_fails_step4_red() {
+        // The step-4→step-6 red case: ref expects the matview, synthesis hasn't
+        // created it yet.
+        let ref_ = vec![mv("advice_rule_l", &[("block:t", "block:a", 1)])];
+        assert!(compare_advice_matviews(&Vec::new(), &ref_).is_err());
+    }
+
+    #[test]
+    fn advice_matching_rows_order_free_agree() {
+        let ref_ = vec![mv(
+            "advice_rule_l",
+            &[("block:t", "block:a", 2), ("block:t", "block:b", 1)],
+        )];
+        // Same multiset, different order → agree.
+        let sut = vec![mv(
+            "advice_rule_l",
+            &[("block:t", "block:b", 1), ("block:t", "block:a", 2)],
+        )];
+        assert!(compare_advice_matviews(&sut, &ref_).is_ok());
+    }
+
+    #[test]
+    fn advice_wrong_name_fails() {
+        let ref_ = vec![mv("advice_rule_l", &[("block:t", "block:a", 1)])];
+        let sut = vec![mv("advice_rule_other", &[("block:t", "block:a", 1)])];
+        assert!(compare_advice_matviews(&sut, &ref_).is_err());
+    }
+
+    #[test]
+    fn advice_row_divergence_fails() {
+        let ref_ = vec![mv("advice_rule_l", &[("block:t", "block:a", 2)])];
+        let sut = vec![mv("advice_rule_l", &[("block:t", "block:a", 1)])];
+        assert!(compare_advice_matviews(&sut, &ref_).is_err());
     }
 }

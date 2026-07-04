@@ -37,6 +37,10 @@ pub trait FileSystem: Send + Sync {
     async fn read_to_string(&self, path: &Path) -> std::io::Result<String>;
     async fn read(&self, path: &Path) -> std::io::Result<Vec<u8>>;
     async fn write(&self, path: &Path, contents: &[u8]) -> std::io::Result<()>;
+    /// Remove a file. Errors if absent (like `std::fs::remove_file`). Adapters
+    /// with a change-notification surface emit a `Remove` event, mirroring what
+    /// the real `notify` watcher delivers for an on-disk deletion.
+    async fn remove(&self, path: &Path) -> std::io::Result<()>;
     async fn create_dir_all(&self, path: &Path) -> std::io::Result<()>;
     /// Recursive walk respecting `.gitignore`, skipping hidden entries
     /// (`.git`, `.jj`, …). A missing `root` yields empty entries, not an
@@ -65,6 +69,12 @@ impl FileSystem for RealFileSystem {
 
     async fn write(&self, path: &Path, contents: &[u8]) -> std::io::Result<()> {
         tokio::fs::write(path, contents).await
+    }
+
+    async fn remove(&self, path: &Path) -> std::io::Result<()> {
+        tokio::fs::remove_file(path)
+            .await
+            .map_err(|e| std::io::Error::new(e.kind(), format!("remove {}: {e}", path.display())))
     }
 
     async fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {

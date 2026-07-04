@@ -10,18 +10,14 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::local_caps::SutAppLifecycle;
-use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::validation::{Reason, check};
-use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
+use holon_pbt_core::capabilities::{RefDocumentsMut, RefLifecycle, SutAppLifecycle};
+use holon_pbt_core::validation::{Reason, check};
+use holon_pbt_core::{TransitionFactory, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{
     CACHE_EVENT_READS, ExpectedSql, REACTIVE_BASE, READS_PER_WATCH, cdc_tolerance,
 };
-
-use holon_api::EntityUri;
-use holon_api::block::Block;
 
 /// Create a new empty document (post-startup).
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -29,80 +25,55 @@ pub struct CreateDocument {
     pub file_name: String,
 }
 
-impl TransitionFactory<ReferenceState> for CreateDocument {
+impl<R: RefLifecycle + RefDocumentsMut> TransitionFactory<R> for CreateDocument {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        vec![::holon_pbt_core::composition::CapId::of::<
-            dyn crate::pbt::local_caps::SutAppLifecycle,
-        >()]
+        Self::declared_caps()
     }
 
     type Reason = Reason;
-    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let instance = CreateDocument {
-            file_name: format!("doc_{}.org", state.action.next_doc_id),
+            file_name: format!("doc_{}.org", state.next_doc_id()),
         };
         instance.preconditions(state).map(|_| {
             let strat = Just(instance).boxed();
-            (1, strat)
+            // Weight 2: feeds DeleteDocument's candidate pool; at weight 1 a
+            // 16-case run created only 6 docs and never drew a deletion.
+            (2, strat)
         })
     }
 }
 
-impl TransitionRef<ReferenceState> for CreateDocument {
+impl<R: RefLifecycle + RefDocumentsMut> TransitionRef<R> for CreateDocument {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> =
-            vec![check(state.action.app_started, Reason::AppNotStarted)];
+            vec![check(state.app_started(), Reason::AppNotStarted)];
         checks
             .into_iter()
             .collect::<Validated<Vec<()>, _>>()
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
-        let doc_uri = state.next_synthetic_doc_uri();
-        state
-            .files
-            .documents
-            .insert(doc_uri.clone(), self.file_name.clone());
-
-        let doc_name = std::path::Path::new(self.file_name.as_str())
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or(&self.file_name)
-            .to_string();
-        let mut doc_block = Block::new_text(doc_uri.clone(), EntityUri::no_parent(), doc_name);
-        doc_block.set_page(true);
-        // New empty documents don't have #+TODO: headers — keywords only
-        // appear after the file is written with content. The on_file_changed
-        // handler syncs parsed keywords to the document block.
-        state
-            .domain
-            .block_state
-            .blocks
-            .insert(doc_uri.clone(), doc_block);
-        state
-            .domain
-            .block_state
-            .block_documents
-            .insert(doc_uri.clone(), doc_uri);
+    fn apply_to_ref(&self, state: &mut R) {
+        // The whole create-document reference effect (mint synthetic uri, register
+        // filename, insert the empty page block) lives in
+        // `RefDocumentsMut::insert_document`.
+        state.insert_document(&self.file_name);
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutAppLifecycle> TransitionImpl<ReferenceState, S> for CreateDocument {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.create_document(&self.file_name).await;
+crate::cap_transition! {
+    CreateDocument: SutAppLifecycle,
+    where R: [ RefLifecycle + RefDocumentsMut ],
+    |me, _state, sut| {
+        sut.create_document(&me.file_name).await;
     }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for CreateDocument {
-    fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
-        let watches = state.mcp.active_watches.len();
-        let blocks = state.domain.block_state.blocks.len();
-        let docs = state.files.documents.len();
+    sql_budget: |_me, state| {
+        let watches = state.active_watch_count();
+        let blocks = state.block_count();
+        let docs = state.document_count();
         ExpectedSql {
             reads: REACTIVE_BASE + CACHE_EVENT_READS + 4 + watches * READS_PER_WATCH,
             writes: 4,

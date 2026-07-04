@@ -12,8 +12,8 @@ use std::sync::Arc;
 use holon_pbt_core::capabilities::SutLoroTaskState;
 use holon_pbt_core::composition::{CapMap, CapProvider};
 
-use crate::pbt::loro_slice::components::LoroBackendComponent;
 use crate::pbt::sql_slice::components::SqlProjectionComponent;
+use holon_loro_testing::LoroBackendComponent;
 
 /// Build the combined SUT: SQL is the canonical block store, Loro the second
 /// task_state oracle. The catalog selects every `SutBackend`/`SutSqlProjection`

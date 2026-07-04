@@ -12,15 +12,14 @@
 //! are `focusable_rendered_block_ids(Region::Main)` (visible blocks in the
 //! main panel — the user can only shift-click on a rendered bullet).
 
-use crate::pbt::validation::{Reason, check};
-use holon_api::{ContentType, EntityUri, Region};
+use holon_api::{EntityUri, Region};
+use holon_pbt_core::validation::{Reason, check};
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::reference_state::{OpenPinEntry, ReferenceState};
-use holon_pbt_core::capabilities::SutNavHistoryDrive;
-use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
+use holon_pbt_core::capabilities::{RefBlockTree, RefLifecycle, RefPinsMut, SutNavHistoryDrive};
+use holon_pbt_core::{TransitionFactory, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{
@@ -34,11 +33,11 @@ pub struct PinBlock {
     pub block_id: EntityUri,
 }
 
-impl TransitionFactory<ReferenceState> for PinBlock {
+impl<R: RefLifecycle + RefBlockTree + RefPinsMut> TransitionFactory<R> for PinBlock {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        vec![::holon_pbt_core::composition::CapId::of::<
-            dyn ::holon_pbt_core::capabilities::SutNavHistoryDrive,
-        >()]
+        // Single-sourced from the `cap_transition!` below — cannot drift with the
+        // `S: SutNavHistoryDrive` dispatch bound (both come from the one cap token).
+        Self::declared_caps()
     }
 
     type Reason = Reason;
@@ -49,7 +48,7 @@ impl TransitionFactory<ReferenceState> for PinBlock {
         // Gate it out of {Loro} slices.
         ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Turso)
     }
-    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // Candidate set: Main's editable descendants. Per-precondition
         // filter narrows to pinnable subset.
         let candidates: Vec<EntityUri> = state
@@ -79,28 +78,31 @@ impl TransitionFactory<ReferenceState> for PinBlock {
     }
 }
 
-impl TransitionRef<ReferenceState> for PinBlock {
+impl<R: RefLifecycle + RefBlockTree + RefPinsMut> TransitionRef<R> for PinBlock {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
-        let block = state.domain.block_state.blocks.get(&self.block_id);
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
+        let block_exists = state.block_content(&self.block_id).is_some();
         let mut checks: Vec<Validated<(), Reason>> = vec![
-            check(state.action.app_started, Reason::AppNotStarted),
-            check(block.is_some(), Reason::FocusedBlockMissing),
+            check(state.app_started(), Reason::AppNotStarted),
+            check(block_exists, Reason::FocusedBlockMissing),
         ];
-        if let Some(b) = block {
+        if block_exists {
             checks.push(check(
-                b.content_type == ContentType::Text,
+                state.is_text_block(&self.block_id),
                 Reason::FocusedNotText,
             ));
-            checks.push(check(!b.is_page(), Reason::PreconditionFailed));
+            checks.push(check(
+                !state.is_page_block(&self.block_id),
+                Reason::PreconditionFailed,
+            ));
         }
         checks.push(check(
-            !state.domain.layout_blocks.contains(&self.block_id),
+            !state.is_layout_block(&self.block_id),
             Reason::FocusedInLayoutBlocks,
         ));
         checks.push(check(
-            state.domain.layout_blocks.is_focusable(&self.block_id),
+            state.is_focusable(&self.block_id),
             Reason::FocusedNotFocusable,
         ));
 
@@ -110,48 +112,20 @@ impl TransitionRef<ReferenceState> for PinBlock {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
-        // Move-to-top dedup, mirroring `provider.rs::focus_pin`:
-        // SELECT existing open `(region, block_id)`; UPDATE timestamp if
-        // found, else INSERT. Bumping `next_pin_ts` (not `next_history_id`)
-        // matches the no-INSERT path of `update_pin_timestamp.sql`.
-        let added_ts_logical = state.ui.user.next_pin_ts;
-        state.ui.user.next_pin_ts += 1;
-
-        let pins = state.ui.user.open_pins.entry(self.region).or_default();
-        if let Some(existing) = pins
-            .iter_mut()
-            .find(|p| p.block_id.as_ref() == Some(&self.block_id))
-        {
-            existing.added_ts_logical = added_ts_logical;
-        } else {
-            let history_id = state.ui.tab.next_history_id;
-            state.ui.tab.next_history_id += 1;
-            state
-                .ui
-                .user
-                .open_pins
-                .entry(self.region)
-                .or_default()
-                .push(OpenPinEntry {
-                    history_id,
-                    block_id: Some(self.block_id.clone()),
-                    added_ts_logical,
-                });
-        }
+    fn apply_to_ref(&self, state: &mut R) {
+        // Move-to-top dedup + counter bookkeeping is encapsulated in the ref cap
+        // (mirrors `provider.rs::focus_pin`); the transition just declares intent.
+        state.upsert_open_pin(self.region, &self.block_id);
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutNavHistoryDrive> TransitionImpl<ReferenceState, S> for PinBlock {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.pin_block(self.region, &self.block_id).await;
+crate::cap_transition! {
+    PinBlock: SutNavHistoryDrive,
+    where R: [ RefLifecycle + RefBlockTree + RefPinsMut ],
+    |me, _state, sut| {
+        sut.pin_block(me.region, &me.block_id).await;
     }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for PinBlock {
-    fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
+    sql_budget: |_me, state| {
         // focus_pin = SELECT (existence check) + INSERT or UPDATE.
         // Two round-trips total — one read and one write. The reactive base
         // captures the watcher activity; NAV_DML_READS covers the SELECT.

@@ -16,7 +16,11 @@ variants:
     # `block_domain::collection_render_from_profile` (live_block path). The
     # tree builder reads the resolved string to construct the slot's
     # synthetic data row id (`<scheme>:__virtual:<parent_local>`).
-    render: 'tree(#{parent_id: col("parent_id"), sortkey: col("sequence"), item_template: render_entity(), creation_slot: true, virtual_parent: true})'
+    # Sort by `sort_key` (FractionalIndex), not `sequence`: blocks minted by
+    # split/insert carry no `sequence` and would sort to the end (see
+    # `data_row_sort_key` in holon-api/src/widget_spec.rs). The level-0 rule
+    # mirrors the right sidebar's inline render (assets/default/index.org).
+    render: 'tree(#{parent_id: col("parent_id"), sortkey: col("sort_key"), item_template: render_entity(), creation_slot: true, virtual_parent: true, rules: [#{when: eq("level", 0), override: #{role: "page_title", show_bullet: false, show_chevron: false}}]})'
   - name: table_view
     priority: 1
     condition: 'view_mode == "table"'

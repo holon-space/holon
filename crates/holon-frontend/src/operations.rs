@@ -17,6 +17,12 @@ pub fn dispatch_operation(
 ) {
     let session = Arc::clone(session);
     let entity_name = entity_name.clone();
+    // End-to-end latency: start the interaction clock at the dispatch entry
+    // point; `holon_api::latency_e2e` closes it when the target's row lands
+    // in a LiveData mirror (stage="e2e").
+    if let Some(target) = params.get("id").and_then(|v| v.as_string()) {
+        holon_api::latency_e2e::interaction_dispatched(&op_name, target);
+    }
     handle.spawn(async move {
         if let Err(e) = session
             .execute_operation(&entity_name, &op_name, params)
@@ -97,6 +103,17 @@ impl OperationIntent {
         field: &str,
         value: Value,
     ) -> Self {
+        // Model.md invariant 3: intent never carries an order key. A widget
+        // constructing a set_field over `sort_key`/`after_block_id` is a
+        // programming error — reorders are expressed positionally through
+        // structural ops (`move_block` with an `after_block_id` anchor) so
+        // the ordering authority mints the key. Assert here so the bug
+        // surfaces at the constructor, not as a downstream dispatch Err.
+        assert!(
+            !matches!(field, "sort_key" | "after_block_id"),
+            "OperationIntent::set_field({field:?}): intent must never carry an order key \
+             (Model.md invariant 3); dispatch a structural move (move_block) instead"
+        );
         let mut params = HashMap::new();
         params.insert("id".to_string(), Value::String(row_id.to_string()));
         params.insert("field".to_string(), Value::String(field.to_string()));
@@ -220,5 +237,37 @@ pub fn get_row_id(ctx: &RenderContext) -> Option<String> {
         Some(Value::String(s)) => Some(s.clone()),
         Some(Value::Integer(i)) => Some(i.to_string()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Model.md invariant 3: no widget may construct a `set_field` intent
+    /// carrying an order key — the constructor asserts immediately instead
+    /// of letting the smuggle travel to a downstream dispatch Err.
+    #[test]
+    #[should_panic(expected = "intent must never carry an order key")]
+    fn set_field_intent_over_sort_key_is_unconstructible() {
+        let _ = OperationIntent::set_field(
+            &EntityName::Named("block".to_string()),
+            "set_field",
+            "block:a",
+            "sort_key",
+            Value::String("A5".to_string()),
+        );
+    }
+
+    #[test]
+    fn set_field_intent_over_content_constructs() {
+        let intent = OperationIntent::set_field(
+            &EntityName::Named("block".to_string()),
+            "set_field",
+            "block:a",
+            "content",
+            Value::String("hello".to_string()),
+        );
+        assert_eq!(intent.op_name, "set_field");
     }
 }

@@ -66,16 +66,16 @@ use crate::pbt::is_synthetic_ref_id;
 use crate::pbt::op_write_cap::{IdResolver, OpDispatchWriter};
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::sql_slice::SqlProjectionComponent;
-use crate::pbt::transitions::toggle_state::CycleTarget;
 use crate::pbt::transitions::{
-    CreateDocument, DeleteBackward, E2ETransition, FocusEditableText, Indent, JoinBlock,
-    NavigateBack, NavigateFocus, NavigateForward, NavigateHome, Nothing, Outdent, PinBlock,
-    SimulateRestart, SplitBlock, ToggleState, TypeChars,
+    CreateDocument, DeleteBackward, DeleteDocument, E2ETransition, FocusEditableText, Indent,
+    JoinBlock, NavigateBack, NavigateFocus, NavigateForward, NavigateHome, Nothing, Outdent,
+    PinBlock, SimulateRestart, SplitBlock, ToggleState, TypeChars,
 };
 use holon_pbt_core::capabilities::{
     SutBackend, SutBlockTreeWrite, SutEditorMirrorRead, SutFocus, SutQueryResults, SutSqlProjection,
 };
 use holon_pbt_core::composition::CapProvider;
+use holon_pbt_core::types::CycleTarget;
 
 /// The structural slice's transition alphabet — `Split` (the id-minting transition
 /// that drives the reconcile loop, the point of C2.0) + `Join`, each binding only
@@ -351,6 +351,11 @@ fn wide_aggregate(state: &ReferenceState) -> BoxedStrategy<E2ETransition> {
     // by the harness's per-tick reconcile (doc-uri-minting generalization) — the
     // doc-uri case the old E2ESut `block_tree_post_action` CreateDocument arm handled.
     arm!(CreateDocument, E2ETransition::CreateDocument);
+    // Inverse of SR-1: `DeleteDocument` removes a `CreateDocument`-minted org file via
+    // the production `FileSystem::remove` seam (the watcher observes the deletion). Its
+    // generator self-gates on a synthetic `doc_<n>.org` existing, so it only fires after
+    // a create landed.
+    arm!(DeleteDocument, E2ETransition::DeleteDocument);
     // Nav-history transitions folded from the nav slice (toward deleting it). The wide boot's
     // nav-history is aligned in `structural_ref_wired` ([journals#1, page#2], next=3), and the
     // probe proved the structural/editor/doc transitions write NO nav rows, so the AUTOINCREMENT
@@ -910,6 +915,37 @@ mod teeth {
             "non-vacuity: blocks-match must run (ran: {:?})",
             report.ran_ids()
         );
+    }
+
+    /// COVERAGE TOOTH (2026-07-05): the keystone's generator must PROPOSE `ToggleState`
+    /// in a booted, page-focused, seeded state — the exact state the wide alphabet
+    /// reaches after boot. The dogfood/latency triage found ToggleState NEVER fires in
+    /// keystone draws even at `HOLON_PBT_WEIGHTS=ToggleState:200` (change-status had
+    /// ZERO PBT coverage). This tooth pins the generator side: if
+    /// `ToggleState::weighted_generator` rejects the canonical seeded ref, the keystone
+    /// alphabet silently lost its only change-status transition. On failure it prints
+    /// the precise rejection `Reason`s.
+    #[test]
+    fn toggle_state_generator_proposes_in_wide_seeded_state() {
+        use holon_pbt_core::TransitionFactory;
+        for (name, state) in [
+            ("structural_ref", structural_ref()),
+            ("wide_ref", crate::pbt::composed::wide_e2e::wide_ref()),
+        ] {
+            match ToggleState::weighted_generator(&state) {
+                validated::Validated::Good((w, _strat)) => {
+                    assert!(w > 0, "[{name}] ToggleState arm has zero weight");
+                }
+                validated::Validated::Fail(reasons) => {
+                    drop_ref_off_thread(state);
+                    panic!(
+                        "[{name}] ToggleState generator REJECTS the seeded wide state — \
+                         change-status has zero keystone coverage. Reasons: {reasons:?}"
+                    );
+                }
+            }
+            drop_ref_off_thread(state);
+        }
     }
 
     /// Teeth: toggle `c1`'s task_state on the SUT ONLY (oracle frozen) — the SUT's

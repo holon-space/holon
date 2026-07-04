@@ -219,10 +219,11 @@ fn interpret_static(
     }
 }
 
-/// Interpret a single static card and attach `row_id` / `sort_key` props
-/// so the GPUI renderer can dispatch persistence ops on drag/drop. The
-/// streaming path doesn't need this — it gets row metadata via
-/// `card_vm.data` (set by `flat_driver::interpret_and_attach`).
+/// Interpret a single static card and attach `row_id` / `parent_id` /
+/// `sort_key` props so the GPUI renderer can dispatch persistence ops on
+/// drag/drop (`move_block` anchored on neighbor cards). The streaming path
+/// doesn't need this — it gets row metadata via `card_vm.data` (set by
+/// `flat_driver::interpret_and_attach`).
 fn build_static_card(
     tmpl: &holon_api::render_types::RenderExpr,
     row: Arc<HashMap<String, Value>>,
@@ -234,14 +235,21 @@ fn build_static_card(
         .get("id")
         .and_then(|v| v.as_string())
         .map(|s| s.to_string());
+    let parent_id_val = row
+        .get("parent_id")
+        .and_then(|v| v.as_string())
+        .map(|s| s.to_string());
     let sort_key_val = row
         .get("sort_key")
         .and_then(|v| v.as_string())
         .map(|s| s.to_string());
-    if row_id_val.is_some() || sort_key_val.is_some() {
+    if row_id_val.is_some() || parent_id_val.is_some() || sort_key_val.is_some() {
         let mut extended = card_vm.props.get_cloned();
         if let Some(id) = row_id_val {
             extended.insert("row_id".to_string(), Value::String(id));
+        }
+        if let Some(pid) = parent_id_val {
+            extended.insert("parent_id".to_string(), Value::String(pid));
         }
         if let Some(sk) = sort_key_val {
             extended.insert("sort_key".to_string(), Value::String(sk));

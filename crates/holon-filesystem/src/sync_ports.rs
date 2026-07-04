@@ -20,6 +20,19 @@ pub trait BlockReader: Send + Sync {
     /// Get all blocks for a document by its ID.
     async fn get_blocks(&self, doc_id: &EntityUri) -> Result<Vec<Block>>;
 
+    /// Authoritative single-block point read, fully edge-hydrated
+    /// (`tags`/`requires`/`advice_suppressed`). Reads the **write-authority**
+    /// store — `block_raw` under Turso, the Loro tree under Loro — NOT the
+    /// lagging `block` matview, and NOT the doc-scoped recursive-CTE walk. An
+    /// O(1) indexed lookup.
+    ///
+    /// Powers the org-writeback incremental cache: after a content-only block
+    /// edit, the controller refreshes just the changed block from the same
+    /// authority its cache was seeded from (`get_blocks` reads `block_raw`
+    /// too), so seed and refresh never straddle the matview-vs-`block_raw`
+    /// authority boundary. Returns `None` if the id is absent.
+    async fn get_block_authoritative(&self, id: &EntityUri) -> Result<Option<Block>>;
+
     /// List all known documents with their blocks (for startup initialization).
     /// Returns (doc_id, blocks) pairs. Path resolution is the caller's concern.
     async fn iter_documents_with_blocks(&self) -> Result<Vec<(EntityUri, Vec<Block>)>>;
