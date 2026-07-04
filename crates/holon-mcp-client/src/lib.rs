@@ -8,7 +8,6 @@
 //!
 //! Reusable MCP client: connects to MCP servers and exposes their tools as `OperationProvider`s.
 
-pub mod claude_sessions;
 pub mod credential_store;
 pub mod integration_config;
 pub mod mcp_call_surface;

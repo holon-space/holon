@@ -463,7 +463,7 @@ impl McpSyncEngine {
     }
 
     /// Access the underlying MCP peer (e.g. to build additional typed
-    /// sources like `McpClaudeSessionSource` over the same connection).
+    /// sources over the same connection).
     pub fn peer(&self) -> &Peer<RoleClient> {
         &self.peer
     }
