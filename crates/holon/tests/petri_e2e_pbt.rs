@@ -922,7 +922,8 @@ fn check_dependency_arcs(ref_state: &PetriRefState, net: &TaskNet) {
         for dep_id in block.depends_on.iter() {
             let has_dep_arc = transition.inputs().iter().any(|i| {
                 i.token_type == "completion"
-                    && i.precond.get("source_task").map(|v| v.as_str()) == Some(dep_id.as_str())
+                    && matches!(i.precond.get("source_task"),
+                        Some(holon_engine::PrecondSpec::Exact(s)) if s == dep_id)
             });
             assert!(
                 has_dep_arc,
@@ -940,8 +941,8 @@ fn check_dependency_arcs(ref_state: &PetriRefState, net: &TaskNet) {
             let prev_sut_id = sut_id(&prev_id);
             let has_seq_arc = transition.inputs().iter().any(|i| {
                 i.token_type == "completion"
-                    && i.precond.get("source_task").map(|v| v.as_str())
-                        == Some(prev_sut_id.as_str())
+                    && matches!(i.precond.get("source_task"),
+                        Some(holon_engine::PrecondSpec::Exact(s)) if s == &prev_sut_id)
             });
             assert!(
                 has_seq_arc,
