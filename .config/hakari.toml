@@ -22,3 +22,27 @@ platforms = [
 
 # Write out exact versions rather than a semver range. (Defaults to false.)
 # exact-versions = true
+
+# Keep `gpui` out of workspace-hack's feature unification. It is a *dev-only*
+# dependency (frontends/gpui/Cargo.toml [dev-dependencies], features =
+# ["test-support"]) used solely by the GPUI test/PBT harness. Without this
+# exclude, hakari's feature-unification promotes the test-support-flavoured
+# `gpui` — and, through it, the whole GPUI framework plus the `proptest` git
+# fork — into workspace-hack as a *normal* dependency, dragging both into the
+# production build graphs of holon-tui, holon-mcp and the storage adapters.
+#
+# `traversal-excludes` (not `final-excludes`) is required: holon-gpui itself
+# links `gpui` normally *and* with test-support, so hakari can only leave that
+# per-crate feature split alone if it stops traversing `gpui` entirely —
+# `final-excludes` would still try to unify it and `cargo hakari verify` fails.
+# The exclude keeps the framework + proptest on the dev-only edges where they
+# belong. Regression-guarded by holon-architecture-tests.
+[traversal-excludes]
+third-party = [
+    { name = "gpui", git = "https://github.com/holon-space/zed.git", branch = "holon" },
+    # gpui's zed-fork utility crates, injected only because of the test-support
+    # gpui dev-dep; their sole real consumer is holon-gpui (via its own `gpui`
+    # dep), so keep them off every other crate's normal graph too.
+    { name = "collections", git = "https://github.com/holon-space/zed.git", branch = "holon" },
+    { name = "http_client", git = "https://github.com/holon-space/zed.git", branch = "holon" },
+]

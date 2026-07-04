@@ -22,7 +22,6 @@ use holon_api::{
     ApiError, Block, BlockContent, Change, ChangeOrigin, ContentType, SourceBlock, StreamPosition,
     Tags, Value,
 };
-use holon_core::fractional_index::default_sort_key;
 use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -380,6 +379,7 @@ fn read_properties_from_meta(meta: &loro::LoroMap) -> HashMap<String, Value> {
     // the stray keys.
     props.remove("tags");
     props.remove("requires");
+    props.remove("advice_suppressed");
     props
 }
 
@@ -430,11 +430,13 @@ fn read_block_from_tree(
 
     let tags = read_tags_from_meta(&meta);
     let requires = read_requires_from_meta(&meta);
+    let advice_suppressed = read_advice_suppressed_from_meta(&meta);
 
     let mut block = Block::from_block_content(id, parent_id, content);
     block.set_properties_map(properties);
     block.tags = tags.into();
     block.requires = requires;
+    block.advice_suppressed = advice_suppressed;
     block.created_at = created_at;
     block.updated_at = updated_at;
     block
@@ -475,6 +477,27 @@ fn read_requires_from_meta(meta: &loro::LoroMap) -> Vec<EntityUri> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Read the `advice_suppressed` JSON-encoded list (advice-suppression exclusion
+/// set, ADR 0021) from a node's metadata. Mirrors `read_requires_from_meta`:
+/// an edge field stored under its own meta key (the `advice_suppressed`
+/// junction), never in the generic `properties` blob. Empty when absent;
+/// malformed JSON is corruption of our own metadata — fail loud.
+fn read_advice_suppressed_from_meta(meta: &loro::LoroMap) -> Vec<EntityUri> {
+    meta.get_typed("advice_suppressed", |val| {
+        val.as_string().map(|s| s.to_string())
+    })
+    .map(|s| {
+        serde_json::from_str::<Vec<String>>(&s)
+            .unwrap_or_else(|e| panic!("corrupt `advice_suppressed` metadata JSON {s:?}: {e}"))
+            .into_iter()
+            .map(|r| {
+                EntityUri::parse_owned(r).expect("stored advice_suppressed must be a valid URI")
+            })
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 /// Check if two snapshotted blocks differ in content, structure, ordering, or
@@ -841,7 +864,7 @@ pub fn snapshot_blocks_from_doc_settled(
     let tree = doc.get_tree(TREE_NAME);
     let mut blocks: HashMap<String, SnapshotBlock> = HashMap::new();
     let mut settled = true;
-    let mut sibling_keys: HashMap<Option<loro::TreeID>, HashMap<loro::TreeID, String>> =
+    let mut sibling_keys: HashMap<Option<loro::TreeID>, HashMap<loro::TreeID, Option<String>>> =
         HashMap::new();
     for node in tree.get_nodes(false) {
         if matches!(
@@ -869,7 +892,15 @@ pub fn snapshot_blocks_from_doc_settled(
         // Computed per sibling group so concurrently-created siblings whose
         // peers minted the SAME fi still project DISTINCT keys in Loro's true
         // child order (see `effective_sibling_sort_keys`).
-        let sort_key = sibling_keys
+        //
+        // A live node with no fractional index (inner `None`) or one absent from
+        // its parent's child list (outer `None`) is an ordering-invariant
+        // violation (ADR 0005). We MUST NOT fake a `default_sort_key()` ("A0")
+        // here: that is the exact historical fi-corruption shape and a fail-loud
+        // violation (CLAUDE.md "never fake"). Instead disclose the degraded node
+        // loudly and withhold it (like the missing-meta skip above), marking the
+        // snapshot unsettled so the caller withholds deletes.
+        let key_opt = sibling_keys
             .entry(parent_tid)
             .or_insert_with(|| {
                 let siblings = match parent_tid {
@@ -880,8 +911,19 @@ pub fn snapshot_blocks_from_doc_settled(
                 siblings.into_iter().zip(keys).collect()
             })
             .get(&node.id)
-            .cloned()
-            .unwrap_or_else(default_sort_key);
+            .cloned();
+        let Some(Some(sort_key)) = key_opt else {
+            tracing::error!(
+                block_id = %block.id,
+                ?parent_tid,
+                node = ?node.id,
+                "loro projection: live node has no fractional index (ADR 0005 \
+                 ordering-invariant violation); withholding from snapshot rather \
+                 than faking an A0 sort key"
+            );
+            settled = false;
+            continue;
+        };
         if std::env::var("HOLON_LORO_DUP_DEBUG").is_ok()
             && let Some(prev) = blocks.get(&block.id.to_string())
         {
@@ -902,25 +944,39 @@ pub fn snapshot_blocks_from_doc_settled(
 /// index — but concurrent peer creates at the same position mint the SAME fi
 /// (jitter is 0), and Loro breaks that tie internally by op id, an order the
 /// plain fi string loses. Projecting the tied string would collapse SQL to its
-/// `ORDER BY sort_key, id` fallback — id-string order, random from the user's
+/// `ORDER BY sort_key, id` tiebreak — id-string order, random from the user's
 /// PoV and divergent from the Loro authority. Tied runs therefore get a
 /// `.<position>` suffix in child order; `.` (0x2E) sorts below every fi hex
 /// char, so a suffixed key keeps its place relative to every distinctly-keyed
 /// sibling (ties share the exact fi string as a common prefix).
-fn effective_sibling_sort_keys(tree: &loro::LoroTree, siblings: &[loro::TreeID]) -> Vec<String> {
-    let fis: Vec<String> = siblings
+fn effective_sibling_sort_keys(
+    tree: &loro::LoroTree,
+    siblings: &[loro::TreeID],
+) -> Vec<Option<String>> {
+    // `None` marks a sibling with no fractional index — a live-node ordering
+    // invariant violation (ADR 0005). It is propagated (never defaulted to
+    // "A0") so the caller can withhold that node and fail loud.
+    let fis: Vec<Option<String>> = siblings
         .iter()
-        .map(|&tid| tree.fractional_index(tid).unwrap_or_else(default_sort_key))
+        .map(|&tid| tree.fractional_index(tid))
         .collect();
     fis.iter()
         .enumerate()
         .map(|(i, fi)| {
-            let tied = fis.iter().filter(|f| *f == fi).count() > 1;
+            let fi = fi.as_ref()?;
+            let tied = fis
+                .iter()
+                .filter(|f| f.as_deref() == Some(fi.as_str()))
+                .count()
+                > 1;
             if tied {
-                let run_pos = fis[..i].iter().filter(|f| *f == fi).count();
-                format!("{fi}.{run_pos:06x}")
+                let run_pos = fis[..i]
+                    .iter()
+                    .filter(|f| f.as_deref() == Some(fi.as_str()))
+                    .count();
+                Some(format!("{fi}.{run_pos:06x}"))
             } else {
-                fi.clone()
+                Some(fi.clone())
             }
         })
         .collect()
@@ -1785,6 +1841,7 @@ impl LoroBackend {
         properties: &HashMap<String, Value>,
         tags: &Tags,
         requires: &[EntityUri],
+        advice_suppressed: &[EntityUri],
     ) -> Result<Block, ApiError> {
         let now = self.now_millis();
         let stable_id = match &id {
@@ -1834,6 +1891,16 @@ impl LoroBackend {
                         .map_err(|e| anyhow::anyhow!("serialize requires: {e}"))?;
                     meta.insert("requires", loro::LoroValue::from(serialized.as_str()))?;
                 }
+                // `advice_suppressed` mirrors `requires`: an edge field carried
+                // in the create commit under its own meta key (ADR 0021).
+                if !advice_suppressed.is_empty() {
+                    let serialized = serde_json::to_string(advice_suppressed)
+                        .map_err(|e| anyhow::anyhow!("serialize advice_suppressed: {e}"))?;
+                    meta.insert(
+                        "advice_suppressed",
+                        loro::LoroValue::from(serialized.as_str()),
+                    )?;
+                }
                 meta.insert("created_at", loro::LoroValue::from(now))?;
                 meta.insert("updated_at", loro::LoroValue::from(now))?;
                 doc.commit();
@@ -1851,6 +1918,7 @@ impl LoroBackend {
                 block.set_properties_map(properties.clone());
                 block.tags = tags.clone();
                 block.requires = requires.to_vec();
+                block.advice_suppressed = advice_suppressed.to_vec();
                 block.created_at = now;
                 block.updated_at = now;
                 Ok((block, node))
@@ -2227,6 +2295,40 @@ impl LoroBackend {
         })
     }
 
+    /// Set the `advice_suppressed` edge field (advice-suppression exclusion set,
+    /// ADR 0021) on a block's Loro meta. Mirrors
+    /// [`set_block_requires`](Self::set_block_requires): a dedicated
+    /// `advice_suppressed` meta key holding a JSON list, read back by
+    /// `read_block_from_tree`, projected to the `advice_suppressed` junction.
+    pub async fn set_block_advice_suppressed(
+        &self,
+        tree_id_str: &str,
+        advice_suppressed: &[EntityUri],
+    ) -> anyhow::Result<()> {
+        let target = self
+            .resolve_write_target_checked(tree_id_str)
+            .await
+            .map_err(|e| anyhow::anyhow!("set_block_advice_suppressed: {e}"))?;
+        let (write_doc, tree_id) = self.target_doc(&target);
+
+        let serialized = serde_json::to_string(advice_suppressed)?;
+
+        write_doc.with_write(|doc| {
+            let tree = doc.get_tree(TREE_NAME);
+            let meta = tree.get_meta(tree_id)?;
+            if advice_suppressed.is_empty() {
+                meta.delete("advice_suppressed")?;
+            } else {
+                meta.insert(
+                    "advice_suppressed",
+                    loro::LoroValue::from(serialized.as_str()),
+                )?;
+            }
+            doc.commit();
+            Ok(())
+        })
+    }
+
     /// Set the `source_language` meta field on a source block's Loro node.
     /// Needed by the org re-ingest update path: an `index.org` swap can change
     /// a `#+BEGIN_SRC` block's language (e.g. `holon_prql` → `holon_gql`);
@@ -2344,7 +2446,7 @@ impl LoroBackend {
                 Ok(siblings
                     .iter()
                     .position(|t| *t == tree_id)
-                    .map(|i| keys[i].clone()))
+                    .and_then(|i| keys[i].clone()))
             })
             .map_err(|e| ApiError::InternalError {
                 message: format!("block_sort_key({id}): {e}"),
@@ -2864,6 +2966,7 @@ impl CoreOperations for LoroBackend {
             id,
             &HashMap::new(),
             &Tags::default(),
+            &[],
             &[],
         )
         .await

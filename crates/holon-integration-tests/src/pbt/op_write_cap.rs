@@ -393,6 +393,13 @@ impl SutEdgeFieldWrite for EdgeFieldWriter {
                     .await
                     .unwrap_or_else(|e| panic!("set_block_requires({rid}) failed: {e:#}"));
             }
+            EdgeFieldUpdate::AdviceSuppressed(reqs) => {
+                let resolved: Vec<EntityUri> = reqs.iter().map(|t| self.resolve(t)).collect();
+                backend
+                    .set_block_advice_suppressed(rid.as_str(), &resolved)
+                    .await
+                    .unwrap_or_else(|e| panic!("set_block_advice_suppressed({rid}) failed: {e:#}"));
+            }
         }
     }
 }

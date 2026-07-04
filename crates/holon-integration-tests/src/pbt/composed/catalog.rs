@@ -71,6 +71,10 @@ pub fn composed_invariant_catalog() -> Vec<Box<dyn CapInvariant>> {
         invariants::frontend_engine::wire(),
         invariants::frontend_root_not_error::wire(),
         invariants::live_tree_matches_fresh::wire(),
+        // No-stale-rows-after-navigation (2026-07-05, cross-frontend prod bug):
+        // main-panel rendered ref-known blocks must be in Main's current
+        // focus-root subtree. Needs SutRenderer + RefViewSelection/RefLayout/RefFocus.
+        invariants::main_panel_rows_match_focus::wire(),
         // Auto-derived by `capability_pair! { pub trait ViewSelection … }` in
         // holon-pbt-core (the `#[compare] fn current_view` method).
         holon_pbt_core::capabilities::inv_pair_view_selection_current_view(),
@@ -85,6 +89,11 @@ pub fn composed_invariant_catalog() -> Vec<Box<dyn CapInvariant>> {
         // `ReactiveEngine` `widget_tree_snapshot`) supplies the SUT cap.
         invariants::viewmodel_snapshot::wire(),
         invariants::viewmodel_tree_virtual_slots::wire(),
+        // Advice weave (ADR 0021/0022/0023): the rendered tree must weave each
+        // anchor's top-K suppression-filtered advice rows. Needs `SutRenderer` +
+        // `RefAdvice`. EXPECTED RED between the generator arm (step 4) and the
+        // renderer weave (step 6).
+        invariants::advice_rows_woven::wire(),
         invariants::editable_text_has_draggable::wire(),
         invariants::viewmodel_root_matches_render_expr::wire(),
         invariants::viewmodel_decompiled_rows_match_query::wire(),
@@ -124,5 +133,10 @@ pub fn composed_invariant_catalog() -> Vec<Box<dyn CapInvariant>> {
     catalog.extend(correspondences::active_editor_caret().wire());
     catalog.extend(correspondences::org_blocks().wire());
     catalog.extend(correspondences::matview_ghost_rows().wire());
+    // SQL-level advice twin (`inv-advice-matview-matches-ref/matview`): the raw
+    // synthesized `advice_rule_%` matview contract vs the reference. Flips green
+    // when step-6 synthesis lands even while `inv-advice-rows-woven` stays red —
+    // driver-ladder localization. Needs `SutAdviceMatview` + `RefAdvice`.
+    catalog.extend(correspondences::advice_matviews().wire());
     catalog
 }

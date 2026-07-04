@@ -41,6 +41,7 @@ holon-macros.workspace = true
 holon-api.workspace = true
 holon-core.workspace = true
 holon-turso.workspace = true
+holon-advice.workspace = true
 similar.workspace = true
 prqlc.workspace = true
 prqlc-parser.workspace = true

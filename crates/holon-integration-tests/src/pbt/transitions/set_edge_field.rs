@@ -24,6 +24,7 @@ use proptest::prelude::*;
 use proptest::strategy::{BoxedStrategy, Union};
 use validated::Validated;
 
+use crate::pbt::generators::ADVICE_TAG_POOL;
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::validation::{Reason, check};
 use holon_pbt_core::{TransitionFactory, TransitionRef};
@@ -101,11 +102,14 @@ impl TransitionFactory<ReferenceState> for SetEdgeField {
 
         let mut arms: Vec<(u32, BoxedStrategy<SetEdgeField>)> = Vec::new();
 
-        // `tags` arm: 1–2 lowercase tags (never `Page` → `is_page` unchanged).
+        // `tags` arm (never `Page` → `is_page` unchanged). Two sub-arms, 2:1
+        // pool:random. The pool sub-arm draws DISTINCT tags from
+        // `ADVICE_TAG_POOL` (the same pool the advice-rule generator anchors on),
+        // making `task`/`lesson` tagging and hence advice tag-overlap reachable;
+        // the random sub-arm keeps arbitrary `[a-z]{3,6}` coverage.
         {
-            let elig = eligible.clone();
-            let tags_arm = (
-                proptest::sample::select(elig),
+            let random_tags = (
+                proptest::sample::select(eligible.clone()),
                 proptest::collection::vec("[a-z]{3,6}", 1..3),
             )
                 .prop_map(|(block_id, tags)| SetEdgeField {
@@ -113,7 +117,16 @@ impl TransitionFactory<ReferenceState> for SetEdgeField {
                     update: EdgeFieldUpdate::Tags(Tags::from_csv(&tags.join(","))),
                 })
                 .boxed();
-            arms.push((1, tags_arm));
+            let pool_tags = (
+                proptest::sample::select(eligible.clone()),
+                proptest::sample::subsequence(ADVICE_TAG_POOL.to_vec(), 1..=3),
+            )
+                .prop_map(|(block_id, tags)| SetEdgeField {
+                    block_id,
+                    update: EdgeFieldUpdate::Tags(Tags::from_csv(&tags.join(","))),
+                })
+                .boxed();
+            arms.push((1, prop_oneof![2 => pool_tags, 1 => random_tags].boxed()));
         }
 
         // `requires` arm: a single dependency edge to a *distinct* existing block.
@@ -128,6 +141,77 @@ impl TransitionFactory<ReferenceState> for SetEdgeField {
                 })
                 .boxed();
             arms.push((2, requires_arm));
+
+            // `advice_suppressed` arm: mirrors `requires` — a single dismissal
+            // edge to a *distinct* existing block (ADR 0021 exclusion set). The
+            // general (unbiased) sub-arm keeps weight 1.
+            let elig = eligible.clone();
+            let advice_arm = (0..n, 0..n)
+                .prop_filter("advice target must differ from subject", |(i, j)| i != j)
+                .prop_map(move |(i, j)| SetEdgeField {
+                    block_id: elig[i].clone(),
+                    update: EdgeFieldUpdate::AdviceSuppressed(vec![elig[j].clone()]),
+                })
+                .boxed();
+            arms.push((1, advice_arm));
+
+            // Biased advice sub-arm (weight 2): when both a `task`-tagged and a
+            // `lesson`-tagged eligible block exist, prefer subject = task,
+            // target(s) = lesson(s) — the exact shape a `lessons_for_tasks` rule
+            // suppresses, so suppression actually removes a woven row. Gated on
+            // carrier availability like the `n >= 2` gate. ~1 in 3 draws two
+            // distinct lessons: the edge set is REPLACED whole, so multi-element
+            // sets exercise the accumulate/replace semantics.
+            let carriers = |tag: &str| -> Vec<EntityUri> {
+                eligible
+                    .iter()
+                    .filter(|id| {
+                        state
+                            .domain
+                            .block_state
+                            .blocks
+                            .get(*id)
+                            .is_some_and(|b| b.tags.contains(tag))
+                    })
+                    .cloned()
+                    .collect()
+            };
+            let tasks = carriers("task");
+            let lessons = carriers("lesson");
+            // Constructive pairing, NOT a prop_filter: when the only task
+            // carrier IS the only lesson carrier, a subject≠target filter can
+            // never succeed and its rejects abort the whole run.
+            let pairs: Vec<(EntityUri, Vec<EntityUri>)> = tasks
+                .iter()
+                .map(|t| {
+                    let ls: Vec<EntityUri> =
+                        lessons.iter().filter(|l| *l != t).cloned().collect();
+                    (t.clone(), ls)
+                })
+                .filter(|(_, ls)| !ls.is_empty())
+                .collect();
+            if !pairs.is_empty() {
+                let biased_advice = proptest::sample::select(pairs)
+                    .prop_flat_map(|(subject, ls)| {
+                        let targets = if ls.len() >= 2 {
+                            prop_oneof![
+                                2 => proptest::sample::select(ls.clone()).prop_map(|l| vec![l]),
+                                1 => proptest::sample::subsequence(ls.clone(), 2..=2),
+                            ]
+                            .boxed()
+                        } else {
+                            proptest::sample::select(ls.clone())
+                                .prop_map(|l| vec![l])
+                                .boxed()
+                        };
+                        targets.prop_map(move |targets| SetEdgeField {
+                            block_id: subject.clone(),
+                            update: EdgeFieldUpdate::AdviceSuppressed(targets),
+                        })
+                    })
+                    .boxed();
+                arms.push((2, biased_advice));
+            }
         }
 
         // Weight 4 (cf. ApplyMutation's conflict arm): the sole transition that
@@ -158,8 +242,13 @@ impl TransitionRef<ReferenceState> for SetEdgeField {
                 Reason::FocusedInLayoutBlocks,
             ),
         ];
-        // A `requires` dependency must point at an existing block.
-        if let EdgeFieldUpdate::Requires(targets) = &self.update {
+        // A `requires` / `advice_suppressed` edge must point at an existing block.
+        let edge_targets = match &self.update {
+            EdgeFieldUpdate::Requires(targets) => Some(targets),
+            EdgeFieldUpdate::AdviceSuppressed(targets) => Some(targets),
+            EdgeFieldUpdate::Tags(_) => None,
+        };
+        if let Some(targets) = edge_targets {
             for t in targets {
                 checks.push(check(
                     state.domain.block_state.blocks.contains_key(t),
@@ -186,6 +275,7 @@ impl TransitionRef<ReferenceState> for SetEdgeField {
         match &self.update {
             EdgeFieldUpdate::Tags(tags) => block.tags = tags.clone(),
             EdgeFieldUpdate::Requires(reqs) => block.requires = reqs.clone(),
+            EdgeFieldUpdate::AdviceSuppressed(reqs) => block.advice_suppressed = reqs.clone(),
         }
     }
 }

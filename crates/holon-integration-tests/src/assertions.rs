@@ -51,6 +51,15 @@ pub fn normalize_block(block: &Block) -> Block {
         holon_api::Value::String(s) if s.is_empty() => false,
         _ => true,
     });
+    // `task_state_category` is `task_state`'s sidecar — without a (non-empty)
+    // keyword it carries no information, and the org round-trip drops the PAIR
+    // (no keyword rendered → neither parsed back). The retain above already
+    // dropped an empty/Null keyword; drop its orphaned sidecar with it, or the
+    // ref (which stores ""+"active" after cycling to Clear, exactly like
+    // block_raw) diverges from the org-parsed side on a phantom property.
+    if !normalized.properties.contains_key("task_state") {
+        normalized.properties.remove("task_state_category");
+    }
     normalized
 }
 

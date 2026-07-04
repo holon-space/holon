@@ -107,6 +107,15 @@ impl TransitionFactory<ReferenceState> for WriteOrgFile {
         // `HOLON_PBT_LAYOUT_OVERRIDE=1` to exercise custom-layout paths.
         let state_for_preconditions = state.clone();
         let allow_index_override = std::env::var("HOLON_PBT_LAYOUT_OVERRIDE").is_ok();
+        // Gate the advice-rule arm at generation time: mint a rule only when the
+        // reference holds no NON-SEED rule yet, so `active_rule`'s ≤1-active
+        // invariant holds. The bundled INACTIVE `index.org` rule seeds every
+        // vault (and the reference), so counting it would silently kill this
+        // arm forever. Re-checked under shrinking in `preconditions` below.
+        let allow_advice_rule = crate::pbt::advice_expectation::non_seed_advice_rule_blocks(
+            &state.domain.block_state,
+        )
+        .is_empty();
         // Axis 5 (promoted 2026-06-10): ~half the files carry a custom
         // `#+TODO:` keyword set, emitted as the org header on the SUT side
         // and adopted by the reference doc block.
@@ -115,6 +124,7 @@ impl TransitionFactory<ReferenceState> for WriteOrgFile {
                 crate::pbt::generators::generate_org_file_content_with_keywords(
                     keyword_set.clone(),
                     allow_index_override,
+                    allow_advice_rule,
                 )
                 .prop_map(move |(filename, blocks)| WriteOrgFile {
                     filename,
@@ -161,6 +171,26 @@ impl TransitionRef<ReferenceState> for WriteOrgFile {
                     .is_some_and(|existing_doc| *existing_doc != doc_uri)
             });
         checks.push(check(!any_collision, Reason::BlockIdAlreadyExists));
+
+        // Shrink-safe ≤1-rule gate: a file that seeds an advice-rule block may
+        // only land when the reference holds no advice-rule block yet. Generation
+        // time already gates this, but the shrinker can reorder/drop earlier
+        // transitions and revalidate this file against a state that now already
+        // has a rule — so the invariant (`active_rule` asserts ≤1 active) must be
+        // enforced here too, not only at generation.
+        let this_seeds_rule = self.blocks.iter().any(|b| {
+            b.source_language.as_ref().map(|sl| sl.to_string()).as_deref()
+                == Some(holon_advice::ADVICE_RULE_SOURCE_LANGUAGE)
+        });
+        if this_seeds_rule {
+            // Non-seed count only: the bundled INACTIVE seed rule is always
+            // present and must not veto minting (see `non_seed_advice_rule_blocks`).
+            let state_has_rule = !crate::pbt::advice_expectation::non_seed_advice_rule_blocks(
+                &state.domain.block_state,
+            )
+            .is_empty();
+            checks.push(check(!state_has_rule, Reason::PreconditionFailed));
+        }
 
         checks
             .into_iter()
@@ -393,7 +423,7 @@ mod keyword_set_round_trip_tests {
         #[test]
         fn keyword_set_survives_sut_serialize_parse(
             (ks, (filename, blocks)) in todo_keyword_set_strategy().prop_flat_map(|ks| {
-                (Just(ks.clone()), generate_org_file_content_with_keywords(Some(ks), false))
+                (Just(ks.clone()), generate_org_file_content_with_keywords(Some(ks), false, false))
             })
         ) {
             let placeholder = EntityUri::block(GEN_PLACEHOLDER);

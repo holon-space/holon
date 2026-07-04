@@ -30,6 +30,39 @@ fn json_to_holon_value(v: serde_json::Value) -> Value {
     Value::from_json_value(v)
 }
 
+/// A SUT retired by `reset_vault` (Phase 1 Option A, plan F). Holds its Arcs +
+/// temp dirs so nothing Drops: the retired engine's watchers/consolidator idle
+/// against still-existing but abandoned fresh paths. `_`-prefixed because the
+/// point is to KEEP them alive, not read them.
+#[cfg(debug_assertions)]
+struct RetiredSut {
+    _session: Arc<holon_frontend::FrontendSession>,
+    _engine: Arc<holon_frontend::reactive::ReactiveEngine>,
+    _backend: Arc<holon::api::backend_engine::BackendEngine>,
+    _tempdirs: Box<dyn std::any::Any + Send>,
+}
+
+/// Process-wide retirement list. Grows by exactly one per `reset_vault`; a hard
+/// cap (checked in the tool) refuses further resets rather than leaking
+/// unboundedly.
+#[cfg(debug_assertions)]
+static RETIRED: std::sync::Mutex<Vec<RetiredSut>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(debug_assertions)]
+fn retired_len() -> usize {
+    RETIRED.lock().expect("RETIRED poisoned").len()
+}
+
+#[cfg(debug_assertions)]
+fn push_retired(sut: RetiredSut) {
+    let mut r = RETIRED.lock().expect("RETIRED poisoned");
+    r.push(sut);
+    tracing::warn!(
+        "reset_vault: {} retired engine(s) held (leaked-but-inert on abandoned temp paths)",
+        r.len()
+    );
+}
+
 // Helper function to convert holon_api::Value to serde_json::Value
 fn holon_to_json_value(v: &Value) -> serde_json::Value {
     match v {
@@ -268,7 +301,8 @@ impl HolonMcpServer {
             use holon::storage::SchemaModule;
             let module =
                 holon::storage::dynamic_schema_module::DynamicSchemaModule::new(type_def.clone());
-            let db_handle = self.engine().db_handle();
+            let engine = self.engine();
+            let db_handle = engine.db_handle();
             module.ensure_schema(db_handle).await.map_err(|e| {
                 rmcp::ErrorData::internal_error(
                     format!("Failed to create table for '{}': {e}", name),
@@ -449,7 +483,7 @@ impl HolonMcpServer {
         &self,
         Parameters(params): Parameters<WatchQueryParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let context = extract_context_from_params(self.service(), &params.params).await;
+        let context = extract_context_from_params(&self.service(), &params.params).await;
 
         let mut holon_params = HashMap::new();
         for (k, v) in &params.params {
@@ -1135,7 +1169,7 @@ impl HolonMcpServer {
         let agent_id = resolve_agent_id(params.agent_id)?;
         let task_id = ensure_block_prefix(&params.task_id);
 
-        let current = read_assigned_to(self.engine(), &task_id).await?;
+        let current = read_assigned_to(&self.engine(), &task_id).await?;
         if let Some(other) = &current {
             if other != &agent_id {
                 return Ok(CallToolResult::success(vec![Content::text(
@@ -1159,14 +1193,14 @@ impl HolonMcpServer {
             .map(|p| p.display().to_string());
 
         set_field(
-            self.service(),
+            &self.service(),
             &task_id,
             "assigned-to",
             Value::String(agent_id.clone()),
         )
         .await?;
         set_field(
-            self.service(),
+            &self.service(),
             &task_id,
             "claimed-at",
             Value::String(now_iso.clone()),
@@ -1174,7 +1208,7 @@ impl HolonMcpServer {
         .await?;
         if let Some(wt) = &worktree {
             set_field(
-                self.service(),
+                &self.service(),
                 &task_id,
                 "claimed-from",
                 Value::String(wt.clone()),
@@ -1182,7 +1216,7 @@ impl HolonMcpServer {
             .await?;
         }
         set_field(
-            self.service(),
+            &self.service(),
             &task_id,
             "task_state",
             Value::String("DOING".to_string()),
@@ -1190,7 +1224,7 @@ impl HolonMcpServer {
         .await?;
 
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        let final_assignee = read_assigned_to(self.engine(), &task_id).await?;
+        let final_assignee = read_assigned_to(&self.engine(), &task_id).await?;
         let claimed = final_assignee.as_deref() == Some(&agent_id);
 
         Ok(CallToolResult::success(vec![Content::text(
@@ -1337,14 +1371,14 @@ impl HolonMcpServer {
             .expect("now within range")
             .to_rfc3339();
         set_field(
-            self.service(),
+            &self.service(),
             &task_id,
             "task_state",
             Value::String("DONE".to_string()),
         )
         .await?;
         set_field(
-            self.service(),
+            &self.service(),
             &task_id,
             "completed-at",
             Value::String(completed_iso.clone()),
@@ -1394,6 +1428,147 @@ impl HolonMcpServer {
 
 #[tool_router(router = tool_router_ui, vis = "pub(crate)")]
 impl HolonMcpServer {
+    /// Per-case, in-process reset (Phase 1 Option A). Builds a FRESH seeded
+    /// engine+session on fresh temp paths, swaps the live MCP backend cell so
+    /// every subsequent tool call reads the new engine, then rebinds the live
+    /// window onto it — keeping ONE window and ONE MCP server. Returns the new
+    /// `block_raw` id-set (a fail-loud self-check that the reset actually
+    /// re-seeded).
+    ///
+    /// GATED: compiled only in debug builds AND requires `HOLON_MCP_ALLOW_RESET`
+    /// to be set, so a shipped release can never swap a user's vault over MCP.
+    #[cfg(debug_assertions)]
+    #[tool(
+        description = "TEST-ONLY per-case reset: boot a fresh seeded vault and rebind the running window onto it in place (no relaunch, no 2nd MCP server). Requires HOLON_MCP_ALLOW_RESET. Returns the new block_raw id-set."
+    )]
+    async fn reset_vault(
+        &self,
+        Parameters(params): Parameters<ResetVaultParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if std::env::var("HOLON_MCP_ALLOW_RESET").is_err() {
+            return Err(rmcp::ErrorData::internal_error(
+                "reset_vault is disabled — set HOLON_MCP_ALLOW_RESET=1 to enable the \
+                 in-process vault reset (test harness only)",
+                None,
+            ));
+        }
+
+        // Retirement-list cap (plan F): refuse rather than leak unboundedly;
+        // the caller falls back to the Option B' cold relaunch past this.
+        const RESET_CAP: usize = 20;
+        if retired_len() >= RESET_CAP {
+            return Err(rmcp::ErrorData::internal_error(
+                format!(
+                    "reset_vault retirement cap reached ({RESET_CAP} retired engines); \
+                     fall back to a cold `ios_reset_sut.sh` relaunch"
+                ),
+                None,
+            ));
+        }
+
+        let builder = self.debug.reset_builder.get().cloned().ok_or_else(|| {
+            rmcp::ErrorData::internal_error(
+                "reset_vault requires a frontend reset builder (no window/pump wired)",
+                None,
+            )
+        })?;
+        let reset_tx = self.debug.reset_tx.get().cloned().ok_or_else(|| {
+            rmcp::ErrorData::internal_error(
+                "reset_vault requires a frontend reset pump (reset_tx not installed)",
+                None,
+            )
+        })?;
+
+        // 1. Build the fresh SUT on the tokio side (NOT the GPUI main thread).
+        let files: Vec<(String, String)> = params
+            .files
+            .into_iter()
+            .map(|f| (f.name, f.content))
+            .collect();
+        let out = builder(files).await.map_err(|e| {
+            rmcp::ErrorData::internal_error(format!("reset_vault build failed: {e}"), None)
+        })?;
+
+        // 2. Swap the live MCP backend cell BEFORE rebinding, so any concurrent
+        //    read already sees the fresh engine (plan C2).
+        {
+            let mut cell = self.backend.write().expect("backend cell poisoned");
+            cell.engine = Some(out.backend.clone());
+            let bs: Arc<dyn holon_frontend::reactive::BuilderServices> = out.engine.clone();
+            cell.builder_services = Some(bs);
+        }
+
+        // 3. Rebind the live window (main thread) and await the ack.
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        reset_tx
+            .clone()
+            .try_send(crate::server::ResetRequest {
+                session: out.session.clone(),
+                engine: out.engine.clone(),
+                ack: ack_tx,
+            })
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!("reset_vault could not reach the reset pump: {e}"),
+                    None,
+                )
+            })?;
+        // Fail loud rather than hang forever if the main-thread pump stalls.
+        tokio::time::timeout(std::time::Duration::from_secs(30), ack_rx)
+            .await
+            .map_err(|_| {
+                rmcp::ErrorData::internal_error(
+                    "reset_vault timed out (30s) waiting for the main-thread rebind pump",
+                    None,
+                )
+            })?
+            .map_err(|_| {
+                rmcp::ErrorData::internal_error(
+                    "reset_vault pump dropped the ack (window gone?)",
+                    None,
+                )
+            })?
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("reset_vault rebind failed: {e}"), None)
+            })?;
+
+        // 4. Retire the SUT: keep its Arcs + temp dirs alive-but-inert so no
+        //    Drop runs (plan F). Growth is observable via `RETIRED.len()`.
+        push_retired(RetiredSut {
+            _session: out.session,
+            _engine: out.engine,
+            _backend: out.backend.clone(),
+            _tempdirs: out.retire,
+        });
+
+        // 5. Fail-loud self-check: read the fresh engine's block_raw id-set.
+        let probe = self
+            .service()
+            .execute_raw_sql("SELECT id FROM block_raw ORDER BY id", HashMap::new())
+            .await
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!("reset_vault self-check query failed: {e}"),
+                    None,
+                )
+            })?;
+        let ids: Vec<String> = probe
+            .rows
+            .iter()
+            .filter_map(|row| row.get("id").map(|v| format!("{v:?}")))
+            .collect();
+
+        let result = serde_json::json!({
+            "reset": true,
+            "block_raw_count": ids.len(),
+            "block_raw_ids": ids,
+            "retired_engines": retired_len(),
+        });
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
+    }
+
     #[tool(
         description = "List all loaded Loro documents with their file paths and UUID→path alias mappings. Requires Loro to be enabled."
     )]
@@ -1714,7 +1889,7 @@ impl HolonMcpServer {
             )
         })?;
 
-        let svc = self.builder_services.clone().ok_or_else(|| {
+        let svc = self.builder_services().ok_or_else(|| {
             rmcp::ErrorData::internal_error(
                 "describe_ui requires a running frontend (builder_services not registered)",
                 None,

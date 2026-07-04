@@ -24,10 +24,13 @@ use std::sync::Arc;
 use holon_api::Region;
 use holon_api::entity_uri::EntityUri;
 use holon_pbt_core::capabilities::{
-    CapCursor, CapRegion, RefBackend, RefBlockTree, RefBlockTreeMut, RefEditorMirror,
-    RefEditorMirrorMut, RefFocus, RefFocusMut, RefFocusRoots, RefGlobalFocus, RefLayout,
-    RefLifecycle, RefPeers, RefPeersMut, RefTaskState, RefViewSelection, RefWatch, WatchRow,
+    AdviceExpectation, CapCursor, CapRegion, RefAdvice, RefBackend, RefBlockTree, RefBlockTreeMut,
+    RefEditorMirror, RefEditorMirrorMut, RefFocus, RefFocusMut, RefFocusRoots, RefGlobalFocus,
+    RefLayout, RefLifecycle, RefPeers, RefPeersMut, RefTaskState, RefViewSelection, RefWatch,
+    WatchRow,
 };
+
+use super::advice_expectation::{active_rule, expectation_for, matview_rows_for};
 
 use super::peer_ops::PeerBlock;
 use super::reference_state::PeerRefState;
@@ -948,6 +951,41 @@ impl RefTaskState for ReferenceState {
     }
 }
 
+/// Advice-weave read surface (ADR 0021/0022) — delegates to the pure
+/// `advice_expectation` module over the resolved block map. Plain reads suffice:
+/// the `ReferenceState` behind the caps is already `Resolved`
+/// (`with_resolved_doc_uris` → `remapped_doc_uris`), so `block.id` and the
+/// `advice_suppressed` edge targets are already in SUT id space; no per-method
+/// remapping is needed here. Ids are rendered via `EntityUri::as_str()` — the
+/// scheme-form `block_raw.id` carries — so anchor/candidate strings compare
+/// directly against the SUT advice matview.
+impl RefAdvice for ReferenceState {
+    fn advice_expectation(&self, anchor: &str) -> AdviceExpectation {
+        let blocks = &self.domain.block_state.blocks;
+        let Some(rule) = active_rule(blocks) else {
+            return AdviceExpectation::default();
+        };
+        let anchor_id =
+            EntityUri::parse(anchor).expect("advice anchor id must be a valid EntityUri");
+        expectation_for(blocks, &rule, &anchor_id)
+    }
+
+    fn advice_matview_rows(&self) -> Vec<(String, String, u32)> {
+        let blocks = &self.domain.block_state.blocks;
+        let Some(rule) = active_rule(blocks) else {
+            return Vec::new();
+        };
+        matview_rows_for(blocks, &rule)
+            .into_iter()
+            .map(|(a, c, n)| (a.as_str().to_string(), c.as_str().to_string(), n))
+            .collect()
+    }
+
+    fn advice_matview_name(&self) -> Option<String> {
+        active_rule(&self.domain.block_state.blocks).map(|rule| rule.name.matview_name())
+    }
+}
+
 // ─── CapProvider — the keystone (ADR 0007 / PbtCompositionDesign §6) ───
 //
 // Lets a live `ReferenceState` BE the ref `CapMap` that `run_selected`
@@ -998,6 +1036,11 @@ impl holon_pbt_core::composition::CapProvider for ReferenceState {
         // Logic already on `ReferenceState`; harmless to existing slices (selection
         // ANDs SUT∧ref cap sets — only a `SutViewSelection` slice selects them).
         caps.insert(self.clone() as Arc<dyn RefTaskState>);
+        // `RefAdvice` carries the advice-weave expectation (ADR 0021/0022) the
+        // `advice rows woven` keystone invariant reads. Harmless to existing
+        // slices: selection ANDs SUT∧ref cap sets, and only a slice supplying the
+        // matching SUT advice-matview cap selects it.
+        caps.insert(self.clone() as Arc<dyn RefAdvice>);
         caps.insert(self as Arc<dyn RefGlobalFocus>);
     }
 }

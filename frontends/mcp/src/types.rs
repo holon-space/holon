@@ -239,6 +239,24 @@ fn default_text_format() -> String {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ResetVaultFile {
+    /// File name (e.g. `"structural-page.org"`). Its stem becomes a Page in the
+    /// left sidebar.
+    pub name: String,
+    /// Org file body.
+    pub content: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ResetVaultParams {
+    /// Seed `.org` files to materialize into a FRESH temp vault. The running
+    /// window is rebound onto the freshly-booted engine in place — no second
+    /// MCP server, no window relaunch. Client supplies the seed so the server
+    /// embeds no seed copy (single source of truth).
+    pub files: Vec<ResetVaultFile>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ScreenshotParams {
     /// Window title or app name substring to match (e.g. "Holon" for GPUI, "Blinc").
     /// If omitted, tries known frontend names in order: "Holon", "Blinc".

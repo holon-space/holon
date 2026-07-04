@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/holon",
+    "crates/holon-advice",
     "crates/holon-api",
     "crates/holon-core",
     "crates/holon-turso",
@@ -8,7 +9,6 @@ members = [
     "crates/holon-expr",
     "crates/holon-org-format",
     "crates/holon-orgmode",
-    "crates/holon-markdown",
     "crates/holon-filesystem",
     "crates/holon-frontend",
     "crates/holon-app",
@@ -171,6 +171,7 @@ r3bl_tui = { git = "https://github.com/nightscape/r3bl-open-core.git", branch = 
 
 # === Internal crates ===
 holon = { path = "crates/holon" }
+holon-advice = { path = "crates/holon-advice" }
 holon-api = { path = "crates/holon-api" }
 holon-core = { path = "crates/holon-core" }
 holon-engine = { path = "crates/holon-engine" }
@@ -189,7 +190,6 @@ holon-macros = { path = "crates/holon-macros" }
 holon-mcp-client = { path = "crates/holon-mcp-client" }
 holon-org-format = { path = "crates/holon-org-format" }
 holon-orgmode = { path = "crates/holon-orgmode", features = ["di"] }
-holon-markdown = { path = "crates/holon-markdown" }
 holon-filesystem = { path = "crates/holon-filesystem" }
 holon-block-roundtrip-testing = { path = "crates/holon-block-roundtrip-testing" }
 
@@ -259,8 +259,36 @@ gpui_platform = { git = "https://github.com/holon-space/zed.git", branch = "holo
 [patch."https://github.com/itsbalamurali/gpui-mobile"]
 gpui-mobile = { git = "https://github.com/holon-space/gpui-mobile.git", branch = "holon" }
 
-# Point at local clone while the `context_menu_extender` commit is
-# unpublished — once pushed to holon-space/gpui-component the `path`
-# can be replaced by the git+branch spec used in frontends/gpui/Cargo.toml.
+# NON-REPRODUCIBLE BUILD — needs owner action to convert to a git pin.
+#
+# This patch points at a local clone because the required gpui-component state
+# is not published anywhere a git pin could reach it, verified 2026-07-06:
+#   * The clone's HEAD is b8e6266 "feat(input): add context_menu_extender hook"
+#     (2026-04-20). It is a jj-local commit (only reachable via refs/jj/keep),
+#     NOT on origin/holon (b8e9511) — origin/holon is behind by 10 commits,
+#     including this very hook. So a `git = …, rev = "b8e6266"` pin would 404
+#     on CI / other machines.
+#   * The clone's working tree is also DIRTY (uncommitted edits to
+#     crates/ui/src/input/state.rs, +20/-3), so no existing commit is even
+#     behaviour-identical to what builds here today.
+#
+# To make this reproducible the owner must, in
+# /Users/martin/Workspaces/rust/gpui-component:
+#   1. commit the working-tree changes to crates/ui/src/input/state.rs,
+#   2. push that commit (and b8e6266's ancestry) to a branch on
+#      holon-space/gpui-component, then
+#   3. replace the two lines below with the git+branch/rev spec, matching the
+#      form already used in frontends/gpui/Cargo.toml
+#      (git = "https://github.com/holon-space/gpui-component", branch = "holon").
+# Until then the local `path` is intentionally retained so this machine builds.
 [patch."https://github.com/holon-space/gpui-component"]
 gpui-component = { path = "/Users/martin/Workspaces/rust/gpui-component/crates/ui" }
+
+# TEMP (turso-fix session 2026-07-07): local turso override to develop/verify
+# the cross-junction LEFT JOIN duplicate fix. Remove once the fix is pushed
+# and the git pin is bumped.
+[patch."https://github.com/nightscape/turso.git"]
+turso = { path = "/Users/martin/Workspaces/bigdata/turso/bindings/rust" }
+turso_core = { path = "/Users/martin/Workspaces/bigdata/turso/core" }
+turso_sdk_kit = { path = "/Users/martin/Workspaces/bigdata/turso/sdk-kit" }
+turso_ext = { path = "/Users/martin/Workspaces/bigdata/turso/extensions/core" }

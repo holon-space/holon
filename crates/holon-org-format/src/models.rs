@@ -545,10 +545,7 @@ impl OrgBlockExt for Block {
 
     fn set_task_state(&mut self, state: Option<TaskState>) {
         if let Some(s) = state {
-            let category = match s.category {
-                StateCategory::Active => "active",
-                StateCategory::Done => "done",
-            };
+            let category = s.category.as_str();
             self.set_property(
                 org_props::TASK_STATE,
                 holon_api::Value::String(s.keyword.clone()),
@@ -660,6 +657,7 @@ impl OrgBlockExt for Block {
             "priority",
             "tags",
             "requires",
+            "advice_suppressed",
             "scheduled",
             "deadline",
             "org_properties",
@@ -722,6 +720,19 @@ impl OrgBlockExt for Block {
                 .map(|uri| uri.id().to_string())
                 .collect();
             result.insert("REQUIRES".to_string(), bare.join(" "));
+        }
+
+        // `advice_suppressed` mirrors `requires`: a typed edge field on Block
+        // (hydrated from the advice_suppressed junction) reconstructed into the
+        // `:ADVICE_SUPPRESSED:` drawer with the scheme stripped (bare slugs).
+        // See ADR 0021.
+        if !self.advice_suppressed.is_empty() {
+            let bare: Vec<String> = self
+                .advice_suppressed
+                .iter()
+                .map(|uri| uri.id().to_string())
+                .collect();
+            result.insert("ADVICE_SUPPRESSED".to_string(), bare.join(" "));
         }
 
         result

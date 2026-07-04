@@ -718,7 +718,7 @@ pub fn max_rss_delta_bytes(transition: &crate::pbt::transitions::E2ETransition) 
         // wiring guard rejects the flipped consolidator (no matviews/CDC/spans of a
         // full boot, but a fresh backend + DI allocations); budget alongside StartApp.
         "EpochFlipRejected" => 1500 * MB,
-        "BulkExternalAdd" | "CreateDocument" => 200 * MB,
+        "BulkExternalAdd" | "CreateDocument" | "DeleteDocument" => 200 * MB,
         "SimulateRestart" => 80 * MB,
         "ApplyMutation" => 50 * MB,
         "SetupWatch" => 15 * MB,

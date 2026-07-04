@@ -15,6 +15,15 @@ use holon_api::predicate::Predicate;
 
 use std::collections::HashMap;
 
+/// Shared tag vocabulary. Drawn from by BOTH the advice-rule-minting arm
+/// (`file_with_advice_rule`) and `SetEdgeField`'s pool tag sub-arm, so that a
+/// rule's anchor/candidate tags and the tags landed on blocks collide with
+/// non-trivial probability — that collision is what makes advice expectations
+/// nonempty. Non-vacuity of the advice invariants depends on this shared pool.
+/// All lowercase (`PAGE_TAG` is `"Page"`), so a pool tag can never flip
+/// `is_page`.
+pub const ADVICE_TAG_POOL: &[&str] = &["task", "lesson", "proj", "urgent", "ctx"];
+
 /// A set of TODO keywords generated per test case.
 /// Drives both the `#+TODO:` org header and the task_state mutation generator.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -122,6 +131,18 @@ fn extended_content_arm() -> BoxedStrategy<String> {
             2 => format!("#+ {tail}"),
             _ => format!(":PROPERTIES:{tail}"),
         }),
+        // snake_case identifiers with mid-word underscores — the single
+        // biggest content class in a code-heavy PKM (`focused_block`,
+        // `sort_key`, `keyed_rows_signal_vec`). orgize parses a mid-word `_`
+        // (preceded by a word char, so it can't open org UNDERLINE) as a bare
+        // SUBSCRIPT, and the mark-extraction round-trip used to destroy the
+        // surrounding characters (`focused_block` → `focusedloc`) — a silent
+        // vault-corrupting data-loss bug. This arm de-vacuums the org
+        // round-trip's inline-mark path (the default ASCII generators never
+        // emit `_`). See handoff 2026-07-06 (org round-trip mangles content)
+        // + the `bare_underscore_identifiers_survive_round_trip` regression in
+        // holon-org-format/src/inline_marks.rs.
+        2 => "[a-z]{1,6}(_[a-z]{1,6}){1,4}",
     ]
     .boxed()
 }
@@ -251,6 +272,7 @@ fn uniquify_ids(ids: impl IntoIterator<Item = String>) -> Vec<String> {
 pub fn generate_org_file_content_with_keywords(
     keyword_set: Option<TodoKeywordSet>,
     allow_index_override: bool,
+    allow_advice_rule: bool,
 ) -> BoxedStrategy<(String, Vec<Block>)> {
     use proptest::collection::vec as prop_vec;
 
@@ -472,6 +494,82 @@ pub fn generate_org_file_content_with_keywords(
             (filename, blocks)
         });
 
+    // Advice-rule file: a headline plus ONE `holon_advice_rule_yaml` source
+    // block (ADR 0022). Structurally mirrors `file_with_profile` — a source
+    // block under a heading — but the source language marks it a runtime rule
+    // definition that the engine synthesizes into a matview. The slug is fixed
+    // (`pbt_lessons`): at most one minted rule exists per run, so one slug is
+    // enough — but it must NOT be `lessons_for_tasks`: the bundled INACTIVE
+    // seed rule owns that slug, and the reconciler's first-owner-wins arbiter
+    // refuses a same-slug newcomer (SlugCollision) even while the owner is
+    // inactive — the minted ACTIVE rule would never synthesize a matview and
+    // the advice invariants would sit in a permanent false RED.
+    // Anchor/candidate tags are drawn DISTINCT from `ADVICE_TAG_POOL`
+    // (the same pool `SetEdgeField` tags blocks from) so overlaps — hence
+    // nonempty advice — are reachable. `k` is kept small (1..=3) so top-K
+    // truncation cases are reachable; `active` is weighted ~4:1 true.
+    let file_with_advice_rule = (
+        "[a-z_]+_[0-9]+\\.org",
+        "[A-Z][a-zA-Z0-9 ]{0,15}",
+        "[a-z0-9-]+",
+        prop::sample::select(ADVICE_TAG_POOL.to_vec()),
+        prop::sample::select(ADVICE_TAG_POOL.to_vec()),
+        1..=3u8,
+        prop::sample::select(vec![true, true, true, true, false]),
+    )
+        .prop_filter(
+            "advice anchor and candidate source tags must differ",
+            |(_, _, _, anchor_tag, source_tag, _, _)| anchor_tag != source_tag,
+        )
+        .prop_map(
+            |(filename, headline, id, anchor_tag, source_tag, k, active)| {
+                let doc_uri = EntityUri::block("gen-placeholder");
+                let heading_uri = EntityUri::block(&id);
+
+                let mut heading =
+                    Block::new_text(heading_uri.clone(), doc_uri.clone(), &headline);
+                heading.set_property("ID", Value::String(id.clone()));
+
+                // Shaped like `crates/holon-advice/assets/lessons_for_tasks.yaml`.
+                let yaml = format!(
+                    "name: pbt_lessons\n\
+                     active: {active}\n\
+                     anchor:\n  has_tag: {anchor_tag}\n\
+                     candidates:\n  tag_overlap_recency:\n    source:\n      has_tag: {source_tag}\n\
+                     k: {k}\n"
+                );
+
+                // Round-trip guard (fail loud): the oracle reuses this exact prod
+                // parser, so a mismatch here would be parser-circular. Assert the
+                // parsed rule equals the typed intent before it leaves the arm.
+                let parsed = holon_advice::parse_advice_rule(&yaml)
+                    .expect("generator-minted advice rule must parse");
+                assert_eq!(
+                    parsed.anchor,
+                    holon_advice::AnchorSelector::HasTag(anchor_tag.to_string()),
+                );
+                let holon_advice::ScoringTemplate::TagOverlapRecency(spec) = &parsed.candidates;
+                assert_eq!(
+                    spec.source,
+                    holon_advice::AnchorSelector::HasTag(source_tag.to_string()),
+                );
+                assert_eq!(parsed.k.get(), k);
+                assert_eq!(parsed.active, active);
+
+                let mut rule_block = Block::new_source(
+                    EntityUri::block(&format!("{id}::src::0")),
+                    heading_uri,
+                    "holon_advice_rule_yaml",
+                    &yaml,
+                );
+                rule_block.set_sequence(1);
+
+                let blocks = vec![heading, rule_block];
+                (filename, blocks)
+            },
+        )
+        .boxed();
+
     // Shared-tree mount: a headline with `:share-role: mount` and
     // `:shared-tree-id: <uuid>` in its property drawer, plus 1–3 children
     // that carry the same `:shared-tree-id:`. This shape exists in
@@ -533,8 +631,25 @@ pub fn generate_org_file_content_with_keywords(
     // keep CI green.
     let mount_enabled = std::env::var("HOLON_PBT_SHARED_TREE_MOUNT").ok().as_deref() == Some("1");
 
+    // Mix the advice-rule arm into a profile-bearing base at a weight
+    // comparable to `file_with_profile`'s (roughly 1 part in ~10). The arm is
+    // only present when `allow_advice_rule` holds — i.e. no advice-rule block
+    // exists in the reference yet — so at most one rule is ever minted per run
+    // (the `active_rule` ≤1 invariant). The gate is re-checked under shrinking
+    // in `WriteOrgFile::preconditions`.
+    let mix_advice =
+        |base: BoxedStrategy<(String, Vec<Block>)>,
+         advice: BoxedStrategy<(String, Vec<Block>)>| {
+            if allow_advice_rule {
+                prop_oneof![9 => base, 1 => advice].boxed()
+            } else {
+                let _ = advice; // hold onto the strategy without firing
+                base
+            }
+        };
+
     if allow_index_override {
-        if mount_enabled {
+        let base = if mount_enabled {
             prop_oneof![
                 3 => regular_file,
                 2 => index_file_prql,
@@ -558,25 +673,30 @@ pub fn generate_org_file_content_with_keywords(
                 1 => file_with_profile,
             ]
             .boxed()
-        }
+        };
+        mix_advice(base, file_with_advice_rule)
     } else if extended_gen_enabled() {
         // Extended-gen axis 4: profile-bearing files in the no-overrides
         // configuration. The test profile YAMLs render just
         // `row(editable_text(...))` — no state_toggle — so the ref model
         // must track the active profile per rendered block. Triaged on the
         // extended slice before promotion.
-        prop_oneof![
+        let base = prop_oneof![
             8 => regular_file,
             1 => file_with_profile,
         ]
-        .boxed()
+        .boxed();
+        mix_advice(base, file_with_advice_rule)
     } else {
         // Profile-bearing files override the default block entity profile,
         // and the test's profile YAMLs render just `row(editable_text(...))`
         // — no state_toggle. We keep them out of the no-overrides
         // configuration so the default `assets/default/types/block_profile.yaml`
         // (which has the state_toggle variant) stays in effect.
-        regular_file.boxed()
+        // Advice-rule blocks do NOT override profiles (inert data until the
+        // weave lands, then the feature under test) — so unlike profiles they
+        // stay in the default mix; excluding them made advice unreachable.
+        mix_advice(regular_file.boxed(), file_with_advice_rule)
     }
 }
 
@@ -879,4 +999,74 @@ pub fn generate_profile_content_mutation(ids: Vec<EntityUri>) -> impl Strategy<V
                 .collect(),
         }
     })
+}
+
+#[cfg(test)]
+mod advice_rule_tests {
+    use super::*;
+    use holon_advice::{AnchorSelector, ScoringTemplate, parse_advice_rule};
+
+    /// Reachability floor for the advice-rule arm: with `allow_advice_rule`
+    /// the default (no-overrides) file mix must actually draw
+    /// `holon_advice_rule_yaml` source blocks at roughly its 1-in-10 weight —
+    /// a silent gate-out here makes both advice keystone invariants vacuous.
+    #[test]
+    fn advice_rule_arm_reachable_in_default_mix() {
+        use proptest::strategy::ValueTree;
+        use proptest::test_runner::TestRunner;
+        let mut runner = TestRunner::deterministic();
+        let strat = generate_org_file_content_with_keywords(None, false, true);
+        let hits = (0..200)
+            .filter(|_| {
+                let (_, blocks) = strat
+                    .new_tree(&mut runner)
+                    .expect("file strategy must draw")
+                    .current();
+                blocks.iter().any(|b| {
+                    b.source_language
+                        .as_ref()
+                        .map(|sl| sl.to_string())
+                        .as_deref()
+                        == Some(holon_advice::ADVICE_RULE_SOURCE_LANGUAGE)
+                })
+            })
+            .count();
+        assert!(
+            hits > 5,
+            "advice-rule arm near-vacuous in the default file mix: {hits}/200 draws \
+             carried a holon_advice_rule_yaml block (expected ~20)"
+        );
+    }
+
+    proptest! {
+        /// Pins the advice-rule YAML template shut: any draw over the same input
+        /// space the `file_with_advice_rule` arm uses (distinct pool tags, small
+        /// k, weighted-active flag) must parse back to the typed intent. This is
+        /// the same round-trip the arm asserts inline — surfaced as a standalone
+        /// test so a template regression fails here, not only mid-generation.
+        #[test]
+        fn advice_rule_yaml_round_trips(
+            (anchor_tag, source_tag, k, active) in (
+                prop::sample::select(ADVICE_TAG_POOL.to_vec()),
+                prop::sample::select(ADVICE_TAG_POOL.to_vec()),
+                1..=3u8,
+                prop::sample::select(vec![true, true, true, true, false]),
+            )
+                .prop_filter("anchor and source tags must differ", |(a, s, _, _)| a != s)
+        ) {
+            let yaml = format!(
+                "name: pbt_lessons\n\
+                 active: {active}\n\
+                 anchor:\n  has_tag: {anchor_tag}\n\
+                 candidates:\n  tag_overlap_recency:\n    source:\n      has_tag: {source_tag}\n\
+                 k: {k}\n"
+            );
+            let parsed = parse_advice_rule(&yaml).expect("advice rule must parse");
+            prop_assert_eq!(&parsed.anchor, &AnchorSelector::HasTag(anchor_tag.to_string()));
+            let ScoringTemplate::TagOverlapRecency(spec) = &parsed.candidates;
+            prop_assert_eq!(&spec.source, &AnchorSelector::HasTag(source_tag.to_string()));
+            prop_assert_eq!(parsed.k.get(), k);
+            prop_assert_eq!(parsed.active, active);
+        }
+    }
 }

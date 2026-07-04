@@ -301,6 +301,151 @@ impl FileSyncController {
         hex::encode(hasher.finalize())
     }
 
+    /// Handle an EXTERNAL file deletion (the user removed the org file outside
+    /// Holon — `rm` in the vault, a file manager, a git checkout). Reached from
+    /// `on_file_changed` when the changed path no longer exists, and from
+    /// `poll_tracked_files` when a tracked path stops stat-ing.
+    ///
+    /// Cascade-deletes the vanished document's blocks from the store: content
+    /// blocks bottom-up (children before parents, so each delete targets a
+    /// still-present node regardless of whether the tree backing cascades
+    /// subtree deletes), then the page block itself. All deletes go through
+    /// `BlockOrdering::delete_in_tree` — the same single org→block write seam
+    /// the diff-ingestion delete pass uses.
+    #[tracing::instrument(skip(self, canonical), name = "org.on_file_deleted", fields(path = %path.display()))]
+    async fn on_file_deleted(&mut self, path: &Path, canonical: &CanonicalPath) -> Result<()> {
+        // Resolve the vanished file's document. The disk bytes are gone, so
+        // identity comes from the last projected content's `#+ID:` (survives
+        // renames, same authority as the ingest path); when this session never
+        // projected the file, fall back to name-chain lookup (get-only — a
+        // deletion must never mint page blocks).
+        let last = self.last_projection.get(canonical).cloned();
+        let document = match last
+            .as_deref()
+            .and_then(|l| self.format.doc_id_from_content(l))
+        {
+            Some(bare) => self.doc_manager.get_by_id(&EntityUri::block(&bare)).await?,
+            None => {
+                let rel_path = path.strip_prefix(&self.root_dir).map_err(|e| {
+                    anyhow::anyhow!(
+                        "Deleted file {} not under root {}: {}",
+                        path.display(),
+                        self.root_dir.display(),
+                        e
+                    )
+                })?;
+                let segments = path_to_name_chain(rel_path);
+                let segment_refs: Vec<&str> = segments.iter().map(|s| s.as_str()).collect();
+                self.doc_manager.find_by_name_chain(&segment_refs).await?
+            }
+        };
+        let Some(document) = document else {
+            // A file we never ingested vanished — nothing in the store to
+            // delete. Disclosed, then drop any per-file tracking state.
+            debug!(
+                "[FileSyncController] Deleted file {} has no document entity — nothing to cascade",
+                path.display()
+            );
+            self.forget_file_state(canonical);
+            return Ok(());
+        };
+        let document_uri = document.id.clone();
+
+        let blocks = self.block_reader.get_blocks(&document_uri).await?;
+        info!(
+            "[FileSyncController] File deleted externally: {} — cascade-deleting document {} \
+             ({} blocks)",
+            path.display(),
+            document_uri,
+            blocks.len(),
+        );
+
+        // Order children before parents: depth (hops until the parent leaves
+        // the doc's block set) descending.
+        // Owned parent map (no borrows of `blocks` escape into the closure —
+        // the `#[instrument]` async wrapper otherwise infers a 'static bound).
+        let parent_of: HashMap<EntityUri, EntityUri> = blocks
+            .iter()
+            .map(|b| (b.id.clone(), b.parent_id.clone()))
+            .collect();
+        let depth_of = |id: &EntityUri| -> usize {
+            let mut depth = 0;
+            let mut cur = id;
+            while let Some(parent) = parent_of.get(cur) {
+                if parent == cur {
+                    break; // self-parent guard
+                }
+                cur = parent;
+                depth += 1;
+                if depth > 100 {
+                    break; // cycle guard, matches the parser's depth bound
+                }
+            }
+            depth
+        };
+        let mut ordered: Vec<EntityUri> = blocks
+            .iter()
+            .map(|b| b.id.clone())
+            .filter(|id| *id != document_uri)
+            .collect();
+        ordered.sort_by_key(|id| std::cmp::Reverse(depth_of(id)));
+
+        for block_id in ordered {
+            let mut params: holon_api::StorageEntity = HashMap::new();
+            params.insert("id".into(), Value::String(block_id.to_string()));
+            params.insert(
+                ROUTING_DOC_URI_KEY.into(),
+                Value::String(document_uri.to_string()),
+            );
+            self.ordering.delete_in_tree(params).await.map_err(|e| {
+                anyhow::anyhow!(
+                    "delete_in_tree({block_id}) for deleted file {}: {e:#}",
+                    path.display()
+                )
+            })?;
+        }
+
+        // The page block last — its children are gone.
+        let mut params: holon_api::StorageEntity = HashMap::new();
+        params.insert("id".into(), Value::String(document_uri.to_string()));
+        params.insert(
+            ROUTING_DOC_URI_KEY.into(),
+            Value::String(document_uri.to_string()),
+        );
+        self.ordering.delete_in_tree(params).await.map_err(|e| {
+            anyhow::anyhow!(
+                "delete_in_tree(page {}) for deleted file {}: {e:#}",
+                document_uri,
+                path.display()
+            )
+        })?;
+
+        // Publish the consolidator's accumulated deletes to the SQL sink
+        // (same single-sink-writer contract as the ingest path's flush).
+        if let Some(downstream) = &self.downstream {
+            downstream
+                .flush()
+                .await
+                .map_err(|e| anyhow::anyhow!("downstream projection flush after delete: {e}"))?;
+        }
+
+        self.forget_file_state(canonical);
+        // Also clear the diff base so a later re-create of the same document
+        // id starts from an empty base (all blocks are creates), not from the
+        // deleted snapshot.
+        self.base_store
+            .put_base(&BaseKey::file("org", document_uri.as_str()), HashMap::new());
+        Ok(())
+    }
+
+    /// Drop every per-file tracking entry for a vanished path.
+    fn forget_file_state(&mut self, canonical: &CanonicalPath) {
+        self.last_projection.remove(canonical);
+        self.last_projection_hash.remove(canonical);
+        self.disk_signatures.remove(canonical);
+        self.base_source.remove(canonical);
+    }
+
     /// Handle a file change event from the FileWatcher.
     ///
     /// Echo suppression: if disk content matches last_projection, skip.
@@ -324,8 +469,11 @@ impl FileSyncController {
         let disk_content = match self.fs.read_to_string(path).await {
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                debug!("[FileSyncController] File deleted: {}", path.display(),);
-                return Ok(());
+                // External deletion (user removed the file outside Holon):
+                // cascade-delete the document's blocks. No echo-suppression
+                // needed — no Holon code path removes org files, so a vanished
+                // file is always an external deletion.
+                return self.on_file_deleted(path, &canonical).await;
             }
             Err(e) => {
                 return Err(e).with_context(|| {
@@ -461,6 +609,7 @@ impl FileSyncController {
                 &document.properties,
                 &document.tags,
                 &document.requires,
+                &document.advice_suppressed,
             )
             .await
             .map_err(|e| anyhow::anyhow!("create_in_tree(document {document_uri}): {e:#}"))?;
@@ -708,6 +857,7 @@ impl FileSyncController {
                         &block.properties,
                         &block.tags,
                         &block.requires,
+                        &block.advice_suppressed,
                     )
                     .await
                     .map_err(|e| anyhow::anyhow!("re-seed create_in_tree({}): {e:#}", block.id))?;
@@ -776,6 +926,7 @@ impl FileSyncController {
                             &block.properties,
                             &block.tags,
                             &block.requires,
+                            &block.advice_suppressed,
                         )
                         .await
                         .map_err(|e| anyhow::anyhow!("create_in_tree({}): {e:#}", block.id))?;
@@ -1480,7 +1631,15 @@ impl FileSyncController {
             // dominated idle CPU before this).
             let meta = match self.fs.metadata(&path).await {
                 Ok(m) => m,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // Backstop for a deletion the event watcher missed: a
+                    // tracked file vanished — cascade-delete its document
+                    // (also drops the path from `last_projection`, so the
+                    // next poll no longer visits it).
+                    self.on_file_deleted(&path, &canonical).await?;
+                    ingested += 1;
+                    continue;
+                }
                 Err(e) => {
                     return Err(e).with_context(|| {
                         format!("[poll_external_changes] Cannot stat {}", path.display())
@@ -1494,7 +1653,13 @@ impl FileSyncController {
 
             let disk_content = match self.fs.read_to_string(&path).await {
                 Ok(c) => c,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // Deleted between the stat above and this read (TOCTOU) —
+                    // same external-deletion handling as the stat arm.
+                    self.on_file_deleted(&path, &canonical).await?;
+                    ingested += 1;
+                    continue;
+                }
                 Err(e) => {
                     return Err(e).with_context(|| {
                         format!("[poll_external_changes] Cannot read {}", path.display())

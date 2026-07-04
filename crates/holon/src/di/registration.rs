@@ -115,14 +115,28 @@ async fn create_initialized_engine(
     )
     .await;
 
-    let engine = BackendEngine::new(
-        db_handle,
+    let mut engine = BackendEngine::new(
+        db_handle.clone(),
         dispatcher,
         profile_resolver.clone(),
         build_sql_transformers(),
         graph_schema_registry,
     )
     .expect("Failed to create BackendEngine");
+
+    // Advice-rule reconciler (ADR 0022): discover `holon_advice_rule_yaml` blocks and
+    // keep their `advice_rule_{slug}` matviews synthesized/diffed/torn-down as the rule
+    // blocks are edited — the exact profile-resolver pattern, one view per *rule*. DDL
+    // runs off the CDC delivery path (see `spawn_advice_reconciler`).
+    let advice_status = holon_advice::AdviceRuleStatusHandle::new();
+    match crate::sync::spawn_advice_reconciler(&matview_mgr, db_handle, advice_status.clone()).await
+    {
+        Ok(handle) => engine.install_advice_reconciler(advice_status, handle),
+        Err(e) => tracing::error!(
+            error = %format!("{e:#}"),
+            "[DI] advice-rule reconciler failed to start — advice rules will not be synthesized"
+        ),
+    }
 
     // Preload startup matviews (reuses existing ones from previous sessions).
     preload_startup_views(&engine, None)

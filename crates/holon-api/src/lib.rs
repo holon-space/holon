@@ -13,6 +13,7 @@ pub mod action_dsl;
 pub mod auth;
 pub mod block;
 pub mod block_mutation;
+pub mod block_write_field;
 pub mod capability;
 pub mod change_set;
 pub mod clock;
@@ -78,6 +79,7 @@ pub use block::{
 };
 
 // Re-export the intent ChangeSet vocabulary (block-sync rework, Phase 2)
+pub use block_write_field::{BlockWriteField, BlockWriteFieldError, PropertyKey};
 pub use change_set::{agrees_with_ops, source_op_names, ChangeOp, ChangeSet, Provenance};
 pub use clock::{Clock, SystemClock, TestClock};
 
@@ -112,7 +114,9 @@ pub use render_eval::{eval_binary_op, eval_to_value, is_template_arg, resolve_ar
 
 // Re-export interpreter-level value type (non-serializable — runtime only).
 /// flutter_rust_bridge:ignore
-pub use interp_value::{ptr_identity, InterpValue, ReactiveRowProvider};
+pub use interp_value::{
+    ptr_identity, InterpValue, Occurrence, OccurrenceId, ReactiveRowProvider, RowKey,
+};
 
 // Re-export predicate types
 pub use predicate::Predicate;

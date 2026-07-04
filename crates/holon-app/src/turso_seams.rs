@@ -93,7 +93,8 @@ impl CacheBlockReader {
              b.properties, b.marks, b.collapsed, b.completed, \
              b.block_type, b.created_at, b.updated_at, \
              COALESCE((SELECT json_group_array(tag) FROM block_tags WHERE block_id = b.id), '[]') AS tags, \
-             COALESCE((SELECT json_group_array(required_id) FROM block_requires WHERE block_id = b.id), '[]') AS requires \
+             COALESCE((SELECT json_group_array(required_id) FROM block_requires WHERE block_id = b.id), '[]') AS requires, \
+             COALESCE((SELECT json_group_array(lesson_id) FROM advice_suppressed WHERE anchor_id = b.id), '[]') AS advice_suppressed \
              FROM {BLOCK_WRITE_TABLE} b \
              ORDER BY b.sort_key, b.id"
         );
@@ -152,7 +153,8 @@ impl BlockReader for CacheBlockReader {
                    b.properties, b.marks, b.collapsed, b.completed, \
                    b.block_type, b.created_at, b.updated_at, \
                    COALESCE((SELECT json_group_array(tag) FROM block_tags WHERE block_id = b.id), '[]') AS tags, \
-                   COALESCE((SELECT json_group_array(required_id) FROM block_requires WHERE block_id = b.id), '[]') AS requires \
+                   COALESCE((SELECT json_group_array(required_id) FROM block_requires WHERE block_id = b.id), '[]') AS requires, \
+                   COALESCE((SELECT json_group_array(lesson_id) FROM advice_suppressed WHERE anchor_id = b.id), '[]') AS advice_suppressed \
             FROM {table} b \
             JOIN descendants d ON d.id = b.id \
             ORDER BY b.sort_key, b.id",

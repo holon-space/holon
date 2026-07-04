@@ -554,6 +554,7 @@ impl SqlOperationProvider {
         // TRACE: any non-standard custom property being written via update path
         const STANDARD_PROP_KEYS: &[&str] = &[
             "task_state",
+            "task_state_category",
             "priority",
             "tags",
             "scheduled",
@@ -997,11 +998,37 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     )
                 } else if matches!(value, Value::Null) {
                     // Null means "remove this property" — use json_remove so we don't
-                    // leave a {"key": null} entry in the JSON column.
+                    // leave a {"key": null} entry in the JSON column. `task_state`
+                    // removal also removes its `task_state_category` sidecar (the
+                    // pair invariant `Block::set_task_state` establishes).
+                    if field == "task_state" {
+                        format!(
+                            "UPDATE {} SET properties = json_remove(COALESCE(properties, '{{}}'), '$.task_state', '$.task_state_category') WHERE id = '{}'",
+                            self.table_name,
+                            id.replace('\'', "''")
+                        )
+                    } else {
+                        format!(
+                            "UPDATE {} SET properties = json_remove(COALESCE(properties, '{{}}'), '$.{}') WHERE id = '{}'",
+                            self.table_name,
+                            field.replace('\'', "''"),
+                            id.replace('\'', "''")
+                        )
+                    }
+                } else if field == "task_state" {
+                    // A bare keyword write gets its `task_state_category` sidecar
+                    // derived and written in the SAME statement — otherwise every
+                    // UI cycle dropped/staled the category and a DONE keyword could
+                    // read back as Active (see `TaskState::category_str_for_keyword`).
+                    let keyword = value.as_string().ok_or_else(|| {
+                        format!("set_field('task_state'): expected String or Null, got {value:?}")
+                    })?;
+                    let category = holon_api::TaskState::category_str_for_keyword(keyword);
                     format!(
-                        "UPDATE {} SET properties = json_remove(COALESCE(properties, '{{}}'), '$.{}') WHERE id = '{}'",
+                        "UPDATE {} SET properties = json_set(COALESCE(properties, '{{}}'), '$.task_state', {}, '$.task_state_category', '{}') WHERE id = '{}'",
                         self.table_name,
-                        field.replace('\'', "''"),
+                        sql_value,
+                        category,
                         id.replace('\'', "''")
                     )
                 } else {
@@ -1150,6 +1177,9 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     vec!["".into(), "TODO".into(), "DOING".into(), "DONE".into()];
                 let next = holon_api::render_eval::cycle_state(current, &states);
 
+                // `set_field("task_state")` pairs the `task_state_category`
+                // sidecar in the same UPDATE (see the set_field arm), keeping
+                // the pair invariant `Block::set_task_state` establishes.
                 let mut set_params = StorageEntity::new();
                 set_params.insert("id".into(), Value::String(id));
                 set_params.insert("field".into(), Value::String("task_state".into()));

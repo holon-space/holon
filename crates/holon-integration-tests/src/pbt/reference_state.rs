@@ -345,6 +345,11 @@ impl BlockState {
                 // (e.g. `/matview`) matches when a dependency points at a
                 // minted (split-reconciled) block, not just a stable seed id.
                 b.requires = b.requires.iter().map(|u| resolve(u)).collect();
+                // `advice_suppressed` is likewise an edge field of block-id
+                // references (ADR 0021 dismissal set); remap its targets the
+                // same way, or a dismissal pointing at a split-reconciled block
+                // keeps the synthetic id and diverges from the SUT's resolved id.
+                b.advice_suppressed = b.advice_suppressed.iter().map(|u| resolve(u)).collect();
                 (b.id.clone(), b)
             })
             .collect();

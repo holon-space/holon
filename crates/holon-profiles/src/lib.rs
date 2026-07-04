@@ -1,3 +1,11 @@
+//! @c4 component
+//! @c4 layer Core
+//! Pattern: Strategy
+//! @c4 uses holon-api "shared value & operation types" "Rust"
+//! @c4 uses holon-core "core datasource traits" "Rust"
+//! @c4 uses holon-engine "Petri-net engine" "Rust"
+//! @c4 uses holon-macros "entity/operation derive macros" "Rust"
+//!
 //! EntityProfile system: per-entity, per-row render + operation resolution.
 //!
 //! Each entity (e.g., "block") can have a profile that defines:
@@ -38,6 +46,11 @@ const UI_STATE_VARIABLES: &[&str] = &[
     "is_focused",
     "is_expanded",
     "view_mode",
+    // Render-context flag set by tree-builder `rules:` overrides (e.g.
+    // `role: "page_title"`); merged into ui_state by `pick_active_variant`.
+    // Classifying it as data would drop the variant at resolve time (rows
+    // have no `role` column).
+    "role",
     // Container-query inputs: refined per subtree during render interpretation.
     "available_width_px",
     "available_height_px",

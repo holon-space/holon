@@ -5,6 +5,7 @@
 //! @c4 uses holon-api "shared value & operation types" "Rust"
 //! @c4 uses holon-core "core datasource traits" "Rust"
 //! @c4 uses holon-macros "entity/operation derive macros" "Rust"
+//! @c4 uses holon-profiles "entity profile resolution" "Rust"
 //!
 //! Reusable MCP client: connects to MCP servers and exposes their tools as `OperationProvider`s.
 

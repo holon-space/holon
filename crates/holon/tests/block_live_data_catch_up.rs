@@ -63,6 +63,7 @@ fn block_row(id: &str, content: &str) -> holon_api::StorageEntity {
     row.insert("updated_at".into(), Value::Integer(0));
     row.insert("tags".into(), Value::Json("[]".to_string()));
     row.insert("requires".into(), Value::Json("[]".to_string()));
+    row.insert("advice_suppressed".into(), Value::Json("[]".to_string()));
     row
 }
 

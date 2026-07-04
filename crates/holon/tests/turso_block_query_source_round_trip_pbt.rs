@@ -139,6 +139,7 @@ async fn seed_loro_backend(
             &HashMap::new(),
             &Tags::default(),
             &[],
+            &[],
         )
         .await
         .map_err(|e| TestCaseError::fail(format!("loro seed doc root: {e}")))?;
@@ -163,6 +164,7 @@ async fn seed_loro_backend(
                 &b.properties_map(),
                 &b.tags,
                 &b.requires,
+                &b.advice_suppressed,
             )
             .await
             .map_err(|e| TestCaseError::fail(format!("loro seed {}: {e}", b.id)))?;

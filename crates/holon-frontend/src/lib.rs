@@ -24,6 +24,7 @@
 //! ).await?;
 //! ```
 
+pub mod advice_weaver;
 pub mod cdc;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cli;
@@ -88,6 +89,7 @@ pub mod reactive_view_model;
 mod render_context;
 pub mod render_interpreter;
 pub mod rich_text_selection;
+pub mod row_origin;
 pub mod row_pipeline;
 pub mod shadow_builders;
 pub mod size_expectation;
@@ -115,6 +117,7 @@ pub use reactive_view_model::{
     ReactiveSlot, ReactiveViewModel,
 };
 pub use render_context::{AvailableSpace, LayoutHint, RenderContext};
+pub use row_origin::{Occurrence, OccurrenceId, RowOrigin};
 pub use shadow_builders::DEFAULT_DRAWER_WIDTH;
 pub use user_driver::{ReactiveEngineDriver, UserDriver};
 pub use view_model::ViewModel;
@@ -133,8 +136,8 @@ pub use editor_view_model::{EditorAction, EditorKey, EditorViewModel};
 pub use holon_api::QueryContext;
 pub use holon_api::{OperationDescriptor, ProviderAuthStatus, UiEvent, Value, WatcherCommand};
 pub use operations::OperationIntent;
-pub use reactive::LiveBlock;
 pub use reactive::StubBuilderServices;
+pub use reactive::{LiveBlock, WatchGuard};
 
 /// Unified session for all frontend consumers (Flutter, TUI, tests)
 ///

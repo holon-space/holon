@@ -1,6 +1,7 @@
 -- The base block table. Reads should normally go through the `block`
--- matview (defined in block_matview.sql) which hydrates tags +
--- blocked_by from the junction tables. Writes go to this table.
+-- matview (synthesized in schema_modules.rs from the EdgeFieldDescriptor
+-- registry) which hydrates the edge fields from the junction tables.
+-- Writes go to this table.
 CREATE TABLE IF NOT EXISTS block_raw (
     id TEXT PRIMARY KEY,
     parent_id TEXT,

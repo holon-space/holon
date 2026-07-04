@@ -59,6 +59,57 @@ pub struct CapCursor {
     pub column: usize,
 }
 
+// ─── Reference-side: Advice ───────────────────────────────────────────
+
+/// Expected advice rows for one anchor (read-time contract of ADR 0022's
+/// advice matview: suppression anti-join + top-K happen at read time).
+/// Total: `scored` is empty and `k == 0` when no active rule targets the anchor.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AdviceExpectation {
+    /// Eligible candidates AFTER the suppression anti-join, as
+    /// (candidate id, shared-tag count), sorted by count DESC (tie order unspecified).
+    pub scored: Vec<(String, u32)>,
+    /// The rule's read-time top-K. 0 iff no active rule matches the anchor.
+    pub k: u8,
+}
+
+/// Reference-side advice-weave contract for the `advice rows woven` keystone
+/// invariant. `#[capmap_adapter]` hosts it on `CapMap` exactly like
+/// [`RefBlockTree`] (sync, owned returns → no `#[async_trait]`); ids are rendered
+/// as `EntityUri::as_str()` strings, the same form `block_raw.id` carries in the
+/// SUT so the anchor/candidate strings compare directly against the advice matview.
+#[holon_macros::capmap_adapter]
+pub trait RefAdvice {
+    /// Total over all anchors: empty expectation when no rule matches.
+    fn advice_expectation(&self, anchor: &str) -> AdviceExpectation;
+    /// The matview-level contract: ALL (anchor, candidate, shared_tag_count)
+    /// pairs of the single active rule, WITHOUT suppression and WITHOUT top-K
+    /// (those are read-time). Empty when no active rule exists.
+    fn advice_matview_rows(&self) -> Vec<(String, String, u32)>;
+    /// Name of the matview the single active rule synthesizes
+    /// (`advice_rule_{slug}`), or `None` when no active rule exists. The
+    /// SQL-level twin `inv-advice-matview-matches-ref` compares this against the
+    /// `advice_rule_%` matviews actually present in the SUT's `sqlite_master`.
+    fn advice_matview_name(&self) -> Option<String>;
+}
+
+/// SUT-side observation of the synthesized advice matviews (ADR 0022 step-6). One
+/// materialized view per active rule, named `advice_rule_{slug}`, projecting
+/// `(anchor_id, lesson_id, shared_tag_count)` — the pre-suppression, un-capped
+/// matview contract. The `inv-advice-matview-matches-ref` twin reads this and
+/// compares it against [`RefAdvice::advice_matview_name`] +
+/// [`RefAdvice::advice_matview_rows`]. Until synthesis lands (step 6) the SUT has
+/// no such matview, so this observes an empty set — that IS the observed-absent
+/// state the twin flips out of once synthesis wires the DDL.
+#[holon_macros::capmap_adapter]
+pub trait SutAdviceMatview {
+    /// Every materialized view named `advice_rule_%` present in the SUT's
+    /// `sqlite_master`, paired with its full row set as
+    /// `(anchor_id, lesson_id, shared_tag_count)`. Empty when synthesis has
+    /// created none. Read AFTER CDC quiescence.
+    async fn advice_matviews(&self) -> Vec<(String, Vec<(String, String, u32)>)>;
+}
+
 // ─── Reference-side: BlockTree ────────────────────────────────────────
 
 /// Read-side block-tree queries used by Phase 5 T0 transitions and their

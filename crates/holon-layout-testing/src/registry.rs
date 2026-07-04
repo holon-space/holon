@@ -116,6 +116,7 @@ impl BlockTreeRegistry {
         LiveBlock {
             tree,
             structural_changes: Box::pin(stream),
+            watch_guard: None,
         }
     }
 

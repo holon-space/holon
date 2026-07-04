@@ -1,3 +1,14 @@
+> **⚠️ SUPERSEDED / PARTIALLY STALE (2026-07-05).** This document predates the completion
+> of the γ-composition PBT endgame. The `E2ESut` monolith, the `declare_pbt_slice!` /
+> `component_pbt!` macros, the standalone slice binaries, and the deleted `Sut*` capability
+> twins referenced below were REMOVED on the `w1-pbt-endgame` branch. The live mechanism is
+> the ONE composed keystone
+> [`crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs)
+> plus the cfg(test) lib slice tests (`just pbt-lib-slices`). For the current architecture see
+> [`docs/Architecture/Model.md`](../Architecture/Model.md). Kept for historical context.
+
+---
+
 # PBT Composition — Endgame Roadmap (synthesized 2026-06-25)
 
 Output of a 5-agent parallel research sweep over the remaining γ-composition migration.
@@ -659,3 +670,109 @@ not the headless `ReactiveEngineDriver`.
 
 ⚠ Runtime must stay multi-thread and alive on the background thread while the window runs on main
 (CDC/matview/org-sync tasks). `wait_for_ready = true` avoids the `without_wait()` sync-handle race.
+
+## Round 6 (2026-07-05) — E2ESut MONOLITH DELETED (step-5 tail); native runner FULLY retired
+
+Workstream W1 (jj workspace `ws-pbt-endgame`, based on `f92ca119`). State found on entry: increments
+1–4 AND the step-5 runner core were already landed by prior sessions (`phased.rs`, `parity.rs`,
+`impl StateMachineTest for E2ESut`, the slice macros, `run_invariant_registry`, `PbtSuiteSpec`/`min_sut`
+all gone; `registry.rs` retains ONLY the `Subsystem` enum — the bisector dimension, still live).
+All five windowed harness repoints (4c) were done: `gpui_capture_replay`/`gpui_gherkin_replay` ride
+`with_windowed_wide_sut` + `replay_steps`, `sim_windowed_replay`'s phased replay host + the
+`HOLON_PBT_WINDOWED_CATALOG` env gate were deleted (composed check IS primary), the 4b random loop
+lives in `gpui_composed_windowed_loop.rs`, and tui `pbt_main.rs` is the composed windowed RANDOM
+runner. What remained: `struct E2ESut` + its cap-impl cluster — **never constructed anywhere** —
+pure dead code. This round deleted it.
+
+**Deleted files** (crates/holon-integration-tests/src/pbt/):
+- `sut.rs` (struct E2ESut + Deref/Drop/inherent helpers, 1295 lines)
+- `sut_handle.rs` (SutAppLifecycle/SutBlockInteract/SutArrowNavigate/SutFocusWrite/SutNavHistory*/
+  SutWatchRegister/SutViewControl/SutMcpEmit/SutHistoryWrite/SutMutate/SutSeamMutate/SutFixtureFs
+  impls for E2ESut, 1091 lines)
+- `sut_capabilities.rs` (SutEdgeFieldWrite/SutLoro/SutLayout/SutEditorMirrorWrite/SutBlockTreeWrite/
+  SutDriver impls, 1101 lines) — `view_model_to_snapshot` RELOCATED to new `pbt/vm_snapshot.rs`
+  (consumers: frontend_slice/{components,block_query_component}.rs, window_slice/components.rs)
+- `sut_check_invariants.rs`, `sut_render.rs`, `sut_keybindings.rs` (E2ESut-only)
+- `slice.rs` (last remnant: capture-on-panic thread-local helpers — zero consumers)
+
+**Trimmed:** `fixtures/mod.rs` (E2ESut FixtureAssertable impl), `fixtures/assert.rs` (the E2ESut
+`evaluate_assertion`/`widget_contains`/`focus_on` path — `evaluate_assertion_caps` is now the ONLY
+assertion path; `snapshot_text` kept, caps path uses it), `transitions/apply_mutation.rs`
+(`impl SutApplyMutation for E2ESut` + `apply_apply_mutation_to_sut`, ~395 lines),
+`transitions/bulk_external_add.rs` (`apply_bulk_external_add_to_sut`, ~325 lines),
+`transitions/start_app.rs` (`impl SutBootWatches for E2ESut`), `sut_row_parsing.rs`
+(`BLOCK_SQL_COLUMNS`/`mutation_expected_properties`/`row_properties_to_map` — only the deleted
+mutation helper read them), `widget_state.rs` (`extract_column_text`/`extract_view_text`).
+KEPT (live composed consumers): `sut_loro.rs` (`LoroSut` — composed/builder), `sut_metrics.rs`
+(`MetricsSut` — composed/span_metrics), `sut_row_parsing.rs` (parse_block_rows etc.),
+`state_machine.rs` (ReferenceMachine), `stepper.rs` (BisectionStepper, already on ComposedSut).
+
+**DISCLOSED casualty:** the `PBT_MATVIEW_METRICS=1` whole-case drop report (`MetricsSut::
+print_drop_report` + `query_origin_acc`) died with `E2ESut::drop` — nothing composed hosts a
+BackendEngine at drop time. Per-transition `sql_budget_report` (inv-sql-budget) fully survives.
+Re-host on the span_metrics component if case-level matview-cache dumps are wanted again.
+
+**Slices NOT deleted (deliberate):** `memory_slice`/`sql_slice`/`loro_slice`/`frontend_slice`/
+`window_slice`/`sql_loro_slice` today host (a) the composed component impls `compose_sut` builds
+from and (b) cfg(test) composed catch-triad/integration tests — they are composed-path assets, not
+E2ESut scaffolding. Their retirement is W5's scope (per-invariant catch triads), not this step.
+NOTE: `composed/subsystem_seed.rs` `seed_ref*`/`assert_ref_seeded` warn "never used" in the plain
+lib build — pre-existing cfg(test)-consumer pattern (memory_slice/integration_tests uses them),
+not new rot.
+
+**Build environment fixes (this workspace, disclosed):** tip `f92ca119`'s wholesale lock
+re-resolution broke `ed25519-dalek 3.0.0-pre.1` (iroh-base pins `=3.0.0-pre.1`; resolver drifted
+`ed25519` to stable 3.0.0). Fixed by supervisor lock restore + rc-era pins (`ed25519 3.0.0-rc.4`,
+`pkcs8 0.11.0-rc.11`, `spki 0.8.0-rc.4`, `signature 3.0.0-rc.10`). Do NOT `cargo update`. The
+`gql-transform` pin stays at `0c5a6dd` (a newer `023bbf4` adds `MappedNodeResolver.extension_column`/
+`multi_value_properties`; if that pin ever moves forward, `holon-turso/src/graph_schema.rs` needs
+the two fields added — `None`/`HashMap::new()` is the behavior-preserving form).
+
+**Hard-D check:** the 3 windowed-only invariants live as composed catalog wires in
+`composed/invariants/{displayed_text,focus_matches_ref,window_focus}.rs` and run on the windowed
+composed path (gpui windowed tests + the 4b loop + tui runner). Not collapsed into the headless keystone.
+
+**Gates (logs in /tmp/w1_gate_*.log):**
+- `cargo check -p holon-integration-tests --features pbt --tests` — **GREEN**.
+- Keystone `general_e2e_composed_pbt` — **GREEN** at PROPTEST_CASES=4 (211s) AND
+  PROPTEST_CASES=16 (259s, w1_gate_keystone_full.log).
+- Lib slices (`cargo nextest run -p holon-integration-tests --lib --features pbt`) —
+  **155/156 pass, ONE RED** `pbt::frontend_slice::structural_pbt::teeth::
+  wide_frontend_toggle_state_lockstep_stays_green`: SUT block lacks
+  `task_state_category:"active"` that the ref carries. NOT caused by this round (every
+  deletion was never-constructed code — zero runtime-behavior change). Root: the ref/org
+  path routes task-state writes through `OrgBlockExt::set_task_state`
+  (`holon-org-format/src/models.rs:546` — writes BOTH `task_state` +
+  `task_state_category`), while the prod SQL `cycle_task_state` op writes only the
+  keyword. Rerun EXCLUDING this one test: **GREEN** (w1_gate_libslices2.log) — the red is
+  isolated. Per the "model divergence = prod-bug candidate first" rule this is a prod-side
+  gap (or a deliberate legacy form — `models.rs` task_state() tolerates a missing
+  category); pre-existing at tip `f92ca119` (likely surfaced by the Petri-net engine
+  merge). Owner: whoever owns the toggle/task-state track.
+- GPUI windowed (`--test-threads=1` MANDATORY — TestApp is not parallel-safe; a parallel
+  run SIGABRTs, which is an invocation error not a red):
+  `gpui_compose_sut_windowed` — **GREEN** (5 tests: render-over-compose_sut, full-catalog
+  frame, ClickBlock sequence, gherkin bridge). `gpui_composed_windowed_loop` (4b random
+  loop) — **GREEN**. `gpui_window_slice` — **ONE RED, pre-existing**:
+  `capmap_hosts_windowed_sutlayout_over_real_geometry` fails
+  `inv-matview-consistent-with-ref/root_layout` ("ghost row `block:root-layout`" — the
+  boot seeds a root-layout matview row the test's EMPTY ref universe doesn't model; a
+  boot-seeding vs ref-universe drift at tip `f92ca119`, matches the dogfood-triage
+  matview suspects). Untouched by this round (dead-code deletion, zero behavior change).
+- TUI windowed random runner (`tui_ui_pbt`, PROPTEST_CASES=4) — **RED, pre-existing gap**:
+  the composed windowed alphabet drew `ToggleDrawer` and the TUI geometry registry has no
+  `block:default-left-sidebar` entity (TUI renders no left sidebar), so
+  `click_entity(drawer_toggle::block:default-left-sidebar)` fails loud
+  (`driver_input.rs:511`). The runner itself works (full catalog ran per tick; boot +
+  ClickBlock etc. fine). Fork to resolve (fix-the-cap-not-withhold): either the TUI
+  renders the sidebar (faithful) or the TUI overlay's cap surface honestly excludes the
+  drawer-toggle capability so the generator narrows it out — the current state (cap
+  present, entity absent) is the bug. Untouched by this round.
+
+**Round 6 verdict.** The native runner + `E2ESut` monolith are FULLY RETIRED: one SUT shape
+(`ComponentSet`-described `CapMap`), one catalog, two harnesses (headless tokio keystone +
+windowed gpui-thread), exactly the end state §8.10 / the Round-5 reframe called for. The three
+reds above (toggle-state category, TUI drawer-toggle geometry, window-slice root-layout ghost
+row) are pre-existing prod/harness divergences the composed machinery CAUGHT — triage them as
+prod-bug candidates, not as regressions of this round. Remaining roadmap work is Phase-4-era
+(env-selected ONE PBT wiring parameterization for the windowed runners) plus those triages.

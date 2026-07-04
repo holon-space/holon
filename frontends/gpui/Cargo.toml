@@ -119,6 +119,9 @@ toml.workspace = true
 # Error handling
 anyhow.workspace = true
 
+# Per-case reset (Phase 1 Option A): fresh temp org/db/config paths per rebind.
+tempfile = "3"
+
 # Observability
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -137,6 +140,7 @@ android-activity = { version = "0.6", features = ["native-activity"] }
 log = "0.4"
 
 [dev-dependencies]
+tempfile = "3"
 holon-integration-tests = { path = "../../crates/holon-integration-tests" }
 holon-layout-testing = { path = "../../crates/holon-layout-testing" }
 holon-pbt-core = { path = "../../crates/holon-pbt-core" }

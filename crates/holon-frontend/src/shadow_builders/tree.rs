@@ -75,7 +75,7 @@ holon_macros::widget_builder! {
         match (__template, ba.ctx.data_source.clone()) {
             (Some(tmpl), Some(ds)) => {
                 // Inject the creation placeholder as a REACTIVE virtual row
-                // (VirtualChildRowProvider) rather than a static `TrailingSlot`
+                // (AppendedRowsProvider creation-slot) rather than a static `TrailingSlot`
                 // snapshot. A snapshot is interpreted once (unfocused →
                 // read-only `rendered_text`) and never re-resolves on focus, so
                 // clicking the trailing placeholder set focus but it never
@@ -110,7 +110,8 @@ holon_macros::widget_builder! {
                 if flat.is_empty() {
                     return ViewModel::leaf("text", Value::String("[tree: no item_template]".into()));
                 }
-                ViewModel::static_collection("tree", flat_tree_items(flat), 4.0)
+                let items = weave_advice_into_items(&ba, flat_tree_items(flat));
+                ViewModel::static_collection("tree", items, 4.0)
             }
         }
     }

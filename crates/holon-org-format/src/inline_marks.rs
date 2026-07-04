@@ -25,15 +25,29 @@
 
 use holon_api::link_parser::{classify_link, LinkTarget};
 use holon_api::{EntityRef, InlineMark, MarkSpan};
+use orgize::config::UseSubSuperscript;
 use orgize::rowan::ast::AstNode;
 use orgize::rowan::NodeOrToken;
-use orgize::{Org, SyntaxKind, SyntaxNode};
+use orgize::{ParseConfig, SyntaxKind, SyntaxNode};
 
 /// Parse `text` as inline org content. Returns `(rendered_text, marks)` where
 /// `rendered_text` has all mark delimiters stripped and `marks` carries
 /// Unicode-scalar offsets into the rendered text.
+///
+/// Parses with `use_sub_superscript: Brace` (the org `#+OPTIONS: ^:{}`
+/// semantics): only the braced `_{…}` / `^{…}` forms are sub/superscript
+/// marks. A bare `_` in `focused_block` or a lone `^` is literal text — the
+/// default orgize setting (`True`) parses those as subscripts and the Sub/Super
+/// `strip_prefix_suffix(raw, 2, 1)` (which assumes the braced shape) then
+/// destroys the surrounding characters (`focused_block` → `focusedloc`). Brace
+/// mode is the only shape the emit path can round-trip losslessly, and it is
+/// what this module's contract has always documented.
 pub fn extract_inline_marks(text: &str) -> (String, Vec<MarkSpan>) {
-    let org = Org::parse(text);
+    let config = ParseConfig {
+        use_sub_superscript: UseSubSuperscript::Brace,
+        ..Default::default()
+    };
+    let org = config.parse(text);
     let mut state = ExtractState::default();
     walk_node(org.document().syntax(), &mut state);
     (state.out, state.marks)
@@ -611,5 +625,58 @@ mod tests {
         // Internal block link round-trip.
         let (org, _) = round_trip("[[block:abc-123][see also]]");
         assert_eq!(org, "[[block:abc-123][see also]]");
+    }
+
+    /// Regression for the vault data-loss bug: bare (unbraced) `_`/`^` in
+    /// snake_case identifiers must NOT be parsed as sub/superscript, so they
+    /// survive the extract→render round-trip byte-for-byte. Before the
+    /// `UseSubSuperscript::Brace` fix, orgize parsed `focused_block` as
+    /// `focused` + subscript `_block`, and the braced-form strip mangled it to
+    /// `focusedloc`. Each string here is a real token from the user's PKM vault.
+    #[test]
+    fn bare_underscore_identifiers_survive_round_trip() {
+        for input in [
+            "focused_block",
+            "set_focus_with_caret",
+            "virtual_parent",
+            "sort_key",
+            "keyed_rows_signal_vec",
+            "watch_changes_since",
+            "change_set.rs",
+            "vector_distance",
+            "model_version",
+            "a_b_c",
+            "jxa_sbzys",
+            // bare superscripts too
+            "E=mc^2",
+            "x^y_z",
+        ] {
+            let (text, marks) = extract_inline_marks(input);
+            assert!(
+                marks.is_empty(),
+                "bare `_`/`^` must not produce marks: input={input:?} text={text:?} marks={marks:?}",
+            );
+            assert_eq!(
+                text, input,
+                "ingest must preserve bare-underscore identifier"
+            );
+            let rendered = render_inline_marks(&text, &marks);
+            assert_eq!(rendered, input, "round-trip must be identity for {input:?}");
+        }
+    }
+
+    /// The braced sub/superscript forms remain real marks and round-trip.
+    #[test]
+    fn braced_sub_super_still_marks() {
+        let (text, marks) = extract_inline_marks("a_{sub} b^{sup}");
+        assert_eq!(text, "asub bsup");
+        assert_eq!(
+            marks,
+            vec![
+                MarkSpan::new(1, 4, InlineMark::Sub),
+                MarkSpan::new(6, 9, InlineMark::Super),
+            ]
+        );
+        assert_eq!(render_inline_marks(&text, &marks), "a_{sub} b^{sup}");
     }
 }

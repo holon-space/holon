@@ -319,6 +319,16 @@ async fn compose_sut_seeded_impl(
         if has_editor {
             caps.insert(comp.clone() as Arc<dyn SutEditorMirrorRead>);
         }
+        // `SutFixtureFs` (write_org_file into the session's watched org_root) —
+        // admits `WriteOrgFile` into the composed alphabet. This is the ONLY
+        // transition that can mint an advice-rule block (ADR 0022 step 4), so
+        // without this cap the two advice keystone invariants are structurally
+        // vacuous (no rule ever enters the reference; empty-vs-empty stays
+        // green). The four other `SutFixtureFs` transitions (CreateDirectory /
+        // GitInit / JjGitInit / CreateStaleLoro) are `!app_started`-gated and
+        // the composed oracle boots pre-started, so they stay honestly
+        // unreachable (their cap methods fail loud if that ever changes).
+        caps.insert(comp.clone() as Arc<dyn crate::pbt::local_caps::SutFixtureFs>);
         // Edge-field write cap (`tags` / `requires` on an existing block) — hosted
         // only when a Loro authority doc is present (`loro_doc_store()` is `Some`
         // iff Loro is on for this build). Routes through the production
@@ -1163,6 +1173,7 @@ mod tests {
             UndoLastMutation,
             ToggleState,
             CreateDocument,
+            DeleteDocument,
             SimulateRestart,
             StartApp,
             ConcurrentSchemaInit,
@@ -1188,7 +1199,7 @@ mod tests {
         eprintln!("\n=== SWAP PROBE: full_headless cap-feasibility ===");
         eprintln!("CAP-FEASIBLE ({}): {:?}", feasible.len(), feasible);
         eprintln!(
-            "CAP-INFEASIBLE ({}, stay on E2ESut): {:?}",
+            "CAP-INFEASIBLE ({}): {:?}",
             infeasible.len(),
             infeasible.keys().collect::<Vec<_>>()
         );

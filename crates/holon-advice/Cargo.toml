@@ -1,0 +1,20 @@
+[package]
+name = "holon-advice"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+holon-api.workspace = true
+holon-turso.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "rt-multi-thread"] }
+turso.workspace = true

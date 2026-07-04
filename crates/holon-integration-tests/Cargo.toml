@@ -66,6 +66,7 @@ pbt = [
     "dep:validated",
     "dep:nonempty-collections",
     "dep:holon-block-roundtrip-testing",
+    "dep:holon-advice",
 ]
 
 [dependencies]
@@ -101,6 +102,7 @@ holon-pbt-core = { path = "../holon-pbt-core", optional = true }
 holon-macros = { workspace = true, optional = true }
 holon-block-roundtrip-testing = { workspace = true, optional = true }
 holon-mcp = { path = "../../frontends/mcp", optional = true }
+holon-advice = { workspace = true, optional = true }
 proptest = { workspace = true, optional = true }
 proptest-state-machine = { workspace = true, optional = true }
 loro = { workspace = true, optional = true }
