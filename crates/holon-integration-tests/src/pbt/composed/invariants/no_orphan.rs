@@ -1,10 +1,11 @@
-//! `inv-no-orphan-blocks` wired into the memory slice — `SutBackend` +
-//! `RefBackend`. Reads the SUT via `SutBackend` and the reference's seed/
-//! non-seed sets via `RefBackend` (after dropping its spurious `SutSqlProjection`
-//! bound, §8.6), so it composes on the memory slice.
+//! `inv-no-orphan-blocks` wired into the composed catalog — a pure `SutBackend`
+//! matview self-check (no ref). Its former CDC-lag staleness gate (which read
+//! `RefBackend`) was proven dead under the deterministic settle and removed, so
+//! `Needs` no longer requires a ref cap — it selects wherever a `SutBackend` is
+//! wired, like the sibling `no_parent_cycles` self-check.
 
 use holon_pbt_core::RunMode;
-use holon_pbt_core::capabilities::{RefBackend, SutBackend};
+use holon_pbt_core::capabilities::SutBackend;
 use holon_pbt_core::composition::{BridgedInvariant, CapId, CapInvariant, Needs};
 
 use crate::pbt::invariants::bodies::no_orphan_blocks::InvNoOrphanBlocks;
@@ -16,7 +17,7 @@ pub fn wire() -> Box<dyn CapInvariant> {
         Needs {
             sut_present: vec![CapId::of::<dyn SutBackend>()],
             sut_absent: Vec::new(),
-            ref_present: vec![CapId::of::<dyn RefBackend>()],
+            ref_present: Vec::new(),
         },
     ))
 }
@@ -26,9 +27,9 @@ mod tests {
     use crate::pbt::composed::fixtures::*;
     use crate::pbt::composed::subsystem_seed::{run_with_seeded_ref, seed_ref};
 
-    /// Catch (doc §6 gate): a block whose parent is absent. The reference carries
-    /// the same id set (so the CDC-lag staleness gate doesn't fire), and only the
-    /// SUT's parent pointer is dangling — isolating the failure to no-orphan.
+    /// Catch (doc §6 gate): a block whose parent is absent — the SUT's parent
+    /// pointer is dangling, isolating the failure to no-orphan (a pure SUT
+    /// matview self-check; the reference is present but unread).
     #[tokio::test]
     async fn memory_slice_catches_orphan_block() {
         let orphan = uri("local://o");

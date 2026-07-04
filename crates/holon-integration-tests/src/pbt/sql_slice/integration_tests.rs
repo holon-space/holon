@@ -37,14 +37,19 @@ async fn sql_slice_runs_structural_block_invariants_over_turso() {
 
     let report = run_selected(&composed_invariant_catalog(), &sut, &ref_).await;
 
-    // With no reference wired, only the two `SutBackend`-only structural
-    // invariants run; everything ref-comparing (and the Loro invariants) is
+    // With no reference wired, only the three `SutBackend`-only structural
+    // invariants run (`no-orphan-blocks` became ref-free when its CDC-lag gate
+    // was removed); everything ref-comparing (and the Loro invariants) is
     // deselected — disclosed, not faked.
     let mut ran = report.ran_ids();
     ran.sort_unstable();
     assert_eq!(
         ran,
-        ["inv-no-parent-cycles", "inv-source-language-iff-source"],
+        [
+            "inv-no-orphan-blocks",
+            "inv-no-parent-cycles",
+            "inv-source-language-iff-source",
+        ],
         "exactly the no-ref SutBackend invariants are cap-selected over Turso; deselected={:?}",
         report.deselected,
     );

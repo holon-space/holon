@@ -59,7 +59,7 @@ impl MemoryBackendComponent {
 impl SutBackend for MemoryBackendComponent {
     /// No CDC matview here — the "live" view *is* the store. Reading the same
     /// convergent truth as `block_raw_snapshot` makes the slice CDC-lag-free by
-    /// construction (the `inv-no-orphan-blocks` staleness gate can never fire).
+    /// construction.
     async fn live_block_snapshot(&self) -> Vec<holon_api::Block> {
         self.backend
             .get_all_blocks(Traversal::ALL)

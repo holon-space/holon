@@ -53,12 +53,13 @@ async fn memory_slice_runs_structural_block_invariants_without_turso() {
 
     let report = run_selected(&composed_invariant_catalog(), &sut, &ref_).await;
 
-    // The two `SutBackend`-only invariants run; the ref-comparing
+    // The three `SutBackend`-only invariants run (`no-orphan-blocks` became
+    // ref-free when its CDC-lag gate was removed); the ref-comparing
     // `blocks-match-ref/block_raw` is *deselected* (no `RefBackend` wired),
     // disclosed rather than faked — the §2 negative containment in action.
     assert_eq!(
         report.ran_ids().len(),
-        2,
+        3,
         "only the SutBackend invariants are cap-selected; ran={:?} deselected={:?}",
         report.ran_ids(),
         report.deselected,
@@ -79,9 +80,10 @@ async fn memory_slice_runs_structural_block_invariants_without_turso() {
     );
 }
 
-/// The Ref side composes (§5.1): wiring a `RefBackend` cap selects both the
-/// `blocks-match-ref/block_raw` and `no-orphan` invariants, which pass when the
-/// SUT's `block_raw` matches the reference's non-seed blocks field-for-field.
+/// The Ref side composes (§5.1): wiring a `RefBackend` cap selects the
+/// `blocks-match-ref/block_raw` invariant (the SUT-only `no-orphan` self-check
+/// runs regardless), which pass when the SUT's `block_raw` matches the
+/// reference's non-seed blocks field-for-field.
 #[tokio::test]
 async fn memory_slice_runs_ref_comparison_when_ref_is_wired() {
     let blocks = vec![
@@ -103,7 +105,7 @@ async fn memory_slice_runs_ref_comparison_when_ref_is_wired() {
     for id in ["inv-blocks-match-ref/block_raw", "inv-no-orphan-blocks"] {
         assert!(
             report.ran_ids().contains(&id),
-            "wiring RefBackend must select {id}; ran={:?}",
+            "{id} must run here; ran={:?}",
             report.ran_ids(),
         );
     }
