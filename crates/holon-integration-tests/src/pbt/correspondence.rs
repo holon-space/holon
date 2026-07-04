@@ -17,12 +17,18 @@
 //!
 //! # Convergence policy — settle-first (user decision 2026-07-03)
 //!
-//! The harness's convergence settle (`settle_after_apply` +
-//! `converge_projections`, covering CDC + Loro + org) is the convergence
-//! guarantee: the DEFAULT for every store is [`Converge::None`] (diverged =
-//! Fail). [`Converge::Retry`] is a *disclosed exception* for a store the settle
-//! hook provably cannot cover; each use states why in the table. A lag
-//! tolerance firing is first a settle GAP to fix, not something to tolerate.
+//! The harness quiesces projections before the invariant-check pass, so the
+//! DEFAULT for every store is [`Converge::None`] (diverged = Fail).
+//! [`Converge::Retry`] is a *disclosed exception* for a store the settle
+//! provably cannot cover; each use states why in the table. A lag tolerance
+//! firing is first a settle GAP to fix, not something to tolerate.
+//!
+//! CAVEAT (2026-07-04): on THIS branch the quiescence is a flat
+//! `wide_e2e::SETTLE` (150 ms) slept per transition — not yet the deterministic
+//! `converge_projections` settle being built on the boot-parallelism branch.
+//! The flat sleep is itself an undisclosed lag tolerance that happens to cover;
+//! every `Converge::None` store's strictness must be RE-CONFIRMED once the
+//! deterministic settle merges and the flat sleep is removed.
 //!
 //! # Growth path (do not add speculatively)
 //!
