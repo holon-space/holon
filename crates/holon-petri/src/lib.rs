@@ -2,11 +2,14 @@
 //!
 //! Reads task blocks from the database and constructs a Petri Net where:
 //! - Tokens represent entities (the user, referenced people/documents)
-//! - Transitions represent tasks (with dependency ordering via completion tokens)
-//! - The objective function scores tasks via prototypal inheritance with `=` computed properties
+//! - Transitions represent tasks (with dependency ordering via completion
+//!   tokens)
+//! - The objective function scores tasks via prototypal inheritance with `=`
+//!   computed properties
 //!
-//! Prototype blocks define both literal defaults and `=`-prefixed Rhai computed attributes.
-//! Instance (task) blocks inherit from and override prototype properties.
+//! Prototype blocks define both literal defaults and `=`-prefixed Rhai computed
+//! attributes. Instance (task) blocks inherit from and override prototype
+//! properties.
 //!
 //! Content prefix parsing order (each strips its marker):
 //! 1. `>` — sequential dependency on previous sibling
@@ -15,17 +18,33 @@
 //!
 //! The engine then ranks enabled transitions by WSJF (Δobj / duration).
 
-use chrono::{DateTime, Utc};
-use holon_api::block::Block;
-use holon_api::types::{DependsOn, Priority, TaskState, Timestamp};
-use holon_api::{CompiledExpr, EntityUri};
-use holon_engine::arc::{CreateArc, InputArc, OutputArc};
-use holon_engine::value::Value;
-use holon_engine::{Marking, NetDef, TokenState, TransitionDef};
-use rhai::{Dynamic, Engine as RhaiEngine, Scope};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::collections::HashSet;
 
-pub use holon_engine::engine::{Engine, RankedTransition};
+use chrono::DateTime;
+use chrono::Utc;
+use holon_api::CompiledExpr;
+use holon_api::EntityUri;
+use holon_api::block::Block;
+use holon_api::types::DependsOn;
+use holon_api::types::Priority;
+use holon_api::types::TaskState;
+use holon_api::types::Timestamp;
+use holon_engine::Marking;
+use holon_engine::NetDef;
+use holon_engine::PrecondSpec;
+use holon_engine::TokenState;
+use holon_engine::TransitionDef;
+use holon_engine::arc::CreateArc;
+use holon_engine::arc::InputArc;
+use holon_engine::arc::OutputArc;
+pub use holon_engine::engine::Engine;
+pub use holon_engine::engine::RankedTransition;
+use holon_engine::value::Value;
+use rhai::Dynamic;
+use rhai::Engine as RhaiEngine;
+use rhai::Scope;
 
 // ---------------------------------------------------------------------------
 // Token
@@ -205,7 +224,8 @@ impl Marking for TaskMarking {
 // Prototype system — replaces MaterializeConfig + scoring helpers
 // ---------------------------------------------------------------------------
 
-/// A prototype property value: either a literal number or a pre-compiled Rhai expression.
+/// A prototype property value: either a literal number or a pre-compiled Rhai
+/// expression.
 #[derive(Clone, Debug)]
 pub enum PrototypeValue {
     Literal(f64),
@@ -225,8 +245,9 @@ impl PartialEq for PrototypeValue {
 }
 
 impl PrototypeValue {
-    /// Parse a raw string into a PrototypeValue. `=`-prefixed strings become Computed
-    /// (compiled immediately), otherwise the string must parse as f64.
+    /// Parse a raw string into a PrototypeValue. `=`-prefixed strings become
+    /// Computed (compiled immediately), otherwise the string must parse as
+    /// f64.
     pub fn parse(engine: &RhaiEngine, raw: &str) -> Result<Self, String> {
         if let Some(expr) = raw.strip_prefix('=') {
             let compiled = CompiledExpr::compile(engine, expr)?;
@@ -234,7 +255,12 @@ impl PrototypeValue {
         } else {
             raw.parse::<f64>()
                 .map(PrototypeValue::Literal)
-                .map_err(|_| format!("prototype value '{raw}' is neither a number nor a '='-prefixed Rhai expression"))
+                .map_err(|_| {
+                    format!(
+                        "prototype value '{raw}' is neither a number nor a '='-prefixed Rhai \
+                         expression"
+                    )
+                })
         }
     }
 
@@ -275,9 +301,9 @@ fn default_computed_props(engine: &RhaiEngine) -> Vec<(&'static str, PrototypeVa
             PrototypeValue::Computed(
                 CompiledExpr::compile(
                     engine,
-                    "if days_to_deadline > deadline_buffer_days { 0.0 } \
-                     else if days_to_deadline <= 0.0 { deadline_penalty } \
-                     else { deadline_penalty * (1.0 - days_to_deadline / deadline_buffer_days) }",
+                    "if days_to_deadline > deadline_buffer_days { 0.0 } else if days_to_deadline \
+                     <= 0.0 { deadline_penalty } else { deadline_penalty * (1.0 - \
+                     days_to_deadline / deadline_buffer_days) }",
                 )
                 .expect("default urgency_weight must compile"),
             ),
@@ -302,7 +328,8 @@ fn default_computed_props(engine: &RhaiEngine) -> Vec<(&'static str, PrototypeVa
     ]
 }
 
-/// Resolve prototypal inheritance: prototype → instance → context, then evaluate Computed expressions.
+/// Resolve prototypal inheritance: prototype → instance → context, then
+/// evaluate Computed expressions.
 ///
 /// Returns all final attribute values as f64s.
 pub fn resolve_prototype(
@@ -386,7 +413,8 @@ fn topo_sort_computed(computed: &BTreeMap<String, &CompiledExpr>) -> Vec<String>
 }
 
 /// Build prototype properties from a block's properties.
-/// Parses each property into a PrototypeValue at the boundary — panics on invalid values.
+/// Parses each property into a PrototypeValue at the boundary — panics on
+/// invalid values.
 pub fn block_to_prototype_props(
     engine: &RhaiEngine,
     block: &Block,
@@ -437,7 +465,8 @@ fn build_context_props(
     ctx
 }
 
-/// Build the full default prototype: const literal defaults + compiled computed expressions.
+/// Build the full default prototype: const literal defaults + compiled computed
+/// expressions.
 pub fn default_prototype_props(engine: &RhaiEngine) -> BTreeMap<String, PrototypeValue> {
     let mut props: BTreeMap<String, PrototypeValue> = DEFAULT_TASK_PROTOTYPE
         .iter()
@@ -478,7 +507,8 @@ fn numeric_prop(block_id: &EntityUri, name: &str, v: &holon_api::Value) -> f64 {
     }
 }
 
-/// Parse an integer property value; fails loud on fractional or non-numeric values.
+/// Parse an integer property value; fails loud on fractional or non-numeric
+/// values.
 fn integer_prop(block_id: &EntityUri, name: &str, v: &holon_api::Value) -> i64 {
     let f = numeric_prop(block_id, name, v);
     if f.fract() != 0.0 {
@@ -521,7 +551,8 @@ impl SelfDescriptor {
         }
     }
 
-    /// Returns true if `block` is a self block (has `is_self` property set to true).
+    /// Returns true if `block` is a self block (has `is_self` property set to
+    /// true).
     pub fn is_self_block(block: &Block) -> bool {
         block
             .properties
@@ -578,7 +609,8 @@ pub fn parse_content_prefixes(raw: &str) -> (String, bool, Executor, bool) {
     (content, has_sequential_dep, executor, is_question)
 }
 
-/// Extract `[[wiki links]]` from text content. Handles `[[target][display]]` syntax.
+/// Extract `[[wiki links]]` from text content. Handles `[[target][display]]`
+/// syntax.
 pub fn extract_wiki_links(content: &str) -> Vec<String> {
     let mut links = Vec::new();
     let mut remaining = content;
@@ -824,8 +856,9 @@ fn task_to_instance_props_from_info(task: &TaskInfo) -> BTreeMap<String, Prototy
     props
 }
 
-/// Resolve `>` sequential dependencies: within each sibling group (same parent_id),
-/// a task with `has_sequential_dep` gets a dependency on the previous sibling.
+/// Resolve `>` sequential dependencies: within each sibling group (same
+/// parent_id), a task with `has_sequential_dep` gets a dependency on the
+/// previous sibling.
 fn resolve_sequential_deps(tasks: &mut [TaskInfo]) {
     let mut sibling_groups: HashMap<String, Vec<usize>> = HashMap::new();
     for (idx, task) in tasks.iter().enumerate() {
@@ -954,8 +987,8 @@ fn build_delegate_tokens(active: &[&TaskInfo]) -> Vec<TaskToken> {
     tokens
 }
 
-/// Build transitions for a single task. Returns 1 transition for self-executed tasks,
-/// 2 for delegated tasks (delegate sub-transition + main transition).
+/// Build transitions for a single task. Returns 1 transition for self-executed
+/// tasks, 2 for delegated tasks (delegate sub-transition + main transition).
 fn build_task_transitions(
     task: &TaskInfo,
     default_duration: f64,
@@ -1128,7 +1161,8 @@ fn build_objective_expr(tasks: &[&TaskInfo], task_weights: &BTreeMap<String, f64
         .map(|task| {
             let weight = task_weights.get(&task.block_id).copied().unwrap_or(1.0);
             format!(
-                "(if is_def_var(\"completed_{frag}\") && completed_{frag}.source_task == \"{bid}\" {{ {weight:.6} }} else {{ 0.0 }})",
+                "(if is_def_var(\"completed_{frag}\") && completed_{frag}.source_task == \
+                 \"{bid}\" {{ {weight:.6} }} else {{ 0.0 }})",
                 frag = rhai_ident_fragment(&task.block_id),
                 bid = task.block_id
             )
