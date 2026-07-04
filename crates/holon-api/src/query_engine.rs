@@ -58,4 +58,34 @@ pub trait QueryEngine: Send + Sync {
     /// settles, which would mask the projection races the PBTs hunt).
     /// `None` when the row hasn't materialised yet.
     async fn block_content_by_id(&self, id: &EntityUri) -> Result<Option<String>>;
+
+    /// ONE-SHOT, non-watching read: compile + execute `query` exactly once and
+    /// return its current rows. Unlike [`Self::watch_query`], this sets up
+    /// **no** materialized view and **no** CDC stream.
+    ///
+    /// This is the ONLY sanctioned execution path for the advice weave's
+    /// canonical read (anchor anti-join + `ORDER BY` + `LIMIT`, ADR 0022): that
+    /// shape MUST NOT be handed to `watch_query`, which matview-izes any SQL
+    /// and whose Turso IVM cannot maintain an anti-join FUSED WITH an
+    /// aggregate/GROUP BY (see holon-advice `probe_ivm_shape_findings`).
+    /// NOTE: a PLAIN anti-join in a non-aggregating outer view IS
+    /// incrementally maintained (proven by
+    /// `probe_outer_antijoin_is_incrementally_maintained`), so watching such a
+    /// read is fine — the advice weaver does exactly that.
+    /// See `holon_frontend::advice_weaver`.
+    ///
+    /// Default impl fails loud (returns `Err`) rather than silently returning
+    /// an empty set — a `QueryEngine` that has not wired one-shot execution
+    /// should surface that, not fake success. The Turso `BackendEngine`
+    /// overrides it.
+    async fn execute_query(
+        &self,
+        query: &str,
+        language: QueryLanguage,
+        params: HashMap<String, Value>,
+        context: Option<QueryContext>,
+    ) -> Result<Vec<crate::widget_spec::DataRow>> {
+        let _ = (query, language, params, context);
+        anyhow::bail!("QueryEngine::execute_query (one-shot) not implemented by this impl")
+    }
 }

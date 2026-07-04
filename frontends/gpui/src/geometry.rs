@@ -205,6 +205,42 @@ impl GeometryProvider for BoundsRegistry {
     }
 }
 
+/// [`GeometryProvider`] over a [`BoundsRegistry`] that promotes the staged
+/// buffer before every read. A window that paints once and then goes idle
+/// (iOS) leaves the last frame's bounds in `staged` forever — no next
+/// `begin_pass` ever rotates them — so an idle-window reader (the MCP
+/// driver) would see stale/empty `committed`. MCP reads arrive when the app
+/// is quiescent (no render pass in flight), so an on-demand `flush` commits
+/// exactly the last complete frame. Do NOT hand this wrapper to a
+/// render-concurrent reader: a mid-pass flush splits one frame's writes
+/// across two rotations.
+#[derive(Clone)]
+pub struct FlushOnReadGeometry(pub BoundsRegistry);
+
+impl GeometryProvider for FlushOnReadGeometry {
+    fn element_info(&self, id: &str) -> Option<ElementInfo> {
+        self.0.flush();
+        GeometryProvider::element_info(&self.0, id)
+    }
+
+    fn all_elements(&self) -> Vec<(String, ElementInfo)> {
+        self.0.flush();
+        GeometryProvider::all_elements(&self.0)
+    }
+
+    fn changed(&self) -> futures::future::BoxFuture<'static, ()> {
+        GeometryProvider::changed(&self.0)
+    }
+
+    fn generation(&self) -> u64 {
+        GeometryProvider::generation(&self.0)
+    }
+
+    fn clone_box(&self) -> Box<dyn GeometryProvider> {
+        Box::new(self.clone())
+    }
+}
+
 // Thread-local render-path stack used by `BoundsTracker` / `TransparentTracker`
 // to record each widget's immediate tracked parent. Pushed on `prepaint` before
 // recursing into children, popped after.

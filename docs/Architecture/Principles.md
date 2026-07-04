@@ -391,7 +391,7 @@ Cells (`Cell<T>`) are the system's universal reactive read primitive. Each cell 
 
 Per-entity-type cell registries hold the cells. `BlockCellRegistry` knows how to construct each block field's backing — in the default (CRDT-enabled) wiring: meta-backed for `completed`/`collapsed`/etc., text-backed for `content`; LWW-scalar-backed in SqlOnly mode. The backing kind is a wiring choice, not a property of the field. Cells are `Weak`-keyed: held alive while consumers reference them; reaped when the last consumer drops.
 
-**Cells vs `Mutable<T>`**: `Cell<T>` is for entity field state (has identity, has authority, could be persisted/queried/synced). Per-VM `Mutable<T>` (FU-1 pattern) is for per-instance widget state (tree-item `expanded`, view-mode-switcher selection, focused_block) — same-id entities in different render slots need independent state. Genuinely-ephemeral state (cursor blink, hover, drag offset) stays raw `Mutable<T>` too.
+**Cells vs `Mutable<T>`**: `Cell<T>` is for entity field state (has identity, has authority, could be persisted/queried/synced). Per-VM `Mutable<T>` (FU-1 pattern) is for per-instance widget state (tree-item `expanded`, view-mode-switcher selection) — same-id entities in different render slots need independent state. Not everything on a `Mutable<T>` is per-instance, though: `focused_block` is a **window-global `UiState` singleton** (`Mutable<Option<EntityUri>>`, `reactive.rs:953`), deliberately NOT per-instance — exactly one focused block per window, moved atomically, so two editors can't both believe they hold focus (see [UI.md](UI.md) app-level UI singletons and ADR 0010). Genuinely-ephemeral state (cursor blink, hover, drag offset) stays raw `Mutable<T>` too.
 
 ### Plain-Text File Layer
 

@@ -31,8 +31,7 @@ use holon_pbt_core::capabilities::SutLayout;
 use holon_pbt_core::invariant::Invariant;
 use holon_pbt_core::invariant::InvariantId;
 use holon_pbt_core::invariant::InvariantResult;
-
-use crate::pbt::retry::retry_until_ok;
+use holon_pbt_core::retry::retry_until_ok;
 
 pub struct InvWindowFocusMatchesEngineFocus;
 

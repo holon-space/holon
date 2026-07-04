@@ -8,27 +8,29 @@
 
 use std::time::Duration;
 
-use holon_api::ContentType;
 use holon_api::EntityUri;
 use holon_pbt_core::TransitionFactory;
-use holon_pbt_core::TransitionImpl;
 use holon_pbt_core::TransitionRef;
+use holon_pbt_core::capabilities::CapRegion;
+use holon_pbt_core::capabilities::RefBlockTree;
+use holon_pbt_core::capabilities::RefFocusRoots;
+use holon_pbt_core::capabilities::RefLayout;
+use holon_pbt_core::capabilities::RefLayoutInteract;
+use holon_pbt_core::capabilities::RefLayoutMutate;
+use holon_pbt_core::capabilities::RefLifecycle;
 use holon_pbt_core::capabilities::SutBlockInteract;
 use holon_pbt_core::capabilities::SutDriver;
 use holon_pbt_core::capabilities::SutLayout;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::check;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::reference_state::ReferenceState;
-#[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::ExpectedSql;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::MutationKind;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::expected_sql_for_kind;
-use crate::pbt::validation::Reason;
-use crate::pbt::validation::check;
 
 // ── Capability-bound free function (Phase C, Option A — real user input) ──
 //
@@ -102,11 +104,12 @@ pub struct TriggerSlashCommand {
     pub block_id: EntityUri,
 }
 
-impl TransitionFactory<ReferenceState> for TriggerSlashCommand {
+impl<
+    R: RefLifecycle + RefBlockTree + RefLayout + RefFocusRoots + RefLayoutInteract + RefLayoutMutate,
+> TransitionFactory<R> for TriggerSlashCommand
+{
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        vec![::holon_pbt_core::composition::CapId::of::<
-            dyn ::holon_pbt_core::capabilities::SutBlockInteract,
-        >()]
+        Self::declared_caps()
     }
 
     type Reason = Reason;
@@ -114,9 +117,9 @@ impl TransitionFactory<ReferenceState> for TriggerSlashCommand {
         ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Loro)
     }
 
-    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
-        let focused_in_main = state.focused_entity(holon_api::Region::Main).cloned();
-        let candidates: Vec<EntityUri> = focused_in_main
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+        let candidates: Vec<EntityUri> = state
+            .region_focused_entity(CapRegion::Main)
             .into_iter()
             .filter(|uri| {
                 TriggerSlashCommand {
@@ -136,23 +139,23 @@ impl TransitionFactory<ReferenceState> for TriggerSlashCommand {
     }
 }
 
-impl TransitionRef<ReferenceState> for TriggerSlashCommand {
+impl<
+    R: RefLifecycle + RefBlockTree + RefLayout + RefFocusRoots + RefLayoutInteract + RefLayoutMutate,
+> TransitionRef<R> for TriggerSlashCommand
+{
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
-        let focus_roots = state.expected_focus_root_ids(holon_api::Region::Main);
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
+        let focus_roots = state.expected_focus_root_ids(CapRegion::Main);
         let mut checks: Vec<Validated<(), Reason>> = vec![
-            check(state.action.app_started, Reason::AppNotStarted),
+            check(state.app_started(), Reason::AppNotStarted),
             check(state.is_properly_setup(), Reason::NotProperlySetup),
             // Block-interaction transitions need the block to render as an
             // interactive widget (ops/draggable) reactively over the navigated
             // focus. Only the default layout does; custom `index.org` query
             // layouts don't (see RefLifecycle::renders_block_interactively).
             check(
-                holon_pbt_core::capabilities::RefLifecycle::renders_block_interactively(
-                    state,
-                    &self.block_id,
-                ),
+                state.renders_block_interactively(&self.block_id),
                 Reason::BlocksNotInteractiveUnderLayout,
             ),
             // Slash-command input is character typing through the editor's
@@ -163,20 +166,15 @@ impl TransitionRef<ReferenceState> for TriggerSlashCommand {
         ];
 
         checks.push(check(
-            state.domain.block_state.blocks.contains_key(&self.block_id),
+            state.block_content(&self.block_id).is_some(),
             Reason::FocusedBlockMissing,
         ));
         checks.push(check(
-            state
-                .domain
-                .block_state
-                .blocks
-                .get(&self.block_id)
-                .is_some_and(|b| b.content_type == ContentType::Text),
+            state.is_text_block(&self.block_id),
             Reason::FocusedNotText,
         ));
         checks.push(check(
-            !state.domain.layout_blocks.contains(&self.block_id),
+            !state.is_layout_block(&self.block_id),
             Reason::FocusedInLayoutBlocks,
         ));
         checks.push(check(
@@ -184,7 +182,7 @@ impl TransitionRef<ReferenceState> for TriggerSlashCommand {
             Reason::BlockIsDefaultLayout,
         ));
         checks.push(check(
-            state.domain.block_state.blocks.len() > 2,
+            state.all_block_ids().len() > 2,
             Reason::InsufficientBlocksForDelete,
         ));
         checks.push(check(
@@ -198,37 +196,28 @@ impl TransitionRef<ReferenceState> for TriggerSlashCommand {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
-        use crate::pbt::types::Mutation;
-        use crate::pbt::types::MutationEvent;
-        use crate::pbt::types::MutationSource;
-        state.push_undo_snapshot();
-        state.apply_mutation(&MutationEvent {
-            source: MutationSource::UI,
-            mutation: Mutation::Delete {
-                entity: "block".to_string(),
-                id: self.block_id.clone(),
-            },
-        });
-        state.clear_focus_if_deleted(&self.block_id);
+    fn apply_to_ref(&self, state: &mut R) {
+        // The whole slash-delete reference effect (undo snapshot + delete via the
+        // shared mutation machinery + focus clear) lives in
+        // `RefLayoutMutate::apply_slash_delete`.
+        state.apply_slash_delete(&self.block_id);
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutBlockInteract> TransitionImpl<ReferenceState, S> for TriggerSlashCommand {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.trigger_slash_command(&self.block_id).await;
+crate::cap_transition! {
+    TriggerSlashCommand: SutBlockInteract,
+    where R: [
+        RefLifecycle + RefBlockTree + RefLayout + RefFocusRoots + RefLayoutInteract + RefLayoutMutate
+    ],
+    |me, _state, sut| {
+        sut.trigger_slash_command(&me.block_id).await;
     }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for TriggerSlashCommand {
-    fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
+    sql_budget: |_me, state| {
         expected_sql_for_kind(
             MutationKind::Delete,
-            state.mcp.active_watches.len(),
-            state.domain.block_state.blocks.len(),
-            state.files.documents.len(),
+            state.active_watch_count(),
+            state.block_count(),
+            state.document_count(),
         )
     }
 }

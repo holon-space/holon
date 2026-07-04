@@ -39,7 +39,8 @@ impl SinkReader for TursoSinkReader {
              b.source_name, b.properties, b.marks, b.created_at, b.updated_at, COALESCE((SELECT \
              json_group_array(tag) FROM block_tags WHERE block_id = b.id), '[]') AS tags, \
              COALESCE((SELECT json_group_array(required_id) FROM block_requires WHERE block_id = \
-             b.id), '[]') AS requires FROM {table} b",
+             b.id), '[]') AS requires, COALESCE((SELECT json_group_array(lesson_id) FROM \
+             advice_suppressed WHERE anchor_id = b.id), '[]') AS advice_suppressed FROM {table} b",
             table = BLOCK_WRITE_TABLE,
         );
         let rows = self

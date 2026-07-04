@@ -15,19 +15,13 @@ use holon_pbt_core::TransitionFactory;
 use holon_pbt_core::TransitionImpl;
 use holon_pbt_core::TransitionRef;
 use holon_pbt_core::capabilities::SutBlockInteract;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::map_nevec;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
 use crate::pbt::layout_bridge::SutClickAdapter;
 use crate::pbt::reference_state::ReferenceState;
-#[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::ExpectedSql;
-#[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::REACTIVE_BASE;
-#[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::docs_tolerance;
-use crate::pbt::validation::Reason;
-use crate::pbt::validation::map_nevec;
 
 fn map_reason(r: SwitchViewModeReason) -> Reason {
     match r {
@@ -84,17 +78,5 @@ impl<S: SutBlockInteract> TransitionImpl<ReferenceState, S> for SwitchViewMode {
             LayoutSut<'_, SutClickAdapter<'_, S>>,
         >>::apply_to_sut(self, &ref_view, &mut layout_sut)
         .await;
-    }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for SwitchViewMode {
-    fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
-        ExpectedSql {
-            reads: REACTIVE_BASE + 10,
-            writes: 0,
-            ddl: 0,
-            tolerance: docs_tolerance(state) + 5,
-        }
     }
 }

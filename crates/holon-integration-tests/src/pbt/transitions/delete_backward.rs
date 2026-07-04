@@ -7,7 +7,6 @@
 //! `transition_budgets.rs:368-377` (expected SQL).
 
 use holon_pbt_core::TransitionFactory;
-use holon_pbt_core::TransitionImpl;
 use holon_pbt_core::TransitionRef;
 use holon_pbt_core::capabilities::CapRegion;
 use holon_pbt_core::capabilities::RefBlockTreeMut;
@@ -18,17 +17,16 @@ use holon_pbt_core::capabilities::RefFocusMut;
 use holon_pbt_core::capabilities::RefLifecycle;
 use holon_pbt_core::capabilities::SutEditorMirrorWrite;
 use holon_pbt_core::capabilities::commit_active_editor_if_changed;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::check;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::reference_state::ReferenceState;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::REACTIVE_BASE;
-use crate::pbt::validation::Reason;
-use crate::pbt::validation::check;
 
 /// Delete `count` characters backward in the active editor.
 /// Gated to `PBT_ATOMIC_EDITOR=1` runs.
@@ -150,9 +148,7 @@ where
 
 impl<R: RefEditorMirror + RefFocus + RefLifecycle> TransitionFactory<R> for DeleteBackward {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        vec![::holon_pbt_core::composition::CapId::of::<
-            dyn ::holon_pbt_core::capabilities::SutEditorMirrorWrite,
-        >()]
+        Self::declared_caps()
     }
 
     type Reason = Reason;
@@ -188,16 +184,13 @@ impl<
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutEditorMirrorWrite> TransitionImpl<ReferenceState, S> for DeleteBackward {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.apply_delete_backward(self.count).await;
+crate::cap_transition! {
+    DeleteBackward: SutEditorMirrorWrite,
+    where R: [ RefEditorMirror + RefFocus + RefLifecycle ],
+    |me, _state, sut| {
+        sut.apply_delete_backward(me.count).await;
     }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for DeleteBackward {
-    fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
+    sql_budget: |_me, _state| {
         ExpectedSql {
             reads: REACTIVE_BASE,
             writes: 0,

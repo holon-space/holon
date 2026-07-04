@@ -9,20 +9,6 @@ use std::sync::atomic::AtomicU64;
 
 use async_trait::async_trait;
 use futures::future::FutureExt;
-use holon_api::Batch;
-use holon_api::BatchMetadata;
-use holon_api::BatchTraceContext;
-use holon_api::BatchWithMetadata;
-use holon_api::CHANGE_ORIGIN_COLUMN;
-use holon_api::Change;
-use holon_api::ChangeOrigin;
-use holon_api::Value;
-use holon_core::storage::Filter;
-use holon_core::storage::Resource;
-use holon_core::storage::Result;
-use holon_core::storage::StorageBackend;
-use holon_core::storage::StorageEntity;
-use holon_core::storage::StorageError;
 use serde_json;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
@@ -38,6 +24,52 @@ use turso_core::types::RelationChangeEvent;
 use turso_sdk_kit::rsapi::DatabaseChangeType;
 use turso_sdk_kit::rsapi::TursoConnection;
 use turso_sdk_kit::rsapi::TursoDatabaseConfig;
+
+/// Host-IO seam for wasm32: browser workers register their `turso_core::IO`
+/// implementation (e.g. an OPFS shim) here before opening a file-backed
+/// database. Insert-only — a second registration is a wiring bug.
+#[cfg(all(not(target_family = "unix"), target_family = "wasm"))]
+pub mod wasm_io {
+    use std::cell::RefCell;
+    use std::sync::Arc;
+
+    // thread_local because host IO shims (e.g. the browser worker's OPFS
+    // shim) are deliberately not Send/Sync; the engine and its Turso actor
+    // all run on the worker's single napi thread.
+    thread_local! {
+        static IO: RefCell<Option<Arc<dyn turso_core::IO>>> = const { RefCell::new(None) };
+    }
+
+    pub fn register(io: Arc<dyn turso_core::IO>) {
+        IO.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            assert!(
+                slot.is_none(),
+                "wasm IO already registered — register must be called exactly once per thread"
+            );
+            *slot = Some(io);
+        });
+    }
+
+    pub fn registered() -> Option<Arc<dyn turso_core::IO>> {
+        IO.with(|slot| slot.borrow().clone())
+    }
+}
+
+use holon_api::Batch;
+use holon_api::BatchMetadata;
+use holon_api::BatchTraceContext;
+use holon_api::BatchWithMetadata;
+use holon_api::CHANGE_ORIGIN_COLUMN;
+use holon_api::Change;
+use holon_api::ChangeOrigin;
+use holon_api::Value;
+use holon_core::storage::Filter;
+use holon_core::storage::Resource;
+use holon_core::storage::Result;
+use holon_core::storage::StorageBackend;
+use holon_core::storage::StorageEntity;
+use holon_core::storage::StorageError;
 
 use crate::sql_parser::extract_created_tables;
 use crate::sql_parser::extract_table_refs;
@@ -1122,13 +1154,32 @@ impl TursoBackend {
     }
 
     #[cfg(all(not(target_family = "unix"), target_family = "wasm"))]
-    pub fn open_database<P: AsRef<Path>>(_: P) -> Result<Arc<Database>> {
-        // wasm32: always in-memory. No OPFS yet (see handoff §Out of scope).
+    pub fn open_database<P: AsRef<Path>>(db_path: P) -> Result<Arc<Database>> {
+        // wasm32: `:memory:` uses MemoryIO; any other path requires a host IO
+        // registered via `register_wasm_io` (the browser worker registers its
+        // OPFS shim before engine init). Fail loud if a file path is requested
+        // without one — silently falling back to memory would fake persistence.
+        let db_path_str = db_path
+            .as_ref()
+            .to_str()
+            .ok_or_else(|| StorageError::DatabaseError("Invalid path".to_string()))?;
         let opts = DatabaseOpts::default().with_views(true);
-        let io = Arc::new(MemoryIO::new());
-        let db = Database::open_file_with_flags(io, ":memory:", OpenFlags::default(), opts, None)
-            .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
-        tracing::info!("Turso in-memory database opened (wasm32)");
+        let db = if db_path_str.starts_with(":memory:") {
+            let io = Arc::new(MemoryIO::new());
+            Database::open_file_with_flags(io, db_path_str, OpenFlags::default(), opts, None)
+                .map_err(|e| StorageError::DatabaseError(e.to_string()))?
+        } else {
+            let io = wasm_io::registered().ok_or_else(|| {
+                StorageError::DatabaseError(format!(
+                    "open_database('{db_path_str}'): no wasm IO registered — call \
+                     holon_turso::register_wasm_io (e.g. with the OPFS shim) before \
+                     opening a file-backed database on wasm32"
+                ))
+            })?;
+            Database::open_file_with_flags(io, db_path_str, OpenFlags::Create, opts, None)
+                .map_err(|e| StorageError::DatabaseError(e.to_string()))?
+        };
+        tracing::info!("Turso database opened (wasm32) at: {}", db_path_str);
         Ok(db)
     }
 
@@ -1293,6 +1344,12 @@ impl TursoBackend {
             tracing::error!("[CONN-{}] Failed to create connection: {}", conn_id, e);
             StorageError::DatabaseError(e.to_string())
         })?;
+
+        // Enforce foreign keys DB-wide: FK checking is per-connection in the
+        // fork, so every connection minted here opts in. This is the single
+        // place that makes the block_raw parent FK (roots → sentinel:no_parent)
+        // actually enforced on writes.
+        conn_core.set_foreign_keys_enabled(true);
 
         let turso_conn = TursoConnection::new(&default_turso_config(), conn_core);
         let conn = turso::Connection::create(turso_conn, None);
@@ -1879,12 +1936,66 @@ impl TursoBackend {
     async fn handle_ddl(conn: &turso::Connection, sql: &str) -> Result<()> {
         trace_sql("actor_ddl", sql);
 
-        conn.execute(sql, ())
-            .await
-            .map_err(|e| StorageError::DatabaseError(format!("Failed to execute DDL: {}", e)))?;
+        // The actor processes commands sequentially, so an unbounded DDL await
+        // parks the *entire* DB actor: every later query/exec queues behind it
+        // and never gets a response — the app freezes with no error. A
+        // `CREATE MATERIALIZED VIEW` that selects FROM another matview can hang
+        // forever in Turso IVM (matview-on-matview is unsupported — see
+        // .claude/skills/turso-chained-matview-hang/SKILL.md). Bounding the
+        // execution here lets the actor recover and surface a loud error
+        // instead. The caller-side DEPENDENCY_TIMEOUT (120s) does NOT help:
+        // it only abandons the caller's wait; the actor stays parked forever.
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        {
+            let timeout = Self::ddl_execution_timeout();
+            match tokio::time::timeout(timeout, conn.execute(sql, ())).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    return Err(StorageError::DatabaseError(format!(
+                        "Failed to execute DDL: {}",
+                        e
+                    )));
+                }
+                Err(_elapsed) => {
+                    let sql_preview: String = sql.chars().take(160).collect();
+                    return Err(StorageError::DatabaseError(format!(
+                        "DDL execution timed out after {:?} — actor would have hung. \
+                         Suspected Turso chained-matview (matview-on-matview) limitation: \
+                         CREATE MATERIALIZED VIEW selecting FROM another matview hangs \
+                         indefinitely in Turso IVM. See \
+                         .claude/skills/turso-chained-matview-hang/SKILL.md. SQL: {}...",
+                        timeout, sql_preview
+                    )));
+                }
+            }
+        }
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        {
+            conn.execute(sql, ()).await.map_err(|e| {
+                StorageError::DatabaseError(format!("Failed to execute DDL: {}", e))
+            })?;
+        }
 
         tracing::debug!("[TursoBackend::Actor] DDL completed successfully");
         Ok(())
+    }
+
+    /// Upper bound on a single DDL statement's execution inside the actor.
+    ///
+    /// Kept well under the caller-side `DEPENDENCY_TIMEOUT` (120s) so a genuine
+    /// hang is caught here first (freeing the actor) rather than only
+    /// abandoning one caller's wait. Overridable via `HOLON_DDL_TIMEOUT_MS`
+    /// so tests can exercise the hang guard without a 30s wall.
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    fn ddl_execution_timeout() -> std::time::Duration {
+        const DDL_EXECUTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+        match std::env::var("HOLON_DDL_TIMEOUT_MS") {
+            Ok(ms) => std::time::Duration::from_millis(
+                ms.parse()
+                    .expect("HOLON_DDL_TIMEOUT_MS must be a u64 millisecond count"),
+            ),
+            Err(_) => DDL_EXECUTION_TIMEOUT,
+        }
     }
 
     /// Handle a transaction command

@@ -31,7 +31,7 @@ boundaries, each with its own vocabulary and its own translation rules.
 
 | Context | Crate(s) | Owns | Calls a block a… | Block identity is… |
 |---|---|---|---|---|
-| **Authoring / Format** | `holon-org-format`, `holon-orgmode`, `holon-markdown` | parse/render disk text ↔ Block | headline / heading / drawer / fence / frontmatter | **bare id** on disk |
+| **Authoring / Format** | `holon-org-format`, `holon-orgmode` | parse/render disk text ↔ Block | headline / heading / drawer / fence / frontmatter | **bare id** on disk |
 | **CRDT of record** | `holon-loro` | the authoritative block store + merge | LoroTree **node** (`TreeID`) + meta `LoroMap` | `STABLE_ID` meta key (`TreeID` is peer-local!) |
 | **P2P transport** | `holon-loro` (Iroh) | replicate the CRDT between peers | version-vector delta bytes | per-share `stable_peer_id` |
 | **Read projection / Query** | `holon-turso` | SQL read model + CDC | **row** in `block` matview / `block_raw` | `id` column (not SQLite ROWID!) |
@@ -268,8 +268,8 @@ shipped. Anchors: `share_subtree`, `HistoryRetention` in
   absent from the reintegrated tree). Contrast `unmount_with_reintegration`
   (`HistoryRetention::Full`) which succeeds because lineage is preserved.
 
-**H6 — Markdown identity drift. ✅ FIXED (2026-07-02) — scoped: latent until the
-markdown adapter is wired into file-sync.**
+**H6 — Markdown identity drift. ✅ FIXED (2026-07-02) — MOOT since 2026-07-06: the
+`holon-markdown` crate was removed as unwired dead code (recoverable from git history).**
 An out-of-charset block id used to be *silently* dropped from rendered text (empty
 `^` marker), so the re-parse minted a fresh UUID → the block lost identity across a
 round-trip. `block_id_marker` (`holon-markdown/src/renderer.rs`) now returns a loud

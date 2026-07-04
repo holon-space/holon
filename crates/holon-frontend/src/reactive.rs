@@ -104,6 +104,16 @@ pub trait BuilderServices: Send + Sync {
         None
     }
 
+    /// Advice rows to weave as read-only children under `anchor` (ADR 0022),
+    /// already synthesized (rank-ordered `DataRow`s, `parent_id = anchor`,
+    /// occurrence-keyed columns). Empty when no active rule matches / not yet
+    /// computed. A SYNCHRONOUS pure read of the pre-populated session sidecar —
+    /// mirrors [`Self::virtual_child_config`]; every stub/headless-without-advice
+    /// service keeps the default (empty), so snapshots stay byte-identical.
+    fn advice_children(&self, _anchor: &EntityUri) -> Vec<Arc<DataRow>> {
+        Vec::new()
+    }
+
     /// Entity-level operations (keyed by id scheme, e.g. `"block"`) — the same
     /// set the renderer attaches to a row of that entity. Used by headless
     /// input paths to build the slash-command menu without a rendered node.
@@ -122,6 +132,15 @@ pub trait BuilderServices: Send + Sync {
         lang: QueryLanguage,
         ctx: Option<crate::QueryContext>,
     ) -> Result<holon_api::EnrichedChangeStream>;
+
+    /// The one-shot query-execution capability, when a Turso query engine is
+    /// wired. `None` for a no-Turso (Loro-only) session. The advice weaver reaches
+    /// it via this accessor to run its canonical read as a single
+    /// [`holon_api::QueryEngine::execute_query`] — NEVER a watch (see
+    /// `crate::advice_weaver`). Default `None` (stub/headless services).
+    fn query_engine(&self) -> Option<Arc<dyn holon_api::QueryEngine>> {
+        None
+    }
 
     /// Look up widget state by block ID.
     fn widget_state(&self, id: &str) -> WidgetState;
@@ -578,10 +597,14 @@ impl ReactiveRowSet {
     ///
     /// Used by `MutableTree` to translate keyed VecDiff into tree operations.
     /// Unlike `row_signal_vec()`, preserves the entity ID for `RemoveAt` tracking.
-    pub fn keyed_signal_vec(&self) -> impl SignalVec<Item = (EntityUri, Arc<DataRow>)> {
-        self.data
-            .entries_cloned()
-            .map_signal(|(k, cell)| cell.signal_cloned().map(move |v| (k.clone(), v)))
+    pub fn keyed_signal_vec(&self) -> impl SignalVec<Item = (holon_api::RowKey, Arc<DataRow>)> {
+        // The store is `EntityUri`-keyed; every canonical row carries
+        // `Occurrence::Canonical`. Display-placed occurrences are injected by
+        // `AppendedRowsProvider`, never by the store.
+        self.data.entries_cloned().map_signal(|(k, cell)| {
+            cell.signal_cloned()
+                .map(move |v| ((k.clone(), holon_api::Occurrence::Canonical), v))
+        })
     }
 }
 
@@ -601,7 +624,7 @@ impl ReactiveRowProvider for ReactiveRowSet {
     }
     fn keyed_rows_signal_vec(
         &self,
-    ) -> Pin<Box<dyn SignalVec<Item = (EntityUri, Arc<DataRow>)> + Send>> {
+    ) -> Pin<Box<dyn SignalVec<Item = (holon_api::RowKey, Arc<DataRow>)> + Send>> {
         Box::pin(self.keyed_signal_vec())
     }
     fn cache_identity(&self) -> u64 {
@@ -755,7 +778,7 @@ impl ReactiveRenderedRows {
     }
 
     /// Per-row keyed `SignalVec`. Delegates to the inner row set.
-    pub fn keyed_signal_vec(&self) -> impl SignalVec<Item = (EntityUri, Arc<DataRow>)> {
+    pub fn keyed_signal_vec(&self) -> impl SignalVec<Item = (holon_api::RowKey, Arc<DataRow>)> {
         self.rows.keyed_signal_vec()
     }
 
@@ -867,7 +890,7 @@ impl ReactiveRowProvider for ReactiveRenderedRows {
     }
     fn keyed_rows_signal_vec(
         &self,
-    ) -> Pin<Box<dyn SignalVec<Item = (EntityUri, Arc<DataRow>)> + Send>> {
+    ) -> Pin<Box<dyn SignalVec<Item = (holon_api::RowKey, Arc<DataRow>)> + Send>> {
         Box::pin(self.rows.keyed_signal_vec())
     }
     fn row_mutable(&self, id: &EntityUri) -> Option<ReadOnlyMutable<Arc<DataRow>>> {
@@ -917,9 +940,52 @@ impl ReactiveRegistry {
 struct WatcherState {
     task: tokio::task::JoinHandle<()>,
     command_tx: tokio::sync::mpsc::Sender<holon_api::WatcherCommand>,
-    /// Number of active consumers (ReactiveShell instances) watching this block.
-    /// When refcount drops to 0, the watcher is eligible for cleanup.
+    /// Number of live [`WatchGuard`]s pinning this watcher. Read-only paths
+    /// ([`ReactiveEngine::ensure_watching`]) never touch this — a watcher
+    /// started by a read alone sits at 0 (warm cache) and is only reclaimed
+    /// once an acquired count drops back to 0.
     refcount: usize,
+}
+
+// ── WatchGuard ───────────────────────────────────────────────────────────
+
+/// RAII pin on a block/query watcher.
+///
+/// Acquired via [`ReactiveEngine::acquire_watch`], or carried inside the
+/// [`LiveBlock`] returned by [`ReactiveEngine::watch_live`] /
+/// [`ReactiveEngine::watch_query_live`]. Dropping the last guard for a key
+/// aborts the watcher task and releases its reactive state. Long-lived
+/// subscribers (shells, views) hold the guard for as long as they consume
+/// the watch; one-shot readers must NOT acquire one — they use the
+/// non-counting [`ReactiveEngine::ensure_watching`] read path instead.
+#[must_use = "dropping the guard releases the watcher; hold it for the lifetime of the subscription"]
+pub struct WatchGuard {
+    key: EntityUri,
+    services: Arc<dyn BuilderServices>,
+}
+
+impl WatchGuard {
+    fn new(key: EntityUri, services: Arc<dyn BuilderServices>) -> Self {
+        Self { key, services }
+    }
+
+    /// The watcher key this guard pins (a block URI, or a synthetic
+    /// `query:<hash>` key for query watchers).
+    pub fn key(&self) -> &EntityUri {
+        &self.key
+    }
+}
+
+impl std::fmt::Debug for WatchGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("WatchGuard").field(&self.key).finish()
+    }
+}
+
+impl Drop for WatchGuard {
+    fn drop(&mut self) {
+        self.services.unwatch(&self.key);
+    }
 }
 
 // ── UiState ──────────────────────────────────────────────────────────────
@@ -970,6 +1036,14 @@ pub struct UiState {
     /// is how the initial caret reaches a backend-driven mount in-process,
     /// replacing the old `editor_cursor` round-trip.
     pending_caret_seed: Mutable<Option<(EntityUri, usize)>>,
+    /// SPIKE (Phase 1b — display-placement de-risk): which *occurrence* of
+    /// `focused_block` holds focus. `None` = the block's canonical occurrence
+    /// (every existing `set_focus` path leaves this `None`, so behaviour is
+    /// unchanged — this is deliberately ADDITIVE). `Some(n)` = a display-placed
+    /// occurrence. This proves the focus authority can carry `(id, occurrence)`
+    /// WITHOUT widening `focused_block`'s type (which would ripple through ~10
+    /// readers + all four frontends — ADR 0010's reserved graduation).
+    focused_occurrence: Mutable<Option<u32>>,
 }
 
 impl UiState {
@@ -979,7 +1053,21 @@ impl UiState {
             viewport_generation: Mutable::new(0),
             viewport: Mutable::new(None),
             pending_caret_seed: Mutable::new(None),
+            focused_occurrence: Mutable::new(None),
         }
+    }
+
+    /// SPIKE: set the focused occurrence alongside the focused block. `None`
+    /// restores canonical focus. Additive — no effect on `focused_block`.
+    pub(crate) fn set_focus_occurrence(&self, occ: Option<u32>) {
+        if self.focused_occurrence.get_cloned() != occ {
+            self.focused_occurrence.set(occ);
+        }
+    }
+
+    /// SPIKE: read the currently focused occurrence (`None` = canonical).
+    pub(crate) fn focused_occurrence(&self) -> Option<u32> {
+        self.focused_occurrence.get_cloned()
     }
 
     /// Get a signal that fires when the viewport changes. Include in reactive
@@ -1189,6 +1277,18 @@ pub struct ReactiveEngine {
     /// inside `&self` methods. Populated by the owning frontend right after
     /// the engine is wrapped in an Arc; `clone_arc()` reads it.
     pub services_slot: Arc<std::sync::OnceLock<Arc<dyn BuilderServices>>>,
+
+    /// The session-level advice weave sidecar (ADR 0022): anchor → synthesized
+    /// advice rows, read synchronously and purely by
+    /// [`BuilderServices::advice_children`] during interpretation. Populated by
+    /// [`Self::refresh_advice_sidecar`] (deterministic settle) and by the lazily
+    /// spawned reactive weaver ([`crate::advice_weaver::spawn_session_weaver`]),
+    /// both writing this same map. Empty when no active rule matches — the
+    /// snapshot then stays byte-identical to a pre-advice render.
+    advice_sidecar: crate::advice_weaver::AdviceSidecar,
+    /// Guards the one-time lazy spawn of the reactive advice weaver (spawned on
+    /// first `advice_children` call, once a query engine is wired).
+    advice_weaver_started: std::sync::atomic::AtomicBool,
 }
 
 impl ReactiveEngine {
@@ -1243,7 +1343,45 @@ impl ReactiveEngine {
             provider_cache: Arc::new(crate::provider_cache::ProviderCache::new()),
             block_cell_registry: Mutex::new(None),
             services_slot,
+            advice_sidecar: Arc::new(Mutex::new(HashMap::new())),
+            advice_weaver_started: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Recompute the advice weave sidecar from the current SQL state (one-shot
+    /// canonical read over every anchor the active rule produces). Called by the
+    /// composed settle to converge the weave deterministically before a snapshot;
+    /// also the recompute the reactive weaver runs on each trigger. A no-Turso
+    /// (Loro-only) session has no query engine → the sidecar stays empty.
+    pub async fn refresh_advice_sidecar(&self) {
+        match self.session.query_engine() {
+            Some(query_engine) => {
+                crate::advice_weaver::recompute_sidecar(query_engine.as_ref(), &self.advice_sidecar)
+                    .await
+            }
+            None => self.advice_sidecar.lock().unwrap().clear(),
+        }
+    }
+
+    /// Lazily start the reactive advice weaver exactly once, as soon as a query
+    /// engine is wired. Idempotent and cheap on the hot path (an already-started
+    /// atomic load). A session that never wires a query engine never spawns it.
+    fn ensure_advice_weaver(&self) {
+        use std::sync::atomic::Ordering;
+        if self.advice_weaver_started.load(Ordering::Relaxed) {
+            return;
+        }
+        let Some(query_engine) = self.session.query_engine() else {
+            return;
+        };
+        if self.advice_weaver_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        crate::advice_weaver::spawn_session_weaver(
+            &self.runtime_handle,
+            query_engine,
+            self.advice_sidecar.clone(),
+        );
     }
 
     /// Access the shared `ReactiveRowProvider` cache. Value functions
@@ -1355,7 +1493,7 @@ impl ReactiveEngine {
         block_id: &EntityUri,
         services: Arc<dyn BuilderServices>,
     ) -> LiveBlock {
-        let results = self.ensure_watching(block_id);
+        let (results, watch_guard) = self.acquire_watch(block_id, services.clone());
 
         // Interpret the initial tree from current snapshot.
         // If render_expr is Loading (watcher hasn't delivered yet), return a
@@ -1403,6 +1541,7 @@ impl ReactiveEngine {
         LiveBlock {
             tree,
             structural_changes: structural_stream,
+            watch_guard: Some(watch_guard),
         }
     }
 
@@ -1495,18 +1634,73 @@ impl ReactiveEngine {
     }
 
     /// Get the ReactiveRenderedRows for a block, ensuring a watcher is running.
-    /// Used by the interpreter's live_block builder and by tests.
+    ///
+    /// **Non-counting read path**: starts the watcher if absent but does NOT
+    /// pin it. The refcount tracks live [`WatchGuard`]s only, so one-shot
+    /// readers (`snapshot_reactive`, `get_block_data`, `await_ready`, MCP /
+    /// PBT / TUI snapshots) can call this arbitrarily often without leaking
+    /// the watcher. A watcher started by a read alone stays warm at
+    /// refcount 0 until a guard cycle reclaims it. Long-lived subscribers
+    /// must pin the watcher via [`Self::acquire_watch`] (or hold the
+    /// [`LiveBlock`] from [`Self::watch_live`], which carries the guard).
     pub fn ensure_watching(&self, block_id: &EntityUri) -> Arc<ReactiveRenderedRows> {
         let results = self.registry.get_or_create(block_id);
-
         let mut watchers = self.watchers.lock().unwrap();
-        if let Some(state) = watchers.get_mut(block_id) {
-            state.refcount += 1;
-            return results;
+        if !watchers.contains_key(block_id) {
+            let state = self.spawn_block_watcher(block_id, results.clone(), 0);
+            watchers.insert(block_id.clone(), state);
         }
+        results
+    }
 
+    /// Counting acquisition: ensure the watcher is running AND pin it with an
+    /// RAII [`WatchGuard`]. Dropping the last guard aborts the watcher task
+    /// and releases the block's reactive state. `services` must resolve
+    /// [`BuilderServices::unwatch`] to this engine — it is what the guard's
+    /// `Drop` calls.
+    pub fn acquire_watch(
+        &self,
+        block_id: &EntityUri,
+        services: Arc<dyn BuilderServices>,
+    ) -> (Arc<ReactiveRenderedRows>, WatchGuard) {
+        let results = self.registry.get_or_create(block_id);
+        let mut watchers = self.watchers.lock().unwrap();
+        match watchers.get_mut(block_id) {
+            Some(state) => state.refcount += 1,
+            None => {
+                let state = self.spawn_block_watcher(block_id, results.clone(), 1);
+                watchers.insert(block_id.clone(), state);
+            }
+        }
+        drop(watchers);
+        (results, WatchGuard::new(block_id.clone(), services))
+    }
+
+    /// Test/diagnostic introspection: the number of live [`WatchGuard`]s
+    /// pinning `block_id`'s watcher (`Some(0)` = read-warmed, unpinned;
+    /// `None` = no watcher running).
+    pub fn watcher_refcount(&self, block_id: &EntityUri) -> Option<usize> {
+        self.watchers
+            .lock()
+            .unwrap()
+            .get(block_id)
+            .map(|s| s.refcount)
+    }
+
+    /// Test/diagnostic introspection: how many watcher tasks are running.
+    pub fn active_watcher_count(&self) -> usize {
+        self.watchers.lock().unwrap().len()
+    }
+
+    /// Spawn the CDC watcher task for `block_id`, feeding `reactive`.
+    /// Callers hold the `watchers` lock and insert the returned state.
+    fn spawn_block_watcher(
+        &self,
+        block_id: &EntityUri,
+        reactive: Arc<ReactiveRenderedRows>,
+        refcount: usize,
+    ) -> WatcherState {
         let session = self.session.clone();
-        let reactive = results.clone();
         let bid = block_id.clone();
 
         let (proxy_cmd_tx, mut proxy_cmd_rx) =
@@ -1696,16 +1890,11 @@ impl ReactiveEngine {
             }
         });
 
-        watchers.insert(
-            block_id.clone(),
-            WatcherState {
-                task,
-                command_tx: proxy_cmd_tx,
-                refcount: 1,
-            },
-        );
-
-        results
+        WatcherState {
+            task,
+            command_tx: proxy_cmd_tx,
+            refcount,
+        }
     }
 
     /// Watch a live query with per-row collection reactivity.
@@ -1724,6 +1913,9 @@ impl ReactiveEngine {
         services: Arc<dyn BuilderServices>,
     ) -> (EntityUri, LiveBlock) {
         let (key, results) = self.ensure_query_watching(query, lang, render_expr, query_context);
+        // `ensure_query_watching` counted +1 for this call; the guard owns
+        // that count and releases it on drop.
+        let watch_guard = WatchGuard::new(key.clone(), services.clone());
 
         let (expr, rows) = results.snapshot();
         let ctx = RenderContext {
@@ -1754,13 +1946,15 @@ impl ReactiveEngine {
             LiveBlock {
                 tree,
                 structural_changes: structural_stream,
+                watch_guard: Some(watch_guard),
             },
         )
     }
 
     /// Ensure a query watcher is running and return its watcher key plus
-    /// ReactiveRenderedRows. Reuse bumps the watcher refcount — every caller
-    /// owes a matching [`Self::unwatch`] with the returned key.
+    /// ReactiveRenderedRows. Every call counts +1 on the watcher refcount;
+    /// [`Self::watch_query_live`] (the only caller) wraps that count in a
+    /// [`WatchGuard`] whose drop releases it.
     fn ensure_query_watching(
         &self,
         query: String,
@@ -1831,16 +2025,30 @@ impl ReactiveEngine {
             .map_err(|_| anyhow::anyhow!("Watcher channel closed"))
     }
 
-    /// Decrement the refcount for a block's watcher. When the last consumer
-    /// drops, the watcher task is aborted and reactive state is released.
+    /// Release one [`WatchGuard`]'s pin on a block's watcher. When the last
+    /// guard drops, the watcher task is aborted and reactive state is
+    /// released. Called by `WatchGuard::drop` — do not call manually; pair
+    /// every count with a guard from [`Self::acquire_watch`] instead.
     pub fn unwatch(&self, block_id: &EntityUri) {
         let mut watchers = self.watchers.lock().unwrap();
         let should_remove = match watchers.get_mut(block_id) {
             Some(state) => {
+                debug_assert!(
+                    state.refcount > 0,
+                    "unwatch({block_id}) without a matching acquire_watch — guard bookkeeping bug"
+                );
                 state.refcount = state.refcount.saturating_sub(1);
                 state.refcount == 0
             }
-            None => false,
+            None => {
+                // A guard outliving its (already reclaimed) watcher is a
+                // bookkeeping bug — surface it, don't silently ignore.
+                tracing::error!(
+                    %block_id,
+                    "unwatch for a block with no active watcher (guard/acquire mismatch)"
+                );
+                false
+            }
         };
         if should_remove {
             if let Some(state) = watchers.remove(block_id) {
@@ -1889,6 +2097,21 @@ impl ReactiveEngine {
     pub fn runtime_handle(&self) -> &tokio::runtime::Handle {
         &self.runtime_handle
     }
+
+    /// SPIKE (Phase 1b): which occurrence of the focused block holds focus
+    /// (`None` = canonical). The headless editor mirror keys its cursor map by
+    /// `(block_id, occurrence)` so two display occurrences of one block get
+    /// independent carets while edits still resolve to the canonical block.
+    pub fn focused_occurrence(&self) -> Option<u32> {
+        self.ui_state.focused_occurrence()
+    }
+
+    /// SPIKE (Phase 1b): set the focused occurrence (`None` = canonical).
+    /// Additive to `set_focus`; leaves `focused_block` untouched. `pub` so the
+    /// integration-tests crate's end-to-end occurrence test can drive it.
+    pub fn set_focus_occurrence(&self, occ: Option<u32>) {
+        self.ui_state.set_focus_occurrence(occ);
+    }
 }
 
 impl BuilderServices for ReactiveEngine {
@@ -1933,6 +2156,18 @@ impl BuilderServices for ReactiveEngine {
         self.session.profiles().virtual_child_config(entity_name)
     }
 
+    fn advice_children(&self, anchor: &EntityUri) -> Vec<Arc<DataRow>> {
+        // Lazily bring the reactive weaver up on first read so a live session
+        // keeps the sidecar fresh; the composed settle refreshes it explicitly.
+        self.ensure_advice_weaver();
+        self.advice_sidecar
+            .lock()
+            .unwrap()
+            .get(anchor)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     fn entity_operations(
         &self,
         entity_name: &str,
@@ -1956,6 +2191,10 @@ impl BuilderServices for ReactiveEngine {
                 .join()
                 .unwrap()
         })
+    }
+
+    fn query_engine(&self) -> Option<Arc<dyn holon_api::QueryEngine>> {
+        self.session.query_engine()
     }
 
     fn widget_state(&self, id: &str) -> WidgetState {
@@ -2000,6 +2239,12 @@ impl BuilderServices for ReactiveEngine {
         let entity_name = intent.entity_name.clone();
         let op_name = intent.op_name.clone();
         let params = intent.params;
+        // End-to-end latency: start the interaction clock at the dispatch
+        // entry point; `holon_api::latency_e2e` closes it when the target's
+        // row lands in a LiveData mirror (stage="e2e").
+        if let Some(target) = params.get("id").and_then(|v| v.as_string()) {
+            holon_api::latency_e2e::interaction_dispatched(&op_name, target);
+        }
         self.runtime_handle.spawn(async move {
             match session
                 .execute_operation(&entity_name, &op_name, params)
@@ -2071,6 +2316,25 @@ impl BuilderServices for ReactiveEngine {
         let session = self.session.clone();
         let (focused_block, caret_seed) = self.ui_state.focus_handles();
         Box::pin(async move {
+            // Latency stage (dispatch->op-applied): a user action enters the
+            // pipeline here. `block` is the entity the op targets; `action` the
+            // op name (split_block, indent, outdent, cycle_state, ...). The push
+            // pipeline (Loro commit -> projection -> CDC rows) runs downstream and
+            // is measured by the `projection`/`rows` stages. Greppable via
+            // target="holon_latency".
+            let block = intent
+                .params
+                .get("id")
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| intent.entity_name.as_str().to_string());
+            // End-to-end latency: start the interaction clock here;
+            // `holon_api::latency_e2e` closes it when the target's row lands
+            // in a LiveData mirror (stage="e2e").
+            if let Some(target) = intent.params.get("id").and_then(|v| v.as_string()) {
+                holon_api::latency_e2e::interaction_dispatched(&intent.op_name, target);
+            }
+            let t_dispatch = std::time::Instant::now();
             let response = session
                 .execute_operation(&intent.entity_name, &intent.op_name, intent.params)
                 .await
@@ -2080,6 +2344,14 @@ impl BuilderServices for ReactiveEngine {
                         intent.entity_name, intent.op_name
                     )
                 })?;
+            tracing::debug!(
+                target: "holon_latency",
+                stage = "dispatch",
+                action = %intent.op_name,
+                block = %block,
+                ms = t_dispatch.elapsed().as_millis() as u64,
+                "holon_latency",
+            );
             // Same in-process structural-focus projection as `dispatch_intent`.
             apply_structural_focus(&focused_block, &caret_seed, &intent.op_name, &response);
             Ok(())
@@ -2592,6 +2864,11 @@ pub struct LiveBlock {
     /// Emits a new tree when the render expression changes (structural rebuild).
     /// Data-only changes do NOT emit — they update the existing tree in-place.
     pub structural_changes: Pin<Box<dyn futures::Stream<Item = ReactiveViewModel> + Send>>,
+    /// RAII pin on the underlying watcher — dropping it (with the LiveBlock,
+    /// or after `take()`ing it out) releases the engine's watcher when this
+    /// was the last consumer. `None` only for stub/test constructors that
+    /// don't own a real engine watcher (e.g. layout-testing fixtures).
+    pub watch_guard: Option<WatchGuard>,
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────

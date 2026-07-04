@@ -7,21 +7,21 @@
 //! `transition_budgets.rs:351-360` (expected SQL).
 
 use holon_pbt_core::TransitionFactory;
-use holon_pbt_core::TransitionImpl;
 use holon_pbt_core::TransitionRef;
+use holon_pbt_core::capabilities::PeerEditOp;
+use holon_pbt_core::capabilities::RefLifecycle;
+use holon_pbt_core::capabilities::RefPeers;
+use holon_pbt_core::capabilities::RefPeersMut;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::check;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use proptest::strategy::Union;
 use validated::Validated;
 
-use crate::pbt::reference_state::ReferenceState;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
-use crate::pbt::transition_dispatch::SutHandle;
-use crate::pbt::transitions::PeerEditOp;
 use crate::pbt::transitions::deterministic_peer_block_id;
-use crate::pbt::validation::Reason;
-use crate::pbt::validation::check;
 
 /// Edit a block on a peer's LoroDoc directly (no SQL, no BackendEngine).
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -30,11 +30,9 @@ pub struct PeerEdit {
     pub op: PeerEditOp,
 }
 
-impl TransitionFactory<ReferenceState> for PeerEdit {
+impl<R: RefLifecycle + RefPeers + RefPeersMut> TransitionFactory<R> for PeerEdit {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        vec![::holon_pbt_core::composition::CapId::of::<
-            dyn ::holon_pbt_core::capabilities::SutLoro,
-        >()]
+        Self::declared_caps()
     }
 
     type Reason = Reason;
@@ -42,13 +40,13 @@ impl TransitionFactory<ReferenceState> for PeerEdit {
         ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Loro)
     }
 
-    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // Early gate: app started, Loro enabled, peers available.
         // `preconditions` checks peer_idx bounds and op validity.
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(state.action.app_started, Reason::AppNotStarted),
+            check(state.app_started(), Reason::AppNotStarted),
             check(state.enable_loro(), Reason::LoroRequiredForPeers),
-            check(!state.peers.is_empty(), Reason::NoPeersAvailable),
+            check(state.peers_len() > 0, Reason::NoPeersAvailable),
         ];
         let merged: Validated<Vec<()>, Reason> = checks.into_iter().collect();
         if merged.is_fail() {
@@ -56,8 +54,8 @@ impl TransitionFactory<ReferenceState> for PeerEdit {
         }
 
         (|| {
-            let peer_count = state.peers.len();
-            let seq = state.domain.block_state.next_id;
+            let peer_count = state.peers_len();
+            let seq = state.next_block_id();
 
             let mut arms: Vec<(u32, BoxedStrategy<PeerEdit>)> = Vec::new();
 
@@ -66,7 +64,7 @@ impl TransitionFactory<ReferenceState> for PeerEdit {
             {
                 // Extract peer data before the strategy to avoid borrow escaping.
                 let peer_blocks_per_idx: Vec<Vec<String>> = (0..peer_count)
-                    .map(|idx| state.peers[idx].blocks.keys().cloned().collect::<Vec<_>>())
+                    .map(|idx| state.peer_block_stable_ids(idx))
                     .collect();
 
                 let pc = peer_count;
@@ -108,10 +106,7 @@ impl TransitionFactory<ReferenceState> for PeerEdit {
             // and filter via preconditions (which checks source-block exclusion).
             {
                 let all_peers: Vec<(usize, Vec<String>)> = (0..peer_count)
-                    .map(|idx| {
-                        let ids = state.peers[idx].blocks.keys().cloned().collect::<Vec<_>>();
-                        (idx, ids)
-                    })
+                    .map(|idx| (idx, state.peer_block_stable_ids(idx)))
                     .filter(|(_, ids)| !ids.is_empty())
                     .collect();
 
@@ -143,28 +138,26 @@ impl TransitionFactory<ReferenceState> for PeerEdit {
     }
 }
 
-impl TransitionRef<ReferenceState> for PeerEdit {
+impl<R: RefLifecycle + RefPeers + RefPeersMut> TransitionRef<R> for PeerEdit {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         let mut checks: Vec<Validated<(), Reason>> = vec![
-            check(state.action.app_started, Reason::AppNotStarted),
+            check(state.app_started(), Reason::AppNotStarted),
             check(
-                self.peer_idx < state.peers.len(),
+                self.peer_idx < state.peers_len(),
                 Reason::PeerIndexOutOfBounds,
             ),
         ];
 
-        if self.peer_idx < state.peers.len() {
-            let peer = &state.peers[self.peer_idx];
+        if self.peer_idx < state.peers_len() {
+            let has_block = |sid: &str| state.peer_block_content(self.peer_idx, sid).is_some();
             let valid_op = match &self.op {
                 PeerEditOp::Create {
                     parent_stable_id, ..
-                } => parent_stable_id
-                    .as_ref()
-                    .is_none_or(|pid| peer.blocks.contains_key(pid)),
-                PeerEditOp::Update { stable_id, .. } => peer.blocks.contains_key(stable_id),
-                PeerEditOp::Delete { stable_id } => peer.blocks.contains_key(stable_id),
+                } => parent_stable_id.as_ref().is_none_or(|pid| has_block(pid)),
+                PeerEditOp::Update { stable_id, .. } => has_block(stable_id),
+                PeerEditOp::Delete { stable_id } => has_block(stable_id),
             };
 
             // Use PeerEditSourceBlockViolation for source-block exclusions if needed
@@ -177,8 +170,7 @@ impl TransitionRef<ReferenceState> for PeerEdit {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
-        use holon_pbt_core::capabilities::RefPeersMut;
+    fn apply_to_ref(&self, state: &mut R) {
         match &self.op {
             PeerEditOp::Create {
                 parent_stable_id,
@@ -198,16 +190,13 @@ impl TransitionRef<ReferenceState> for PeerEdit {
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutHandle> TransitionImpl<ReferenceState, S> for PeerEdit {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.apply_peer_edit(self.peer_idx, &self.op).await;
+crate::cap_transition! {
+    PeerEdit: holon_pbt_core::capabilities::SutLoro,
+    where R: [ RefLifecycle + RefPeers + RefPeersMut ],
+    |me, _state, sut| {
+        sut.apply_peer_edit(me.peer_idx, &me.op).await;
     }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for PeerEdit {
-    fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
+    sql_budget: |_me, _state| {
         // PeerEdit: async CDC drain from previous transitions can land here.
         ExpectedSql {
             reads: 5,

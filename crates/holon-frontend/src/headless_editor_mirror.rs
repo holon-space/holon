@@ -34,8 +34,18 @@ use crate::reactive::BuilderServices;
 use crate::reactive::ReactiveEngine;
 
 /// Per-block byte cursor + helpers for routing one keystroke at a time.
+///
+/// SPIKE (Phase 1b): the cursor map is keyed by `(block_id, occurrence)`, not
+/// bare `block_id`. `occurrence = None` is the block's canonical occurrence
+/// (every existing caller resolves to it, unchanged); `Some(n)` is a
+/// display-placed occurrence. This is the crux of the display-placement
+/// de-risk: two occurrences of one block get INDEPENDENT carets here, while the
+/// text write still resolves through `editable_text(canonical_uri)` — caret per
+/// occurrence, edit to canonical home.
+type CursorKey = (String, Option<u32>);
+
 pub struct HeadlessEditorMirror {
-    cursors: Mutex<HashMap<String, usize>>,
+    cursors: Mutex<HashMap<CursorKey, usize>>,
 }
 
 impl Default for HeadlessEditorMirror {
@@ -51,25 +61,36 @@ impl HeadlessEditorMirror {
         }
     }
 
-    /// Reset the tracked cursor for a block (e.g. on Escape or focus loss).
-    /// Idempotent.
-    pub fn forget(&self, block_id: &str) {
-        self.cursors.lock().unwrap().remove(block_id);
-    }
-
-    /// Read-only view of the tracked cursor for `block_id`. `None` when no
-    /// keystroke has touched the block yet (the lazy seed-or-end init in
-    /// `handle_keystroke` hasn't run). Never initializes — observation must
-    /// not mutate the mirror.
-    pub fn tracked_cursor(&self, block_id: &str) -> Option<usize> {
-        self.cursors.lock().unwrap().get(block_id).copied()
-    }
-
-    fn set_cursor(&self, block_id: &str, byte: usize) {
+    /// Reset the tracked cursor for one occurrence of a block (Escape / focus
+    /// loss / after a structural op). Idempotent.
+    pub fn forget(&self, block_id: &str, occ: Option<u32>) {
         self.cursors
             .lock()
             .unwrap()
-            .insert(block_id.to_string(), byte);
+            .remove(&(block_id.to_string(), occ));
+    }
+
+    /// Read-only view of the tracked cursor for a block's CANONICAL occurrence.
+    /// `None` when no keystroke has touched it yet. Never initializes.
+    /// (Back-compat: existing callers want the canonical caret.)
+    pub fn tracked_cursor(&self, block_id: &str) -> Option<usize> {
+        self.tracked_cursor_at(block_id, None)
+    }
+
+    /// SPIKE: read the tracked cursor for a specific occurrence.
+    pub fn tracked_cursor_at(&self, block_id: &str, occ: Option<u32>) -> Option<usize> {
+        self.cursors
+            .lock()
+            .unwrap()
+            .get(&(block_id.to_string(), occ))
+            .copied()
+    }
+
+    fn set_cursor(&self, block_id: &str, occ: Option<u32>, byte: usize) {
+        self.cursors
+            .lock()
+            .unwrap()
+            .insert((block_id.to_string(), occ), byte);
     }
 
     /// Mirror a user click on a block: seed the tracked caret for
@@ -87,12 +108,13 @@ impl HeadlessEditorMirror {
         block_uri: &holon_api::EntityUri,
     ) -> Result<()> {
         let block_id = block_uri.to_string();
+        let occ = engine.focused_occurrence();
         let services: &dyn BuilderServices = engine.as_ref();
         let current_text = match services.editable_text(block_uri, "content") {
             Ok(mt) => mt.current(),
             Err(_) => self.sql_block_content(engine, &block_id).await?,
         };
-        self.set_cursor(&block_id, current_text.len());
+        self.set_cursor(&block_id, occ, current_text.len());
         Ok(())
     }
 
@@ -140,6 +162,9 @@ impl HeadlessEditorMirror {
             )
         })?;
         let block_id = block_uri.to_string();
+        // SPIKE (Phase 1b): the focused OCCURRENCE keys the caret; the block id
+        // still keys the write (`editable_text(block_uri)` below is unchanged).
+        let occ = engine.focused_occurrence();
 
         let services: &dyn BuilderServices = engine.as_ref();
         // `editable_text` returns Err in SqlOnly mode (no Loro provider
@@ -166,14 +191,7 @@ impl HeadlessEditorMirror {
             .iter()
             .any(|m| matches!(*m, "ctrl" | "alt" | "cmd"))
             && ((keystroke == "backspace"
-                && self
-                    .cursors
-                    .lock()
-                    .unwrap()
-                    .get(&block_id)
-                    .copied()
-                    .unwrap_or(0)
-                    > 0)
+                && self.tracked_cursor_at(&block_id, occ).unwrap_or(0) > 0)
                 || (keystroke.chars().count() == 1
                     && !matches!(keystroke, "home" | "end" | "left" | "right" | "tab")));
         if needs_mt && mt.is_none() {
@@ -206,7 +224,7 @@ impl HeadlessEditorMirror {
         // `peek_caret_seed`; without a seed, default to end-of-text
         // (`set_value` behaviour). A tracked cursor always wins — the seed is
         // only the mount-time initial position.
-        let cursor_byte = match self.tracked_cursor(&block_id) {
+        let cursor_byte = match self.tracked_cursor_at(&block_id, occ) {
             Some(c) => c,
             None => {
                 let init = engine
@@ -214,7 +232,7 @@ impl HeadlessEditorMirror {
                     .filter(|&o| current_text.is_char_boundary(o.min(current_text.len())))
                     .map(|o| o.min(current_text.len()))
                     .unwrap_or(current_text.len());
-                self.set_cursor(&block_id, init);
+                self.set_cursor(&block_id, occ, init);
                 init
             }
         };
@@ -226,20 +244,22 @@ impl HeadlessEditorMirror {
 
         match keystroke {
             "home" if !has_ctrl_alt_cmd => {
-                self.set_cursor(&block_id, 0);
+                self.set_cursor(&block_id, occ, 0);
             }
             "end" if !has_ctrl_alt_cmd => {
-                self.set_cursor(&block_id, current_text.len());
+                self.set_cursor(&block_id, occ, current_text.len());
             }
             "right" if !has_ctrl_alt_cmd => {
                 self.set_cursor(
                     &block_id,
+                    occ,
                     editor_caret::move_right(&current_text, cursor_byte),
                 );
             }
             "left" if !has_ctrl_alt_cmd => {
                 self.set_cursor(
                     &block_id,
+                    occ,
                     editor_caret::move_left(&current_text, cursor_byte),
                 );
             }
@@ -247,7 +267,7 @@ impl HeadlessEditorMirror {
                 let intent = structural_block_action(EditorKey::Backspace, &block_id, 0)
                     .expect("Backspace at caret 0 is the structural join_block");
                 engine.dispatch_intent_sync(intent).await?;
-                self.forget(&block_id);
+                self.forget(&block_id, occ);
             }
             "backspace" if cursor_byte > 0 && !has_ctrl_alt_cmd && !has_shift => {
                 // `cursor_byte > 0` guarantees a preceding char, so `move_left`
@@ -263,7 +283,7 @@ impl HeadlessEditorMirror {
                         len_codepoint,
                     })?;
                 }
-                self.set_cursor(&block_id, new_cursor_byte);
+                self.set_cursor(&block_id, occ, new_cursor_byte);
             }
             "enter" if !has_ctrl_alt_cmd && !has_shift => {
                 // LogSeq parity: if the cursor sits after a `/cmd` that matches a
@@ -279,7 +299,7 @@ impl HeadlessEditorMirror {
                         .expect("Enter is the structural split_block");
                     engine.dispatch_intent_sync(intent).await?;
                 }
-                self.forget(&block_id);
+                self.forget(&block_id, occ);
             }
             "tab" if !has_shift && !has_ctrl_alt_cmd => {
                 let intent = structural_block_action(EditorKey::Tab, &block_id, cursor_byte)
@@ -292,7 +312,7 @@ impl HeadlessEditorMirror {
                 engine.dispatch_intent_sync(intent).await?;
             }
             "escape" => {
-                self.forget(&block_id);
+                self.forget(&block_id, occ);
             }
             single if !has_ctrl_alt_cmd && single.chars().count() == 1 => {
                 let raw = single
@@ -312,7 +332,7 @@ impl HeadlessEditorMirror {
                         text: inserted.clone(),
                     })?;
                 }
-                self.set_cursor(&block_id, cursor_byte + inserted.len());
+                self.set_cursor(&block_id, occ, cursor_byte + inserted.len());
             }
             _ => {
                 tracing::trace!(
@@ -401,5 +421,41 @@ impl HeadlessEditorMirror {
             } => Some(OperationIntent::new(entity_name, op_name, params)),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod spike_phase_1b_tests {
+    //! SPIKE (Phase 1b — display-placement de-risk): proves the mirror keys the
+    //! caret by `(block_id, occurrence)`, so two occurrences of ONE block hold
+    //! INDEPENDENT carets. Combined with `handle_keystroke` resolving
+    //! `editable_text(&block_uri)` by the canonical id (unchanged by this
+    //! spike), this is the "caret per occurrence, write to canonical" property
+    //! the display-placement contract needs. Pure cursor-map test — no engine.
+    use super::*;
+
+    #[test]
+    fn occurrence_keyed_cursors_are_independent() {
+        let m = HeadlessEditorMirror::new();
+        let block = "block:abc";
+
+        // Canonical occurrence (None) and a display-placed occurrence Some(1).
+        m.set_cursor(block, None, 3);
+        m.set_cursor(block, Some(1), 7);
+
+        // Independent, and `tracked_cursor` (back-compat) resolves canonical.
+        assert_eq!(m.tracked_cursor(block), Some(3));
+        assert_eq!(m.tracked_cursor_at(block, None), Some(3));
+        assert_eq!(m.tracked_cursor_at(block, Some(1)), Some(7));
+
+        // Moving the display occurrence's caret does NOT touch the canonical.
+        m.set_cursor(block, Some(1), 9);
+        assert_eq!(m.tracked_cursor_at(block, Some(1)), Some(9));
+        assert_eq!(m.tracked_cursor_at(block, None), Some(3));
+
+        // Forgetting one occurrence leaves the other intact.
+        m.forget(block, Some(1));
+        assert_eq!(m.tracked_cursor_at(block, Some(1)), None);
+        assert_eq!(m.tracked_cursor_at(block, None), Some(3));
     }
 }

@@ -183,6 +183,13 @@ pub fn register_loro_operation_engine(
         Arc::new(block_ops) as Arc<dyn OperationProvider>,
         Arc::new(nav_ops) as Arc<dyn OperationProvider>,
     ]);
+    // Same fail-loud assembly guard the Turso path runs via `OperationModule`:
+    // this is the ONE dispatcher construction outside DI, so a future edit that
+    // drops block CRUD here must crash at composition time, not silently drop
+    // content writes (the EventInfraModule-alone class of bug).
+    dispatcher
+        .assert_content_write_capability()
+        .expect("[loro_block_query_source] operation-registry assembly check failed");
     let engine: Arc<dyn OperationEngine> =
         Arc::new(DispatchingOperationEngine::new(Arc::new(dispatcher)));
     injector.provide::<dyn OperationEngine>(Provider::root(move |_| engine.clone()));

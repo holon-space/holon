@@ -9,11 +9,11 @@
 
 use std::sync::Arc;
 
+use holon_loro_testing::LoroBackendComponent;
 use holon_pbt_core::capabilities::SutLoroTaskState;
 use holon_pbt_core::composition::CapMap;
 use holon_pbt_core::composition::CapProvider;
 
-use crate::pbt::loro_slice::components::LoroBackendComponent;
 use crate::pbt::sql_slice::components::SqlProjectionComponent;
 
 /// Build the combined SUT: SQL is the canonical block store, Loro the second

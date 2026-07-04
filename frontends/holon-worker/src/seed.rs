@@ -111,10 +111,15 @@ pub async fn seed_default_layout(engine: &Arc<BackendEngine>) -> anyhow::Result<
             "a4",
             r#"{"sequence":3,"level":2,"collapse_to":"drawer"}"#,
         ),
+        // Sidebar mirrors assets/default/index.org: pages are blocks tagged
+        // 'Page' (see the block_tags seeding below), displayed by content.
+        // The old seed filtered on a `name` column that the `block` matview
+        // does not project — the generated watch_view failed to create and
+        // the sidebar rendered an error banner (HANDOFF gap #1).
         (
             "block:default-left-sidebar::render::0",
             "block:default-left-sidebar",
-            r#"list(#{sortkey: "name", item_template: selectable(row(icon("notebook"), spacer(6), text(col("name"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})})})"#,
+            r#"tree(#{parent_id: col("parent_id"), sortkey: col("sort_key"), item_template: selectable(row(icon("notebook"), spacer(6), text(col("content"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})})})"#,
             "source",
             "render",
             "a5",
@@ -123,10 +128,10 @@ pub async fn seed_default_layout(engine: &Arc<BackendEngine>) -> anyhow::Result<
         (
             "block:default-left-sidebar::src::0",
             "block:default-left-sidebar",
-            "from block\nfilter name != null\nfilter name != \"\" && name != \"index\" && name != \
-             \"__default__\"",
+            "SELECT b.* FROM block b JOIN block_tags bt ON bt.block_id = b.id WHERE bt.tag = \
+             'Page' AND b.id != 'block:__default__'",
             "source",
-            "holon_prql",
+            "holon_sql",
             "a6",
             r#"{"sequence":5}"#,
         ),
@@ -189,6 +194,27 @@ pub async fn seed_default_layout(engine: &Arc<BackendEngine>) -> anyhow::Result<
             "c1",
             r#"{"sequence":101,"level":2}"#,
         ),
+        // A few sibling blocks so structural interactions (drag & drop,
+        // indent/outdent, split/join) have material to work with on first boot.
+        (
+            "block:welcome::para::1",
+            "block:welcome",
+            "Try dragging a block by its bullet and dropping it on another block.",
+            "text",
+            "",
+            "c2",
+            r#"{"sequence":102,"level":2}"#,
+        ),
+        (
+            "block:welcome::para::2",
+            "block:welcome",
+            "Enter splits a block, Backspace at the start joins it, Tab / Shift-Tab indent and \
+             outdent.",
+            "text",
+            "",
+            "c3",
+            r#"{"sequence":103,"level":2}"#,
+        ),
         // Journals page — bundled inline because the org parser is not available
         // on wasm32. Native equivalent: `assets/default/Journals.org` parsed by
         // `seed_default_layout` via DEFAULT_ASSETS. The two source children
@@ -205,19 +231,24 @@ pub async fn seed_default_layout(engine: &Arc<BackendEngine>) -> anyhow::Result<
             "d0",
             r#"{"name":"Journals","sequence":200,"level":1}"#,
         ),
+        // Worker-local variant of Journals.org: the native version filters and
+        // sorts on `name`, a column the `block` matview does not project (the
+        // native engine resolves it via the doc-type dynamic-schema view,
+        // which never materializes for the worker's hand-seeded layout).
+        // Journal entries carry their date in `content`, so sort/display that.
         (
             "block:journals::src::0",
             "block:journals",
-            "from block\nfilter parent_id == 'block:journals'\nfilter name != null\nsort {-name}",
+            "SELECT b.* FROM block b WHERE b.parent_id = 'block:journals' ORDER BY b.content DESC",
             "source",
-            "holon_prql",
+            "holon_sql",
             "d1",
             r#"{"sequence":201}"#,
         ),
         (
             "block:journals::render::0",
             "block:journals",
-            r#"list(#{sortkey: "-name", item_template: selectable(row(icon("calendar"), spacer(6), text(col("name"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})})})"#,
+            r#"list(#{sortkey: "-content", item_template: selectable(row(icon("calendar"), spacer(6), text(col("content"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})})})"#,
             "source",
             "render",
             "d2",
@@ -252,13 +283,20 @@ pub async fn seed_default_layout(engine: &Arc<BackendEngine>) -> anyhow::Result<
         db.execute(&sql, vec![]).await?;
     }
 
-    // `name` is carried in the `properties` JSON (set in the INSERTs above:
-    // `{"name":"Welcome",…}` / `{"name":"Journals",…}`); the `block` read view
-    // derives the `name` column from it. The write table no longer has a
-    // top-level `name` column, so the old per-doc name-update statements were
-    // removed — they tripped a "no such column" parse error during seeding.
+    // Pages surface in the left sidebar via the 'Page' tag (same convention
+    // the native org ingest uses); the sidebar query joins block_tags.
+    for page_id in ["block:welcome", "block:journals"] {
+        db.execute(
+            &format!(
+                // ALLOW(sql): seed INSERT for the bundled default layout
+                "INSERT OR IGNORE INTO block_tags (block_id, tag) VALUES ('{page_id}', 'Page')"
+            ),
+            vec![],
+        )
+        .await?;
+    }
 
-    // FU-10 browser parity: land first-launch users on `block:journals`. Going
+    // FU-10 browser parity: land first-launch users on `block:welcome`. Going
     // through `navigation::focus` (rather than raw INSERT into navigation_history)
     // keeps navigation_history and navigation_cursor atomically in sync, so the
     // focus_roots / current_focus matviews resolve correctly on first render.
@@ -268,14 +306,14 @@ pub async fn seed_default_layout(engine: &Arc<BackendEngine>) -> anyhow::Result<
     nav_params.insert("region".into(), Value::from(Region::Main));
     nav_params.insert(
         "block_id".into(),
-        Value::String(EntityUri::block("journals").as_str().to_string()),
+        Value::String(EntityUri::block("welcome").as_str().to_string()),
     );
     engine
         .execute_operation(&EntityName::from("navigation"), "focus", nav_params)
         .await?;
 
     tracing::info!(
-        "[seed] seeded {} default layout blocks; main panel focused on block:journals",
+        "[seed] seeded {} default layout blocks; main panel focused on block:welcome",
         stmts.len()
     );
     Ok(())

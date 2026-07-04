@@ -265,11 +265,24 @@ fn prompt_text_input(key: &str, default: &str, hidden: bool) -> Option<String> {
         default = if hidden { "" } else { default }.replace('"', r#"\""#),
         hidden_str = hidden_str,
     );
-    let output = std::process::Command::new("osascript")
+    let output = match std::process::Command::new("osascript")
         .arg("-e")
         .arg(&script)
         .output()
-        .ok()?; // ALLOW(ok): osascript best-effort
+    {
+        Ok(o) => o,
+        Err(e) => {
+            // Disclosed degradation (fail-loud rule): on iOS/Android (and
+            // Linux/Windows) there is no osascript — preference text entry
+            // needs a native dialog seam there. Log instead of silently
+            // treating the failure as user-cancelled.
+            tracing::warn!(
+                "pref_field: cannot prompt for '{key}' — osascript unavailable                  \
+                 on this platform ({e}); preference left unchanged"
+            );
+            return None;
+        }
+    };
     if !output.status.success() {
         return None; // user cancelled
     }

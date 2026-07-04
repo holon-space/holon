@@ -25,6 +25,7 @@ use super::query::TestQuery;
 use super::query::WatchSpec;
 use super::reference_domain_state::ReferenceDomainState;
 use super::ui_actor_state::UIActorState;
+use crate::pbt::types::MutationApply;
 
 pub type ShadowInterpreter =
     holon_frontend::render_interpreter::RenderInterpreter<holon_frontend::ReactiveViewModel>;
@@ -359,6 +360,11 @@ impl BlockState {
                 // (e.g. `/matview`) matches when a dependency points at a
                 // minted (split-reconciled) block, not just a stable seed id.
                 b.requires = b.requires.iter().map(|u| resolve(u)).collect();
+                // `advice_suppressed` is likewise an edge field of block-id
+                // references (ADR 0021 dismissal set); remap its targets the
+                // same way, or a dismissal pointing at a split-reconciled block
+                // keeps the synthetic id and diverges from the SUT's resolved id.
+                b.advice_suppressed = b.advice_suppressed.iter().map(|u| resolve(u)).collect();
                 (b.id.clone(), b)
             })
             .collect();
@@ -1680,6 +1686,57 @@ impl ReferenceState {
         new_id
     }
 
+    /// Create a new text block under `parent` as its LAST child — the oracle
+    /// prediction for the creation-slot "type here to create" gesture
+    /// (`CreateBlockUnderFocus`). Prod's `block.create` from the
+    /// `:__virtual:<parent>` slot appends the block at the end of the parent's
+    /// children (the slot sorts last, then the created block takes a fresh
+    /// fractional index at the tail); mirror that ordering with `max_seq + 1`
+    /// so `recanon_and_rebuild`'s canonical pass lands it last. The synthetic
+    /// `block::create-N` id pairs 1:1 with the SUT's minted uuid via the
+    /// composed harness's per-tick reconcile. `recanon_and_rebuild` bumps
+    /// `next_id` (same as `split_block`), so this does not increment it.
+    pub fn create_block_under(&mut self, parent: &EntityUri, content: &str) -> EntityUri {
+        use holon_orgmode::models::OrgBlockExt;
+
+        let new_id = EntityUri::block(&format!(":create-{}", self.domain.block_state.next_id));
+        let mut new_block = Block::new_text(new_id.clone(), parent.clone(), content.to_string());
+        let max_seq = self
+            .domain
+            .block_state
+            .blocks
+            .values()
+            .filter(|b| b.parent_id == *parent)
+            .map(|b| b.sequence())
+            .max();
+        new_block.set_sequence(max_seq.map_or(0, |s| s + 1));
+
+        // The new block belongs to the DOCUMENT that contains it, mirroring
+        // `split_block`. When the focus-root `parent` is itself a page /
+        // document root (its own `block_documents` entry is the sentinel
+        // `no_parent` — a page IS its own doc), the child lives in that page's
+        // document, i.e. the page id ITSELF — not the sentinel. Writing the
+        // sentinel here would make `seed_block_ids` misclassify the created
+        // block as a seed and `RefBackend::org_blocks` drop it from the org
+        // projection (while the SQL projection keeps it), diverging `/org` only.
+        // A regular-block parent contributes its own document unchanged.
+        let doc_uri = match self.domain.block_state.block_documents.get(parent) {
+            Some(doc) if doc.is_no_parent() || doc.is_sentinel() => parent.clone(),
+            Some(doc) => doc.clone(),
+            None => parent.clone(),
+        };
+        self.domain
+            .block_state
+            .block_documents
+            .insert(new_id.clone(), doc_uri);
+        self.domain
+            .block_state
+            .blocks
+            .insert(new_id.clone(), new_block);
+        self.recanon_and_rebuild();
+        new_id
+    }
+
     /// Join `block_id` into its merge target.
     ///
     /// Two cases, both triggered by Backspace at position 0:
@@ -1809,7 +1866,7 @@ impl ReferenceState {
 
     /// Apply a mutation to the block state, re-canonicalize, and rebuild
     /// profiles.
-    pub fn apply_mutation(&mut self, event: &super::types::MutationEvent) {
+    pub fn apply_mutation(&mut self, event: &holon_pbt_core::types::MutationEvent) {
         let mut blocks: Vec<Block> = self.domain.block_state.blocks.values().cloned().collect();
         event.mutation.apply_to(&mut blocks);
         self.domain.block_state.blocks = blocks.into_iter().map(|b| (b.id.clone(), b)).collect();

@@ -7,12 +7,15 @@
 //! Three wiring modules stay in `holon` because they bridge the `holon::core`
 //! SQL types into the Loro pipeline (see Phase D partition).
 
+pub mod advice_reconciler;
 pub mod event_infra_module;
 pub mod loro_block_query_source;
 pub mod loro_module;
 pub mod turso_block_query_source;
 
 // Re-export wiring modules that stayed in holon
+pub use advice_reconciler::AdviceReconcilerHandle;
+pub use advice_reconciler::spawn_advice_reconciler;
 pub use event_infra_module::EventInfraModule;
 pub use event_infra_module::LinkEventSubscriberHandle;
 // Re-export live_data module and the LiveData type (moved to holon-api earlier)

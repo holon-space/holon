@@ -7,18 +7,18 @@
 //! `transition_budgets.rs:351-360` (expected SQL).
 
 use holon_pbt_core::TransitionFactory;
-use holon_pbt_core::TransitionImpl;
 use holon_pbt_core::TransitionRef;
+use holon_pbt_core::capabilities::RefLifecycle;
+use holon_pbt_core::capabilities::RefPeers;
+use holon_pbt_core::capabilities::RefPeersMut;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::check;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::reference_state::ReferenceState;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
-use crate::pbt::transition_dispatch::SutHandle;
-use crate::pbt::validation::Reason;
-use crate::pbt::validation::check;
 
 /// One-directional merge: peer's changes → primary.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -26,11 +26,9 @@ pub struct MergeFromPeer {
     pub peer_idx: usize,
 }
 
-impl TransitionFactory<ReferenceState> for MergeFromPeer {
+impl<R: RefLifecycle + RefPeers + RefPeersMut> TransitionFactory<R> for MergeFromPeer {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        vec![::holon_pbt_core::composition::CapId::of::<
-            dyn ::holon_pbt_core::capabilities::SutLoro,
-        >()]
+        Self::declared_caps()
     }
 
     type Reason = Reason;
@@ -38,11 +36,11 @@ impl TransitionFactory<ReferenceState> for MergeFromPeer {
         ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Loro)
     }
 
-    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // Enumerate parameter space (peer indices) and let `preconditions` be the
         // single source of truth for which ones are actually mergeable. Avoids
         // duplicating the Loro / peer count checks across two sites.
-        let candidates: Vec<usize> = (0..state.peers.len())
+        let candidates: Vec<usize> = (0..state.peers_len())
             .filter(|peer_idx| {
                 MergeFromPeer {
                     peer_idx: *peer_idx,
@@ -60,15 +58,15 @@ impl TransitionFactory<ReferenceState> for MergeFromPeer {
     }
 }
 
-impl TransitionRef<ReferenceState> for MergeFromPeer {
+impl<R: RefLifecycle + RefPeers + RefPeersMut> TransitionRef<R> for MergeFromPeer {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(state.action.app_started, Reason::AppNotStarted),
+            check(state.app_started(), Reason::AppNotStarted),
             check(state.enable_loro(), Reason::LoroRequiredForPeers),
             check(
-                self.peer_idx < state.peers.len(),
+                self.peer_idx < state.peers_len(),
                 Reason::PeerIndexOutOfBounds,
             ),
         ];
@@ -78,8 +76,7 @@ impl TransitionRef<ReferenceState> for MergeFromPeer {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
-        use holon_pbt_core::capabilities::RefPeersMut;
+    fn apply_to_ref(&self, state: &mut R) {
         // recanon_and_rebuild is handled inside
         // `RefPeersMut::peer_merge_into_primary` — the order matters
         // because newly-created peer blocks default to sequence=0 and
@@ -89,16 +86,13 @@ impl TransitionRef<ReferenceState> for MergeFromPeer {
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutHandle> TransitionImpl<ReferenceState, S> for MergeFromPeer {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.apply_merge_from_peer(self.peer_idx).await;
+crate::cap_transition! {
+    MergeFromPeer: holon_pbt_core::capabilities::SutLoro,
+    where R: [ RefLifecycle + RefPeers + RefPeersMut ],
+    |me, _state, sut| {
+        sut.apply_merge_from_peer(me.peer_idx).await;
     }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for MergeFromPeer {
-    fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
+    sql_budget: |_me, _state| {
         // MergeFromPeer: async CDC drain from previous transitions can land here.
         // In production, fires Loro's `subscribe_root` callback, which wakes
         // `LoroSyncController` to reconcile the diff into the command/event bus.

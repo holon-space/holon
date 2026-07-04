@@ -245,6 +245,24 @@ async fn render_and_forward(
     variant: &Option<String>,
     generation: u64,
 ) {
+    // Advice-rule status surface (ADR 0022 "rule blocks render their own status"):
+    // a rule block whose id carries a NON-Active status has its render replaced
+    // by the error surface, so parse errors and async DDL failures are visible
+    // in place (v1 replaces, like the existing render-failure path; over-cap
+    // banner comes later).
+    if let Some(status) = engine.advice_status().get(block_id.as_str()) {
+        if !status.is_active() {
+            let _ = tx
+                .send(UiEvent::Structure {
+                    render_expr: error_render_expr(&format!("advice rule: {status}")),
+                    candidates: Vec::new(),
+                    generation,
+                })
+                .await;
+            return;
+        }
+    }
+
     match engine.blocks().render_entity(block_id, variant).await {
         Ok((render_expr, data_stream)) => {
             tracing::info!(
@@ -275,7 +293,7 @@ async fn render_and_forward(
             tracing::warn!("[UiWatcher] render_entity('{}') failed: {}", block_id, e);
             let _ = tx
                 .send(UiEvent::Structure {
-                    render_expr: error_render_expr(&format!("{e}")),
+                    render_expr: error_render_expr(&format!("{e:#}")),
                     candidates: Vec::new(),
                     generation,
                 })

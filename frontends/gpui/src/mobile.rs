@@ -17,44 +17,142 @@ fn open_holon_window(cx: &mut App, db_path: Option<PathBuf>, orgmode_root: Optio
     let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
     let rt_handle = rt.handle().clone();
 
-    let session = rt.block_on(async {
+    let (session, engine, debug, app) = rt.block_on(async {
         let widgets = crate::render_supported_widgets();
         let ui_info = holon_api::UiInfo {
             available_widgets: widgets,
             screen_size: None,
         };
         let mut holon_config = HolonConfig {
-            db_path: db_path,
+            db_path,
             vault: holon_frontend::config::VaultConfig { root: orgmode_root },
             ..Default::default()
         };
         // Mobile builds don't read `~/.config/holon/holon.toml`, so the
-        // desktop-style opt-in (`[loro] enabled = true`) doesn't apply here.
+        // desktop-style opt-in (`[crdt] enabled = true`) doesn't apply here.
         // Without this, `LoroModule` is never configured → `Arc<LoroShareBackend>`
         // is never registered → share/accept ops fail with
         // "No provider registered for entity: tree". Mobile is a first-class
-        // target for sharing, so enable Loro unconditionally.
-        holon_config.loro.enabled = Some(true);
+        // target for sharing, so enable the CRDT substrate unconditionally.
+        holon_config.crdt.enabled = Some(true);
         let config_dir = holon_frontend::config::resolve_config_dir(None);
         let session_config = SessionConfig::new(ui_info);
-        holon_app::new_from_config(
+
+        // Bootstrap through `GpuiModule` (same path as desktop `main.rs`)
+        // instead of `holon_app::new_from_config`. This starts the embedded
+        // MCP server in `GpuiModule::on_start`, making mobile a first-class
+        // debuggable / automatable target. The iOS simulator shares the
+        // host's loopback, so the MCP HTTP server (default `:8520`, override
+        // with `MCP_SERVER_PORT`) is reachable from the host — set a distinct
+        // port when a desktop Holon already holds 8520.
+        let mut app = fluxdi::Application::new(crate::di::GpuiModule {
             holon_config,
             session_config,
             config_dir,
-            std::collections::HashSet::new(),
-        )
-        .await
-        .expect("FrontendSession init failed")
+            locked_keys: std::collections::HashSet::new(),
+        });
+        app.bootstrap().await.expect("GpuiModule bootstrap failed");
+
+        let injector = app.injector();
+        let session = injector.resolve::<FrontendSession>();
+        let engine = injector.resolve::<holon_frontend::reactive::ReactiveEngine>();
+        let debug = injector.resolve::<holon_mcp::server::DebugServices>();
+
+        // Populate the reset-safe `live_debug` cell so the debug PBT tools
+        // (`await_quiescence`, `debug_pbt_snapshot`) observe the boot session's
+        // convergence/mirror handles. These are `root_async` factories — awaited
+        // here so they are live (not raced) before any tool call; a later
+        // `reset_vault` swaps this cell for the fresh session's handles.
+        {
+            let loro_sync_handle = injector
+                .try_resolve_async::<holon::sync::LoroSyncControllerHandle>()
+                .await
+                .ok();
+            // `BlockQuerySource` is not a DI key — the FrontendSession factory
+            // builds it inline; the session accessor is the only handle.
+            let block_query_source = Some(session.block_query().clone());
+            let org_idle_signal = injector
+                .try_resolve::<holon_orgmode::OrgSyncIdleSignal>()
+                .ok();
+            let loro_doc_store = injector
+                .try_resolve::<holon::sync::LoroBlockOperations>()
+                .ok()
+                .map(|ops| ops.shared_doc_store());
+            *debug.live_debug.write().expect("live_debug cell poisoned") =
+                holon_mcp::server::DebugHandlesCell {
+                    loro_sync_handle,
+                    org_idle_signal,
+                    block_query_source,
+                    loro_doc_store,
+                    reactive_engine: Some(engine.clone()),
+                };
+        }
+
+        (session, engine, debug, app)
     });
 
-    // Keep runtime alive on a background thread
+    // Keep the runtime AND the DI application alive for the process lifetime:
+    // the spawned MCP server task and background factories hold services
+    // resolved from `app`'s injector, and the `NavigationState` built below
+    // shares `debug.input_router` so MCP-injected input reaches the window.
     std::thread::spawn(move || {
+        let _app = app;
         rt.block_on(std::future::pending::<()>());
     });
 
-    let nav = crate::navigation_state::NavigationState::new();
+    // Phase 1 Option A: open a REBINDABLE window so a per-case `reset_vault`
+    // MCP call can swap the engine+session in place (keeping this one window,
+    // one MCP server). Mirror `launch_holon_window_with_engine`'s nav wiring so
+    // MCP-injected input still reaches the window.
+    let mut nav =
+        crate::navigation_state::NavigationState::with_input_router(debug.input_router.clone());
+    nav.set_navigation_debug(debug.navigation_state.clone());
     let bounds_registry = BoundsRegistry::new();
-    crate::launch_holon_window_with_registry(session, rt_handle, nav, bounds_registry, cx);
+    let handle = crate::launch_holon_window_rebindable(
+        session,
+        engine,
+        rt_handle,
+        nav,
+        bounds_registry,
+        Some(debug.clone()),
+        "Holon",
+        cx,
+    )
+    .expect("rebindable Holon window failed to open");
+
+    // Install the gpui-side reset builder so the (tokio) `reset_vault` tool can
+    // boot a fresh SUT without a second MCP server. It runs on whatever runtime
+    // the tool awaits it on — the MCP server runs on `rt`, so this lands there.
+    let reset_builder: holon_mcp::server::ResetBuilderFn = Arc::new(|files| {
+        Box::pin(crate::reset::build_fresh_sut_from_files(files))
+            as futures::future::BoxFuture<
+                'static,
+                anyhow::Result<holon_mcp::server::ResetBuildOutput>,
+            >
+    });
+    debug.reset_builder.set(reset_builder).ok();
+
+    // Main-thread reset pump: owns the `!Send` `RebindHandle` and re-points the
+    // live window when a `ResetRequest` arrives. Mirrors `setup_interaction_pump`.
+    let (reset_tx, mut reset_rx) =
+        futures::channel::mpsc::channel::<holon_mcp::server::ResetRequest>(4);
+    debug.reset_tx.set(reset_tx).ok();
+    cx.spawn(async move |cx| {
+        use futures::StreamExt;
+        while let Some(req) = reset_rx.next().await {
+            let holon_mcp::server::ResetRequest {
+                session,
+                engine,
+                ack,
+            } = req;
+            // `AsyncApp::update` is infallible on the gpui-mobile fork (returns
+            // the closure result directly), so the rebind always runs on the
+            // main thread here; report success once it has.
+            cx.update(|cx| handle.rebind(session, engine, cx));
+            ack.send(Ok(())).ok();
+        }
+    })
+    .detach();
 }
 
 // ─── iOS ─────────────────────────────────────────────────────────────────
@@ -105,6 +203,20 @@ fn ios_data_paths() -> (Option<PathBuf>, Option<PathBuf>) {
 #[cfg(target_os = "ios")]
 #[no_mangle]
 pub extern "C" fn gpui_ios_register_app() {
+    // Route `tracing` to stderr. iOS installed no subscriber, so every
+    // `tracing::{error,warn,info,debug}!` — including the `dispatch_intent_chain`
+    // failure logs that explain why an operation didn't commit — was silently
+    // dropped, leaving the app undebuggable on device (a fail-loud violation).
+    // Captured via `xcrun simctl launch --console-pty`. `RUST_LOG` overrides the
+    // default `info` filter (pass through `SIMCTL_CHILD_RUST_LOG`).
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .try_init();
+
     std::panic::set_hook(Box::new(|info| {
         eprintln!("GPUI PANIC: {info}");
     }));
@@ -189,4 +301,69 @@ pub fn safe_area_bottom_px() -> f32 {
     }
     #[allow(unreachable_code)]
     0.0
+}
+
+// ─── Soft keyboard lifecycle ─────────────────────────────────────────────
+//
+// The platform keyboard must be up exactly while a text input owns focus.
+// gpui delivers Blur/Focus in no guaranteed order on a block→block focus
+// move (the zombie-editor blur can arrive AFTER the next editor's focus),
+// so a naive hide-on-blur dismisses the keyboard mid-editing. Guard with a
+// focus generation counter: every focus bumps it; a blur schedules a
+// deferred hide that only fires if no focus arrived in the meantime.
+
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+
+static KEYBOARD_FOCUS_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// How long a scheduled hide waits for a successor focus before firing.
+/// One frame is enough for the mount→grab pipeline; 150ms adds margin for
+/// slow re-renders (variant switch re-mounts the editor) without a user-
+/// perceivable keyboard flicker window.
+const KEYBOARD_HIDE_GRACE: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// A text input gained focus: bump the generation (cancels any pending
+/// deferred hide) and raise the platform soft keyboard.
+pub fn editor_focus_gained() {
+    KEYBOARD_FOCUS_GENERATION.fetch_add(1, Ordering::SeqCst);
+    tracing::debug!("soft keyboard: show (editor focus)");
+    platform_show_keyboard();
+}
+
+/// A text input lost focus: schedule a deferred hide. If another input
+/// gains focus within the grace window (generation moved), the hide is a
+/// no-op and the keyboard stays up.
+pub fn editor_focus_lost(cx: &mut App) {
+    let generation = KEYBOARD_FOCUS_GENERATION.load(Ordering::SeqCst);
+    cx.spawn(async move |cx| {
+        cx.background_executor().timer(KEYBOARD_HIDE_GRACE).await;
+        if KEYBOARD_FOCUS_GENERATION.load(Ordering::SeqCst) == generation {
+            tracing::debug!("soft keyboard: hide (editor blur, no refocus)");
+            platform_hide_keyboard();
+        } else {
+            tracing::debug!("soft keyboard: hide skipped (focus moved to another input)");
+        }
+    })
+    .detach();
+}
+
+fn platform_show_keyboard() {
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    gpui_mobile::show_keyboard();
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    tracing::warn!(
+        "soft keyboard show requested but this platform has no soft-keyboard backend (mobile \
+         feature enabled on a desktop OS) — input continues via hardware keyboard"
+    );
+}
+
+fn platform_hide_keyboard() {
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    gpui_mobile::hide_keyboard();
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    tracing::warn!(
+        "soft keyboard hide requested but this platform has no soft-keyboard backend (mobile \
+         feature enabled on a desktop OS)"
+    );
 }
