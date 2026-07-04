@@ -19,7 +19,9 @@ use crate::org_renderer::OrgRenderer;
 use holon_api::block::Block;
 use holon_api::EntityUri;
 use holon_core::block_ordering::BlockOrdering;
-use holon_filesystem::{AliasRegistrar, BlockReader, DocumentManager, FileSyncController};
+use holon_filesystem::{
+    AliasRegistrar, BlockDelta, BlockReader, DocumentManager, FileSyncController,
+};
 
 /// Signal that indicates the FileWatcher is ready to receive file change events.
 ///
@@ -446,11 +448,18 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                                         MapDiff::Insert { value, .. }
                                         | MapDiff::Update { value, .. } => {
                                             match resolve_doc_for_block(&feed, &value) {
-                                                Some(doc) => OrgRerender::Doc(doc),
+                                                Some(doc) => OrgRerender::Block {
+                                                    doc,
+                                                    delta: BlockDelta::Upsert((*value).clone()),
+                                                },
                                                 // ALLOW(fallback): doc unresolved (matview lag / nested) → full re-render
                                                 None => OrgRerender::All,
                                             }
                                         }
+                                        // A removed block is gone from the feed, so its owning
+                                        // document can't be resolved here → reseed every file.
+                                        // (`BlockDelta::Remove` exists for the controller's own
+                                        // classification; the feed can't route it to a doc.)
                                         MapDiff::Remove { .. }
                                         | MapDiff::Replace { .. }
                                         | MapDiff::Clear {} => OrgRerender::All,
@@ -494,10 +503,15 @@ pub struct FileSyncStarted;
 /// org controller's single-owner `select!` loop (Phase 5: replaces the EventBus
 /// `Consumer::ORG` block-event path).
 pub enum OrgRerender {
-    /// Re-render exactly this document (resolved to its `Page` root).
-    Doc(EntityUri),
+    /// Re-render exactly this document (resolved to its `Page` root), carrying
+    /// the single block change so the controller can update just that block in
+    /// its per-doc cache instead of re-reading the whole document.
+    Block {
+        doc: EntityUri,
+        delta: holon_filesystem::BlockDelta,
+    },
     /// Document could not be resolved (matview lag, deleted block, etc.) —
-    /// fall back to a debounced re-render of every tracked file.
+    /// reseed via a debounced re-render of every tracked file.
     All,
 }
 
@@ -784,15 +798,15 @@ pub async fn run_file_sync_controller(
                 let span = tracing::info_span!("org.on_block_feed");
                 async {
                     match rerender {
-                        OrgRerender::Doc(doc_id) => {
-                            match controller.on_block_changed(&doc_id).await {
+                        OrgRerender::Block { doc, delta } => {
+                            match controller.on_block_changed(&doc, &delta).await {
                                 Ok(true) => {}
                                 // ALLOW(fallback): doc resolved to no tracked file → full re-render
                                 Ok(false) => { pending_full_rerender = true; }
                                 Err(e) => {
                                     error!(
                                         "[OrgMode] Block change error for {}: {}",
-                                        doc_id, e
+                                        doc, e
                                     );
                                 }
                             }

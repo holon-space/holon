@@ -295,6 +295,14 @@ pub struct Block {
     #[edge_field]
     pub requires: Vec<EntityUri>,
 
+    /// Advice-suppression exclusion set: lesson block IDs this (anchor) block
+    /// has dismissed as advice. Stored in the `advice_suppressed` junction
+    /// table (edge field), serialized as the `:ADVICE_SUPPRESSED:` drawer, and
+    /// read from the `block` matview's hydrated `advice_suppressed` JSON array.
+    /// See ADR 0021.
+    #[edge_field]
+    pub advice_suppressed: Vec<EntityUri>,
+
     // --- Content fields (flattened from BlockContent) ---
     /// Text content (raw text or source code)
     pub content: String,
@@ -340,6 +348,7 @@ impl Default for Block {
             parent_id: EntityUri::no_parent(),
             tags: Tags::default(),
             requires: Vec::new(),
+            advice_suppressed: Vec::new(),
             content: String::new(),
             content_type: ContentType::Text,
             source_language: None,
@@ -828,6 +837,16 @@ impl TryFrom<crate::StorageEntity> for Block {
                 })
             })
             .collect::<anyhow::Result<Vec<EntityUri>>>()?;
+        let advice_suppressed = require_string_array(&row, "advice_suppressed", &id)?
+            .into_iter()
+            .map(|s| {
+                EntityUri::parse_owned(s.clone()).map_err(|e| {
+                    anyhow::anyhow!(
+                        "block {id}: 'advice_suppressed' entry {s:?} is not a valid URI: {e}"
+                    )
+                })
+            })
+            .collect::<anyhow::Result<Vec<EntityUri>>>()?;
         let marks = match row.get("marks") {
             None | Some(Value::Null) => None,
             Some(Value::Json(s)) | Some(Value::String(s)) => {
@@ -848,6 +867,7 @@ impl TryFrom<crate::StorageEntity> for Block {
             parent_id,
             tags,
             requires,
+            advice_suppressed,
             content,
             content_type,
             source_language,
@@ -976,6 +996,9 @@ pub struct BlockWire {
     /// Junction-derived edge field, carried explicitly. See `tags`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requires: Vec<EntityUri>,
+    /// Junction-derived edge field (advice-suppression set). See `tags`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub advice_suppressed: Vec<EntityUri>,
 }
 
 impl From<&Block> for BlockWire {
@@ -993,6 +1016,7 @@ impl From<&Block> for BlockWire {
             updated_at: b.updated_at,
             tags: b.tags.to_vec(),
             requires: b.requires.clone(),
+            advice_suppressed: b.advice_suppressed.clone(),
         }
     }
 }
@@ -1004,6 +1028,7 @@ impl From<BlockWire> for Block {
             parent_id: w.parent_id,
             tags: w.tags.into(),
             requires: w.requires,
+            advice_suppressed: w.advice_suppressed,
             content: w.content,
             content_type: w.content_type,
             source_language: w.source_language,
@@ -1298,6 +1323,7 @@ mod mutation_gap_tests {
                 ("updated_at", Value::Integer(2)),
                 ("tags", Value::Array(vec![Value::String("a".to_string())])),
                 ("requires", Value::Array(vec![])),
+                ("advice_suppressed", Value::Array(vec![])),
             ]
             .into_iter()
             .map(|(k, v)| (std::sync::Arc::<str>::from(k), v))
@@ -1310,7 +1336,14 @@ mod mutation_gap_tests {
         assert_eq!(ok.updated_at, 2);
         assert!(ok.tags.contains("a"));
         assert!(ok.requires.is_empty());
+        assert!(ok.advice_suppressed.is_empty());
         assert!(ok.parent_id.as_block_id().is_none());
+
+        // Absent advice_suppressed column = broken projection, must error.
+        let mut no_advice = base_row();
+        no_advice.remove("advice_suppressed");
+        let err = Block::try_from(no_advice).unwrap_err().to_string();
+        assert!(err.contains("advice_suppressed"), "got: {err}");
 
         // Absent tags column = broken projection, must error mentioning the column.
         let mut no_tags = base_row();

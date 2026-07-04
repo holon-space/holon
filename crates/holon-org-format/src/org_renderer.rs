@@ -61,11 +61,44 @@ impl OrgRenderer {
         // it and never re-derives order from a per-block key. Build a
         // parent→children index that preserves the input order.
         let mut children_by_parent: HashMap<&str, Vec<&Block>> = HashMap::new();
+        let mut ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for b in blocks {
+            ids.insert(b.id.as_str());
             children_by_parent
                 .entry(b.parent_id.as_str())
                 .or_default()
                 .push(b);
+        }
+
+        // WP-F projection assertion (cheap, no extra pass beyond ids we already
+        // built): every block's stated parent must be the file root or another
+        // block in this set. Otherwise the block is a dangling orphan that this
+        // renderer would silently drop (never reachable from the file roots).
+        // A self-parented row (the filtered-out `sentinel:no_parent` FK anchor)
+        // is excluded so it can never trip a false positive. This path returns
+        // `String` (see the `FileFormat::render_document` trait), so a `Result`
+        // is not available — per the fail-loud directive a `panic!` is used.
+        let file_id_str = file_id.as_str();
+        for b in blocks {
+            let parent = b.parent_id.as_str();
+            if parent == b.id.as_str() {
+                continue; // self-parented FK-anchor sentinel; never a real block
+            }
+            if parent != file_id_str && !ids.contains(parent) {
+                panic!(
+                    "{}",
+                    holon_api::ProjectionInvariantViolated {
+                        detail: format!(
+                            "org render: block {} has dangling parent {} \
+                             (not the file root {} and not in the {}-block set)",
+                            b.id.as_str(),
+                            parent,
+                            file_id_str,
+                            blocks.len()
+                        ),
+                    }
+                );
+            }
         }
         // The only re-ordering the renderer imposes is a content-type grouping:
         // Source/Image children render before Text children (sub-headings) so a
@@ -75,9 +108,44 @@ impl OrgRenderer {
             kids.sort_by_key(|b| b.content_type.sibling_order_group());
         }
 
+        let mut visited: std::collections::HashSet<&str> = std::collections::HashSet::new();
         if let Some(roots) = children_by_parent.get(file_id.as_str()) {
             for root_block in roots {
-                Self::render_entity_tree(root_block, &children_by_parent, &mut result, 0);
+                Self::render_entity_tree(
+                    root_block,
+                    &children_by_parent,
+                    &mut result,
+                    0,
+                    &mut visited,
+                );
+            }
+        }
+
+        // WP-F projection assertion (free — `visited` is populated by the walk we
+        // already performed): with dangling parents ruled out above, every real
+        // block chains up to a file root, so every block must have been visited.
+        // A block that was NOT visited is present with a present parent yet
+        // unreachable from any root — the signature of a parent CYCLE (or a
+        // disconnected component). Self-parented sentinel rows are skipped so
+        // they cannot masquerade as a cycle. No `Result` on this path → `panic!`.
+        for b in blocks {
+            if b.parent_id.as_str() == b.id.as_str() {
+                continue; // self-parented FK-anchor sentinel
+            }
+            if !visited.contains(b.id.as_str()) {
+                panic!(
+                    "{}",
+                    holon_api::ProjectionInvariantViolated {
+                        detail: format!(
+                            "org render: block {} (parent {}) is unreachable from \
+                             file root {} despite its parent being present — parent \
+                             cycle or disconnected component",
+                            b.id.as_str(),
+                            b.parent_id.as_str(),
+                            file_id.as_str()
+                        ),
+                    }
+                );
             }
         }
 
@@ -85,12 +153,17 @@ impl OrgRenderer {
     }
 
     /// Render a block and its children recursively.
-    fn render_entity_tree(
-        block: &Block,
-        children_by_parent: &HashMap<&str, Vec<&Block>>,
+    fn render_entity_tree<'b>(
+        block: &'b Block,
+        children_by_parent: &HashMap<&'b str, Vec<&'b Block>>,
         result: &mut String,
         depth: usize,
+        visited: &mut std::collections::HashSet<&'b str>,
     ) {
+        // Record reachability for the WP-F cycle/disconnected-component assertion
+        // in `render_entitys` — free, we are already walking every reachable node.
+        visited.insert(block.id.as_str());
+
         // Prepare block for org rendering - transfer Loro properties to org_props format
         let mut prepared_block = block.clone();
         Self::prepare_block_for_org(&mut prepared_block, depth);
@@ -100,7 +173,13 @@ impl OrgRenderer {
 
         if let Some(kids) = children_by_parent.get(block.id.as_str()) {
             for child_block in kids {
-                Self::render_entity_tree(child_block, children_by_parent, result, depth + 1);
+                Self::render_entity_tree(
+                    child_block,
+                    children_by_parent,
+                    result,
+                    depth + 1,
+                    visited,
+                );
             }
         }
     }
@@ -242,6 +321,68 @@ mod tests {
         assert!(org_text.contains("* Test Title"));
         assert!(org_text.contains("Body content here"));
         assert!(org_text.contains(":ID: local://test-uuid"));
+    }
+
+    // WP-F: dangling parent must fail loud, not silently drop the block.
+    #[test]
+    #[should_panic(expected = "projection invariant violated")]
+    fn wpf_dangling_parent_panics() {
+        let doc = test_doc_uri();
+        // Block whose parent is neither the file root nor any block in the set.
+        let mut orphan = Block::new_text(
+            EntityUri::block("orphan"),
+            EntityUri::block("ghost-parent-not-in-set"),
+            "Orphan",
+        );
+        orphan.set_property("ID", Value::String("orphan".to_string()));
+        let _ = OrgRenderer::render_entitys(&[orphan], Path::new("/test/file.org"), &doc);
+    }
+
+    // WP-F: a parent cycle (present parents, unreachable from the file root)
+    // must fail loud rather than silently dropping the whole component.
+    #[test]
+    #[should_panic(expected = "projection invariant violated")]
+    fn wpf_parent_cycle_panics() {
+        let doc = test_doc_uri();
+        let mut a = Block::new_text(EntityUri::block("a"), EntityUri::block("b"), "A");
+        a.set_property("ID", Value::String("a".to_string()));
+        let mut b = Block::new_text(EntityUri::block("b"), EntityUri::block("a"), "B");
+        b.set_property("ID", Value::String("b".to_string()));
+        let _ = OrgRenderer::render_entitys(&[a, b], Path::new("/test/file.org"), &doc);
+    }
+
+    // WP-F guard against false positives: a normal tree (roots parented to the
+    // file root, children parented to present blocks) renders without panicking.
+    #[test]
+    fn wpf_normal_tree_does_not_panic() {
+        let doc = test_doc_uri();
+        let mut root = Block::new_text(EntityUri::block("root"), doc.clone(), "Root");
+        root.set_property("ID", Value::String("root".to_string()));
+        let mut child =
+            Block::new_text(EntityUri::block("child"), EntityUri::block("root"), "Child");
+        child.set_property("ID", Value::String("child".to_string()));
+        let out = OrgRenderer::render_entitys(&[root, child], Path::new("/test/file.org"), &doc);
+        assert!(out.contains("Root"));
+        assert!(out.contains("Child"));
+    }
+
+    // WP-F: a self-parented row (the filtered-out `sentinel:no_parent` FK anchor
+    // shape) must NOT trip the dangling or cycle assertion.
+    #[test]
+    fn wpf_self_parented_sentinel_does_not_panic() {
+        let doc = test_doc_uri();
+        let mut root = Block::new_text(EntityUri::block("root"), doc.clone(), "Root");
+        root.set_property("ID", Value::String("root".to_string()));
+        // Self-parented sentinel-shaped row (id == parent_id) alongside a normal
+        // root — the same self-parent shape as the filtered `sentinel:no_parent`.
+        let mut sentinel = Block::new_text(
+            EntityUri::block("selfanchor"),
+            EntityUri::block("selfanchor"),
+            "Sentinel",
+        );
+        sentinel.set_property("ID", Value::String("selfanchor".to_string()));
+        let out = OrgRenderer::render_entitys(&[root, sentinel], Path::new("/test/file.org"), &doc);
+        assert!(out.contains("Root"));
     }
 
     #[test]

@@ -13,6 +13,7 @@ pub mod action_dsl;
 pub mod auth;
 pub mod block;
 pub mod block_mutation;
+pub mod block_write_field;
 pub mod capability;
 pub mod change_set;
 pub mod clock;
@@ -26,6 +27,7 @@ pub mod inline_mark;
 pub mod input_types;
 /// flutter_rust_bridge:ignore
 pub mod interp_value;
+pub mod latency_e2e;
 pub mod link_candidate;
 pub mod link_parser;
 pub mod live_data;
@@ -39,6 +41,7 @@ pub mod render_dsl;
 pub mod render_eval;
 pub mod render_types;
 pub mod repository;
+pub mod storage_error;
 pub mod streaming;
 pub mod types;
 pub mod ui_watcher;
@@ -48,6 +51,7 @@ pub mod widget_spec;
 pub use entity_profile::{EntityProfile, ProfileCache, ProfileResolving, VirtualChildConfig};
 pub use operation_engine::OperationEngine;
 pub use query_engine::QueryEngine;
+pub use storage_error::{ParentNotFound, ProjectionInvariantViolated};
 pub use ui_watcher::UiWatcher;
 
 /// Fixed root layout block ID — must match `:ID:` property on the root heading in index.org.
@@ -78,6 +82,7 @@ pub use block::{
 };
 
 // Re-export the intent ChangeSet vocabulary (block-sync rework, Phase 2)
+pub use block_write_field::{BlockWriteField, BlockWriteFieldError, PropertyKey};
 pub use change_set::{agrees_with_ops, source_op_names, ChangeOp, ChangeSet, Provenance};
 pub use clock::{Clock, SystemClock, TestClock};
 
@@ -112,7 +117,9 @@ pub use render_eval::{eval_binary_op, eval_to_value, is_template_arg, resolve_ar
 
 // Re-export interpreter-level value type (non-serializable — runtime only).
 /// flutter_rust_bridge:ignore
-pub use interp_value::{ptr_identity, InterpValue, ReactiveRowProvider};
+pub use interp_value::{
+    ptr_identity, InterpValue, Occurrence, OccurrenceId, ReactiveRowProvider, RowKey,
+};
 
 // Re-export predicate types
 pub use predicate::Predicate;

@@ -10,10 +10,19 @@ use holon_orgmode::models::OrgBlockExt;
 
 use super::query::{QuerySource, QueryTable, TestQuery};
 use super::reference_state::{VALID_PROFILE_YAMLS, valid_render_expression_strings};
-use super::types::Mutation;
 use holon_api::predicate::Predicate;
+use holon_pbt_core::types::Mutation;
 
 use std::collections::HashMap;
+
+/// Shared tag vocabulary. Drawn from by BOTH the advice-rule-minting arm
+/// (`file_with_advice_rule`) and `SetEdgeField`'s pool tag sub-arm, so that a
+/// rule's anchor/candidate tags and the tags landed on blocks collide with
+/// non-trivial probability — that collision is what makes advice expectations
+/// nonempty. Non-vacuity of the advice invariants depends on this shared pool.
+/// All lowercase (`PAGE_TAG` is `"Page"`), so a pool tag can never flip
+/// `is_page`.
+pub const ADVICE_TAG_POOL: &[&str] = &["task", "lesson", "proj", "urgent", "ctx"];
 
 /// A set of TODO keywords generated per test case.
 /// Drives both the `#+TODO:` org header and the task_state mutation generator.
@@ -122,6 +131,18 @@ fn extended_content_arm() -> BoxedStrategy<String> {
             2 => format!("#+ {tail}"),
             _ => format!(":PROPERTIES:{tail}"),
         }),
+        // snake_case identifiers with mid-word underscores — the single
+        // biggest content class in a code-heavy PKM (`focused_block`,
+        // `sort_key`, `keyed_rows_signal_vec`). orgize parses a mid-word `_`
+        // (preceded by a word char, so it can't open org UNDERLINE) as a bare
+        // SUBSCRIPT, and the mark-extraction round-trip used to destroy the
+        // surrounding characters (`focused_block` → `focusedloc`) — a silent
+        // vault-corrupting data-loss bug. This arm de-vacuums the org
+        // round-trip's inline-mark path (the default ASCII generators never
+        // emit `_`). See handoff 2026-07-06 (org round-trip mangles content)
+        // + the `bare_underscore_identifiers_survive_round_trip` regression in
+        // holon-org-format/src/inline_marks.rs.
+        2 => "[a-z]{1,6}(_[a-z]{1,6}){1,4}",
     ]
     .boxed()
 }
@@ -251,6 +272,7 @@ fn uniquify_ids(ids: impl IntoIterator<Item = String>) -> Vec<String> {
 pub fn generate_org_file_content_with_keywords(
     keyword_set: Option<TodoKeywordSet>,
     allow_index_override: bool,
+    allow_advice_rule: bool,
 ) -> BoxedStrategy<(String, Vec<Block>)> {
     use proptest::collection::vec as prop_vec;
 
@@ -472,6 +494,170 @@ pub fn generate_org_file_content_with_keywords(
             (filename, blocks)
         });
 
+    // Render-artifact file: a heading carrying BOTH a `Source` and an `Image`
+    // child PLUS a `Text` sub-heading — the only shape that puts a mixed
+    // `Source`/`Image`/`Text` sibling group under one parent. Image blocks are
+    // NOT reachable via the interactive create path (`BlockContent` has no
+    // Image variant — a `block create` always yields Text or Source); they only
+    // arise from the parser's `[[file:…]]` links, so the org-file path is the
+    // one faithful producer.
+    //
+    // The renderer emits section content (Source/Image, group 0) ahead of the
+    // sub-heading and preserves this vec's order WITHIN group 0, but the parser
+    // re-emits all Sources before all Images regardless — so the stored order is
+    // always `Source < Image < Text` (world (b)). `image_first` deliberately
+    // varies the on-disk order of the two artifacts so the reference model's
+    // sibling-order prediction is exercised in both directions; the presence of
+    // the non-exempt Text sub-heading is what makes the ordering actually
+    // checked (a pure Source/Image group is order-exempt).
+    let file_with_render_artifacts = (
+        "[a-z_]+_[0-9]+\\.org",
+        "[A-Z][a-zA-Z0-9 ]{0,15}", // heading
+        "[a-z0-9-]+",              // heading id
+        "[A-Z][a-zA-Z0-9 ]{0,15}", // sub-heading
+        "[a-z0-9-]+",              // sub-heading id
+        prop::sample::select(vec!["python", "rust", "shell"]),
+        "[a-zA-Z_][a-zA-Z0-9_ ]{3,20}", // source body
+        prop::sample::select(vec!["png", "jpg", "gif", "webp", "svg"]),
+        "[a-z][a-z0-9_]{2,12}", // image stem
+        prop::bool::ANY,        // image_first
+    )
+        .prop_map(
+            |(
+                filename,
+                headline,
+                id,
+                sub_headline,
+                sub_id_raw,
+                lang,
+                body,
+                ext,
+                stem,
+                image_first,
+            )| {
+                let doc_uri = EntityUri::block("gen-placeholder");
+                let heading_uri = EntityUri::block(&id);
+                // Sub-heading id must differ from the heading id (org `:ID:`
+                // uniqueness); suffix on collision.
+                let sub_id = if sub_id_raw == id {
+                    format!("{sub_id_raw}-sub")
+                } else {
+                    sub_id_raw
+                };
+
+                let mut heading = Block::new_text(heading_uri.clone(), doc_uri.clone(), &headline);
+                heading.set_property("ID", Value::String(id.clone()));
+
+                // Parser-faithful ids: `{parent}::src::0` / `{parent}::img::0`.
+                let source = Block::new_source(
+                    EntityUri::block(&format!("{id}::src::0")),
+                    heading_uri.clone(),
+                    lang,
+                    &body,
+                );
+                let image = Block::new_image(
+                    EntityUri::block(&format!("{id}::img::0")),
+                    heading_uri.clone(),
+                    format!("attachments/{stem}.{ext}"),
+                );
+
+                let mut sub =
+                    Block::new_text(EntityUri::block(&sub_id), heading_uri, &sub_headline);
+                sub.set_property("ID", Value::String(sub_id.clone()));
+
+                // Vec order == on-disk document order. `image_first` flips the
+                // Source/Image order the renderer writes; the sub-heading trails
+                // (the renderer hoists section content ahead of it regardless).
+                let mut blocks = vec![heading];
+                if image_first {
+                    blocks.push(image);
+                    blocks.push(source);
+                } else {
+                    blocks.push(source);
+                    blocks.push(image);
+                }
+                blocks.push(sub);
+                (filename, blocks)
+            },
+        )
+        .boxed();
+
+    // Advice-rule file: a headline plus ONE `holon_advice_rule_yaml` source
+    // block (ADR 0022). Structurally mirrors `file_with_profile` — a source
+    // block under a heading — but the source language marks it a runtime rule
+    // definition that the engine synthesizes into a matview. The slug is fixed
+    // (`pbt_lessons`): at most one minted rule exists per run, so one slug is
+    // enough — but it must NOT be `lessons_for_tasks`: the bundled INACTIVE
+    // seed rule owns that slug, and the reconciler's first-owner-wins arbiter
+    // refuses a same-slug newcomer (SlugCollision) even while the owner is
+    // inactive — the minted ACTIVE rule would never synthesize a matview and
+    // the advice invariants would sit in a permanent false RED.
+    // Anchor/candidate tags are drawn DISTINCT from `ADVICE_TAG_POOL`
+    // (the same pool `SetEdgeField` tags blocks from) so overlaps — hence
+    // nonempty advice — are reachable. `k` is kept small (1..=3) so top-K
+    // truncation cases are reachable; `active` is weighted ~4:1 true.
+    let file_with_advice_rule = (
+        "[a-z_]+_[0-9]+\\.org",
+        "[A-Z][a-zA-Z0-9 ]{0,15}",
+        "[a-z0-9-]+",
+        prop::sample::select(ADVICE_TAG_POOL.to_vec()),
+        prop::sample::select(ADVICE_TAG_POOL.to_vec()),
+        1..=3u8,
+        prop::sample::select(vec![true, true, true, true, false]),
+    )
+        .prop_filter(
+            "advice anchor and candidate source tags must differ",
+            |(_, _, _, anchor_tag, source_tag, _, _)| anchor_tag != source_tag,
+        )
+        .prop_map(
+            |(filename, headline, id, anchor_tag, source_tag, k, active)| {
+                let doc_uri = EntityUri::block("gen-placeholder");
+                let heading_uri = EntityUri::block(&id);
+
+                let mut heading =
+                    Block::new_text(heading_uri.clone(), doc_uri.clone(), &headline);
+                heading.set_property("ID", Value::String(id.clone()));
+
+                // Shaped like `crates/holon-advice/assets/lessons_for_tasks.yaml`.
+                let yaml = format!(
+                    "name: pbt_lessons\n\
+                     active: {active}\n\
+                     anchor:\n  has_tag: {anchor_tag}\n\
+                     candidates:\n  tag_overlap_recency:\n    source:\n      has_tag: {source_tag}\n\
+                     k: {k}\n"
+                );
+
+                // Round-trip guard (fail loud): the oracle reuses this exact prod
+                // parser, so a mismatch here would be parser-circular. Assert the
+                // parsed rule equals the typed intent before it leaves the arm.
+                let parsed = holon_advice::parse_advice_rule(&yaml)
+                    .expect("generator-minted advice rule must parse");
+                assert_eq!(
+                    parsed.anchor,
+                    holon_advice::AnchorSelector::HasTag(anchor_tag.to_string()),
+                );
+                let holon_advice::ScoringTemplate::TagOverlapRecency(spec) = &parsed.candidates;
+                assert_eq!(
+                    spec.source,
+                    holon_advice::AnchorSelector::HasTag(source_tag.to_string()),
+                );
+                assert_eq!(parsed.k.get(), k);
+                assert_eq!(parsed.active, active);
+
+                let mut rule_block = Block::new_source(
+                    EntityUri::block(&format!("{id}::src::0")),
+                    heading_uri,
+                    "holon_advice_rule_yaml",
+                    &yaml,
+                );
+                rule_block.set_sequence(1);
+
+                let blocks = vec![heading, rule_block];
+                (filename, blocks)
+            },
+        )
+        .boxed();
+
     // Shared-tree mount: a headline with `:share-role: mount` and
     // `:shared-tree-id: <uuid>` in its property drawer, plus 1–3 children
     // that carry the same `:shared-tree-id:`. This shape exists in
@@ -533,8 +719,24 @@ pub fn generate_org_file_content_with_keywords(
     // keep CI green.
     let mount_enabled = std::env::var("HOLON_PBT_SHARED_TREE_MOUNT").ok().as_deref() == Some("1");
 
+    // Mix the advice-rule arm into a profile-bearing base at a weight
+    // comparable to `file_with_profile`'s (roughly 1 part in ~10). The arm is
+    // only present when `allow_advice_rule` holds — i.e. no advice-rule block
+    // exists in the reference yet — so at most one rule is ever minted per run
+    // (the `active_rule` ≤1 invariant). The gate is re-checked under shrinking
+    // in `WriteOrgFile::preconditions`.
+    let mix_advice = |base: BoxedStrategy<(String, Vec<Block>)>,
+                      advice: BoxedStrategy<(String, Vec<Block>)>| {
+        if allow_advice_rule {
+            prop_oneof![9 => base, 1 => advice].boxed()
+        } else {
+            let _ = advice; // hold onto the strategy without firing
+            base
+        }
+    };
+
     if allow_index_override {
-        if mount_enabled {
+        let base = if mount_enabled {
             prop_oneof![
                 3 => regular_file,
                 2 => index_file_prql,
@@ -543,6 +745,7 @@ pub fn generate_org_file_content_with_keywords(
                 1 => index_file_sql,
                 1 => index_file_tree,
                 1 => file_with_profile,
+                1 => file_with_render_artifacts,
                 2 => shared_tree_mount_file,
             ]
             .boxed()
@@ -556,27 +759,41 @@ pub fn generate_org_file_content_with_keywords(
                 1 => index_file_sql,
                 1 => index_file_tree,
                 1 => file_with_profile,
+                1 => file_with_render_artifacts,
             ]
             .boxed()
-        }
+        };
+        mix_advice(base, file_with_advice_rule)
     } else if extended_gen_enabled() {
         // Extended-gen axis 4: profile-bearing files in the no-overrides
         // configuration. The test profile YAMLs render just
         // `row(editable_text(...))` — no state_toggle — so the ref model
         // must track the active profile per rendered block. Triaged on the
         // extended slice before promotion.
-        prop_oneof![
+        let base = prop_oneof![
             8 => regular_file,
             1 => file_with_profile,
+            1 => file_with_render_artifacts,
         ]
-        .boxed()
+        .boxed();
+        mix_advice(base, file_with_advice_rule)
     } else {
         // Profile-bearing files override the default block entity profile,
         // and the test's profile YAMLs render just `row(editable_text(...))`
         // — no state_toggle. We keep them out of the no-overrides
         // configuration so the default `assets/default/types/block_profile.yaml`
         // (which has the state_toggle variant) stays in effect.
-        regular_file.boxed()
+        // Advice-rule blocks do NOT override profiles (inert data until the
+        // weave lands, then the feature under test) — so unlike profiles they
+        // stay in the default mix; excluding them made advice unreachable.
+        // The render-artifact arm rides along here too so the mixed
+        // Source/Image/Text sibling group is reachable in the default config.
+        let base = prop_oneof![
+            8 => regular_file,
+            1 => file_with_render_artifacts,
+        ]
+        .boxed();
+        mix_advice(base, file_with_advice_rule)
     }
 }
 
@@ -628,7 +845,6 @@ pub fn generate_mutation(
                 fields.insert(prop_name.to_string(), Value::String(prop_value));
             }
             Mutation::Create {
-                entity: "block".to_string(),
                 id: EntityUri::block(&format!("block-{}", next_id)),
                 parent_id,
                 fields,
@@ -646,7 +862,6 @@ pub fn generate_mutation(
     )
         .prop_map(
             move |(language, source_content, parent_id)| Mutation::Create {
-                entity: "block".to_string(),
                 id: EntityUri::block(&format!("block-{}", next_id)),
                 parent_id,
                 fields: [
@@ -674,7 +889,6 @@ pub fn generate_mutation(
 
     let update_content = if updatable_content_ids.is_empty() {
         Just(Mutation::Update {
-            entity: "block".to_string(),
             id: ids[0].clone(),
             fields: [("content".to_string(), Value::String("fallback".to_string()))]
                 .into_iter()
@@ -687,7 +901,6 @@ pub fn generate_mutation(
             edit_content_strategy(),
         )
             .prop_map(|(id, new_content)| Mutation::Update {
-                entity: "block".to_string(),
                 id,
                 fields: [("content".to_string(), Value::String(new_content))]
                     .into_iter()
@@ -720,7 +933,6 @@ pub fn generate_mutation(
             "[a-zA-Z0-9]{1,10}",
         )
             .prop_map(|(id, prop_name, prop_value)| Mutation::Update {
-                entity: "block".to_string(),
                 id,
                 fields: [(prop_name.to_string(), Value::String(prop_value))]
                     .into_iter()
@@ -730,10 +942,7 @@ pub fn generate_mutation(
         prop_oneof![2 => update_content, 1 => update_custom_prop].boxed()
     };
 
-    let delete = prop::sample::select(ids).prop_map(|id| Mutation::Delete {
-        entity: "block".to_string(),
-        id,
-    });
+    let delete = prop::sample::select(ids).prop_map(|id| Mutation::Delete { id });
 
     prop_oneof![3 => create, 2 => update, 1 => delete].boxed()
 }
@@ -802,7 +1011,6 @@ pub fn generate_layout_headline_mutation(
     let content_mutation =
         (prop::sample::select(ids.clone()), content_strategy()).prop_map(|(id, content)| {
             Mutation::Update {
-                entity: "block".to_string(),
                 id,
                 fields: [("content".to_string(), Value::String(content))]
                     .into_iter()
@@ -825,7 +1033,6 @@ pub fn generate_layout_headline_mutation(
                     None => Value::Null,
                 };
                 Mutation::Update {
-                    entity: "block".to_string(),
                     id,
                     fields: [("task_state".to_string(), value)].into_iter().collect(),
                 }
@@ -858,7 +1065,6 @@ pub fn generate_render_source_mutation(ids: Vec<EntityUri>) -> impl Strategy<Val
 
     (prop::sample::select(ids), prop::sample::select(weighted)).prop_map(|(id, expr)| {
         Mutation::Update {
-            entity: "block".to_string(),
             id,
             fields: [("content".to_string(), Value::String(expr))]
                 .into_iter()
@@ -872,11 +1078,80 @@ pub fn generate_profile_content_mutation(ids: Vec<EntityUri>) -> impl Strategy<V
     let yamls: Vec<String> = VALID_PROFILE_YAMLS.iter().map(|s| s.to_string()).collect();
     (prop::sample::select(ids), prop::sample::select(yamls)).prop_map(|(id, yaml)| {
         Mutation::Update {
-            entity: "block".to_string(),
             id,
             fields: [("content".to_string(), Value::String(yaml))]
                 .into_iter()
                 .collect(),
         }
     })
+}
+
+#[cfg(test)]
+mod advice_rule_tests {
+    use super::*;
+    use holon_advice::{AnchorSelector, ScoringTemplate, parse_advice_rule};
+
+    /// Reachability floor for the advice-rule arm: with `allow_advice_rule`
+    /// the default (no-overrides) file mix must actually draw
+    /// `holon_advice_rule_yaml` source blocks at roughly its 1-in-10 weight —
+    /// a silent gate-out here makes both advice keystone invariants vacuous.
+    #[test]
+    fn advice_rule_arm_reachable_in_default_mix() {
+        use proptest::strategy::ValueTree;
+        use proptest::test_runner::TestRunner;
+        let mut runner = TestRunner::deterministic();
+        let strat = generate_org_file_content_with_keywords(None, false, true);
+        let hits = (0..200)
+            .filter(|_| {
+                let (_, blocks) = strat
+                    .new_tree(&mut runner)
+                    .expect("file strategy must draw")
+                    .current();
+                blocks.iter().any(|b| {
+                    b.source_language
+                        .as_ref()
+                        .map(|sl| sl.to_string())
+                        .as_deref()
+                        == Some(holon_advice::ADVICE_RULE_SOURCE_LANGUAGE)
+                })
+            })
+            .count();
+        assert!(
+            hits > 5,
+            "advice-rule arm near-vacuous in the default file mix: {hits}/200 draws \
+             carried a holon_advice_rule_yaml block (expected ~20)"
+        );
+    }
+
+    proptest! {
+        /// Pins the advice-rule YAML template shut: any draw over the same input
+        /// space the `file_with_advice_rule` arm uses (distinct pool tags, small
+        /// k, weighted-active flag) must parse back to the typed intent. This is
+        /// the same round-trip the arm asserts inline — surfaced as a standalone
+        /// test so a template regression fails here, not only mid-generation.
+        #[test]
+        fn advice_rule_yaml_round_trips(
+            (anchor_tag, source_tag, k, active) in (
+                prop::sample::select(ADVICE_TAG_POOL.to_vec()),
+                prop::sample::select(ADVICE_TAG_POOL.to_vec()),
+                1..=3u8,
+                prop::sample::select(vec![true, true, true, true, false]),
+            )
+                .prop_filter("anchor and source tags must differ", |(a, s, _, _)| a != s)
+        ) {
+            let yaml = format!(
+                "name: pbt_lessons\n\
+                 active: {active}\n\
+                 anchor:\n  has_tag: {anchor_tag}\n\
+                 candidates:\n  tag_overlap_recency:\n    source:\n      has_tag: {source_tag}\n\
+                 k: {k}\n"
+            );
+            let parsed = parse_advice_rule(&yaml).expect("advice rule must parse");
+            prop_assert_eq!(&parsed.anchor, &AnchorSelector::HasTag(anchor_tag.to_string()));
+            let ScoringTemplate::TagOverlapRecency(spec) = &parsed.candidates;
+            prop_assert_eq!(&spec.source, &AnchorSelector::HasTag(source_tag.to_string()));
+            prop_assert_eq!(parsed.k.get(), k);
+            prop_assert_eq!(parsed.active, active);
+        }
+    }
 }

@@ -42,7 +42,17 @@ pub fn render(
                 .overflow_hidden()
                 .child(main),
         )
-        .child(div().w_full().pb(px(bottom_inset)).child(dock))
+        .child(
+            // `id` + `overflow_x_scroll`: the dock hosts one op_button per
+            // registered block op — more than fits a phone width — so the
+            // bar scrolls horizontally instead of clipping ops off-screen.
+            div()
+                .id("bottom-dock-scroll")
+                .w_full()
+                .overflow_x_scroll()
+                .pb(px(bottom_inset))
+                .child(dock),
+        )
 }
 
 /// Logical-px bottom safe-area inset (nav bar / home indicator). Folds in

@@ -28,7 +28,8 @@ holon_macros::widget_builder! {
                         flat.push((vc, 0, std::collections::HashMap::new()));
                     }
                 }
-                ViewModel::static_collection("outline", flat_tree_items(flat), 4.0)
+                let items = weave_advice_into_items(&ba, flat_tree_items(flat));
+                ViewModel::static_collection("outline", items, 4.0)
             }
         }
     }

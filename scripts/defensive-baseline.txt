@@ -1,0 +1,427 @@
+crates/holon-api/src/action_dsl.rs	.unwrap_or_default();
+crates/holon-api/src/block.rs	.unwrap_or_default()
+crates/holon-api/src/block.rs	if let Ok(json) = serde_json::to_string(&header_args) {
+crates/holon-api/src/entity_profile.rs	Err(e) => {
+crates/holon-api/src/entity_uri.rs	if let Ok(uri) = Self::parse(s) {
+crates/holon-api/src/entity.rs	} else if let Ok(b) = d.as_bool() {
+crates/holon-api/src/entity.rs	} else if let Ok(f) = d.as_float() {
+crates/holon-api/src/entity.rs	} else if let Ok(i) = d.as_int() {
+crates/holon-api/src/entity.rs	Err(e) => {
+crates/holon-api/src/entity.rs	if let Ok(s) = d.clone().into_string() {
+crates/holon-api/src/lib.rs	serde_json::to_string(&serde_json::Value::Number(n)).unwrap_or_default(),
+crates/holon-api/src/lib.rs	serde_json::to_string(self).unwrap_or_default()
+crates/holon-api/src/lib.rs	Value::Object(map) => serde_json::to_string(map).unwrap_or_default(),
+crates/holon-api/src/reactive.rs	let _ = tx.send(n * 100).await;
+crates/holon-api/src/render_dsl.rs	if let Ok(expr) = serde_json::from_str::<RenderExpr>(trimmed) {
+crates/holon-api/src/streaming.rs	if let Ok(ctx) = CURRENT_TRACE_CONTEXT.try_with(|ctx| ctx.clone()) {
+crates/holon-app/src/loro_seams.rs	BlockContent::source(lang, content.clone().unwrap_or_default())
+crates/holon-app/src/loro_seams.rs	BlockContent::text(content.clone().unwrap_or_default())
+crates/holon-app/src/mcp_integrations.rs	Err(e) => {
+crates/holon-app/src/mcp_integrations.rs	if let Ok(configs) = &configs {
+crates/holon-app/src/no_turso.rs	.ok();
+crates/holon-app/src/turso_seams.rs	resolver.try_resolve::<CrudAuthority>().ok();
+crates/holon-app/src/wiring.rs	if let Ok(db_handle_provider) = resolver.try_resolve::<dyn DbHandleProvider>() {
+crates/holon-app/src/wiring.rs	if let Ok(mcp_registry) = mcp_result {
+crates/holon-block-roundtrip-testing/src/lib.rs	.map(|(k, v)| (k, v.as_string().unwrap_or_default().to_string()))
+crates/holon-block-roundtrip-testing/src/lib.rs	other_props: other_props.unwrap_or_default(),
+crates/holon-core/src/block_operations_tests.rs	.unwrap_or_default()
+crates/holon-core/src/storage/block_query.rs	.unwrap_or_default()
+crates/holon-engine/src/guard.rs	} else if let Ok(i) = d.as_int() {
+crates/holon-engine/src/guard.rs	Err(e) => {
+crates/holon-engine/src/guard.rs	if let Ok(f) = d.as_float() {
+crates/holon-engine/src/value.rs	} else if let Ok(b) = d.as_bool() {
+crates/holon-engine/src/value.rs	} else if let Ok(f) = d.as_float() {
+crates/holon-engine/src/value.rs	} else if let Ok(i) = d.as_int() {
+crates/holon-engine/src/value.rs	} else if let Ok(s) = d.into_string() {
+crates/holon-filesystem/src/change_source.rs	Err(e) => {
+crates/holon-filesystem/src/change_source.rs	let _ = event_tx.send(FileChange { path, kind, seq });
+crates/holon-filesystem/src/file_sync_controller.rs	.unwrap_or_default()
+crates/holon-filesystem/src/file_sync_controller.rs	canonical_parent.join(joined.file_name().unwrap_or_default())
+crates/holon-filesystem/src/file_sync_controller.rs	Err(e) => {
+crates/holon-filesystem/src/in_memory.rs	let _ = self.tx.send(FileChange {
+crates/holon-filesystem/src/sync_base_store.rs	.unwrap_or_default()
+crates/holon-filesystem/src/sync_base_store.rs	Err(e) => {
+crates/holon-frontend/src/config.rs	if let Ok(home) = std::env::var("HOME") {
+crates/holon-frontend/src/config.rs	if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+crates/holon-frontend/src/focus_path.rs	.ok();
+crates/holon-frontend/src/headless_editor_mirror.rs	.unwrap_or_default())
+crates/holon-frontend/src/headless_editor_mirror.rs	Err(e) => {
+crates/holon-frontend/src/lib.rs	self.widget_state_explicit(block_id).unwrap_or_default()
+crates/holon-frontend/src/link_provider.rs	Err(e) => {
+crates/holon-frontend/src/link_provider.rs	let signal = signal.map(|opt| opt.unwrap_or_default());
+crates/holon-frontend/src/memory_monitor.rs	if let Ok(mut lock) = PROFILER.lock() {
+crates/holon-frontend/src/reactive_view_model.rs	.unwrap_or_default(),
+crates/holon-frontend/src/reactive_view_model.rs	accent: self.prop_str("accent").unwrap_or_default(),
+crates/holon-frontend/src/reactive_view_model.rs	alt: self.prop_str("alt").unwrap_or_default(),
+crates/holon-frontend/src/reactive_view_model.rs	block_id: self.prop_str("block_id").unwrap_or_default(),
+crates/holon-frontend/src/reactive_view_model.rs	child: Box::new(self.children.first().map(|c| snap(c)).unwrap_or_default()),
+crates/holon-frontend/src/reactive_view_model.rs	content: self.prop_str("content").unwrap_or_default(),
+crates/holon-frontend/src/reactive_view_model.rs	current: self.prop_str("current").unwrap_or_default(),
+crates/holon-frontend/src/reactive_view_model.rs	display_name: self.prop_str("display_name").unwrap_or_default(),
+crates/holon-frontend/src/reactive_view_model.rs	fields: self.prop_str("fields").unwrap_or_default(),
+crates/holon-frontend/src/reactive_view_model.rs	header: self.prop_str("header").unwrap_or_default(),
+crates/holon-frontend/src/reactive_view_model.rs	icon: self.prop_str("icon").unwrap_or_default(),
+crates/holon-frontend/src/reactive_view_model.rs	key: self.prop_str("key").unwrap_or_default(),
+crates/holon-frontend/src/reactive_view_model.rs	label: self.prop_str("label").unwrap_or_default(),
+crates/holon-frontend/src/reactive_view_model.rs	let block_id_str = self.prop_str("block_id").unwrap_or_default();
+crates/holon-frontend/src/reactive_view_model.rs	let target_id = self.prop_str("target_id").unwrap_or_default();
+crates/holon-frontend/src/reactive_view_model.rs	message: self.prop_str("message").unwrap_or_default(),
+crates/holon-frontend/src/reactive_view_model.rs	name: self.prop_str("name").unwrap_or_default(),
+crates/holon-frontend/src/reactive_view_model.rs	op_name: self.prop_str("op_name").unwrap_or_default(),
+crates/holon-frontend/src/reactive_view_model.rs	operations: self.prop_str("operations").unwrap_or_default(),
+crates/holon-frontend/src/reactive_view_model.rs	path: self.prop_str("path").unwrap_or_default(),
+crates/holon-frontend/src/reactive_view_model.rs	pref_type: self.prop_str("pref_type").unwrap_or_default(),
+crates/holon-frontend/src/reactive_view_model.rs	self.slot.as_ref().map(|s| s.snapshot()).unwrap_or_default(),
+crates/holon-frontend/src/reactive_view_model.rs	sender: self.prop_str("sender").unwrap_or_default(),
+crates/holon-frontend/src/reactive_view_model.rs	states: self.prop_str("states").unwrap_or_default(),
+crates/holon-frontend/src/reactive_view_model.rs	target_id: self.prop_str("target_id").unwrap_or_default(),
+crates/holon-frontend/src/reactive_view_model.rs	time: self.prop_str("time").unwrap_or_default(),
+crates/holon-frontend/src/reactive_view_model.rs	title: self.prop_str("title").unwrap_or_default(),
+crates/holon-frontend/src/reactive_view.rs	.unwrap_or_default();
+crates/holon-frontend/src/reactive_view.rs	let _ = abortable.await; // Ok(()) on completion, Err on abort — both fine
+crates/holon-frontend/src/reactive_view.rs	let rows = buckets.remove(&title).unwrap_or_default();
+crates/holon-frontend/src/reactive.rs	Err(e) => {
+crates/holon-frontend/src/reactive.rs	if let Ok(needle) = std::env::var("HOLON_TRACE_BLOCK_DATA") {
+crates/holon-frontend/src/render_interpreter.rs	.unwrap_or_default();
+crates/holon-frontend/src/row_pipeline.rs	.unwrap_or_default();
+crates/holon-frontend/src/shadow_builders/board.rs	let rows_in_lane = lane_rows.remove(&lane).unwrap_or_default();
+crates/holon-frontend/src/shadow_builders/card.rs	.unwrap_or_default();
+crates/holon-frontend/src/shadow_builders/chat_bubble.rs	.unwrap_or_default();
+crates/holon-frontend/src/shadow_builders/collapsible.rs	.unwrap_or_default();
+crates/holon-frontend/src/shadow_builders/columns.rs	.unwrap_or_default();
+crates/holon-frontend/src/shadow_builders/drawer.rs	.unwrap_or_default();
+crates/holon-frontend/src/shadow_builders/image.rs	.unwrap_or_default();
+crates/holon-frontend/src/shadow_builders/image.rs	None => ba.args.get_positional_string(0).unwrap_or_default(),
+crates/holon-frontend/src/shadow_builders/live_query.rs	Value::String(serde_json::to_string(&result.render_expr).unwrap_or_default()));
+crates/holon-frontend/src/shadow_builders/transclude.rs	.unwrap_or_default();
+crates/holon-frontend/src/shadow_builders/tree.rs	if let Ok(inner) = std::sync::Arc::try_unwrap(slot.view_model) {
+crates/holon-frontend/src/shadow_builders/view_mode_switcher.rs	Value::String(serde_json::to_string(v).unwrap_or_default()),
+crates/holon-frontend/src/theme.rs	if let Ok(content) = std::fs::read_to_string(&path) {
+crates/holon-frontend/src/theme.rs	if let Ok(entries) = std::fs::read_dir(dir) {
+crates/holon-frontend/src/value_fns/ops_of.rs	.unwrap_or_default()
+crates/holon-frontend/src/widget_gallery.rs	.map(|c| c.prop_str("row_id").unwrap_or_default())
+crates/holon-frontend/src/widget_gallery.rs	.map(|c| c.prop_str("sort_key").unwrap_or_default())
+crates/holon-frontend/src/widget_gallery.rs	.map(|l| l.prop_str("title").unwrap_or_default())
+crates/holon-frontend/src/widget_gallery.rs	lane.prop_str("title").unwrap_or_default()
+crates/holon-frontend/src/widget_gallery.rs	let accent = card.prop_str("accent").unwrap_or_default();
+crates/holon-frontend/src/widget_gallery.rs	let title = lane.prop_str("title").unwrap_or_default();
+crates/holon-integration-tests/src/pbt/bisect_driver.rs	let outcome = catch_unwind(AssertUnwindSafe(|| {
+crates/holon-integration-tests/src/pbt/bisect_driver.rs	use std::panic::{AssertUnwindSafe, catch_unwind};
+crates/holon-integration-tests/src/pbt/composed/builder.rs	let _ = compose_sut(&ComponentSet::of([]), &resolver()).await;
+crates/holon-integration-tests/src/pbt/fixtures/mod.rs	if let Ok(n) = std::env::var("HOLON_PBT_FORCE_FAIL_AT_STEP") {
+crates/holon-integration-tests/src/pbt/frontend_slice/block_query_component.rs	.and_then(|s| EntityUri::parse(s).ok())
+crates/holon-integration-tests/src/pbt/frontend_slice/block_query_component.rs	std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+crates/holon-integration-tests/src/pbt/frontend_slice/components.rs	.and_then(|s| EntityUri::parse(s).ok())
+crates/holon-integration-tests/src/pbt/frontend_slice/components.rs	.map(|v| v.as_string().unwrap_or_default().to_string())
+crates/holon-integration-tests/src/pbt/frontend_slice/components.rs	.unwrap_or_default();
+crates/holon-integration-tests/src/pbt/frontend_slice/components.rs	let current = self.block_task_state(id).await.unwrap_or_default();
+crates/holon-integration-tests/src/pbt/frontend_slice/components.rs	let id = r.get("id").map(|v| format!("{v:?}")).unwrap_or_default();
+crates/holon-integration-tests/src/pbt/frontend_slice/components.rs	let mut current = self.block_task_state(&id).await.unwrap_or_default();
+crates/holon-integration-tests/src/pbt/frontend_slice/components.rs	let now_state = self.block_task_state(&id).await.unwrap_or_default();
+crates/holon-integration-tests/src/pbt/frontend_slice/components.rs	let parent = Self::cell(row, "parent_id").unwrap_or_default();
+crates/holon-integration-tests/src/pbt/frontend_slice/components.rs	let tree = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+crates/holon-integration-tests/src/pbt/frontend_slice/components.rs	std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+crates/holon-integration-tests/src/pbt/generators.rs	.unwrap_or_default();
+crates/holon-integration-tests/src/pbt/invariants/bodies/focus_roots.rs	.unwrap_or_default();
+crates/holon-integration-tests/src/pbt/invariants/bodies/focus_roots.rs	let actual = mirror.get(&region).cloned().unwrap_or_default();
+crates/holon-integration-tests/src/pbt/invariants/bodies/focus_roots.rs	let base_truth = base.get(&region).cloned().unwrap_or_default();
+crates/holon-integration-tests/src/pbt/invariants/bodies/value_fn_provider_identity.rs	let expected = ref_.task_state_of(block_id).unwrap_or_default();
+crates/holon-integration-tests/src/pbt/invariants/bodies/viewmodel_editable_text_triggers.rs	.and_then(|s| s.parse().ok())
+crates/holon-integration-tests/src/pbt/invariants/bodies/viewmodel_state_toggle_correct.rs	let expected_state = ref_.task_state_of(&cap_id).unwrap_or_default();
+crates/holon-integration-tests/src/pbt/loro_sync/stub_sut.rs	.unwrap_or_default()
+crates/holon-integration-tests/src/pbt/loro_sync/stub_sut.rs	let _ = store.get_global_doc().await?;
+crates/holon-integration-tests/src/pbt/op_write_cap.rs	Err(e) => {
+crates/holon-integration-tests/src/pbt/panic_diag.rs	Err(e) => {
+crates/holon-integration-tests/src/pbt/query.rs	let roots = focus_roots.get(region).cloned().unwrap_or_default();
+crates/holon-integration-tests/src/pbt/reference_capabilities.rs	.unwrap_or_default()
+crates/holon-integration-tests/src/pbt/reference_state.rs	.unwrap_or_default()
+crates/holon-integration-tests/src/pbt/retry.rs	Err(e) => {
+crates/holon-integration-tests/src/pbt/retry.rs	let _ = tokio::time::timeout(max_wait, wake()).await;
+crates/holon-integration-tests/src/pbt/shadow_mesh.rs	tree.children(parent).unwrap_or_default()
+crates/holon-integration-tests/src/pbt/sql_slice/components.rs	.map(|v| v.as_string().unwrap_or_default().to_string())
+crates/holon-integration-tests/src/pbt/sut_metrics.rs	.unwrap_or_default();
+crates/holon-integration-tests/src/pbt/sut_row_parsing.rs	.unwrap_or_default()
+crates/holon-integration-tests/src/pbt/sut_row_parsing.rs	.unwrap_or_default();
+crates/holon-integration-tests/src/pbt/sut_row_parsing.rs	if let Ok(map) = serde_json::from_str::<HashMap<String, Value>>(s) {
+crates/holon-integration-tests/src/pbt/sut_row_parsing.rs	serde_json::from_str::<Vec<String>>(s).unwrap_or_default()
+crates/holon-integration-tests/src/pbt/transition_budgets.rs	.and_then(|v| v.parse().ok())
+crates/holon-integration-tests/src/pbt/transition_budgets.rs	if let Ok(output) = std::process::Command::new("footprint")
+crates/holon-integration-tests/src/pbt/transition_budgets.rs	if let Ok(output) = std::process::Command::new("ps")
+crates/holon-integration-tests/src/pbt/transition_budgets.rs	if let Ok(smaps) = std::fs::read_to_string("/proc/self/smaps_rollup") {
+crates/holon-integration-tests/src/pbt/transition_budgets.rs	if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+crates/holon-integration-tests/src/pbt/transitions/apply_mutation.rs	.and_then(|s| s.parse().ok())
+crates/holon-integration-tests/src/pbt/transitions/apply_mutation.rs	.unwrap_or_default()
+crates/holon-integration-tests/src/pbt/transitions/apply_mutation.rs	.unwrap_or_default();
+crates/holon-integration-tests/src/pbt/transitions/delete_backward.rs	.unwrap_or_default();
+crates/holon-integration-tests/src/pbt/transitions/focus_editable_text.rs	.unwrap_or_default();
+crates/holon-integration-tests/src/pbt/transitions/mod.rs	.unwrap_or_default()
+crates/holon-integration-tests/src/pbt/transitions/split_block.rs	.unwrap_or_default()
+crates/holon-integration-tests/src/pbt/transitions/split_block.rs	Err(e) => {
+crates/holon-integration-tests/src/pbt/transitions/toggle_state.rs	.filter_map(|id| holon_api::EntityUri::parse(&id).ok())
+crates/holon-integration-tests/src/pbt/transitions/toggle_state.rs	.unwrap_or_default();
+crates/holon-integration-tests/src/pbt/transitions/write_org_file.rs	if let Ok(expr) = state.interpreter.parse_dsl(block.content.as_str()) {
+crates/holon-integration-tests/src/pbt/types.rs	.unwrap_or_default();
+crates/holon-integration-tests/src/pbt/ui_harness.rs	.and_then(|v| v.parse().ok())
+crates/holon-integration-tests/src/pbt/ui_harness.rs	let _ = quit_tx.send(());
+crates/holon-integration-tests/src/pbt/window_slice/components.rs	.and_then(|s| EntityUri::parse(s).ok()),
+crates/holon-integration-tests/src/pbt/window_slice/components.rs	.map(|id| (sort_key_of(id).unwrap_or_default(), id.clone()))
+crates/holon-integration-tests/src/pbt/window_slice/components.rs	.unwrap_or_default()
+crates/holon-integration-tests/src/pbt/window_slice/components.rs	let tree = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+crates/holon-integration-tests/src/pbt/window_slice/components.rs	std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+crates/holon-integration-tests/src/polling.rs	if let Ok(content) = fs.read_to_string(file_path).await
+crates/holon-integration-tests/src/polling.rs	if let Ok(rows) = ctx
+crates/holon-integration-tests/src/test_environment.rs	.and_then(|s| s.parse::<u64>().ok())
+crates/holon-integration-tests/src/test_environment.rs	.ok();
+crates/holon-integration-tests/src/test_environment.rs	.unwrap_or_default();
+crates/holon-integration-tests/src/test_environment.rs	Err(e) => {
+crates/holon-integration-tests/src/test_environment.rs	if let Ok(ops) = injector.try_resolve::<holon::sync::LoroBlockOperations>() {
+crates/holon-integration-tests/src/test_environment.rs	if let Ok(uri) = self.resolve_page_uri_by_name(file_name).await {
+crates/holon-integration-tests/src/test_tracing.rs	if let Ok(mut guard) = slot.lock() {
+crates/holon-integration-tests/src/ui_driver.rs	.ok();
+crates/holon-integration-tests/src/ui_driver.rs	.unwrap_or_default()
+crates/holon-integration-tests/src/ui_driver.rs	.unwrap_or_default();
+crates/holon-integration-tests/src/ui_driver.rs	Err(e) => {
+crates/holon-integration-tests/src/ui_driver.rs	let _ = f.write_all(line.as_bytes());
+crates/holon-layout-testing/src/display_assertions.rs	.unwrap_or_default()
+crates/holon-loro/src/block_cell_registry.rs	.unwrap_or_default()
+crates/holon-loro/src/degraded_signal_bus.rs	let _ = self.tx.send(event);
+crates/holon-loro/src/device_key_store.rs	if let Ok(dir) = std::fs::File::open(storage_dir) {
+crates/holon-loro/src/iroh_advertiser.rs	Err(e) => {
+crates/holon-loro/src/iroh_advertiser.rs	let _ = h.task.await;
+crates/holon-loro/src/iroh_sync_adapter.rs	Err(e) => {
+crates/holon-loro/src/loro_backend.rs	.unwrap_or_default()
+crates/holon-loro/src/loro_backend.rs	.unwrap_or_default();
+crates/holon-loro/src/loro_backend.rs	Err(e) => {
+crates/holon-loro/src/loro_backend.rs	if let Ok(meta) = tree.get_meta(node.id)
+crates/holon-loro/src/loro_backend.rs	if let Ok(meta) = tree.get_meta(tree_node.id) {
+crates/holon-loro/src/loro_backend.rs	Some(p) => tree.children(p).unwrap_or_default(),
+crates/holon-loro/src/loro_backend.rs	Some(tree_id) => tree.children(tree_id).unwrap_or_default(),
+crates/holon-loro/src/loro_backend.rs	val.as_string().map(|s| s.to_string()).unwrap_or_default()
+crates/holon-loro/src/loro_block_operations.rs	.unwrap_or_default();
+crates/holon-loro/src/loro_block_operations.rs	let current = block.get_property_str("task_state").unwrap_or_default();
+crates/holon-loro/src/loro_blocks_datasource.rs	if let Ok(block) = backend.get_block(id).await {
+crates/holon-loro/src/loro_blocks_datasource.rs	if let Ok(blocks) = backend.get_all_blocks(Traversal::ALL_BUT_ROOT).await {
+crates/holon-loro/src/loro_blocks_datasource.rs	let _ = self.change_tx.send(changes);
+crates/holon-loro/src/loro_document_store.rs	Err(e) => {
+crates/holon-loro/src/loro_document_store.rs	if let Ok(doc) = self.get_global_doc().await {
+crates/holon-loro/src/loro_document.rs	if let Ok(mut seen) = origin_seen_clone.lock()
+crates/holon-loro/src/loro_meta_cell_backing.rs	let _ = tx_cb.send(());
+crates/holon-loro/src/loro_share_backend.rs	.unwrap_or_default();
+crates/holon-loro/src/loro_share_backend.rs	Err(e) => {
+crates/holon-loro/src/loro_share_backend.rs	guard.get(shared_tree_id).cloned().unwrap_or_default()
+crates/holon-loro/src/loro_share_backend.rs	if let Ok(meta) = tree.get_meta(node.id)
+crates/holon-loro/src/loro_share_backend.rs	if let Ok(on_disk) = backend.snapshot_store.list_snapshots() {
+crates/holon-loro/src/loro_share_backend.rs	let _ = read_text(&backend_a, "shared-parent").await;
+crates/holon-loro/src/loro_sync_controller.rs	Err(e) => {
+crates/holon-loro/src/loro_text_cell_backing.rs	let _ = tx_for_cb.send(translated);
+crates/holon-loro/src/multi_peer.rs	.unwrap_or_default()
+crates/holon-loro/src/multi_peer.rs	if let Ok(meta) = tree.get_meta(node.id) {
+crates/holon-loro/src/shared_snapshot_store.rs	Err(e) => {
+crates/holon-loro/src/shared_snapshot_store.rs	if let Ok(dir) = std::fs::File::open(&self.shares_dir) {
+crates/holon-loro/src/shared_tree.rs	for child in tree.children(current).unwrap_or_default() {
+crates/holon-loro/src/shared_tree.rs	for child in tree.children(node).unwrap_or_default() {
+crates/holon-macros/src/attr_parser.rs	if let Ok(args) = syn::parse_str::<AttrArgs>(rest.trim()) {
+crates/holon-macros/src/builder_registry.rs	.filter_map(|e| e.ok())
+crates/holon-macros/src/capability_pair.rs	Err(e) => {
+crates/holon-macros/src/operations_trait.rs	.unwrap_or_default();
+crates/holon-macros/src/widget_builder.rs	.unwrap_or_default(),
+crates/holon-mcp-client/examples/github_probe.rs	let user = env::var("GITHUB_USER").ok();
+crates/holon-mcp-client/examples/todoist_sync_probe.rs	.ok();
+crates/holon-mcp-client/src/integration_config.rs	Err(e) => {
+crates/holon-mcp-client/src/mcp_notification_handler.rs	let _ = self.sender.send(params.uri);
+crates/holon-mcp-client/src/mcp_provider.rs	.unwrap_or_default();
+crates/holon-mcp-client/src/mcp_provider.rs	Err(e) => {
+crates/holon-mcp-client/src/mcp_schema_mapping.rs	.unwrap_or_default();
+crates/holon-mcp-client/src/mcp_schema_mapping.rs	let prop = prop_schema.as_object().cloned().unwrap_or_default();
+crates/holon-mcp-client/src/mcp_sync_engine.rs	Err(e) => {
+crates/holon-mcp-client/src/mcp_vtable.rs	) => Value::build_text(serde_json::to_string(&v).unwrap_or_default()),
+crates/holon-org-format/src/models.rs	.unwrap_or_default();
+crates/holon-org-format/src/models.rs	} else if let Ok(props) =
+crates/holon-org-format/src/models.rs	if let Ok(props) = serde_json::from_str::<HashMap<String, String>>(&json) {
+crates/holon-org-format/src/models.rs	if let Ok(states) = serde_json::from_str::<Vec<TaskState>>(json_str) {
+crates/holon-org-format/src/org_renderer.rs	Err(e) => {
+crates/holon-org-format/src/parser.rs	Err(e) => {
+crates/holon-org-format/src/parser.rs	SourceBlock::new(language.clone().unwrap_or_default(), source);
+crates/holon-orgmode/src/block_params.rs	if let Ok(json) = serde_json::to_string(&header_args) {
+crates/holon-orgmode/src/di.rs	Err(e) => {
+crates/holon-orgmode/src/di.rs	let _ = self.sender.send(Some(Err(error)));
+crates/holon-orgmode/src/di.rs	let _ = self.sender.send(Some(Ok(())));
+crates/holon-orgmode/src/di.rs	let _ = tokio::time::timeout(remaining, notified).await;
+crates/holon-orgmode/src/di.rs	let _ = tx.send(msg);
+crates/holon-orgmode/src/file_io.rs	Value::Object(_) | Value::Json(_) => serde_json::to_string(value).unwrap_or_default(),
+crates/holon-orgmode/src/orgmode_sync_provider.rs	let _ = self.directory_tx.send(WithMetadata {
+crates/holon-orgmode/src/orgmode_sync_provider.rs	let _ = self.file_tx.send(WithMetadata {
+crates/holon-pbt-core/src/caching_proxy.rs	self.vm_emissions_cache.clone().unwrap_or_default()
+crates/holon-pbt-core/src/capabilities.rs	/// Wide PBT: `root_render_expr().map(|e| e.visible_columns()).unwrap_or_default()`.
+crates/holon-pbt-core/src/fixture.rs	.filter_map(|k| std::env::var(k).ok().map(|v| (k.to_string(), v)))
+crates/holon-profiles/src/lib.rs	.unwrap_or_default()
+crates/holon-profiles/src/lib.rs	.unwrap_or_default();
+crates/holon-profiles/src/lib.rs	} else if let Ok(f) = s.parse::<f64>() {
+crates/holon-profiles/src/lib.rs	} else if let Ok(i) = s.parse::<i64>() {
+crates/holon-profiles/src/type_registry.rs	.unwrap_or_default()
+crates/holon-turso/src/matview_manager.rs	.unwrap_or_default();
+crates/holon-turso/src/matview_manager.rs	Err(e) => {
+crates/holon-turso/src/matview_manager.rs	let _ = ack.send(());
+crates/holon-turso/src/sql_parser.rs	.unwrap_or_default();
+crates/holon-turso/src/turso.rs	.catch_unwind()
+crates/holon-turso/src/turso.rs	.unwrap_or_default(),
+crates/holon-turso/src/turso.rs	.unwrap_or_default();
+crates/holon-turso/src/turso.rs	// Wrap command processing in catch_unwind to prevent panics
+crates/holon-turso/src/turso.rs	Err(e) => {
+crates/holon-turso/src/turso.rs	let _ = cdc_tx_for_callback.send(batch);
+crates/holon-turso/src/turso.rs	let _ = op.response.send(result);
+crates/holon-turso/src/turso.rs	let _ = response.send(());
+crates/holon-turso/src/turso.rs	let _ = response.send(*phase);
+crates/holon-turso/src/turso.rs	let _ = response.send(exists);
+crates/holon-turso/src/turso.rs	let _ = response.send(Ok(()));
+crates/holon-turso/src/turso.rs	let _ = response.send(Ok(rx));
+crates/holon-turso/src/turso.rs	let _ = response.send(result);
+crates/holon-turso/src/turso.rs	let stmts = parse_sql(&sql).unwrap_or_default();
+crates/holon/examples/now_query_perf_h7.rs	let _ = run_query(conn, sql).await?;
+crates/holon/examples/turso_ivm_chained_matview_null_cdc.rs	.unwrap_or_default();
+crates/holon/examples/turso_ivm_dirty_pages_repro.rs	Err(e) => {
+crates/holon/examples/turso_ivm_json_array_gating_h2.rs	Err(e) => {
+crates/holon/examples/turso_ivm_json_array_gating_h2.rs	Some(row) => row.get::<String>(0).ok(),
+crates/holon/examples/turso_ivm_junction_gating_repro.rs	Err(e) => {
+crates/holon/examples/turso_ivm_negative_weight_repro.rs	Err(e) => {
+crates/holon/examples/turso_ivm_negative_weight_restart_repro.rs	Err(e) => {
+crates/holon/examples/turso_ivm_recursive_cte_join_repro.rs	let _ = conn.execute("DROP VIEW IF EXISTS current_focus", ()).await;
+crates/holon/src/api/backend_engine.rs	Err(e) => {
+crates/holon/src/api/block_domain.rs	Err(e) => {
+crates/holon/src/api/block_domain.rs	if let Ok(updated) = serde_json::to_string(&modes) {
+crates/holon/src/api/loro_ui_watcher.rs	Err(e) => {
+crates/holon/src/api/memory_backend.rs	.unwrap_or_default()
+crates/holon/src/api/memory_backend.rs	.unwrap_or_default();
+crates/holon/src/api/memory_backend.rs	.unwrap_or_default())
+crates/holon/src/api/operation_dispatcher.rs	Err(e) => {
+crates/holon/src/api/pbt_infrastructure.rs	.unwrap_or_default();
+crates/holon/src/api/ui_watcher.rs	Err(e) => {
+crates/holon/src/api/ui_watcher.rs	let _ = tx_init.send(RenderTrigger::Initial).await;
+crates/holon/src/core/queryable_cache.rs	Err(e) => {
+crates/holon/src/core/sql_block_operations.rs	.unwrap_or_default()
+crates/holon/src/core/sql_block_operations.rs	.unwrap_or_default();
+crates/holon/src/core/sql_operation_provider.rs	.unwrap_or_default();
+crates/holon/src/core/sql_operation_provider.rs	Err(e) => {
+crates/holon/src/core/sql_operation_provider.rs	if let Ok(f) = sql_literal.parse::<f64>() {
+crates/holon/src/core/sql_operation_provider.rs	if let Ok(n) = sql_literal.parse::<i64>() {
+crates/holon/src/core/sql_operation_provider.rs	other => serde_json::to_string(&other).unwrap_or_default(),
+crates/holon/src/core/sql_operation_provider.rs	serde_json::to_string(&sorted).unwrap_or_default()
+crates/holon/src/core/stream_cache.rs	.unwrap_or_default(),
+crates/holon/src/core/stream_cache.rs	Err(e) => {
+crates/holon/src/core/stream_cache.rs	Value::Json(serde_json::to_string(&value).unwrap_or_default())
+crates/holon/src/di/registration.rs	Err(e) => {
+crates/holon/src/sync/loro_module.rs	Err(e) => {
+crates/holon/src/sync/turso_block_query_source.rs	.unwrap_or_default();
+crates/holon/src/testing/e2e_test_helpers.rs	.unwrap_or_default()
+crates/holon/src/testing/e2e_test_helpers.rs	.unwrap_or_default(),
+crates/holon/src/testing/e2e_test_helpers.rs	.unwrap_or_default();
+crates/holon/src/testing/generic_provider_state.rs	.unwrap_or_default()
+crates/holon/src/testing/generic_provider_state.rs	.unwrap_or_default();
+frontends/dioxus-web/src/bridge.rs	let _ = tx.send(Err(reason.to_string()));
+frontends/dioxus-web/src/bridge.rs	let _ = tx.send(Ok(()));
+frontends/dioxus-web/src/editor.rs	.unwrap_or_default();
+frontends/dioxus-web/src/editor.rs	acc += utf16_len(&n.text_content().unwrap_or_default());
+frontends/dioxus-web/src/editor.rs	let current = el.text_content().unwrap_or_default();
+frontends/dioxus-web/src/editor.rs	let len = utf16_len(&last.text_content().unwrap_or_default());
+frontends/dioxus-web/src/editor.rs	let len = utf16_len(&n.text_content().unwrap_or_default());
+frontends/dioxus-web/src/editor.rs	let text = el.text_content().unwrap_or_default();
+frontends/dioxus-web/src/main.rs	.unwrap_or_default();
+frontends/dioxus-web/src/main.rs	Err(e) => {
+frontends/dioxus-web/src/main.rs	if let Ok(s) = serde_json::to_string(&response) {
+frontends/dioxus-web/src/main.rs	let _ = ws.send_with_str(&s);
+frontends/dioxus-web/src/render/builders/live_block.rs	Err(e) => {
+frontends/dioxus-web/src/render/builders/rendered_text.rs	let dom_entity_id = entity_id.clone().unwrap_or_default();
+frontends/dioxus-web/src/render/builders/text.rs	.unwrap_or_default();
+frontends/dioxus/src/render/builders/text.rs	.unwrap_or_default();
+frontends/gpui/examples/reactive_vm_demo.rs	.unwrap_or_default();
+frontends/gpui/src/lib.rs	Err(e) => {
+frontends/gpui/src/main.rs	Err(e) => {
+frontends/gpui/src/main.rs	if let Ok(backend) = injector_for_signal
+frontends/gpui/src/navigation_state.rs	if let Ok(mut state) = self.navigation_debug.write() {
+frontends/gpui/src/reactive_vm_poc.rs	.unwrap_or_default(),
+frontends/gpui/src/reactive_vm_poc.rs	.unwrap_or_default();
+frontends/gpui/src/render/builders/badge.rs	let label = node.prop_str("label").unwrap_or_default();
+frontends/gpui/src/render/builders/block_operations.rs	let operations = node.prop_str("operations").unwrap_or_default();
+frontends/gpui/src/render/builders/board.rs	let accent_str = card_vm.prop_str("accent").unwrap_or_default();
+frontends/gpui/src/render/builders/board.rs	let content = child.prop_str("content").unwrap_or_default();
+frontends/gpui/src/render/builders/card.rs	let accent = node.prop_str("accent").unwrap_or_default();
+frontends/gpui/src/render/builders/chat_bubble.rs	let sender = node.prop_str("sender").unwrap_or_default();
+frontends/gpui/src/render/builders/chat_bubble.rs	let time = node.prop_str("time").unwrap_or_default();
+frontends/gpui/src/render/builders/collapsible.rs	let header_text = node.prop_str("header").unwrap_or_default();
+frontends/gpui/src/render/builders/collapsible.rs	let icon_text = node.prop_str("icon").unwrap_or_default();
+frontends/gpui/src/render/builders/drawer.rs	let block_id = node.prop_str("block_id").unwrap_or_default();
+frontends/gpui/src/render/builders/editable_text.rs	let content = node.prop_str("content").unwrap_or_default();
+frontends/gpui/src/render/builders/error.rs	let message = node.prop_str("message").unwrap_or_default();
+frontends/gpui/src/render/builders/expand_toggle.rs	let target_id = node.prop_str("target_id").unwrap_or_default();
+frontends/gpui/src/render/builders/icon.rs	Err(e) => {
+frontends/gpui/src/render/builders/icon.rs	if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
+frontends/gpui/src/render/builders/icon.rs	if let Ok(root) = std::env::var("HOLON_WORKSPACE_ROOT") {
+frontends/gpui/src/render/builders/image.rs	Err(e) => {
+frontends/gpui/src/render/builders/image.rs	if let Ok(canonical) = candidate.canonicalize() {
+frontends/gpui/src/render/builders/image.rs	if let Ok(root_canonical) = root.canonicalize() {
+frontends/gpui/src/render/builders/image.rs	let alt = node.prop_str("alt").unwrap_or_default();
+frontends/gpui/src/render/builders/image.rs	let path = node.prop_str("path").unwrap_or_default();
+frontends/gpui/src/render/builders/live_block.rs	let block_id_str = node.prop_str("block_id").unwrap_or_default();
+frontends/gpui/src/render/builders/live_query.rs	if let Ok(re) = serde_json::from_str::<holon_api::render_types::RenderExpr>(&re_str) {
+frontends/gpui/src/render/builders/op_button.rs	let display_name = node.prop_str("display_name").unwrap_or_default();
+frontends/gpui/src/render/builders/op_button.rs	let op_name = node.prop_str("op_name").unwrap_or_default();
+frontends/gpui/src/render/builders/op_button.rs	let target_id = node.prop_str("target_id").unwrap_or_default();
+frontends/gpui/src/render/builders/pie_menu.rs	let fields = node.prop_str("fields").unwrap_or_default();
+frontends/gpui/src/render/builders/pref_field.rs	Err(e) => {
+frontends/gpui/src/render/builders/pref_field.rs	let key = node.prop_str("key").unwrap_or_default();
+frontends/gpui/src/render/builders/pref_field.rs	let pref_type = node.prop_str("pref_type").unwrap_or_default();
+frontends/gpui/src/render/builders/rendered_text.rs	let content = node.prop_str("content").unwrap_or_default();
+frontends/gpui/src/render/builders/section.rs	let title = node.prop_str("title").unwrap_or_default();
+frontends/gpui/src/render/builders/source_block.rs	let content = node.prop_str("content").unwrap_or_default();
+frontends/gpui/src/render/builders/source_block.rs	let name = node.prop_str("name").unwrap_or_default();
+frontends/gpui/src/render/builders/source_editor.rs	let content = node.prop_str("content").unwrap_or_default();
+frontends/gpui/src/render/builders/state_toggle.rs	let current = node.prop_str("current").unwrap_or_default();
+frontends/gpui/src/render/builders/state_toggle.rs	let states = node.prop_str("states").unwrap_or_default();
+frontends/gpui/src/render/builders/table_row.rs	let val = data.get(key).map(|v| v.to_display_string()).unwrap_or_default();
+frontends/gpui/src/render/builders/text.rs	let content = node.prop_str("content").unwrap_or_default();
+frontends/gpui/src/render/builders/view_mode_switcher.rs	let active_mode_prop = node.prop_str("active_mode").unwrap_or_default();
+frontends/gpui/src/share_ui.rs	.unwrap_or_default();
+frontends/gpui/src/share_ui.rs	let _ = tx.send(outcome);
+frontends/gpui/src/user_driver.rs	if let Ok(r @ (holon_api::Region::LeftSidebar | holon_api::Region::RightSidebar)) =
+frontends/gpui/src/user_driver.rs	let _ = tokio::time::timeout(Duration::from_millis(50), self.geometry.changed()).await;
+frontends/gpui/src/views/editor_view.rs	.unwrap_or_default();
+frontends/gpui/src/views/editor_view.rs	Err(e) => {
+frontends/gpui/src/views/editor_view.rs	if let Ok(cell) = services.editable_text(&row_uri, &field_for_subscription) {
+frontends/gpui/src/views/editor_view.rs	if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
+frontends/gpui/src/views/editor_view.rs	if let Ok(root) = std::env::var("HOLON_VAULT_ROOT") {
+frontends/gpui/src/views/editor_view.rs	if let Ok(root) = std::env::var("HOLON_WORKSPACE_ROOT") {
+frontends/mcp/src/browser_relay.rs	Err(e) => {
+frontends/mcp/src/browser_relay.rs	let _ = tx.send(Err(McpError::internal_error(
+frontends/mcp/src/browser_relay.rs	let _ = tx.send(result);
+frontends/mcp/src/di.rs	if let Ok(fs) = injector.try_resolve::<dyn holon_filesystem::FileSystem>() {
+frontends/mcp/src/di.rs	if let Ok(hub_url) = std::env::var("HOLON_BROWSER_RELAY_URL") {
+frontends/mcp/src/main.rs	.unwrap_or_default()
+frontends/mcp/src/main.rs	Err(e) => {
+frontends/mcp/src/main.rs	if let Ok(backend) = injector_for_signal
+frontends/mcp/src/tools.rs	.or_else(|| std::env::var("HOLON_AGENT_ID").ok())
+frontends/mcp/src/tools.rs	let a = w.app_name().unwrap_or_default().to_lowercase();
+frontends/mcp/src/tools.rs	let t = w.title().unwrap_or_default().to_lowercase();
+frontends/mcp/src/tools.rs	let win_app = window.app_name().unwrap_or_default();
+frontends/mcp/src/tools.rs	let win_title = window.title().unwrap_or_default();
+frontends/ply/src/main.rs	Err(e) => {
+frontends/ply/src/render/builders/table.rs	.unwrap_or_default()
+frontends/ply/src/render/builders/text.rs	.unwrap_or_default()
+frontends/tui/src/app_main.rs	buffer: e.vm.current_text().unwrap_or_default(),
+frontends/tui/src/app_main.rs	Err(e) => {
+frontends/tui/src/app_main.rs	let current = edit_state.vm.current_text().unwrap_or_default();
+frontends/tui/src/app_main.rs	let cursor = vm.current_text().unwrap_or_default().len();
+frontends/tui/src/app_main.rs	let new_text = es.vm.current_text().unwrap_or_default();
+frontends/tui/src/input_pump.rs	let _ = cmd.response_tx.send(response);
+frontends/tui/src/render/mod.rs	.unwrap_or_default()
+frontends/tui/src/render/mod.rs	.unwrap_or_default();
+frontends/tui/src/render/mod.rs	let content = node.prop_str("content").unwrap_or_default();
+frontends/tui/src/render/mod.rs	let current = node.prop_str("current").unwrap_or_default();
+frontends/tui/src/render/mod.rs	let current_content = node.prop_str("content").unwrap_or_default();
+frontends/tui/src/render/mod.rs	let inner_name = inner.widget_name().unwrap_or_default();
+frontends/tui/src/render/mod.rs	let label = node.prop_str("label").unwrap_or_default();
+frontends/tui/src/render/mod.rs	let message = node.prop_str("message").unwrap_or_default();
+frontends/tui/src/render/mod.rs	let name = node.widget_name().unwrap_or_default();
+frontends/tui/src/render/mod.rs	let title = node.prop_str("title").unwrap_or_default();
+frontends/tui/src/render/mod.rs	node.widget_name().unwrap_or_default(),
+frontends/waterui/src/render/builders/table.rs	.unwrap_or_default();
+frontends/waterui/src/render/builders/text.rs	.unwrap_or_default()

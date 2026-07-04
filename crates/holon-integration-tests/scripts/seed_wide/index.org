@@ -1,0 +1,51 @@
+#+ID: 15223f86-4b69-49b0-8ad7-c5b15fbc9f95
+* Holon Layout
+:PROPERTIES:
+:ID: root-layout
+:END:
+** Left Sidebar
+:PROPERTIES:
+:ID: default-left-sidebar
+:collapse_to: drawer
+:END:
+#+BEGIN_SRC render :id left_sidebar::render::0
+tree(#{parent_id: col("parent_id"), sortkey: col("sort_key"), item_template: selectable(row(icon("notebook"), spacer(6), text(col("content"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})})})
+#+END_SRC
+#+BEGIN_SRC holon_sql :id left_sidebar::src::0
+SELECT b.* FROM block b JOIN block_tags bt ON bt.block_id = b.id WHERE bt.tag = 'Page' AND b.id != 'block:__default__'
+#+END_SRC
+** Main Panel
+:PROPERTIES:
+:ID: default-main-panel
+:END:
+#+BEGIN_SRC holon_gql :id default-main-panel::src::0
+MATCH (fr:focus_root), (root:block)<-[:CHILD_OF*0..20]-(d:block) WHERE fr.region = 'main' AND root.id = fr.root_id RETURN d
+#+END_SRC
+** Right Sidebar
+:PROPERTIES:
+:ID: default-right-sidebar
+:collapse_to: drawer
+:END:
+#+BEGIN_SRC render :id default-right-sidebar::render::0
+tree(#{parent_id: col("parent_id"), sortkey: col("sort_key"), item_template: render_entity(), rules: [#{when: eq("level", 0), override: #{role: "page_title", show_bullet: false, show_chevron: false}}]})
+#+END_SRC
+#+BEGIN_SRC holon_gql :id default-right-sidebar::src::0
+MATCH (fr:focus_root), (root:block)<-[:CHILD_OF*0..20]-(d:block) WHERE fr.region = 'right' AND root.id = fr.root_id RETURN d ORDER BY fr.added_ts DESC, d.sort_key
+#+END_SRC
+** Advice Rules
+:PROPERTIES:
+:ID: default-advice-rules
+:END:
+#+BEGIN_SRC holon_advice_rule_yaml :id lessons_for_tasks::rule::0
+# Bundled advice rule (ADR 0022 v1 cut). Ships INACTIVE — set `active: true` to
+# enable; flipping it triggers the single matview reconcile. See docs/adr/0022.
+name: lessons_for_tasks
+active: false
+anchor:
+  has_tag: task
+candidates:
+  tag_overlap_recency:
+    source:
+      has_tag: lesson
+k: 5
+#+END_SRC

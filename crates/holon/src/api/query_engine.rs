@@ -102,6 +102,24 @@ impl QueryEngine for BackendEngine {
             .collect()
     }
 
+    /// One-shot compile + execute (the advice weave's canonical read, ADR 0022):
+    /// no matview, no CDC — delegates to the inherent `execute_query` retry path
+    /// and re-keys `StorageEntity` (`Arc<str>` keys) into `DataRow` (`String`).
+    async fn execute_query(
+        &self,
+        query: &str,
+        language: QueryLanguage,
+        params: HashMap<String, Value>,
+        context: Option<QueryContext>,
+    ) -> Result<Vec<holon_api::widget_spec::DataRow>> {
+        let sql = BackendEngine::compile_to_sql(self, query, language)?;
+        let rows = BackendEngine::execute_query(self, sql, params, context).await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| row.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+            .collect())
+    }
+
     async fn block_content_by_id(&self, id: &EntityUri) -> Result<Option<String>> {
         use crate::storage::BLOCK_WRITE_TABLE;
         let escaped = id.to_string().replace('\'', "''");

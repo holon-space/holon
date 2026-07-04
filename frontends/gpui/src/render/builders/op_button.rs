@@ -100,6 +100,7 @@ fn op_icon_char(op_name: &str) -> &'static str {
     match op_name {
         "cycle_task_state" => "\u{27F3}", // ⟳
         "delete" => "\u{1F5D1}",           // 🗑
+        "dismiss_advice" => "\u{2715}",    // ✕ (dismiss a woven advice suggestion, ADR 0022)
         "create" => "+",
         "update" | "set_field" => "\u{270E}", // ✎
         "embed_entity" | "embed" => "\u{29C9}", // ⧉

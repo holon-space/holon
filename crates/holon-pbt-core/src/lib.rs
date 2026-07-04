@@ -36,22 +36,32 @@ use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
 pub mod bisect;
+pub mod budget;
 pub mod caching_proxy;
 pub mod capabilities;
 pub mod component_set;
 pub mod composition;
+pub mod contribution;
 pub mod fixture;
 pub mod interactions;
 pub mod invariant;
+pub mod retry;
+pub mod sibling_order;
+pub mod types;
+pub mod validation;
 pub mod wiring;
 
 pub use bisect::{bisect, bisect_downward, bisect_upward, Localization};
 pub use caching_proxy::{cached, CachingProxy};
 pub use component_set::{Component, ComponentSet, ComponentSetError, Projection};
+pub use contribution::{
+    fold_catalog, CapInstaller, CrateId, GeneratorFactory, PbtContribution, PbtFootprint,
+};
 pub use invariant::{Invariant, InvariantId, InvariantResult, RunMode};
+pub use sibling_order::compare_sibling_order;
 pub use wiring::{
-    any_valid_wiring, wiring_axes, Actor, RequiredWiring, StorageAdapter, SyncAdapter, Wiring,
-    WiringError,
+    any_valid_wiring, wiring_axes, wiring_from_exact_spec, Actor, RequiredWiring, StorageAdapter,
+    SyncAdapter, Wiring, WiringError,
 };
 
 pub use interactions::{DeliverBlockContent, SwitchViewMode, ToggleCollapse, ToggleDrawer};

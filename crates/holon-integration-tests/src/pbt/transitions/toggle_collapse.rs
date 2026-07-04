@@ -13,11 +13,8 @@ pub use holon_pbt_core::ToggleCollapse;
 
 use crate::pbt::layout_bridge::SutClickAdapter;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::validation::{Reason, map_nevec};
-use holon_pbt_core::capabilities::SutBlockInteract;
-
-#[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::{ExpectedSql, REACTIVE_BASE, docs_tolerance};
+use holon_pbt_core::capabilities::{RefToggleMut, SutBlockInteract};
+use holon_pbt_core::validation::{Reason, map_nevec};
 
 fn map_reason(r: ToggleCollapseReason) -> Reason {
     match r {
@@ -69,7 +66,7 @@ impl TransitionRef<ReferenceState> for ToggleCollapse {
         // ref state must reflect that so subsequent preconditions stay
         // accurate.
         let uri = parse_target(&self.target_id);
-        state.ui.tab.expanded_toggles.remove(&uri);
+        state.set_expanded(&uri, false);
     }
 }
 
@@ -84,17 +81,5 @@ impl<S: SutBlockInteract> TransitionImpl<ReferenceState, S> for ToggleCollapse {
             LayoutSut<'_, SutClickAdapter<'_, S>>,
         >>::apply_to_sut(self, &ref_view, &mut layout_sut)
         .await;
-    }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for ToggleCollapse {
-    fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
-        ExpectedSql {
-            reads: REACTIVE_BASE + 10,
-            writes: 0,
-            ddl: 0,
-            tolerance: docs_tolerance(state) + 5,
-        }
     }
 }

@@ -6,13 +6,18 @@ use rmcp::{service::RequestContext, ErrorData as McpError, RoleServer};
 impl HolonMcpServer {
     fn resources_engine(
         &self,
-    ) -> Result<&std::sync::Arc<holon::api::backend_engine::BackendEngine>, McpError> {
-        self.engine.as_ref().ok_or_else(|| {
-            McpError::internal_error(
-                "resources require a backend engine (not available in this mode)",
-                None,
-            )
-        })
+    ) -> Result<std::sync::Arc<holon::api::backend_engine::BackendEngine>, McpError> {
+        self.backend
+            .read()
+            .expect("backend cell poisoned")
+            .engine
+            .clone()
+            .ok_or_else(|| {
+                McpError::internal_error(
+                    "resources require a backend engine (not available in this mode)",
+                    None,
+                )
+            })
     }
 
     pub async fn list_resources_impl(

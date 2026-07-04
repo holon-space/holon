@@ -37,7 +37,7 @@ pub use directory::{Directory, ROOT_ID};
 pub use error::FilesystemError;
 pub use file::File;
 #[cfg(not(target_arch = "wasm32"))]
-pub use file_sync_controller::{FileSyncController, RENDERER_VERSION};
+pub use file_sync_controller::{BlockDelta, FileSyncController, RENDERER_VERSION};
 #[cfg(not(target_arch = "wasm32"))]
 pub use fs_port::{FileMeta, FileSystem, RealFileSystem, ScannedEntries};
 #[cfg(not(target_arch = "wasm32"))]

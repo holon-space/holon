@@ -6,14 +6,13 @@
 //! `sut.rs:4169-4176` (SUT apply), and
 //! `transition_budgets.rs:331-336` (expected SQL).
 
-use crate::pbt::validation::{Reason, check};
+use holon_pbt_core::validation::{Reason, check};
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::reference_state::ReferenceState;
-use holon_pbt_core::capabilities::SutMcpEmit;
-use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
+use holon_pbt_core::capabilities::{RefLifecycle, SutMcpEmit};
+use holon_pbt_core::{TransitionFactory, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{ExpectedSql, docs_tolerance};
@@ -23,11 +22,9 @@ use crate::pbt::transition_budgets::{ExpectedSql, docs_tolerance};
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct EmitMcpData;
 
-impl TransitionFactory<ReferenceState> for EmitMcpData {
+impl<R: RefLifecycle> TransitionFactory<R> for EmitMcpData {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        vec![::holon_pbt_core::composition::CapId::of::<
-            dyn ::holon_pbt_core::capabilities::SutMcpEmit,
-        >()]
+        Self::declared_caps()
     }
 
     type Reason = Reason;
@@ -37,7 +34,7 @@ impl TransitionFactory<ReferenceState> for EmitMcpData {
         // (see loro_block_query_source.rs:77). Gate it out of {Loro} slices.
         ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Turso)
     }
-    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // Delegate all validation to preconditions — single source of truth.
         EmitMcpData
             .preconditions(state)
@@ -45,12 +42,12 @@ impl TransitionFactory<ReferenceState> for EmitMcpData {
     }
 }
 
-impl TransitionRef<ReferenceState> for EmitMcpData {
+impl<R: RefLifecycle> TransitionRef<R> for EmitMcpData {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> =
-            vec![check(state.action.app_started, Reason::AppNotStarted)];
+            vec![check(state.app_started(), Reason::AppNotStarted)];
 
         checks
             .into_iter()
@@ -58,22 +55,19 @@ impl TransitionRef<ReferenceState> for EmitMcpData {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, _: &mut ReferenceState) {
+    fn apply_to_ref(&self, _: &mut R) {
         // No reference state change — just triggers IVM re-evaluation.
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutMcpEmit> TransitionImpl<ReferenceState, S> for EmitMcpData {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
+crate::cap_transition! {
+    EmitMcpData: SutMcpEmit,
+    where R: [ RefLifecycle ],
+    |_me, _state, sut| {
         sut.emit_mcp_data().await;
     }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for EmitMcpData {
-    fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
-        let blocks = state.domain.block_state.blocks.len();
+    sql_budget: |_me, state| {
+        let blocks = state.block_count();
         ExpectedSql {
             reads: 4,
             writes: 2,

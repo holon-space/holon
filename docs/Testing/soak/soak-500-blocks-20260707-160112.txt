@@ -1,0 +1,59 @@
+# Holon scale-soak — 20260707-160112 (run5; test binary killed mid-case-2, latency data complete & valid)
+# size=500 blocks  actions≈40 (cases=2)  settle=60000ms  per_doc=200  CRDT=on (HOLON_PBT_FORCE_FULL=1)
+# soften: inv-main-panel-rows-match-focus:warn (DISCLOSED)
+# raw log: /tmp/holon-soak-20260707-160112.log   rss: /tmp/holon-soak-rss-20260707-160112.csv
+# repro: just soak 500 40 60000 200 inv-main-panel-rows-match-focus:warn
+# NOTE: recipe prints 'action_total events: 0' — grep misses ANSI+quoted field; true count below.
+
+action_total events (ANSI-stripped): 170
+
+========================================================================
+HOLON UI ACTION LATENCY  (headless composed pipeline; excludes GPU paint)
+========================================================================
+
+== END-TO-END  action -> visible rows  (stage=action_total) ==
+action                     n      p50      p95      max     mean  (ms)
+------------------------------------------------------------------------
+SplitBlock               127    131.0    191.3    208.0    136.7
+NavigateFocus              6    224.5    259.2    268.0    231.5
+BulkExternalAdd            3    467.0    494.0    497.0    443.3
+PinBlock                   4    216.0    217.8    218.0    216.2
+ApplyMutation              2    341.5    350.9    352.0    341.5
+SimulateRestart            2    244.0    244.9    245.0    244.0
+CreateDocument             3    147.0    166.8    169.0    148.0
+SetEdgeField               4    104.5    110.1    111.0    105.5
+AddPeer                    3    111.0    114.6    115.0    108.0
+EmitMcpData                5     53.0     53.0     53.0     52.6
+DeleteDocument             1    257.0    257.0    257.0    257.0
+NavigateHome               1    230.0    230.0    230.0    230.0
+SwitchView                 3     54.0     54.0     54.0     53.0
+ToggleState                1    153.0    153.0    153.0    153.0
+EpochFlipRejected          1     70.0     70.0     70.0     70.0
+Nothing                    1     56.0     56.0     56.0     56.0
+SetupWatch                 1     54.0     54.0     54.0     54.0
+ArrowNavigate              1     53.0     53.0     53.0     53.0
+RemoveWatch                1     53.0     53.0     53.0     53.0
+
+== DISPATCH stage  action -> op applied  (stage=dispatch) ==
+action                     n      p50      p95      max     mean  (ms)
+------------------------------------------------------------------------
+focus                     16   2796.5   3397.2   3815.0   1869.2
+split_block              127     11.0     19.0     35.0     10.9
+set_field                  1     35.0     35.0     35.0     35.0
+
+== PIPELINE STAGE COST (global, all actions) ==
+stage                            n      p50      p95      max     mean  (ms)
+------------------------------------------------------------------------
+projection (full pass)         189     53.0    495.2    799.0    121.1
+projection (snapshot only)     189     16.0     22.0     38.0     16.2
+rows (CDC batch apply)         609      0.0      1.0      3.0      0.1
+
+projection doc size: blocks p50=524 max=558  (full-document DFS snapshot per commit)
+rows per CDC batch:  p50=1 max=201
+
+DOMINATOR: projection accounts for 22879ms across 189 passes vs 24659ms of end-to-end action wall (93% of total action time).
+
+LATENCY GATE: worst end-to-end p95 = 494.0ms (action='BulkExternalAdd'); threshold = 200.0ms
+
+== RSS (resident set, MB) ==
+samples=1534  start=401  peak=912  end=490  growth=+88 MB

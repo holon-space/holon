@@ -93,7 +93,8 @@ impl CacheBlockReader {
              b.properties, b.marks, b.collapsed, b.completed, \
              b.block_type, b.created_at, b.updated_at, \
              COALESCE((SELECT json_group_array(tag) FROM block_tags WHERE block_id = b.id), '[]') AS tags, \
-             COALESCE((SELECT json_group_array(required_id) FROM block_requires WHERE block_id = b.id), '[]') AS requires \
+             COALESCE((SELECT json_group_array(required_id) FROM block_requires WHERE block_id = b.id), '[]') AS requires, \
+             COALESCE((SELECT json_group_array(lesson_id) FROM advice_suppressed WHERE anchor_id = b.id), '[]') AS advice_suppressed \
              FROM {BLOCK_WRITE_TABLE} b \
              ORDER BY b.sort_key, b.id"
         );
@@ -152,7 +153,8 @@ impl BlockReader for CacheBlockReader {
                    b.properties, b.marks, b.collapsed, b.completed, \
                    b.block_type, b.created_at, b.updated_at, \
                    COALESCE((SELECT json_group_array(tag) FROM block_tags WHERE block_id = b.id), '[]') AS tags, \
-                   COALESCE((SELECT json_group_array(required_id) FROM block_requires WHERE block_id = b.id), '[]') AS requires \
+                   COALESCE((SELECT json_group_array(required_id) FROM block_requires WHERE block_id = b.id), '[]') AS requires, \
+                   COALESCE((SELECT json_group_array(lesson_id) FROM advice_suppressed WHERE anchor_id = b.id), '[]') AS advice_suppressed \
             FROM {table} b \
             JOIN descendants d ON d.id = b.id \
             ORDER BY b.sort_key, b.id",
@@ -184,6 +186,50 @@ impl BlockReader for CacheBlockReader {
                 })
             })
             .collect()
+    }
+
+    async fn get_block_authoritative(&self, id: &EntityUri) -> anyhow::Result<Option<Block>> {
+        // Single-block point read on the write authority (`block_raw`), edge-
+        // hydrated identically to `get_blocks` (same COALESCE(json_group_array)
+        // subqueries). `id` is the primary key → O(1) indexed lookup, NO
+        // recursive CTE and NO read of the lagging `block` matview. This is the
+        // per-edit refresh for the org-writeback incremental cache; it shares
+        // `block_raw` authority with the cache's `get_blocks` seed.
+        let sql = format!(
+            "SELECT b.id, b.parent_id, b.depth, b.sort_key, b.content, \
+                    b.content_type, b.source_language, b.source_name, \
+                    b.properties, b.marks, b.collapsed, b.completed, \
+                    b.block_type, b.created_at, b.updated_at, \
+                    COALESCE((SELECT json_group_array(tag) FROM block_tags WHERE block_id = b.id), '[]') AS tags, \
+                    COALESCE((SELECT json_group_array(required_id) FROM block_requires WHERE block_id = b.id), '[]') AS requires, \
+                    COALESCE((SELECT json_group_array(lesson_id) FROM advice_suppressed WHERE anchor_id = b.id), '[]') AS advice_suppressed \
+             FROM {table} b \
+             WHERE b.id = $id",
+            table = BLOCK_WRITE_TABLE,
+        );
+
+        let mut params = std::collections::HashMap::new();
+        params.insert("id".to_string(), holon_api::Value::String(id.to_string()));
+
+        let rows = self
+            .cache
+            .db_handle()
+            .query(&sql, params)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "[CacheBlockReader::get_block_authoritative] point read failed: {e}"
+                )
+            })?;
+
+        match rows.into_iter().next() {
+            Some(row) => Ok(Some(Block::try_from(row).map_err(|e| {
+                anyhow::anyhow!(
+                    "[CacheBlockReader::get_block_authoritative] Block::try_from row failed: {e}"
+                )
+            })?)),
+            None => Ok(None),
+        }
     }
 
     async fn iter_documents_with_blocks(&self) -> anyhow::Result<Vec<(EntityUri, Vec<Block>)>> {

@@ -45,8 +45,26 @@ use crate::pbt::reference_state::{ReferenceState, Resolved};
 /// CreateDocument-minted doc pages (`block:ref-doc-N`, from
 /// `ReferenceState::next_synthetic_doc_uri`). Composed-local on purpose — the global
 /// [`is_synthetic_ref_id`] stays split-only so E2ESut's mapping is unaffected.
+/// Action-kind label for a transition, derived from its `Debug` head token
+/// (`Indent { .. }` -> "Indent"). Generic over the slice `Transition` enum
+/// (only `Debug` is available at the harness layer), used solely for the
+/// `target="holon_latency"` per-action summary — never for control flow.
+fn action_label<T: std::fmt::Debug>(t: &T) -> String {
+    let dbg = format!("{t:?}");
+    dbg.split(|c: char| c == ' ' || c == '(' || c == '{' || c == '\n')
+        .next()
+        .unwrap_or("<transition>")
+        .to_string()
+}
+
 fn is_composed_minted_synthetic_id(id: &EntityUri) -> bool {
-    is_synthetic_ref_id(id) || id.as_str().starts_with("block:ref-doc-")
+    is_synthetic_ref_id(id)
+        || id.as_str().starts_with("block:ref-doc-")
+        // `CreateBlockUnderFocus` mints `block::create-N` in the oracle; the SUT's
+        // creation-slot `block.create` op materializes a fresh uuid the per-tick
+        // reconcile pairs 1:1 with it. Composed-local (not the global split-only
+        // `is_synthetic_ref_id`) for the same reason `ref-doc-` is.
+        || id.as_str().starts_with("block::create-")
 }
 
 /// Ids of peer-created blocks (`block:peer-HHHH-LLLL-IIII-SSSS`, minted by
@@ -257,6 +275,37 @@ impl<S: ComposedSlice> ComposedSut<S> {
         &self.rt
     }
 
+    /// The slice handle — a deterministic test needs it to reach the booted
+    /// stores (e.g. `WideHandle::engine` for a production op dispatch).
+    pub fn handle(&self) -> &S::Handle {
+        &self.handle
+    }
+
+    /// Settle the slice's async projections now — the SAME post-apply settle
+    /// [`StateMachineTest::apply`] runs. For deterministic tests that dispatch
+    /// a write outside the transition alphabet (e.g. a production operation)
+    /// and must not read invariants against a half-projected sink.
+    pub fn settle_projections(&self) {
+        let caps = &self.caps;
+        let handle = &self.handle;
+        self.rt.block_on(S::settle_after_apply(handle, caps));
+    }
+
+    /// Produce the catalog run report over the current SUT/oracle state — the
+    /// SAME report [`StateMachineTest::check_invariants`] asserts over. Lets a
+    /// deterministic test prove an invariant actually RAN (present in
+    /// `report.ran`), not merely that nothing failed — a silently deselected
+    /// invariant must fail such a test, not pass it vacuously.
+    pub fn run_report_now(&self, ref_state: &ReferenceState) -> RunReport {
+        (self.settle)();
+        self.rt.block_on(S::run_report(
+            &self.caps,
+            &self.resolver,
+            &self.scaffold_ids,
+            ref_state,
+        ))
+    }
+
     /// The live cap set this SUT's `CapMap` actually provides. The windowed harness
     /// feeds this into the oracle (`wide_e2e_windowed_ref`) so `aggregate_transitions`
     /// narrows the generated alphabet to exactly what THIS SUT can drive — the overlaid
@@ -298,6 +347,7 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
     }
 
     fn apply(mut sut: Self, ref_state: &ReferenceState, transition: S::Transition) -> Self {
+        let action = action_label(&transition);
         let (before, after) = {
             // Split the borrow: `settle_after_apply` reads `&sut.handle` while the apply
             // writes `&mut sut.caps` — disjoint fields, so borrow each separately before
@@ -306,8 +356,19 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
             let handle = &sut.handle;
             sut.rt.block_on(async move {
                 let before = sut_ids(caps).await;
+                let t_action = std::time::Instant::now();
                 S::apply_transition(&transition, ref_state, caps).await;
                 S::settle_after_apply(handle, caps).await;
+                // Latency (end-to-end, action->visible rows): dispatch through the
+                // real pipeline plus the CDC settle — everything except final GPU
+                // paint (headless harness). Greppable via target="holon_latency".
+                tracing::debug!(
+                    target: "holon_latency",
+                    stage = "action_total",
+                    action = %action,
+                    total_ms = t_action.elapsed().as_millis() as u64,
+                    "holon_latency",
+                );
                 feed_sut_clock(caps, ref_state).await;
                 let after = sut_ids(caps).await;
                 (before, after)
@@ -327,7 +388,12 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
         // `is_synthetic_ref_id` (which E2ESut keys its split-only mapping off — widening it
         // there would make E2ESut mis-treat doc-uris as splits).
         let mut map = sut.resolver.lock().expect("resolver lock");
-        let synthetic: Vec<EntityUri> = ref_state
+        // Born-equal doc pages: `WriteOrgFile` pins the oracle's `block:ref-doc-N`
+        // into the file via `#+ID:`, so the SUT ingests the SAME id — synthetic in
+        // scheme, but with no fresh real partner. Self-map those (identity), like
+        // the counter-sync case above; only synthetics the SUT does NOT already
+        // hold (CreateDocument's empty file → fresh uuid) enter the 1:1 pairing.
+        let unmapped: Vec<EntityUri> = ref_state
             .domain
             .block_state
             .blocks
@@ -335,6 +401,11 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
             .filter(|id| is_composed_minted_synthetic_id(id) && !map.contains_key(id))
             .cloned()
             .collect();
+        let (born_equal, synthetic): (Vec<EntityUri>, Vec<EntityUri>) =
+            unmapped.into_iter().partition(|id| after.contains(id));
+        for id in born_equal {
+            map.insert(id.clone(), id);
+        }
         // Peer-merged blocks (`block:peer-…`) surface in the SUT `block_raw` with a
         // stable id already shared with the oracle — they need no synthetic→real mapping,
         // so exclude them from `real_new` to keep the 1:1 split/doc guard intact (a

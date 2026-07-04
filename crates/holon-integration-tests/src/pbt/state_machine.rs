@@ -283,7 +283,7 @@ impl ReferenceStateMachine for ReferenceMachine {
         match transition.preconditions(state) {
             Validated::Good(()) => true,
             Validated::Fail(reasons) => {
-                crate::pbt::validation::record_rejection(transition.variant_name(), &reasons);
+                holon_pbt_core::validation::record_rejection(transition.variant_name(), &reasons);
                 false
             }
         }

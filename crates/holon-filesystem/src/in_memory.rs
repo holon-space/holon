@@ -84,8 +84,8 @@ impl InMemoryFileSystem {
     }
 
     /// Remove a file, emitting a `Remove` change. Errors if absent.
-    /// (Not on the `FileSystem` trait — no production code path removes
-    /// org files; tests simulating external deletion use this directly.)
+    /// Synchronous core the trait's `remove` delegates to; pre-existing
+    /// callers simulating external deletion use it directly.
     pub fn remove_file(&self, path: &Path) -> std::io::Result<()> {
         let path = normalize(path);
         let seq = {
@@ -184,6 +184,13 @@ impl FileSystem for InMemoryFileSystem {
             seq: tick,
         });
         Ok(())
+    }
+
+    async fn remove(&self, path: &Path) -> std::io::Result<()> {
+        // Emits `FileChangeKind::Remove` on the same broadcast channel as
+        // `write` — the in-memory analog of the `notify` deletion event, so
+        // the org watcher's `on_file_changed` runs for the removed path.
+        self.remove_file(path)
     }
 
     async fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {

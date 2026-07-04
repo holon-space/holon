@@ -10,7 +10,7 @@
 //! - `"execute_ddl_with_deps"` — DDL with dependency tracking
 
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use opentelemetry::global;
@@ -21,6 +21,99 @@ use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SpanData
 #[derive(Clone)]
 pub struct SpanCollector {
     exporter: InMemorySpanExporter,
+    /// Swallowed problems (ERROR events + panics) captured since the last
+    /// [`SpanCollector::reset`]. Shared `Arc` — clones observe the same sink.
+    problems: ProblemSink,
+}
+
+/// A problem captured during a test run that would otherwise be SWALLOWED: an
+/// ERROR-level tracing event, or a panic on ANY thread — including spawned
+/// background tokio workers, whose panics kill only that task and never fail the
+/// test thread (exactly how the advice `No id found` panic hid behind a green
+/// deterministic test). Drained per-case by the observability invariant.
+#[derive(Clone, Debug)]
+pub struct CapturedProblem {
+    pub kind: ProblemKind,
+    pub target: String,
+    pub message: String,
+    pub location: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProblemKind {
+    ErrorLog,
+    Panic,
+}
+
+impl std::fmt::Display for CapturedProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let kind = match self.kind {
+            ProblemKind::ErrorLog => "ERROR",
+            ProblemKind::Panic => "PANIC",
+        };
+        let loc = self.location.as_deref().unwrap_or("?");
+        write!(f, "[{kind}] {} ({loc}): {}", self.target, self.message)
+    }
+}
+
+/// Shared, resettable sink for captured problems.
+type ProblemSink = Arc<Mutex<Vec<CapturedProblem>>>;
+
+/// A `tracing` layer that records every ERROR-level EVENT into the shared sink.
+/// Events (not spans) are what `tracing::error!(...)` emits; the OTel layer only
+/// captures spans, so a bare `error!` would otherwise be invisible to assertions.
+struct ErrorCaptureLayer {
+    sink: ProblemSink,
+}
+
+#[derive(Default)]
+struct MessageVisitor {
+    message: String,
+    extra: Vec<String>,
+}
+
+impl tracing::field::Visit for MessageVisitor {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.message = format!("{value:?}");
+        } else {
+            self.extra.push(format!("{}={value:?}", field.name()));
+        }
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ErrorCaptureLayer {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if *event.metadata().level() != tracing::Level::ERROR {
+            return;
+        }
+        let mut v = MessageVisitor::default();
+        event.record(&mut v);
+        let meta = event.metadata();
+        let message = if v.message.is_empty() {
+            v.extra.join(" ")
+        } else if v.extra.is_empty() {
+            v.message
+        } else {
+            format!("{} ({})", v.message, v.extra.join(" "))
+        };
+        let location = match (meta.file(), meta.line()) {
+            (Some(file), Some(line)) => Some(format!("{file}:{line}")),
+            _ => None,
+        };
+        if let Ok(mut g) = self.sink.lock() {
+            g.push(CapturedProblem {
+                kind: ProblemKind::ErrorLog,
+                target: meta.target().to_string(),
+                message,
+                location,
+            });
+        }
+    }
 }
 
 static GLOBAL_COLLECTOR: OnceLock<SpanCollector> = OnceLock::new();
@@ -63,15 +156,40 @@ impl SpanCollector {
     /// and `set_global_default` can only be called once.
     pub fn global() -> &'static SpanCollector {
         GLOBAL_COLLECTOR.get_or_init(|| {
-            // Install a panic hook that flushes the chrome trace before
-            // the panic propagates. The PBT thread regularly panics
-            // (intentional, on invariant violations) and never reaches
-            // the explicit `flush_chrome_trace()` call in test main(),
-            // so without a hook the trace JSON is left truncated.
-            #[cfg(feature = "chrome-trace")]
+            let problems: ProblemSink = Arc::new(Mutex::new(Vec::new()));
+
+            // Record panics from EVERY thread — including spawned background tokio
+            // workers, whose panics kill only that task and never fail the test
+            // thread (exactly how the advice `No id found` panic hid behind a green
+            // test) — into the shared sink so `inv-no-observed-errors` fails on a
+            // swallowed panic. Then flush the chrome trace (the intentionally-
+            // panicking PBT thread would otherwise leave it truncated) and chain
+            // the previous hook.
             {
+                let sink = problems.clone();
                 let prev_hook = std::panic::take_hook();
                 std::panic::set_hook(Box::new(move |info| {
+                    let message = info
+                        .payload()
+                        .downcast_ref::<&str>()
+                        .map(|s| s.to_string())
+                        .or_else(|| info.payload().downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "<non-string panic payload>".to_string());
+                    let location = info
+                        .location()
+                        .map(|l| format!("{}:{}", l.file(), l.line()));
+                    let target = std::thread::current()
+                        .name()
+                        .unwrap_or("<unnamed>")
+                        .to_string();
+                    if let Ok(mut g) = sink.lock() {
+                        g.push(CapturedProblem {
+                            kind: ProblemKind::Panic,
+                            target,
+                            message,
+                            location,
+                        });
+                    }
                     flush_chrome_trace();
                     prev_hook(info);
                 }));
@@ -80,6 +198,7 @@ impl SpanCollector {
             let exporter = InMemorySpanExporter::default();
             let collector = SpanCollector {
                 exporter: exporter.clone(),
+                problems: problems.clone(),
             };
 
             let provider = SdkTracerProvider::builder()
@@ -113,13 +232,24 @@ impl SpanCollector {
                 tracing_opentelemetry::OpenTelemetryLayer::new(global::tracer("holon-pbt"))
                     .with_filter(otel_filter);
 
-            let registry = tracing_subscriber::registry().with(otel_layer).with(
-                tracing_subscriber::fmt::layer()
-                    .with_test_writer()
-                    .with_filter(
-                        EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
-                    ),
-            );
+            // ERROR-only filter: registers interest in ERROR alone, so it does
+            // NOT raise the registry's global max-level and resurrect the hot
+            // DEBUG `interpret`-span cost the OTel filter above deliberately drops.
+            let error_capture = ErrorCaptureLayer {
+                sink: problems.clone(),
+            }
+            .with_filter(tracing_subscriber::filter::LevelFilter::ERROR);
+
+            let registry = tracing_subscriber::registry()
+                .with(otel_layer)
+                .with(error_capture)
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_test_writer()
+                        .with_filter(
+                            EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
+                        ),
+                );
 
             // tokio-console async-wait profiler. `spawn()` starts the gRPC
             // aggregator on its own background thread+runtime (no ambient
@@ -187,9 +317,28 @@ impl SpanCollector {
         })
     }
 
-    /// Clear all collected spans. Call at the start of each transition.
+    /// Clear all collected spans + captured problems. Call at the start of each
+    /// transition (per-transition isolation for both spans and error/panic capture).
     pub fn reset(&self) {
         self.exporter.reset();
+        if let Ok(mut g) = self.problems.lock() {
+            g.clear();
+        }
+    }
+
+    /// Problems (ERROR-level tracing events + panics on any thread) captured
+    /// since the last [`SpanCollector::reset`]. Read by the observability
+    /// invariant so a SWALLOWED error/panic fails the run.
+    pub fn captured_problems(&self) -> Vec<CapturedProblem> {
+        self.problems
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+
+    /// Count of problems captured since the last [`SpanCollector::reset`].
+    pub fn problem_count(&self) -> usize {
+        self.problems.lock().map(|g| g.len()).unwrap_or(0)
     }
 
     /// Get all spans collected since last reset.
@@ -775,4 +924,36 @@ pub fn maybe_write_flamegraph(collector: &SpanCollector, transition_key: &str) {
         perf_spans.len(),
         path.display()
     );
+}
+
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+    use tracing_subscriber::Layer as _;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    /// The ERROR-capture layer records ERROR events and IGNORES lower levels —
+    /// verified against a THREAD-LOCAL subscriber + local sink (`with_default`),
+    /// so it never touches the process-global collector other tests read.
+    #[test]
+    fn error_capture_layer_records_only_error_events() {
+        let sink: ProblemSink = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(
+            ErrorCaptureLayer { sink: sink.clone() }
+                .with_filter(tracing_subscriber::filter::LevelFilter::ERROR),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!("ignored warning");
+            tracing::error!("captured boom");
+        });
+        let got = sink.lock().unwrap();
+        assert_eq!(got.len(), 1, "only the ERROR event is recorded; got {got:?}");
+        assert_eq!(got[0].kind, ProblemKind::ErrorLog);
+        assert!(
+            got[0].message.contains("captured boom"),
+            "message captured: {:?}",
+            got[0].message
+        );
+    }
 }

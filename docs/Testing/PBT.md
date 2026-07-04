@@ -54,7 +54,7 @@ Over time the reusable pieces (generators, reference state, invariants, driver t
 
 | File | Driver | Slice |
 |---|---|---|
-| `crates/holon-integration-tests/tests/general_e2e_pbt.rs` | `ReactiveEngineDriver` | Full stack: Loro + Turso + OrgFile + frontend logic (no real UI) |
+| `crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs` | `ReactiveEngineDriver` | Full stack: Loro + Turso + OrgFile + frontend logic (no real UI) |
 | `frontends/gpui/tests/gpui_ui_pbt.rs` | `GpuiUserDriver` | Same harness inside a real GPUI window with `BoundsRegistry` + xcap screenshots |
 | `frontends/tui/tests/tui_ui_pbt.rs` | `TuiUserDriver` | Same harness inside the TUI frontend |
 | `crates/holon-integration-tests/tests/cross_frontend_pbt.rs` | Multiple | Cross-frontend convergence |
@@ -80,7 +80,6 @@ These exist but each invented its own generators and (where applicable) referenc
 - `crates/holon-org-format` — ~72
 - `crates/holon-core` — ~47
 - `frontends/gpui` — ~44
-- `crates/holon-markdown` — ~39
 
 A large fraction of these pin internal seams whose contracts are covered combinatorially by PBTs. They are candidates for deletion as the narrow-PBT layer fills in.
 
@@ -103,13 +102,13 @@ Existing narrow PBTs migrate onto `holon-pbt-core` so generators don't drift. Th
 |---|---|---|---|
 | T0 | ms | Boundary/parser proptest in each crate (Unicode, BOM, CRLF, malformed SQL, …) | Pin pathological inputs PBT generators rarely synthesize |
 | T1 | seconds | Narrow PBTs sharing `holon-pbt-core` (see below) | Daily-driver discovery; failures name the subsystem |
-| T2 | minutes | `general_e2e_pbt` (headless full stack) | Integration bumper |
+| T2 | minutes | `general_e2e_composed_pbt` (headless full stack) | Integration bumper |
 | T3 | slow | `gpui_ui_pbt`, `tui_ui_pbt`, `cross_frontend_pbt` (real UI) | UI/render correctness, cross-frontend convergence |
 | T4 | offline replay | `turso-sql-replay` + `crates/holon-turso/sql/regressions/*.sql` | Frozen regression gates for upstream bugs |
 
 ### Six narrow PBTs to add (T1)
 
-These cover bug classes that today only surface after minutes in `general_e2e_pbt`.
+These cover bug classes that today only surface after minutes in `general_e2e_composed_pbt`.
 
 1. **BlockCellRegistry routing PBT** — generate cell-write sequences (content/parent/tags/sort_key/marks) against an in-memory Loro + SQL pair, assert projection convergence + EventOrigin routing.
 2. **SqlOperationProvider + event-bus PBT** — generate operation streams, assert SQL state + `Event::routing_doc_uri` round-trip + inbound-runtime gate behaviour. No Loro, no OrgFile.
@@ -164,3 +163,94 @@ Default to delete on refactor; do not preserve a unit test just because it curre
 - Invariants: `crates/holon-integration-tests/src/pbt/sut.rs::check_invariants_async`
 - SQL regression replay: `crates/holon-turso/sql/regressions/`, `turso-sql-replay` binary
 - Architecture lint: `crates/holon-architecture-tests/tests/architecture_rules.rs` (a thin wrapper over `archlint`)
+
+## The wiring grid — drawn, not fixed (2026-07-07)
+
+**Why.** A quality audit of 21 manual-bug escapes classified 12 as ENVIRONMENT: prod
+assemblies the tests never ran (worst case: the dioxus-web worker wired
+`EventInfraModule` alone → SILENT loss of every content write; also an empty op
+registry and CRDT-config-only latency). Modularity with deactivatable subsystems is
+net-quality-positive only while the keystone actually draws the wiring grid. It does,
+since Roadmap Round 3c: `WideE2EMachine::init_state` draws `any_valid_wiring()` — a
+wiring bug is now either drawn-and-tested, rejected loudly at composition time, or a
+conscious omission from `wiring_axes()`.
+
+**The typed grid.** `holon-pbt-core::wiring::Wiring` = three axes (`storage_adapters`,
+`sync_adapters`, `actors`) as `BTreeSet`s; validity is `Wiring::validate()` (≥1 storage
+adapter; `MCPServer` ⇒ storage; `ActionEngine` ⇒ a query-capable adapter). "Valid grid"
+is a typed, enumerable notion (parse-don’t-validate), not folklore. Blessed CI manifests:
+`Wiring::blessed_manifests()`.
+
+**The draw.** `wiring_axes()` defaults to storage `{Loro, Org, Turso}`, sync `{}`,
+actors `{MCPServer, ActionEngine}` (no `Actor::UI` — the windowed gpui harness is the
+sibling; no `Markdown`/`GCal`/`GMail`). Turso is included with probability 0.15
+(`QUERY_ADAPTER_INCLUSION_PROB`) so most cases stay on the cheap LoroMemory backend;
+shrinking removes components, i.e. walks DOWN the lattice toward Loro-only.
+`set_for_wiring(&Wiring) -> ComponentSet` normalizes a draw into the bootable headless
+set; `cap_set_for_wiring` extracts the composed cap set; `aggregate_transitions`
+auto-narrows the transition alphabet to it; `WideE2E::required_invariants` is the
+per-draw non-vacuity floor. Each case prints `[wide-e2e wiring] drawn: ...` to stderr,
+so a run log yields per-wiring case counts.
+
+**Run controls.**
+
+- `PROPTEST_CASES` (test default 16; `just pbt general <cases>`)
+- `HOLON_PBT_FORCE_FULL=1` — pin every case to `full_headless` (deterministic exerciser
+  for the frontend-only arms). Also the pin to use when replaying seeds/captures minted
+  under `full_headless`.
+- `HOLON_PBT_WIRING_AXES="storage;sync;actors"` — scope the drawn universe (fail-loud on
+  a typo), e.g. `"Loro;;"` for all-Loro-only runs.
+
+**Product surface ↔ grid points** (reduced surface: GPUI desktop+mobile, dioxus-web,
+MCP; tui/flutter/ply/waterui are archived and deliberately NOT in the axes):
+
+| Shipped assembly | Grid point |
+|---|---|
+| GPUI desktop default (Turso authority, CRDT off) | `full_headless`-like draws: `{Loro?, Org, Turso}` + ViewModel |
+| GPUI mobile (crdt.enabled ⇒ Loro authority + Turso) | `{Loro, Turso}` draws; substrate pinned by `keystone_boots_ios_crdt_loro_authority_substrate` |
+| dioxus-web worker (SqlOnly Turso, no Loro) | `{Turso}`-without-Loro draws (≈ `Wiring::sql_only()`) |
+| Headless MCP | draws with `Actor::MCPServer` |
+
+**Invalid assemblies fail loud, they are not tested.** Composition-time rejections:
+`Wiring::validate()` / `ComponentSet` validity (test-side), and in PRODUCTION startup
+`OperationDispatcher::assert_content_write_capability()` — a `block` pipeline wired
+without its CRUD ops (the `EventInfraModule`-alone trap) crashes `BackendEngine`
+construction with a message naming the missing ops and the fix
+(`crates/holon/src/api/operation_dispatcher.rs`; tests `content_write_guard_*`).
+
+**Lattice operations (bottom-up runs + delta-debug).** The valid-wiring set is an
+explicit partial order (subset lattice), queryable via
+`ComponentSet::valid_children` / `valid_parents_within`; `bisect_downward` /
+`bisect_upward` (`holon-pbt-core::bisect`, ADR 0009 §3) walk it greedily. The wiring is
+externally suppliable, not only drawn: `reproduces_under(set, transitions)`
+(`pbt/bisect_driver.rs`) replays a captured sequence under ANY supplied `ComponentSet`,
+and cross-set replay uses `ReplayMode::SkipGated` — a transition gated out by the
+narrower wiring becomes a flagged `StepOutcome::SkippedByGating` no-op (reference state
+NOT advanced), never silently different semantics. These three properties are design
+commitments: a future ladder-runner (start from the minimal wiring covering a dev
+session’s diff, grow rung by rung; on failure delta-debug down to a minimal
+(wiring, sequence) pair) composes out of them with no representation change.
+`HOLON_PBT_PIN_WIRING="storage;sync;actors"` pins the keystone's generation to ONE
+exact manifest (fail-loud on typo/invalid; mutually exclusive with FORCE_FULL) — the
+env-level face of the function-arg seam (`wide_e2e_ref_for(&Wiring)`).
+
+**Draw distribution (default axes, quantified).** The validity filter reweights the
+draw: raw Turso inclusion is 0.15, but `Wiring::validate` rejects empty-storage and
+ActionEngine-without-Turso draws, so P(Turso | valid) ≈ 0.35, P(ActionEngine | valid)
+≈ 0.17, P(MCPServer | valid) ≈ 0.39. Expected Turso (full BackendEngine + frontend)
+cases in a 16-case run ≈ 5.5; a default run misses Turso entirely with probability
+≈ 0.1%. The drawn universe has 22 valid raw grid points, collapsing to 20 distinct
+booted `ComponentSet`s under `set_for_wiring` normalization. The 0.15 bias therefore
+does NOT need reweighting for the default 16-case run.
+
+**Replay-mode caveat.** `stepper::run_sequence` is the ONLY cap-aware replayer
+(`ReplayMode::SkipGated` gates on `required_wiring().satisfied_by() &&
+caps_available(required_caps())`). `fixtures::replay_steps` and proptest's stock
+persisted-regression replay are Strict/same-set by construction — replaying a recorded
+sequence under a SUBSET wiring must go through `run_sequence`/`reproduces_under`, not
+the fixture path.
+
+**Seeds.** No persisted regression file exists yet for
+`general_e2e_composed_pbt` (`crates/holon-integration-tests/proptest-regressions/`).
+Historical captures/seeds minted under `full_headless` replay meaningfully via
+`HOLON_PBT_FORCE_FULL=1` (pin) or `reproduces_under` with an explicit set.

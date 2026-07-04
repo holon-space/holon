@@ -11,10 +11,8 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::transition_dispatch::SutHandle;
-use crate::pbt::validation::{Reason, check};
-use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
+use holon_pbt_core::validation::{Reason, check};
+use holon_pbt_core::{TransitionFactory, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
@@ -39,9 +37,7 @@ pub fn add_peer_preconditions<R: RefPeers + RefLifecycle>(state: &R) -> Validate
 
 impl<R: RefPeers + RefLifecycle> TransitionFactory<R> for AddPeer {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        vec![::holon_pbt_core::composition::CapId::of::<
-            dyn ::holon_pbt_core::capabilities::SutLoro,
-        >()]
+        Self::declared_caps()
     }
 
     type Reason = Reason;
@@ -66,16 +62,13 @@ impl<R: RefPeers + RefPeersMut + RefLifecycle> TransitionRef<R> for AddPeer {
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutHandle> TransitionImpl<ReferenceState, S> for AddPeer {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
+crate::cap_transition! {
+    AddPeer: holon_pbt_core::capabilities::SutLoro,
+    where R: [ RefLifecycle + RefPeers + RefPeersMut ],
+    |_me, _state, sut| {
         sut.apply_add_peer().await;
     }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for AddPeer {
-    fn expected_sql(&self, _: &ReferenceState) -> ExpectedSql {
+    sql_budget: |_me, _state| {
         // AddPeer: export_snapshot triggers ~5 SQL reads (store persistence).
         // Others: async CDC drain from previous transitions can land here.
         ExpectedSql {

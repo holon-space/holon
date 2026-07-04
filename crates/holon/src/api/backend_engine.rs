@@ -55,6 +55,14 @@ pub struct BackendEngine {
         Arc<std::sync::RwLock<crate::storage::graph_schema::GraphSchemaRegistry>>,
     /// Cached GQL graph schema, rebuilt from registry on mutation.
     graph_schema_cache: Arc<std::sync::RwLock<gql_transform::resolver::GraphSchema>>,
+    /// Advice-rule compilation/runtime status (ADR 0022). Written by the advice
+    /// reconciler task, read by the UI watcher so a broken rule renders its error in
+    /// place. Empty until an advice reconciler is installed (see `create_initialized_engine`).
+    advice_status: holon_advice::AdviceRuleStatusHandle,
+    /// Keeps the advice reconciler's background tasks alive (mirrors how the profile
+    /// watcher / `LinkEventSubscriberHandle` stay alive by being held on the engine).
+    /// `None` in configs that never install one (tests, no-advice sessions).
+    _advice_reconciler: Option<Arc<crate::sync::AdviceReconcilerHandle>>,
 }
 
 impl BackendEngine {
@@ -86,7 +94,26 @@ impl BackendEngine {
             sql_transformers,
             graph_schema_registry: Arc::new(std::sync::RwLock::new(graph_schema_registry)),
             graph_schema_cache: Arc::new(std::sync::RwLock::new(graph_schema)),
+            advice_status: holon_advice::AdviceRuleStatusHandle::new(),
+            _advice_reconciler: None,
         })
+    }
+
+    /// The advice-rule status map (ADR 0022) — read by the UI watcher to replace a
+    /// broken rule block's render with its error.
+    pub fn advice_status(&self) -> &holon_advice::AdviceRuleStatusHandle {
+        &self.advice_status
+    }
+
+    /// Install the advice reconciler: share the status handle the reconciler writes to
+    /// and hold its keep-alive handle. Called once during engine initialization.
+    pub fn install_advice_reconciler(
+        &mut self,
+        status: holon_advice::AdviceRuleStatusHandle,
+        handle: crate::sync::AdviceReconcilerHandle,
+    ) {
+        self.advice_status = status;
+        self._advice_reconciler = Some(Arc::new(handle));
     }
 
     /// Apply all registered SQL-level transformers to a SQL string.
@@ -510,7 +537,8 @@ impl BackendEngine {
                 Err(e) => {
                     let err_str = format!("{:?}", e);
                     let is_retryable = err_str.contains("no such table")
-                        || err_str.contains("Database schema changed");
+                        || err_str.contains("Database schema changed")
+                        || err_str.contains("database is locked");
                     if is_retryable && attempt < 9 {
                         tracing::debug!(
                             "[query_and_watch] Retryable error (attempt {}): {}",

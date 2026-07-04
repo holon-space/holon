@@ -5,54 +5,13 @@ use holon_api::EntityUri;
 use holon_api::block::Block;
 use holon_orgmode::models::OrgBlockExt;
 
-use crate::org_utils::INTERNAL_PROPS;
+pub use holon_orgmode_testing::normalize_block;
 
 /// Normalize a block for comparison by zeroing out timestamps and trimming content.
 ///
 /// Page URIs in parent_id are normalized to a canonical form so that
 /// file-based URIs (file:test.org) and UUID-based URIs (block:{uuid})
 /// for the same page compare equal.
-pub fn normalize_block(block: &Block) -> Block {
-    let mut normalized = block.clone();
-    normalized.created_at = 0;
-    normalized.updated_at = 0;
-    // sort_key is no longer a field of the domain Block (ADR 0005) — ordering is
-    // validated separately via `assert_block_order` / `children_of`.
-    // Trim overall content and normalize internal trailing whitespace per line
-    // (org round-trip strips trailing whitespace from source block lines)
-    normalized.content = normalized
-        .content
-        .lines()
-        .map(|l| l.trim_end())
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_string();
-    // The `__default__` page is prod's layout-owning root container (a real
-    // block, not the sentinel — see `default_doc_block_uri`). The reference
-    // model represents the document root as `__document_root__` and parents the
-    // layout straight to it, so unify the two roots here.
-    if normalized.parent_id.is_no_parent()
-        || normalized.parent_id.is_sentinel()
-        || normalized.parent_id == holon_api::default_doc_block_uri()
-    {
-        normalized.parent_id = holon_api::EntityUri::block("__document_root__");
-    }
-    // document_id removed from Block struct; no normalization needed
-    for prop in INTERNAL_PROPS {
-        normalized.properties.remove(*prop);
-    }
-    // Strip Null-valued and empty-string properties: the org parser stores
-    // task_state=Null explicitly in the DB but the reference model omits absent
-    // properties. Empty-string task_state means "no state" and is lost during
-    // org round-trip (not written as a keyword, so not parsed back).
-    normalized.properties.retain(|_, v| match v {
-        holon_api::Value::Null => false,
-        holon_api::Value::String(s) if s.is_empty() => false,
-        _ => true,
-    });
-    normalized
-}
 
 /// Assert that two Block slices are equivalent (using normalize_block)
 pub fn assert_blocks_equivalent(actual_blocks: &[Block], expected_blocks: &[Block], message: &str) {

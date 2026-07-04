@@ -7,6 +7,45 @@
 - [ ] Improve error handling and logging
 - [ ] Refactor code to use more idiomatic Rust practices
 
+## Bugs Found (2026-07-05) — GPUI Dogfooding Triage
+
+Full root-cause analysis with file:line citations: `devlog/2026-07-05-011500-gpui-dogfood-triage.md`.
+Plan: lock each bug in as a failing PBT/test FIRST, then fix.
+
+### PBT coverage gaps (do these first — they gate everything else)
+- [ ] Register the seeded `left_sidebar::src::0` watch as a `RefWatch` in `transitions/start_app.rs` ref-apply so `inv-watch-rows-match-ref` covers the sidebar for free
+- [ ] Add a page-delete transition (new `delete_document.rs` or lift `!is_page()` filters in `apply_mutation.rs:78,96,122`); ref model must cascade the subtree and drop the page from the expected Page set
+- [ ] Keystone invariant: focused page's title row precedes the virtual "add block" child; title carries `role=page_title`
+- [ ] Unit PBT: virtual-child sort key sorts after ANY FractionalIndex key (kills the `Float(f64::MAX)` → `"18442240…"` lexicographic bug class)
+
+### Stale left sidebar after page deletion
+- **Status**: Open; keystone blind to it (gaps above)
+- **Causes (ranked)**: (H1) Turso chained-matview stale rows on delete — repro `crates/holon/examples/turso_ivm_chained_matview_stale_rows.rs`, needs upstream fix via /turso-fix; (H2) `block_tags` orphans — FK CASCADE declared but Turso FK enforcement off, `prepare_delete` skips junction tables; (H3) rowid-keyed CDC deletes no-op in `ReactiveRenderedRows::apply` (`reactive.rs:491-495`, no rowid fallback unlike `LiveData`)
+- [ ] Fix H3 (rowid fallback) + H2 (cascade `block_tags` in `prepare_delete` or `PRAGMA foreign_keys=ON`); H1 upstream
+
+### "Type here to add a new block" above page title; title not h1
+- **Status**: Open, fully root-caused
+- **Causes**: `collection_profile.yaml` `tree_view` lacks the `rules:` arg setting `role=page_title`; streaming tree driver evaluates rules with empty positional map and DISCARDS overrides (`reactive_view.rs:863-876`); virtual child parented to `block:default-main-panel` (never in rowset → root sibling) with `Float(f64::MAX)` sort key that string-sorts before FI hex keys
+- [ ] `"\u{10FFFF}"` sentinel sort key + parent virtual row to focus-root page (cheap)
+- [ ] Thread depth + rule overrides through the streaming tree driver (full)
+
+### Multi-second interaction latency
+- **Status**: Open; suspect identified, needs `snapshot_ms` (debug log) confirmation
+- **Suspect**: `LoroProjection::project()` full-doc DFS snapshot + diff on EVERY Loro commit under global `project_lock` (`loro_sync_controller.rs:349-388`); amplified by 50ms-quiet/5s-ceiling settle (`turso_block_query_source.rs:72-73`)
+- [ ] Confirm, then de-risk incremental projection (diff from Loro event deltas) with an experiment before refactoring
+- [ ] Also: RSS grew +426MB in ~15min light use — leak check
+
+### GitHub page shows no data
+- **Status**: Root-caused; needs a design decision
+- **Cause**: page queries read base `gh_*` tables; integration yaml is vtable-only (no sync) → base tables fill ONLY via lazy writeback when `gh_*_fdw` is queried, which nothing does. One manual FDW SELECT wrote 95 rows to `gh_repository`.
+- [ ] Decide: page queries via `*_fdw` (≈5s network at render) vs declarative poll/materialization in yaml sidecar (generic-MCP phase 3)
+
+### App freeze clicking some pages (e.g. Holon)
+- **Status**: Open, unconfirmed suspect
+- **Suspect**: page-open `CREATE MATERIALIZED VIEW watch_view_*` chained on `block` matview → known Turso matview-on-matview DDL hang; log shows same-family failure for `block:cc-conversation`
+- [ ] Capture `sample Holon 3` during next freeze
+- [ ] Guard: watch-view DDL timeout + loud error instead of indefinite block (integration test)
+
 ## Bugs Found (2026-02-27) — Custom Property Stripping
 
 ### Source Block Custom Properties Lost in Org Round-Trip

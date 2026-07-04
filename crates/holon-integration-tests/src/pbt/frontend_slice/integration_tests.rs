@@ -490,11 +490,26 @@ async fn frontend_slice_org_render_pairs_reach_fixed_point() {
 
 /// E1 teeth: the relocated `SutOrgRender` (production `CacheBlockReader` +
 /// `OrgRenderer`) makes `inv-org-render-fixed-point` **bite** on the composition
-/// path — no ref needed (it compares the SUT's render against the SUT's disk). Clean
-/// → `Ok` (the booted session settled the seed file to a fixed point); overwrite the
-/// disk file so it diverges from the SQL render → `Fail`.
+/// path — no ref needed (it compares the SUT's render against the SUT's disk).
+///
+/// - clean → `Ok`: the booted session settled the seed file to a fixed point.
+/// - catch → `Fail`: a `render(SQL) != disk` divergence that PERSISTS.
+///
+/// The catch injects the divergence through a wrapper `SutOrgRender` rather than by
+/// editing the disk. A live disk edit does NOT work here: the headless session runs
+/// the real `FileSyncController`, which re-ingests any changed org bytes into SQL and
+/// re-renders them straight back to a NEW fixed point — self-healing the divergence
+/// within the run (verified: the corrupted file comes back rewritten with `:ID:`
+/// drawers, `disk == render`). That self-healing is CORRECT: a healthy session never
+/// sustains a permanent disagreement, so `inv-org-render-fixed-point` rightly returns
+/// `Ok`. The invariant only fires on a divergence that persists (the May-2026
+/// property-drawer round-trip echo-loop). To exercise that Fail path deterministically
+/// — without a real echo-loop bug and without racing the re-render loop — the wrapper
+/// reports a disk side the renderer will never emit, so the disagreement holds for the
+/// invariant's whole stability budget.
 #[tokio::test(flavor = "multi_thread")]
 async fn frontend_slice_org_render_fixed_point_bites() {
+    use holon_pbt_core::capabilities::SutOrgRender;
     use holon_pbt_core::composition::CapMap;
     use holon_pbt_core::invariant::InvariantResult;
 
@@ -520,16 +535,41 @@ async fn frontend_slice_org_render_fixed_point_bites() {
     );
     eprintln!("[org-render-teeth] clean: inv-org-render-fixed-point Ok");
 
-    // catch: corrupt the disk so it diverges from the SQL render → Fail.
-    comp.overwrite_first_org_file("* a totally different on-disk heading\n")
-        .await;
-    let corrupted = run_selected(&composed_invariant_catalog(), &sut, &ref_).await;
-    let failed: Vec<&str> = corrupted.failures().iter().map(|(id, _)| *id).collect();
+    // catch: a persistent `render(SQL) != disk` divergence must make the invariant
+    // FAIL. Override the `SutOrgRender` cap with a wrapper over the SAME component
+    // whose reported disk bytes carry a heading the render never emits — a
+    // disagreement the session cannot self-heal (nothing re-ingests the wrapper's
+    // synthetic bytes), so it holds across the invariant's stability window.
+    let mut divergent = frontend_wide(comp.clone());
+    divergent.replace(Arc::new(DivergentOrgRender(comp.clone())) as Arc<dyn SutOrgRender>);
+    let corrupted = run_selected(&composed_invariant_catalog(), &divergent, &ref_).await;
     assert!(
-        failed.contains(&wf_id),
-        "a disk/render divergence must make {wf_id} FAIL; failures={failed:?}",
+        matches!(result_of(&corrupted), Some(InvariantResult::Fail(_))),
+        "a persistent disk/render divergence must make {wf_id} FAIL; got {:?}; ran={:?}",
+        result_of(&corrupted),
+        corrupted.ran_ids(),
     );
     eprintln!("[org-render-teeth] catch: inv-org-render-fixed-point FAILED on disk divergence");
+}
+
+/// A `SutOrgRender` that delegates to the real component but perturbs the disk side
+/// of the first tracked pair so `disk != rendered` — the echo-loop precondition
+/// `inv-org-render-fixed-point` guards. Injecting it (rather than editing the disk)
+/// is what makes the teeth deterministic: the live `FileSyncController` would ingest
+/// and re-render a real disk edit back to a fixed point, but nothing re-ingests these
+/// synthetic bytes, so the divergence persists across the invariant's stability budget.
+struct DivergentOrgRender(Arc<HeadlessFrontendComponent>);
+
+#[async_trait::async_trait(?Send)]
+impl holon_pbt_core::capabilities::SutOrgRender for DivergentOrgRender {
+    async fn snapshot_org_render_pairs(&self) -> Vec<(String, String, String)> {
+        let mut pairs = self.0.snapshot_org_render_pairs().await;
+        let first = pairs
+            .first_mut()
+            .expect("component must track \u{2265}1 org file to perturb");
+        first.1 = format!("* a totally different on-disk heading\n{}", first.1);
+        pairs
+    }
 }
 
 /// E1 teeth: the relocated `SutOrgRead` (production `holon_orgmode` parser) makes

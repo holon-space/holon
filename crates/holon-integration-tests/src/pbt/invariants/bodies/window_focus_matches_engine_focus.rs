@@ -27,7 +27,7 @@
 use holon_pbt_core::capabilities::{EngineFocus, EntityUri, SutDriver, SutLayout};
 use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
 
-use crate::pbt::retry::retry_until_ok;
+use holon_pbt_core::retry::retry_until_ok;
 
 pub struct InvWindowFocusMatchesEngineFocus;
 

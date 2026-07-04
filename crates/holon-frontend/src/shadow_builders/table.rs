@@ -15,6 +15,7 @@ holon_macros::widget_builder! {
                         items.push(vc);
                     }
                 }
+                let items = weave_advice_into_items(&ba, items);
                 ViewModel::static_collection("table", items, 4.0)
             }
         }

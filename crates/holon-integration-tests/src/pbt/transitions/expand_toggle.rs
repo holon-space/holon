@@ -18,16 +18,14 @@
 //! reactive tree and flips `.expanded`); it fails loud if the corpus
 //! produces a toggle render but the engine yields no matching node.
 
-use crate::pbt::validation::{Reason, check};
 use holon_api::EntityUri;
+use holon_pbt_core::validation::{Reason, check};
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::value_fn_invariants::rhai_mentions;
-use holon_pbt_core::capabilities::SutBlockInteract;
-use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
+use holon_pbt_core::capabilities::{RefLifecycle, RefRenderExpr, RefToggleMut, SutBlockInteract};
+use holon_pbt_core::{TransitionFactory, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{ExpectedSql, REACTIVE_BASE, docs_tolerance};
@@ -37,24 +35,19 @@ pub struct ExpandToggle {
     pub block_id: EntityUri,
 }
 
-impl TransitionFactory<ReferenceState> for ExpandToggle {
+impl<R: RefLifecycle + RefRenderExpr + RefToggleMut> TransitionFactory<R> for ExpandToggle {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        vec![::holon_pbt_core::composition::CapId::of::<
-            dyn ::holon_pbt_core::capabilities::SutBlockInteract,
-        >()]
+        Self::declared_caps()
     }
 
     type Reason = Reason;
-    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let candidates: Vec<EntityUri> = state
-            .domain
-            .render_expressions
-            .iter()
-            .filter(|(uri, expr)| {
-                rhai_mentions(expr, "expand_toggle")
-                    && !state.ui.tab.expanded_toggles.contains(*uri)
+            .render_expr_ids()
+            .into_iter()
+            .filter(|uri| {
+                state.render_expr_mentions(uri, "expand_toggle") && !state.is_expanded(uri)
             })
-            .map(|(uri, _)| uri.clone())
             .collect();
         check(!candidates.is_empty(), Reason::NoExpandToggleCandidates).map(|_| {
             let strat = prop::sample::select(candidates)
@@ -68,25 +61,25 @@ impl TransitionFactory<ReferenceState> for ExpandToggle {
     }
 }
 
-impl TransitionRef<ReferenceState> for ExpandToggle {
+impl<R: RefLifecycle + RefRenderExpr + RefToggleMut> TransitionRef<R> for ExpandToggle {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         let mut checks: Vec<Validated<(), Reason>> = vec![
-            check(state.action.app_started, Reason::AppNotStarted),
+            check(state.app_started(), Reason::AppNotStarted),
             check(
-                state.domain.render_expressions.contains_key(&self.block_id),
+                state.has_render_expr(&self.block_id),
                 Reason::FocusedBlockMissing,
             ),
         ];
-        if let Some(expr) = state.domain.render_expressions.get(&self.block_id) {
+        if state.has_render_expr(&self.block_id) {
             checks.push(check(
-                rhai_mentions(expr, "expand_toggle"),
+                state.render_expr_mentions(&self.block_id, "expand_toggle"),
                 Reason::PreconditionFailed,
             ));
         }
         checks.push(check(
-            !state.ui.tab.expanded_toggles.contains(&self.block_id),
+            !state.is_expanded(&self.block_id),
             Reason::ToggleAlreadyExpanded,
         ));
         checks
@@ -95,21 +88,18 @@ impl TransitionRef<ReferenceState> for ExpandToggle {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
-        state.ui.tab.expanded_toggles.insert(self.block_id.clone());
+    fn apply_to_ref(&self, state: &mut R) {
+        state.set_expanded(&self.block_id, true);
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutBlockInteract> TransitionImpl<ReferenceState, S> for ExpandToggle {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
-        sut.expand_toggle(&self.block_id).await;
+crate::cap_transition! {
+    ExpandToggle: SutBlockInteract,
+    where R: [ RefLifecycle + RefRenderExpr + RefToggleMut ],
+    |me, _state, sut| {
+        sut.expand_toggle(&me.block_id).await;
     }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for ExpandToggle {
-    fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
+    sql_budget: |_me, state| {
         // Pure frontend-state flip: no SQL traffic. The reactive base
         // captures any incidental watcher activity.
         ExpectedSql {

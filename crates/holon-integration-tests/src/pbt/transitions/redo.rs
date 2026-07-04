@@ -6,27 +6,24 @@
 //! `sut.rs:4159-4167` (SUT apply), and
 //! `transition_budgets.rs:339-343` (expected SQL).
 
-use crate::pbt::validation::{Reason, check};
+use holon_pbt_core::validation::{Reason, check};
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::reference_state::{CursorPosition, ReferenceState};
-use holon_pbt_core::capabilities::SutHistoryWrite;
-use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
+use holon_pbt_core::capabilities::{RefBlockTreeMut, RefLifecycle, SutHistoryWrite};
+use holon_pbt_core::{TransitionFactory, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::{ExpectedSql, MutationKind, expected_sql_for_kind};
+use crate::pbt::transition_budgets::{MutationKind, expected_sql_for_kind};
 
 /// Redo the last undone mutation via the engine's redo stack.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Redo;
 
-impl TransitionFactory<ReferenceState> for Redo {
+impl<R: RefLifecycle + RefBlockTreeMut> TransitionFactory<R> for Redo {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        vec![::holon_pbt_core::composition::CapId::of::<
-            dyn ::holon_pbt_core::capabilities::SutHistoryWrite,
-        >()]
+        Self::declared_caps()
     }
 
     type Reason = Reason;
@@ -36,18 +33,18 @@ impl TransitionFactory<ReferenceState> for Redo {
         // path is wired for a1. Gate it out of {Loro} slices.
         ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Turso)
     }
-    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         Redo.preconditions(state).map(|()| (2, Just(Redo).boxed()))
     }
 }
 
-impl TransitionRef<ReferenceState> for Redo {
+impl<R: RefLifecycle + RefBlockTreeMut> TransitionRef<R> for Redo {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         let checks: Vec<Validated<(), Reason>> = vec![
-            check(state.action.app_started, Reason::AppNotStarted),
-            check(!state.action.redo_stack.is_empty(), Reason::NoRedoHistory),
+            check(state.app_started(), Reason::AppNotStarted),
+            check(state.has_redo_history(), Reason::NoRedoHistory),
         ];
 
         checks
@@ -56,38 +53,23 @@ impl TransitionRef<ReferenceState> for Redo {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
-        state.pop_redo_to_undo();
-        for region in state
-            .ui
-            .tab
-            .focused_entity_id
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>()
-        {
-            state
-                .ui
-                .tab
-                .focused_cursor
-                .insert(region, CursorPosition::start());
-        }
+    fn apply_to_ref(&self, state: &mut R) {
+        // Pop redo→undo and reset every region cursor — the whole effect lives
+        // in the ref cap.
+        state.redo_last_and_reset_cursors();
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutHistoryWrite> TransitionImpl<ReferenceState, S> for Redo {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
+crate::cap_transition! {
+    Redo: SutHistoryWrite,
+    where R: [ RefLifecycle ],
+    |_me, _state, sut| {
         sut.redo().await;
     }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for Redo {
-    fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
-        let watches = state.mcp.active_watches.len();
-        let blocks = state.domain.block_state.blocks.len();
-        let docs = state.files.documents.len();
+    sql_budget: |_me, state| {
+        let watches = state.active_watch_count();
+        let blocks = state.block_count();
+        let docs = state.document_count();
         let mut sql = expected_sql_for_kind(MutationKind::Update, watches, blocks, docs);
         sql.tolerance += 5; // undo journal adds a few extra reads
         sql

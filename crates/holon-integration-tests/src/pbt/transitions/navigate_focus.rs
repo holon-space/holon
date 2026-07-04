@@ -6,19 +6,18 @@
 //! `sut.rs:1266-1292` (SUT apply), and
 //! `transition_budgets.rs:165-172` (expected SQL).
 
-use crate::pbt::validation::{Reason, check};
-use holon_api::ContentType;
 use holon_api::EntityUri;
 use holon_api::Region;
+use holon_pbt_core::validation::{Reason, check};
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use crate::pbt::reference_state::OpenPinEntry;
-use crate::pbt::reference_state::ReferenceState;
-use holon_layout_testing::LayoutRefState;
-use holon_pbt_core::capabilities::{CapRegion, SutFocusWrite};
-use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
+use holon_pbt_core::capabilities::{
+    CapRegion, RefBlockTree, RefFocusRoots, RefLayout, RefLifecycle, RefNavHistoryMut,
+    SutFocusWrite,
+};
+use holon_pbt_core::{TransitionFactory, TransitionRef};
 
 /// Canonical block id of the default LeftSidebar panel — the drawer whose
 /// open/closed state gates whether sidebar page entries are clickable.
@@ -37,11 +36,11 @@ pub struct NavigateFocus {
     pub block_id: EntityUri,
 }
 
-impl TransitionFactory<ReferenceState> for NavigateFocus {
+impl<R: RefLifecycle + RefBlockTree + RefLayout + RefFocusRoots + RefNavHistoryMut>
+    TransitionFactory<R> for NavigateFocus
+{
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        vec![::holon_pbt_core::composition::CapId::of::<
-            dyn ::holon_pbt_core::capabilities::SutFocusWrite,
-        >()]
+        Self::declared_caps()
     }
 
     type Reason = Reason;
@@ -54,7 +53,7 @@ impl TransitionFactory<ReferenceState> for NavigateFocus {
         // NavigateBack / NavigateForward / NavigateHome / ToggleDrawer.)
         ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Turso)
     }
-    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // Restricted to Main: in production the only UI that triggers
         // `navigation.focus` is the LeftSidebar selectable's bound
         // action, and it ALWAYS targets `region: "main"`. The ref model
@@ -86,11 +85,11 @@ impl TransitionFactory<ReferenceState> for NavigateFocus {
             // bump in `bulk_external_add.rs:65`. Once a text descendant
             // exists, the weight drops back to base so the rest of the
             // random strategy can run.
-            let main_focus_roots = state.expected_focus_root_ids(Region::Main);
-            let main_has_text_descendant = state.domain.block_state.blocks.iter().any(|(id, b)| {
-                b.content_type == ContentType::Text
-                    && !b.is_page()
-                    && !state.domain.layout_blocks.contains(id)
+            let main_focus_roots = state.expected_focus_root_ids(CapRegion::Main);
+            let main_has_text_descendant = state.all_block_ids().iter().any(|id| {
+                state.is_text_block(id)
+                    && !state.is_page_block(id)
+                    && !state.is_layout_block(id)
                     && state.is_descendant_of_any(id, &main_focus_roots)
             });
             let weight = if main_has_text_descendant { 3 } else { 100 };
@@ -106,12 +105,12 @@ impl TransitionFactory<ReferenceState> for NavigateFocus {
     }
 }
 
-impl TransitionRef<ReferenceState> for NavigateFocus {
+impl<R: RefLifecycle + RefBlockTree + RefNavHistoryMut> TransitionRef<R> for NavigateFocus {
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         let mut checks: Vec<Validated<(), Reason>> = vec![
-            check(state.action.app_started, Reason::AppNotStarted),
+            check(state.app_started(), Reason::AppNotStarted),
             check(
                 self.block_id.scheme() == "block",
                 Reason::FocusedBlockMissing,
@@ -143,16 +142,16 @@ impl TransitionRef<ReferenceState> for NavigateFocus {
         ));
 
         // Block must be text-typed and not a layout block
-        let block = state.domain.block_state.blocks.get(&self.block_id);
-        checks.push(check(block.is_some(), Reason::FocusedBlockMissing));
-        if let Some(b) = block {
+        let block_exists = state.block_content(&self.block_id).is_some();
+        checks.push(check(block_exists, Reason::FocusedBlockMissing));
+        if block_exists {
             checks.push(check(
-                b.content_type == ContentType::Text,
+                state.is_text_block(&self.block_id),
                 Reason::FocusedNotText,
             ));
         }
         checks.push(check(
-            !state.domain.layout_blocks.contains(&self.block_id),
+            !state.is_layout_block(&self.block_id),
             Reason::FocusedInLayoutBlocks,
         ));
 
@@ -162,98 +161,32 @@ impl TransitionRef<ReferenceState> for NavigateFocus {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
-        // Re-focusing the block that is already this region's current focus is
-        // idempotent in prod: `navigation.focus` on the active target writes no
-        // new `navigation_history` row (the SUT stays at exactly one row, id and
-        // cursor unmoved — confirmed across ~15 consecutive same-block focuses).
-        // Pushing a new back-stack entry / bumping `next_history_id` here would
-        // let the ref accumulate duplicate entries and walk back through them on
-        // NavigateBack while prod goes to home — an inv-navigation-focus divergence.
-        let already_focused = state.current_focus(self.region).as_ref() == Some(&self.block_id);
-
-        // Budget model: the first navigation to a root renders it for the
-        // first time and creates its watch matviews; `expected_sql` grants
-        // the creation allowance off this flag (recorded pre-insert because
-        // the budget invariant only sees the post-apply state).
-        state.ui.tab.last_navigate_first_visit = state
-            .ui
-            .tab
-            .seen_focus_targets
-            .insert(self.block_id.clone());
-
-        if !already_focused {
-            let history = state
-                .ui
-                .tab
-                .navigation_history
-                .entry(self.region)
-                .or_default();
-
-            history.entries.truncate(history.cursor + 1);
-            history.entries.push(Some(self.block_id.clone()));
-            history.cursor = history.entries.len() - 1;
-
-            // Mirror provider.rs `focus`: close all open rows in the region,
-            // then insert a new open row. `next_history_id` matches SQLite's
-            // AUTOINCREMENT, which monotonically increases across INSERTs and
-            // is unaffected by UPDATE (closed_at flip) or DELETE. A same-block
-            // re-focus inserts no row, so the counter must not advance either.
-            let history_id = state.ui.tab.next_history_id;
-            state.ui.tab.next_history_id += 1;
-            let added_ts_logical = state.ui.user.next_pin_ts;
-            state.ui.user.next_pin_ts += 1;
-            let pins = state.ui.user.open_pins.entry(self.region).or_default();
-            pins.clear();
-            pins.push(OpenPinEntry {
-                history_id,
-                block_id: Some(self.block_id.clone()),
-                added_ts_logical,
-            });
-        }
-
-        // NavigateFocus changes what's displayed but clears editor focus —
-        // the previously-focused block may no longer be visible.
-        state.ui.tab.focused_entity_id.remove(&self.region);
-        state.ui.tab.focused_cursor.remove(&self.region);
-
-        // Mirror `UiState::set_focus`: the navigation target becomes the
-        // globally focused block. `focus_chain()` and `chain_ops()` read
-        // from this — inv-value-fn-provider-arg-variance asserts they reflect the predicted URI.
-        state.ui.tab.focused_block = Some(self.block_id.clone());
-
-        // Production blurs the editor on this click — empirically verified
-        // by seed 8 of the post-Blur-deletion PBT run, where leaving
-        // `active_editor` set let TypeChars fire and panic with
-        // "GPUI keystroke not consumed: keystroke=\"d\"" (devlog
-        // 2026-05-08-133241). `blur_active_editor` commits the pending text
-        // on blur ONLY under a real editor (`real_editor_enabled`), mirroring
-        // prod's `on_blur` → `set_field("content")`; the headless slices (no
-        // real editor) keep the prior "don't pre-bake the commit" behaviour.
-        state.blur_active_editor();
+    fn apply_to_ref(&self, state: &mut R) {
+        // The whole `focus(region, block_id)` reference effect — idempotency guard,
+        // first-visit budget flag, history-row push, open-pin reset, region-focus
+        // clear, global-focus set, editor blur — lives in
+        // `RefNavHistoryMut::nav_focus` (mirrors `provider.rs::focus`).
+        state.nav_focus(self.region, &self.block_id);
     }
 }
 
-#[allow(async_fn_in_trait)]
-impl<S: SutFocusWrite> TransitionImpl<ReferenceState, S> for NavigateFocus {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
+crate::cap_transition! {
+    NavigateFocus: SutFocusWrite,
+    where R: [ RefLifecycle + RefBlockTree + RefNavHistoryMut ],
+    |me, _state, sut| {
         // The generator only ever emits `Region::Main` (sidebar nav-focus binds
         // `region: "main"`); map it to the cap's `CapRegion`. Any other region is
         // a generator bug, not a runtime case to handle.
-        let region = match self.region {
+        let region = match me.region {
             Region::Main => CapRegion::Main,
             other => panic!("NavigateFocus generator must only emit Main; got {other:?}"),
         };
-        sut.apply_navigate_focus(region, &self.block_id).await;
+        sut.apply_navigate_focus(region, &me.block_id).await;
     }
-}
-
-#[cfg(feature = "otel-testing")]
-impl crate::pbt::transition_budgets::SqlBudget for NavigateFocus {
-    fn expected_sql(&self, state: &ReferenceState) -> ExpectedSql {
+    sql_budget: |_me, state| {
         // First navigation to a root creates its watch matviews (see
         // FIRST_VISIT_VIEW_READS); revisits reuse the known-views cache.
-        let (first_visit_reads, first_visit_ddl) = if state.ui.tab.last_navigate_first_visit {
+        let (first_visit_reads, first_visit_ddl) = if state.last_navigate_first_visit() {
             (FIRST_VISIT_VIEW_READS, FIRST_VISIT_VIEW_DDL)
         } else {
             (0, 0)
