@@ -16,6 +16,7 @@ pub mod action_dsl;
 pub mod auth;
 pub mod block;
 pub mod block_mutation;
+pub mod block_write_field;
 pub mod capability;
 pub mod change_set;
 pub mod clock;
@@ -29,6 +30,7 @@ pub mod inline_mark;
 pub mod input_types;
 /// flutter_rust_bridge:ignore
 pub mod interp_value;
+pub mod latency_e2e;
 pub mod link_candidate;
 pub mod link_parser;
 pub mod live_data;
@@ -42,6 +44,7 @@ pub mod render_dsl;
 pub mod render_eval;
 pub mod render_types;
 pub mod repository;
+pub mod storage_error;
 pub mod streaming;
 pub mod types;
 pub mod ui_watcher;
@@ -54,6 +57,8 @@ pub use entity_profile::ProfileResolving;
 pub use entity_profile::VirtualChildConfig;
 pub use operation_engine::OperationEngine;
 pub use query_engine::QueryEngine;
+pub use storage_error::ParentNotFound;
+pub use storage_error::ProjectionInvariantViolated;
 pub use ui_watcher::UiWatcher;
 
 /// Fixed root layout block ID — must match `:ID:` property on the root heading
@@ -91,7 +96,12 @@ pub use block::SnapshotBlock;
 pub use block::SourceBlock;
 pub use block::blocks_by_document;
 // Re-export the intent ChangeSet vocabulary (block-sync rework, Phase 2)
-pub use change_set::{ChangeOp, ChangeSet, Provenance, agrees_with_ops, source_op_names};
+pub use block_write_field::{BlockWriteField, BlockWriteFieldError, PropertyKey};
+pub use change_set::ChangeOp;
+pub use change_set::ChangeSet;
+pub use change_set::Provenance;
+pub use change_set::agrees_with_ops;
+pub use change_set::source_op_names;
 pub use clock::Clock;
 pub use clock::SystemClock;
 pub use clock::TestClock;
@@ -114,7 +124,9 @@ pub use inline_mark::{
 pub use input_types::{Key, KeyChord};
 // Re-export interpreter-level value type (non-serializable — runtime only).
 /// flutter_rust_bridge:ignore
-pub use interp_value::{InterpValue, ReactiveRowProvider, ptr_identity};
+pub use interp_value::{
+    InterpValue, Occurrence, OccurrenceId, ReactiveRowProvider, RowKey, ptr_identity,
+};
 // CompletionStateInfo is defined in holon-core and re-exported here for frontend use
 // The actual definition is in holon-core/src/traits.rs
 

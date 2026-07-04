@@ -37,12 +37,14 @@ use holon_api::EntityUri;
 use holon_api::KeyChord;
 use holon_api::Value;
 
+use crate::editor_view_model::EditorViewModel;
 use crate::input::InputAction;
 use crate::input::WidgetInput;
 use crate::operations::OperationIntent;
 use crate::reactive::BuilderServices;
 use crate::reactive::ReactiveEngine;
 use crate::reactive_view_model::ReactiveViewModel;
+use crate::row_origin::RowOrigin;
 
 /// Default operation dispatched when a drop completes on a block drop zone.
 /// Used as fallback when `ViewKind::DropZone { op_name }` isn't readable. //
@@ -475,6 +477,95 @@ impl ReactiveEngineDriver {
         }
     }
 
+    /// Headless equivalent of GPUI `editor_view.rs`'s on-blur / authority-leave
+    /// commit for the focused main panel's creation slot. Resolves the slot's
+    /// parent the SAME way the render pipeline keys the `:__virtual:<parent>`
+    /// slot — `row_origin::resolve_creation_parent` over the main panel's LIVE
+    /// query rows (WP-E's navigation focus root) — then runs the production
+    /// `ViewEventHandler::handle_text_sync` create path
+    /// ([`EditorViewModel::pending_commit_intent`]) to obtain the
+    /// `block.create{parent_id, content}` intent and dispatches it exactly as
+    /// GPUI does via `dispatch_intent`.
+    ///
+    /// Why compute the parent instead of reading a rendered slot node: the slot
+    /// materializes only on the streaming `create_tree_driver` render path (the
+    /// `AppendedRowsProvider` creation-slot). The pure `engine.snapshot` /
+    /// MCP render path a headless reader sees does NOT append it for a panel
+    /// rendered via `live_block` — `virtual_parent: true` is resolved only in
+    /// the `live_query` builder (`resolve_virtual_parent`), the documented
+    /// "live_block still pending" gap in `shadow_builders::tree`. So there is
+    /// no rendered virtual node to read here. Rather than re-derive from
+    /// the editor caret (`engine.focused_block()`, ADR 0010 — WRONG,
+    /// diverges from the nav root under
+    /// `SplitBlock`/`JoinBlock`/`FocusEditableText`), this reuses the exact
+    /// production parent-resolution (`resolve_creation_parent`) on the
+    /// exact rows the render uses, so the committed parent is byte-identical to
+    /// the slot id the streaming render keys. It is NOT a new create path — the
+    /// `create` intent still comes from `handle_text_sync`.
+    ///
+    /// This is the shared seam the iOS render-path focus edge (B1, deferred)
+    /// will later call; here it lets the headless keystone drive WP-E's
+    /// creation-slot focus-root parenting cross-backend. Fails loud (per the
+    /// project's error policy) if the focused main panel resolves no creation
+    /// parent (empty / cold-boot rowset) or the commit yields no intent.
+    pub async fn commit_creation_slot(&self, content: &str) -> Result<EntityUri> {
+        let main_panel = region_panel_block_id(holon_api::Region::Main);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let parent = loop {
+            let (_expr, rows) = self.engine.ensure_watching(&main_panel).snapshot();
+            // WP-E: the slot parents to the main panel's navigation focus root,
+            // resolved from the rendered rowset (NOT the caret, NOT the panel
+            // container). This is the SAME call the render's `build_trailing_slot`
+            // makes, so the parent matches the rendered slot id exactly.
+            if let Some(parent) = crate::row_origin::resolve_creation_parent(&rows, &main_panel) {
+                break parent;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                let row_ids: Vec<String> = rows
+                    .iter()
+                    .filter_map(|r| r.get("id").and_then(|v| v.as_string()).map(String::from))
+                    .collect();
+                anyhow::bail!(
+                    "commit_creation_slot: main panel {main_panel} resolves NO creation parent \
+                     after 3s (caret focus {:?}; {} live rows {row_ids:?}) — the focused main \
+                     panel query returned an empty / not-yet-resolvable rowset (cold-boot \
+                     empty-page case). WP-E's `resolve_creation_parent` needs at least one real \
+                     row to key the slot on the nav focus root.",
+                    self.engine.focused_block(),
+                    rows.len()
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(120)).await;
+        };
+
+        // Build the `:__virtual:<parent>` slot id exactly as the render does, and
+        // commit through the production `handle_text_sync` create path. The
+        // editor node only needs `context_params["id"]` = this virtual id; the
+        // create branch reads the parent back out of it (never the caret).
+        let slot_id = RowOrigin::creation_placeholder_id(&parent);
+        let slot_uri = EntityUri::parse(&slot_id)
+            .with_context(|| format!("creation-slot id {slot_id:?} is not a valid EntityUri"))?;
+        let mut context_params = std::collections::HashMap::new();
+        context_params.insert("id".to_string(), holon_api::Value::String(slot_id.clone()));
+        let intent = EditorViewModel::new(
+            Vec::new(),
+            Vec::new(),
+            context_params,
+            "content".to_string(),
+            String::new(),
+        )
+        .pending_commit_intent(content)
+        .with_context(|| {
+            format!(
+                "creation-slot commit produced no create intent for slot {slot_id} content \
+                 {content:?} — the slot id did not parse as a CreationPlaceholder, or the content \
+                 was empty"
+            )
+        })?;
+        self.engine.dispatch_intent_sync(intent).await?;
+        Ok(slot_uri)
+    }
+
     /// Ensure the router is warmed for `root_block_id`. Idempotent — safe to
     /// call before every chord. Used by per-frontend drivers that route input
     /// through the real UI pipeline but still need the engine-quiescence
@@ -580,7 +671,23 @@ impl UserDriver for ReactiveEngineDriver {
         // focusing the block, matching GPUI's `render_entity` click handler.
         // Focus is pure in-memory state (ADR 0010): set the authority
         // directly instead of dispatching `navigation.editor_focus`.
+        //
+        // A real click also RE-PLACES the caret: GPUI re-mounts the block's
+        // editor at the click position (modeled as end-of-text, see
+        // `model_chord_click_focus` in the PBT ref). Seed the headless caret
+        // mirror the same way `send_key_chord` does, or a cursor tracked
+        // during an earlier editor session on this block — or a stale armed
+        // caret seed (split → 0) that `set_focus` keeps for the same block —
+        // survives the click and diverges from the freshly-mounted editor.
+        // Clicking the already-focused block is a no-op on the caret, like
+        // the already-active early-return in the ref model.
         let _ = region;
+        if self.engine.focused_block().as_ref() != Some(entity_id) {
+            self.editor_mirror
+                .seed_for_click(&self.engine, entity_id)
+                .await
+                .with_context(|| format!("click_entity: caret seed for clicked {entity_id}"))?;
+        }
         self.engine.set_focus(Some(entity_id.clone()));
         Ok(())
     }

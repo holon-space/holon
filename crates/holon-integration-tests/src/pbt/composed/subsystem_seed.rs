@@ -198,6 +198,10 @@ pub(crate) fn build_started_ref(subsystems: &BTreeSet<Subsystem>) -> ReferenceSt
     let mut state = fresh_reference_state(wiring_for_subsystems(subsystems));
     state.action.app_started = true;
     seed_booted_layout_into_ref(&mut state, true);
+    // The booted SUT's ProfileResolver serves the bundled block profile; the
+    // oracle must carry the same one or `render_entity` interprets to Empty
+    // and ToggleState never generates (see `load_seed_profile_into_ref`).
+    crate::pbt::transitions::start_app::load_seed_profile_into_ref(&mut state);
     seed_ref_tree(&mut state);
     if state.wiring.has_actor(Actor::UI) {
         let c1 = fixed_ids().c1;

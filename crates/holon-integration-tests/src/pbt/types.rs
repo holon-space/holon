@@ -1,8 +1,6 @@
 //! Core PBT types: mutations, test variants, and marker traits.
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::Mutex;
 
 use holon_api::ContentType;
 use holon_api::SourceLanguage;
@@ -10,58 +8,14 @@ use holon_api::Value;
 use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
 use holon_orgmode::models::OrgBlockExt;
+use holon_pbt_core::types::Mutation;
 
-/// Shared, `Send`-safe handle to the reference-stable-id → resolved-UUID map.
-///
-/// Lives in this neutral module (not `sut`) so component SUTs like
-/// [`crate::pbt::sut_loro::LoroSut`] can hold a clone without depending on the
-/// `E2ESut` facade. `std::sync::Mutex` (not `RefCell`) because the SUT is moved
-/// across threads at teardown.
-pub type DocUriMap = Arc<Mutex<HashMap<EntityUri, EntityUri>>>;
-
-/// Source of a mutation
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum MutationSource {
-    /// User action via BackendEngine operations (through ctx.execute_op)
-    UI,
-    /// External change to an Org file (simulates file edit)
-    External,
-    /// Block created by an action watcher (trigger query → action execution)
-    Action,
-    /// Mutation applied through a Loro CRDT *peer* (not the primary instance).
-    /// Diverges from the primary until a separate
-    /// `SyncWithPeer`/`MergeFromPeer` transition converges it. `peer_idx`
-    /// selects which peer (from prior `AddPeer`s) the mutation targets.
-    LoroPeer { peer_idx: usize },
-}
-
-/// A mutation to the data model
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum Mutation {
-    Create {
-        entity: String,
-        id: EntityUri,
-        parent_id: EntityUri,
-        fields: HashMap<String, Value>,
-    },
-    Update {
-        entity: String,
-        id: EntityUri,
-        fields: HashMap<String, Value>,
-    },
-    Delete {
-        entity: String,
-        id: EntityUri,
-    },
-    Move {
-        entity: String,
-        id: EntityUri,
-        new_parent_id: EntityUri,
-    },
-    /// Simulate app restart: clears FileSyncController's last_projection.
-    /// This tests that re-parsing org files doesn't create orphan blocks in
-    /// Loro.
-    RestartApp,
+/// Org-dependent reference-model applier for [`Mutation`]. Lives here (not in
+/// holon-pbt-core) because it needs `holon_orgmode::OrgBlockExt` via the org
+/// round-trip helpers below. Callers `use crate::pbt::types::MutationApply`.
+pub trait MutationApply {
+    /// Apply this mutation to a vector of blocks (for the reference model).
+    fn apply_to(&self, blocks: &mut Vec<Block>);
 }
 
 // TODO: Move to some sut_org.rs or similar
@@ -229,99 +183,9 @@ pub fn apply_org_headline_tag_split(block: &mut Block) {
     }
 }
 
-impl Mutation {
-    /// Returns the block ID targeted by this mutation, if any.
-    pub fn target_block_id(&self) -> Option<EntityUri> {
-        match self {
-            Mutation::Create { id, .. }
-            | Mutation::Update { id, .. }
-            | Mutation::Delete { id, .. }
-            | Mutation::Move { id, .. } => Some(id.clone()),
-            Mutation::RestartApp => None,
-        }
-    }
-
-    /// Convert mutation to BackendEngine operation parameters
-    pub fn to_operation(&self) -> (String, String, HashMap<String, Value>) {
-        match self {
-            Mutation::Create {
-                entity,
-                id,
-                parent_id,
-                fields,
-            } => {
-                let mut params = fields.clone();
-                params.insert("id".to_string(), id.clone().into());
-                params.insert("parent_id".to_string(), parent_id.clone().into());
-                (entity.clone(), "create".to_string(), params)
-            }
-            Mutation::Update { entity, id, fields } => {
-                let mut params = HashMap::new();
-                params.insert("id".to_string(), id.clone().into());
-
-                // Check if update targets a known SQL column or a custom property.
-                // Known columns use set_field (single-field update); custom properties
-                // use the "update" operation which packs unknown keys into the
-                // `properties` JSON column via partition_params.
-                const KNOWN_COLUMNS: &[&str] = &[
-                    "content",
-                    "parent_id",
-                    "content_type",
-                    "source_language",
-                    "source_name",
-                    "collapsed",
-                    "completed",
-                    "block_type",
-                ];
-
-                let has_custom_props = fields.keys().any(|k| !KNOWN_COLUMNS.contains(&k.as_str()));
-
-                if has_custom_props {
-                    // Use "update" operation — partition_params will pack custom
-                    // keys into the properties JSON column.
-                    for (k, v) in fields.iter() {
-                        params.insert(k.clone(), v.clone());
-                    }
-                    (entity.clone(), "update".to_string(), params)
-                } else if let Some((field_name, field_value)) = fields
-                    .iter()
-                    .find(|(k, _)| *k != "id" && *k != "parent_id")
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                {
-                    params.insert("field".to_string(), Value::String(field_name));
-                    params.insert("value".to_string(), field_value);
-                    (entity.clone(), "set_field".to_string(), params)
-                } else {
-                    params.insert("field".to_string(), Value::String("content".to_string()));
-                    params.insert("value".to_string(), Value::String(String::new()));
-                    (entity.clone(), "set_field".to_string(), params)
-                }
-            }
-            Mutation::Delete { entity, id } => {
-                let mut params = HashMap::new();
-                params.insert("id".to_string(), id.clone().into());
-                (entity.clone(), "delete".to_string(), params)
-            }
-            Mutation::Move {
-                entity,
-                id,
-                new_parent_id,
-            } => {
-                let mut params = HashMap::new();
-                params.insert("id".to_string(), id.clone().into());
-                params.insert("parent_id".to_string(), new_parent_id.clone().into());
-                (entity.clone(), "set_field".to_string(), params)
-            }
-            Mutation::RestartApp => (
-                "_restart".to_string(),
-                "restart".to_string(),
-                HashMap::new(),
-            ),
-        }
-    }
-
+impl MutationApply for Mutation {
     /// Apply mutation to a vector of blocks (for reference model)
-    pub fn apply_to(&self, blocks: &mut Vec<Block>) {
+    fn apply_to(&self, blocks: &mut Vec<Block>) {
         match self {
             Mutation::Create {
                 id,
@@ -430,11 +294,4 @@ impl Mutation {
             Mutation::RestartApp => {}
         }
     }
-}
-
-/// A mutation event with source information
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct MutationEvent {
-    pub source: MutationSource,
-    pub mutation: Mutation,
 }

@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Superseded
 
 ## Context
 
@@ -766,4 +766,4 @@ None
 
 ## Superseded By
 
-None (current)
+Superseded — never built. None of the proposed traits (`Completable`/`Prioritizable`/`Schedulable`/`Hierarchical`), `BlockView`, `BlockAdapter`, or per-provider types (`TodoistTask`, `JiraIssue`) exist in `crates/`. Third-party integration was instead delivered as generic MCP + YAML sidecars (see ADR 0004 domain/adapter/actor split, ADR 0006 actor terminology, and `docs/integrations/*.yaml`). NOTE: the "capability traits" framing here now name-collides with ADR 0012's reference-model capability contract — this ADR describes no shipped code.

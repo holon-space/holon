@@ -5,9 +5,12 @@ use std::sync::Arc;
 use holon::api::backend_engine::BackendEngine;
 use holon::api::holon_service::HolonService;
 use holon::sync::LoroDocumentStore;
+use holon::sync::LoroSyncControllerHandle;
+use holon_core::storage::BlockQuerySource;
 use holon_frontend::focus_path::InputRouter;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::user_driver::UserDriver;
+use holon_orgmode::OrgSyncIdleSignal;
 use rmcp::ErrorData as McpError;
 use rmcp::RoleServer;
 use rmcp::ServerHandler;
@@ -133,6 +136,60 @@ pub struct DebugServices {
     /// `DebugServicesPopulatorModule` so inspection tools see the same vault
     /// the session uses (in tests: the in-memory filesystem).
     pub org_fs: std::sync::OnceLock<Arc<dyn holon_filesystem::FileSystem>>,
+    /// Channel to the GPUI main-thread reset pump (Phase 1 Option A). The
+    /// `reset_vault` tool (tokio) sends a [`ResetRequest`] carrying a freshly
+    /// built session+engine; the pump owns the `!Send` `RebindHandle` and
+    /// re-points the live window onto them. Installed by the frontend after
+    /// window creation. `None` when the frontend didn't wire a reset pump.
+    pub reset_tx: std::sync::OnceLock<futures::channel::mpsc::Sender<ResetRequest>>,
+    /// Frontend-supplied builder that boots a fresh, seeded SUT WITHOUT
+    /// starting a second MCP server (the existing one is reused via the
+    /// swappable [`LiveMcpBackend`] cell). Lives in the gpui crate;
+    /// installed here so the `reset_vault` tool stays decoupled from gpui.
+    /// Runs on the same tokio runtime the MCP server runs on.
+    pub reset_builder: std::sync::OnceLock<ResetBuilderFn>,
+    /// Live, swappable convergence/mirror handles the debug PBT tools
+    /// (`await_quiescence`, `debug_pbt_snapshot`) read. Populated at boot by
+    /// the frontend and SWAPPED in place by `reset_vault` — so a per-case
+    /// rebind points these at the fresh session's Loro sync controller /
+    /// org idle signal / CDC-driven `BlockQuerySource` instead of the
+    /// retired one. A plain boot-time `OnceLock` (like
+    /// [`Self::loro_doc_store`]) would go stale after a reset and silently
+    /// answer against the retired engine; this cell fails that failure mode
+    /// by being swappable alongside [`LiveMcpBackend`].
+    pub live_debug: LiveDebugHandles,
+}
+
+/// Live, swappable [`DebugHandlesCell`] shared across every session's server (a
+/// cloned `Arc`), so a `reset_vault` swap is visible everywhere.
+/// `std::sync::RwLock` (not tokio's) so the debug tools can read it without an
+/// `.await`.
+pub type LiveDebugHandles = Arc<std::sync::RwLock<DebugHandlesCell>>;
+
+/// The swappable convergence/mirror handles behind
+/// [`DebugServices::live_debug`]. Each is `None` when the running config
+/// doesn't wire that substrate (Loro off, no org file-sync). The debug tools
+/// distinguish "not wired" from "should be wired but unreachable" and fail loud
+/// on the latter rather than skipping.
+#[derive(Default, Clone)]
+pub struct DebugHandlesCell {
+    /// The frontend's Loro sync controller — `last_synced_frontiers()` is the
+    /// Loro convergence watermark; `error_count()` backs `loro_had_errors`.
+    pub loro_sync_handle: Option<Arc<LoroSyncControllerHandle>>,
+    /// The file-sync controller's idle signal — `current_tick()` bumps after
+    /// every processed change, the org convergence signal.
+    pub org_idle_signal: Option<Arc<OrgSyncIdleSignal>>,
+    /// The CDC-driven `LiveData<Block>`/`LiveData<FocusRoot>` mirror producer —
+    /// `snapshot()` captures the live mirrors (NOT a matview SQL read).
+    pub block_query_source: Option<Arc<dyn BlockQuerySource>>,
+    /// The live Loro document store — its global doc backs `lamport_height`,
+    /// `loro_tree_children`, and the current-frontier side of the Loro signal.
+    /// A reset-safe copy of [`DebugServices::loro_doc_store`] that IS swapped.
+    pub loro_doc_store: Option<Arc<RwLock<LoroDocumentStore>>>,
+    /// The reactive engine — `focused_block()` is the engine's authoritative
+    /// focus, exposed via `debug_pbt_snapshot` so the live-MCP PBT driver can
+    /// wait for a click's focus to land before dispatching caret keystrokes.
+    pub reactive_engine: Option<Arc<holon_frontend::reactive::ReactiveEngine>>,
 }
 
 impl DebugServices {
@@ -172,16 +229,74 @@ impl Default for DebugServices {
             interaction_tx: std::sync::OnceLock::new(),
             user_driver: std::sync::OnceLock::new(),
             org_fs: std::sync::OnceLock::new(),
+            reset_tx: std::sync::OnceLock::new(),
+            reset_builder: std::sync::OnceLock::new(),
+            live_debug: Arc::new(std::sync::RwLock::new(DebugHandlesCell::default())),
         }
     }
 }
 
-pub struct HolonMcpServer {
+/// A request from the `reset_vault` tool (tokio) to the GPUI main-thread reset
+/// pump: re-point the live window onto this freshly-built session+engine. The
+/// pump owns the `!Send` `RebindHandle`, so both Arcs (which already cross the
+/// tokio↔GPUI boundary at boot) are handed across and the pump does the
+/// main-thread `rebind`. `ack` reports the rebind result back to the tool.
+pub struct ResetRequest {
+    pub session: Arc<holon_frontend::FrontendSession>,
+    pub engine: Arc<holon_frontend::reactive::ReactiveEngine>,
+    pub ack: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
+}
+
+/// What the gpui-side reset builder returns to the `reset_vault` tool. All
+/// members are `Send` so the tool can push them onto its retirement list.
+pub struct ResetBuildOutput {
+    pub session: Arc<holon_frontend::FrontendSession>,
+    pub engine: Arc<holon_frontend::reactive::ReactiveEngine>,
+    pub backend: Arc<BackendEngine>,
+    /// Opaque holder keeping the fresh SUT's temp dirs (org root, db, config)
+    /// alive. The tool moves it onto the retirement list so the retired
+    /// engine's watchers/consolidator idle against still-existing but
+    /// abandoned paths (plan F: leak deliberately, isolate completely).
+    pub retire: Box<dyn std::any::Any + Send>,
+    /// Fresh convergence/mirror handles resolved from the reset's own DI
+    /// injector — `reset_vault` swaps these into [`DebugServices::live_debug`]
+    /// so the debug PBT tools read the fresh session, not the retired one.
+    pub live_debug: DebugHandlesCell,
+}
+
+/// Frontend-installed reset builder: takes the seed files (`(name, content)`)
+/// and boots a fresh, seeded SUT on fresh temp paths. Boxed future so the
+/// gpui-crate async builder can be stored on the mcp-crate `DebugServices`.
+pub type ResetBuilderFn = Arc<
+    dyn Fn(
+            Vec<(String, String)>,
+        ) -> futures::future::BoxFuture<'static, anyhow::Result<ResetBuildOutput>>
+        + Send
+        + Sync,
+>;
+
+/// Live, swappable backend the MCP tools read **per call**. A per-case
+/// `reset_vault` rebind (Phase 1 Option A) swaps this cell in place, so EVERY
+/// subsequent tool call — even on a streamable-http session opened *before* the
+/// reset — observes the FRESH engine instead of the retired one (plan C2).
+/// Mirrors the window's `LiveEngine` cell. `std::sync::RwLock` (not tokio's) so
+/// the sync tool accessors can read it without an `.await`.
+pub type LiveMcpBackend = Arc<std::sync::RwLock<McpBackendCell>>;
+
+/// The swappable contents of a [`LiveMcpBackend`].
+#[derive(Default, Clone)]
+pub struct McpBackendCell {
     pub engine: Option<Arc<BackendEngine>>,
-    pub service: Option<HolonService>,
+    pub builder_services: Option<Arc<dyn BuilderServices>>,
+}
+
+pub struct HolonMcpServer {
+    /// The live, swappable backend (engine + builder services). Shared across
+    /// every session's server via a cloned `Arc`, so a reset swap is visible
+    /// everywhere.
+    pub backend: LiveMcpBackend,
     pub type_registry: Option<Arc<holon_profiles::TypeRegistry>>,
     pub debug: Arc<DebugServices>,
-    pub builder_services: Option<Arc<dyn BuilderServices>>,
     pub watches: Arc<Mutex<HashMap<String, WatchState>>>,
     pub(crate) tool_router: ToolRouter<HolonMcpServer>,
 }
@@ -201,43 +316,75 @@ impl HolonMcpServer {
         debug: Arc<DebugServices>,
         builder_services: Option<Arc<dyn BuilderServices>>,
     ) -> Self {
-        let tool_router = if engine.is_some() {
+        let backend = Arc::new(std::sync::RwLock::new(McpBackendCell {
+            engine,
+            builder_services,
+        }));
+        Self::with_backend_cell(backend, type_registry, debug)
+    }
+
+    /// Build a server that shares an existing [`LiveMcpBackend`] cell — the
+    /// session factory uses this so all sessions (and the reset tool) point at
+    /// ONE swappable cell.
+    pub fn with_backend_cell(
+        backend: LiveMcpBackend,
+        type_registry: Option<Arc<holon_profiles::TypeRegistry>>,
+        debug: Arc<DebugServices>,
+    ) -> Self {
+        // Whether backend tools are registered is fixed at construction from
+        // whether an engine is present. A reset only ever swaps one engine for
+        // another (never Some→None), so this stays correct across resets.
+        let has_engine = backend
+            .read()
+            .expect("backend cell poisoned")
+            .engine
+            .is_some();
+        let tool_router = if has_engine {
             Self::tool_router_ui() + Self::tool_router_backend()
         } else {
             Self::tool_router_ui()
         };
-
-        let service = engine.as_ref().map(|e| HolonService::new(e.clone()));
+        #[cfg(debug_assertions)]
+        let tool_router = tool_router + Self::tool_router_reset();
 
         Self {
-            engine,
-            service,
+            backend,
             type_registry,
             debug,
-            builder_services,
             watches: Arc::new(Mutex::new(HashMap::new())),
             tool_router,
         }
     }
 
-    /// Access the backend engine. Panics if not available.
-    ///
-    /// Safe because backend tools are only registered when engine is `Some`.
-    /// If this panics, a backend tool was somehow called in design gallery
-    /// mode.
-    pub(crate) fn engine(&self) -> &Arc<BackendEngine> {
-        self.engine.as_ref().expect(
-            "BackendEngine accessed but not available — backend tools should not be registered in \
-             design gallery mode",
-        )
+    /// The live backend engine (cloned from the swappable cell). Panics if not
+    /// available — backend tools are only registered when an engine is present,
+    /// so this only fires if a backend tool ran in design-gallery mode.
+    pub(crate) fn engine(&self) -> Arc<BackendEngine> {
+        self.backend
+            .read()
+            .expect("backend cell poisoned")
+            .engine
+            .clone()
+            .expect(
+                "BackendEngine accessed but not available — backend tools should not be \
+                 registered in design gallery mode",
+            )
     }
 
-    /// Access the shared service layer. Panics if not available.
-    pub(crate) fn service(&self) -> &HolonService {
-        self.service.as_ref().expect(
-            "HolonService accessed but not available — backend tools should not be registered in \
-             design gallery mode",
-        )
+    /// The shared service layer over the live engine. Cheap: `HolonService` is
+    /// a thin `Arc<BackendEngine>` wrapper, rebuilt per call from the live
+    /// cell.
+    pub(crate) fn service(&self) -> HolonService {
+        HolonService::new(self.engine())
+    }
+
+    /// The live builder services (cloned from the swappable cell), if present.
+    pub(crate) fn builder_services(&self) -> Option<Arc<dyn BuilderServices>> {
+        self.backend
+            .read()
+            .expect("backend cell poisoned")
+            .builder_services
+            .clone()
     }
 }
 

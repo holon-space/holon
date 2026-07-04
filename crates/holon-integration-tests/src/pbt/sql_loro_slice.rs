@@ -19,7 +19,7 @@
 //! [`SutLoroTaskState`]: holon_pbt_core::capabilities::SutLoroTaskState
 //! [`CapMap`]: holon_pbt_core::composition::CapMap
 //! [`SqlProjectionComponent`]: crate::pbt::sql_slice::components::SqlProjectionComponent
-//! [`LoroBackendComponent`]: crate::pbt::loro_slice::components::LoroBackendComponent
+//! [`LoroBackendComponent`]: holon_loro_testing::LoroBackendComponent
 
 pub mod builders;
 

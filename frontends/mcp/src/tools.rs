@@ -41,6 +41,39 @@ fn json_to_holon_value(v: serde_json::Value) -> Value {
     Value::from_json_value(v)
 }
 
+/// A SUT retired by `reset_vault` (Phase 1 Option A, plan F). Holds its Arcs +
+/// temp dirs so nothing Drops: the retired engine's watchers/consolidator idle
+/// against still-existing but abandoned fresh paths. `_`-prefixed because the
+/// point is to KEEP them alive, not read them.
+#[cfg(debug_assertions)]
+struct RetiredSut {
+    _session: Arc<holon_frontend::FrontendSession>,
+    _engine: Arc<holon_frontend::reactive::ReactiveEngine>,
+    _backend: Arc<holon::api::backend_engine::BackendEngine>,
+    _tempdirs: Box<dyn std::any::Any + Send>,
+}
+
+/// Process-wide retirement list. Grows by exactly one per `reset_vault`; a hard
+/// cap (checked in the tool) refuses further resets rather than leaking
+/// unboundedly.
+#[cfg(debug_assertions)]
+static RETIRED: std::sync::Mutex<Vec<RetiredSut>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(debug_assertions)]
+fn retired_len() -> usize {
+    RETIRED.lock().expect("RETIRED poisoned").len()
+}
+
+#[cfg(debug_assertions)]
+fn push_retired(sut: RetiredSut) {
+    let mut r = RETIRED.lock().expect("RETIRED poisoned");
+    r.push(sut);
+    tracing::warn!(
+        "reset_vault: {} retired engine(s) held (leaked-but-inert on abandoned temp paths)",
+        r.len()
+    );
+}
+
 // Helper function to convert holon_api::Value to serde_json::Value
 fn holon_to_json_value(v: &Value) -> serde_json::Value {
     match v {
@@ -285,7 +318,8 @@ impl HolonMcpServer {
             use holon::storage::SchemaModule;
             let module =
                 holon::storage::dynamic_schema_module::DynamicSchemaModule::new(type_def.clone());
-            let db_handle = self.engine().db_handle();
+            let engine = self.engine();
+            let db_handle = engine.db_handle();
             module.ensure_schema(db_handle).await.map_err(|e| {
                 rmcp::ErrorData::internal_error(
                     format!("Failed to create table for '{}': {e}", name),
@@ -476,7 +510,7 @@ impl HolonMcpServer {
         &self,
         Parameters(params): Parameters<WatchQueryParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let context = extract_context_from_params(self.service(), &params.params).await;
+        let context = extract_context_from_params(&self.service(), &params.params).await;
 
         let mut holon_params = HashMap::new();
         for (k, v) in &params.params {
@@ -667,8 +701,11 @@ impl HolonMcpServer {
             .await
             .map_err(|e| {
                 rmcp::ErrorData::internal_error(
+                    // `{:#}` renders the FULL anyhow chain (every `.context`
+                    // layer down to the typed source, e.g. `ParentNotFound`),
+                    // not just the outermost message.
                     format!(
-                        "Operation '{}' on '{}' failed: {}",
+                        "Operation '{}' on '{}' failed: {:#}",
                         params.operation, params.entity_name, e
                     ),
                     None,
@@ -1171,7 +1208,7 @@ impl HolonMcpServer {
         let agent_id = resolve_agent_id(params.agent_id)?;
         let task_id = ensure_block_prefix(&params.task_id);
 
-        let current = read_assigned_to(self.engine(), &task_id).await?;
+        let current = read_assigned_to(&self.engine(), &task_id).await?;
         if let Some(other) = &current {
             if other != &agent_id {
                 return Ok(CallToolResult::success(vec![Content::text(
@@ -1195,14 +1232,14 @@ impl HolonMcpServer {
             .map(|p| p.display().to_string());
 
         set_field(
-            self.service(),
+            &self.service(),
             &task_id,
             "assigned-to",
             Value::String(agent_id.clone()),
         )
         .await?;
         set_field(
-            self.service(),
+            &self.service(),
             &task_id,
             "claimed-at",
             Value::String(now_iso.clone()),
@@ -1210,7 +1247,7 @@ impl HolonMcpServer {
         .await?;
         if let Some(wt) = &worktree {
             set_field(
-                self.service(),
+                &self.service(),
                 &task_id,
                 "claimed-from",
                 Value::String(wt.clone()),
@@ -1218,7 +1255,7 @@ impl HolonMcpServer {
             .await?;
         }
         set_field(
-            self.service(),
+            &self.service(),
             &task_id,
             "task_state",
             Value::String("DOING".to_string()),
@@ -1226,7 +1263,7 @@ impl HolonMcpServer {
         .await?;
 
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        let final_assignee = read_assigned_to(self.engine(), &task_id).await?;
+        let final_assignee = read_assigned_to(&self.engine(), &task_id).await?;
         let claimed = final_assignee.as_deref() == Some(&agent_id);
 
         Ok(CallToolResult::success(vec![Content::text(
@@ -1386,14 +1423,14 @@ impl HolonMcpServer {
             .expect("now within range")
             .to_rfc3339();
         set_field(
-            self.service(),
+            &self.service(),
             &task_id,
             "task_state",
             Value::String("DONE".to_string()),
         )
         .await?;
         set_field(
-            self.service(),
+            &self.service(),
             &task_id,
             "completed-at",
             Value::String(completed_iso.clone()),
@@ -1441,14 +1478,419 @@ impl HolonMcpServer {
     }
 }
 
+/// Debug-only per-case reset tool, isolated in its own `#[tool_router]` impl
+/// so the whole router (method + macro-generated registration) compiles out
+/// together in release — rmcp's `#[tool_router]` does not honour a per-method
+/// `#[cfg]`, so a gated tool inside a shared router leaves a dangling
+/// `reset_vault_tool_attr` reference and breaks the release build.
+#[cfg(debug_assertions)]
+#[tool_router(router = tool_router_reset, vis = "pub(crate)")]
+impl HolonMcpServer {
+    /// Per-case, in-process reset (Phase 1 Option A). Builds a FRESH seeded
+    /// engine+session on fresh temp paths, swaps the live MCP backend cell so
+    /// every subsequent tool call reads the new engine, then rebinds the live
+    /// window onto it — keeping ONE window and ONE MCP server. Returns the new
+    /// `block_raw` id-set (a fail-loud self-check that the reset actually
+    /// re-seeded).
+    ///
+    /// GATED: compiled only in debug builds AND requires
+    /// `HOLON_MCP_ALLOW_RESET` to be set, so a shipped release can never
+    /// swap a user's vault over MCP.
+    #[tool(
+        description = "TEST-ONLY per-case reset: boot a fresh seeded vault and rebind the running \
+                       window onto it in place (no relaunch, no 2nd MCP server). Requires \
+                       HOLON_MCP_ALLOW_RESET. Returns the new block_raw id-set."
+    )]
+    async fn reset_vault(
+        &self,
+        Parameters(params): Parameters<ResetVaultParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if std::env::var("HOLON_MCP_ALLOW_RESET").is_err() {
+            return Err(rmcp::ErrorData::internal_error(
+                "reset_vault is disabled — set HOLON_MCP_ALLOW_RESET=1 to enable the in-process \
+                 vault reset (test harness only)",
+                None,
+            ));
+        }
+
+        // Retirement-list cap (plan F): refuse rather than leak unboundedly;
+        // the caller falls back to the Option B' cold relaunch past this.
+        const RESET_CAP: usize = 20;
+        if retired_len() >= RESET_CAP {
+            return Err(rmcp::ErrorData::internal_error(
+                format!(
+                    "reset_vault retirement cap reached ({RESET_CAP} retired engines); fall back \
+                     to a cold `ios_reset_sut.sh` relaunch"
+                ),
+                None,
+            ));
+        }
+
+        let builder = self.debug.reset_builder.get().cloned().ok_or_else(|| {
+            rmcp::ErrorData::internal_error(
+                "reset_vault requires a frontend reset builder (no window/pump wired)",
+                None,
+            )
+        })?;
+        let reset_tx = self.debug.reset_tx.get().cloned().ok_or_else(|| {
+            rmcp::ErrorData::internal_error(
+                "reset_vault requires a frontend reset pump (reset_tx not installed)",
+                None,
+            )
+        })?;
+
+        // 1. Build the fresh SUT on the tokio side (NOT the GPUI main thread).
+        let files: Vec<(String, String)> = params
+            .files
+            .into_iter()
+            .map(|f| (f.name, f.content))
+            .collect();
+        let out = builder(files).await.map_err(|e| {
+            rmcp::ErrorData::internal_error(format!("reset_vault build failed: {e}"), None)
+        })?;
+
+        // 2. Swap the live MCP backend cell BEFORE rebinding, so any concurrent read
+        //    already sees the fresh engine (plan C2).
+        {
+            let mut cell = self.backend.write().expect("backend cell poisoned");
+            cell.engine = Some(out.backend.clone());
+            let bs: Arc<dyn holon_frontend::reactive::BuilderServices> = out.engine.clone();
+            cell.builder_services = Some(bs);
+        }
+
+        // Swap the debug convergence/mirror handles in the SAME breath, so
+        // `await_quiescence` / `debug_pbt_snapshot` read the fresh session's
+        // Loro sync controller / org idle signal / CDC mirror rather than the
+        // retired engine's (a stale read would silently answer wrong — fail
+        // that failure mode by swapping alongside the backend cell).
+        {
+            let mut cell = self
+                .debug
+                .live_debug
+                .write()
+                .expect("live_debug cell poisoned");
+            *cell = out.live_debug.clone();
+        }
+
+        // 3. Rebind the live window (main thread) and await the ack.
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        reset_tx
+            .clone()
+            .try_send(crate::server::ResetRequest {
+                session: out.session.clone(),
+                engine: out.engine.clone(),
+                ack: ack_tx,
+            })
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!("reset_vault could not reach the reset pump: {e}"),
+                    None,
+                )
+            })?;
+        // Fail loud rather than hang forever if the main-thread pump stalls.
+        tokio::time::timeout(std::time::Duration::from_secs(30), ack_rx)
+            .await
+            .map_err(|_| {
+                rmcp::ErrorData::internal_error(
+                    "reset_vault timed out (30s) waiting for the main-thread rebind pump",
+                    None,
+                )
+            })?
+            .map_err(|_| {
+                rmcp::ErrorData::internal_error(
+                    "reset_vault pump dropped the ack (window gone?)",
+                    None,
+                )
+            })?
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("reset_vault rebind failed: {e}"), None)
+            })?;
+
+        // 4. Retire the SUT: keep its Arcs + temp dirs alive-but-inert so no Drop runs
+        //    (plan F). Growth is observable via `RETIRED.len()`.
+        push_retired(RetiredSut {
+            _session: out.session,
+            _engine: out.engine,
+            _backend: out.backend.clone(),
+            _tempdirs: out.retire,
+        });
+
+        // 5. Fail-loud self-check: read the fresh engine's block_raw id-set.
+        let probe = self
+            .service()
+            .execute_raw_sql("SELECT id FROM block_raw ORDER BY id", HashMap::new())
+            .await
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!("reset_vault self-check query failed: {e}"),
+                    None,
+                )
+            })?;
+        let ids: Vec<String> = probe
+            .rows
+            .iter()
+            .filter_map(|row| row.get("id").map(|v| format!("{v:?}")))
+            .collect();
+
+        let result = serde_json::json!({
+            "reset": true,
+            "block_raw_count": ids.len(),
+            "block_raw_ids": ids,
+            "retired_engines": retired_len(),
+        });
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
+    }
+}
+
 #[tool_router(router = tool_router_ui, vis = "pub(crate)")]
 impl HolonMcpServer {
+    /// Block-until-quiescent: the MCP-facing twin of the composed PBT's
+    /// `converge_projections` combined-fixed-point settle. Waits — capped at
+    /// `budget_ms` (default 30000) — until the CDC watermark, the Loro
+    /// sync-controller frontier (vs the authority doc's oplog frontier), and
+    /// the org idle tick are ALL simultaneously stable for one quiet floor,
+    /// then reports the signals it actually watched. Budget exhaustion is
+    /// an error naming the still-moving signal(s) — a non-converged wait is
+    /// NEVER reported as success. Reads the swappable `live_debug` handles,
+    /// so it follows a `reset_vault` onto the fresh session.
+    #[cfg(debug_assertions)]
+    #[tool(
+        description = "TEST-ONLY: block until the live session reaches a combined fixed point \
+                       (Turso CDC + Loro frontier + org idle tick all quiet for one floor), \
+                       capped at budget_ms (default 30000). Errors naming the still-moving \
+                       signal(s) if the budget is exhausted."
+    )]
+    async fn await_quiescence(
+        &self,
+        Parameters(params): Parameters<AwaitQuiescenceParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let budget = std::time::Duration::from_millis(params.budget_ms.unwrap_or(30_000));
+
+        // Snapshot the swappable handles once: a concurrent `reset_vault` swaps
+        // the cell, but a single quiescence wait converges the session that was
+        // live when it began.
+        let (loro_sync, loro_store, org_idle) = {
+            let cell = self
+                .debug
+                .live_debug
+                .read()
+                .expect("live_debug cell poisoned");
+            (
+                cell.loro_sync_handle.clone(),
+                cell.loro_doc_store.clone(),
+                cell.org_idle_signal.clone(),
+            )
+        };
+
+        // Wired-but-unreachable is a bug, not a skip: a Loro doc-store with no
+        // sync controller can never be observed for convergence — fail loud
+        // rather than silently dropping the Loro signal.
+        if loro_store.is_some() && loro_sync.is_none() {
+            return Err(rmcp::ErrorData::internal_error(
+                "await_quiescence: a Loro doc-store is wired but its sync-controller handle is \
+                 unreachable — cannot observe Loro convergence (half-wired/stale session)",
+                None,
+            ));
+        }
+
+        let engine = self.engine();
+        let check_loro = loro_sync.is_some() && loro_store.is_some();
+
+        let mut signals: Vec<&str> = vec!["cdc"];
+        if check_loro {
+            signals.push("loro");
+        }
+        if org_idle.is_some() {
+            signals.push("org");
+        }
+
+        let start = tokio::time::Instant::now();
+        let deadline = start + budget;
+        let quiet = std::time::Duration::from_millis(50);
+        let poll = std::time::Duration::from_millis(2);
+
+        let mut last_cdc = engine.db_handle().cdc_emitted_watermark();
+        let mut last_tick = org_idle.as_ref().map(|s| s.current_tick());
+        let mut last_activity = tokio::time::Instant::now();
+        let mut still_moving: Vec<&str> = Vec::new();
+
+        loop {
+            tokio::time::sleep(poll).await;
+            let mut moving: Vec<&str> = Vec::new();
+
+            // Loro FIRST (the projection that writes the reordered sort_key CDC
+            // then fires): a frontier not yet caught up counts as activity.
+            if let (Some(sync), Some(store)) = (&loro_sync, &loro_store) {
+                let current = {
+                    let guard = store.read().await;
+                    guard.get_global_doc().await.map_err(|e| {
+                        rmcp::ErrorData::internal_error(
+                            format!("await_quiescence: live Loro global doc unreachable: {e}"),
+                            None,
+                        )
+                    })?
+                }
+                .doc()
+                .oplog_frontiers();
+                if sync.last_synced_frontiers() != current {
+                    moving.push("loro");
+                }
+            }
+
+            let now_cdc = engine.db_handle().cdc_emitted_watermark();
+            if now_cdc != last_cdc {
+                last_cdc = now_cdc;
+                moving.push("cdc");
+            }
+
+            if let Some(idle) = &org_idle {
+                let now_tick = idle.current_tick();
+                if last_tick != Some(now_tick) {
+                    last_tick = Some(now_tick);
+                    moving.push("org");
+                }
+            }
+
+            let now = tokio::time::Instant::now();
+            if moving.is_empty() {
+                if now.duration_since(last_activity) >= quiet {
+                    let lamport_height = self.live_lamport_height().await?;
+                    let result = serde_json::json!({
+                        "converged": true,
+                        "waited_ms": start.elapsed().as_millis() as u64,
+                        "lamport_height": lamport_height,
+                        "signals": signals,
+                    });
+                    return Ok(CallToolResult::success(vec![Content::text(
+                        result.to_string(),
+                    )]));
+                }
+            } else {
+                last_activity = now;
+                still_moving = moving;
+            }
+
+            if now >= deadline {
+                return Err(rmcp::ErrorData::internal_error(
+                    format!(
+                        "await_quiescence: budget {}ms exhausted before a combined fixed point; \
+                         still-moving signal(s): {:?}",
+                        budget.as_millis(),
+                        still_moving
+                    ),
+                    None,
+                ));
+            }
+        }
+    }
+
+    /// Capture the live PBT-facing snapshot: the CDC-driven `LiveData` block
+    /// mirror (NOT a matview SQL read) + focus-roots, plus the Loro tree's
+    /// error flag, lamport height, and per-parent child lists. The block
+    /// source is the swappable `block_query_source` — fail loud (no SQL
+    /// fallback) if it is unwired. Follows a `reset_vault` onto the fresh
+    /// session.
+    #[cfg(debug_assertions)]
+    #[tool(
+        description = "TEST-ONLY: snapshot the live CDC-mirrored blocks (LiveData, not matview \
+                       SQL), focus-roots, and Loro tree state (had_errors, lamport_height, \
+                       per-parent children). Errors if no block_query_source is wired."
+    )]
+    async fn debug_pbt_snapshot(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+        let (block_query_source, loro_sync, reactive_engine) = {
+            let cell = self
+                .debug
+                .live_debug
+                .read()
+                .expect("live_debug cell poisoned");
+            (
+                cell.block_query_source.clone(),
+                cell.loro_sync_handle.clone(),
+                cell.reactive_engine.clone(),
+            )
+        };
+        let block_query_source = block_query_source.ok_or_else(|| {
+            rmcp::ErrorData::internal_error(
+                "debug_pbt_snapshot requires a wired block_query_source (the live CDC mirror); \
+                 there is no SQL fallback",
+                None,
+            )
+        })?;
+        // The cell is populated (block_query_source resolved), so the reactive
+        // engine slot MUST be present too — a missing one is a boot/reset wiring
+        // bug, not an honest "not wired". Fail loud rather than emit null.
+        let reactive_engine = reactive_engine.ok_or_else(|| {
+            rmcp::ErrorData::internal_error(
+                "debug_pbt_snapshot: live_debug cell is populated but reactive_engine is unset \
+                 (boot/reset failed to wire the engine)",
+                None,
+            )
+        })?;
+        let focused_block =
+            holon_frontend::reactive::BuilderServices::focused_block(&*reactive_engine)
+                .map(|b| b.to_string());
+
+        let snapshot = block_query_source.snapshot().await.map_err(|e| {
+            rmcp::ErrorData::internal_error(
+                format!("debug_pbt_snapshot: live block snapshot failed: {e}"),
+                None,
+            )
+        })?;
+
+        let live_blocks: Vec<serde_json::Value> = snapshot
+            .iter_blocks()
+            .map(|b| serde_json::to_value(holon_api::block::BlockWire::from(b)))
+            .collect::<Result<_, _>>()
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!("debug_pbt_snapshot: BlockWire serialization failed: {e}"),
+                    None,
+                )
+            })?;
+
+        let focus_roots: Vec<serde_json::Value> =
+            holon_core::storage::BlockQuery::focus_roots(&snapshot)
+                .into_iter()
+                .map(|fr| serde_json::json!({"region": fr.region, "root_id": fr.root_id}))
+                .collect();
+
+        let loro_had_errors = loro_sync.map(|h| h.error_count() > 0).unwrap_or(false);
+
+        let (lamport_height, loro_tree_children) = match self.live_loro_backend().await? {
+            Some(backend) => {
+                let height = backend.lamport_height().await.map_err(|e| {
+                    rmcp::ErrorData::internal_error(
+                        format!("debug_pbt_snapshot: live Loro lamport_height failed: {e}"),
+                        None,
+                    )
+                })?;
+                let children = self.live_loro_tree_children(&backend).await?;
+                (Some(height), children)
+            }
+            None => (None, std::collections::BTreeMap::new()),
+        };
+
+        let result = serde_json::json!({
+            "live_blocks": live_blocks,
+            "focus_roots": focus_roots,
+            "loro_had_errors": loro_had_errors,
+            "lamport_height": lamport_height,
+            "loro_tree_children": loro_tree_children,
+            "focused_block": focused_block,
+        });
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
+    }
+
     #[tool(
         description = "List all loaded Loro documents with their file paths and UUID→path alias \
                        mappings. Requires Loro to be enabled."
     )]
     async fn list_loro_documents(&self) -> Result<CallToolResult, rmcp::ErrorData> {
-        let store = self.debug.loro_doc_store.get().ok_or_else(|| {
+        let store = self.current_loro_doc_store().ok_or_else(|| {
             rmcp::ErrorData::internal_error("Loro is not enabled in this session", None)
         })?;
 
@@ -1770,7 +2212,7 @@ impl HolonMcpServer {
             )
         })?;
 
-        let svc = self.builder_services.clone().ok_or_else(|| {
+        let svc = self.builder_services().ok_or_else(|| {
             rmcp::ErrorData::internal_error(
                 "describe_ui requires a running frontend (builder_services not registered)",
                 None,
@@ -2390,9 +2832,101 @@ impl HolonMcpServer {
         )]))
     }
 
+    /// The current Loro doc store: the swappable `live_debug` cell when
+    /// populated (mobile boot + every `reset_vault` swap), else the boot-time
+    /// `OnceLock` (desktop paths that never reset). Tools MUST read through
+    /// this, not `debug.loro_doc_store` directly — the `OnceLock` goes stale
+    /// after a reset and would silently answer against the retired session.
+    fn current_loro_doc_store(
+        &self,
+    ) -> Option<Arc<tokio::sync::RwLock<holon::sync::LoroDocumentStore>>> {
+        let from_cell = self
+            .debug
+            .live_debug
+            .read()
+            .expect("live_debug cell poisoned")
+            .loro_doc_store
+            .clone();
+        from_cell.or_else(|| self.debug.loro_doc_store.get().cloned())
+    }
+
+    /// Build a `LoroBackend` over the live, swappable global doc from the
+    /// `live_debug` cell. `None` when Loro is not wired in this config; a wired
+    /// store whose global doc is unreachable is an error, not `None`.
+    #[cfg(debug_assertions)]
+    async fn live_loro_backend(&self) -> Result<Option<LoroBackend>, rmcp::ErrorData> {
+        let store = {
+            let cell = self
+                .debug
+                .live_debug
+                .read()
+                .expect("live_debug cell poisoned");
+            cell.loro_doc_store.clone()
+        };
+        match store {
+            None => Ok(None),
+            Some(store) => {
+                let doc = {
+                    let guard = store.read().await;
+                    guard.get_global_doc().await.map_err(|e| {
+                        rmcp::ErrorData::internal_error(
+                            format!("live Loro global doc unreachable: {e}"),
+                            None,
+                        )
+                    })?
+                };
+                Ok(Some(LoroBackend::from_document(doc)))
+            }
+        }
+    }
+
+    /// The live Loro doc's lamport height, or `None` when Loro is not wired.
+    #[cfg(debug_assertions)]
+    async fn live_lamport_height(&self) -> Result<Option<u32>, rmcp::ErrorData> {
+        match self.live_loro_backend().await? {
+            None => Ok(None),
+            Some(backend) => {
+                let height = backend.lamport_height().await.map_err(|e| {
+                    rmcp::ErrorData::internal_error(
+                        format!("live Loro lamport_height failed: {e}"),
+                        None,
+                    )
+                })?;
+                Ok(Some(height))
+            }
+        }
+    }
+
+    /// Per-parent child-id lists from the live Loro tree (only parents that
+    /// have children are keyed), for cross-checking against the
+    /// CDC-mirrored snapshot.
+    #[cfg(debug_assertions)]
+    async fn live_loro_tree_children(
+        &self,
+        backend: &LoroBackend,
+    ) -> Result<std::collections::BTreeMap<String, Vec<String>>, rmcp::ErrorData> {
+        let blocks = backend.get_all_blocks(Traversal::ALL).await.map_err(|e| {
+            rmcp::ErrorData::internal_error(format!("live Loro get_all_blocks failed: {e}"), None)
+        })?;
+        let mut out = std::collections::BTreeMap::new();
+        for block in &blocks {
+            let parent = block.id.to_string();
+            let children = backend.list_children(&parent).await.map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!("live Loro list_children({parent}) failed: {e}"),
+                    None,
+                )
+            })?;
+            if !children.is_empty() {
+                out.insert(parent, children);
+            }
+        }
+        Ok(out)
+    }
+
     /// Resolve a doc_id (UUID or file path) to blocks from Loro.
     async fn get_loro_blocks(&self, doc_id: &str) -> Result<Vec<Block>, rmcp::ErrorData> {
-        let store = self.debug.loro_doc_store.get().ok_or_else(|| {
+        let store = self.current_loro_doc_store().ok_or_else(|| {
             rmcp::ErrorData::internal_error("Loro is not enabled in this session", None)
         })?;
 
@@ -2447,7 +2981,7 @@ impl HolonMcpServer {
         }
 
         // Try to resolve via Loro aliases
-        if let Some(store) = self.debug.loro_doc_store.get() {
+        if let Some(store) = self.current_loro_doc_store() {
             let store_read = store.read().await;
             if let Some(path) = store_read.resolve_alias_to_path(doc_id).await {
                 return Ok(path);

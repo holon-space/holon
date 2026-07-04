@@ -183,6 +183,27 @@ impl ContentType {
             ContentType::Text => 1,
         }
     }
+
+    /// Finer sibling-ordering rank that the render→parse round trip actually
+    /// realises. The renderer hoists section content (`Source`/`Image`) ahead
+    /// of headings (`Text`) via [`Self::sibling_order_group`], but the org
+    /// parser additionally re-emits **all `Source` blocks before all `Image`
+    /// blocks** (the source loop precedes the image loop in
+    /// `process_headlines`). So the post-round-trip kind order is `Source <
+    /// Image < Text`.
+    ///
+    /// This is DISTINCT from [`Self::sibling_order_group`] on purpose: the
+    /// renderer relies on the coarse grouping (both section-content kinds share
+    /// group 0, insertion order preserved within the group), while a reference
+    /// model that must reproduce the *stored* order after a round trip needs
+    /// this finer rank as its primary sort key.
+    pub fn parse_order_rank(self) -> u8 {
+        match self {
+            ContentType::Source => 0,
+            ContentType::Image => 1,
+            ContentType::Text => 2,
+        }
+    }
 }
 
 impl fmt::Display for ContentType {
@@ -449,6 +470,19 @@ pub enum StateCategory {
     Done,
 }
 
+impl StateCategory {
+    /// Canonical stored spelling of the `task_state_category` sidecar
+    /// property ("active" / "done"). One source of truth for every writer
+    /// (org parse boundary, Loro `set_state`, SQL `cycle_task_state`) so the
+    /// stored strings can never drift apart.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Done => "done",
+        }
+    }
+}
+
 /// Well-known done keywords (everything after `|` in org `#+TODO:` config).
 const DEFAULT_DONE_KEYWORDS: &[&str] = &["DONE", "CANCELLED", "CLOSED"];
 
@@ -499,6 +533,14 @@ impl TaskState {
             StateCategory::Active
         };
         Self::new(keyword, category)
+    }
+
+    /// The `task_state_category` sidecar value for a BARE keyword write
+    /// arriving at a storage boundary (widget click intent, `set_state`,
+    /// `cycle_task_state`) — i.e. one with no org `#+TODO:` config in hand.
+    /// Uses the default done-keyword list, exactly like [`Self::from_keyword`].
+    pub fn category_str_for_keyword(keyword: &str) -> &'static str {
+        Self::from_keyword(keyword).category.as_str()
     }
 
     pub fn is_done(&self) -> bool {

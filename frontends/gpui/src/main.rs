@@ -65,6 +65,22 @@ fn main() -> Result<()> {
 
     let rt_handle = runtime.handle().clone();
 
+    // Live oracles (debug builds): run the cheap tier of the keystone PBT
+    // invariants as background checks against the live DB, so every manual
+    // dogfood session carries oracles. HOLON_ORACLES=off opts out. The UI
+    // bridge + banner are wired inside the window launch; the latency-SLO
+    // layer is installed by `holon_frontend::logging::init` above.
+    #[cfg(debug_assertions)]
+    {
+        let mode = holon_oracles::OracleMode::from_env();
+        if mode.enabled() {
+            let backend_engine = injector
+                .try_resolve::<holon::api::backend_engine::BackendEngine>()
+                .map_err(|e| anyhow::anyhow!("live oracles need BackendEngine from DI: {e}"))?;
+            holon_gpui::oracles_ui::spawn_oracle_runner(backend_engine, &rt_handle, mode);
+        }
+    }
+
     // Shutdown flush: spawn a tokio task that awaits Ctrl+C and flushes
     // every in-flight shared-doc save before exit. The 150ms debounce
     // window in `SaveWorker` means pending edits could otherwise be

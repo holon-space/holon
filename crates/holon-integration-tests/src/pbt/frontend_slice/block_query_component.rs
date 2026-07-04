@@ -38,7 +38,7 @@ use holon_pbt_core::capabilities::WidgetSnapshot;
 use holon_pbt_core::composition::CapMap;
 use holon_pbt_core::composition::CapProvider;
 
-use crate::pbt::sut_capabilities::view_model_to_snapshot;
+use crate::pbt::vm_snapshot::view_model_to_snapshot;
 
 /// A composition component wrapping a real no-Turso block-query frontend. Owns
 /// the DI injector, `FrontendSession`, `ReactiveEngine`, and the seeded

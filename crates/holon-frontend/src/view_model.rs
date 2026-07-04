@@ -120,6 +120,16 @@ pub struct ViewModel {
     /// space). `Fixed { px }` claims an exact number of pixels.
     #[serde(default, skip_serializing_if = "is_default_layout_hint")]
     pub layout_hint: LayoutHint,
+
+    /// Which display occurrence of the row this node renders (ADR 0015 rule 4:
+    /// node metadata, NEVER an id-infix). `Canonical` for every real row;
+    /// `ReactiveViewModel::snapshot` threads the stamped `Placed` occurrence
+    /// through so PBT snapshots can observe display-placed rows without the
+    /// occurrence ever touching the `EntityUri`. `#[serde(skip)]`: the
+    /// coordinate is in-memory only — it never rides the serialized wire
+    /// form, keeping the ViewModel bytes identical to before this widening.
+    #[serde(skip)]
+    pub occurrence: holon_api::Occurrence,
 }
 
 /// The kind of widget this node represents.
@@ -632,6 +642,7 @@ impl Default for ViewModel {
             operations: vec![],
             triggers: vec![],
             layout_hint: LayoutHint::default(),
+            occurrence: holon_api::Occurrence::Canonical,
         }
     }
 }

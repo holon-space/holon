@@ -1,3 +1,11 @@
+//! @c4 component
+//! @c4 layer Adapters
+//! Pattern: Adapter
+//! @c4 uses holon-api "shared value & operation types" "Rust"
+//! @c4 uses holon-core "core datasource traits" "Rust"
+//! @c4 uses holon-filesystem "filesystem ports" "Rust"
+//! @c4 uses holon-macros "entity/operation derive macros" "Rust"
+//!
 //! Loro CRDT document engine and peer-to-peer synchronization.
 //!
 //! This crate provides the Loro CRDT backend, P2P sync infrastructure,
@@ -114,12 +122,16 @@ pub use loro_backend::EXTERNAL_ID;
 pub use loro_backend::LoroBackend;
 pub use loro_backend::LoroMapExt;
 pub use loro_backend::LoroTreeView;
+pub use loro_backend::PendingChange;
 pub use loro_backend::SOURCE_CODE;
 pub use loro_backend::SOURCE_LANGUAGE;
 pub use loro_backend::STABLE_ID;
 pub use loro_backend::SnapshotBlock;
 pub use loro_backend::TREE_NAME;
+pub use loro_backend::build_tid_index;
 pub use loro_backend::configure_text_styles;
+pub use loro_backend::extract_pending_changes;
+pub use loro_backend::incremental_block_changes;
 pub use loro_backend::mark_from_loro_value;
 pub use loro_backend::mark_to_loro_value;
 pub use loro_backend::read_marks_from_text;

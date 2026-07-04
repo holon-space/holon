@@ -159,7 +159,11 @@ impl Render for RenderEntityView {
             }
         }
 
-        let el_id = format!("render-entity-{}", id);
+        // Suffix the occurrence coordinate (ADR 0016 §3): a display-placed
+        // second occurrence renders under its own element identity. `Canonical`
+        // → empty suffix → byte-identical to the historical key.
+        let occ = self.current.occurrence().key_suffix();
+        let el_id = format!("render-entity-{}{}", id, occ);
         let services = gpui_ctx.services.clone();
         click_to_focus(&el_id, child_el, id.clone(), services).into_any_element()
     }

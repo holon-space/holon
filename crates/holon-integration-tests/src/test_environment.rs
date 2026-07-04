@@ -53,19 +53,9 @@ use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive::BuilderServicesSlot;
 use holon_frontend::reactive::ReactiveEngine;
 use holon_loro::LoroBackend;
+use holon_pbt_core::types::LoroCorruptionType;
 use tempfile::TempDir;
 use tokio::sync::RwLock;
-
-/// Types of corruption for stale .loro files (for testing recovery)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum LoroCorruptionType {
-    /// Empty file (0 bytes)
-    Empty,
-    /// File with partial/truncated Loro header
-    Truncated,
-    /// File with invalid magic bytes
-    InvalidHeader,
-}
 
 /// Resolve the DI-registered `DebugServices` and pre-populate its
 /// optional fields (`loro_doc_store`) from other DI services. Mirrors
@@ -427,13 +417,7 @@ impl TestEnvironmentBuilder {
             config_dir,
             std::collections::HashSet::new(),
             move |injector| {
-                use holon_frontend::reactive::BuilderServicesSlot;
-                use holon_frontend::reactive::RenderInterpreterInjectorExt;
-                override_org_fs_bindings(injector, &org_fs_for_di);
-                let slot = injector.resolve::<BuilderServicesSlot>();
-                injector.set_render_interpreter(holon_frontend::reactive::make_interpret_fn(
-                    slot.0.clone(),
-                ));
+                install_headless_render_interpreter(injector, &org_fs_for_di);
                 holon_mcp::di::register_debug_services(injector);
                 if enable_fake_mcp {
                     crate::fake_mcp_module::register_fake_mcp(injector);
@@ -441,13 +425,7 @@ impl TestEnvironmentBuilder {
                 Ok(())
             },
             move |injector| {
-                use holon_frontend::reactive::BuilderServices;
-                use holon_frontend::reactive::BuilderServicesSlot;
-                use holon_frontend::reactive::ReactiveEngine;
-                let engine = injector.resolve::<ReactiveEngine>();
-                let slot = injector.resolve::<BuilderServicesSlot>();
-                let services: Arc<dyn BuilderServices> = engine.clone();
-                slot.0.set(services).ok(); // ALLOW(ok): OnceLock set — idempotent
+                let engine = publish_reactive_builder_services(injector);
 
                 let doc_store = if enable_loro {
                     injector
@@ -545,6 +523,41 @@ pub(crate) fn override_org_fs_bindings(
     injector.override_provider::<dyn holon_filesystem::FileChangeSource>(fluxdi::Provider::root(
         move |_| cs.clone() as Arc<dyn holon_filesystem::FileChangeSource>,
     ));
+}
+
+/// The CapMap↔fluxdi bridge, `extra_setup` half (ADR 0019 §5). fluxdi's
+/// `add_frontend` / `new_from_config_with_di` assembles the REAL frontend app;
+/// a headless PBT host then wraps that assembled app as CapMap capabilities —
+/// it does NOT re-implement the wiring. This is the one shared adapter every
+/// headless boot runs in its `extra_setup` closure: rebind the org filesystem
+/// to the in-memory `org_fs` and install the render interpreter over
+/// `BuilderServicesSlot`. Site-specific registrations (debug services, fake
+/// MCP) run AFTER this, in the caller. Keeping it in ONE place is why the boot
+/// sites (`TestEnvironment`, `HeadlessFrontendComponent`) no longer each copy
+/// the block.
+pub(crate) fn install_headless_render_interpreter(
+    injector: &fluxdi::Injector,
+    org_fs: &Arc<holon_filesystem::InMemoryFileSystem>,
+) {
+    use holon_frontend::reactive::RenderInterpreterInjectorExt;
+    override_org_fs_bindings(injector, org_fs);
+    let slot = injector.resolve::<BuilderServicesSlot>();
+    injector.set_render_interpreter(holon_frontend::reactive::make_interpret_fn(slot.0.clone()));
+}
+
+/// The CapMap↔fluxdi bridge, `build` half (ADR 0019 §5): resolve the production
+/// `ReactiveEngine` and publish it into `BuilderServicesSlot` — breaking the
+/// engine↔interpreter cycle so render interpretation and the engine share one
+/// instance — then return the engine. Shared by every headless boot so the
+/// "publish ReactiveEngine as BuilderServices" step lives in ONE place.
+pub(crate) fn publish_reactive_builder_services(
+    injector: &fluxdi::Injector,
+) -> Arc<ReactiveEngine> {
+    let engine = injector.resolve::<ReactiveEngine>();
+    let slot = injector.resolve::<BuilderServicesSlot>();
+    let services: Arc<dyn BuilderServices> = engine.clone();
+    slot.0.set(services).ok(); // ALLOW(ok): OnceLock set — idempotent
+    engine
 }
 
 /// Spec 0008 §4.2(b) — re-boot the app IN-PROCESS with the consolidator flipped
@@ -750,7 +763,7 @@ impl TestEnvironment {
     ///
     /// Equivalent to `new()` followed by `start_app(true)`.
     pub async fn new_running(runtime: Arc<tokio::runtime::Runtime>) -> Result<Self> {
-        let mut env = Self::new(runtime)?;
+        let env = Self::new(runtime)?;
         env.start_app(true).await?;
         Ok(env)
     }
@@ -808,8 +821,8 @@ impl TestEnvironment {
 
         let content = match corruption_type {
             LoroCorruptionType::Empty => Vec::new(),
-            LoroCorruptionType::Truncated => vec![0x4C, 0x6F, 0x72, 0x6F], /* "Loro" prefix but
-                                                                             * truncated */
+            LoroCorruptionType::Truncated => vec![0x4C, 0x6F, 0x72, 0x6F], /* "Loro" prefix but */
+            // truncated
             LoroCorruptionType::InvalidHeader => vec![0xFF, 0xFE, 0x00, 0x01], /* Invalid magic
                                                                                 * bytes */
         };
@@ -899,13 +912,7 @@ impl TestEnvironment {
             config_dir,
             std::collections::HashSet::new(),
             move |injector| {
-                use holon_frontend::reactive::BuilderServicesSlot;
-                use holon_frontend::reactive::RenderInterpreterInjectorExt;
-                override_org_fs_bindings(injector, &org_fs_for_di);
-                let slot = injector.resolve::<BuilderServicesSlot>();
-                injector.set_render_interpreter(holon_frontend::reactive::make_interpret_fn(
-                    slot.0.clone(),
-                ));
+                install_headless_render_interpreter(injector, &org_fs_for_di);
                 holon_mcp::di::register_debug_services(injector);
                 if enable_fake_mcp {
                     crate::fake_mcp_module::register_fake_mcp(injector);
@@ -913,13 +920,7 @@ impl TestEnvironment {
                 Ok(())
             },
             move |injector| {
-                use holon_frontend::reactive::BuilderServices;
-                use holon_frontend::reactive::BuilderServicesSlot;
-                use holon_frontend::reactive::ReactiveEngine;
-                let engine = injector.resolve::<ReactiveEngine>();
-                let slot = injector.resolve::<BuilderServicesSlot>();
-                let services: Arc<dyn BuilderServices> = engine.clone();
-                slot.0.set(services).ok(); // ALLOW(ok): OnceLock set — idempotent
+                let engine = publish_reactive_builder_services(injector);
 
                 let doc_store = if enable_loro {
                     injector
@@ -1120,12 +1121,7 @@ impl TestEnvironment {
         .await?;
 
         let session = injector.resolve::<FrontendSession>();
-        let reactive_engine = injector.resolve::<ReactiveEngine>();
-        // Populate the OnceLock that breaks the engine↔interpreter cycle — the
-        // same step the Turso path performs after resolving the engine.
-        let slot = injector.resolve::<BuilderServicesSlot>();
-        let services: Arc<dyn BuilderServices> = reactive_engine.clone();
-        slot.0.set(services).ok(); // ALLOW(ok): OnceLock set — idempotent
+        let reactive_engine = publish_reactive_builder_services(&injector);
 
         self.latch_injector((*injector).clone());
         self.latch_session(session);

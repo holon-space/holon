@@ -4,6 +4,7 @@
 //! reused by other test harnesses (e.g. Flutter FFI PBT).
 
 pub mod action_actor_state;
+pub mod advice_expectation;
 pub mod bisect_driver;
 pub mod composed;
 pub mod convergence;
@@ -16,7 +17,6 @@ pub mod generators;
 pub mod invariant_mode_override;
 pub mod invariants;
 pub mod layout_bridge;
-pub mod local_caps;
 pub mod loro_slice;
 pub mod loro_sync;
 pub mod mcp_server_actor_state;
@@ -29,21 +29,13 @@ pub mod query_ast;
 pub mod reference_capabilities;
 pub mod reference_domain_state;
 pub mod reference_state;
-pub mod retry;
 pub mod shadow_mesh;
-pub mod slice;
 pub mod sql_loro_slice;
 pub mod sql_slice;
 pub mod state_machine;
 pub mod stepper;
-pub mod sut;
-pub mod sut_capabilities;
-mod sut_check_invariants;
-mod sut_handle;
-mod sut_keybindings;
 pub mod sut_loro;
 mod sut_metrics;
-mod sut_render;
 mod sut_row_parsing;
 #[cfg(feature = "otel-testing")]
 pub mod transition_budgets;
@@ -53,8 +45,8 @@ pub mod types;
 pub mod ui_actor_state;
 pub mod ui_harness;
 pub mod ui_interaction;
-pub mod validation;
 pub mod value_fn_invariants;
+pub mod vm_snapshot;
 pub mod window_slice;
 
 /// Whether `id` is a ref-side SYNTHETIC placeholder the SUT replaces with a
@@ -84,7 +76,6 @@ pub use reference_state::ReferenceState;
 pub use state_machine::ReferenceMachine;
 pub use state_machine::fresh_reference_state;
 pub use state_machine::storage_selector_for_wiring;
-pub use sut::E2ESut;
 pub use transitions::E2ETransition;
 pub use types::*;
 pub use ui_actor_state::UIActorState;

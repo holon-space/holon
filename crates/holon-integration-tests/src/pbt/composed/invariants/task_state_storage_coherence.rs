@@ -136,6 +136,7 @@ mod real_sut_teeth {
     use holon_pbt_core::TransitionImpl;
     use holon_pbt_core::capabilities::SutLoroTaskState;
     use holon_pbt_core::capabilities::SutSqlProjection;
+    use holon_pbt_core::types::CycleTarget;
 
     use crate::pbt::composed::seed_primitives::fixed_ids;
     use crate::pbt::composed::wide_e2e::SETTLE;
@@ -143,7 +144,6 @@ mod real_sut_teeth {
     use crate::pbt::composed::wide_e2e::wide_e2e_ref;
     use crate::pbt::op_write_cap::IdResolver;
     use crate::pbt::transitions::ToggleState;
-    use crate::pbt::transitions::toggle_state::CycleTarget;
 
     /// A real `ToggleState(c1 → TODO)` over the composed `full_headless` CapMap
     /// must land in BOTH stores. Before the toggle both read `None` (plain

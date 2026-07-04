@@ -51,6 +51,8 @@ pub use directory::ROOT_ID;
 pub use error::FilesystemError;
 pub use file::File;
 #[cfg(not(target_arch = "wasm32"))]
+pub use file_sync_controller::BlockDelta;
+#[cfg(not(target_arch = "wasm32"))]
 pub use file_sync_controller::FileSyncController;
 #[cfg(not(target_arch = "wasm32"))]
 pub use file_sync_controller::RENDERER_VERSION;
