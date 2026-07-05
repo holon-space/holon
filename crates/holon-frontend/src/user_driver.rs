@@ -566,7 +566,23 @@ impl UserDriver for ReactiveEngineDriver {
         // focusing the block, matching GPUI's `render_entity` click handler.
         // Focus is pure in-memory state (ADR 0010): set the authority
         // directly instead of dispatching `navigation.editor_focus`.
+        //
+        // A real click also RE-PLACES the caret: GPUI re-mounts the block's
+        // editor at the click position (modeled as end-of-text, see
+        // `model_chord_click_focus` in the PBT ref). Seed the headless caret
+        // mirror the same way `send_key_chord` does, or a cursor tracked
+        // during an earlier editor session on this block — or a stale armed
+        // caret seed (split → 0) that `set_focus` keeps for the same block —
+        // survives the click and diverges from the freshly-mounted editor.
+        // Clicking the already-focused block is a no-op on the caret, like
+        // the already-active early-return in the ref model.
         let _ = region;
+        if self.engine.focused_block().as_ref() != Some(entity_id) {
+            self.editor_mirror
+                .seed_for_click(&self.engine, entity_id)
+                .await
+                .with_context(|| format!("click_entity: caret seed for clicked {entity_id}"))?;
+        }
         self.engine.set_focus(Some(entity_id.clone()));
         Ok(())
     }
