@@ -2071,6 +2071,19 @@ impl BuilderServices for ReactiveEngine {
         let session = self.session.clone();
         let (focused_block, caret_seed) = self.ui_state.focus_handles();
         Box::pin(async move {
+            // Latency stage (dispatch->op-applied): a user action enters the
+            // pipeline here. `block` is the entity the op targets; `action` the
+            // op name (split_block, indent, outdent, cycle_state, ...). The push
+            // pipeline (Loro commit -> projection -> CDC rows) runs downstream and
+            // is measured by the `projection`/`rows` stages. Greppable via
+            // target="holon_latency".
+            let block = intent
+                .params
+                .get("id")
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| intent.entity_name.as_str().to_string());
+            let t_dispatch = std::time::Instant::now();
             let response = session
                 .execute_operation(&intent.entity_name, &intent.op_name, intent.params)
                 .await
@@ -2080,6 +2093,14 @@ impl BuilderServices for ReactiveEngine {
                         intent.entity_name, intent.op_name
                     )
                 })?;
+            tracing::debug!(
+                target: "holon_latency",
+                stage = "dispatch",
+                action = %intent.op_name,
+                block = %block,
+                ms = t_dispatch.elapsed().as_millis() as u64,
+                "holon_latency",
+            );
             // Same in-process structural-focus projection as `dispatch_intent`.
             apply_structural_focus(&focused_block, &caret_seed, &intent.op_name, &response);
             Ok(())

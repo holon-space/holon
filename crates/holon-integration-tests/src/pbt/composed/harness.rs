@@ -45,6 +45,18 @@ use crate::pbt::reference_state::{ReferenceState, Resolved};
 /// CreateDocument-minted doc pages (`block:ref-doc-N`, from
 /// `ReferenceState::next_synthetic_doc_uri`). Composed-local on purpose — the global
 /// [`is_synthetic_ref_id`] stays split-only so E2ESut's mapping is unaffected.
+/// Action-kind label for a transition, derived from its `Debug` head token
+/// (`Indent { .. }` -> "Indent"). Generic over the slice `Transition` enum
+/// (only `Debug` is available at the harness layer), used solely for the
+/// `target="holon_latency"` per-action summary — never for control flow.
+fn action_label<T: std::fmt::Debug>(t: &T) -> String {
+    let dbg = format!("{t:?}");
+    dbg.split(|c: char| c == ' ' || c == '(' || c == '{' || c == '\n')
+        .next()
+        .unwrap_or("<transition>")
+        .to_string()
+}
+
 fn is_composed_minted_synthetic_id(id: &EntityUri) -> bool {
     is_synthetic_ref_id(id) || id.as_str().starts_with("block:ref-doc-")
 }
@@ -298,6 +310,7 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
     }
 
     fn apply(mut sut: Self, ref_state: &ReferenceState, transition: S::Transition) -> Self {
+        let action = action_label(&transition);
         let (before, after) = {
             // Split the borrow: `settle_after_apply` reads `&sut.handle` while the apply
             // writes `&mut sut.caps` — disjoint fields, so borrow each separately before
@@ -306,8 +319,19 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
             let handle = &sut.handle;
             sut.rt.block_on(async move {
                 let before = sut_ids(caps).await;
+                let t_action = std::time::Instant::now();
                 S::apply_transition(&transition, ref_state, caps).await;
                 S::settle_after_apply(handle, caps).await;
+                // Latency (end-to-end, action->visible rows): dispatch through the
+                // real pipeline plus the CDC settle — everything except final GPU
+                // paint (headless harness). Greppable via target="holon_latency".
+                tracing::debug!(
+                    target: "holon_latency",
+                    stage = "action_total",
+                    action = %action,
+                    total_ms = t_action.elapsed().as_millis() as u64,
+                    "holon_latency",
+                );
                 feed_sut_clock(caps, ref_state).await;
                 let after = sut_ids(caps).await;
                 (before, after)

@@ -341,6 +341,7 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
                 let changes: Vec<Change<StorageEntity>> =
                     batch.inner.items.into_iter().map(Into::into).collect();
                 let change_count = changes.len();
+                let t_rows = std::time::Instant::now();
                 live.apply_changes(changes);
                 if seq > 0 {
                     live.last_consumed_seq.store(seq, Ordering::SeqCst);
@@ -352,6 +353,21 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
                     changes = change_count,
                     "LiveData batch applied"
                 );
+                // Latency stage (projection->rows): a CDC batch from the matview
+                // lands and the reactive mirror applies it — the point at which a
+                // projected change becomes visible to the view model / widgets
+                // (final GPU paint excluded). Greppable via target="holon_latency".
+                if change_count > 0 {
+                    tracing::debug!(
+                        target: "holon_latency",
+                        stage = "rows",
+                        source = source_name,
+                        rows = change_count,
+                        seq,
+                        ms = t_rows.elapsed().as_millis() as u64,
+                        "holon_latency",
+                    );
+                }
             }
         });
     }

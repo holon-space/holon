@@ -472,6 +472,19 @@ impl LoroProjection {
                 after.len(),
                 before.len(),
             );
+            // Latency stage (commit->projection): the full-document DFS snapshot
+            // + diff cost of one Loro commit's projection pass. `snapshot_ms` is
+            // the O(blocks) snapshot+base-read portion; `ms` the whole pass incl.
+            // the consolidator SQL write. Greppable via target="holon_latency".
+            tracing::debug!(
+                target: "holon_latency",
+                stage = "projection",
+                ops = op_count,
+                blocks = after.len(),
+                snapshot_ms = snapshot_ms as u64,
+                ms = t0.elapsed().as_millis() as u64,
+                "holon_latency",
+            );
         }
 
         // Advance the Phase-3 base to the just-projected Loro snapshot. Only on

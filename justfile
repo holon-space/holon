@@ -135,6 +135,22 @@ pbt-layout-override cases='64' *FLAGS:
         -p holon-integration-tests --features pbt --test general_e2e_composed_pbt \
         -- --nocapture {{FLAGS}} 2>&1 | tee /tmp/pbt-layout-override.log
 
+# Measure end-to-end UI action latency (indent / outdent / cycle-state / split / ...).
+# Drives the REAL pipeline (dispatch -> Loro commit -> LoroProjection resample ->
+# Turso/matview CDC -> reactive rows) through the headless composed keystone with the
+# `holon_latency` tracing target enabled, then prints a per-action count/p50/p95/max
+# table plus per-stage cost. Measures everything EXCEPT final GPU paint. HOLON_OTEL_FILTER=off
+# silences the OTel span layer so its recording cost doesn't distort the numbers.
+measure-latency cases='16' *FLAGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    RUST_LOG="holon_latency=debug" HOLON_OTEL_FILTER=off PROPTEST_CASES={{cases}} \
+        cargo test -p holon-integration-tests --features pbt \
+        --test general_e2e_composed_pbt -- --nocapture {{FLAGS}} \
+        > /tmp/holon-latency.log 2>&1 || true
+    echo "raw log: /tmp/holon-latency.log ($(grep -c holon_latency /tmp/holon-latency.log || true) events)"
+    python3 scripts/measure_latency.py /tmp/holon-latency.log
+
 # --- Lib slices (composed catch triads + slice component tests) ---------------
 # The declare_pbt_slice!/component_pbt! standalone slice binaries were retired
 # (§8.10: coverage lives in the ONE composed keystone). What remains are the
