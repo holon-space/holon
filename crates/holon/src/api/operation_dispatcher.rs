@@ -112,6 +112,69 @@ impl OperationDispatcher {
     pub fn providers(&self) -> Vec<Arc<dyn OperationProvider>> {
         self.providers.clone()
     }
+
+    /// Fail-loud guard against the "block pipeline wired but no CRUD" trap.
+    ///
+    /// `EventInfraModule` registers `SqlBlockOperations`, which advertises only
+    /// **structural** block ops (`indent` / `outdent` / `move_*` / `split_block`
+    /// / `join_block`). The content-write ops (`create` / `set_field` / `delete`)
+    /// come from a *separate* provider - `LoroBlockOperations` under Loro
+    /// authority, or a bare `SqlOperationProvider` in SqlOnly embedders. An
+    /// embedder that wires `EventInfraModule` alone therefore gets a block
+    /// pipeline that answers structural dispatches but silently drops every
+    /// content write as "No provider registered for entity: block" (this bit the
+    /// dioxus-web worker; see `frontends/holon-worker/src/lib.rs`).
+    ///
+    /// This check runs at startup (from [`OperationModule`], during
+    /// `BackendEngine` construction) so the misconfiguration crashes loudly with
+    /// a clear message instead of degrading to silent data loss. It is a no-op
+    /// when no `block` provider is registered at all (a read-only / nav-only
+    /// backend never dispatches block writes).
+    pub fn assert_content_write_capability(&self) -> Result<()> {
+        // The content-write ops any writable-block frontend dispatches. Kept in
+        // sync with `CrudOperations` (holon-core `traits.rs`): the ops a
+        // structural-only provider does NOT advertise.
+        const REQUIRED_BLOCK_WRITE_OPS: [&str; 3] = ["create", "set_field", "delete"];
+
+        // No block pipeline => nothing dispatches block writes => nothing to guard.
+        if !self.has_provider("block") {
+            return Ok(());
+        }
+
+        let block_ops: HashSet<String> = self
+            .operations()
+            .into_iter()
+            .filter(|op| op.entity_name == "block")
+            .map(|op| op.name)
+            .collect();
+
+        let missing: Vec<&str> = REQUIRED_BLOCK_WRITE_OPS
+            .into_iter()
+            .filter(|op| !block_ops.contains(*op))
+            .collect();
+
+        if missing.is_empty() {
+            return Ok(());
+        }
+
+        let mut present: Vec<&str> = block_ops.iter().map(String::as_str).collect();
+        present.sort_unstable();
+
+        Err(format!(
+            "[OperationDispatcher] the `block` pipeline is wired but the operation \
+             registry is missing content-write op(s) {missing:?}. Every dispatch of \
+             those ops would be silently dropped as \"No provider registered for \
+             entity: block\", losing user content. `EventInfraModule` alone \
+             advertises only STRUCTURAL block ops (indent / outdent / move_* / \
+             split_block / join_block); the CRUD ops (create / set_field / delete) \
+             come from a SEPARATE provider. Fix the wiring: register a block-CRUD \
+             `OperationProvider` - LoroModule + OrgModeModule (native, via \
+             holon-app `add_frontend`) under Loro authority, or a bare \
+             `SqlOperationProvider` for the `block` entity in SqlOnly embedders \
+             (see frontends/holon-worker/src/lib.rs). Present block ops: {present:?}"
+        )
+        .into())
+    }
 }
 
 #[async_trait]
@@ -601,6 +664,14 @@ impl Module for OperationModule {
                 dispatcher.set_sync_token_store(store);
             }
             dispatcher.set_matview_manager(matview_mgr);
+
+            // Fail loud if a block pipeline is wired without its content-write
+            // ops (the EventInfraModule-only trap). A silent "No provider" drop
+            // of every create/set_field/delete is worse than a startup crash.
+            dispatcher
+                .assert_content_write_capability()
+                .expect("[OperationModule] operation-registry startup check failed");
+
             Shared::new(dispatcher)
         }));
         Ok(())
@@ -723,6 +794,72 @@ mod tests {
                 .to_string()
                 .contains("No provider registered")
         );
+    }
+
+    /// Reproduces the `EventInfraModule`-only wiring at the dispatcher level:
+    /// a `block` provider advertising ONLY structural ops (what
+    /// `SqlBlockOperations` registers) and no CRUD provider. The startup guard
+    /// must reject it loudly, naming the missing content-write ops.
+    #[tokio::test]
+    async fn content_write_guard_rejects_structural_only_block_pipeline() {
+        let structural_only = Arc::new(MockProvider {
+            entity_name: "block".to_string(),
+            operations_list: vec![
+                create_test_operation("block", "indent"),
+                create_test_operation("block", "outdent"),
+                create_test_operation("block", "split_block"),
+                create_test_operation("block", "move_up"),
+            ],
+        });
+        let dispatcher = OperationDispatcher::new(vec![structural_only]);
+
+        let err = dispatcher
+            .assert_content_write_capability()
+            .expect_err("structural-only block pipeline must fail the content-write guard");
+        let msg = err.to_string();
+        assert!(msg.contains("create"), "message names missing create: {msg}");
+        assert!(msg.contains("set_field"), "message names missing set_field: {msg}");
+        assert!(msg.contains("delete"), "message names missing delete: {msg}");
+        assert!(
+            msg.contains("EventInfraModule"),
+            "message points at the culprit module: {msg}"
+        );
+    }
+
+    /// A block pipeline that DOES advertise the CRUD triple (the fixed wiring:
+    /// EventInfraModule + a `SqlOperationProvider`, or Loro authority) passes.
+    #[tokio::test]
+    async fn content_write_guard_accepts_full_block_pipeline() {
+        let structural = Arc::new(MockProvider {
+            entity_name: "block".to_string(),
+            operations_list: vec![create_test_operation("block", "split_block")],
+        });
+        let crud = Arc::new(MockProvider {
+            entity_name: "block".to_string(),
+            operations_list: vec![
+                create_test_operation("block", "create"),
+                create_test_operation("block", "set_field"),
+                create_test_operation("block", "delete"),
+            ],
+        });
+        let dispatcher = OperationDispatcher::new(vec![structural, crud]);
+        dispatcher
+            .assert_content_write_capability()
+            .expect("full block pipeline must pass the content-write guard");
+    }
+
+    /// A backend with no `block` provider at all (nav-only / read-only) never
+    /// dispatches block writes, so the guard is a no-op.
+    #[tokio::test]
+    async fn content_write_guard_ignores_backend_without_block_provider() {
+        let nav = Arc::new(MockProvider {
+            entity_name: "navigation".to_string(),
+            operations_list: vec![create_test_operation("navigation", "navigate")],
+        });
+        let dispatcher = OperationDispatcher::new(vec![nav]);
+        dispatcher
+            .assert_content_write_capability()
+            .expect("no block pipeline => guard is a no-op");
     }
 
     #[tokio::test]
