@@ -393,17 +393,6 @@ pub trait SutBootWatches {
     async fn register_seeded_sidebar_watch(&self);
 }
 
-/// `E2ESut` hosts `SutWatchRegister` directly, so it registers the compiled
-/// seeded-sidebar SQL through it (identical path to `SetupWatch`).
-#[allow(async_fn_in_trait)]
-impl SutBootWatches for crate::pbt::sut::E2ESut {
-    async fn register_seeded_sidebar_watch(&self) {
-        let spec = seeded_sidebar_watch_spec();
-        self.register_watch(SEEDED_SIDEBAR_WATCH_ID, &spec.query.to_sql(), spec.language)
-            .await;
-    }
-}
-
 /// The composed `CapMap` registers the watch only when it actually hosts
 /// `SutWatchRegister`. If the cap is absent, this is a deliberate no-op:
 /// `inv-watch-rows-match-ref` intersects the two sides, so a ref-only entry is

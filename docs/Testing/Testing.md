@@ -591,23 +591,21 @@ cargo test -p holon-gpui --test gpui_capture_replay --features pbt
 HOLON_CAPTURE=/abs/path.json cargo test -p holon-gpui --test gpui_capture_replay --features pbt
 ```
 
-## Minimizing a capture in a *reused* window
+## Minimizing a capture through a real window
 
 `frontends/gpui/tests/gpui_windowed_minimize.rs` (`harness = false`) runs a greedy
-ddmin **through one reused window**, re-pointed at a fresh SUT per candidate —
-not one process per candidate (GPUI owns the main thread; an `Application` is
-per-process, so process-per-candidate re-pays full app+window init every time).
+ddmin through the **composed windowed path** (increment 4c repoint: the phased
+rebind service + `E2ESut` isolation described in earlier versions of this doc
+were deleted).
 
-- **bg thread** runs the ddmin loop; each candidate replays via
-  `replay_fixture_with_driver_sync_callback`, whose `on_ready` posts a rebind
-  request to the main thread and blocks until the window has repainted, then
-  injects a `GpuiUserDriver`.
-- **main thread** runs `Application::run`: opens the window for the first
-  candidate, then a `cx.spawn` loop rebinds it for each subsequent one (via
-  `holon_gpui::RebindHandle`) and quits when ddmin is done.
-- **isolation**: every candidate builds its own `E2ESut` (fresh `TempDir` +
-  Turso + Loro, auto-deleted on drop). The window is *re-pointed*, the backend is
-  never reused — no cross-candidate poisoning.
+- each ddmin candidate boots a fresh windowed `ComposedSut<WideE2E>` via
+  `replay_fixture_windowed` (TestPlatform window + wide seed + settle, ~10s —
+  the same per-case cost the windowed random loop pays) and replays the
+  candidate steps.
+- **isolation**: per-candidate fresh boot (fresh TempDir + Turso + Loro);
+  nothing is reused across candidates.
+- **captures must be POST-BOOT** — the composed alphabet has no `StartApp`;
+  the wide seed is the boot org.
 - **signature guard**: a candidate counts as a reproduction iff the replay panics
   with `HOLON_MINIMIZE_SIGNATURE` (default `inv-blocks-match-ref/loro`) — same
   discipline as the bisector, so ddmin can't collapse into a different failure.
@@ -618,10 +616,9 @@ cargo test -p holon-gpui --test gpui_windowed_minimize --features pbt
 # writes the minimized subsequence to <capture>.min.json
 ```
 
-Example: the `gpui_ui_pbt` SplitBlock capture minimizes 9 → 6 transitions
-(`WriteOrgFile, StartApp, CreateDocument, BulkExternalAdd, NavigateFocus,
-SplitBlock{block:bulk-0-7,pos2}`); the two `CreateDirectory`s and `CreateStaleLoro`
-drop out. Per candidate ≈ 25–30 s.
+Historical example (pre-composed `gpui_ui_pbt` era): a SplitBlock capture
+minimized 9 → 6 transitions; the two `CreateDirectory`s and `CreateStaleLoro`
+dropped out.
 
 > Headless counterparts live in `bisection_pbt.rs`:
 > `minimize_capture_from_env` (signature-aware ddmin over the cheap in-process

@@ -40,7 +40,7 @@ use crate::pbt::query::TestQuery;
 use crate::pbt::transitions::toggle_state::{CycleTarget, cycle_click_count};
 use crate::pbt::types::{Mutation, MutationEvent};
 
-use crate::pbt::sut_capabilities::view_model_to_snapshot;
+use crate::pbt::vm_snapshot::view_model_to_snapshot;
 use crate::pbt::sut_row_parsing::{
     BLOCK_MATVIEW_SNAPSHOT_SQL, BLOCK_RAW_SNAPSHOT_SQL, parse_block_rows,
 };

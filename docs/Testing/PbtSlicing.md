@@ -1,5 +1,11 @@
 # PBT Slicing — Capability-Composed Property Tests
 
+> **RETIRED (2026-07-05).** The `declare_pbt_slice!`/`component_pbt!` macros, the standalone
+> slice binaries, and the `E2ESut` monolith this doc describes were ALL DELETED (see
+> [`PbtComposition_EndgameRoadmap.md`](PbtComposition_EndgameRoadmap.md) Rounds 4–6). The live
+> mechanism is the ONE composed keystone (`general_e2e_composed_pbt`) + cfg(test) lib slice
+> tests (`just pbt-lib-slices`). Kept for concept archaeology only.
+>
 > **PARTIALLY SUPERSEDED (2026-06-14) by [`PbtCompositionDesign.md`](PbtCompositionDesign.md).**
 > The capability/selection *concepts* here remain valid, but several concrete
 > details have drifted from code (§4/§12/§13 reference `MemBlockStore` /

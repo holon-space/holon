@@ -726,7 +726,7 @@ impl TestEnvironment {
     ///
     /// Equivalent to `new()` followed by `start_app(true)`.
     pub async fn new_running(runtime: Arc<tokio::runtime::Runtime>) -> Result<Self> {
-        let mut env = Self::new(runtime)?;
+        let env = Self::new(runtime)?;
         env.start_app(true).await?;
         Ok(env)
     }
