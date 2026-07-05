@@ -73,12 +73,31 @@ fn App() -> Element {
         };
 
         // Pre-register the OPFS files (db + WAL) so the worker's OPFS shim
-        // can hand Turso sync access handles for them.
-        for file in [DB_PATH.to_string(), format!("{DB_PATH}-wal")] {
-            if let Err(e) = bridge.call("registerFile", [file.clone().into()]).await {
-                boot_state.set(BootState::Failed(format!("registerFile {file}: {e}")));
-                return;
+        // can hand Turso sync access handles for them. On a page reload the
+        // PREVIOUS worker's sync handles may not have been released yet
+        // (worker teardown is async), which surfaces as
+        // NoModificationAllowedError — retry with backoff instead of failing
+        // the boot on a race the browser resolves itself moments later.
+        'files: for file in [DB_PATH.to_string(), format!("{DB_PATH}-wal")] {
+            const ATTEMPTS: u32 = 10;
+            let mut last_err = String::new();
+            for attempt in 0..ATTEMPTS {
+                match bridge.call("registerFile", [file.clone().into()]).await {
+                    Ok(_) => continue 'files,
+                    Err(e) => {
+                        last_err = format!("{e}");
+                        tracing::warn!(
+                            "[boot] registerFile {file} attempt {}/{ATTEMPTS} failed: {last_err}",
+                            attempt + 1
+                        );
+                        gloo_timers::future::TimeoutFuture::new(300).await;
+                    }
+                }
             }
+            boot_state.set(BootState::Failed(format!(
+                "registerFile {file} after {ATTEMPTS} attempts: {last_err}"
+            )));
+            return;
         }
 
         if let Err(e) = bridge.call("engineInit", [DB_PATH.into()]).await {
