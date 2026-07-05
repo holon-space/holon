@@ -130,7 +130,7 @@ impl EditorView {
                 move |this, entity, event, _window, cx| match event {
                     InputEvent::Focus => {
                         #[cfg(feature = "mobile")]
-                        gpui_mobile::show_keyboard();
+                        crate::mobile::editor_focus_gained();
 
                         // Promote this block to be the UiState.focused_block.
                         // Without this, clicking inside an editable_text gives the
@@ -156,7 +156,7 @@ impl EditorView {
                     }
                     InputEvent::Blur => {
                         #[cfg(feature = "mobile")]
-                        gpui_mobile::hide_keyboard();
+                        crate::mobile::editor_focus_lost(cx);
 
                         let value = entity.read(cx).value().to_string();
                         let action = ctrl.lock().unwrap().on_blur(&value);
