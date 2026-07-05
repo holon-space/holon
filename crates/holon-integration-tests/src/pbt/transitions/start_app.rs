@@ -146,12 +146,7 @@ impl TransitionRef<ReferenceState> for StartApp {
         // Load the seed entity profile from the TypeRegistry's bundled
         // block_profile.yaml (not from org blocks — the seed index.org
         // doesn't contain entity profile blocks).
-        let registry = holon_profiles::create_default_registry()
-            .expect("default TypeRegistry must initialize");
-        let block_type_def = registry
-            .get("block")
-            .expect("Block type must be registered");
-        state.domain.seed_profile = holon::entity_profile::profile_from_type_def(&block_type_def);
+        load_seed_profile_into_ref(state);
 
         // FU-10 mirror: production `seed_default_layout` calls
         // `navigation::focus(Main, block:journals)` on fresh DBs ONLY, which
@@ -185,6 +180,24 @@ impl TransitionRef<ReferenceState> for StartApp {
             });
         }
     }
+}
+
+/// Load the bundled `block` entity profile (the TypeRegistry's
+/// `block_profile.yaml`) into `domain.seed_profile` — the SAME profile the
+/// production boot's ProfileResolver serves `render_entity`. Extracted from
+/// `StartApp::apply_to_ref` so pre-started oracles (`build_started_ref`, the
+/// keystone's `wide_e2e_ref`) carry it too: without it the ref-side
+/// `resolve_profile` returns `None`, `render_entity` interprets to `Empty`,
+/// the generator sees ZERO `state_toggle` widgets, and `ToggleState` silently
+/// vanishes from the composed alphabet (`NoTogglableStates` on every draw —
+/// the change-status coverage hole found in the 2026-07-05 dogfood triage).
+pub(crate) fn load_seed_profile_into_ref(state: &mut ReferenceState) {
+    let registry = holon_profiles::create_default_registry()
+        .expect("default TypeRegistry must initialize");
+    let block_type_def = registry
+        .get("block")
+        .expect("Block type must be registered");
+    state.domain.seed_profile = holon::entity_profile::profile_from_type_def(&block_type_def);
 }
 
 /// Model the bundled default-asset layout the production boot's

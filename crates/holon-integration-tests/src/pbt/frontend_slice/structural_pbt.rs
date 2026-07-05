@@ -917,6 +917,37 @@ mod teeth {
         );
     }
 
+    /// COVERAGE TOOTH (2026-07-05): the keystone's generator must PROPOSE `ToggleState`
+    /// in a booted, page-focused, seeded state — the exact state the wide alphabet
+    /// reaches after boot. The dogfood/latency triage found ToggleState NEVER fires in
+    /// keystone draws even at `HOLON_PBT_WEIGHTS=ToggleState:200` (change-status had
+    /// ZERO PBT coverage). This tooth pins the generator side: if
+    /// `ToggleState::weighted_generator` rejects the canonical seeded ref, the keystone
+    /// alphabet silently lost its only change-status transition. On failure it prints
+    /// the precise rejection `Reason`s.
+    #[test]
+    fn toggle_state_generator_proposes_in_wide_seeded_state() {
+        use holon_pbt_core::TransitionFactory;
+        for (name, state) in [
+            ("structural_ref", structural_ref()),
+            ("wide_ref", crate::pbt::composed::wide_e2e::wide_ref()),
+        ] {
+            match ToggleState::weighted_generator(&state) {
+                validated::Validated::Good((w, _strat)) => {
+                    assert!(w > 0, "[{name}] ToggleState arm has zero weight");
+                }
+                validated::Validated::Fail(reasons) => {
+                    drop_ref_off_thread(state);
+                    panic!(
+                        "[{name}] ToggleState generator REJECTS the seeded wide state — \
+                         change-status has zero keystone coverage. Reasons: {reasons:?}"
+                    );
+                }
+            }
+            drop_ref_off_thread(state);
+        }
+    }
+
     /// Teeth: toggle `c1`'s task_state on the SUT ONLY (oracle frozen) — the SUT's
     /// `block_raw.properties.task_state` becomes `TODO` while the oracle's stays unset,
     /// so `inv-blocks-match-ref/block_raw` MUST `Fail`. Proves the `set_field` op

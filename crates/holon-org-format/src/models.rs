@@ -545,10 +545,7 @@ impl OrgBlockExt for Block {
 
     fn set_task_state(&mut self, state: Option<TaskState>) {
         if let Some(s) = state {
-            let category = match s.category {
-                StateCategory::Active => "active",
-                StateCategory::Done => "done",
-            };
+            let category = s.category.as_str();
             self.set_property(
                 org_props::TASK_STATE,
                 holon_api::Value::String(s.keyword.clone()),

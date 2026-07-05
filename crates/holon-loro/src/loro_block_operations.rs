@@ -256,8 +256,28 @@ impl CrudOperations<Block> for LoroBlockOperations {
                     .map_err(|e| format!("set_field(\"parent_id\") for {id}: {e}"))?;
             }
             _ => {
-                // Store in properties
+                // Store in properties. A bare `task_state` keyword write gets
+                // its `task_state_category` sidecar derived and written in the
+                // SAME commit — the pair invariant `Block::set_task_state`
+                // establishes at the org parse boundary (see
+                // `TaskState::category_str_for_keyword`); without this every
+                // UI cycle dropped/staled the category.
                 let mut props = HashMap::new();
+                if field == "task_state" {
+                    let category = match &value {
+                        Value::Null => Value::Null,
+                        Value::String(kw) => Value::String(
+                            holon_api::TaskState::category_str_for_keyword(kw).to_string(),
+                        ),
+                        other => {
+                            return Err(format!(
+                                "set_field('task_state'): expected String or Null, got {other:?}"
+                            )
+                            .into());
+                        }
+                    };
+                    props.insert("task_state_category".to_string(), category);
+                }
                 props.insert(field.to_string(), value);
                 backend
                     .update_block_properties(id, &props)
@@ -493,6 +513,9 @@ impl TaskOperations<Block> for LoroBlockOperations {
         // all read/write `properties["task_state"]`. Writing `"TODO"` here stored a stray
         // property the cycle never read back, so `cycle_task_state` (read `task_state`, write
         // `TODO`) was a no-op in Loro mode — Cmd+Enter never advanced the keyword.
+        // `set_field("task_state")` pairs the `task_state_category` sidecar in
+        // the same commit (see its properties branch), so this delegate keeps
+        // the pair invariant.
         self.set_field(id, "task_state", Value::String(state)).await
     }
 
