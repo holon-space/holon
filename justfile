@@ -2,6 +2,12 @@
 
 set dotenv-load
 
+# GPUI/blinc builds link libfontconfig on Linux; RUST_FONTCONFIG_DLOPEN=on makes the
+# fontconfig -sys build script dlopen it at runtime instead of static-linking (needed
+# for fresh clones/CI/jj workspaces). Previously lived in an untracked .env; tracked
+# here so every checkout inherits it. `export` puts it in recipes' environment.
+export RUST_FONTCONFIG_DLOPEN := "on"
+
 # List available recipes
 default:
     @just --list

@@ -1,3 +1,14 @@
+> **⚠️ SUPERSEDED / PARTIALLY STALE (2026-07-05).** This document predates the completion
+> of the γ-composition PBT endgame. The `E2ESut` monolith, the `declare_pbt_slice!` /
+> `component_pbt!` macros, the standalone slice binaries, and the deleted `Sut*` capability
+> twins referenced below were REMOVED on the `w1-pbt-endgame` branch. The live mechanism is
+> the ONE composed keystone
+> [`crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs)
+> plus the cfg(test) lib slice tests (`just pbt-lib-slices`). For the current architecture see
+> [`docs/Architecture/Model.md`](../Architecture/Model.md). Kept for historical context.
+
+---
+
 # Integration Test Suite Documentation
 
 ## Overview
@@ -292,13 +303,13 @@ New (direct injection):
 
 ```bash
 # Fast run (direct injection, default):
-cargo test --test general_e2e_pbt -- --nocapture
+cargo test --test general_e2e_composed_pbt -- --nocapture
 
 # Debug file watcher issues (old path):
-PBT_VIA_FS=1 cargo test --test general_e2e_pbt -- --nocapture
+PBT_VIA_FS=1 cargo test --test general_e2e_composed_pbt -- --nocapture
 
 # Minimal run for quick feedback:
-PROPTEST_CASES=2 cargo test --test general_e2e_pbt -- --nocapture
+PROPTEST_CASES=2 cargo test --test general_e2e_composed_pbt -- --nocapture
 ```
 
 ## Chrome Trace Profiling
@@ -306,7 +317,7 @@ PROPTEST_CASES=2 cargo test --test general_e2e_pbt -- --nocapture
 Enable the `chrome-trace` feature to produce flame chart JSON for PBT runs:
 
 ```bash
-cargo test -p holon-integration-tests --test general_e2e_pbt \
+cargo test -p holon-integration-tests --test general_e2e_composed_pbt \
   --features chrome-trace -- --nocapture
 ```
 

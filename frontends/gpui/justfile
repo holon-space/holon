@@ -2,7 +2,17 @@ set dotenv-path := "android/.env"
 set dotenv-load
 set export
 
-project_root := `git rev-parse --show-toplevel`
+# GPUI links libfontconfig on Linux; dlopen it at runtime instead of static-linking.
+# `set export` (above) exports this into every recipe's environment. Was an untracked
+# .env var; tracked here so fresh clones + jj workspaces build without manual setup.
+RUST_FONTCONFIG_DLOPEN := "on"
+
+# Derive the workspace root from this justfile's location (frontends/gpui/justfile),
+# NOT `git rev-parse --show-toplevel`: git reports the MAIN checkout even when this
+# justfile runs inside a jj workspace (jj workspaces are not git worktrees), which
+# sent target/ + assets/ paths to the wrong tree. justfile_directory() is always
+# the dir containing THIS justfile, so two parents up is the real workspace root.
+project_root := parent_directory(parent_directory(justfile_directory()))
 assets := project_root / "assets"
 sdk := env("ANDROID_SDK_HOME", env("HOME") / "Library/Android/sdk")
 bt := sdk / "build-tools/36.0.0"
