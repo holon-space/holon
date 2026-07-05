@@ -16,6 +16,37 @@ use turso_core::types::RelationChangeEvent;
 use turso_core::{Database, DatabaseOpts, OpenFlags};
 use turso_sdk_kit::rsapi::{DatabaseChangeType, TursoConnection, TursoDatabaseConfig};
 
+/// Host-IO seam for wasm32: browser workers register their `turso_core::IO`
+/// implementation (e.g. an OPFS shim) here before opening a file-backed
+/// database. Insert-only — a second registration is a wiring bug.
+#[cfg(all(not(target_family = "unix"), target_family = "wasm"))]
+pub mod wasm_io {
+    use std::cell::RefCell;
+    use std::sync::Arc;
+
+    // thread_local because host IO shims (e.g. the browser worker's OPFS
+    // shim) are deliberately not Send/Sync; the engine and its Turso actor
+    // all run on the worker's single napi thread.
+    thread_local! {
+        static IO: RefCell<Option<Arc<dyn turso_core::IO>>> = const { RefCell::new(None) };
+    }
+
+    pub fn register(io: Arc<dyn turso_core::IO>) {
+        IO.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            assert!(
+                slot.is_none(),
+                "wasm IO already registered — register must be called exactly once per thread"
+            );
+            *slot = Some(io);
+        });
+    }
+
+    pub fn registered() -> Option<Arc<dyn turso_core::IO>> {
+        IO.with(|slot| slot.borrow().clone())
+    }
+}
+
 use crate::sql_parser::{extract_created_tables, extract_table_refs, parse_sql};
 use holon_api::{
     Batch, BatchMetadata, BatchTraceContext, BatchWithMetadata, CHANGE_ORIGIN_COLUMN, Value,
@@ -1088,13 +1119,32 @@ impl TursoBackend {
     }
 
     #[cfg(all(not(target_family = "unix"), target_family = "wasm"))]
-    pub fn open_database<P: AsRef<Path>>(_: P) -> Result<Arc<Database>> {
-        // wasm32: always in-memory. No OPFS yet (see handoff §Out of scope).
+    pub fn open_database<P: AsRef<Path>>(db_path: P) -> Result<Arc<Database>> {
+        // wasm32: `:memory:` uses MemoryIO; any other path requires a host IO
+        // registered via `register_wasm_io` (the browser worker registers its
+        // OPFS shim before engine init). Fail loud if a file path is requested
+        // without one — silently falling back to memory would fake persistence.
+        let db_path_str = db_path
+            .as_ref()
+            .to_str()
+            .ok_or_else(|| StorageError::DatabaseError("Invalid path".to_string()))?;
         let opts = DatabaseOpts::default().with_views(true);
-        let io = Arc::new(MemoryIO::new());
-        let db = Database::open_file_with_flags(io, ":memory:", OpenFlags::default(), opts, None)
-            .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
-        tracing::info!("Turso in-memory database opened (wasm32)");
+        let db = if db_path_str.starts_with(":memory:") {
+            let io = Arc::new(MemoryIO::new());
+            Database::open_file_with_flags(io, db_path_str, OpenFlags::default(), opts, None)
+                .map_err(|e| StorageError::DatabaseError(e.to_string()))?
+        } else {
+            let io = wasm_io::registered().ok_or_else(|| {
+                StorageError::DatabaseError(format!(
+                    "open_database('{db_path_str}'): no wasm IO registered — call \
+                     holon_turso::register_wasm_io (e.g. with the OPFS shim) before \
+                     opening a file-backed database on wasm32"
+                ))
+            })?;
+            Database::open_file_with_flags(io, db_path_str, OpenFlags::Create, opts, None)
+                .map_err(|e| StorageError::DatabaseError(e.to_string()))?
+        };
+        tracing::info!("Turso database opened (wasm32) at: {}", db_path_str);
         Ok(db)
     }
 

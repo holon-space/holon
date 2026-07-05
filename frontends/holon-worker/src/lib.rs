@@ -156,6 +156,16 @@ mod backend {
     /// against the OPFS-backed DB at `db_path`. Idempotent: a second call replaces
     /// the state.
     pub(super) fn init(db_path: String) -> napi::Result<()> {
+        // Install the worker's log sink exactly once (init may be re-entered).
+        static TRACING: OnceLock<()> = OnceLock::new();
+        TRACING.get_or_init(|| {
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::INFO)
+                .with_ansi(false)
+                .with_writer(std::io::stderr)
+                .init();
+        });
+
         let runtime = Arc::new(
             tokio::runtime::Builder::new_current_thread()
                 .enable_time()
@@ -163,6 +173,13 @@ mod backend {
                 .map_err(|e| super::nerr("runtime build", e))?,
         );
 
+        // File-backed DBs on wasm32 need a host IO: register the OPFS shim
+        // before the engine opens the database. The page must have
+        // `registerFile`d the db + wal paths first (OPFS sync handles are
+        // created ahead of time — see web/opfs-bridge.mjs).
+        if db_path != ":memory:" && holon::storage::turso::wasm_io::registered().is_none() {
+            holon::storage::turso::wasm_io::register(super::turso_browser_shim::opfs());
+        }
         let path = PathBuf::from(db_path);
         // EventInfraModule registers `SqlBlockOperations` as the "block"
         // OperationProvider (update / set_field / split_block / join_block /
@@ -175,7 +192,36 @@ mod backend {
                     use fluxdi::Module as _;
                     holon::sync::EventInfraModule
                         .configure(injector)
-                        .map_err(|e| anyhow::anyhow!("EventInfraModule: {e}"))
+                        .map_err(|e| anyhow::anyhow!("EventInfraModule: {e}"))?;
+
+                    // EventInfraModule's `SqlBlockOperations` only advertises
+                    // structural block ops (indent / split / move_*). CRUD ops
+                    // (set_field / create / delete) are advertised by a second
+                    // provider — native holon-app registers it in
+                    // `turso_seams.rs`, but the worker doesn't load that module,
+                    // so editor content writes and state_toggle dispatches died
+                    // as "No provider registered for entity: block". The worker
+                    // is always SqlOnly (no Loro), so a bare
+                    // `SqlOperationProvider` is the correct CRUD authority (in
+                    // Loro mode native routes CRUD through Loro instead — see the
+                    // drift note in turso_seams.rs). Structural ops still win on
+                    // `SqlBlockOperations` by registration order.
+                    injector.provide_into_set::<dyn holon_core::OperationProvider>(
+                        fluxdi::Provider::root(|resolver| {
+                            let db = resolver
+                                .resolve::<dyn holon::di::DbHandleProvider>()
+                                .handle();
+                            let provider = holon::core::SqlOperationProvider::new(
+                                db,
+                                holon::storage::BLOCK_WRITE_TABLE.to_string(),
+                                "block".to_string(),
+                                "block".to_string(),
+                            );
+                            std::sync::Arc::new(provider)
+                                as std::sync::Arc<dyn holon_core::OperationProvider>
+                        }),
+                    );
+                    Ok(())
                 })
                 .await
             })

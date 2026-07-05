@@ -375,8 +375,28 @@ Both fail loudly if anyone adds `#[serde(tag = "…")]` to `Value`.
    accept yet. Don't chase these when triaging — they have nothing to
    do with the rendering pipeline.
 
-## Supported interactions (GPUI parity, 2026-07-04)
+## Supported interactions (GPUI parity, 2026-07-05)
 
+- **Persistent storage (OPFS)**: the worker opens a file-backed Turso DB
+  (`holon.db`) on the browser's Origin Private File System via the OPFS
+  sync-handle shim (`web/opfs-bridge.mjs` + `turso_browser_shim.rs`). The
+  page `registerFile`s `holon.db` + `holon.db-wal` before `engineInit`,
+  and `holon_turso::turso::wasm_io` hands the shim to `open_database`.
+  Edits survive a reload. (`DB_PATH` in `main.rs`; set it to `:memory:`
+  to opt back into a throwaway in-memory DB.)
+- **Block drag & drop**: `draggable` (the bullet) is an HTML5 drag source
+  parking the block id in `dnd.rs`; `drop_zone` (rendered under each row)
+  highlights on `dragover` and on drop dispatches the same
+  `build_drop_intent` -> `move_block` intent GPUI and the headless
+  `UserDriver::drop_entity` use — the dropped block reparents under the
+  target. Reorder/reparent persist across reloads.
+- **Sidebar navigation**: `selectable` rows dispatch their bound
+  `navigation_focus` intent on click (modifier-keyed via `ClickModifiers`,
+  GPUI parity) — clicking a page focuses it in the main panel.
+- **Cross-block caret navigation**: `ArrowUp`/`ArrowDown` with a collapsed
+  caret at the block's start/end jumps focus to the previous/next block in
+  DOM document order (`editor::focus_ring`), seeding the caret at the far
+  edge via `engineSetFocus` — GPUI's MoveUp/MoveDown propagation.
 - **Viewport-aware layout**: `engineSetViewport` is sent on boot (before
   the first watch) and on window resize; `if_space(...)` breakpoints are
   live. The old `[layout: degraded]` banner is gone.
@@ -399,11 +419,23 @@ Both fail loudly if anyone adds `#[serde(tag = "…")]` to `Value`.
 
 ## Known limitations
 
-- **Deferred interactions**: drag & drop / board reorder, pie menu,
-  slash-command + `[[link]]` popups, cross-block caret navigation
-  (Up/Down at boundaries), rich-text marks, `selectable` modifier
-  clicks, drawer toggle, `op_button` (needs `present_op` param
-  collection), `view_mode_switcher` (needs template swap).
+- **Content writes need the CRUD provider**: `EventInfraModule`'s
+  `SqlBlockOperations` only advertises *structural* block ops
+  (indent/split/move); `set_field`/`create`/`delete` are advertised by a
+  second provider. Native holon-app registers it in `turso_seams.rs`; the
+  worker registers a bare `SqlOperationProvider` for `block` in its DI
+  setup closure (`holon-worker/src/lib.rs`). Without it, editor content
+  edits and `state_toggle` die as "No provider registered for entity:
+  block". The worker is always SqlOnly (no Loro), so a direct SQL CRUD
+  provider is the correct authority.
+- **Structural ops re-render on next watch, not instantly**: `indent`/
+  `outdent`/`move_block` land in the engine and persist, but the visible
+  tree updates on the following watch envelope rather than synchronously
+  — a brief lag, not a lost write.
+- **Still deferred**: pie menu, slash-command + `[[link]]` popups,
+  rich-text marks, drawer toggle, `op_button` (needs `present_op` param
+  collection), `view_mode_switcher` (needs template swap). Board reorder
+  (columns) is unverified — only outline drag&drop was exercised.
 
 - **Caret seed unit**: `caret_offset` is a byte offset into the block's
   content (matches `split_block`'s `position`); the page converts to
@@ -413,7 +445,7 @@ Both fail loudly if anyone adds `#[serde(tag = "…")]` to `Value`.
   `DbHandle::query` doesn't expose `changes()`; needs a new accessor
   if we want "X rows inserted" UI.
 
-- **Dev wasm is 640 MB.** Fine for localhost but `release-official`
+- **Dev wasm is ~800 MB.** Fine for localhost but `release-official`
   (~21 MB) is what you'd ship.
 
 ## Related docs

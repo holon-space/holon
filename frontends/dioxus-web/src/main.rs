@@ -7,6 +7,7 @@
 //! the only coupling is the JSON wire format.
 
 mod bridge;
+mod dnd;
 mod editor;
 mod render;
 
@@ -28,7 +29,10 @@ const BLOCK_READ_TABLE: &str = "block";
 
 /// URL of the worker entry module, relative to the serving root.
 const WORKER_URL: &str = "/web/worker-entry.mjs";
-const DB_PATH: &str = ":memory:";
+/// OPFS-backed database file. The worker's OPFS bridge requires every file
+/// Turso will open to be `registerFile`d ahead of `engineInit` (sync access
+/// handles must be created in advance) — see the boot sequence below.
+const DB_PATH: &str = "holon.db";
 
 // WorkerBridge wraps Rc<_> so it is !Send. We keep it alive in a thread-local
 // so Dioxus signals (which require Send) never need to hold it directly.
@@ -67,6 +71,15 @@ fn App() -> Element {
                 return;
             }
         };
+
+        // Pre-register the OPFS files (db + WAL) so the worker's OPFS shim
+        // can hand Turso sync access handles for them.
+        for file in [DB_PATH.to_string(), format!("{DB_PATH}-wal")] {
+            if let Err(e) = bridge.call("registerFile", [file.clone().into()]).await {
+                boot_state.set(BootState::Failed(format!("registerFile {file}: {e}")));
+                return;
+            }
+        }
 
         if let Err(e) = bridge.call("engineInit", [DB_PATH.into()]).await {
             boot_state.set(BootState::Failed(format!("engineInit: {e}")));
