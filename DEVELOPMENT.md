@@ -249,3 +249,31 @@ The MCP sync pipeline carries span context through the full cycle:
 - `sync_entity{entity, provider}` — per-entity sync with diff stats
 - `resource_fetch{uri}` — individual MCP resource read
 - `subscription_resync{uri}` — notification-triggered resync
+
+## Quality gates (two-tier)
+
+This is a colocated jj+git repo: **git hooks do not fire for jj commits**, so the
+gates are `just` recipes you run yourself. Plain-git contributors can wire them
+into hooks with `scripts/install-git-hooks.sh` (bypass a run with `--no-verify`).
+
+| Tier | Command | When | What runs |
+|------|---------|------|-----------|
+| 1 | `just precommit` | every commit | defensive-code ratchet + `cargo check --workspace` |
+| 2 | `just prepush` | every push | full keystone (`PROPTEST_CASES=16`, incl. persisted regression seeds) |
+
+Notes:
+
+- **Defensive-code ratchet** (`scripts/defensive-ratchet.sh`): runs
+  `scripts/check-defensive-code.sh` and compares against the committed baseline
+  `scripts/defensive-baseline.txt` (the pre-existing stock of violations).
+  Only NEW violations fail the gate. Fix them or annotate with
+  `// ALLOW(<reason>)`; after a reviewed intentional change run
+  `scripts/defensive-ratchet.sh --update` and commit the baseline.
+- **Why no keystone smoke in Tier 1**: measured 2026-07-07, even
+  `PROPTEST_CASES=2` on the keystone takes ~4.5 min — proptest unconditionally
+  replays the persisted regression seeds
+  (`tests/general_e2e_composed_pbt.proptest-regressions`, 11 seeds) and every
+  case pays full composed-SUT boot. A "smoke" is barely cheaper than the full
+  16-case run, so the keystone lives entirely in Tier 2.
+- Timings assume a **warm build cache**; the first run after a rebase that
+  touches many crates pays the compile cost once.

@@ -477,3 +477,35 @@ coverage-rust:
 # Process Flutter coverage data
 coverage-flutter:
     ./scripts/process-flutter-coverage.sh
+
+# --- Quality gates (two-tier) -------------------------------------------------
+# Tier 1: cheap checks at every commit. Tier 2: full keystone before every push.
+# jj does not fire git hooks — run these by hand (or scripts/install-git-hooks.sh
+# wires them up for plain-git users). See DEVELOPMENT.md "Quality gates".
+
+# Tier 1 pre-commit gate: defensive-code ratchet + workspace typecheck.
+# MEASURED (2026-07-07): warm `cargo check --workspace` = 5.4s; ratchet ~5s CPU.
+# A keystone smoke was CUT from this tier: even PROPTEST_CASES=2 takes ~4.5min
+# because proptest unconditionally replays the persisted regression seeds and
+# each case pays full composed-SUT boot — it belongs in `just prepush` (Tier 2).
+# Assumes a warm build cache; the first run after a big rebase pays compile cost.
+precommit:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "== Tier 1 [1/2]: defensive-code ratchet =="
+    ./scripts/defensive-ratchet.sh
+    echo "== Tier 1 [2/2]: cargo check --workspace =="
+    cargo check --workspace 2>&1 | tee /tmp/precommit-check.log
+    echo "== Tier 1 PASS =="
+
+# Tier 2 pre-push gate: full keystone at default PROPTEST_CASES=16 (includes the
+# persisted regression seeds in tests/general_e2e_composed_pbt.proptest-regressions).
+# MEASURED (2026-07-07): green run ~5min quiet; a RED run that shrinks can take ~15min.
+prepush:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "== Tier 2: full keystone (PROPTEST_CASES=16) =="
+    PROPTEST_CASES=16 cargo test \
+        -p holon-integration-tests --features pbt --test general_e2e_composed_pbt \
+        2>&1 | tee /tmp/prepush-keystone.log
+    echo "== Tier 2 PASS =="
