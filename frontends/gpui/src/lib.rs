@@ -14,6 +14,8 @@ pub mod inspector;
 #[cfg(feature = "mobile")]
 pub mod mobile;
 pub mod navigation_state;
+#[cfg(debug_assertions)]
+pub mod oracles_ui;
 pub mod reactive_vm_poc;
 pub mod render;
 pub mod share_ui;
@@ -418,6 +420,10 @@ pub struct HolonApp {
     /// so the render pass can build overlays without a double-read through
     /// `app_model.read(cx).share_ui.read(cx)`.
     pub share_ui: Entity<share_ui::ShareUiState>,
+    /// Live-oracle violations (debug builds): mirrors the global
+    /// `holon_oracles` status; rendered as an impossible-to-miss top banner.
+    #[cfg(debug_assertions)]
+    pub oracle_ui: Entity<oracles_ui::OracleUiState>,
     /// Name of the theme currently applied to the `gpui_component` global.
     /// Compared against the session's selected theme on every render so a
     /// theme change (settings dropdown, or any other path) re-applies live.
@@ -855,6 +861,18 @@ impl Render for HolonApp {
             }
         }
 
+        // Live-oracle violation banner (debug builds) — rendered LAST so it
+        // sits on top of everything: a violation must be impossible to miss.
+        #[cfg(debug_assertions)]
+        {
+            let oracle_state_read = self.oracle_ui.read(cx);
+            if let Some(banner) =
+                oracles_ui::render_banner(oracle_state_read, self.oracle_ui.clone())
+            {
+                page = page.child(banner);
+            }
+        }
+
         page.into_any_element()
     }
 }
@@ -1157,6 +1175,14 @@ fn launch_holon_window_impl(
         Arc::new(std::sync::OnceLock::new());
     let model_slot = model_entity.clone();
 
+    // Slot to carry the oracle-UI entity out of the window-creation closure
+    // so the status bridge (needs the window handle) can be wired after.
+    #[cfg(debug_assertions)]
+    let oracle_entity_slot: Arc<std::sync::OnceLock<Entity<oracles_ui::OracleUiState>>> =
+        Arc::new(std::sync::OnceLock::new());
+    #[cfg(debug_assertions)]
+    let oracle_entity_slot_for_window = oracle_entity_slot.clone();
+
     let glass = session_clone
         .ui_settings()
         .glass_background
@@ -1313,6 +1339,12 @@ fn launch_holon_window_impl(
 
         let initial_root_view = root_reactive_view(&root_vm);
         let share_ui_entity = cx.new(|_cx| share_ui::ShareUiState::new());
+        #[cfg(debug_assertions)]
+        let oracle_ui_entity = cx.new(|_cx| oracles_ui::OracleUiState::default());
+        #[cfg(debug_assertions)]
+        oracle_entity_slot_for_window
+            .set(oracle_ui_entity.clone())
+            .ok();
         let app_model = cx.new(|cx| {
             let mut model = AppModel {
                 session: Arc::clone(&session_clone),
@@ -1371,6 +1403,17 @@ fn launch_holon_window_impl(
             )
             .detach();
 
+            // Re-render whenever the live-oracle status changes, so a
+            // violation banner appears the moment an oracle fires.
+            #[cfg(debug_assertions)]
+            cx.subscribe(
+                &oracle_ui_entity,
+                move |_, _, _: &oracles_ui::NotifyOracleUi, cx| {
+                    cx.notify();
+                },
+            )
+            .detach();
+
             HolonApp {
                 session: session_clone,
                 rt_handle: handle_clone,
@@ -1381,6 +1424,8 @@ fn launch_holon_window_impl(
                 safe_area_top: 0.0,
                 safe_area_bottom: 0.0,
                 share_ui: share_ui_entity,
+                #[cfg(debug_assertions)]
+                oracle_ui: oracle_ui_entity.clone(),
                 applied_theme: String::new(),
             }
         });
@@ -1428,6 +1473,25 @@ fn launch_holon_window_impl(
             bounds_registry_for_pump,
             live_engine.clone(),
             entity_cache.clone(),
+        );
+    }
+
+    // Wire the live-oracle status bridge (debug builds): global OracleStatus
+    // changes → OracleUiState entity → top banner. The runner itself is
+    // spawned in main.rs (plain tokio, no GPUI needed); this only wires the
+    // surfacing. Gated on the same env switch as the runner.
+    #[cfg(debug_assertions)]
+    if holon_oracles::OracleMode::from_env().enabled() {
+        let async_cx = cx.to_async();
+        let oracle_ui_entity = oracle_entity_slot
+            .get()
+            .expect("oracle entity slot must be populated by the window closure")
+            .clone();
+        oracles_ui::spawn_oracle_bridge(
+            &rt_handle,
+            oracle_ui_entity,
+            window_handle.into(),
+            &async_cx,
         );
     }
 

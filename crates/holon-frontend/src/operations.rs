@@ -17,6 +17,12 @@ pub fn dispatch_operation(
 ) {
     let session = Arc::clone(session);
     let entity_name = entity_name.clone();
+    // End-to-end latency: start the interaction clock at the dispatch entry
+    // point; `holon_api::latency_e2e` closes it when the target's row lands
+    // in a LiveData mirror (stage="e2e").
+    if let Some(target) = params.get("id").and_then(|v| v.as_string()) {
+        holon_api::latency_e2e::interaction_dispatched(&op_name, target);
+    }
     handle.spawn(async move {
         if let Err(e) = session
             .execute_operation(&entity_name, &op_name, params)

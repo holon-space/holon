@@ -341,8 +341,41 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
                 let changes: Vec<Change<StorageEntity>> =
                     batch.inner.items.into_iter().map(Into::into).collect();
                 let change_count = changes.len();
+                // Entity ids this batch makes visible — feeds the e2e
+                // interaction-latency correlator AFTER apply below. Row ids
+                // plus `parent_id` of created/updated rows (a create/split op
+                // dispatched at a parent completes via its new child's row).
+                let touched_ids: Vec<String> = changes
+                    .iter()
+                    .flat_map(|c| {
+                        let row_fields = |data: &StorageEntity| {
+                            ["id", "parent_id"]
+                                .iter()
+                                .filter_map(|k| {
+                                    data.get(*k)
+                                        .and_then(|v| v.as_string())
+                                        .map(|s| s.to_string())
+                                })
+                                .collect::<Vec<_>>()
+                        };
+                        match c {
+                            Change::Created { data, .. } => row_fields(data),
+                            Change::Updated { id, data, .. } => {
+                                let mut ids = row_fields(data);
+                                ids.push(id.clone());
+                                ids
+                            }
+                            Change::Deleted { id, .. } => vec![id.clone()],
+                            Change::FieldsChanged { entity_id, .. } => vec![entity_id.clone()],
+                        }
+                    })
+                    .collect();
                 let t_rows = std::time::Instant::now();
                 live.apply_changes(changes);
+                crate::latency_e2e::rows_delivered(
+                    source_name,
+                    touched_ids.iter().map(String::as_str),
+                );
                 if seq > 0 {
                     live.last_consumed_seq.store(seq, Ordering::SeqCst);
                     live.seq_advanced.notify_waiters();

@@ -28,6 +28,7 @@ tracing.workspace = true
 holon-core.workspace = true
 holon-macros.workspace = true
 holon-api.workspace = true
+holon-oracles.workspace = true
 holon-pbt-core = { path = "../holon-pbt-core", optional = true }
 async-trait.workspace = true
 futures.workspace = true

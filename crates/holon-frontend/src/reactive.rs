@@ -2150,6 +2150,12 @@ impl BuilderServices for ReactiveEngine {
         let entity_name = intent.entity_name.clone();
         let op_name = intent.op_name.clone();
         let params = intent.params;
+        // End-to-end latency: start the interaction clock at the dispatch
+        // entry point; `holon_api::latency_e2e` closes it when the target's
+        // row lands in a LiveData mirror (stage="e2e").
+        if let Some(target) = params.get("id").and_then(|v| v.as_string()) {
+            holon_api::latency_e2e::interaction_dispatched(&op_name, target);
+        }
         self.runtime_handle.spawn(async move {
             match session
                 .execute_operation(&entity_name, &op_name, params)
@@ -2233,6 +2239,12 @@ impl BuilderServices for ReactiveEngine {
                 .and_then(|v| v.as_string())
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| intent.entity_name.as_str().to_string());
+            // End-to-end latency: start the interaction clock here;
+            // `holon_api::latency_e2e` closes it when the target's row lands
+            // in a LiveData mirror (stage="e2e").
+            if let Some(target) = intent.params.get("id").and_then(|v| v.as_string()) {
+                holon_api::latency_e2e::interaction_dispatched(&intent.op_name, target);
+            }
             let t_dispatch = std::time::Instant::now();
             let response = session
                 .execute_operation(&intent.entity_name, &intent.op_name, intent.params)

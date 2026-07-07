@@ -99,6 +99,7 @@ holon-api.workspace = true
 holon-core.workspace = true
 holon-macros.workspace = true
 holon-mcp = { path = "../mcp" }
+holon-oracles.workspace = true
 holon-integration-tests = { path = "../../crates/holon-integration-tests", optional = true }
 enigo = { version = "0.6", optional = true }
 

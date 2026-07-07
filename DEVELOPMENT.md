@@ -182,6 +182,56 @@ python3 scripts/measure_latency.py /path/to/log
 some-command | python3 scripts/measure_latency.py -
 ```
 
+## Scale Soak
+
+`just measure-latency` runs the keystone against a 3-block focus doc, so vault-scale
+behaviour never manifests — the projection/CDC/consolidator latency cliff
+(`pass_ms ≈ 11.3 + 0.221×blocks`) and RSS growth at 5–10k blocks are found by hand. The
+soak reproduces that regime automatically: it boots the SAME headless composed keystone
+(the real `dispatch → Loro commit → projection → Turso/matview CDC → reactive rows`
+pipeline, **CRDT on** — `full_headless` forces `crdt.enabled = Some(true)`) against a
+seeded synthetic vault, then drives a few hundred mixed actions and grades each action
+type against the **p95 < 200ms SLO**.
+
+```bash
+just soak                 # 5000 blocks, ~320 mixed actions, 30s settle budget
+just soak 10000 480       # 10k blocks, ~480 actions
+just soak 5000 320 30000 200   # size, actions, settle_ms, blocks-per-doc
+```
+
+What it does:
+
+- **Seeds** a deterministic synthetic vault of `size` extra blocks (`scripts` →
+  `crates/holon-integration-tests/src/pbt/composed/soak_seed.rs`): many pages, deep
+  trees, `TODO`/`DONE`/`DOING` tasks, intra-vault links, and unicode (CJK / RTL / emoji /
+  math). Same bytes every run. The extra blocks are seeded as separate org **docs** the
+  SUT boots but the oracle folds into its scaffold seed-set, so the invariant catalog
+  stays green while every action still pays the whole-vault projection/CDC cost.
+- **Raises the settle budget** to `settle_ms` (default 30000). The keystone's 150ms
+  `converge_projections` cap is far below a multi-second vault-scale drain; too small a
+  budget would silently cap `action_total` below the true latency and hide the cliff.
+- **Drives** ~`actions` mixed actions (edit / indent / outdent / split / toggle task
+  state / navigate) via the production `E2ETransition` alphabet.
+- **Measures** per-action-type p50/p95/max + per-stage cost + dominator
+  (`measure_latency.py --fail-over-p95 200`) and samples process RSS over time
+  (`scripts/soak_rss_sampler.sh` — the OS RSS, since the headless run emits no
+  `MemoryMonitor` lines).
+
+Results (per-action latency table, SLO gate verdict, RSS start→peak→end) are written to
+`docs/Testing/soak/soak-<size>-blocks-<stamp>.txt` and echoed to the console. Runtime is
+minutes: the vault is re-seeded once per proptest case (~20 actions each), so boot
+overhead dominates wall time — but boot is not counted in `action_total`.
+
+**Nightly:** run `just soak` (5k) or `just soak 10000 480` and commit the result file
+under `docs/Testing/soak/`. No CI/cron wiring — it is a single reliable command; diff
+the newest result against the prior committed one to spot regressions.
+
+**Not covered** (disclosed casualties): final GPU paint (headless — no window), real
+file-watcher churn (the vault is seeded once, not edited on disk mid-run), multi-peer
+CRDT sync/merge latency (single in-process peer), and platform differences (measured on
+the dev host only). The soak stresses **block count**; it does not vary editor buffer
+size or query complexity.
+
 ## Log Analysis
 
 The application logs to `/tmp/holon.log` using the `tracing` crate (format: `timestamp LEVEL module: [Component] message`).

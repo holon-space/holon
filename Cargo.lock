@@ -4905,6 +4905,7 @@ dependencies = [
  "holon-core",
  "holon-filesystem",
  "holon-macros",
+ "holon-oracles",
  "holon-pbt-core",
  "libc",
  "memory-stats",
@@ -4955,6 +4956,7 @@ dependencies = [
  "holon-layout-testing",
  "holon-macros",
  "holon-mcp",
+ "holon-oracles",
  "holon-pbt-core",
  "insta",
  "io-surface",
@@ -4999,6 +5001,7 @@ dependencies = [
  "holon-macros",
  "holon-mcp",
  "holon-mcp-client",
+ "holon-oracles",
  "holon-orgmode",
  "holon-pbt-core",
  "holon-profiles",
@@ -5177,6 +5180,19 @@ dependencies = [
  "turso",
  "turso_core",
  "turso_ext",
+ "workspace-hack 0.1.0",
+]
+
+[[package]]
+name = "holon-oracles"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "holon-api",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
  "workspace-hack 0.1.0",
 ]
 

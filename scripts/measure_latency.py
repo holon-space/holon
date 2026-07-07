@@ -7,6 +7,7 @@ stage, all under the `holon_latency` tracing target:
   stage=dispatch      action=<op>  block=<id>            ms=<dispatch->op-applied>
   stage=projection    ops=<n> blocks=<n> snapshot_ms=<n> ms=<full projection pass>
   stage=rows          source=<matview> rows=<n> seq=<n>  ms=<CDC batch apply>
+  stage=e2e           action=<op> block=<id> source=<m>  ms=<dispatch->row visible (PROD)>
   stage=action_total  action=<kind>                      total_ms=<action->visible rows>
 
 `action_total` is the end-to-end wall time of one UI action driven through the
@@ -72,6 +73,7 @@ def main():
     src = sys.stdin if args[0] == "-" else open(args[0])
 
     total_by_action = defaultdict(list)
+    e2e_by_action = defaultdict(list)
     dispatch_by_action = defaultdict(list)
     proj_ms, proj_snap, proj_blocks = [], [], []
     rows_ms, rows_n = [], []
@@ -85,6 +87,10 @@ def main():
             v = num(f, "total_ms")
             if v is not None:
                 total_by_action[f.get("action", "?")].append(v)
+        elif stage == "e2e":
+            v = num(f, "ms")
+            if v is not None:
+                e2e_by_action[f.get("action", "?")].append(v)
         elif stage == "dispatch":
             v = num(f, "ms")
             if v is not None:
@@ -117,6 +123,9 @@ def main():
         table("END-TO-END  action -> visible rows  (stage=action_total)", total_by_action)
     else:
         print("\n(no stage=action_total events - was RUST_LOG=holon_latency=debug set?)")
+
+    if e2e_by_action:
+        table("PROD END-TO-END  interaction -> visible  (stage=e2e)", e2e_by_action)
 
     if dispatch_by_action:
         table("DISPATCH stage  action -> op applied  (stage=dispatch)", dispatch_by_action)

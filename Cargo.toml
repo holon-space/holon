@@ -13,6 +13,7 @@ members = [
     "crates/holon-app",
     "crates/holon-block-roundtrip-testing",
     "crates/holon-layout-testing",
+    "crates/holon-oracles",
     "crates/holon-pbt-core",
     "crates/holon-integration-tests",
     "crates/holon-mcp-client",
@@ -171,6 +172,7 @@ r3bl_tui = { git = "https://github.com/nightscape/r3bl-open-core.git", branch = 
 # === Internal crates ===
 holon = { path = "crates/holon" }
 holon-api = { path = "crates/holon-api" }
+holon-oracles = { path = "crates/holon-oracles" }
 holon-core = { path = "crates/holon-core" }
 holon-engine = { path = "crates/holon-engine" }
 holon-expr = { path = "crates/holon-expr" }

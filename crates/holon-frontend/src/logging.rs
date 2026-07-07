@@ -181,6 +181,15 @@ fn init_with_destinations(destinations: &[LogDest]) -> LogGuard {
     #[cfg(feature = "chrome-trace")]
     let (chrome_layer, chrome_guard) = crate::memory_monitor::chrome_trace::layer();
 
+    // Live-oracle latency SLO (debug builds): watch the existing
+    // `holon_latency` stage events (dispatch/rows always; projection when
+    // CRDT is on); a stage slower than the SLO becomes a violation (banner +
+    // error log). HOLON_ORACLES=off opts out; HOLON_ORACLES_SLO_MS tunes.
+    #[cfg(debug_assertions)]
+    if holon_oracles::OracleMode::from_env().enabled() {
+        layers.push(Box::new(holon_oracles::latency::LatencySloLayer::from_env()));
+    }
+
     let registry = tracing_subscriber::registry().with(layers);
 
     #[cfg(feature = "chrome-trace")]

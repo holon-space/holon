@@ -781,23 +781,51 @@ pub async fn run_file_sync_controller(
                 }
             }
             Some(rerender) = rerender_rx.recv() => {
+                // EXPERIMENTAL (latency investigation): coalesce the rerender
+                // queue. The block feed emits one message PER ROW diff, so a
+                // 42-block file ingest queues 42 identical Doc(page) messages,
+                // each costing one full get_blocks CTE (~0.25-0.7s on the
+                // single DB actor). Drain everything pending and process each
+                // unique doc once; All collapses into the debounced full pass.
+                let mut docs: Vec<EntityUri> = Vec::new();
+                let mut saw_all = false;
+                let mut absorb = |msg: OrgRerender| match msg {
+                    OrgRerender::Doc(doc_id) => {
+                        if !docs.contains(&doc_id) {
+                            docs.push(doc_id);
+                        }
+                    }
+                    OrgRerender::All => saw_all = true,
+                };
+                absorb(rerender);
+                let mut coalesced: usize = 0;
+                while let Ok(next) = rerender_rx.try_recv() {
+                    coalesced += 1;
+                    absorb(next);
+                }
+                if coalesced > 0 {
+                    tracing::info!(
+                        "[OrgMode] rerender coalesce: {} queued message(s) -> {} unique doc(s){}",
+                        coalesced + 1,
+                        docs.len(),
+                        if saw_all { " + full rerender" } else { "" },
+                    );
+                }
+                if saw_all { pending_full_rerender = true; }
                 let span = tracing::info_span!("org.on_block_feed");
                 async {
-                    match rerender {
-                        OrgRerender::Doc(doc_id) => {
-                            match controller.on_block_changed(&doc_id).await {
-                                Ok(true) => {}
-                                // ALLOW(fallback): doc resolved to no tracked file → full re-render
-                                Ok(false) => { pending_full_rerender = true; }
-                                Err(e) => {
-                                    error!(
-                                        "[OrgMode] Block change error for {}: {}",
-                                        doc_id, e
-                                    );
-                                }
+                    for doc_id in docs {
+                        match controller.on_block_changed(&doc_id).await {
+                            Ok(true) => {}
+                            // ALLOW(fallback): doc resolved to no tracked file → full re-render
+                            Ok(false) => { pending_full_rerender = true; }
+                            Err(e) => {
+                                error!(
+                                    "[OrgMode] Block change error for {}: {}",
+                                    doc_id, e
+                                );
                             }
                         }
-                        OrgRerender::All => { pending_full_rerender = true; }
                     }
                 }.instrument(span).await;
                 idle_signal_for_task.mark_progress();
