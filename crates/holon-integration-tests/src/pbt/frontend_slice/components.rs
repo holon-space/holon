@@ -45,6 +45,19 @@ use crate::pbt::sut_row_parsing::{
 };
 use crate::pbt::vm_snapshot::view_model_to_snapshot;
 
+
+/// Raise a fixed test deadline to the scale-soak settle budget (`HOLON_SOAK_SETTLE_MS`)
+/// when the soak is on. The frontend component's settle/bind/postcondition deadlines
+/// (3-10s) are tuned for the keystone's 3-block doc; at a 5-10k-block soak vault the
+/// sidebar/CDC streams legitimately take longer, and a too-small deadline turns honest
+/// lag into a false fail-loud. No-op (the fixed default) when the env var is unset.
+fn soak_deadline(default: Duration) -> Duration {
+    match std::env::var("HOLON_SOAK_SETTLE_MS").ok().and_then(|s| s.parse::<u64>().ok()) {
+        Some(ms) => default.max(Duration::from_millis(ms)),
+        None => default,
+    }
+}
+
 /// A composition component wrapping a real headless frontend stack. Owns the
 /// `TempDir`, `FrontendSession`, and `ReactiveEngine` so background tasks and
 /// the on-disk (in-memory FS) org root stay alive for the component's lifetime.
@@ -146,7 +159,16 @@ impl HeadlessFrontendComponent {
             holon_filesystem::FileSystem::write(org_fs.as_ref(), &file_path, content.as_bytes())
                 .await
                 .expect("write seed org file");
-            org_paths.push(file_path);
+            // Scale-soak vault docs (`soak-*.org`) are background LOAD: written to disk
+            // (so the session's file-sync ingests them into the store — the whole point)
+            // but NOT tracked in `org_paths`. Tracking them would drag thousands of
+            // oracle-unknown blocks into the org readers (`SutOrgRead` /
+            // `SutOrgRender` / the external-mutation doc rewriter) and false-RED
+            // `inv-blocks-match-ref/org`. The org invariants keep the keystone-sized
+            // comparison surface; the soak load is exercised via store/CDC/Loro.
+            if !filename.starts_with("soak-") {
+                org_paths.push(file_path);
+            }
         }
 
         let holon_config = HolonConfig {
@@ -474,7 +496,7 @@ impl HeadlessFrontendComponent {
     /// the shared runtime). Mirrors `E2ESut::resolve_watch`'s no-frontend-engine
     /// branch.
     async fn resolve_watch(&self, uri: &EntityUri) -> Option<Arc<ReactiveRenderedRows>> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let deadline = tokio::time::Instant::now() + soak_deadline(Duration::from_secs(3));
         loop {
             let rqr = self.reactive.ensure_watching(uri);
             if !rqr.is_loading() {
@@ -567,7 +589,7 @@ impl HeadlessFrontendComponent {
     /// `watch_rows` settle loop). Reaching the fixed point is what makes the
     /// `focus_roots` teeth produce a real `Fail` (not a CDC-lag `Skipped`, V4).
     async fn settle_focus_matviews(&self) {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let deadline = tokio::time::Instant::now() + soak_deadline(Duration::from_secs(3));
         let mut last = (usize::MAX, usize::MAX);
         let mut stable = 0u32;
         loop {
@@ -607,7 +629,7 @@ impl HeadlessFrontendComponent {
     /// than let the click silently fake focus.
     async fn await_sidebar_nav_intent(&self, id: &EntityUri) {
         let root_uri = holon_api::root_layout_block_uri();
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let deadline = tokio::time::Instant::now() + soak_deadline(Duration::from_secs(5));
         loop {
             let resolved = self.reactive.snapshot_resolved(&root_uri);
             if holon_frontend::focus_path::find_click_intent_in_region(
@@ -637,7 +659,7 @@ impl HeadlessFrontendComponent {
     /// `navigation.focus` SQL write (silent set_focus fallthrough) or the matview
     /// lagged past `settle_focus_matviews` — either way, never fake focus: fail loud.
     async fn assert_navigate_focus_landed(&self, id: &EntityUri) {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let deadline = tokio::time::Instant::now() + soak_deadline(Duration::from_secs(3));
         loop {
             let focus = self
                 .sql_query("SELECT block_id FROM current_focus WHERE region = 'main'")
@@ -669,7 +691,7 @@ impl HeadlessFrontendComponent {
     async fn settle_block_content(&self, block_id: &EntityUri) {
         let escaped = block_id.as_str().replace('\'', "''");
         let sql = format!("SELECT content FROM block_raw WHERE id = '{escaped}'");
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let deadline = tokio::time::Instant::now() + soak_deadline(Duration::from_secs(3));
         let mut last: Option<String> = None;
         let mut stable = 0u32;
         loop {
@@ -764,7 +786,7 @@ impl SutRenderer for HeadlessFrontendComponent {
         // analogue of the windowed slice's pump-settle. (Rich ViewModel, thin
         // frontend: the shared `shadow_builders` produce the whole tree here; the
         // only thing a real frontend adds is *waiting* for CDC, which we do too.)
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let deadline = tokio::time::Instant::now() + soak_deadline(Duration::from_secs(5));
         let mut snap = view_model_to_snapshot(&self.reactive.snapshot(&root_uri));
         let mut last = (usize::MAX, usize::MAX);
         let mut stable = 0u32;
@@ -1019,7 +1041,7 @@ impl SutWatch for HeadlessFrontendComponent {
         // few reads) — converges fast for an empty watch (0,0,0) and a populated one
         // (…,N,N,N alike).
         let rqr = self.reactive.ensure_watching(&key);
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let deadline = tokio::time::Instant::now() + soak_deadline(Duration::from_secs(3));
         let mut last = usize::MAX;
         let mut stable = 0u32;
         loop {
@@ -1671,7 +1693,7 @@ impl HeadlessFrontendComponent {
             // step — a user hammering an unresponsive toggle sees the same.
             // The generator excludes no-op toggles, so every landed click
             // changes `task_state`.
-            let overall = tokio::time::Instant::now() + Duration::from_secs(10);
+            let overall = tokio::time::Instant::now() + soak_deadline(Duration::from_secs(10));
             'landing: loop {
                 let attempt_deadline =
                     (tokio::time::Instant::now() + Duration::from_millis(500)).min(overall);

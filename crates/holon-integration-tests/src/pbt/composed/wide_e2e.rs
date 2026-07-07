@@ -297,13 +297,18 @@ pub async fn boot_and_seed_wide(
     // `any_valid_wiring()` once the ref-side wiring + required-invariants sub-steps land).
     let set = set_for_wiring(&ref_state.wiring);
     let has_frontend = set.has_projection(Projection::ViewModel);
-    let bundle = compose_sut_seeded(
-        &set,
-        resolver,
-        &[("structural-page.org", WIDE_TREE_ORG)],
-        &wide_seed_tree(),
-    )
-    .await;
+    // Scale-soak inflation: extra synthetic doc files (deep trees, tasks, links,
+    // unicode) appended to the SUT boot ONLY. Empty unless `HOLON_SOAK_SEED_BLOCKS`
+    // is set, so the keystone is untouched by default. Their ids fold into the
+    // oracle via the scaffold math below (booted-but-not-tree ⇒ seed-classified),
+    // so the invariant catalog stays green while every action pays the whole-vault
+    // projection/CDC/consolidator cost.
+    let soak_files = crate::pbt::composed::soak_seed::soak_org_files();
+    let mut seed_files: Vec<(&str, &str)> = vec![("structural-page.org", WIDE_TREE_ORG)];
+    for (name, body) in &soak_files {
+        seed_files.push((name.as_str(), body.as_str()));
+    }
+    let bundle = compose_sut_seeded(&set, resolver, &seed_files, &wide_seed_tree()).await;
     // The settle handles — the Turso engine (CDC watermark) and the frontend component
     // (Loro sync + org idle). Cloned out before `bundle.caps` is moved so the
     // post-write [`converge_projections`] settle can prove all three projections drained.
@@ -312,6 +317,16 @@ pub async fn boot_and_seed_wide(
         frontend: bundle.frontend.clone(),
     };
     let mut caps = bundle.caps;
+
+    // Scale-soak: drain the WHOLE seeded vault into `block_raw` BEFORE the scaffold
+    // id-set is snapshotted below. The frontend boot settle is a flat 300ms — far too
+    // short to project 5–10k blocks — so an un-drained soak block would be absent from
+    // `booted`, escape seed-classification in the oracle, and later surface in the SUT
+    // store with no matching oracle seed entry → a false `inv-blocks-match-ref`
+    // divergence. Off (count 0) this is skipped entirely; the keystone is untouched.
+    if crate::pbt::composed::soak_seed::soak_block_count() > 0 {
+        converge_projections(&handle, crate::pbt::composed::soak_seed::soak_settle()).await;
+    }
 
     // `inv-sql-budget` coverage: a span-metrics provider hosting the SAME `MetricsSut`
     // the native E2ESut uses, exposed through `ComposedBudget` (the read) +
@@ -376,7 +391,7 @@ pub async fn boot_and_seed_wide(
             &mut caps,
         )
         .await;
-        converge_projections(&handle, SETTLE).await;
+        converge_projections(&handle, crate::pbt::composed::soak_seed::soak_settle()).await;
     }
 
     (caps, handle, scaffold)
@@ -691,7 +706,7 @@ impl ComposedSlice for WideE2E {
     /// settle — the CDC-only lever under-settled (Loro/org lagged and the block/org
     /// invariants diverged). Capped at `SETTLE`, so it never over-waits vs the old sleep.
     async fn settle_after_apply(handle: &WideHandle, _: &CapMap) {
-        converge_projections(handle, SETTLE).await;
+        converge_projections(handle, crate::pbt::composed::soak_seed::soak_settle()).await;
     }
 
     async fn apply_transition(

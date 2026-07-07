@@ -373,7 +373,15 @@ async fn compose_sut_seeded_impl(
         // without it (don't silently degrade to a no-op quiescence wait). Validated by
         // the A0 probe `headless_loro_sync_controller_resolves_after_boot`.
         if has_editor {
-            for _ in 0..40 {
+            // Scale-soak: a 5-10k-block org ingest delays controller resolution far past
+            // the 2s default; scale the poll budget with `HOLON_SOAK_SETTLE_MS` (never
+            // below the 2s default) so the fail-loud assert below stays meaningful.
+            let boot_poll_ms: u64 = std::env::var("HOLON_SOAK_SETTLE_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(2_000)
+                .max(2_000);
+            for _ in 0..(boot_poll_ms / 50) {
                 frontend_sync_handle = comp.loro_sync_handle();
                 if frontend_sync_handle.is_some() {
                     break;
@@ -382,8 +390,8 @@ async fn compose_sut_seeded_impl(
             }
             assert!(
                 frontend_sync_handle.is_some(),
-                "compose_sut full mode: LoroSyncControllerHandle never resolved within 2s \
-                 of headless boot — peer deltas would not project to Turso. See the A0 probe."
+                "compose_sut full mode: LoroSyncControllerHandle never resolved within the boot \
+                 poll budget (>=2s, HOLON_SOAK_SETTLE_MS-scaled) of headless boot — peer deltas would not project to Turso. See the A0 probe."
             );
         }
         scaffold_ids = booted_scaffold_ids(&caps).await;

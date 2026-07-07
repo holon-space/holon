@@ -157,6 +157,58 @@ measure-latency cases='16' *FLAGS:
     echo "raw log: /tmp/holon-latency.log ($(grep -c holon_latency /tmp/holon-latency.log || true) events)"
     python3 scripts/measure_latency.py /tmp/holon-latency.log
 
+# Scale-soak: drive the REAL pipeline against a seeded 5–10k-block vault WITH CRDT on,
+# measuring per-action latency vs the p95<200ms SLO plus RSS growth. Boots the keystone
+# (`general_e2e_composed_pbt`, forced to the full_headless/CRDT wiring) over a synthetic
+# vault of `size` extra blocks (deep trees, tasks, links, unicode; deterministic seed),
+# then drives ~`actions` mixed actions (edit / indent / outdent / split / toggle / nav)
+# and prints the per-action-type latency table + dominator + RSS start→peak→end.
+# Results land in docs/Testing/soak/ . Runtime: minutes (boot re-seeds the vault per
+# proptest case). See DEVELOPMENT.md "Scale Soak".
+#
+#   just soak                 # 5000 blocks, ~320 actions
+#   just soak 10000 480       # 10k blocks
+soak size='5000' actions='320' settle_ms='30000' per_doc='200' soften='':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p docs/Testing/soak
+    stamp="$(date +%Y%m%d-%H%M%S)"
+    log="/tmp/holon-soak-${stamp}.log"
+    rss="/tmp/holon-soak-rss-${stamp}.csv"
+    out="docs/Testing/soak/soak-{{size}}-blocks-${stamp}.txt"
+    # ~20 actions per proptest case (draws 1..40); derive case count from target actions.
+    cases=$(( ({{actions}} + 19) / 20 )); [ "$cases" -lt 1 ] && cases=1
+    echo "soak: size={{size}} blocks  actions≈{{actions}} (cases=$cases)  settle={{settle_ms}}ms  CRDT=on"
+    echo "raw log: $log   rss: $rss   report: $out"
+    # Background RSS sampler (self-terminates when the test process exits).
+    bash scripts/soak_rss_sampler.sh "$rss" 'general_e2e_composed_pb[t]' 2 &
+    sampler=$!
+    HOLON_SOAK_SEED_BLOCKS={{size}} HOLON_SOAK_SETTLE_MS={{settle_ms}} \
+        HOLON_SOAK_BLOCKS_PER_DOC={{per_doc}} HOLON_PBT_FORCE_FULL=1 \
+        HOLON_PBT_INVARIANTS="{{soften}}" \
+        RUST_LOG="holon_latency=debug" HOLON_OTEL_FILTER=off PROPTEST_CASES="$cases" \
+        cargo test -p holon-integration-tests --features pbt \
+        --test general_e2e_composed_pbt -- --nocapture \
+        > "$log" 2>&1 || echo "NOTE: test exited non-zero (see $log tail) — latency data below is still valid"
+    wait "$sampler" 2>/dev/null || true
+    {
+        echo "# Holon scale-soak — $stamp"
+        echo "# size={{size}} blocks  actions≈{{actions}} (cases=$cases)  settle={{settle_ms}}ms  per_doc={{per_doc}}  CRDT=on"
+        [ -n "{{soften}}" ] && echo "# DISCLOSED SOFTENING: HOLON_PBT_INVARIANTS={{soften}} ($(grep -c 'softened (DISCLOSED degraded run)' "$log" || true) softened failures — see raw log)"
+        echo "# raw log: $log"
+        echo ""
+        echo "action_total events: $(grep -c 'stage=action_total' "$log" || true)"
+        echo ""
+        python3 scripts/measure_latency.py "$log" --fail-over-p95 200 || true
+        echo ""
+        echo "== RSS (resident set, MB) =="
+        awk -F, 'NR>1{v=$2; if(NR==2)start=v; if(v>peak)peak=v; end=v; n++}
+            END{ if(n>0) printf "samples=%d  start=%.0f  peak=%.0f  end=%.0f  growth=%+.0f MB\n", n,start,peak,end,end-start;
+                 else print "no RSS samples" }' "$rss"
+    } | tee "$out"
+    echo ""
+    echo "SLO verdict + full table written to: $out"
+
 # --- Lib slices (composed catch triads + slice component tests) ---------------
 # The declare_pbt_slice!/component_pbt! standalone slice binaries were retired
 # (§8.10: coverage lives in the ONE composed keystone). What remains are the

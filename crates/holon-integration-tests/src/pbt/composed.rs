@@ -67,6 +67,13 @@ pub mod seed_primitives;
 #[cfg(any(test, feature = "pbt"))]
 pub mod wide_e2e;
 
+/// Scale-soak vault seeder (env-gated). Inflates the `WideE2E` SUT boot with extra
+/// synthetic org doc files so the keystone can be driven against a 5–10k-block vault,
+/// quantifying the projection/CDC/consolidator latency cliff. Zero-cost (empty seed,
+/// keystone `SETTLE`) when `HOLON_SOAK_SEED_BLOCKS` is unset.
+#[cfg(any(test, feature = "pbt"))]
+pub mod soak_seed;
+
 /// The single-sourced E4 windowed composition-path check
 /// ([`windowed::run_windowed_composed_check`]). `pbt`-gated like the windowed
 /// slice it builds; consumed by both the `E2ESut` invariant runner and the gpui
