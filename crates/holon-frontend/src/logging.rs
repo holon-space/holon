@@ -178,6 +178,18 @@ fn init_with_destinations(destinations: &[LogDest]) -> LogGuard {
         }
     }
 
+    // tokio-console async-stall profiler. `spawn()` starts the gRPC aggregator
+    // on its own background thread so the `tokio-console` CLI can attach. Only
+    // records task busy/idle data when built with `--cfg tokio_unstable` (plus
+    // tokio's `tracing` feature, pulled in by the `tokio-console` cargo
+    // feature). Bind address overridable via `TOKIO_CONSOLE_BIND`.
+    #[cfg(feature = "tokio-console")]
+    layers.push(Box::new(
+        console_subscriber::ConsoleLayer::builder()
+            .with_default_env()
+            .spawn(),
+    ));
+
     #[cfg(feature = "chrome-trace")]
     let (chrome_layer, chrome_guard) = crate::memory_monitor::chrome_trace::layer();
 

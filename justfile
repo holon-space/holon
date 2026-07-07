@@ -157,6 +157,36 @@ measure-latency cases='16' *FLAGS:
     echo "raw log: /tmp/holon-latency.log ($(grep -c holon_latency /tmp/holon-latency.log || true) events)"
     python3 scripts/measure_latency.py /tmp/holon-latency.log
 
+# --- Memory & async-stall profiling -----------------------------------------
+
+# Heap-profile a headless soak workload with dhat, then print top allocators
+# (no web viewer needed). Writes dhat-heap.json in the repo root.
+heap-profile blocks='2000':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    HOLON_SOAK_SEED_BLOCKS={{blocks}} \
+        cargo run --release --example diag_harness -p holon-integration-tests \
+        --features heap-profile
+    bash scripts/analyze_dhat.sh dhat-heap.json
+
+# Async-stall profile a headless soak workload; attach the tokio-console CLI to
+# it. Needs: cargo install tokio-console. Requires --cfg tokio_unstable (set).
+tokio-console-harness blocks='2000' hold='120':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "console aggregator -> 127.0.0.1:6669 (holding {{hold}}s after ingest)"
+    echo "attach from another shell:  tokio-console http://127.0.0.1:6669"
+    RUSTFLAGS="--cfg tokio_unstable" \
+        HOLON_SOAK_SEED_BLOCKS={{blocks}} HOLON_DIAG_HOLD_SECS={{hold}} \
+        cargo run --example diag_harness -p holon-integration-tests \
+        --features tokio-console
+
+# Run the REAL GPUI desktop app with tokio-console attached to its live runtime
+# (the DatabaseActor, file-sync, save-worker tasks). Attach as above.
+tokio-console-app:
+    RUSTFLAGS="--cfg tokio_unstable" \
+        cargo run -p holon-gpui --features tokio-console
+
 # --- Lib slices (composed catch triads + slice component tests) ---------------
 # The declare_pbt_slice!/component_pbt! standalone slice binaries were retired
 # (§8.10: coverage lives in the ONE composed keystone). What remains are the

@@ -74,6 +74,9 @@ chrome-trace = [
     "holon-integration-tests?/chrome-trace",
 ]
 heap-profile = ["holon-frontend/heap-profile"]
+# tokio-console async-stall profiler for the live app. Build with
+# RUSTFLAGS="--cfg tokio_unstable" cargo run -p holon-gpui --features tokio-console
+tokio-console = ["holon-frontend/tokio-console", "tokio/tracing"]
 hot-reload = ["dep:subsecond", "dep:dioxus-devtools"]
 pbt = ["dep:holon-integration-tests", "dep:enigo"]
 

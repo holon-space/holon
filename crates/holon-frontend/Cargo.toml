@@ -12,6 +12,9 @@ default = []
 pbt = ["dep:holon-pbt-core"]
 heap-profile = ["dep:dhat", "dep:ctrlc", "dep:libc"]
 chrome-trace = ["dep:tracing-chrome", "dep:chrono"]
+# tokio-console async-stall profiler. Adds a console_subscriber gRPC layer
+# to logging::init(). Requires building with RUSTFLAGS="--cfg tokio_unstable".
+tokio-console = ["dep:console-subscriber", "tokio/tracing"]
 otel = ["dep:tracing-opentelemetry", "dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:opentelemetry-stdout"]
 blinc = ["dep:blinc_core", "dep:blinc_theme"]
 
@@ -36,6 +39,7 @@ fluxdi.workspace = true
 dhat = { workspace = true, optional = true }
 libc = { version = "0.2", optional = true }
 ctrlc = { workspace = true, optional = true }
+console-subscriber = { workspace = true, optional = true }
 tracing-chrome = { workspace = true, optional = true }
 tracing-appender.workspace = true
 tracing-subscriber = { workspace = true }

@@ -182,6 +182,100 @@ python3 scripts/measure_latency.py /path/to/log
 some-command | python3 scripts/measure_latency.py -
 ```
 
+## Memory & Async-Stall Profiling
+
+Two profilers sit alongside the latency tooling above. Together the four tools
+answer four different "why is it slow / heavy?" questions:
+
+| tool                | question it answers                          | how to run              |
+|---------------------|----------------------------------------------|-------------------------|
+| **latency** (above) | which *stage* of a UI action is slow?        | `just measure-latency`  |
+| **chrome-trace**    | wall-clock timeline of spans (flamechart)    | `--features chrome-trace` (see `memory_monitor::chrome_trace`) |
+| **heap (dhat)**     | *what allocates* the memory / where it grows | `just heap-profile`     |
+| **stall (tokio-console)** | which async *task* stalls / never yields | `just tokio-console-*`   |
+
+Both are feature-gated and zero-cost in normal builds.
+
+### Heap profiling — dhat
+
+Answers "where did the 4 GB go?". dhat installs a `#[global_allocator]` that
+records every allocation's size and call stack, and writes `dhat-heap.json` on
+a clean exit or Ctrl+C.
+
+The allocator + profiler live in `holon-frontend`
+(`memory_monitor::heap_profile`) behind the `heap-profile` feature, and are
+already wired into the **real GPUI app** (`frontends/gpui/src/main.rs` calls
+`heap_profile::start()`). For a scriptable, headless run there is a dedicated
+harness that boots the same engine (org parse -> Loro -> CDC -> Turso, incl. the
+async `DatabaseActor`) and ingests a synthetic vault:
+
+```bash
+just heap-profile            # seeds 2000 blocks, writes + summarizes dhat-heap.json
+just heap-profile 8000       # bigger workload
+
+# equivalent raw invocation:
+HOLON_SOAK_SEED_BLOCKS=2000 \
+  cargo run --release --example diag_harness -p holon-integration-tests \
+  --features heap-profile
+```
+
+To profile the **live desktop app** instead, build it with the feature and use
+the UI, then Ctrl+C:
+
+```bash
+cargo run -p holon-gpui --features heap-profile   # exercise the UI, then Ctrl+C
+```
+
+`HOLON_RSS_ABORT_MB` (default 1024) makes the `MemoryMonitor` self-abort — and
+flush dhat — if RSS blows past the threshold, so a runaway leak still produces a
+profile.
+
+**Reading the output** — the web viewer at
+<https://nnethercote.github.io/dh_view/dh_view.html> is the richest view, but
+offline you can summarize with:
+
+```bash
+bash scripts/analyze_dhat.sh dhat-heap.json      # total bytes + top 15 sites
+bash scripts/analyze_dhat.sh dhat-heap.json 40   # top 40
+```
+
+It prints lifetime total bytes/allocations and the top allocation sites by total
+bytes at their leaf frame. A *true negative* (flat total, allocations dominated
+by expected sites) is a useful result — it rules memory out.
+
+### Async-stall profiling — tokio-console
+
+Answers "which task starved the runtime?" (e.g. the `DatabaseActor` starvation
+deadlock). `console_subscriber` exposes per-task poll/idle/busy times over a gRPC
+port; the `tokio-console` TUI attaches to a live process. It only records real
+data when built with `--cfg tokio_unstable`.
+
+It is wired into `holon-frontend::logging::init()` behind the `tokio-console`
+feature, so it attaches to the **live GPUI app**:
+
+```bash
+cargo install tokio-console                       # one-time (the CLI)
+
+# 1) run the real app with the console runtime enabled:
+just tokio-console-app
+#    (= RUSTFLAGS="--cfg tokio_unstable" cargo run -p holon-gpui --features tokio-console)
+
+# 2) in another shell, attach:
+tokio-console http://127.0.0.1:6669
+```
+
+For a headless, scriptable run against the same engine boot (no window), use the
+harness — it holds the process open so you can attach:
+
+```bash
+just tokio-console-harness 2000 120               # 2000 blocks, hold 120s
+tokio-console http://127.0.0.1:6669               # attach from another shell
+```
+
+The task list shows total polls, busy time, and last-poll — a task that is
+`RUNNING` with a large busy time and few polls is monopolizing a worker thread
+(the starvation signature). Bind address overridable via `TOKIO_CONSOLE_BIND`.
+
 ## Log Analysis
 
 The application logs to `/tmp/holon.log` using the `tracing` crate (format: `timestamp LEVEL module: [Component] message`).

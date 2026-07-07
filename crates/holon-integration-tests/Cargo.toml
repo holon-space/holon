@@ -44,6 +44,11 @@ chrome-trace = ["dep:tracing-chrome", "otel-testing"]
 # `tokio/tracing` enables task instrumentation; otel-testing brings the
 # tracing-subscriber registry the ConsoleLayer attaches to.
 tokio-console = ["dep:console-subscriber", "otel-testing", "tokio/tracing"]
+# dhat heap profiler for the diag_harness example. Enabling this turns on
+# holon-frontend's dhat #[global_allocator], so the whole example binary is
+# profiled. Run: cargo run --release --example diag_harness \
+#   --no-default-features --features test-infra,heap-profile
+heap-profile = ["holon-frontend/heap-profile"]
 pbt = [
     "test-infra",
     "otel-testing",
