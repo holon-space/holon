@@ -48,6 +48,18 @@ use holon_core::OriginTaggedWrites;
 /// `.loro` snapshot. One file per `LoroDocumentStore`.
 pub const SIDECAR_FILENAME: &str = "holon_tree.loro.sync";
 
+/// Whether the O(changed) incremental Loro→SQL projection fast path is enabled.
+/// Default OFF: the incremental path is a spike pending correctness hardening on
+/// rare create/move/delete sequences (the composed keystone occasionally tripped
+/// a `SplitBlock` "Block not found"). With it off the projection takes the
+/// baseline full-snapshot-and-diff path, which is the shipped behaviour.
+/// Set `HOLON_LORO_INCREMENTAL_PROJECTION=1` (or `true`/`on`/`yes`) to opt in.
+fn incremental_projection_enabled() -> bool {
+    std::env::var("HOLON_LORO_INCREMENTAL_PROJECTION")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
 /// Bidirectional sync between Loro and the abstract command/event bus.
 pub struct LoroSyncController {
     doc_store: Arc<RwLock<LoroDocumentStore>>,
@@ -258,10 +270,25 @@ pub struct LoroProjection {
     /// updates but withholds deletes, so those SQL-only seed rows survive until
     /// the seed reconciles them into Loro. Creates/updates are never gated.
     armed: Arc<AtomicBool>,
-    /// Phase 3 (shadow): the last-projected Loro snapshot. The shadow base-diff
-    /// (Loro authority vs this base) runs alongside the live sink-diff and
-    /// asserts op-multiset agreement before the diff source is flipped. See
-    /// [`crate::sync_base_store`].
+    /// The last-projected block snapshot, kept live in memory and mutated
+    /// **in place** by the incremental fast path (O(changed) per commit). It is
+    /// the diff "before" — replacing the former per-pass full-document snapshot
+    /// + `SyncBaseStore` sidecar. Seeded by a full reseed on cold boot (and any
+    /// unsettled/unarmed fallback pass); steady-state edits mutate only the
+    /// changed keys. Persistence is no longer needed: on restart the snapshot is
+    /// rebuilt from the loaded `.loro` (the authority) and reconciled once
+    /// against the SQL sink.
+    live: StdMutex<HashMap<String, SnapshotBlock>>,
+    /// `true` once `live` has been seeded by at least one full reseed. Until
+    /// then every pass takes the full path (cold-boot reconcile against SQL).
+    seeded: AtomicBool,
+    /// `TreeID -> stable id` for every live node, maintained by the incremental
+    /// path so a deleted node — whose Loro meta may already be gone — can still
+    /// be mapped to the sink row to delete. Rebuilt on each full reseed.
+    tid_index: StdMutex<HashMap<loro::TreeID, String>>,
+    /// The last-projected snapshot (persisted sidecar), used ONLY by the default
+    /// full-projection path (`HOLON_LORO_INCREMENTAL_PROJECTION` off). Baseline
+    /// diff "before". The incremental path ignores it and uses `live` instead.
     base_store: crate::SyncBaseStore,
 }
 
@@ -289,6 +316,9 @@ impl LoroProjection {
             sidecar_path,
             project_lock: tokio::sync::Mutex::new(()),
             armed: Arc::new(AtomicBool::new(false)),
+            live: StdMutex::new(HashMap::new()),
+            seeded: AtomicBool::new(false),
+            tid_index: StdMutex::new(HashMap::new()),
             base_store,
         }
     }
@@ -350,35 +380,88 @@ impl LoroProjection {
         let _guard = self.project_lock.lock().await;
         let t0 = std::time::Instant::now();
 
-        let current = self.current_frontiers().await?;
-
-        // "after" = Loro authority. "before" = the SQL sink's current state.
-        // `after_settled` is false when a live tree node was transiently
-        // meta-incomplete (mid-mutation) and therefore skipped — the snapshot
-        // under-reports the live set, so deletes derived from it would be
-        // spurious (see the delete-pass gate below).
         let doc_arc = self.raw_doc().await?;
+        let current = {
+            let doc = &*doc_arc;
+            doc.oplog_frontiers()
+        };
+        let last = self.last_synced.lock().unwrap().clone();
+        let incremental = incremental_projection_enabled();
+        let seeded = self.seeded.load(Ordering::SeqCst);
+        let armed = self.armed.load(Ordering::SeqCst);
+
+        // Idle wake (incremental mode only): nothing new landed in the oplog
+        // since the last projection. The default path re-derives from the base
+        // each pass and emits nothing on an idle wake anyway.
+        if incremental && seeded && last == current {
+            return Ok(());
+        }
+
+        // ── Incremental fast path — O(changed), not O(vault) ──────────────────
+        // GATED behind `HOLON_LORO_INCREMENTAL_PROJECTION` (default OFF): a spike
+        // pending correctness hardening (rare create/move/delete sequences). When
+        // on and seeded+armed, compute only the delta named by
+        // `doc.diff(last, current)` and mutate `live` in place.
+        if incremental && seeded && armed && !is_empty_frontiers(&last) {
+            let (changed, settled) = {
+                let doc = &*doc_arc;
+                let mut tid_index = self.tid_index.lock().unwrap();
+                crate::loro_backend::incremental_block_changes(doc, &last, &current, &mut tid_index)?
+            };
+            if settled {
+                let (ops, before_len, after_len) = {
+                    let mut live = self.live.lock().unwrap();
+                    let before_len = live.len();
+                    let mut ops: Vec<(String, holon_api::StorageEntity)> = Vec::new();
+                    for (id, new) in changed {
+                        match new {
+                            Some(nb) => match live.get(&id) {
+                                None => {
+                                    ops.push(("create".to_string(), block_to_params(&nb)));
+                                    live.insert(id, nb);
+                                }
+                                Some(old) if blocks_differ(old, &nb) => {
+                                    ops.push(("update".to_string(), block_diff_params(old, &nb)));
+                                    live.insert(id, nb);
+                                }
+                                Some(_) => { /* identical — no-op (compare-and-skip) */ }
+                            },
+                            None => {
+                                if live.remove(&id).is_some() {
+                                    let mut params = holon_api::StorageEntity::new();
+                                    params.insert("id".into(), Value::String(id));
+                                    ops.push(("delete".to_string(), params));
+                                }
+                            }
+                        }
+                    }
+                    let after_len = live.len();
+                    (ops, before_len, after_len)
+                };
+                let snapshot_ms = t0.elapsed().as_millis();
+                return self
+                    .emit_ops(ops, current, &t0, snapshot_ms, after_len, before_len, "incremental")
+                    .await;
+            }
+            tracing::warn!(
+                "[LoroProjection] incremental pass unsettled; falling back to full reseed"
+            );
+        }
+
+        // ── Full projection path (DEFAULT; base_store-based, baseline-exact) ──
+        // "after" = the full Loro authority snapshot. "before" = the persisted
+        // base (baseline diff source), seeded from the SQL sink on cold boot. In
+        // incremental mode after the first seed, `live` is the authoritative
+        // last-emitted state, so an incremental→full fallback diffs against it.
         let (after, after_settled): (HashMap<String, SnapshotBlock>, bool) = {
             let doc = &*doc_arc;
             snapshot_blocks_from_doc_settled(doc)
         };
-        // ── Phase 3: diff the Loro authority against the BASE, not the cache ──
-        // `before` is the last Loro snapshot we projected (the 3-way base),
-        // NOT the live SQL sink. Diffing against a stable base means:
-        //   • an unchanged Loro snapshot emits zero ops (no lossy
-        //     `sort_key`/`properties` round-trip churn — old #7);
-        //   • a transiently-incomplete sink can't make a live block look
-        //     "deleted" (no add/remove CDC churn);
-        //   • a SQL-only delete that left the node alive in Loro is NOT
-        //     resurrected (the node is in both base and `after` → no create).
-        // Cold boot (unseeded base): seed from the SQL sink so already-persisted
-        // seed-layout rows are treated as updates, not re-creates.
-        // Read the base through the `BaseStore` trait seam (Phase 2). Keyed by
-        // `BaseKey::global()` — one Loro doc for the whole tree today; the key
-        // becomes a real `(peer, file)` when bases go domain-scoped (Phase 3+).
         let base_key = BaseKey::global();
         let was_seeded = self.base_store.is_base_seeded(&base_key);
-        let before: Arc<HashMap<String, SnapshotBlock>> = if was_seeded {
+        let before: Arc<HashMap<String, SnapshotBlock>> = if incremental && seeded {
+            Arc::new(self.live.lock().unwrap().clone())
+        } else if was_seeded {
             self.base_store.get_base(&base_key)
         } else {
             Arc::new(self.read_sql_snapshot().await?)
@@ -388,37 +471,63 @@ impl LoroProjection {
         let mut ops = diff_snapshots_to_ops(&before, &after);
         let had_changes = !ops.is_empty();
 
-        // Delete-pass gate. Withhold deletes when EITHER:
-        //  (a) the projection is not yet armed (Loro still seeding from the
-        //      persistent store) — the bootstrap org scan's flush must not
-        //      delete raw-inserted seed-layout rows the seed hasn't mirrored
-        //      into Loro yet; or
-        //  (b) the snapshot is not settled — a live node was transiently
-        //      meta-incomplete and dropped from `after`, so a block still in
-        //      `before` (SQL) looks "deleted". Emitting that delete removes the
-        //      sink row; the next settled projection re-creates it — the
-        //      add/remove CDC churn cycle (`inv-editable-text-has-draggable`).
-        //      A genuinely deleted node parents to Deleted/Unexist and keeps
-        //      `after_settled = true`, so real deletes still flow next pass.
-        // Creates/updates always flow.
-        if !self.armed.load(Ordering::SeqCst) || !after_settled {
-            let before_len = ops.len();
+        // Delete-pass gate. Withhold deletes when the projection is not yet armed
+        // (Loro still seeding — raw-inserted seed-layout rows not yet mirrored) or
+        // the snapshot is unsettled (a live node was transiently meta-incomplete,
+        // so a still-live block looks "deleted"). Creates / updates always flow.
+        if !armed || !after_settled {
+            let n = ops.len();
             ops.retain(|(name, _)| name != "delete");
-            let withheld = before_len - ops.len();
+            let withheld = n - ops.len();
             if withheld > 0 {
                 tracing::warn!(
                     "[LoroProjection] withholding {} delete(s) (armed={}, snapshot_settled={})",
                     withheld,
-                    self.armed.load(Ordering::SeqCst),
+                    armed,
                     after_settled,
                 );
             }
         }
 
+        let before_len = before.len();
+        let after_len = after.len();
+
+        // Commit the new base state — only on a settled snapshot.
+        if after_settled {
+            if incremental {
+                // Seed / refresh the incremental state so a later gated pass can
+                // take the fast path (and so a fallback diffs against `live`).
+                let idx = {
+                    let doc = &*doc_arc;
+                    crate::loro_backend::build_tid_index(doc)
+                };
+                *self.tid_index.lock().unwrap() = idx;
+                *self.live.lock().unwrap() = after;
+                self.seeded.store(true, Ordering::SeqCst);
+            } else if had_changes || !was_seeded {
+                // Baseline: advance the persisted base; skip the doc-sized rewrite
+                // when the diff was empty against an already-seeded base.
+                self.base_store.put_base(&base_key, after);
+            }
+        }
+
+        self.emit_ops(ops, current, &t0, snapshot_ms, after_len, before_len, "full")
+            .await
+    }
+
+    /// Apply the diff ops through the consolidator and advance the watermark.
+    /// Shared by the incremental fast path and the full reseed path.
+    async fn emit_ops(
+        &self,
+        ops: Vec<(String, holon_api::StorageEntity)>,
+        current: Frontiers,
+        t0: &std::time::Instant,
+        snapshot_ms: u128,
+        after_len: usize,
+        before_len: usize,
+        mode: &str,
+    ) -> Result<()> {
         if !ops.is_empty() {
-            // Surface the aggregate_ids of each outbound op so we can
-            // bisect Loro-create → block_raw-write drops by grepping the
-            // log for the failing block id.
             let op_summary: Vec<String> = ops
                 .iter()
                 .map(|(op_name, params)| {
@@ -430,79 +539,45 @@ impl LoroProjection {
                 })
                 .collect();
             tracing::trace!(
-                "[LoroSyncController OUTBOUND] before={} after={} ops={} aggregate_ids={:?}",
-                before.len(),
-                after.len(),
+                "[LoroSyncController OUTBOUND] mode={} after={} before={} ops={} aggregate_ids={:?}",
+                mode,
+                after_len,
+                before_len,
                 ops.len(),
                 op_summary,
             );
             let op_count = op_summary.len();
 
-            // Phase 5: the block sink-write flows as a typed intent through the
-            // consolidator. `base_ref` records the base this diff was computed
-            // against (the pre-projection watermark frontiers) so the intent
-            // carries its provenance. `command_id` stays `None` — the projection
-            // diffs the merged Loro authority and so has no single originating
-            // command (block undo/redo is EventBus-independent; verified Risk #7).
-            // The consolidator records the typed `ChangeSet` (op-multiset
-            // agreement, the Phase-2 shadow relation) and writes the SQL sink.
             let base_ref = {
                 let bytes = self.last_synced.lock().unwrap().encode();
-                Some(
-                    bytes
-                        .iter()
-                        .map(|b| format!("{:02x}", b))
-                        .collect::<String>(),
-                )
+                Some(bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>())
             };
             let provenance = holon_api::Provenance {
                 command_id: None,
                 base_ref,
             };
             self.consolidator.apply(ops, provenance).await?;
-            // Startup-promptness timing: how long a projection pass took to read
-            // the Loro+SQL snapshots and apply the diff. During the boot burst
-            // this surfaces whether per-pass snapshot cost (O(blocks)) is the
-            // bottleneck behind slow first-paint.
             tracing::info!(
-                "[LoroProjection] applied {} op(s) in {}ms (snapshot {}ms, after={} before={})",
+                "[LoroProjection] applied {} op(s) in {}ms (snapshot {}ms, after={} before={}) [{}]",
                 op_count,
                 t0.elapsed().as_millis(),
                 snapshot_ms,
-                after.len(),
-                before.len(),
+                after_len,
+                before_len,
+                mode,
             );
-            // Latency stage (commit->projection): the full-document DFS snapshot
-            // + diff cost of one Loro commit's projection pass. `snapshot_ms` is
-            // the O(blocks) snapshot+base-read portion; `ms` the whole pass incl.
-            // the consolidator SQL write. Greppable via target="holon_latency".
             tracing::debug!(
                 target: "holon_latency",
                 stage = "projection",
                 ops = op_count,
-                blocks = after.len(),
+                blocks = after_len,
                 snapshot_ms = snapshot_ms as u64,
                 ms = t0.elapsed().as_millis() as u64,
+                mode = mode,
                 "holon_latency",
             );
         }
 
-        // Advance the Phase-3 base to the just-projected Loro snapshot. Only on
-        // a settled snapshot — an unsettled `after` under-reports the live set,
-        // so committing it as the base would make the next base-diff emit
-        // spurious creates/deletes. (Shadow: this changes only future base-diff
-        // comparisons, not what is applied.)
-        // Skip the write (and the full-store sidecar rewrite it triggers) when
-        // the diff was empty against an already-seeded base — the stored base
-        // is semantically identical to `after`, so replacing it only burns a
-        // document-sized serialize + disk write per idle wake.
-        if after_settled && (had_changes || !was_seeded) {
-            self.base_store.put_base(&base_key, after);
-        }
-
-        // Advance the watermark. This is the ONLY place last_synced is
-        // updated — on_inbound_event deliberately does NOT touch it, so
-        // concurrent peer imports are always captured by the next diff.
         *self.last_synced.lock().unwrap() = current;
         self.persist_sidecar().await?;
         Ok(())
@@ -515,12 +590,6 @@ impl LoroProjection {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to get global doc: {}", e))?;
         Ok(collab.doc())
-    }
-
-    async fn current_frontiers(&self) -> Result<Frontiers> {
-        let doc_arc = self.raw_doc().await?;
-        let doc = &*doc_arc;
-        Ok(doc.oplog_frontiers())
     }
 
     /// Read the sink's current block state (the diff "before") via the injected

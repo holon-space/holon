@@ -982,6 +982,226 @@ fn effective_sibling_sort_keys(
         .collect()
 }
 
+/// Reverse-map a changed container (from `doc.diff`) to the tree node that owns
+/// it — the deepest `Index::Node` on its container path. A block's content
+/// (text) and properties (nested map) live in containers under the node's meta
+/// map, so a content/property edit surfaces as a `Map`/`Text` diff on such a
+/// container; this recovers the owning `TreeID`. Returns `None` for containers
+/// with no tree-node ancestor (not part of the block tree).
+fn owning_tree_node(doc: &loro::LoroDoc, cid: &loro::ContainerID) -> Option<loro::TreeID> {
+    let path = doc.get_path_to_container(cid)?;
+    path.iter().rev().find_map(|(_, idx)| match idx {
+        loro::Index::Node(tid) => Some(*tid),
+        _ => None,
+    })
+}
+
+/// Children `TreeID`s of a `TreeParentId` scope in Loro child order (the same
+/// order `snapshot_blocks_from_doc_settled` reads for sibling sort keys).
+fn children_of_scope(tree: &loro::LoroTree, scope: loro::TreeParentId) -> Vec<loro::TreeID> {
+    match scope {
+        loro::TreeParentId::Node(pid) => tree.children(pid).unwrap_or_default(),
+        loro::TreeParentId::Root => tree.roots(),
+        loro::TreeParentId::Deleted | loro::TreeParentId::Unexist => Vec::new(),
+    }
+}
+
+/// Read ONE live tree node into a `(stable_id, SnapshotBlock)`, sharing the
+/// sibling tie-break recompute across a group via `group_keys` (parent scope →
+/// {child → sort_key}). Returns `None` — WITHOUT faking an A0 key — when the
+/// node is transiently incomplete (missing meta / stable id / fractional
+/// index): identical withhold semantics to the full-snapshot reader
+/// (`snapshot_blocks_from_doc_settled`), so the caller can mark the pass
+/// unsettled and retry.
+fn read_one_node_snapshot(
+    tree: &loro::LoroTree,
+    node: loro::TreeID,
+    group_keys: &mut HashMap<loro::TreeParentId, HashMap<loro::TreeID, Option<String>>>,
+) -> Option<(String, SnapshotBlock)> {
+    let meta = tree.get_meta(node).ok()?;
+    let stable_id = read_stable_id(&meta)?;
+    let parent_tid = get_node_parent(tree, node);
+    let scope = match parent_tid {
+        Some(p) => loro::TreeParentId::Node(p),
+        None => loro::TreeParentId::Root,
+    };
+    let keys = group_keys.entry(scope).or_insert_with(|| {
+        let siblings = children_of_scope(tree, scope);
+        let ks = effective_sibling_sort_keys(tree, &siblings);
+        siblings.into_iter().zip(ks).collect()
+    });
+    let Some(Some(sort_key)) = keys.get(&node).cloned() else {
+        tracing::error!(
+            block_id = %stable_id,
+            ?scope,
+            node = ?node,
+            "loro incremental projection: live node has no fractional index (ADR \
+             0005 ordering-invariant violation); withholding rather than faking \
+             an A0 sort key"
+        );
+        return None;
+    };
+    let block = read_block_from_tree(tree, node, parent_tid);
+    // Key by the SCHEMED id (`block:<stable>`), exactly as the full-snapshot
+    // reader keys `blocks` — the `live`/SQL rows use the schemed id. Keying by
+    // the bare `stable_id` here would make every update look like a create
+    // (live grows unboundedly) and every delete miss its schemed sink row.
+    Some((block.id.to_string(), SnapshotBlock { block, sort_key }))
+}
+
+/// Incremental block changes between two frontiers, computed from `doc.diff`
+/// (cost proportional to the number of ops in the interval, NOT the total tree
+/// size). This is the O(changed) replacement for the full-document walk +
+/// full-map diff on every commit.
+///
+/// Returns `(changed, settled)` where `changed` maps each affected stable id to
+/// its new state (`None` = the node was deleted). `settled` is `false` when a
+/// touched live node was transiently incomplete (mid-mutation) — the caller
+/// discards the incremental result and falls back to a full reseed for that
+/// pass (which owns the delete-withhold gate), mirroring the full-snapshot
+/// reader's unsettled handling.
+///
+/// Invariant preservation:
+/// * **peer-sibling-order** — any Create/Move/Delete marks its parent scope(s)
+///   dirty; every current member of a dirty scope is re-read so the
+///   `effective_sibling_sort_keys` tie-break is recomputed for the WHOLE group
+///   (a new/removed tied sibling shifts the `.<run_pos>` suffix of its peers).
+///   A pure content/property edit touches no scope, so no sibling recompute.
+/// * **delete-pass** — deletes come from the tree diff's `Delete` items; the
+///   node's stable id is recovered from its (often still-present) meta or the
+///   maintained `tid_index`, so a delete is never silently dropped.
+///
+/// `tid_index` (TreeID -> stable id) is maintained across calls so a deleted
+/// node whose meta is already gone can still be mapped to the sink row.
+pub fn incremental_block_changes(
+    doc: &loro::LoroDoc,
+    from: &loro::Frontiers,
+    to: &loro::Frontiers,
+    tid_index: &mut HashMap<loro::TreeID, String>,
+) -> anyhow::Result<(HashMap<String, Option<SnapshotBlock>>, bool)> {
+    let batch = doc
+        .diff(from, to)
+        .map_err(|e| anyhow::anyhow!("loro doc.diff({from:?}, {to:?}) failed: {e:?}"))?;
+    let tree = doc.get_tree(TREE_NAME);
+
+    let mut reread: HashSet<loro::TreeID> = HashSet::new();
+    let mut deleted: HashSet<loro::TreeID> = HashSet::new();
+    let mut dirty_scopes: HashSet<loro::TreeParentId> = HashSet::new();
+
+    for (cid, diff) in batch.iter() {
+        match diff {
+            loro::event::Diff::Tree(td) => {
+                for item in td.diff.iter() {
+                    match &item.action {
+                        loro::TreeExternalDiff::Create { parent, .. } => {
+                            dirty_scopes.insert(*parent);
+                            reread.insert(item.target);
+                        }
+                        loro::TreeExternalDiff::Move {
+                            parent, old_parent, ..
+                        } => {
+                            dirty_scopes.insert(*parent);
+                            dirty_scopes.insert(*old_parent);
+                            reread.insert(item.target);
+                        }
+                        loro::TreeExternalDiff::Delete { old_parent, .. } => {
+                            dirty_scopes.insert(*old_parent);
+                            deleted.insert(item.target);
+                        }
+                    }
+                }
+            }
+            // A content (text) or property (map) edit on a node's sub-container.
+            _ => {
+                if let Some(tid) = owning_tree_node(doc, cid) {
+                    reread.insert(tid);
+                }
+            }
+        }
+    }
+
+    // A structural change in a scope can shift the sibling tie-break key of
+    // EVERY current member (peer-sibling-order) — re-read the whole group.
+    for scope in &dirty_scopes {
+        for child in children_of_scope(&tree, *scope) {
+            reread.insert(child);
+        }
+    }
+    // A node explicitly deleted this interval is handled by `deleted`, never
+    // re-read as live.
+    reread.retain(|t| !deleted.contains(t));
+
+    let mut group_keys: HashMap<loro::TreeParentId, HashMap<loro::TreeID, Option<String>>> =
+        HashMap::new();
+    let mut changed: HashMap<String, Option<SnapshotBlock>> = HashMap::new();
+    let mut settled = true;
+
+    for node in reread {
+        // A node whose parent scope was dirtied may itself have been deleted in
+        // the same interval (e.g. subtree prune): if it is no longer alive,
+        // route it through the delete path instead of reading it as live.
+        if !is_node_alive(&tree, node) {
+            if let Some(sid) = tid_index.remove(&node) {
+                changed.insert(sid, None);
+            }
+            continue;
+        }
+        match read_one_node_snapshot(&tree, node, &mut group_keys) {
+            Some((sid, snap)) => {
+                tid_index.insert(node, sid.clone());
+                changed.insert(sid, Some(snap));
+            }
+            None => settled = false,
+        }
+    }
+
+    for node in deleted {
+        let sid = tree
+            .get_meta(node)
+            .ok()
+            .and_then(|m| read_stable_id(&m))
+            .map(|raw| EntityUri::block(&raw).to_string())
+            .or_else(|| tid_index.get(&node).cloned());
+        match sid {
+            Some(sid) => {
+                tid_index.remove(&node);
+                changed.insert(sid, None);
+            }
+            None => {
+                tracing::warn!(
+                    node = ?node,
+                    "loro incremental projection: deleted node has no known stable id \
+                     (never projected) - nothing to delete"
+                );
+            }
+        }
+    }
+
+    Ok((changed, settled))
+}
+
+/// Build a `TreeID -> stable id` index over all live nodes. (Re)seeds the
+/// incremental projector's index on a full reseed pass so subsequent deletes
+/// map even after Loro drops a deleted node's meta.
+pub fn build_tid_index(doc: &loro::LoroDoc) -> HashMap<loro::TreeID, String> {
+    let tree = doc.get_tree(TREE_NAME);
+    let mut index = HashMap::new();
+    for node in tree.get_nodes(false) {
+        if matches!(
+            node.parent,
+            loro::TreeParentId::Deleted | loro::TreeParentId::Unexist
+        ) {
+            continue;
+        }
+        if let Ok(meta) = tree.get_meta(node.id)
+            && let Some(sid) = read_stable_id(&meta)
+        {
+            index.insert(node.id, EntityUri::block(&sid).to_string());
+        }
+    }
+    index
+}
+
 /// A doc's Lamport height: 1 + the max lamport of any applied op, computed
 /// from public API only (frontiers + `ChangeMeta`). This scalar is the ONLY
 /// value the E-solid shadow-mesh oracle reads from the SUT (clock sync at

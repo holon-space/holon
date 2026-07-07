@@ -102,8 +102,8 @@ pub use live_value::LiveValue;
 pub use loro_backend::{
     CONTENT_RAW, CONTENT_TYPE, EXTERNAL_ID, LoroBackend, LoroMapExt, LoroTreeView, SOURCE_CODE,
     SOURCE_LANGUAGE, STABLE_ID, SnapshotBlock, TREE_NAME, configure_text_styles,
-    mark_from_loro_value, mark_to_loro_value, read_marks_from_text, snapshot_blocks_from_doc,
-    snapshot_blocks_from_doc_settled,
+    build_tid_index, incremental_block_changes, mark_from_loro_value, mark_to_loro_value,
+    read_marks_from_text, snapshot_blocks_from_doc, snapshot_blocks_from_doc_settled,
 };
 pub use loro_block_operations::LoroBlockOperations;
 pub use loro_blocks_datasource::LoroBlocksDataSource;
