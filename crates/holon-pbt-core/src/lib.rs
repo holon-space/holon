@@ -50,8 +50,8 @@ pub use caching_proxy::{cached, CachingProxy};
 pub use component_set::{Component, ComponentSet, ComponentSetError, Projection};
 pub use invariant::{Invariant, InvariantId, InvariantResult, RunMode};
 pub use wiring::{
-    any_valid_wiring, wiring_axes, Actor, RequiredWiring, StorageAdapter, SyncAdapter, Wiring,
-    WiringError,
+    any_valid_wiring, wiring_axes, wiring_from_exact_spec, Actor, RequiredWiring, StorageAdapter,
+    SyncAdapter, Wiring, WiringError,
 };
 
 pub use interactions::{DeliverBlockContent, SwitchViewMode, ToggleCollapse, ToggleDrawer};

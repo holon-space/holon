@@ -292,10 +292,19 @@ pub async fn boot_and_seed_wide(
     resolver: &IdResolver,
     ref_state: &ReferenceState,
 ) -> (CapMap, WideHandle, BTreeSet<EntityUri>) {
-    // SUT-side parameterization seam: the booted set follows the oracle's drawn wiring
-    // (today fixed to `full_headless` by `wide_e2e_ref`; `init_state` draws
-    // `any_valid_wiring()` once the ref-side wiring + required-invariants sub-steps land).
+    // SUT-side parameterization seam: the booted set follows the oracle's DRAWN wiring
+    // (`init_state` draws `any_valid_wiring()`; `HOLON_PBT_FORCE_FULL=1` pins
+    // `full_headless`). Disclose the draw per case so a run log yields per-wiring case
+    // counts (grep "wide-e2e wiring") -- the drawn grid is auditable, not assumed.
     let set = set_for_wiring(&ref_state.wiring);
+    eprintln!(
+        "[wide-e2e wiring] drawn: storage={:?} sync={:?} actors={:?} -> booted storage={:?} projections={:?}",
+        ref_state.wiring.storage_adapters,
+        ref_state.wiring.sync_adapters,
+        ref_state.wiring.actors,
+        set.wiring.storage_adapters,
+        set.projections,
+    );
     let has_frontend = set.has_projection(Projection::ViewModel);
     let bundle = compose_sut_seeded(
         &set,
@@ -493,8 +502,8 @@ pub fn windowed_composed_sut(
 }
 
 /// Normalize a (possibly drawn) `Wiring` into the composed **headless** `ComponentSet`
-/// the `general_e2e_composed_pbt` swap boots — the SUT-side seam env-parameterization
-/// flips (drawing `any_valid_wiring()` instead of fixing `full_headless`). Mirrors the
+/// the `general_e2e_composed_pbt` swap boots — the SUT half of the wiring draw
+/// (`init_state` draws `any_valid_wiring()`; this maps each draw to a bootable set). Mirrors the
 /// native `storage_selector_for_wiring` backend choice so a Loro-only draw maps to the
 /// cheap `LoroMemory` SUT and a Turso draw to the full `BackendEngine`:
 ///
@@ -555,8 +564,8 @@ pub fn cap_set_for_wiring(wiring: &Wiring) -> CapSet {
     cs
 }
 
-/// The `full_headless` cap set — the swap's current fixed wiring. Thin alias over
-/// [`cap_set_for_wiring`] (the parameterized seam).
+/// The `full_headless` cap set — the WIDEST wiring's cap set (used by the cap-presence
+/// guard and the FORCE_FULL pin). Thin alias over [`cap_set_for_wiring`].
 pub fn full_headless_cap_set() -> CapSet {
     cap_set_for_wiring(&ComponentSet::full_headless().wiring)
 }
@@ -582,8 +591,8 @@ pub fn wide_e2e_ref_for(wiring: &Wiring) -> ReferenceState {
     state.with_cap_set(cap_set_for_wiring(wiring))
 }
 
-/// The swap oracle for the current fixed wiring (`full_headless`). Thin alias over
-/// [`wide_e2e_ref_for`] (the parameterized seam).
+/// The swap oracle for the WIDEST wiring (`full_headless`) — the `HOLON_PBT_FORCE_FULL`
+/// pin and the teeth's fixed target. Thin alias over [`wide_e2e_ref_for`].
 pub fn wide_e2e_ref() -> ReferenceState {
     wide_e2e_ref_for(&ComponentSet::full_headless().wiring)
 }
@@ -636,7 +645,24 @@ impl ReferenceStateMachine for WideE2EMachine {
         // false-REDing on the SQL/ViewModel ids it has no caps for.
         // `HOLON_PBT_FORCE_FULL=1` pins every draw to `full_headless` — the deterministic
         // exerciser for the frontend-only composed arms (`ApplyMutation` External /
-        // `BulkExternalAdd`), which `any_valid_wiring` only reaches on a rare Turso draw.
+        // `BulkExternalAdd`). NOT actually rare by default: the validity filter
+        // (`Wiring::validate` rejects empty-storage and ActionEngine-without-Turso draws)
+        // reweights the raw 0.15 Turso inclusion to ≈35% of VALID draws, so a 16-case
+        // run misses Turso entirely with probability ≈0.1%.
+        // `HOLON_PBT_PIN_WIRING="storage;sync;actors"` pins every draw to ONE exact
+        // manifest (fail-loud on a typo or invalid manifest) — the external-supply seam
+        // for bottom-up ladder runs and subset-wiring repros. Mutually exclusive with
+        // FORCE_FULL to keep a run's provenance unambiguous.
+        if let Ok(spec) = std::env::var("HOLON_PBT_PIN_WIRING") {
+            assert!(
+                std::env::var("HOLON_PBT_FORCE_FULL").is_err(),
+                "HOLON_PBT_PIN_WIRING and HOLON_PBT_FORCE_FULL are mutually exclusive"
+            );
+            let wiring = holon_pbt_core::wiring_from_exact_spec(&spec);
+            return ::proptest::strategy::Strategy::boxed(::proptest::prelude::Just(
+                wide_e2e_ref_for(&wiring),
+            ));
+        }
         if std::env::var("HOLON_PBT_FORCE_FULL").is_ok() {
             return ::proptest::strategy::Strategy::boxed(
                 ::proptest::prelude::Just(wide_e2e_ref()),
@@ -663,7 +689,8 @@ impl ReferenceStateMachine for WideE2EMachine {
 }
 
 /// The swap slice: production `E2ETransition` enum, production `aggregate_transitions`
-/// generator, composed `compose_sut(full_headless)` SUT (via [`boot_and_seed_wide`]).
+/// generator, composed `compose_sut(set_for_wiring(drawn wiring))` SUT (via
+/// [`boot_and_seed_wide`]) -- one SUT per drawn point of the wiring grid.
 pub struct WideE2E;
 
 impl ComposedSlice for WideE2E {
