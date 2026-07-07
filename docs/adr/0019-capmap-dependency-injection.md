@@ -10,7 +10,10 @@ why `CapMap` is an *insert-only, fail-loud-on-duplicate* dependency-injection
 container, why that shape (over a service locator or pervasive constructor
 injection) is what enables the single-SUT-shape PBT architecture, and where its
 boundary with the production application's DI (`fluxdi`) lies.
-**Relates to:** ADR 0007 (wiring manifest for PBT subsets), ADR 0009
+**Relates to:** ADR 0007 (wiring manifest for PBT subsets — NOTE: ADR 0007's
+`Wiring` manifest concept was SUPERSEDED in the γ-endgame; the live mechanism is
+the one composed keystone + `cfg(test)` lib slices, and feature-reduction is a
+runtime-config concern, not separate binaries), ADR 0009
 (component-subset PBTs and bisection), ADR 0012 (reference-model capability
 contract — the trait surface `CapMap` hosts). How-to companion:
 `docs/Testing/PbtSlicing.md`.

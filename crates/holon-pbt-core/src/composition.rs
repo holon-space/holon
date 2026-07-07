@@ -1,5 +1,17 @@
 //! Capability-composition spine for trivially-sliceable PBT (γ design).
 //!
+//! **Relationship to production DI (`fluxdi`) — NESTED, not parallel (ADR 0019
+//! §5).** `fluxdi` (`holon_app::wiring::add_frontend`) *assembles the real
+//! application*; `CapMap` is a capability-*disclosure facade* that a PBT run wraps
+//! AROUND a fluxdi-assembled app — a headless component boots the real app via
+//! `holon_app::new_from_config_with_di` and then registers that ONE app under many
+//! `Sut*`/`Ref*` capability trait-objects here. `CapMap` never re-implements the
+//! wiring and prod never boots through `CapMap`. Do NOT try to unify the two
+//! containers: `CapMap` is insert-only / fail-loud (selection + honesty), `fluxdi`
+//! is a permissive async runtime container — opposite optimization targets. The
+//! shared boot→cap adapter lives in ONE place: `install_headless_render_interpreter`
+//! / `publish_reactive_builder_services` in `holon-integration-tests::test_environment`.
+//!
 //! This is the PoC backbone for the refactor discussed in
 //! `docs/Testing/PbtSlicing_Trivialization_Handoff.md` and its design
 //! follow-up. It de-risks the three pieces that were genuinely uncertain:

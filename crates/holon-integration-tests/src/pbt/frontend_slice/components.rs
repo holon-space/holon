@@ -176,20 +176,14 @@ impl HeadlessFrontendComponent {
             config_dir,
             std::collections::HashSet::new(),
             move |injector| {
-                use holon_frontend::reactive::{BuilderServicesSlot, RenderInterpreterInjectorExt};
-                crate::test_environment::override_org_fs_bindings(injector, &org_fs_for_di);
-                let slot = injector.resolve::<BuilderServicesSlot>();
-                injector.set_render_interpreter(holon_frontend::reactive::make_interpret_fn(
-                    slot.0.clone(),
-                ));
+                crate::test_environment::install_headless_render_interpreter(
+                    injector,
+                    &org_fs_for_di,
+                );
                 Ok(())
             },
             move |injector| {
-                use holon_frontend::reactive::{BuilderServicesSlot, ReactiveEngine};
-                let engine = injector.resolve::<ReactiveEngine>();
-                let slot = injector.resolve::<BuilderServicesSlot>();
-                let services: Arc<dyn BuilderServices> = engine.clone();
-                slot.0.set(services).ok(); // ALLOW(ok): OnceLock set — idempotent
+                let engine = crate::test_environment::publish_reactive_builder_services(injector);
                 injector_slot_c.set(injector.clone()).ok(); // ALLOW(ok): OnceLock set
                 engine
             },

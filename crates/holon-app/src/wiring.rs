@@ -4,6 +4,14 @@
 //! `FrontendInjectorExt::add_frontend()` registers all frontend-specific services
 //! (ThemeRegistry, conditional modules, FrontendSession factory)
 //! so that callers can `injector.resolve_async::<FrontendSession>().await`.
+//!
+//! **Relationship to the PBT `CapMap` (ADR 0019 §5) — NESTED, not parallel.** This
+//! `fluxdi` wiring *assembles the real application*. The PBT composition spine
+//! (`holon_pbt_core::composition::CapMap`) is a capability-*disclosure facade* that
+//! wraps a fluxdi-assembled app: the headless PBT host boots this exact wiring via
+//! `new_from_config_with_di` and exposes the result as `Sut*`/`Ref*` capabilities.
+//! `CapMap` does NOT duplicate this wiring, and prod does NOT boot through `CapMap`.
+//! The two DI containers must stay separate — see ADR 0019 (do-not-unify).
 
 use std::collections::HashSet;
 use std::path::PathBuf;
