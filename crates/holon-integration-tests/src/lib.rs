@@ -22,6 +22,12 @@
 
 pub mod assertions;
 pub mod debug_pause;
+
+/// `cap_transition!` now lives in `holon-pbt-core` (shared with the
+/// per-subsystem companion PBT crates). Re-exported at this crate root so the
+/// many `crate::cap_transition!` call sites in `pbt::transitions::*` keep
+/// resolving.
+pub use holon_pbt_core::cap_transition;
 pub mod fake_mcp_module;
 /// `display_assertions` moved to `holon-layout-testing`. Re-exported here
 /// so call sites inside this crate can keep using
