@@ -234,7 +234,29 @@ impl Cell<String> {
     pub fn remote_deltas(&self) -> BoxStream<'static, TextDelta> {
         match self.inner.as_text_backing() {
             Some(text) => text.remote_deltas(),
-            None => Box::pin(futures::stream::empty()),
+            // Non-text-backed (LWW / SqlOnly) cells have no rich delta stream,
+            // but they DO have a CDC-fed `signal()` of the whole current value.
+            // Derive a WAKEUP-ONLY delta stream from it: each external content
+            // change (or local-write echo) yields one empty-`ops` `TextDelta`.
+            // The payload is intentionally empty — every `remote_deltas()`
+            // subscriber converges ABSOLUTELY to `current()` on wakeup (it never
+            // replays the ops), so the ops carry no information and MUST NOT be
+            // applied as an edit. This keeps the entity `Cell` the sole external
+            // content source in SqlOnly mode too (retiring `_data_subscription`)
+            // WITHOUT enabling LWW text *editing*: this is inbound-only, and
+            // `as_text_backing()` stays `None`, so `apply_text_op` still fails
+            // loud (authority-first invariant preserved). This wakeup-only path
+            // becomes obsolete once the SqlOnly axis moves to an ephemeral-LoroText cell
+            // (2026-07-07 reframe: retire the `Lww*` backings), which supplies a
+            // real text backing and thus a real delta stream.
+            None => {
+                use futures::StreamExt;
+                Box::pin(
+                    self.inner
+                        .signal()
+                        .map(|_wakeup| TextDelta { ops: Vec::new() }),
+                )
+            }
         }
     }
 }
@@ -524,7 +546,7 @@ mod tests {
         fn signal(&self) -> BoxStream<'static, String> {
             Box::pin(futures::stream::empty())
         }
-        fn apply_replace(&self, _v: String) -> BoxFuture<'static, Result<()>> {
+        fn apply_replace(&self, _: String) -> BoxFuture<'static, Result<()>> {
             Box::pin(async { Ok(()) })
         }
         fn as_text_backing(&self) -> Option<&dyn TextCellBacking> {
@@ -533,7 +555,7 @@ mod tests {
     }
 
     impl TextCellBacking for OffsetTextBacking {
-        fn apply_text_op(&self, _op: TextOp) -> Result<()> {
+        fn apply_text_op(&self, _: TextOp) -> Result<()> {
             Ok(())
         }
         fn anchor_cursor(&self, char_offset: usize, bias: CursorBias) -> CursorAnchor {
