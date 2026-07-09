@@ -7,33 +7,42 @@
 //! frontends (including MCP's channel-based `GpuiUserDriver`). This module
 //! re-exports them for backcompat with existing test code.
 
-use anyhow::{Context, Result};
-use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex};
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::Mutex;
 
+use anyhow::Context;
+use anyhow::Result;
 use holon::api::backend_engine::BackendEngine;
-use holon_api::{EntityName, EntityUri, KeyChord, StorageEntity, Value};
+use holon_api::EntityName;
+use holon_api::EntityUri;
+use holon_api::KeyChord;
+use holon_api::StorageEntity;
+use holon_api::Value;
 use holon_frontend::ReactiveViewModel;
 use holon_frontend::operations::OperationIntent;
+pub use holon_frontend::user_driver::ReactiveEngineDriver;
+pub use holon_frontend::user_driver::UserDriver;
+use holon_pbt_core::capabilities::SutBlockCreate;
 use holon_pbt_core::capabilities::SutBlockTreeWrite;
 
 use crate::pbt::op_write_cap::IdResolver;
-
-pub use holon_frontend::user_driver::{ReactiveEngineDriver, UserDriver};
 
 /// Dispatches mutations directly via `BackendEngine::execute_operation`.
 /// Legacy driver — bypasses FrontendSession and ReactiveEngine.
 ///
 /// This is also the **dispatch floor** of the layer-localization driver ladder
-/// (§8.11): the bottom rung that applies a structural op directly to the engine,
-/// below the interaction (geometry / view-model) layers. Its `SutBlockTreeWrite`
-/// impl is what a storage-only composed config (no ViewModel/UI → no higher driver)
-/// installs, so "the floor is just another `UserDriver`" rather than a bespoke cap.
+/// (§8.11): the bottom rung that applies a structural op directly to the
+/// engine, below the interaction (geometry / view-model) layers. Its
+/// `SutBlockTreeWrite` impl is what a storage-only composed config (no
+/// ViewModel/UI → no higher driver) installs, so "the floor is just another
+/// `UserDriver`" rather than a bespoke cap.
 pub struct DirectUserDriver {
     engine: Arc<BackendEngine>,
-    /// Synthetic-oracle→SUT-real id map (the `SutBlockTreeWrite` floor resolves every
-    /// id through it, exactly like `OpDispatchWriter`). Empty = identity (the legacy
-    /// `new` callers that dispatch fixed ids).
+    /// Synthetic-oracle→SUT-real id map (the `SutBlockTreeWrite` floor resolves
+    /// every id through it, exactly like `OpDispatchWriter`). Empty =
+    /// identity (the legacy `new` callers that dispatch fixed ids).
     resolver: IdResolver,
 }
 
@@ -46,8 +55,9 @@ impl DirectUserDriver {
         }
     }
 
-    /// Share the composed runner's id map so the floor `SutBlockTreeWrite` resolves an
-    /// oracle synthetic id (`block::split-N`) to the engine-minted id before dispatch.
+    /// Share the composed runner's id map so the floor `SutBlockTreeWrite`
+    /// resolves an oracle synthetic id (`block::split-N`) to the
+    /// engine-minted id before dispatch.
     pub fn with_resolver(engine: Arc<BackendEngine>, resolver: IdResolver) -> Self {
         Self { engine, resolver }
     }
@@ -61,8 +71,9 @@ impl DirectUserDriver {
             .unwrap_or_else(|| id.clone())
     }
 
-    /// Dispatch a `block` op directly to the engine — the floor below interaction
-    /// resolution (`synthetic_dispatch` == `BackendEngine::execute_operation`).
+    /// Dispatch a `block` op directly to the engine — the floor below
+    /// interaction resolution (`synthetic_dispatch` ==
+    /// `BackendEngine::execute_operation`).
     async fn dispatch_block(&self, op: &str, params: StorageEntity) {
         let params: HashMap<String, Value> = params
             .into_iter()
@@ -80,11 +91,12 @@ impl DirectUserDriver {
     }
 }
 
-/// The dispatch-floor `SutBlockTreeWrite` (§8.11 LL-2). Each structural op is applied
-/// directly to the engine via `synthetic_dispatch` (== `OpDispatchWriter`'s no-focus-sink
-/// path), below the geometry/view-model interaction layers. UI-only gestures
-/// (click→focus, expand/collapse, slash) have NO floor — they are view-model concepts
-/// and correctly bottom out at the VM rung (§8.11 care-point 3), so this floor provides
+/// The dispatch-floor `SutBlockTreeWrite` (§8.11 LL-2). Each structural op is
+/// applied directly to the engine via `synthetic_dispatch` (==
+/// `OpDispatchWriter`'s no-focus-sink path), below the geometry/view-model
+/// interaction layers. UI-only gestures (click→focus, expand/collapse, slash)
+/// have NO floor — they are view-model concepts and correctly bottom out at the
+/// VM rung (§8.11 care-point 3), so this floor provides
 /// only the structural-write cap, not the gesture caps.
 #[async_trait::async_trait(?Send)]
 impl SutBlockTreeWrite for DirectUserDriver {
@@ -117,6 +129,36 @@ impl SutBlockTreeWrite for DirectUserDriver {
     }
 }
 
+/// The op-floor `SutBlockCreate` (`CreateBlockUnderFocus`). Unlike the headless
+/// UI's creation-slot gesture, this dispatches `block.create` straight to the
+/// engine under the ref-resolved `parent` — deterministic, no dependency on a
+/// live rendered slot rowset. This is what makes `CreateBlockUnderFocus` run
+/// under a no-UI (storage-only) pin. The `parent` is resolved through the
+/// shared id map (a minted/synthetic parent → its real id); the born-equal
+/// `id`, when present, is passed verbatim so oracle and SUT share it. When `id`
+/// is `None` the `id` key is OMITTED — exercising the provider's
+/// mint-when-absent path.
+#[async_trait::async_trait(?Send)]
+impl SutBlockCreate for DirectUserDriver {
+    async fn apply_create_under_focus(
+        &self,
+        parent: &EntityUri,
+        content: &str,
+        id: Option<&EntityUri>,
+    ) {
+        let mut params: StorageEntity = HashMap::new();
+        params.insert(
+            "parent_id".into(),
+            Value::String(self.resolve(parent).to_string()),
+        );
+        params.insert("content".into(), Value::String(content.to_string()));
+        if let Some(uri) = id {
+            params.insert("id".into(), Value::String(uri.to_string()));
+        }
+        self.dispatch_block("create", params).await;
+    }
+}
+
 #[async_trait::async_trait]
 impl UserDriver for DirectUserDriver {
     async fn synthetic_dispatch(
@@ -146,9 +188,8 @@ impl UserDriver for DirectUserDriver {
     /// access (e.g. `ReactiveEngineDriver` or `GpuiUserDriver`).
     async fn drop_entity(&self, _: &EntityUri, _: &EntityUri, _: &EntityUri) -> Result<bool> {
         anyhow::bail!(
-            "DirectUserDriver does not implement drop_entity — install \
-             ReactiveEngineDriver or a native frontend driver to exercise \
-             drag&drop transitions"
+            "DirectUserDriver does not implement drop_entity — install ReactiveEngineDriver or a \
+             native frontend driver to exercise drag&drop transitions"
         )
     }
 
@@ -168,7 +209,8 @@ impl UserDriver for DirectUserDriver {
         chord: &KeyChord,
         extra_params: HashMap<String, Value>,
     ) -> Result<bool> {
-        use holon_frontend::input::{InputAction, WidgetInput};
+        use holon_frontend::input::InputAction;
+        use holon_frontend::input::WidgetInput;
         let input = WidgetInput::KeyChord {
             keys: chord.0.clone(),
         };
@@ -197,9 +239,9 @@ impl UserDriver for DirectUserDriver {
     /// need click-to-focus must install `ReactiveEngineDriver`.
     async fn click_entity(&self, _: &EntityUri, _: &str) -> Result<()> {
         anyhow::bail!(
-            "DirectUserDriver cannot click-to-focus: editor focus is frontend \
-             in-memory state (ADR 0010), not a backend op. Install \
-             ReactiveEngineDriver to exercise focus transitions"
+            "DirectUserDriver cannot click-to-focus: editor focus is frontend in-memory state \
+             (ADR 0010), not a backend op. Install ReactiveEngineDriver to exercise focus \
+             transitions"
         )
     }
 
