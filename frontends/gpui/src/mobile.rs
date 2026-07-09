@@ -320,22 +320,45 @@ static KEYBOARD_FOCUS_GENERATION: AtomicU64 = AtomicU64::new(0);
 /// perceivable keyboard flicker window.
 const KEYBOARD_HIDE_GRACE: std::time::Duration = std::time::Duration::from_millis(150);
 
-/// A text input gained focus: bump the generation (cancels any pending
-/// deferred hide) and raise the platform soft keyboard.
-pub fn editor_focus_gained() {
-    KEYBOARD_FOCUS_GENERATION.fetch_add(1, Ordering::SeqCst);
-    tracing::debug!("soft keyboard: show (editor focus)");
+/// A text input gained focus: claim the next generation (cancelling any
+/// pending deferred hide) and raise the platform soft keyboard. Returns the
+/// generation this focus claimed; the editor stores it and passes it back to
+/// [`editor_focus_lost`] so a *stale* editor's later blur cannot hide the
+/// keyboard out from under whoever currently holds focus.
+pub fn editor_focus_gained() -> u64 {
+    let generation = KEYBOARD_FOCUS_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    tracing::debug!(generation, "soft keyboard: show (editor focus)");
     platform_show_keyboard();
+    generation
 }
 
-/// A text input lost focus: schedule a deferred hide. If another input
-/// gains focus within the grace window (generation moved), the hide is a
-/// no-op and the keyboard stays up.
-pub fn editor_focus_lost(cx: &mut App) {
-    let generation = KEYBOARD_FOCUS_GENERATION.load(Ordering::SeqCst);
+/// A text input lost focus: schedule a deferred hide keyed to the generation
+/// that focus *claimed* (`my_generation`, from the matching
+/// [`editor_focus_gained`]).
+///
+/// The bare generation counter only guards blur-BEFORE-focus (a successor's
+/// focus bumps the counter, so a hide scheduled by the predecessor's earlier
+/// blur is skipped). It does NOT guard blur-AFTER-focus: gpui delivers
+/// Focus/Blur unordered on a block→block move (and on the iOS render-path the
+/// unmounting editor's `is_focused=false` edge can be evaluated *after* the
+/// successor's `true` edge in the same frame), so the stale editor's blur
+/// reads the already-advanced counter and schedules a hide that nothing
+/// cancels — the keyboard drops ~150ms after focus though a block is focused.
+///
+/// Fix: only the editor still holding the current generation may schedule a
+/// hide. A stale editor (`my_generation != current`) has already been
+/// superseded by a later focus and its blur is ignored.
+pub fn editor_focus_lost(cx: &mut App, my_generation: u64) {
+    if KEYBOARD_FOCUS_GENERATION.load(Ordering::SeqCst) != my_generation {
+        tracing::debug!(
+            my_generation,
+            "soft keyboard: hide skipped (stale editor blur; focus already moved on)"
+        );
+        return;
+    }
     cx.spawn(async move |cx| {
         cx.background_executor().timer(KEYBOARD_HIDE_GRACE).await;
-        if KEYBOARD_FOCUS_GENERATION.load(Ordering::SeqCst) == generation {
+        if KEYBOARD_FOCUS_GENERATION.load(Ordering::SeqCst) == my_generation {
             tracing::debug!("soft keyboard: hide (editor blur, no refocus)");
             platform_hide_keyboard();
         } else {

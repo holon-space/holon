@@ -67,6 +67,18 @@ pub enum InteractionEvent {
         keystroke: String,
         modifiers: Vec<String>,
     },
+    /// Insert text the way a soft keyboard's `insertText:` delivers it —
+    /// as a finished string, NOT as a sequence of hardware `KeyDown`s.
+    ///
+    /// This is the harness-faithful mirror of the iOS UIKit text-input path
+    /// (`gpui-mobile`'s `IosWindow::handle_text_input`): the GPUI keymap is
+    /// bypassed and the text is committed straight into the focused editor's
+    /// input handler. A soft `Return` arrives here as `"\n"` and must become
+    /// an `enter` action (split_block), not a literal newline — see the
+    /// GPUI-side handler. `KeyDown` (used by `type_text`) cannot reach this
+    /// path, which is why a soft-keyboard-only bug can escape a KeyDown-driven
+    /// test.
+    InsertText { text: String },
     /// Move the pointer. `pressed_button` mirrors GPUI's `MouseMoveEvent` —
     /// when set, GPUI treats this as a drag move (which is required for
     /// `cx.active_drag` to populate after a `MouseDown` on a draggable).

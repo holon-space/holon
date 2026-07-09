@@ -763,6 +763,31 @@ impl UserDriver for GpuiUserDriver {
         Ok(())
     }
 
+    /// Deliver `text` through the soft-keyboard `insertText:` path
+    /// (`InteractionEvent::InsertText`), bypassing the keymap and committing
+    /// into the focused editor's input handler. See `dispatch_insert_text` in
+    /// `frontends/gpui/src/lib.rs` for the mobile-fidelity note.
+    async fn insert_text(&self, text: &str) -> Result<()> {
+        let response = self
+            .dispatch_event(InteractionEvent::InsertText {
+                text: text.to_string(),
+            })
+            .await?;
+        if !response.handled {
+            anyhow::bail!(
+                "GPUI insert_text not consumed: text={text:?}{detail}",
+                detail = match &response.detail {
+                    Some(d) => format!(" (detail: {d})"),
+                    None => String::new(),
+                },
+            );
+        }
+        if !superhuman_input() {
+            let _ = tokio::time::timeout(Duration::from_millis(50), self.geometry.changed()).await;
+        }
+        Ok(())
+    }
+
     /// Tree-aware click — for the screen driver this is just `click_entity`.
     /// The bound click handler reads `click_intent` itself at the rendered
     /// widget, so dispatching the right intent is the click handler's job,
