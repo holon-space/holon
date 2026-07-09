@@ -2038,11 +2038,31 @@ impl SutSeamMutate for HeadlessFrontendComponent {
 /// intent.
 #[async_trait::async_trait(?Send)]
 impl SutBlockCreate for HeadlessFrontendComponent {
-    async fn apply_create_under_focus(&self, content: &str) {
-        self.driver
-            .commit_creation_slot(content)
-            .await
-            .unwrap_or_else(|e| panic!("[SutBlockCreate::apply_create_under_focus] {e:#}"));
+    async fn apply_create_under_focus(
+        &self,
+        parent: &EntityUri,
+        content: &str,
+        id: Option<&EntityUri>,
+    ) {
+        match id {
+            // Explicit id: no slot gesture exists for a born-equal id, so dispatch
+            // the production `block.create{id, parent_id, content}` intent directly
+            // under the ref-resolved focus root.
+            Some(uri) => self
+                .driver
+                .create_block_with_id(parent, content, uri)
+                .await
+                .unwrap_or_else(|e| panic!("[SutBlockCreate::apply_create_under_focus] {e:#}")),
+            // No id: drive the PRODUCTION creation-slot gesture EXACTLY as today —
+            // it re-resolves the parent from its own live rendered rowset (WP-E
+            // focus-root cross-check preserved) and mints via `block.create`.
+            None => self
+                .driver
+                .commit_creation_slot(content)
+                .await
+                .map(|_| ())
+                .unwrap_or_else(|e| panic!("[SutBlockCreate::apply_create_under_focus] {e:#}")),
+        }
         self.settle_block_ids_stable(Duration::from_secs(5)).await;
     }
 }

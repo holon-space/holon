@@ -588,6 +588,30 @@ impl ReactiveEngineDriver {
         Ok(slot_uri)
     }
 
+    /// Create a block under `parent` with an explicit, born-equal `id` — the
+    /// counterpart to [`commit_creation_slot`] for the case where the caller
+    /// already owns the id (no slot gesture applies to an explicit id). Builds
+    /// the production `block.create{id, parent_id, content}` intent and
+    /// dispatches it through the same `dispatch_intent_sync` seam GPUI uses.
+    /// Unlike `commit_creation_slot` it does NOT re-resolve the parent from the
+    /// live rowset — the caller passes the resolved focus root directly.
+    pub async fn create_block_with_id(
+        &self,
+        parent: &EntityUri,
+        content: &str,
+        id: &EntityUri,
+    ) -> Result<()> {
+        let mut params = HashMap::new();
+        params.insert("id".to_string(), Value::String(id.to_string()));
+        params.insert("parent_id".to_string(), Value::String(parent.to_string()));
+        params.insert("content".to_string(), Value::String(content.to_string()));
+        let intent = OperationIntent::new(EntityName::new("block"), "create".to_string(), params);
+        self.engine
+            .dispatch_intent_sync(intent)
+            .await
+            .with_context(|| format!("create_block_with_id({id}) under {parent} failed"))
+    }
+
     /// Ensure the router is warmed for `root_block_id`. Idempotent — safe to
     /// call before every chord. Used by per-frontend drivers that route input
     /// through the real UI pipeline but still need the engine-quiescence

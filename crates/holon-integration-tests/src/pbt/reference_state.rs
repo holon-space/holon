@@ -1697,9 +1697,26 @@ impl ReferenceState {
     /// composed harness's per-tick reconcile. `recanon_and_rebuild` bumps
     /// `next_id` (same as `split_block`), so this does not increment it.
     pub fn create_block_under(&mut self, parent: &EntityUri, content: &str) -> EntityUri {
+        let new_id = EntityUri::block(&format!(":create-{}", self.domain.block_state.next_id));
+        self.create_block_under_with_id(parent, content, new_id.clone());
+        new_id
+    }
+
+    /// The born-equal sibling of [`create_block_under`]: append a new text
+    /// block under `parent` using exactly `new_id` (a fresh normal id
+    /// supplied by the transition, NOT a minted `create-N` synthetic). The
+    /// SUT's op-floor create dispatches the same id, so the reconcile
+    /// treats it as born-equal (both sides already hold it — no
+    /// synthetic→real pairing). Otherwise identical to
+    /// [`create_block_under`] (tail append, document ownership, re-canon).
+    pub fn create_block_under_with_id(
+        &mut self,
+        parent: &EntityUri,
+        content: &str,
+        new_id: EntityUri,
+    ) {
         use holon_orgmode::models::OrgBlockExt;
 
-        let new_id = EntityUri::block(&format!(":create-{}", self.domain.block_state.next_id));
         let mut new_block = Block::new_text(new_id.clone(), parent.clone(), content.to_string());
         let max_seq = self
             .domain
@@ -1734,7 +1751,6 @@ impl ReferenceState {
             .blocks
             .insert(new_id.clone(), new_block);
         self.recanon_and_rebuild();
-        new_id
     }
 
     /// Join `block_id` into its merge target.
