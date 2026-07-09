@@ -78,32 +78,7 @@ pub(crate) fn row_render_context(
 pub struct ReactiveView {
     inner: ReactiveViewInner,
     pub items: MutableVec<Arc<ReactiveViewModel>>,
-    /// Optional placeholder ViewModel rendered after all real `items`.
-    ///
-    /// Built once at construction from a `creation_slot` template (not from a
-    /// synthetic data row). Frontends should subscribe to `children_signal_vec()`
-    /// rather than `items.signal_vec_cloned()` so they see the slot as an
-    /// additional reactive child without it leaking into the data path.
-    pub trailing_slot: Option<TrailingSlot>,
     driver_handle: Mutex<Option<AbortHandle>>,
-}
-
-/// A placeholder reactive child appended after the collection's real `items`.
-///
-/// Unlike `VirtualChildSlot` (which injects a synthetic `DataRow` upstream of
-/// row interpretation, requiring downstream consumers to recognise a `virtual:`
-/// id prefix), `TrailingSlot` is built directly at the ViewModel level. The
-/// slot's submit handler fires a real `create_entity` operation; CDC delivers
-/// the new row through the normal data path.
-#[derive(Clone)]
-pub struct TrailingSlot {
-    pub view_model: Arc<ReactiveViewModel>,
-}
-
-impl std::fmt::Debug for TrailingSlot {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TrailingSlot").finish_non_exhaustive()
-    }
 }
 
 /// Virtual child slot: entity profile defaults + parent context.
@@ -592,7 +567,6 @@ impl ReactiveView {
                 space: Mutable::new(initial_space),
             },
             items: MutableVec::new(),
-            trailing_slot: None,
             driver_handle: Mutex::new(None),
         }
     }
@@ -618,51 +592,29 @@ impl ReactiveView {
                 rules: config.rules,
             },
             items: MutableVec::new(),
-            trailing_slot: None,
             driver_handle: Mutex::new(None),
         }
     }
 
-    /// Attach a trailing slot ViewModel to be rendered after `items`.
+    /// SignalVec of the collection's real `items` — the children to render.
     ///
-    /// Spike-only setter — for the final design this should move into
-    /// `CollectionConfig` so construction is atomic. Used by collection
-    /// builders that opt in via `creation_slot: true` in the DSL.
-    pub fn set_trailing_slot(&mut self, slot: TrailingSlot) {
-        self.trailing_slot = Some(slot);
-    }
-
-    /// SignalVec exposing real `items` followed by the optional trailing slot.
-    ///
-    /// Frontends should subscribe to this rather than `items.signal_vec_cloned()`
-    /// directly when they want to render the trailing slot. The chain is at
-    /// the ViewModel layer — the slot's ViewModel is built from a real
-    /// `creation_slot` template, never as a synthetic `DataRow` passing
-    /// through `render_entity()`.
+    /// The stable "children to render" seam. The creation slot is injected
+    /// upstream as a real row (streaming path: `AppendedRowsProvider`), so it
+    /// arrives through `items` like any other row — there is no ViewModel-level
+    /// suffix to chain.
     pub fn children_signal_vec(
         &self,
     ) -> std::pin::Pin<
         Box<dyn futures_signals::signal_vec::SignalVec<Item = Arc<ReactiveViewModel>> + Send>,
     > {
-        use futures_signals::signal_vec::{always, SignalVecExt};
-        let real = self.items.signal_vec_cloned();
-        let suffix = match &self.trailing_slot {
-            Some(slot) => vec![slot.view_model.clone()],
-            None => vec![],
-        };
-        Box::pin(real.chain(always(suffix)))
+        Box::pin(self.items.signal_vec_cloned())
     }
 
-    /// Eager snapshot of `items` followed by the optional trailing slot.
+    /// Eager snapshot of the collection's real `items` — the children to render.
     ///
-    /// Used by initial-render sites that read `view.items.lock_ref()` today
-    /// and need to also see the slot.
+    /// Used by initial-render sites that read the current children synchronously.
     pub fn children_snapshot(&self) -> Vec<Arc<ReactiveViewModel>> {
-        let mut out: Vec<Arc<ReactiveViewModel>> = self.items.lock_ref().iter().cloned().collect();
-        if let Some(slot) = &self.trailing_slot {
-            out.push(slot.view_model.clone());
-        }
-        out
+        self.items.lock_ref().iter().cloned().collect()
     }
 
     /// Handle to the container-query space `Mutable` for this view, if the
@@ -712,7 +664,6 @@ impl ReactiveView {
                 gap,
             },
             items: MutableVec::new_with_values(arced),
-            trailing_slot: None,
             driver_handle: Mutex::new(None),
         }
     }
@@ -745,7 +696,6 @@ impl ReactiveView {
                 space: Mutable::new(initial_space),
             },
             items: MutableVec::new(),
-            trailing_slot: None,
             driver_handle: Mutex::new(None),
         }
     }
@@ -756,7 +706,6 @@ impl ReactiveView {
         Self {
             inner: ReactiveViewInner::Static,
             items: MutableVec::new_with_values(arced),
-            trailing_slot: None,
             driver_handle: Mutex::new(None),
         }
     }
@@ -770,7 +719,6 @@ impl ReactiveView {
         Self {
             inner: ReactiveViewInner::StaticCollection { layout },
             items: MutableVec::new_with_values(arced),
-            trailing_slot: None,
             driver_handle: Mutex::new(None),
         }
     }

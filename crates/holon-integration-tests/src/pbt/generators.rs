@@ -392,10 +392,10 @@ pub fn generate_org_file_content_with_keywords(
         ("index.org".to_string(), blocks)
     });
 
-    // Tree view with virtual child — exercises the trailing-slot creation
-    // path. `creation_slot: true` triggers `build_trailing_slot`;
-    // `virtual_parent` is deliberately omitted — the builder falls back to
-    // `ba.ctx.row().get("id")` (the focused block's id).
+    // Tree view with virtual child — exercises the creation-slot path.
+    // `creation_slot: true` triggers `interpret_virtual_child` (static /
+    // snapshot path); `virtual_parent` is deliberately omitted — the builder
+    // falls back to `ba.ctx.row().get("id")` (the focused block's id).
     let index_file_tree = "[A-Z][a-zA-Z0-9 ]{0,15}".prop_map(|headline| {
         let id = root_layout_bare_id();
         let (src, lang) = TestQuery::layout(QuerySource::DirectChildren {

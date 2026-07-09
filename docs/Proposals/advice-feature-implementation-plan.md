@@ -225,6 +225,17 @@ This gives `OccurrenceId` its meaning. `resolve_virtual_parent`
   (that path has no provider); eliminating it means routing static collections
   through a provider — a separate refactor with GPUI-render blast radius, tracked
   but out of this fold's scope.
+  - **UPDATE 2026-07-09 — `TrailingSlot` DELETED.** On investigation the
+    ViewModel-level `TrailingSlot` was already **dead in production**: every
+    `streaming_collection` caller passed `None`, so the `children_*` suffix was
+    never populated. The static-collection creation slot is served by
+    `interpret_virtual_child` (inlined into the eager `items`), which `tree.rs`
+    now uses uniformly (the old `build_trailing_slot` wrapper is gone). So no
+    "route static through a provider" refactor was needed to remove it —
+    `TrailingSlot`, its field, `set_trailing_slot`, and the suffix branches were
+    deleted outright; `children_signal_vec`/`children_snapshot` now return `items`
+    directly. Unifying `interpret_virtual_child` onto `AppendedRowsProvider`
+    remains a separate, deferred increment.
 - **Smallest first step (DONE 2026-07-07 — proves the mechanism, BEFORE the trait
   widening):** one `AppendedRowsProvider::placement` (`LiveCell` case) mirroring one
   real block's live cell under an anchor whose collection does **not** canonically

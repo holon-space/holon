@@ -1,70 +1,6 @@
 use super::prelude::*;
 use crate::render_interpreter::shared_tree_build;
 
-/// Build the trailing-slot ViewModel for a tree's creation slot.
-///
-/// Activated by `creation_slot: true` in the args. Looks up the parent's
-/// entity profile defaults via `BuilderServices::virtual_child_config`,
-/// constructs a synthetic data row with `id: "virtual:<parent_id>"` plus the
-/// defaults, and interprets the tree's `item_template` against that row.
-///
-/// The synthetic `virtual:` id is a private routing token: it lives only on
-/// this slot's local `DataRow` and never enters the data source's SignalVec.
-/// The existing `editable_text` → `EditorView` → `EditorViewModel.on_blur`
-/// → `ViewEventHandler::handle_text_sync` → `parse_virtual_id` pipeline picks
-/// it up at submit time and dispatches `<entity>.create` with the typed
-/// content as the `content` field plus `parent_id`.
-///
-/// Returns `None` when `creation_slot` is absent, when no `virtual_parent`
-/// is resolved into args (live_query already substitutes; live_block still
-/// pending — see `block_domain.rs::collection_render_from_profile`), when
-/// the surrounding entity has no `virtual_child` profile, or when the tree
-/// has no `item_template`.
-fn build_trailing_slot(ba: &BA<'_>) -> Option<crate::reactive_view::TrailingSlot> {
-    let cs = ba.args.get_bool("creation_slot");
-    let vp_str = ba.args.get_string("virtual_parent").map(|s| s.to_string());
-    let has_template = ba
-        .args
-        .get_template("item_template")
-        .or(ba.args.get_template("item"))
-        .is_some();
-    tracing::debug!(
-        "[VIRTUAL_CHILD] build_trailing_slot: creation_slot={cs:?} virtual_parent={vp_str:?} has_template={has_template}"
-    );
-    if !cs.unwrap_or(false) {
-        tracing::debug!("[VIRTUAL_CHILD] -> None (creation_slot not true)");
-        return None;
-    }
-    let Some(slot) = virtual_child_slot_from_arg(ba) else {
-        tracing::debug!("[VIRTUAL_CHILD] -> None (virtual_child_slot_from_arg failed)");
-        return None;
-    };
-    let Some(template) = ba
-        .args
-        .get_template("item_template")
-        .or(ba.args.get_template("item"))
-    else {
-        tracing::debug!("[VIRTUAL_CHILD] -> None (no item_template)");
-        return None;
-    };
-    // Bug 2A: parent the creation slot at the query's focus root (resolved from
-    // the rendered rows), not the static container `slot.parent_id`. `None`
-    // (empty / not-yet-resolvable) → no slot rather than a silent mis-parent.
-    let Some(parent) =
-        crate::row_origin::resolve_creation_parent(&ba.ctx.data_rows, &slot.parent_id)
-    else {
-        tracing::debug!("[VIRTUAL_CHILD] -> None (no resolvable focus root)");
-        return None;
-    };
-    let row = virtual_child_row(&parent, &slot.defaults);
-    let row_ctx = ba.ctx.with_row(row);
-    let vm = (ba.interpret)(template, &row_ctx);
-    tracing::debug!("[VIRTUAL_CHILD] -> Some slot for parent_id={parent}");
-    Some(crate::reactive_view::TrailingSlot {
-        view_model: Arc::new(vm),
-    })
-}
-
 holon_macros::widget_builder! {
     raw fn tree(ba: BA<'_>) -> ViewModel {
         tracing::debug!("[VIRTUAL_CHILD] tree::build dispatched! creation_slot={:?} virtual_parent={:?}",
@@ -77,38 +13,27 @@ holon_macros::widget_builder! {
             .map(|s| s.to_string());
 
         let __parent_space = ba.ctx.available_space;
-        let __trailing_slot = build_trailing_slot(&ba);
         match (__template, ba.ctx.data_source.clone()) {
             (Some(tmpl), Some(ds)) => {
-                // Inject the creation placeholder as a REACTIVE virtual row
-                // (AppendedRowsProvider creation-slot) rather than a static `TrailingSlot`
-                // snapshot. A snapshot is interpreted once (unfocused →
-                // read-only `rendered_text`) and never re-resolves on focus, so
-                // clicking the trailing placeholder set focus but it never
-                // became an editable `EditorView` — no caret, typing did
-                // nothing. As a real row it re-resolves `rendered_text` →
-                // `editable_text` on focus exactly like the other rows. The
-                // static `TrailingSlot` is still used for the no-data_source
-                // (live-query/static) branch below, where reactive injection
-                // isn't available.
-                let _ = &__trailing_slot;
+                // Streaming path: the creation placeholder is injected as a
+                // REACTIVE virtual row via `AppendedRowsProvider::creation_slot`
+                // (wired in the collection driver from `virtual_child`), NOT as a
+                // ViewModel snapshot. A snapshot is interpreted once (unfocused →
+                // read-only `rendered_text`) and never re-resolves on focus; as a
+                // real row it re-resolves `rendered_text` → `editable_text` on
+                // focus exactly like the other rows.
                 let virtual_child = virtual_child_slot_from_arg(&ba);
                 let __rules = crate::row_pipeline::parse_rules_arg(ba.args.named.get("rules"));
-                ViewModel::streaming_collection("tree", tmpl, ds, 4.0, __sort_key, __parent_space, None, virtual_child, None, __rules)
+                ViewModel::streaming_collection("tree", tmpl, ds, 4.0, __sort_key, __parent_space, None, virtual_child, __rules)
             }
             _ => {
                 let mut flat: Vec<(ViewModel, usize, std::collections::HashMap<String, Value>)> =
                     shared_tree_build(&ba);
-                // Push the trailing slot BEFORE the empty check so the slot
-                // renders even for empty collections — the user needs to be
-                // able to create the first child via the slot. Prefer the
-                // `creation_slot: true`-driven slot; fall back to legacy
-                // `virtual_parent` only when the new flag is absent.
-                if let Some(slot) = __trailing_slot {
-                    if let Ok(inner) = std::sync::Arc::try_unwrap(slot.view_model) {
-                        flat.push((inner, 0, std::collections::HashMap::new()));
-                    }
-                } else if let Some(tmpl) = ba.args.get_template("item_template").or(ba.args.get_template("item")) {
+                // Push the creation slot BEFORE the empty check so it renders even
+                // for empty collections — the user needs to create the first child
+                // via the slot. Static/snapshot path only (live-query / MCP / PBT);
+                // the streaming path above injects it as a reactive row instead.
+                if let Some(tmpl) = ba.args.get_template("item_template").or(ba.args.get_template("item")) {
                     if let Some(vc) = interpret_virtual_child(&ba, tmpl) {
                         flat.push((vc, 0, std::collections::HashMap::new()));
                     }
