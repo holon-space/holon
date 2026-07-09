@@ -228,9 +228,17 @@ deltas, and the created/consumed blocks are themselves the tokens**:
   Turing-completeness, weaker reachability analysis — relevant to the
   deliberative layer's static reasoning.)
 
-Guard safety: Datalog range restriction — every variable must be bound by a
-positive atom before appearing under negation (`clock.today as today and not
-journal(date = today)`); enforced by the Pattern parser.
+Guard surface vs compilation (revised after Martin's review): builtins like
+`{today}` / `{clock.today}` are **environment references, interpolated** — not
+pattern variables — so the author writes `when: not
+block_exists("Journals/{today}")` with no explicit binding. The compiler
+desugars each builtin reference into a read arc on the corresponding
+clock/environment relation (this is what makes the rule re-fire on rollover
+and keeps the compiled matview deterministic, per P5). The Datalog
+range-restriction check (every pattern variable bound by a positive atom
+before appearing under negation) remains as an internal well-formedness rule;
+it surfaces only for user-introduced pattern variables, with a plain-language
+error, never for builtins.
 
 Why this beats side-effect-style `block.create(...)` transitions:
 1. **Simulability for free** — the marking delta *is* the declaration; the
