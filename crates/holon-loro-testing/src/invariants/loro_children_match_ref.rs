@@ -13,11 +13,11 @@
 
 use std::collections::BTreeSet;
 
+use holon_pbt_core::RunMode;
 use holon_pbt_core::capabilities::{EntityUri, RefBlockTree, SutLoroLog};
 use holon_pbt_core::composition::{BridgedInvariant, CapId, CapInvariant, Needs};
 use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
 use holon_pbt_core::sibling_order::compare_sibling_order;
-use holon_pbt_core::RunMode;
 
 pub struct InvLoroChildrenMatchRef;
 

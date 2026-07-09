@@ -826,6 +826,31 @@ pub enum PeerEditOp {
     },
 }
 
+/// Generate a deterministic, UUID-like stable ID from inputs.
+/// Both the reference model and SUT use this to produce identical
+/// block IDs for peer-created blocks (see [`PeerEditOp::Create`]).
+///
+/// Lives here (shared floor) rather than in the integration-test crate so the
+/// co-located Loro transitions (`holon-loro-testing`) and the still-central
+/// `apply_mutation` transition both reach the same implementation.
+pub fn deterministic_peer_block_id(
+    peer_idx: usize,
+    parent_stable_id: Option<&str>,
+    content: &str,
+    seq: usize,
+) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    peer_idx.hash(&mut hasher);
+    parent_stable_id.hash(&mut hasher);
+    content.hash(&mut hasher);
+    seq.hash(&mut hasher);
+    let h = hasher.finish();
+    let hi = (h >> 32) as u32;
+    let lo = h as u32;
+    format!("peer-{hi:08x}-{lo:08x}-{peer_idx:04x}-{seq:04x}")
+}
+
 /// SUT-side peer-Loro write surface. Methods are `async` because the
 /// wide-PBT SUT performs real LoroDoc imports/exports + reactive-engine
 /// quiescence between ops.

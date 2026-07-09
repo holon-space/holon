@@ -11,6 +11,7 @@ use holon_orgmode::models::OrgBlockExt;
 use super::query::{QuerySource, QueryTable, TestQuery};
 use super::reference_state::{VALID_PROFILE_YAMLS, valid_render_expression_strings};
 use holon_api::predicate::Predicate;
+use holon_pbt_core::content_generators::{extended_char, extended_content_arm};
 use holon_pbt_core::types::Mutation;
 
 use std::collections::HashMap;
@@ -96,57 +97,6 @@ pub fn extended_gen_enabled() -> bool {
     })
 }
 
-/// Characters spanning all UTF-8 widths plus ASCII filler. The 2/3/4-byte
-/// codepoints are the payload: any path that converts byte offsets to
-/// keystroke counts (or slices content at a char boundary it computed in
-/// the other unit) breaks on these.
-fn extended_char() -> BoxedStrategy<char> {
-    prop_oneof![
-        2 => proptest::char::range('a', 'z'),
-        1 => Just(' '),
-        2 => prop_oneof![Just('é'), Just('ß'), Just('ñ')],   // 2-byte
-        2 => prop_oneof![Just('€'), Just('中'), Just('日')], // 3-byte
-        2 => prop_oneof![Just('😀'), Just('🎉')],            // 4-byte emoji
-    ]
-    .boxed()
-}
-
-/// Single-line extended content: multi-byte runs, empty, whitespace-only,
-/// and org-special prefixes (`*`, `[[…]]`, `:PROPERTIES:`, `#+`) that a user
-/// can legitimately type but the org renderer must round-trip.
-fn extended_content_arm() -> BoxedStrategy<String> {
-    prop_oneof![
-        4 => prop::collection::vec(extended_char(), 1..=12)
-            .prop_map(|cs| cs.into_iter().collect::<String>()),
-        1 => Just(String::new()),
-        1 => prop_oneof![Just("   ".to_string()), Just("\t".to_string())],
-        // Org-special spellings. `:PROPERTIES:{tail}` (incl. the bare
-        // trailing-tag-group form) is BY-DESIGN org tag syntax — the ref
-        // model mirrors it via `split_headline_tags` in
-        // `normalize_content_for_org_roundtrip`; pinned in
-        // holon-org-format/tests/properties_prefix_headline_repro.rs.
-        2 => ("[A-Za-z0-9 ]{0,12}", 0..4u8).prop_map(|(tail, kind)| match kind {
-            0 => format!("* {tail}"),
-            1 => format!("[[{tail}]]"),
-            2 => format!("#+ {tail}"),
-            _ => format!(":PROPERTIES:{tail}"),
-        }),
-        // snake_case identifiers with mid-word underscores — the single
-        // biggest content class in a code-heavy PKM (`focused_block`,
-        // `sort_key`, `keyed_rows_signal_vec`). orgize parses a mid-word `_`
-        // (preceded by a word char, so it can't open org UNDERLINE) as a bare
-        // SUBSCRIPT, and the mark-extraction round-trip used to destroy the
-        // surrounding characters (`focused_block` → `focusedloc`) — a silent
-        // vault-corrupting data-loss bug. This arm de-vacuums the org
-        // round-trip's inline-mark path (the default ASCII generators never
-        // emit `_`). See handoff 2026-07-06 (org round-trip mangles content)
-        // + the `bare_underscore_identifiers_survive_round_trip` regression in
-        // holon-org-format/src/inline_marks.rs.
-        2 => "[a-z]{1,6}(_[a-z]{1,6}){1,4}",
-    ]
-    .boxed()
-}
-
 /// Generate single-line block content for headlines.
 /// Headlines must be single-line because the org parser treats newlines in
 /// headline text as content boundaries — multi-line headlines cause
@@ -186,13 +136,6 @@ pub fn typing_text_strategy() -> BoxedStrategy<String> {
             .prop_map(|cs| cs.into_iter().collect::<String>()),
     ]
     .boxed()
-}
-
-/// Peer-edit content (`PeerEdit::{Create,Update}`). Extended mode adds
-/// multi-byte and org-special content arriving from a remote peer.
-pub fn peer_content_strategy() -> BoxedStrategy<String> {
-    let base = "[a-z]{4,8}".prop_map(|s| s).boxed();
-    prop_oneof![6 => base, 4 => extended_content_arm()].boxed()
 }
 
 /// Externally-added block content (`BulkExternalAdd`). Extended mode adds

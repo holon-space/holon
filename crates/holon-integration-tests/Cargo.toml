@@ -37,6 +37,8 @@ otel-testing = [
     "dep:serde",
     "dep:chrono",
     "dep:memory-stats",
+    # Compile the moved Loro transitions' SqlBudget impls in the keystone build.
+    "holon-loro-testing?/otel-testing",
 ]
 chrome-trace = ["dep:tracing-chrome", "otel-testing"]
 # tokio-console async-wait profiler. Build with

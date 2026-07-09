@@ -15,7 +15,7 @@ use holon_pbt_core::validation::{Reason, check};
 use holon_pbt_core::{TransitionFactory, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::ExpectedSql;
+use holon_pbt_core::budget::ExpectedSql;
 
 /// One-directional merge: peer's changes → primary.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -83,7 +83,7 @@ impl<R: RefLifecycle + RefPeers + RefPeersMut> TransitionRef<R> for MergeFromPee
     }
 }
 
-crate::cap_transition! {
+holon_pbt_core::cap_transition! {
     MergeFromPeer: holon_pbt_core::capabilities::SutLoro,
     where R: [ RefLifecycle + RefPeers + RefPeersMut ],
     |me, _state, sut| {

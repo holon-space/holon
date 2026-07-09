@@ -1,18 +1,31 @@
 [package]
 name = "holon-loro-testing"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 publish = false
 
 [lib]
 name = "holon_loro_testing"
 path = "src/lib.rs"
 
+[features]
+# Gates the per-transition SQL-budget (`SqlBudget`) impls, mirroring the
+# integration-test crate's `otel-testing`. integration-tests propagates its own
+# `otel-testing` into this crate so the budgets compile in the keystone build.
+otel-testing = []
+
 [dependencies]
 holon = { workspace = true }
 holon-api = { workspace = true }
 holon-loro = { workspace = true }
+loro = { workspace = true }
 holon-pbt-core = { path = "../holon-pbt-core" }
+holon-orgmode-testing = { path = "../holon-orgmode-testing" }
 async-trait = { workspace = true }
 proptest = { workspace = true }
+validated = "1.0"
+tokio = { workspace = true, features = ["sync", "time"] }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }

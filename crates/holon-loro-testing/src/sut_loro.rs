@@ -11,13 +11,13 @@ use std::time::Duration;
 
 use tokio::sync::RwLock;
 
-use crate::assertions::normalize_block;
-use crate::test_environment::wait_for_loro_quiescence_on;
+use crate::quiescence::wait_for_loro_quiescence_on;
 use holon::api::CoreOperations;
 use holon::sync::{LoroDocumentStore, LoroSyncControllerHandle};
 use holon_api::EntityUri;
 use holon_api::block::Block;
 use holon_loro::LoroBackend;
+use holon_orgmode_testing::normalize_block;
 use holon_pbt_core::capabilities::{PeerEditOp, SutLoro, TextOp};
 use holon_pbt_core::composition::{CapMap, CapProvider};
 use holon_pbt_core::retry::retry_until_ok;
@@ -240,7 +240,7 @@ impl SutLoro for LoroSut {
                 content,
                 stable_id,
             } => {
-                super::peer_ops::peer_create_block(
+                crate::peer_ops::peer_create_block(
                     &peer.doc,
                     parent_stable_id.as_deref(),
                     content,
@@ -249,11 +249,11 @@ impl SutLoro for LoroSut {
             }
             PeerEditOp::Update { stable_id, content } => {
                 let resolved = self.resolve_stable_id(stable_id);
-                super::peer_ops::peer_update_block(&peer.doc, &resolved, content);
+                crate::peer_ops::peer_update_block(&peer.doc, &resolved, content);
             }
             PeerEditOp::Delete { stable_id } => {
                 let resolved = self.resolve_stable_id(stable_id);
-                super::peer_ops::peer_delete_block(&peer.doc, &resolved);
+                crate::peer_ops::peer_delete_block(&peer.doc, &resolved);
             }
         }
     }
@@ -348,13 +348,13 @@ impl SutLoro for LoroSut {
                 pos_codepoint,
                 text,
             } => {
-                super::peer_ops::peer_insert_text(&peer.doc, &resolved_id, *pos_codepoint, text);
+                crate::peer_ops::peer_insert_text(&peer.doc, &resolved_id, *pos_codepoint, text);
             }
             TextOp::Delete {
                 pos_codepoint,
                 len_codepoint,
             } => {
-                super::peer_ops::peer_delete_text(
+                crate::peer_ops::peer_delete_text(
                     &peer.doc,
                     &resolved_id,
                     *pos_codepoint,
