@@ -346,6 +346,14 @@ pub enum ViewKind {
         icon: String,
         children: LazyChildren,
     },
+    /// Hover-reveal container. `children.items[0]` is the always-visible
+    /// trigger; `children.items[1..]` is the content shown only while the
+    /// trigger's region is hovered. Hover state is per-render-slot view
+    /// state, not carried in the snapshot — each frontend owns its own
+    /// hover signal seeded to "not hovered".
+    OnHover {
+        children: LazyChildren,
+    },
     /// Two-slot anchored container. `children.items[0]` fills the remaining
     /// vertical space; `children.items[1]` is pinned at its intrinsic height
     /// anchored to the bottom inset (IME / nav bar / home indicator). GPUI
@@ -448,6 +456,7 @@ impl ViewKind {
             ViewKind::Card { .. } => "card",
             ViewKind::ChatBubble { .. } => "chat_bubble",
             ViewKind::Collapsible { .. } => "collapsible",
+            ViewKind::OnHover { .. } => "on_hover",
             ViewKind::BottomDock { .. } => "bottom_dock",
             ViewKind::OpButton { .. } => "op_button",
             ViewKind::LiveBlock { .. } => "live_block",
@@ -1206,6 +1215,12 @@ impl ViewModel {
                     child.fmt_indent(out, indent + 1);
                 }
             }
+            ViewKind::OnHover { children } => {
+                let _ = writeln!(out, "{pad}on_hover{ops_suffix}");
+                for child in &children.items {
+                    child.fmt_indent(out, indent + 1);
+                }
+            }
             ViewKind::BottomDock { children } => {
                 let _ = writeln!(out, "{pad}bottom_dock{ops_suffix}");
                 for child in &children.items {
@@ -1311,6 +1326,7 @@ impl ViewModel {
             | ViewKind::Card { children, .. }
             | ViewKind::ChatBubble { children, .. }
             | ViewKind::Collapsible { children, .. }
+            | ViewKind::OnHover { children, .. }
             | ViewKind::ExpandToggle { children, .. }
             | ViewKind::BottomDock { children, .. } => &children.items,
 
@@ -1403,6 +1419,7 @@ impl ViewModel {
             ViewKind::Card { .. } => "card",
             ViewKind::ChatBubble { .. } => "chat_bubble",
             ViewKind::Collapsible { .. } => "collapsible",
+            ViewKind::OnHover { .. } => "on_hover",
             ViewKind::BottomDock { .. } => "bottom_dock",
             ViewKind::OpButton { .. } => "op_button",
             ViewKind::LiveBlock { .. } => "live_block",

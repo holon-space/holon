@@ -1230,22 +1230,31 @@ fn rule_card(
 /// A journal-entry block row carrying the subtle ⚙ provenance affordance and
 /// inline "created by <rule> · <time>" secondary text (ADR 0024 P8 `fired-by`).
 fn provenance_row(entry: &str, rule: &str, time: &str, badge: bool) -> RenderExpr {
-    let mut cells = vec![
-        call(
-            "text",
-            vec![pos(lit_str(entry)), named("size", lit_f64(14.0))],
-        ),
-        call(
-            "text",
-            vec![
-                pos(lit_str("⚙")),
-                named("size", lit_f64(12.0)),
-                named("color", lit_str("muted")),
-            ],
-        ),
-    ];
+    let gear = call(
+        "text",
+        vec![
+            pos(lit_str("⚙")),
+            named("size", lit_f64(12.0)),
+            named("color", lit_str("muted")),
+        ],
+    );
+    let mut cells = vec![call(
+        "text",
+        vec![pos(lit_str(entry)), named("size", lit_f64(14.0))],
+    )];
+    // DECIDED (action-ux.md, 2026-07-09 demo review): provenance is
+    // hover-only. The "created by <rule> · <time>" caption lives inside
+    // `on_hover`, revealed only while the ⚙ trigger is hovered.
     if badge {
-        cells.push(muted_line(&format!("created by {rule} · {time}")));
+        cells.push(call(
+            "on_hover",
+            vec![
+                pos(gear),
+                pos(muted_line(&format!("created by {rule} · {time}"))),
+            ],
+        ));
+    } else {
+        cells.push(gear);
     }
     row(cells, 8.0)
 }
@@ -1627,10 +1636,31 @@ mod tests {
         }
         // Interprets into a non-empty tree via the shadow pipeline.
         let vm = mode_view_model(&expr);
-        assert!(!matches!(
-            vm.snapshot().kind,
-            crate::view_model::ViewKind::Empty
-        ));
+        let snap = vm.snapshot();
+        assert!(!matches!(snap.kind, crate::view_model::ViewKind::Empty));
+
+        // Provenance is hover-only (action-ux.md): the "created by …" caption
+        // is wrapped in an `on_hover` node whose trigger is the ⚙ affordance.
+        fn find_on_hover(vm: &crate::view_model::ViewModel) -> Vec<&crate::view_model::ViewModel> {
+            let mut out = vec![];
+            if vm.widget_name() == Some("on_hover") {
+                out.push(vm);
+            }
+            for child in vm.children() {
+                out.extend(find_on_hover(child));
+            }
+            out
+        }
+        let on_hovers = find_on_hover(&snap);
+        assert!(
+            !on_hovers.is_empty(),
+            "expected at least one on_hover node in Actions-mode snapshot"
+        );
+        // Each on_hover carries a trigger child plus the revealed content.
+        assert!(
+            on_hovers.iter().all(|n| n.children().len() >= 2),
+            "on_hover should carry a trigger child and content child"
+        );
     }
 
     #[test]
