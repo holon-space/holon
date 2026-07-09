@@ -420,3 +420,47 @@ Notes:
   16-case run, so the keystone lives entirely in Tier 2.
 - Timings assume a **warm build cache**; the first run after a rebase that
   touches many crates pays the compile cost once.
+
+## iOS live-MCP E2E gate (`general_e2e_composed_pbt_live_mcp`)
+
+The out-of-process twin of the headless keystone: the SAME transitions +
+invariant catalog, driven against a **live Holon app on the iOS simulator** over
+its embedded MCP server. This is how iOS joins the E2E gate — it exercises the
+real platform input/render/store wiring the headless keystone cannot see.
+
+**Recipe** (wrapped by [`scripts/run_ios_live_mcp_e2e.sh`](scripts/run_ios_live_mcp_e2e.sh)):
+
+1. The app must be built + installed on the sim already (this is a *launch*, not
+   a build/install).
+2. Relaunch it with reset + MCP enabled. `simctl launch` forwards `SIMCTL_CHILD_*`
+   env into the app process:
+   ```sh
+   xcrun simctl terminate <SIM_UDID> space.holon.gpui
+   SIMCTL_CHILD_MCP_SERVER_PORT=8521 \
+   SIMCTL_CHILD_HOLON_MCP_ALLOW_RESET=1 \
+     xcrun simctl launch <SIM_UDID> space.holon.gpui
+   ```
+   `HOLON_MCP_ALLOW_RESET=1` is REQUIRED — the keystone does a per-case
+   `reset_vault`, which the app refuses without it (fails with
+   "reset_vault is disabled — set HOLON_MCP_ALLOW_RESET=1").
+3. Run the test (note: **NOT** `--ignored` — `general_e2e_composed_pbt_live_mcp`
+   is a plain `#[test]` that self-skips unless `HOLON_PBT_LIVE_MCP` is set, so
+   `--ignored` filters it OUT):
+   ```sh
+   HOLON_PBT_LIVE_MCP=1 MCP_SERVER_PORT=8521 PROPTEST_CASES=3 \
+     cargo test -p holon-integration-tests \
+       --test general_e2e_composed_pbt general_e2e_composed_pbt_live_mcp \
+       -- --nocapture --test-threads=1
+   ```
+   The server's reset budget is 20/process, so keep `PROPTEST_CASES` small and
+   never shrink live (`max_shrink_iters: 0` in the test).
+
+**Status (2026-07-09): NOT yet green.** The keystone connects, resets, and drives
+transitions for ~50s, then panics in the `SplitBlock` transition
+(`crates/holon-integration-tests/src/pbt/composed/live_mcp.rs` `focus_editor`):
+the driver geometry-clicks the split target by its `BoundsRegistry` bounds, but
+if that block lives under a page other than the focused `main` root it is never
+rendered → `click_entity` returns "no bounds recorded" and the 10s budget
+expires. To reach green the live driver must navigate the target block's page
+into `main` (or focus it) before geometry-driving it. Re-run the script to
+reproduce and to re-check once that harness gap closes.
