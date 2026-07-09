@@ -96,12 +96,7 @@ pub struct TriggerSlashCommand {
 }
 
 impl<
-    R: RefLifecycle
-        + RefBlockTree
-        + RefLayout
-        + RefFocusRoots
-        + RefLayoutInteract
-        + RefLayoutMutate,
+    R: RefLifecycle + RefBlockTree + RefLayout + RefFocusRoots + RefLayoutInteract + RefLayoutMutate,
 > TransitionFactory<R> for TriggerSlashCommand
 {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
@@ -136,12 +131,7 @@ impl<
 }
 
 impl<
-    R: RefLifecycle
-        + RefBlockTree
-        + RefLayout
-        + RefFocusRoots
-        + RefLayoutInteract
-        + RefLayoutMutate,
+    R: RefLifecycle + RefBlockTree + RefLayout + RefFocusRoots + RefLayoutInteract + RefLayoutMutate,
 > TransitionRef<R> for TriggerSlashCommand
 {
     type Reason = Reason;
