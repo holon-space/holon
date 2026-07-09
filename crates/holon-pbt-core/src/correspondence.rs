@@ -54,11 +54,11 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
-use holon_pbt_core::RunMode;
-use holon_pbt_core::composition::{CapInvariant, CapMap, Needs};
-use holon_pbt_core::invariant::{InvariantId, InvariantResult};
+use crate::composition::{CapInvariant, CapMap, Needs};
+use crate::invariant::{InvariantId, InvariantResult};
+use crate::RunMode;
 
-use holon_pbt_core::retry::retry_until_ok;
+use crate::retry::retry_until_ok;
 
 /// A logical observable: one named reference projection with an owned value
 /// type. `NAME` is the invariant-id family stem: each store emits

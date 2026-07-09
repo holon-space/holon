@@ -36,6 +36,7 @@ use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
 pub mod bisect;
+pub mod block_compare;
 pub mod budget;
 pub mod caching_proxy;
 pub mod cap_transition;
@@ -44,9 +45,11 @@ pub mod component_set;
 pub mod composition;
 pub mod content_generators;
 pub mod contribution;
+pub mod correspondence;
 pub mod fixture;
 pub mod interactions;
 pub mod invariant;
+pub mod observables;
 pub mod retry;
 pub mod sibling_order;
 pub mod types;
@@ -59,7 +62,11 @@ pub use component_set::{Component, ComponentSet, ComponentSetError, Projection};
 pub use contribution::{
     fold_catalog, CapInstaller, CrateId, GeneratorFactory, PbtContribution, PbtFootprint,
 };
+pub use correspondence::{
+    Converge, Correspondence, Extraction, NamedCompare, Observable, StoreProjection,
+};
 pub use invariant::{Invariant, InvariantId, InvariantResult, RunMode};
+pub use observables::{ref_non_seed_blocks, NonSeedBlocks};
 pub use sibling_order::compare_sibling_order;
 pub use wiring::{
     any_valid_wiring, wiring_axes, wiring_from_exact_spec, Actor, RequiredWiring, StorageAdapter,

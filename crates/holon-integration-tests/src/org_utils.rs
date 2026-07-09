@@ -7,7 +7,7 @@ use holon_api::block::Block;
 use holon_orgmode::models::OrgBlockExt;
 
 /// Internal properties that Loro/Org adds but reference model doesn't track
-pub use holon_orgmode_testing::INTERNAL_PROPS;
+pub use holon_pbt_core::block_compare::INTERNAL_PROPS;
 
 /// Extract the first :ID: property value from org content.
 ///

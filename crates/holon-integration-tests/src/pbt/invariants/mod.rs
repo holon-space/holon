@@ -7,7 +7,6 @@
 //! survives there is [`Subsystem`], the shrinkable dimension a PBT's SUT
 //! supplies — consumed by the composed reference-seeding path.
 
-pub mod block_compare;
 pub mod bodies;
 pub mod registry;
 pub mod text_compare;

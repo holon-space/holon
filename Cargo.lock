@@ -5232,7 +5232,6 @@ dependencies = [
  "holon-mcp-client",
  "holon-oracles",
  "holon-orgmode",
- "holon-orgmode-testing",
  "holon-pbt-core",
  "holon-profiles",
  "holon-turso",
@@ -5324,7 +5323,6 @@ dependencies = [
  "holon",
  "holon-api",
  "holon-loro",
- "holon-orgmode-testing",
  "holon-pbt-core",
  "loro",
  "proptest 1.10.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -5497,15 +5495,6 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "uuid",
- "workspace-hack 0.1.0",
-]
-
-[[package]]
-name = "holon-orgmode-testing"
-version = "0.1.0"
-dependencies = [
- "holon-api",
- "holon-orgmode",
  "workspace-hack 0.1.0",
 ]
 

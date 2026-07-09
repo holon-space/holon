@@ -30,9 +30,16 @@
 //! The `LoroSut` and transitions are co-located here (Phase-1a Step 4), but the
 //! central `declare_e2e_transitions!` enum still assembles them (it re-exports
 //! the structs) — the strategy is enum-driven, so [`pbt_contribution`]'s
-//! `generators` is inert until a later contribution-driven-strategy phase. The
-//! `/loro` correspondence arm also stays central (deferred: its registry
-//! framework is not yet lifted to a shared crate).
+//! `generators` is inert until a later contribution-driven-strategy phase.
+//!
+//! ## `/loro` correspondence arm co-located (Phase-1a follow-on)
+//! The `inv-blocks-match-ref/loro` store arm now lives here
+//! ([`invariants::loro_blocks_match_ref`]) as a single-store
+//! `Correspondence<NonSeedBlocks>`, contributed through [`pbt_contribution`].
+//! This was unblocked by lifting the correspondence framework, the
+//! `NonSeedBlocks` observable, and the `block_compare` leaf onto the pbt-core
+//! floor; the central table keeps only the not-yet-co-located `block_raw` +
+//! `matview` arms (Phase 2).
 
 pub mod component;
 pub mod invariants;
@@ -59,6 +66,7 @@ pub fn pbt_contribution() -> PbtContribution {
         invariants: vec![
             invariants::loro_no_errors::wire(),
             invariants::loro_children_match_ref::wire(),
+            invariants::loro_blocks_match_ref::wire(),
         ],
         cap_installers: Vec::new(),
         generators: Vec::new(),
@@ -70,7 +78,11 @@ pub fn pbt_contribution() -> PbtContribution {
 pub fn pbt_footprint() -> PbtFootprint {
     PbtFootprint {
         crate_id: CrateId::Loro,
-        invariant_ids: vec!["inv-loro-no-errors", "inv-loro-children-match-ref"],
+        invariant_ids: vec![
+            "inv-loro-no-errors",
+            "inv-loro-children-match-ref",
+            "inv-blocks-match-ref/loro",
+        ],
         transition_kinds: Vec::new(),
     }
 }

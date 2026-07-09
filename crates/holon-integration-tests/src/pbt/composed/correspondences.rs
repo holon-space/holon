@@ -13,32 +13,28 @@ use std::pin::Pin;
 use holon_api::Block;
 use holon_pbt_core::capabilities::{
     EntityUri, RefAdvice, RefBackend, RefBlockTree, RefEditorMirror, RefLayout, SutAdviceMatview,
-    SutBackend, SutEditorMirrorRead, SutLoroLog, SutOrgRead, SutRenderer, SutSqlProjection,
+    SutBackend, SutEditorMirrorRead, SutOrgRead, SutRenderer, SutSqlProjection,
 };
 use holon_pbt_core::composition::{CapId, CapMap, Needs};
 use holon_pbt_core::invariant::InvariantResult;
 
-use crate::pbt::correspondence::{
-    Converge, Correspondence, Extraction, NamedCompare, Observable, StoreProjection,
-};
-use crate::pbt::invariants::block_compare::{
+use holon_pbt_core::block_compare::{
     BlockFacet, compare_block_fields, compare_block_subset, compare_blocks,
 };
+use holon_pbt_core::correspondence::{
+    Converge, Correspondence, Extraction, NamedCompare, Observable, StoreProjection,
+};
+use holon_pbt_core::observables::{NonSeedBlocks, ref_non_seed_blocks};
 
 // ─── Observable: non-seed blocks (the `inv-blocks-match-ref/*` family) ──────
-
-/// The set of non-seed blocks, as each storage-pipeline store sees it. The
-/// reference projection is [`RefBackend::non_seed_blocks`]; each store
-/// snapshot filters seed rows via [`RefBackend::seed_block_ids`] (context
-/// read: it shapes comparability, it never supplies the expected value). The
-/// `/org` view stays a hand-written invariant for now — distinct observable
-/// facet (renderer-canonical sibling order), Phase 3.
-pub struct NonSeedBlocks;
-
-impl Observable for NonSeedBlocks {
-    type Value = Vec<Block>;
-    const NAME: &'static str = "blocks-match-ref";
-}
+//
+// `NonSeedBlocks` + its `ref_non_seed_blocks` projection now live on the
+// pbt-core floor (co-location Phase 1a follow-on) so the `/loro` store arm can
+// be contributed from `holon-loro-testing`. This central table keeps only the
+// storage-pipeline arms that have not yet co-located: `block_raw` + `matview`
+// (both move to `holon-turso-testing` in Phase 2). The `/org` view stays a
+// hand-written invariant for now — distinct observable facet (renderer-canonical
+// sibling order), Phase 3.
 
 pub fn non_seed_blocks() -> Correspondence<NonSeedBlocks> {
     Correspondence {
@@ -86,32 +82,15 @@ pub fn non_seed_blocks() -> Correspondence<NonSeedBlocks> {
                 },
                 converge: Converge::None,
             },
-            // Live Loro tree. Unobservable (disclosed Skip) when Loro isn't
-            // enabled on the variant; strict otherwise — seeds materialize
-            // into the Loro store, so a non-seed divergence is a real bug.
-            StoreProjection {
-                // BLOCKED on Phase 1a: part of the shared cross-store correspondence
-                // registry; splitting the /loro arm out fragments it. Stays central.
-                id: "inv-blocks-match-ref/loro",
-                store: "loro",
-                needs: Needs {
-                    sut_present: vec![CapId::of::<dyn SutLoroLog>()],
-                    sut_absent: Vec::new(),
-                    ref_present: vec![CapId::of::<dyn RefBackend>()],
-                },
-                extract: extract_loro,
-                compare: NamedCompare {
-                    name: "compare_block_fields",
-                    f: compare_loro_fields,
-                },
-                converge: Converge::None,
-            },
+            // The live Loro tree arm (`inv-blocks-match-ref/loro`) co-located to
+            // `holon-loro-testing` (Phase 1a follow-on): it is contributed as a
+            // single-store `Correspondence<NonSeedBlocks>` via that crate's
+            // `pbt_contribution()`. `Correspondence::wire()` fans out one
+            // `CapInvariant` per store and `run_selected` runs all invariants
+            // order-independently, so a per-crate single-store arm is exactly
+            // equivalent to holding it here in the multi-store list.
         ],
     }
-}
-
-fn ref_non_seed_blocks(refs: &CapMap) -> Extraction<Vec<Block>> {
-    Extraction::Value(refs.non_seed_blocks())
 }
 
 fn extract_block_raw<'a>(
@@ -146,30 +125,8 @@ fn extract_matview<'a>(
     })
 }
 
-fn extract_loro<'a>(
-    sut: &'a CapMap,
-    refs: &'a CapMap,
-) -> Pin<Box<dyn Future<Output = Extraction<Vec<Block>>> + 'a>> {
-    Box::pin(async move {
-        let Some(loro_blocks) = sut.loro_block_snapshot().await else {
-            return Extraction::Unobservable("Loro not enabled on this variant".to_string());
-        };
-        let seed_block_ids = refs.seed_block_ids();
-        Extraction::Value(
-            loro_blocks
-                .into_iter()
-                .filter(|b| !seed_block_ids.contains(&b.id))
-                .collect(),
-        )
-    })
-}
-
 fn compare_matview_fields(sut: &Vec<Block>, ref_: &Vec<Block>) -> Result<(), String> {
     compare_block_fields("inv-blocks-match-ref/matview", sut, ref_)
-}
-
-fn compare_loro_fields(sut: &Vec<Block>, ref_: &Vec<Block>) -> Result<(), String> {
-    compare_block_fields("inv-blocks-match-ref/loro", sut, ref_)
 }
 
 fn compare_block_raw_subset(sut: &Vec<Block>, ref_: &Vec<Block>) -> Result<(), String> {

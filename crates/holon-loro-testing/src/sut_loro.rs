@@ -17,7 +17,7 @@ use holon::sync::{LoroDocumentStore, LoroSyncControllerHandle};
 use holon_api::EntityUri;
 use holon_api::block::Block;
 use holon_loro::LoroBackend;
-use holon_orgmode_testing::normalize_block;
+use holon_pbt_core::block_compare::normalize_block;
 use holon_pbt_core::capabilities::{PeerEditOp, SutLoro, TextOp};
 use holon_pbt_core::composition::{CapMap, CapProvider};
 use holon_pbt_core::retry::retry_until_ok;

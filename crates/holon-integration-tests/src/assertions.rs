@@ -5,7 +5,7 @@ use holon_api::EntityUri;
 use holon_api::block::Block;
 use holon_orgmode::models::OrgBlockExt;
 
-pub use holon_orgmode_testing::normalize_block;
+pub use holon_pbt_core::block_compare::normalize_block;
 
 /// Normalize a block for comparison by zeroing out timestamps and trimming content.
 ///
