@@ -204,8 +204,35 @@ ios-sim profile="Debug": (ios-xcbuild profile)
     echo "Installing Holon.app..."
     xcrun simctl install "$SIM_ID" "$APP"
     echo "Launching..."
-    xcrun simctl launch "$SIM_ID" space.holon.gpui
-    echo "Launched! 🚀"
+    # SIMCTL_CHILD_* env is forwarded into the app process; MCP_SERVER_PORT makes
+    # the embedded MCP server reachable at http://127.0.0.1:8521/mcp (used by the
+    # holon MCP + the live-MCP E2E). Relaunch with reset unlocked via `just ios-launch`.
+    SIMCTL_CHILD_MCP_SERVER_PORT=8521 xcrun simctl launch "$SIM_ID" space.holon.gpui
+    echo "Launched! 🚀  MCP at http://127.0.0.1:8521/mcp"
+
+# `simctl launch` forwards SIMCTL_CHILD_* env into the app process: MCP_SERVER_PORT
+# makes the embedded MCP server reachable; HOLON_MCP_ALLOW_RESET unlocks the in-process
+# vault reset the live-MCP E2E gate needs. Launch-only (no build/install): pair with
+# `just ios-sim` for a fresh build. See scripts/run_ios_live_mcp_e2e.sh + DEVELOPMENT.md.
+# Relaunch the installed app on a booted sim with MCP + vault-reset enabled
+ios-launch port="8521" allow_reset="1" sim="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    SIM_ID="{{ sim }}"
+    if [ -z "$SIM_ID" ]; then
+        SIM_ID=$(xcrun simctl list devices booted | grep -oE '[0-9A-F]{8}-[0-9A-F-]{27}' | head -1)
+    fi
+    if [ -z "$SIM_ID" ]; then
+        echo "ERROR: no booted simulator found; pass sim=<UDID> or run 'just ios-sim' first"
+        exit 1
+    fi
+    echo "Relaunching space.holon.gpui on $SIM_ID (MCP port {{ port }}, allow_reset={{ allow_reset }})"
+    xcrun simctl terminate "$SIM_ID" space.holon.gpui >/dev/null 2>&1 || true
+    sleep 1
+    SIMCTL_CHILD_MCP_SERVER_PORT={{ port }} \
+    SIMCTL_CHILD_HOLON_MCP_ALLOW_RESET={{ allow_reset }} \
+        xcrun simctl launch "$SIM_ID" space.holon.gpui
+    echo "Launched — MCP at http://127.0.0.1:{{ port }}/mcp"
 
 # Clean the iOS Xcode build artefacts.
 ios-clean:
