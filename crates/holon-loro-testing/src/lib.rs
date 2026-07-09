@@ -10,35 +10,49 @@
 //! Owns the Loro storage subsystem's cleanly-decoupled PBT artifacts:
 //! - [`LoroBackendComponent`] — the SUT cap component wrapping a real
 //!   `holon_loro::LoroBackend` (`SutBackend` + `SutLoroLog` + `SutLoroTaskState`).
+//! - [`LoroSut`] — the peer-mesh / Loro-validation SUT (`sut_loro`), plus its
+//!   [`quiescence`] and [`peer_ops`] helpers.
+//! - The six peer-sync / CRDT [`transitions`] (`AddPeer`, `PeerEdit`,
+//!   `PeerCharEdit`, `MergeFromPeer`, `SyncWithPeer`, `CreateStaleLoro`), each
+//!   generic over the reference type `R`.
 //! - `inv-loro-no-errors` and `inv-loro-children-match-ref` invariant bodies +
 //!   their `wire()`s.
 //!
 //! Exposed to the central fold via [`pbt_contribution`] / [`pbt_footprint`].
 //!
 //! ## Ref-state independence (plan §4)
-//! Nothing here names a concrete reference-state type: the invariant bodies read
-//! `Ref*` capabilities generically. A guard integration test
+//! Nothing here names a concrete reference-state type: the invariant bodies and
+//! transitions read `Ref*` capabilities generically. A guard integration test
 //! (`tests/no_ref_state_dep.rs`) fails the build if this crate ever reaches for
 //! the central `ReferenceState` monolith.
 //!
-//! ## What is NOT here yet (BLOCKED on Phase 1a)
-//! `LoroSut`, the 7 CRDT/sync transitions, and the `/loro` correspondence arm
-//! stay central: they bind the concrete `ReferenceState` + the monolithic
-//! `SutHandle` dispatch trait + central shared helpers. They co-locate once
-//! those are lifted into a shared crate (the Phase 1a decoupling).
+//! ## Dispatch stays central (for now)
+//! The `LoroSut` and transitions are co-located here (Phase-1a Step 4), but the
+//! central `declare_e2e_transitions!` enum still assembles them (it re-exports
+//! the structs) — the strategy is enum-driven, so [`pbt_contribution`]'s
+//! `generators` is inert until a later contribution-driven-strategy phase. The
+//! `/loro` correspondence arm also stays central (deferred: its registry
+//! framework is not yet lifted to a shared crate).
 
 pub mod component;
 pub mod invariants;
+pub mod peer_ops;
+pub mod quiescence;
+pub mod sut_loro;
+pub mod transitions;
 
 pub use component::LoroBackendComponent;
+pub use sut_loro::LoroSut;
 
 use holon_pbt_core::contribution::{CrateId, PbtContribution, PbtFootprint};
 
 /// `holon-loro`'s contribution to the ONE composed PBT: its two Loro-specific
 /// invariants. `cap_installers` is empty — the central `compose_sut_*` still
 /// constructs [`LoroBackendComponent`] (it needs the live shared backend + sync
-/// handle), registering the moved `CapProvider` impl. `generators` is empty:
-/// the Loro transitions are BLOCKED on Phase 1a.
+/// handle), registering the moved `CapProvider` impl. `generators` is empty by
+/// convention (matching the central footprint): the six Loro transitions live
+/// in [`transitions`] but are dispatched by the central enum, so nothing is
+/// registered through this seam until the strategy becomes contribution-driven.
 pub fn pbt_contribution() -> PbtContribution {
     PbtContribution {
         crate_id: CrateId::Loro,

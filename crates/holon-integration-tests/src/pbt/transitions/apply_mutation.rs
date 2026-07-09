@@ -376,7 +376,7 @@ impl TransitionFactory<ReferenceState> for ApplyMutation {
                             Just(None).boxed()
                         };
                         parent_strat.prop_map(move |parent_stable_id: Option<String>| {
-                            let sid = crate::pbt::transitions::deterministic_peer_block_id(
+                            let sid = holon_pbt_core::capabilities::deterministic_peer_block_id(
                                 peer_idx,
                                 parent_stable_id.as_deref(),
                                 &content,

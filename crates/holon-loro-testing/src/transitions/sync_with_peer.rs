@@ -15,7 +15,7 @@ use holon_pbt_core::validation::{Reason, check};
 use holon_pbt_core::{TransitionFactory, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::ExpectedSql;
+use holon_pbt_core::budget::ExpectedSql;
 
 /// Bidirectional sync between primary's LoroDoc and a peer via DirectSync.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -80,7 +80,7 @@ impl<R: RefLifecycle + RefPeers + RefPeersMut> TransitionRef<R> for SyncWithPeer
     }
 }
 
-crate::cap_transition! {
+holon_pbt_core::cap_transition! {
     SyncWithPeer: holon_pbt_core::capabilities::SutLoro,
     where R: [ RefLifecycle + RefPeers + RefPeersMut ],
     |me, _state, sut| {

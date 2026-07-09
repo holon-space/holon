@@ -19,7 +19,7 @@ use holon_pbt_core::validation::{Reason, check};
 use holon_pbt_core::{TransitionFactory, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::ExpectedSql;
+use holon_pbt_core::budget::ExpectedSql;
 
 /// Edit a block's LoroText container on a peer at the character level.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -81,7 +81,7 @@ impl<R: RefLifecycle + RefPeers> TransitionRef<R> for PeerCharEdit {
     }
 }
 
-crate::cap_transition! {
+holon_pbt_core::cap_transition! {
     PeerCharEdit: holon_pbt_core::capabilities::SutLoro,
     where R: [ RefLifecycle + RefPeers ],
     |me, _state, sut| {

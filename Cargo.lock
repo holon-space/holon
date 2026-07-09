@@ -5318,12 +5318,19 @@ dependencies = [
 name = "holon-loro-testing"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "holon",
  "holon-api",
  "holon-loro",
+ "holon-orgmode-testing",
  "holon-pbt-core",
+ "loro",
  "proptest 1.10.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "serde",
+ "tokio",
+ "tracing",
+ "validated",
  "workspace-hack 0.1.0",
 ]
 

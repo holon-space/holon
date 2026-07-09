@@ -77,7 +77,6 @@ pub fn model_chord_click_focus<
     state.open_active_editor(block_id.clone(), content, caret);
 }
 
-pub mod add_peer;
 pub mod apply_mutation;
 mod arrow_navigate;
 pub mod bulk_external_add;
@@ -86,7 +85,6 @@ mod concurrent_schema_init;
 mod create_block_under_focus;
 mod create_directory;
 mod create_document;
-mod create_stale_loro;
 pub mod delete_backward;
 mod delete_document;
 mod drag_drop_block;
@@ -98,7 +96,6 @@ mod git_init;
 pub mod indent;
 mod jj_git_init;
 pub mod join_block;
-mod merge_from_peer;
 pub mod move_cursor;
 pub mod move_down;
 pub mod move_up;
@@ -108,8 +105,6 @@ mod navigate_forward;
 mod navigate_home;
 mod nothing;
 pub mod outdent;
-mod peer_char_edit;
-mod peer_edit;
 mod pin_block;
 mod press_key;
 mod redo;
@@ -120,7 +115,6 @@ mod simulate_restart;
 pub mod split_block;
 pub(crate) mod start_app;
 mod switch_view;
-mod sync_with_peer;
 mod toggle_collapse;
 pub mod toggle_state;
 pub mod trigger_slash_command;
@@ -134,7 +128,6 @@ mod deliver_block_content;
 mod switch_view_mode;
 mod toggle_drawer;
 
-pub use add_peer::AddPeer;
 pub use apply_mutation::ApplyMutation;
 pub use arrow_navigate::ArrowNavigate;
 pub use bulk_external_add::BulkExternalAdd;
@@ -143,7 +136,6 @@ pub use concurrent_schema_init::ConcurrentSchemaInit;
 pub use create_block_under_focus::CreateBlockUnderFocus;
 pub use create_directory::CreateDirectory;
 pub use create_document::CreateDocument;
-pub use create_stale_loro::CreateStaleLoro;
 pub use delete_backward::DeleteBackward;
 pub use delete_document::DeleteDocument;
 pub use drag_drop_block::DragDropBlock;
@@ -155,7 +147,6 @@ pub use git_init::GitInit;
 pub use indent::Indent;
 pub use jj_git_init::JjGitInit;
 pub use join_block::JoinBlock;
-pub use merge_from_peer::MergeFromPeer;
 pub use move_cursor::MoveCursor;
 pub use move_down::MoveDown;
 pub use move_up::MoveUp;
@@ -165,8 +156,6 @@ pub use navigate_forward::NavigateForward;
 pub use navigate_home::NavigateHome;
 pub use nothing::Nothing;
 pub use outdent::Outdent;
-pub use peer_char_edit::PeerCharEdit;
-pub use peer_edit::PeerEdit;
 pub use pin_block::PinBlock;
 pub use press_key::PressKey;
 pub use redo::Redo;
@@ -177,7 +166,6 @@ pub use simulate_restart::SimulateRestart;
 pub use split_block::SplitBlock;
 pub use start_app::StartApp;
 pub use switch_view::SwitchView;
-pub use sync_with_peer::SyncWithPeer;
 pub use toggle_state::ToggleState;
 pub use trigger_slash_command::TriggerSlashCommand;
 pub use type_chars::TypeChars;
@@ -190,36 +178,16 @@ pub use switch_view_mode::SwitchViewMode;
 pub use toggle_collapse::ToggleCollapse;
 pub use toggle_drawer::ToggleDrawer;
 
-// ── Shared helper types for peer-sync transitions ──────────────────
-// These would naturally live in `peer_edit.rs` / `peer_char_edit.rs`
-// but they're referenced as field types from BOTH the variant
-// definitions and outside callers (sut.rs SutHandle impls), so they
-// stay at the module root for ergonomic imports.
-
-use std::hash::{Hash, Hasher};
-
-/// Generate a deterministic, UUID-like stable ID from inputs.
-/// Both the reference model and SUT use this to produce identical
-/// block IDs for peer-created blocks.
-pub fn deterministic_peer_block_id(
-    peer_idx: usize,
-    parent_stable_id: Option<&str>,
-    content: &str,
-    seq: usize,
-) -> String {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    peer_idx.hash(&mut hasher);
-    parent_stable_id.hash(&mut hasher);
-    content.hash(&mut hasher);
-    seq.hash(&mut hasher);
-    let h = hasher.finish();
-    let hi = (h >> 32) as u32;
-    let lo = h as u32;
-    format!("peer-{hi:08x}-{lo:08x}-{peer_idx:04x}-{seq:04x}")
-}
-
-// Peer edit operations live in `holon-pbt-core` so the `SutLoro` capability
-// trait there can name them. Re-exported here for the transition call sites.
+// The peer-sync transitions (`AddPeer`, `PeerEdit`, `PeerCharEdit`,
+// `MergeFromPeer`, `SyncWithPeer`, `CreateStaleLoro`) and their shared helper
+// `deterministic_peer_block_id` are co-located in `holon-loro-testing` /
+// `holon-pbt-core` (Phase-1a Step 4). Re-exported here so the
+// `declare_e2e_transitions!` enum below (the central assembler) names them
+// unchanged; `deterministic_peer_block_id` now lives in
+// `holon_pbt_core::capabilities`.
+pub use holon_loro_testing::transitions::{
+    AddPeer, CreateStaleLoro, MergeFromPeer, PeerCharEdit, PeerEdit, SyncWithPeer,
+};
 
 crate::declare_e2e_transitions! {
     pub enum E2ETransition {

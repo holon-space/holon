@@ -5,10 +5,10 @@
 //! teeth run in the ONE PBT (full mode), where `compose_sut` backs `SutLoroLog`
 //! with the live `LoroSyncControllerHandle` error counter.
 
+use holon_pbt_core::RunMode;
 use holon_pbt_core::capabilities::SutLoroLog;
 use holon_pbt_core::composition::{BridgedInvariant, CapId, CapInvariant, Needs};
 use holon_pbt_core::invariant::{Invariant, InvariantId, InvariantResult};
-use holon_pbt_core::RunMode;
 
 pub struct InvLoroNoErrors;
 

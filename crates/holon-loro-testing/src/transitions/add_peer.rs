@@ -15,7 +15,7 @@ use holon_pbt_core::validation::{Reason, check};
 use holon_pbt_core::{TransitionFactory, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::ExpectedSql;
+use holon_pbt_core::budget::ExpectedSql;
 
 /// Add a Loro-only peer instance that shares the primary's current state.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -62,7 +62,7 @@ impl<R: RefPeers + RefPeersMut + RefLifecycle> TransitionRef<R> for AddPeer {
     }
 }
 
-crate::cap_transition! {
+holon_pbt_core::cap_transition! {
     AddPeer: holon_pbt_core::capabilities::SutLoro,
     where R: [ RefLifecycle + RefPeers + RefPeersMut ],
     |_me, _state, sut| {
