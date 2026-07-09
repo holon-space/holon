@@ -131,10 +131,13 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         invariants::observed_errors::wire(),
     ];
     // Correspondence-registry entries (one CapInvariant per store projection;
-    // see `pbt::correspondence`). The `inv-blocks-match-ref/{block_raw,matview,
-    // loro}` family lives in `correspondences::non_seed_blocks`; the per-id
-    // `inv-block-content/{block_raw,sql}` and `inv-block-parent/block_raw`
-    // families in `correspondences::block_{content,parent}`; the editor-mirror
+    // see `holon_pbt_core::correspondence`). The
+    // `inv-blocks-match-ref/{block_raw,matview}` arms live in
+    // `correspondences::non_seed_blocks` (the `/loro` arm co-located to
+    // `holon-loro-testing`, folded in via
+    // `holon_loro_testing::pbt_contribution()`); the per-id `inv-block-content/
+    // {block_raw,sql}` and `inv-block-parent/block_raw` families in
+    // `correspondences::block_{content,parent}`; the editor-mirror
     // `inv-editor-{text,caret}/mirror` families in
     // `correspondences::active_editor_{text,caret}`; the org store
     // `inv-blocks-match-ref/org` and the root-layout ghost-row check
@@ -246,7 +249,8 @@ const CENTRAL_INVARIANT_IDS_HEAD: &[&str] = &[
 const CENTRAL_INVARIANT_IDS_TAIL: &[&str] = &[
     "inv-blocks-match-ref/block_raw",
     "inv-blocks-match-ref/matview",
-    "inv-blocks-match-ref/loro",
+    // `inv-blocks-match-ref/loro` co-located to `holon-loro-testing` (Phase 1a
+    // follow-on); it is now listed in that crate's `pbt_footprint()`.
     "inv-block-content/block_raw",
     "inv-block-content/sql",
     "inv-block-parent/block_raw",
