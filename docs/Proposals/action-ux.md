@@ -37,13 +37,22 @@ One rule = one source block, same YAML-ish dialect family as
 ```
 * Daily journal
 #+begin_src holon_rule
-when: today and not journal(date = today)
-then: block.create
-  parent: journals
+when: clock.today as today and not journal(date = today)
+emit:
+  place: journals
   name: "{today}"
 #+end_src
 ```
 
+- **DECIDED — valid YAML, token-operation surface.** Rule bodies are valid
+  YAML (guard expressions as strings). Intra-Holon effects are declared as
+  marking deltas (`emit` / `consume` / consume+emit), not `block.create(...)`
+  calls — see ADR 0024 Amendment "effects are token operations". Source
+  language: `holon_rule` (supersedes the bare `action` language; what the
+  program-marking keys off).
+- **DECIDED — guards need a positive binder.** `when: today` alone is
+  always-true; negation may only use variables bound by a positive atom
+  (Datalog range restriction, enforced by the Pattern parser).
 - **DECIDED — no `unless` keyword.** A separate `unless` forces the author to
   classify complicated predicates into when-vs-unless arbitrarily. One `when`
   with full boolean composition (`and` / `or` / `not` — the Pattern AST has
@@ -65,13 +74,21 @@ the page (inverting the current bug where they render as broken query results).
 - **Provenance badge:** every auto-created block carries a subtle ⚙ affordance
   → "created by *Daily journal*, today 00:03" → click-through to the rule card.
   This is ADR 0024 P8 (`fired-by`) surfaced as UI.
-  OPEN — loudness: always-badge vs badge-until-acknowledged vs hover-only.
-  Lean: badge-until-acknowledged for new rules, hover-only once trusted (trust
-  decays the ceremony).
+  **DECIDED (2026-07-09 demo review) — hover-only.** The always-visible
+  variant was judged too intrusive. Requires a new `on_hover` render
+  primitive (reveal content only while the row/region is hovered) across
+  ReactiveViewModel, GPUI, and dioxus-web; hover state is per-render-slot
+  (`Mutable` on the ViewModel node, never a `Cell` — FU-1 lesson).
 - **Dry-run before enable:** enabling a new rule first shows "this would fire
   3× right now → [list]"; confirm or cancel. This is the in-memory evaluator /
   simulator doing its first product job, and it converts automation from scary
   to boring.
+  Design note (Martin, demo review): users should be able to **opt out of
+  individual pending firings** (e.g. skip back-filling past days, keep future
+  ones). A skipped firing must be recorded as handled for its key or the rule
+  re-fires — i.e. skip = a suppression entry, the exact ADR 0021/0022
+  suppression shape with system-vs-user provenance. Post-MVP, but journal/
+  dry-run rows should be designed to carry a per-row toggle.
 
 ### Auditing: the Automations page is a query
 
@@ -149,7 +166,7 @@ sovereign".
 
 ## Open forks (queued for a design pass)
 
-1. Provenance badge loudness (lean: badge-until-acknowledged → hover-only).
+1. ~~Provenance badge loudness~~ DECIDED: hover-only (see above).
 2. Undo scope: per-firing / per-run / day-level (MVP: none; journal rows must
    leave room for per-firing).
 3. Action bar placement detail: inline in the outline vs side rail with
