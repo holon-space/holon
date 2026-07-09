@@ -57,6 +57,7 @@ pbt = [
     "holon-frontend/pbt",
     "dep:holon-layout-testing",
     "dep:holon-loro-testing",
+    "dep:holon-turso-testing",
     "dep:holon-oracles",
     "dep:holon-pbt-core",
     "dep:holon-macros",
@@ -108,6 +109,7 @@ xcap = { git = "https://github.com/nightscape/xcap", branch = "feat/macos-offscr
 signal-hook = "0.3"
 holon-layout-testing = { path = "../holon-layout-testing", optional = true }
 holon-loro-testing = { path = "../holon-loro-testing", optional = true }
+holon-turso-testing = { path = "../holon-turso-testing", optional = true }
 holon-oracles = { workspace = true, optional = true }
 holon-pbt-core = { path = "../holon-pbt-core", optional = true }
 holon-macros = { workspace = true, optional = true }

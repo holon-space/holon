@@ -5235,6 +5235,7 @@ dependencies = [
  "holon-pbt-core",
  "holon-profiles",
  "holon-turso",
+ "holon-turso-testing",
  "image",
  "indexmap 2.13.0",
  "loro",
@@ -5621,6 +5622,24 @@ dependencies = [
  "turso_sdk_kit",
  "wasm-bindgen-futures",
  "web-time",
+ "workspace-hack 0.1.0",
+]
+
+[[package]]
+name = "holon-turso-testing"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "holon",
+ "holon-api",
+ "holon-pbt-core",
+ "holon-turso",
+ "proptest 1.10.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "serde",
+ "tokio",
+ "tracing",
+ "validated",
  "workspace-hack 0.1.0",
 ]
 

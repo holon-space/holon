@@ -125,27 +125,20 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         invariants::observed_errors::wire(),
     ];
     // Correspondence-registry entries (one CapInvariant per store projection;
-    // see `holon_pbt_core::correspondence`). The `inv-blocks-match-ref/{block_raw,matview}`
-    // arms live in `correspondences::non_seed_blocks` (the `/loro` arm co-located to
-    // `holon-loro-testing`, folded in via `holon_loro_testing::pbt_contribution()`); the per-id
-    // `inv-block-content/{block_raw,sql}` and `inv-block-parent/block_raw`
-    // families in `correspondences::block_{content,parent}`; the editor-mirror
-    // `inv-editor-{text,caret}/mirror` families in
-    // `correspondences::active_editor_{text,caret}`; the org store
-    // `inv-blocks-match-ref/org` and the root-layout ghost-row check
-    // `inv-matview-consistent-with-ref/root_layout`.
-    catalog.extend(correspondences::non_seed_blocks().wire());
-    catalog.extend(correspondences::block_content().wire());
-    catalog.extend(correspondences::block_parent().wire());
+    // see `holon_pbt_core::correspondence`). The Turso storage-pipeline arms
+    // (`inv-blocks-match-ref/{block_raw,matview}`, `inv-block-content/{block_raw,sql}`,
+    // `inv-block-parent/block_raw`, `inv-advice-matview-matches-ref/matview`) are
+    // co-located to `holon-turso-testing` (Phase 2, folded in via
+    // `holon_turso_testing::pbt_contribution()`); the `/loro` arm to
+    // `holon-loro-testing`. What stays central: the editor-mirror
+    // `inv-editor-{text,caret}/mirror` families (`active_editor_{text,caret}`),
+    // the org store `inv-blocks-match-ref/org` (`org_blocks`), and the root-layout
+    // ghost-row check `inv-matview-consistent-with-ref/root_layout`
+    // (`matview_ghost_rows`, renderer-observed).
     catalog.extend(correspondences::active_editor_text().wire());
     catalog.extend(correspondences::active_editor_caret().wire());
     catalog.extend(correspondences::org_blocks().wire());
     catalog.extend(correspondences::matview_ghost_rows().wire());
-    // SQL-level advice twin (`inv-advice-matview-matches-ref/matview`): the raw
-    // synthesized `advice_rule_%` matview contract vs the reference. Flips green
-    // when step-6 synthesis lands even while `inv-advice-rows-woven` stays red —
-    // driver-ladder localization. Needs `SutAdviceMatview` + `RefAdvice`.
-    catalog.extend(correspondences::advice_matviews().wire());
     catalog
 }
 
@@ -170,7 +163,11 @@ pub fn pbt_contribution() -> PbtContribution {
 /// selected invariant), so this is byte-identical in effect to the former
 /// hand-maintained `Vec`.
 pub fn composed_invariant_catalog() -> Vec<Box<dyn CapInvariant>> {
-    fold_catalog([pbt_contribution(), holon_loro_testing::pbt_contribution()])
+    fold_catalog([
+        pbt_contribution(),
+        holon_loro_testing::pbt_contribution(),
+        holon_turso_testing::pbt_contribution(),
+    ])
 }
 
 /// Static, boot-free footprint of the `Central` contributor — the ladder-floor /
@@ -238,18 +235,16 @@ const CENTRAL_INVARIANT_IDS_HEAD: &[&str] = &[
 
 /// Correspondence-registry ids folded in after the (feature-gated) budget invariant.
 const CENTRAL_INVARIANT_IDS_TAIL: &[&str] = &[
-    "inv-blocks-match-ref/block_raw",
-    "inv-blocks-match-ref/matview",
-    // `inv-blocks-match-ref/loro` co-located to `holon-loro-testing` (Phase 1a
-    // follow-on); it is now listed in that crate's `pbt_footprint()`.
-    "inv-block-content/block_raw",
-    "inv-block-content/sql",
-    "inv-block-parent/block_raw",
+    // Co-located to companion crates, listed in their own `pbt_footprint()`:
+    //   `inv-blocks-match-ref/loro`                → `holon-loro-testing` (Phase 1a).
+    //   `inv-blocks-match-ref/{block_raw,matview}` → `holon-turso-testing` (Phase 2).
+    //   `inv-block-content/{block_raw,sql}`        → `holon-turso-testing` (Phase 2).
+    //   `inv-block-parent/block_raw`               → `holon-turso-testing` (Phase 2).
+    //   `inv-advice-matview-matches-ref/matview`   → `holon-turso-testing` (Phase 2).
     "inv-editor-text/mirror",
     "inv-editor-caret/mirror",
     "inv-blocks-match-ref/org",
     "inv-matview-consistent-with-ref/root_layout",
-    "inv-advice-matview-matches-ref/matview",
 ];
 
 #[cfg(test)]
