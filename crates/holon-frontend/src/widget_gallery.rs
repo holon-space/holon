@@ -1663,6 +1663,56 @@ mod tests {
         );
     }
 
+    /// Root-cause guard for the "hover never reveals" bug: the on_hover node
+    /// carries its own `hovered` `Mutable<bool>`, and the reveal only survives
+    /// if the SAME node instance is reused across renders. The GPUI gallery
+    /// used to rebuild this tree every frame, so `.on_hover` flipped a Mutable
+    /// that the very next repaint discarded — the content could never show.
+    ///
+    /// This test pins both halves of that mechanism:
+    ///  - reusing the node preserves a flipped `hovered` (what the fixed
+    ///    gallery does by caching `Arc<ReactiveViewModel>` across renders),
+    ///  - a freshly rebuilt tree resets `hovered` to its `false` seed (why the
+    ///    per-frame rebuild hid the reveal).
+    #[test]
+    fn on_hover_state_survives_only_when_node_is_reused() {
+        fn find_on_hover(
+            node: &crate::reactive_view_model::ReactiveViewModel,
+        ) -> Option<&crate::reactive_view_model::ReactiveViewModel> {
+            if node.widget_name().as_deref() == Some("on_hover") {
+                return Some(node);
+            }
+            node.children.iter().find_map(|c| find_on_hover(c))
+        }
+
+        let expr = actions_mode_expr();
+
+        let vm = mode_view_model(&expr);
+        let node = find_on_hover(&vm).expect("actions mode has an on_hover node");
+        let hovered = node
+            .hovered
+            .clone()
+            .expect("on_hover node seeds a `hovered` Mutable");
+        assert!(!hovered.get(), "hover seeds `false`");
+
+        // Simulate `.on_hover(true)` firing on the persisted node.
+        hovered.set(true);
+        let same = find_on_hover(&vm).expect("on_hover node still present");
+        assert!(
+            same.hovered.as_ref().unwrap().get(),
+            "a reused node keeps the flipped hover state across a re-render"
+        );
+
+        // Rebuilding from scratch — the old per-frame behaviour — loses it.
+        let rebuilt = mode_view_model(&expr);
+        let fresh = find_on_hover(&rebuilt).expect("on_hover node present in rebuild");
+        assert!(
+            !fresh.hovered.as_ref().unwrap().get(),
+            "a freshly rebuilt tree resets hover to false — the per-frame \
+             rebuild is exactly what hid the reveal"
+        );
+    }
+
     #[test]
     fn design_gallery_view_model_produces_tree() {
         let vm = design_gallery_view_model();
