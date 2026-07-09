@@ -139,11 +139,22 @@ struct GalleryView {
     stub_services: Arc<dyn holon_frontend::reactive::BuilderServices>,
     bounds_registry: holon_gpui::geometry::BoundsRegistry,
     entity_cache: holon_gpui::entity_view_registry::EntityCache,
+    /// The interpreted tree for the current `mode`, held across renders so
+    /// per-node view state (hover, expand) survives repaints. Rebuilding it
+    /// every frame — as an earlier version did — reset every `Mutable<bool>`
+    /// to its seed on the very repaint `window.refresh()` triggers, so
+    /// `on_hover` could never reveal its content. Prod persists the tree the
+    /// same way (`HolonView::root_vm: Arc<ReactiveViewModel>`).
+    view_cache: Option<(
+        Mode,
+        Arc<holon_frontend::reactive_view_model::ReactiveViewModel>,
+    )>,
 }
 
 impl Render for GalleryView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mode = self.mode;
+        let rvm = self.view_model_for(mode);
         div()
             .id("gallery-root")
             .size_full()
@@ -160,15 +171,6 @@ impl Render for GalleryView {
                     .overflow_hidden()
                     .child(sidebar())
                     .child({
-                        let expr = match mode {
-                            Mode::Orient => holon_frontend::widget_gallery::orient_mode_expr(),
-                            Mode::Flow => holon_frontend::widget_gallery::flow_mode_expr(),
-                            Mode::Capture => holon_frontend::widget_gallery::capture_mode_expr(),
-                            Mode::Chat => holon_frontend::widget_gallery::chat_mode_expr(),
-                            Mode::Board => holon_frontend::widget_gallery::board_mode_expr(),
-                            Mode::Actions => holon_frontend::widget_gallery::actions_mode_expr(),
-                        };
-                        let rvm = holon_frontend::widget_gallery::mode_view_model(&expr);
                         let gpui_ctx = holon_gpui::render::builders::GpuiRenderContext::new(
                             holon_frontend::RenderContext::default(),
                             self.stub_services.clone(),
@@ -201,6 +203,31 @@ impl Render for GalleryView {
 }
 
 impl GalleryView {
+    /// Return the interpreted tree for `mode`, reusing the cached one so
+    /// per-node view state (hover/expand `Mutable`s) survives repaints.
+    /// Rebuilt only when the mode changes.
+    fn view_model_for(
+        &mut self,
+        mode: Mode,
+    ) -> Arc<holon_frontend::reactive_view_model::ReactiveViewModel> {
+        if let Some((cached_mode, rvm)) = &self.view_cache {
+            if *cached_mode == mode {
+                return rvm.clone();
+            }
+        }
+        let expr = match mode {
+            Mode::Orient => holon_frontend::widget_gallery::orient_mode_expr(),
+            Mode::Flow => holon_frontend::widget_gallery::flow_mode_expr(),
+            Mode::Capture => holon_frontend::widget_gallery::capture_mode_expr(),
+            Mode::Chat => holon_frontend::widget_gallery::chat_mode_expr(),
+            Mode::Board => holon_frontend::widget_gallery::board_mode_expr(),
+            Mode::Actions => holon_frontend::widget_gallery::actions_mode_expr(),
+        };
+        let rvm = Arc::new(holon_frontend::widget_gallery::mode_view_model(&expr));
+        self.view_cache = Some((mode, rvm.clone()));
+        rvm
+    }
+
     fn top_bar(&self, cx: &mut Context<Self>) -> Div {
         div()
             .w_full()
@@ -300,6 +327,7 @@ impl GalleryView {
             stub_services: services,
             bounds_registry,
             entity_cache: Default::default(),
+            view_cache: None,
         }
     }
 }
