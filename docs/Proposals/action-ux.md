@@ -37,7 +37,7 @@ One rule = one source block, same YAML-ish dialect family as
 ```
 * Daily journal
 #+begin_src holon_rule
-when: clock.today as today and not journal(date = today)
+when: not block_exists("Journals/{today}")
 emit:
   place: journals
   name: "{today}"
@@ -50,9 +50,16 @@ emit:
   calls — see ADR 0024 Amendment "effects are token operations". Source
   language: `holon_rule` (supersedes the bare `action` language; what the
   program-marking keys off).
-- **DECIDED — guards need a positive binder.** `when: today` alone is
-  always-true; negation may only use variables bound by a positive atom
-  (Datalog range restriction, enforced by the Pattern parser).
+- **DECIDED — builtins interpolate; no explicit binding.** `{today}` (or
+  namespaced `{clock.today}`) is an environment reference, substituted — not a
+  pattern variable, so no `clock.today as today` ceremony. The **compiler**
+  desugars each builtin reference into a read arc on the clock/environment
+  relation (which is what makes the rule re-fire on rollover and keeps the
+  matview deterministic — ADR 0024 P5); authors never see that. The
+  range-restriction well-formedness check survives internally and surfaces
+  only for user-introduced pattern variables (future quantifiers), with a
+  human message ("`x` is used in a negation but never matched against
+  anything").
 - **DECIDED — no `unless` keyword.** A separate `unless` forces the author to
   classify complicated predicates into when-vs-unless arbitrarily. One `when`
   with full boolean composition (`and` / `or` / `not` — the Pattern AST has
