@@ -147,8 +147,7 @@ impl<R: RefLifecycle + RefPeers + RefPeersMut> TransitionRef<R> for PeerEdit {
         ];
 
         if self.peer_idx < state.peers_len() {
-            let has_block =
-                |sid: &str| state.peer_block_content(self.peer_idx, sid).is_some();
+            let has_block = |sid: &str| state.peer_block_content(self.peer_idx, sid).is_some();
             let valid_op = match &self.op {
                 PeerEditOp::Create {
                     parent_stable_id, ..

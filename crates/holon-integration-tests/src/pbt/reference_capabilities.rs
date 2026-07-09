@@ -1016,7 +1016,10 @@ impl RefDocuments for ReferenceState {
         self.files.documents.values().cloned().collect()
     }
     fn has_document(&self, file_name: &str) -> bool {
-        self.files.documents.values().any(|name| name.as_str() == file_name)
+        self.files
+            .documents
+            .values()
+            .any(|name| name.as_str() == file_name)
     }
     fn document_count(&self) -> usize {
         self.files.documents.len()
@@ -1025,7 +1028,11 @@ impl RefDocuments for ReferenceState {
         ReferenceState::doc_uri_by_name(self, name)
     }
     fn block_document_of(&self, block_id: &EntityUri) -> Option<EntityUri> {
-        self.domain.block_state.block_documents.get(block_id).cloned()
+        self.domain
+            .block_state
+            .block_documents
+            .get(block_id)
+            .cloned()
     }
     fn has_non_seed_advice_rule(&self) -> bool {
         !crate::pbt::advice_expectation::non_seed_advice_rule_blocks(&self.domain.block_state)
@@ -1042,7 +1049,9 @@ impl RefDocuments for ReferenceState {
 impl RefDocumentsMut for ReferenceState {
     fn insert_document(&mut self, file_name: &str) {
         let doc_uri = self.next_synthetic_doc_uri();
-        self.files.documents.insert(doc_uri.clone(), file_name.to_string());
+        self.files
+            .documents
+            .insert(doc_uri.clone(), file_name.to_string());
 
         let doc_name = std::path::Path::new(file_name)
             .file_stem()
@@ -1053,7 +1062,10 @@ impl RefDocumentsMut for ReferenceState {
         doc_block.set_page(true);
         // New empty documents don't have #+TODO: headers — keywords only appear
         // after the file is written with content.
-        self.domain.block_state.blocks.insert(doc_uri.clone(), doc_block);
+        self.domain
+            .block_state
+            .blocks
+            .insert(doc_uri.clone(), doc_block);
         self.domain
             .block_state
             .block_documents
@@ -1151,7 +1163,8 @@ impl RefDocumentsMut for ReferenceState {
         // parented to `GEN_PLACEHOLDER` are remapped to the resolved doc uri; the
         // `ID` renderer hint is stripped; layout classification is derived from each
         // block's `source_language`, mirroring the org parser's index.org handling.
-        let placeholder = EntityUri::block(crate::pbt::transitions::write_org_file::GEN_PLACEHOLDER);
+        let placeholder =
+            EntityUri::block(crate::pbt::transitions::write_org_file::GEN_PLACEHOLDER);
         let is_index = filename == "index.org";
         for (seq, generated) in blocks.iter().enumerate() {
             let mut block = generated.clone();
@@ -1520,8 +1533,10 @@ impl RefLayoutMutate for ReferenceState {
         for block in blocks {
             let mut block = block.clone();
             // Mirror the org round-trip normalization `Mutation::apply_to` does.
-            block.content =
-                crate::pbt::types::normalize_content_for_org_roundtrip(&block.content, block.content_type);
+            block.content = crate::pbt::types::normalize_content_for_org_roundtrip(
+                &block.content,
+                block.content_type,
+            );
             crate::pbt::types::apply_org_headline_tag_split(&mut block);
             let id = block.id.clone();
             self.domain.block_state.blocks.insert(id.clone(), block);

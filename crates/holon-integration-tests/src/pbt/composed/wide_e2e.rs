@@ -411,9 +411,8 @@ pub async fn boot_and_seed_wide(
         caps.insert(m as std::sync::Arc<dyn SutMetricsLifecycle>);
 
         use crate::pbt::composed::observed_errors::{ComposedObservedErrors, ObservedProblems};
-        caps.insert(
-            std::sync::Arc::new(ComposedObservedErrors::new()) as std::sync::Arc<dyn ObservedProblems>,
-        );
+        caps.insert(std::sync::Arc::new(ComposedObservedErrors::new())
+            as std::sync::Arc<dyn ObservedProblems>);
     }
 
     // Scaffold = everything the SUT booted OR the oracle models, EXCEPT the non-seed

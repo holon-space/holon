@@ -49,7 +49,8 @@ impl<R: RefLifecycle + RefDocuments + RefLayoutInteract + RefLayoutMutate> Trans
             // ClickBlock-as-Main, …) returns `None` and the PBT never reaches
             // editing code. Once docs hold Text blocks the weight drops back to
             // base so the rest of the strategy can run.
-            let is_empty_doc = |doc_uri: &EntityUri| -> bool { !state.doc_has_editable_text(doc_uri) };
+            let is_empty_doc =
+                |doc_uri: &EntityUri| -> bool { !state.doc_has_editable_text(doc_uri) };
             let empty_doc_uris: Vec<EntityUri> = doc_uris
                 .iter()
                 .filter(|u| is_empty_doc(u))

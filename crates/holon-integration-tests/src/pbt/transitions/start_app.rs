@@ -15,8 +15,8 @@ use validated::Validated;
 
 use crate::pbt::query::{QuerySource, QueryTable, TestQuery, WatchSpec, all_block_columns};
 use crate::pbt::reference_state::ReferenceState;
-use holon_pbt_core::capabilities::{RefBoot, RefBootMut, RefLifecycle, SutAppLifecycle};
 use holon_pbt_core::capabilities::SutWatchRegister;
+use holon_pbt_core::capabilities::{RefBoot, RefBootMut, RefLifecycle, SutAppLifecycle};
 use holon_pbt_core::validation::{Reason, check};
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 

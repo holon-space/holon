@@ -46,7 +46,10 @@ impl<R: RefLifecycle + RefLayout + RefWatch> TransitionRef<R> for ConcurrentSche
         let checks: Vec<Validated<(), Reason>> = vec![
             check(state.app_started(), Reason::AppNotStarted),
             check(!state.all_block_ids().is_empty(), Reason::BlockStateEmpty),
-            check(!state.active_watch_ids().is_empty(), Reason::NoWatchesActive),
+            check(
+                !state.active_watch_ids().is_empty(),
+                Reason::NoWatchesActive,
+            ),
         ];
 
         checks

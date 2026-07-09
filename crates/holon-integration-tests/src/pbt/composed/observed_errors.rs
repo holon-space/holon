@@ -114,11 +114,15 @@ mod tests {
     #[tokio::test]
     async fn fails_when_a_problem_was_captured() {
         let sut = map(vec![
-            "[PANIC] tokio-rt-worker (crates/holon-profiles/src/lib.rs:770): No id found".to_string(),
+            "[PANIC] tokio-rt-worker (crates/holon-profiles/src/lib.rs:770): No id found"
+                .to_string(),
         ]);
         match InvNoObservedErrors.check(&CapMap::new(), &sut).await {
             InvariantResult::Fail(msg) => {
-                assert!(msg.contains("No id found"), "message must surface the problem: {msg}");
+                assert!(
+                    msg.contains("No id found"),
+                    "message must surface the problem: {msg}"
+                );
             }
             other => panic!("expected Fail on a captured problem, got {other:?}"),
         }

@@ -330,10 +330,7 @@ impl SpanCollector {
     /// since the last [`SpanCollector::reset`]. Read by the observability
     /// invariant so a SWALLOWED error/panic fails the run.
     pub fn captured_problems(&self) -> Vec<CapturedProblem> {
-        self.problems
-            .lock()
-            .map(|g| g.clone())
-            .unwrap_or_default()
+        self.problems.lock().map(|g| g.clone()).unwrap_or_default()
     }
 
     /// Count of problems captured since the last [`SpanCollector::reset`].
@@ -926,7 +923,6 @@ pub fn maybe_write_flamegraph(collector: &SpanCollector, transition_key: &str) {
     );
 }
 
-
 #[cfg(test)]
 mod capture_tests {
     use super::*;
@@ -948,7 +944,11 @@ mod capture_tests {
             tracing::error!("captured boom");
         });
         let got = sink.lock().unwrap();
-        assert_eq!(got.len(), 1, "only the ERROR event is recorded; got {got:?}");
+        assert_eq!(
+            got.len(),
+            1,
+            "only the ERROR event is recorded; got {got:?}"
+        );
         assert_eq!(got[0].kind, ProblemKind::ErrorLog);
         assert!(
             got[0].message.contains("captured boom"),

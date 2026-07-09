@@ -773,8 +773,10 @@ impl ProfileResolving for ProfileResolver {
             // junction/aggregate projection (e.g. the advice `advice_suppressed`
             // watch, 2026-07-09): project `... AS id` or route it through a
             // signal-only path instead of the enriched watch. Fail loud with the row.
-            panic!("profile resolver: row has no entity `id` — watch_query/enrichment \
-                    requires entity-shaped rows (project `... AS id`): {e}")
+            panic!(
+                "profile resolver: row has no entity `id` — watch_query/enrichment \
+                    requires entity-shaped rows (project `... AS id`): {e}"
+            )
         });
         let entity_name_str = entity_uri.scheme();
         let entity_name = EntityName::new(entity_name_str);
@@ -837,8 +839,10 @@ impl ProfileResolving for ProfileResolver {
             // junction/aggregate projection (e.g. the advice `advice_suppressed`
             // watch, 2026-07-09): project `... AS id` or route it through a
             // signal-only path instead of the enriched watch. Fail loud with the row.
-            panic!("profile resolver: row has no entity `id` — watch_query/enrichment \
-                    requires entity-shaped rows (project `... AS id`): {e}")
+            panic!(
+                "profile resolver: row has no entity `id` — watch_query/enrichment \
+                    requires entity-shaped rows (project `... AS id`): {e}"
+            )
         });
         let entity_name_str = entity_uri.scheme();
         let entity_name = EntityName::new(entity_name_str);

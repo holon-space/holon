@@ -88,7 +88,10 @@ impl<R: RefLifecycle + RefDocumentsMut> TransitionRef<R> for DeleteDocument {
             check(state.app_started(), Reason::AppNotStarted),
             // Shrinking re-checks this: the doc must still exist (an earlier
             // shrunk-away CreateDocument invalidates dependent deletes).
-            check(state.has_document(&self.file_name), Reason::NoDocumentsAvailable),
+            check(
+                state.has_document(&self.file_name),
+                Reason::NoDocumentsAvailable,
+            ),
         ];
         checks
             .into_iter()

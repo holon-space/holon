@@ -38,6 +38,7 @@ use validated::Validated;
 pub mod bisect;
 pub mod budget;
 pub mod caching_proxy;
+pub mod cap_transition;
 pub mod capabilities;
 pub mod component_set;
 pub mod composition;
