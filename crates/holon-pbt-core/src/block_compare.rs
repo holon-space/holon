@@ -1,21 +1,26 @@
-//! Shared, non-panicking block-equivalence core for the `inv-blocks-match-ref`
-//! composite.
+//! Shared block-equivalence core (normalization + non-panicking comparison),
+//! lifted to `holon-pbt-core` (co-location Phase 1a follow-on) so every
+//! companion `*-testing` crate can compare a store's block snapshot against the
+//! reference without depending on `holon-integration-tests`.
 //!
-//! The composite checks the SAME comparison against every store that holds
-//! blocks (Loro, Org, `block_raw`, the `block` matview/live mirror): each store
-//! normalises to a `Vec<holon_api::Block>` (the snapshot) and this module
-//! compares it to the reference's snapshot. Two facets, both derived from the
-//! normalised `Vec<Block>`:
+//! Block equivalence in Holon is *defined by* the org round-trip: two blocks
+//! are "equal" when their org-normalized forms match. [`normalize_block`]
+//! hand-replicates that round-trip (trim trailing whitespace, strip
+//! internal/null/empty properties, unify the document root) using only
+//! `holon-api` — so the floor stays org-crate-free.
 //!
-//! - **fields** — `normalize_block` + sort-by-id + `==` (the proven
-//!   [`crate::assertions::assert_blocks_equivalent`] rule, but returning a
-//!   `Result` instead of unwinding). `normalize_block` already zeroes
-//!   `sort_key`/timestamps and strips internal/null/empty properties, so this
+//! The `inv-blocks-match-ref` composite checks the SAME comparison against
+//! every store that holds blocks (Loro, Org, `block_raw`, the `block` matview):
+//! each store normalises to a `Vec<holon_api::Block>` and this module compares
+//! it to the reference's snapshot. Two facets, both derived from the normalised
+//! `Vec<Block>`:
+//!
+//! - **fields** — [`normalize_block`] + sort-by-id + `==`. `normalize_block`
+//!   zeroes timestamps and strips internal/null/empty properties, so this
 //!   compares content, content_type, parent, properties, tags, requires,
 //!   task_state, source_language — everything *except* sibling order.
 //! - **order** — per-parent sibling order under the renderer's canonical sort
-//!   (source/image before text, then `sequence`, then id), the `Result` port of
-//!   [`crate::assertions::assert_block_order`].
+//!   (source/image before text, then `sequence`, then id).
 //!
 //! Bodies stay dumb: they pick a store snapshot, a readiness gate, and which
 //! facets apply, then call [`compare_blocks`]. The per-store `RunMode` and
@@ -24,19 +29,90 @@
 use holon_api::ContentType;
 use holon_api::EntityUri;
 use holon_api::block::Block;
-use holon_orgmode::models::OrgBlockExt;
-use holon_pbt_core::invariant::InvariantResult;
-/// Shared order comparator, lifted to `holon-pbt-core` (co-location Phase 1)
-/// and re-exported here so the historical
-/// `block_compare::compare_sibling_order` path stays valid for central callers.
-use holon_pbt_core::sibling_order::compare_sibling_order;
 
-use crate::assertions::normalize_block;
+use crate::invariant::InvariantResult;
+use crate::sibling_order::compare_sibling_order;
+
+/// Properties that are internal bookkeeping (never part of an org round-trip)
+/// and must be stripped before comparing a reference block against a
+/// store-projected one.
+pub const INTERNAL_PROPS: &[&str] = &[
+    "sequence",
+    "level",
+    "ID",
+    "id",
+    "created_at",
+    "updated_at",
+    "document_id",
+    "todo_keywords",
+];
+
+/// The block's ordering key, read straight off its `properties` map (pure
+/// `holon-api`). This is the inlined equivalent of
+/// `holon_org_format::OrgBlockExt::sequence` — kept here so block comparison
+/// never drags an org crate onto the pbt-core floor. The `sequence` property is
+/// the canonical intra-parent ordering key; absent → `0`.
+pub fn block_sequence(block: &Block) -> i64 {
+    block
+        .get_property("sequence")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0)
+}
+
+pub fn normalize_block(block: &Block) -> Block {
+    let mut normalized = block.clone();
+    normalized.created_at = 0;
+    normalized.updated_at = 0;
+    // sort_key is no longer a field of the domain Block (ADR 0005) — ordering is
+    // validated separately via the order facet below.
+    // Trim overall content and normalize internal trailing whitespace per line
+    // (org round-trip strips trailing whitespace from source block lines)
+    normalized.content = normalized
+        .content
+        .lines()
+        .map(|l| l.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string();
+    // The `__default__` page is prod's layout-owning root container (a real
+    // block, not the sentinel — see `default_doc_block_uri`). The reference
+    // model represents the document root as `__document_root__` and parents the
+    // layout straight to it, so unify the two roots here.
+    if normalized.parent_id.is_no_parent()
+        || normalized.parent_id.is_sentinel()
+        || normalized.parent_id == holon_api::default_doc_block_uri()
+    {
+        normalized.parent_id = holon_api::EntityUri::block("__document_root__");
+    }
+    // document_id removed from Block struct; no normalization needed
+    for prop in INTERNAL_PROPS {
+        normalized.properties.remove(*prop);
+    }
+    // Strip Null-valued and empty-string properties: the org parser stores
+    // task_state=Null explicitly in the DB but the reference model omits absent
+    // properties. Empty-string task_state means "no state" and is lost during
+    // org round-trip (not written as a keyword, so not parsed back).
+    normalized.properties.retain(|_, v| match v {
+        holon_api::Value::Null => false,
+        holon_api::Value::String(s) if s.is_empty() => false,
+        _ => true,
+    });
+    // `task_state_category` is `task_state`'s sidecar — without a (non-empty)
+    // keyword it carries no information, and the org round-trip drops the PAIR
+    // (no keyword rendered → neither parsed back). The retain above already
+    // dropped an empty/Null keyword; drop its orphaned sidecar with it, or the
+    // ref (which stores ""+"active" after cycling to Clear, exactly like
+    // block_raw) diverges from the org-parsed side on a phantom property.
+    if !normalized.properties.contains_key("task_state") {
+        normalized.properties.remove("task_state_category");
+    }
+    normalized
+}
 
 /// Field-equality facet: `Ok(())` when the two snapshots are
-/// `normalize_block`-equivalent (id-set + every non-order field), else an
-/// `Err` carrying the normalized diff. Mirrors
-/// [`crate::assertions::assert_blocks_equivalent`] as a `Result`.
+/// [`normalize_block`]-equivalent (id-set + every non-order field), else an
+/// `Err` carrying the normalized diff.
 pub fn compare_block_fields(
     label: &str,
     actual: &[Block],
@@ -59,10 +135,9 @@ pub fn compare_block_fields(
 }
 
 /// Ordering facet: per-parent sibling order under the renderer's canonical
-/// sort. `Result` port of [`crate::assertions::assert_block_order`] — same
-/// canonicalisation (source/image first, then `sequence`, then id), same
-/// "only compare when both sides hold the same id set" and "skip all-source
-/// sibling groups" guards. Returns the first divergent parent as an `Err`.
+/// sort (source/image first, then `sequence`, then id), only comparing when
+/// both sides hold the same id set and skipping all-source sibling groups.
+/// Returns the first divergent parent as an `Err`.
 pub fn compare_block_order(
     label: &str,
     actual: &[Block],
@@ -81,7 +156,7 @@ pub fn compare_block_order(
         children.sort_by(|a, b| {
             render_group(a.content_type)
                 .cmp(&render_group(b.content_type))
-                .then_with(|| a.sequence().cmp(&b.sequence()))
+                .then_with(|| block_sequence(a).cmp(&block_sequence(b)))
                 .then_with(|| a.id.as_str().cmp(b.id.as_str()))
         });
     };
@@ -121,6 +196,7 @@ pub fn compare_block_order(
     }
     Ok(())
 }
+
 /// Run the field facet (always) and, when `check_order`, the ordering facet.
 /// Returns `Fail` on the first divergence, else `Ok`. Stores with a CDC-lag /
 /// readiness gate convert their own "not ready" into `Skipped` *before*
@@ -156,7 +232,7 @@ pub enum BlockFacet {
 }
 
 /// Compare only `facets` (plus the id-set, always) between two snapshots, both
-/// `normalize_block`-normalised. For stores that don't natively carry every
+/// [`normalize_block`]-normalised. For stores that don't natively carry every
 /// `Block` field — comparing the full struct would false-fail on fields the
 /// store can't represent. Returns `Fail` on the first divergence.
 pub fn compare_block_subset(
