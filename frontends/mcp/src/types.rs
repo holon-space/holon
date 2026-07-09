@@ -385,6 +385,14 @@ pub struct TypeTextParams {
     pub modifiers: Vec<String>,
 }
 
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct InsertTextParams {
+    /// Text to insert via the soft-keyboard `insertText:` path (bypasses the
+    /// GPUI keymap and commits straight into the focused editor). A soft
+    /// Return is `"\n"` and is translated to an `enter` action.
+    pub text: String,
+}
+
 /// Parameters for the `now_for_agent` agent-coordination tool.
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct NowForAgentParams {

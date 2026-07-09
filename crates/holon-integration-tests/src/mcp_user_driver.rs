@@ -14,6 +14,7 @@
 //! | `click_entity`                   | `click { entity_id, region }`               |
 //! | `send_key_chord`                 | `send_key_chord { entity_id, keys }`        |
 //! | `send_raw_keystroke`             | `type_text { text, modifiers }`             |
+//! | `insert_text`                    | `insert_text { text }`                      |
 //! | `scroll_at` / `scroll_entity`    | `scroll { x, y / entity_id, dx, dy }`       |
 //! | `displayed_text` etc. (observe)  | `describe_ui { block_id, format: "json" }`  |
 //!
@@ -338,6 +339,17 @@ impl UserDriver for McpUserDriver {
         )
         .await
         .with_context(|| format!("type_text({keystroke:?}, {modifiers:?}) over MCP failed"))?;
+        Ok(())
+    }
+
+    /// Routes through the MCP `insert_text` tool, which injects an
+    /// `InteractionEvent::InsertText` — the soft-keyboard `insertText:` path
+    /// (bypasses the keymap, commits into the focused editor's input handler).
+    /// Mirrors `send_raw_keystroke` but for the UIKit text-input rung.
+    async fn insert_text(&self, text: &str) -> Result<()> {
+        self.call_tool_text("insert_text", serde_json::json!({ "text": text }))
+            .await
+            .with_context(|| format!("insert_text({text:?}) over MCP failed"))?;
         Ok(())
     }
 

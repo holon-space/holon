@@ -1838,6 +1838,7 @@ pub fn dispatch_interaction(
             }
             false
         }
+        InteractionEvent::InsertText { text } => dispatch_insert_text(text, window, cx),
         _ => {
             let inputs = interaction_event_to_platform_inputs(event);
             let mut handled = false;
@@ -2033,15 +2034,68 @@ pub fn interaction_event_to_platform_inputs(
                 touch_phase: gpui::TouchPhase::default(),
             })]
         }
-        InteractionEvent::ScrollEntityIntoView { .. } => {
-            // Handled directly by `dispatch_interaction`'s match arm via
-            // cache walk + `ListState::scroll_to_reveal_item`, not by
+        InteractionEvent::ScrollEntityIntoView { .. } | InteractionEvent::InsertText { .. } => {
+            // Handled directly by `dispatch_interaction`'s match arms
+            // (`scroll_entity_into_view` / `dispatch_insert_text`), not by
             // synthesizing a platform input. Returning an empty vec keeps
-            // this fn's callers (which iterate inputs) a no-op for this
-            // variant.
+            // this fn's callers (which iterate inputs) a no-op for these
+            // variants.
             vec![]
         }
     }
+}
+
+/// Deliver text the way a soft keyboard's `insertText:` does: bypass the GPUI
+/// keymap and commit the string straight into the focused editor's input
+/// handler. This mirrors `gpui-mobile`'s `IosWindow::handle_text_input` so the
+/// harness can exercise the soft-keyboard input path that `type_text`'s
+/// `KeyDown` route cannot reach.
+///
+/// A soft `Return` arrives as `"\n"`/`"\r"`/`"\r\n"`; the real soft keyboard
+/// (post-fix) translates it into an `enter` action rather than inserting a
+/// literal newline, so we do the same here — otherwise driving a soft Return
+/// through this path would split nothing.
+///
+/// MOBILE-FIDELITY NOTE: on the `mobile` build this still routes through GPUI's
+/// public `Window` API (`dispatch_keystroke` with a `key_char`), which reaches
+/// the SAME `EntityInputHandler::replace_text_in_range` that
+/// `IosWindow::handle_text_input` ultimately calls — it does NOT traverse the
+/// Objective-C `insertText:` FFI glue itself. Covering that final hop requires
+/// a `gpui-mobile` fork addition: a `pub fn gpui_mobile::insert_text(&str)`
+/// that reaches `ios::ffi::IOS_WINDOW_LIST` and calls a `&str` variant of the
+/// (currently `pub(crate)`) `IosWindow::handle_text_input`. Until that hook
+/// lands, this rung covers the editor-side behavior (the class of the escaped
+/// soft-Return bug) but not the fork's own FFI translation.
+fn dispatch_insert_text(text: &str, window: &mut Window, cx: &mut App) -> bool {
+    #[cfg(feature = "mobile")]
+    tracing::warn!(
+        "insert_text on the mobile build routes through GPUI's Window input \
+         handler, NOT the Objective-C insertText: FFI (IosWindow::handle_text_input) \
+         — that final hop needs a gpui_mobile::insert_text fork hook (see \
+         dispatch_insert_text doc comment)"
+    );
+
+    if matches!(text, "\n" | "\r" | "\r\n") {
+        // Soft Return → `enter` action, mirroring handle_text_input's
+        // Return-translation so the editor's Enter capture (split_block) fires.
+        let ks = gpui::Keystroke {
+            modifiers: gpui::Modifiers::default(),
+            key: "enter".to_string(),
+            key_char: None,
+        };
+        return window.dispatch_keystroke(ks, cx);
+    }
+
+    // Commit the text through the focused element's input handler. A keystroke
+    // carrying `key_char` drives GPUI's `input_handler.dispatch_input` →
+    // `replace_text_in_range` — the same editor entry point the soft keyboard
+    // reaches — without matching the keymap character-by-character.
+    let ks = gpui::Keystroke {
+        modifiers: gpui::Modifiers::default(),
+        key: text.to_string(),
+        key_char: Some(text.to_string()),
+    };
+    window.dispatch_keystroke(ks, cx)
 }
 
 /// Apply holon's custom theme colors on top of gpui_component's base theme.
