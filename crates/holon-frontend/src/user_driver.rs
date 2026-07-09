@@ -536,7 +536,8 @@ impl ReactiveEngineDriver {
             let (_expr, rows) = self.engine.ensure_watching(&main_panel).snapshot();
             // WP-E: the slot parents to the main panel's navigation focus root,
             // resolved from the rendered rowset (NOT the caret, NOT the panel
-            // container). This is the SAME call the render's `build_trailing_slot`
+            // container). This is the SAME call the render's `interpret_virtual_child`
+            // (static path) / `AppendedRowsProvider::creation_slot` (streaming path)
             // makes, so the parent matches the rendered slot id exactly.
             if let Some(parent) = crate::row_origin::resolve_creation_parent(&rows, &main_panel) {
                 break parent;
