@@ -347,6 +347,14 @@ pub struct ReactiveViewModel {
     /// Expand/collapse state — shared handle from the engine's cache.
     pub expanded: Option<Mutable<bool>>,
 
+    /// Per-render-slot hover state for the `on_hover` widget. A live
+    /// `Mutable<bool>` owned by this node (never a `Cell`, never keyed by
+    /// `(uri, field)`), so two same-id rows in different panes hover
+    /// independently (Model.md "Cell vs Mutable", FU-1 lesson). The GPUI
+    /// builder's `.on_hover` handler flips it; the builder reveals the
+    /// content children only while it is `true`.
+    pub hovered: Option<Mutable<bool>>,
+
     /// Operations available at this node.
     pub operations: Vec<OperationWiring>,
 
@@ -543,6 +551,7 @@ impl ReactiveViewModel {
             slot: Self::push_down_slot(&self.slot, &fresh.slot),
             lazy_slot: Self::push_down_lazy_slot(&self.lazy_slot, &fresh.lazy_slot),
             expanded: self.expanded.clone(),
+            hovered: self.hovered.clone(),
             operations: fresh.operations.clone(),
             triggers: fresh.triggers.clone(),
             layout_hint: fresh.layout_hint,
@@ -592,6 +601,7 @@ impl ReactiveViewModel {
                                 &fresh_child.lazy_slot,
                             ),
                             expanded: old_child.expanded.clone(),
+                            hovered: old_child.hovered.clone(),
                             operations: fresh_child.operations.clone(),
                             triggers: fresh_child.triggers.clone(),
                             layout_hint: fresh_child.layout_hint,
@@ -1088,6 +1098,13 @@ impl ReactiveViewModel {
                 icon: self.prop_str("icon").unwrap_or_default(),
                 children: snap_children(),
             },
+            // `children[0]` is the always-visible trigger; `children[1..]`
+            // is the content revealed only while hovered. The snapshot
+            // carries both — hover is a per-frontend view concern, so the
+            // static ViewModel holds the full tree.
+            "on_hover" => ViewKind::OnHover {
+                children: snap_children(),
+            },
             "bottom_dock" => ViewKind::BottomDock {
                 children: snap_children(),
             },
@@ -1171,6 +1188,7 @@ impl Default for ReactiveViewModel {
             slot: None,
             lazy_slot: None,
             expanded: None,
+            hovered: None,
             operations: vec![],
             triggers: vec![],
             layout_hint: LayoutHint::default(),
