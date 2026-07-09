@@ -19,6 +19,26 @@
 //! # -> writes dhat-heap.json in the cwd
 //! ```
 //!
+//! ## Cold-boot ingest benchmark (boot ingest latency, Options 0+1)
+//! Set `HOLON_SOAK_SEED_FILES` > 1 to seed a MANY-FILE vault (M files ×
+//! `HOLON_SOAK_BLOCKS_PER_FILE` blocks each) instead of one big file. Boot
+//! ingest is `N_files × (parse + write + feed barrier)`, so only a many-file
+//! vault exercises the per-file cadence. `TestEnvironmentBuilder` builds a
+//! fresh empty Turso per run (no persisted `file.content_hash` rows), so every
+//! file is ingested — the run is **cold by construction** (the warm-boot hash
+//! fast-path cannot engage). The harness prints boot-to-last-block wall time;
+//! run under `RUST_LOG=holon_latency=debug` and pipe to
+//! `scripts/measure_latency.py` for the per-phase (`boot_parse`/`boot_write`/
+//! `boot_feed_wait`/`boot_feed_converge`) split.
+//!
+//! ```text
+//! HOLON_SOAK_SEED_FILES=200 HOLON_SOAK_BLOCKS_PER_FILE=10 \
+//!   RUST_LOG=holon_latency=debug \
+//!   cargo run --release --example diag_harness -p holon-integration-tests \
+//!   --features boot-bench 2>&1 | tee /tmp/boot.log
+//! python3 scripts/measure_latency.py /tmp/boot.log
+//! ```
+//!
 //! ## Async-stall profiling (tokio-console)
 //! Enabling `tokio-console` (and building with `--cfg tokio_unstable`) starts a
 //! `console_subscriber` gRPC aggregator so the `tokio-console` CLI can attach
@@ -57,12 +77,38 @@ fn build_org(n: usize) -> String {
     s
 }
 
+/// One file's org content with a stable `#+ID:` and stable per-block `:ID:`s,
+/// so re-render produces identical bytes (no `#+ID:` writeback churn to skew
+/// timing).
+fn build_org_file(file_idx: usize, blocks: usize) -> String {
+    let mut s = format!("#+ID: file-{file_idx}\n#+TITLE: Page {file_idx}\n\n");
+    for j in 0..blocks {
+        s.push_str(&format!(
+            "* Block {file_idx}-{j}: headline with a [[link]] and *emphasis*\n:PROPERTIES:\n:ID: \
+             p{file_idx}_{j}\n:END:\nBody paragraph {file_idx}-{j}.\n\n"
+        ));
+    }
+    s
+}
+
 fn main() -> anyhow::Result<()> {
     // dhat: dropping this guard at the end of main writes dhat-heap.json.
     // The global allocator itself is installed by holon-frontend when the
     // `heap-profile` feature is on, so it covers the whole process.
     #[cfg(feature = "heap-profile")]
     let _heap_guard = holon_frontend::memory_monitor::heap_profile::start();
+
+    // boot-bench: init a RUST_LOG fmt subscriber (to stderr) so the cold-boot
+    // `boot_*` holon_latency events are captured for `measure_latency.py`.
+    // Skipped under tokio-console, which installs its own registry below.
+    #[cfg(all(feature = "boot-bench", not(feature = "tokio-console")))]
+    {
+        use tracing_subscriber::EnvFilter;
+        tracing_subscriber::fmt()
+            .with_env_filter(EnvFilter::from_default_env())
+            .with_writer(std::io::stderr)
+            .init();
+    }
 
     // tokio-console: expose task poll-times on the gRPC port (default
     // 127.0.0.1:6669). Only records real data under `--cfg tokio_unstable`.
@@ -89,20 +135,48 @@ fn main() -> anyhow::Result<()> {
             .build()?,
     );
 
+    // Cold-boot many-file benchmark when HOLON_SOAK_SEED_FILES > 1.
+    let seed_files = env_usize("HOLON_SOAK_SEED_FILES", 1);
+    let blocks_per_file = env_usize("HOLON_SOAK_BLOCKS_PER_FILE", 10);
+
     let rt2 = rt.clone();
     rt.block_on(async move {
-        eprintln!("[diag] seeding {seed} blocks via headless engine boot…");
-        let org = build_org(seed);
-        let env = TestEnvironmentBuilder::new()
-            .with_org_file("soak.org", org)
-            .build(rt2.clone())
-            .await?;
+        let mut builder = TestEnvironmentBuilder::new();
+        let last_block: String;
+        if seed_files > 1 {
+            eprintln!(
+                "[diag] cold-boot many-file bench: {seed_files} files × {blocks_per_file} blocks \
+                 (empty Turso by construction)…"
+            );
+            for i in 0..seed_files {
+                builder = builder
+                    .with_org_file(format!("page-{i}.org"), build_org_file(i, blocks_per_file));
+            }
+            last_block = format!("p{}_{}", seed_files - 1, blocks_per_file - 1);
+        } else {
+            eprintln!("[diag] seeding {seed} blocks via headless engine boot…");
+            builder = builder.with_org_file("soak.org", build_org(seed));
+            last_block = format!("soak-{}", seed - 1);
+        }
 
-        // Prove the full ingest pipeline ran end-to-end: the last block must
-        // have projected into the SQL read model.
-        let last = format!("soak-{}", seed - 1);
-        let ok = env.wait_for_block(&last, Duration::from_secs(180)).await;
-        anyhow::ensure!(ok, "last block {last} never projected within 180s");
+        // Time boot-to-last-block: build() spawns the initial scan; the last
+        // block projecting into the SQL read model marks ingest complete.
+        let t_boot = std::time::Instant::now();
+        let env = builder.build(rt2.clone()).await?;
+        let ok = env
+            .wait_for_block(&last_block, Duration::from_secs(180))
+            .await;
+        anyhow::ensure!(ok, "last block {last_block} never projected within 180s");
+        eprintln!(
+            "[diag] BOOT-TO-PAGES-COMPLETE: {} ms  ({} files, {} blocks/file)",
+            t_boot.elapsed().as_millis(),
+            if seed_files > 1 { seed_files } else { 1 },
+            if seed_files > 1 {
+                blocks_per_file
+            } else {
+                seed
+            },
+        );
 
         // Exercise the read path.
         let rows = env
