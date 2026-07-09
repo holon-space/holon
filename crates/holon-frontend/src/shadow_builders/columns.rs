@@ -183,7 +183,6 @@ holon_macros::widget_builder! {
                     parent_space,
                     child_space_fn,
                     None,
-                    None,
                     rules,
                 )
             }
