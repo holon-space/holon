@@ -4,7 +4,7 @@ Every bug found OUTSIDE an automated test gets one row here, classified by the
 `bug-gap-triage` skill (`.claude/skills/bug-gap-triage/SKILL.md`). The gap
 distribution steers QA investment.
 
-**Running distribution: ENVIRONMENT 18 · COVERAGE 8 · PERCEPTION 4 · ORACLE 1** (as of 2026-07-09)
+**Running distribution: ENVIRONMENT 19 · COVERAGE 8 · PERCEPTION 4 · ORACLE 1** (as of 2026-07-10)
 
 Gap definitions: **COVERAGE** = keystone couldn't generate the interaction ·
 **ORACLE** = generatable but no invariant flags it · **ENVIRONMENT** = prod
@@ -19,6 +19,7 @@ Seeded 2026-07-07 from the retroactive audit of documented dogfood/triage bugs.
 
 | Date | Bug (one line) | Primary gap | Secondary | Missing piece | Remedy status |
 |---|---|---|---|---|---|
+| 2026-07-10 | design_gallery on_hover never reveals: example rebuilds ReactiveViewModel per frame, resetting per-node `hovered` Mutable | ENVIRONMENT | COVERAGE | example embedder diverges from prod (per-frame `mode_view_model` vs persistent `root_vm` + reconcile); no mouse-move/hover primitive in any driver alphabet | FIXED (per-mode VM cache mirroring root_vm) + `on_hover_state_survives_only_when_node_is_reused` pins the mechanism; hover driver rung still open |
 | 2026-07-06 | iOS drawer doesn't collapse on nav | COVERAGE | — | no windowed drawer render/driver in keystone | fixed (uncommitted); gap open |
 | 2026-07-06 | iOS theme not applied live | COVERAGE | — | no theme-change transition; headless doesn't render Theme global | fixed; gap open |
 | 2026-07-07 | iOS add-block: creation slot parents to panel id, engine rejects create | COVERAGE | ENVIRONMENT | no text-sync-on-virtual transition; creation-slot code unreachable | FIXED (landed main e831f0bd): `resolve_creation_parent` resolves the slot parent to the query focus root + keystone `create_block_under_focus` transition |
