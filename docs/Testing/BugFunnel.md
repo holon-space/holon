@@ -4,7 +4,7 @@ Every bug found OUTSIDE an automated test gets one row here, classified by the
 `bug-gap-triage` skill (`.claude/skills/bug-gap-triage/SKILL.md`). The gap
 distribution steers QA investment.
 
-**Running distribution: ENVIRONMENT 13 · COVERAGE 7 · PERCEPTION 2 · ORACLE 1** (as of 2026-07-09)
+**Running distribution: ENVIRONMENT 14 · COVERAGE 7 · PERCEPTION 3 · ORACLE 1** (as of 2026-07-09)
 
 Gap definitions: **COVERAGE** = keystone couldn't generate the interaction ·
 **ORACLE** = generatable but no invariant flags it · **ENVIRONMENT** = prod
@@ -21,7 +21,7 @@ Seeded 2026-07-07 from the retroactive audit of documented dogfood/triage bugs.
 |---|---|---|---|---|---|
 | 2026-07-06 | iOS drawer doesn't collapse on nav | COVERAGE | — | no windowed drawer render/driver in keystone | fixed (uncommitted); gap open |
 | 2026-07-06 | iOS theme not applied live | COVERAGE | — | no theme-change transition; headless doesn't render Theme global | fixed; gap open |
-| 2026-07-07 | iOS add-block: creation slot parents to panel id, engine rejects create | COVERAGE | ENVIRONMENT | no text-sync-on-virtual transition; creation-slot code unreachable | root-caused; fix deferred |
+| 2026-07-07 | iOS add-block: creation slot parents to panel id, engine rejects create | COVERAGE | ENVIRONMENT | no text-sync-on-virtual transition; creation-slot code unreachable | FIXED (landed main e831f0bd): `resolve_creation_parent` resolves the slot parent to the query focus root + keystone `create_block_under_focus` transition |
 | 2026-07-05 | GPUI stale sidebar on page-delete | COVERAGE | ORACLE | keystone never deletes a page (`apply_mutation` filters `!is_page()`); sidebar watch never a RefWatch | open |
 | 2026-07-05 | page_title-not-h1 / virtual-slot ordering | COVERAGE | — | streaming render path not driven headless | open |
 | 2026-07-05 | ToggleState never fires even at 200× weight | COVERAGE | — | generator precondition never satisfiable | open |
@@ -42,6 +42,8 @@ Seeded 2026-07-07 from the retroactive audit of documented dogfood/triage bugs.
 | 2026-07-06 | iOS share/accept modal wider than screen (hardcoded 640px) | PERCEPTION | — | no pixel geometry at ReactiveEngine rung | fixed (uncommitted) |
 | 2026-07-08 | Per-edit org writeback ran the O(N) recursive-CTE `get_blocks` 2×/edit (render + `materialize_images`), ~585ms@2k / ~4s@5k — breaches p95<200ms on the CRDT interactive path | ORACLE | ENVIRONMENT | no per-edit writeback SLO invariant / recursive-CTE-count assertion in keystone; recursive CTE is cheap at keystone's small N so wall never breaches | fixed (uncommitted): Tier-1 per-doc block cache + O(1) `block_raw` point-read + image-gated `materialize_images`; regression test `crates/holon-orgmode/tests/incremental_org_writeback_smoke.rs` asserts 0 recursive-CTE per content edit; keystone SLO invariant still open |
 | 2026-07-09 | Advice weaver watched the `advice_suppressed` JUNCTION (`SELECT anchor_id, lesson_id`) — id-less rows hit the `watch_query` enrichment boundary (`row_id().expect`), panicking on a `tokio-rt-worker`; the dying task dropped 3 blocks from the shared keystone stream and dominated the shrinker | ENVIRONMENT | ORACLE | background-task panic isolation masks it: the deterministic `advice_step6` fired the panic (visible in its log) yet stayed GREEN because the spawned weaver task's death doesn't fail the test; the id-less-row path exists only in the live watch wiring, not the deterministic refresh path | FIXED (uncommitted): weaver now watches the entity-shaped canonical-read matview (`advice_watch_sql`, `lesson_id AS id`) instead of the junction — proven-incremental suppression anti-join (holon-advice `probe_outer_antijoin_is_incrementally_maintained`); retires the proxy trigger. Open gap: no assertion on background-weaver health / swallowed spawned-task panics |
+| 2026-07-09 | iOS soft-keyboard Return inserts a literal `\n` instead of creating a block (add-block dead via the on-screen keyboard). A real `enter` keystroke DOES split/create (verified on sim via `type_text`/`send_raw_keystroke`), so only the soft-keyboard insertText:→enter translation was missing | ENVIRONMENT | — | keystone's raw-keystroke rung injects a synthetic `KeyDown "enter"` that bypasses gpui-mobile `handle_text_input`'s insertText: path; no soft-keyboard-faithful (insertText:) input rung exists in the harness | FIXED: gpui-mobile fork `68df9dd` routes `\n`/`\r` → `enter` (mirrors the fork's Backspace handling), pinned via Cargo.lock bump. Parity gap open: no insertText:-path rung in keystone |
+| 2026-07-09 | iOS soft keyboard raises on editor focus then hides (~150ms, `KEYBOARD_HIDE_GRACE` / focus churn) — appears then dismisses rather than staying visible | PERCEPTION | — | keyboard show/hide is a device-visual timing property; no headless assertion; render-edge `editor_focus_gained/lost` + deferred-hide grace race | open |
 
 Notes:
 - The 2026-07-05 latency bug was originally classed PERCEPTION in the audit;
@@ -60,6 +62,11 @@ Notes:
   gap.
 - Successes are not escapes: the editor-caret divergence was *found by* the
   keystone oracle and does not belong here.
+- The 2026-07-06 "iOS Focus/Blur never fire → tap doesn't move `focused_block`,
+  keyboard/commit dead" premise (memory `ios-text-2-causes`) was VERIFIED FIXED
+  on 2026-07-09 against the live iOS sim with real `idb` finger taps: a tap moves
+  the editor authority, typing lands, and moving focus away commits — the
+  Petri-net/`InputRouter` rework closed it. No longer an open escape.
 
 ## Deferred perf
 
