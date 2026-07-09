@@ -2318,3 +2318,242 @@ mod fast_path_loro_presence_tests {
         );
     }
 }
+
+// ============================================================================
+// Test 8: initial-scan batched feed barrier (boot ingest latency, Options 0+1)
+// ============================================================================
+
+#[cfg(test)]
+mod initial_scan_batched_barrier_tests {
+    use super::*;
+    use std::path::Path;
+
+    /// Ordering stub whose `children()` reads the shared block store (like the
+    /// real `SqlBlockOperations::children`, which reads the authority directly so
+    /// the scan's `place` loop sees freshly-created blocks) — so wait B resolves
+    /// immediately instead of hanging. SqlOnly by default (no upstream
+    /// consolidator), so creates flow through `update_in_tree` into the store.
+    struct ScanOrderingStub {
+        store: Arc<InMemoryBlockStore>,
+    }
+
+    #[async_trait]
+    impl BlockOrdering for ScanOrderingStub {
+        async fn place(
+            &self,
+            _uri: &EntityUri,
+            _parent_id: &EntityUri,
+            _after_id: Option<&EntityUri>,
+        ) -> BlockOrderingResult<()> {
+            Ok(())
+        }
+
+        async fn place_all(
+            &self,
+            _parent_id: &EntityUri,
+            _ordered_ids: &[EntityUri],
+        ) -> BlockOrderingResult<()> {
+            Ok(())
+        }
+
+        async fn prev_sibling(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
+            Ok(None)
+        }
+        async fn next_sibling(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
+            Ok(None)
+        }
+        async fn first_child(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
+            Ok(None)
+        }
+        async fn last_child(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
+            Ok(None)
+        }
+
+        async fn children(&self, parent_id: &EntityUri) -> BlockOrderingResult<Vec<EntityUri>> {
+            Ok(self
+                .store
+                .get_all_blocks(parent_id.as_str())
+                .into_iter()
+                .map(|b| b.id)
+                .collect())
+        }
+
+        async fn update_in_tree(
+            &self,
+            params: holon_api::StorageEntity,
+        ) -> BlockOrderingResult<()> {
+            self.store.apply_upsert(block_from_params(&params));
+            Ok(())
+        }
+
+        async fn delete_in_tree(
+            &self,
+            params: holon_api::StorageEntity,
+        ) -> BlockOrderingResult<()> {
+            let id = params
+                .get("id")
+                .and_then(|v| v.as_string())
+                .expect("delete_in_tree: missing id");
+            self.store.apply_delete(id);
+            Ok(())
+        }
+    }
+
+    /// A BlockReader that delegates reads to the shared store but whose feed
+    /// NEVER converges — models a stalled projection/CDC. Drives the
+    /// `finish_initial_scan` fail-loud path.
+    struct StallingReader {
+        store: Arc<InMemoryBlockStore>,
+    }
+
+    #[async_trait]
+    impl BlockReader for StallingReader {
+        async fn get_blocks(&self, doc_id: &EntityUri) -> Result<Vec<Block>> {
+            self.store.get_blocks(doc_id).await
+        }
+        async fn get_block_authoritative(&self, id: &EntityUri) -> Result<Option<Block>> {
+            self.store.get_block_authoritative(id).await
+        }
+        async fn iter_documents_with_blocks(&self) -> Result<Vec<(EntityUri, Vec<Block>)>> {
+            self.store.iter_documents_with_blocks().await
+        }
+        async fn wait_for_blocks_in_feed(&self, _: &[String], _: u64) -> bool {
+            false // feed never converges
+        }
+    }
+
+    fn build_scan_controller(
+        root: &Path,
+        reader: Arc<dyn BlockReader>,
+        store: Arc<InMemoryBlockStore>,
+    ) -> FileSyncController {
+        let doc_manager = Arc::new(MockDocumentManager::new());
+        let ordering = Arc::new(ScanOrderingStub { store });
+        new_org_sync_controller(
+            reader,
+            doc_manager,
+            root.to_path_buf(),
+            ordering,
+            Arc::new(holon_filesystem::RealFileSystem),
+        )
+    }
+
+    fn org_file(idx: usize, blocks: usize) -> String {
+        let mut s = format!("#+ID: file-{idx}\n\n");
+        for j in 0..blocks {
+            s.push_str(&format!(
+                "* Block {idx}-{j}\n:PROPERTIES:\n:ID: p{idx}_{j}\n:END:\nBody {idx}-{j}.\n\n"
+            ));
+        }
+        s
+    }
+
+    /// Batched barrier ingests every file's blocks correctly and `place_all`
+    /// order is preserved — the end-of-scan convergence wait succeeds and the
+    /// scan flag is cleared. Proves the batched path does not drop blocks.
+    #[tokio::test]
+    async fn initial_scan_batched_barrier_ingests_all_files() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(InMemoryBlockStore::new());
+        let mut controller = build_scan_controller(temp_dir.path(), store.clone(), store.clone());
+        controller.initialize().await.expect("initialize");
+
+        const FILES: usize = 12;
+        const BLOCKS: usize = 5;
+        let mut paths = Vec::new();
+        for i in 0..FILES {
+            let p = temp_dir.path().join(format!("page-{i}.org"));
+            tokio::fs::write(&p, org_file(i, BLOCKS)).await.unwrap();
+            paths.push(p.canonicalize().expect("canonicalize"));
+        }
+
+        // Drive the initial scan exactly as `run_file_sync_controller` does.
+        controller.begin_initial_scan();
+        assert!(controller.in_initial_scan(), "flag on during scan");
+        for p in &paths {
+            controller
+                .on_file_changed(p)
+                .await
+                .unwrap_or_else(|e| panic!("on_file_changed {}: {e:#}", p.display()));
+        }
+        controller
+            .finish_initial_scan(30_000)
+            .await
+            .expect("finish_initial_scan should converge (in-memory feed = true)");
+
+        // Steady-state guard: flag cleared after finish.
+        assert!(
+            !controller.in_initial_scan(),
+            "scan flag must be off after finish_initial_scan"
+        );
+
+        // Every file's every block landed in block_raw (the store).
+        for i in 0..FILES {
+            let doc_blocks = store.get_all_blocks(&format!("block:file-{i}"));
+            let ids: BTreeSet<String> = doc_blocks.iter().map(|b| b.id.id().to_string()).collect();
+            for j in 0..BLOCKS {
+                assert!(
+                    ids.contains(&format!("p{i}_{j}")),
+                    "file {i}: block p{i}_{j} missing after batched scan; got {ids:?}"
+                );
+            }
+        }
+    }
+
+    /// A stalled feed makes the SINGLE end-of-scan convergence wait fail loud —
+    /// never a silent continue. The per-file ingest still succeeds (block_raw is
+    /// synchronous; the count-check passes), so the failure surfaces only at
+    /// `finish_initial_scan`, which is where `run_file_sync_controller` routes it
+    /// into `signal_error`.
+    #[tokio::test]
+    async fn initial_scan_feed_stall_fails_loud() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(InMemoryBlockStore::new());
+        let reader = Arc::new(StallingReader {
+            store: store.clone(),
+        });
+        let mut controller = build_scan_controller(temp_dir.path(), reader, store.clone());
+        controller.initialize().await.expect("initialize");
+
+        let p = temp_dir.path().join("page-0.org");
+        tokio::fs::write(&p, org_file(0, 3)).await.unwrap();
+        let p = p.canonicalize().expect("canonicalize");
+
+        controller.begin_initial_scan();
+        controller
+            .on_file_changed(&p)
+            .await
+            .expect("per-file ingest succeeds (block_raw synchronous)");
+
+        let err = controller
+            .finish_initial_scan(200)
+            .await
+            .expect_err("finish_initial_scan must bail loud when the feed never converges");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("did not converge"),
+            "expected a fail-loud convergence error, got: {msg}"
+        );
+        // Even on failure the flag is cleared (take()), so no leak into runtime.
+        assert!(!controller.in_initial_scan());
+    }
+
+    /// The scan flag never leaks into steady-state: it is on between begin and
+    /// finish and off afterwards, even with an empty vault.
+    #[tokio::test]
+    async fn scan_flag_off_after_finish() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(InMemoryBlockStore::new());
+        let mut controller = build_scan_controller(temp_dir.path(), store.clone(), store.clone());
+        controller.initialize().await.expect("initialize");
+
+        assert!(!controller.in_initial_scan(), "off before begin");
+        controller.begin_initial_scan();
+        assert!(controller.in_initial_scan(), "on after begin");
+        controller
+            .finish_initial_scan(30_000)
+            .await
+            .expect("empty scan converges trivially");
+        assert!(!controller.in_initial_scan(), "off after finish");
+    }
+}

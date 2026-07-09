@@ -610,8 +610,29 @@ pub async fn run_file_sync_controller(
             .instrument(tracing::info_span!("org.initial_scan.parallel_read"))
             .await;
         let mut failures = Vec::new();
+        // Boot ingest latency (Options 0+1): batch the per-file feed barrier.
+        // `begin_initial_scan` makes each `on_file_changed` buffer its feed-catch-up
+        // ids instead of paying an up-to-2s round-trip per file; `finish_initial_scan`
+        // below does ONE convergence wait over the union before `signal_ready`.
+        // `block_raw` is written synchronously per file, so the per-file
+        // `get_blocks` count-check + `ordering.children` propagation gate still
+        // cover intra-file correctness; only the sidebar-facing `block`-matview
+        // feed is deferred. Scoped to the initial scan — runtime edits keep the
+        // per-edit barrier.
+        let files = preloaded.len();
+        let t_scan = std::time::Instant::now();
+        controller.begin_initial_scan();
         for (file_path, _content) in preloaded {
-            if let Err(e) = controller.on_file_changed(&file_path).await {
+            let t_file = std::time::Instant::now();
+            let result = controller.on_file_changed(&file_path).await;
+            tracing::debug!(
+                target: "holon_latency",
+                stage = "boot_file",
+                ms = t_file.elapsed().as_millis() as u64,
+                path = %file_path.display(),
+                "holon_latency",
+            );
+            if let Err(e) = result {
                 error!(
                     "[OrgMode] Failed to process existing file {}: {}",
                     file_path.display(),
@@ -620,6 +641,19 @@ pub async fn run_file_sync_controller(
                 failures.push((file_path, e));
             }
         }
+        // ONE end-of-scan convergence wait (30s loud ceiling). A stall becomes a
+        // scan failure routed through the existing `signal_error` path below.
+        if let Err(e) = controller.finish_initial_scan(30_000).await {
+            error!("[OrgMode] initial-scan feed convergence failed: {}", e);
+            failures.push((root_directory.clone(), e));
+        }
+        tracing::debug!(
+            target: "holon_latency",
+            stage = "boot_ingest_total",
+            ms = t_scan.elapsed().as_millis() as u64,
+            files = files as u64,
+            "holon_latency",
+        );
         failures
     }
     .instrument(tracing::info_span!("org.initial_scan.ingest"))

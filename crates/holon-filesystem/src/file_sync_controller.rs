@@ -152,6 +152,22 @@ pub struct FileSyncController {
     /// mode this is left unused — the live CRDT already merges concurrent edits,
     /// so adding a second merge here would be wrong.
     text_merge: Option<Arc<dyn ThreeWayTextMerge>>,
+
+    /// Initial-scan feed-barrier batching (boot ingest latency, Options 0+1).
+    /// `None` in steady state — each runtime `on_file_changed` pays its own
+    /// per-file `wait_for_blocks_in_feed` barrier (unchanged). `Some(buf)` only
+    /// between [`begin_initial_scan`](Self::begin_initial_scan) and
+    /// [`finish_initial_scan`](Self::finish_initial_scan): the per-file feed
+    /// waits (sites A and C) instead push their expected ids into `buf` and skip
+    /// the wait, so the whole cold-boot vault ingests without N×(≤2s) round-trips;
+    /// `finish_initial_scan` then does ONE convergence wait over the union before
+    /// `signal_ready`. `block_raw` is written synchronously per file, so the
+    /// per-file `get_blocks` count-check (the intra-file write-success gate) and
+    /// wait B (`ordering.children`, the ordering-authority propagation gate) stay
+    /// in place and cover correctness; only the sidebar-facing `block`-matview
+    /// `LiveData` feed is deferred to end-of-scan. Scoped to the initial scan —
+    /// runtime edits keep the per-edit barrier and its fail-loud stall detection.
+    scan_feed_ids: Option<Vec<String>>,
 }
 
 impl FileSyncController {
@@ -188,7 +204,101 @@ impl FileSyncController {
             fs,
             doc_blocks: HashMap::new(),
             text_merge: None,
+            scan_feed_ids: None,
         }
+    }
+
+    /// Enter initial-scan mode: the per-file feed barriers (sites A and C in
+    /// `on_file_changed`) buffer their expected ids instead of waiting, so the
+    /// cold-boot vault ingests without N×(≤2s) feed round-trips. Must be paired
+    /// with [`finish_initial_scan`](Self::finish_initial_scan), which drains the
+    /// buffer with one convergence wait. Boot ingest latency, Option 1.
+    pub fn begin_initial_scan(&mut self) {
+        self.scan_feed_ids = Some(Vec::new());
+    }
+
+    /// Whether the controller is currently in initial-scan (feed-barrier
+    /// batching) mode. `false` in steady state — used by tests to prove the
+    /// scan flag does not leak past `finish_initial_scan`.
+    pub fn in_initial_scan(&self) -> bool {
+        self.scan_feed_ids.is_some()
+    }
+
+    /// Leave initial-scan mode: do exactly ONE `wait_for_blocks_in_feed` over the
+    /// union of every id the scan's deferred barriers buffered, then reset to
+    /// steady state. Fail loud (never silently continue) if the `block`-matview
+    /// feed has not converged within `budget_ms` — a stalled projection/CDC is a
+    /// real bug. Called before `signal_ready` so a stall becomes a scan failure.
+    pub async fn finish_initial_scan(&mut self, budget_ms: u64) -> Result<()> {
+        let mut ids = self.scan_feed_ids.take().unwrap_or_default();
+        ids.sort();
+        ids.dedup();
+        let t = std::time::Instant::now();
+        let caught_up = if ids.is_empty() {
+            true
+        } else {
+            self.block_reader
+                .wait_for_blocks_in_feed(&ids, budget_ms)
+                .await
+        };
+        tracing::debug!(
+            target: "holon_latency",
+            stage = "boot_feed_converge",
+            ms = t.elapsed().as_millis() as u64,
+            blocks = ids.len() as u64,
+            caught_up = caught_up,
+            "holon_latency",
+        );
+        // Steady-state guard: the scan flag must not leak past finish.
+        debug_assert!(
+            self.scan_feed_ids.is_none(),
+            "scan_feed_ids must be None after finish_initial_scan"
+        );
+        if !caught_up {
+            anyhow::bail!(
+                "[finish_initial_scan] block feed did not converge within {budget_ms}ms \
+                 for {} expected id(s) — projection/CDC stalled during the initial scan",
+                ids.len()
+            );
+        }
+        Ok(())
+    }
+
+    /// The initial-scan feed barrier (sites A and C). During the scan
+    /// (`scan_feed_ids.is_some()`) the expected ids are buffered for the single
+    /// end-of-scan convergence wait and this returns immediately. In steady
+    /// state it performs the per-file `wait_for_blocks_in_feed` exactly as
+    /// before (byte-identical runtime behavior). Emits `boot_feed_wait` on the
+    /// `holon_latency` target so the cost — and how much of the 2s ceiling binds
+    /// — is measurable per file. `site` is `"updates"` (A) or `"creates"` (C).
+    async fn feed_barrier(&mut self, ids: &[String], site: &'static str) -> bool {
+        if let Some(buf) = self.scan_feed_ids.as_mut() {
+            buf.extend(ids.iter().cloned());
+            tracing::debug!(
+                target: "holon_latency",
+                stage = "boot_feed_wait",
+                ms = 0u64,
+                caught_up = true,
+                skipped = true,
+                site = site,
+                "holon_latency",
+            );
+            return true;
+        }
+        // Steady-state path — byte-identical to the pre-batching per-file wait.
+        debug_assert!(self.scan_feed_ids.is_none());
+        let t = std::time::Instant::now();
+        let caught_up = self.block_reader.wait_for_blocks_in_feed(ids, 2000).await;
+        tracing::debug!(
+            target: "holon_latency",
+            stage = "boot_feed_wait",
+            ms = t.elapsed().as_millis() as u64,
+            caught_up = caught_up,
+            skipped = false,
+            site = site,
+            "holon_latency",
+        );
+        caught_up
     }
 
     pub fn with_alias_registrar(mut self, registrar: Arc<dyn AliasRegistrar>) -> Self {
@@ -605,6 +715,13 @@ impl FileSyncController {
             "[FileSyncController] Processing external change: {}",
             path.display()
         );
+
+        // Boot-ingest instrumentation (holon_latency target, Option 0). Marks the
+        // start of the real ingest path (past echo-suppression + the cold-boot
+        // fast-path skip). `boot_parse` / `boot_write` / `boot_place_wait` /
+        // `boot_feed_wait` split this file's cost; `boot_file` (per-file total) is
+        // emitted by the scan driver in `run_file_sync_controller`.
+        let t_ingest = std::time::Instant::now();
 
         // An external ingest mutates `block_raw` for arbitrary blocks of this
         // file's document — invalidate the incremental block cache so the next
@@ -1139,6 +1256,14 @@ impl FileSyncController {
         // flush.
         let expected_block_count = new_blocks.len() - consolidator_creates;
         tracing::debug!(
+            target: "holon_latency",
+            stage = "boot_parse",
+            ms = t_ingest.elapsed().as_millis() as u64,
+            blocks = new_blocks.len() as u64,
+            path = %path.display(),
+            "holon_latency",
+        );
+        tracing::debug!(
             "[ORGSYNC_OPS] {} ops={:?}",
             path.display(),
             operations
@@ -1149,6 +1274,7 @@ impl FileSyncController {
                 ))
                 .collect::<Vec<_>>(),
         );
+        let t_write = std::time::Instant::now();
         if !operations.is_empty() {
             for (op, params) in operations {
                 match op.as_str() {
@@ -1170,6 +1296,14 @@ impl FileSyncController {
                     }
                 }
             }
+            tracing::debug!(
+                target: "holon_latency",
+                stage = "boot_write",
+                ms = t_write.elapsed().as_millis() as u64,
+                blocks = expected_block_count as u64,
+                path = %path.display(),
+                "holon_latency",
+            );
 
             // Phase 5 cutover (site A): wait on the positional `LiveData<Block>`
             // catch-up — every block this scan expects in the cache is visible
@@ -1186,10 +1320,13 @@ impl FileSyncController {
                 .map(|b| b.id.to_string())
                 .filter(|id| !consolidator_create_ids.contains(id))
                 .collect();
-            let caught_up = self
-                .block_reader
-                .wait_for_blocks_in_feed(&expected_present_ids, 2000)
-                .await;
+            // Site A feed barrier. During the initial scan this buffers the ids
+            // for the single end-of-scan convergence wait and returns at once;
+            // in steady state it waits per file, unchanged. The `get_blocks`
+            // count-check below stays UNCONDITIONAL — `block_raw` is written
+            // synchronously by the ops above, so it is the real intra-file
+            // write-success gate independent of the (async, sidebar-facing) feed.
+            let caught_up = self.feed_barrier(&expected_present_ids, "updates").await;
             let cached_blocks = self.block_reader.get_blocks(&document_uri).await?;
             if cached_blocks.len() < expected_block_count {
                 anyhow::bail!(
@@ -1225,6 +1362,7 @@ impl FileSyncController {
         // Polling `ordering.children(parent)` reads through the same path
         // `ordering.place` will use, so once a created id appears there the
         // subsequent `place` is guaranteed to find it.
+        let t_place = std::time::Instant::now();
         {
             let mut live_children: HashMap<EntityUri, Vec<String>> = HashMap::new();
             let mut expected_per_parent: HashMap<EntityUri, HashSet<String>> = HashMap::new();
@@ -1403,6 +1541,13 @@ impl FileSyncController {
                 }
             }
         }
+        tracing::debug!(
+            target: "holon_latency",
+            stage = "boot_place_wait",
+            ms = t_place.elapsed().as_millis() as u64,
+            path = %path.display(),
+            "holon_latency",
+        );
 
         // Downstream convergent feed: publish the consolidator's accumulated
         // changes from this scan (creates + placements) to the SQL sink. This
@@ -1443,10 +1588,10 @@ impl FileSyncController {
             // based, positional proxy. Validated by the Step-0 shadow: 33/33 PBT
             // cases caught up at 0 ms, 0 misses. Fail loud on timeout — a stuck
             // feed is a real bug, not a state to silently continue past.
-            let feed_caught_up = self
-                .block_reader
-                .wait_for_blocks_in_feed(&created_ids, 2000)
-                .await;
+            // During the initial scan (site C) this buffers `created_ids` for the
+            // single end-of-scan convergence wait instead of blocking per file;
+            // the fail-loud check then fires once in `finish_initial_scan`.
+            let feed_caught_up = self.feed_barrier(&created_ids, "creates").await;
             if !feed_caught_up {
                 anyhow::bail!(
                     "[on_file_changed] LiveData<Block> feed did not contain all {} \

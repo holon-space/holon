@@ -51,6 +51,11 @@ tokio-console = ["dep:console-subscriber", "otel-testing", "tokio/tracing"]
 # profiled. Run: cargo run --release --example diag_harness \
 #   --no-default-features --features test-infra,heap-profile
 heap-profile = ["holon-frontend/heap-profile"]
+# Cold-boot ingest benchmark: init a RUST_LOG fmt subscriber in diag_harness so
+# the `boot_*` holon_latency events are captured. Run:
+#   HOLON_SOAK_SEED_FILES=200 RUST_LOG=holon_latency=debug \
+#     cargo run --release --example diag_harness --features boot-bench
+boot-bench = ["dep:tracing-subscriber"]
 pbt = [
     "test-infra",
     "otel-testing",
