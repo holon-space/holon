@@ -178,6 +178,14 @@ pub trait RefBlockTree {
     /// `Block::is_page()`. Pure slice has no pages → returns `false`.
     fn is_page_block(&self, id: &EntityUri) -> bool;
 
+    /// True if `id` exists and is a Source-typed block (rhai/query source).
+    /// `ApplyMutation`'s Move/Create preconditions gate targets on
+    /// `content_type != Source`. Pure slice has no source blocks → default
+    /// `false` (so a defaulted impl on `EditorPureRef`/toy refs stays correct).
+    fn is_source_block(&self, _: &EntityUri) -> bool {
+        false
+    }
+
     /// All block ids tracked by the reference model, EXCLUDING seed
     /// blocks (those with sentinel/no_parent docs — they're inserted
     /// via direct SQL, never reverse-synced to Loro, and don't appear
@@ -755,6 +763,13 @@ pub trait RefPeers {
 
     /// Stable IDs (peer-internal, NOT EntityUri) the peer currently holds.
     fn peer_block_stable_ids(&self, peer_idx: usize) -> Vec<String>;
+
+    /// Stable IDs a peer has locally modified (pending, un-merged edits). The
+    /// `ApplyMutation` generator excludes these from the primary's
+    /// mutable-block candidate set (a block a peer is mid-editing is not a
+    /// safe primary target). Wide PBT reads `peer.modified_stable_ids`; a
+    /// peer-less slice returns empty.
+    fn peer_modified_stable_ids(&self, peer_idx: usize) -> Vec<String>;
 
     /// Content of a peer's block by its stable id.
     fn peer_block_content(&self, peer_idx: usize, stable_id: &str) -> Option<String>;
@@ -2004,6 +2019,11 @@ pub trait RefWiring {
     /// composed config, not the monolithic `E2ESut`). `SetEdgeField` /
     /// `ApplyMutation` gate their Loro-authority-dependent arms on this.
     fn has_cap_set(&self) -> bool;
+
+    /// True iff every cap in `caps` is present in this reference's composed cap
+    /// set. `ApplyMutation` gates its External/seam arm on `SutSeamMutate`
+    /// presence (native always; composed only when a frontend seam is wired).
+    fn caps_available(&self, caps: &[crate::composition::CapId]) -> bool;
 }
 
 /// Reference-side wide-PBT layout / render / focus read surface for the
@@ -2034,6 +2054,29 @@ pub trait RefLayoutInteract {
     /// True iff `doc_uri` has at least one editable (Text, non-page,
     /// non-layout) child block — `BulkExternalAdd`'s empty-doc weighting.
     fn doc_has_editable_text(&self, doc_uri: &EntityUri) -> bool;
+
+    /// Layout headline block ids (`layout_blocks.headline_ids`) — the candidate
+    /// set for `ApplyMutation`'s layout-headline mutation arm.
+    fn headline_ids(&self) -> Vec<EntityUri>;
+}
+
+/// Reference-side high-level content-mutation apply for `ApplyMutation`'s
+/// non-peer arm. The single method performs ALL the internal reference
+/// bookkeeping — block-tree apply + canonical re-sequencing, document routing
+/// for `Create`, profile-tracking rebuild, render-expr cache refresh, next-id
+/// bump, and cursor reset on content updates — so the generic `apply_to_ref`
+/// never touches reference internals. Wide-only (only `ReferenceState`
+/// implements it); the pure editor slice models no generic mutations. The
+/// payload is the pbt-core-native [`crate::types::Mutation`], so no associated
+/// type is needed.
+pub trait RefApplyMutationMut {
+    /// Apply a non-peer (`UI`/`External`) content `mutation` and perform all
+    /// the encapsulated reference bookkeeping described on the trait.
+    /// Undo-snapshot (UI only) and focus-clear-on-delete stay OUTSIDE this
+    /// method — the generic `apply_to_ref` drives them through
+    /// [`RefBlockTreeMut::push_undo_snapshot`]
+    /// and [`RefFocusMut::clear_focus_if_deleted`].
+    fn apply_content_mutation(&mut self, mutation: &crate::types::Mutation);
 }
 
 /// Reference-side wide-PBT block-interaction mutation surface. Each method is
