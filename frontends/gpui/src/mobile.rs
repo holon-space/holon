@@ -201,18 +201,28 @@ fn ios_data_paths() -> (Option<PathBuf>, Option<PathBuf>) {
 #[cfg(target_os = "ios")]
 #[no_mangle]
 pub extern "C" fn gpui_ios_register_app() {
-    // Route `tracing` to stderr. iOS installed no subscriber, so every
-    // `tracing::{error,warn,info,debug}!` — including the `dispatch_intent_chain`
-    // failure logs that explain why an operation didn't commit — was silently
-    // dropped, leaving the app undebuggable on device (a fail-loud violation).
-    // Captured via `xcrun simctl launch --console-pty`. `RUST_LOG` overrides the
-    // default `info` filter (pass through `SIMCTL_CHILD_RUST_LOG`).
-    let _ = tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
+    // Route `tracing` to BOTH stderr and Apple's unified logging (os_log). iOS
+    // installed no subscriber, so every `tracing::{error,warn,info,debug}!` —
+    // including the `dispatch_intent_chain` failure logs that explain why an
+    // operation didn't commit — was silently dropped, leaving the app
+    // undebuggable on device (a fail-loud violation).
+    //
+    // A simulator app's stderr is NOT captured by `xcrun simctl log show` or
+    // Console.app, so the stderr layer alone (captured only via
+    // `simctl launch --console-pty`) was invisible during live debugging. The
+    // os_log layer surfaces the same events to the unified log, queryable via
+    // `xcrun simctl log show --predicate 'process == "Holon"'` and Console.app
+    // (subsystem `space.holon.gpui`). Both layers share one `EnvFilter`;
+    // `RUST_LOG` overrides the default `info` filter (pass through
+    // `SIMCTL_CHILD_RUST_LOG`).
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let _ = tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .with(tracing_oslog::OsLogger::new("space.holon.gpui", "rust"))
         .try_init();
 
     std::panic::set_hook(Box::new(|info| {
