@@ -77,6 +77,12 @@ def main():
     dispatch_by_action = defaultdict(list)
     proj_ms, proj_snap, proj_blocks = [], [], []
     rows_ms, rows_n = [], []
+    # Boot ingest (and any other unrecognized stage): bucket generically by stage
+    # name so new instrumentation surfaces without a script edit. `feed_timeouts`
+    # counts feed barriers that hit their ceiling (caught_up=false) — i.e. how
+    # much of the 2s per-file / 30s convergence budget actually binds.
+    misc_by_stage = defaultdict(list)
+    feed_timeouts = defaultdict(int)
 
     for line in src:
         f = parse(line)
@@ -106,6 +112,15 @@ def main():
                 v = num(f, k)
                 if v is not None:
                     lst.append(v)
+        else:
+            # Generic bucket — boot_parse / boot_write / boot_feed_wait /
+            # boot_place_wait / boot_file / boot_ingest_total / boot_feed_converge
+            # and any future stage.
+            v = num(f, "ms")
+            if v is not None:
+                misc_by_stage[stage].append(v)
+            if f.get("caught_up") == "false":
+                feed_timeouts[stage] += 1
 
     def table(title, by_key, unit="ms"):
         print(f"\n== {title} ==")
@@ -139,6 +154,20 @@ def main():
         if vals:
             n, p50, p95, mx, mean = stats(vals)
             print(f"{name:<28}{n:>6}{p50:>9.1f}{p95:>9.1f}{mx:>9.1f}{mean:>9.1f}")
+
+    if misc_by_stage:
+        print("\n== BOOT INGEST (stage=boot_*, per file unless noted) ==")
+        print(f"{'stage':<28}{'n':>6}{'p50':>9}{'p95':>9}{'max':>9}{'mean':>9}  (ms)")
+        print("-" * 72)
+        for name in sorted(misc_by_stage, key=lambda x: -sum(misc_by_stage[x])):
+            n, p50, p95, mx, mean = stats(misc_by_stage[name])
+            print(f"{name:<28}{n:>6}{p50:>9.1f}{p95:>9.1f}{mx:>9.1f}{mean:>9.1f}")
+        if feed_timeouts:
+            for name, cnt in sorted(feed_timeouts.items()):
+                print(f"  ! {name}: {cnt} occurrence(s) hit the feed ceiling "
+                      f"(caught_up=false)")
+        else:
+            print("  (all feed barriers converged; caught_up=true everywhere)")
 
     if proj_blocks:
         print(f"\nprojection doc size: blocks p50={pct(sorted(proj_blocks),50):.0f} "

@@ -174,6 +174,20 @@ Each stage emits one greppable line under `target="holon_latency"`:
 | `projection`   | `LoroProjection::project` (per commit)  | `ops`, `blocks`, `snapshot_ms`, `ms` |
 | `rows`         | `LiveData::subscribe` (CDC batch apply) | `source`, `rows`, `seq`, `ms` |
 | `action_total` | composed harness `apply` (per action)   | `action`, `total_ms`          |
+| `boot_parse`   | `on_file_changed` (per file, cold boot) | `blocks`, `path`, `ms` (parse+diff) |
+| `boot_write`   | `on_file_changed` (per file)            | `blocks`, `path`, `ms` (block_raw ops apply) |
+| `boot_feed_wait` | `on_file_changed` feed barrier (A/C)  | `caught_up`, `skipped`, `site`, `ms` |
+| `boot_place_wait` | `on_file_changed` ordering replay    | `path`, `ms` (`ordering.children` + `place`) |
+| `boot_file`    | `run_file_sync_controller` (per file)   | `path`, `ms` (whole `on_file_changed`) |
+| `boot_ingest_total` | `run_file_sync_controller` (once)  | `files`, `ms` (whole initial scan) |
+| `boot_feed_converge` | `finish_initial_scan` (once)      | `blocks`, `caught_up`, `ms` (one end-of-scan wait) |
+
+Boot ingest is a per-file serial pipeline; the `boot_*` stages measure a cold
+boot (empty Turso + existing org vault). Under Option 1 the per-file
+`boot_feed_wait` is deferred (`skipped=true`, `ms=0`) and replaced by one
+`boot_feed_converge` at end of scan; `caught_up=false` on any feed stage means
+the barrier hit its ceiling. `measure_latency.py` prints a `BOOT INGEST` table
+for these and flags any ceiling hits.
 
 To run against a custom log (e.g. the live app with `RUST_LOG=holon_latency=debug`):
 
@@ -220,7 +234,20 @@ What it does:
 Results (per-action latency table, SLO gate verdict, RSS start→peak→end) are written to
 `docs/Testing/soak/soak-<size>-blocks-<stamp>.txt` and echoed to the console. Runtime is
 minutes: the vault is re-seeded once per proptest case (~20 actions each), so boot
-overhead dominates wall time — but boot is not counted in `action_total`.
+overhead dominates wall time — boot is excluded from `action_total`, but the
+`stage=boot_*` events (above) time boot ingest directly under the same
+`holon_latency` target. For a cold-boot many-file benchmark:
+
+```bash
+HOLON_SOAK_SEED_FILES=200 HOLON_SOAK_BLOCKS_PER_FILE=10 \
+  RUST_LOG=holon_latency=debug \
+  cargo run --release --example diag_harness -p holon-integration-tests \
+  --features boot-bench 2>&1 | tee /tmp/boot.log
+python3 scripts/measure_latency.py /tmp/boot.log   # BOOT INGEST table
+```
+
+`TestEnvironmentBuilder` builds a fresh empty Turso per run, so this is cold by
+construction (the warm-boot `file.content_hash` fast-path cannot engage).
 
 **Nightly:** run `just soak` (5k) or `just soak 10000 480` and commit the result file
 under `docs/Testing/soak/`. No CI/cron wiring — it is a single reliable command; diff
