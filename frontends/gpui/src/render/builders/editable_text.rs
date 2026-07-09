@@ -101,10 +101,15 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
                 // no-ops off `feature = "mobile"`.
                 #[cfg(feature = "mobile")]
                 {
+                    // Re-borrow via short-lived `entity.read(cx)` temporaries rather
+                    // than the outer `view` binding: `editor_focus_lost` needs
+                    // `&mut cx`, which cannot coexist with a live `entity.read(cx)`
+                    // borrow (`view` is such a borrow).
                     if just_focused {
-                        crate::mobile::editor_focus_gained();
+                        entity.read(cx).note_focus_gained_mobile();
                     } else if just_blurred {
-                        crate::mobile::editor_focus_lost(cx);
+                        let my_gen = entity.read(cx).focus_gen();
+                        crate::mobile::editor_focus_lost(cx, my_gen);
                     }
                 }
                 #[cfg(not(feature = "mobile"))]
