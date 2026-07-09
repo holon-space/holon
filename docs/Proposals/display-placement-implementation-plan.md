@@ -189,6 +189,16 @@ already an inert non-ref-known render row).
 
 ## Phase 0 — Pay the `:__virtual:` debt (rewritten; keep BOTH mechanisms)
 
+> **UPDATE 2026-07-09 — `TrailingSlot` DELETED (superseded).** The
+> ViewModel-level `TrailingSlot` layer discussed throughout this Phase 0 was
+> later found **dead in production** (all `streaming_collection` callers passed
+> `None`) and removed. The static/live-query creation slot is served by
+> `interpret_virtual_child` (which already uses the `Value::Float(f64::MAX)`
+> sentinel noted below); the streaming path uses `AppendedRowsProvider`. The
+> "keep BOTH mechanisms" guidance below refers to `TrailingSlot` vs the provider
+> — read it as historical: today the two live mechanisms are
+> `interpret_virtual_child` (static) and `AppendedRowsProvider` (streaming).
+
 **Correction from review (B1):** the earlier draft was wrong. `TrailingSlot` is
 **not** the clean mechanism to standardize on — it is the broken one:
 - its `Value::Float(f64::MAX)` sort sentinel (`prelude.rs:75`) sorts **before**
