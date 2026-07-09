@@ -1471,14 +1471,13 @@ impl ReactiveViewModel {
         parent_space: Option<crate::render_context::AvailableSpace>,
         child_space_fn: Option<std::sync::Arc<crate::reactive_view::ChildSpaceFn>>,
         virtual_child: Option<crate::reactive_view::VirtualChildSlot>,
-        trailing_slot: Option<crate::reactive_view::TrailingSlot>,
         rules: Vec<holon_api::render_types::RuleSpec>,
     ) -> Self {
         if widget == "query_result" {
             return Self::from_widget("query_result", HashMap::new());
         }
         let layout = Self::widget_layout(widget, gap);
-        let mut view = crate::reactive_view::ReactiveView::new_collection(
+        let view = crate::reactive_view::ReactiveView::new_collection(
             crate::reactive_view::CollectionConfig {
                 layout,
                 item_template,
@@ -1490,9 +1489,6 @@ impl ReactiveViewModel {
             parent_space,
             child_space_fn,
         );
-        if let Some(slot) = trailing_slot {
-            view.set_trailing_slot(slot);
-        }
         Self {
             collection: Some(std::sync::Arc::new(view)),
             ..Self::from_widget(widget, HashMap::new())

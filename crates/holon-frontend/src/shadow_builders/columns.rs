@@ -1,7 +1,8 @@
 use super::prelude::*;
 use crate::reactive_view::ChildSpaceFn;
 use crate::reactive_view_model::CollectionVariant;
-use crate::render_context::{AvailableSpace, LayoutHint};
+use crate::render_context::AvailableSpace;
+use crate::render_context::LayoutHint;
 
 /// Horizontal list layout — the primary layout of the application.
 ///
@@ -17,16 +18,16 @@ use crate::render_context::{AvailableSpace, LayoutHint};
 /// Three call shapes are supported:
 ///
 /// 1. **Positional children** `columns(a, b, c)` — each child expression is
-///    interpreted lazily with a partitioned `RenderContext` so that
-///    `if_space` / `pick_active_variant` inside a child sees the slot width,
-///    not the parent width.
+///    interpreted lazily with a partitioned `RenderContext` so that `if_space`
+///    / `pick_active_variant` inside a child sees the slot width, not the
+///    parent width.
 ///
 /// 2. **Streaming** `columns(item_template: expr, from: live_query)` — the
 ///    existing flat-driver path; partitioning is handled by the driver via
 ///    `child_space_fn` (unchanged).
 ///
-/// 3. **Snapshot** `columns(item_template: expr)` over `ctx.data_rows` —
-///    same partitioning as (1), applied per-row at interpretation time.
+/// 3. **Snapshot** `columns(item_template: expr)` over `ctx.data_rows` — same
+///    partitioning as (1), applied per-row at interpretation time.
 holon_macros::widget_builder! {
     raw fn columns(ba: BA<'_>) -> ViewModel {
         let gap = ba.args.get_f64("gap").map(|v| v as f32).unwrap_or(16.0);
@@ -181,7 +182,6 @@ holon_macros::widget_builder! {
                     sort_key,
                     parent_space,
                     child_space_fn,
-                    None,
                     None,
                     rules,
                 )
