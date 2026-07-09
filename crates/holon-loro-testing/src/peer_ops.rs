@@ -5,7 +5,8 @@
 
 use holon::sync::multi_peer;
 use holon_loro::STABLE_ID;
-use loro::{LoroDoc, TreeID};
+use loro::LoroDoc;
+use loro::TreeID;
 
 /// A lightweight block representation for peer reference state tracking.
 #[derive(Debug, Clone)]

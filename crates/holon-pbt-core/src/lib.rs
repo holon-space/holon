@@ -44,6 +44,7 @@ pub mod cap_transition;
 pub mod capabilities;
 pub mod component_set;
 pub mod composition;
+pub mod content_generators;
 pub mod contribution;
 pub mod fixture;
 pub mod interactions;
