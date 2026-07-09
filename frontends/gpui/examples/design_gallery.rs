@@ -13,7 +13,6 @@ use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::*;
-
 #[cfg(feature = "hot-reload")]
 use subsecond;
 
@@ -106,6 +105,7 @@ enum Mode {
     Flow,
     Chat,
     Board,
+    Actions,
 }
 
 impl Mode {
@@ -116,6 +116,7 @@ impl Mode {
             Mode::Flow => "Flow",
             Mode::Chat => "Chat",
             Mode::Board => "Board",
+            Mode::Actions => "Actions",
         }
     }
 
@@ -126,6 +127,7 @@ impl Mode {
             Mode::Flow => "≡",
             Mode::Chat => "◎",
             Mode::Board => "▦",
+            Mode::Actions => "⚙",
         }
     }
 }
@@ -164,6 +166,7 @@ impl Render for GalleryView {
                             Mode::Capture => holon_frontend::widget_gallery::capture_mode_expr(),
                             Mode::Chat => holon_frontend::widget_gallery::chat_mode_expr(),
                             Mode::Board => holon_frontend::widget_gallery::board_mode_expr(),
+                            Mode::Actions => holon_frontend::widget_gallery::actions_mode_expr(),
                         };
                         let rvm = holon_frontend::widget_gallery::mode_view_model(&expr);
                         let gpui_ctx = holon_gpui::render::builders::GpuiRenderContext::new(
@@ -235,6 +238,7 @@ impl GalleryView {
             Mode::Flow,
             Mode::Chat,
             Mode::Board,
+            Mode::Actions,
         ];
         let mut row = div()
             .flex()
@@ -292,7 +296,7 @@ impl GalleryView {
     ) -> Self {
         let bounds_registry = holon_gpui::geometry::BoundsRegistry::new();
         Self {
-            mode: Mode::Chat,
+            mode: Mode::Actions,
             stub_services: services,
             bounds_registry,
             entity_cache: Default::default(),
@@ -376,4 +380,5 @@ fn sidebar_item(label: &str) -> Div {
 }
 
 // All mode content rendered via builder pipeline.
-// See holon_frontend::widget_gallery::{orient_mode_expr, flow_mode_expr, capture_mode_expr, chat_mode_expr}
+// See holon_frontend::widget_gallery::{orient_mode_expr, flow_mode_expr,
+// capture_mode_expr, chat_mode_expr}

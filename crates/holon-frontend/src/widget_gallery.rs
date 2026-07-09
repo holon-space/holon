@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
-use holon_api::render_types::{Arg, RenderExpr};
 use holon_api::Value;
+use holon_api::render_types::Arg;
+use holon_api::render_types::RenderExpr;
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -935,9 +936,9 @@ pub fn flow_mode_expr() -> RenderExpr {
 
 /// Board mode: kanban-style lanes rendered through `card(...)`.
 ///
-/// Demonstrates the `board(item_template: card(...), lane_field: ..., rows: [...])`
-/// shape end-to-end. The shadow `board` builder groups the inline rows by
-/// `lane_field` into `board_lane(...)` view models whose children are
+/// Demonstrates the `board(item_template: card(...), lane_field: ..., rows:
+/// [...])` shape end-to-end. The shadow `board` builder groups the inline rows
+/// by `lane_field` into `board_lane(...)` view models whose children are
 /// interpreted via `item_template` — i.e. through the regular `card` builder.
 pub fn board_mode_expr() -> RenderExpr {
     fn card_row(title: &str, status: &str, accent: &str, summary: &str) -> Value {
@@ -1103,22 +1104,33 @@ pub fn chat_mode_expr() -> RenderExpr {
             chat_msg(
                 "user",
                 "9:14 AM",
-                "Can you help me understand how the CRDT sync protocol works in the Delta Sharing project?",
+                "Can you help me understand how the CRDT sync protocol works in the Delta Sharing \
+                 project?",
             ),
             chat_msg(
                 "assistant",
                 "9:14 AM",
-                "The Delta Sharing sync uses a two-phase approach:\n\n1. Capture phase — local edits are recorded as Loro operations in a CRDT document\n2. Reconciliation phase — when peers connect, they exchange operation logs and merge automatically\n\nThe key insight is that Loro's tree-move operations are commutative, so the merge order doesn't matter. Conflicts only arise at the semantic level (e.g. two users editing the same paragraph), not the structural level.",
+                "The Delta Sharing sync uses a two-phase approach:\n\n1. Capture phase — local \
+                 edits are recorded as Loro operations in a CRDT document\n2. Reconciliation \
+                 phase — when peers connect, they exchange operation logs and merge \
+                 automatically\n\nThe key insight is that Loro's tree-move operations are \
+                 commutative, so the merge order doesn't matter. Conflicts only arise at the \
+                 semantic level (e.g. two users editing the same paragraph), not the structural \
+                 level.",
             ),
             tool_call_entry(
                 "Read — crates/holon/src/sync/file_sync_controller.rs",
                 "📄",
-                "Lines 1-245 of file_sync_controller.rs\n\npub struct FileSyncController { ... }\nimpl FileSyncController {\n    pub fn on_remote_changes(&self, ops: Vec<LoroOp>) { ... }\n}",
+                "Lines 1-245 of file_sync_controller.rs\n\npub struct FileSyncController { ... \
+                 }\nimpl FileSyncController {\n    pub fn on_remote_changes(&self, ops: \
+                 Vec<LoroOp>) { ... }\n}",
             ),
             tool_call_entry(
                 "Grep — Search for 'Lamport' in crates/holon — 3 matches",
                 "🔍",
-                "loro_bridge.rs:42: // Lamport timestamp for causal ordering\nloro_bridge.rs:89: let lamport = op.lamport_timestamp();\nconflict.rs:15: // Last-writer-wins using Lamport clock",
+                "loro_bridge.rs:42: // Lamport timestamp for causal ordering\nloro_bridge.rs:89: \
+                 let lamport = op.lamport_timestamp();\nconflict.rs:15: // Last-writer-wins using \
+                 Lamport clock",
             ),
             chat_msg(
                 "user",
@@ -1128,7 +1140,11 @@ pub fn chat_mode_expr() -> RenderExpr {
             chat_msg(
                 "assistant",
                 "9:15 AM",
-                "Great question. Loro handles tree-move conflicts with a \"last-writer-wins\" policy based on Lamport timestamps. If user A moves block X under parent P1, and user B moves X under P2, the operation with the higher Lamport timestamp wins.\n\nIn practice, this is rare because the Petri net scheduler assigns blocks to focus areas, reducing concurrent moves to the same block.",
+                "Great question. Loro handles tree-move conflicts with a \"last-writer-wins\" \
+                 policy based on Lamport timestamps. If user A moves block X under parent P1, and \
+                 user B moves X under P2, the operation with the higher Lamport timestamp \
+                 wins.\n\nIn practice, this is rare because the Petri net scheduler assigns \
+                 blocks to focus areas, reducing concurrent moves to the same block.",
             ),
             chat_msg(
                 "user",
@@ -1138,20 +1154,346 @@ pub fn chat_mode_expr() -> RenderExpr {
             tool_call_entry(
                 "Grep — Search for 'on_remote_changes' — 2 matches",
                 "🔍",
-                "file_sync_controller.rs:147: pub fn on_remote_changes(&self, ops: Vec<LoroOp>) {\ndi.rs:203: controller.on_remote_changes(batch);",
+                "file_sync_controller.rs:147: pub fn on_remote_changes(&self, ops: Vec<LoroOp>) \
+                 {\ndi.rs:203: controller.on_remote_changes(batch);",
             ),
             chat_msg(
                 "assistant",
                 "9:17 AM",
-                "The reconciliation entry point is FileSyncController::on_remote_changes() in file_sync_controller.rs. It:\n\n1. Receives a batch of remote Loro operations\n2. Applies them to the local Loro document\n3. Diffs the resulting block tree against the SQL cache\n4. Emits block.created / block.updated / block.deleted events\n5. The CacheEventSubscriber picks these up and updates QueryableCache\n\nThe echo suppression (last_projection) prevents file re-writes when the change originated from an org file edit on this machine.",
+                "The reconciliation entry point is FileSyncController::on_remote_changes() in \
+                 file_sync_controller.rs. It:\n\n1. Receives a batch of remote Loro \
+                 operations\n2. Applies them to the local Loro document\n3. Diffs the resulting \
+                 block tree against the SQL cache\n4. Emits block.created / block.updated / \
+                 block.deleted events\n5. The CacheEventSubscriber picks these up and updates \
+                 QueryableCache\n\nThe echo suppression (last_projection) prevents file re-writes \
+                 when the change originated from an org file edit on this machine.",
             ),
             chat_msg(
                 "user",
                 "9:18 AM",
-                "Perfect, that clears it up. One more thing — how does the watcher synthesis tie into this?",
+                "Perfect, that clears it up. One more thing — how does the watcher synthesis tie \
+                 into this?",
             ),
         ],
         4.0,
+    )
+}
+
+// ── Actions Mode (ADR 0024 / docs/Proposals/action-ux.md) ────────────────
+// Mocks the MVP action UX: rules become the most legible blocks on the page.
+// Everything is a render profile over (hard-coded) vault data — no backend.
+
+fn muted_line(text: &str) -> RenderExpr {
+    call(
+        "text",
+        vec![
+            pos(lit_str(text)),
+            named("size", lit_f64(13.0)),
+            named("color", lit_str("muted")),
+        ],
+    )
+}
+
+/// A rule block rendered as its collapsed **rule card**: name, enabled toggle,
+/// `last fired: …`, an optional fail-loud guard error, and the when/then
+/// source in an expandable section. `error` present → red error state.
+fn rule_card(
+    name: &str,
+    accent: &str,
+    enabled: bool,
+    last_fired: &str,
+    source: &str,
+    error: Option<&str>,
+) -> RenderExpr {
+    let header = row(
+        vec![
+            call(
+                "text",
+                vec![pos(lit_str("⚙")), named("color", lit_str(accent))],
+            ),
+            call(
+                "text",
+                vec![
+                    pos(lit_str(name)),
+                    named("bold", lit_bool(true)),
+                    named("size", lit_f64(16.0)),
+                ],
+            ),
+            call("checkbox", vec![named("checked", lit_bool(enabled))]),
+            call(
+                "text",
+                vec![
+                    pos(lit_str(if enabled { "Enabled" } else { "Disabled" })),
+                    named("size", lit_f64(13.0)),
+                    named("color", lit_str(if enabled { "success" } else { "muted" })),
+                ],
+            ),
+        ],
+        8.0,
+    );
+
+    let mut children = vec![pos(header)];
+    if let Some(err) = error {
+        children.push(pos(call("error", vec![pos(lit_str(err))])));
+    }
+    children.push(pos(muted_line(&format!("last fired: {last_fired}"))));
+    children.push(pos(call(
+        "collapsible",
+        vec![
+            named("summary", lit_str("when / then source")),
+            named("icon", lit_str("⚙")),
+            pos(call("text", vec![named("content", lit_str(source))])),
+        ],
+    )));
+
+    let mut args = vec![named("accent", lit_str(accent))];
+    args.extend(children);
+    call("card", args)
+}
+
+/// A journal-entry block row carrying the subtle ⚙ provenance affordance and
+/// inline "created by <rule> · <time>" secondary text (ADR 0024 P8 `fired-by`).
+fn provenance_row(entry: &str, rule: &str, time: &str, badge: bool) -> RenderExpr {
+    let mut cells = vec![
+        call(
+            "text",
+            vec![pos(lit_str(entry)), named("size", lit_f64(14.0))],
+        ),
+        call(
+            "text",
+            vec![
+                pos(lit_str("⚙")),
+                named("size", lit_f64(12.0)),
+                named("color", lit_str("muted")),
+            ],
+        ),
+    ];
+    if badge {
+        cells.push(muted_line(&format!("created by {rule} · {time}")));
+    }
+    row(cells, 8.0)
+}
+
+/// One firing in the Automations audit journal. `accent` tints the tick.
+fn automation_row(time: &str, rule: &str, detail: &str, accent: &str) -> RenderExpr {
+    row(
+        vec![
+            call(
+                "text",
+                vec![
+                    pos(lit_str(time)),
+                    named("size", lit_f64(12.0)),
+                    named("color", lit_str("muted")),
+                ],
+            ),
+            call(
+                "text",
+                vec![pos(lit_str("⚙")), named("color", lit_str(accent))],
+            ),
+            call(
+                "text",
+                vec![
+                    pos(lit_str(rule)),
+                    named("bold", lit_bool(true)),
+                    named("size", lit_f64(13.0)),
+                ],
+            ),
+            call(
+                "text",
+                vec![pos(lit_str("→")), named("color", lit_str("muted"))],
+            ),
+            call(
+                "text",
+                vec![pos(lit_str(detail)), named("size", lit_f64(13.0))],
+            ),
+        ],
+        8.0,
+    )
+}
+
+/// A named enabled-transition affordance for the in-context action bar (ADR
+/// 0024 presentation ladder #1: horizontal text is the highest-bandwidth
+/// label format). Rendered as a `badge` — the real data-driven `op_button`
+/// widget requires a `chain_ops`/`ops_of` row source, absent in this static
+/// mock; a badge carries the same named-transition label statically.
+fn action_button(display_name: &str) -> RenderExpr {
+    call("badge", vec![pos(lit_str(display_name))])
+}
+
+/// Actions mode: rule cards + provenance + automations page + action bar +
+/// dry-run dialog. One scrollable column of sections, like the other modes.
+pub fn actions_mode_expr() -> RenderExpr {
+    // ── 1. Rule cards ────────────────────────────────────────────────────
+    let rule_cards = section(
+        "Rules",
+        vec![
+            muted_line(
+                "Rules render as the most legible blocks on the page — not broken query results.",
+            ),
+            rule_card(
+                "Daily journal",
+                "#7D9D7D",
+                true,
+                "today 00:03",
+                "when: today and not journal(date = today)\nthen: block.create\n  parent: \
+                 journals\n  name: \"{today}\"",
+                None,
+            ),
+            rule_card(
+                "Weekly digest",
+                "#C97064",
+                false,
+                "never",
+                "when: jurnal(date = last_week)\nthen: block.create\n  parent: digests\n  name: \
+                 \"Digest {week}\"",
+                Some("guard references unknown relation 'jurnal'"),
+            ),
+        ],
+    );
+
+    // ── 2. Provenance badge ──────────────────────────────────────────────
+    let provenance = section(
+        "Provenance",
+        vec![
+            muted_line(
+                "Every auto-created block carries a ⚙ affordance back to the rule that made it.",
+            ),
+            provenance_row("2026-07-09", "Daily journal", "00:03", true),
+            provenance_row("2026-07-08", "Daily journal", "00:02", false),
+        ],
+    );
+
+    // ── 3. Automations page ──────────────────────────────────────────────
+    let automations = section(
+        "Automations",
+        vec![
+            muted_line(
+                "An ordinary, user-customizable page: a query over provenance-stamped effects.",
+            ),
+            call(
+                "text",
+                vec![
+                    pos(lit_str("Today — 2026-07-09")),
+                    named("bold", lit_bool(true)),
+                    named("size", lit_f64(13.0)),
+                ],
+            ),
+            automation_row(
+                "00:03",
+                "Daily journal",
+                "created '2026-07-09' in Journals",
+                "#7D9D7D",
+            ),
+            call(
+                "text",
+                vec![
+                    pos(lit_str("Yesterday — 2026-07-08")),
+                    named("bold", lit_bool(true)),
+                    named("size", lit_f64(13.0)),
+                ],
+            ),
+            automation_row(
+                "00:02",
+                "Daily journal",
+                "created '2026-07-08' in Journals",
+                "#7D9D7D",
+            ),
+            automation_row(
+                "14:20",
+                "Archive done",
+                "moved 'Ship v2.0' to Archive",
+                "#5DBDBD",
+            ),
+            automation_row(
+                "09:00",
+                "Weekly digest",
+                "guard error: unknown relation 'jurnal'",
+                "#C97064",
+            ),
+        ],
+    );
+
+    // ── 4. In-context action bar ─────────────────────────────────────────
+    let action_bar = section(
+        "In-context actions",
+        vec![
+            muted_line("The net computes what you can do; the UI offers it where you're looking."),
+            call(
+                "card",
+                vec![
+                    named("accent", lit_str("#5DBDBD")),
+                    pos(row(
+                        vec![
+                            call("state_toggle", vec![pos(lit_str("task_state_doing"))]),
+                            call(
+                                "text",
+                                vec![
+                                    pos(lit_str("Review PR from Sarah")),
+                                    named("bold", lit_bool(true)),
+                                    named("size", lit_f64(15.0)),
+                                ],
+                            ),
+                        ],
+                        8.0,
+                    )),
+                    pos(muted_line("3 actions available here")),
+                    pos(row(
+                        vec![
+                            action_button("Send to review"),
+                            action_button("Archive with note"),
+                            action_button("Split"),
+                        ],
+                        12.0,
+                    )),
+                ],
+            ),
+        ],
+    );
+
+    // ── 5. Dry-run dialog ────────────────────────────────────────────────
+    let dry_run = section(
+        "Dry-run before enable",
+        vec![
+            muted_line("Enabling a new rule first shows what it would do — scary becomes boring."),
+            call(
+                "card",
+                vec![
+                    named("accent", lit_str("#D4A373")),
+                    pos(call(
+                        "text",
+                        vec![
+                            pos(lit_str("Enable 'Daily journal'?")),
+                            named("bold", lit_bool(true)),
+                            named("size", lit_f64(16.0)),
+                        ],
+                    )),
+                    pos(call(
+                        "text",
+                        vec![
+                            pos(lit_str("This rule would fire 3 times right now:")),
+                            named("size", lit_f64(14.0)),
+                        ],
+                    )),
+                    pos(column_gap(
+                        vec![
+                            muted_line("→ create '2026-07-07' in Journals"),
+                            muted_line("→ create '2026-07-08' in Journals"),
+                            muted_line("→ create '2026-07-09' in Journals"),
+                        ],
+                        4.0,
+                    )),
+                    pos(row(
+                        vec![action_button("Cancel"), action_button("Confirm & fire")],
+                        12.0,
+                    )),
+                ],
+            ),
+        ],
+    );
+
+    column_gap(
+        vec![rule_cards, provenance, automations, action_bar, dry_run],
+        24.0,
     )
 }
 
@@ -1163,7 +1505,8 @@ pub fn mode_view_model(expr: &RenderExpr) -> crate::reactive_view_model::Reactiv
 
 // ── Standalone interpretation ────────────────────────────────────────────
 
-/// Interpret the design gallery into a `ReactiveViewModel` using `StubBuilderServices`.
+/// Interpret the design gallery into a `ReactiveViewModel` using
+/// `StubBuilderServices`.
 ///
 /// This is the main entry point for standalone gallery apps. No database,
 /// no DI, no backend — just the shadow interpreter + hardcoded data.
@@ -1176,7 +1519,8 @@ pub fn design_gallery_view_model() -> crate::reactive_view_model::ReactiveViewMo
     )
 }
 
-/// Interpret the original widget gallery into a `ReactiveViewModel` using `StubBuilderServices`.
+/// Interpret the original widget gallery into a `ReactiveViewModel` using
+/// `StubBuilderServices`.
 pub fn widget_gallery_view_model() -> crate::reactive_view_model::ReactiveViewModel {
     let services = crate::reactive::StubBuilderServices::new();
     crate::reactive::interpret_pure(
@@ -1294,6 +1638,29 @@ mod tests {
             }
             other => panic!("expected column FunctionCall, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn actions_mode_has_five_sections_and_renders() {
+        let expr = actions_mode_expr();
+        match &expr {
+            RenderExpr::FunctionCall { name, args } => {
+                assert_eq!(name, "column");
+                // 5 sections + a trailing `gap` named arg.
+                let sections = args
+                    .iter()
+                    .filter(|a| matches!(&a.value, RenderExpr::FunctionCall { name, .. } if name == "section"))
+                    .count();
+                assert_eq!(sections, 5, "expected 5 Actions-mode sections");
+            }
+            other => panic!("expected column FunctionCall, got {other:?}"),
+        }
+        // Interprets into a non-empty tree via the shadow pipeline.
+        let vm = mode_view_model(&expr);
+        assert!(!matches!(
+            vm.snapshot().kind,
+            crate::view_model::ViewKind::Empty
+        ));
     }
 
     #[test]
@@ -1614,12 +1981,14 @@ mod tests {
 
 #[cfg(test)]
 mod board_yaml_parse_tests {
-    use crate::reactive;
-    use crate::reactive::BuilderServices;
-    use holon_api::widget_spec::DataRow;
-    use holon_api::Value;
     use std::collections::HashMap;
     use std::sync::Arc;
+
+    use holon_api::Value;
+    use holon_api::widget_spec::DataRow;
+
+    use crate::reactive;
+    use crate::reactive::BuilderServices;
 
     #[test]
     fn collection_profile_board_render_parses_and_interprets() {
@@ -1688,8 +2057,9 @@ mod board_yaml_parse_tests {
         // rows. Each lane should be a `board_lane` VM with a `slot` whose
         // content is a `streaming_collection` of cards filtered to that
         // lane via `LaneFilteredProvider`.
-        use crate::value_fns::synthetic::SyntheticRows;
         use holon_api::ReactiveRowProvider;
+
+        use crate::value_fns::synthetic::SyntheticRows;
 
         crate::shadow_builders::register_render_dsl_widget_names();
         let src =
