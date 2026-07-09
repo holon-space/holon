@@ -97,6 +97,13 @@ python3 holon_mcp_cli.py $PORT screenshot '{}' --out $SANDBOX/shots/01.png
 Do NOT use a harness-configured `holon` MCP tool unless you are certain which port it targets
 (the default config targets 8520 — the live instance).
 
+**Shell caveat:** the harness Bash tool may run under **nushell**, not bash. `$PORT`/`$SANDBOX`
+shell vars and the bash idiom `CLI="python3 …"; $CLI describe_ui …` (var-as-command) do NOT
+expand in nushell — the whole var is treated as one command name. Either invoke `python3
+<abs-path>/holon_mcp_cli.py <port> …` directly each call, or wrap a block in `bash -c "…"`.
+The CLI prints a `NotOpenSSLWarning` on stderr; filter with `2>&1 | grep -v NotOpenSSL` when
+piping to a JSON parser, or read stdout only with `2>/dev/null`.
+
 ---
 
 ## 2. Session protocol (per exploratory step)
@@ -118,15 +125,23 @@ Do NOT use a harness-configured `holon` MCP tool unless you are certain which po
    platform-standard editing chords exist).
    `execute_operation {"entity_name":"block","operation":"…","params":{…}}` (field is
    `operation`, not `operation_name`) when no editor is focused.
-4. **Fresh-boot trap (CONFIRMED on desktop).** The empty main panel shows a creation slot
-   `block:__virtual:<panel-id>` — clicking it + typing + Enter does NOT commit: the create op
-   panics (`create: missing 'id'`, sql_operation_provider.rs) and the UI swallows it. Until that
-   bug is fixed, create the first block via `execute_operation` create (supply an explicit `id`)
-   or seed the vault. Typing into EXISTING blocks works.
+4. **Fresh-boot trap (root-caused 2026-07-09).** The empty main panel shows a creation slot
+   `block:__virtual:<panel-id>` — clicking it + typing + Enter builds a `create` op with NO `id`,
+   and `sql_operation_provider.rs` create branch `.expect("create: missing 'id'")` panics on a
+   `tokio-rt-worker` the UI silently swallows (the typed block vanishes). The SAME root fires the
+   journal auto-create Rhai action at boot (`block.create(#{parent_id, name})`, no id). `split_block`
+   is unaffected — it mints a uuid before dispatch. FIX (this dogfood session): the create branch now
+   mints `{entity}:{uuid}` when `id` is absent, so slot-commit and action create both work. If you're
+   on a build BEFORE that fix, create the first block via `execute_operation` create with an explicit
+   `id`, or seed the vault. Typing into EXISTING blocks always works.
 5. **Verify BOTH surfaces after every mutating step:**
    - Rendered: `describe_ui` (+ screenshot for anything visual).
    - Internal: `execute_raw_sql` / `execute_query`. NOTE: `task_state`/`task_state_category` are
      inside the `properties` JSON column, not top-level columns — `SELECT *` and inspect.
+     TABLE CHOICE: query the **`block`** view (has `tags`, `requires`, `advice_suppressed`) for
+     page/tag/edge inspection — NOT `block_raw` (the base table lacks those columns, and selecting
+     them fails with the swallowed "Failed to execute raw SQL" error). `SELECT id, content, tags,
+     parent_id, sort_key FROM block ORDER BY parent_id, sort_key` gives the whole forest.
      Disk: read `$SANDBOX/vault/*.org` directly (the `read_org_file` MCP tool takes `doc_id`,
      not a path).
    - **Divergence between the two is itself a bug** — e.g. sidebar rendering 3 rows where its
@@ -136,10 +151,13 @@ Do NOT use a harness-configured `holon` MCP tool unless you are certain which po
    failure with no banner + a PANIC line = a fail-loud violation to report.
 7. **Latency.** With `RUST_LOG=…,holon_latency=debug`, run
    `python3 $WS/scripts/measure_latency.py $SANDBOX/logs/app.log`. SLO: p95
-   interaction→projection-visible < 200ms. CAVEAT (found live): prod desktop emits only
-   `dispatch` + `rows` stages — the `projection` stage never fires, so the SLO is currently
-   unmeasurable in prod wiring; report dispatch p95 and note the instrumentation gap.
-   (`action_total` is harness-only.)
+   interaction→projection-visible < 200ms. CAVEAT (updated 2026-07-09): prod desktop now emits an
+   `e2e` (interaction→visible) stage for `set_field` — `measure_latency.py` reports it under
+   "PROD END-TO-END". But `split_block` still emits only `dispatch` (no `e2e`), and the named
+   `projection` stage never fires, so e2e coverage is partial; report the `e2e` p50/p95 where
+   present and the `dispatch` p95 elsewhere, and note which stages were absent. (`action_total`
+   is harness-only.) At tiny fresh-boot scale expect single-digit ms (e.g. set_field e2e p95 ~8ms);
+   latency bugs need vault scale to surface.
 
 ## 3. Exploration heuristics — vary seeds, replay known-breakers
 
