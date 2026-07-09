@@ -54,20 +54,15 @@ pub mod value_fn_invariants;
 pub mod vm_snapshot;
 pub mod window_slice;
 
-/// Whether `id` is a ref-side SYNTHETIC placeholder the SUT replaces with a
-/// real UUID. Only split suffixes are: `reference_state.rs::split_block`
-/// mints `block::split-N` (note the double colon) and the SUT later binds it
-/// to a freshly-minted UUID. Bulk ids (`block:bulk-N-i`) are NOT synthetic —
-/// `bulk_external_add` writes them deterministically on BOTH sides, so they
-/// appear verbatim in `block_raw`/CDC. Single source of truth — substring
-/// sniffs like `contains(":split-")` false-positived on legitimately named
-/// blocks (e.g. the gherkin fixture's `block:split-target-block`).
-pub fn is_synthetic_ref_id(id: &holon_api::EntityUri) -> bool {
-    id.as_str().starts_with("block::split-")
-}
-
 pub use action_actor_state::ActionActorState;
 pub use file_adapter_state::FileAdapterState;
+/// Whether `id` is a ref-side SYNTHETIC placeholder the SUT replaces with a
+/// real UUID. Single source of truth lifted to the pbt-core floor (co-location
+/// Phase 2) so co-located store arms (`holon-turso-testing`) can filter
+/// synthetic ids without reaching into this crate; re-exported here for the
+/// many central call sites (`test_environment`, `frontend_slice`, `harness`,
+/// `builder`).
+pub use holon_pbt_core::observables::is_synthetic_ref_id;
 pub use mcp_server_actor_state::MCPServerActorState;
 // The phased entry points (the ready-context struct + the driver-sync run/replay
 // functions) are deliberately NOT re-exported
