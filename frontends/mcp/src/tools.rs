@@ -1789,9 +1789,9 @@ impl HolonMcpServer {
     /// Capture the live PBT-facing snapshot: the CDC-driven `LiveData` block
     /// mirror (NOT a matview SQL read) + focus-roots, plus the Loro tree's
     /// error flag, lamport height, and per-parent child lists. The block
-    /// source is the swappable `block_query_source` — fail loud (no SQL
-    /// fallback) if it is unwired. Follows a `reset_vault` onto the fresh
-    /// session.
+    /// source is the swappable `block_query_source` — fail loud (no silent
+    /// SQL substitute) if it is unwired. Follows a `reset_vault` onto the
+    /// fresh session.
     #[cfg(debug_assertions)]
     #[tool(
         description = "TEST-ONLY: snapshot the live CDC-mirrored blocks (LiveData, not matview \
@@ -1814,7 +1814,7 @@ impl HolonMcpServer {
         let block_query_source = block_query_source.ok_or_else(|| {
             rmcp::ErrorData::internal_error(
                 "debug_pbt_snapshot requires a wired block_query_source (the live CDC mirror); \
-                 there is no SQL fallback",
+                 there is no silent SQL substitute",
                 None,
             )
         })?;
@@ -2413,8 +2413,45 @@ impl HolonMcpServer {
                 operation,
                 entity_id,
             }) => {
+                // send_key_chord can only supply the entity id (plus any params
+                // the descriptor pre-bound from its DSL args). Structural editor
+                // ops (e.g. split_block) additionally need UI-context params —
+                // a live caret `position`, a selection range — that live in the
+                // editor's InputState, not in this tool. Dispatching without
+                // them fails deep inside the op with an opaque
+                // "Missing or invalid parameter 'position'". Detect it here and
+                // fail loud with an actionable message instead.
                 let mut op_params: holon_api::StorageEntity = HashMap::new();
                 op_params.insert("id".into(), holon_api::Value::String(entity_id.to_string()));
+                for (k, v) in &operation.bound_params {
+                    op_params.insert(k.as_str().into(), v.clone());
+                }
+
+                let missing: Vec<&str> = operation
+                    .required_params
+                    .iter()
+                    .map(|p| p.name.as_str())
+                    .filter(|name| {
+                        *name != "id"
+                            && *name != operation.id_column.as_str()
+                            && !op_params.contains_key(*name)
+                    })
+                    .collect();
+                if !missing.is_empty() {
+                    return Err(rmcp::ErrorData::invalid_params(
+                        format!(
+                            "Key chord matched operation '{}.{}', but it requires UI-context \
+                             parameter(s) {:?} that send_key_chord cannot supply — it dispatches \
+                             with only the entity id (and DSL-bound params). These come from the \
+                             live caret/selection in the editor's InputState. Drive this through \
+                             the real input pipeline instead: use `type_text` / \
+                             `send_raw_keystroke` to send the keystroke, which lets the focused \
+                             editor supply {:?}.",
+                            entity_name, operation.name, missing, missing
+                        ),
+                        None,
+                    ));
+                }
 
                 let entity_name_typed = EntityName::new(&entity_name);
                 let response = self
@@ -2646,6 +2683,52 @@ impl HolonMcpServer {
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::json!({
                 "keystrokes_sent": keystrokes.len(),
+            })
+            .to_string(),
+        )]))
+    }
+
+    #[tool(
+        description = "Insert text through the soft-keyboard `insertText:` path instead of \
+                       hardware KeyDown events. Unlike `type_text` (which sends per-character \
+                       KeyDown keystrokes through the GPUI keymap), this commits the whole string \
+                       straight into the focused editor's input handler — the same path iOS UIKit \
+                       uses for the on-screen keyboard. A soft Return is sent as \"\\n\" and \
+                       becomes an `enter` action (split_block), not a literal newline. Use this \
+                       to exercise soft-keyboard-only behavior that a KeyDown-driven test cannot \
+                       reach."
+    )]
+    async fn insert_text(
+        &self,
+        Parameters(params): Parameters<InsertTextParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let tx = self.debug.interaction_tx.get().ok_or_else(|| {
+            rmcp::ErrorData::internal_error(
+                "No GPUI window connected (interaction channel not set up)",
+                None,
+            )
+        })?;
+
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        tx.clone()
+            .try_send(crate::server::InteractionCommand {
+                event: crate::server::InteractionEvent::InsertText {
+                    text: params.text.clone(),
+                },
+                response_tx: resp_tx,
+            })
+            .map_err(|_| {
+                rmcp::ErrorData::internal_error("GPUI interaction channel disconnected", None)
+            })?;
+
+        let response = resp_rx.await.map_err(|_| {
+            rmcp::ErrorData::internal_error("GPUI did not respond to insert_text event", None)
+        })?;
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::json!({
+                "inserted_text": params.text,
+                "handled": response.handled,
             })
             .to_string(),
         )]))
