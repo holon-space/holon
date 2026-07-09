@@ -1113,11 +1113,22 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 Ok(OperationResult::irreversible(Vec::new()))
             }
             "create" => {
-                let id = params
-                    .get("id")
-                    .and_then(|v| v.as_string())
-                    .expect("create: missing 'id'")
-                    .to_string();
+                // Entity ids are `{entity}:{uuid}`. A create without an explicit
+                // id means "mint a fresh one" — the normal case for interactive
+                // block creation and Rhai `block.create(..)` actions. Only split
+                // and seeds supply an id. Mint here (mirroring `split_block`) so
+                // the op's postcondition — a row with a valid id — holds for every
+                // caller, instead of panicking a background worker whose crash the
+                // UI silently swallows.
+                let mut params = params;
+                let id = match params.get("id").and_then(|v| v.as_string()) {
+                    Some(existing) => existing.to_string(),
+                    None => {
+                        let minted = format!("{}:{}", self.entity_name, uuid::Uuid::new_v4());
+                        params.insert("id".into(), Value::String(minted.clone()));
+                        minted
+                    }
+                };
                 let prepared = self.prepare_create(&params);
                 // Run the create atomically in one transaction. The block parent
                 // FK is DEFERRABLE INITIALLY DEFERRED, so it is checked at COMMIT.
@@ -1361,5 +1372,67 @@ mod clock_tests {
         let row = &rows[0];
         assert_eq!(row.get("created_at"), Some(&Value::Integer(123456)));
         assert_eq!(row.get("updated_at"), Some(&Value::Integer(123456)));
+    }
+}
+
+#[cfg(test)]
+mod create_id_tests {
+    use super::*;
+
+    /// A `create` op with no `id` must MINT a fresh `{entity}:{uuid}` id and
+    /// insert the row — never panic. Regression for the dogfood P1 where the
+    /// GPUI creation-slot commit and the journal auto-create Rhai action both
+    /// build `block.create` without an id and the provider `.expect`-panicked
+    /// on a background worker the UI silently swallowed.
+    #[tokio::test]
+    async fn create_without_id_mints_a_block_scoped_id() {
+        let (_backend, db_handle) = crate::storage::turso::TursoBackend::new_in_memory()
+            .await
+            .expect("in-memory turso");
+        db_handle
+            .execute(
+                "CREATE TABLE block_raw (id TEXT PRIMARY KEY, parent_id TEXT, content TEXT, \
+                 created_at INTEGER, updated_at INTEGER)",
+                vec![],
+            )
+            .await
+            .expect("create table");
+
+        let provider = SqlOperationProvider::new(
+            db_handle.clone(),
+            "block_raw".to_string(),
+            "block".to_string(),
+            "block".to_string(),
+        );
+
+        let mut params = StorageEntity::new();
+        params.insert("content".into(), Value::String("hello world".to_string()));
+        // Deliberately no "id" — mirrors the creation-slot / action-watcher paths.
+        provider
+            .execute_operation_with_origin(
+                &EntityName::new("block"),
+                "create",
+                params,
+                EventOrigin::Other("test".to_string()),
+            )
+            .await
+            .expect("create without an explicit id should mint one, not panic");
+
+        let rows = db_handle
+            .query("SELECT id, content FROM block_raw", HashMap::new())
+            .await
+            .expect("query");
+        assert_eq!(rows.len(), 1, "exactly one row should have been inserted");
+        let id = rows[0]
+            .get("id")
+            .and_then(|v| v.as_string())
+            .expect("minted id present");
+        let uuid_part = id
+            .strip_prefix("block:")
+            .unwrap_or_else(|| panic!("minted id should be block-scoped, got {id:?}"));
+        assert!(
+            uuid::Uuid::parse_str(uuid_part).is_ok(),
+            "minted id suffix should be a uuid, got {uuid_part:?}"
+        );
     }
 }
