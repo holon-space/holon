@@ -72,11 +72,13 @@ pub struct EditorView {
     /// of poking the EditorViewModel directly.
     bounds_registry: BoundsRegistry,
     /// Last window-focus state observed by the render-path reconcile gate
-    /// (`focus_arrived`). Used to detect the frame where focus first arrives
-    /// (false→true) so the builder can re-sync a stale `InputState` from the
-    /// live backend content *once*, before the user has typed — the backstop
-    /// for the editor's data-sync subscription being orphaned by a row-set
-    /// rebuild (split/join/navigation replaces the per-row `Mutable` cell).
+    /// (`focus_transition`). Used to detect the frame where focus first arrives
+    /// (false→true) so the NO-CELL builder backstop can re-sync a stale
+    /// `InputState` from the live backend content *once*, before the user has
+    /// typed — the backstop for a no-cell editor's data-sync subscription being
+    /// orphaned by a row-set rebuild (split/join/navigation replaces the
+    /// per-row `Mutable` cell). Cell-attached editors bypass this gate
+    /// (Increment G).
     prev_focused: std::cell::Cell<bool>,
     /// The soft-keyboard focus generation this editor claimed on its last
     /// focus-gain (see `crate::mobile::editor_focus_gained`). Passed back on
@@ -104,29 +106,13 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let input = cx.new(|cx| {
-            let row_id_for_menu = row_id.clone();
-            InputState::new(window, cx)
-                .auto_grow(1, usize::MAX)
-                .default_value(&content)
-                .context_menu_extender(move |menu, _window, _cx| {
-                    let row_id_for_click = row_id_for_menu.clone();
-                    menu.separator()
-                        .item(PopupMenuItem::new("Share subtree…").on_click(
-                            move |_, _window, cx| {
-                                ShareTrigger::trigger(row_id_for_click.clone(), cx);
-                            },
-                        ))
-                })
-        });
-
         let context_params = std::collections::HashMap::from([(
             "id".into(),
             holon_api::Value::String(row_id.clone()),
         )]);
         let field_for_subscription = field.clone();
         let mut controller =
-            EditorViewModel::new(operations, triggers, context_params, field, content);
+            EditorViewModel::new(operations, triggers, context_params, field, content.clone());
         controller.set_async_context(services.clone());
         // Attach a `Cell<String>` if the cell registry can resolve one.
         // Headless / stub / test paths leave it unattached and the VM's
@@ -137,7 +123,39 @@ impl EditorView {
         if let Ok(cell) = services.editable_text(&row_uri, &field_for_subscription) {
             controller.attach_cell(cell);
         }
+
+        // Increment G — seed `InputState` from the cell authority when a cell is
+        // attached. `remote_deltas()` delivers only FUTURE deltas, so without
+        // this seed a freshly-mounted cell-attached editor would display the
+        // SQL-projected `content` prop until the first delta — the transient
+        // staleness the removed just-focused render backstop used to cure. The
+        // cell text is synchronously readable here (`current_text()` is a
+        // synchronous borrow, already used below to seed `previous_text`).
+        // Building `input` AFTER `attach_cell` means no stale value ever exists.
+        // No cell (unwired / headless) → seed from `content`, exactly as before.
+        let cell_attached = controller.has_cell();
+        let seed_value = if cell_attached {
+            controller.current_text().unwrap_or_default()
+        } else {
+            content.clone()
+        };
         let controller = Arc::new(Mutex::new(controller));
+
+        let input = cx.new(|cx| {
+            let row_id_for_menu = row_id.clone();
+            InputState::new(window, cx)
+                .auto_grow(1, usize::MAX)
+                .default_value(&seed_value)
+                .context_menu_extender(move |menu, _window, _cx| {
+                    let row_id_for_click = row_id_for_menu.clone();
+                    menu.separator()
+                        .item(PopupMenuItem::new("Share subtree…").on_click(
+                            move |_, _window, cx| {
+                                ShareTrigger::trigger(row_id_for_click.clone(), cx);
+                            },
+                        ))
+                })
+        });
 
         // Subscribe to blur and change events.
         {
@@ -287,6 +305,17 @@ impl EditorView {
         // `Task<()>` cancels on drop, so removing this `EditorView`
         // (e.g. via collection driver `RemoveAt`) tears the subscription
         // down naturally.
+        // Increment G — in cell-attached mode the entity `Cell`'s
+        // `remote_deltas()` (subscribed below) is the SINGLE external content
+        // source. The per-row `DataRow` subscription is bound to the
+        // `ReactiveRowSet`'s per-row `Mutable`, which is replaced — orphaning the
+        // subscription — on every split/join/nav rowset rebuild; that fragility
+        // is the exact reason the render backstop existed. Drop the data handle
+        // so `.map` never spawns it. The surviving cell subscription is
+        // un-orphaned (`CellCache` returns the same live `Cell` for the same
+        // block id across rebuilds), so no external update is lost. No-cell
+        // (unwired / headless) editors keep the DataRow subscription.
+        let data = if cell_attached { None } else { data };
         let _data_subscription: Option<Task<()>> = data.map(|data_handle| {
             let field_for_stream = field_for_subscription.clone();
             let signal = data_handle
@@ -386,7 +415,7 @@ impl EditorView {
                                     // SQL DataRow value for SqlOnly mode).
                                     // Keeps `previous_text` in lockstep so the
                                     // re-entrant Change writes nothing back.
-                                    this.converge_input(&new_value, window, cx);
+                                    this.converge_input("data_sync", &new_value, window, cx);
                                     applied = true;
                                 });
                             });
@@ -427,11 +456,20 @@ impl EditorView {
             cx.spawn(async move |this, cx| {
                 use futures::StreamExt;
                 let mut stream = cell.remote_deltas();
-                // Each remote delta is a WAKEUP only: we converge absolutely
-                // to `cell.current()` (the authority) instead of replaying the
-                // delta. Out-of-order / coalesced deltas therefore all land on
-                // the same string, and the prior delta-replay sibling-flip
-                // (a stale splice landing on the wrong block) is impossible.
+                // Each remote delta is a WAKEUP only. The payload is discarded
+                // STRUCTURALLY — `stream.next().await.is_some()` never binds the
+                // `TextDelta`, so its `ops` are unreachable and cannot be applied
+                // even by accident. We converge absolutely to `cell.current()`
+                // (the authority) instead of replaying the delta. This structural
+                // discard is a STRONGER guarantee than a runtime
+                // `debug_assert!(ops.is_empty())` (the Step-0 alternative): it
+                // holds in release builds and for EVERY backing — including the
+                // SqlOnly wakeup-only `remote_deltas()` derived from `signal()`
+                // (see `Cell::remote_deltas`), whose empty-`ops` deltas carry no
+                // payload by construction. Out-of-order / coalesced deltas
+                // therefore all land on the same string, and the prior
+                // delta-replay sibling-flip (a stale splice landing on the wrong
+                // block) is impossible.
                 while stream.next().await.is_some() {
                     if this.upgrade().is_none() {
                         break;
@@ -468,7 +506,12 @@ impl EditorView {
                                     if focused && !user_idle {
                                         return;
                                     }
-                                    this.converge_input(&cell.current(), window, cx);
+                                    this.converge_input(
+                                        "remote_delta",
+                                        &cell.current(),
+                                        window,
+                                        cx,
+                                    );
                                 });
                             });
                         }
@@ -538,15 +581,6 @@ impl EditorView {
         self.focus_gen.get()
     }
 
-    /// Update the render-path focus-transition tracker and report whether
-    /// window focus *just arrived* this frame (false→true). The builder uses
-    /// this to allow a one-time external-content reconcile into a
-    /// freshly-focused editor (e.g. click-to-edit) before any keystroke,
-    /// without clobbering text a continuously-focused user is mid-typing.
-    pub fn focus_arrived(&self, is_focused: bool) -> bool {
-        self.focus_transition(is_focused).0
-    }
-
     /// Render-path focus-edge detector. Returns `(just_focused, just_blurred)`
     /// — the false→true and true→false window-focus transitions since the last
     /// call. On iOS/Android the gpui focus-change events never reach the
@@ -576,8 +610,16 @@ impl EditorView {
     /// (gpui_component's "silent" splice is NOT silent — it emits Change
     /// unconditionally) computes an empty delta and writes nothing back to the
     /// authority. This is the "write only genuine user edits" invariant.
+    ///
+    /// `source` names the caller (`"remote_delta"`, `"data_sync"`,
+    /// `"render_backstop"`) and is recorded on the `editor.converge_input`
+    /// trace event emitted whenever this call actually mutates `InputState`
+    /// (past the idempotent early-return). Gate 1 counts `source =
+    /// "render_backstop"` events to prove the entity-`Cell` remote-delta path —
+    /// not the backstop — carries cross-occurrence propagation.
     pub(crate) fn converge_input(
         &mut self,
+        source: &'static str,
         sql_default: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -591,6 +633,12 @@ impl EditorView {
         if current == target {
             return; // idempotent — nothing to converge
         }
+        tracing::debug!(
+            target: "editor.converge_input",
+            source,
+            row_id = %self.row_id,
+            "converge InputState to authority"
+        );
         // Anchor the caret on the authority before the absolute set (Loro
         // cells only; SqlOnly returns None and the caret lands at end).
         let anchor = {
@@ -809,6 +857,15 @@ impl EditorView {
 
     pub fn input_entity(&self) -> &Entity<InputState> {
         &self.input
+    }
+
+    /// Whether this editor has an attached content `Cell` (the stable-identity
+    /// authority). Delegates to the same `EditorViewModel::has_cell()` the
+    /// per-keystroke `InputEvent::Change` handler gates on, so "cell-attached"
+    /// has exactly ONE definition across the write path and Increment G's
+    /// sync-retirement gate (skip `_data_subscription` + the render backstop).
+    pub fn has_cell(&self) -> bool {
+        self.controller.lock().unwrap().has_cell()
     }
 }
 
