@@ -144,6 +144,15 @@ android_logger = "0.13"
 android-activity = { version = "0.6", features = ["native-activity"] }
 log = "0.4"
 
+# iOS-only: route `tracing` to Apple's unified logging (os_log) so that
+# `xcrun simctl log show --predicate 'process == "Holon"'` and Console.app
+# capture Rust `tracing` output. A sim app's stderr is NOT captured by the
+# unified logging system, so the stderr fmt layer alone left every `holon_*`
+# log invisible during on-device debugging. Lightweight: cc build script over a
+# tiny C shim + tracing-core/subscriber, no crypto/network deps.
+[target.'cfg(target_os = "ios")'.dependencies]
+tracing-oslog = "0.3"
+
 [dev-dependencies]
 tempfile = "3"
 holon-integration-tests = { path = "../../crates/holon-integration-tests" }
