@@ -23,7 +23,10 @@ pub mod mcp_server_actor_state;
 pub mod memory_slice;
 pub mod op_write_cap;
 pub mod panic_diag;
-pub mod peer_ops;
+// `peer_ops` co-located to `holon-loro-testing` (Phase-1a Step 4); re-exported
+// here so central `crate::pbt::peer_ops::*` / `super::peer_ops::*` call sites
+// (reference_state, state_machine, shadow_mesh, …) keep resolving unchanged.
+pub use holon_loro_testing::peer_ops;
 pub mod query;
 pub mod query_ast;
 pub mod reference_capabilities;
@@ -34,7 +37,10 @@ pub mod sql_loro_slice;
 pub mod sql_slice;
 pub mod state_machine;
 pub mod stepper;
-pub mod sut_loro;
+// `sut_loro` (the `LoroSut`) co-located to `holon-loro-testing`; re-exported so
+// central `crate::pbt::sut_loro::LoroSut` (composed::builder) resolves
+// unchanged.
+pub use holon_loro_testing::sut_loro;
 mod sut_metrics;
 mod sut_row_parsing;
 #[cfg(feature = "otel-testing")]
