@@ -8,20 +8,19 @@
 
 use holon_pbt_core::TransitionFactory;
 use holon_pbt_core::TransitionRef;
+#[cfg(feature = "otel-testing")]
+use holon_pbt_core::budget::ExpectedSql;
 use holon_pbt_core::capabilities::PeerEditOp;
 use holon_pbt_core::capabilities::RefLifecycle;
 use holon_pbt_core::capabilities::RefPeers;
 use holon_pbt_core::capabilities::RefPeersMut;
+use holon_pbt_core::capabilities::deterministic_peer_block_id;
 use holon_pbt_core::validation::Reason;
 use holon_pbt_core::validation::check;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use proptest::strategy::Union;
 use validated::Validated;
-
-#[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::ExpectedSql;
-use crate::pbt::transitions::deterministic_peer_block_id;
 
 /// Edit a block on a peer's LoroDoc directly (no SQL, no BackendEngine).
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -68,7 +67,10 @@ impl<R: RefLifecycle + RefPeers + RefPeersMut> TransitionFactory<R> for PeerEdit
                     .collect();
 
                 let pc = peer_count;
-                let create = (0..pc, crate::pbt::generators::peer_content_strategy())
+                let create = (
+                    0..pc,
+                    holon_pbt_core::content_generators::peer_content_strategy(),
+                )
                     .prop_flat_map(move |(peer_idx, content)| {
                         let has_blocks = !peer_blocks_per_idx[peer_idx].is_empty();
                         let parent_strat = if has_blocks {
@@ -116,7 +118,7 @@ impl<R: RefLifecycle + RefPeers + RefPeersMut> TransitionFactory<R> for PeerEdit
                             (
                                 Just(peer_idx),
                                 proptest::sample::select(ids),
-                                crate::pbt::generators::peer_content_strategy(),
+                                holon_pbt_core::content_generators::peer_content_strategy(),
                             )
                         })
                         .prop_map(|(peer_idx, stable_id, content)| PeerEdit {
@@ -190,7 +192,7 @@ impl<R: RefLifecycle + RefPeers + RefPeersMut> TransitionRef<R> for PeerEdit {
     }
 }
 
-crate::cap_transition! {
+holon_pbt_core::cap_transition! {
     PeerEdit: holon_pbt_core::capabilities::SutLoro,
     where R: [ RefLifecycle + RefPeers + RefPeersMut ],
     |me, _state, sut| {
