@@ -364,6 +364,27 @@ pub trait UserDriver: Send + Sync {
         )
     }
 
+    /// Insert `text` the way a soft keyboard's `insertText:` delivers it —
+    /// as a finished string committed straight into the focused editor's input
+    /// handler, NOT as hardware `KeyDown` keystrokes routed through the keymap.
+    ///
+    /// This is the harness rung for the iOS UIKit text-input path
+    /// (`gpui-mobile`'s `IosWindow::handle_text_input`). A soft `Return`
+    /// arrives as `"\n"` and must become an `enter` action, not a literal
+    /// newline — a class of bug that `send_raw_keystroke` (KeyDown) cannot
+    /// reach, and therefore cannot catch.
+    ///
+    /// Default impl is `bail!` — headless drivers have no window input handler,
+    /// mirroring `send_raw_keystroke`.
+    async fn insert_text(&self, text: &str) -> Result<()> {
+        let _ = text;
+        anyhow::bail!(
+            "insert_text is unimplemented for this UserDriver. The soft-keyboard insertText: path \
+             needs a real-window driver (GpuiUserDriver / McpUserDriver). Was a \
+             soft-keyboard-input transition generated for a headless run?"
+        )
+    }
+
     /// Like [`UserDriver::send_raw_keystroke`], but retry until some handler
     /// consumes the keystroke or `timeout` elapses. Real-window drivers
     /// override this to cover the editor-mount race: after a focus move, the

@@ -25,16 +25,22 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::Context;
+use anyhow::Result;
 use async_trait::async_trait;
 use futures::channel::mpsc::Sender;
-use holon_api::{EntityUri, KeyChord, Value};
+use holon_api::EntityUri;
+use holon_api::KeyChord;
+use holon_api::Value;
 use holon_frontend::geometry::GeometryProvider;
 use holon_frontend::operations::OperationIntent;
-use holon_frontend::reactive::{BuilderServices, ReactiveEngine};
+use holon_frontend::reactive::BuilderServices;
+use holon_frontend::reactive::ReactiveEngine;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
 use holon_frontend::user_driver::UserDriver;
-use holon_mcp::server::{InteractionCommand, InteractionEvent, InteractionResponse};
+use holon_mcp::server::InteractionCommand;
+use holon_mcp::server::InteractionEvent;
+use holon_mcp::server::InteractionResponse;
 
 /// Channel-based `UserDriver` for GPUI. Sends `InteractionCommand`s on
 /// the shared `interaction_tx` channel; the GPUI interaction pump drains
@@ -105,8 +111,8 @@ impl GpuiUserDriver {
                     // (e.g. a split that DID happen but reported unhandled).
                     // Make every such retry loud so failure logs can correlate.
                     eprintln!(
-                        "[key_down_until_handled] {context}: {keystroke:?} consumed on \
-                         attempt {attempt} (earlier dispatches reported unhandled)"
+                        "[key_down_until_handled] {context}: {keystroke:?} consumed on attempt \
+                         {attempt} (earlier dispatches reported unhandled)"
                     );
                 }
                 return Ok(());
@@ -248,11 +254,11 @@ impl GpuiUserDriver {
     fn require_element_center(&self, entity_id: &str, verb: &str) -> Result<(f32, f32)> {
         self.element_center(entity_id).with_context(|| {
             format!(
-                "GpuiUserDriver::{verb}: no bounds recorded for entity {entity_id:?} — \
-                 element not rendered, or BoundsRegistry hasn't promoted staged → committed \
-                 since it was added. Tests should call \
-                 `holon_integration_tests::polling::wait_for_element_bounds` before \
-                 driving input on a freshly-rendered element."
+                "GpuiUserDriver::{verb}: no bounds recorded for entity {entity_id:?} — element \
+                 not rendered, or BoundsRegistry hasn't promoted staged → committed since it was \
+                 added. Tests should call \
+                 `holon_integration_tests::polling::wait_for_element_bounds` before driving input \
+                 on a freshly-rendered element."
             )
         })
     }
@@ -355,10 +361,11 @@ impl UserDriver for GpuiUserDriver {
     /// For a sidebar `region`, resolution is scoped to that region's panel: a
     /// block rendered in BOTH a sidebar list and the main panel (e.g.
     /// `block:journals`) would otherwise resolve to the main-panel
-    /// `render-entity-` element, whose click dispatches `navigation.editor_focus`
-    /// instead of the sidebar row's `navigation.focus` — so the click silently
-    /// places a cursor rather than navigating. Main clicks keep the global
-    /// `render-entity-`-first resolution.
+    /// `render-entity-` element, whose click dispatches
+    /// `navigation.editor_focus` instead of the sidebar row's
+    /// `navigation.focus` — so the click silently places a cursor rather
+    /// than navigating. Main clicks keep the global `render-entity-`-first
+    /// resolution.
     #[tracing::instrument(skip(self), name = "GpuiUserDriver.click_entity", fields(%entity_id))]
     async fn click_entity(&self, entity_id: &EntityUri, region: &str) -> Result<()> {
         // The geometry/bounds registry is string-keyed (element ids, not
@@ -374,8 +381,8 @@ impl UserDriver for GpuiUserDriver {
         let candidates = self.hit_test(cx, cy, 4);
         if candidates.is_empty() {
             tracing::warn!(
-                "[ui-event] click_entity({entity_id:?}) coords=({cx:.1},{cy:.1}) — \
-                 hit-test found NO containing element in BoundsRegistry"
+                "[ui-event] click_entity({entity_id:?}) coords=({cx:.1},{cy:.1}) — hit-test found \
+                 NO containing element in BoundsRegistry"
             );
         } else {
             let summary: Vec<String> = candidates
@@ -393,8 +400,8 @@ impl UserDriver for GpuiUserDriver {
             let topmost_entity = candidates.first().and_then(|(_, eid, _, _)| eid.as_deref());
             if topmost_entity != Some(entity_id) {
                 eprintln!(
-                    "[ui-event] click_entity({entity_id:?}) WARN: topmost element entity_id \
-                     is {:?}, not {entity_id:?} — click may activate the topmost handler instead",
+                    "[ui-event] click_entity({entity_id:?}) WARN: topmost element entity_id is \
+                     {:?}, not {entity_id:?} — click may activate the topmost handler instead",
                     topmost_entity
                 );
             }
@@ -409,11 +416,12 @@ impl UserDriver for GpuiUserDriver {
     }
 
     /// Real expand/collapse: synthesize a click on the chevron registered under
-    /// `expand_toggle_id_for(target)`, so the production `on_mouse_down` handler
-    /// flips the row's view-local `expanded` `Mutable<bool>` — the same path a
-    /// user's chevron tap takes. The chevron is a toggle with no driver-readable
-    /// state (`snapshot_reactive` rebuilds a fresh tree), so direction is owned
-    /// by the ref model (see the trait doc); `expanded` is the intended result.
+    /// `expand_toggle_id_for(target)`, so the production `on_mouse_down`
+    /// handler flips the row's view-local `expanded` `Mutable<bool>` — the
+    /// same path a user's chevron tap takes. The chevron is a toggle with
+    /// no driver-readable state (`snapshot_reactive` rebuilds a fresh
+    /// tree), so direction is owned by the ref model (see the trait doc);
+    /// `expanded` is the intended result.
     async fn set_block_expanded(&self, target: &EntityUri, expanded: bool) -> Result<()> {
         let target_str = target.as_str();
         let bare = target_str.strip_prefix("block:").unwrap_or(target_str);
@@ -530,14 +538,14 @@ impl UserDriver for GpuiUserDriver {
                 }
                 if tokio::time::Instant::now() >= overall_deadline {
                     anyhow::bail!(
-                        "send_key_chord: click on {entity_id:?} never moved focused_block \
-                         to it within 4s (incl. re-click attempts) — refusing to press \
-                         {chord:?} into the wrong editor"
+                        "send_key_chord: click on {entity_id:?} never moved focused_block to it \
+                         within 4s (incl. re-click attempts) — refusing to press {chord:?} into \
+                         the wrong editor"
                     );
                 }
                 eprintln!(
-                    "[send_key_chord] click did not land focus on {entity_id:?} (re-render \
-                     likely shifted bounds mid-click); re-clicking"
+                    "[send_key_chord] click did not land focus on {entity_id:?} (re-render likely \
+                     shifted bounds mid-click); re-clicking"
                 );
             }
         }
@@ -763,6 +771,31 @@ impl UserDriver for GpuiUserDriver {
         Ok(())
     }
 
+    /// Deliver `text` through the soft-keyboard `insertText:` path
+    /// (`InteractionEvent::InsertText`), bypassing the keymap and committing
+    /// into the focused editor's input handler. See `dispatch_insert_text` in
+    /// `frontends/gpui/src/lib.rs` for the mobile-fidelity note.
+    async fn insert_text(&self, text: &str) -> Result<()> {
+        let response = self
+            .dispatch_event(InteractionEvent::InsertText {
+                text: text.to_string(),
+            })
+            .await?;
+        if !response.handled {
+            anyhow::bail!(
+                "GPUI insert_text not consumed: text={text:?}{detail}",
+                detail = match &response.detail {
+                    Some(d) => format!(" (detail: {d})"),
+                    None => String::new(),
+                },
+            );
+        }
+        if !superhuman_input() {
+            let _ = tokio::time::timeout(Duration::from_millis(50), self.geometry.changed()).await;
+        }
+        Ok(())
+    }
+
     /// Tree-aware click — for the screen driver this is just `click_entity`.
     /// The bound click handler reads `click_intent` itself at the rendered
     /// widget, so dispatching the right intent is the click handler's job,
@@ -805,9 +838,9 @@ impl UserDriver for GpuiUserDriver {
     /// Walk the BoundsRegistry parent-id chain from every tracked element
     /// up to a `live_block` widget bound to the panel's URI. Elements that
     /// terminate there are in-region. Mirrors
-    /// `crates/holon-integration-tests/src/pbt/live_geometry.rs::rendered_entity_ids_in_panel`
-    /// but reads from this driver's own `GeometryProvider` so it doesn't
-    /// require the PBT-only static.
+    /// `crates/holon-integration-tests/src/pbt/live_geometry.
+    /// rs::rendered_entity_ids_in_panel` but reads from this driver's own
+    /// `GeometryProvider` so it doesn't require the PBT-only static.
     fn entities_in_region(&self, region: holon_api::Region) -> Vec<holon_api::EntityUri> {
         let panel_id = region_panel_block_id(region);
         let elements: HashMap<String, holon_frontend::geometry::ElementInfo> =
