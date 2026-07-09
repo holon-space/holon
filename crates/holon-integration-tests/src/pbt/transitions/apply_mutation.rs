@@ -5,24 +5,29 @@
 //! `state_machine.rs:2148-2202` (ref-state apply),
 //! `sut.rs:2177-2180` (SUT apply dispatch), and
 //! `transition_budgets.rs:230-231` (expected SQL).
+//!
+//! The `TransitionFactory`/`TransitionRef` impls are generic over the reference
+//! type `R` (bounded by the fine-grained `holon-pbt-core` `Ref*` cap traits) —
+//! they name no concrete central `ReferenceState`. The apply-side bookkeeping is
+//! encapsulated behind [`RefApplyMutationMut::apply_content_mutation`]; the reads
+//! fold into their semantic-home cap traits (see the bounds below).
 
 use holon_pbt_core::validation::{Reason, check};
 use proptest::prelude::*;
 use proptest::strategy::{BoxedStrategy, Union};
 use validated::Validated;
 
-use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::types::MutationApply;
-use holon_pbt_core::capabilities::SutLoro;
+use holon_pbt_core::capabilities::{
+    RefApplyMutationMut, RefBlockTree, RefBlockTreeMut, RefDocuments, RefFocusMut, RefLayout,
+    RefLayoutInteract, RefLifecycle, RefPeers, RefPeersMut, RefWiring, SutLoro,
+};
 use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
 
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::{ExpectedSql, expected_mutation_sql};
 
-use holon_api::block::Block;
-use holon_api::{ContentType, EntityUri, Value};
+use holon_api::{EntityUri, Value};
 
-use crate::assign_reference_sequences_canonical;
 use crate::pbt::generators::{
     generate_layout_headline_mutation, generate_mutation, generate_profile_content_mutation,
     generate_render_source_mutation,
@@ -38,21 +43,35 @@ pub struct ApplyMutation {
     pub event: MutationEvent,
 }
 
-impl TransitionFactory<ReferenceState> for ApplyMutation {
+impl<
+    R: RefLifecycle
+        + RefPeers
+        + RefWiring
+        + RefLayout
+        + RefLayoutInteract
+        + RefBlockTree
+        + RefDocuments,
+> TransitionFactory<R> for ApplyMutation
+{
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
         // Routed by `SutApplyMutation` (source as a shrinkable axis). The gate names
         // `SutLoro` so the composed alphabet admits `ApplyMutation` exactly when the
         // peer mesh is wired (the implemented arm); the generator further restricts the
-        // composed source set to the implemented arms via `state.cap_set.is_some()`.
+        // composed source set to the implemented arms via `state.has_cap_set()`.
+        //
+        // NOTE: this gate cap (`SutLoro`) legitimately differs from the dispatch trait
+        // (`SutApplyMutation`), so this transition is NOT authored through
+        // `cap_transition!` (which single-sources ONE cap into both). The
+        // `required_caps_match_transition_impl_bounds` guard tracks the gate cap here.
         vec![::holon_pbt_core::composition::CapId::of::<
             dyn ::holon_pbt_core::capabilities::SutLoro,
         >()]
     }
 
     type Reason = Reason;
-    fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let checks: Vec<Validated<(), Reason>> =
-            vec![check(state.action.app_started, Reason::AppNotStarted)];
+            vec![check(state.app_started(), Reason::AppNotStarted)];
 
         let merged: Validated<Vec<()>, Reason> = checks.into_iter().collect();
         match merged {
@@ -60,47 +79,35 @@ impl TransitionFactory<ReferenceState> for ApplyMutation {
             Validated::Good(_) => {}
         }
         (|| {
-            let peer_modified: std::collections::HashSet<String> = state
-                .peers
-                .iter()
-                .flat_map(|p| p.modified_stable_ids.iter().cloned())
+            let peer_modified: std::collections::HashSet<String> = (0..state.peers_len())
+                .flat_map(|idx| state.peer_modified_stable_ids(idx))
                 .collect();
             let is_peer_modified = |id: &EntityUri| peer_modified.contains(id.id());
             let default_doc = EntityUri::no_parent();
-            let block_ids: Vec<EntityUri> = state
-                .domain
-                .block_state
-                .blocks
+            // A block is a mutable primary target iff its owning document is not the
+            // seed sentinel (`no_parent`). `block_document_of` returns `None` for a
+            // block with no explicit document entry — treated as mutable, matching the
+            // legacy `is_none_or(|doc| *doc != default_doc)`.
+            let doc_ok = |id: &EntityUri| {
+                state
+                    .block_document_of(id)
+                    .is_none_or(|doc| doc != default_doc)
+            };
+            let all_ids = state.all_block_ids();
+            let block_ids: Vec<EntityUri> = all_ids
                 .iter()
-                .filter(|(_, b)| {
-                    !b.is_page()
-                        && !is_peer_modified(&b.id)
-                        && state
-                            .domain
-                            .block_state
-                            .block_documents
-                            .get(&b.id)
-                            .is_none_or(|doc| *doc != default_doc)
-                })
-                .map(|(id, _)| id.clone())
+                .filter(|id| !state.is_page_block(id) && !is_peer_modified(id) && doc_ok(id))
+                .cloned()
                 .collect();
-            let text_block_ids: Vec<EntityUri> = state
-                .domain
-                .block_state
-                .blocks
+            let text_block_ids: Vec<EntityUri> = all_ids
                 .iter()
-                .filter(|(_, b)| {
-                    b.content_type == ContentType::Text
-                        && !b.is_page()
-                        && !is_peer_modified(&b.id)
-                        && state
-                            .domain
-                            .block_state
-                            .block_documents
-                            .get(&b.id)
-                            .is_none_or(|doc| *doc != default_doc)
+                .filter(|id| {
+                    state.is_text_block(id)
+                        && !state.is_page_block(id)
+                        && !is_peer_modified(id)
+                        && doc_ok(id)
                 })
-                .map(|(id, _)| id.clone())
+                .cloned()
                 .collect();
             // Extended-gen axis 3 (same-block concurrency): text blocks the
             // primary may edit even though a peer has a pending edit on them.
@@ -110,35 +117,24 @@ impl TransitionFactory<ReferenceState> for ApplyMutation {
             // it just was never generated.
             // Content-only: Delete/Move on peer-modified blocks stay excluded
             // (no ref merge model for structural conflicts yet).
-            let conflict_text_block_ids: Vec<EntityUri> = state
-                .domain
-                .block_state
-                .blocks
+            let conflict_text_block_ids: Vec<EntityUri> = all_ids
                 .iter()
-                .filter(|(_, b)| {
-                    b.content_type == ContentType::Text
-                        && !b.is_page()
-                        && is_peer_modified(&b.id)
-                        && state
-                            .domain
-                            .block_state
-                            .block_documents
-                            .get(&b.id)
-                            .is_none_or(|doc| *doc != default_doc)
+                .filter(|id| {
+                    state.is_text_block(id)
+                        && !state.is_page_block(id)
+                        && is_peer_modified(id)
+                        && doc_ok(id)
                 })
-                .map(|(id, _)| id.clone())
+                .cloned()
                 .collect();
-            let doc_uris: Vec<EntityUri> = state.files.documents.keys().cloned().collect();
-            let next_id = state.domain.block_state.next_id;
+            let doc_uris: Vec<EntityUri> = state.document_uris();
+            let next_id = state.next_block_id();
 
             let no_content_update: std::collections::HashSet<EntityUri> = state
-                .domain
-                .layout_blocks
-                .render_source_ids
-                .iter()
-                .chain(state.domain.layout_blocks.query_source_ids.iter())
-                .chain(state.domain.profile_block_ids.iter())
-                .cloned()
+                .render_source_ids()
+                .into_iter()
+                .chain(state.query_source_ids())
+                .chain(state.profile_block_ids())
                 .collect();
 
             let mut arms: Vec<(u32, BoxedStrategy<ApplyMutation>)> = Vec::new();
@@ -148,7 +144,7 @@ impl TransitionFactory<ReferenceState> for ApplyMutation {
             // not-yet-composed UI/layout/profile arms to native; the External arm is gated
             // instead on `SutSeamMutate` presence (native always; composed iff a frontend),
             // and the LoroPeer arm self-gates on `enable_loro`+peers below.
-            let composed = state.cap_set.is_some();
+            let composed = state.has_cap_set();
             let seam_present = state.caps_available(&[::holon_pbt_core::composition::CapId::of::<
                 dyn holon_pbt_core::capabilities::SutSeamMutate,
             >()]);
@@ -251,13 +247,10 @@ impl TransitionFactory<ReferenceState> for ApplyMutation {
                 .into_iter()
                 .collect();
                 let headline_ids: Vec<EntityUri> = state
-                    .domain
-                    .layout_blocks
-                    .headline_ids
-                    .iter()
+                    .headline_ids()
+                    .into_iter()
                     .filter(|id| !is_peer_modified(id))
                     .filter(|id| !seed_layout_block_ids.contains(id.as_str()))
-                    .cloned()
                     .collect();
                 if !headline_ids.is_empty() {
                     arms.push((
@@ -298,10 +291,8 @@ impl TransitionFactory<ReferenceState> for ApplyMutation {
                 .into_iter()
                 .collect();
                 let render_ids: Vec<EntityUri> = state
-                    .domain
-                    .layout_blocks
-                    .render_source_ids
-                    .iter()
+                    .render_source_ids()
+                    .into_iter()
                     .filter(|id| !seed_render_source_ids.contains(id.as_str()))
                     // Defense-in-depth against id drift: never mutate a render
                     // that provides a `navigation_focus` affordance. The ref
@@ -310,13 +301,9 @@ impl TransitionFactory<ReferenceState> for ApplyMutation {
                     // focus_chain fixture) would desync ref vs SUT navigability.
                     .filter(|id| {
                         !state
-                            .domain
-                            .block_state
-                            .blocks
-                            .get(*id)
-                            .is_some_and(|b| b.content.contains("navigation_focus"))
+                            .block_content(id)
+                            .is_some_and(|c| c.contains("navigation_focus"))
                     })
-                    .cloned()
                     .collect();
                 if !render_ids.is_empty() {
                     arms.push((
@@ -333,8 +320,7 @@ impl TransitionFactory<ReferenceState> for ApplyMutation {
                 }
             }
 
-            let profile_ids: Vec<EntityUri> =
-                state.domain.profile_block_ids.iter().cloned().collect();
+            let profile_ids: Vec<EntityUri> = state.profile_block_ids().into_iter().collect();
             if !composed && !profile_ids.is_empty() {
                 arms.push((
                     1,
@@ -356,11 +342,11 @@ impl TransitionFactory<ReferenceState> for ApplyMutation {
             // Mirrors `PeerEdit`'s generator: Create (deterministic stable id so
             // ref + SUT agree) and Update (content-only); Delete is skipped
             // (cascading-delete ref-model gap, same as PeerEdit).
-            if state.enable_loro() && !state.peers.is_empty() {
-                let peer_count = state.peers.len();
-                let seq = state.domain.block_state.next_id;
+            if state.enable_loro() && state.peers_len() > 0 {
+                let peer_count = state.peers_len();
+                let seq = state.next_block_id();
                 let peer_blocks_per_idx: Vec<Vec<String>> = (0..peer_count)
-                    .map(|idx| state.peers[idx].blocks.keys().cloned().collect::<Vec<_>>())
+                    .map(|idx| state.peer_block_stable_ids(idx))
                     .collect();
 
                 let create_blocks = peer_blocks_per_idx.clone();
@@ -442,33 +428,43 @@ impl TransitionFactory<ReferenceState> for ApplyMutation {
     }
 }
 
-impl TransitionRef<ReferenceState> for ApplyMutation {
+impl<
+    R: RefLifecycle
+        + RefPeers
+        + RefPeersMut
+        + RefBlockTree
+        + RefBlockTreeMut
+        + RefFocusMut
+        + RefLayoutInteract
+        + RefDocuments
+        + RefApplyMutationMut,
+> TransitionRef<R> for ApplyMutation
+{
     type Reason = Reason;
 
-    fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
+    fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         let mut checks: Vec<Validated<(), Reason>> =
-            vec![check(state.action.app_started, Reason::AppNotStarted)];
+            vec![check(state.app_started(), Reason::AppNotStarted)];
 
         // LoroPeer mutations are validated against the targeted peer's state,
         // not the primary block map.
         if let MutationSource::LoroPeer { peer_idx } = self.event.source {
             checks.push(check(state.enable_loro(), Reason::LoroRequiredForPeers));
             checks.push(check(
-                peer_idx < state.peers.len(),
+                peer_idx < state.peers_len(),
                 Reason::PeerIndexOutOfBounds,
             ));
-            if peer_idx < state.peers.len() {
-                let peer = &state.peers[peer_idx];
+            if peer_idx < state.peers_len() {
+                let peer_ids = state.peer_block_stable_ids(peer_idx);
+                let has = |sid: &str| peer_ids.iter().any(|s| s == sid);
                 let valid = match &self.event.mutation {
                     Mutation::Create { parent_id, .. } => {
-                        parent_id.is_no_parent()
-                            || parent_id.is_sentinel()
-                            || peer.blocks.contains_key(parent_id.id())
+                        parent_id.is_no_parent() || parent_id.is_sentinel() || has(parent_id.id())
                     }
                     Mutation::Update { id, fields, .. } => {
-                        peer.blocks.contains_key(id.id()) && fields.contains_key("content")
+                        has(id.id()) && fields.contains_key("content")
                     }
-                    Mutation::Delete { id, .. } => peer.blocks.contains_key(id.id()),
+                    Mutation::Delete { id, .. } => has(id.id()),
                     Mutation::Move { .. } | Mutation::RestartApp => false,
                 };
                 checks.push(check(valid, Reason::PeerEditSourceBlockViolation));
@@ -483,21 +479,21 @@ impl TransitionRef<ReferenceState> for ApplyMutation {
         match &self.event.mutation {
             Mutation::Delete { id, .. } => {
                 checks.push(check(
-                    state.domain.block_state.blocks.contains_key(id),
+                    state.block_content(id).is_some(),
                     Reason::PreconditionFailed,
                 ));
                 checks.push(check(
-                    !state.domain.layout_blocks.contains(id),
+                    !state.is_layout_block(id),
                     Reason::FocusedInLayoutBlocks,
                 ));
             }
             Mutation::Update { id, .. } => {
                 checks.push(check(
-                    state.domain.block_state.blocks.contains_key(id),
+                    state.block_content(id).is_some(),
                     Reason::PreconditionFailed,
                 ));
                 checks.push(check(
-                    !state.domain.layout_blocks.is_immutable(id),
+                    !state.is_immutable(id),
                     Reason::FocusedInLayoutBlocks,
                 ));
             }
@@ -505,39 +501,25 @@ impl TransitionRef<ReferenceState> for ApplyMutation {
                 id, new_parent_id, ..
             } => {
                 checks.push(check(
-                    state.domain.block_state.blocks.contains_key(id),
+                    state.block_content(id).is_some(),
                     Reason::PreconditionFailed,
                 ));
                 checks.push(check(
-                    state
-                        .domain
-                        .block_state
-                        .blocks
-                        .get(id)
-                        .is_some_and(|b| b.content_type != ContentType::Source),
+                    state.block_content(id).is_some() && !state.is_source_block(id),
                     Reason::PreconditionFailed,
                 ));
-                checks.push(check(
-                    state
-                        .domain
-                        .block_state
-                        .blocks
-                        .get(new_parent_id)
-                        .map_or(state.files.documents.contains_key(new_parent_id), |b| {
-                            b.content_type != ContentType::Source
-                        }),
-                    Reason::PreconditionFailed,
-                ));
+                let parent_ok = if state.block_content(new_parent_id).is_some() {
+                    !state.is_source_block(new_parent_id)
+                } else {
+                    state.has_document_uri(new_parent_id)
+                };
+                checks.push(check(parent_ok, Reason::PreconditionFailed));
             }
             Mutation::Create { parent_id, .. } => {
                 checks.push(check(
-                    state.files.documents.contains_key(parent_id)
-                        || state
-                            .domain
-                            .block_state
-                            .blocks
-                            .get(parent_id)
-                            .is_some_and(|b| b.content_type != ContentType::Source),
+                    state.has_document_uri(parent_id)
+                        || (state.block_content(parent_id).is_some()
+                            && !state.is_source_block(parent_id)),
                     Reason::PreconditionFailed,
                 ));
             }
@@ -552,13 +534,12 @@ impl TransitionRef<ReferenceState> for ApplyMutation {
             .map(|_| ())
     }
 
-    fn apply_to_ref(&self, state: &mut ReferenceState) {
+    fn apply_to_ref(&self, state: &mut R) {
         // LoroPeer mutations apply to the peer's reference state only — they do
         // NOT touch the primary block map until a `SyncWithPeer`/`MergeFromPeer`
         // converges them. Mirrors `PeerEdit::apply_to_ref` (peer_apply_*),
         // keyed off the mutation's bare ids.
         if let MutationSource::LoroPeer { peer_idx } = self.event.source {
-            use holon_pbt_core::capabilities::RefPeersMut;
             match &self.event.mutation {
                 Mutation::Create {
                     id,
@@ -597,54 +578,15 @@ impl TransitionRef<ReferenceState> for ApplyMutation {
         if self.event.source == MutationSource::UI {
             state.push_undo_snapshot();
         }
-        if let Mutation::Create { id, parent_id, .. } = &self.event.mutation {
-            let doc_uri = if parent_id.is_no_parent() || parent_id.is_sentinel() {
-                parent_id.clone()
-            } else {
-                // The new block belongs to its parent's document. But when the
-                // parent is itself a top-level page (its own `block_documents`
-                // entry is `no_parent`/`sentinel`), the page IS the document —
-                // the child lives in the page's org file, not in the page's
-                // (sentinel) document. Inheriting the sentinel would misclassify
-                // the child as a seed block and drop it from the `/org` view.
-                match state.domain.block_state.block_documents.get(parent_id) {
-                    Some(doc) if !doc.is_no_parent() && !doc.is_sentinel() => doc.clone(),
-                    _ => parent_id.clone(),
-                }
-            };
-            state
-                .domain
-                .block_state
-                .block_documents
-                .insert(id.clone(), doc_uri);
-        }
 
-        let mut blocks: Vec<Block> = state.domain.block_state.blocks.values().cloned().collect();
-        self.event.mutation.apply_to(&mut blocks);
-        assign_reference_sequences_canonical(&mut blocks);
-        state.domain.block_state.blocks = blocks.into_iter().map(|b| (b.id.clone(), b)).collect();
-        state.rebuild_profile_tracking();
+        // All the internal reference bookkeeping (document routing, block-tree
+        // apply + canonical re-sequencing, profile rebuild, render-expr cache,
+        // next-id bump, cursor reset on content update) is encapsulated in the
+        // `ReferenceState` impl — the generic body never touches ref internals.
+        state.apply_content_mutation(&self.event.mutation);
 
-        if let Mutation::Update { id, fields, .. } = &self.event.mutation
-            && state.domain.layout_blocks.render_source_ids.contains(id)
-            && fields.contains_key("content")
-            && let Some(block) = state.domain.block_state.blocks.get(id)
-            && let Some(expr) =
-                super::super::reference_state::render_expr_from_rhai(block.content.as_str())
-        {
-            state.domain.render_expressions.insert(id.clone(), expr);
-        }
-
-        state.domain.block_state.next_id += 1;
-
-        match &self.event.mutation {
-            Mutation::Update { id, fields, .. } if fields.contains_key("content") => {
-                state.reset_cursor_if_focused(id);
-            }
-            Mutation::Delete { id, .. } => {
-                state.clear_focus_if_deleted(id);
-            }
-            _ => {}
+        if let Mutation::Delete { id, .. } = &self.event.mutation {
+            state.clear_focus_if_deleted(id);
         }
     }
 }
@@ -653,7 +595,7 @@ impl TransitionRef<ReferenceState> for ApplyMutation {
 /// arm is implemented (routed to the already-hosted `SutLoro` peer cap, mirroring the
 /// seam's LoroPeer dispatch). The `External` (org) arm is the next increment — together
 /// they give the org-vs-Loro differential the shrinker can localize. Other sources are
-/// gated OUT of the composed alphabet by the generator (`state.cap_set.is_some()`), so
+/// gated OUT of the composed alphabet by the generator (`state.has_cap_set()`), so
 /// they cannot reach this `panic!`.
 #[allow(async_fn_in_trait)]
 pub trait SutApplyMutation {
@@ -731,8 +673,8 @@ impl SutApplyMutation for holon_pbt_core::composition::CapMap {
 }
 
 #[allow(async_fn_in_trait)]
-impl<S: SutApplyMutation> TransitionImpl<ReferenceState, S> for ApplyMutation {
-    async fn apply_to_sut(&self, _: &ReferenceState, sut: &mut S) {
+impl<R, S: SutApplyMutation> TransitionImpl<R, S> for ApplyMutation {
+    async fn apply_to_sut(&self, _: &R, sut: &mut S) {
         sut.apply_mutation_routed(self.event.clone()).await;
     }
 }

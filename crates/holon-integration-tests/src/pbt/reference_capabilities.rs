@@ -25,12 +25,13 @@ use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
 use holon_api::{ContentType, EdgeFieldUpdate, Region, SourceLanguage};
 use holon_pbt_core::capabilities::{
-    AdviceExpectation, CapCursor, CapRegion, RefAdvice, RefBackend, RefBlockTree, RefBlockTreeMut,
-    RefBoot, RefBootMut, RefDocuments, RefDocumentsMut, RefEditorMirror, RefEditorMirrorMut,
-    RefFocus, RefFocusMut, RefFocusRoots, RefGlobalFocus, RefLayout, RefLayoutInteract,
-    RefLayoutMutate, RefLifecycle, RefNavHistory, RefNavHistoryMut, RefPeers, RefPeersMut, RefPins,
-    RefPinsMut, RefRenderExpr, RefSqlCardinality, RefTaskState, RefToggle, RefToggleMut,
-    RefViewSelection, RefViewSelectionMut, RefWatch, RefWatchesMut, RefWiring, WatchRow,
+    AdviceExpectation, CapCursor, CapRegion, RefAdvice, RefApplyMutationMut, RefBackend,
+    RefBlockTree, RefBlockTreeMut, RefBoot, RefBootMut, RefDocuments, RefDocumentsMut,
+    RefEditorMirror, RefEditorMirrorMut, RefFocus, RefFocusMut, RefFocusRoots, RefGlobalFocus,
+    RefLayout, RefLayoutInteract, RefLayoutMutate, RefLifecycle, RefNavHistory, RefNavHistoryMut,
+    RefPeers, RefPeersMut, RefPins, RefPinsMut, RefRenderExpr, RefSqlCardinality, RefTaskState,
+    RefToggle, RefToggleMut, RefViewSelection, RefViewSelectionMut, RefWatch, RefWatchesMut,
+    RefWiring, WatchRow,
 };
 
 use crate::pbt::types::MutationApply;
@@ -227,6 +228,17 @@ impl RefBlockTree for ReferenceState {
             .blocks
             .get(&uri)
             .is_some_and(|b| b.is_page())
+    }
+
+    fn is_source_block(&self, id: &EntityUri) -> bool {
+        let Some(uri) = parse_id(id) else {
+            return false;
+        };
+        self.domain
+            .block_state
+            .blocks
+            .get(&uri)
+            .is_some_and(|b| b.content_type == ContentType::Source)
     }
 
     fn all_non_seed_block_ids(&self) -> BTreeSet<EntityUri> {
@@ -497,6 +509,13 @@ impl RefPeers for ReferenceState {
         self.peers
             .get(peer_idx)
             .map(|p| p.blocks.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    fn peer_modified_stable_ids(&self, peer_idx: usize) -> Vec<String> {
+        self.peers
+            .get(peer_idx)
+            .map(|p| p.modified_stable_ids.iter().cloned().collect())
             .unwrap_or_default()
     }
 
@@ -1393,6 +1412,10 @@ impl RefWiring for ReferenceState {
     fn has_cap_set(&self) -> bool {
         self.cap_set.is_some()
     }
+
+    fn caps_available(&self, caps: &[holon_pbt_core::composition::CapId]) -> bool {
+        ReferenceState::caps_available(self, caps)
+    }
 }
 
 impl RefLayoutInteract for ReferenceState {
@@ -1441,6 +1464,66 @@ impl RefLayoutInteract for ReferenceState {
                 && !b.is_page()
                 && !self.domain.layout_blocks.contains(&b.id)
         })
+    }
+
+    fn headline_ids(&self) -> Vec<EntityUri> {
+        self.domain
+            .layout_blocks
+            .headline_ids
+            .iter()
+            .cloned()
+            .collect()
+    }
+}
+
+impl RefApplyMutationMut for ReferenceState {
+    fn apply_content_mutation(&mut self, mutation: &holon_pbt_core::types::Mutation) {
+        use holon_pbt_core::types::Mutation;
+
+        if let Mutation::Create { id, parent_id, .. } = mutation {
+            let doc_uri = if parent_id.is_no_parent() || parent_id.is_sentinel() {
+                parent_id.clone()
+            } else {
+                // The new block belongs to its parent's document. But when the
+                // parent is itself a top-level page (its own `block_documents`
+                // entry is `no_parent`/`sentinel`), the page IS the document —
+                // the child lives in the page's org file, not in the page's
+                // (sentinel) document. Inheriting the sentinel would misclassify
+                // the child as a seed block and drop it from the `/org` view.
+                match self.domain.block_state.block_documents.get(parent_id) {
+                    Some(doc) if !doc.is_no_parent() && !doc.is_sentinel() => doc.clone(),
+                    _ => parent_id.clone(),
+                }
+            };
+            self.domain
+                .block_state
+                .block_documents
+                .insert(id.clone(), doc_uri);
+        }
+
+        let mut blocks: Vec<Block> = self.domain.block_state.blocks.values().cloned().collect();
+        mutation.apply_to(&mut blocks);
+        crate::org_utils::assign_reference_sequences_canonical(&mut blocks);
+        self.domain.block_state.blocks = blocks.into_iter().map(|b| (b.id.clone(), b)).collect();
+        self.rebuild_profile_tracking();
+
+        if let Mutation::Update { id, fields, .. } = mutation
+            && self.domain.layout_blocks.render_source_ids.contains(id)
+            && fields.contains_key("content")
+            && let Some(block) = self.domain.block_state.blocks.get(id)
+            && let Some(expr) =
+                super::reference_state::render_expr_from_rhai(block.content.as_str())
+        {
+            self.domain.render_expressions.insert(id.clone(), expr);
+        }
+
+        self.domain.block_state.next_id += 1;
+
+        if let Mutation::Update { id, fields, .. } = mutation
+            && fields.contains_key("content")
+        {
+            self.reset_cursor_if_focused(id);
+        }
     }
 }
 
