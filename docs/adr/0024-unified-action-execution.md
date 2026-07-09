@@ -207,6 +207,53 @@ kinds: `advise` (view) and `operate` (transition).
   nets executable also makes them simulable (the effect's marking-delta is
   derivable); external effects simulate lease/token movement only.
 
+## Amendment (2026-07-09, same session): effects are token operations
+
+Ratified direction from Martin's demo review: for intra-Holon effects, the
+effect DSL is **not** the authoring surface — **transitions declare marking
+deltas, and the created/consumed blocks are themselves the tokens**:
+
+- `create` = **output arc** (the emitted token *is* the new block);
+- `delete` = **input arc** (consume);
+- `update` = consume + emit with **identity preserved** — a colored-token value
+  update, compiled to `update`/`set_field` intents, **never** delete+create
+  (references, CRDT history, and provenance must survive);
+- `move` = consume-from-place-A + emit-into-place-B, compiled to `move_block`;
+- guard context = **read arcs** (test without consuming);
+- negative conditions (`not journal(date = today)`) = **inhibitor arcs** — the
+  suppression/at-most-once anti-join seen from the net side. A create-rule is
+  typically inhibited by *its own output*, so it self-disables after firing:
+  at-most-once-per-key becomes plain enabledness semantics, not a bolted-on
+  firing discipline. (Disclosed: inhibitor arcs extend classic PNs —
+  Turing-completeness, weaker reachability analysis — relevant to the
+  deliberative layer's static reasoning.)
+
+Guard safety: Datalog range restriction — every variable must be bound by a
+positive atom before appearing under negation (`clock.today as today and not
+journal(date = today)`); enforced by the Pattern parser.
+
+Why this beats side-effect-style `block.create(...)` transitions:
+1. **Simulability for free** — the marking delta *is* the declaration; the
+   "simulator fidelity" consequence above dissolves for all intra-Holon rules.
+2. **Analyzability** — "at most one journal per day" is a checkable place
+   invariant, not a hoped-for runtime property.
+3. **Invertibility** — undo = reversed arcs (the kept-warm inverse-ops
+   invariant).
+4. **Convergence** — deterministic emission IDs (P4) attach to output arcs.
+
+Disclosed extensions/residue: places are ordered in Holon (output arcs carry an
+`after` hint; classic places are multisets); "place" generalizes to relation so
+typed edges are tokens too; output-token value construction needs a small
+expression language (the residual Rhai/expr slot — confined to color functions,
+never in matching). The `block.*` operation DSL remains as the **compilation
+target** at the intent boundary, not a user surface. External side-effects are
+untouched by this amendment (P4 lease taxonomy).
+
+Rule blocks get a `holon_rule` source language (family of
+`holon_advice_rule_yaml`, superseding the bare `action` language) — this is
+what the P6 program-marking keys off. Rule bodies are **valid YAML**, with
+guard expressions as strings parsed by the Pattern parser.
+
 ## Phases
 
 **Phase 1 — decision-invariant fixes (valid under every outcome above):**
