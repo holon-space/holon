@@ -8,6 +8,8 @@
 
 use holon_pbt_core::TransitionFactory;
 use holon_pbt_core::TransitionRef;
+#[cfg(feature = "otel-testing")]
+use holon_pbt_core::budget::ExpectedSql;
 use holon_pbt_core::capabilities::RefDocuments;
 use holon_pbt_core::capabilities::RefLifecycle;
 use holon_pbt_core::types::LoroCorruptionType;
@@ -16,9 +18,6 @@ use holon_pbt_core::validation::check;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
-
-#[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::ExpectedSql;
 
 /// Create a stale/corrupted .loro file BEFORE the system starts.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -115,7 +114,7 @@ impl<R: RefLifecycle + RefDocuments> TransitionRef<R> for CreateStaleLoro {
     }
 }
 
-crate::cap_transition! {
+holon_pbt_core::cap_transition! {
     CreateStaleLoro: holon_pbt_core::capabilities::SutFixtureFs,
     where R: [ RefLifecycle + RefDocuments ],
     |me, _state, sut| {
