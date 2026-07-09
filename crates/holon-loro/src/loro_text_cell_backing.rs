@@ -9,17 +9,26 @@
 
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
-use futures::{StreamExt, future::BoxFuture, stream::BoxStream};
+use anyhow::Result;
+use anyhow::anyhow;
+use futures::StreamExt;
+use futures::future::BoxFuture;
+use futures::stream::BoxStream;
+use holon_core::cell::CellBacking;
+use holon_core::cell::CursorAnchor;
+use holon_core::cell::CursorBias;
+use holon_core::cell::DeltaOp;
+use holon_core::cell::TextCellBacking;
+use holon_core::cell::TextDelta;
+use holon_core::cell::TextOp;
+use loro::ContainerID;
+use loro::ContainerTrait;
+use loro::LoroDoc;
+use loro::LoroText;
 use loro::cursor::Cursor as LoroCursor;
 use loro::event::Diff;
-use loro::{ContainerID, ContainerTrait, LoroDoc, LoroText};
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
-
-use holon_core::cell::{
-    CellBacking, CursorAnchor, CursorBias, DeltaOp, TextCellBacking, TextDelta, TextOp,
-};
 
 /// Commit origin stamped on the editor's *own keystroke* writes
 /// (`apply_text_op`). It is the **only** origin the subscribe filter
@@ -171,8 +180,8 @@ impl TextCellBacking for LoroTextCellBacking {
     fn resolve_cursor(&self, anchor: &CursorAnchor) -> usize {
         let Some(inner) = anchor.inner.downcast_ref::<LoroCursor>() else {
             tracing::warn!(
-                "LoroTextCellBacking::resolve_cursor received an anchor whose inner is not \
-                 a loro::Cursor. Returning 0; caller likely created the anchor on a different \
+                "LoroTextCellBacking::resolve_cursor received an anchor whose inner is not a \
+                 loro::Cursor. Returning 0; caller likely created the anchor on a different \
                  backing."
             );
             return 0;
@@ -190,8 +199,8 @@ impl TextCellBacking for LoroTextCellBacking {
                 Ok(delta) => Some(delta),
                 Err(_) => {
                     tracing::warn!(
-                        "LoroTextCellBacking remote_deltas lagged; \
-                         consumer should call current() and resync"
+                        "LoroTextCellBacking remote_deltas lagged; consumer should call current() \
+                         and resync"
                     );
                     None
                 }
@@ -228,8 +237,9 @@ fn translate_text_delta(deltas: &[loro::TextDelta]) -> TextDelta {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use loro::LoroDoc;
+
+    use super::*;
 
     fn make_doc_with_text() -> (Arc<LoroDoc>, LoroText) {
         let doc = Arc::new(LoroDoc::new());
@@ -307,6 +317,61 @@ mod tests {
         assert!(
             rx.try_recv().is_ok(),
             "authoritative apply_replace must reach remote_tx (editor convergence channel)"
+        );
+        Ok(())
+    }
+
+    /// Increment G finding — echo suppression is GLOBAL to the backing, not
+    /// scoped to the originating editor. Two occurrences of the SAME block
+    /// share ONE `LoroTextCellBacking` (same `EntityUri` → one `CellCache`
+    /// entry → one `remote_tx`, since `Cell` clones share the backing `Arc`).
+    /// A keystroke via `apply_text_op` is stamped `EDITOR_ECHO_ORIGIN` and
+    /// dropped at the doc-subscribe callback (Filter A) BEFORE it reaches
+    /// `remote_tx`, so it reaches NEITHER subscriber — a non-typing sibling
+    /// occurrence is starved and never converges via `remote_deltas`. This is
+    /// why "type in one occurrence, the other updates live" is NOT true "by
+    /// construction" on the shared-cell path: pre-Increment-G it was the
+    /// per-row `_data_subscription` (CDC) and the render backstop that
+    /// carried sibling liveness — exactly the paths Increment G retires. A
+    /// non-echo write (`apply_replace`, origin `"ui_local"` — the same
+    /// origin class as structural `set_field` / peer imports; the filter is
+    /// a pure origin-string check, so this is representative) DOES reach
+    /// both subscribers, so the filter's legitimate job (never echoing an
+    /// editor's OWN keystroke back to itself) stays proven.
+    #[tokio::test]
+    async fn keystroke_echo_starves_sibling_subscriber() -> Result<()> {
+        let (doc, text) = make_doc_with_text();
+        let backing = LoroTextCellBacking::new(doc, text)?;
+        // Occurrence 1 (the typist) and occurrence 2 (the sibling) both
+        // subscribe to the one shared remote-delta channel.
+        let mut occ1 = backing.remote_tx.subscribe();
+        let mut occ2 = backing.remote_tx.subscribe();
+
+        // (a) A keystroke reaches NEITHER subscriber — the sibling is starved.
+        backing.apply_text_op(TextOp::Insert {
+            pos_codepoint: 0,
+            text: "x".into(),
+        })?;
+        assert!(
+            occ1.try_recv().is_err(),
+            "keystroke echo must not reach the originating occurrence"
+        );
+        assert!(
+            occ2.try_recv().is_err(),
+            "keystroke echo is filtered GLOBALLY, so a sibling occurrence sharing the backing \
+             never receives the edit via remote_deltas"
+        );
+
+        // (b) A non-echo authoritative write reaches BOTH subscribers — the
+        // filter's legitimate pass-through is intact.
+        backing.apply_replace("y".to_string()).await?;
+        assert!(
+            occ1.try_recv().is_ok(),
+            "non-echo write must reach the first subscriber"
+        );
+        assert!(
+            occ2.try_recv().is_ok(),
+            "non-echo write must reach the sibling subscriber"
         );
         Ok(())
     }
