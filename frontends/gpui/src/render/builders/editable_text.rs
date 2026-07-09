@@ -76,6 +76,9 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
     // pushing the live content into a stale `InputState` is always safe — it
     // is the backstop that keeps the displayed/edited text converged with the
     // backend even after the event-driven subscription has been orphaned.
+    // Increment G: this backstop runs ONLY for no-cell (unwired / headless)
+    // editors — a cell-attached editor's `_remote_delta_subscription` over the
+    // un-orphaned entity `Cell` makes it unnecessary, so it is gated off below.
     let (displayed_text, is_window_focused): (std::sync::Arc<str>, bool) = ctx.with_gpui(|window, cx| {
         use gpui::Focusable;
         // Read phase: gather focus state, then DROP the `entity.read` borrow
@@ -118,9 +121,17 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
         // is left alone so in-flight typing is never yanked. `converge_input`
         // prefers the Loro cell authority over the SQL-lagged `content`
         // (curing the projection lag) and keeps `previous_text` in lockstep.
-        if !is_focused || just_focused {
+        // Increment G — the render-path backstop is NO-CELL ONLY. A cell-attached
+        // editor converges solely via its `_remote_delta_subscription` (the entity
+        // `Cell` is the single external content source), so with the backstop gone
+        // `displayed_text` below reports the editor's actual live `InputState` with
+        // no render-path patch-up — giving `inv-displayed-text/widget` real teeth
+        // over the cell path. No-cell (unwired / headless) editors keep the
+        // backstop that cures their orphaned `_data_subscription`.
+        let cell_attached = entity.read(cx).has_cell();
+        if !cell_attached && (!is_focused || just_focused) {
             entity.update(cx, |this, cx| {
-                this.converge_input(&content, window, cx);
+                this.converge_input("render_backstop", &content, window, cx);
             });
         }
         // Snapshot the post-convergence value for the PBT staleness invariants.
