@@ -39,6 +39,14 @@ use crate::pbt::transition_budgets::{
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CreateBlockUnderFocus {
     pub content: String,
+    /// When `Some(uri)`, create the block with that exact born-equal id (the
+    /// op-floor `block.create` receives it verbatim, so oracle and SUT share the
+    /// id — no synthetic→real reconcile). When `None`, the oracle mints a
+    /// synthetic `block::create-N` and the SUT's `block.create` MINTS a fresh
+    /// uuid (the mint-when-absent provider path); the harness reconcile pairs the
+    /// two 1:1. `id` is a fresh normal id (`block:gen-N`), deliberately NOT a
+    /// `block::create-` synthetic, so the born-equal partition holds.
+    pub id: Option<EntityUri>,
 }
 
 /// The single Main focus root the creation slot parents a new block under, iff
@@ -79,12 +87,24 @@ impl<R: RefLifecycle + RefLayout + RefFocusRoots + RefLayoutInteract + RefLayout
             Reason::PreconditionFailed,
         )
         .map(|_| {
+            // A fresh, deterministic, non-`create-` id for the born-equal (Some)
+            // arm. `next_block_id()` advances after every mutating tick
+            // (`recanon_and_rebuild` bumps it), so `block:gen-N` is unique per
+            // creation and reproducible under proptest replay (unlike a random
+            // uuid). Distinct `gen-` prefix ⇒ no collision with `create-N` /
+            // `split-N` / `bulk-N`.
+            let next = state.next_block_id();
             // Short org-safe ASCII words: no trailing whitespace, no org markup,
             // so the created content round-trips through the block store / any
             // org sync unchanged — the ref content matches the SUT verbatim.
-            let strat = proptest::string::string_regex("[a-z]{1,8}")
-                .expect("valid regex")
-                .prop_map(|content| CreateBlockUnderFocus { content })
+            let content = proptest::string::string_regex("[a-z]{1,8}").expect("valid regex");
+            // Mix both create paths: `Some` exercises the explicit-id (born-equal)
+            // op dispatch; `None` exercises the provider's mint-when-absent fix.
+            let strat = (content, proptest::bool::ANY)
+                .prop_map(move |(content, with_id)| CreateBlockUnderFocus {
+                    content,
+                    id: with_id.then(|| EntityUri::block(&format!("gen-{next}"))),
+                })
                 .boxed();
             // Moderate weight: valuable structural growth of the focused page,
             // but not so high it starves the editing/navigation alphabet.
@@ -119,15 +139,30 @@ impl<R: RefLifecycle + RefLayout + RefFocusRoots + RefLayoutInteract + RefLayout
             "CreateBlockUnderFocus precondition guarantees a single rendered Main focus root \
              under the default layout",
         );
-        state.create_block_under(&parent, &self.content);
+        match &self.id {
+            // Born-equal: the oracle holds the exact id the SUT will dispatch.
+            Some(uri) => state.create_block_under_with_id(&parent, &self.content, uri.clone()),
+            // Mint-when-absent: oracle allocates a synthetic `create-N` the
+            // harness reconcile pairs with the SUT's minted uuid.
+            None => state.create_block_under(&parent, &self.content),
+        }
     }
 }
 
 crate::cap_transition! {
     CreateBlockUnderFocus: holon_pbt_core::capabilities::SutBlockCreate,
     where R: [ RefLifecycle + RefLayout + RefFocusRoots + RefLayoutInteract + RefLayoutMutate ],
-    |me, _state, sut| {
-        sut.apply_create_under_focus(&me.content).await;
+    |me, state, sut| {
+        // Resolve the creation-slot focus-root parent from the SAME ref predicate
+        // the precondition/generator gate on. The headless UI driver honors the
+        // production slot gesture for the `None` case (re-resolving the parent
+        // from its own live rowset — WP-E cross-check preserved); the op-floor
+        // driver dispatches `block.create` directly under this parent.
+        let parent = create_under_focus_parent(state).expect(
+            "CreateBlockUnderFocus precondition guarantees a single rendered Main focus root \
+             under the default layout",
+        );
+        sut.apply_create_under_focus(&parent, &me.content, me.id.as_ref()).await;
     }
     sql_budget: |_me, state| {
         let watches = state.active_watch_count();

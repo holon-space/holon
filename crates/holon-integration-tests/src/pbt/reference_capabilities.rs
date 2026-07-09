@@ -1639,6 +1639,10 @@ impl RefLayoutMutate for ReferenceState {
     fn create_block_under(&mut self, parent: &EntityUri, content: &str) {
         ReferenceState::create_block_under(self, parent, content);
     }
+
+    fn create_block_under_with_id(&mut self, parent: &EntityUri, content: &str, id: EntityUri) {
+        ReferenceState::create_block_under_with_id(self, parent, content, id);
+    }
 }
 
 // ─── RefBackend ───────────────────────────────────────────────────────

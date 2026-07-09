@@ -2064,7 +2064,15 @@ pub trait RefLayoutMutate {
 
     /// `CreateBlockUnderFocus`: append a new text block carrying `content` as
     /// the last child of `parent` (the focused page's creation-slot parent).
+    /// Mints a synthetic `block::create-N` id the harness reconcile pairs 1:1
+    /// with the SUT's minted uuid.
     fn create_block_under(&mut self, parent: &EntityUri, content: &str);
+
+    /// `CreateBlockUnderFocus` with an explicit, born-equal id: append a new text
+    /// block carrying `content` as the last child of `parent`, using exactly
+    /// `id` (a fresh normal id, NOT a synthetic `create-N`). The SUT dispatches
+    /// the same id, so both sides born-equal — no synthetic→real reconcile.
+    fn create_block_under_with_id(&mut self, parent: &EntityUri, content: &str, id: EntityUri);
 }
 
 /// Reference-side arrow-key navigation surface (`ArrowNavigate`). The
@@ -2352,7 +2360,19 @@ pub trait SutSeamMutate {
 /// it, so the transition auto-narrows to exactly those configs.
 #[holon_macros::capmap_adapter]
 pub trait SutBlockCreate {
-    async fn apply_create_under_focus(&self, content: &str);
+    /// Create a block under `parent` with `content`. When `id` is `Some`, the
+    /// backend uses that exact (born-equal) id; when `None`, the backend MINTS a
+    /// fresh id (the `block.create` mint-when-absent path). The `parent` is the
+    /// ref-resolved creation-slot focus root; the headless UI driver honors the
+    /// production slot gesture for the `None` case (resolving the parent from its
+    /// own live rowset), while the op-floor driver dispatches `block.create`
+    /// directly with the passed parent.
+    async fn apply_create_under_focus(
+        &self,
+        parent: &EntityUri,
+        content: &str,
+        id: Option<&EntityUri>,
+    );
 }
 
 /// SUT capability: app lifecycle for the wide PBT — boot, restart, document

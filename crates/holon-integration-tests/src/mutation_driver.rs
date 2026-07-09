@@ -15,7 +15,7 @@ use holon::api::backend_engine::BackendEngine;
 use holon_api::{EntityName, EntityUri, KeyChord, StorageEntity, Value};
 use holon_frontend::ReactiveViewModel;
 use holon_frontend::operations::OperationIntent;
-use holon_pbt_core::capabilities::SutBlockTreeWrite;
+use holon_pbt_core::capabilities::{SutBlockCreate, SutBlockTreeWrite};
 
 use crate::pbt::op_write_cap::IdResolver;
 
@@ -114,6 +114,35 @@ impl SutBlockTreeWrite for DirectUserDriver {
 
     async fn apply_move_down(&self, id: &EntityUri) {
         self.dispatch_block("move_down", self.id_only(id)).await;
+    }
+}
+
+/// The op-floor `SutBlockCreate` (`CreateBlockUnderFocus`). Unlike the headless
+/// UI's creation-slot gesture, this dispatches `block.create` straight to the
+/// engine under the ref-resolved `parent` — deterministic, no dependency on a
+/// live rendered slot rowset. This is what makes `CreateBlockUnderFocus` run
+/// under a no-UI (storage-only) pin. The `parent` is resolved through the shared
+/// id map (a minted/synthetic parent → its real id); the born-equal `id`, when
+/// present, is passed verbatim so oracle and SUT share it. When `id` is `None`
+/// the `id` key is OMITTED — exercising the provider's mint-when-absent path.
+#[async_trait::async_trait(?Send)]
+impl SutBlockCreate for DirectUserDriver {
+    async fn apply_create_under_focus(
+        &self,
+        parent: &EntityUri,
+        content: &str,
+        id: Option<&EntityUri>,
+    ) {
+        let mut params: StorageEntity = HashMap::new();
+        params.insert(
+            "parent_id".into(),
+            Value::String(self.resolve(parent).to_string()),
+        );
+        params.insert("content".into(), Value::String(content.to_string()));
+        if let Some(uri) = id {
+            params.insert("id".into(), Value::String(uri.to_string()));
+        }
+        self.dispatch_block("create", params).await;
     }
 }
 

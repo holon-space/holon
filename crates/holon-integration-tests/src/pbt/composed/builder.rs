@@ -31,8 +31,8 @@ use holon_api::EntityUri;
 use holon_api::repository::{CoreOperations, NewBlock};
 use holon_loro::LoroBackend;
 use holon_pbt_core::capabilities::{
-    SutBackend, SutBlockTreeWrite, SutEdgeFieldWrite, SutEditorMirrorRead, SutFocus,
-    SutQueryResults, SutSqlProjection,
+    SutBackend, SutBlockCreate, SutBlockTreeWrite, SutEdgeFieldWrite, SutEditorMirrorRead,
+    SutFocus, SutQueryResults, SutSqlProjection,
 };
 use holon_pbt_core::composition::{CapMap, CapProvider};
 use holon_pbt_core::{Actor, ComponentSet, Projection, StorageAdapter};
@@ -427,10 +427,16 @@ async fn compose_sut_seeded_impl(
         // bisector descends to. `SqlProjectionComponent::register` installs a
         // fresh-resolver writer; this replaces it under the same cap `TypeId`
         // (explicit `replace` — a plain `insert` would fail loud on the duplicate).
-        caps.replace(Arc::new(DirectUserDriver::with_resolver(
+        let floor = Arc::new(DirectUserDriver::with_resolver(
             eng.clone(),
             resolver.clone(),
-        )) as Arc<dyn SutBlockTreeWrite>);
+        ));
+        caps.replace(floor.clone() as Arc<dyn SutBlockTreeWrite>);
+        // Also expose the op-floor `SutBlockCreate` so `CreateBlockUnderFocus`
+        // runs under this no-UI (storage-only) pin — deterministic `block.create`
+        // dispatch with AND without an explicit id (the mint-when-absent path),
+        // which the UI-only creation-slot gesture could not reach here.
+        caps.insert(floor as Arc<dyn SutBlockCreate>);
         engine = Some(eng);
     }
 
