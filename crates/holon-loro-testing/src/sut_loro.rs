@@ -15,7 +15,7 @@ use holon::sync::LoroSyncControllerHandle;
 use holon_api::EntityUri;
 use holon_api::block::Block;
 use holon_loro::LoroBackend;
-use holon_orgmode_testing::normalize_block;
+use holon_pbt_core::block_compare::normalize_block;
 use holon_pbt_core::capabilities::PeerEditOp;
 use holon_pbt_core::capabilities::SutLoro;
 use holon_pbt_core::capabilities::TextOp;

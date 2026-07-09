@@ -15,7 +15,6 @@ members = [
     "crates/holon-block-roundtrip-testing",
     "crates/holon-layout-testing",
     "crates/holon-loro-testing",
-    "crates/holon-orgmode-testing",
     "crates/holon-oracles",
     "crates/holon-pbt-core",
     "crates/holon-integration-tests",
