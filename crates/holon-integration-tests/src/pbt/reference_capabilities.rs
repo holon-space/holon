@@ -330,8 +330,13 @@ impl RefBlockTreeMut for ReferenceState {
             // `SqlOperationProvider::trimmed_content`, mirroring the
             // inherent `commit_active_editor_if_changed`. The generic
             // pbt-core commit helper writes through here, so both commit
-            // paths now share one normalization.
-            b.content = super::types::normalize_content_for_org_roundtrip(text, b.content_type);
+            // paths now share one normalization. Marks are re-derived from
+            // the committed text (replacing any previous mark set) — the org
+            // writeback→re-ingest fixed point the SUT converges to.
+            let (content, marks) =
+                super::types::normalize_content_for_org_roundtrip(text, b.content_type);
+            b.content = content;
+            b.marks = marks;
         }
     }
 
@@ -1248,11 +1253,17 @@ impl RefDocumentsMut for ReferenceState {
                 block.parent_id = doc_uri.clone();
             }
             block.properties.remove("ID");
-            block.content = crate::pbt::types::normalize_content_for_org_roundtrip(
+            // File-parse order: the org parser splits trailing `:tag:` groups
+            // off the RAW headline line first, then extracts inline marks from
+            // the tag-less title — mirror that order or mark offsets computed
+            // over a still-tagged line diverge from the SUT's.
+            crate::pbt::types::apply_org_headline_tag_split(&mut block);
+            let (content, marks) = crate::pbt::types::normalize_content_for_org_roundtrip(
                 &block.content,
                 block.content_type,
             );
-            crate::pbt::types::apply_org_headline_tag_split(&mut block);
+            block.content = content;
+            block.marks = marks;
             block.set_sequence(seq as i64);
             let block_uri = block.id.clone();
 
@@ -1676,11 +1687,15 @@ impl RefLayoutMutate for ReferenceState {
         for block in blocks {
             let mut block = block.clone();
             // Mirror the org round-trip normalization `Mutation::apply_to` does.
-            block.content = crate::pbt::types::normalize_content_for_org_roundtrip(
+            // Parse order: tag split off the raw headline first, THEN mark
+            // extraction (see write_org_file ingest above).
+            crate::pbt::types::apply_org_headline_tag_split(&mut block);
+            let (content, marks) = crate::pbt::types::normalize_content_for_org_roundtrip(
                 &block.content,
                 block.content_type,
             );
-            crate::pbt::types::apply_org_headline_tag_split(&mut block);
+            block.content = content;
+            block.marks = marks;
             let id = block.id.clone();
             self.domain.block_state.blocks.insert(id.clone(), block);
             self.domain

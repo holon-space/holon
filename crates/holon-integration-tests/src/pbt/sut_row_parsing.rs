@@ -25,8 +25,8 @@ use holon_orgmode::OrgBlockExt;
 /// [`parse_block_row`], so the column list and its parser stay in lockstep and
 /// the SQL isn't duplicated across SUT impls.
 pub(super) const BLOCK_MATVIEW_SNAPSHOT_SQL: &str = "SELECT id, parent_id, content, content_type, \
-                                                     source_language, properties, tags, requires, \
-                                                     advice_suppressed FROM block";
+                                                     source_language, properties, marks, tags, \
+                                                     requires, advice_suppressed FROM block";
 
 /// Snapshot SQL for the write-side `block_raw` BASE TABLE. Native columns only
 /// — `block_raw` has no junction `tags`/`requires`, so [`parse_block_row`]
@@ -39,8 +39,8 @@ pub(super) const BLOCK_MATVIEW_SNAPSHOT_SQL: &str = "SELECT id, parent_id, conte
 /// matview drops it the same way (`schema_modules.rs`: `WHERE b.id !=
 /// 'sentinel:no_parent'`).
 pub(super) const BLOCK_RAW_SNAPSHOT_SQL: &str = "SELECT id, parent_id, content, content_type, \
-                                                 source_language, properties FROM block_raw WHERE \
-                                                 id != 'sentinel:no_parent'";
+                                                 source_language, properties, marks FROM \
+                                                 block_raw WHERE id != 'sentinel:no_parent'";
 
 /// Parse a batch of snapshot rows into typed [`Block`]s, fail-loud on any row
 /// that won't parse (a malformed row is a bug, never silently skipped).
@@ -141,6 +141,25 @@ pub(super) fn parse_block_row(row: &holon_core::storage::types::StorageEntity) -
                 .collect::<Vec<EntityUri>>()
         })
         .unwrap_or_default();
+
+    // `marks` — inline rich-text marks JSON (dogfood 2026-07-10 link-destruction
+    // class): parse it into `block.marks` or the SUT-side observable is
+    // marks-blind and `inv-blocks-match-ref` can never see mark loss. Mirrors
+    // `Block::try_from`'s arm: absent/Null/empty → None; invalid JSON = bug.
+    block.marks =
+        match row.get("marks") {
+            None | Some(Value::Null) => None,
+            Some(Value::Json(s)) | Some(Value::String(s)) => {
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(holon_api::marks_from_json(s).unwrap_or_else(|e| {
+                        panic!("block row 'marks' holds invalid JSON {s:?}: {e}")
+                    }))
+                }
+            }
+            Some(other) => panic!("block row 'marks' must be a JSON string, got {other:?}"),
+        };
 
     if let Some(content_type) = row.get("content_type").and_then(|v| v.as_string()) {
         block.content_type = content_type.parse::<ContentType>().unwrap();
