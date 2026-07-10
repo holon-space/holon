@@ -9,18 +9,29 @@
 //! ## One loop, one direction
 //!
 //! Any change to the Loro doc — a local edit, a peer `doc.import(&delta)`, or a
-//! background `.loro` file load — fires `doc.subscribe_root`, which wakes the
-//! controller. Each wake drives one outbound reconcile: [`LoroProjection`]
-//! diffs the current Loro snapshot against the sink's current state and writes
-//! only the genuinely-changed rows (compare-and-skip), so re-projecting an
-//! unchanged snapshot is a no-op.
+//! background `.loro` file load — fires `doc.subscribe_root`, which (on the
+//! committing thread) extracts the commit's dirty facts
+//! (`extract_pending_changes` — a pure function of the event, no `doc` access,
+//! no checkout) into a shared queue and wakes the controller. Each wake drives
+//! one outbound reconcile via [`LoroProjection`].
 //!
-//! ## Diff strategy
+//! ## Diff strategy — event-driven, `O(changed)`
 //!
-//! `before` = the SQL sink's own current state (via [`SinkReader`]); `after` =
-//! the live Loro snapshot. The projection emits the create/update/delete ops
-//! that turn `before` into `after`. No persistent block projection is kept in
-//! memory; the `Frontiers` watermark only advances the reconcile cursor.
+//! Steady state is the ONLY steady-state path: drain the pending-facts queue
+//! and read just the changed nodes from the CURRENT tree
+//! (`incremental_block_changes`), diffing against the in-memory `live` snapshot
+//! (the last-emitted state). Cost is proportional to what changed, not the tree
+//! size, and nothing checks the shared live doc out — eliminating the torn-walk
+//! race behind the flaky `SplitBlock … Block not found`.
+//!
+//! The full-document walk survives ONLY to (re)seed `live`, in three
+//! checkout-free roles: cold-boot seeding (diffing against the SQL sink via
+//! [`SinkReader`]), reseed-on-unsettled (a touched node was transiently
+//! meta-incomplete), and the unarmed/oversized-batch bootstrap. There is no env
+//! switch and no separate persisted base store. The `live` snapshot and the
+//! `Frontiers` watermark advance only AFTER the sink write succeeds, so a
+//! failed (rolled-back) batch never advances the base ahead of the sink — the
+//! next pass reseeds and retries rather than silently dropping the change.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -45,8 +56,6 @@ use tracing::error;
 use tracing::info;
 use tracing::warn;
 
-use crate::BaseKey;
-use crate::BaseStore;
 use crate::LoroDocumentStore;
 use crate::loro_backend::SnapshotBlock;
 use crate::loro_backend::snapshot_blocks_from_doc;
@@ -55,18 +64,6 @@ use crate::loro_backend::snapshot_blocks_from_doc_settled;
 /// Filename of the sidecar file that persists the sync watermark next to the
 /// `.loro` snapshot. One file per `LoroDocumentStore`.
 pub const SIDECAR_FILENAME: &str = "holon_tree.loro.sync";
-
-/// Whether the O(changed) incremental Loro→SQL projection fast path is enabled.
-/// Default OFF: the incremental path is a spike pending correctness hardening
-/// on rare create/move/delete sequences (the composed keystone occasionally
-/// tripped a `SplitBlock` "Block not found"). With it off the projection takes
-/// the baseline full-snapshot-and-diff path, which is the shipped behaviour.
-/// Set `HOLON_LORO_INCREMENTAL_PROJECTION=1` (or `true`/`on`/`yes`) to opt in.
-fn incremental_projection_enabled() -> bool {
-    std::env::var("HOLON_LORO_INCREMENTAL_PROJECTION")
-        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
-        .unwrap_or(false)
-}
 
 /// Above this many pending facts in one drain, the incremental fast path defers
 /// to a full reseed: one bulk `snapshot_blocks_from_doc_settled` is cheaper
@@ -300,12 +297,11 @@ pub struct LoroProjection {
     armed: Arc<AtomicBool>,
     /// The last-projected block snapshot, kept live in memory and mutated
     /// **in place** by the incremental fast path (O(changed) per commit). It is
-    /// the diff "before" — replacing the former per-pass full-document snapshot
-    /// + `SyncBaseStore` sidecar. Seeded by a full reseed on cold boot (and any
-    /// unsettled/unarmed reseed pass); steady-state edits mutate only the
-    /// changed keys. Persistence is no longer needed: on restart the snapshot
-    /// is rebuilt from the loaded `.loro` (the authority) and reconciled
-    /// once against the SQL sink.
+    /// the diff "before" — the sole in-memory projection base. Seeded by a full
+    /// reseed on cold boot (and any unsettled/unarmed reseed pass);
+    /// steady-state edits mutate only the changed keys. Persistence is not
+    /// needed: on restart the snapshot is rebuilt from the loaded `.loro`
+    /// (the authority) and reconciled once against the SQL sink.
     live: StdMutex<HashMap<String, SnapshotBlock>>,
     /// `true` once `live` has been seeded by at least one full reseed. Until
     /// then every pass takes the full path (cold-boot reconcile against SQL).
@@ -314,11 +310,6 @@ pub struct LoroProjection {
     /// path so a deleted node — whose Loro meta may already be gone — can still
     /// be mapped to the sink row to delete. Rebuilt on each full reseed.
     tid_index: StdMutex<HashMap<loro::TreeID, String>>,
-    /// The last-projected snapshot (persisted sidecar), used ONLY by the
-    /// default full-projection path (`HOLON_LORO_INCREMENTAL_PROJECTION`
-    /// off). Baseline diff "before". The incremental path ignores it and
-    /// uses `live` instead.
-    base_store: crate::SyncBaseStore,
     /// Event-driven incremental input: the `subscribe_root` callback extracts
     /// the dirty facts of each commit (`extract_pending_changes`) and
     /// appends them here on the committing thread. `project()` drains the
@@ -338,7 +329,6 @@ impl LoroProjection {
         sink_reader: Arc<dyn SinkReader>,
         sidecar_path: PathBuf,
     ) -> Self {
-        let base_store = crate::SyncBaseStore::from_frontiers_sidecar(&sidecar_path);
         // A `LoroProjection` exists only in the Loro-present config (it IS the
         // Loro→SQL projection), so the consolidator is pinned to Loro.
         let caps = crate::capability::SessionCapabilities::detect_and_pin(true);
@@ -357,7 +347,6 @@ impl LoroProjection {
             live: StdMutex::new(HashMap::new()),
             seeded: AtomicBool::new(false),
             tid_index: StdMutex::new(HashMap::new()),
-            base_store,
             pending: Arc::new(StdMutex::new(Vec::new())),
         }
     }
@@ -395,6 +384,26 @@ impl LoroProjection {
         self.armed.store(true, Ordering::SeqCst);
     }
 
+    /// Test-only view of the incremental diff base (`live`), the atomic
+    /// base-advance contract's guarded state.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn live_snapshot(&self) -> std::collections::HashMap<String, SnapshotBlock> {
+        self.live.lock().unwrap().clone()
+    }
+
+    /// Test-only view of the synced watermark.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn last_synced_value(&self) -> Frontiers {
+        self.last_synced.lock().unwrap().clone()
+    }
+
+    /// Test-only view of the seeded flag — flipped to `false` by the atomic
+    /// base-advance contract when a sink write fails, forcing a full reseed.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn is_seeded(&self) -> bool {
+        self.seeded.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Build a projection from a storage directory, loading the `last_synced`
     /// watermark from the sidecar (last session's synced frontier). Loro's own
     /// persisted snapshot is the startup source of truth, so this watermark
@@ -426,13 +435,13 @@ impl LoroProjection {
 
     /// Project the Loro doc (the authority) onto the SQL sink, writing only
     /// genuinely-changed rows. The ONLY writer of the `block_raw` rows in Loro
-    /// mode. The diff "before" is the last projected Loro snapshot read through
-    /// the `BaseStore` seam (the 3-way base), NOT the sink's own current state;
-    /// the SQL sink is consulted only as a cold-boot seed when the base is
-    /// unseeded. Diffing against a stable base means re-projecting an unchanged
-    /// snapshot emits zero ops regardless of any frontier position — no
-    /// bootstrap cycle to police, no race between the seed and concurrent
-    /// creates.
+    /// mode. Steady state drains the event-driven pending-facts queue and reads
+    /// only the changed nodes (`O(changed)`); the diff "before" is the
+    /// in-memory `live` snapshot. The full walk runs only to (re)seed
+    /// `live` — cold boot (diffing against the SQL sink),
+    /// reseed-on-unsettled, and the unarmed/oversized-batch bootstrap.
+    /// Diffing against a stable base means re-projecting an unchanged
+    /// snapshot emits zero ops regardless of any frontier position.
     pub async fn project(&self) -> Result<()> {
         let _guard = self.project_lock.lock().await;
         let t0 = std::time::Instant::now();
@@ -443,19 +452,19 @@ impl LoroProjection {
             doc.oplog_frontiers()
         };
         let last = self.last_synced.lock().unwrap().clone();
-        let incremental = incremental_projection_enabled();
         let seeded = self.seeded.load(Ordering::SeqCst);
         let armed = self.armed.load(Ordering::SeqCst);
 
         // ── Incremental fast path — O(changed), event-driven, no checkout ─────
-        // GATED behind `HOLON_LORO_INCREMENTAL_PROJECTION` (default OFF). When on
-        // and seeded+armed, drain the pending-facts queue (populated by the
-        // `subscribe_root` callback via `extract_pending_changes`) and read only
-        // the named nodes from the CURRENT tree. This replaces
-        // `doc.diff(last, current)`, which checked the shared live doc out (to
-        // `last`, then `current`, then restored) and raced concurrent readers —
-        // the root cause of the flaky `SplitBlock … Block not found`.
-        if incremental && seeded && armed {
+        // The SOLE steady-state projector. Once seeded+armed, drain the
+        // pending-facts queue (populated by the `subscribe_root` callback via
+        // `extract_pending_changes`) and read only the named nodes from the
+        // CURRENT tree. This replaces `doc.diff(last, current)`, which checked the
+        // shared live doc out (to `last`, then `current`, then restored) and raced
+        // concurrent readers — the root cause of the flaky `SplitBlock … Block not
+        // found`. The full walk below survives ONLY for cold-boot seeding,
+        // reseed-on-unsettled, and the unarmed/oversized-batch bootstrap.
+        if seeded && armed {
             // Drain the WHOLE queue first — never early-return while facts are
             // pending (that would silently drop a committed change).
             let pending: Vec<crate::loro_backend::PendingChange> =
@@ -482,40 +491,53 @@ impl LoroProjection {
                     crate::loro_backend::incremental_block_changes(doc, &pending, &mut tid_index)?
                 };
                 if settled {
-                    let (ops, before_len, after_len) = {
-                        let mut live = self.live.lock().unwrap();
+                    // Build ops + a STAGING plan WITHOUT mutating `live`. `live`
+                    // (the diff base) and `last_synced` advance only AFTER the sink
+                    // write succeeds — a failed apply (e.g. an FK reject that rolls
+                    // the whole batch back) must not advance the base, which would
+                    // silently drop the change; instead we reseed and retry.
+                    let (ops, staging, before_len, after_len) = {
+                        let live = self.live.lock().unwrap();
                         let before_len = live.len();
                         let mut ops: Vec<(String, holon_api::StorageEntity)> = Vec::new();
+                        // (id, Some(block)) = insert/update into `live`; (id, None)
+                        // = remove from `live`. Applied only on emit_ops success.
+                        let mut staging: Vec<(String, Option<SnapshotBlock>)> = Vec::new();
+                        let mut creates = 0usize;
+                        let mut deletes = 0usize;
                         for (id, new) in changed {
                             match new {
                                 Some(nb) => match live.get(&id) {
                                     None => {
                                         ops.push(("create".to_string(), block_to_params(&nb)));
-                                        live.insert(id, nb);
+                                        staging.push((id, Some(nb)));
+                                        creates += 1;
                                     }
                                     Some(old) if blocks_differ(old, &nb) => {
                                         ops.push((
                                             "update".to_string(),
                                             block_diff_params(old, &nb),
                                         ));
-                                        live.insert(id, nb);
+                                        staging.push((id, Some(nb)));
                                     }
                                     Some(_) => { /* identical — no-op (compare-and-skip) */ }
                                 },
                                 None => {
-                                    if live.remove(&id).is_some() {
+                                    if live.contains_key(&id) {
                                         let mut params = holon_api::StorageEntity::new();
-                                        params.insert("id".into(), Value::String(id));
+                                        params.insert("id".into(), Value::String(id.clone()));
                                         ops.push(("delete".to_string(), params));
+                                        staging.push((id, None));
+                                        deletes += 1;
                                     }
                                 }
                             }
                         }
-                        let after_len = live.len();
-                        (ops, before_len, after_len)
+                        let after_len = before_len + creates - deletes;
+                        (ops, staging, before_len, after_len)
                     };
                     let snapshot_ms = t0.elapsed().as_millis();
-                    return self
+                    match self
                         .emit_ops(
                             ops,
                             current,
@@ -525,7 +547,33 @@ impl LoroProjection {
                             before_len,
                             "incremental",
                         )
-                        .await;
+                        .await
+                    {
+                        Ok(()) => {
+                            // Sink write committed — now advance the diff base.
+                            let mut live = self.live.lock().unwrap();
+                            for (id, v) in staging {
+                                match v {
+                                    Some(nb) => {
+                                        live.insert(id, nb);
+                                    }
+                                    None => {
+                                        live.remove(&id);
+                                    }
+                                }
+                            }
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            // The sink write failed (batch rolled back). Leave
+                            // `live`/`last_synced` untouched and force a full reseed
+                            // next pass so the base is rebuilt from truth and the
+                            // change retried — never silently dropped (Q9: reseed,
+                            // not requeue).
+                            self.seeded.store(false, Ordering::SeqCst);
+                            return Err(e);
+                        }
+                    }
                 }
                 tracing::warn!(
                     "[LoroProjection] incremental pass unsettled; reseeding from full snapshot"
@@ -536,28 +584,22 @@ impl LoroProjection {
             // checkout).
         }
 
-        // ── Full projection path (DEFAULT; base_store-based, baseline-exact) ──
-        // "after" = the full Loro authority snapshot. "before" = the persisted
-        // base (baseline diff source), seeded from the SQL sink on cold boot. In
-        // incremental mode after the first seed, `live` is the authoritative
-        // last-emitted state, so an incremental→full reseed diffs against it.
+        // ── Full walk — cold-boot seed / reseed-on-unsettled / bootstrap ONLY ──
+        // "after" = the full Loro authority snapshot. "before" = the last-emitted
+        // `live` state once seeded, else the SQL sink read as the cold-boot seed.
+        // This path no longer runs in steady state; it exists to (re)seed `live`.
         let (after, after_settled): (HashMap<String, SnapshotBlock>, bool) = {
             let doc = &*doc_arc;
             snapshot_blocks_from_doc_settled(doc)
         };
-        let base_key = BaseKey::global();
-        let was_seeded = self.base_store.is_base_seeded(&base_key);
-        let before: Arc<HashMap<String, SnapshotBlock>> = if incremental && seeded {
+        let before: Arc<HashMap<String, SnapshotBlock>> = if seeded {
             Arc::new(self.live.lock().unwrap().clone())
-        } else if was_seeded {
-            self.base_store.get_base(&base_key)
         } else {
             Arc::new(self.read_sql_snapshot().await?)
         };
         let snapshot_ms = t0.elapsed().as_millis();
 
         let mut ops = diff_snapshots_to_ops(&before, &after);
-        let had_changes = !ops.is_empty();
 
         // Delete-pass gate. Withhold deletes when the projection is not yet armed
         // (Loro still seeding — raw-inserted seed-layout rows not yet mirrored) or
@@ -612,31 +654,10 @@ impl LoroProjection {
         let before_len = before.len();
         let after_len = after.len();
 
-        // Commit the new base state — only on a settled snapshot.
-        if after_settled {
-            if incremental {
-                // Seed / refresh the incremental state so a later gated pass can
-                // take the fast path (and so an incremental→full reseed diffs
-                // against `live`).
-                let idx = {
-                    let doc = &*doc_arc;
-                    crate::loro_backend::build_tid_index(doc)
-                };
-                *self.tid_index.lock().unwrap() = idx;
-                *self.live.lock().unwrap() = after;
-                self.seeded.store(true, Ordering::SeqCst);
-                // This full snapshot captured everything up to `current`, so any
-                // facts accumulated before/during it are now stale — drop them so
-                // the next incremental pass starts clean (bounds the queue during
-                // the pre-arm boot window and after every reseed).
-                self.pending.lock().unwrap().clear();
-            } else if had_changes || !was_seeded {
-                // Baseline: advance the persisted base; skip the doc-sized rewrite
-                // when the diff was empty against an already-seeded base.
-                self.base_store.put_base(&base_key, after);
-            }
-        }
-
+        // Apply to the sink FIRST; commit the new base state only AFTER the write
+        // succeeds, so a failed apply (batch rollback) never advances `live` /
+        // `last_synced` ahead of the sink (silent drift). On failure the pass
+        // returns `Err` with the base untouched and retries next wake.
         self.emit_ops(
             ops,
             current,
@@ -646,7 +667,27 @@ impl LoroProjection {
             before_len,
             "full",
         )
-        .await
+        .await?;
+
+        // Seed / refresh the incremental state — only on a settled snapshot — so
+        // the next pass can take the fast path (and so a later reseed diffs against
+        // `live`).
+        if after_settled {
+            let idx = {
+                let doc = &*doc_arc;
+                crate::loro_backend::build_tid_index(doc)
+            };
+            *self.tid_index.lock().unwrap() = idx;
+            *self.live.lock().unwrap() = after;
+            self.seeded.store(true, Ordering::SeqCst);
+            // This full snapshot captured everything up to `current`, so any facts
+            // accumulated before/during it are now stale — drop them so the next
+            // incremental pass starts clean (bounds the queue during the pre-arm
+            // boot window and after every reseed).
+            self.pending.lock().unwrap().clear();
+        }
+
+        Ok(())
     }
 
     /// Apply the diff ops through the consolidator and advance the watermark.

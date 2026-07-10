@@ -107,9 +107,6 @@ pub use event_ring::EventRing;
 pub use event_ring::deliver_to_subscribers;
 pub use holon_api::EntityUri;
 pub use holon_core::CanonicalPath;
-pub use holon_filesystem::BaseKey;
-pub use holon_filesystem::BaseStore;
-pub use holon_filesystem::SyncBaseStore;
 #[cfg(all(
     feature = "iroh-sync",
     not(all(target_arch = "wasm32", target_os = "unknown"))
