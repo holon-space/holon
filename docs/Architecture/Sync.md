@@ -142,7 +142,7 @@ Each block contains:
 | `LoroBlockOperations` | `crates/holon-loro/src/loro_block_operations.rs` | `OperationProvider` for `entity_name="block"` — primary writer; translates set_field/create/delete to Loro mutations |
 | `BlockCellRegistry` | `crates/holon-loro/src/block_cell_registry.rs` | Per-entity cell registry; picks `LoroTextCellBacking` (Full mode, `content` field) or `LwwTextCellBacking` (SqlOnly) per field |
 | `LoroTextCellBacking` | `crates/holon-loro/src/loro_text_cell_backing.rs` | Wraps `LoroText` for `content`; produces TextOps + commit |
-| `LoroSyncController` / `LoroProjection` | `crates/holon-loro/src/loro_sync_controller.rs` | Observes Loro doc commits; diffs vs a persisted base and projects the delta into SQL |
+| `LoroSyncController` / `LoroProjection` | `crates/holon-loro/src/loro_sync_controller.rs` | Observes Loro doc commits (`subscribe_root`), drains the commit's dirty facts and re-reads only the changed nodes (event-driven, `O(changed)`), diffing against the in-memory `live` snapshot and projecting the delta into SQL. A full-document walk runs only to (re)seed `live`: cold boot, reseed-on-unsettled, and unarmed/oversized-batch bootstrap. `live`/watermark advance only after the sink write succeeds (atomic base advance) |
 | `BlockConsolidator` | `crates/holon-loro/src/consolidator.rs` | The single writer that applies projected ops to Turso `block_raw` (raw INSERT/UPDATE/DELETE) |
 | `LoroDocumentStore` | `crates/holon-loro/src/loro_document_store.rs` | Manages Loro CRDT documents on disk |
 | `SqlOperationProvider` | `crates/holon/src/core/sql_operation_provider.rs` | Used for non-block entities; SqlOnly mode fallback for blocks |

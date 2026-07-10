@@ -3,25 +3,30 @@
 //! In the Loro-present session, **Loro is the consolidator**: it owns sibling
 //! order and merge (pinned at session start via [`SessionCapabilities`]). The
 //! projection ([`crate::loro_sync_controller::LoroProjection`]) computes
-//! the diff of the Loro authority against the persisted base and hands the
-//! result here as a typed-intent [`ChangeSet`] carrying [`Provenance`]. The
-//! consolidator records the intent (op-multiset agreement — the Phase-2
-//! equivalence relation) and writes the SQL sink.
+//! the diff of the Loro authority against its in-memory `live` snapshot and
+//! hands the result here as a typed-intent [`ChangeSet`] carrying
+//! [`Provenance`]. The consolidator records the intent (op-multiset agreement —
+//! the Phase-2 equivalence relation) and writes the SQL sink.
 //!
 //! Routing every block sink-write through this one seam is the Phase-5
 //! "writes flow as intent to the consolidator" end-state: the projection no
 //! longer calls `execute_batch_with_origin` for blocks directly.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 use anyhow::Result;
-use holon_api::{ChangeSet, EntityName, Provenance, agrees_with_ops};
-
-use crate::capability::{Consolidator, SessionCapabilities};
-use crate::event_bus::EventOrigin;
+use holon_api::ChangeSet;
+use holon_api::EntityName;
+use holon_api::Provenance;
 use holon_api::StorageEntity;
+use holon_api::agrees_with_ops;
 use holon_core::OriginTaggedWrites;
+
+use crate::capability::Consolidator;
+use crate::capability::SessionCapabilities;
+use crate::event_bus::EventOrigin;
 
 /// The block consolidator. Wraps the sink command bus and the pinned session
 /// capabilities; owns the op-multiset shadow counters.
@@ -59,12 +64,13 @@ impl BlockConsolidator {
 
     /// Apply a block change batch as a typed intent.
     ///
-    /// `ops` is the lossless diff the projection computed (Loro authority vs the
-    /// persisted base); `provenance` records the base it was diffed against (and,
-    /// when known, the originating command). The consolidator records the typed
-    /// [`ChangeSet`] — asserting it round-trips to the same op multiset (the
-    /// intent vocabulary must capture every op) — and writes the SQL sink. This
-    /// is the ONLY block sink-write path.
+    /// `ops` is the lossless diff the projection computed (Loro authority vs
+    /// the in-memory `live` snapshot); `provenance` records the base it was
+    /// diffed against (and, when known, the originating command). The
+    /// consolidator records the typed [`ChangeSet`] — asserting it
+    /// round-trips to the same op multiset (the intent vocabulary must
+    /// capture every op) — and writes the SQL sink. This is the ONLY block
+    /// sink-write path.
     ///
     /// Divergences are logged loudly and counted but never abort the write: the
     /// write carries the lossless `ops`, and the gate checks the counter.
@@ -79,7 +85,8 @@ impl BlockConsolidator {
         debug_assert_eq!(
             self.caps.consolidator(),
             Consolidator::Upstream,
-            "BlockConsolidator writes the upstream→SQL projection sink; expected an upstream consolidator"
+            "BlockConsolidator writes the upstream→SQL projection sink; expected an upstream \
+             consolidator"
         );
 
         let change_set = ChangeSet::from_ops(&ops, provenance);
