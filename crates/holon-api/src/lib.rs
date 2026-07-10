@@ -22,6 +22,7 @@ pub mod change_set;
 pub mod clock;
 pub mod computed;
 pub mod edge_field;
+pub mod effect_id;
 pub mod entity;
 pub mod entity_profile;
 pub mod entity_uri;
