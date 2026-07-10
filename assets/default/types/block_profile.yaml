@@ -23,7 +23,15 @@ computed:
   # this NO LONGER matches `holon_rule`, so a rule block is routed by `is_program`
   # to the rule card instead of being silently swallowed by the spacer variant.
   is_holon_source: 'is_source && (source_language == "holon_prql" || source_language == "holon_gql" || source_language == "holon_sql" || source_language == "render")'
-  has_query_source: 'query_source(id) != ()'
+  # A block renders as a live query page (the `query_block` variant → `live_block`
+  # → `render_entity` → `query_and_watch`) iff it owns a query-source child AND is
+  # NOT a rule-machinery heading. `rule_sibling(id) != ()` ("does block `id` own a
+  # rule-head child?") is true for the `Journal Auto-Create` heading, whose only
+  # query-source child is the rule's TRIGGER — program machinery that the action
+  # watcher alone evaluates. Excluding it here keeps the trigger off the display-
+  # query path (C-revised ruling); the same `rule_sibling` live entity already
+  # backs `is_program`, so no new lookup is introduced.
+  has_query_source: 'query_source(id) != () && rule_sibling(id) == ()'
   # A rule head: the `holon_rule` language or the retired `action` language
   # (ADR 0024). Pure-row check — no DB lookup.
   is_rule_head: 'is_source && (source_language == "holon_rule" || source_language == "action")'

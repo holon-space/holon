@@ -84,6 +84,26 @@ impl<'a> BlockDomain<'a> {
             Err(_) => return self.render_leaf_block(block_id).await,
         };
 
+        // WP3 / C-revised ruling loud guard: a rule's trigger/action blocks are
+        // program machinery, evaluated ONLY by the action watcher — they must
+        // never reach display-query evaluation. Profile routing (`is_program` →
+        // rule_card, `has_query_source` excludes rule-machinery headings) keeps
+        // them off this path; if one slips through anyway, fail loud and visible
+        // (this Err surfaces as a red error node via UiWatcher) rather than
+        // running `query_and_watch` on a tableless/no-id trigger query.
+        if block_info
+            .get("query_src_is_rule_trigger")
+            .and_then(|v| v.as_i64())
+            == Some(1)
+        {
+            anyhow::bail!(
+                "block '{block_id}' resolved a rule TRIGGER as its display query source — a \
+                 rule's trigger/action blocks are program machinery (evaluated solely by the \
+                 action watcher) and must render as the rule card, never as a display query (ADR \
+                 0024 WP3 / C-revised ruling). This is a render-dispatch routing bypass."
+            );
+        }
+
         let query_source = block_info
             .get("query_source")
             .and_then(|v| v.as_string())
