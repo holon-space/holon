@@ -4,7 +4,7 @@ Every bug found OUTSIDE an automated test gets one row here, classified by the
 `bug-gap-triage` skill (`.claude/skills/bug-gap-triage/SKILL.md`). The gap
 distribution steers QA investment.
 
-**Running distribution: ENVIRONMENT 19 · COVERAGE 9 · PERCEPTION 4 · ORACLE 1** (as of 2026-07-10)
+**Running distribution: ENVIRONMENT 21 · COVERAGE 9 · PERCEPTION 5 · ORACLE 2** (as of 2026-07-10)
 
 Gap definitions: **COVERAGE** = keystone couldn't generate the interaction ·
 **ORACLE** = generatable but no invariant flags it · **ENVIRONMENT** = prod
@@ -19,6 +19,10 @@ Seeded 2026-07-07 from the retroactive audit of documented dogfood/triage bugs.
 
 | Date | Bug (one line) | Primary gap | Secondary | Missing piece | Remedy status |
 |---|---|---|---|---|---|
+| 2026-07-10 | Org writeback RE-MINTS a vault file's document `#+ID:` (Frontends.org 0776062a→102ea172 during dogfood boot; identity mutation of a real file — breaks every reference to the old doc id) | ENVIRONMENT | — | doc-id round-trip stability at real-vault shape never asserted; the block-roundtrip PBTs don't pin the document-level `#+ID` | open (data-loss class); reverted in vault via jj; repro = boot vs holon-pkm and diff |
+| 2026-07-10 | Rule-created journal block puts the date in `properties.name` with EMPTY `content` → empty row in UI, `* ` headline + `:name:` property on disk (live dogfood vs holon-pkm; rule fired correctly otherwise: v5 id, parent, at-most-once) | ORACLE | — | capstone/PBT oracles assert the field the impl writes (`name` property), not the org/render truth (`content`); no invariant says "a created journal block renders its date" | open; fix = create maps `name` to headline content (or rule emits `content:`), THEN flip the oracle to assert content/org round-trip |
+| 2026-07-10 | One bad-ingest vault file (Frontends/GPUI.org: `update_in_tree parent block not found` for a same-file `:ID:` parent defined EARLIER in the file) PANICS OrgMode startup on a tokio worker; app keeps running healthy-looking with file sync DEAD — subsequent vault edits silently ignored, no UI banner | ENVIRONMENT | ORACLE | real-vault file shapes/scale absent from test env; swallowed-background-panic invariant exists only in PBT harness, not prod surface | open (ship-blocker class); repro = boot against holon-pkm; needs ingest-ordering root-cause + fail-loud boot surface |
+| 2026-07-10 | Rule card renders `last fired: â` — mojibake (em-dash placeholder mangled) in live GPUI render | PERCEPTION | — | no visual/encoding assertion possible in headless harness | open; trivial fix in rule_card profile variant |
 | 2026-07-10 | FiringKey included CDC `_rowid` (Integer on Created path, String on Updated path) → same day's journal mints path-dependent deterministic ids → cross-replica at-most-once broken for mixed boot/rollover firings (found by capstone agent's static probe, not a test) | COVERAGE | ORACLE | neither the two-replica convergence PBT nor the keystone can generate two replicas firing the same key via *different* CDC paths | FIXED (`FiringKey::from_row` excludes `_`-prefixed internal columns) + `firing_key_excludes_internal_columns` pins it; mixed-path replica generation in convergence PBT still open |
 | 2026-07-10 | design_gallery on_hover never reveals: example rebuilds ReactiveViewModel per frame, resetting per-node `hovered` Mutable | ENVIRONMENT | COVERAGE | example embedder diverges from prod (per-frame `mode_view_model` vs persistent `root_vm` + reconcile); no mouse-move/hover primitive in any driver alphabet | FIXED (per-mode VM cache mirroring root_vm) + `on_hover_state_survives_only_when_node_is_reused` pins the mechanism; hover driver rung still open |
 | 2026-07-06 | iOS drawer doesn't collapse on nav | COVERAGE | — | no windowed drawer render/driver in keystone | fixed (uncommitted); gap open |

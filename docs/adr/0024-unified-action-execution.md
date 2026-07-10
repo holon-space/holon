@@ -391,10 +391,10 @@ How the one-language claim holds up:
   deterministic emission ids). Same mechanism, different provenance —
   deliberate, since silently deduping a canonical emission would hide firing
   semantics the author must own.
-- **Migration note:** advice rules' `source_language` is `'ln'` in code today
-  (`holon-advice/src/discovery.rs`); actions use `'action'`. Both converge on
-  `holon_rule` in Phase 3; until then the two formats coexist with their
-  current languages.
+- **Migration note:** advice rules' `source_language` is
+  `'holon_advice_rule_yaml'` (`holon-advice/src/discovery.rs:11`); actions used
+  `'action'` (now `holon_rule`, with `LegacyAction` deprecation). Both converge
+  on `holon_rule` in Phase 3; until then the two formats coexist.
 
 ## What this rejects
 
