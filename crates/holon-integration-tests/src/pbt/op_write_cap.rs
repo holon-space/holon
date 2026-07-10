@@ -92,7 +92,7 @@ impl OpDispatchWriter {
     async fn execute(&self, op: &str, params: StorageEntity) {
         let entity = "block".to_string().into();
         self.engine
-            .execute_operation(&entity, op, params)
+            .execute_operation(&entity, op, params, holon_api::OpOrigin::User)
             .await
             .unwrap_or_else(|e| panic!("block/{op} operation failed: {e}"));
     }
