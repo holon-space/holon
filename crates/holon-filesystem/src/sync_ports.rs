@@ -133,6 +133,23 @@ pub trait DocumentManager: Send + Sync {
     /// Create a new page block.
     async fn create(&self, doc: Block) -> Result<Block>;
 
+    /// Create a page block, FORCING `doc.id` as the page identity — never
+    /// substituting a pre-existing same-`(parent, title)` page.
+    ///
+    /// Used by org ingest when the file carries an authoritative `#+ID`: that
+    /// id IS the page's identity (parse-don't-validate). A name-chain
+    /// placeholder minted with a RANDOM id for the same directory by an
+    /// earlier-scanned sibling file must NOT win — if it did, writeback would
+    /// render the placeholder's id as the file's `#+ID`, silently re-minting
+    /// (and thus breaking every reference to) the document's identity.
+    ///
+    /// Default delegates to [`create`](Self::create); stores whose `create`
+    /// de-duplicates by `(parent, title)` override this to bypass that
+    /// substitution and honor the supplied `doc.id`.
+    async fn create_forcing_id(&self, doc: Block) -> Result<Block> {
+        self.create(doc).await
+    }
+
     /// Get a page block by its ID.
     async fn get_by_id(&self, id: &EntityUri) -> Result<Option<Block>>;
 

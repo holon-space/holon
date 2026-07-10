@@ -794,7 +794,15 @@ impl FileSyncController {
                         };
                         let mut new_doc = Block::new_text(id, parent_id, title);
                         new_doc.set_page(true);
-                        self.doc_manager.create(new_doc).await?
+                        // FORCE the `#+ID` as the page identity. A sibling file
+                        // scanned earlier under a same-named subdirectory (e.g.
+                        // `Frontends/GPUI.org` next to `Frontends.org`) mints a
+                        // random-id name-chain placeholder page for the shared
+                        // `Frontends` segment; a plain `create` would de-dup by
+                        // `(parent, title)` and hand that placeholder's id back,
+                        // so writeback would re-mint this file's `#+ID` (data
+                        // loss). `create_forcing_id` keeps the authoritative id.
+                        self.doc_manager.create_forcing_id(new_doc).await?
                     }
                 }
             }
@@ -2101,32 +2109,59 @@ impl FileSyncController {
                     self.root_dir.display(),
                 )
             })?;
+            // Resolve the document by its authoritative `#+ID` first. Name-chain
+            // resolution (below) is ambiguous when a same-named subdirectory has
+            // minted a placeholder page with the file's title, so it can pick the
+            // wrong page and re-mint the file's `#+ID` on write-back (data loss).
+            // The disk bytes carry the id, so prefer it whenever present.
+            let doc = match self
+                .format
+                .doc_id_from_content(&disk_content)
+                .map(|bare| EntityUri::block(&bare))
+            {
+                Some(id) => match self.doc_manager.get_by_id(&id).await {
+                    Ok(Some(doc)) => Some(doc),
+                    Ok(None) => None,
+                    Err(e) => {
+                        warn!(
+                            "[re_render_all_tracked] get_by_id({id}) failed for {}: {} — skipping",
+                            path.display(),
+                            e
+                        );
+                        continue;
+                    }
+                },
+                None => None,
+            };
             let segments = path_to_name_chain(rel_path);
             let segment_refs: Vec<&str> = segments.iter().map(|s| s.as_str()).collect();
-            let doc = match self.doc_manager.find_by_name_chain(&segment_refs).await {
-                Ok(Some(doc)) => doc,
-                Ok(None) => {
-                    // Path was tracked but no document entity exists (e.g.
-                    // empty file was registered before the skip-empty guard).
-                    // Downgraded to debug: re_render_all_tracked is now
-                    // debounced and runs on every burst, so warn-level would
-                    // flood the log on every initial scan.
-                    debug!(
-                        "[re_render_all_tracked] No document found for path {} (segments: {:?}) — \
-                         skipping",
-                        path.display(),
-                        segment_refs
-                    );
-                    continue;
-                }
-                Err(e) => {
-                    warn!(
-                        "[re_render_all_tracked] Doc lookup error for {}: {} — skipping",
-                        path.display(),
-                        e
-                    );
-                    continue;
-                }
+            let doc = match doc {
+                Some(doc) => doc,
+                None => match self.doc_manager.find_by_name_chain(&segment_refs).await {
+                    Ok(Some(doc)) => doc,
+                    Ok(None) => {
+                        // Path was tracked but no document entity exists (e.g.
+                        // empty file was registered before the skip-empty guard).
+                        // Downgraded to debug: re_render_all_tracked is now
+                        // debounced and runs on every burst, so warn-level would
+                        // flood the log on every initial scan.
+                        debug!(
+                            "[re_render_all_tracked] No document found for path {} (segments: \
+                             {:?}) — skipping",
+                            path.display(),
+                            segment_refs
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!(
+                            "[re_render_all_tracked] Doc lookup error for {}: {} — skipping",
+                            path.display(),
+                            e
+                        );
+                        continue;
+                    }
+                },
             };
 
             let rendered = self.render_file_by_doc_id(&doc.id, &path).await?;
