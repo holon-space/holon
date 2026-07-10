@@ -85,6 +85,17 @@ pub fn build_block_params(
 
     if let Some(task_state) = block.task_state() {
         params.insert("task_state".into(), Value::String(task_state.to_string()));
+        // `cycle_task_state` writes this sidecar in the same statement as
+        // `task_state` (`sql_operation_provider.rs`'s `category_str_for_keyword`
+        // pairing) so category-filtering queries can see the state without a
+        // keyword-list join. The org parser already derived the category from
+        // `#+TODO:` config (`TaskState::from_keyword_with_done_list`) — mirror
+        // it here so file-originated tasks pair the same way, one source of
+        // truth (`TaskState.category`) instead of two.
+        params.insert(
+            "task_state_category".into(),
+            Value::String(task_state.category.as_str().to_string()),
+        );
     }
     if let Some(priority) = block.priority() {
         params.insert("priority".into(), Value::Integer(priority.to_int() as i64));
@@ -132,4 +143,67 @@ pub fn build_block_params(
     }
 
     params
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::parse_org_file;
+
+    /// Regression: org-ingested TODO/DONE blocks must carry BOTH `task_state`
+    /// and its `task_state_category` sidecar in the params sent to
+    /// create/update — otherwise category-filtering queries never see
+    /// file-originated tasks (only ones cycled through the UI, which pairs
+    /// them via `cycle_task_state`). The category is already derived by the
+    /// parser (`TaskState::from_keyword_with_done_list` off `#+TODO:`
+    /// config); this boundary must not drop it.
+    #[test]
+    fn ingested_todo_and_done_blocks_carry_task_state_category() {
+        let org = "\
+#+TODO: TODO | DONE
+
+* TODO Buy milk
+* DONE Ship it
+";
+        let parent_dir_id = EntityUri::no_parent();
+        let path = std::path::Path::new("/vault/doc.org");
+        let root = std::path::Path::new("/vault");
+        let parsed = parse_org_file(path, org, &parent_dir_id, root).expect("parse org fixture");
+
+        let headlines: Vec<&Block> = parsed
+            .blocks
+            .iter()
+            .filter(|b| b.task_state().is_some())
+            .collect();
+        assert_eq!(
+            headlines.len(),
+            2,
+            "expected exactly the TODO and DONE headlines, got {:?}",
+            parsed.blocks
+        );
+
+        for block in headlines {
+            let params = build_block_params(block, &parsed.document.id, &parsed.document.id);
+            let task_state = params
+                .get("task_state")
+                .and_then(|v| v.as_string())
+                .unwrap_or_else(|| panic!("task_state missing from ingest params for {block:?}"));
+            let category = params
+                .get("task_state_category")
+                .and_then(|v| v.as_string())
+                .unwrap_or_else(|| {
+                    panic!("task_state_category missing from ingest params for {block:?}")
+                });
+
+            let expected_category = if task_state == "DONE" {
+                "done"
+            } else {
+                "active"
+            };
+            assert_eq!(
+                category, expected_category,
+                "wrong task_state_category for keyword {task_state:?}"
+            );
+        }
+    }
 }
