@@ -305,6 +305,32 @@ pub trait ProfileResolving: Send + Sync {
         self.resolve_with_computed(row)
     }
 
+    /// Resolve a row that the caller DECLARES must be entity-shaped.
+    ///
+    /// This is the CONTRACT seam (Martin ruling 2026-07-11). Most render paths
+    /// accept either row shape and call [`Self::resolve_with_computed`], where
+    /// a value row (no entity `id`) is a legitimate display case rendered
+    /// plainly. But an entity TEMPLATE / entity-id-dependent widget (e.g.
+    /// click-to-open the entity) genuinely REQUIRES an entity row: handing
+    /// it a value row is a contract violation, not a display case. Such
+    /// callers route through this method, which returns a loud `Err`
+    /// instead of silently rendering a value row — the fail-loud path for a
+    /// declared expectation.
+    fn resolve_entity_required(
+        &self,
+        row: &HashMap<String, Value>,
+    ) -> anyhow::Result<(Arc<RenderProfile>, HashMap<String, Value>)> {
+        if crate::RowIdentity::of_row(row).is_value() {
+            anyhow::bail!(
+                "widget declared it requires an ENTITY row but received a VALUE row (no \
+                 entity-shaped `id`): {row:?}. Entity templates / entity-id click handling cannot \
+                 resolve a synthetic value row — project a real `... AS id` or render this query \
+                 through a value-row-tolerant widget"
+            );
+        }
+        Ok(self.resolve_with_computed(row))
+    }
+
     /// Get virtual child config for an entity type, if declared in its profile.
     // ALLOW(unused_param): trait shape; default impl ignores name
     fn virtual_child_config(&self, _entity_name: &str) -> Option<VirtualChildConfig> {

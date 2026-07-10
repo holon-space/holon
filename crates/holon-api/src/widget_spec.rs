@@ -24,31 +24,6 @@ pub fn data_row_entity_uri(row: &DataRow) -> Option<EntityUri> {
         .map(entity_uri_from_id_str)
 }
 
-/// Key a reactive row for the accumulator, tolerating **id-less** rows.
-///
-/// Prefers the entity `id` column. Id-less rows are a LEGAL, representable
-/// input — they arise from rule-trigger / aggregate queries (e.g. the journals
-/// day-list `SELECT date('now') AS name`, dogfood 2026-07-10) that get pointed
-/// at the enriched watch path. For those we key on the matview `_rowid`
-/// (Turso's per-row storage identity, the same id-less path `LiveData` uses for
-/// id-less deletes) under a distinct `degraded:` scheme, so the row can still
-/// be stored and rendered as a degraded entry (mirroring the profile resolver's
-/// `degraded_missing_id_profile`) instead of panicking the render worker.
-///
-/// Returns `None` only when the row has neither `id` nor `_rowid` — a truly
-/// unkeyable row that the caller must drop visibly (log) rather than panic on.
-pub fn data_row_reactive_key(row: &DataRow) -> Option<EntityUri> {
-    if let Some(uri) = data_row_entity_uri(row) {
-        return Some(uri);
-    }
-    let rowid = match row.get("_rowid")? {
-        Value::Integer(i) => i.to_string(),
-        Value::String(s) => s.clone(),
-        other => format!("{other:?}"),
-    };
-    Some(EntityUri::from_raw(&format!("degraded:rowid-{rowid}"))) // ALLOW(entity_uri_from_raw): synthesizes a key from the matview `_rowid` storage identity — a genuine SQL/matview row boundary value
-}
-
 /// Typed accessor for the matview `parent_id` column of a row.
 ///
 /// Boundary read — routes through the centralized [`entity_uri_from_id_str`]
@@ -82,6 +57,178 @@ pub fn entity_uri_from_id_str(id: &str) -> EntityUri {
     // ALLOW(entity_uri_from_raw): matview/CDC row id column is the typed-id
     // boundary
     EntityUri::from_raw(id)
+}
+
+/// Deterministic content hash of a value-shaped row.
+///
+/// Stable across incremental matview recompute: a matview `_rowid` is NOT
+/// guaranteed stable when the view is recomputed, but the row's column/value
+/// content is. Same content → same hash → same identity → no spurious
+/// re-render churn (Martin ruling 2026-07-11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RowContentHash(u64);
+
+impl RowContentHash {
+    /// FNV-1a over the canonical (sorted-key, recursively-canonicalized)
+    /// serialization of the row. A fixed algorithm (not `DefaultHasher`, whose
+    /// output is not guaranteed stable across std versions) so the identity is
+    /// reproducible.
+    ///
+    /// Generic over the key type so both `DataRow` (`String` keys) and
+    /// `StorageEntity` (`Arc<str>` keys) hash to the SAME identity for equal
+    /// content — the prod row set and the keystone twin agree.
+    pub fn of_row<K>(row: &HashMap<K, Value>) -> Self
+    where
+        K: std::borrow::Borrow<str> + std::hash::Hash + Eq,
+    {
+        let mut hasher = Fnv1a::new();
+        let mut keys: Vec<&str> = row.keys().map(|k| k.borrow()).collect();
+        keys.sort_unstable();
+        for k in keys {
+            hasher.write(k.as_bytes());
+            hasher.write(&[0x1f]); // unit separator: key/value boundary
+            canonicalize_value(&row[k], &mut hasher);
+            hasher.write(&[0x1e]); // record separator: end of column
+        }
+        Self(hasher.finish())
+    }
+
+    /// Lowercase hex serialization (the `value:` scheme's path component).
+    pub fn to_hex(self) -> String {
+        format!("{:016x}", self.0)
+    }
+}
+
+/// Fold a `Value` into the hasher in a canonical, key-order-independent way.
+fn canonicalize_value(v: &Value, hasher: &mut Fnv1a) {
+    match v {
+        Value::String(s) => {
+            hasher.write(b"s");
+            hasher.write(s.as_bytes());
+        }
+        Value::Integer(i) => {
+            hasher.write(b"i");
+            hasher.write(&i.to_le_bytes());
+        }
+        Value::Float(f) => {
+            hasher.write(b"f");
+            hasher.write(&f.to_bits().to_le_bytes());
+        }
+        Value::Boolean(b) => {
+            hasher.write(b"b");
+            hasher.write(&[*b as u8]);
+        }
+        Value::DateTime(s) => {
+            hasher.write(b"d");
+            hasher.write(s.as_bytes());
+        }
+        Value::Json(s) => {
+            hasher.write(b"j");
+            hasher.write(s.as_bytes());
+        }
+        Value::Array(items) => {
+            hasher.write(b"a");
+            for it in items {
+                canonicalize_value(it, hasher);
+                hasher.write(&[0x1d]);
+            }
+        }
+        Value::Object(map) => {
+            hasher.write(b"o");
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            for k in keys {
+                hasher.write(k.as_bytes());
+                hasher.write(&[0x1f]);
+                canonicalize_value(&map[k], hasher);
+                hasher.write(&[0x1d]);
+            }
+        }
+        Value::Null => hasher.write(b"n"),
+    }
+}
+
+/// Minimal FNV-1a 64-bit hasher — a fixed, dependency-free algorithm so the
+/// content hash is deterministic and stable across builds.
+struct Fnv1a(u64);
+
+impl Fnv1a {
+    fn new() -> Self {
+        Self(0xcbf29ce484222325)
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 ^= b as u64;
+            self.0 = self.0.wrapping_mul(0x100000001b3);
+        }
+    }
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+/// Identity of a query result row at the reactive keying layer.
+///
+/// Every row is one of two shapes (Martin ruling 2026-07-11), and the shape is
+/// a legitimate display case — not an error:
+///
+/// - [`RowIdentity::Entity`] — the row carries a real, entity-shaped `id`
+///   column. It resolves to an entity profile / entity templates, and
+///   entity-id-dependent interactions (click-to-navigate) are meaningful.
+/// - [`RowIdentity::Value`] — a synthetic-identity row (an aggregate, a
+///   rule-trigger result, a future table row). It has NO entity to resolve;
+///   identity is the deterministic [`RowContentHash`] of its content, so the
+///   same row keeps the same identity across incremental matview recompute. It
+///   renders as a plain value row.
+///
+/// **Parse, don't validate**: this enum is the MODEL. The `value:` (and, for
+/// entities, `block:`/`doc:`/…) URI *scheme* is only how the identity is
+/// *serialized* into the `EntityUri` used as the row-store key — it is not the
+/// model. Downstream that reasons about identity matches on the enum.
+///
+/// **Collision**: two value rows with byte-identical content share one
+/// identity and collapse to a single store entry. This is an inherent,
+/// documented limitation of content-hash identity (distinct content → distinct
+/// identity). A future refinement can disambiguate identical rows by an
+/// occurrence index within a batch; today identical value rows collapse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowIdentity {
+    Entity(EntityUri),
+    Value(RowContentHash),
+}
+
+impl RowIdentity {
+    /// Classify a row into its identity shape. Uses the SAME authority the
+    /// profile resolver uses ([`crate::row_id`]): a row whose `id` column
+    /// parses to a valid `EntityUri` is entity-shaped; anything else (missing,
+    /// empty, or non-URI `id`) is value-shaped. Keeping this classification in
+    /// one place guarantees the store key and the render profile agree on which
+    /// rows are value rows.
+    pub fn of_row<K>(row: &HashMap<K, Value>) -> Self
+    where
+        K: std::borrow::Borrow<str> + std::hash::Hash + Eq + std::fmt::Debug,
+    {
+        match crate::row_id(row) {
+            Ok(uri) => RowIdentity::Entity(uri),
+            Err(_) => RowIdentity::Value(RowContentHash::of_row(row)),
+        }
+    }
+
+    /// True for value-shaped rows (no resolvable entity).
+    pub fn is_value(&self) -> bool {
+        matches!(self, RowIdentity::Value(_))
+    }
+
+    /// Serialize the identity into the `EntityUri` used as the row-store key.
+    /// Entity rows key on their own URI; value rows key on the `value:` scheme
+    /// carrying the hex content hash. This is the serialization boundary — the
+    /// enum is the model, the scheme is its wire form.
+    pub fn to_store_key(&self) -> EntityUri {
+        match self {
+            RowIdentity::Entity(uri) => uri.clone(),
+            RowIdentity::Value(hash) => EntityUri::new("value", &hash.to_hex()),
+        }
+    }
 }
 
 /// A row that has been through the enrichment pipeline (`flatten_properties` +
@@ -337,6 +484,87 @@ mod tests {
             acc.to_vec()
                 .iter()
                 .any(|r| { r.get("id").unwrap().as_string().unwrap() == "b" })
+        );
+    }
+
+    fn value_row(name: &str) -> DataRow {
+        HashMap::from([
+            ("_rowid".into(), Value::Integer(7)),
+            ("name".into(), Value::String(name.into())),
+        ])
+    }
+
+    #[test]
+    fn entity_row_identity_is_the_entity_uri() {
+        let r = row("block:abc", "hi");
+        match RowIdentity::of_row(&r) {
+            RowIdentity::Entity(uri) => assert_eq!(uri.as_str(), "block:abc"),
+            other => panic!("entity-shaped row must be Entity, got {other:?}"),
+        }
+        assert!(!RowIdentity::of_row(&r).is_value());
+    }
+
+    #[test]
+    fn value_row_identity_is_content_hash() {
+        let r = value_row("2026-07-10");
+        let id = RowIdentity::of_row(&r);
+        assert!(id.is_value(), "id-less row must be value-shaped");
+        // Serializes under the `value:` scheme.
+        assert_eq!(id.to_store_key().scheme(), "value");
+    }
+
+    #[test]
+    fn value_row_identity_is_stable_across_recompute() {
+        // Two independent constructions of the same row content (simulating an
+        // incremental matview recompute that re-emits the row) hash to the SAME
+        // identity — identity is content, so a recompute does not churn the row.
+        let a = value_row("2026-07-10");
+        let b = value_row("2026-07-10");
+        assert_eq!(RowIdentity::of_row(&a), RowIdentity::of_row(&b));
+    }
+
+    #[test]
+    fn distinct_value_rows_get_distinct_identity() {
+        let a = value_row("2026-07-10");
+        let b = value_row("2026-07-11");
+        assert_ne!(RowIdentity::of_row(&a), RowIdentity::of_row(&b));
+    }
+
+    #[test]
+    fn content_hash_is_key_order_independent() {
+        let mut a: DataRow = HashMap::new();
+        a.insert("x".into(), Value::Integer(1));
+        a.insert("y".into(), Value::String("q".into()));
+        let mut b: DataRow = HashMap::new();
+        b.insert("y".into(), Value::String("q".into()));
+        b.insert("x".into(), Value::Integer(1));
+        assert_eq!(RowContentHash::of_row(&a), RowContentHash::of_row(&b));
+    }
+
+    #[test]
+    fn value_row_round_trips_through_accumulator_with_stable_key() {
+        // A value row flows through the same Created path an aggregate takes;
+        // re-applying the identical content (recompute) keys to the same slot,
+        // so the row set does not churn.
+        let mut acc = DataRowAccumulator::new();
+        let key = RowIdentity::of_row(&value_row("2026-07-10"))
+            .to_store_key()
+            .as_str()
+            .to_string();
+        // Mimic the reactive store keying: insert under the identity key.
+        acc.rows.insert(key.clone(), value_row("2026-07-10"));
+        assert_eq!(acc.len(), 1);
+        // Recompute re-emits the same content → same key → still one row.
+        let key2 = RowIdentity::of_row(&value_row("2026-07-10"))
+            .to_store_key()
+            .as_str()
+            .to_string();
+        assert_eq!(key, key2);
+        acc.rows.insert(key2, value_row("2026-07-10"));
+        assert_eq!(
+            acc.len(),
+            1,
+            "stable identity ⇒ no duplicate row on recompute"
         );
     }
 }
