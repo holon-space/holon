@@ -357,7 +357,7 @@ impl HolonMcpServer {
             Self::tool_router_ui()
         };
         #[cfg(debug_assertions)]
-        let tool_router = tool_router + Self::tool_router_reset();
+        let tool_router = tool_router + Self::tool_router_reset() + Self::tool_router_debug();
 
         Self {
             backend,
