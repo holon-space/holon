@@ -1431,3 +1431,61 @@ proptest! {
         assert_normalized_docs_equal(&expected, &actual, "org_text_mutation")?;
     }
 }
+
+/// Regression: a headline with BOTH SCHEDULED and DEADLINE, and no explicit
+/// `:ID:` (so a `:PROPERTIES:` drawer still follows the planning line).
+///
+/// orgize's `planning_node` parser reads `(keyword, timestamp)` pairs back to
+/// back with no intervening newline, then consumes a single end-of-line — so
+/// SCHEDULED and DEADLINE on separate lines only let the FIRST keyword parse
+/// as planning; the second keyword (and the `:PROPERTIES:` drawer meant to
+/// follow it) got swallowed into the section body as plain text, silently
+/// renaming the block's id and duplicating a `:PROPERTIES:` drawer on
+/// re-render. Both keywords must render on one line.
+#[test]
+fn planning_scheduled_and_deadline_share_one_line_and_round_trip_stably() {
+    use holon_block_roundtrip_testing::{build_blocks, HeadlineSpec, PropertiesDrawer};
+    let hl = HeadlineSpec {
+        block_id: EntityUri::block("00000000-0000-0000-00d2-6a8b21a78458"),
+        properties_drawer: PropertiesDrawer {
+            explicit_id: None,
+            other_props: std::collections::HashMap::new(),
+        },
+        level: 1,
+        task_state: None,
+        priority: None,
+        title: "AA".to_string(),
+        tags: None,
+        body: None,
+        scheduled: Some("<2024-01-15 Mon>".to_string()),
+        deadline: Some("<2024-01-15 Mon>".to_string()),
+        source_blocks: vec![],
+        child_headlines: vec![],
+    };
+    let doc_id = EntityUri::block("test-doc");
+    let mut doc = Block::new_text(doc_id.clone(), EntityUri::no_parent(), "test.org");
+    doc.set_page(true);
+    let blocks = build_blocks(&doc_id, &[hl]);
+    let org_text_1 = build_org_text(&doc, &blocks);
+    assert!(
+        org_text_1.contains("SCHEDULED: <2024-01-15 Mon> DEADLINE: <2024-01-15 Mon>\n"),
+        "SCHEDULED and DEADLINE must share one planning line: {org_text_1:?}"
+    );
+
+    let parsed = parse_org(&org_text_1).expect("parse failed");
+    assert!(
+        parsed
+            .blocks
+            .iter()
+            .any(|b| b.id.id() == "00000000-0000-0000-00d2-6a8b21a78458"),
+        "headline id must survive the round-trip, not get replaced by a fresh \
+         UUID from a misparsed drawer-as-body: {:?}",
+        parsed.blocks
+    );
+
+    let org_text_2 = build_org_text(&parsed.document, &parsed.blocks);
+    assert_eq!(
+        org_text_1, org_text_2,
+        "render must be stable across a round-trip"
+    );
+}
