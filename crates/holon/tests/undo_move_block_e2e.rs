@@ -83,8 +83,13 @@ async fn create_block(
     params.insert("content".into(), Value::String(content.to_string()));
     params.insert("depth".into(), Value::Integer(depth));
     params.insert("parent_id".into(), Value::String(parent_id.to_string()));
+    // Fixture setup, not the user action under test: use a non-User origin so
+    // these pre-existing blocks don't land on the undo stack. (Since Wave 1,
+    // `create` carries a real inverse and a User-origin create IS undoable, so
+    // a User fixture here would pollute the stack the move-block assertions
+    // inspect.)
     engine
-        .execute_operation(&EntityName::new("block"), "create", params, OpOrigin::User)
+        .execute_operation(&EntityName::new("block"), "create", params, OpOrigin::Sync)
         .await
         .unwrap_or_else(|e| panic!("create {id}: {e:#}"));
 }

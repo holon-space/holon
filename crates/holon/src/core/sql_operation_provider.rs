@@ -10,11 +10,13 @@ use std::collections::HashSet;
 use async_trait::async_trait;
 use holon_api::EntityName;
 use holon_api::EntityUri;
+use holon_api::Operation;
 use holon_api::OperationDescriptor;
 use holon_api::OperationParam;
 use holon_api::ParentNotFound;
 use holon_api::TypeHint;
 use holon_api::Value;
+use holon_core::FieldDelta;
 use holon_core::OperationProvider;
 use holon_core::OperationResult;
 use holon_core::OriginTaggedWrites;
@@ -883,6 +885,130 @@ impl SqlOperationProvider {
             edge_statements: Vec::new(),
         })
     }
+
+    /// Read the current value of `field` for row `id` so an inverse
+    /// [`Operation`] can restore it. Known SQL columns are read directly;
+    /// everything else is a `properties` JSON entry. A missing row or a
+    /// null/absent field both read back as [`Value::Null`] — the sentinel the
+    /// inverse `set_field` uses to REMOVE a property (`json_remove`).
+    async fn read_field_old_value(&self, id: &str, field: &str) -> Result<Value> {
+        let sql = if self.known_columns.contains(field) {
+            format!(
+                "SELECT {col} AS v FROM {table} WHERE id = '{id}'",
+                col = Self::quote_identifier(field),
+                table = self.table_name,
+                id = id.replace('\'', "''"),
+            )
+        } else {
+            format!(
+                "SELECT json_extract(properties, '$.{field}') AS v FROM {table} WHERE id = '{id}'",
+                field = field.replace('\'', "''"),
+                table = self.table_name,
+                id = id.replace('\'', "''"),
+            )
+        };
+        let rows = self
+            .db_handle
+            .query(&sql, HashMap::new())
+            .await
+            .map_err(|e| format!("read_field_old_value({field}): {e}"))?;
+        Ok(rows
+            .into_iter()
+            .next()
+            .and_then(|mut r| r.remove("v"))
+            .unwrap_or(Value::Null))
+    }
+
+    /// Build the inverse `set_field` [`Operation`] that restores `field` to
+    /// `old_value` on row `id`. The param shape ({id, field, value}) matches
+    /// the forward op so the undo stack's word-boundary coalescer (which
+    /// inspects `set_field` op params) recognizes single-character text
+    /// edits.
+    fn set_field_inverse(&self, id: &str, field: &str, old_value: Value) -> Operation {
+        Operation::from_params(
+            EntityName::new(&self.entity_name),
+            "set_field",
+            "set_field",
+            [
+                ("id".to_string(), Value::String(id.to_string())),
+                ("field".to_string(), Value::String(field.to_string())),
+                ("value".to_string(), old_value),
+            ],
+        )
+    }
+
+    /// Capture the full `block_raw` row for `id` as create-op params (columns
+    /// verbatim, minus the CDC-provenance sentinel `_change_origin`, which the
+    /// writer stamps fresh). Returns `None` when the row is absent. Used to
+    /// build the identity-preserving inverse of a leaf `delete`.
+    async fn capture_row(&self, id: &str) -> Result<Option<StorageEntity>> {
+        let sql = format!(
+            "SELECT * FROM {table} WHERE id = '{id}'",
+            table = self.table_name,
+            id = id.replace('\'', "''"),
+        );
+        let rows = self
+            .db_handle
+            .query(&sql, HashMap::new())
+            .await
+            .map_err(|e| format!("capture_row({id}): {e}"))?;
+        let Some(row) = rows.into_iter().next() else {
+            return Ok(None);
+        };
+        let params: StorageEntity = row
+            .into_iter()
+            .filter(|(k, v)| k.as_ref() != "_change_origin" && !matches!(v, Value::Null))
+            .collect();
+        Ok(Some(params))
+    }
+
+    /// Whether any row has `id` as its `parent_id` (i.e. the delete would
+    /// cascade). A leaf (no children) delete is identity-invertible; a subtree
+    /// delete is declared irreversible for now (see the `delete` arm).
+    async fn has_children(&self, id: &str) -> Result<bool> {
+        let sql = format!(
+            "SELECT 1 FROM {table} WHERE parent_id = '{id}' LIMIT 1",
+            table = self.table_name,
+            id = id.replace('\'', "''"),
+        );
+        let rows = self
+            .db_handle
+            .query(&sql, HashMap::new())
+            .await
+            .map_err(|e| format!("has_children({id}): {e}"))?;
+        Ok(!rows.is_empty())
+    }
+
+    /// Read this entity's edge-field targets for `id` (one entry per declared
+    /// edge field, as a `Value::Array` of target ids) so a delete's inverse
+    /// `create` re-attaches them. Empty when the entity declares no edge
+    /// fields.
+    async fn capture_edges(&self, id: &str) -> Result<Vec<(String, Value)>> {
+        let mut out = Vec::new();
+        for descriptor in self.edge_fields.values() {
+            let sql = format!(
+                "SELECT {tc} AS t FROM {jt} WHERE {sc} = '{id}'",
+                tc = Self::quote_identifier(&descriptor.target_col),
+                jt = descriptor.join_table,
+                sc = Self::quote_identifier(&descriptor.source_col),
+                id = id.replace('\'', "''"),
+            );
+            let rows = self
+                .db_handle
+                .query(&sql, HashMap::new())
+                .await
+                .map_err(|e| format!("capture_edges({id}, {}): {e}", descriptor.field))?;
+            let targets: Vec<Value> = rows
+                .into_iter()
+                .filter_map(|mut r| r.remove("t"))
+                .filter(|v| !matches!(v, Value::Null))
+                .collect();
+            if !targets.is_empty() {
+                out.push((descriptor.field.clone(), Value::Array(targets)));
+            }
+        }
+        Ok(out)
+    }
 }
 
 #[async_trait]
@@ -1051,6 +1177,20 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 // ones (route through prepare-style helper so set_field
                 // honours the same junction-table contract as create/update).
                 if let Some(descriptor) = self.edge_fields.get(field) {
+                    // Capture the CURRENT edge targets BEFORE the replace so the
+                    // inverse can restore them (edge writes are a whole-set
+                    // replace, so the inverse is just `set_field(field, old_set)`).
+                    let old_targets: Vec<Value> = self
+                        .capture_edges(id)
+                        .await?
+                        .into_iter()
+                        .find(|(f, _)| f == field)
+                        .map(|(_, v)| match v {
+                            Value::Array(items) => items,
+                            _ => Vec::new(),
+                        })
+                        .unwrap_or_default();
+
                     let empty: Vec<Value> = Vec::new();
                     let arr: &Vec<Value> = match &value {
                         Value::Array(items) => items,
@@ -1079,8 +1219,15 @@ impl OriginTaggedWrites for SqlOperationProvider {
                             .await
                             .map_err(|e| format!("Failed to execute edge-field SQL: {}", e))?;
                     }
-                    return Ok(OperationResult::irreversible(Vec::new()));
+                    // Edge targets live in a junction table the staleness reader
+                    // (column-only) cannot fingerprint, so the precondition is
+                    // empty (single-writer safe); the inverse is still a real
+                    // whole-set restore.
+                    let inverse = self.set_field_inverse(id, field, Value::Array(old_targets));
+                    return Ok(OperationResult::new(Vec::new(), inverse));
                 }
+
+                let old_value = self.read_field_old_value(id, field).await?;
 
                 let sql = if self.known_columns.contains(field) {
                     format!(
@@ -1187,7 +1334,24 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     );
                 }
 
-                Ok(OperationResult::irreversible(Vec::new()))
+                // Inverse = set_field back to the pre-write value. Only COLUMN
+                // fields carry a staleness fingerprint: the reader reads columns
+                // only, so a `properties`-backed field (e.g. `task_state`) gets
+                // an empty precondition (single-writer safe) but still a real
+                // inverse. `Value::Null` old-value on a property drives the
+                // inverse `json_remove`, restoring "absent" faithfully.
+                let changes = if self.known_columns.contains(field) {
+                    vec![FieldDelta::new(
+                        id.to_string(),
+                        field.to_string(),
+                        old_value.clone(),
+                        value.clone(),
+                    )]
+                } else {
+                    Vec::new()
+                };
+                let inverse = self.set_field_inverse(id, field, old_value);
+                Ok(OperationResult::new(changes, inverse))
             }
             "create" => {
                 // Entity ids are `{entity}:{uuid}`. A create without an explicit
@@ -1312,7 +1476,34 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     None
                 };
 
-                let mut result = OperationResult::irreversible(Vec::new());
+                // Inverse of a genuine create = delete the minted/supplied id
+                // (identity-preserving, ADR 0024). An IGNORED insert created
+                // nothing, so undoing it must NOT delete the pre-existing row —
+                // that path is declared irreversible. Forward fingerprint: the
+                // `id` column is present post-create (absent → `Value::Null`
+                // pre-create), so undo drops loudly if the row vanished under it.
+                let mut result = if inserted {
+                    let inverse = Operation::from_params(
+                        EntityName::new(&self.entity_name),
+                        "delete",
+                        "delete",
+                        [("id".to_string(), Value::String(id.clone()))],
+                    );
+                    OperationResult::new(
+                        vec![FieldDelta::new(
+                            id.clone(),
+                            "id",
+                            Value::Null,
+                            Value::String(id.clone()),
+                        )],
+                        inverse,
+                    )
+                } else {
+                    OperationResult::declared_irreversible(
+                        Vec::new(),
+                        "create: insert ignored (row already existed)",
+                    )
+                };
                 result.response = response;
                 Ok(result)
             }
@@ -1323,9 +1514,61 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 Ok(OperationResult::irreversible(Vec::new()))
             }
             "delete" => {
+                let id = params
+                    .get("id")
+                    .and_then(|v| v.as_string())
+                    .ok_or_else(|| "Missing 'id' parameter".to_string())?
+                    .to_string();
+
+                // Capture the FULL row + edges BEFORE deleting so a LEAF delete
+                // is identity-invertible (inverse = `create` with the same id,
+                // parent_id, sort_key, content, properties, edges — ADR 0024:
+                // never delete+create where identity can be preserved). A delete
+                // that CASCADES to descendants is declared irreversible for now:
+                // faithfully resurrecting an ordered subtree is a Wave-2 concern.
+                let captured = self.capture_row(&id).await?;
+                let cascades = self.has_children(&id).await?;
+                let inverse = match (&captured, cascades) {
+                    (Some(row), false) => {
+                        let mut create_params = row.clone();
+                        for (field, targets) in self.capture_edges(&id).await? {
+                            create_params.insert(field.into(), targets);
+                        }
+                        Some(Operation::from_params(
+                            EntityName::new(&self.entity_name),
+                            "create",
+                            "create",
+                            create_params.into_iter().map(|(k, v)| (k.to_string(), v)),
+                        ))
+                    }
+                    _ => None,
+                };
+
                 let prepared = self.prepare_delete(&params).await?;
                 self.execute_prepared(prepared).await?;
-                Ok(OperationResult::irreversible(Vec::new()))
+
+                // Forward fingerprint: the `id` column is absent post-delete
+                // (present → its own value pre-delete), so an undo (`create`)
+                // drops loudly if the row was resurrected under it.
+                match inverse {
+                    Some(create_op) => Ok(OperationResult::new(
+                        vec![FieldDelta::new(
+                            id.clone(),
+                            "id",
+                            Value::String(id.clone()),
+                            Value::Null,
+                        )],
+                        create_op,
+                    )),
+                    None if captured.is_none() => Ok(OperationResult::declared_irreversible(
+                        Vec::new(),
+                        "delete: target row absent (nothing to resurrect)",
+                    )),
+                    None => Ok(OperationResult::declared_irreversible(
+                        Vec::new(),
+                        "delete: subtree capture not yet implemented",
+                    )),
+                }
             }
             "cycle_task_state" => {
                 let id = params
@@ -1570,6 +1813,110 @@ mod create_id_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod delete_inverse_classification_tests {
+    use holon_core::traits::UndoAction;
+
+    use super::*;
+
+    async fn provider_with_rows() -> (crate::storage::turso::DbHandle, SqlOperationProvider) {
+        let (_backend, db_handle) = crate::storage::turso::TursoBackend::new_in_memory()
+            .await
+            .expect("in-memory turso");
+        db_handle
+            .execute(
+                "CREATE TABLE block_raw (id TEXT PRIMARY KEY, parent_id TEXT, content TEXT, \
+                 sort_key TEXT, depth INTEGER, properties TEXT, created_at INTEGER, updated_at \
+                 INTEGER)",
+                vec![],
+            )
+            .await
+            .expect("create table");
+        let provider = SqlOperationProvider::new(
+            db_handle.clone(),
+            "block_raw".to_string(),
+            "block".to_string(),
+            "block".to_string(),
+        );
+        // Leak the backend for the test's lifetime so the actor stays alive.
+        std::mem::forget(_backend);
+        (db_handle, provider)
+    }
+
+    async fn insert(provider: &SqlOperationProvider, id: &str, parent_id: &str) {
+        let mut params = StorageEntity::new();
+        params.insert("id".into(), Value::String(id.to_string()));
+        params.insert("parent_id".into(), Value::String(parent_id.to_string()));
+        params.insert("content".into(), Value::String(format!("content-{id}")));
+        provider
+            .execute_operation_with_origin(
+                &EntityName::new("block"),
+                "create",
+                params,
+                EventOrigin::Other("test".to_string()),
+            )
+            .await
+            .expect("seed create");
+    }
+
+    async fn delete_result(provider: &SqlOperationProvider, id: &str) -> OperationResult {
+        let mut params = StorageEntity::new();
+        params.insert("id".into(), Value::String(id.to_string()));
+        provider
+            .execute_operation_with_origin(
+                &EntityName::new("block"),
+                "delete",
+                params,
+                EventOrigin::Other("test".to_string()),
+            )
+            .await
+            .expect("delete")
+    }
+
+    /// A LEAF delete carries a real identity-preserving inverse: a `create` of
+    /// the same id.
+    #[tokio::test]
+    async fn leaf_delete_inverse_is_create_of_same_id() {
+        let (_db, provider) = provider_with_rows().await;
+        insert(&provider, "block:leaf", "block:root").await;
+
+        let result = delete_result(&provider, "block:leaf").await;
+        match result.undo {
+            UndoAction::Undo(op) => {
+                assert_eq!(op.op_name, "create");
+                assert_eq!(
+                    op.params.get("id").and_then(|v| v.as_string()),
+                    Some("block:leaf"),
+                    "inverse create must restore the same id"
+                );
+            }
+            other => panic!("leaf delete must be reversible, got {other:?}"),
+        }
+    }
+
+    /// A delete that CASCADES to descendants is DECLARED irreversible (subtree
+    /// capture is a Wave-2 concern) — never an `Undeclared` loud-error, never a
+    /// silent no-inverse.
+    #[tokio::test]
+    async fn subtree_delete_is_declared_irreversible() {
+        let (_db, provider) = provider_with_rows().await;
+        insert(&provider, "block:parent", "block:root").await;
+        insert(&provider, "block:child", "block:parent").await;
+
+        let result = delete_result(&provider, "block:parent").await;
+        match result.undo {
+            UndoAction::DeclaredIrreversible(reason) => {
+                assert!(
+                    reason.contains("subtree"),
+                    "reason should name the subtree limitation, got {reason:?}"
+                );
+            }
+            other => panic!("subtree delete must be declared irreversible, got {other:?}"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod two_phase_fk_tests {
     use std::collections::HashMap;
