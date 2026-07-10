@@ -49,3 +49,6 @@ base64 = "0.22"
 [target.'cfg(target_os = "macos")'.dependencies]
 xcap = { git = "https://github.com/nightscape/xcap", branch = "feat/macos-offscreen-windows" }
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
