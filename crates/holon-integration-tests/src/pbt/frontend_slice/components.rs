@@ -41,6 +41,7 @@ use holon_pbt_core::capabilities::SutAppLifecycle;
 use holon_pbt_core::capabilities::SutBackend;
 use holon_pbt_core::capabilities::SutBlockCreate;
 use holon_pbt_core::capabilities::SutBlockTreeWrite;
+use holon_pbt_core::capabilities::SutClockAdvance;
 use holon_pbt_core::capabilities::SutEditorMirrorRead;
 use holon_pbt_core::capabilities::SutEditorMirrorWrite;
 use holon_pbt_core::capabilities::SutErrorLog;
@@ -163,6 +164,13 @@ pub struct HeadlessFrontendComponent {
     /// Unset (`OnceLock` empty) ⇒ identity resolution (the fixed-id slices,
     /// where oracle id == store id).
     resolver: std::sync::OnceLock<crate::pbt::op_write_cap::IdResolver>,
+    /// The controllable clock this boot injected into the engine's DI (as
+    /// `InjectedClock`), so the `ClockScheduler` ticks on it instead of the OS
+    /// clock. `Some` only when the caller asked for an injected clock (the
+    /// `AdvanceDay` keystone driver); `None` for the ordinary SystemClock boot.
+    /// `SutClockAdvance` advances THIS clock and re-runs the scheduler's own
+    /// `reconcile_clock`, so a day-rollover CDC re-fires the journal rule.
+    clock: Option<Arc<holon_api::TestClock>>,
 }
 
 impl HeadlessFrontendComponent {
@@ -173,6 +181,21 @@ impl HeadlessFrontendComponent {
     /// storage) — the navigation/structural slices don't need the CRDT layer.
     pub async fn new(org_files: &[(&str, &str)], settle: Duration) -> Self {
         Self::new_with_loro(org_files, settle, false).await
+    }
+
+    /// Like [`Self::new_with_loro`] but injects a controllable [`TestClock`]
+    /// into the engine's DI as `InjectedClock`, so the production
+    /// `ClockScheduler` ticks on it. The keystone `AdvanceDay` transition
+    /// (ADR 0024 §6) then advances this clock through `SutClockAdvance`,
+    /// driving day-rollover re-fires of the journal rule down the real
+    /// reactive path.
+    pub async fn new_with_clock(
+        org_files: &[(&str, &str)],
+        settle: Duration,
+        loro_enabled: bool,
+        clock: Arc<holon_api::TestClock>,
+    ) -> Self {
+        Self::new_impl(org_files, settle, loro_enabled, Some(clock)).await
     }
 
     /// Like [`Self::new`] but with the Loro CRDT layer ENABLED — the production
@@ -187,6 +210,15 @@ impl HeadlessFrontendComponent {
         org_files: &[(&str, &str)],
         settle: Duration,
         loro_enabled: bool,
+    ) -> Self {
+        Self::new_impl(org_files, settle, loro_enabled, None).await
+    }
+
+    async fn new_impl(
+        org_files: &[(&str, &str)],
+        settle: Duration,
+        loro_enabled: bool,
+        clock: Option<Arc<holon_api::TestClock>>,
     ) -> Self {
         use holon_frontend::HolonConfig;
         use holon_frontend::SessionConfig;
@@ -236,6 +268,12 @@ impl HeadlessFrontendComponent {
         let injector_slot: Arc<std::sync::OnceLock<fluxdi::Injector>> =
             Arc::new(std::sync::OnceLock::new());
         let injector_slot_c = injector_slot.clone();
+        // Clock DI seam (ADR 0024 §6): when the caller injects a controllable
+        // clock, register it as `InjectedClock` BEFORE the engine resolves, so the
+        // `ClockScheduler` (spawned in `create_initialized_engine`) ticks on it
+        // instead of the OS `SystemClock`. `None` → the factory falls back to
+        // `SystemClock`, unchanged.
+        let clock_for_di = clock.clone();
 
         let (session, engine, reactive) = holon_app::new_from_config_with_di(
             holon_config,
@@ -247,6 +285,13 @@ impl HeadlessFrontendComponent {
                     injector,
                     &org_fs_for_di,
                 );
+                if let Some(test_clock) = clock_for_di.clone() {
+                    let injected =
+                        holon_api::InjectedClock(test_clock as Arc<dyn holon_api::Clock>);
+                    injector.provide::<holon_api::InjectedClock>(fluxdi::Provider::root(
+                        move |_| injected.clone().into(),
+                    ));
+                }
                 Ok(())
             },
             move |injector| {
@@ -369,6 +414,7 @@ impl HeadlessFrontendComponent {
                 .clone(),
             current_view: Mutex::new("all".to_string()),
             resolver: std::sync::OnceLock::new(),
+            clock,
         }
     }
 
@@ -1681,6 +1727,29 @@ impl SutMcpEmit for HeadlessFrontendComponent {
     }
 }
 
+/// `SutClockAdvance` (the `AdvanceDay` transition, ADR 0024 §6): advance the
+/// injected fake clock and re-run the scheduler's OWN reconcile so a
+/// day-rollover CDC re-fires the journal rule — the prod-faithful path (WP1),
+/// never a raw `clock`-relation UPDATE. `days == 0` re-ticks the same day
+/// (idempotence probe: `reconcile_clock` sees `Unchanged`, no CDC, no re-fire).
+/// Hosted only on a clock-injected boot; a `None`-clock component would fail
+/// loud rather than silently no-op.
+#[async_trait::async_trait(?Send)]
+impl SutClockAdvance for HeadlessFrontendComponent {
+    async fn advance_clock_days(&self, days: i64) -> String {
+        let clock = self
+            .clock
+            .as_ref()
+            .expect("SutClockAdvance requires an injected TestClock (new_with_clock boot)");
+        const MS_PER_DAY: i64 = 86_400_000;
+        clock.advance(days * MS_PER_DAY);
+        holon::sync::clock_scheduler::reconcile_clock(self.engine.db_handle(), clock.as_ref())
+            .await
+            .expect("reconcile_clock after advancing the injected clock");
+        holon_api::CalendarDate::from_clock(clock.as_ref()).ymd()
+    }
+}
+
 /// `SutHistoryWrite` (the `UndoLastMutation` / `Redo` transitions): undo/redo
 /// the last committed mutation through the production `BackendEngine` undo
 /// stack — the same `engine().undo()/redo()` path `E2ESut` drives. The
@@ -2726,6 +2795,218 @@ mod tests {
              import would not wake the controller"
         );
         eprintln!("[A0-probe] global doc is cached/shared ✓");
+    }
+
+    // ── ADR 0024 §6 capstone: the AdvanceDay property as a directed test ──────
+    //
+    // Boots the real headless frontend over the FULL journal rule (trigger joins
+    // the `clock` relation, action is `holon_rule`) with an INJECTED fake clock,
+    // then drives day-rollover through `SutClockAdvance` and asserts the §6
+    // invariant directly: N advances spanning D distinct days ⇒ exactly D journal
+    // day-blocks (one per day, deterministic id), re-ticking the same day adds
+    // nothing, and each journal block is ordinary content (not program-marked).
+    // This exercises the whole prod path — injected clock → scheduler reconcile →
+    // clock CDC → journal trigger matview → action watcher → `block.create` with a
+    // WP2 deterministic id — so the composed generator rolling few AdvanceDay steps
+    // never leaves the property un-driven.
+
+    /// A fixed local-noon millis for `y-m-d`, timezone-robust (noon UTC lands
+    /// on the same civil date from UTC-12..+12), so the boot day is
+    /// deterministic regardless of the test host's TZ.
+    fn noon_millis(y: i32, m: u32, d: u32) -> i64 {
+        chrono::NaiveDate::from_ymd_opt(y, m, d)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_millis()
+    }
+
+    /// The journal DAY children under `block:journals`: `(id, name)` pairs
+    /// whose `name` parses as a `YYYY-MM-DD` date. Excludes the rule's
+    /// source blocks and the `Journal Auto-Create` heading (also children
+    /// of `block:journals`, but not date-named).
+    async fn journal_day_children(comp: &HeadlessFrontendComponent) -> Vec<(String, String)> {
+        // The `name` the action sets lands in the block's `properties` JSON.
+        let rows = comp
+            .engine
+            .db_handle()
+            .query(
+                "SELECT id, properties FROM block_raw WHERE parent_id = 'block:journals'",
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("journal children query");
+        rows.iter()
+            .filter_map(|r| {
+                let id = r.get("id").and_then(|v| v.as_string())?.to_string();
+                // `properties` is a jsonb column — CDC delivers it as a
+                // Value::Object (or Value::Json), never Value::String (archlint
+                // jsonb-as-string). The action's `name` param lands here.
+                let name = match r.get("properties")? {
+                    Value::Object(map) => map.get("name")?.as_string()?.to_string(),
+                    other => other.as_json_value()?.get("name")?.as_str()?.to_string(),
+                };
+                holon_api::CalendarDate::parse(&name)
+                    .ok()
+                    .map(|_| (id, name))
+            })
+            .collect()
+    }
+
+    /// Poll until the journal day-block count reaches `expected` (the rule
+    /// fires asynchronously off the CDC path), failing loud on timeout with
+    /// the current rows so a divergence is legible.
+    async fn wait_for_journal_days(
+        comp: &HeadlessFrontendComponent,
+        expected: usize,
+        timeout: Duration,
+    ) -> Vec<(String, String)> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let days = journal_day_children(comp).await;
+            if days.len() == expected {
+                return days;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "expected {expected} journal day-blocks, still {} after timeout: {days:?}",
+                days.len()
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// The FULL journal rule seed: `#+ID: journals` fixes the page id to
+    /// `block:journals`; the trigger/action pair lives under a `Journal
+    /// Auto-Create` heading (same parent, so `action_discovery` joins them)
+    /// and NOT directly under journals, so the day-blocks the action
+    /// creates are the only date-named children.
+    const JOURNAL_RULE_ORG: &str = "#+ID: journals\n* Journal Auto-Create\n#+BEGIN_SRC holon_sql \
+                                    :id journals::trigger::0\nSELECT today as name FROM clock \
+                                    WHERE grain = 'day'\n#+END_SRC\n#+BEGIN_SRC holon_rule :id \
+                                    journals::action::0\nblock.create(#{parent_id: \
+                                    \"block:journals\", name: col(\"name\")})\n#+END_SRC\n";
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn advance_day_fires_one_journal_per_distinct_day_idempotently() {
+        use holon_pbt_core::capabilities::SutClockAdvance;
+
+        let boot_ms = noon_millis(2026, 1, 15);
+        let clock = Arc::new(holon_api::TestClock::new(boot_ms));
+        let boot_date = holon_api::CalendarDate::from_clock(clock.as_ref()).ymd();
+
+        let comp = HeadlessFrontendComponent::new_with_clock(
+            &[("Journals.org", JOURNAL_RULE_ORG)],
+            Duration::from_millis(500),
+            false, // SqlOnly-shaped: no Loro. The rule path is storage-agnostic.
+            clock.clone(),
+        )
+        .await;
+
+        // Boot fired the rule once for the boot day.
+        let boot_days = wait_for_journal_days(&comp, 1, Duration::from_secs(10)).await;
+        assert_eq!(boot_days[0].1, boot_date, "boot journal is the boot day");
+        eprintln!("[advance-day] boot day journal: {boot_days:?}");
+
+        // WP2: the boot-day block carries the deterministic id
+        // UUIDv5(rule-id, firing-key, slot). Reproduce it from the discovered rule
+        // block id + the trigger row `{name: <date>}` and assert it matches — the
+        // convergence-by-naming property the whole capstone rests on.
+        let rule_id = comp
+            .engine
+            .db_handle()
+            .query(
+                "SELECT id FROM block_raw WHERE source_language = 'holon_rule'",
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("rule-block query")
+            .first()
+            .and_then(|r| r.get("id").and_then(|v| v.as_string()).map(str::to_string))
+            .expect("a holon_rule block exists");
+        eprintln!("[advance-day] discovered rule id: {rule_id}");
+        // The firing row is the trigger matview row: `{name: <date>, _rowid: 1}`
+        // (the clock relation holds a single day-row, so `_rowid` is stably 1).
+        let expect_id_for = |date: &str| -> String {
+            let mut row = holon_api::StorageEntity::new();
+            row.insert("name".into(), Value::String(date.to_string()));
+            row.insert("_rowid".into(), Value::Integer(1));
+            holon_api::effect_id::deterministic_block_id(
+                &holon_api::effect_id::RuleId::new(rule_id.clone()),
+                &holon_api::effect_id::FiringKey::from_row(&row),
+                &holon_api::effect_id::OutputSlot::first(),
+            )
+            .as_str()
+            .to_string()
+        };
+        assert_eq!(
+            boot_days[0].0,
+            expect_id_for(&boot_date),
+            "boot journal block carries the WP2 deterministic id"
+        );
+
+        // Journal day-blocks are ORDINARY content (WP3): not source/program blocks.
+        let program_rows = comp
+            .engine
+            .db_handle()
+            .query(
+                "SELECT id FROM block_raw WHERE parent_id = 'block:journals' AND content_type = \
+                 'source'",
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("program-child query");
+        assert!(
+            program_rows.is_empty(),
+            "journal day-blocks must be ordinary content, none program/source-marked"
+        );
+
+        // A rule-minted id is a deterministic name-based UUIDv5 (the version nibble
+        // is `5`), never a random v4 — the property that makes concurrent replicas
+        // converge (WP2). `block:XXXXXXXX-XXXX-5XXX-...`.
+        let is_uuid_v5 = |id: &str| {
+            id.strip_prefix("block:")
+                .and_then(|u| u.split('-').nth(2))
+                .map(|g| g.starts_with('5'))
+                .unwrap_or(false)
+        };
+        assert!(is_uuid_v5(&boot_days[0].0), "boot journal id is a v5 UUID");
+
+        // Advance one day: exactly one NEW journal appears, with a deterministic id.
+        let d1 = comp.advance_clock_days(1).await;
+        let after1 = wait_for_journal_days(&comp, 2, Duration::from_secs(10)).await;
+        let d1_block = after1
+            .iter()
+            .find(|(_, n)| n == &d1)
+            .expect("day+1 journal created");
+        assert!(is_uuid_v5(&d1_block.0), "day+1 journal id is a v5 UUID");
+
+        // Re-tick the SAME day: idempotent — no new block (deterministic-id upsert).
+        let d1_again = comp.advance_clock_days(0).await;
+        assert_eq!(d1_again, d1, "re-tick stays on the same day");
+        // Give any (erroneous) re-fire a chance to land, then assert nothing grew.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let after_retick = journal_day_children(&comp).await;
+        assert_eq!(
+            after_retick.len(),
+            2,
+            "re-ticking the same day adds nothing: {after_retick:?}"
+        );
+
+        // Advance a second distinct day: a third journal.
+        let d2 = comp.advance_clock_days(1).await;
+        let after2 = wait_for_journal_days(&comp, 3, Duration::from_secs(10)).await;
+        assert!(
+            after2.iter().any(|(_, n)| n == &d2),
+            "day+2 journal created"
+        );
+
+        // Exactly D=3 distinct days ⇒ 3 blocks, one per day.
+        let distinct_days: std::collections::BTreeSet<&String> =
+            after2.iter().map(|(_, n)| n).collect();
+        assert_eq!(distinct_days.len(), 3, "one journal per distinct day");
+        eprintln!("[advance-day] final journals: {after2:?} ✓");
     }
 
     /// Step 0 make-or-break PROBE (SutHandle decomposition / NavigateFocus):

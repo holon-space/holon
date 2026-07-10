@@ -48,8 +48,13 @@ pub struct FiringKey(String);
 
 impl FiringKey {
     pub fn from_row(row: &StorageEntity) -> Self {
+        // Internal columns (`_rowid`, watermarks) are excluded: they are not part
+        // of the semantic binding, and CDC delivers `_rowid` with a different
+        // Value type on the Created vs Updated path (Integer vs String), which
+        // would mint path-dependent ids and break cross-replica convergence.
         let mut entries: Vec<String> = row
             .iter()
+            .filter(|(k, _)| !k.starts_with('_'))
             .map(|(k, v)| format!("{k}={}", canonical_value(v)))
             .collect();
         entries.sort();
@@ -183,5 +188,29 @@ mod tests {
         let as_int = FiringKey::from_row(&row(&[("v", Value::Integer(1))]));
         let as_str = FiringKey::from_row(&row(&[("v", Value::String("1".into()))]));
         assert_ne!(as_int.as_str(), as_str.as_str());
+    }
+
+    #[test]
+    fn firing_key_excludes_internal_columns() {
+        // CDC delivers _rowid as Integer on the Created path but String on the
+        // Updated path; the key must be identical either way (and with no
+        // _rowid at all), or the same day's journal gets path-dependent ids.
+        let semantic = row(&[("name", Value::String("2026-07-10".into()))]);
+        let created_path = row(&[
+            ("name", Value::String("2026-07-10".into())),
+            ("_rowid", Value::Integer(1)),
+        ]);
+        let updated_path = row(&[
+            ("name", Value::String("2026-07-10".into())),
+            ("_rowid", Value::String("1".into())),
+        ]);
+        assert_eq!(
+            FiringKey::from_row(&semantic).as_str(),
+            FiringKey::from_row(&created_path).as_str()
+        );
+        assert_eq!(
+            FiringKey::from_row(&created_path).as_str(),
+            FiringKey::from_row(&updated_path).as_str()
+        );
     }
 }
