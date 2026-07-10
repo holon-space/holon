@@ -280,6 +280,72 @@ pub fn seed_forward_edge_corpus(state: &mut ReferenceState) {
     }
 }
 
+// ── Journals-machinery keystone closure (dogfood 2026-07-10 P0) ──────────────
+//
+// The dogfood id-less-row worker panic: the journals machinery's `holon_sql`
+// TRIGGER source block (`SELECT today AS name FROM clock`) produces rows with
+// NO entity `id`. When the frontend watches that machinery headless, those
+// VALUE rows reach `ReactiveRowSet::apply_change`, whose `Created` arm used to
+// `.expect("... 'id' column")` and PANIC the render worker — a panic
+// `inv-no-observed-errors` captures. `boot_and_seed_wide`'s bare `Journals.org`
+// SHELL omits the machinery, so the headless keystone never rendered an id-less
+// row and structurally could not see this class. This seeds the machinery into
+// BOTH the SUT boot org and the oracle, mirroring `seed_forward_edge_corpus`.
+//
+// GATING: env `HOLON_JOURNALS_MACHINERY_SEED=1` AND a frontend draw. Kept OFF
+// by default (unlike forward-edge's always-on-for-frontend) pending a live
+// keystone run confirming the render-worker reproduction end-to-end; the
+// panic→no-panic behaviour itself is proven at the unit layer by
+// `reactive::tests::id_less_value_row_does_not_panic_apply_change`. Promote to
+// always-on-for-frontend (drop the env gate) once verified.
+
+/// True when the journals-machinery closure is activated for this run.
+pub fn journals_machinery_enabled() -> bool {
+    std::env::var("HOLON_JOURNALS_MACHINERY_SEED").is_ok()
+}
+
+/// The journals TRIGGER source block id — `journals::trigger::0` in the
+/// packaged `assets/default/Journals.org`. Its `holon_sql` body is an aggregate
+/// whose result rows carry no entity `id` (the value-row shape).
+pub fn journals_trigger_block() -> EntityUri {
+    EntityUri::block("journals::trigger::0")
+}
+
+/// The `holon_sql` body of the journals trigger — an aggregate over the `clock`
+/// table projecting `name` only, so every result row is id-less (value-shaped).
+pub const JOURNALS_TRIGGER_SQL: &str = "SELECT today as name FROM clock WHERE grain = 'day'";
+
+/// `Journals.org` extended with the id-less-aggregate TRIGGER source block,
+/// used as the SUT boot org in place of the bare shell when the oracle carries
+/// the machinery. Matches the packaged asset's `:id`-tagged `holon_sql` src
+/// block so the org round-trip stays faithful.
+pub const JOURNALS_MACHINERY_ORG: &str = "#+ID: journals\n#+BEGIN_SRC holon_sql :id \
+                                          journals::trigger::0\nSELECT today as name FROM clock \
+                                          WHERE grain = 'day'\n#+END_SRC\n";
+
+/// Seed the journals TRIGGER source block into `state` as a NON-seed source
+/// child of the seed `block:journals` page — the reference half that makes the
+/// block-comparison invariants expect the machinery in the SUT projection.
+/// Mirrors [`seed_forward_edge_corpus`]. Called by [`wide_e2e_ref_for`] ONLY
+/// for a frontend wiring with the env gate on; [`boot_and_seed_wide`] keys the
+/// org seed on the block being present in the ref.
+pub fn seed_journals_machinery(state: &mut ReferenceState) {
+    let journals = EntityUri::parse("block:journals").expect("journals id");
+    let trigger = journals_trigger_block();
+    let mut block = Block::new_source(
+        trigger.clone(),
+        journals.clone(),
+        "holon_sql",
+        JOURNALS_TRIGGER_SQL,
+    );
+    block.set_sequence(0);
+    state
+        .domain
+        .block_state
+        .blocks
+        .insert(trigger.clone(), block);
+}
+
 /// The page-rooted leaf-sibling oracle (`parent`/`c1`/`c2` re-rooted under a
 /// seed `page_root`, focused on the page), wired by `subsystems` (invariant
 /// selection) + nav-history aligned to the headless boot stack `[journals,
@@ -494,9 +560,25 @@ pub async fn boot_and_seed_wide(
     // page IS journals), so the `/org` snapshot observes it and matches the
     // reference's `org_blocks` (non-seed, non-page journals child). Mirrors the
     // `live_mcp` sibling harness's `Journals.org` seed, extended to also track it.
+    // `Journals.org`: the bare page shell, OR (when the oracle carries the
+    // journals machinery — the id-less-aggregate trigger source block, seeded
+    // by `seed_journals_machinery` for a frontend draw with the env gate on)
+    // the machinery org, so the SUT actually ingests and watches the id-less
+    // source headless. Keyed on the block being present in the ref, exactly like
+    // the forward-edge org seed below.
+    let journals_org = if ref_state
+        .domain
+        .block_state
+        .blocks
+        .contains_key(&journals_trigger_block())
+    {
+        JOURNALS_MACHINERY_ORG
+    } else {
+        "#+ID: journals\n"
+    };
     let mut seed_files: Vec<(&str, &str)> = vec![
         ("structural-page.org", WIDE_TREE_ORG),
-        ("Journals.org", "#+ID: journals\n"),
+        ("Journals.org", journals_org),
     ];
     // Forward-edge ingest corpus (dogfood 2026-07-10 P0): seed
     // `forward-edge-page.org` through the REAL FileSyncController ingest ONLY
@@ -584,10 +666,15 @@ pub async fn boot_and_seed_wide(
     // (they are in neither `booted` nor `ref_ids` there); for a frontend draw
     // it keeps them non-seed so a dropped `fe-blocked`/`fe-target` diverges the
     // block-id sets and fires `inv-blocks-match-ref/{block_raw,matview}` as
-    // INGEST DATA LOSS.
+    // INGEST DATA LOSS. The journals TRIGGER source block (id-less-aggregate
+    // machinery) is a non-seed source child of journals when seeded — kept
+    // compared, like the forward-edge children. Listed unconditionally: a no-op
+    // when the machinery is not seeded (absent from both `booted` and
+    // `ref_ids`).
     let tree: BTreeSet<EntityUri> = [ids.parent.clone(), ids.c1.clone(), ids.c2.clone()]
         .into_iter()
         .chain(FORWARD_EDGE_IDS.into_iter().map(EntityUri::block))
+        .chain(std::iter::once(journals_trigger_block()))
         .collect();
     let booted = sut_ids(&caps).await;
     let ref_ids: BTreeSet<EntityUri> = ref_state
@@ -843,6 +930,11 @@ pub fn wide_e2e_ref_for(wiring: &Wiring) -> ReferenceState {
     // (no `SutSqlProjection`).
     if set.has_projection(Projection::ViewModel) {
         seed_forward_edge_corpus(&mut state);
+        // Journals-machinery closure: id-less-aggregate trigger source block.
+        // Frontend-only (Turso+ViewModel watch path) AND env-gated OFF by default.
+        if journals_machinery_enabled() {
+            seed_journals_machinery(&mut state);
+        }
     }
     state.with_cap_set(cap_set_for_wiring(wiring))
 }

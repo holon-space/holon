@@ -106,14 +106,27 @@ pub struct WidgetStateModel {
     rows: IndexMap<String, holon_api::StorageEntity>,
 }
 
+/// Twin of prod's `RowIdentity` store key
+/// (crates/holon-frontend/src/reactive.rs).
+///
+/// Mirrors prod exactly: an entity-shaped row keys on its `id`; a VALUE-shaped
+/// row (no entity `id` — aggregate / rule-trigger result) keys on its
+/// deterministic content hash under the `value:` scheme. The old twin dropped
+/// id-less rows (`if let Some(id)`), diverging from prod which now represents
+/// them; matching the key here makes the ref/SUT comparison cover value rows.
+fn row_identity_key(row: &holon_api::StorageEntity) -> String {
+    holon_api::RowIdentity::of_row(row)
+        .to_store_key()
+        .as_str()
+        .to_string()
+}
+
 impl WidgetStateModel {
     /// Create a new WidgetStateModel from initial data rows.
     pub fn from_data(data: &[holon_api::StorageEntity]) -> Self {
         let mut rows = IndexMap::new();
         for row in data {
-            if let Some(id) = row.get("id").and_then(|v| v.as_string()) {
-                rows.insert(id.to_string(), row.clone());
-            }
+            rows.insert(row_identity_key(row), row.clone());
         }
         Self { rows }
     }
@@ -122,13 +135,13 @@ impl WidgetStateModel {
     pub fn apply_change(&mut self, change: &RowChange) {
         match &change.change {
             ChangeData::Created { data, .. } => {
-                if let Some(id) = data.get("id").and_then(|v| v.as_string()) {
-                    self.rows.insert(id.to_string(), data.clone());
-                }
+                self.rows.insert(row_identity_key(data), data.clone());
             }
             ChangeData::Updated { data, .. } => {
-                if let Some(id) = data.get("id").and_then(|v| v.as_string()) {
-                    self.rows.insert(id.to_string(), data.clone());
+                // Value rows never arrive as `Updated` (no id to key CDC by);
+                // an entity row updates the entry under its id.
+                if data.get("id").and_then(|v| v.as_string()).is_some() {
+                    self.rows.insert(row_identity_key(data), data.clone());
                 }
             }
             ChangeData::Deleted { id, .. } => {
