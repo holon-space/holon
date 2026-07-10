@@ -193,6 +193,89 @@ pub const WIDE_TREE_ORG: &str = "#+ID: structural-page\n* parent\n:PROPERTIES:\n
                                  parent\n:END:\n* c1\n:PROPERTIES:\n:ID: c1\n:END:\n* \
                                  c2\n:PROPERTIES:\n:ID: c2\n:END:\n";
 
+/// The `#+ID:` page id of the forward-edge ingest-totality corpus.
+pub fn forward_edge_page() -> EntityUri {
+    EntityUri::block("forward-edge-page")
+}
+
+/// The FORWARD-EDGE INGEST-TOTALITY regression corpus (dogfood 2026-07-10 P0).
+///
+/// `fe-blocked` carries a forward same-file `:REQUIRES: fe-target` edge — the
+/// target is a LATER sibling in the SAME file. Before the fix, `fe-blocked`'s
+/// create transaction hit the `block_requires.required_id` FK at COMMIT (the
+/// target row not yet inserted), aborted the WHOLE file ingest, and silently
+/// dropped every block from `fe-blocked` onward (`fe-blocked` + `fe-target`)
+/// while `fe-parent` survived. The fix drops that soft target FK
+/// (`crates/holon-turso/sql/schema/block_requires.sql`) so all three land.
+///
+/// This is the environment half of `inv-ingest-totality`. It is seeded (by
+/// [`boot_and_seed_wide`]) ONLY for a frontend draw whose oracle carries the
+/// corpus ([`seed_forward_edge_corpus`]) — the Turso ingest path is where the
+/// bug lives; a Loro-only draw has no such corpus and `inv-ingest-totality`
+/// deselects there. Mirrors the standalone `forward_edge_ingest_regression`
+/// shape, minus its cross-file dangling `now-query-mcp` target: the INNER-JOIN
+/// `block_requirement_edges_matview` drops a dangling target (matview
+/// `requires=[]`) while the org drawer keeps it, so a dangling target would
+/// make the matview and org projections disagree on the compared `requires`
+/// field. A forward SAME-FILE ref alone reproduces the COMMIT-time FK abort
+/// with all three projections agreeing on `requires=[fe-target]`.
+pub const FORWARD_EDGE_ORG: &str = "#+ID: forward-edge-page\n* fe-parent\n:PROPERTIES:\n:ID: \
+                                    fe-parent\n:END:\n* fe-blocked\n:PROPERTIES:\n:ID: \
+                                    fe-blocked\n:REQUIRES: fe-target\n:END:\n* \
+                                    fe-target\n:PROPERTIES:\n:ID: fe-target\n:END:\n";
+
+/// The three non-page ids the forward-edge corpus MUST ingest (in file order).
+/// Every one of these must land in the SUT projection — `fe-blocked` (the
+/// forward-`:REQUIRES:` block) and `fe-target` are what the pre-fix FK abort
+/// dropped.
+pub const FORWARD_EDGE_IDS: [&str; 3] = ["fe-parent", "fe-blocked", "fe-target"];
+
+/// Seed the forward-edge ingest-totality corpus into `state` as NON-seed
+/// working blocks under a seed `forward-edge-page` — the reference half that
+/// makes `inv-ingest-totality` (and the symmetric `inv-blocks-match-ref/*`)
+/// expect `fe-parent`/`fe-blocked`/`fe-target` in the SUT projection. Called by
+/// [`wide_e2e_ref_for`] ONLY for a frontend wiring, so a Loro-only draw's
+/// oracle never carries the corpus (and the file is never seeded there —
+/// [`boot_and_seed_wide`] keys the org seed on the corpus being present in the
+/// ref). The page is a seed page (filtered from the block comparison); its
+/// children are non-seed and stay out of the scaffold seed (their ids are in
+/// [`boot_and_seed_wide`]'s `tree` set), so a dropped `fe-blocked`/`fe-target`
+/// diverges the ref/SUT block-id sets and fires `inv-ingest-totality`.
+pub fn seed_forward_edge_corpus(state: &mut ReferenceState) {
+    let page = forward_edge_page();
+    let mut page_block = Block::new_text(page.clone(), EntityUri::no_parent(), "forward-edge-page");
+    page_block.set_page(true);
+    state
+        .domain
+        .block_state
+        .blocks
+        .insert(page.clone(), page_block);
+    state
+        .domain
+        .block_state
+        .block_documents
+        .insert(page.clone(), EntityUri::no_parent());
+    state
+        .files
+        .documents
+        .insert(page.clone(), "forward-edge-page.org".to_string());
+
+    for (i, name) in FORWARD_EDGE_IDS.into_iter().enumerate() {
+        let id = EntityUri::block(name);
+        let mut block = Block::new_text(id.clone(), page.clone(), name);
+        block.set_sequence(i as i64);
+        // `fe-blocked` forward-`:REQUIRES:` its later sibling `fe-target` — the edge
+        // that the pre-fix `block_requires.required_id` FK rejected at COMMIT.
+        // The org drawer, the `block` matview (inner-join keeps the present
+        // target), and the Loro authority all project `requires=[fe-target]`,
+        // so the field comparison stays consistent.
+        if name == "fe-blocked" {
+            block.requires = vec![EntityUri::block("fe-target")];
+        }
+        state.domain.block_state.blocks.insert(id.clone(), block);
+    }
+}
+
 /// The page-rooted leaf-sibling oracle (`parent`/`c1`/`c2` re-rooted under a
 /// seed `page_root`, focused on the page), wired by `subsystems` (invariant
 /// selection) + nav-history aligned to the headless boot stack `[journals,
@@ -411,6 +494,21 @@ pub async fn boot_and_seed_wide(
         ("structural-page.org", WIDE_TREE_ORG),
         ("Journals.org", "#+ID: journals\n"),
     ];
+    // Forward-edge ingest-totality corpus (dogfood 2026-07-10 P0): seed
+    // `forward-edge-page.org` through the REAL FileSyncController ingest ONLY
+    // when this draw's oracle carries the corpus (a frontend draw —
+    // `wide_e2e_ref_for` inserts it via `seed_forward_edge_corpus`). Keying the
+    // file seed on the oracle keeps every non-corpus frontend boot (the teeth,
+    // which build their own oracles) untouched: no corpus in the ref ⇒ no file on
+    // disk ⇒ no `/org` divergence.
+    if ref_state
+        .domain
+        .block_state
+        .blocks
+        .contains_key(&forward_edge_page())
+    {
+        seed_files.push(("forward-edge-page.org", FORWARD_EDGE_ORG));
+    }
     for (name, body) in &soak_files {
         seed_files.push((name.as_str(), body.as_str()));
     }
@@ -475,8 +573,16 @@ pub async fn boot_and_seed_wide(
     // (filtered) to match the oracle's modeled-but-not-booted copy.
     let ids = fixed_ids();
     let journals = EntityUri::parse("block:journals").expect("journals id");
+    // The non-seed working tree kept OUT of the scaffold seed (so it stays
+    // compared): `parent`/`c1`/`c2` plus, for a frontend draw that seeded it,
+    // the forward-edge corpus children (`fe-parent`/`fe-blocked`/`fe-target`).
+    // Listing the corpus ids unconditionally is a no-op for a Loro-only draw
+    // (they are in neither `booted` nor `ref_ids` there); for a frontend draw
+    // it keeps them non-seed so a dropped `fe-blocked`/`fe-target` diverges the
+    // block-id sets and fires `inv-ingest-totality`.
     let tree: BTreeSet<EntityUri> = [ids.parent.clone(), ids.c1.clone(), ids.c2.clone()]
         .into_iter()
+        .chain(FORWARD_EDGE_IDS.into_iter().map(EntityUri::block))
         .collect();
     let booted = sut_ids(&caps).await;
     let ref_ids: BTreeSet<EntityUri> = ref_state
@@ -724,6 +830,15 @@ pub fn wide_e2e_ref_for(wiring: &Wiring) -> ReferenceState {
     let set = set_for_wiring(wiring);
     let mut state = wide_ref();
     state.wiring = set.wiring.clone();
+    // Forward-edge ingest-totality corpus (dogfood 2026-07-10 P0): a
+    // Turso-ingest-only regression, so seed it ONLY for a frontend draw.
+    // `boot_and_seed_wide` keys the `forward-edge-page.org` seed on this corpus
+    // being present in the oracle, so a Loro-only draw (no `ViewModel`
+    // projection) never carries it and `inv-ingest-totality` deselects there
+    // (no `SutSqlProjection`).
+    if set.has_projection(Projection::ViewModel) {
+        seed_forward_edge_corpus(&mut state);
+    }
     state.with_cap_set(cap_set_for_wiring(wiring))
 }
 
