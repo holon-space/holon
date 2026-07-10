@@ -229,6 +229,44 @@ impl McpServerHandle {
     }
 }
 
+/// The `rmcp` streamable-HTTP transport (`server_side_http.rs` in the
+/// `modelcontextprotocol/rust-sdk` crate) hardcodes its SSE response
+/// `Content-Type` to the bare `text/event-stream` — no `charset` parameter —
+/// via `Response::builder().header(CONTENT_TYPE, EVENT_STREAM_MIME_TYPE)`.
+/// Per RFC 2616/the fetch spec, a charset-less `text/*` response defaults to
+/// Latin-1 for spec-compliant HTTP clients, so every multibyte character
+/// (UTF-8 in tool output, e.g. dogfood seed text) gets mojibake'd by any
+/// client that honors that default — poisoning debugging evidence before it
+/// ever reaches the tool caller. That header is set inside the vendored git
+/// dependency, not our code, so we can't patch the literal in place without
+/// forking `rmcp`; instead this response-rewriting middleware (wrapping the
+/// whole router, not the dependency) appends `; charset=utf-8` to
+/// `text/event-stream` and bare `application/json` responses on the way out.
+async fn add_utf8_charset_to_content_type(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut response = next.run(request).await;
+    if let Some(content_type) = response.headers().get(axum::http::header::CONTENT_TYPE) {
+        if let Ok(ct_str) = content_type.to_str() {
+            let with_charset = if ct_str == "text/event-stream" {
+                Some("text/event-stream; charset=utf-8")
+            } else if ct_str == "application/json" {
+                Some("application/json; charset=utf-8")
+            } else {
+                None
+            };
+            if let Some(value) = with_charset {
+                response.headers_mut().insert(
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::HeaderValue::from_static(value),
+                );
+            }
+        }
+    }
+    response
+}
+
 /// Run the MCP HTTP server
 ///
 /// This is the core server loop, extracted for reuse by both the standalone
@@ -274,7 +312,8 @@ pub async fn run_http_server(
 
         let app = axum::Router::new()
             .route("/health", axum::routing::get(|| async { "OK" }))
-            .nest_service("/mcp", mcp_service);
+            .nest_service("/mcp", mcp_service)
+            .layer(axum::middleware::from_fn(add_utf8_charset_to_content_type));
 
         let listener = tokio::net::TcpListener::bind(bind_address).await?;
         tracing::info!(
@@ -373,7 +412,8 @@ pub async fn run_http_server(
     let app = Router::new()
         .route("/", get(index))
         .route("/health", get(health_check))
-        .nest_service("/mcp", mcp_service);
+        .nest_service("/mcp", mcp_service)
+        .layer(axum::middleware::from_fn(add_utf8_charset_to_content_type));
 
     // Start HTTP server
     let listener = tokio::net::TcpListener::bind(bind_address).await?;
@@ -498,5 +538,73 @@ impl McpInjectorExt for Injector {
         self.provide::<McpServerConfig>(Provider::root(move |_| Shared::new(config.clone())));
         McpServerModule.configure(self)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod content_type_charset_tests {
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::Request;
+    use axum::http::StatusCode;
+    use axum::routing::get;
+    use tower::ServiceExt;
+
+    use super::add_utf8_charset_to_content_type;
+
+    async fn probe(content_type: &'static str) -> String {
+        let app = Router::new()
+            .route(
+                "/probe",
+                get(move || async move {
+                    axum::response::Response::builder()
+                        .status(StatusCode::OK)
+                        .header(axum::http::header::CONTENT_TYPE, content_type)
+                        .body(Body::from("data: {}\n\n"))
+                        .expect("valid response")
+                }),
+            )
+            .layer(axum::middleware::from_fn(add_utf8_charset_to_content_type));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/probe")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn sse_content_type_gets_utf8_charset() {
+        assert_eq!(
+            probe("text/event-stream").await,
+            "text/event-stream; charset=utf-8"
+        );
+    }
+
+    #[tokio::test]
+    async fn json_content_type_gets_utf8_charset() {
+        assert_eq!(
+            probe("application/json").await,
+            "application/json; charset=utf-8"
+        );
+    }
+
+    #[tokio::test]
+    async fn content_type_already_carrying_charset_is_untouched() {
+        assert_eq!(
+            probe("text/event-stream; charset=utf-8").await,
+            "text/event-stream; charset=utf-8"
+        );
     }
 }
