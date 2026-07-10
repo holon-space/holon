@@ -163,6 +163,45 @@ impl ParsedProfile {
     }
 }
 
+/// Build a visibly-degraded render profile for a row that has no entity-shaped
+/// `id` (so it cannot be resolved to an entity profile).
+///
+/// Such rows are legal — they come from rule-trigger / aggregate queries — but
+/// they carry no entity to look a profile up by. Rather than panic the render
+/// worker (which blanks the whole page with a silent -32603), we render the raw
+/// row content behind a `⚠ unresolved row` marker: the page still renders and
+/// the degraded state is disclosed on screen, matching the fail-loud contract.
+fn degraded_missing_id_profile(row: &HashMap<String, Value>) -> RenderProfile {
+    let mut cells: Vec<String> = row
+        .iter()
+        .map(|(k, v)| format!("{k}={}", value_display(v)))
+        .collect();
+    cells.sort();
+    let text = format!("⚠ unresolved row (no id): {}", cells.join(", "));
+    RenderProfile {
+        name: "degraded-missing-id".to_string(),
+        render: RenderExpr::Literal {
+            value: Value::String(text),
+        },
+        operations: vec![],
+        variants: vec![],
+    }
+}
+
+/// Compact one-line display of a cell value for the degraded-row marker.
+fn value_display(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Integer(i) => i.to_string(),
+        Value::Float(f) => f.to_string(),
+        Value::Boolean(b) => b.to_string(),
+        Value::DateTime(s) => s.clone(),
+        Value::Json(s) => s.clone(),
+        Value::Null => "null".to_string(),
+        other => format!("{other:?}"),
+    }
+}
+
 /// Strip the `= ` prefix convention from a Rhai expression string.
 fn strip_rhai_prefix(s: &str) -> String {
     s.strip_prefix('=')
@@ -789,17 +828,29 @@ impl ProfileResolving for ProfileResolver {
     ) -> (Arc<RenderProfile>, HashMap<String, holon_api::Value>) {
         let cache = self.cache_signal.get_cloned();
 
-        let entity_uri = row_id(row).unwrap_or_else(|e| {
-            // The enrichment boundary REQUIRES entity-shaped rows (a scheme'd
-            // `id`). A row without one is almost always a `watch_query` pointed at a
-            // junction/aggregate projection (e.g. the advice `advice_suppressed`
-            // watch, 2026-07-09): project `... AS id` or route it through a
-            // signal-only path instead of the enriched watch. Fail loud with the row.
-            panic!(
-                "profile resolver: row has no entity `id` — watch_query/enrichment requires \
-                 entity-shaped rows (project `... AS id`): {e}"
-            )
-        });
+        // A row either carries an entity-shaped `id` or it does not — BOTH are
+        // representable, legal inputs. Id-less rows arise legitimately from
+        // rule-trigger / aggregate queries (e.g. `SELECT date('now') AS name`,
+        // dogfood 2026-07-10) that are pointed at the enriched watch path.
+        // Historically this `panic!`ed and killed the whole render/resolve
+        // worker, so the page returned -32603 with no error banner. Instead,
+        // degrade VISIBLY: log loudly and render the raw row content marked as
+        // unresolved, so the page still renders and the degradation is disclosed
+        // both in the log and on screen. (The full fix — action-rule blocks must
+        // not render as display queries — is deferred as "fork A".)
+        let entity_uri = match row_id(row) {
+            Ok(uri) => uri,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "profile resolver: row has no entity `id` — rendering a visible \
+                     degraded row instead of resolving to an entity profile (id-less \
+                     rows come from rule-trigger/aggregate queries; project `... AS id` \
+                     or route through a signal-only path to resolve normally)"
+                );
+                return (Arc::new(degraded_missing_id_profile(row)), HashMap::new());
+            }
+        };
         let entity_name_str = entity_uri.scheme();
         let entity_name = EntityName::new(entity_name_str);
 
@@ -855,17 +906,29 @@ impl ProfileResolving for ProfileResolver {
         row: &HashMap<String, holon_api::Value>,
     ) -> (Arc<RenderProfile>, HashMap<String, holon_api::Value>) {
         let cache = self.cache_signal.get_cloned();
-        let entity_uri = row_id(row).unwrap_or_else(|e| {
-            // The enrichment boundary REQUIRES entity-shaped rows (a scheme'd
-            // `id`). A row without one is almost always a `watch_query` pointed at a
-            // junction/aggregate projection (e.g. the advice `advice_suppressed`
-            // watch, 2026-07-09): project `... AS id` or route it through a
-            // signal-only path instead of the enriched watch. Fail loud with the row.
-            panic!(
-                "profile resolver: row has no entity `id` — watch_query/enrichment requires \
-                 entity-shaped rows (project `... AS id`): {e}"
-            )
-        });
+        // A row either carries an entity-shaped `id` or it does not — BOTH are
+        // representable, legal inputs. Id-less rows arise legitimately from
+        // rule-trigger / aggregate queries (e.g. `SELECT date('now') AS name`,
+        // dogfood 2026-07-10) that are pointed at the enriched watch path.
+        // Historically this `panic!`ed and killed the whole render/resolve
+        // worker, so the page returned -32603 with no error banner. Instead,
+        // degrade VISIBLY: log loudly and render the raw row content marked as
+        // unresolved, so the page still renders and the degradation is disclosed
+        // both in the log and on screen. (The full fix — action-rule blocks must
+        // not render as display queries — is deferred as "fork A".)
+        let entity_uri = match row_id(row) {
+            Ok(uri) => uri,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "profile resolver: row has no entity `id` — rendering a visible \
+                     degraded row instead of resolving to an entity profile (id-less \
+                     rows come from rule-trigger/aggregate queries; project `... AS id` \
+                     or route through a signal-only path to resolve normally)"
+                );
+                return (Arc::new(degraded_missing_id_profile(row)), HashMap::new());
+            }
+        };
         let entity_name_str = entity_uri.scheme();
         let entity_name = EntityName::new(entity_name_str);
 
@@ -1587,5 +1650,35 @@ variants:
             computed.get("is_legacy_rule"),
             Some(&holon_api::Value::Boolean(true))
         );
+    }
+
+    /// Regression (dogfood 2026-07-10): a rule-trigger / aggregate query row
+    /// that carries NO entity-shaped `id` (e.g. `SELECT
+    /// date('now','localtime') AS name`) used to panic the profile resolver
+    /// ("row has no entity `id`") and blank the whole page with a silent
+    /// -32603. It must now degrade VISIBLY: a `degraded-missing-id` profile
+    /// that renders the raw row content behind a loud marker, and never
+    /// panic.
+    #[test]
+    fn id_less_row_degrades_visibly_instead_of_panicking() {
+        let mut row: HashMap<String, Value> = HashMap::new();
+        row.insert("_rowid".to_string(), Value::Integer(1));
+        row.insert("name".to_string(), Value::String("2026-07-10".to_string()));
+
+        let profile = degraded_missing_id_profile(&row);
+        assert_eq!(profile.name, "degraded-missing-id");
+        let RenderExpr::Literal {
+            value: Value::String(text),
+        } = &profile.render
+        else {
+            panic!(
+                "degraded profile must render a string literal, got {:?}",
+                profile.render
+            );
+        };
+        // Loud marker + the actual row data are both surfaced on screen.
+        assert!(text.contains("unresolved row"), "marker missing: {text}");
+        assert!(text.contains("name=2026-07-10"), "row data missing: {text}");
+        assert!(text.contains("_rowid=1"), "row data missing: {text}");
     }
 }
