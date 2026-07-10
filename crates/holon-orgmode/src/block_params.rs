@@ -220,4 +220,73 @@ mod tests {
             );
         }
     }
+
+    /// Regression (dogfood 2026-07-10, on-disk data loss): org ingest extracts
+    /// inline `[[…]]`/`*bold*` markup into `block.marks` and stores the
+    /// rendered LABEL as `content`. The store-write params MUST carry
+    /// `marks` (JSON, the exact shape `Block::try_from` reads back from the
+    /// `marks` column) — otherwise readback yields `marks = None`,
+    /// writeback re-emits the stripped label, and the user's link syntax is
+    /// permanently destroyed on disk.
+    ///
+    /// Mirrors the canonical Loro write path
+    /// (`loro_sync_controller::block_to_params`, which DOES emit `marks`); the
+    /// org-ingest path here was the sole writer that dropped it.
+    #[test]
+    fn ingested_inline_marks_survive_store_write_params() {
+        use crate::models::ToOrg;
+
+        let org = "* See [[Linked Page]] here\n";
+        let parent_dir_id = EntityUri::no_parent();
+        let path = std::path::Path::new("/vault/doc.org");
+        let root = std::path::Path::new("/vault");
+        let parsed = parse_org_file(path, org, &parent_dir_id, root).expect("parse org fixture");
+
+        let block = parsed
+            .blocks
+            .iter()
+            .find(|b| b.marks.as_ref().is_some_and(|m| !m.is_empty()))
+            .unwrap_or_else(|| {
+                panic!(
+                    "parser must extract a Link mark from `[[Linked Page]]`; got {:?}",
+                    parsed.blocks
+                )
+            });
+
+        // Parse side: the raw `[[…]]` was stripped to its label in content.
+        assert!(
+            block.content.contains("Linked Page") && !block.content.contains("[["),
+            "expected stripped label in content, got {:?}",
+            block.content
+        );
+
+        // Store-write side (org-ingest → SQL create/update params).
+        let params = build_block_params(block, &parsed.document.id, &parsed.document.id);
+        let marks_param = params.get("marks").unwrap_or_else(|| {
+            panic!(
+                "build_block_params dropped `marks` — org-ingested link syntax is lost on store \
+                 write; params={params:?}"
+            )
+        });
+        let stored_marks = holon_api::marks_from_json(
+            marks_param
+                .as_string()
+                .expect("`marks` store param must be a JSON string"),
+        )
+        .expect("`marks` store param must hold valid marks JSON");
+        assert_eq!(
+            &stored_marks,
+            block.marks.as_ref().unwrap(),
+            "store-write marks diverge from parsed marks"
+        );
+
+        // Readback side: a block reconstructed with those marks re-emits the link.
+        let mut restored = block.clone();
+        restored.marks = Some(stored_marks);
+        let rendered = restored.to_org();
+        assert!(
+            rendered.contains("[[Linked Page]]"),
+            "writeback must re-emit `[[Linked Page]]` from restored marks, got {rendered:?}"
+        );
+    }
 }
