@@ -30,7 +30,6 @@ pub mod frontend_bounds_rendered;
 pub mod frontend_engine;
 pub mod frontend_no_error_widgets;
 pub mod frontend_root_not_error;
-pub mod ingest_totality;
 pub mod live_children_match_ref;
 pub mod live_tree_matches_fresh;
 pub mod loro_children_match_ref;
