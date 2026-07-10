@@ -205,9 +205,25 @@ const BLOCKS_KNOWN_COLUMNS: &[&str] = &[
     "_change_origin",
 ];
 
-/// A prepared operation: SQL statements ready for execution.
+/// A prepared operation, split into two FK-ordered phases so a batch can apply
+/// ALL block_raw rows before ANY edge junction (rows-then-edges). This makes
+/// the op-vec order irrelevant for FK safety: a create batch containing a
+/// `block_requires`/`advice_suppressed` pair can never insert the junction
+/// before its referenced row exists — the root cause of the Face-A whole-batch
+/// rollback.
 struct PreparedOp {
-    sql_statements: Vec<String>,
+    /// `block_raw` row statements (INSERT/UPSERT/DELETE of the row itself).
+    /// Order-independent within one transaction: `parent_id`'s self-FK is
+    /// DEFERRABLE INITIALLY DEFERRED (checked at COMMIT), and the junction
+    /// tables (`block_requires`/`block_tags`/`advice_suppressed`) are `ON
+    /// DELETE CASCADE`, so deleting a row cleans up its junctions
+    /// automatically.
+    row_statements: Vec<String>,
+    /// Junction/edge-table statements (`block_requires`/`block_tags`/
+    /// `advice_suppressed`). Their FKs into `block_raw(id)` are IMMEDIATE, so
+    /// they MUST run after every referenced `block_raw` row exists — i.e.
+    /// after all `row_statements` of the whole batch.
+    edge_statements: Vec<String>,
 }
 
 /// SQL-based operation provider that writes directly to a Turso table.
@@ -494,9 +510,14 @@ impl SqlOperationProvider {
         })
     }
 
-    /// Execute a prepared operation: run its SQL statements.
+    /// Execute a prepared operation: run its SQL statements, rows before edges
+    /// so a junction never precedes its referenced `block_raw` row.
     async fn execute_prepared(&self, prepared: PreparedOp) -> Result<()> {
-        for sql in &prepared.sql_statements {
+        for sql in prepared
+            .row_statements
+            .iter()
+            .chain(&prepared.edge_statements)
+        {
             self.db_handle
                 .execute(sql, vec![])
                 .await
@@ -560,7 +581,7 @@ impl SqlOperationProvider {
                 format!("{q} = excluded.{q}")
             })
             .collect();
-        let mut sql_statements = vec![format!(
+        let row_statements = vec![format!(
             "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT(id) DO UPDATE SET {}",
             self.table_name,
             columns.join(", "),
@@ -575,15 +596,19 @@ impl SqlOperationProvider {
 
         // Edge-field rows: clear and reinsert per descriptor (no-op when no
         // edge fields are declared on this entity).
+        let mut edge_statements = Vec::new();
         for (descriptor, targets) in &edge_field_params {
-            sql_statements.extend(Self::edge_field_replace_sql(
+            edge_statements.extend(Self::edge_field_replace_sql(
                 aggregate_id,
                 descriptor,
                 targets,
             ));
         }
 
-        PreparedOp { sql_statements }
+        PreparedOp {
+            row_statements,
+            edge_statements,
+        }
     }
 
     /// Build SQL for an update operation without executing.
@@ -765,19 +790,23 @@ impl SqlOperationProvider {
 
         let where_clause = format!("id = '{}'", id.replace('\'', "''"));
 
-        let mut sql_statements = Vec::new();
+        let mut row_statements = Vec::new();
         if !update_pairs.is_empty() {
-            sql_statements.push(format!(
+            row_statements.push(format!(
                 "UPDATE {} SET {} WHERE {}",
                 self.table_name,
                 set_clauses.join(", "),
                 where_clause,
             ));
         }
+        let mut edge_statements = Vec::new();
         for (descriptor, targets) in &edge_field_params {
-            sql_statements.extend(Self::edge_field_replace_sql(id, descriptor, targets));
+            edge_statements.extend(Self::edge_field_replace_sql(id, descriptor, targets));
         }
-        Ok(Some(PreparedOp { sql_statements }))
+        Ok(Some(PreparedOp {
+            row_statements,
+            edge_statements,
+        }))
     }
 
     /// Build SQL for a delete operation (with cascade) without executing.
@@ -828,11 +857,14 @@ impl SqlOperationProvider {
             }
         }
 
-        let mut sql_statements = Vec::new();
+        // All statements are `block_raw` row DELETEs; the junction tables are
+        // `ON DELETE CASCADE`, so removing the row cleans up its edges. No
+        // `edge_statements` needed.
+        let mut row_statements = Vec::new();
 
         // Delete descendants bottom-up
         for desc_id in all_ids.iter().rev() {
-            sql_statements.push(format!(
+            row_statements.push(format!(
                 "DELETE FROM {} WHERE id = '{}'",
                 self.table_name,
                 desc_id.replace('\'', "''")
@@ -840,13 +872,16 @@ impl SqlOperationProvider {
         }
 
         // Delete the target block itself
-        sql_statements.push(format!(
+        row_statements.push(format!(
             "DELETE FROM {} WHERE id = '{}'",
             self.table_name,
             id.replace('\'', "''")
         ));
 
-        Ok(PreparedOp { sql_statements })
+        Ok(PreparedOp {
+            row_statements,
+            edge_statements: Vec::new(),
+        })
     }
 }
 
@@ -1178,7 +1213,13 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 // offending row on that commit-time failure, so a rejected create
                 // leaves no partial row — integrity, not just a loud error.
                 let mut stmts = Vec::new();
-                stmts.extend(prepared.sql_statements.iter().map(|s| (s.clone(), vec![])));
+                stmts.extend(
+                    prepared
+                        .row_statements
+                        .iter()
+                        .chain(&prepared.edge_statements)
+                        .map(|s| (s.clone(), vec![])),
+                );
                 if let Err(e) = self.db_handle.transaction(stmts).await {
                     let msg = e.to_string();
                     if Self::is_fk_violation(&msg) {
@@ -1209,7 +1250,11 @@ impl OriginTaggedWrites for SqlOperationProvider {
                              {parent} EXISTS — a junction/edge source FK or another constraint \
                              rejected the write, NOT the parent. Failing statements: {:#?}. \
                              Underlying: {msg}",
-                            prepared.sql_statements
+                            prepared
+                                .row_statements
+                                .iter()
+                                .chain(&prepared.edge_statements)
+                                .collect::<Vec<_>>()
                         )
                         .into());
                     }
@@ -1350,8 +1395,10 @@ impl OriginTaggedWrites for SqlOperationProvider {
         }
 
         // Phase 1: Prepare all operations (may involve async DB reads for delete
-        // cascade)
-        let mut all_sql = Vec::new();
+        // cascade), collecting block_raw ROW statements separately from EDGE
+        // (junction) statements.
+        let mut row_sql: Vec<String> = Vec::new();
+        let mut edge_sql: Vec<String> = Vec::new();
 
         for (op_name, params) in &operations {
             let prepared = match op_name.as_str() {
@@ -1363,8 +1410,21 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 "delete" => self.prepare_delete(params).await?,
                 other => return Err(format!("Unknown batch operation: {}", other).into()),
             };
-            all_sql.extend(prepared.sql_statements.into_iter().map(|s| (s, vec![])));
+            row_sql.extend(prepared.row_statements);
+            edge_sql.extend(prepared.edge_statements);
         }
+
+        // Rows-then-edges: every `block_raw` row of the WHOLE batch is written
+        // before any junction row, so a junction's IMMEDIATE FK into `block_raw`
+        // always finds its target regardless of op-vec order. Row ordering among
+        // themselves is safe (deferred `parent_id` self-FK settles at COMMIT;
+        // junction cleanup on delete is `ON DELETE CASCADE`). This is the
+        // structural fix for the Face-A whole-batch rollback.
+        let all_sql: Vec<_> = row_sql
+            .into_iter()
+            .chain(edge_sql)
+            .map(|s| (s, vec![]))
+            .collect();
 
         let count = operations.len();
 
@@ -1432,7 +1492,7 @@ mod clock_tests {
         let prepared = provider.prepare_create(&params);
 
         db_handle
-            .execute(&prepared.sql_statements[0], vec![])
+            .execute(&prepared.row_statements[0], vec![])
             .await
             .expect("insert");
 
@@ -1508,5 +1568,95 @@ mod create_id_tests {
             uuid::Uuid::parse_str(uuid_part).is_ok(),
             "minted id suffix should be a uuid, got {uuid_part:?}"
         );
+    }
+}
+#[cfg(test)]
+mod two_phase_fk_tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    /// Face-A regression: a create batch containing a `requires` pair — the
+    /// DEPENDENT block ordered BEFORE its required target — must apply
+    /// FK-clean. Before the rows-then-edges two-phase split, the
+    /// dependent's junction INSERT ran before the target's `block_raw` row
+    /// existed, FK-rejecting and rolling back the WHOLE transaction (losing
+    /// BOTH blocks). The two-phase apply writes every `block_raw` row
+    /// before any junction, so op-vec order is irrelevant.
+    #[tokio::test]
+    async fn requires_pair_batch_applies_fk_clean_regardless_of_op_order() {
+        let (_backend, db_handle) = crate::storage::turso::TursoBackend::new_in_memory()
+            .await
+            .expect("in-memory turso");
+        for ddl in [
+            "PRAGMA foreign_keys = ON",
+            "CREATE TABLE block_raw (id TEXT PRIMARY KEY, content TEXT, created_at INTEGER, \
+             updated_at INTEGER)",
+            "CREATE TABLE block_requires (block_id TEXT NOT NULL, required_id TEXT NOT NULL, \
+             PRIMARY KEY (block_id, required_id), FOREIGN KEY (block_id) REFERENCES block_raw(id) \
+             ON DELETE CASCADE, FOREIGN KEY (required_id) REFERENCES block_raw(id) ON DELETE \
+             CASCADE)",
+        ] {
+            db_handle.execute(ddl, vec![]).await.expect("ddl");
+        }
+
+        // Precondition: FK enforcement is actually live in this environment —
+        // a junction row referencing absent blocks must be REJECTED. Without
+        // this, the test below would pass vacuously.
+        db_handle
+            .execute(
+                "INSERT INTO block_requires (block_id, required_id) VALUES ('block:ghostA', \
+                 'block:ghostB')",
+                vec![],
+            )
+            .await
+            .expect_err("FK enforcement must be ON for this test to be meaningful");
+
+        let requires_descriptor = EdgeFieldDescriptor {
+            entity: "block".to_string(),
+            field: "requires".to_string(),
+            join_table: "block_requires".to_string(),
+            source_col: "block_id".to_string(),
+            target_col: "required_id".to_string(),
+        };
+        let provider = SqlOperationProvider::with_edge_fields(
+            db_handle.clone(),
+            "block_raw".to_string(),
+            "block".to_string(),
+            "block".to_string(),
+            vec![requires_descriptor],
+        );
+
+        // Adversarial op order: dependent A (requires B) emitted BEFORE B.
+        let mut a = StorageEntity::new();
+        a.insert("id".into(), Value::String("block:A".to_string()));
+        a.insert("content".into(), Value::String("A".to_string()));
+        a.insert(
+            "requires".into(),
+            Value::Array(vec![Value::String("block:B".to_string())]),
+        );
+        let mut b = StorageEntity::new();
+        b.insert("id".into(), Value::String("block:B".to_string()));
+        b.insert("content".into(), Value::String("B".to_string()));
+
+        let ops = vec![("create".to_string(), a), ("create".to_string(), b)];
+        provider
+            .execute_batch_with_origin(&EntityName::new("block"), ops, EventOrigin::Loro)
+            .await
+            .expect("two-phase batch must apply FK-clean despite dependent-first order");
+
+        let blocks = db_handle
+            .query("SELECT id FROM block_raw ORDER BY id", HashMap::new())
+            .await
+            .expect("query blocks");
+        assert_eq!(blocks.len(), 2, "both blocks must survive the batch");
+        let junction = db_handle
+            .query(
+                "SELECT block_id, required_id FROM block_requires",
+                HashMap::new(),
+            )
+            .await
+            .expect("query junction");
+        assert_eq!(junction.len(), 1, "the requires edge must be persisted");
     }
 }
