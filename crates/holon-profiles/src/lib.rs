@@ -952,6 +952,40 @@ pub fn is_profile_block_by_source_language(source_language: Option<&str>) -> boo
 mod tests {
     use super::*;
 
+    /// Walk a parsed render tree and collect every string-literal value (the
+    /// text a `text("…")` / label arg carries), so a test can assert none was
+    /// corrupted into mojibake on the parse path.
+    fn collect_string_literals(expr: &RenderExpr, out: &mut Vec<String>) {
+        use holon_api::Value;
+        match expr {
+            RenderExpr::Literal { value } => {
+                if let Value::String(s) = value {
+                    out.push(s.clone());
+                }
+            }
+            RenderExpr::FunctionCall { args, .. } => {
+                for a in args {
+                    collect_string_literals(&a.value, out);
+                }
+            }
+            RenderExpr::Array { items } => {
+                for it in items {
+                    collect_string_literals(it, out);
+                }
+            }
+            RenderExpr::Object { fields } => {
+                for v in fields.values() {
+                    collect_string_literals(v, out);
+                }
+            }
+            RenderExpr::BinaryOp { left, right, .. } => {
+                collect_string_literals(left, out);
+                collect_string_literals(right, out);
+            }
+            RenderExpr::LiveBlock { .. } | RenderExpr::ColumnRef { .. } => {}
+        }
+    }
+
     fn init_render_dsl() {
         holon_api::render_dsl::register_widget_names(&[
             "table",
@@ -976,6 +1010,36 @@ mod tests {
             "focusable",
             "live_query",
         ]);
+    }
+
+    /// Bug-4 (PERCEPTION): the `rule_card` variant used a literal em-dash
+    /// (`—`, U+2014) as the "last fired" placeholder. The DSL parse preserves it
+    /// intact, but the live GPUI render/capture path surfaced only its first UTF-8
+    /// byte (0xE2 → `â`) — mojibake. The placeholders are now plain ASCII; guard
+    /// that the real `rule_card` render carries no byte that would re-open the
+    /// mojibake (0xE2 is the lead byte of the em/en-dash family that regressed).
+    #[test]
+    fn rule_card_render_has_no_mojibake_bytes() {
+        init_render_dsl();
+        let profile = parse_entity_profile(BLOCK_PROFILE_YAML).unwrap();
+        let rule_card = profile
+            .variants
+            .iter()
+            .find(|v| v.name == "rule_card")
+            .expect("block profile defines a rule_card variant");
+        let mut lits = Vec::new();
+        collect_string_literals(&rule_card.profile.render, &mut lits);
+        assert!(
+            lits.iter().any(|s| s.contains("last fired")),
+            "sanity: rule_card carries the 'last fired' placeholder text node: {lits:?}"
+        );
+        for s in &lits {
+            assert!(
+                !s.as_bytes().contains(&0xE2),
+                "rule_card text node contains a multibyte char (0xE2 lead byte) that \
+                 mangles on the live render path — keep placeholders ASCII: {s:?}"
+            );
+        }
     }
 
     #[test]

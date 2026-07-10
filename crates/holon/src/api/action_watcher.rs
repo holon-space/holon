@@ -318,7 +318,7 @@ mod tests {
     use std::time::Duration;
 
     const JOURNAL_ACTION: &str =
-        "block.create(#{parent_id: \"block:journals\", name: col(\"name\")})";
+        "block.create(#{parent_id: \"block:journals\", content: col(\"name\")})";
 
     /// A test engine with the `block` SQL operation provider registered (writes
     /// to `block_raw`), mirroring the production wiring in `loro_module.rs`.

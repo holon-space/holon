@@ -73,8 +73,8 @@ variants:
     render: >-
       card(#{accent: "primary"},
         row(icon("orgmode"), text("Automation rule", #{bold: true}), checkbox(#{checked: true}), text("Enabled", #{color: "success"})),
-        if_col("source_language", "action", error("legacy 'action' language — rename source block to holon_rule"), spacer(0)),
-        text("last fired: —", #{color: "muted"}),
+        if_col("source_language", "action", error("legacy 'action' language - rename source block to holon_rule"), spacer(0)),
+        text("last fired: -", #{color: "muted"}),
         text(col("content")))
   - name: source_editing
     priority: -1
