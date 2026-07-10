@@ -35,6 +35,7 @@ pub mod loro_ui_watcher;
 pub mod operation_dispatcher;
 pub mod operation_engine;
 pub mod query_engine;
+pub mod rule_status;
 pub mod ui_watcher;
 
 // `SnapshotBlock` is a pure-data API type (it lives in `holon-api`, not a
@@ -42,27 +43,30 @@ pub mod ui_watcher;
 // `LoroBackend` and the Loro snapshot readers are no longer re-exported here —
 // consumers name `holon_loro::` directly (Phase 3b decoupling). The
 // `holon::sync::*` glob (sync/mod.rs) remains its own deferred migration slice.
+// Re-export render engine types for FFI
+pub use backend_engine::BackendEngine;
+pub use block_domain::BlockDomain;
 pub use holon_api::SnapshotBlock;
-
-pub use memory_backend::MemoryBackend;
-pub use repository::{CoreOperations, DocumentRepository, Lifecycle, P2POperations};
 // Re-export streaming types from holon-api (moved from streaming module)
 pub use holon_api::{
     ApiError, Batch, BatchMapChange, BatchMetadata, BatchTraceContext, BatchWithMetadata, Block,
     BlockChange, BlockMetadata, Change, ChangeOrigin, MapChange, StreamPosition, WithMetadata,
 };
-
-// Re-export render engine types for FFI
-pub use backend_engine::BackendEngine;
-pub use block_domain::BlockDomain;
-pub use holon_service::HolonService;
-pub use operation_dispatcher::OperationDispatcher;
-pub use operation_engine::{DispatchingOperationEngine, OperationEngine};
-pub use query_engine::{QueryEngine, SqlQueryEngine};
-pub use ui_watcher::{UiWatcher, watch_ui};
-
 // Re-export OperationDescriptor and OperationParam for FRB type generation
 pub use holon_api::{OperationDescriptor, OperationParam};
+pub use holon_service::HolonService;
+pub use memory_backend::MemoryBackend;
+pub use operation_dispatcher::OperationDispatcher;
+pub use operation_engine::DispatchingOperationEngine;
+pub use operation_engine::OperationEngine;
+pub use query_engine::QueryEngine;
+pub use query_engine::SqlQueryEngine;
+pub use repository::CoreOperations;
+pub use repository::DocumentRepository;
+pub use repository::Lifecycle;
+pub use repository::P2POperations;
+pub use ui_watcher::UiWatcher;
+pub use ui_watcher::watch_ui;
 
 // Re-export CDC streaming types
 pub use crate::storage::turso::{ChangeData, RowChange, RowChangeStream};
