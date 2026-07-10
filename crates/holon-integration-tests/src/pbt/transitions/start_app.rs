@@ -161,24 +161,63 @@ pub(crate) fn seed_booted_layout_into_ref(state: &mut ReferenceState, fresh: boo
     let default_doc_uri = EntityUri::no_parent();
     let default_doc_id = EntityUri::block("__default__");
 
-    // Fixed-ID document pages (e.g. block:journals) are built regardless
-    // of freshness — prod repairs missing page shells idempotently.
-    for asset in holon_frontend::DEFAULT_ASSETS {
-        if let Some(doc_id) = asset.fixed_doc_id {
-            let uri = EntityUri::parse(doc_id).expect("static asset id");
-            let name = asset
-                .filename
-                .strip_suffix(".org")
-                .unwrap_or(asset.filename);
-            let mut block = Block::new_text(uri.clone(), EntityUri::no_parent(), name.to_string());
-            block.set_page(true);
-            state.domain.block_state.blocks.insert(uri.clone(), block);
-            state
-                .domain
-                .block_state
-                .block_documents
-                .insert(uri.clone(), uri);
+    // The `block:journals` page + its machinery (query/render/auto-create rule),
+    // seeded programmatically by prod's `build_default_layout_blocks` regardless
+    // of freshness — prod repairs the page + rule idempotently. Model the SAME
+    // blocks here so `inv-blocks-match-ref` sees the identical booted set. The
+    // page block documents itself (`block_documents[journals]=journals`, NON-seed:
+    // the wide oracle asserts the user-visible first-boot page); its children
+    // belong to the journals page document.
+    let journals_uri = EntityUri::parse(holon_frontend::JOURNALS_PAGE_ID).expect("journals id");
+    for block in holon_frontend::journals_page_blocks() {
+        let block_id = block.id.clone();
+        let doc = if block_id == journals_uri {
+            block_id.clone()
+        } else {
+            journals_uri.clone()
+        };
+        // Classify the query/render source children into layout_blocks so PBT
+        // mutation transitions leave them alone and the render tracks its expr,
+        // mirroring the index.org layout handling below.
+        if block.content_type == ContentType::Source {
+            if let Some(sl) = block.source_language.as_ref() {
+                if sl.as_query().is_some() {
+                    state
+                        .domain
+                        .layout_blocks
+                        .query_source_ids
+                        .insert(block_id.clone());
+                    state
+                        .domain
+                        .layout_blocks
+                        .headline_ids
+                        .insert(block.parent_id.clone());
+                } else if matches!(sl, SourceLanguage::Render) {
+                    state
+                        .domain
+                        .layout_blocks
+                        .render_source_ids
+                        .insert(block_id.clone());
+                    state
+                        .domain
+                        .layout_blocks
+                        .headline_ids
+                        .insert(block.parent_id.clone());
+                    if let Ok(expr) = state.interpreter.parse_dsl(&block.content) {
+                        state
+                            .domain
+                            .render_expressions
+                            .insert(block_id.clone(), expr);
+                    }
+                }
+            }
         }
+        state
+            .domain
+            .block_state
+            .block_documents
+            .insert(block_id.clone(), doc);
+        state.domain.block_state.blocks.insert(block_id, block);
     }
 
     if fresh {

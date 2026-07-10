@@ -215,45 +215,6 @@ pub async fn seed_default_layout(engine: &Arc<BackendEngine>) -> anyhow::Result<
             "c3",
             r#"{"sequence":103,"level":2}"#,
         ),
-        // Journals page — bundled inline because the org parser is not available
-        // on wasm32. Native equivalent: `assets/default/Journals.org` parsed by
-        // `seed_default_layout` via DEFAULT_ASSETS. The two source children
-        // (`::src::0` PRQL listing journal entries, `::render::0` render
-        // expression) make `block:journals` resolve to a list-of-journal-entries
-        // when focused. The "Journal Auto-Create" subtree (trigger + action) is
-        // intentionally omitted — auto-create is a page-level concern.
-        (
-            "block:journals",
-            DOC_ID,
-            "Journals",
-            "text",
-            "",
-            "d0",
-            r#"{"name":"Journals","sequence":200,"level":1}"#,
-        ),
-        // Worker-local variant of Journals.org: the native version filters and
-        // sorts on `name`, a column the `block` matview does not project (the
-        // native engine resolves it via the doc-type dynamic-schema view,
-        // which never materializes for the worker's hand-seeded layout).
-        // Journal entries carry their date in `content`, so sort/display that.
-        (
-            "block:journals::src::0",
-            "block:journals",
-            "SELECT b.* FROM block b WHERE b.parent_id = 'block:journals' ORDER BY b.content DESC",
-            "source",
-            "holon_sql",
-            "d1",
-            r#"{"sequence":201}"#,
-        ),
-        (
-            "block:journals::render::0",
-            "block:journals",
-            r#"list(#{sortkey: "-content", item_template: selectable(row(icon("calendar"), spacer(6), text(col("content"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})})})"#,
-            "source",
-            "render",
-            "d2",
-            r#"{"sequence":202}"#,
-        ),
     ];
 
     for (id, parent_id, content, content_type, source_language, sort_key, properties) in stmts {
@@ -280,6 +241,37 @@ pub async fn seed_default_layout(engine: &Arc<BackendEngine>) -> anyhow::Result<
         // (holon-orgmode doesn't build on wasm — see this module's doc), so the
         // initial layout is written via hand-rolled SQL. Runs once on a fresh
         // in-memory DB before any BlockOperations writer exists.
+        db.execute(&sql, vec![]).await?;
+    }
+
+    // Journals page + machinery: the SAME blocks the native seed builds
+    // (`build_default_layout_blocks` → `journals_page_blocks`), translated to the
+    // worker's hand-rolled SQL. Sharing one block spec keeps the query/render/
+    // auto-create rule identical across the browser and native frontends. The
+    // `block:journals` page parents under the no-parent sentinel, matching this
+    // module's DOC_ID convention for the other bundled pages.
+    for (i, block) in holon_frontend::journals_page_blocks()
+        .into_iter()
+        .enumerate()
+    {
+        let content_escaped = block.content.replace('\'', "''");
+        let (lang_col, lang_val) = match block.source_language.as_ref() {
+            Some(lang) => (", source_language".to_string(), format!(", '{lang}'")),
+            None => (String::new(), String::new()),
+        };
+        let content_type = block.content_type.to_string();
+        let sort_key = format!("d{i}");
+        let sql = format!(
+            // ALLOW(sql): seed INSERT for the bundled default layout
+            "INSERT OR IGNORE INTO {BLOCK_WRITE_TABLE} (id, parent_id, content, \
+             content_type{lang_col}, sort_key, properties, created_at, updated_at) VALUES \
+             ('{id}', '{parent_id}', '{content_escaped}', '{content_type}'{lang_val}, \
+             '{sort_key}', '{{}}', {now}, {now})",
+            id = block.id.as_str(),
+            parent_id = block.parent_id.as_str(),
+        );
+        // ALLOW(sole_block_writer): bootstrap seed for the bundled default layout
+        // (see the doc-comment on the tuple loop above).
         db.execute(&sql, vec![]).await?;
     }
 
