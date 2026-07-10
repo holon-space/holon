@@ -116,6 +116,11 @@ pub enum DegradedKind {
     /// Other files keep syncing; the failed file(s) need fixing. Surfaced so a
     /// bad file is visible instead of silently killing file sync.
     OrgIngestFailed,
+    /// Red — an undo/redo request reached the engine but failed (e.g. no
+    /// operation engine wired, or the underlying apply errored). Fail-loud:
+    /// undo/redo must never look like a silent no-op when it actually blew
+    /// up, so this is always surfaced instead of just logged.
+    UndoFailed,
     /// A plain info-style toast (used for "ticket copied").
     Info,
 }
@@ -426,6 +431,134 @@ pub fn dispatch_accept(
             });
         })
         .detach();
+}
+
+/// Undo/redo dispatch, cmd-z / cmd-shift-z.
+///
+/// `FrontendSession::undo`/`redo` currently return `Result<bool>` (`true` =
+/// applied, `false` = stack empty) — there is no richer outcome type wired
+/// into this workspace yet (a `holon_api::UndoOutcome` with a
+/// `StaleDropped { reason }` case exists in a sibling, not-yet-integrated
+/// workstream; once it lands, replace the `Ok(bool)` match below with a
+/// match on the enum and route `StaleDropped` through its own toast kind
+/// instead of `UndoFailed`).
+///
+/// Same tokio-side-compute + oneshot + GPUI-side-toast shape as
+/// `dispatch_share`/`dispatch_accept` above: the engine call runs on the
+/// tokio runtime (`rt_handle`), the result crosses to the GPUI executor via
+/// a oneshot channel, and only a genuine `Err` produces a user-visible
+/// toast — `Applied` is silent (the projection update is the feedback) and
+/// `Empty` only logs at debug level.
+fn dispatch_undo_redo(
+    is_redo: bool,
+    session: Arc<FrontendSession>,
+    rt_handle: tokio::runtime::Handle,
+    share_state: Entity<ShareUiState>,
+    window_handle: AnyWindowHandle,
+    async_cx: &AsyncApp,
+) {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<holon_api::UndoOutcome, String>>();
+    rt_handle.spawn(async move {
+        let result = if is_redo {
+            session.redo().await
+        } else {
+            session.undo().await
+        };
+        let _ = tx.send(result.map_err(|e| format!("{e:#}")));
+    });
+
+    async_cx
+        .spawn(async move |cx| {
+            let outcome = rx.await;
+            let label = if is_redo { "redo" } else { "undo" };
+            match outcome {
+                Ok(Ok(holon_api::UndoOutcome::Applied)) => {
+                    tracing::debug!("[{label}] applied");
+                }
+                Ok(Ok(holon_api::UndoOutcome::Empty)) => {
+                    tracing::debug!("[{label}] stack empty — no-op");
+                }
+                Ok(Ok(holon_api::UndoOutcome::StaleDropped { reason })) => {
+                    tracing::error!("[{label}] entry stale — dropped: {reason}");
+                    let _ = cx.update_window(window_handle, |_, _window, cx| {
+                        share_state.update(cx, |s, cx| {
+                            s.push_toast(DegradedToast {
+                                kind: DegradedKind::UndoFailed,
+                                shared_tree_id: "undo".into(),
+                                detail: format!(
+                                    "{label}: history entry stale — dropped ({reason})"
+                                ),
+                            });
+                            cx.emit(NotifyShareUi);
+                            cx.notify();
+                        });
+                    });
+                }
+                Ok(Err(e)) => {
+                    tracing::error!("[{label}] failed: {e}");
+                    let _ = cx.update_window(window_handle, |_, _window, cx| {
+                        share_state.update(cx, |s, cx| {
+                            s.push_toast(DegradedToast {
+                                kind: DegradedKind::UndoFailed,
+                                shared_tree_id: "undo".into(),
+                                detail: format!("{label}: {e}"),
+                            });
+                            cx.emit(NotifyShareUi);
+                            cx.notify();
+                        });
+                    });
+                }
+                Err(_cancelled) => {
+                    tracing::error!("[{label}] task dropped before responding");
+                    let _ = cx.update_window(window_handle, |_, _window, cx| {
+                        share_state.update(cx, |s, cx| {
+                            s.push_toast(DegradedToast {
+                                kind: DegradedKind::UndoFailed,
+                                shared_tree_id: "undo".into(),
+                                detail: format!("{label}: task dropped before responding"),
+                            });
+                            cx.emit(NotifyShareUi);
+                            cx.notify();
+                        });
+                    });
+                }
+            }
+        })
+        .detach();
+}
+
+pub fn dispatch_undo(
+    session: Arc<FrontendSession>,
+    rt_handle: tokio::runtime::Handle,
+    share_state: Entity<ShareUiState>,
+    window_handle: AnyWindowHandle,
+    async_cx: &AsyncApp,
+) {
+    dispatch_undo_redo(
+        false,
+        session,
+        rt_handle,
+        share_state,
+        window_handle,
+        async_cx,
+    );
+}
+
+pub fn dispatch_redo(
+    session: Arc<FrontendSession>,
+    rt_handle: tokio::runtime::Handle,
+    share_state: Entity<ShareUiState>,
+    window_handle: AnyWindowHandle,
+    async_cx: &AsyncApp,
+) {
+    dispatch_undo_redo(
+        true,
+        session,
+        rt_handle,
+        share_state,
+        window_handle,
+        async_cx,
+    );
 }
 
 // ─── Rendering ──────────────────────────────────────────────────────────────
@@ -937,6 +1070,7 @@ fn render_toast_stack(
                 "⚠",
                 "File sync degraded (bad org file)",
             ),
+            DegradedKind::UndoFailed => (gpui::rgba(0xef4444ff), "⛔", "Undo/redo failed"),
             DegradedKind::Info => (gpui::rgba(0x60a5faff), "i", "Info"),
         };
         let close_state = share_state.clone();
@@ -1080,6 +1214,25 @@ mod tests {
         });
         assert_eq!(s.toasts.len(), 1);
         assert_eq!(s.toasts[0].kind, DegradedKind::RehydrationFailed);
+    }
+
+    /// `dispatch_undo`/`dispatch_redo` (below) route a genuine engine `Err`
+    /// through exactly this `push_toast` call — this pins the toast-kind
+    /// plumbing on its own (undo/redo never gets a `ShareDegraded` broadcast
+    /// event, so it can't go through `apply_degraded` like the other kinds).
+    #[test]
+    fn undo_failed_toast_is_pushed_and_bounded_like_other_kinds() {
+        let mut s = ShareUiState::new();
+        s.push_toast(DegradedToast {
+            kind: DegradedKind::UndoFailed,
+            shared_tree_id: "undo".into(),
+            detail: "undo: this operation requires an operation engine, which is not wired in \
+                     this (no-Turso) session"
+                .into(),
+        });
+        assert_eq!(s.toasts.len(), 1);
+        assert_eq!(s.toasts[0].kind, DegradedKind::UndoFailed);
+        assert!(s.toasts[0].detail.contains("operation engine"));
     }
 
     #[test]
