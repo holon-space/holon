@@ -576,6 +576,38 @@ impl LoroProjection {
                 );
             }
         }
+        // Orphan-create gate. On an unsettled (torn) snapshot a create's parent
+        // block may itself have been withheld from `after`; emitting the child
+        // alone FK-rejects at the SQL sink and the whole batch (row included) is
+        // lost. Withhold such creates — the writer's commit that tore this walk
+        // retriggers a settled pass that re-emits them with their parents.
+        if !after_settled {
+            let n = ops.len();
+            ops.retain(|(name, entity)| {
+                if name != "create" {
+                    return true;
+                }
+                let parent_in_sink = |pid: &str| {
+                    !pid.starts_with("block:")
+                        || after.contains_key(pid)
+                        || before.contains_key(pid)
+                };
+                match entity.get("parent_id").and_then(|v| v.as_string()) {
+                    Some(pid) => parent_in_sink(&pid),
+                    // A create without parent_id params is malformed; let it
+                    // flow so the sink fails loudly rather than hiding it.
+                    None => true,
+                }
+            });
+            let withheld = n - ops.len();
+            if withheld > 0 {
+                tracing::warn!(
+                    "[LoroProjection] withholding {} orphan create(s) whose parent is absent from \
+                     the torn snapshot (snapshot_settled=false)",
+                    withheld,
+                );
+            }
+        }
 
         let before_len = before.len();
         let after_len = after.len();
@@ -874,11 +906,22 @@ fn topological_sort_creates<'a>(
             return;
         }
         visited.insert(id);
-        let parent_id = snap.block.parent_id.as_str();
-        if create_ids.contains(parent_id)
-            && let Some(parent) = all.get(parent_id)
-        {
-            visit(parent, all, create_ids, visited, result);
+        // FK dependencies that must exist as `block_raw` rows before this
+        // block's create (row + junction writes) lands in the same batch:
+        // the parent (`block_raw.parent_id`) AND every block-referencing edge
+        // target (`block_requires.required_id`, `advice_suppressed.lesson_id`).
+        // Ordering by parent alone loses BOTH blocks of a requires pair when
+        // HashMap iteration puts the dependent first: the junction insert
+        // FK-rejects and the whole batch transaction rolls back.
+        let deps = std::iter::once(snap.block.parent_id.as_str())
+            .chain(snap.block.requires.iter().map(|r| r.as_str()))
+            .chain(snap.block.advice_suppressed.iter().map(|a| a.as_str()));
+        for dep in deps {
+            if create_ids.contains(dep)
+                && let Some(dep_snap) = all.get(dep)
+            {
+                visit(dep_snap, all, create_ids, visited, result);
+            }
         }
         result.push(snap);
     }
