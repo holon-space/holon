@@ -110,44 +110,64 @@ fn apply_org_properties(block: &mut Block, fields: &HashMap<String, Value>, is_c
 }
 
 // TODO: Move to sut_org.rb
-/// Normalize content to match what an org round-trip will produce.
+/// Normalize `(content, marks)` to the org round-trip FIXED POINT — the state
+/// the SUT converges to after writeback (`render_inline_marks`) and re-ingest
+/// (headline trim + `extract_inline_marks`) stop changing the block.
 ///
 /// For Text blocks the first line becomes the org headline, which the parser
 /// `.trim()`s (both ends) on re-parse, so leading *and* trailing whitespace
 /// on the first line is stripped. Trailing whitespace on the entire string
-/// is also stripped. Source blocks preserve content verbatim and are returned
-/// unchanged (aside from overall trailing-whitespace trim, which the
-/// renderer's `push_str(content); push('\n')` path doesn't reintroduce
-/// differently).
-pub fn normalize_content_for_org_roundtrip(content: &str, content_type: ContentType) -> String {
+/// is also stripped. The parser extracts inline org markup (`[[…]]` links,
+/// `*bold*`, …) into `block.marks` and stores only the RENDERED LABEL as
+/// content (parse-don't-validate at the boundary); the reference must carry
+/// those marks — modeling only the stripped content is exactly the oracle gap
+/// that let the 2026-07-10 on-disk link-destruction escape (both sides
+/// compared `marks = None`). Identity for plain text, so the default ASCII
+/// generators are unaffected.
+///
+/// One pass is NOT idempotent (e.g. `[[x]]` resolves its bare wiki-target to a
+/// deterministic entity id on the first parse, so the second writeback emits
+/// the resolved `[[block:<hash>][x]]` form), hence the loop. Terminates in
+/// practice within a few iterations (render∘extract is idempotent — pinned by
+/// holon-org-format's inline_marks_proptest); the cap fails loud.
+///
+/// Source blocks preserve content verbatim (no headline, no inline markup) and
+/// never carry marks.
+///
+/// Marks are returned canonicalized (`canonicalize_marks`) mirroring every
+/// prod read boundary (`marks_from_json`, Loro Peritext reader).
+pub fn normalize_content_for_org_roundtrip(
+    content: &str,
+    content_type: ContentType,
+) -> (String, Option<Vec<holon_api::MarkSpan>>) {
     if content_type == ContentType::Source {
-        return content.trim_end().to_string();
+        return (content.trim_end().to_string(), None);
     }
-    // One trim+mark-extraction pass is NOT idempotent (e.g. `[[ x]]` →
-    // label ` x` → next round-trip trims to `x`), and the SUT keeps
-    // round-tripping the file until it converges — so the reference must
-    // normalize to the FIXED POINT, not the first iterate. Terminates: every
-    // pass either shrinks the string or leaves it unchanged. Surfaced by
-    // extended-gen axis 1 (`[[ Hbplihw7UF]]` after promotion).
-    let mut current = content.to_string();
-    loop {
-        let trimmed_end = current.trim_end();
+    let mut text = content.to_string();
+    let mut marks: Vec<holon_api::MarkSpan> = Vec::new();
+    for _ in 0..32 {
+        // Writeback: what the block looks like on disk (identity while no
+        // marks have been extracted yet — the raw input IS the org text).
+        let on_disk = holon_orgmode::inline_marks::render_inline_marks(&text, &marks);
+        // Re-ingest: headline-title trim, then mark extraction.
+        let trimmed_end = on_disk.trim_end();
         let trimmed = match trimmed_end.split_once('\n') {
             Some((first, rest)) => format!("{}\n{}", first.trim(), rest),
             None => trimmed_end.trim_start().to_string(),
         };
-        // The parser also extracts inline org markup (`[[…]]` links, `*bold*`,
-        // …) into `block.marks` and stores only the RENDERED LABEL as content
-        // (parse-don't-validate at the boundary). Content that happens to spell
-        // org markup therefore normalizes to its label after a file round-trip
-        // — identity for plain text, so the default ASCII generators are
-        // unaffected. Surfaced by extended-gen axis 1 (`[[x]]` → `x`).
-        let (rendered, _marks) = holon_orgmode::inline_marks::extract_inline_marks(&trimmed);
-        if rendered == current {
-            return rendered;
+        let (rendered, spans) = holon_orgmode::inline_marks::extract_inline_marks(&trimmed);
+        if rendered == text && spans == marks {
+            holon_api::canonicalize_marks(&mut marks);
+            let marks = if marks.is_empty() { None } else { Some(marks) };
+            return (text, marks);
         }
-        current = rendered;
+        text = rendered;
+        marks = spans;
     }
+    panic!(
+        "normalize_content_for_org_roundtrip: org render/parse did not reach a fixed point after \
+         32 iterations for input {content:?} (last iterate: text={text:?}, marks={marks:?})"
+    );
 }
 
 /// Apply the org HEADLINE-TAG lens to a block: the first content line is the
@@ -210,7 +230,7 @@ impl MutationApply for Mutation {
                     .get("content")
                     .and_then(|v| v.as_string())
                     .unwrap_or_default();
-                let content = normalize_content_for_org_roundtrip(raw, content_type);
+                let (content, marks) = normalize_content_for_org_roundtrip(raw, content_type);
 
                 let source_language: Option<SourceLanguage> = fields
                     .get("source_language")
@@ -225,6 +245,7 @@ impl MutationApply for Mutation {
                 } else {
                     Block::new_text(id.clone(), parent_id.clone(), content)
                 };
+                block.marks = marks;
 
                 apply_org_properties(&mut block, fields, true);
 
@@ -250,8 +271,10 @@ impl MutationApply for Mutation {
             Mutation::Update { id, fields, .. } => {
                 if let Some(block) = blocks.iter_mut().find(|b| b.id == *id) {
                     if let Some(content) = fields.get("content").and_then(|v| v.as_string()) {
-                        block.content =
+                        let (text, marks) =
                             normalize_content_for_org_roundtrip(content, block.content_type);
+                        block.content = text;
+                        block.marks = marks;
                     }
 
                     if fields.contains_key("task_state") || fields.contains_key("TODO") {

@@ -107,6 +107,18 @@ pub fn normalize_block(block: &Block) -> Block {
     if !normalized.properties.contains_key("task_state") {
         normalized.properties.remove("task_state_category");
     }
+    // Marks canonicalization: stores emit equal mark SETS in different orders
+    // (Loro Peritext closes overlapping runs in HashMap order; the SQL JSON
+    // column preserves insertion order) — sort into the canonical order on
+    // both sides. An empty set is semantically "no marks": unify with None so
+    // `Some([])` vs `None` never diverges spuriously.
+    if let Some(marks) = &mut normalized.marks {
+        if marks.is_empty() {
+            normalized.marks = None;
+        } else {
+            holon_api::canonicalize_marks(marks);
+        }
+    }
     normalized
 }
 
@@ -229,6 +241,10 @@ pub enum BlockFacet {
     Parent,
     ContentType,
     SourceLanguage,
+    /// Inline rich-text marks (`block_raw` has a `marks` column). Compared
+    /// canonicalized (see [`normalize_block`]) — losing this facet is the
+    /// 2026-07-10 on-disk link-destruction class.
+    Marks,
 }
 
 /// Compare only `facets` (plus the id-set, always) between two snapshots, both
@@ -274,6 +290,7 @@ pub fn compare_block_subset(
                 BlockFacet::Parent => ab.parent_id != eb.parent_id,
                 BlockFacet::ContentType => ab.content_type != eb.content_type,
                 BlockFacet::SourceLanguage => ab.source_language != eb.source_language,
+                BlockFacet::Marks => ab.marks != eb.marks,
             };
             if diverged {
                 return InvariantResult::Fail(format!(

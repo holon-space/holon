@@ -94,7 +94,7 @@ pub fn non_seed_blocks() -> Correspondence<NonSeedBlocks> {
                 },
                 extract: extract_block_raw,
                 compare: NamedCompare {
-                    name: "compare_block_subset{content,properties}",
+                    name: "compare_block_subset{content,properties,marks}",
                     f: compare_block_raw_subset,
                 },
                 converge: Converge::None,
@@ -172,7 +172,11 @@ fn compare_block_raw_subset(sut: &Vec<Block>, ref_: &Vec<Block>) -> Result<(), S
         label,
         sut,
         ref_,
-        &[BlockFacet::Content, BlockFacet::Properties],
+        &[
+            BlockFacet::Content,
+            BlockFacet::Properties,
+            BlockFacet::Marks,
+        ],
     ) {
         InvariantResult::Ok => Ok(()),
         InvariantResult::Fail(msg) => Err(msg),

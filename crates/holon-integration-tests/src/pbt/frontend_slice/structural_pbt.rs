@@ -819,6 +819,107 @@ mod teeth {
         );
     }
 
+    /// **Org-ingest MARKS gate (dogfood 2026-07-10 link-destruction class).**
+    /// Boot the composed headless SUT from an org file whose `c2` headline
+    /// carries a `[[Linked Page]]` wiki link, and run the full catalog
+    /// against a reference whose `c2` holds the org-lens `(content, marks)`
+    /// fixed point. The SUT ingest must persist `block.marks` through
+    /// `build_block_params` into the stores — with the ingest
+    /// drop reinstated (marks param omitted), `inv-blocks-match-ref` goes RED
+    /// on `marks: None` vs `Some(Link)`. Non-vacuity: the ref block's marks
+    /// are asserted `Some` before the catalog runs, so this can never
+    /// silently degrade into the plain-text org-seed probe above.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn org_ingest_link_marks_survive_full_catalog() {
+        use holon_pbt_core::capabilities::SutFocus;
+        use holon_pbt_core::capabilities::SutQueryResults;
+        use holon_pbt_core::capabilities::SutSqlProjection;
+        use holon_pbt_core::composition::CapProvider;
+
+        const TREE_ORG: &str = "#+ID: structural-page\n* parent\n:PROPERTIES:\n:ID: \
+                                parent\n:END:\n* c1\n:PROPERTIES:\n:ID: c1\n:END:\n* See [[Linked \
+                                Page]] here\n:PROPERTIES:\n:ID: c2\n:END:\n";
+        const C2_RAW: &str = "See [[Linked Page]] here";
+
+        let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
+        let comp = Arc::new(
+            HeadlessFrontendComponent::new(
+                &[("structural-page.org", TREE_ORG)],
+                Duration::from_millis(300),
+            )
+            .await,
+        );
+        let engine = comp.engine();
+        let mut caps = CapMap::new();
+        comp.clone().register(&mut caps);
+        caps.insert(comp.clone() as Arc<dyn SutSqlProjection>);
+        caps.insert(comp.clone() as Arc<dyn SutFocus>);
+        caps.insert(comp.clone() as Arc<dyn SutQueryResults>);
+        caps.replace(Arc::new(OpDispatchWriter::with_resolver(
+            engine.clone(),
+            resolver.clone(),
+        )) as Arc<dyn SutBlockTreeWrite>);
+
+        let ids = fixed_ids();
+        let tree: BTreeSet<EntityUri> = [ids.parent.clone(), ids.c1.clone(), ids.c2.clone()]
+            .into_iter()
+            .collect();
+        let booted = sut_ids(&caps).await;
+        let scaffold: BTreeSet<EntityUri> = booted.difference(&tree).cloned().collect();
+
+        let mut oracle = structural_ref();
+        // c2 on disk spells a wiki link: the reference holds the org-lens fixed
+        // point — label-stripped content + the extracted Link mark.
+        let (c2_content, c2_marks) = crate::pbt::types::normalize_content_for_org_roundtrip(
+            C2_RAW,
+            holon_api::ContentType::Text,
+        );
+        assert!(
+            c2_marks.as_ref().is_some_and(|m| !m.is_empty()),
+            "non-vacuity: the org lens must extract a Link mark from {C2_RAW:?}, got {c2_marks:?}"
+        );
+        assert_eq!(c2_content, "See Linked Page here");
+        {
+            let b = oracle
+                .domain
+                .block_state
+                .blocks
+                .get_mut(&ids.c2)
+                .expect("seed block c2 present");
+            b.content = c2_content;
+            b.marks = c2_marks;
+        }
+
+        NavigateFocus {
+            region: Region::Main,
+            block_id: page_root(),
+        }
+        .apply_to_sut(&oracle, &mut caps)
+        .await;
+        tokio::time::sleep(SETTLE).await;
+
+        let mut resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
+        drop_ref_off_thread(oracle);
+        inject_scaffold_seed(&mut resolved, &scaffold);
+
+        let report = run_with_seeded_ref(&composed_invariant_catalog(), &caps, resolved).await;
+        for (id, msg) in report.failures() {
+            eprintln!("[org-link-marks] FAIL {id}: {msg}");
+        }
+        assert!(
+            report.ran_ids().contains(&"inv-blocks-match-ref/block_raw")
+                || report.ran_ids().contains(&"inv-blocks-match-ref/matview")
+                || report.ran_ids().contains(&"inv-blocks-match-ref/org"),
+            "block invariants must SELECT (ran: {:?})",
+            report.ran_ids()
+        );
+        assert!(
+            report.failures().is_empty(),
+            "org-ingested [[Linked Page]] must survive as block.marks in every store: {:?}",
+            report.failures()
+        );
+    }
+
     /// Apply `SplitBlock(c1)` to BOTH the oracle and the composed SUT,
     /// reconcile the minted ids, and run the catalog — the faithful
     /// structural write path over the real headless component stays green
