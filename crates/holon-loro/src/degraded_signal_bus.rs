@@ -38,6 +38,13 @@ pub enum ShareDegradedReason {
     /// row; the watermark is NOT advanced, so an honest later diff still
     /// projects. String carries the colliding block id.
     ForeignIdCollision(String),
+    /// OrgMode initial-scan ingest failed for one or more vault files. The
+    /// app stays up and the OTHER files keep syncing (the watch loop is
+    /// armed), but the failed file(s) are NOT ingested until fixed — this is
+    /// a visible degraded mode, not a silent sync death. String carries the
+    /// aggregated per-file failure summary. `shared_tree_id` is the sentinel
+    /// `"org-initial-scan"` (this is not tied to a shared doc).
+    OrgIngestFailed(String),
 }
 
 #[derive(Clone, Debug)]
