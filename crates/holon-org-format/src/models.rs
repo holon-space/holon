@@ -180,16 +180,26 @@ fn format_properties_drawer(properties_json: &str) -> String {
     result
 }
 
-/// Format planning lines (SCHEDULED/DEADLINE)
+/// Format the planning line (SCHEDULED/DEADLINE).
+///
+/// Both keywords MUST share one line: orgize's `planning_node` parser reads
+/// `(keyword, timestamp)` pairs back to back with no intervening newline,
+/// then consumes a single end-of-line — a second keyword on its OWN line
+/// isn't part of the same `PLANNING` node, so it (and everything meant to
+/// follow it, e.g. the `:PROPERTIES:` drawer) gets swallowed into the
+/// section body as plain text instead of being parsed structurally.
 fn format_planning(scheduled: Option<&str>, deadline: Option<&str>) -> String {
-    let mut result = String::new();
+    let mut parts = Vec::new();
     if let Some(sched) = scheduled {
-        result.push_str(&format!("SCHEDULED: {}\n", sched.trim()));
+        parts.push(format!("SCHEDULED: {}", sched.trim()));
     }
     if let Some(dead) = deadline {
-        result.push_str(&format!("DEADLINE: {}\n", dead.trim()));
+        parts.push(format!("DEADLINE: {}", dead.trim()));
     }
-    result
+    if parts.is_empty() {
+        return String::new();
+    }
+    parts.join(" ") + "\n"
 }
 
 /// Format header arguments with Value types as Org Mode inline parameters.
@@ -842,6 +852,16 @@ impl ToOrg for Block {
 
         result.push('\n');
 
+        // Planning (SCHEDULED/DEADLINE) — org syntax requires this line
+        // directly after the headline, before any drawer (Emacs/LogSeq won't
+        // parse it in a :PROPERTIES: drawer's wake).
+        let sched_str = self.scheduled().map(|t| t.to_string());
+        let dead_str = self.deadline().map(|t| t.to_string());
+        let planning = format_planning(sched_str.as_deref(), dead_str.as_deref());
+        if !planning.is_empty() {
+            result.push_str(&planning);
+        }
+
         // Properties drawer
         if let Some(props_json) = self.org_properties() {
             let props_drawer = format_properties_drawer(&props_json);
@@ -849,14 +869,6 @@ impl ToOrg for Block {
                 result.push_str(&props_drawer);
                 result.push('\n');
             }
-        }
-
-        // Planning (SCHEDULED/DEADLINE)
-        let sched_str = self.scheduled().map(|t| t.to_string());
-        let dead_str = self.deadline().map(|t| t.to_string());
-        let planning = format_planning(sched_str.as_deref(), dead_str.as_deref());
-        if !planning.is_empty() {
-            result.push_str(&planning);
         }
 
         // Body text (source blocks are child Block entities, rendered via tree
@@ -1267,6 +1279,40 @@ mod tests {
             "deadline dropped from to_org: {org:?}"
         );
         assert!(org.contains("2026-02-01"), "deadline date missing: {org:?}");
+    }
+
+    /// Org syntax requires SCHEDULED/DEADLINE directly after the headline,
+    /// before any drawer — Emacs/LogSeq won't parse a planning line that
+    /// follows :PROPERTIES:. Regression: writeback used to emit the drawer
+    /// first.
+    #[test]
+    fn to_org_planning_lines_precede_properties_drawer() {
+        let mut block = Block::new_text(
+            EntityUri::block("id1"),
+            EntityUri::block("parent1"),
+            "Planned task",
+        );
+        block.set_level(1);
+        block.set_scheduled(Some(Timestamp::parse("<2026-01-15 Thu>").unwrap()));
+        block.set_deadline(Some(Timestamp::parse("<2026-02-01 Sun>").unwrap()));
+        block.set_org_properties(Some(r#"{"ID":"id1"}"#.to_string()));
+
+        let org = block.to_org();
+        let scheduled_pos = org.find("SCHEDULED:").expect("SCHEDULED line missing");
+        let drawer_pos = org.find(":PROPERTIES:").expect("drawer missing");
+        assert!(
+            scheduled_pos < drawer_pos,
+            "planning line must precede the properties drawer: {org:?}"
+        );
+
+        // The headline itself must be the immediately preceding line — no
+        // blank line or drawer between it and SCHEDULED.
+        let headline_end = org.find('\n').expect("headline newline missing");
+        assert_eq!(
+            headline_end + 1,
+            scheduled_pos,
+            "planning line must come directly after the headline: {org:?}"
+        );
     }
 
     #[test]
