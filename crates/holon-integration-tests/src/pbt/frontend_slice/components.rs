@@ -1762,14 +1762,20 @@ impl SutHistoryWrite for HeadlessFrontendComponent {
         tracing::trace!("[apply] UndoLastMutation");
         let result = self.engine.undo().await;
         assert!(result.is_ok(), "undo failed: {:?}", result.err());
-        assert!(result.unwrap(), "undo returned false (nothing to undo)");
+        assert!(
+            result.unwrap().applied(),
+            "undo returned non-applied (nothing to undo or stale)"
+        );
     }
 
     async fn redo(&self) {
         tracing::trace!("[apply] Redo");
         let result = self.engine.redo().await;
         assert!(result.is_ok(), "redo failed: {:?}", result.err());
-        assert!(result.unwrap(), "redo returned false (nothing to redo)");
+        assert!(
+            result.unwrap().applied(),
+            "redo returned non-applied (nothing to redo or stale)"
+        );
     }
 }
 

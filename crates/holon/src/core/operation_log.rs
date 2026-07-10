@@ -7,11 +7,16 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tracing::{debug, info};
+use holon_api::Operation;
+use holon_api::Value;
+use holon_core::OperationLogEntry;
+use holon_core::OperationLogOperations;
+use holon_core::OperationStatus;
+use holon_core::UndoAction;
+use tracing::debug;
+use tracing::info;
 
 use crate::storage::DbHandle;
-use holon_api::{Operation, Value};
-use holon_core::{OperationLogEntry, OperationLogOperations, OperationStatus, UndoAction};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -114,8 +119,10 @@ impl OperationLogOperations for OperationLogStore {
 
         // INSERT RETURNING id: combines insert + get ID in one round-trip.
         // Saves 1 SQL query vs separate INSERT + SELECT last_insert_rowid().
-        let insert_sql = "INSERT INTO operation (operation, inverse, status, created_at, display_name, entity_name, op_name)
-                          VALUES ($operation, $inverse, $status, $created_at, $display_name, $entity_name, $op_name)
+        let insert_sql = "INSERT INTO operation (operation, inverse, status, created_at, \
+                          display_name, entity_name, op_name)
+                          VALUES ($operation, $inverse, $status, $created_at, $display_name, \
+                          $entity_name, $op_name)
                           RETURNING id";
 
         let mut params = HashMap::new();
@@ -228,8 +235,9 @@ impl OperationLogOperations for OperationLogStore {
 
 /// Observer that logs operations to the persistent OperationLogStore.
 ///
-/// This observer implements OperationObserver and delegates to OperationLogStore.
-/// It observes all operations (entity_filter = "*") and logs them for undo/redo.
+/// This observer implements OperationObserver and delegates to
+/// OperationLogStore. It observes all operations (entity_filter = "*") and logs
+/// them for undo/redo.
 pub struct OperationLogObserver {
     store: Arc<OperationLogStore>,
 }
@@ -333,7 +341,7 @@ mod tests {
 
         let op = Operation::new("test", "op1", "Op 1", HashMap::new());
         let id = store
-            .log_operation(op, UndoAction::Irreversible)
+            .log_operation(op, UndoAction::DeclaredIrreversible("test op"))
             .await
             .unwrap();
 
@@ -377,7 +385,7 @@ mod tests {
 
         let op1 = Operation::new("test", "op1", "Op 1", HashMap::new());
         let id1 = store
-            .log_operation(op1, UndoAction::Irreversible)
+            .log_operation(op1, UndoAction::DeclaredIrreversible("test op"))
             .await
             .unwrap();
 
@@ -385,7 +393,7 @@ mod tests {
 
         let op2 = Operation::new("test", "op2", "Op 2", HashMap::new());
         store
-            .log_operation(op2, UndoAction::Irreversible)
+            .log_operation(op2, UndoAction::DeclaredIrreversible("test op"))
             .await
             .unwrap();
 
@@ -419,7 +427,7 @@ mod tests {
                 HashMap::new(),
             );
             store
-                .log_operation(op, UndoAction::Irreversible)
+                .log_operation(op, UndoAction::DeclaredIrreversible("test op"))
                 .await
                 .unwrap();
         }
@@ -453,7 +461,7 @@ mod tests {
 
             let op2 = Operation::new("test", "op2", "Op 2", HashMap::new());
             store
-                .log_operation(op2, UndoAction::Irreversible)
+                .log_operation(op2, UndoAction::DeclaredIrreversible("test op"))
                 .await
                 .unwrap();
         }
@@ -518,7 +526,7 @@ mod tests {
 
         let op = Operation::new("test", "op_new", "New Op", HashMap::new());
         store
-            .log_operation(op, UndoAction::Irreversible)
+            .log_operation(op, UndoAction::DeclaredIrreversible("test op"))
             .await
             .unwrap();
 
@@ -553,7 +561,7 @@ mod tests {
                     HashMap::new(),
                 );
                 store_clone
-                    .log_operation(op, UndoAction::Irreversible)
+                    .log_operation(op, UndoAction::DeclaredIrreversible("test op"))
                     .await
                     .unwrap()
             }));

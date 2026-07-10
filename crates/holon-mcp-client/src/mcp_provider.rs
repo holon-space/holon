@@ -5,26 +5,33 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use holon_api::EntityName;
+use holon_api::Value;
+use holon_api::render_types::Operation;
+use holon_api::render_types::OperationDescriptor;
+use holon_api::render_types::ParamMapping;
+use holon_core::OperationProvider;
+use holon_core::storage::types::StorageEntity;
+use holon_core::traits::OperationResult;
+use holon_core::traits::Result;
+use holon_core::traits::UndoAction;
+use rmcp::RoleClient;
+use rmcp::ServiceExt;
 use rmcp::model::CallToolRequestParam;
 use rmcp::service::Peer;
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::TokioChildProcess;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
-use rmcp::{RoleClient, ServiceExt};
 use tokio::process::Command;
 use tracing::info;
 
-use holon_api::render_types::{Operation, OperationDescriptor, ParamMapping};
-use holon_api::{EntityName, Value};
-use holon_core::OperationProvider;
-use holon_core::storage::types::StorageEntity;
-use holon_core::traits::{OperationResult, Result, UndoAction};
-
 use crate::mcp_schema_mapping::input_schema_to_params;
-use crate::mcp_sidecar::{McpSidecar, UndoConfig};
+use crate::mcp_sidecar::McpSidecar;
+use crate::mcp_sidecar::UndoConfig;
 
-/// Type-erased entity field reader — reads entity fields as HashMap<String, Value>.
-/// Allows McpOperationProvider to capture old state without knowing concrete entity types.
+/// Type-erased entity field reader — reads entity fields as HashMap<String,
+/// Value>. Allows McpOperationProvider to capture old state without knowing
+/// concrete entity types.
 type FieldReadFuture<'a> =
     Pin<Box<dyn Future<Output = Result<Option<holon_api::StorageEntity>>> + Send + 'a>>;
 
@@ -34,10 +41,12 @@ pub trait EntityFieldReader: Send + Sync {
 
 use rmcp::handler::client::ClientHandler;
 
-/// Connect to an MCP server over Streamable HTTP and return a Peer for making requests.
+/// Connect to an MCP server over Streamable HTTP and return a Peer for making
+/// requests.
 ///
 /// When `auth_token` is provided it is sent as a `Bearer` authorization header.
-/// The returned `McpRunningService` must be kept alive for the connection to stay open.
+/// The returned `McpRunningService` must be kept alive for the connection to
+/// stay open.
 pub async fn connect_mcp(
     uri: &str,
     auth_token: Option<&str>,
@@ -65,9 +74,10 @@ pub async fn connect_mcp_with_handler<H: ClientHandler>(
 
 /// Connect to an MCP server over Streamable HTTP with OAuth authentication.
 ///
-/// Uses rmcp's `AuthClient` to transparently inject OAuth tokens into every request.
-/// The `AuthorizationManager` handles token refresh automatically.
-/// The returned `McpRunningService` must be kept alive for the connection to stay open.
+/// Uses rmcp's `AuthClient` to transparently inject OAuth tokens into every
+/// request. The `AuthorizationManager` handles token refresh automatically.
+/// The returned `McpRunningService` must be kept alive for the connection to
+/// stay open.
 pub async fn connect_mcp_oauth(
     uri: &str,
     auth_manager: rmcp::transport::auth::AuthorizationManager,
@@ -75,7 +85,8 @@ pub async fn connect_mcp_oauth(
     connect_mcp_oauth_with_handler(uri, auth_manager, default_client_info()).await
 }
 
-/// Connect to an MCP server over Streamable HTTP with OAuth and a custom `ClientHandler`.
+/// Connect to an MCP server over Streamable HTTP with OAuth and a custom
+/// `ClientHandler`.
 pub async fn connect_mcp_oauth_with_handler<H: ClientHandler>(
     uri: &str,
     auth_manager: rmcp::transport::auth::AuthorizationManager,
@@ -90,10 +101,12 @@ pub async fn connect_mcp_oauth_with_handler<H: ClientHandler>(
     Ok((peer, McpRunningService(Box::new(service))))
 }
 
-/// Connect to an MCP server via stdio child process and return a Peer for making requests.
+/// Connect to an MCP server via stdio child process and return a Peer for
+/// making requests.
 ///
-/// Spawns the given command as a child process and communicates via stdin/stdout.
-/// The returned `McpRunningService` must be kept alive for the connection to stay open.
+/// Spawns the given command as a child process and communicates via
+/// stdin/stdout. The returned `McpRunningService` must be kept alive for the
+/// connection to stay open.
 pub async fn connect_mcp_child(
     command: &str,
     args: &[String],
@@ -102,7 +115,8 @@ pub async fn connect_mcp_child(
     connect_mcp_child_with_handler(command, args, env, default_client_info()).await
 }
 
-/// Connect to an MCP server via stdio child process with a custom `ClientHandler`.
+/// Connect to an MCP server via stdio child process with a custom
+/// `ClientHandler`.
 pub async fn connect_mcp_child_with_handler<H: ClientHandler>(
     command: &str,
     args: &[String],
@@ -140,22 +154,25 @@ pub struct McpRunningService(#[allow(dead_code)] Box<dyn std::any::Any + Send + 
 pub struct McpOperationProvider {
     peer: Peer<RoleClient>,
     descriptors: Vec<OperationDescriptor>,
-    /// Maps normalized op_name (snake_case) -> original MCP tool name (kebab-case)
+    /// Maps normalized op_name (snake_case) -> original MCP tool name
+    /// (kebab-case)
     tool_name_map: HashMap<String, String>,
     /// Sidecar config for undo declarations
     sidecar: McpSidecar,
     /// Type-erased cache readers keyed by entity_name (e.g. "todoist_task")
     entity_readers: HashMap<String, Arc<dyn EntityFieldReader>>,
     /// Keeps the MCP connection alive for the lifetime of this provider.
-    /// None when the caller holds the connection externally (e.g., McpIntegration).
+    /// None when the caller holds the connection externally (e.g.,
+    /// McpIntegration).
     _connection: Option<McpRunningService>,
 }
 
 impl McpOperationProvider {
     /// Connect to an MCP server, fetch tool schemas, and build the provider.
     ///
-    /// When `auth_token` is provided it is sent as a `Bearer` authorization header.
-    /// The connection is kept alive for the lifetime of this provider.
+    /// When `auth_token` is provided it is sent as a `Bearer` authorization
+    /// header. The connection is kept alive for the lifetime of this
+    /// provider.
     pub async fn connect(
         uri: &str,
         auth_token: Option<&str>,
@@ -178,8 +195,9 @@ impl McpOperationProvider {
         Self::from_peer(peer, connection, sidecar, entity_readers).await
     }
 
-    /// Build the provider from an already-connected peer, merging with sidecar UI annotations.
-    /// Takes ownership of the connection to keep it alive for the provider's lifetime.
+    /// Build the provider from an already-connected peer, merging with sidecar
+    /// UI annotations. Takes ownership of the connection to keep it alive
+    /// for the provider's lifetime.
     pub async fn from_peer(
         peer: Peer<RoleClient>,
         connection: McpRunningService,
@@ -191,8 +209,9 @@ impl McpOperationProvider {
         Ok(provider)
     }
 
-    /// Build the provider from an already-connected peer without taking ownership
-    /// of the connection. The caller must keep the `McpRunningService` alive separately.
+    /// Build the provider from an already-connected peer without taking
+    /// ownership of the connection. The caller must keep the
+    /// `McpRunningService` alive separately.
     pub async fn from_peer_shared(
         peer: Peer<RoleClient>,
         sidecar: McpSidecar,
@@ -293,8 +312,8 @@ impl McpOperationProvider {
     ) -> Result<HashMap<String, Value>> {
         let reader = self.entity_readers.get(entity_name).ok_or_else(|| {
             let err: Box<dyn std::error::Error + Send + Sync> = format!(
-                "no EntityFieldReader registered for entity '{entity_name}' — \
-                 cannot capture old state for undo"
+                "no EntityFieldReader registered for entity '{entity_name}' — cannot capture old \
+                 state for undo"
             )
             .into();
             err
@@ -302,8 +321,8 @@ impl McpOperationProvider {
 
         let all_fields = reader.get_fields(entity_id).await?.ok_or_else(|| {
             let err: Box<dyn std::error::Error + Send + Sync> = format!(
-                "entity '{entity_name}' with id '{entity_id}' not found in cache — \
-                 cannot capture old state for undo"
+                "entity '{entity_name}' with id '{entity_id}' not found in cache — cannot capture \
+                 old state for undo"
             )
             .into();
             err
@@ -342,16 +361,22 @@ impl McpOperationProvider {
     ) -> UndoAction {
         let tool_config = match self.sidecar.tools.get(original_tool_name) {
             Some(tc) => tc,
-            None => return UndoAction::Irreversible,
+            None => {
+                return UndoAction::DeclaredIrreversible("mcp: undo not configured for this tool");
+            }
         };
 
         let undo_config = match &tool_config.undo {
             Some(cfg) => cfg,
-            None => return UndoAction::Irreversible,
+            None => {
+                return UndoAction::DeclaredIrreversible("mcp: undo not configured for this tool");
+            }
         };
 
         match undo_config {
-            UndoConfig::Irreversible { .. } => UndoAction::Irreversible,
+            UndoConfig::Irreversible { .. } => {
+                UndoAction::DeclaredIrreversible("mcp: undo not configured for this tool")
+            }
             UndoConfig::Mirror { tool, capture } => {
                 let entity_config = match self.sidecar.entities.get(entity_name) {
                     Some(ec) => ec,
@@ -360,7 +385,9 @@ impl McpOperationProvider {
                             "undo for '{original_tool_name}' configured as Mirror but entity \
                              '{entity_name}' is not in the sidecar — degrading to Irreversible"
                         );
-                        return UndoAction::Irreversible;
+                        return UndoAction::DeclaredIrreversible(
+                            "mcp: undo not configured for this tool",
+                        );
                     }
                 };
 
@@ -369,11 +396,13 @@ impl McpOperationProvider {
                     Some(Value::String(id)) => id.clone(),
                     other => {
                         tracing::warn!(
-                            "undo for '{original_tool_name}' configured as Mirror but params \
-                             lack a string id column '{id_col}' (got {other:?}) — \
-                             degrading to Irreversible"
+                            "undo for '{original_tool_name}' configured as Mirror but params lack \
+                             a string id column '{id_col}' (got {other:?}) — degrading to \
+                             Irreversible"
                         );
-                        return UndoAction::Irreversible;
+                        return UndoAction::DeclaredIrreversible(
+                            "mcp: undo not configured for this tool",
+                        );
                     }
                 };
 
@@ -386,7 +415,9 @@ impl McpOperationProvider {
                         tracing::warn!(
                             "Failed to capture old state for undo of '{original_tool_name}': {e}"
                         );
-                        return UndoAction::Irreversible;
+                        return UndoAction::DeclaredIrreversible(
+                            "mcp: undo not configured for this tool",
+                        );
                     }
                 };
 

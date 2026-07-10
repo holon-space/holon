@@ -187,18 +187,25 @@ pub struct CompletionStateInfo {
     pub is_active: bool,
 }
 
-/// Represents the undo capability of an operation.
+/// Represents the undo classification of an operation.
 ///
-/// Operations return this type to indicate whether they can be undone
-/// and if so, what operation would undo them.
+/// Every provider result MUST carry a deliberate classification — either a
+/// concrete inverse ([`UndoAction::Undo`]) or an explicit
+/// [`UndoAction::DeclaredIrreversible`] naming *why* it cannot be undone. The
+/// third variant, [`UndoAction::Undeclared`], is the loud-failure default: a
+/// result that reaches the engine still `Undeclared` is a programming error
+/// (an arm that forgot to classify), not a silent no-op.
 #[derive(Debug, Clone)]
 pub enum UndoAction {
     /// The operation can be undone by executing the contained inverse
     /// operation.
     Undo(Operation),
-    /// The operation cannot be undone (e.g., complex operations like
-    /// split_block).
-    Irreversible,
+    /// The operation is deliberately not undoable; the reason is greppable and
+    /// user-surfaceable (e.g. "split_block: inverse not yet implemented").
+    DeclaredIrreversible(&'static str),
+    /// No classification was made. Reaching the engine in this state is a loud
+    /// error — providers must choose `Undo` or `DeclaredIrreversible`.
+    Undeclared,
 }
 
 impl UndoAction {
@@ -208,13 +215,18 @@ impl UndoAction {
     pub fn into_option(self) -> Option<Operation> {
         match self {
             UndoAction::Undo(op) => Some(op),
-            UndoAction::Irreversible => None,
+            UndoAction::DeclaredIrreversible(_) | UndoAction::Undeclared => None,
         }
     }
 
     /// Check if this action is reversible
     pub fn is_reversible(&self) -> bool {
         matches!(self, UndoAction::Undo(_))
+    }
+
+    /// Whether the provider forgot to classify (loud-error condition).
+    pub fn is_undeclared(&self) -> bool {
+        matches!(self, UndoAction::Undeclared)
     }
 }
 
@@ -228,7 +240,7 @@ impl From<Option<Operation>> for UndoAction {
     fn from(opt: Option<Operation>) -> Self {
         match opt {
             Some(op) => UndoAction::Undo(op),
-            None => UndoAction::Irreversible,
+            None => UndoAction::DeclaredIrreversible("inverse not provided"),
         }
     }
 }
@@ -292,11 +304,20 @@ impl OperationResult {
         }
     }
 
-    /// Create an irreversible operation result
+    /// Create a deliberately-irreversible operation result with a default
+    /// reason. Behaviour-preserving replacement for the former silent
+    /// "no undo entry" path; the classification is now visible and greppable
+    /// (`UndoAction::DeclaredIrreversible`). Use
+    /// [`Self::declared_irreversible`] to name the specific reason.
     pub fn irreversible(changes: Vec<FieldDelta>) -> Self {
+        Self::declared_irreversible(changes, "inverse not yet implemented")
+    }
+
+    /// Create an irreversible result naming *why* it cannot be undone.
+    pub fn declared_irreversible(changes: Vec<FieldDelta>, reason: &'static str) -> Self {
         Self {
             changes,
-            undo: UndoAction::Irreversible,
+            undo: UndoAction::DeclaredIrreversible(reason),
             response: None,
             follow_ups: vec![],
         }
@@ -1954,8 +1975,13 @@ mod trait_unit_tests {
         let inner = undo.into_option().expect("Undo(op) must yield Some(op)");
         assert_eq!(inner.op_name, "op");
 
-        assert!(!UndoAction::Irreversible.is_reversible());
-        assert!(UndoAction::Irreversible.into_option().is_none());
+        assert!(!UndoAction::DeclaredIrreversible("x").is_reversible());
+        assert!(
+            UndoAction::DeclaredIrreversible("x")
+                .into_option()
+                .is_none()
+        );
+        assert!(UndoAction::Undeclared.is_undeclared());
     }
 
     #[test]
@@ -2012,8 +2038,8 @@ mod trait_unit_tests {
         );
 
         // Non-block parents (doc URIs) must read as "no parent block".
-        // ALLOW(entity_uri_from_raw): constructing a doc-scheme parent fixture.
         let mut doc_child = test_block();
+        // ALLOW(entity_uri_from_raw): constructing a doc-scheme parent fixture.
         doc_child.parent_id = EntityUri::from_raw("doc:some-file");
         assert_eq!(BlockEntity::parent_id(&doc_child), None);
     }

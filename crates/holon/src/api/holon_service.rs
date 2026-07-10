@@ -5,15 +5,21 @@
 //! test coverage through PBTs while keeping MCP-specific concerns
 //! (tool descriptions, `CallToolResult` wrapping, transport) in the MCP crate.
 
-use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use anyhow::Context;
+use anyhow::Result;
+use holon_api::EntityName;
+use holon_api::EntityUri;
+use holon_api::OperationDescriptor;
+use holon_api::QueryContext;
+use holon_api::QueryLanguage;
+use holon_api::Value;
+use holon_core::storage::types::StorageEntity;
+
 use crate::api::backend_engine::BackendEngine;
 use crate::storage::turso::RowChangeStream;
-use holon_api::QueryContext;
-use holon_api::{EntityName, EntityUri, OperationDescriptor, QueryLanguage, Value};
-use holon_core::storage::types::StorageEntity;
 
 /// Result of a query execution, including timing.
 pub struct QueryResult {
@@ -86,7 +92,8 @@ impl HolonService {
         ))
     }
 
-    /// Compile a query (PRQL / GQL / SQL) to its final SQL form without executing.
+    /// Compile a query (PRQL / GQL / SQL) to its final SQL form without
+    /// executing.
     pub fn compile_query(&self, query: &str, language: QueryLanguage) -> Result<String> {
         self.engine
             .compile_to_sql(query, language)
@@ -124,7 +131,8 @@ impl HolonService {
         })
     }
 
-    /// Execute raw SQL directly against the database, bypassing query compilation.
+    /// Execute raw SQL directly against the database, bypassing query
+    /// compilation.
     pub async fn execute_raw_sql(
         &self,
         sql: &str,
@@ -161,15 +169,18 @@ impl HolonService {
 
     // ── Operation dispatch ────────────────────────────────────────────
 
-    /// Execute an operation on an entity, returning the optional response value.
+    /// Execute an operation on an entity, returning the optional response
+    /// value.
     pub async fn execute_operation(
         &self,
         entity_name: &EntityName,
         op_name: &str,
         params: StorageEntity,
     ) -> Result<Option<Value>> {
+        // HolonService is a user-session facade (MCP tools, dioxus-web worker);
+        // rule/sync/ingest ops do not route through it.
         self.engine
-            .execute_operation(entity_name, op_name, params)
+            .execute_operation(entity_name, op_name, params, holon_api::OpOrigin::User)
             .await
             .context(format!(
                 "Failed to execute operation '{}' on entity '{}'",
@@ -184,11 +195,11 @@ impl HolonService {
 
     // ── Undo / Redo ───────────────────────────────────────────────────
 
-    pub async fn undo(&self) -> Result<bool> {
+    pub async fn undo(&self) -> Result<holon_api::UndoOutcome> {
         self.engine.undo().await
     }
 
-    pub async fn redo(&self) -> Result<bool> {
+    pub async fn redo(&self) -> Result<holon_api::UndoOutcome> {
         self.engine.redo().await
     }
 

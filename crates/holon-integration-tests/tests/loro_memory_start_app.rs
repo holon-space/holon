@@ -2,11 +2,11 @@
 //! through DI.
 //!
 //! `TestEnvironment::new_with_backend(StorageSelector::LoroMemory)` →
-//! `start_app` must assemble a no-Turso container (no `BackendEngine`), register
-//! the Loro storage adapter + the block-query frontend, and **resolve** a
-//! `FrontendSession` + `ReactiveEngine` that render structural blocks straight
-//! from the Loro tree. The Turso machinery (MCP, CDC watches, org sync, seed
-//! priming) is simply not registered in this wiring.
+//! `start_app` must assemble a no-Turso container (no `BackendEngine`),
+//! register the Loro storage adapter + the block-query frontend, and
+//! **resolve** a `FrontendSession` + `ReactiveEngine` that render structural
+//! blocks straight from the Loro tree. The Turso machinery (MCP, CDC watches,
+//! org sync, seed priming) is simply not registered in this wiring.
 //!
 //! This is also the headless V2-gate extension for the slice: it proves the
 //! whole no-Turso render path (snapshot → `UiEvent` → `ReactiveEngine`) paints
@@ -19,7 +19,10 @@ use std::time::Duration;
 
 use holon::api::repository::CoreOperations;
 use holon::di::StorageSelector;
-use holon_api::{BlockContent, EntityName, EntityUri, Value};
+use holon_api::BlockContent;
+use holon_api::EntityName;
+use holon_api::EntityUri;
+use holon_api::Value;
 use holon_frontend::reactive::ReactiveRenderedRows;
 use holon_integration_tests::TestEnvironment;
 
@@ -107,10 +110,10 @@ async fn run_test(runtime: Arc<tokio::runtime::Runtime>) {
 }
 
 /// Stage 4 (ADR 0004 Phase 9): a no-Turso `LoroMemory` session exposes the
-/// **operation** capability over Loro-native providers — `operation_engine()` is
-/// `Some`, block operations are advertised, and a mutation dispatched through the
-/// session lands in the same Loro doc the read path observes. This proves the
-/// cache-free `LoroBlockOperations` → `OperationDispatcher` →
+/// **operation** capability over Loro-native providers — `operation_engine()`
+/// is `Some`, block operations are advertised, and a mutation dispatched
+/// through the session lands in the same Loro doc the read path observes. This
+/// proves the cache-free `LoroBlockOperations` → `OperationDispatcher` →
 /// `DispatchingOperationEngine` wiring works end-to-end without Turso.
 #[test]
 fn loro_memory_operation_engine_mutates_shared_doc() {
@@ -179,7 +182,10 @@ async fn run_operation_engine_test(runtime: Arc<tokio::runtime::Runtime>) {
     // `set_field("content")` is reversible: undo restores the prior text, redo
     // re-applies it — full round-trip through the no-Turso undo stack.
     assert!(session.can_undo().await, "set_field must be undoable");
-    assert!(session.undo().await.expect("undo"), "undo applied");
+    assert!(
+        session.undo().await.expect("undo").applied(),
+        "undo applied"
+    );
     assert_eq!(
         backend
             .get_block(child.id.as_str())
@@ -193,7 +199,10 @@ async fn run_operation_engine_test(runtime: Arc<tokio::runtime::Runtime>) {
         session.can_redo().await,
         "redo must be available after undo"
     );
-    assert!(session.redo().await.expect("redo"), "redo applied");
+    assert!(
+        session.redo().await.expect("redo").applied(),
+        "redo applied"
+    );
     assert_eq!(
         backend
             .get_block(child.id.as_str())

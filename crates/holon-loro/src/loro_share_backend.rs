@@ -1648,7 +1648,7 @@ impl OperationProvider for LoroShareBackend {
                     op.entity_name = entity_name.clone();
                     UndoAction::Undo(op)
                 }
-                UndoAction::Irreversible => UndoAction::Irreversible,
+                other => other,
             },
             response: result.response,
             follow_ups: result.follow_ups,

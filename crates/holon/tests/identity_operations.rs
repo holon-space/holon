@@ -5,12 +5,15 @@
 //! test that randomizes the canonical/alias topology to surface invariants
 //! (the spec calls for PBT coverage on merge + undo).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 
-use holon::identity::{ENTITY_NAME, IdentityProvider};
+use holon::identity::ENTITY_NAME;
+use holon::identity::IdentityProvider;
 use holon::storage::schema_module::SchemaModule;
 use holon::storage::turso::TursoBackend;
-use holon_api::{Operation, Value};
+use holon_api::Operation;
+use holon_api::Value;
 use holon_core::OperationProvider;
 use holon_core::storage::types::StorageEntity;
 use holon_turso::schema_modules::IdentitySchemaModule;
@@ -48,8 +51,8 @@ async fn seed_alias(
     params.insert("confidence".into(), Value::Float(confidence));
     handle
         .query(
-            "INSERT INTO entity_alias (canonical_id, system, foreign_id, confidence) \
-             VALUES ($canonical_id, $system, $foreign_id, $confidence)",
+            "INSERT INTO entity_alias (canonical_id, system, foreign_id, confidence) VALUES \
+             ($canonical_id, $system, $foreign_id, $confidence)",
             params,
         )
         .await
@@ -76,8 +79,8 @@ async fn snapshot(
 
     let aliases = handle
         .query(
-            "SELECT canonical_id, system, foreign_id, confidence \
-             FROM entity_alias ORDER BY system, foreign_id",
+            "SELECT canonical_id, system, foreign_id, confidence FROM entity_alias ORDER BY \
+             system, foreign_id",
             HashMap::new(),
         )
         .await
@@ -127,9 +130,8 @@ async fn merge_entities_rewrites_aliases_and_deletes_a() {
 
     handle
         .query(
-            "INSERT INTO canonical_entity (id, kind, primary_label, created_at) \
-             VALUES ('a', 'person', 'Sarah A', 100), \
-                    ('b', 'person', 'Sarah B', 100)",
+            "INSERT INTO canonical_entity (id, kind, primary_label, created_at) VALUES ('a', \
+             'person', 'Sarah A', 100), ('b', 'person', 'Sarah B', 100)",
             HashMap::new(),
         )
         .await
@@ -161,9 +163,7 @@ async fn merge_entities_rewrites_aliases_and_deletes_a() {
     // Inverse is restore_canonical_after_merge with full snapshot.
     let inverse = match result.undo {
         holon_core::traits::UndoAction::Undo(op) => op,
-        holon_core::traits::UndoAction::Irreversible => {
-            panic!("merge_entities must be reversible")
-        }
+        other => panic!("merge_entities must be reversible, got {other:?}"),
     };
     assert_eq!(inverse.entity_name.as_str(), ENTITY_NAME);
     assert_eq!(inverse.op_name, "restore_canonical_after_merge");
@@ -192,9 +192,8 @@ async fn merge_then_undo_restores_state_exactly() {
     // Seed via raw SQL.
     handle
         .query(
-            "INSERT INTO canonical_entity (id, kind, primary_label, created_at) \
-             VALUES ('a', 'person', 'A', 100), \
-                    ('b', 'person', 'B', 200)",
+            "INSERT INTO canonical_entity (id, kind, primary_label, created_at) VALUES ('a', \
+             'person', 'A', 100), ('b', 'person', 'B', 200)",
             HashMap::new(),
         )
         .await
@@ -353,8 +352,8 @@ async fn merge_with_no_aliases_round_trips() {
 
     handle
         .query(
-            "INSERT INTO canonical_entity (id, kind, primary_label, created_at) \
-             VALUES ('a', 'person', 'A', 1), ('b', 'person', 'B', 2)",
+            "INSERT INTO canonical_entity (id, kind, primary_label, created_at) VALUES ('a', \
+             'person', 'A', 1), ('b', 'person', 'B', 2)",
             HashMap::new(),
         )
         .await
@@ -392,9 +391,9 @@ async fn merge_with_no_aliases_round_trips() {
 // PBT-style coverage: random merge scenarios round-trip via undo.
 // -------------------------------------------------------------------------
 
-/// Generate a small random scenario: 2..=5 canonical entities with 0..=8 aliases
-/// distributed among them. Returns (canonical_ids, aliases as (canonical_id,
-/// system, foreign_id)).
+/// Generate a small random scenario: 2..=5 canonical entities with 0..=8
+/// aliases distributed among them. Returns (canonical_ids, aliases as
+/// (canonical_id, system, foreign_id)).
 fn arb_scenario() -> impl Strategy<Value = (Vec<String>, Vec<(String, String, String)>)> {
     let canonicals = prop::collection::vec("[a-d]", 2..=5).prop_map(|mut v| {
         v.sort();

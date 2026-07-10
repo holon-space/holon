@@ -638,7 +638,7 @@ impl OperationProvider for OperationDispatcher {
                         op.entity_name = resolved_entity_name_typed.clone();
                         UndoAction::Undo(op)
                     }
-                    UndoAction::Irreversible => UndoAction::Irreversible,
+                    other => other,
                 };
 
                 match &operation_result.undo {
@@ -649,10 +649,17 @@ impl OperationProvider for OperationDispatcher {
                             entity_name, op_name
                         );
                     }
-                    UndoAction::Irreversible => {
+                    UndoAction::DeclaredIrreversible(reason) => {
                         info!(
                             "[OperationDispatcher] Provider execution succeeded: entity={}, op={} \
-                             (no inverse operation)",
+                             (no inverse: {reason})",
+                            entity_name, op_name
+                        );
+                    }
+                    UndoAction::Undeclared => {
+                        info!(
+                            "[OperationDispatcher] Provider execution succeeded: entity={}, op={} \
+                             (undo UNDECLARED — engine will reject)",
                             entity_name, op_name
                         );
                     }

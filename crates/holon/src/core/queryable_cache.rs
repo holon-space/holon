@@ -1303,7 +1303,9 @@ where
     /// Used for full sync operations.
     async fn clear_cache(&self) -> Result<UndoAction> {
         self.get_cache().clear().await?;
-        Ok(UndoAction::Irreversible)
+        Ok(UndoAction::DeclaredIrreversible(
+            "clear_cache: full-sync cache clear is not undoable",
+        ))
     }
 }
 
