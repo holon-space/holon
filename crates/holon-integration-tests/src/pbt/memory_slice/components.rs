@@ -2,18 +2,26 @@
 //! contributes one or more capabilities to a composed `CapMap`.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::Mutex;
 
+use holon::api::BackendEngine;
+use holon::api::MemoryBackend;
 use holon::api::types::Traversal;
-use holon::api::{BackendEngine, MemoryBackend};
+use holon_api::ApiError;
+use holon_api::BlockContent;
+use holon_api::EntityUri;
+use holon_api::StorageEntity;
+use holon_api::Value;
 use holon_api::repository::CoreOperations;
 use holon_api::types::ContentType;
-use holon_api::{ApiError, BlockContent, EntityUri, StorageEntity, Value};
 use holon_frontend::editor_caret;
-use holon_pbt_core::capabilities::{
-    SutBackend, SutBlockTreeWrite, SutEditorMirrorRead, SutEditorMirrorWrite,
-};
-use holon_pbt_core::composition::{CapMap, CapProvider};
+use holon_pbt_core::capabilities::SutBackend;
+use holon_pbt_core::capabilities::SutBlockTreeWrite;
+use holon_pbt_core::capabilities::SutEditorMirrorRead;
+use holon_pbt_core::capabilities::SutEditorMirrorWrite;
+use holon_pbt_core::composition::CapMap;
+use holon_pbt_core::composition::CapProvider;
 
 use crate::pbt::types::normalize_content_for_org_roundtrip;
 
@@ -22,14 +30,16 @@ use crate::pbt::types::normalize_content_for_org_roundtrip;
 /// CDC, no async settle. The whole point of the memory slice's speed.
 ///
 /// Holds the backend behind `Arc` so a write target (e.g. [`InProcEditorSut`])
-/// can commit into the SAME store this read cap observes. `MemoryBackend::clone`
-/// deep-copies, so sharing MUST go through the `Arc`, not a clone.
+/// can commit into the SAME store this read cap observes.
+/// `MemoryBackend::clone` deep-copies, so sharing MUST go through the `Arc`,
+/// not a clone.
 pub struct MemoryBackendComponent {
     backend: Arc<MemoryBackend>,
-    /// Mirror of the reference oracle's `next_id`, kept in lockstep by the driver
-    /// (`set_next_split_id` after each tick) so `apply_split_block` mints the SAME
-    /// synthetic `:split-N` id the reference does. The pure-memory slice has an
-    /// identity ref↔SUT id space, so the ids must agree for `inv-blocks-match-ref`.
+    /// Mirror of the reference oracle's `next_id`, kept in lockstep by the
+    /// driver (`set_next_split_id` after each tick) so `apply_split_block`
+    /// mints the SAME synthetic `:split-N` id the reference does. The
+    /// pure-memory slice has an identity ref↔SUT id space, so the ids must
+    /// agree for `inv-blocks-match-ref`.
     next_split_id: Mutex<usize>,
 }
 
@@ -38,8 +48,8 @@ impl MemoryBackendComponent {
         Self::new_shared(Arc::new(backend))
     }
 
-    /// Wrap an already-shared backend so the read cap and a write target observe
-    /// one store. The F2 keystone for committed-content parity.
+    /// Wrap an already-shared backend so the read cap and a write target
+    /// observe one store. The F2 keystone for committed-content parity.
     pub fn new_shared(backend: Arc<MemoryBackend>) -> Self {
         Self {
             backend,
@@ -75,8 +85,8 @@ impl SutBackend for MemoryBackendComponent {
     }
 
     /// The memory slice has no focus-roots projection. None of the cap-selected
-    /// invariants read it (selection guarantees this), so an empty mirror is the
-    /// honest answer rather than a fabricated row.
+    /// invariants read it (selection guarantees this), so an empty mirror is
+    /// the honest answer rather than a fabricated row.
     async fn live_focus_root_rows(&self) -> Vec<(String, String)> {
         Vec::new()
     }
@@ -97,8 +107,9 @@ impl MemoryBackendComponent {
     /// seed order and reorders via explicit `move_block` anchors.
     ///
     /// A virtual parent (`no_parent`/sentinel) is not a stored block, so
-    /// `list_children` rejects it; its "children" are the top-level blocks, read
-    /// from a full snapshot filtered by `parent_id` (preserving traversal order).
+    /// `list_children` rejects it; its "children" are the top-level blocks,
+    /// read from a full snapshot filtered by `parent_id` (preserving
+    /// traversal order).
     async fn ordered_children(&self, parent: &EntityUri) -> Vec<EntityUri> {
         if parent.is_no_parent() || parent.is_sentinel() {
             return self
@@ -147,15 +158,17 @@ impl MemoryBackendComponent {
 /// The structural block-tree write cap over the real `MemoryBackend`. Each op
 /// mirrors the corresponding `ReferenceState`/`transitions::*::apply_to_ref`
 /// algorithm so the SUT tree converges to the oracle's. `MemoryBackend` has no
-/// `sequence` column — child order IS `children_by_parent` insertion/move order,
-/// so ordering is reproduced by driving `move_block` with the explicit anchor
-/// each op implies (no order invariant compares it directly; the SUT's own
-/// prev/next-sibling reads must match the ref, which these anchors guarantee).
+/// `sequence` column — child order IS `children_by_parent` insertion/move
+/// order, so ordering is reproduced by driving `move_block` with the explicit
+/// anchor each op implies (no order invariant compares it directly; the SUT's
+/// own prev/next-sibling reads must match the ref, which these anchors
+/// guarantee).
 #[async_trait::async_trait(?Send)]
 impl SutBlockTreeWrite for MemoryBackendComponent {
-    /// `transitions::indent`: move under the previous sibling, appended after its
-    /// existing children (`move_block(id, prev, after=last child of prev)`).
-    /// `MemoryBackend::move_block` with the last child as anchor == append to end.
+    /// `transitions::indent`: move under the previous sibling, appended after
+    /// its existing children (`move_block(id, prev, after=last child of
+    /// prev)`). `MemoryBackend::move_block` with the last child as anchor
+    /// == append to end.
     async fn apply_indent(&self, id: &EntityUri) {
         let prev = self
             .prev_sibling(id)
@@ -166,16 +179,18 @@ impl SutBlockTreeWrite for MemoryBackendComponent {
     }
 
     /// `ReferenceState::outdent_block`: move to the grandparent, placed
-    /// immediately after the old parent (`move_block(id, grandparent, after=parent)`).
+    /// immediately after the old parent (`move_block(id, grandparent,
+    /// after=parent)`).
     async fn apply_outdent(&self, id: &EntityUri) {
         let parent = self.block(id).await.parent_id;
         let grandparent = self.block(&parent).await.parent_id;
         self.move_block(id, grandparent, Some(parent)).await;
     }
 
-    /// `swap_siblings(id, prev)`: swap by moving the previous sibling to *after*
-    /// `id`. Works whether or not `prev` is the first child (no front-insertion
-    /// needed, which `MemoryBackend::move_block` can't express).
+    /// `swap_siblings(id, prev)`: swap by moving the previous sibling to
+    /// *after* `id`. Works whether or not `prev` is the first child (no
+    /// front-insertion needed, which `MemoryBackend::move_block` can't
+    /// express).
     async fn apply_move_up(&self, id: &EntityUri) {
         let prev = self
             .prev_sibling(id)
@@ -185,7 +200,8 @@ impl SutBlockTreeWrite for MemoryBackendComponent {
         self.move_block(&prev, parent, Some(id.clone())).await;
     }
 
-    /// `swap_siblings(id, next)`: swap by moving `id` to *after* its next sibling.
+    /// `swap_siblings(id, next)`: swap by moving `id` to *after* its next
+    /// sibling.
     async fn apply_move_down(&self, id: &EntityUri) {
         let next = self
             .next_sibling(id)
@@ -195,9 +211,10 @@ impl SutBlockTreeWrite for MemoryBackendComponent {
         self.move_block(id, parent, Some(next)).await;
     }
 
-    /// `ReferenceState::split_block`: original keeps `content[..pos].trim_end()`,
-    /// a new `:split-N` sibling gets `content[pos..].trim_start()`, placed right
-    /// after the original. `N` mirrors the oracle's `next_id` (`set_next_split_id`).
+    /// `ReferenceState::split_block`: original keeps
+    /// `content[..pos].trim_end()`, a new `:split-N` sibling gets
+    /// `content[pos..].trim_start()`, placed right after the original. `N`
+    /// mirrors the oracle's `next_id` (`set_next_split_id`).
     async fn apply_split_block(&self, id: &EntityUri, position: usize) {
         let block = self.block(id).await;
         let parent = block.parent_id.clone();
@@ -238,8 +255,9 @@ impl SutBlockTreeWrite for MemoryBackendComponent {
 
     /// `ReferenceState::join_block`: target = previous sibling, else the parent
     /// (child→parent join). Append `id`'s content onto the target, re-parent
-    /// `id`'s children onto the target, delete `id`. Order of the moved children
-    /// is not invariant-checked (only parent/content/orphan/cycle are).
+    /// `id`'s children onto the target, delete `id`. Order of the moved
+    /// children is not invariant-checked (only parent/content/orphan/cycle
+    /// are).
     async fn apply_join_block(&self, id: &EntityUri) {
         let block = self.block(id).await;
         let target = match self.prev_sibling(id).await {
@@ -290,46 +308,89 @@ struct EditorCell {
     dirty: bool,
 }
 
-/// The narrow commit dependency of [`InMemEditorComponent`]: the editor only ever
-/// writes a block's content on commit, so it depends on exactly that — not the full
-/// [`CoreOperations`] surface. This lets the editor commit into any canonical
-/// backend: a `CoreOperations` store (Loro/memory, via [`CoreOpsCommit`]) **or** a
-/// Turso [`BackendEngine`] (via its production `set_field` op) — the latter is what
-/// lets `compose_sut`'s Turso-canonical configs host the editor (no `CoreOperations`
-/// exists over `BackendEngine`). Minimal interface = no faked methods.
+/// The narrow commit dependency of [`InMemEditorComponent`]: the editor only
+/// ever writes a block's content on commit, so it depends on exactly that — not
+/// the full [`CoreOperations`] surface. This lets the editor commit into any
+/// canonical backend: a `CoreOperations` store (Loro/memory, via
+/// [`CoreOpsCommit`]) **or** a Turso [`BackendEngine`] (via its production
+/// `set_field` op) — the latter is what lets `compose_sut`'s Turso-canonical
+/// configs host the editor (no `CoreOperations` exists over `BackendEngine`).
+/// Minimal interface = no faked methods.
 #[async_trait::async_trait(?Send)]
 pub trait EditorCommitTarget {
-    /// Write `content` as block `id`'s text content into the canonical store.
-    async fn commit_block_content(&self, id: &str, content: &str) -> Result<(), ApiError>;
+    /// Write `content` (and its org-lens-derived `marks`, replacing any
+    /// previous mark set — `None` clears) as block `id`'s text content into
+    /// the canonical store.
+    async fn commit_block_content(
+        &self,
+        id: &str,
+        content: &str,
+        marks: Option<&[holon_api::MarkSpan]>,
+    ) -> Result<(), ApiError>;
 }
 
-/// Adapts a [`CoreOperations`] store (Loro/memory) to [`EditorCommitTarget`] via
-/// `update_block` — the commit path the memory/loro slices use.
+/// Adapts a [`CoreOperations`] store (Loro/memory) to [`EditorCommitTarget`]
+/// via `update_block` — the commit path the memory/loro slices use.
 pub struct CoreOpsCommit(pub Arc<dyn CoreOperations>);
 
 #[async_trait::async_trait(?Send)]
 impl EditorCommitTarget for CoreOpsCommit {
-    async fn commit_block_content(&self, id: &str, content: &str) -> Result<(), ApiError> {
-        self.0.update_block(id, BlockContent::text(content)).await
+    async fn commit_block_content(
+        &self,
+        id: &str,
+        content: &str,
+        marks: Option<&[holon_api::MarkSpan]>,
+    ) -> Result<(), ApiError> {
+        let block_content = match marks {
+            Some(m) => BlockContent::RichText {
+                text: content.to_string(),
+                marks: m.to_vec(),
+            },
+            None => BlockContent::text(content),
+        };
+        self.0.update_block(id, block_content).await
     }
 }
 
 /// Commits editor content into a Turso [`BackendEngine`] through the production
-/// `block`/`set_field` operation — the SAME op `SqlProjectionComponent::update_content`
-/// drives, so the committed text lands in `block_raw` where the block invariants read.
+/// `block`/`set_field` operation — the SAME op
+/// `SqlProjectionComponent::update_content` drives, so the committed text lands
+/// in `block_raw` where the block invariants read.
 #[async_trait::async_trait(?Send)]
 impl EditorCommitTarget for BackendEngine {
-    async fn commit_block_content(&self, id: &str, content: &str) -> Result<(), ApiError> {
+    async fn commit_block_content(
+        &self,
+        id: &str,
+        content: &str,
+        marks: Option<&[holon_api::MarkSpan]>,
+    ) -> Result<(), ApiError> {
+        let entity: holon_api::types::EntityName = "block".to_string().into();
         let mut params: StorageEntity = HashMap::new();
         params.insert("id".into(), Value::String(id.to_string()));
         params.insert("field".into(), Value::String("content".to_string()));
         params.insert("value".into(), Value::String(content.to_string()));
-        let entity = "block".to_string().into();
         self.execute_operation(&entity, "set_field", params)
             .await
             .map(|_| ())
             .map_err(|e| ApiError::InternalError {
                 message: format!("editor commit set_field failed: {e}"),
+            })?;
+        // Marks half of the org lens: replace the block's mark set alongside
+        // its content (Null clears), matching the `marks IS NOT NULL` column
+        // discriminator and the Loro `write_field(marks)` route.
+        let marks_value = match marks {
+            Some(m) => Value::String(holon_api::marks_to_json(m)),
+            None => Value::Null,
+        };
+        let mut params: StorageEntity = HashMap::new();
+        params.insert("id".into(), Value::String(id.to_string()));
+        params.insert("field".into(), Value::String("marks".to_string()));
+        params.insert("value".into(), marks_value);
+        self.execute_operation(&entity, "set_field", params)
+            .await
+            .map(|_| ())
+            .map_err(|e| ApiError::InternalError {
+                message: format!("editor commit set_field(marks) failed: {e}"),
             })
     }
 }
@@ -346,26 +407,29 @@ impl EditorCommitTarget for BackendEngine {
 pub struct InMemEditorComponent {
     cell: Mutex<EditorCell>,
     /// Where this editor commits live text — the SAME canonical store the
-    /// [`SutBackend`] cap reads, so a write is observed by both the editor-mirror
-    /// and block-content invariants. A narrow [`EditorCommitTarget`] (not the full
-    /// [`CoreOperations`]) so the editor commits into a `CoreOperations` store
-    /// (Loro/memory) OR a Turso `BackendEngine` (via `set_field`) uniformly. Owning
-    /// it lets the component host [`SutEditorMirrorWrite`] directly (E1, Stage-1b —
-    /// the old `InProcEditorSut` split is collapsed: one editor component is both the
-    /// read mirror and the keystroke-driven write target).
+    /// [`SutBackend`] cap reads, so a write is observed by both the
+    /// editor-mirror and block-content invariants. A narrow
+    /// [`EditorCommitTarget`] (not the full [`CoreOperations`]) so the
+    /// editor commits into a `CoreOperations` store (Loro/memory) OR a
+    /// Turso `BackendEngine` (via `set_field`) uniformly. Owning
+    /// it lets the component host [`SutEditorMirrorWrite`] directly (E1,
+    /// Stage-1b — the old `InProcEditorSut` split is collapsed: one editor
+    /// component is both the read mirror and the keystroke-driven write
+    /// target).
     commit_target: Arc<dyn EditorCommitTarget>,
 }
 
 impl InMemEditorComponent {
-    /// Commit into a [`CoreOperations`] store (Loro/memory) — the memory/loro slices'
-    /// path; the store is wrapped in [`CoreOpsCommit`].
+    /// Commit into a [`CoreOperations`] store (Loro/memory) — the memory/loro
+    /// slices' path; the store is wrapped in [`CoreOpsCommit`].
     pub fn new(store: Arc<dyn CoreOperations>) -> Self {
         Self::new_commit(Arc::new(CoreOpsCommit(store)))
     }
 
     /// Commit into an explicit [`EditorCommitTarget`] — used by `compose_sut`'s
-    /// Turso-canonical configs, where the canonical backend is a `BackendEngine`
-    /// (no `CoreOperations`), committing through its production `set_field` op.
+    /// Turso-canonical configs, where the canonical backend is a
+    /// `BackendEngine` (no `CoreOperations`), committing through its
+    /// production `set_field` op.
     pub fn new_commit(commit_target: Arc<dyn EditorCommitTarget>) -> Self {
         Self {
             cell: Mutex::new(EditorCell::default()),
@@ -419,28 +483,29 @@ impl InMemEditorComponent {
         c.block.clone().map(|b| (b, c.text.clone()))
     }
 
-    /// Commit the editor's live text into the shared store, normalizing the SAME
-    /// way the reference does (`commit_active_editor_if_changed`) so the RAW
-    /// content `inv-block-content/block_raw` compares matches
+    /// Commit the editor's live text into the shared store, normalizing the
+    /// SAME way the reference does (`commit_active_editor_if_changed`) so
+    /// the RAW content `inv-block-content/block_raw` compares matches
     /// byte-for-byte.
     ///
-    /// `take_commit` returns `Some` whenever a block is open — it does NOT gate on
-    /// the dirty flag — so this fires on every type/delete, re-writing identical
-    /// content when nothing changed (e.g. a backspace at caret 0). That redundant
-    /// same-value write is harmless; the reference content-gates and converges to
-    /// the same string.
+    /// `take_commit` returns `Some` whenever a block is open — it does NOT gate
+    /// on the dirty flag — so this fires on every type/delete, re-writing
+    /// identical content when nothing changed (e.g. a backspace at caret
+    /// 0). That redundant same-value write is harmless; the reference
+    /// content-gates and converges to the same string.
     ///
-    /// `ContentType::Text` is hardcoded: Stage 1 only ever opens the editor on a
-    /// text block. Reading the block's real `content_type` is a later-stage
-    /// concern (non-Text editing).
+    /// `ContentType::Text` is hardcoded: Stage 1 only ever opens the editor on
+    /// a text block. Reading the block's real `content_type` is a
+    /// later-stage concern (non-Text editing).
     async fn commit(&self) {
         if let Some((id, text)) = self.take_commit() {
-            let normalized = normalize_content_for_org_roundtrip(&text, ContentType::Text);
+            let (normalized, marks) = normalize_content_for_org_roundtrip(&text, ContentType::Text);
             self.commit_target
-                .commit_block_content(id.as_str(), &normalized)
+                .commit_block_content(id.as_str(), &normalized, marks.as_deref())
                 .await
                 .expect(
-                    "InMemEditorComponent commit: commit_block_content into shared store must not fail",
+                    "InMemEditorComponent commit: commit_block_content into shared store must not \
+                     fail",
                 );
         }
     }
@@ -471,9 +536,9 @@ impl SutEditorMirrorRead for InMemEditorComponent {
 /// (E1, Stage-1b): the `TypeChars`/`DeleteBackward`/`MoveCursor` `apply_to_sut`
 /// bodies drive the real caret/text math, then commit the live text into the
 /// shared store — the headless analogue of `E2ESut`'s keystroke-driven
-/// `SutEditorMirrorWrite`, no `UserDriver`/GPUI window. The composed `CapMap` is a
-/// `SutTransitionTarget` for editor ops just as `MemoryBackendComponent` makes it
-/// one for structural ops.
+/// `SutEditorMirrorWrite`, no `UserDriver`/GPUI window. The composed `CapMap`
+/// is a `SutTransitionTarget` for editor ops just as `MemoryBackendComponent`
+/// makes it one for structural ops.
 #[async_trait::async_trait(?Send)]
 impl SutEditorMirrorWrite for InMemEditorComponent {
     async fn apply_type_chars(&self, text: &str) {

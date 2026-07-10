@@ -913,15 +913,16 @@ impl ReferenceState {
         let Some(block) = self.domain.block_state.blocks.get_mut(&block_id) else {
             return false;
         };
-        let normalized =
+        let (normalized, marks) =
             super::types::normalize_content_for_org_roundtrip(&in_memory, block.content_type);
-        if block.content == normalized {
+        if block.content == normalized && block.marks == marks {
             if let Some(e) = self.ui.tab.active_editor.as_mut() {
                 e.dirty = false;
             }
             return false;
         }
         block.content = normalized;
+        block.marks = marks;
         if let Some(e) = self.ui.tab.active_editor.as_mut() {
             e.dirty = false;
         }
