@@ -36,6 +36,20 @@ pub fn build_block_params(
         Value::String(block.content_type.to_string()),
     );
 
+    // Project Block.marks → SQL `marks` TEXT column as a JSON string, mirroring
+    // the canonical Loro writer (`loro_sync_controller::block_to_params`). The
+    // org parser extracts inline `[[…]]`/`*bold*` markup into `block.marks` and
+    // stores the rendered label in `content`; dropping marks here re-emits the
+    // stripped label on writeback and destroys the user's link syntax on disk.
+    // `None` → omit (NULL); `Some` → JSON-encode. The column discriminator on
+    // readback is `marks IS NOT NULL`.
+    if let Some(ref marks) = block.marks {
+        params.insert(
+            "marks".into(),
+            Value::String(holon_api::marks_to_json(marks)),
+        );
+    }
+
     // Timestamps must be provided explicitly as integers (millis).
     // The blocks table DDL has `DEFAULT (datetime('now'))` which produces TEXT,
     // but Block::from_entity expects i64. Always provide integer timestamps
@@ -280,13 +294,34 @@ mod tests {
             "store-write marks diverge from parsed marks"
         );
 
-        // Readback side: a block reconstructed with those marks re-emits the link.
+        // Readback side: a block reconstructed with those marks re-emits the
+        // link with its human-readable label — NOT stripped to plain text. The
+        // parser resolves the bare wiki-target to a deterministic entity id
+        // (`link_parser::deterministic_entity_id`), so writeback emits the
+        // resolved `[[block:…][Linked Page]]` form; the label is what the user
+        // sees and it survives. (The block_links junction is increment 2.)
         let mut restored = block.clone();
         restored.marks = Some(stored_marks);
-        let rendered = restored.to_org();
+        let render1 = restored.to_org();
         assert!(
-            rendered.contains("[[Linked Page]]"),
-            "writeback must re-emit `[[Linked Page]]` from restored marks, got {rendered:?}"
+            render1.contains("[[") && render1.contains("Linked Page"),
+            "writeback must re-emit the link preserving its `Linked Page` label, got {render1:?}"
+        );
+
+        // Echo-stability (the writeback-loop hazard): re-parsing the writeback
+        // and rendering again is a fixed point — the resolved target id is
+        // deterministic, so there is no render↔parse churn on disk.
+        let reparsed =
+            parse_org_file(path, &render1, &parent_dir_id, root).expect("re-parse writeback");
+        let rblock = reparsed
+            .blocks
+            .iter()
+            .find(|b| b.marks.as_ref().is_some_and(|m| !m.is_empty()))
+            .expect("re-parsed writeback must retain its marks");
+        assert_eq!(
+            rblock.to_org(),
+            render1,
+            "writeback must be byte-stable across repeated render/parse cycles"
         );
     }
 }
