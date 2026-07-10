@@ -25,6 +25,7 @@ use anyhow::Context;
 use anyhow::Result;
 use holon_api::EntityName;
 use holon_api::InterpValue;
+use holon_api::SourceLanguage;
 use holon_api::Value;
 use holon_api::action_dsl::parse_action_dsl;
 use holon_api::effect_id::FiringKey;
@@ -40,6 +41,8 @@ use tokio_stream::StreamExt;
 use tracing::info;
 
 use crate::api::backend_engine::BackendEngine;
+use crate::api::rule_status::RuleStatus;
+use crate::api::rule_status::RuleStatusHandle;
 
 const DISCOVERY_SQL: &str = include_str!("../../../../assets/queries/action_discovery.sql");
 
@@ -50,12 +53,14 @@ pub async fn start_action_watchers(engine: Arc<BackendEngine>) -> Result<()> {
         .await
         .context("Failed to subscribe to action discovery matview")?;
 
-    crate::util::spawn_actor(run_discovery_loop(engine, discovery_stream));
+    let status = engine.rule_status().clone();
+    crate::util::spawn_actor(run_discovery_loop(engine, status, discovery_stream));
     Ok(())
 }
 
 async fn run_discovery_loop(
     engine: Arc<BackendEngine>,
+    status: RuleStatusHandle,
     mut discovery_stream: crate::storage::turso::RowChangeStream,
 ) {
     let mut active: HashMap<String, JoinHandle<()>> = HashMap::new();
@@ -64,76 +69,17 @@ async fn run_discovery_loop(
         for item in batch.inner.items {
             match item.change {
                 Change::Created { data, .. } => {
-                    let action_id = match extract_string(&data, "action_id") {
-                        Some(id) => id,
-                        None => {
-                            tracing::warn!("[action_watcher] discovery row missing action_id");
-                            continue;
-                        }
-                    };
-                    let query_source = match extract_string(&data, "query_source") {
-                        Some(s) => s,
-                        None => {
-                            tracing::warn!("[action_watcher] {action_id} missing query_source");
-                            continue;
-                        }
-                    };
-                    let query_language = match extract_string(&data, "query_language") {
-                        Some(s) => s,
-                        None => {
-                            tracing::warn!("[action_watcher] {action_id} missing query_language");
-                            continue;
-                        }
-                    };
-                    let action_source = match extract_string(&data, "action_source") {
-                        Some(s) => s,
-                        None => {
-                            tracing::warn!("[action_watcher] {action_id} missing action_source");
-                            continue;
-                        }
-                    };
-
-                    info!("[action_watcher] starting watcher for {action_id}");
-                    let handle = tokio::spawn(run_pair_watcher(
-                        engine.clone(),
-                        action_id.clone(),
-                        query_source,
-                        query_language,
-                        action_source,
-                    ));
-                    active.insert(action_id, handle);
+                    start_pair(&engine, &status, &mut active, &data);
                 }
                 Change::Deleted { id, .. } => {
                     if let Some(handle) = active.remove(&id) {
                         handle.abort();
                         info!("[action_watcher] aborted watcher for {id}");
                     }
+                    status.clear(&id);
                 }
-                Change::Updated { id, data, .. } => {
-                    if let Some(handle) = active.remove(&id) {
-                        handle.abort();
-                    }
-                    let query_source = match extract_string(&data, "query_source") {
-                        Some(s) => s,
-                        None => continue,
-                    };
-                    let query_language = match extract_string(&data, "query_language") {
-                        Some(s) => s,
-                        None => continue,
-                    };
-                    let action_source = match extract_string(&data, "action_source") {
-                        Some(s) => s,
-                        None => continue,
-                    };
-                    info!("[action_watcher] restarting watcher for {id}");
-                    let handle = tokio::spawn(run_pair_watcher(
-                        engine.clone(),
-                        id.clone(),
-                        query_source,
-                        query_language,
-                        action_source,
-                    ));
-                    active.insert(id, handle);
+                Change::Updated { data, .. } => {
+                    start_pair(&engine, &status, &mut active, &data);
                 }
                 _ => {}
             }
@@ -141,8 +87,69 @@ async fn run_discovery_loop(
     }
 }
 
+/// Spawn (or respawn) the pair watcher for one discovered rule head. Aborts any
+/// prior watcher for the same id first. A legacy `action`-language head is NOT
+/// executed — it only records a loud [`RuleStatus::DeprecatedLanguage`] so it
+/// surfaces on the rule card instead of going silently inert (ADR 0024 WP3).
+fn start_pair(
+    engine: &Arc<BackendEngine>,
+    status: &RuleStatusHandle,
+    active: &mut HashMap<String, JoinHandle<()>>,
+    data: &StorageEntity,
+) {
+    let action_id = match extract_string(data, "action_id") {
+        Some(id) => id,
+        None => {
+            tracing::warn!("[action_watcher] discovery row missing action_id");
+            return;
+        }
+    };
+    if let Some(handle) = active.remove(&action_id) {
+        handle.abort();
+    }
+
+    // Legacy `action` language: refuse to execute; surface the deprecation loud.
+    let action_language = extract_string(data, "action_language").map(|s| {
+        s.parse::<SourceLanguage>()
+            .expect("SourceLanguage::from_str is infallible")
+    });
+    if matches!(action_language, Some(SourceLanguage::LegacyAction)) {
+        tracing::warn!(
+            "[action_watcher] {action_id} uses the retired 'action' language — not executing; \
+             rename the source block to holon_rule"
+        );
+        status.set(&action_id, RuleStatus::DeprecatedLanguage);
+        return;
+    }
+
+    let (query_source, query_language, action_source) = match (
+        extract_string(data, "query_source"),
+        extract_string(data, "query_language"),
+        extract_string(data, "action_source"),
+    ) {
+        (Some(qs), Some(ql), Some(a)) => (qs, ql, a),
+        _ => {
+            tracing::warn!("[action_watcher] {action_id} missing query/action source");
+            return;
+        }
+    };
+
+    info!("[action_watcher] starting watcher for {action_id}");
+    status.set(&action_id, RuleStatus::Active);
+    let handle = tokio::spawn(run_pair_watcher(
+        engine.clone(),
+        status.clone(),
+        action_id.clone(),
+        query_source,
+        query_language,
+        action_source,
+    ));
+    active.insert(action_id, handle);
+}
+
 async fn run_pair_watcher(
     engine: Arc<BackendEngine>,
+    status: RuleStatusHandle,
     action_id: String,
     query_source: String,
     query_language: String,
@@ -150,6 +157,7 @@ async fn run_pair_watcher(
 ) {
     if let Err(e) = run_pair_watcher_inner(
         engine,
+        &status,
         action_id.clone(),
         query_source,
         query_language,
@@ -163,6 +171,7 @@ async fn run_pair_watcher(
 
 async fn run_pair_watcher_inner(
     engine: Arc<BackendEngine>,
+    status: &RuleStatusHandle,
     action_id: String,
     query_source: String,
     query_language: String,
@@ -172,14 +181,25 @@ async fn run_pair_watcher_inner(
         format!("Unknown query language '{query_language}' for action {action_id}")
     })?;
 
-    let sql = engine
-        .compile_to_sql(&query_source, language)
-        .with_context(|| {
-            format!("Failed to compile query for action {action_id}: {query_source}")
-        })?;
+    let sql = match engine.compile_to_sql(&query_source, language) {
+        Ok(sql) => sql,
+        Err(e) => {
+            status.set(&action_id, RuleStatus::CompileError(format!("{e:#}")));
+            return Err(e).with_context(|| {
+                format!("Failed to compile query for action {action_id}: {query_source}")
+            });
+        }
+    };
 
-    let parsed_action = parse_action_dsl(&action_source)
-        .with_context(|| format!("Failed to parse action DSL for {action_id}: {action_source}"))?;
+    let parsed_action = match parse_action_dsl(&action_source) {
+        Ok(a) => a,
+        Err(e) => {
+            status.set(&action_id, RuleStatus::ParseError(format!("{e:#}")));
+            return Err(e).with_context(|| {
+                format!("Failed to parse action DSL for {action_id}: {action_source}")
+            });
+        }
+    };
 
     let entity_name = EntityName::new(&parsed_action.entity);
     // Parse the discovery id into a typed rule identity once, at the watcher
@@ -201,7 +221,7 @@ async fn run_pair_watcher_inner(
         for item in batch.inner.items {
             match item.change {
                 Change::Created { data, .. } => {
-                    fire_action(&engine, &entity_name, &parsed_action, &rule, &data).await;
+                    fire_action(&engine, status, &entity_name, &parsed_action, &rule, &data).await;
                 }
                 // Re-fire on Updated ONLY for create-effect rules. A rowid-stable
                 // UPDATE (the clock relation's day-rollover write, WP1) re-fires
@@ -212,7 +232,7 @@ async fn run_pair_watcher_inner(
                 // re-fire hazard deferred to Phase-2 inhibitor guards). Gate
                 // strictly on the operation kind.
                 Change::Updated { data, .. } if parsed_action.operation == "create" => {
-                    fire_action(&engine, &entity_name, &parsed_action, &rule, &data).await;
+                    fire_action(&engine, status, &entity_name, &parsed_action, &rule, &data).await;
                 }
                 _ => {}
             }
@@ -228,6 +248,7 @@ async fn run_pair_watcher_inner(
 /// not abort the watcher — one bad row must not tear down the whole action.
 async fn fire_action(
     engine: &BackendEngine,
+    status: &RuleStatusHandle,
     entity_name: &EntityName,
     parsed_action: &holon_api::action_dsl::ParsedAction,
     rule: &RuleId,
@@ -278,6 +299,7 @@ async fn fire_action(
         .execute_operation(entity_name, &parsed_action.operation, params)
         .await
     {
+        status.set(rule.as_str(), RuleStatus::ExecError(format!("{e:#}")));
         tracing::error!(
             "[action_watcher] execute_operation failed for action {}: {e:#}",
             rule.as_str()
@@ -367,15 +389,39 @@ mod tests {
         let entity = EntityName::new(&parsed.entity);
         let rule = RuleId::new("journals::action::0");
 
-        fire_action(&engine, &entity, &parsed, &rule, &name_row("2026-07-10")).await;
-        fire_action(&engine, &entity, &parsed, &rule, &name_row("2026-07-10")).await;
+        fire_action(
+            &engine,
+            engine.rule_status(),
+            &entity,
+            &parsed,
+            &rule,
+            &name_row("2026-07-10"),
+        )
+        .await;
+        fire_action(
+            &engine,
+            engine.rule_status(),
+            &entity,
+            &parsed,
+            &rule,
+            &name_row("2026-07-10"),
+        )
+        .await;
         assert_eq!(
             count_journal_children(&engine).await,
             1,
             "same-day re-fire must converge to one journal block"
         );
 
-        fire_action(&engine, &entity, &parsed, &rule, &name_row("2026-07-11")).await;
+        fire_action(
+            &engine,
+            engine.rule_status(),
+            &entity,
+            &parsed,
+            &rule,
+            &name_row("2026-07-11"),
+        )
+        .await;
         assert_eq!(
             count_journal_children(&engine).await,
             2,
@@ -424,6 +470,7 @@ mod tests {
 
         let watcher = tokio::spawn(run_pair_watcher(
             engine.clone(),
+            engine.rule_status().clone(),
             "journals::action::0".to_string(),
             "SELECT today as name FROM clock WHERE grain = 'day'".to_string(),
             "holon_sql".to_string(),

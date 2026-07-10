@@ -35,6 +35,7 @@ pub mod loro_ui_watcher;
 pub mod operation_dispatcher;
 pub mod operation_engine;
 pub mod query_engine;
+pub mod rule_status;
 pub mod ui_watcher;
 
 // `SnapshotBlock` is a pure-data API type (it lives in `holon-api`, not a

@@ -72,6 +72,11 @@ pub struct BackendEngine {
     /// error in place. Empty until an advice reconciler is installed (see
     /// `create_initialized_engine`).
     advice_status: holon_advice::AdviceRuleStatusHandle,
+    /// Reactive-rule (ADR 0024 WP3) compilation/runtime status. Written by the
+    /// action watcher (deprecation / parse / compile / exec outcomes), read by
+    /// the render path and MCP so a broken or deprecated rule surfaces its
+    /// error in place. Empty until action watchers run.
+    rule_status: crate::api::rule_status::RuleStatusHandle,
     /// Keeps the advice reconciler's background tasks alive (mirrors how the
     /// profile watcher / `LinkEventSubscriberHandle` stay alive by being
     /// held on the engine). `None` in configs that never install one
@@ -115,9 +120,16 @@ impl BackendEngine {
             graph_schema_registry: Arc::new(std::sync::RwLock::new(graph_schema_registry)),
             graph_schema_cache: Arc::new(std::sync::RwLock::new(graph_schema)),
             advice_status: holon_advice::AdviceRuleStatusHandle::new(),
+            rule_status: crate::api::rule_status::RuleStatusHandle::new(),
             _advice_reconciler: None,
             _clock_scheduler: None,
         })
+    }
+
+    /// The reactive-rule status map (ADR 0024 WP3) — the action watcher writes
+    /// deprecation / parse / compile / exec outcomes; the render path reads it.
+    pub fn rule_status(&self) -> &crate::api::rule_status::RuleStatusHandle {
+        &self.rule_status
     }
 
     /// The advice-rule status map (ADR 0022) — read by the UI watcher to

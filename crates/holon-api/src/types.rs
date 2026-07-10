@@ -386,6 +386,14 @@ impl FromStr for NavigationOp {
 pub enum SourceLanguage {
     Query(QueryLanguage),
     Render,
+    /// A reactive rule block (ADR 0024). Its content is a program (the effect
+    /// DSL), never display content — the renderer routes it to the rule card.
+    HolonRule,
+    /// The retired `action` language. Parses to a *typed* deprecation sentinel
+    /// (never folded into `Other`) so a legacy `action` block fails loud on the
+    /// rule card — "legacy 'action' language; rename to holon_rule" — instead
+    /// of silently becoming an inert unknown source. See ADR 0024 WP3.
+    LegacyAction,
     Other(String),
 }
 
@@ -400,6 +408,22 @@ impl SourceLanguage {
     pub fn is_prql(&self) -> bool {
         matches!(self, SourceLanguage::Query(QueryLanguage::HolonPrql))
     }
+
+    /// True for a rule head — the current `holon_rule` language or the retired
+    /// `action` language. Both mark a block as program (routed to the rule
+    /// card).
+    pub fn is_rule(&self) -> bool {
+        matches!(
+            self,
+            SourceLanguage::HolonRule | SourceLanguage::LegacyAction
+        )
+    }
+
+    /// True only for the retired `action` language — a rule that must surface a
+    /// loud deprecation status rather than execute silently.
+    pub fn is_legacy(&self) -> bool {
+        matches!(self, SourceLanguage::LegacyAction)
+    }
 }
 
 impl fmt::Display for SourceLanguage {
@@ -407,6 +431,8 @@ impl fmt::Display for SourceLanguage {
         match self {
             SourceLanguage::Query(q) => write!(f, "{q}"),
             SourceLanguage::Render => write!(f, "render"),
+            SourceLanguage::HolonRule => write!(f, "holon_rule"),
+            SourceLanguage::LegacyAction => write!(f, "action"),
             SourceLanguage::Other(s) => write!(f, "{s}"),
         }
     }
@@ -418,6 +444,12 @@ impl FromStr for SourceLanguage {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s.eq_ignore_ascii_case("render") {
             return Ok(SourceLanguage::Render);
+        }
+        if s.eq_ignore_ascii_case("holon_rule") {
+            return Ok(SourceLanguage::HolonRule);
+        }
+        if s.eq_ignore_ascii_case("action") {
+            return Ok(SourceLanguage::LegacyAction);
         }
         match QueryLanguage::from_str(s) {
             Ok(q) => Ok(SourceLanguage::Query(q)),
@@ -1106,6 +1138,33 @@ mod tests {
         );
         assert_eq!(SourceLanguage::Render.to_string(), "render");
         assert_eq!(SourceLanguage::Other("rust".into()).to_string(), "rust");
+    }
+
+    #[test]
+    fn source_language_rule_and_legacy() {
+        // holon_rule parses to the typed rule variant and round-trips.
+        assert_eq!(
+            "holon_rule".parse::<SourceLanguage>().unwrap(),
+            SourceLanguage::HolonRule
+        );
+        assert_eq!(SourceLanguage::HolonRule.to_string(), "holon_rule");
+        assert!(SourceLanguage::HolonRule.is_rule());
+        assert!(!SourceLanguage::HolonRule.is_legacy());
+
+        // The retired `action` language parses to a typed deprecation sentinel —
+        // NOT Other("action") — so it fails loud, never silently inert.
+        let action = "action".parse::<SourceLanguage>().unwrap();
+        assert_eq!(action, SourceLanguage::LegacyAction);
+        assert_ne!(action, SourceLanguage::Other("action".into()));
+        assert_eq!(action.to_string(), "action");
+        assert!(action.is_rule());
+        assert!(action.is_legacy());
+
+        // Round-trip through serde string form.
+        for lang in [SourceLanguage::HolonRule, SourceLanguage::LegacyAction] {
+            let s = lang.to_string();
+            assert_eq!(s.parse::<SourceLanguage>().unwrap(), lang);
+        }
     }
 
     #[test]

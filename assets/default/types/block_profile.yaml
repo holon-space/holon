@@ -17,8 +17,25 @@ computed:
   is_task: 'task_state != ()'
   is_source: 'content_type == "source"'
   is_image: 'content_type == "image"'
-  is_holon_source: 'is_source && (source_language.starts_with("holon_") || source_language == "render")'
+  # Query/render machinery that must be hidden (spacer) rather than shown as raw
+  # text. TYPED enumeration of the exact languages — replaces the banned stringly
+  # `source_language.starts_with("holon_")` smell (ADR 0024 WP3 / Q2). Crucially
+  # this NO LONGER matches `holon_rule`, so a rule block is routed by `is_program`
+  # to the rule card instead of being silently swallowed by the spacer variant.
+  is_holon_source: 'is_source && (source_language == "holon_prql" || source_language == "holon_gql" || source_language == "holon_sql" || source_language == "render")'
   has_query_source: 'query_source(id) != ()'
+  # A rule head: the `holon_rule` language or the retired `action` language
+  # (ADR 0024). Pure-row check — no DB lookup.
+  is_rule_head: 'is_source && (source_language == "holon_rule" || source_language == "action")'
+  # Program marking (ADR 0024 WP3 / Q2 option a): a block is program iff it is a
+  # rule head OR the trigger sibling of one. Clause (b) reuses the discovery
+  # parent-sibling join via the `rule_sibling` live-entity lookup keyed by
+  # parent_id (`rule_sibling(parent_id)` = "does my parent have a rule-head
+  # child?"). `||` short-circuits so a rule head never runs the DB lookup, and
+  # the sibling clause only runs for source blocks.
+  is_program: 'is_rule_head || (is_source && rule_sibling(parent_id) != ())'
+  # A rule using the retired `action` language — surfaced loud on the card.
+  is_legacy_rule: 'source_language == "action"'
   todo_states: 'if is_def_var("document_id") && document_id != () { let d = document(document_id); if d != () { d.todo_keywords } else { () } } else { () }'
 
 variants:
@@ -44,6 +61,21 @@ variants:
         if_space(1000,
           columns(drawer("block:default-left-sidebar", live_block("block:default-left-sidebar"), #{mode: "shrink"}), live_block("block:default-main-panel"), drawer("block:default-right-sidebar", live_block("block:default-right-sidebar"), #{mode: "overlay"})),
           columns(drawer("block:default-left-sidebar", live_block("block:default-left-sidebar"), #{mode: "shrink"}), live_block("block:default-main-panel"), drawer("block:default-right-sidebar", live_block("block:default-right-sidebar"), #{mode: "shrink"}))))
+  # Program blocks (rule heads + their trigger siblings, ADR 0024 WP3) render as
+  # the rule card, NEVER as a query result or raw source text. Priority 0 wins
+  # over the whole -1 variant cluster (holon_source spacer, source query_result),
+  # so a `holon_sql` trigger that also matches `is_holon_source` is still routed
+  # here — documented precedence, not implied variant ordering. The `if_col`
+  # surfaces a loud red deprecation banner for the retired `action` language.
+  - name: rule_card
+    priority: 0
+    condition: 'is_program'
+    render: >-
+      card(#{accent: "primary"},
+        row(icon("orgmode"), text("Automation rule", #{bold: true}), checkbox(#{checked: true}), text("Enabled", #{color: "success"})),
+        if_col("source_language", "action", error("legacy 'action' language — rename source block to holon_rule"), spacer(0)),
+        text("last fired: —", #{color: "muted"}),
+        text(col("content")))
   - name: source_editing
     priority: -1
     condition: 'is_source && is_focused'
@@ -66,7 +98,7 @@ variants:
     render: 'column(row(selectable(draggable(icon("orgmode")), #{shift_action: focus_pin(#{region: "right", block_id: col("id")})}), state_toggle(col("task_state"), #{states: col("todo_states")}), spacer(8), editable_text(col("content"))), drop_zone())'
   - name: source
     priority: -1
-    condition: 'is_source'
+    condition: 'is_source && !is_program'
     render: 'query_result(#{language: col("source_language")})'
   - name: default
     priority: -1
