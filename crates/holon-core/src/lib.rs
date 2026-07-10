@@ -83,4 +83,10 @@ pub use traits::{
     __operations_move_operations, __operations_rename_operations, __operations_task_operations,
     __operations_text_operations,
 };
+pub use undo::FieldFingerprint;
+pub use undo::Precondition;
+pub use undo::UndoEntry;
 pub use undo::UndoStack;
+pub use undo::UndoStateReader;
+pub use undo::UndoStore;
+pub use undo::verify_precondition;

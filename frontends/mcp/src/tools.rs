@@ -773,15 +773,17 @@ impl HolonMcpServer {
         let result = self.service().undo().await;
 
         match result {
-            Ok(success) => {
-                let undo_result = UndoRedoResult {
-                    success,
-                    message: if success {
-                        "Operation undone successfully".to_string()
-                    } else {
-                        "Nothing to undo".to_string()
-                    },
+            Ok(outcome) => {
+                let (success, message) = match outcome {
+                    holon_api::UndoOutcome::Applied => {
+                        (true, "Operation undone successfully".to_string())
+                    }
+                    holon_api::UndoOutcome::Empty => (false, "Nothing to undo".to_string()),
+                    holon_api::UndoOutcome::StaleDropped { reason } => {
+                        (false, format!("Undo skipped (stale): {reason}"))
+                    }
                 };
+                let undo_result = UndoRedoResult { success, message };
                 Ok(CallToolResult::success(vec![Content::text(
                     serde_json::to_string(&undo_result).map_err(|e| {
                         rmcp::ErrorData::internal_error(
@@ -803,15 +805,17 @@ impl HolonMcpServer {
         let result = self.service().redo().await;
 
         match result {
-            Ok(success) => {
-                let redo_result = UndoRedoResult {
-                    success,
-                    message: if success {
-                        "Operation redone successfully".to_string()
-                    } else {
-                        "Nothing to redo".to_string()
-                    },
+            Ok(outcome) => {
+                let (success, message) = match outcome {
+                    holon_api::UndoOutcome::Applied => {
+                        (true, "Operation redone successfully".to_string())
+                    }
+                    holon_api::UndoOutcome::Empty => (false, "Nothing to redo".to_string()),
+                    holon_api::UndoOutcome::StaleDropped { reason } => {
+                        (false, format!("Redo skipped (stale): {reason}"))
+                    }
                 };
+                let redo_result = UndoRedoResult { success, message };
                 Ok(CallToolResult::success(vec![Content::text(
                     serde_json::to_string(&redo_result).map_err(|e| {
                         rmcp::ErrorData::internal_error(
