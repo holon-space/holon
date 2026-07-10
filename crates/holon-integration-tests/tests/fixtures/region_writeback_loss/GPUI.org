@@ -1,0 +1,290 @@
+#+ID: d09025cc-3748-404e-ad4d-432fcdc194d5
+#+TODO: TODO DOING BLOCKED | DONE WONT
+* Android
+:PROPERTIES:
+:ID: gpui-android
+:reference-worktree: placeholder
+:status: DOING
+:END:
+** DOING [#A] Android build target stable
+:PROPERTIES:
+:ID: gpui-android-stable
+:Effort: -
+:END:
+Placeholder text for the Android build target block.
+
+** TODO [#B] Android-specific UX adaptations
+:PROPERTIES:
+:ID: gpui-android-ux
+:BLOCKED-BY: gpui-android-stable
+:Effort: 2:00
+:REQUIRES: gpui-android-stable
+:END:
+Placeholder text for Android UX adaptations.
+
+* Cross-platform infrastructure
+:PROPERTIES:
+:ID: gpui-cross-platform
+:END:
+** Outliner editing
+:PROPERTIES:
+:ID: 2b4f3e8e-57f0-46de-a47a-be1242dd9e12
+:END:
+Placeholder text for outliner editing.
+
+** Three-mode UX shells
+:PROPERTIES:
+:ID: ba5ad62d-bd47-47b8-873b-1b668a85e9eb
+:END:
+*** TODO [#A] Capture mode overlay (global hotkey)
+:PROPERTIES:
+:ID: capture-mode-overlay
+:Effort: 4:00
+:END:
+Placeholder text for capture mode overlay.
+
+*** TODO [#B] Flow mode shell
+:PROPERTIES:
+:ID: flow-mode-shell
+:BLOCKED-BY: orient-daily-view
+:Effort: 3:00
+:REQUIRES: orient-daily-view
+:END:
+Placeholder text for flow mode shell.
+
+*** TODO [#A] Orient daily view
+:PROPERTIES:
+:ID: orient-daily-view
+:BLOCKED-BY: now-query-mcp
+:Effort: 4:00
+:REQUIRES: now-query-mcp
+:END:
+Placeholder text for orient daily view.
+
+* Filed: investigations and worktree state
+:PROPERTIES:
+:ID: gpui-investigations
+:END:
+Placeholder text for filed investigations.
+
+* iOS
+:PROPERTIES:
+:ID: gpui-ios
+:reference-worktree: placeholder
+:status: DOING
+:END:
+** DOING [#A] iOS build target stable
+:PROPERTIES:
+:ID: gpui-ios-stable
+:Effort: -
+:END:
+Placeholder text for iOS build target.
+
+** TODO [#B] iOS-specific UX adaptations
+:PROPERTIES:
+:ID: gpui-ios-ux
+:BLOCKED-BY: gpui-ios-stable
+:Effort: 2:00
+:REQUIRES: gpui-ios-stable
+:END:
+* macOS
+:PROPERTIES:
+:ID: gpui-macos
+:status: DOING
+:END:
+** DOING [#A] Daily-driveable polish
+:PROPERTIES:
+:ID: gpui-macos-stable
+:Effort: -
+:END:
+Placeholder text for macOS polish.
+
+* Why this is the primary frontend
+:PROPERTIES:
+:ID: gpui-primary-rationale
+:reference-memory: placeholder
+:END:
+Placeholder text for primary-frontend rationale.
+
+* Handoff — displayed-text invariant for split/join UI staleness
+:PROPERTIES:
+:ID: handoff-displayed-text-invariant
+:source-date: 2026-04-27
+:source-file: placeholder
+:END:
+** Why the GPUI PBT didn't detect it
+:PROPERTIES:
+:ID: 1bc04fbe-5ebf-442c-8d79-835dab6bf77f
+:END:
+Placeholder text describing why the PBT missed it.
+
+** TODOs
+:PROPERTIES:
+:ID: 22da2e7f-dc3c-457c-81db-1fe73ca9d7d7
+:END:
+- [ ] Placeholder todo item one.
+- [ ] Placeholder todo item two.
+
+** Build status
+:PROPERTIES:
+:ID: 4e69c69d-68f0-47ce-b154-720a6f7dbfc9
+:END:
+Placeholder text for build status.
+
+** Open questions
+:PROPERTIES:
+:ID: 64723edc-36ca-45aa-bf4b-9937e167e687
+:END:
+Placeholder text for open questions.
+
+** What landed (this session)
+:PROPERTIES:
+:ID: 92bd7471-a03b-4cc0-8981-e24e1ba833a3
+:END:
+*** 2. GPUI plumbing
+:PROPERTIES:
+:ID: 1be0e5f8-a64d-4b91-9434-6a03ecf9957b
+:END:
+Placeholder text for GPUI plumbing.
+
+*** 4. Invariant — inv-displayed-text
+:PROPERTIES:
+:ID: 8d0f44bf-8505-43e6-9e91-a6695515ba4c
+:END:
+Placeholder text for invariant notes.
+
+*** 1. New field — ElementInfo.displayed_text
+:PROPERTIES:
+:ID: 9be6a99d-f5a8-4dd3-9cc2-35611c1fc0a3
+:END:
+Placeholder text for new field.
+
+*** 3. Builder captures
+:PROPERTIES:
+:ID: d3aa021f-1c89-48b0-b025-ae8392730c18
+:END:
+Placeholder text for builder captures.
+
+** Files touched
+:PROPERTIES:
+:ID: b1a5c00e-5bdb-4b87-be3d-9496d787e6f7
+:END:
+Placeholder text for files touched.
+
+** MCP one-liner used to confirm DB state
+:PROPERTIES:
+:ID: c8f65c84-3843-4bbd-bdd5-e4c4ed340562
+:END:
+#+BEGIN_SRC bash :id c8f65c84-3843-4bbd-bdd5-e4c4ed340562::src::0
+echo placeholder command
+#+END_SRC
+** What we were chasing
+:PROPERTIES:
+:ID: ca3da762-4def-4756-8cf4-3576a52beb54
+:END:
+Placeholder text for what we were chasing.
+
+* Handoff — GPUI PBT: remaining open items
+:PROPERTIES:
+:ID: handoff-gpui-pbt-remaining
+:source-date: 2026-04-29
+:source-file: placeholder
+:END:
+** Remaining open items
+:PROPERTIES:
+:ID: 05e9b86d-54df-4524-91c9-8216a4c5b17c
+:END:
+*** 2. inv13 render budget
+:PROPERTIES:
+:ID: 3b50edcb-76bc-489e-b829-25cc01273945
+:END:
+Placeholder text for render budget item.
+
+#+BEGIN_SRC text :id 3b50edcb-76bc-489e-b829-25cc01273945::src::0
+placeholder log line
+#+END_SRC
+*** 3. try_interaction fallback with block count mismatch
+:PROPERTIES:
+:ID: aecc1b51-b719-46bc-a2ce-908989d51b6b
+:END:
+Placeholder text for fallback item.
+
+#+BEGIN_SRC text :id aecc1b51-b719-46bc-a2ce-908989d51b6b::src::0
+placeholder log line
+#+END_SRC
+*** 1. Production staleness while focused
+:PROPERTIES:
+:ID: f92f3df5-4e7d-4dfb-b675-ae65b8e5d6f1
+:END:
+Placeholder text for production staleness item.
+
+#+BEGIN_SRC rust :id f92f3df5-4e7d-4dfb-b675-ae65b8e5d6f1::src::0
+let focused = true;
+#+END_SRC
+** File map
+:PROPERTIES:
+:ID: 5c8fe690-b9df-43f8-8b72-bd0f548c46cd
+:END:
+Placeholder text for file map.
+
+** What landed this session
+:PROPERTIES:
+:ID: 80beb3b6-a231-4bd8-b676-600f991d261e
+:END:
+*** inv-displayed-text false positive fix
+:PROPERTIES:
+:ID: f29b6733-709e-4ea1-8961-37532605de9b
+:END:
+Placeholder text for false-positive fix.
+
+* Handoff — gpui-component changes for MutableText Phase 2
+:PROPERTIES:
+:ID: handoff-gpui-splice-silent
+:source-date: 2026-04-29
+:source-file: placeholder
+:END:
+Placeholder text for MutableText handoff.
+
+** Blocker 2 — IME composition strategy decision
+:PROPERTIES:
+:ID: 2cafa228-27d4-43b1-9a7e-1383e2a69504
+:END:
+Placeholder text for blocker 2.
+
+#+BEGIN_SRC rust :id 2cafa228-27d4-43b1-9a7e-1383e2a69504::src::0
+let placeholder = 0;
+#+END_SRC
+*** API surface needed from gpui-component
+:PROPERTIES:
+:ID: 1bdd8711-fbf1-4e02-bf49-a88be6ae1f26
+:END:
+Placeholder text for API surface.
+
+*** Strategy A — Skip-while-marked
+:PROPERTIES:
+:ID: 269cfb94-7afc-49ef-b254-45d953ead1ce
+:END:
+Placeholder text for strategy A.
+
+*** Strategy B — Buffer-and-drain (recommended)
+:PROPERTIES:
+:ID: 44aac963-1078-4f45-8365-906fe02f7171
+:END:
+Placeholder text for strategy B.
+
+** Verification
+:PROPERTIES:
+:ID: 766ca430-bb4a-4333-8a75-e55df79cce7d
+:END:
+#+BEGIN_SRC bash :id 766ca430-bb4a-4333-8a75-e55df79cce7d::src::0
+echo placeholder verify
+#+END_SRC
+** Blocker 1 — make replace_text_in_range_silent public
+:PROPERTIES:
+:ID: a5fe0a63-026e-421f-bd1d-3830a9c8eb13
+:END:
+Placeholder text for blocker 1.
+
+#+BEGIN_SRC rust :id a5fe0a63-026e-421f-bd1d-3830a9c8eb13::src::0
+fn placeholder() {}
+#+END_SRC
