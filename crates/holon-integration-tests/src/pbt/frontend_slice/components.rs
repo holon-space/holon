@@ -3081,6 +3081,74 @@ mod tests {
         eprintln!("[advance-day] final journals: {after2:?} ✓");
     }
 
+    /// C-revised ruling (WP3) loud-guard: a rule's trigger is program machinery
+    /// evaluated SOLELY by the action watcher, so it must never reach
+    /// display-query evaluation. `block_domain::render_entity` on the
+    /// rule-machinery heading (whose only query-source child is the
+    /// `holon_sql` trigger) must FAIL LOUD — surfaced as a visible error
+    /// node by UiWatcher — rather than compiling the tableless, no-`id`
+    /// trigger query into a display matview (the boot-critical
+    /// panic the journal rule was once deferred behind). The action watcher
+    /// itself still fires (proven by the day-block created on boot), so the
+    /// rule stays live while its content is never display-evaluated.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rule_trigger_never_reaches_display_evaluation() {
+        let boot_ms = noon_millis(2026, 1, 15);
+        let clock = Arc::new(holon_api::TestClock::new(boot_ms));
+
+        let comp = HeadlessFrontendComponent::new_with_clock(
+            &[("Journals.org", JOURNAL_RULE_ORG)],
+            Duration::from_millis(500),
+            false,
+            clock.clone(),
+        )
+        .await;
+
+        // The rule fired on boot — the action watcher IS the evaluator (rule live).
+        wait_for_journal_days(&comp, 1, Duration::from_secs(10)).await;
+
+        // Discover the trigger (holon_sql source) and its parent = the machinery
+        // heading. The heading owns exactly one query-source child (the trigger),
+        // so it is the block that would wrongly resolve a display query.
+        let trigger_rows = comp
+            .engine
+            .db_handle()
+            .query(
+                "SELECT id, parent_id FROM block_raw WHERE source_language = 'holon_sql'",
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("trigger-block query");
+        let heading_id = trigger_rows
+            .first()
+            .and_then(|r| {
+                r.get("parent_id")
+                    .and_then(|v| v.as_string())
+                    .map(str::to_string)
+            })
+            .expect("the holon_sql trigger has a parent heading");
+        let heading_uri = EntityUri::parse(&heading_id).expect("heading id parses");
+
+        // render_entity on the heading MUST fail loud (the guard), never run
+        // `query_and_watch` on the trigger. A silent fallback to a leaf/collection
+        // render would mean the trigger leaked onto the display path.
+        let result = comp
+            .engine
+            .blocks()
+            .render_entity(&heading_uri, &None)
+            .await;
+        let err = result.expect_err(
+            "render_entity on a rule-machinery heading must fail loud, not resolve the trigger as \
+             a display query",
+        );
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("rule TRIGGER") || msg.contains("program machinery"),
+            "guard error must name the program-machinery/rule-trigger cause, got: {msg}"
+        );
+        eprintln!("[rule-guard] render_entity({heading_id}) failed loud as required: {msg}");
+    }
+
     /// Step 0 make-or-break PROBE (SutHandle decomposition / NavigateFocus):
     /// does driving the production `navigation.focus` op through the
     /// **windowless** `FrontendSession` actually update the `current_focus`
