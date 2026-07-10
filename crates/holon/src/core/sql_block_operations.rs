@@ -877,6 +877,43 @@ impl CrudOperations<Block> for SqlBlockOperations {
             .and_then(|v| v.as_string())
             .map(String::from)
             .ok_or_else(|| "SqlBlockOperations::create: missing 'id'".to_string())?;
+
+        // This path writes `block_raw` directly — it never goes through
+        // `BlockOrdering::place`/`OrderKeyMinting`, so a caller that omits
+        // `sort_key` (creation-slot commit, a bare `block.create` Rhai/MCP
+        // action, page create) would otherwise fall through to the SQL
+        // column's literal default `"A0"` for EVERY such create. Two
+        // consecutive id-less creates under the same parent then collide on
+        // the identical key, leaving sibling order ambiguous until some
+        // later op (e.g. `split_block`'s tie-detected rebalance) re-mints
+        // distinct keys. Mint a real key here — strictly after the current
+        // last sibling — using the same `gen_key_between` fractional-index
+        // generator `new_child_anchor` uses, so a caller-supplied `sort_key`
+        // still wins.
+        //
+        // Gated on consolidator exactly like `new_child_anchor`: only the
+        // SqlOnly order owner mints. In Upstream (Loro) mode the tree is
+        // authoritative and its outbound projector is the sole `sort_key`
+        // writer (see the UPSERT comment in `prepare_create`), so minting
+        // here too would mix `gen_key_between` values with Loro-fi values in
+        // the same column — the exact keyspace-mixing bug class invariant 10
+        // warns about.
+        let mut fields = fields;
+        if !fields.contains_key("sort_key") && matches!(self.consolidator(), Consolidator::Store) {
+            if let Some(parent_id) = fields.get("parent_id").and_then(|v| v.as_string()) {
+                let siblings = self.sibling_keys(parent_id).await?;
+                let last_key = siblings.last().map(|(_, sk)| sk.clone());
+                // ALLOW(order_minting): sanctioned SqlOnly order-owner mint site
+                // (Replication.md §5), same file/gate as `new_child_anchor`.
+                let minted = gen_key_between(last_key.as_deref(), None).map_err(
+                    |e| -> Box<dyn std::error::Error + Send + Sync> {
+                        format!("SqlBlockOperations::create: mint sort_key: {e:#}").into()
+                    },
+                )?;
+                fields.insert("sort_key".into(), Value::String(minted));
+            }
+        }
+
         let result = self
             .sql_ops
             .execute_operation(&entity, "create", fields)
@@ -1117,6 +1154,96 @@ mod tests {
             sort_key_after_first, sort_key_after_second,
             "place() called twice with identical args must not change sort_key (idempotency guard \
              regression)"
+        );
+    }
+
+    /// Bug (dogfood 2026-07-10): `block.create` without an explicit `sort_key`
+    /// always minted the SQL column default `"A0"`, so two consecutive
+    /// id-less creates under the same parent collided on the identical key —
+    /// sibling order stayed ambiguous until some later op (e.g.
+    /// `split_block`'s tie-detected rebalance) re-minted distinct keys.
+    /// `SqlBlockOperations::create` must instead mint a real, strictly
+    /// increasing key for each create when the caller omits `sort_key`.
+    #[tokio::test]
+    async fn create_without_sort_key_mints_strictly_increasing_keys() {
+        use std::collections::HashMap;
+
+        use holon_core::CrudOperations;
+        use holon_core::storage::types::StorageEntity;
+
+        let (_backend, ops, handle) = setup_sql_block_ops().await;
+
+        // ALLOW(entity_uri_from_raw): test-fixture literal (#[cfg(test)])
+        let parent = EntityUri::from_raw("block:test-parent");
+        handle
+            .execute(
+                &format!(
+                    "INSERT INTO block_raw (id, parent_id, sort_key, content, content_type, \
+                     created_at, updated_at) VALUES ('{}', 'sentinel:no_parent', 'V', 'parent', \
+                     'text', 0, 0)",
+                    parent.as_str()
+                ),
+                vec![],
+            )
+            .await
+            .expect("insert parent");
+
+        let mut fields1: StorageEntity = HashMap::new();
+        fields1.insert(
+            "id".into(),
+            holon_api::Value::String("block:child-1".to_string()),
+        );
+        fields1.insert(
+            "parent_id".into(),
+            holon_api::Value::String(parent.as_str().to_string()),
+        );
+        fields1.insert(
+            "content".into(),
+            holon_api::Value::String("first".to_string()),
+        );
+        fields1.insert(
+            "content_type".into(),
+            holon_api::Value::String("text".to_string()),
+        );
+        ops.create(fields1).await.expect("create child 1");
+
+        let mut fields2: StorageEntity = HashMap::new();
+        fields2.insert(
+            "id".into(),
+            holon_api::Value::String("block:child-2".to_string()),
+        );
+        fields2.insert(
+            "parent_id".into(),
+            holon_api::Value::String(parent.as_str().to_string()),
+        );
+        fields2.insert(
+            "content".into(),
+            holon_api::Value::String("second".to_string()),
+        );
+        fields2.insert(
+            "content_type".into(),
+            holon_api::Value::String("text".to_string()),
+        );
+        ops.create(fields2).await.expect("create child 2");
+
+        let key1 = read_sort_key(&handle, "block:child-1").await;
+        let key2 = read_sort_key(&handle, "block:child-2").await;
+
+        assert_ne!(
+            key1, "A0",
+            "id-less create must not fall back to the literal SQL default"
+        );
+        assert_ne!(
+            key2, "A0",
+            "id-less create must not fall back to the literal SQL default"
+        );
+        assert_ne!(
+            key1, key2,
+            "two consecutive id-less creates must not collide"
+        );
+        assert!(
+            key1 < key2,
+            "second create must sort strictly after the first: {key1:?} vs {key2:?}"
         );
     }
 }
