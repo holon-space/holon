@@ -159,8 +159,6 @@ fn open_holon_window(cx: &mut App, db_path: Option<PathBuf>, orgmode_root: Optio
 
 #[cfg(target_os = "ios")]
 const DEFAULT_INDEX_ORG: &str = include_str!("../../../assets/default/index.org");
-#[cfg(target_os = "ios")]
-const DEFAULT_JOURNALS_ORG: &str = include_str!("../../../assets/default/Journals.org");
 
 #[cfg(target_os = "ios")]
 fn ios_data_paths() -> (Option<PathBuf>, Option<PathBuf>) {
@@ -187,15 +185,11 @@ fn ios_data_paths() -> (Option<PathBuf>, Option<PathBuf>) {
             std::fs::write(&seed, DEFAULT_INDEX_ORG).expect("write seed index.org");
             eprintln!("GPUI iOS: seeded {}", seed.display());
         }
-        // Seed notes.org whenever it doesn't exist — independent of is_empty so
-        // existing installs that only have index.org also get a visible document.
-        // "index.org" is filtered from the sidebar (name == "index"), so without
-        // this file the sidebar is always empty on a fresh install.
-        let journals_path = org.join("Journals.org");
-        if !journals_path.exists() {
-            std::fs::write(&journals_path, DEFAULT_JOURNALS_ORG).expect("write seed Journals.org");
-            eprintln!("GPUI iOS: seeded {}", journals_path.display());
-        }
+        // The Journals page (`block:journals` + its query/render/auto-create
+        // rule) is seeded programmatically at boot by
+        // `build_default_layout_blocks`, NOT as a disk `Journals.org` —
+        // writing the org file too would mint a second "Journals" Page
+        // (the disk file parses to a distinct `file:` document).
     }
     (db_path, orgmode_root)
 }
