@@ -715,6 +715,7 @@ impl BackendEngine {
         entity_name: &EntityName,
         op_name: &str,
         params: StorageEntity,
+        origin: holon_api::OpOrigin,
     ) -> Result<Option<Value>> {
         use tracing::Instrument;
         use tracing::info;
@@ -725,31 +726,58 @@ impl BackendEngine {
             tracing::Level::INFO,
             "backend.execute_operation",
             "operation.entity" = entity_name.to_string(),
-            "operation.name" = op_name
+            "operation.name" = op_name,
+            "operation.origin" = origin.tag()
         );
 
         async {
             info!(
-                "[BackendEngine] execute_operation: entity={}, op={}, params={:?}",
-                entity_name, op_name, params
+                "[BackendEngine] execute_operation: entity={}, op={}, origin={}, params={:?}",
+                entity_name,
+                op_name,
+                origin.tag(),
+                params
             );
 
             // Dispatch + undo-stack bookkeeping live in the shared op engine
             // (over the same dispatcher). Span context propagates via the
             // tracing-opentelemetry bridge.
             self.op_engine
-                .execute_operation(entity_name, op_name, params)
+                .execute_operation(entity_name, op_name, params, origin)
                 .await
         }
         .instrument(span)
         .await
     }
 
+    /// Replace the in-memory undo engine with a persistent one backed by the
+    /// replica DB: the `undo_log` snapshot table plus a live-state reader for
+    /// precondition (staleness) verification. Called once during DI init while
+    /// the engine is still owned (before it is shared behind `Arc`).
+    pub async fn enable_undo_persistence(&mut self) -> Result<()> {
+        use crate::api::undo_persistence::SqlUndoStateReader;
+        use crate::api::undo_persistence::SqlUndoStore;
+        use crate::api::undo_persistence::ensure_undo_log;
+        ensure_undo_log(&self.db_handle).await?;
+        let reader = Arc::new(SqlUndoStateReader::new(
+            self.db_handle.clone(),
+            crate::storage::BLOCK_WRITE_TABLE,
+        ));
+        let store = Arc::new(SqlUndoStore::new(self.db_handle.clone()));
+        self.op_engine = crate::api::operation_engine::DispatchingOperationEngine::new_persistent(
+            self.dispatcher.clone(),
+            reader,
+            store,
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Undo the last operation.
     ///
     /// Delegates to the shared op engine. Returns true if an operation was
     /// undone, false if the undo stack is empty.
-    pub async fn undo(&self) -> Result<bool> {
+    pub async fn undo(&self) -> Result<holon_api::UndoOutcome> {
         self.op_engine.undo().await
     }
 
@@ -757,7 +785,7 @@ impl BackendEngine {
     ///
     /// Delegates to the shared op engine. Returns true if an operation was
     /// redone, false if the redo stack is empty.
-    pub async fn redo(&self) -> Result<bool> {
+    pub async fn redo(&self) -> Result<holon_api::UndoOutcome> {
         self.op_engine.redo().await
     }
 

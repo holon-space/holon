@@ -175,6 +175,14 @@ async fn create_initialized_engine(
     )
     .expect("Failed to create BackendEngine");
 
+    // Undo substrate: back the per-session undo stack with the replica DB
+    // (`undo_log` snapshot + live-state precondition reader) so history survives
+    // a restart and stale entries are dropped loudly at replay.
+    engine
+        .enable_undo_persistence()
+        .await
+        .expect("Failed to enable undo persistence");
+
     // Advice-rule reconciler (ADR 0022): discover `holon_advice_rule_yaml` blocks
     // and keep their `advice_rule_{slug}` matviews synthesized/diffed/torn-down
     // as the rule blocks are edited — the exact profile-resolver pattern, one

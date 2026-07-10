@@ -361,16 +361,22 @@ impl McpOperationProvider {
     ) -> UndoAction {
         let tool_config = match self.sidecar.tools.get(original_tool_name) {
             Some(tc) => tc,
-            None => return UndoAction::Irreversible,
+            None => {
+                return UndoAction::DeclaredIrreversible("mcp: undo not configured for this tool");
+            }
         };
 
         let undo_config = match &tool_config.undo {
             Some(cfg) => cfg,
-            None => return UndoAction::Irreversible,
+            None => {
+                return UndoAction::DeclaredIrreversible("mcp: undo not configured for this tool");
+            }
         };
 
         match undo_config {
-            UndoConfig::Irreversible { .. } => UndoAction::Irreversible,
+            UndoConfig::Irreversible { .. } => {
+                UndoAction::DeclaredIrreversible("mcp: undo not configured for this tool")
+            }
             UndoConfig::Mirror { tool, capture } => {
                 let entity_config = match self.sidecar.entities.get(entity_name) {
                     Some(ec) => ec,
@@ -379,7 +385,9 @@ impl McpOperationProvider {
                             "undo for '{original_tool_name}' configured as Mirror but entity \
                              '{entity_name}' is not in the sidecar — degrading to Irreversible"
                         );
-                        return UndoAction::Irreversible;
+                        return UndoAction::DeclaredIrreversible(
+                            "mcp: undo not configured for this tool",
+                        );
                     }
                 };
 
@@ -392,7 +400,9 @@ impl McpOperationProvider {
                              a string id column '{id_col}' (got {other:?}) — degrading to \
                              Irreversible"
                         );
-                        return UndoAction::Irreversible;
+                        return UndoAction::DeclaredIrreversible(
+                            "mcp: undo not configured for this tool",
+                        );
                     }
                 };
 
@@ -405,7 +415,9 @@ impl McpOperationProvider {
                         tracing::warn!(
                             "Failed to capture old state for undo of '{original_tool_name}': {e}"
                         );
-                        return UndoAction::Irreversible;
+                        return UndoAction::DeclaredIrreversible(
+                            "mcp: undo not configured for this tool",
+                        );
                     }
                 };
 

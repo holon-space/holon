@@ -996,18 +996,28 @@ mod backend {
             }
 
             "undo" => {
-                let success = runtime.block_on(service.undo())?;
-                Ok(serde_json::json!({
-                    "success": success,
-                    "message": if success { "Undo successful" } else { "Nothing to undo" },
-                }))
+                let outcome = runtime.block_on(service.undo())?;
+                let success = outcome.applied();
+                let message = match outcome {
+                    holon_api::UndoOutcome::Applied => "Undo successful".to_string(),
+                    holon_api::UndoOutcome::Empty => "Nothing to undo".to_string(),
+                    holon_api::UndoOutcome::StaleDropped { reason } => {
+                        format!("Undo skipped (stale): {reason}")
+                    }
+                };
+                Ok(serde_json::json!({ "success": success, "message": message }))
             }
             "redo" => {
-                let success = runtime.block_on(service.redo())?;
-                Ok(serde_json::json!({
-                    "success": success,
-                    "message": if success { "Redo successful" } else { "Nothing to redo" },
-                }))
+                let outcome = runtime.block_on(service.redo())?;
+                let success = outcome.applied();
+                let message = match outcome {
+                    holon_api::UndoOutcome::Applied => "Redo successful".to_string(),
+                    holon_api::UndoOutcome::Empty => "Nothing to redo".to_string(),
+                    holon_api::UndoOutcome::StaleDropped { reason } => {
+                        format!("Redo skipped (stale): {reason}")
+                    }
+                };
+                Ok(serde_json::json!({ "success": success, "message": message }))
             }
             "can_undo" => {
                 let available = runtime.block_on(async { service.can_undo().await });

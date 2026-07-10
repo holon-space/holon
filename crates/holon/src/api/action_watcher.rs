@@ -295,8 +295,17 @@ async fn fire_action(
     // Duplicate-id create is a convergent upsert (Ok) in both providers, so a
     // re-fire is idempotent, not an error. Any *other* execute failure is a real
     // fault — logged loudly (fail-loud); it must not tear down the watcher.
+    // Rule-fired effects carry `fired-by` provenance (ADR 0024) and must NEVER
+    // enter the user undo stack.
     if let Err(e) = engine
-        .execute_operation(entity_name, &parsed_action.operation, params)
+        .execute_operation(
+            entity_name,
+            &parsed_action.operation,
+            params,
+            holon_api::OpOrigin::Rule {
+                transition_id: rule.as_str().to_string(),
+            },
+        )
         .await
     {
         status.set(rule.as_str(), RuleStatus::ExecError(format!("{e:#}")));

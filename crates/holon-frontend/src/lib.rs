@@ -740,11 +740,16 @@ impl<T> FrontendSession<T> {
         op_name: &str,
         params: HashMap<String, Value>,
     ) -> Result<Option<Value>> {
+        // A `FrontendSession` is, by construction, a user session: every op it
+        // dispatches is a direct user gesture. System-authored ops (rule
+        // firings, CRDT sync, org ingest) never route through here — they call
+        // the engine / providers directly with their own `OpOrigin`.
         self.require_operation_engine()?
             .execute_operation(
                 entity_name,
                 op_name,
                 params.into_iter().map(|(k, v)| (k.into(), v)).collect(),
+                holon_api::OpOrigin::User,
             )
             .await
     }
@@ -770,19 +775,15 @@ impl<T> FrontendSession<T> {
         }
     }
 
-    /// Undo the last operation
-    ///
-    /// Returns true if an operation was undone, false if the undo stack is
-    /// empty.
-    pub async fn undo(&self) -> Result<bool> {
+    /// Undo the last operation. See [`holon_api::UndoOutcome`] — a stale entry
+    /// is dropped with `StaleDropped` (surfaceable) rather than silently
+    /// skipped.
+    pub async fn undo(&self) -> Result<holon_api::UndoOutcome> {
         self.require_operation_engine()?.undo().await
     }
 
-    /// Redo the last undone operation
-    ///
-    /// Returns true if an operation was redone, false if the redo stack is
-    /// empty.
-    pub async fn redo(&self) -> Result<bool> {
+    /// Redo the last undone operation. See [`holon_api::UndoOutcome`].
+    pub async fn redo(&self) -> Result<holon_api::UndoOutcome> {
         self.require_operation_engine()?.redo().await
     }
 

@@ -182,7 +182,10 @@ async fn run_operation_engine_test(runtime: Arc<tokio::runtime::Runtime>) {
     // `set_field("content")` is reversible: undo restores the prior text, redo
     // re-applies it — full round-trip through the no-Turso undo stack.
     assert!(session.can_undo().await, "set_field must be undoable");
-    assert!(session.undo().await.expect("undo"), "undo applied");
+    assert!(
+        session.undo().await.expect("undo").applied(),
+        "undo applied"
+    );
     assert_eq!(
         backend
             .get_block(child.id.as_str())
@@ -196,7 +199,10 @@ async fn run_operation_engine_test(runtime: Arc<tokio::runtime::Runtime>) {
         session.can_redo().await,
         "redo must be available after undo"
     );
-    assert!(session.redo().await.expect("redo"), "redo applied");
+    assert!(
+        session.redo().await.expect("redo").applied(),
+        "redo applied"
+    );
     assert_eq!(
         backend
             .get_block(child.id.as_str())
