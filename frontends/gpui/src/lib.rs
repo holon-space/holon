@@ -47,6 +47,20 @@ use holon_frontend::view_model::ViewModel;
 use navigation_state::NavigationState;
 use render::builders::GpuiRenderContext;
 
+// ── Global undo/redo actions ────────────────────────────────────────────────
+//
+// `gpui_component::input::{Undo, Redo}` (bound to cmd-z / cmd-shift-z inside
+// `InputState`, see gpui-component's `input/state.rs`) are scoped to the
+// "Input" key context, so they never resolve at all while no editor is
+// focused — that's the dogfooded "No handler matched the key chord" bug.
+// These two actions are bound with `context: None` below (`launch_holon_
+// window_impl`) so cmd-z/cmd-shift-z always resolves to *something*
+// dispatchable, regardless of focus. The page-level capture_action handlers
+// in `HolonApp::render` intercept both these and the `Input` actions (in the
+// capture phase, before `InputState`'s own bubble-phase text-undo can run)
+// and route both to the engine-level `FrontendSession::undo`/`redo`.
+actions!(holon_gpui, [TriggerUndo, TriggerRedo]);
+
 // ── AppModel: Entity-based reactive state ──────────────────────────────────
 
 /// Reactive model backed by `ReactiveEngine`.
@@ -769,12 +783,87 @@ impl Render for HolonApp {
                 let m = self.app_model.read(cx);
                 (m.session.clone(), m.rt_handle.clone())
             };
+            let window_handle = window.window_handle();
             div()
                 .size_full()
                 .flex_1()
                 .flex()
                 .flex_col()
                 .overflow_hidden()
+                // Engine-level undo/redo. Two action types land here:
+                // `gpui_component::input::{Undo, Redo}` resolve while an
+                // editor has focus (their "Input"-context binding); our own
+                // `TriggerUndo`/`TriggerRedo` (bound with `context: None` in
+                // `launch_holon_window_impl`) resolve everywhere else. Both
+                // are captured here — top-down, before `InputState`'s own
+                // bubble-phase local-text-undo handler — and `stop_propagation`d
+                // so the engine op is the only thing that runs; the editor's
+                // own undo/redo history is not a substrate we want to diverge
+                // from the engine's operation-log undo stack.
+                .capture_action({
+                    let session = session.clone();
+                    let rt_handle = rt_handle.clone();
+                    let share_ui = self.share_ui.clone();
+                    move |_: &gpui_component::input::Undo, _window, cx: &mut App| {
+                        let async_cx = cx.to_async();
+                        share_ui::dispatch_undo(
+                            session.clone(),
+                            rt_handle.clone(),
+                            share_ui.clone(),
+                            window_handle,
+                            &async_cx,
+                        );
+                        cx.stop_propagation();
+                    }
+                })
+                .capture_action({
+                    let session = session.clone();
+                    let rt_handle = rt_handle.clone();
+                    let share_ui = self.share_ui.clone();
+                    move |_: &gpui_component::input::Redo, _window, cx: &mut App| {
+                        let async_cx = cx.to_async();
+                        share_ui::dispatch_redo(
+                            session.clone(),
+                            rt_handle.clone(),
+                            share_ui.clone(),
+                            window_handle,
+                            &async_cx,
+                        );
+                        cx.stop_propagation();
+                    }
+                })
+                .capture_action({
+                    let session = session.clone();
+                    let rt_handle = rt_handle.clone();
+                    let share_ui = self.share_ui.clone();
+                    move |_: &TriggerUndo, _window, cx: &mut App| {
+                        let async_cx = cx.to_async();
+                        share_ui::dispatch_undo(
+                            session.clone(),
+                            rt_handle.clone(),
+                            share_ui.clone(),
+                            window_handle,
+                            &async_cx,
+                        );
+                        cx.stop_propagation();
+                    }
+                })
+                .capture_action({
+                    let session = session.clone();
+                    let rt_handle = rt_handle.clone();
+                    let share_ui = self.share_ui.clone();
+                    move |_: &TriggerRedo, _window, cx: &mut App| {
+                        let async_cx = cx.to_async();
+                        share_ui::dispatch_redo(
+                            session.clone(),
+                            rt_handle.clone(),
+                            share_ui.clone(),
+                            window_handle,
+                            &async_cx,
+                        );
+                        cx.stop_propagation();
+                    }
+                })
                 .on_key_down({
                     let nav = nav.clone();
                     let session = session.clone();
@@ -1179,6 +1268,20 @@ fn launch_holon_window_impl(
 )> {
     gpui_component::init(cx);
 
+    // Context-free undo/redo bindings — see the `actions!(holon_gpui, ...)`
+    // comment above for why `gpui_component::input::{Undo, Redo}` alone
+    // (context "Input") can't cover the no-editor-focused case.
+    #[cfg(target_os = "macos")]
+    cx.bind_keys([
+        KeyBinding::new("cmd-z", TriggerUndo, None),
+        KeyBinding::new("cmd-shift-z", TriggerRedo, None),
+    ]);
+    #[cfg(not(target_os = "macos"))]
+    cx.bind_keys([
+        KeyBinding::new("ctrl-z", TriggerUndo, None),
+        KeyBinding::new("ctrl-y", TriggerRedo, None),
+    ]);
+
     #[cfg(debug_assertions)]
     inspector::init(cx);
 
@@ -1470,6 +1573,49 @@ fn launch_holon_window_impl(
 
     let app_model = model_entity.get().unwrap().clone();
     let wh: AnyWindowHandle = window_handle.into();
+
+    // App-level handlers for TriggerUndo/TriggerRedo. The page-level
+    // `capture_action` handlers in `HolonApp::render` only sit on the action
+    // dispatch path while some element inside the content div has window
+    // focus; with NO focus (fresh boot, focus cleared by Escape) the dispatch
+    // path is just the window root, so element listeners never see the
+    // action and cmd-z used to fall through to "No handler matched the key
+    // chord". Global `cx.on_action` handlers run at the end of the bubble
+    // phase precisely when no element consumed the action. `stop_propagation`
+    // also means that on a rebind (a second `launch_holon_window_impl` in the
+    // same App) only the newest registration runs — global listeners are
+    // invoked newest-first and the break on `!propagate_event` skips stale
+    // ones pointing at the previous window.
+    {
+        let session_for_undo = app_model.read(cx).session.clone();
+        let rt_for_undo = rt_handle.clone();
+        let share_ui_for_undo = app_model.read(cx).share_ui.clone();
+        cx.on_action(move |_: &TriggerUndo, cx: &mut App| {
+            let async_cx = cx.to_async();
+            share_ui::dispatch_undo(
+                session_for_undo.clone(),
+                rt_for_undo.clone(),
+                share_ui_for_undo.clone(),
+                wh,
+                &async_cx,
+            );
+            cx.stop_propagation();
+        });
+        let session_for_redo = app_model.read(cx).session.clone();
+        let rt_for_redo = rt_handle.clone();
+        let share_ui_for_redo = app_model.read(cx).share_ui.clone();
+        cx.on_action(move |_: &TriggerRedo, cx: &mut App| {
+            let async_cx = cx.to_async();
+            share_ui::dispatch_redo(
+                session_for_redo.clone(),
+                rt_for_redo.clone(),
+                share_ui_for_redo.clone(),
+                wh,
+                &async_cx,
+            );
+            cx.stop_propagation();
+        });
+    }
 
     // Root layout signal — structural changes only (render_expr).
     // Does NOT react to ui_generation (focus/view_mode) — the root
