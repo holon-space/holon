@@ -282,7 +282,12 @@ fn advice_step6_synthesis_weave_and_dismiss_green() {
             Value::String(lesson_b.as_str().to_string()),
         );
         sut.runtime()
-            .block_on(engine.execute_operation(&EntityName::new("block"), "dismiss_advice", params))
+            .block_on(engine.execute_operation(
+                &EntityName::new("block"),
+                "dismiss_advice",
+                params,
+                holon_api::OpOrigin::User,
+            ))
             .expect("dismiss_advice dispatch must succeed");
     }
     // The dispatch sits outside the transition alphabet, so run the slice's

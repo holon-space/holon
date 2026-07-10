@@ -301,7 +301,12 @@ pub async fn seed_default_layout(engine: &Arc<BackendEngine>) -> anyhow::Result<
         Value::String(EntityUri::block("welcome").as_str().to_string()),
     );
     engine
-        .execute_operation(&EntityName::from("navigation"), "focus", nav_params)
+        .execute_operation(
+            &EntityName::from("navigation"),
+            "focus",
+            nav_params,
+            holon_api::OpOrigin::Ingest,
+        )
         .await?;
 
     tracing::info!(

@@ -176,6 +176,7 @@ impl UserDriver for DirectUserDriver {
                 &EntityName::new(entity),
                 op,
                 params.into_iter().map(|(k, v)| (k.into(), v)).collect(),
+                holon_api::OpOrigin::User,
             )
             .await
             .map(|_| ())

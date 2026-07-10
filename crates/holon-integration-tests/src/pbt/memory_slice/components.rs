@@ -369,7 +369,7 @@ impl EditorCommitTarget for BackendEngine {
         params.insert("id".into(), Value::String(id.to_string()));
         params.insert("field".into(), Value::String("content".to_string()));
         params.insert("value".into(), Value::String(content.to_string()));
-        self.execute_operation(&entity, "set_field", params)
+        self.execute_operation(&entity, "set_field", params, holon_api::OpOrigin::User)
             .await
             .map(|_| ())
             .map_err(|e| ApiError::InternalError {
@@ -386,7 +386,7 @@ impl EditorCommitTarget for BackendEngine {
         params.insert("id".into(), Value::String(id.to_string()));
         params.insert("field".into(), Value::String("marks".to_string()));
         params.insert("value".into(), marks_value);
-        self.execute_operation(&entity, "set_field", params)
+        self.execute_operation(&entity, "set_field", params, holon_api::OpOrigin::User)
             .await
             .map(|_| ())
             .map_err(|e| ApiError::InternalError {
