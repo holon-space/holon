@@ -122,8 +122,11 @@ impl RowOrigin {
 /// - empty / not-yet-resolvable rowset → `None` (the streaming path shows no
 ///   slot rather than silently mis-parenting; the panel's `0..N` query always
 ///   returns its root, so a focused page is never truly empty here);
-/// - a structurally impossible rowset (several disjoint roots) → `panic!`,
-///   since a hidden wrong-parent is worse than a loud failure.
+/// - a multi-root forest with no single query focus root (e.g. the journal
+///   rule-infra page, whose rule/trigger/query/render blocks form several
+///   disjoint roots) → `None` with a loud `warn!`: no creation slot is offered
+///   rather than silently mis-parenting a new block, and the worker never
+///   panics. This is a legitimate shape, not an impossible one.
 pub fn resolve_creation_parent(
     rows: &[std::sync::Arc<holon_api::widget_spec::DataRow>],
     container: &EntityUri,
@@ -189,11 +192,19 @@ pub fn resolve_creation_parent(
             }) {
                 return Some(no_parent);
             }
-            panic!(
-                "creation slot: rowset has {} disjoint root rows (container={container}); cannot \
-                 resolve a single query focus root — malformed query or render spec",
-                many.len()
-            )
+            // A genuine multi-root forest with no single query focus root — e.g.
+            // the journal rule-infra page (rule/trigger/query/render blocks).
+            // This is a legal rowset shape, not a corrupt one: there is simply
+            // no unambiguous parent for a new block, so DON'T offer a creation
+            // slot here. Fail loud in the log, degrade visibly (no slot), never
+            // panic the render worker.
+            tracing::warn!(
+                container = %container,
+                root_count = many.len(),
+                "creation slot: multi-root forest with no single query focus root — \
+                 no creation slot offered for this rowset"
+            );
+            None
         }
     }
 }
@@ -337,15 +348,31 @@ mod tests {
     }
 
     /// A multi-root rowset whose roots have real-but-absent (dangling) parents
-    /// — NOT the sentinel — is a genuinely corrupt rowset → loud panic, never a
-    /// silent wrong-parent.
+    /// — NOT the sentinel — is a legal forest shape (e.g. the journal
+    /// rule-infra page). There is no single query focus root, so NO
+    /// creation slot is offered (`None`) rather than a silent wrong-parent
+    /// or a worker panic.
     #[test]
-    #[should_panic(expected = "disjoint root rows")]
-    fn disjoint_roots_panic() {
+    fn disjoint_roots_offer_no_slot() {
         let rows = vec![
             row("block:p1", Some("block:outsideA")),
             row("block:p2", Some("block:outsideB")),
         ];
-        let _ = resolve_creation_parent(&rows, &uri("block:default-main-panel"));
+        assert!(resolve_creation_parent(&rows, &uri("block:default-main-panel")).is_none());
+    }
+
+    /// Regression (dogfood 2026-07-10): navigating to the journal rule-infra
+    /// page renders a forest of 4 disjoint roots (rule/trigger/query/render
+    /// blocks, each parented under distinct absent infra containers). This must
+    /// NOT panic the render worker — it resolves to `None` (no creation slot).
+    #[test]
+    fn rule_infra_page_four_root_forest_offers_no_slot() {
+        let rows = vec![
+            row("block:rule", Some("block:infra-rules")),
+            row("block:trigger", Some("block:infra-triggers")),
+            row("block:query", Some("block:infra-queries")),
+            row("block:render", Some("block:infra-renders")),
+        ];
+        assert!(resolve_creation_parent(&rows, &uri("block:journals-infra")).is_none());
     }
 }
