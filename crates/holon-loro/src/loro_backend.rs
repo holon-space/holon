@@ -864,6 +864,18 @@ fn get_node_parent(tree: &loro::LoroTree, node: loro::TreeID) -> Option<loro::Tr
     }
 }
 
+/// Is this node deleted (or unknown) in the tree's CURRENT state? Used by the
+/// snapshot readers to distinguish a torn walk — a concurrent commit deleted
+/// the node between enumeration and the per-node reads — from a genuine
+/// ordering-invariant violation on a live node. `Err` from `is_node_deleted`
+/// means the tree no longer knows the node at all: the same torn shape.
+fn node_deleted_now(tree: &loro::LoroTree, node: loro::TreeID) -> bool {
+    match tree.is_node_deleted(&node) {
+        Ok(deleted) => deleted,
+        Err(_) => true,
+    }
+}
+
 /// A [`BlockTreeView`] over a Loro tree, built by scanning live nodes once.
 /// Lets the domain run the ADR-0005 move preconditions
 /// ([`BlockMutation::validate`]) *before* `tree.mov` dispatches, so cycle /
@@ -996,6 +1008,23 @@ pub fn snapshot_blocks_from_doc_settled(
             .get(&node.id)
             .cloned();
         let Some(Some(sort_key)) = key_opt else {
+            // Torn walk: `get_nodes` is a point-in-time enumeration, but a
+            // concurrent commit may delete this node (or an ancestor) before
+            // the per-node reads above run. The enumerated `node.parent` is
+            // then stale, so the sibling-group lookup misses. That is a benign
+            // in-flight delete, NOT an ADR 0005 violation: withhold silently
+            // (exactly like the missing-meta skip above) and let the writer's
+            // own commit trigger the clean re-projection.
+            if node_deleted_now(&tree, node.id) {
+                tracing::debug!(
+                    block_id = %block.id,
+                    node = ?node.id,
+                    "loro projection: node deleted mid-walk; withholding from \
+                     this (unsettled) snapshot"
+                );
+                settled = false;
+                continue;
+            }
             tracing::error!(
                 block_id = %block.id,
                 ?parent_tid,
@@ -1101,7 +1130,7 @@ fn read_one_node_snapshot(
     node: loro::TreeID,
     group_keys: &mut HashMap<loro::TreeParentId, HashMap<loro::TreeID, Option<String>>>,
 ) -> Option<(String, SnapshotBlock)> {
-    let meta = tree.get_meta(node).ok()?;
+    let meta = tree.get_meta(node).ok()?; // ALLOW(ok): absence = node gone mid-batch; None withholds it
     let stable_id = read_stable_id(&meta)?;
     let parent_tid = get_node_parent(tree, node);
     let scope = match parent_tid {
@@ -1114,6 +1143,18 @@ fn read_one_node_snapshot(
         siblings.into_iter().zip(ks).collect()
     });
     let Some(Some(sort_key)) = keys.get(&node).cloned() else {
+        // Torn read: the node (or an ancestor) was deleted by a concurrent
+        // commit between the caller's batch capture and this per-node read —
+        // a benign in-flight delete, not an ADR 0005 violation. Returning
+        // `None` withholds it; the caller's unsettled handling retries.
+        if node_deleted_now(tree, node) {
+            tracing::debug!(
+                block_id = %stable_id,
+                node = ?node,
+                "loro incremental projection: node deleted mid-batch; withholding"
+            );
+            return None;
+        }
         tracing::error!(
             block_id = %stable_id,
             ?scope,
@@ -1315,7 +1356,7 @@ pub fn incremental_block_changes(
     for node in deleted {
         let sid = tree
             .get_meta(node)
-            .ok()
+            .ok() // ALLOW(ok): deleted node's meta may already be pruned; tid_index below recovers the id
             .and_then(|m| read_stable_id(&m))
             .map(|raw| EntityUri::block(&raw).to_string())
             .or_else(|| tid_index.get(&node).cloned());
