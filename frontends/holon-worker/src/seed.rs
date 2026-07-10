@@ -244,12 +244,12 @@ pub async fn seed_default_layout(engine: &Arc<BackendEngine>) -> anyhow::Result<
         db.execute(&sql, vec![]).await?;
     }
 
-    // Journals page + machinery: the SAME blocks the native seed builds
-    // (`build_default_layout_blocks` → `journals_page_blocks`), translated to the
-    // worker's hand-rolled SQL. Sharing one block spec keeps the query/render/
-    // auto-create rule identical across the browser and native frontends. The
-    // `block:journals` page parents under the no-parent sentinel, matching this
-    // module's DOC_ID convention for the other bundled pages.
+    // Journals page: the SAME blocks the native seed builds
+    // (`build_default_layout_blocks` → `journals_page_blocks`: shell + display
+    // query + render), translated to the worker's hand-rolled SQL. Sharing one
+    // block spec keeps the journals page identical across the browser and native
+    // frontends. The `block:journals` page parents under the no-parent sentinel,
+    // matching this module's DOC_ID convention for the other bundled pages.
     for (i, block) in holon_frontend::journals_page_blocks()
         .into_iter()
         .enumerate()
