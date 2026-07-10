@@ -6,9 +6,9 @@
 
 use std::collections::HashMap;
 
-use crate::streaming::Change;
 use crate::EntityUri;
 use crate::Value;
+use crate::streaming::Change;
 
 /// A single row of query result data (may or may not be enriched).
 pub type DataRow = HashMap<String, Value>;
@@ -22,6 +22,31 @@ pub fn data_row_entity_uri(row: &DataRow) -> Option<EntityUri> {
     row.get("id")
         .and_then(|v| v.as_string())
         .map(entity_uri_from_id_str)
+}
+
+/// Key a reactive row for the accumulator, tolerating **id-less** rows.
+///
+/// Prefers the entity `id` column. Id-less rows are a LEGAL, representable
+/// input — they arise from rule-trigger / aggregate queries (e.g. the journals
+/// day-list `SELECT date('now') AS name`, dogfood 2026-07-10) that get pointed
+/// at the enriched watch path. For those we key on the matview `_rowid`
+/// (Turso's per-row storage identity, the same id-less path `LiveData` uses for
+/// id-less deletes) under a distinct `degraded:` scheme, so the row can still
+/// be stored and rendered as a degraded entry (mirroring the profile resolver's
+/// `degraded_missing_id_profile`) instead of panicking the render worker.
+///
+/// Returns `None` only when the row has neither `id` nor `_rowid` — a truly
+/// unkeyable row that the caller must drop visibly (log) rather than panic on.
+pub fn data_row_reactive_key(row: &DataRow) -> Option<EntityUri> {
+    if let Some(uri) = data_row_entity_uri(row) {
+        return Some(uri);
+    }
+    let rowid = match row.get("_rowid")? {
+        Value::Integer(i) => i.to_string(),
+        Value::String(s) => s.clone(),
+        other => format!("{other:?}"),
+    };
+    Some(EntityUri::from_raw(&format!("degraded:rowid-{rowid}"))) // ALLOW(entity_uri_from_raw): synthesizes a key from the matview `_rowid` storage identity — a genuine SQL/matview row boundary value
 }
 
 /// Typed accessor for the matview `parent_id` column of a row.
@@ -54,16 +79,18 @@ pub fn data_row_sort_key(row: &DataRow) -> String {
 /// `entity_id`) into the canonical `EntityUri`. The single `from_raw` seam
 /// for the reactive row pipeline.
 pub fn entity_uri_from_id_str(id: &str) -> EntityUri {
-    // ALLOW(entity_uri_from_raw): matview/CDC row id column is the typed-id boundary
+    // ALLOW(entity_uri_from_raw): matview/CDC row id column is the typed-id
+    // boundary
     EntityUri::from_raw(id)
 }
 
 /// A row that has been through the enrichment pipeline (`flatten_properties` +
 /// computed fields from entity profile resolution).
 ///
-/// **Parse, don't validate**: The only way to obtain an `EnrichedRow` is through
-/// the enrichment pipeline — there is no public constructor.  This makes it a
-/// compile error to feed raw storage data into the reactive pipeline.
+/// **Parse, don't validate**: The only way to obtain an `EnrichedRow` is
+/// through the enrichment pipeline — there is no public constructor.  This
+/// makes it a compile error to feed raw storage data into the reactive
+/// pipeline.
 ///
 /// `Deref<Target = HashMap>` lets read-only code (`.get("task_state")`, etc.)
 /// work unchanged.
@@ -87,9 +114,10 @@ impl EnrichedRow {
     /// Enrich a raw storage row: flatten `properties` JSON to top-level keys
     /// and inject caller-provided computed fields.
     ///
-    /// This is the **only** way to create an `EnrichedRow`.  The `computed_fields`
-    /// closure receives the flattened row and returns additional key-value pairs
-    /// (typically from entity profile resolution).
+    /// This is the **only** way to create an `EnrichedRow`.  The
+    /// `computed_fields` closure receives the flattened row and returns
+    /// additional key-value pairs (typically from entity profile
+    /// resolution).
     pub fn from_raw(
         data: HashMap<String, Value>,
         computed_fields: impl FnOnce(&HashMap<String, Value>) -> HashMap<String, Value>,
@@ -305,9 +333,10 @@ mod tests {
             },
         ]);
         assert_eq!(acc.len(), 1);
-        assert!(acc
-            .to_vec()
-            .iter()
-            .any(|r| { r.get("id").unwrap().as_string().unwrap() == "b" }));
+        assert!(
+            acc.to_vec()
+                .iter()
+                .any(|r| { r.get("id").unwrap().as_string().unwrap() == "b" })
+        );
     }
 }

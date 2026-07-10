@@ -110,7 +110,7 @@ pub trait BuilderServices: Send + Sync {
     /// computed. A SYNCHRONOUS pure read of the pre-populated session sidecar —
     /// mirrors [`Self::virtual_child_config`]; every stub/headless-without-advice
     /// service keeps the default (empty), so snapshots stay byte-identical.
-    fn advice_children(&self, _anchor: &EntityUri) -> Vec<Arc<DataRow>> {
+    fn advice_children(&self, _: &EntityUri) -> Vec<Arc<DataRow>> {
         Vec::new()
     }
 
@@ -481,8 +481,19 @@ impl ReactiveRowSet {
         match change {
             holon_api::Change::Created { data, .. } => {
                 let row = Arc::new(data.into_inner());
-                let key = holon_api::data_row_entity_uri(&row)
-                    .expect("Created event must have 'id' column");
+                // An id-less Created row is a LEGAL input (rule-trigger /
+                // aggregate queries like the journals day-list `date('now') AS
+                // name`, dogfood 2026-07-10). `data_row_reactive_key` keys it on
+                // `_rowid` under a `degraded:` scheme so it can still be stored
+                // and rendered as a degraded row (the profile resolver already
+                // degrades the same row visibly) — never panic the render worker.
+                let Some(key) = holon_api::data_row_reactive_key(&row) else {
+                    tracing::error!(
+                        "reactive row set: Created row has neither `id` nor `_rowid` — \
+                         cannot key it, dropping (visible degrade, not a panic): {row:?}"
+                    );
+                    return;
+                };
                 let mut lock = self.data.lock_mut();
                 if let Some(existing) = lock.get(&key) {
                     // Defensive: a Created arriving for a row we already know
@@ -742,7 +753,11 @@ impl ReactiveRenderedRows {
                     });
                     if is_first_batch_of_generation {
                         if let holon_api::Change::Created { data, .. } = &enriched {
-                            if let Some(key) = holon_api::data_row_entity_uri(data) {
+                            // Use the same id-less-tolerant key as `apply_change`
+                            // so a degraded (id-less) row survives `retain_keys`
+                            // instead of being dropped as "stale" right after
+                            // insertion.
+                            if let Some(key) = holon_api::data_row_reactive_key(data) {
                                 snapshot_keys.push(key);
                             }
                         }
@@ -2966,6 +2981,67 @@ mod tests {
         // Stale-generation data is still discarded.
         rqr.apply_event(data_event(1, vec![row("block:z", "stale")]));
         assert_eq!(ids(&rqr), vec!["block:b", "block:c", "block:d"]);
+    }
+
+    /// Regression (dogfood 2026-07-10, crash chain: focus `block:journals` →
+    /// render the journals day-list collection): a Created row that carries NO
+    /// entity-shaped `id` (the day-list `SELECT date('now') AS name` row
+    /// `{_rowid:1, name:2026-07-10}`) used to hit
+    /// `data_row_entity_uri(..).expect("Created event must have 'id' column")`
+    /// and PANIC the tokio render worker (`reactive.rs:485`), taking down the
+    /// page. It must now degrade: keyed on `_rowid` under a `degraded:` scheme,
+    /// stored and rendered (mirroring the profile resolver's visible degrade),
+    /// and it must survive the first-batch `retain_keys` sweep.
+    #[test]
+    fn id_less_created_row_degrades_instead_of_panicking_the_worker() {
+        use holon_api::streaming::{
+            Batch, BatchMetadata, Change, ChangeOrigin, UiEvent, WithMetadata,
+        };
+
+        let rqr = ReactiveRenderedRows::new();
+        rqr.apply_event(UiEvent::Structure {
+            render_expr: RenderExpr::Literal {
+                value: Value::String("day-list".into()),
+            },
+            candidates: Vec::new(),
+            generation: 1,
+        });
+
+        // The exact id-less row from the crash log.
+        let id_less: DataRow = HashMap::from([
+            ("_rowid".to_string(), Value::Integer(1)),
+            ("name".to_string(), Value::String("2026-07-10".to_string())),
+        ]);
+        rqr.apply_event(UiEvent::Data {
+            batch: WithMetadata {
+                inner: Batch {
+                    items: vec![Change::Created {
+                        data: id_less,
+                        origin: ChangeOrigin::Local {
+                            operation_id: None,
+                            trace_id: None,
+                        },
+                    }],
+                },
+                metadata: BatchMetadata {
+                    relation_name: "journals".into(),
+                    trace_context: None,
+                    sync_token: None,
+                    seq: 0,
+                },
+            },
+            generation: 1,
+        });
+
+        // No panic, and the degraded row is retained (survives the first-batch
+        // retain sweep) and still carries its content for display.
+        let (_, rows) = rqr.snapshot();
+        assert_eq!(rows.len(), 1, "id-less row must be stored, not dropped");
+        assert_eq!(
+            rows[0].get("name").and_then(|v| v.as_string()),
+            Some("2026-07-10"),
+            "degraded row must keep its content for visible rendering",
+        );
     }
 
     #[test]
