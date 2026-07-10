@@ -636,6 +636,12 @@ mod tests {
 
     #[test]
     fn enter_executes_selected_command() {
+        // Selecting a slash-command from the popup must strip the typed
+        // "/delete" text from the editor BEFORE dispatching the op — see
+        // `EditorAction::ExecuteAndStripCommand`'s doc comment — otherwise
+        // the trigger text remains in the block content and gets committed
+        // at the next commit point. Plain `Execute` (no strip) is only for
+        // non-popup paths (blur set_field etc.).
         let mut ctrl = test_controller();
         ctrl.on_text_changed("/", 1);
         ctrl.handler.popup.set_items(vec![PopupItem {
@@ -645,11 +651,15 @@ mod tests {
         }]);
         let action = ctrl.on_key(EditorKey::Enter);
         match action {
-            EditorAction::Execute(intent) => {
+            EditorAction::ExecuteAndStripCommand {
+                intent,
+                strip_prefix_start,
+            } => {
                 assert_eq!(intent.op_name, "delete");
                 assert_eq!(intent.params["id"], Value::String("block-1".into()));
+                assert_eq!(strip_prefix_start, 0);
             }
-            other => panic!("Expected Execute, got {:?}", other),
+            other => panic!("Expected ExecuteAndStripCommand, got {:?}", other),
         }
     }
 
