@@ -688,6 +688,7 @@ impl OrgBlockExt for Block {
             "SCHEDULED",
             "DEADLINE",
             "ID",
+            "COLLAPSED",
             "_source_header_args",
             "_source_results",
         ];
@@ -754,6 +755,14 @@ impl OrgBlockExt for Block {
                 .map(|uri| uri.id().to_string())
                 .collect();
             result.insert("ADVICE_SUPPRESSED".to_string(), bare.join(" "));
+        }
+
+        // `collapsed` is document state (Martin ruling 2026-07-11), written
+        // only when folded — matches `requires`/`advice_suppressed`'s
+        // only-if-non-empty convention so a never-collapsed file's drawer
+        // stays exactly as before this field existed.
+        if self.collapsed {
+            result.insert("COLLAPSED".to_string(), "t".to_string());
         }
 
         result

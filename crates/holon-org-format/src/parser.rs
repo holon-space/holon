@@ -453,6 +453,16 @@ fn process_headlines(
                     // promoted at parse boundary
                     .map(|s| EntityUri::from_raw(s))
                     .collect();
+            } else if key.eq_ignore_ascii_case("COLLAPSED") {
+                // Outline fold state is document state (Martin ruling
+                // 2026-07-11), so it round-trips through org the same as any
+                // other block field — a plain drawer property, following
+                // org-mode's own boolean-drawer convention (LogSeq's
+                // `collapsed:: true`; org-mode itself uses `t`/`nil` for
+                // drawer booleans, e.g. `:VISIBILITY:`). Absent means
+                // expanded (Block::default() already sets `collapsed: false`).
+                block.collapsed =
+                    value.eq_ignore_ascii_case("t") || value.eq_ignore_ascii_case("true");
             } else {
                 block.set_property(key, holon_api::Value::String(value.to_string()));
             }
@@ -1055,6 +1065,59 @@ mod tests {
         assert_eq!(
             h2.advice_suppressed, h.advice_suppressed,
             "advice_suppressed must survive render → re-parse unchanged"
+        );
+    }
+
+    #[test]
+    fn test_collapsed_drawer_round_trips() {
+        // Outline fold state is document state (Martin ruling 2026-07-11):
+        // `:COLLAPSED: t` in the properties drawer parses into
+        // `block.collapsed`, and a folded block renders that property back
+        // out on write. Absent property means expanded (false) — a
+        // never-folded file's drawer must NOT gain a `:COLLAPSED: nil` line
+        // (matches the `requires`/`advice_suppressed` only-if-set convention).
+        use crate::org_renderer::OrgRenderer;
+
+        let content = "* TODO Task\n:PROPERTIES:\n:COLLAPSED: t\n:ID: c1\n:END:\n";
+        let path = PathBuf::from("/test/file.org");
+        let root = PathBuf::from("/test");
+        let file_id = generate_file_id(&path, &root);
+
+        let result = parse_org_file(&path, content, &EntityUri::no_parent(), &root).unwrap();
+        let h = result.blocks.iter().find(|b| b.id.id() == "c1").unwrap();
+        assert!(
+            h.collapsed,
+            "COLLAPSED: t must parse to block.collapsed = true"
+        );
+
+        let rendered = OrgRenderer::render_entitys(&result.blocks, &path, &file_id);
+        assert!(
+            rendered.contains(":COLLAPSED: t"),
+            "renderer must emit the drawer property for a folded block, got:\n{rendered}"
+        );
+
+        let result2 = parse_org_file(&path, &rendered, &EntityUri::no_parent(), &root).unwrap();
+        let h2 = result2.blocks.iter().find(|b| b.id.id() == "c1").unwrap();
+        assert!(
+            h2.collapsed,
+            "collapsed must survive render -> re-parse unchanged"
+        );
+
+        // An expanded (never-collapsed) block must not gain the property.
+        let expanded_content = "* TODO Task2\n:PROPERTIES:\n:ID: c2\n:END:\n";
+        let expanded_result =
+            parse_org_file(&path, expanded_content, &EntityUri::no_parent(), &root).unwrap();
+        let e = expanded_result
+            .blocks
+            .iter()
+            .find(|b| b.id.id() == "c2")
+            .unwrap();
+        assert!(!e.collapsed);
+        let expanded_rendered =
+            OrgRenderer::render_entitys(&expanded_result.blocks, &path, &file_id);
+        assert!(
+            !expanded_rendered.contains("COLLAPSED"),
+            "an expanded block must not gain a :COLLAPSED: drawer line, got:\n{expanded_rendered}"
         );
     }
 

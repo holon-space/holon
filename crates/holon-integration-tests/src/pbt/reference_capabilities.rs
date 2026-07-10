@@ -1330,6 +1330,17 @@ impl RefToggleMut for ReferenceState {
         } else {
             self.ui.tab.expanded_toggles.remove(id);
         }
+        // Collapse is DOCUMENT state (2026-07-11 ruling): the production
+        // chevron/toggle handler dispatches `set_field(collapsed)` alongside
+        // the view-local gate flip, so the SUT block row changes. Mirror it
+        // on the ref block (single-sourced here — ExpandToggle and
+        // ToggleCollapse both route through this cap) so
+        // inv-blocks-match-ref stays honest. Toggles can target widgets
+        // whose target_id is not a tracked block (synthetic fixtures) —
+        // those have no ref block to update.
+        if let Some(block) = self.domain.block_state.blocks.get_mut(id) {
+            block.collapsed = !expanded;
+        }
     }
     fn toggle_drawer(&mut self, id: &str) {
         // Default-open, so an untracked drawer flips to closed.

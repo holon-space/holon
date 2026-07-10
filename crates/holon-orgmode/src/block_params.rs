@@ -132,6 +132,12 @@ pub fn build_block_params(
         params.insert("deadline".into(), Value::String(deadline.to_string()));
     }
 
+    // `collapsed` is document state (2026-07-11 ruling): parsed from the
+    // `:COLLAPSED:` drawer into the typed Block field. Always emit (like
+    // `tags`) so an update from a file edit that REMOVED the drawer property
+    // correctly clears the column back to 0.
+    params.insert("collapsed".into(), Value::Boolean(block.collapsed));
+
     params.insert("sequence".into(), Value::Integer(block.sequence()));
 
     // sort_key is intentionally NOT emitted here. The org parser's

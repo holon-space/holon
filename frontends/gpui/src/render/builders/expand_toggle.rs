@@ -1,4 +1,7 @@
+use holon_api::Value;
+use holon_frontend::OperationIntent;
 use holon_frontend::expand_toggle_id_for;
+use holon_frontend::operations::find_set_field_op;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
 
 use super::prelude::*;
@@ -18,6 +21,17 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
 
     let expanded_handle = expanded.clone();
     let el_id = format!("expand-toggle-{}", target_id);
+
+    // Dispatch the toggle as a real `set_field(collapsed)` op through the
+    // normal op path (dispatcher -> engine), so collapse is undoable,
+    // provenance-tagged (origin=User) and syncs as document state — not a
+    // view-local poke. `None` when no `set_field` op is wired for this row
+    // (e.g. static design-gallery contexts) — the chevron still folds
+    // locally, it just won't persist.
+    let set_field_op = find_set_field_op("collapsed", &node.operations)
+        .map(|op| (node.entity_name(), op.name.clone()));
+    let row_id = node.row_id();
+    let services = ctx.services.clone();
 
     // Lazy content: `materialize_if_gated` reads the gate (= `expanded`) and
     // either returns the cached materialised VM, fires the thunk on first
@@ -45,6 +59,18 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
             // Materialisation happens lazily on the next render when
             // `materialize_if_gated()` sees the open gate. No need to
             // call `services.interpret` here.
+            if let (Some((Some(entity_name), op_name)), Some(id)) =
+                (set_field_op.clone(), row_id.clone())
+            {
+                let intent = OperationIntent::set_field(
+                    &entity_name,
+                    &op_name,
+                    &id,
+                    "collapsed",
+                    Value::Boolean(!new_val),
+                );
+                services.dispatch_intent(intent);
+            }
             window.refresh();
         })
         .child(chevron.to_string());
