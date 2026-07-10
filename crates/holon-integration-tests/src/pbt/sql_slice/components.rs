@@ -6,9 +6,9 @@
 //!
 //! This is deliberately the storage-layer slice of the *future `E2ESut`
 //! replacement*: it reuses `E2ESut`'s own SQL realization (the same `block_raw`
-//! queries, the shared [`parse_block_row`](crate::pbt::sut_row_parsing)) so that
-//! when the monolith is retired (the §F2 convergence) the composed components
-//! already cover its storage surface.
+//! queries, the shared [`parse_block_row`](crate::pbt::sut_row_parsing)) so
+//! that when the monolith is retired (the §F2 convergence) the composed
+//! components already cover its storage surface.
 //!
 //! It provides two caps:
 //! - [`SutBackend`] over `block_raw` — so **every already-wired block-tree
@@ -17,18 +17,27 @@
 //!   realization *for free* (the §6 payoff — a third storage backing the same
 //!   catalog, no catalog change).
 //! - [`SutSqlProjection`] — the SQL read surface. The base-table family
-//!   (`block_raw`/`block_tags`/`block` matview) is realized over real Turso SQL;
-//!   the navigation/focus/watch family is honest-empty (§5.1): this slice has no
-//!   reactive engine driving navigation or CDC watches, so an empty projection
-//!   is the honest answer, never a fabricated row.
+//!   (`block_raw`/`block_tags`/`block` matview) is realized over real Turso
+//!   SQL; the navigation/focus/watch family is honest-empty (§5.1): this slice
+//!   has no reactive engine driving navigation or CDC watches, so an empty
+//!   projection is the honest answer, never a fabricated row.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use holon::api::BackendEngine;
-use holon_api::{Block, ContentType, EntityUri, SourceLanguage, StorageEntity, Value};
-use holon_pbt_core::capabilities::{SutBackend, SutBlockTreeWrite, SutSqlProjection};
-use holon_pbt_core::composition::{CapMap, CapProvider};
+use holon_api::Block;
+use holon_api::ContentType;
+use holon_api::EntityUri;
+use holon_api::SourceLanguage;
+use holon_api::StorageEntity;
+use holon_api::Value;
+use holon_pbt_core::capabilities::SutBackend;
+use holon_pbt_core::capabilities::SutBlockTreeWrite;
+use holon_pbt_core::capabilities::SutSqlProjection;
+use holon_pbt_core::composition::CapMap;
+use holon_pbt_core::composition::CapProvider;
 
 use crate::pbt::sut_row_parsing::parse_block_rows;
 
@@ -54,9 +63,9 @@ impl SqlProjectionComponent {
             .unwrap_or_else(|e| panic!("SqlProjectionComponent query failed ({sql}): {e}"))
     }
 
-    /// Create a block with an explicit id through the production `block`/`create`
-    /// operation. Returns the supplied id so callers can build their reference
-    /// from exactly the id the store holds.
+    /// Create a block with an explicit id through the production
+    /// `block`/`create` operation. Returns the supplied id so callers can
+    /// build their reference from exactly the id the store holds.
     pub async fn create_block(
         &self,
         id: &EntityUri,
@@ -72,8 +81,9 @@ impl SqlProjectionComponent {
         id.clone()
     }
 
-    /// Create a source block (code block) with a language through the production
-    /// `block`/`create` operation — exercises `inv-source-language-iff-source`.
+    /// Create a source block (code block) with a language through the
+    /// production `block`/`create` operation — exercises
+    /// `inv-source-language-iff-source`.
     pub async fn create_source_block(
         &self,
         id: &EntityUri,
@@ -94,7 +104,8 @@ impl SqlProjectionComponent {
         id.clone()
     }
 
-    /// Update a block's `content` column via the production `set_field` operation.
+    /// Update a block's `content` column via the production `set_field`
+    /// operation.
     pub async fn update_content(&self, id: &EntityUri, content: &str) {
         let mut params: StorageEntity = HashMap::new();
         params.insert("id".into(), Value::String(id.to_string()));
@@ -126,7 +137,7 @@ impl SqlProjectionComponent {
     async fn execute_op(&self, op: &str, params: StorageEntity) {
         let entity = "block".to_string().into();
         self.engine
-            .execute_operation(&entity, op, params)
+            .execute_operation(&entity, op, params, holon_api::OpOrigin::User)
             .await
             .unwrap_or_else(|e| panic!("block/{op} operation failed: {e}"));
     }
@@ -243,8 +254,8 @@ impl SutSqlProjection for SqlProjectionComponent {
         let escaped = id.as_str().replace('\'', "''");
         let rows = self
             .query(&format!(
-                "SELECT json_extract(properties, '$.task_state') AS task_state \
-                 FROM block_raw WHERE id = '{escaped}'"
+                "SELECT json_extract(properties, '$.task_state') AS task_state FROM block_raw \
+                 WHERE id = '{escaped}'"
             ))
             .await;
         rows.into_iter()

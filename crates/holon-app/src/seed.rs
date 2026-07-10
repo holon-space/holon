@@ -111,8 +111,15 @@ pub async fn seed_default_layout(
                     &default_doc_uri
                 };
                 let params = holon_orgmode::build_block_params(block, &block.parent_id, doc_uri);
+                // First-boot seeding is system-authored boundary ingest —
+                // never user-undoable.
                 engine
-                    .execute_operation(&EntityName::from("block"), "create", params)
+                    .execute_operation(
+                        &EntityName::from("block"),
+                        "create",
+                        params,
+                        holon_api::OpOrigin::Ingest,
+                    )
                     .await?;
             }
         }
@@ -132,7 +139,12 @@ pub async fn seed_default_layout(
             holon_api::Value::String(EntityUri::block("journals").as_str().to_string()),
         );
         engine
-            .execute_operation(&EntityName::from("navigation"), "focus", nav_params)
+            .execute_operation(
+                &EntityName::from("navigation"),
+                "focus",
+                nav_params,
+                holon_api::OpOrigin::Ingest,
+            )
             .await?;
         tracing::info!(
             "[holon-app] Seeded default layout via intents ({} entries); main panel focused on \

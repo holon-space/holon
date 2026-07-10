@@ -1,25 +1,65 @@
-use crate::keybindings::{
-    self, BindingMode, KeyKind, KeyMatch, Modifiers, SpecialKey as KbSpecialKey,
-};
-use crate::render::{render_view_model, EditableTarget, RenderCtx, RenderRegistry};
-use crate::stylesheet;
-use holon_api::{EntityName, Value};
+use std::marker::PhantomData;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+
+use holon_api::EntityName;
+use holon_api::Value;
+use holon_frontend::FrontendSession;
+use holon_frontend::ReactiveViewModel;
 use holon_frontend::cell::TextOp;
 use holon_frontend::editor_caret;
 use holon_frontend::editor_view_model::EditorViewModel;
 use holon_frontend::operations::OperationIntent;
-use holon_frontend::reactive::{BuilderServices, ReactiveEngine};
-use holon_frontend::{FrontendSession, ReactiveViewModel};
-use r3bl_tui::{
-    col, height, new_style, render_tui_styled_texts_into, row, surface, throws_with_return,
-    tui_color, tui_styled_text, tui_styled_texts, App, BoxedSafeApp, CommonResult,
-    ComponentRegistryMap, EventPropagation, FlexBoxId, GlobalData, HasFocus, InputEvent, Key,
-    KeyPress, LayoutManagement, LengthOps, Pos, RenderOpCommon, RenderOpIRVec, RenderPipeline,
-    Size, SpecialKey, SurfaceProps, TerminalWindowMainThreadSignal, ZOrder, SPACER_GLYPH,
-};
-use std::marker::PhantomData;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use holon_frontend::reactive::BuilderServices;
+use holon_frontend::reactive::ReactiveEngine;
+use r3bl_tui::App;
+use r3bl_tui::BoxedSafeApp;
+use r3bl_tui::CommonResult;
+use r3bl_tui::ComponentRegistryMap;
+use r3bl_tui::EventPropagation;
+use r3bl_tui::FlexBoxId;
+use r3bl_tui::GlobalData;
+use r3bl_tui::HasFocus;
+use r3bl_tui::InputEvent;
+use r3bl_tui::Key;
+use r3bl_tui::KeyPress;
+use r3bl_tui::LayoutManagement;
+use r3bl_tui::LengthOps;
+use r3bl_tui::Pos;
+use r3bl_tui::RenderOpCommon;
+use r3bl_tui::RenderOpIRVec;
+use r3bl_tui::RenderPipeline;
+use r3bl_tui::SPACER_GLYPH;
+use r3bl_tui::Size;
+use r3bl_tui::SpecialKey;
+use r3bl_tui::SurfaceProps;
+use r3bl_tui::TerminalWindowMainThreadSignal;
+use r3bl_tui::ZOrder;
+use r3bl_tui::col;
+use r3bl_tui::height;
+use r3bl_tui::new_style;
+use r3bl_tui::render_tui_styled_texts_into;
+use r3bl_tui::row;
+use r3bl_tui::surface;
+use r3bl_tui::throws_with_return;
+use r3bl_tui::tui_color;
+use r3bl_tui::tui_styled_text;
+use r3bl_tui::tui_styled_texts;
+
+use crate::keybindings::BindingMode;
+use crate::keybindings::KeyKind;
+use crate::keybindings::KeyMatch;
+use crate::keybindings::Modifiers;
+use crate::keybindings::SpecialKey as KbSpecialKey;
+use crate::keybindings::{self};
+use crate::render::EditableTarget;
+use crate::render::RenderCtx;
+use crate::render::RenderRegistry;
+use crate::render::render_view_model;
+use crate::stylesheet;
 
 #[derive(Clone, Debug, Default)]
 pub enum AppSignal {
@@ -188,7 +228,12 @@ impl App for AppMain {
                             tokio::spawn(async move {
                                 let params = std::collections::HashMap::new();
                                 match operation_engine
-                                    .execute_operation(&EntityName::new("*"), "sync", params)
+                                    .execute_operation(
+                                        &EntityName::new("*"),
+                                        "sync",
+                                        params,
+                                        holon_api::OpOrigin::User,
+                                    )
                                     .await
                                 {
                                     Ok(_) => tracing::info!("[TUI] Sync completed"),
@@ -199,7 +244,8 @@ impl App for AppMain {
                         }
                         None => {
                             tracing::warn!(
-                                "[TUI] Sync unavailable: no operation engine wired (no-Turso session)"
+                                "[TUI] Sync unavailable: no operation engine wired (no-Turso \
+                                 session)"
                             );
                             global_data.state.status_message =
                                 "Sync unavailable (no-Turso session)".to_string();
@@ -279,7 +325,7 @@ impl App for AppMain {
                         .store(false, Ordering::Release);
                     global_data.state.status_message = "Ready".to_string();
 
-                    if let Some(km) = key_match_from_input(&input_event, /*leader=*/ true) {
+                    if let Some(km) = key_match_from_input(&input_event, /* leader= */ true) {
                         if let Some(action) = keybindings::global()
                             .action_for(BindingMode::Navigation, &km)
                             .map(str::to_string)
@@ -301,9 +347,9 @@ impl App for AppMain {
                         .state
                         .leader_pending
                         .store(true, Ordering::Release);
-                    global_data.state.status_message =
-                        "Leader · ↑↓ move block · ←→ indent/outdent · ⏎ edit · x toggle"
-                            .to_string();
+                    global_data.state.status_message = "Leader · ↑↓ move block · ←→ \
+                                                        indent/outdent · ⏎ edit · x toggle"
+                        .to_string();
                     return Ok(EventPropagation::ConsumedRender);
                 }
             }
@@ -919,11 +965,10 @@ fn decide_enter_action(registry: &RenderRegistry, idx: usize) -> EnterDecision {
 ///
 /// 1. Focused region is a `Selectable` (sidebar entry): dispatch its click
 ///    intent — same path GPUI's mouse-down uses. Drops the focus pin so
-///    `reconcile_focus` lands on the new doc's first Block on the next
-///    render.
+///    `reconcile_focus` lands on the new doc's first Block on the next render.
 /// 2. Focused region is a `Block` with an inline `editable_text`: seed
-///    `edit_state` from the editable's current content. The next render
-///    will paint the buffer + cursor.
+///    `edit_state` from the editable's current content. The next render will
+///    paint the buffer + cursor.
 /// 3. Nothing focused or focused Block has no editable target: no-op.
 fn enter_pressed(state: &mut TuiState) -> EnterAction {
     let decision = {
@@ -946,7 +991,9 @@ fn enter_pressed(state: &mut TuiState) -> EnterAction {
     // chord-resolution (`bubble_input_oneshot`) and any consumer of
     // `ui_state.focused_block` see stale focus, breaking keybindings on the
     // freshly-opened editor.
-    // ALLOW(entity_uri_from_raw): boundary — `target.block_id` is the focused row id (a `String`); parse once here before handing a typed URI to the cell registry.
+    // ALLOW(entity_uri_from_raw): boundary — `target.block_id` is the focused row
+    // id (a `String`); parse once here before handing a typed URI to the cell
+    // registry.
     let target_uri = holon_api::EntityUri::from_raw(&target.block_id);
     state.engine.set_focus(Some(target_uri.clone()));
     let cell = match state.engine.editable_text(&target_uri, &target.field) {
@@ -1244,7 +1291,10 @@ fn render_status_bar(pipeline: &mut RenderPipeline, size: Size, status_msg: &str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::{EditableTarget, RenderRegistry, SelectableKind, SelectableRegion};
+    use crate::render::EditableTarget;
+    use crate::render::RenderRegistry;
+    use crate::render::SelectableKind;
+    use crate::render::SelectableRegion;
 
     fn region_block(entity_id: &str, editable: Option<EditableTarget>) -> SelectableRegion {
         SelectableRegion {
@@ -1389,8 +1439,8 @@ mod tests {
         for action in keybindings::global().actions(BindingMode::Navigation) {
             assert!(
                 NAVIGATION_ACTIONS.contains(&action),
-                "keybindings.yaml binds action '{action}' but \
-                 run_navigation_action has no arm for it"
+                "keybindings.yaml binds action '{action}' but run_navigation_action has no arm \
+                 for it"
             );
         }
     }

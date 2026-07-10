@@ -2468,7 +2468,12 @@ impl HolonMcpServer {
                 let entity_name_typed = EntityName::new(&entity_name);
                 let response = self
                     .engine()
-                    .execute_operation(&entity_name_typed, &operation.name, op_params)
+                    .execute_operation(
+                        &entity_name_typed,
+                        &operation.name,
+                        op_params,
+                        holon_api::OpOrigin::User,
+                    )
                     .await
                     .map_err(|e| {
                         rmcp::ErrorData::internal_error(
