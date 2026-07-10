@@ -179,31 +179,12 @@ async fn run_pair_watcher_inner(
 
     let entity_name = EntityName::new(&parsed_action.entity);
 
-    // A trigger query with no table references (e.g. the journal auto-create
-    // `SELECT date('now','localtime')`) is a *constant/time* trigger, not a
-    // data-reactive one. It cannot back a CDC materialized view — Turso rejects
-    // `CREATE MATERIALIZED VIEW … AS <tableless select>` with "No tables to
-    // populate from" — and watching it for row *changes* is meaningless anyway
-    // (no data dependency). Evaluate it once at startup and fire the action for
-    // each row. (Re-firing time triggers on day-rollover is a separate future
-    // concern; the matview watch never delivered it — it failed at boot.)
-    let is_tableless = crate::storage::parse_sql(&sql)
-        .map(|stmts| crate::storage::extract_table_refs(&stmts).is_empty())
-        .unwrap_or(false);
-
-    if is_tableless {
-        let rows = engine
-            .execute_query(sql, HashMap::new(), None)
-            .await
-            .with_context(|| {
-                format!("Failed to evaluate one-shot trigger query for action {action_id}")
-            })?;
-        for data in &rows {
-            fire_action(&engine, &entity_name, &parsed_action, &action_id, data).await;
-        }
-        return Ok(());
-    }
-
+    // Every trigger is a data-reactive matview watch. Temporal triggers (the
+    // journal auto-create) read the `clock` relation's materialized `today`
+    // value instead of `date('now')`, so they too back a CDC matview: the
+    // scheduler's day-rollover UPDATE re-fires the watch (ADR 0024 P5). The old
+    // boot-one-shot `is_tableless` branch is gone — it never re-fired and was
+    // the "temporal triggers never re-fire" defect (BugFunnel F4).
     let mut row_stream = engine
         .query_and_watch(sql, HashMap::new(), None)
         .await
@@ -221,10 +202,9 @@ async fn run_pair_watcher_inner(
 }
 
 /// Resolve an action's params against a produced row and dispatch the
-/// operation. Shared by the reactive (`query_and_watch`) and one-shot
-/// (tableless-trigger) paths. Execution failures are logged loudly (fail-loud)
-/// but do not abort the watcher — one bad row must not tear down the whole
-/// action.
+/// operation. Fired for each `Created` row the reactive `query_and_watch`
+/// matview delivers. Execution failures are logged loudly (fail-loud) but do
+/// not abort the watcher — one bad row must not tear down the whole action.
 async fn fire_action(
     engine: &BackendEngine,
     entity_name: &EntityName,

@@ -77,6 +77,11 @@ pub struct BackendEngine {
     /// held on the engine). `None` in configs that never install one
     /// (tests, no-advice sessions).
     _advice_reconciler: Option<Arc<crate::sync::AdviceReconcilerHandle>>,
+    /// Keeps the clock scheduler's ticking task alive (ADR 0024 P5,
+    /// time-as-data). `None` until installed in
+    /// `create_initialized_engine`; the boot guard there fails loud if it
+    /// stays `None`.
+    _clock_scheduler: Option<Arc<crate::sync::clock_scheduler::ClockSchedulerHandle>>,
 }
 
 impl BackendEngine {
@@ -111,6 +116,7 @@ impl BackendEngine {
             graph_schema_cache: Arc::new(std::sync::RwLock::new(graph_schema)),
             advice_status: holon_advice::AdviceRuleStatusHandle::new(),
             _advice_reconciler: None,
+            _clock_scheduler: None,
         })
     }
 
@@ -130,6 +136,16 @@ impl BackendEngine {
     ) {
         self.advice_status = status;
         self._advice_reconciler = Some(Arc::new(handle));
+    }
+
+    /// Install the clock scheduler (ADR 0024 P5): hold its keep-alive handle so
+    /// the day-rollover ticking task survives. Called once during engine
+    /// initialization.
+    pub fn install_clock_scheduler(
+        &mut self,
+        handle: crate::sync::clock_scheduler::ClockSchedulerHandle,
+    ) {
+        self._clock_scheduler = Some(Arc::new(handle));
     }
 
     /// Apply all registered SQL-level transformers to a SQL string.
