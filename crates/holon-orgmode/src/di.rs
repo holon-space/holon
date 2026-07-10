@@ -659,13 +659,19 @@ pub async fn run_file_sync_controller(
     .instrument(tracing::info_span!("org.initial_scan.ingest"))
     .await;
 
-    // Project rule: fail loud, never fake. Any
-    // initial-scan failure propagates as a startup
-    // error — silently continuing past it hides
-    // upstream bugs (e.g. Loro inbound runtime not
-    // mirroring org-ingested blocks, surfacing later
-    // as `update_block_position`/`resolve_parent_tree_id`
-    // failures).
+    // Project rule: fail loud, never fake — but NEVER let one bad file kill
+    // sync for every other file. A per-file initial-scan failure is surfaced
+    // through the ready signal (`signal_error`), which the frontend turns into
+    // a VISIBLE degraded-mode banner (see holon-app wiring `post_ready`), and
+    // then we FALL THROUGH to arm() + the watch loop below so the healthy
+    // files keep syncing and the user can fix the bad file live.
+    //
+    // Regression guard (dogfood 2026-07-10 ship-blocker): this used to
+    // `return` early on ANY failure, so a single bad vault file left arm()
+    // unspawned and every file's runtime sync dead while the window still
+    // looked healthy — a silent sync death with no user-visible signal. The
+    // detached-worker `panic!` that consumed this error at the wiring layer is
+    // likewise replaced by the banner. Do NOT reinstate the early return.
     if !scan_failures.is_empty() {
         let summary = scan_failures
             .iter()
@@ -681,19 +687,17 @@ pub async fn run_file_sync_controller(
         if let Some(sender) = ready_sender.lock().unwrap().take() {
             sender.signal_error(msg);
         }
-        return;
-    }
-
-    // Phase 1 fix: signal_ready BEFORE arm(). The
-    // 9+ s `notify::watch(Recursive)` on macOS runs
-    // detached in the background. Correctness during
-    // the unarmed window is preserved by
-    // `poll_external_changes`, which now also walks
-    // the tree to discover new files via
-    // `scan_directory` (see file_sync_controller.rs).
-    // Without that Phase A→B extension, this fix
-    // breaks `create_document`.
-    if let Some(sender) = ready_sender.lock().unwrap().take() {
+        // No early return — arm() + the watch loop run below regardless.
+    } else if let Some(sender) = ready_sender.lock().unwrap().take() {
+        // Phase 1 fix: signal_ready BEFORE arm(). The
+        // 9+ s `notify::watch(Recursive)` on macOS runs
+        // detached in the background. Correctness during
+        // the unarmed window is preserved by
+        // `poll_external_changes`, which now also walks
+        // the tree to discover new files via
+        // `scan_directory` (see file_sync_controller.rs).
+        // Without that Phase A→B extension, this fix
+        // breaks `create_document`.
         sender.signal_ready();
     }
 

@@ -415,13 +415,42 @@ impl FrontendInjectorExt for Injector {
                     let ready_signal_bg = ready_signal.clone();
                     let post_ready_work = async move {
                         if let Some(mut signal) = ready_signal_bg {
-                            let result = signal
-                                .wait_for(|v| v.is_some())
-                                .await
-                                .expect("FileWatcherReadySignal sender dropped");
-                            match result.as_ref().unwrap() {
-                                Ok(()) => {}
-                                Err(msg) => panic!("OrgMode startup failed: {msg}"),
+                            // Copy the outcome out and drop the non-`Send`
+                            // `watch::Ref` BEFORE any `.await` below.
+                            let scan_error: Option<String> = {
+                                let result = signal
+                                    .wait_for(|v| v.is_some())
+                                    .await
+                                    .expect("FileWatcherReadySignal sender dropped");
+                                match result.as_ref().unwrap() {
+                                    Ok(()) => None,
+                                    Err(msg) => Some(msg.clone()),
+                                }
+                            };
+                            if let Some(msg) = scan_error {
+                                // A per-file initial-scan failure. Do NOT panic
+                                // this detached worker — that left the window
+                                // looking healthy with file sync silently dead
+                                // (dogfood 2026-07-10 ship-blocker). The org
+                                // watch loop is already armed (holon-orgmode
+                                // di.rs no longer early-returns on failure), so
+                                // the OTHER files keep syncing. Surface the
+                                // failure loudly + as a visible degraded banner.
+                                tracing::error!(
+                                    "OrgMode initial scan degraded — some vault files were \
+                                     not ingested; other files continue syncing: {msg}"
+                                );
+                                if let Ok(bus) = resolver_bg
+                                    .try_resolve_async::<Arc<holon::sync::DegradedSignalBus>>()
+                                    .await
+                                {
+                                    bus.emit(holon::sync::ShareDegraded {
+                                        shared_tree_id: "org-initial-scan".to_string(),
+                                        reason: holon::sync::ShareDegradedReason::OrgIngestFailed(
+                                            msg.clone(),
+                                        ),
+                                    });
+                                }
                             }
                         }
                         let _ = resolver_bg
