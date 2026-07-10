@@ -362,42 +362,12 @@ impl LiveDocumentManager {
             create_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
-}
 
-#[async_trait::async_trait]
-impl DocumentManager for LiveDocumentManager {
-    async fn find_by_parent_and_name(
-        &self,
-        parent_id: &EntityUri,
-        title: &str,
-    ) -> anyhow::Result<Option<Block>> {
-        let docs = self.live.read();
-        Ok(docs
-            .values()
-            .find(|d| d.parent_id == *parent_id && d.is_page() && d.title() == title)
-            .map(|d| (**d).clone()))
-    }
-
-    async fn create(&self, doc: Block) -> anyhow::Result<Block> {
+    /// Insert a page row via the SQL create op and mirror it into LiveData.
+    /// Caller holds `create_lock` and has already decided (by title or by id)
+    /// that this page should be created — this method performs only the write.
+    async fn insert_page(&self, doc: Block) -> anyhow::Result<Block> {
         use holon_orgmode::build_block_params;
-
-        // Serialize against concurrent creates so two callers asking for the
-        // same `(parent_id, title)` page can't both observe LiveData empty
-        // and both INSERT distinct UUIDs. Inside the lock, re-check LiveData;
-        // if the page now exists (CDC may have caught up while we were
-        // waiting), return the existing entry.
-        let _guard = self.create_lock.lock().await;
-        if let Some(existing) = self
-            .find_by_parent_and_name(&doc.parent_id, &doc.title())
-            .await?
-        {
-            tracing::debug!(
-                "[LiveDocumentManager] Page {:?} already exists as {} (skipping create)",
-                doc.title(),
-                existing.id,
-            );
-            return Ok(existing);
-        }
 
         // Route document creation events to the document's own ID.
         // _routing_doc_uri is only event routing metadata (not stored in DB) —
@@ -405,7 +375,8 @@ impl DocumentManager for LiveDocumentManager {
         let params = build_block_params(&doc, &doc.parent_id, &doc.id);
         // INSERT OR IGNORE: only triggers on PK collision now that the
         // partial unique index on `(parent_id, name)` is gone. The
-        // `create_lock` above is what prevents same-title duplicates.
+        // `create_lock` held by the caller is what prevents same-title
+        // duplicates on the `create` path.
         // Tag the create event with `EventOrigin::Org` so the
         // `LoroSyncController` inbound gate routes it to `Apply` instead of
         // dropping it as a generic SQL-direct write. This page-creation flow
@@ -423,7 +394,7 @@ impl DocumentManager for LiveDocumentManager {
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         // If the response carries an existing id, the INSERT was ignored —
-        // a page with the same (parent_id, title) already exists in the DB.
+        // a page with the same PRIMARY KEY already exists in the DB.
         // Return that existing page instead of the one we tried to insert.
         if let Some(holon_api::Value::String(existing_id)) = result.response {
             tracing::debug!(
@@ -452,6 +423,57 @@ impl DocumentManager for LiveDocumentManager {
         self.live
             .insert(doc.id.as_str().to_string(), Arc::new(doc.clone()));
         Ok(doc)
+    }
+}
+
+#[async_trait::async_trait]
+impl DocumentManager for LiveDocumentManager {
+    async fn find_by_parent_and_name(
+        &self,
+        parent_id: &EntityUri,
+        title: &str,
+    ) -> anyhow::Result<Option<Block>> {
+        let docs = self.live.read();
+        Ok(docs
+            .values()
+            .find(|d| d.parent_id == *parent_id && d.is_page() && d.title() == title)
+            .map(|d| (**d).clone()))
+    }
+
+    async fn create(&self, doc: Block) -> anyhow::Result<Block> {
+        // Serialize against concurrent creates so two callers asking for the
+        // same `(parent_id, title)` page can't both observe LiveData empty
+        // and both INSERT distinct UUIDs. Inside the lock, re-check LiveData;
+        // if the page now exists (CDC may have caught up while we were
+        // waiting), return the existing entry.
+        let _guard = self.create_lock.lock().await;
+        if let Some(existing) = self
+            .find_by_parent_and_name(&doc.parent_id, &doc.title())
+            .await?
+        {
+            tracing::debug!(
+                "[LiveDocumentManager] Page {:?} already exists as {} (skipping create)",
+                doc.title(),
+                existing.id,
+            );
+            return Ok(existing);
+        }
+
+        self.insert_page(doc).await
+    }
+
+    async fn create_forcing_id(&self, doc: Block) -> anyhow::Result<Block> {
+        // Authoritative `#+ID` path (see trait docs): honor `doc.id` and NEVER
+        // substitute a same-`(parent, title)` placeholder. We still hold the
+        // create lock and re-check by ID so a concurrent create of this exact
+        // page can't race the same PK, but we deliberately skip the
+        // `(parent, title)` de-dup that `create` performs — that de-dup is what
+        // let an earlier sibling's random-id placeholder hijack the file's id.
+        let _guard = self.create_lock.lock().await;
+        if let Some(existing) = self.get_by_id(&doc.id).await? {
+            return Ok(existing);
+        }
+        self.insert_page(doc).await
     }
 
     async fn get_by_id(&self, id: &EntityUri) -> anyhow::Result<Option<Block>> {
