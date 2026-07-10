@@ -223,10 +223,16 @@ for rules.
 
 **Files touched.**
 - **New** `crates/holon-api/src/effect_id.rs` — `deterministic_block_id(rule:
-  &RuleId, key: &FiringKey) -> EntityUri`. Uses `uuid::Uuid::new_v5` (dep already
-  present in `holon-api/Cargo.toml:24`) with a fixed Holon namespace UUID
-  constant; wraps via `EntityUri::block(...)` (`entity_uri.rs:65`) so the scheme
-  prefix is correct.
+  &RuleId, key: &FiringKey, slot: &OutputSlot) -> EntityUri`. The `OutputSlot`
+  discriminator (Martin's ADR review, P4): IDs are minted **per emitted
+  token** — a transition with N output arcs (e.g. a today-page template
+  creating several blocks) mints N distinct ids
+  `UUIDv5(ns, rule ‖ key ‖ slot ‖ [index])`, never one shared id. Phase 1's
+  single-create rules pass a fixed slot, but the signature carries it from day
+  one so Phase-2 templates need no migration. Uses `uuid::Uuid::new_v5` (dep
+  already present in `holon-api/Cargo.toml:24`) with a fixed Holon namespace
+  UUID constant; wraps via `EntityUri::block(...)` (`entity_uri.rs:65`) so the
+  scheme prefix is correct.
 - `crates/holon/src/api/action_watcher.rs` — `fire_action` computes the
   `FiringKey` from the produced trigger row and, when the operation is `create`,
   inserts the deterministic id into `params` before `execute_operation`.
@@ -249,7 +255,7 @@ for rules.
 
 **Test strategy.**
 - `holon-api` unit test: `deterministic_block_id` is stable across calls and
-  distinct across rule/key.
+  distinct across rule/key/slot (incl. two slots of one firing → two ids).
 - **`holon-loro-testing` PBT (the at-most-once-under-concurrent-replicas
   property).** Two `LoroSut` replicas (`sut_loro.rs:36`, `apply_add_peer`) each
   fire the same journal rule for the same day independently, then
