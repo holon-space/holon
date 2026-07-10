@@ -108,13 +108,20 @@ crate::cap_transition! {
         sut.expand_toggle(&me.block_id).await;
     }
     sql_budget: |_me, state| {
-        // Pure frontend-state flip: no SQL traffic. The reactive base
-        // captures any incidental watcher activity.
+        // The gate flip is frontend-local, but collapse is document state
+        // (2026-07-11 ruling): the toggle also dispatches
+        // `set_field(collapsed)` — one block update's worth of SQL.
+        let update = crate::pbt::transition_budgets::expected_sql_for_kind(
+            crate::pbt::transition_budgets::MutationKind::Update,
+            state.active_watch_count(),
+            state.block_count(),
+            state.document_count(),
+        );
         ExpectedSql {
-            reads: REACTIVE_BASE,
-            writes: 0,
+            reads: REACTIVE_BASE + update.reads,
+            writes: update.writes,
             ddl: 0,
-            tolerance: docs_tolerance(state),
+            tolerance: docs_tolerance(state) + update.tolerance,
         }
     }
 }

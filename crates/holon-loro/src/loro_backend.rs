@@ -435,7 +435,19 @@ fn read_block_from_tree(
     // `read_properties_from_meta` already strips edge-typed keys (`tags`,
     // `requires`) that legacy pollution may have flattened into the PROPERTIES
     // blob — they live in dedicated meta keys + typed `Block` slots instead.
-    let properties = read_properties_from_meta(&meta);
+    let mut properties = read_properties_from_meta(&meta);
+    // `collapsed` is a typed Block field (document state, 2026-07-11 ruling)
+    // but `set_field(collapsed)` lands in the Loro properties map like every
+    // other scalar (apply_field_changes_to_meta). Lift it into the typed slot
+    // at this read boundary — parse-don't-validate — so a Loro-derived Block
+    // agrees field-for-field with a SQL-derived one (whose TryFrom reads the
+    // `collapsed` column) and org writeback emits one `:COLLAPSED:` drawer.
+    let collapsed = match properties.remove("collapsed") {
+        None => false,
+        Some(Value::Boolean(b)) => b,
+        Some(Value::Integer(i)) => i != 0,
+        Some(other) => panic!("corrupt `collapsed` property in Loro tree: {other:?}"),
+    };
 
     let id = block_uri_from_meta(&meta, node);
     let parent_id = match parent_tree_id {
@@ -464,6 +476,7 @@ fn read_block_from_tree(
     block.tags = tags.into();
     block.requires = requires;
     block.advice_suppressed = advice_suppressed;
+    block.collapsed = collapsed;
     block.created_at = created_at;
     block.updated_at = updated_at;
     block

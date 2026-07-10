@@ -404,18 +404,25 @@ pub trait UserDriver: Send + Sync {
 
     /// Set block `target`'s expand/collapse state to `expanded`.
     ///
-    /// Block expansion has NO engine representation — it is a per-widget,
-    /// view-local `Mutable<bool>` (the GPUI chevron's `on_mouse_down` flips it
-    /// directly; `Block` documents "UI state like collapsed is NOT stored
-    /// here - kept locally"). So unlike every other gesture, this verb cannot
-    /// dispatch an `OperationIntent`; each driver drives the REAL per-frontend
-    /// mechanism:
+    /// UPDATE (2026-07-11, Martin ruling): collapse IS document state now —
+    /// the production chevron (`render/builders/expand_toggle.rs`) dispatches
+    /// a real `set_field(collapsed)` `OperationIntent` alongside the local
+    /// gate poke, so it is undoable/synced/provenance-tagged like any other
+    /// field write. The doc below (poke the view-local `Mutable` gate
+    /// directly) still describes what each headless/windowed driver here
+    /// does — that remains a faithful simulation of "the user clicked the
+    /// chevron" for gesture-level PBT driving, since the local gate is what
+    /// gates lazy materialisation and what `find_expand_toggle_gate` can
+    /// reach. It does NOT yet dispatch the op, so a driver-driven toggle does
+    /// not itself exercise the durability/undo path — see the keystone-rung
+    /// note this leaves for a future assert-collapsed-persisted rung.
     /// - headless (`ReactiveEngineDriver`): find the `expand_toggle` node in a
     ///   reactive snapshot and `gate.set(expanded)` — the same poke the GPUI
     ///   handler performs.
     /// - windowed (`GpuiUserDriver` / `SimUserDriver`): synthesize a real click
     ///   on the chevron registered under `expand_toggle_id_for(target)`, so the
-    ///   production handler flips the gate exactly as a user's tap would.
+    ///   production handler flips the gate AND dispatches `set_field` exactly
+    ///   as a user's tap would.
     ///
     /// Absoluteness is owned jointly with the ref model: the windowed chevron
     /// is a toggle, and the PBT generates expand/collapse only in the
@@ -766,13 +773,16 @@ impl UserDriver for ReactiveEngineDriver {
     }
 
     /// Headless expand/collapse: find the `expand_toggle` node in a reactive
-    /// snapshot and `gate.set(expanded)` — the same view-local poke the GPUI
-    /// chevron's `on_mouse_down` handler performs. Shares the tree walk with
+    /// snapshot and `gate.set(expanded)`, THEN dispatch the same
+    /// `set_field(collapsed)` intent the production GPUI chevron handler
+    /// dispatches (collapse is document state since the 2026-07-11 ruling —
+    /// the gate poke alone would leave the SUT's `collapsed` column stale and
+    /// diverge from a ref model that tracks it). Shares the tree walk with
     /// the headless test gate (`set_expand_toggle_gate`). Fails loud if no
     /// matching node exists (a shadow_builder / interpret regression). The
-    /// flipped `Mutable` is reborn on the next `snapshot_reactive` (the tree is
-    /// rebuilt per call) — the expansion source of truth is the ref model, as
-    /// documented on the trait method.
+    /// flipped `Mutable` is reborn on the next `snapshot_reactive` (the tree
+    /// is rebuilt per call); the durable half now lives in the `collapsed`
+    /// field.
     async fn set_block_expanded(&self, target: &EntityUri, expanded: bool) -> Result<()> {
         let root_uri = holon_api::root_layout_block_uri();
         let root = self.engine.snapshot_reactive(&root_uri);
@@ -786,6 +796,14 @@ impl UserDriver for ReactiveEngineDriver {
             )
         })?;
         gate.set(expanded);
+        let intent = OperationIntent::set_field(
+            &EntityName::new("block"),
+            "set_field",
+            target.as_str(),
+            "collapsed",
+            Value::Boolean(!expanded),
+        );
+        self.engine.dispatch_intent_sync(intent).await?;
         Ok(())
     }
 
