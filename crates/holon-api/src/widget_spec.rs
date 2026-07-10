@@ -24,6 +24,31 @@ pub fn data_row_entity_uri(row: &DataRow) -> Option<EntityUri> {
         .map(entity_uri_from_id_str)
 }
 
+/// Key a reactive row for the accumulator, tolerating **id-less** rows.
+///
+/// Prefers the entity `id` column. Id-less rows are a LEGAL, representable
+/// input — they arise from rule-trigger / aggregate queries (e.g. the journals
+/// day-list `SELECT date('now') AS name`, dogfood 2026-07-10) that get pointed
+/// at the enriched watch path. For those we key on the matview `_rowid`
+/// (Turso's per-row storage identity, the same id-less path `LiveData` uses for
+/// id-less deletes) under a distinct `degraded:` scheme, so the row can still
+/// be stored and rendered as a degraded entry (mirroring the profile resolver's
+/// `degraded_missing_id_profile`) instead of panicking the render worker.
+///
+/// Returns `None` only when the row has neither `id` nor `_rowid` — a truly
+/// unkeyable row that the caller must drop visibly (log) rather than panic on.
+pub fn data_row_reactive_key(row: &DataRow) -> Option<EntityUri> {
+    if let Some(uri) = data_row_entity_uri(row) {
+        return Some(uri);
+    }
+    let rowid = match row.get("_rowid")? {
+        Value::Integer(i) => i.to_string(),
+        Value::String(s) => s.clone(),
+        other => format!("{other:?}"),
+    };
+    Some(EntityUri::from_raw(&format!("degraded:rowid-{rowid}"))) // ALLOW(entity_uri_from_raw): synthesizes a key from the matview `_rowid` storage identity — a genuine SQL/matview row boundary value
+}
+
 /// Typed accessor for the matview `parent_id` column of a row.
 ///
 /// Boundary read — routes through the centralized [`entity_uri_from_id_str`]
