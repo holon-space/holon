@@ -2828,12 +2828,15 @@ mod tests {
     /// source blocks and the `Journal Auto-Create` heading (also children
     /// of `block:journals`, but not date-named).
     async fn journal_day_children(comp: &HeadlessFrontendComponent) -> Vec<(String, String)> {
-        // The `name` the action sets lands in the block's `properties` JSON.
+        // ORG/RENDER truth: a heading's text IS its `content` — the date the
+        // action creates lands in the block's top-level `content` column (not a
+        // `name` property), so it renders as a non-empty row and org-round-trips
+        // to a `* <date>` headline (Bug-3 ORACLE fix). Read `content` here.
         let rows = comp
             .engine
             .db_handle()
             .query(
-                "SELECT id, properties FROM block_raw WHERE parent_id = 'block:journals'",
+                "SELECT id, content FROM block_raw WHERE parent_id = 'block:journals'",
                 std::collections::HashMap::new(),
             )
             .await
@@ -2841,16 +2844,10 @@ mod tests {
         rows.iter()
             .filter_map(|r| {
                 let id = r.get("id").and_then(|v| v.as_string())?.to_string();
-                // `properties` is a jsonb column — CDC delivers it as a
-                // Value::Object (or Value::Json), never Value::String (archlint
-                // jsonb-as-string). The action's `name` param lands here.
-                let name = match r.get("properties")? {
-                    Value::Object(map) => map.get("name")?.as_string()?.to_string(),
-                    other => other.as_json_value()?.get("name")?.as_str()?.to_string(),
-                };
-                holon_api::CalendarDate::parse(&name)
+                let content = r.get("content").and_then(|v| v.as_string())?.to_string();
+                holon_api::CalendarDate::parse(&content)
                     .ok()
-                    .map(|_| (id, name))
+                    .map(|_| (id, content))
             })
             .collect()
     }
@@ -2882,12 +2879,12 @@ mod tests {
     /// `block:journals`; the trigger/action pair lives under a `Journal
     /// Auto-Create` heading (same parent, so `action_discovery` joins them)
     /// and NOT directly under journals, so the day-blocks the action
-    /// creates are the only date-named children.
+    /// creates are the only date-content children.
     const JOURNAL_RULE_ORG: &str = "#+ID: journals\n* Journal Auto-Create\n#+BEGIN_SRC holon_sql \
                                     :id journals::trigger::0\nSELECT today as name FROM clock \
                                     WHERE grain = 'day'\n#+END_SRC\n#+BEGIN_SRC holon_rule :id \
                                     journals::action::0\nblock.create(#{parent_id: \
-                                    \"block:journals\", name: col(\"name\")})\n#+END_SRC\n";
+                                    \"block:journals\", content: col(\"name\")})\n#+END_SRC\n";
 
     #[tokio::test(flavor = "multi_thread")]
     async fn advance_day_fires_one_journal_per_distinct_day_idempotently() {
@@ -2909,6 +2906,62 @@ mod tests {
         let boot_days = wait_for_journal_days(&comp, 1, Duration::from_secs(10)).await;
         assert_eq!(boot_days[0].1, boot_date, "boot journal is the boot day");
         eprintln!("[advance-day] boot day journal: {boot_days:?}");
+
+        // ORACLE (Bug-3): the created journal block carries the date in `content`
+        // — org/render truth, a heading's text IS its content — so it renders as a
+        // NON-EMPTY row and org-round-trips to `* <date>`, with NO stray `name`
+        // property. `journal_day_children` already read `content`; assert the
+        // storage shape directly, then assert the production org render.
+        let boot_id = boot_days[0].0.clone();
+        let shape = comp
+            .engine
+            .db_handle()
+            .query(
+                &format!(
+                    "SELECT content, properties FROM block_raw WHERE id = '{}'",
+                    boot_id.replace('\'', "''")
+                ),
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("boot journal shape query");
+        let shape_row = shape.first().expect("boot journal row present");
+        assert_eq!(
+            shape_row.get("content").and_then(|v| v.as_string()),
+            Some(boot_date.as_str()),
+            "journal date must live in `content` (renders as a non-empty row), not empty"
+        );
+        let has_name_prop = match shape_row.get("properties") {
+            Some(Value::Object(m)) => m.contains_key("name"),
+            Some(other) => other
+                .as_json_value()
+                .and_then(|j| j.get("name").cloned())
+                .is_some(),
+            None => false,
+        };
+        assert!(
+            !has_name_prop,
+            "journal block must NOT carry a `name` property — Bug-3: the date belongs in content"
+        );
+
+        // ORG round-trip: block:journals renders the day-block as a `* <date>`
+        // headline (content in the headline), never a bare `* ` + `:name:` drawer.
+        {
+            use holon_pbt_core::capabilities::SutOrgRender;
+            let pairs = comp.snapshot_org_render_pairs().await;
+            let (_, _, rendered) = pairs
+                .iter()
+                .find(|(path, _, _)| path.ends_with("Journals.org"))
+                .expect("Journals.org is a tracked org doc");
+            assert!(
+                rendered.contains(&format!("* {boot_date}")),
+                "journal must org-render as headline `* {boot_date}` (content), got:\n{rendered}"
+            );
+            assert!(
+                !rendered.contains(":name:"),
+                "journal block must not org-render a `:name:` property drawer:\n{rendered}"
+            );
+        }
 
         // WP2: the boot-day block carries the deterministic id
         // UUIDv5(rule-id, firing-key, slot). Reproduce it from the discovered rule
