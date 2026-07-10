@@ -1,11 +1,10 @@
 # ADR 0024: Unified action execution — Petri-net surface, block substrate, dual-evaluated guards
 
-**Status:** Proposed (2026-07-09; revised 2026-07-10 incorporating Martin's
-inline review — marking styles, firing-key definition, lease override, precise
-CPN terms). The target "one rule language = Petri nets" is a **declared target,
-not yet ratified**; the Phase-1 work package
-(`docs/Proposals/action-unification-implementation-plan.md`) is
-decision-invariant either way.
+**Status:** Accepted (ratified by Martin 2026-07-10, after two inline-review
+rounds — marking styles, firing-key definition, lease override, precise CPN
+terms, unified output model). Implementation plan:
+`docs/Proposals/action-unification-implementation-plan.md`; execution began
+2026-07-10 with the Phase-2 risk-elimination spike + Phase-1 work packages.
 **Deciders:** Martin (+ discussion session "holon: Actions vs Petri-Net")
 **Relates to:** [ADR 0017](0017-petri-net-task-ranking-engine.md) (the Petri-net
 engine this ADR re-scopes into semantics + simulator; its flat-net v0.3 model —
