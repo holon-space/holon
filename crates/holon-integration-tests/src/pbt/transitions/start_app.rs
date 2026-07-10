@@ -161,13 +161,15 @@ pub(crate) fn seed_booted_layout_into_ref(state: &mut ReferenceState, fresh: boo
     let default_doc_uri = EntityUri::no_parent();
     let default_doc_id = EntityUri::block("__default__");
 
-    // The `block:journals` page + its machinery (query/render/auto-create rule),
-    // seeded programmatically by prod's `build_default_layout_blocks` regardless
-    // of freshness — prod repairs the page + rule idempotently. Model the SAME
-    // blocks here so `inv-blocks-match-ref` sees the identical booted set. The
-    // page block documents itself (`block_documents[journals]=journals`, NON-seed:
-    // the wide oracle asserts the user-visible first-boot page); its children
-    // belong to the journals page document.
+    // The `block:journals` page + its display query/render, seeded programmatically
+    // by prod's `build_default_layout_blocks` regardless of freshness — prod
+    // repairs the page idempotently. Model the SAME blocks here so
+    // `inv-blocks-match-ref` sees the identical booted set. The page block
+    // documents itself (`block_documents[journals]=journals`, NON-seed: the
+    // wide oracle asserts the user-visible first-boot page); its children
+    // belong to the journals page document. (The auto-create RULE is not yet
+    // seeded — see `holon_frontend::journals_auto_create_blocks` — so it is not
+    // modeled here.)
     let journals_uri = EntityUri::parse(holon_frontend::JOURNALS_PAGE_ID).expect("journals id");
     for block in holon_frontend::journals_page_blocks() {
         let block_id = block.id.clone();
