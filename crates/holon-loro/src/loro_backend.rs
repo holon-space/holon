@@ -4042,3 +4042,194 @@ mod diff_checkout_race_tests {
         );
     }
 }
+
+/// Unit tests for [`incremental_block_changes`] — the O(changed) fact-driven
+/// diff the Loro→SQL projection's fast path drives. Each test builds a raw
+/// `LoroDoc` tree (STABLE_ID meta + a fractional index, mirroring the prod
+/// create path), enacts a structural batch, then asserts the `(changed,
+/// settled)` result against the exact rows a projection pass would emit.
+#[cfg(test)]
+mod incremental_tests {
+    use super::*;
+    use loro::{ContainerTrait, LoroDoc};
+
+    fn schemed(sid: &str) -> String {
+        EntityUri::block(sid).to_string()
+    }
+
+    /// A doc whose block tree assigns fractional indices (prod invariant, ADR
+    /// 0005) so every live node projects a real sort key.
+    fn new_fi_doc() -> LoroDoc {
+        let doc = LoroDoc::new();
+        doc.get_tree(TREE_NAME).enable_fractional_index(0);
+        doc
+    }
+
+    /// Create a block node under `parent` (`None` = tree root) with STABLE_ID
+    /// `sid` and text `content`, committing it. Mirrors the meta the prod
+    /// create path writes (`create_block_with_properties`).
+    fn create_node(
+        doc: &LoroDoc,
+        parent: Option<loro::TreeID>,
+        sid: &str,
+        content: &str,
+    ) -> loro::TreeID {
+        let tree = doc.get_tree(TREE_NAME);
+        let node = tree.create(parent).unwrap();
+        let meta = tree.get_meta(node).unwrap();
+        meta.insert(STABLE_ID, loro::LoroValue::from(sid)).unwrap();
+        write_content_to_meta(
+            &meta,
+            &BlockContent::Text {
+                raw: content.to_string(),
+            },
+            None,
+        )
+        .unwrap();
+        doc.commit();
+        node
+    }
+
+    /// Case 1 — subtree delete during a dirtied scope. A batch that creates C
+    /// under P and deletes A (a sibling) must: re-read C as live, tombstone A
+    /// (via the pre-seeded `tid_index`, since Loro may drop a deleted node's
+    /// meta), and re-read the untouched sibling B because a structural change in
+    /// P's scope can shift every member's sibling tie-break key.
+    #[test]
+    fn subtree_delete_during_dirty_scope_reads_survivor_and_tombstones_gone() {
+        let doc = new_fi_doc();
+        let p = create_node(&doc, None, "P", "parent");
+        let a = create_node(&doc, Some(p), "A", "child-a");
+        let _b = create_node(&doc, Some(p), "B", "child-b");
+
+        // The dirty interval: create C under P and delete A.
+        let c = create_node(&doc, Some(p), "C", "child-c");
+        doc.get_tree(TREE_NAME).delete(a).unwrap();
+        doc.commit();
+
+        // The projector indexed A on a prior reseed, so its delete resolves
+        // even after Loro drops the deleted node's meta.
+        let mut tid_index: HashMap<loro::TreeID, String> = HashMap::new();
+        tid_index.insert(a, schemed("A"));
+
+        let pending = vec![
+            PendingChange::Create {
+                parent: loro::TreeParentId::Node(p),
+                target: c,
+            },
+            PendingChange::Delete {
+                old_parent: loro::TreeParentId::Node(p),
+                target: a,
+            },
+        ];
+
+        let (changed, settled) = incremental_block_changes(&doc, &pending, &mut tid_index).unwrap();
+
+        assert!(settled, "all survivors are meta-complete → settled");
+        assert!(
+            matches!(changed.get(&schemed("C")), Some(Some(_))),
+            "newly created C is re-read as a live block; changed = {changed:?}"
+        );
+        assert!(
+            matches!(changed.get(&schemed("A")), Some(None)),
+            "deleted A is emitted as a tombstone (None); changed = {changed:?}"
+        );
+        assert!(
+            matches!(changed.get(&schemed("B")), Some(Some(_))),
+            "untouched sibling B is re-read (dirty-scope sibling-order recompute); \
+             changed = {changed:?}"
+        );
+        assert!(
+            !tid_index.contains_key(&a),
+            "A's stale index entry is removed on delete"
+        );
+    }
+
+    /// Case 3 — a content-container edit re-reads only the owning node, with no
+    /// sibling churn. A `Container` fact dirties no tree scope, so a sibling of
+    /// the edited node must NOT be re-read.
+    #[test]
+    fn container_only_edit_rereads_owner_no_sibling_churn() {
+        let doc = new_fi_doc();
+        let a = create_node(&doc, None, "A", "hello");
+        let _b = create_node(&doc, None, "B", "sibling");
+
+        let cid = {
+            let tree = doc.get_tree(TREE_NAME);
+            let meta = tree.get_meta(a).unwrap();
+            let text = meta
+                .get_or_create_container(CONTENT_RAW, loro::LoroText::new())
+                .unwrap();
+            text.insert(0, "x").unwrap();
+            text.id()
+        };
+        doc.commit();
+
+        let mut tid_index: HashMap<loro::TreeID, String> = HashMap::new();
+        let pending = vec![PendingChange::Container(cid)];
+
+        let (changed, settled) = incremental_block_changes(&doc, &pending, &mut tid_index).unwrap();
+
+        assert!(settled, "the owning node is meta-complete → settled");
+        assert!(
+            matches!(changed.get(&schemed("A")), Some(Some(_))),
+            "the container edit re-reads its owning node A; changed = {changed:?}"
+        );
+        assert!(
+            !changed.contains_key(&schemed("B")),
+            "a container edit dirties no scope → sibling B is NOT re-read; \
+             changed = {changed:?}"
+        );
+        assert_eq!(changed.len(), 1, "only the owning node is touched");
+    }
+
+    /// Case 5 — a live node that `read_one_node_snapshot` withholds (here:
+    /// meta-incomplete, STABLE_ID not yet landed) under a dirtied scope marks
+    /// the pass `settled == false`, so the projector reseeds/withholds deletes
+    /// rather than under-reporting the live set.
+    ///
+    /// NOTE (deviation from the spec's "NO fractional index" framing): loro
+    /// assigns a node position on `create` regardless of
+    /// `enable_fractional_index` (`TreeStateNode::position` is `Some` from the
+    /// create op), so an fi-absent LIVE node is a concurrent mid-commit
+    /// transient, not deterministically constructible in a single-threaded raw
+    /// doc. The meta-incomplete branch is the sibling `read_one_node_snapshot`
+    /// withhold path and drives the identical `settled == false` caller
+    /// contract, so it is the deterministic proof of the same behaviour.
+    #[test]
+    fn withheld_live_node_under_dirty_scope_is_unsettled() {
+        let doc = new_fi_doc();
+        let p = create_node(&doc, None, "P", "parent");
+
+        // A live child of P with a position but NO STABLE_ID — the transient
+        // "meta not yet landed" shape `read_one_node_snapshot` must withhold.
+        let no_sid = {
+            let tree = doc.get_tree(TREE_NAME);
+            let node = tree.create(Some(p)).unwrap();
+            doc.commit();
+            node
+        };
+        assert!(
+            doc.get_tree(TREE_NAME).fractional_index(no_sid).is_some(),
+            "precondition: the withheld node still HAS a fractional index — the \
+             withhold is driven by the missing STABLE_ID, not a missing fi"
+        );
+
+        // Dirty P's scope so the meta-incomplete child is pulled into `reread`.
+        let c = create_node(&doc, Some(p), "C", "child-c");
+
+        let mut tid_index: HashMap<loro::TreeID, String> = HashMap::new();
+        let pending = vec![PendingChange::Create {
+            parent: loro::TreeParentId::Node(p),
+            target: c,
+        }];
+
+        let (_changed, settled) =
+            incremental_block_changes(&doc, &pending, &mut tid_index).unwrap();
+
+        assert!(
+            !settled,
+            "a live node the per-node reader withholds marks the pass unsettled"
+        );
+    }
+}

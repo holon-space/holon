@@ -92,7 +92,6 @@ pub use event_bus::*;
 pub use event_ring::{DEFAULT_EVENT_RING_CAPACITY, EventRing, deliver_to_subscribers};
 pub use holon_api::EntityUri;
 pub use holon_core::CanonicalPath;
-pub use holon_filesystem::{BaseKey, BaseStore, SyncBaseStore};
 #[cfg(all(
     feature = "iroh-sync",
     not(all(target_arch = "wasm32", target_os = "unknown"))

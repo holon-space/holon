@@ -60,6 +60,7 @@ pbt = [
     "test-infra",
     "otel-testing",
     "holon-frontend/pbt",
+    "holon-loro/test-helpers",
     "dep:holon-layout-testing",
     "dep:holon-loro-testing",
     "dep:holon-turso-testing",

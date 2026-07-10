@@ -3,8 +3,8 @@
 //! In the Loro-present session, **Loro is the consolidator**: it owns sibling
 //! order and merge (pinned at session start via [`SessionCapabilities`]). The
 //! projection ([`crate::loro_sync_controller::LoroProjection`]) computes
-//! the diff of the Loro authority against the persisted base and hands the
-//! result here as a typed-intent [`ChangeSet`] carrying [`Provenance`]. The
+//! the diff of the Loro authority against its in-memory `live` snapshot and
+//! hands the result here as a typed-intent [`ChangeSet`] carrying [`Provenance`]. The
 //! consolidator records the intent (op-multiset agreement — the Phase-2
 //! equivalence relation) and writes the SQL sink.
 //!
@@ -60,7 +60,7 @@ impl BlockConsolidator {
     /// Apply a block change batch as a typed intent.
     ///
     /// `ops` is the lossless diff the projection computed (Loro authority vs the
-    /// persisted base); `provenance` records the base it was diffed against (and,
+    /// in-memory `live` snapshot); `provenance` records the base it was diffed against (and,
     /// when known, the originating command). The consolidator records the typed
     /// [`ChangeSet`] — asserting it round-trips to the same op multiset (the
     /// intent vocabulary must capture every op) — and writes the SQL sink. This

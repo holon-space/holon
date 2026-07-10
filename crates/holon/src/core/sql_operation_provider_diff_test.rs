@@ -124,7 +124,13 @@ async fn prepare_update_returns_some_when_content_changed() {
         .expect("prepare_update")
         .expect("Some(PreparedOp) — content changed");
 
-    let sql = result.sql_statements.join(";");
+    let sql = result
+        .row_statements
+        .iter()
+        .chain(&result.edge_statements)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(";");
     assert!(
         sql.contains("'new content'"),
         "SET clause must include new content value; SQL: {sql}"
@@ -186,7 +192,13 @@ async fn prepare_update_null_prop_removes_key_from_properties() {
         .expect("prepare_update")
         .expect("Some(PreparedOp) — property removal is a real change");
 
-    let sql = result.sql_statements.join(";");
+    let sql = result
+        .row_statements
+        .iter()
+        .chain(&result.edge_statements)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(";");
     assert!(
         !sql.contains("todo_keywords"),
         "removed key must not appear in merged properties JSON; SQL: {sql}"
