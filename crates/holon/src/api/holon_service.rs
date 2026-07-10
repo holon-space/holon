@@ -177,8 +177,10 @@ impl HolonService {
         op_name: &str,
         params: StorageEntity,
     ) -> Result<Option<Value>> {
+        // HolonService is a user-session facade (MCP tools, dioxus-web worker);
+        // rule/sync/ingest ops do not route through it.
         self.engine
-            .execute_operation(entity_name, op_name, params)
+            .execute_operation(entity_name, op_name, params, holon_api::OpOrigin::User)
             .await
             .context(format!(
                 "Failed to execute operation '{}' on entity '{}'",
@@ -193,11 +195,11 @@ impl HolonService {
 
     // ── Undo / Redo ───────────────────────────────────────────────────
 
-    pub async fn undo(&self) -> Result<bool> {
+    pub async fn undo(&self) -> Result<holon_api::UndoOutcome> {
         self.engine.undo().await
     }
 
-    pub async fn redo(&self) -> Result<bool> {
+    pub async fn redo(&self) -> Result<holon_api::UndoOutcome> {
         self.engine.redo().await
     }
 

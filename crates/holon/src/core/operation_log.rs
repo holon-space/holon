@@ -341,7 +341,7 @@ mod tests {
 
         let op = Operation::new("test", "op1", "Op 1", HashMap::new());
         let id = store
-            .log_operation(op, UndoAction::Irreversible)
+            .log_operation(op, UndoAction::DeclaredIrreversible("test op"))
             .await
             .unwrap();
 
@@ -385,7 +385,7 @@ mod tests {
 
         let op1 = Operation::new("test", "op1", "Op 1", HashMap::new());
         let id1 = store
-            .log_operation(op1, UndoAction::Irreversible)
+            .log_operation(op1, UndoAction::DeclaredIrreversible("test op"))
             .await
             .unwrap();
 
@@ -393,7 +393,7 @@ mod tests {
 
         let op2 = Operation::new("test", "op2", "Op 2", HashMap::new());
         store
-            .log_operation(op2, UndoAction::Irreversible)
+            .log_operation(op2, UndoAction::DeclaredIrreversible("test op"))
             .await
             .unwrap();
 
@@ -427,7 +427,7 @@ mod tests {
                 HashMap::new(),
             );
             store
-                .log_operation(op, UndoAction::Irreversible)
+                .log_operation(op, UndoAction::DeclaredIrreversible("test op"))
                 .await
                 .unwrap();
         }
@@ -461,7 +461,7 @@ mod tests {
 
             let op2 = Operation::new("test", "op2", "Op 2", HashMap::new());
             store
-                .log_operation(op2, UndoAction::Irreversible)
+                .log_operation(op2, UndoAction::DeclaredIrreversible("test op"))
                 .await
                 .unwrap();
         }
@@ -526,7 +526,7 @@ mod tests {
 
         let op = Operation::new("test", "op_new", "New Op", HashMap::new());
         store
-            .log_operation(op, UndoAction::Irreversible)
+            .log_operation(op, UndoAction::DeclaredIrreversible("test op"))
             .await
             .unwrap();
 
@@ -561,7 +561,7 @@ mod tests {
                     HashMap::new(),
                 );
                 store_clone
-                    .log_operation(op, UndoAction::Irreversible)
+                    .log_operation(op, UndoAction::DeclaredIrreversible("test op"))
                     .await
                     .unwrap()
             }));

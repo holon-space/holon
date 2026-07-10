@@ -12,21 +12,68 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use serde::Deserialize;
+use serde::Serialize;
 
 use crate::EntityName;
 use crate::OperationDescriptor;
 use crate::StorageEntity;
 use crate::Value;
 
+/// Provenance of an operation as it enters the engine — the "who caused this"
+/// axis of ADR 0024's `fired-by: <transition-id>` slot.
+///
+/// This is the undo-provenance dimension, distinct from `EventOrigin`
+/// (CDC/event routing). It decides whether an operation is user-authored
+/// (and therefore belongs on the user undo stack) or system-authored
+/// (rule firings, sync merges, ingest) which must NOT enter the user stack.
+///
+/// There is deliberately no `Default`: every dispatch site names its origin so
+/// the "who caused this" question is answered by the compiler, not guessed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OpOrigin {
+    /// A direct user gesture (UI edit, MCP tool call). The only origin that
+    /// pushes undo entries.
+    User,
+    /// Fired by a rule/transition. `transition_id` is ADR 0024's `fired-by`
+    /// provenance slot. Never enters the user undo stack.
+    Rule { transition_id: String },
+    /// Applied by a CRDT sync merge from a peer replica.
+    Sync,
+    /// Applied by org-file / external ingest at the boundary.
+    Ingest,
+}
+
+impl OpOrigin {
+    /// Whether an operation with this origin should push a user undo entry.
+    pub fn is_user(&self) -> bool {
+        matches!(self, OpOrigin::User)
+    }
+
+    /// Short tag for logs / persistence.
+    pub fn tag(&self) -> &str {
+        match self {
+            OpOrigin::User => "user",
+            OpOrigin::Rule { .. } => "rule",
+            OpOrigin::Sync => "sync",
+            OpOrigin::Ingest => "ingest",
+        }
+    }
+}
+
 /// Execute, discover, and undo/redo operations.
 #[async_trait]
 pub trait OperationEngine: Send + Sync {
     /// Dispatch an operation, returning its optional result value.
+    ///
+    /// `origin` states who caused the operation (ADR 0024 `fired-by`
+    /// provenance). Only [`OpOrigin::User`] operations push undo entries.
     async fn execute_operation(
         &self,
         entity_name: &EntityName,
         op_name: &str,
         params: StorageEntity,
+        origin: OpOrigin,
     ) -> Result<Option<Value>>;
 
     /// The operations registered for `entity_name`.
@@ -35,15 +82,40 @@ pub trait OperationEngine: Send + Sync {
     /// Whether `op_name` is registered for `entity_name`.
     async fn has_operation(&self, entity_name: &str, op_name: &str) -> bool;
 
-    /// Undo the last operation; `false` if the undo stack is empty.
-    async fn undo(&self) -> Result<bool>;
+    /// Undo the last operation. See [`UndoOutcome`] — a stale entry is dropped
+    /// loudly rather than silently skipped.
+    async fn undo(&self) -> Result<UndoOutcome>;
 
-    /// Redo the last undone operation; `false` if the redo stack is empty.
-    async fn redo(&self) -> Result<bool>;
+    /// Redo the last undone operation. See [`UndoOutcome`].
+    async fn redo(&self) -> Result<UndoOutcome>;
 
     /// Whether an undo is available.
     async fn can_undo(&self) -> bool;
 
     /// Whether a redo is available.
     async fn can_redo(&self) -> bool;
+}
+
+/// Result of an undo/redo request.
+///
+/// A stale entry (the state the inverse was computed against has since changed)
+/// is DROPPED with `StaleDropped` — never silently skipped to the next entry —
+/// so the frontend can surface it (banner) and the user knows the history point
+/// was abandoned rather than applied.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UndoOutcome {
+    /// An entry was successfully undone/redone.
+    Applied,
+    /// Nothing to undo/redo (the stack was empty).
+    Empty,
+    /// The top entry's precondition no longer matches current state; the entry
+    /// was dropped. `reason` is user-surfaceable.
+    StaleDropped { reason: String },
+}
+
+impl UndoOutcome {
+    /// Back-compat helper: did an entry actually apply?
+    pub fn applied(&self) -> bool {
+        matches!(self, UndoOutcome::Applied)
+    }
 }
