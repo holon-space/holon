@@ -441,9 +441,30 @@ impl SqlOperationProvider {
 
     /// True when a Turso write error is a foreign-key-constraint failure
     /// (immediate or the deferred-at-commit variant). The fork's `LimboError`
-    /// renders these as "... foreign key constraint failed ...".
-    fn is_parent_fk_violation(err_msg: &str) -> bool {
+    /// renders these as "... foreign key constraint failed ..." and names NO
+    /// constraint, so this predicate cannot tell WHICH FK failed — callers that
+    /// need to attribute a specific FK (e.g. the block parent) must confirm the
+    /// referenced row's presence themselves (see `block_row_exists`).
+    fn is_fk_violation(err_msg: &str) -> bool {
         err_msg.to_lowercase().contains("foreign key constraint")
+    }
+
+    /// Whether a `block_raw` row with `id` currently exists. Used to attribute a
+    /// create-time FK failure accurately: the parent FK and the junction source
+    /// FKs both surface the same opaque message, so "parent not found" must be
+    /// proven, not assumed.
+    async fn block_row_exists(&self, id: &str) -> Result<bool> {
+        let sql = format!(
+            "SELECT 1 FROM {} WHERE id = '{}' LIMIT 1",
+            self.table_name,
+            id.replace('\'', "''"),
+        );
+        Ok(!self
+            .db_handle
+            .query(&sql, HashMap::new())
+            .await
+            .map_err(|e| format!("block_row_exists({id}): {e}"))?
+            .is_empty())
     }
 
     /// The shared typed rejection for a block write whose parent FK failed.
@@ -1078,7 +1099,10 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 };
                 if let Err(e) = exec_res {
                     let msg = e.to_string();
-                    if field == "parent_id" && Self::is_parent_fk_violation(&msg) {
+                    // This UPDATE writes ONLY the `parent_id` column, whose sole
+                    // FK is the block parent — so a FK failure here is
+                    // unambiguously the parent (unlike the multi-FK create path).
+                    if field == "parent_id" && Self::is_fk_violation(&msg) {
                         let parent = value.as_string().unwrap_or_default();
                         return Err(Self::parent_not_found(id, parent));
                     }
@@ -1139,12 +1163,37 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 stmts.extend(prepared.sql_statements.iter().map(|s| (s.clone(), vec![])));
                 if let Err(e) = self.db_handle.transaction(stmts).await {
                     let msg = e.to_string();
-                    if Self::is_parent_fk_violation(&msg) {
+                    if Self::is_fk_violation(&msg) {
                         let parent = params
                             .get("parent_id")
                             .and_then(|v| v.as_string())
                             .unwrap_or_default();
-                        return Err(Self::parent_not_found(&id, parent));
+                        // A create transaction enforces TWO kinds of FK: the
+                        // block's own parent FK (deferred, checked at COMMIT) and
+                        // the junction/edge SOURCE FKs. The fork's error text is
+                        // only "FOREIGN KEY constraint failed" — it names no
+                        // constraint — so we must not assume it was the parent.
+                        // Blindly mapping every create-time FK failure to
+                        // `ParentNotFound` sent TWO debugging rounds down the
+                        // wrong path (dogfood 2026-07-10: the real cause was a
+                        // dangling `block_requires.required_id` target FK, yet the
+                        // error claimed the parent — which existed — was missing).
+                        // Attribute accurately: only claim `ParentNotFound` when
+                        // the parent row is genuinely absent; otherwise surface a
+                        // precise error naming the SQL that actually failed.
+                        let parent_present =
+                            !parent.is_empty() && self.block_row_exists(parent).await?;
+                        if !parent_present {
+                            return Err(Self::parent_not_found(&id, parent));
+                        }
+                        return Err(format!(
+                            "create for {id}: a foreign-key constraint failed but the parent \
+                             {parent} EXISTS — a junction/edge source FK or another constraint \
+                             rejected the write, NOT the parent. Failing statements: {:#?}. \
+                             Underlying: {msg}",
+                            prepared.sql_statements
+                        )
+                        .into());
                     }
                     return Err(format!("Failed to execute SQL: {}", msg).into());
                 }
