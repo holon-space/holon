@@ -168,6 +168,17 @@ pub struct FileSyncController {
     /// `LiveData` feed is deferred to end-of-scan. Scoped to the initial scan —
     /// runtime edits keep the per-edit barrier and its fail-loud stall detection.
     scan_feed_ids: Option<Vec<String>>,
+
+    /// Write-back quarantine (dogfood 2026-07-10 region data-loss guard). A file
+    /// whose ingest FAILED partway (`ingest_file` returned `Err` — a rejected
+    /// block op, a parsed-vs-landed count mismatch, a stalled feed) is recorded
+    /// here so no write-back path re-renders it from the DB. The DB holds only a
+    /// PREFIX of the file's blocks after a partial ingest, so rendering it would
+    /// overwrite the on-disk file with a truncated view — silent data loss. A
+    /// quarantined file is skipped by every write-back until a later ingest of it
+    /// SUCCEEDS (`ingest_file` returns `Ok`), which clears the entry. Keyed by
+    /// the same `CanonicalPath` as `last_projection`.
+    quarantined: HashSet<CanonicalPath>,
 }
 
 impl FileSyncController {
@@ -205,6 +216,7 @@ impl FileSyncController {
             doc_blocks: HashMap::new(),
             text_merge: None,
             scan_feed_ids: None,
+            quarantined: HashSet::new(),
         }
     }
 
@@ -614,10 +626,66 @@ impl FileSyncController {
 
     /// Handle a file change event from the FileWatcher.
     ///
+    /// Thin write-back-quarantine wrapper around [`ingest_file`](Self::ingest_file):
+    /// a partial ingest (an `Err`) records the file in `quarantined` so no
+    /// write-back path re-renders its truncated DB state over disk (dogfood
+    /// 2026-07-10 region data-loss guard). A successful ingest clears the
+    /// quarantine. The `Err` is still propagated so the caller's degraded-mode
+    /// banner / survival logic is unchanged.
+    pub async fn on_file_changed(&mut self, path: &Path) -> Result<()> {
+        let canonical = CanonicalPath::new(path);
+        match self.ingest_file(path).await {
+            Ok(()) => {
+                if self.quarantined.remove(&canonical) {
+                    info!(
+                        "[FileSyncController] write-back quarantine CLEARED for {} \
+                         (ingest fully succeeded)",
+                        path.display()
+                    );
+                }
+                Ok(())
+            }
+            Err(e) => {
+                // Partial ingest: the DB now holds only a PREFIX of this file's
+                // blocks. Quarantine it so write-back never renders that prefix
+                // over the intact on-disk file. Loud + disclosed.
+                if self.quarantined.insert(canonical) {
+                    tracing::error!(
+                        path = %path.display(),
+                        error = %format!("{e:#}"),
+                        "[FileSyncController] ingest FAILED partway — QUARANTINING this file \
+                         from write-back so its truncated DB state is not rendered over disk. \
+                         Un-quarantines on the next fully-successful ingest.",
+                    );
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// True when `path` is quarantined from write-back (its last ingest failed
+    /// partway). A quarantined file's DB state is a truncated prefix, so any
+    /// write-back path must SKIP it (loud + disclosed) rather than render that
+    /// prefix over the intact on-disk file. See [`quarantined`](Self::quarantined).
+    fn is_quarantined(&self, path: &Path) -> bool {
+        if self.quarantined.contains(&CanonicalPath::new(path)) {
+            tracing::error!(
+                path = %path.display(),
+                "[FileSyncController] SKIPPING write-back for quarantined file — its last \
+                 ingest failed partway, so the DB holds only a truncated prefix of its \
+                 blocks; rendering it over disk would DESTROY the un-ingested lines. \
+                 The on-disk file is left intact until a clean re-ingest clears the quarantine.",
+            );
+            true
+        } else {
+            false
+        }
+    }
+
     /// Echo suppression: if disk content matches last_projection, skip.
     /// Otherwise, diff against last_projection to compute create/update/delete ops.
-    #[tracing::instrument(skip(self), name = "org.on_file_changed", fields(path = %path.display()))]
-    pub async fn on_file_changed(&mut self, path: &Path) -> Result<()> {
+    #[tracing::instrument(skip(self), name = "org.ingest_file", fields(path = %path.display()))]
+    async fn ingest_file(&mut self, path: &Path) -> Result<()> {
         // Model.md invariant 11: skip (only) a byte-syncer conflict artifact that
         // appears at runtime — ingesting it would create a duplicate-ID document.
         // Disclosed, never silent; normal files are unaffected.
@@ -1812,6 +1880,9 @@ impl FileSyncController {
             return Ok(true);
         }
 
+        if self.is_quarantined(&path) {
+            return Ok(true);
+        }
         if let Some(parent) = path.parent() {
             self.fs.create_dir_all(parent).await?;
         }
@@ -2168,6 +2239,9 @@ impl FileSyncController {
                 continue;
             }
 
+            if self.is_quarantined(&path) {
+                continue;
+            }
             if let Some(parent) = path.parent() {
                 self.fs.create_dir_all(parent).await?;
             }
