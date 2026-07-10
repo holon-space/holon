@@ -112,6 +112,10 @@ pub enum DegradedKind {
     /// Red — a shared doc tried to shadow a LOCAL block id; the projection was
     /// refused to protect the recipient's own content.
     ForeignIdCollision,
+    /// Red — OrgMode initial-scan failed to ingest one or more vault files.
+    /// Other files keep syncing; the failed file(s) need fixing. Surfaced so a
+    /// bad file is visible instead of silently killing file sync.
+    OrgIngestFailed,
     /// A plain info-style toast (used for "ticket copied").
     Info,
 }
@@ -213,6 +217,13 @@ impl ShareUiState {
                 self.quarantines.push(QuarantineEvent {
                     shared_tree_id: event.shared_tree_id,
                     quarantine_path: path,
+                });
+            }
+            ShareDegradedReason::OrgIngestFailed(summary) => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::OrgIngestFailed,
+                    shared_tree_id: event.shared_tree_id,
+                    detail: summary,
                 });
             }
         }
@@ -920,6 +931,11 @@ fn render_toast_stack(
                 gpui::rgba(0xef4444ff),
                 "⛔",
                 "Blocked shared write (id collision)",
+            ),
+            DegradedKind::OrgIngestFailed => (
+                gpui::rgba(0xef4444ff),
+                "⚠",
+                "File sync degraded (bad org file)",
             ),
             DegradedKind::Info => (gpui::rgba(0x60a5faff), "i", "Info"),
         };
