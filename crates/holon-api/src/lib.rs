@@ -85,7 +85,7 @@ pub use block::{
 // Re-export the intent ChangeSet vocabulary (block-sync rework, Phase 2)
 pub use block_write_field::{BlockWriteField, BlockWriteFieldError, PropertyKey};
 pub use change_set::{agrees_with_ops, source_op_names, ChangeOp, ChangeSet, Provenance};
-pub use clock::{Clock, SystemClock, TestClock};
+pub use clock::{CalendarDate, Clock, Grain, SystemClock, TestClock};
 
 // Re-export typed domain types
 pub use types::{

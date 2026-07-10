@@ -10,7 +10,7 @@ list(#{sortkey: "-name", item_template: selectable(row(icon("calendar"), spacer(
 #+END_SRC
 ** Journal Auto-Create
 #+BEGIN_SRC holon_sql :id journals::trigger::0
-SELECT date('now', 'localtime') as name
+SELECT today as name FROM clock WHERE grain = 'day'
 #+END_SRC
 #+BEGIN_SRC action :id journals::action::0
 block.create(#{parent_id: "block:journals", name: col("name")})

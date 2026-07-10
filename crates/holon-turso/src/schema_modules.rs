@@ -41,6 +41,7 @@ impl SchemaModule for CoreSchemaModule {
             Resource::schema("block_raw"),
             Resource::schema("directory"),
             Resource::schema("file"),
+            Resource::schema("clock"),
         ]
     }
 
@@ -82,6 +83,22 @@ impl SchemaModule for CoreSchemaModule {
             db_handle.execute_ddl(stmt).await?;
         }
         tracing::debug!("[CoreSchemaModule] files table + indexes created");
+
+        // `clock` relation (ADR 0024 P5, time-as-data). Seed a deterministic
+        // placeholder row so the boot guard always finds a `day` grain; the
+        // `ClockScheduler`'s first tick replaces it with the real local date via
+        // a CDC-emitting UPDATE before any temporal-guard matview is created.
+        for stmt in sql_statements(include_str!("../sql/schema/clock.sql")) {
+            db_handle.execute_ddl(stmt).await?;
+        }
+        db_handle
+            .execute(
+                "INSERT OR IGNORE INTO clock (grain, today, epoch_day, updated_at) \
+                 VALUES ('day', '1970-01-01', 0, '1970-01-01T00:00:00Z')",
+                vec![],
+            )
+            .await?;
+        tracing::debug!("[CoreSchemaModule] clock table created + day row seeded");
 
         tracing::info!("[CoreSchemaModule] Core tables created successfully");
         Ok(())
@@ -737,5 +754,81 @@ mod tests {
         assert!(provides.contains(&Resource::schema("entity_alias")));
         assert!(provides.contains(&Resource::schema("proposal_queue")));
         assert!(module.requires().is_empty());
+    }
+
+    #[test]
+    fn test_core_schema_module_provides_clock() {
+        assert!(
+            CoreSchemaModule
+                .provides()
+                .contains(&Resource::schema("clock"))
+        );
+    }
+
+    /// The `clock` relation is created + seeded by `CoreSchemaModule`, and an
+    /// `UPDATE` of the day row emits CDC through a matview (base tables never
+    /// emit directly — only matviews do; see `cdc_base_vs_matview_repro`).
+    #[tokio::test]
+    async fn clock_schema_creates_seeds_and_update_emits_cdc() {
+        use crate::turso::TursoBackend;
+        use holon_api::streaming::Change;
+
+        let (_backend, handle) = TursoBackend::new_in_memory().await.unwrap();
+
+        CoreSchemaModule
+            .ensure_schema(&handle)
+            .await
+            .expect("core schema (incl. clock) must initialize");
+
+        // Seeded: exactly one `day` row at the deterministic placeholder.
+        let rows = handle
+            .query("SELECT grain, today, epoch_day FROM clock", HashMap::new())
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "clock must seed exactly one row");
+        assert_eq!(rows[0].get("grain").unwrap().as_string(), Some("day"));
+        assert_eq!(
+            rows[0].get("today").unwrap().as_string(),
+            Some("1970-01-01")
+        );
+
+        // A matview is the only relation that surfaces base-table changes as CDC.
+        handle
+            .execute_ddl(
+                "CREATE MATERIALIZED VIEW clock_mirror AS \
+                 SELECT grain, today, epoch_day FROM clock",
+            )
+            .await
+            .unwrap();
+
+        let mut cdc_rx = handle.subscribe_cdc("clock_mirror").await.unwrap();
+
+        handle
+            .execute(
+                "UPDATE clock SET today = '2026-07-10', epoch_day = 20644, \
+                 updated_at = '2026-07-10T00:00:00Z' WHERE grain = 'day'",
+                vec![],
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let mut updates = 0usize;
+        while let Ok(batch) = cdc_rx.try_recv() {
+            for rc in batch.inner.items {
+                if rc.relation_name == "clock_mirror" {
+                    if let Change::Updated { data, .. } = &rc.change {
+                        assert_eq!(data.get("today").unwrap().as_string(), Some("2026-07-10"));
+                        updates += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            updates >= 1,
+            "UPDATE of the clock day row must emit an Updated CDC event via clock_mirror"
+        );
+
+        handle.shutdown().await.unwrap();
     }
 }
