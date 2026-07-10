@@ -125,17 +125,37 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
             // is left alone so in-flight typing is never yanked. `converge_input`
             // prefers the Loro cell authority over the SQL-lagged `content`
             // (curing the projection lag) and keeps `previous_text` in lockstep.
-            // Increment G — the render-path backstop is NO-CELL ONLY. A cell-attached
-            // editor converges solely via its `_remote_delta_subscription` (the entity
-            // `Cell` is the single external content source), so with the backstop gone
-            // `displayed_text` below reports the editor's actual live `InputState` with
-            // no render-path patch-up — giving `inv-displayed-text/widget` real teeth
-            // over the cell path. No-cell (unwired / headless) editors keep the
-            // backstop that cures their orphaned `_data_subscription`.
+            // Increment G — in the steady state a cell-attached editor converges
+            // solely via its `_remote_delta_subscription` (the entity `Cell` is the
+            // single external content source), so the render backstop stays OFF
+            // there: `displayed_text` below reports the editor's actual live
+            // `InputState` with no render-path patch-up, giving `inv-displayed-text/
+            // widget` real teeth over the cell path. No-cell (unwired / headless)
+            // editors keep the full backstop that cures their orphaned
+            // `_data_subscription`.
+            //
+            // 2026-07-10 — but a cell-attached editor STILL re-reads the cell
+            // authority on the focus-GAIN edge. A cached editor reused across a
+            // split/join rowset rebuild can hold an `InputState` that never received
+            // the structural `set_field` delta (the entity `Cell`'s broadcast
+            // subscription can be starved / miss the write across the rebuild).
+            // Trusting that stale buffer silently corrupts data: the next keystroke
+            // commits the pre-join text — resurrecting merged-away content — and
+            // `Enter` at its end splits past the canonical length ("Split position 18
+            // exceeds content length 17"). Focus-gain is a safe convergence point
+            // (no keystroke has landed → nothing to yank), and `converge_input`
+            // reads ONLY the cell authority (`current_text()`) for a cell editor, so
+            // this does NOT reintroduce the retired SQL `content` backstop. It is
+            // idempotent — a no-op when the cell already delivered.
             let cell_attached = entity.read(cx).has_cell();
-            if !cell_attached && (!is_focused || just_focused) {
+            if converge_on_render(cell_attached, is_focused, just_focused) {
+                let source = if cell_attached {
+                    "focus_reload"
+                } else {
+                    "render_backstop"
+                };
                 entity.update(cx, |this, cx| {
-                    this.converge_input("render_backstop", &content, window, cx);
+                    this.converge_input(source, &content, window, cx);
                 });
             }
             // Snapshot the post-convergence value for the PBT staleness invariants.
@@ -185,6 +205,24 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
     .into_any_element()
 }
 
+/// Whether the render path should converge this editor's `InputState` to its
+/// content authority this frame. See the call site for the full rationale.
+///
+/// - No-cell editor: converge whenever the user cannot be mid-typing — either
+///   unfocused, or focus just arrived (no keystroke yet). Cures the orphaned
+///   `_data_subscription`.
+/// - Cell-attached editor: converge ONLY on the focus-gain edge (re-read the
+///   cell authority), never in the focused/unfocused steady state — the entity
+///   `Cell` remote-delta subscription owns the steady state, and gating the
+///   backstop off there keeps `inv-displayed-text` teeth.
+fn converge_on_render(cell_attached: bool, is_focused: bool, just_focused: bool) -> bool {
+    if cell_attached {
+        just_focused
+    } else {
+        !is_focused || just_focused
+    }
+}
+
 fn static_fallback(content: &str, ctx: &GpuiRenderContext) -> AnyElement {
     let text_color = tc(ctx, |t| t.foreground);
     let display_text = if content.is_empty() {
@@ -202,4 +240,33 @@ fn static_fallback(content: &str, ctx: &GpuiRenderContext) -> AnyElement {
         .line_height(px(22.0))
         .child(display_text)
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::converge_on_render;
+
+    #[test]
+    fn cell_editor_converges_only_on_focus_gain() {
+        // Focus-gain edge: re-read the cell authority. This is the fix for the
+        // stale-buffer data corruption after a split/join rowset rebuild
+        // (2026-07-10): the cached editor's `InputState` may have missed the
+        // structural `set_field` delta, so focus-gain must reload from the cell.
+        assert!(converge_on_render(true, true, true));
+        // Steady state (focused or unfocused, no edge): the entity `Cell`
+        // remote-delta path owns it — the backstop stays off to keep
+        // `inv-displayed-text` real teeth over the cell path.
+        assert!(!converge_on_render(true, true, false));
+        assert!(!converge_on_render(true, false, false));
+    }
+
+    #[test]
+    fn no_cell_editor_keeps_full_backstop() {
+        // Unfocused steady state and focus gain both converge (cure the orphaned
+        // `_data_subscription`); a continuously-focused editor is left alone so
+        // in-flight typing is never yanked.
+        assert!(converge_on_render(false, false, false));
+        assert!(converge_on_render(false, true, true));
+        assert!(!converge_on_render(false, true, false));
+    }
 }

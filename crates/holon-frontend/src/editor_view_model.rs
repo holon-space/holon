@@ -700,6 +700,47 @@ mod tests {
     }
 
     #[test]
+    fn cell_authority_reflects_merged_content_after_external_join() {
+        // Regression (2026-07-10): after a `join_block`, the surviving block's
+        // content is merged in the backend, and the editor's content authority
+        // — the attached `Cell` read via `current_text()` — MUST reflect that
+        // merged value. The GPUI editor's focus-gain reload converges its
+        // `InputState` to exactly this authority; if the authority itself were
+        // stale, the reload could not cure the stale buffer. This pins the
+        // authority contract the fix depends on: `current_text()` is a live
+        // read of the cell backing, never a snapshot taken at attach time.
+        use std::sync::Arc;
+        use std::sync::Mutex;
+
+        use holon_core::cell::CellBacking;
+        use holon_core::cell::LwwTextCellBacking;
+
+        // Shared backing store the "backend" (join_block's set_field) writes to.
+        let store = Arc::new(Mutex::new("First manual block".to_string())); // pre-split (18)
+        let read_store = store.clone();
+        let backing = Arc::new(LwwTextCellBacking::new(
+            Arc::new(move || read_store.lock().unwrap().clone()),
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            Arc::new(|| Box::pin(futures::stream::empty())),
+        ));
+        let mut ctrl = test_controller();
+        ctrl.attach_cell(Cell::from_backing(backing as Arc<dyn CellBacking<String>>));
+
+        assert_eq!(ctrl.current_text().as_deref(), Some("First manual block"));
+
+        // Backend join merges the two blocks into the survivor (17 chars),
+        // dropping the space, exactly as prod `join_block`'s `set_field` does.
+        *store.lock().unwrap() = "First manualblock".to_string();
+
+        assert_eq!(
+            ctrl.current_text().as_deref(),
+            Some("First manualblock"),
+            "content authority must be a live read of the cell — a focus reload converges \
+             InputState to this, curing the stale pre-join buffer"
+        );
+    }
+
+    #[test]
     fn double_bracket_fires_doc_link() {
         let mut ctrl = test_controller();
         // Without async context, doc_link returns None (no LinkProvider)
