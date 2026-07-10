@@ -29,6 +29,11 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // frontend slice supplies it (production CacheBlockReader + OrgRenderer).
         invariants::org_render_fixed_point::wire(),
         invariants::no_orphan::wire(),
+        // Ingest totality (ref ⊆ SUT): every non-seed reference block must land in the
+        // SQL projection. Needs `SutSqlProjection` + `RefBlockTree`; deselects on a
+        // Loro-only draw. Catches the forward-`:REQUIRES:` target-FK ingest abort
+        // (dogfood 2026-07-10 P0) as a loud ingest-data-loss violation.
+        invariants::ingest_totality::wire(),
         invariants::no_errors::wire(),
         invariants::viewmodel_no_error_widgets::wire(),
         invariants::task_state_storage_coherence::wire(),
@@ -200,6 +205,7 @@ const CENTRAL_INVARIANT_IDS_HEAD: &[&str] = &[
     "inv-source-language-iff-source",
     "inv-org-render-fixed-point",
     "inv-no-orphan-blocks",
+    "inv-ingest-totality",
     "inv-no-errors",
     "inv-viewmodel-no-error-widgets",
     "inv-task-state-storage-coherence",
