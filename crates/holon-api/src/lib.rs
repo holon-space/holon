@@ -103,7 +103,9 @@ pub use change_set::ChangeSet;
 pub use change_set::Provenance;
 pub use change_set::agrees_with_ops;
 pub use change_set::source_op_names;
+pub use clock::CalendarDate;
 pub use clock::Clock;
+pub use clock::Grain;
 pub use clock::SystemClock;
 pub use clock::TestClock;
 // Re-export the block edge-field category

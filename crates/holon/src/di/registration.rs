@@ -53,6 +53,35 @@ use crate::storage::turso::DbHandle;
 use crate::storage::turso::TursoBackend;
 use crate::sync::LiveData;
 
+/// How often the clock scheduler checks for a day-rollover. Cheap — the write
+/// only happens on an actual day change (ADR 0024 P5).
+const CLOCK_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Boot guard: fail loud unless the `clock` day row is seeded with a real,
+/// post-1970 date. Proves the clock scheduler ran on this embedder's boot path
+/// (ENVIRONMENT is the top BugFunnel escape category — every embedder must
+/// seed).
+async fn assert_clock_seeded(db_handle: &DbHandle) {
+    let rows = db_handle
+        .query(
+            "SELECT epoch_day FROM clock WHERE grain = 'day'",
+            HashMap::new(),
+        )
+        .await
+        .expect("[DI] boot guard: reading the clock day row failed");
+    let epoch_day = rows
+        .first()
+        .expect("[DI] boot guard: clock day row missing — schema seed or scheduler did not run")
+        .get("epoch_day")
+        .and_then(|v| v.as_i64())
+        .expect("[DI] boot guard: clock.epoch_day is not an integer");
+    assert!(
+        epoch_day > 0,
+        "[DI] boot guard: clock day row still holds the 1970 placeholder (epoch_day={epoch_day}) \
+         — the clock scheduler did not seed the real date"
+    );
+}
+
 /// Build the default set of SQL-level transformers (applied after compilation).
 fn build_sql_transformers() -> Vec<Box<dyn SqlTransformer>> {
     let mut transformers: Vec<Box<dyn SqlTransformer>> = vec![
@@ -151,7 +180,12 @@ async fn create_initialized_engine(
     // view per *rule*. DDL runs off the CDC delivery path (see
     // `spawn_advice_reconciler`).
     let advice_status = holon_advice::AdviceRuleStatusHandle::new();
-    match crate::sync::spawn_advice_reconciler(&matview_mgr, db_handle, advice_status.clone()).await
+    match crate::sync::spawn_advice_reconciler(
+        &matview_mgr,
+        db_handle.clone(),
+        advice_status.clone(),
+    )
+    .await
     {
         Ok(handle) => engine.install_advice_reconciler(advice_status, handle),
         Err(e) => tracing::error!(
@@ -159,6 +193,27 @@ async fn create_initialized_engine(
             "[DI] advice-rule reconciler failed to start — advice rules will not be synthesized"
         ),
     }
+
+    // Clock scheduler (ADR 0024 P5, time-as-data): seed the `clock` day row from
+    // the injected wall clock and re-fire temporal-guard matviews on
+    // day-rollover. Every embedder resolves through this shared path, so
+    // spawning it here covers GPUI, iOS, dioxus-web worker, and headless tests.
+    // Boot guard below fails loud if the seed did not land. The production
+    // wiring uses the real `SystemClock`; the keystone `AdvanceDay` transition
+    // injects a fake clock instead (§6).
+    let clock: Arc<dyn holon_api::Clock> = Arc::new(holon_api::SystemClock);
+    let clock_scheduler = crate::sync::clock_scheduler::spawn_clock_scheduler(
+        db_handle.clone(),
+        clock,
+        CLOCK_TICK_INTERVAL,
+    )
+    .await
+    .expect("[DI] clock scheduler failed to seed the clock relation at boot");
+    engine.install_clock_scheduler(clock_scheduler);
+
+    // Boot guard: the `clock` day row must be seeded and hold a real (post-1970)
+    // date, proving the scheduler actually ran on this embedder's boot path.
+    assert_clock_seeded(&db_handle).await;
 
     // Preload startup matviews (reuses existing ones from previous sessions).
     preload_startup_views(&engine, None)
