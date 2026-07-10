@@ -1192,7 +1192,12 @@ mod tests {
         params.insert("value".into(), Value::Boolean(true));
 
         let result = engine
-            .execute_operation(&EntityName::new("test_item"), "set_field", params)
+            .execute_operation(
+                &EntityName::new("test_item"),
+                "set_field",
+                params,
+                holon_api::OpOrigin::User,
+            )
             .await;
         assert!(result.is_ok(), "Operation should succeed: {:?}", result);
 
@@ -1225,6 +1230,7 @@ mod tests {
                 &EntityName::Named("block".to_string()),
                 "nonexistent",
                 params,
+                holon_api::OpOrigin::User,
             )
             .await;
 

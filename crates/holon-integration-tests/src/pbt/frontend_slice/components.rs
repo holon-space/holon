@@ -639,7 +639,12 @@ impl HeadlessFrontendComponent {
         params.insert("content".into(), Value::String(content.to_string()));
         params.insert("content_type".into(), ContentType::Text.into());
         self.engine
-            .execute_operation(&EntityName::new("block"), "create", params)
+            .execute_operation(
+                &EntityName::new("block"),
+                "create",
+                params,
+                holon_api::OpOrigin::User,
+            )
             .await
             .expect("headless create_block");
     }

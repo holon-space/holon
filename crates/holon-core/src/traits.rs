@@ -892,6 +892,15 @@ where
 
         // Position + depth update.
         let mut changes = self.move_to_position(id, parent_id, after_block_id).await?;
+        // Disclose the reparent itself: `move_to_position` reports no deltas
+        // (ordering-internal), but parent_id DID change — propagation consumers
+        // and the undo precondition both need the true field-level change.
+        changes.push(FieldDelta::new(
+            id_str,
+            "parent_id",
+            Value::String(old_parent_uri.as_str().to_string()),
+            Value::String(parent_id.as_str().to_string()),
+        ));
         let depth_result = self
             .set_field(id_str, "depth", Value::Integer(new_depth))
             .await?;

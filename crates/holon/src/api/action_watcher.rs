@@ -363,7 +363,12 @@ mod tests {
         parent.insert("id".into(), Value::String("block:journals".to_string()));
         parent.insert("content".into(), Value::String("Journals".to_string()));
         engine
-            .execute_operation(&EntityName::new("block"), "create", parent)
+            .execute_operation(
+                &EntityName::new("block"),
+                "create",
+                parent,
+                holon_api::OpOrigin::User,
+            )
             .await
             .unwrap();
     }
