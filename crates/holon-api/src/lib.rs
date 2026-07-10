@@ -188,7 +188,7 @@ pub use types::{
 pub use widget_meta::{StaticParam, WidgetCategory, WidgetMeta};
 // Re-export widget spec types
 pub use widget_spec::{
-    DataRow, DataRowAccumulator, EnrichedRow, data_row_entity_uri, data_row_reactive_key,
+    DataRow, DataRowAccumulator, EnrichedRow, RowContentHash, RowIdentity, data_row_entity_uri,
     entity_uri_from_id_str,
 };
 

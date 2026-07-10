@@ -110,6 +110,7 @@ pub trait BuilderServices: Send + Sync {
     /// computed. A SYNCHRONOUS pure read of the pre-populated session sidecar —
     /// mirrors [`Self::virtual_child_config`]; every stub/headless-without-advice
     /// service keeps the default (empty), so snapshots stay byte-identical.
+    // ALLOW(unused_param): trait default; overriding impls bind `anchor`
     fn advice_children(&self, _: &EntityUri) -> Vec<Arc<DataRow>> {
         Vec::new()
     }
@@ -481,19 +482,13 @@ impl ReactiveRowSet {
         match change {
             holon_api::Change::Created { data, .. } => {
                 let row = Arc::new(data.into_inner());
-                // An id-less Created row is a LEGAL input (rule-trigger /
-                // aggregate queries like the journals day-list `date('now') AS
-                // name`, dogfood 2026-07-10). `data_row_reactive_key` keys it on
-                // `_rowid` under a `degraded:` scheme so it can still be stored
-                // and rendered as a degraded row (the profile resolver already
-                // degrades the same row visibly) — never panic the render worker.
-                let Some(key) = holon_api::data_row_reactive_key(&row) else {
-                    tracing::error!(
-                        "reactive row set: Created row has neither `id` nor `_rowid` — \
-                         cannot key it, dropping (visible degrade, not a panic): {row:?}"
-                    );
-                    return;
-                };
+                // A Created row is either entity-shaped (real `id`) or
+                // value-shaped (aggregate / rule-trigger result / future table
+                // row — no `id`). Both are legal display cases: an id-less row
+                // is keyed on its deterministic content hash, NOT panicked on
+                // (a `.expect("... 'id' column")` here blanked the whole page
+                // by killing the render worker — dogfood 2026-07-10).
+                let key = holon_api::RowIdentity::of_row(&row).to_store_key();
                 let mut lock = self.data.lock_mut();
                 if let Some(existing) = lock.get(&key) {
                     // Defensive: a Created arriving for a row we already know
@@ -753,13 +748,12 @@ impl ReactiveRenderedRows {
                     });
                     if is_first_batch_of_generation {
                         if let holon_api::Change::Created { data, .. } = &enriched {
-                            // Use the same id-less-tolerant key as `apply_change`
-                            // so a degraded (id-less) row survives `retain_keys`
-                            // instead of being dropped as "stale" right after
-                            // insertion.
-                            if let Some(key) = holon_api::data_row_reactive_key(data) {
-                                snapshot_keys.push(key);
-                            }
+                            // Retain BOTH entity- and value-shaped rows: the
+                            // snapshot key is the row's `RowIdentity` store key
+                            // (content hash for id-less value rows), so an
+                            // aggregate / rule-trigger row is not dropped by the
+                            // post-snapshot `retain_keys`.
+                            snapshot_keys.push(holon_api::RowIdentity::of_row(data).to_store_key());
                         }
                     }
                     self.rows.apply_change(enriched, generation);
@@ -3363,6 +3357,56 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].get("id").unwrap().as_string().unwrap(), "a");
         assert_eq!(rows[1].get("id").unwrap().as_string().unwrap(), "b");
+    }
+
+    /// Regression / A-B proof (dogfood 2026-07-10, Martin ruling 2026-07-11):
+    /// an id-less VALUE row (an aggregate / rule-trigger result — e.g. the
+    /// journals `SELECT today AS name FROM clock` machinery) flowing through the
+    /// reactive row set must NOT panic the render worker. Before the fix,
+    /// `apply_change`'s `Created` arm did `data_row_entity_uri(&row).expect(...)`
+    /// and killed the worker (blanking the page with a silent -32603). Now the
+    /// row is keyed on its deterministic content hash and accumulated. Reverting
+    /// the `RowIdentity`-based keying in `apply_change` makes THIS test panic —
+    /// the same signal `inv-no-observed-errors` observes in the keystone.
+    #[test]
+    fn id_less_value_row_does_not_panic_apply_change() {
+        let rq = ReactiveRenderedRows::new();
+        rq.set_generation(1);
+
+        // A value row: only `name`, NO `id` column (journals trigger shape).
+        let mut value_row = DataRow::new();
+        value_row.insert("name".to_string(), Value::String("2026-07-10".to_string()));
+
+        rq.apply_change(
+            holon_api::Change::Created {
+                data: enriched(value_row.clone()),
+                origin: remote_origin(),
+            },
+            1,
+        );
+
+        let (_, rows) = rq.snapshot();
+        assert_eq!(rows.len(), 1, "value row must be accumulated, not dropped");
+        assert_eq!(
+            rows[0].get("name").unwrap().as_string().unwrap(),
+            "2026-07-10"
+        );
+
+        // Recompute re-emits the same content → same content-hash key → still
+        // one row (stable identity across incremental matview recompute).
+        rq.apply_change(
+            holon_api::Change::Created {
+                data: enriched(value_row),
+                origin: remote_origin(),
+            },
+            1,
+        );
+        let (_, rows) = rq.snapshot();
+        assert_eq!(
+            rows.len(),
+            1,
+            "identical value row on recompute must reuse identity, not duplicate"
+        );
     }
 
     /// Snapshot path regression test: a root-layout-shaped tree with a

@@ -163,23 +163,34 @@ impl ParsedProfile {
     }
 }
 
-/// Build a visibly-degraded render profile for a row that has no entity-shaped
-/// `id` (so it cannot be resolved to an entity profile).
+/// Build a render profile for a VALUE-shaped row — a row that carries no
+/// entity-shaped `id`, so there is no entity to resolve a profile by.
 ///
-/// Such rows are legal — they come from rule-trigger / aggregate queries — but
-/// they carry no entity to look a profile up by. Rather than panic the render
-/// worker (which blanks the whole page with a silent -32603), we render the raw
-/// row content behind a `⚠ unresolved row` marker: the page still renders and
-/// the degraded state is disclosed on screen, matching the fail-loud contract.
-fn degraded_missing_id_profile(row: &HashMap<String, Value>) -> RenderProfile {
-    let mut cells: Vec<String> = row
+/// Value rows are a LEGITIMATE display case (Martin ruling 2026-07-11), not an
+/// error and not "degraded": they arise from aggregate queries
+/// (`SELECT date('now') AS name`), rule-trigger results, and future table
+/// rows. They render as a plain value row — their columns, shown directly —
+/// with no warning marker. Loudness is reserved for a genuine CONTRACT
+/// violation (a widget that DECLARES it needs entity rows being fed a value
+/// row), which is surfaced at the resolver's entity-expecting seam, not here.
+fn value_row_profile(row: &HashMap<String, Value>) -> RenderProfile {
+    // Present the row's columns plainly, sorted for determinism. Internal
+    // matview bookkeeping columns (leading `_`, e.g. `_rowid`) are hidden —
+    // they are not user data. If every column is internal, fall back to
+    // showing them so the row is never blank.
+    let mut visible: Vec<(&String, &Value)> =
+        row.iter().filter(|(k, _)| !k.starts_with('_')).collect();
+    if visible.is_empty() {
+        visible = row.iter().collect();
+    }
+    visible.sort_by(|a, b| a.0.cmp(b.0));
+    let text = visible
         .iter()
-        .map(|(k, v)| format!("{k}={}", value_display(v)))
-        .collect();
-    cells.sort();
-    let text = format!("⚠ unresolved row (no id): {}", cells.join(", "));
+        .map(|(k, v)| format!("{k}: {}", value_display(v)))
+        .collect::<Vec<_>>()
+        .join(", ");
     RenderProfile {
-        name: "degraded-missing-id".to_string(),
+        name: "value-row".to_string(),
         render: RenderExpr::Literal {
             value: Value::String(text),
         },
@@ -832,23 +843,23 @@ impl ProfileResolving for ProfileResolver {
         // representable, legal inputs. Id-less rows arise legitimately from
         // rule-trigger / aggregate queries (e.g. `SELECT date('now') AS name`,
         // dogfood 2026-07-10) that are pointed at the enriched watch path.
-        // Historically this `panic!`ed and killed the whole render/resolve
-        // worker, so the page returned -32603 with no error banner. Instead,
-        // degrade VISIBLY: log loudly and render the raw row content marked as
-        // unresolved, so the page still renders and the degradation is disclosed
-        // both in the log and on screen. (The full fix — action-rule blocks must
-        // not render as display queries — is deferred as "fork A".)
+        // A value row (no entity `id`) is a LEGITIMATE display case — an
+        // aggregate / rule-trigger result — NOT an error. It cannot be resolved
+        // to an entity profile, so it renders plainly as a value row. Logged at
+        // debug (not warn): this is an expected shape, not a degradation. The
+        // loud path is `resolve_entity_required`, taken by callers that DECLARE
+        // they need an entity row. (Historically this `panic!`ed and killed the
+        // render/resolve worker, blanking the page with a silent -32603.)
         let entity_uri = match row_id(row) {
             Ok(uri) => uri,
             Err(e) => {
-                tracing::warn!(
+                tracing::debug!(
                     error = %e,
-                    "profile resolver: row has no entity `id` — rendering a visible \
-                     degraded row instead of resolving to an entity profile (id-less \
-                     rows come from rule-trigger/aggregate queries; project `... AS id` \
-                     or route through a signal-only path to resolve normally)"
+                    "profile resolver: value-shaped row (no entity `id`) — rendering as a \
+                     plain value row (aggregate / rule-trigger result); entity resolution \
+                     not attempted"
                 );
-                return (Arc::new(degraded_missing_id_profile(row)), HashMap::new());
+                return (Arc::new(value_row_profile(row)), HashMap::new());
             }
         };
         let entity_name_str = entity_uri.scheme();
@@ -910,23 +921,23 @@ impl ProfileResolving for ProfileResolver {
         // representable, legal inputs. Id-less rows arise legitimately from
         // rule-trigger / aggregate queries (e.g. `SELECT date('now') AS name`,
         // dogfood 2026-07-10) that are pointed at the enriched watch path.
-        // Historically this `panic!`ed and killed the whole render/resolve
-        // worker, so the page returned -32603 with no error banner. Instead,
-        // degrade VISIBLY: log loudly and render the raw row content marked as
-        // unresolved, so the page still renders and the degradation is disclosed
-        // both in the log and on screen. (The full fix — action-rule blocks must
-        // not render as display queries — is deferred as "fork A".)
+        // A value row (no entity `id`) is a LEGITIMATE display case — an
+        // aggregate / rule-trigger result — NOT an error. It cannot be resolved
+        // to an entity profile, so it renders plainly as a value row. Logged at
+        // debug (not warn): this is an expected shape, not a degradation. The
+        // loud path is `resolve_entity_required`, taken by callers that DECLARE
+        // they need an entity row. (Historically this `panic!`ed and killed the
+        // render/resolve worker, blanking the page with a silent -32603.)
         let entity_uri = match row_id(row) {
             Ok(uri) => uri,
             Err(e) => {
-                tracing::warn!(
+                tracing::debug!(
                     error = %e,
-                    "profile resolver: row has no entity `id` — rendering a visible \
-                     degraded row instead of resolving to an entity profile (id-less \
-                     rows come from rule-trigger/aggregate queries; project `... AS id` \
-                     or route through a signal-only path to resolve normally)"
+                    "profile resolver: value-shaped row (no entity `id`) — rendering as a \
+                     plain value row (aggregate / rule-trigger result); entity resolution \
+                     not attempted"
                 );
-                return (Arc::new(degraded_missing_id_profile(row)), HashMap::new());
+                return (Arc::new(value_row_profile(row)), HashMap::new());
             }
         };
         let entity_name_str = entity_uri.scheme();
@@ -1652,33 +1663,96 @@ variants:
         );
     }
 
-    /// Regression (dogfood 2026-07-10): a rule-trigger / aggregate query row
-    /// that carries NO entity-shaped `id` (e.g. `SELECT
-    /// date('now','localtime') AS name`) used to panic the profile resolver
-    /// ("row has no entity `id`") and blank the whole page with a silent
-    /// -32603. It must now degrade VISIBLY: a `degraded-missing-id` profile
-    /// that renders the raw row content behind a loud marker, and never
-    /// panic.
+    /// Regression (dogfood 2026-07-10, Martin ruling 2026-07-11): a
+    /// rule-trigger / aggregate query row that carries NO entity-shaped
+    /// `id` (e.g. `SELECT date('now','localtime') AS name`) used to panic
+    /// the profile resolver and blank the whole page with a silent -32603.
+    /// It must now render as a plain VALUE row (its columns, shown
+    /// directly) — NOT a "⚠ unresolved" warning, since a value row is a
+    /// legitimate display case.
     #[test]
-    fn id_less_row_degrades_visibly_instead_of_panicking() {
+    fn value_row_renders_plainly_instead_of_panicking() {
         let mut row: HashMap<String, Value> = HashMap::new();
         row.insert("_rowid".to_string(), Value::Integer(1));
         row.insert("name".to_string(), Value::String("2026-07-10".to_string()));
 
-        let profile = degraded_missing_id_profile(&row);
-        assert_eq!(profile.name, "degraded-missing-id");
+        let profile = value_row_profile(&row);
+        assert_eq!(profile.name, "value-row");
         let RenderExpr::Literal {
             value: Value::String(text),
         } = &profile.render
         else {
             panic!(
-                "degraded profile must render a string literal, got {:?}",
+                "value-row profile must render a string literal, got {:?}",
                 profile.render
             );
         };
-        // Loud marker + the actual row data are both surfaced on screen.
-        assert!(text.contains("unresolved row"), "marker missing: {text}");
-        assert!(text.contains("name=2026-07-10"), "row data missing: {text}");
-        assert!(text.contains("_rowid=1"), "row data missing: {text}");
+        // The user column is shown plainly, no warning marker, and the internal
+        // `_rowid` bookkeeping column is hidden.
+        assert!(
+            !text.contains("unresolved"),
+            "value row must NOT carry a degraded/unresolved marker: {text}"
+        );
+        assert!(
+            text.contains("name: 2026-07-10"),
+            "row data missing: {text}"
+        );
+        assert!(
+            !text.contains("_rowid"),
+            "internal column must be hidden: {text}"
+        );
+    }
+
+    /// The CONTRACT seam: a caller that DECLARES it needs an entity row
+    /// (`resolve_entity_required`) must FAIL LOUD when handed a value row,
+    /// rather than silently rendering it.
+    #[test]
+    fn entity_required_resolution_fails_loud_on_value_row() {
+        use holon_api::ProfileResolving;
+
+        // Minimal resolver exercising the trait's DEFAULT `resolve_entity_required`
+        // (the contract seam). Entity rows resolve to a dummy profile; the value
+        // branch bails before ever calling `resolve_with_computed`.
+        struct MockResolver;
+        impl ProfileResolving for MockResolver {
+            fn resolve(&self, _: &HashMap<String, Value>) -> Arc<RenderProfile> {
+                Arc::new(RenderProfile {
+                    name: "mock".to_string(),
+                    render: RenderExpr::Literal { value: Value::Null },
+                    operations: vec![],
+                    variants: vec![],
+                })
+            }
+            fn resolve_with_computed(
+                &self,
+                row: &HashMap<String, Value>,
+            ) -> (Arc<RenderProfile>, HashMap<String, Value>) {
+                (self.resolve(row), HashMap::new())
+            }
+            fn resolve_batch(&self, rows: &[HashMap<String, Value>]) -> Vec<Arc<RenderProfile>> {
+                rows.iter().map(|r| self.resolve(r)).collect()
+            }
+        }
+
+        let resolver = MockResolver;
+        let mut value_row: HashMap<String, Value> = HashMap::new();
+        value_row.insert("name".to_string(), Value::String("2026-07-10".to_string()));
+
+        let err = resolver
+            .resolve_entity_required(&value_row)
+            .expect_err("entity-required resolution must reject a value row");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("requires an ENTITY row") && msg.contains("VALUE row"),
+            "contract error must name the violation: {msg}"
+        );
+
+        // An entity-shaped row passes the contract gate.
+        let mut entity_row: HashMap<String, Value> = HashMap::new();
+        entity_row.insert("id".to_string(), Value::String("block:abc".to_string()));
+        assert!(
+            resolver.resolve_entity_required(&entity_row).is_ok(),
+            "entity row must satisfy the entity-required contract"
+        );
     }
 }
