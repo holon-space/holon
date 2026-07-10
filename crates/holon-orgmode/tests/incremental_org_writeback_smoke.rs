@@ -66,6 +66,13 @@ impl CountingBlockReader {
         }
     }
 
+    /// Replace the whole ordered block list — simulates a same-parent
+    /// reorder (a new `sort_key` sequence), where `get_blocks`/`children`
+    /// would now return a different order for unchanged blocks.
+    fn set_blocks(&self, blocks: Vec<Block>) {
+        *self.blocks.lock().unwrap() = blocks;
+    }
+
     fn get_blocks_calls(&self) -> usize {
         self.get_blocks_calls.load(Ordering::SeqCst)
     }
@@ -134,11 +141,20 @@ impl DocumentManager for StubDocManager {
     }
 }
 
-/// The ordering seam is untouched by `on_block_changed`; every method is inert.
-struct InertOrdering;
+/// `place`/`update_in_tree`/`delete_in_tree` are untouched by
+/// `on_block_changed` and stay inert. `children` is NOT inert: the cheap
+/// content-only-edit path in `render_with_cache` compares the cache's
+/// same-parent sibling order against this live read to detect a same-parent
+/// reorder (sort_key moved without a `parent_id`/`tags` change), so this stub
+/// mirrors the authoritative store — exactly like production, where
+/// `BlockOrdering::children` and `BlockReader::get_blocks` both read the same
+/// underlying order.
+struct LiveOrderOrdering {
+    reader: Arc<CountingBlockReader>,
+}
 
 #[async_trait]
-impl BlockOrdering for InertOrdering {
+impl BlockOrdering for LiveOrderOrdering {
     async fn place(
         &self,
         _: &EntityUri,
@@ -159,8 +175,16 @@ impl BlockOrdering for InertOrdering {
     async fn last_child(&self, _: &EntityUri) -> OrderingResult<Option<EntityUri>> {
         Ok(None)
     }
-    async fn children(&self, _: &EntityUri) -> OrderingResult<Vec<EntityUri>> {
-        Ok(vec![])
+    async fn children(&self, parent_id: &EntityUri) -> OrderingResult<Vec<EntityUri>> {
+        Ok(self
+            .reader
+            .blocks
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|b| b.parent_id == *parent_id)
+            .map(|b| b.id.clone())
+            .collect())
     }
     async fn update_in_tree(&self, _: holon_api::StorageEntity) -> OrderingResult<()> {
         Ok(())
@@ -199,7 +223,9 @@ fn build_harness() -> Harness {
         reader.clone(),
         doc_manager,
         root.clone(),
-        Arc::new(InertOrdering),
+        Arc::new(LiveOrderOrdering {
+            reader: reader.clone(),
+        }),
         fs,
     );
     let path = holon_core::CanonicalPath::new(&root)
@@ -329,6 +355,54 @@ async fn move_takes_full_reseed() {
         h.reader.get_blocks_calls(),
         baseline + 1,
         "a parent_id move must take the full reseed (get_blocks)"
+    );
+}
+
+/// Regression for the disk-sibling-order bug: a same-parent reorder (the
+/// sort_key sequence changes but `parent_id`/`tags` do not) must NOT take the
+/// cheap content-only path — the cache would otherwise keep the pre-reorder
+/// `IndexMap` position forever, so the written file's sibling order would
+/// diverge from the live (SQL/`sort_key`-authoritative) order even though the
+/// delta's own content looks unchanged.
+#[tokio::test]
+async fn reorder_within_parent_takes_full_reseed() {
+    let mut h = build_harness();
+    let (b1, b2, b3) = {
+        let blocks = h.reader.blocks.lock().unwrap();
+        (blocks[0].clone(), blocks[1].clone(), blocks[2].clone())
+    };
+    h.controller
+        .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b1.clone()))
+        .await
+        .unwrap();
+    let baseline = h.reader.get_blocks_calls();
+
+    // Same parent, same tags, same content — only the sibling order changes
+    // (b2 now sorts before b1).
+    h.reader
+        .set_blocks(vec![b2.clone(), b1.clone(), b3.clone()]);
+
+    h.controller
+        .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b1))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        h.reader.get_blocks_calls(),
+        baseline + 1,
+        "a same-parent reorder must take the full reseed (get_blocks), not the cheap content-only \
+         path"
+    );
+
+    let written = std::fs::read_to_string(&h.path).unwrap();
+    assert_eq!(
+        written,
+        full_render_oracle(&h),
+        "written file must reflect the new (post-reorder) sibling order, not the stale cached one"
+    );
+    assert!(
+        written.find("Second heading").unwrap() < written.find("First heading").unwrap(),
+        "b2 must render before b1 after the reorder: {written:?}"
     );
 }
 
