@@ -8,6 +8,7 @@
 //! SQL types into the Loro pipeline (see Phase D partition).
 
 pub mod advice_reconciler;
+pub mod clock_scheduler;
 pub mod event_infra_module;
 pub mod loro_block_query_source;
 pub mod loro_module;
