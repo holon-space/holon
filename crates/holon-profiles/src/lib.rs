@@ -1387,4 +1387,116 @@ variants:
         assert_eq!(data.as_deref(), Some("task_state != () && priority > 0"));
         assert_eq!(ui, Predicate::Always);
     }
+
+    // -----------------------------------------------------------------------
+    // ADR 0024 WP3 — program marking / rule-card render variant.
+    //
+    // These resolve the REAL block_profile.yaml (not a hand-built fixture) so a
+    // regression in `is_program` / the variant precedence fails here.
+    // -----------------------------------------------------------------------
+
+    const BLOCK_PROFILE_YAML: &str =
+        include_str!("../../../assets/default/types/block_profile.yaml");
+
+    /// Rhai engine with the DB-backed lookups the block profile's computed fields
+    /// call. `rule_sibling(parent_id)` returns a non-unit row iff `parent_id`
+    /// names a headline that owns a rule head — i.e. the caller is that rule's
+    /// trigger sibling (WP3 clause b). `query_source` is stubbed empty (no block
+    /// in these rows has query-source children).
+    fn engine_with_rule_parent(rule_parent: &'static str) -> RhaiEngine {
+        let mut engine = RhaiEngine::new();
+        engine.register_fn("rule_sibling", move |parent_id: String| -> rhai::Dynamic {
+            if parent_id == rule_parent {
+                rhai::Dynamic::from(rhai::Map::new())
+            } else {
+                rhai::Dynamic::UNIT
+            }
+        });
+        engine.register_fn("query_source", |_: String| -> rhai::Dynamic {
+            rhai::Dynamic::UNIT
+        });
+        engine
+    }
+
+    fn source_row(id: &str, parent: &str, lang: &str) -> HashMap<String, holon_api::Value> {
+        use holon_api::Value;
+        let mut row = HashMap::new();
+        row.insert("id".into(), Value::String(id.into()));
+        row.insert("parent_id".into(), Value::String(parent.into()));
+        row.insert("content_type".into(), Value::String("source".into()));
+        row.insert("source_language".into(), Value::String(lang.into()));
+        row.insert("content".into(), Value::String("<source body>".into()));
+        row
+    }
+
+    fn variant_for(row: &HashMap<String, holon_api::Value>, engine: &RhaiEngine) -> String {
+        parse_entity_profile(BLOCK_PROFILE_YAML)
+            .unwrap()
+            .resolve(row, engine)
+            .expect("a variant (or default) must resolve")
+            .name
+            .clone()
+    }
+
+    #[test]
+    fn rule_head_renders_rule_card() {
+        // A `holon_rule` head is program → routed to the rule card, never a query.
+        let engine = engine_with_rule_parent("block:journal-auto-create");
+        let row = source_row("block:rule", "block:journal-auto-create", "holon_rule");
+        assert_eq!(variant_for(&row, &engine), "rule_card");
+    }
+
+    #[test]
+    fn trigger_sibling_renders_rule_card_not_query_result() {
+        // The `holon_sql` trigger sibling of a rule is program via the discovery
+        // join (clause b). Priority 0 wins over the `holon_source` spacer that its
+        // language would otherwise match — it renders the card, NOT a query result
+        // and NOT a hidden spacer.
+        let engine = engine_with_rule_parent("block:journal-auto-create");
+        let row = source_row("block:trigger", "block:journal-auto-create", "holon_sql");
+        let variant = variant_for(&row, &engine);
+        assert_eq!(variant, "rule_card");
+        assert_ne!(variant, "source");
+    }
+
+    #[test]
+    fn normal_holon_query_source_is_not_program() {
+        // A holon_prql query source with NO rule sibling stays hidden machinery
+        // (the `holon_source` spacer) — it must NOT be diverted to the rule card.
+        let engine = engine_with_rule_parent("block:journal-auto-create");
+        let row = source_row("block:q", "block:journals", "holon_prql");
+        let variant = variant_for(&row, &engine);
+        assert_ne!(variant, "rule_card");
+        assert_eq!(variant, "holon_source");
+    }
+
+    #[test]
+    fn plain_source_block_still_renders_query_result() {
+        // A non-holon source block (not machinery, not a rule) still renders as a
+        // query result — the `source` variant, gated on `!is_program`. No regression.
+        let engine = engine_with_rule_parent("block:journal-auto-create");
+        let row = source_row("block:py", "block:page", "python");
+        assert_eq!(variant_for(&row, &engine), "source");
+    }
+
+    #[test]
+    fn legacy_action_head_surfaces_deprecation_on_card() {
+        // A retired `action`-language head is still program (rule card) and the
+        // deprecation is surfaced: `is_legacy_rule` is true so the card's `if_col`
+        // renders its loud error line.
+        let engine = engine_with_rule_parent("block:journal-auto-create");
+        let row = source_row("block:legacy", "block:journal-auto-create", "action");
+        let (profile, computed) = parse_entity_profile(BLOCK_PROFILE_YAML)
+            .unwrap()
+            .resolve_with_computed(&row, &engine);
+        assert_eq!(profile.expect("variant resolves").name, "rule_card");
+        assert_eq!(
+            computed.get("is_program"),
+            Some(&holon_api::Value::Boolean(true))
+        );
+        assert_eq!(
+            computed.get("is_legacy_rule"),
+            Some(&holon_api::Value::Boolean(true))
+        );
+    }
 }
