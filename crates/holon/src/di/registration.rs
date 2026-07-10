@@ -291,6 +291,21 @@ fn query_source_blocks_sql() -> String {
     )
 }
 
+/// Rule-head blocks, keyed by `parent_id`, backing the
+/// `rule_sibling(parent_id)` Rhai lookup used by the `is_program` computed
+/// field (ADR 0024 WP3 clause b): "does my parent have a rule-head child?" → I
+/// am the trigger sibling of a rule. Both the current `holon_rule` language and
+/// the retired `action` language count (the latter still needs its trigger
+/// hidden while it surfaces its deprecation). A plain filtered read of
+/// `block_raw` — no self-join, no chained matview.
+fn rule_head_blocks_sql() -> String {
+    format!(
+        "SELECT id, parent_id, source_language FROM {table} WHERE content_type = 'source' AND \
+         (source_language = 'holon_rule' OR source_language = 'action')",
+        table = crate::storage::BLOCK_READ_TABLE,
+    )
+}
+
 /// Create a CDC-driven LiveData<StorageEntity> from a SQL query, keyed by a
 /// given column.
 async fn create_live_data_keyed_by(
@@ -330,6 +345,10 @@ async fn create_live_entities(
     let qs_sql = query_source_blocks_sql();
     if let Some(qs) = create_live_data_keyed_by(matview_manager, &qs_sql, "parent_id").await {
         live_entities.insert(holon_api::EntityName::new("query_source"), qs);
+    }
+    let rh_sql = rule_head_blocks_sql();
+    if let Some(rh) = create_live_data_keyed_by(matview_manager, &rh_sql, "parent_id").await {
+        live_entities.insert(holon_api::EntityName::new("rule_sibling"), rh);
     }
     live_entities
 }
