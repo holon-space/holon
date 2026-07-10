@@ -1,0 +1,7 @@
+#+ID: 0776062a-e04c-4ae3-a1f5-9cc20ebeea67
+#+TITLE: Frontends
+* Overview
+:PROPERTIES:
+:ID: frontends-overview
+:END:
+Placeholder text for the Frontends overview block.
