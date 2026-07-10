@@ -612,11 +612,12 @@ impl EditorView {
     /// authority. This is the "write only genuine user edits" invariant.
     ///
     /// `source` names the caller (`"remote_delta"`, `"data_sync"`,
-    /// `"render_backstop"`) and is recorded on the `editor.converge_input`
-    /// trace event emitted whenever this call actually mutates `InputState`
-    /// (past the idempotent early-return). Gate 1 counts `source =
-    /// "render_backstop"` events to prove the entity-`Cell` remote-delta path —
-    /// not the backstop — carries cross-occurrence propagation.
+    /// `"render_backstop"`, `"focus_reload"`) and is recorded on the
+    /// `editor.converge_input` trace event emitted whenever this call
+    /// actually mutates `InputState` (past the idempotent early-return).
+    /// Gate 1 counts `source = "render_backstop"` events to prove the
+    /// entity-`Cell` remote-delta path — not the backstop — carries
+    /// cross-occurrence propagation.
     pub(crate) fn converge_input(
         &mut self,
         source: &'static str,

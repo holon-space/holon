@@ -14,18 +14,31 @@ use std::ops::Range;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
+use anyhow::anyhow;
 use futures::stream::BoxStream;
+use holon_api::InlineMark;
+use holon_api::MarkSpan;
+use holon_api::Value;
 use holon_api::render_types::OperationWiring;
 use holon_api::types::EntityName;
-use holon_api::{InlineMark, MarkSpan, Value};
-use holon_core::cell::{Cell, CursorAnchor, CursorBias, TextDelta, TextOp};
+use holon_core::cell::Cell;
+use holon_core::cell::CursorAnchor;
+use holon_core::cell::CursorBias;
+use holon_core::cell::TextDelta;
+use holon_core::cell::TextOp;
 
-use crate::input_trigger::{self, InputTrigger, ViewEvent};
+use crate::input_trigger::InputTrigger;
+use crate::input_trigger::ViewEvent;
+use crate::input_trigger::{self};
 use crate::operations::OperationIntent;
-use crate::popup_menu::{MenuKey, PopupItem, PopupResult, PopupState};
+use crate::popup_menu::MenuKey;
+use crate::popup_menu::PopupItem;
+use crate::popup_menu::PopupResult;
+use crate::popup_menu::PopupState;
 use crate::reactive::BuilderServices;
-use crate::view_event_handler::{HandleResult, ViewEventHandler};
+use crate::view_event_handler::HandleResult;
+use crate::view_event_handler::ViewEventHandler;
 
 /// Actions the frontend should execute after calling EditorViewModel methods.
 ///
@@ -48,7 +61,8 @@ pub enum EditorAction {
     /// The popup was dismissed. Frontend should hide the overlay.
     PopupDismissed,
 
-    /// Dispatch an operation (slash command selected, text synced on blur, etc.).
+    /// Dispatch an operation (slash command selected, text synced on blur,
+    /// etc.).
     Execute(OperationIntent),
 
     /// Dispatch an operation AND strip the typed slash-command text first.
@@ -62,8 +76,9 @@ pub enum EditorAction {
     },
 
     /// Insert text at a position (wiki-link selected).
-    /// `prefix_start` is the column where the trigger prefix started (e.g., `[[`).
-    /// Frontend should replace text from `line_start + prefix_start` to `cursor` with `replacement`.
+    /// `prefix_start` is the column where the trigger prefix started (e.g.,
+    /// `[[`). Frontend should replace text from `line_start + prefix_start`
+    /// to `cursor` with `replacement`.
     InsertText {
         replacement: String,
         prefix_start: usize,
@@ -204,8 +219,8 @@ impl EditorViewModel {
 
     /// Build an EditorViewModel from an EditableText ViewModel node.
     ///
-    /// Extracts field, content, operations, triggers, and context params from the node.
-    /// Panics if the node is not an EditableText.
+    /// Extracts field, content, operations, triggers, and context params from
+    /// the node. Panics if the node is not an EditableText.
     pub fn from_view_model(node: &crate::ViewModel) -> Self {
         let (field, content) = match &node.kind {
             crate::view_model::ViewKind::EditableText { field, content } => {
@@ -341,11 +356,12 @@ impl EditorViewModel {
 
     /// Apply an inline mark over a range of the block's text.
     ///
-    /// Range is in Unicode-scalar offsets, half-open `[range.start, range.end)`.
-    /// Returns an `Execute(OperationIntent)` for the `apply_mark` operation
-    /// on the `block` entity; the frontend dispatches it through its standard
-    /// operation pipeline. This is incremental — pre-existing marks of other
-    /// keys, or same-key spans on disjoint ranges, are preserved.
+    /// Range is in Unicode-scalar offsets, half-open `[range.start,
+    /// range.end)`. Returns an `Execute(OperationIntent)` for the
+    /// `apply_mark` operation on the `block` entity; the frontend
+    /// dispatches it through its standard operation pipeline. This is
+    /// incremental — pre-existing marks of other keys, or same-key spans on
+    /// disjoint ranges, are preserved.
     ///
     /// Returns `EditorAction::None` if the controller's context has no `id`
     /// (a programming error in the wiring; logged by callers if needed).
@@ -436,7 +452,8 @@ pub enum EditorKey {
     Enter,
     Escape,
     /// Backspace. Structural only at caret 0 (join with previous block);
-    /// elsewhere it's a per-medium char delete (see [`structural_block_action`]).
+    /// elsewhere it's a per-medium char delete (see
+    /// [`structural_block_action`]).
     Backspace,
     /// Tab → indent.
     Tab,
@@ -502,10 +519,13 @@ pub fn selection_marks(marks: &[MarkSpan], range: Range<usize>) -> Vec<InlineMar
 
 #[cfg(test)]
 mod tests {
+    use holon_api::render_types::OperationDescriptor;
+    use holon_api::render_types::OperationParam;
+    use holon_api::render_types::TypeHint;
+    use holon_api::types::EntityName;
+
     use super::*;
     use crate::input_trigger::InputTrigger;
-    use holon_api::render_types::{OperationDescriptor, OperationParam, TypeHint};
-    use holon_api::types::EntityName;
 
     fn make_op(name: &str, fields: &[&str], params: Vec<OperationParam>) -> OperationWiring {
         OperationWiring {
@@ -661,7 +681,8 @@ mod tests {
         // must be dropped to avoid racing the Loro projection. Without a cell
         // (SqlOnly mode) it MUST fire — that case is covered by
         // `blur_with_changed_text_executes`.
-        use holon_core::cell::{CellBacking, LwwTextCellBacking};
+        use holon_core::cell::CellBacking;
+        use holon_core::cell::LwwTextCellBacking;
         let mut ctrl = test_controller();
         let backing = std::sync::Arc::new(LwwTextCellBacking::new(
             std::sync::Arc::new(|| "original".to_string()),
@@ -675,6 +696,47 @@ mod tests {
         assert!(
             matches!(action, EditorAction::None),
             "content set_field must be dropped when a Loro cell is the writer, got {action:?}"
+        );
+    }
+
+    #[test]
+    fn cell_authority_reflects_merged_content_after_external_join() {
+        // Regression (2026-07-10): after a `join_block`, the surviving block's
+        // content is merged in the backend, and the editor's content authority
+        // — the attached `Cell` read via `current_text()` — MUST reflect that
+        // merged value. The GPUI editor's focus-gain reload converges its
+        // `InputState` to exactly this authority; if the authority itself were
+        // stale, the reload could not cure the stale buffer. This pins the
+        // authority contract the fix depends on: `current_text()` is a live
+        // read of the cell backing, never a snapshot taken at attach time.
+        use std::sync::Arc;
+        use std::sync::Mutex;
+
+        use holon_core::cell::CellBacking;
+        use holon_core::cell::LwwTextCellBacking;
+
+        // Shared backing store the "backend" (join_block's set_field) writes to.
+        let store = Arc::new(Mutex::new("First manual block".to_string())); // pre-split (18)
+        let read_store = store.clone();
+        let backing = Arc::new(LwwTextCellBacking::new(
+            Arc::new(move || read_store.lock().unwrap().clone()),
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            Arc::new(|| Box::pin(futures::stream::empty())),
+        ));
+        let mut ctrl = test_controller();
+        ctrl.attach_cell(Cell::from_backing(backing as Arc<dyn CellBacking<String>>));
+
+        assert_eq!(ctrl.current_text().as_deref(), Some("First manual block"));
+
+        // Backend join merges the two blocks into the survivor (17 chars),
+        // dropping the space, exactly as prod `join_block`'s `set_field` does.
+        *store.lock().unwrap() = "First manualblock".to_string();
+
+        assert_eq!(
+            ctrl.current_text().as_deref(),
+            Some("First manualblock"),
+            "content authority must be a live read of the cell — a focus reload converges \
+             InputState to this, curing the stale pre-join buffer"
         );
     }
 
@@ -723,7 +785,8 @@ mod tests {
     fn apply_mark_round_trips_link_target() {
         // Link variants carry data (target + label); intent payload must
         // preserve them so the backend reconstitutes the full InlineMark.
-        use holon_api::{EntityRef, EntityUri};
+        use holon_api::EntityRef;
+        use holon_api::EntityUri;
 
         let ctrl = test_controller();
         let mark = InlineMark::Link {
