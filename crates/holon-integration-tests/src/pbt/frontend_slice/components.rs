@@ -3001,12 +3001,20 @@ mod tests {
         );
 
         // Journal day-blocks are ORDINARY content (WP3): not source/program blocks.
+        // The boot seed's display machinery (`journals_page_blocks`: `::src::0` +
+        // `::render::0`) legitimately lives as source children of the shell —
+        // exclude those fixed ids; anything ELSE source-typed under journals is a
+        // rule output gone wrong.
         let program_rows = comp
             .engine
             .db_handle()
             .query(
-                "SELECT id FROM block_raw WHERE parent_id = 'block:journals' AND content_type = \
-                 'source'",
+                &format!(
+                    "SELECT id FROM block_raw WHERE parent_id = 'block:journals' AND content_type \
+                     = 'source' AND id != '{src}' AND id != '{render}'",
+                    src = holon_frontend::JOURNALS_SRC_ID,
+                    render = holon_frontend::JOURNALS_RENDER_ID,
+                ),
                 std::collections::HashMap::new(),
             )
             .await
