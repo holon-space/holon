@@ -77,6 +77,22 @@ impl InMemoryBlockStore {
             .unwrap_or_default()
     }
 
+    /// Direct children of `parent_id` — like the real
+    /// `SqlBlockOperations::children`, which filters the authority by
+    /// `parent_id` regardless of which document the block belongs to.
+    /// `on_file_changed`'s post-create wait loop polls this for NESTED
+    /// parents too, so a doc-bucket read is not enough.
+    fn children_of(&self, parent_id: &EntityUri) -> Vec<EntityUri> {
+        self.blocks
+            .read()
+            .unwrap()
+            .values()
+            .flat_map(|v| v.iter())
+            .filter(|b| b.parent_id == *parent_id)
+            .map(|b| b.id.clone())
+            .collect()
+    }
+
     fn apply_create(&self, block: Block) {
         let mut store = self.blocks.write().unwrap();
         // Find the document this block belongs to by checking if parent_id matches a
@@ -94,11 +110,39 @@ impl InMemoryBlockStore {
 
     fn apply_update(&self, block: Block) {
         let mut store = self.blocks.write().unwrap();
-        for blocks in store.values_mut() {
-            if let Some(existing) = blocks.iter_mut().find(|b| b.id == block.id) {
-                *existing = block;
-                return;
-            }
+        let Some(cur_key) = store
+            .iter()
+            .find(|(_, v)| v.iter().any(|b| b.id == block.id))
+            .map(|(k, _)| k.clone())
+        else {
+            return;
+        };
+        // Prod SQL derives doc membership from the parent chain (recursive
+        // CTE), so an update whose parent now lives under a different doc key
+        // must follow it — an in-place replace would strand the block under a
+        // stale doc bucket. Same target-key derivation as `apply_create`.
+        let target_key = store
+            .keys()
+            .find(|k| {
+                k.as_str() == block.parent_id.as_str()
+                    || store[*k].iter().any(|b| b.id == block.parent_id)
+            })
+            .cloned()
+            .unwrap_or_else(|| block.parent_id.to_string());
+        if cur_key == target_key {
+            // Same bucket: replace in place, preserving sibling order.
+            let blocks = store.get_mut(&cur_key).expect("cur_key just found");
+            let existing = blocks
+                .iter_mut()
+                .find(|b| b.id == block.id)
+                .expect("block just found under cur_key");
+            *existing = block;
+        } else {
+            store
+                .get_mut(&cur_key)
+                .expect("cur_key just found")
+                .retain(|b| b.id != block.id);
+            store.entry(target_key).or_default().push(block);
         }
     }
 
@@ -123,6 +167,34 @@ impl InMemoryBlockStore {
         } else {
             self.apply_create(block);
         }
+    }
+
+    /// Upsert from an org write-seam params map, mirroring SQL UPDATE
+    /// semantics: an edge-field param the controller stripped as unchanged
+    /// (`strip_unchanged_edge_fields`) leaves the existing junction values
+    /// untouched — a wholesale struct replace would silently clear them.
+    fn upsert_from_params(&self, params: &holon_api::StorageEntity) {
+        let mut block = block_from_params(params);
+        let existing = {
+            let store = self.blocks.read().unwrap();
+            store
+                .values()
+                .flat_map(|v| v.iter())
+                .find(|b| b.id == block.id)
+                .cloned()
+        };
+        if let Some(existing) = existing {
+            if params.get("tags").is_none() {
+                block.set_tags(existing.tags.clone());
+            }
+            if params.get("requires").is_none() {
+                block.requires = existing.requires.clone();
+            }
+            if params.get("advice_suppressed").is_none() {
+                block.advice_suppressed = existing.advice_suppressed.clone();
+            }
+        }
+        self.apply_upsert(block);
     }
 }
 
@@ -214,8 +286,44 @@ fn block_from_params(params: &holon_api::StorageEntity) -> Block {
             block.set_priority(Some(priority));
         }
     }
-    if let Some(t) = params.get("tags").and_then(|v| v.as_string()) {
-        block.set_tags(Tags::from_csv(t));
+    // `build_block_params` emits edge fields as typed `Value::Array` params
+    // (routed to junctions by the SQL provider; the legacy CSV shape is gone).
+    match params.get("tags") {
+        Some(Value::Array(arr)) => {
+            let tags: Vec<String> = arr
+                .iter()
+                .map(|v| {
+                    v.as_string()
+                        .map(str::to_string)
+                        .expect("tags array element must be a string")
+                })
+                .collect();
+            block.set_tags(Tags::from(tags));
+        }
+        Some(other) => panic!("tags param must be an Array, got {other:?}"),
+        None => {}
+    }
+    let uri_array = |key: &str| -> Option<Vec<EntityUri>> {
+        match params.get(key) {
+            Some(Value::Array(arr)) => Some(
+                arr.iter()
+                    .map(|v| {
+                        // ALLOW(entity_uri_from_raw): edge params carry full URIs
+                        EntityUri::from_raw(
+                            v.as_string().expect("edge array element must be a string"),
+                        )
+                    })
+                    .collect(),
+            ),
+            Some(other) => panic!("{key} param must be an Array, got {other:?}"),
+            None => None,
+        }
+    };
+    if let Some(r) = uri_array("requires") {
+        block.requires = r;
+    }
+    if let Some(a) = uri_array("advice_suppressed") {
+        block.advice_suppressed = a;
     }
     if let Some(s) = params.get("scheduled").and_then(|v| v.as_string()) {
         if let Ok(ts) = Timestamp::parse(s) {
@@ -250,12 +358,18 @@ fn block_from_params(params: &holon_api::StorageEntity) -> Block {
         "task_state",
         "priority",
         "tags",
+        "requires",
+        "advice_suppressed",
         "scheduled",
         "deadline",
         "ID",
+        // Positional intent, not a field: prod strips it before the row write
+        // (`update_in_tree` removes POSITION_AFTER_BLOCK_ID_PARAM); it must
+        // never land in `block.properties`.
+        "after_block_id",
     ];
     for (k, v) in params {
-        if !STANDARD_KEYS.contains(&k.as_ref()) {
+        if !STANDARD_KEYS.contains(&k.as_ref()) && !k.starts_with("_routing_") {
             if let Some(s) = v.as_string() {
                 block.set_property(k.as_ref(), Value::String(s.to_string()));
             }
@@ -362,7 +476,10 @@ fn simulate_sql_round_trip(
         "updated_at",
         "_change_origin",
     ];
-    const EDGE_FIELDS: &[&str] = &["tags", "requires"];
+    // Matches BlockSchemaModule::edge_fields (holon-turso/src/schema_modules.rs):
+    // tags, requires, advice_suppressed. The `block` matview hydrates all three
+    // as JSON arrays, and `Block::try_from` requires all three columns.
+    const EDGE_FIELDS: &[&str] = &["tags", "requires", "advice_suppressed"];
 
     let mut row = holon_api::StorageEntity::new();
     let mut extras: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
@@ -421,7 +538,10 @@ fn value_to_serde_json(v: &Value) -> serde_json::Value {
     }
 }
 
-const POSITION_AFTER_BLOCK_ID_PARAM: &str = "_after_block_id";
+// Mirror of the prod constant (holon-api/src/entity.rs) — a stale
+// "_after_block_id" copy here let the positional param leak into simulated rows
+// undetected.
+const POSITION_AFTER_BLOCK_ID_PARAM: &str = holon_api::entity::POSITION_AFTER_BLOCK_ID_PARAM;
 
 // ============================================================================
 // Stub BlockOrdering for tests
@@ -479,15 +599,15 @@ impl BlockOrdering for StubBlockOrdering {
         unimplemented!("stub BlockOrdering: only place() is exercised by this test")
     }
 
-    async fn children(&self, _: &EntityUri) -> BlockOrderingResult<Vec<EntityUri>> {
-        // Return empty so the misalignment check treats all blocks as misaligned
-        // (they'll call place() once each). Tests that assert place() call count
-        // should reflect this.
-        Ok(vec![])
+    async fn children(&self, parent_id: &EntityUri) -> BlockOrderingResult<Vec<EntityUri>> {
+        // Authority-backed like the real `SqlBlockOperations::children`:
+        // `on_file_changed`'s post-create wait loop polls this until every
+        // created block is visible, then hands the total order to `place_all`.
+        Ok(self.store.children_of(parent_id))
     }
 
     async fn update_in_tree(&self, params: holon_api::StorageEntity) -> BlockOrderingResult<()> {
-        self.store.apply_upsert(block_from_params(&params));
+        self.store.upsert_from_params(&params);
         Ok(())
     }
 
@@ -697,10 +817,6 @@ impl TestFixture {
     fn seed_blocks(&self, blocks: &[Block]) {
         self.store
             .seed_blocks(self.doc_id.as_str(), blocks.to_vec());
-    }
-
-    fn get_stored_blocks(&self) -> Vec<Block> {
-        self.store.get_all_blocks(self.doc_id.as_str())
     }
 }
 
@@ -1257,6 +1373,14 @@ fn generate_baseline_blocks(doc_id: &EntityUri, variant: u8) -> Vec<Block> {
 }
 
 /// Render blocks → parse to get a stable round-tripped baseline.
+///
+/// The parse carries an injected `#+ID: <doc_id>` directive: without it the
+/// parser derives a path-based `file:test.org` document identity and parents
+/// every top-level headline to THAT, so the returned baseline would no longer
+/// be renderable against `doc_id` (the WP-F dangling-parent projection
+/// assertion in `OrgRenderer::render_entitys` fails loud on the mismatch).
+/// Prod vault files carry `#+ID:` — the writeback path even force-persists it
+/// (`needs_id_writeback`) — so the directive is the faithful fixture shape.
 fn stabilize_blocks(
     blocks: &[Block],
     doc_id: &EntityUri,
@@ -1264,6 +1388,7 @@ fn stabilize_blocks(
 ) -> Vec<Block> {
     let file_path = root_dir.join("test.org");
     let org_text = OrgRenderer::render_entitys(blocks, &file_path, doc_id);
+    let org_text = format!("#+ID: {}\n{}", doc_id.id(), org_text);
     let parse_result = parse_org_file(&file_path, &org_text, &EntityUri::no_parent(), root_dir)
         .expect("stabilize: parse must succeed");
     parse_result.blocks
@@ -1473,8 +1598,12 @@ proptest! {
             )
             .unwrap();
 
-            // The store should match what the final file on disk parses to
-            let stored = fixture.get_stored_blocks();
+            // The store should match what the final file on disk parses to.
+            // Read under the RESOLVED leaf doc id (the page-chain walk above
+            // ends with `expected_parent` = leaf): when `pre_seed_doc == false`
+            // and the file carries no `#+ID:`, the controller mints its own
+            // document id — `fixture.doc_id` never appears in the store.
+            let stored = fixture.store.get_all_blocks(expected_parent.as_str());
             assert_blocks_equivalent(&expected_parse.blocks, &stored, "file_change_to_blocks");
 
             Ok::<(), TestCaseError>(())
@@ -1766,44 +1895,49 @@ mod find_foreign_blocks_tests {
 mod ordering_replay_tests {
     use super::*;
 
-    /// A configurable stub that returns specific live children for given
-    /// parents, and records every `place()` call for assertion.
-    struct ConfigurableOrderingStub {
-        /// Maps parent_id → ordered list of child ids representing the LIVE
-        /// order.
-        live_order: std::collections::HashMap<String, Vec<String>>,
-        pub calls: Mutex<Vec<(EntityUri, String, Option<String>)>>,
+    /// Ordering stub whose `children()` reads the shared block store — like the
+    /// real `SqlBlockOperations::children`, which reads the authority directly
+    /// so `on_file_changed`'s post-create wait loop sees freshly-created blocks
+    /// (a static children list makes that loop time out and bail loud). Records
+    /// every `place_all()` call for assertion. SqlOnly (no upstream
+    /// consolidator) → the controller routes order intent through `place_all`.
+    struct RecordingOrderingStub {
+        /// (parent, ordered_ids) per `place_all` call.
+        pub place_all_calls: Mutex<Vec<(EntityUri, Vec<EntityUri>)>>,
         /// Block sink — the controller's only write target now the command bus
         /// is gone; tests assert against this same store.
         store: Arc<InMemoryBlockStore>,
     }
 
-    impl ConfigurableOrderingStub {
-        fn new(
-            live_order: std::collections::HashMap<String, Vec<String>>,
-            store: Arc<InMemoryBlockStore>,
-        ) -> Self {
+    impl RecordingOrderingStub {
+        fn new(store: Arc<InMemoryBlockStore>) -> Self {
             Self {
-                live_order,
-                calls: Mutex::new(Vec::new()),
+                place_all_calls: Mutex::new(Vec::new()),
                 store,
             }
         }
     }
 
     #[async_trait]
-    impl BlockOrdering for ConfigurableOrderingStub {
+    impl BlockOrdering for RecordingOrderingStub {
         async fn place(
             &self,
-            uri: &EntityUri,
-            parent_id: &EntityUri,
-            after_id: Option<&EntityUri>,
+            _: &EntityUri,
+            _: &EntityUri,
+            _: Option<&EntityUri>,
         ) -> BlockOrderingResult<()> {
-            self.calls.lock().unwrap().push((
-                uri.clone(),
-                parent_id.as_str().to_string(),
-                after_id.map(|u| u.as_str().to_string()),
-            ));
+            unimplemented!("RecordingOrderingStub: SqlOnly ingest routes order through place_all")
+        }
+
+        async fn place_all(
+            &self,
+            parent_id: &EntityUri,
+            ordered_ids: &[EntityUri],
+        ) -> BlockOrderingResult<()> {
+            self.place_all_calls
+                .lock()
+                .unwrap()
+                .push((parent_id.clone(), ordered_ids.to_vec()));
             Ok(())
         }
 
@@ -1812,30 +1946,26 @@ mod ordering_replay_tests {
         }
 
         async fn next_sibling(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
-            unimplemented!("ConfigurableOrderingStub: only place() and children() are used")
+            unimplemented!("RecordingOrderingStub: only place_all() and children() are used")
         }
 
         async fn first_child(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
-            unimplemented!("ConfigurableOrderingStub: only place() and children() are used")
+            unimplemented!("RecordingOrderingStub: only place_all() and children() are used")
         }
 
         async fn last_child(&self, _: &EntityUri) -> BlockOrderingResult<Option<EntityUri>> {
-            unimplemented!("ConfigurableOrderingStub: only place() and children() are used")
+            unimplemented!("RecordingOrderingStub: only place_all() and children() are used")
         }
 
         async fn children(&self, parent_id: &EntityUri) -> BlockOrderingResult<Vec<EntityUri>> {
-            Ok(self
-                .live_order
-                .get(parent_id.as_str())
-                .map(|ids| ids.iter().map(|s| EntityUri::from_raw(s)).collect())
-                .unwrap_or_default())
+            Ok(self.store.children_of(parent_id))
         }
 
         async fn update_in_tree(
             &self,
             params: holon_api::StorageEntity,
         ) -> BlockOrderingResult<()> {
-            self.store.apply_upsert(block_from_params(&params));
+            self.store.upsert_from_params(&params);
             Ok(())
         }
 
@@ -1852,30 +1982,13 @@ mod ordering_replay_tests {
         }
     }
 
-    fn build_controller_with_live_order(
+    fn build_recording_controller(
         temp_dir: &std::path::Path,
-        live_order: std::collections::HashMap<String, Vec<String>>,
-    ) -> (
-        Arc<InMemoryBlockStore>,
-        Arc<MockDocumentManager>,
-        FileSyncController,
-        Arc<ConfigurableOrderingStub>,
-        EntityUri,
-        PathBuf,
-    ) {
-        build_controller_with_live_order_and_doc_id(temp_dir, live_order, EntityUri::block_random())
-    }
-
-    fn build_controller_with_live_order_and_doc_id(
-        temp_dir: &std::path::Path,
-        live_order: std::collections::HashMap<String, Vec<String>>,
         doc_id: EntityUri,
     ) -> (
         Arc<InMemoryBlockStore>,
-        Arc<MockDocumentManager>,
         FileSyncController,
-        Arc<ConfigurableOrderingStub>,
-        EntityUri,
+        Arc<RecordingOrderingStub>,
         PathBuf,
     ) {
         let store = Arc::new(InMemoryBlockStore::new());
@@ -1884,7 +1997,7 @@ mod ordering_replay_tests {
         // The ordering stub is the controller's only block sink (no command
         // bus). Share the store so the dispatched create/update/delete intents
         // land where the test asserts.
-        let ordering = Arc::new(ConfigurableOrderingStub::new(live_order, store.clone()));
+        let ordering = Arc::new(RecordingOrderingStub::new(store.clone()));
 
         let root_dir = temp_dir.to_path_buf();
         let controller = new_org_sync_controller(
@@ -1902,37 +2015,34 @@ mod ordering_replay_tests {
         doc_manager.add_document(doc);
 
         let file_path = root_dir.join(format!("{doc_name}.org"));
-        (store, doc_manager, controller, ordering, doc_id, file_path)
+        (store, controller, ordering, file_path)
     }
 
-    /// Test 7a: file order matches live order → place() is never called.
+    /// Test 7a: SqlOnly ingest hands the order owner the file's TOTAL sibling
+    /// order via `place_all` on EVERY `on_file_changed` — including an
+    /// update-only pass whose disk order already matches the live order.
+    ///
+    /// This replaced the old per-block skip-if-aligned replay: incremental
+    /// `place` can't converge a full reorder against a mutating store (the
+    /// `inv-live-children-match-ref` divergence), so the SQL order owner now
+    /// mints one fresh, gap-free key sequence per parent over its text
+    /// children in document order (total by construction, idempotent when
+    /// already aligned). See the `Consolidator::Store` branch of
+    /// `on_file_changed` and `BlockOrdering::place_all`.
     #[tokio::test]
-    async fn ordering_replay_skips_place_when_order_matches() {
+    async fn ordering_replay_hands_owner_total_order_even_when_aligned() {
         let temp_dir = tempfile::tempdir().unwrap();
 
-        // Disk org file has two children: alpha then beta.
-        let _org_content = "\
-* alpha
-* beta
-";
-
-        // Live order also has alpha before beta.
-        // The controller uses the block's bare id (UUID) for the children list.
-        // Use a single-block org file with a stable :ID: property so the parser
+        // Single-block org file with a stable :ID: property so the parser
         // reuses the same block UUID across both on_file_changed calls.
-        // Both controllers use the same doc_id so the live_order key matches.
         let stable_block_uuid = uuid::Uuid::new_v4().to_string();
         let single_block_org =
             format!("* only block\n:PROPERTIES:\n:ID: {stable_block_uuid}\n:END:\n");
         let doc_id = EntityUri::block_random();
 
-        // First pass: empty live_order → place() will be called (one block).
-        let (store, _doc_mgr, mut controller, _ordering_first, _, file_path) =
-            build_controller_with_live_order_and_doc_id(
-                temp_dir.path(),
-                std::collections::HashMap::new(),
-                doc_id.clone(),
-            );
+        // First pass: CREATE path.
+        let (store, mut controller, ordering_first, file_path) =
+            build_recording_controller(temp_dir.path(), doc_id.clone());
 
         controller.initialize().await.expect("initialize");
         tokio::fs::write(&file_path, &single_block_org)
@@ -1951,19 +2061,19 @@ mod ordering_replay_tests {
             1,
             "should have one block after first parse"
         );
-        let block_id = stored_blocks[0].id.id().to_string();
+        let block_uri = stored_blocks[0].id.clone();
+        let first_calls = ordering_first.place_all_calls.lock().unwrap().clone();
+        assert_eq!(
+            first_calls,
+            vec![(doc_id.clone(), vec![block_uri.clone()])],
+            "create pass: order owner must receive the file's total order"
+        );
 
-        // Second pass: live_order already contains the parsed block → disk order
-        // matches live order → place() must NOT be called.
-        let mut live_order = std::collections::HashMap::new();
-        live_order.insert(doc_id.id().to_string(), vec![block_id.clone()]);
-        let (store2, _doc_mgr2, mut controller2, ordering_second, _, file_path2) =
-            build_controller_with_live_order_and_doc_id(
-                temp_dir.path(),
-                live_order,
-                doc_id.clone(),
-            );
-        // Pre-seed the store so the parse sees an existing block → UPDATE path.
+        // Second pass: UPDATE path (store pre-seeded, no creates), disk order
+        // trivially matches live order — place_all is STILL called with the
+        // total order (idempotent re-key), by design.
+        let (store2, mut controller2, ordering_second, file_path2) =
+            build_recording_controller(temp_dir.path(), doc_id.clone());
         store2.seed_blocks(doc_id.as_str(), vec![stored_blocks[0].clone()]);
 
         controller2.initialize().await.expect("initialize2");
@@ -1976,69 +2086,45 @@ mod ordering_replay_tests {
             .await
             .expect("second on_file_changed");
 
-        let place_calls = ordering_second.calls.lock().unwrap().clone();
-        assert!(
-            place_calls.is_empty(),
-            "place() must not be called when disk order matches live order; got {place_calls:?}"
+        let second_calls = ordering_second.place_all_calls.lock().unwrap().clone();
+        assert_eq!(
+            second_calls,
+            vec![(doc_id.clone(), vec![block_uri])],
+            "update pass: total-order re-key must run even when already aligned"
         );
     }
 
-    /// Test 7b: file reorders one block → exactly one place() call.
+    /// Test 7b: a freshly-created block reaches the order owner in document
+    /// order — one `place_all` for its parent containing it.
     #[tokio::test]
     async fn ordering_replay_calls_place_for_misaligned_block() {
         let temp_dir = tempfile::tempdir().unwrap();
 
-        // Org file has block B then block A (B is first on disk).
-        // Live order has A then B (A is first in live DB).
-        // The replay should call place() exactly once — for B (first on disk but
-        // second in live) — to move it before A.
-        //
-        // Since we don't control what IDs the parser assigns, we use a
-        // single-block file where the live order lists a DIFFERENT block as the
-        // only child. From the parser's perspective the block is NOT in the live
-        // children list → current_idx = None → misaligned → place() called.
-
         let single_block_org = "\
 * the block
 ";
-
-        let dummy_other_id = "some-other-block-id".to_string();
-        let mut live_order = std::collections::HashMap::new();
-        // Live order for the doc: a different block is listed → our parsed block
-        // is not in the list → current_idx = None → misaligned.
-        live_order.insert(
-            EntityUri::no_parent().id().to_string(),
-            vec![dummy_other_id],
-        );
-
-        // We need the doc_id for the live_order key. Build a controller first
-        // to learn the doc_id, then rebuild with the right live_order.
-        let (_store, _doc_mgr, _ctrl, _ordering_probe, doc_id, _file_path) =
-            build_controller_with_live_order(temp_dir.path(), std::collections::HashMap::new());
-
-        // Build the real controller with a live_order that doesn't include our block.
-        let dummy_other_id2 = "some-other-block-id".to_string();
-        let mut live_order2 = std::collections::HashMap::new();
-        live_order2.insert(doc_id.id().to_string(), vec![dummy_other_id2]);
-        let (_store2, _doc_mgr2, mut controller, ordering, _doc_id2, file_path2) =
-            build_controller_with_live_order(temp_dir.path(), live_order2);
+        let doc_id = EntityUri::block_random();
+        let (store, mut controller, ordering, file_path) =
+            build_recording_controller(temp_dir.path(), doc_id.clone());
 
         controller.initialize().await.expect("initialize");
-        tokio::fs::write(&file_path2, single_block_org)
+        tokio::fs::write(&file_path, single_block_org)
             .await
             .unwrap();
         // Canonicalize after writing (macOS: /var → /private/var symlink).
-        let canonical_path2 = file_path2.canonicalize().expect("canonicalize file_path2");
+        let canonical_path = file_path.canonicalize().expect("canonicalize file_path");
         controller
-            .on_file_changed(&canonical_path2)
+            .on_file_changed(&canonical_path)
             .await
             .expect("on_file_changed");
 
-        let place_calls = ordering.calls.lock().unwrap().clone();
+        let stored_blocks = store.get_all_blocks(doc_id.as_str());
+        assert_eq!(stored_blocks.len(), 1, "one block ingested");
+        let place_all_calls = ordering.place_all_calls.lock().unwrap().clone();
         assert_eq!(
-            place_calls.len(),
-            1,
-            "exactly one place() call expected for the misaligned block; got {place_calls:?}"
+            place_all_calls,
+            vec![(doc_id, vec![stored_blocks[0].id.clone()])],
+            "exactly one total-order hand-off expected for the new block"
         );
     }
 }
@@ -2367,18 +2453,14 @@ mod initial_scan_batched_barrier_tests {
     impl BlockOrdering for ScanOrderingStub {
         async fn place(
             &self,
-            _uri: &EntityUri,
-            _parent_id: &EntityUri,
-            _after_id: Option<&EntityUri>,
+            _: &EntityUri,
+            _: &EntityUri,
+            _: Option<&EntityUri>,
         ) -> BlockOrderingResult<()> {
             Ok(())
         }
 
-        async fn place_all(
-            &self,
-            _parent_id: &EntityUri,
-            _ordered_ids: &[EntityUri],
-        ) -> BlockOrderingResult<()> {
+        async fn place_all(&self, _: &EntityUri, _: &[EntityUri]) -> BlockOrderingResult<()> {
             Ok(())
         }
 
@@ -2396,19 +2478,14 @@ mod initial_scan_batched_barrier_tests {
         }
 
         async fn children(&self, parent_id: &EntityUri) -> BlockOrderingResult<Vec<EntityUri>> {
-            Ok(self
-                .store
-                .get_all_blocks(parent_id.as_str())
-                .into_iter()
-                .map(|b| b.id)
-                .collect())
+            Ok(self.store.children_of(parent_id))
         }
 
         async fn update_in_tree(
             &self,
             params: holon_api::StorageEntity,
         ) -> BlockOrderingResult<()> {
-            self.store.apply_upsert(block_from_params(&params));
+            self.store.upsert_from_params(&params);
             Ok(())
         }
 

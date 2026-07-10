@@ -7,3 +7,6 @@
 cc 13ea659cb50745853b9ba32f2eea3f9701f322ab0e20e20708aa958f0fa0e586 # shrinks to variant = 0, mutation = ReplaceTitle { headline_idx: 0, new_title: "aa" }
 cc 373b5b31082483e6e926c2d202bf518321b64b675dfa86416e6583ebc9e575b2 # shrinks to variant = 0, mutation = SetTitle("AA"), target_idx = Index(0)
 cc 978a0a0686342e72d091dc5f7b4b4e21ceba68dfbca054670fcde50cdca1d1fe # shrinks to variant = 0, mutation = ReplaceTitle { headline_idx: 0, new_title: "aa" }, path_segments = ["a", "A"], inject_id_directive = true, pre_seed_doc = false
+cc 624a312453d79bc6e6518733ab107bd0f8e0a82b75bdc493bf8326798797eab6 # shrinks to variant = 0, mutation = ReplaceTitle { headline_idx: 0, new_title: "Aa" }, path_segments = ["A"], inject_id_directive = false, pre_seed_doc = false
+cc 77e10bd706d75747e9102f5b27a2f9cbbe29ce86e256a667ec70f5fe247105b1 # shrinks to variant = 1, mutation = ReplaceTitle { headline_idx: 0, new_title: "0a" }, path_segments = ["A"], inject_id_directive = false, pre_seed_doc = false
+cc dfb504aa4814339ae70b51cb91a9fab375ca2828f8a89ad605112230b0910e50 # shrinks to variant = 0, mutation = AddNewHeadline { id: "6124242b-12af-466f-b0bc-8335199665ae", title: "00" }, path_segments = ["A"], inject_id_directive = false, pre_seed_doc = false

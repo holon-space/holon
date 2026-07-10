@@ -50,10 +50,10 @@ pub fn build_block_params(
     params.insert("updated_at".into(), Value::Integer(now));
 
     // Edge-typed fields — `SqlOperationProvider`'s edge partition routes these
-    // to the `block_tags`/`block_requires` junctions (see
+    // to the `block_tags`/`block_requires`/`advice_suppressed` junctions (see
     // schema_modules.rs::edge_fields). Always emit (even when empty) so an
     // empty Vec correctly clears stale junction rows on update, and so strict
-    // row parsing downstream always sees both columns.
+    // row parsing downstream always sees all three columns.
     let arr: Vec<Value> = block
         .tags
         .iter()
@@ -67,6 +67,13 @@ pub fn build_block_params(
         .map(|r| Value::String(r.to_string()))
         .collect();
     params.insert("requires".into(), Value::Array(arr));
+
+    let arr: Vec<Value> = block
+        .advice_suppressed
+        .iter()
+        .map(|r| Value::String(r.to_string()))
+        .collect();
+    params.insert("advice_suppressed".into(), Value::Array(arr));
 
     if block.content_type == ContentType::Source {
         if let Some(ref lang) = block.source_language {
@@ -137,6 +144,13 @@ pub fn build_block_params(
         // string property would pollute `block.properties` with a stray
         // uppercase `REQUIRES` key that the reference model never has.
         if k.eq_ignore_ascii_case("requires") {
+            continue;
+        }
+        // Same shape for `:ADVICE_SUPPRESSED:` (ADR 0021): typed edge field
+        // already emitted as a `Value::Array` param above (routed to the
+        // `advice_suppressed` junction); the drawer string must not leak into
+        // `block.properties`.
+        if k.eq_ignore_ascii_case("advice_suppressed") {
             continue;
         }
         params.insert(k.into(), Value::String(v));
