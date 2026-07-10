@@ -10,6 +10,7 @@
 //! `advice_rule_{slug}` filtered to the current anchor — a separate concern).
 
 pub mod discovery;
+pub mod holon_rule;
 pub mod lowering;
 pub mod reconcile_plan;
 pub mod rule;

@@ -32,6 +32,7 @@ pub mod link_candidate;
 pub mod link_parser;
 pub mod live_data;
 pub mod operation_engine;
+pub mod pattern;
 pub mod predicate;
 pub mod query_context;
 pub mod query_engine;
@@ -123,6 +124,12 @@ pub use interp_value::{
 
 // Re-export predicate types
 pub use predicate::Predicate;
+
+// Re-export the dual-evaluated Pattern guard AST (ADR 0024 Phase-2 spike)
+pub use pattern::{
+    BuiltinRef, CmpOp, CurrentSchema, FieldRef, Guard, GuardParseError, GuardResult, InMemoryWorld,
+    Operand, PathPattern, PathSegment, Pattern, SchemaAbstraction, Subject, WorldBlock,
+};
 
 // Re-export input types
 pub use input_types::{Key, KeyChord};
