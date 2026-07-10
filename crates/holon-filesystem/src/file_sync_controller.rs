@@ -1935,15 +1935,28 @@ impl FileSyncController {
     /// incremental cache (`doc_blocks`) and updating that cache from `delta`.
     ///
     /// Hot path (content-only upsert of a block already cached with unchanged
-    /// structure): refresh just that block via an authoritative `block_raw`
-    /// point read (`get_block_authoritative`, O(1), no recursive CTE) and
-    /// replace it in place, preserving sibling order. Everything else — cold
-    /// doc, `Remove`, an id not yet cached (structural insert), a `parent_id`
-    /// move, or any `tags` change (H4: a `Page` toggle re-partitions the doc's
-    /// subtree) — reseeds the whole doc via `get_blocks` (authoritative,
-    /// `sort_key, id`-ordered). Structural intent is decided from the
-    /// AUTHORITATIVE row, not the (matview-lagged) feed delta, so a structural
-    /// change the delta didn't yet reflect still reseeds.
+    /// structure AND unchanged sibling position): refresh just that block via
+    /// an authoritative `block_raw` point read (`get_block_authoritative`,
+    /// O(1), no recursive CTE) and replace it in place, preserving sibling
+    /// order. Everything else — cold doc, `Remove`, an id not yet cached
+    /// (structural insert), a `parent_id` move, a `tags` change (H4: a `Page`
+    /// toggle re-partitions the doc's subtree), or a same-parent REORDER
+    /// (sort_key moved among unchanged siblings) — reseeds the whole doc via
+    /// `get_blocks` (authoritative, `sort_key, id`-ordered). Structural intent
+    /// is decided from the AUTHORITATIVE row, not the (matview-lagged) feed
+    /// delta, so a structural change the delta didn't yet reflect still
+    /// reseeds.
+    ///
+    /// The domain `Block` doesn't carry `sort_key` (ADR 0005), so a
+    /// same-parent reorder is invisible to a `parent_id`/`tags` comparison
+    /// alone — a block can change sibling position without either changing.
+    /// Left unguarded, `IndexMap::insert` on an existing key keeps its OLD
+    /// position, so the file would keep rendering the pre-reorder sibling
+    /// order forever even though SQL/live reads already show the new one
+    /// (bug: disk sibling order stale after a same-parent move). The live
+    /// `ordering.children(parent)` read (O(siblings), not O(doc)) is compared
+    /// against the cached sibling order to detect this before trusting the
+    /// cheap path.
     async fn render_with_cache(
         &mut self,
         doc_id: &EntityUri,
@@ -1970,13 +1983,31 @@ impl FileSyncController {
                     .and_then(|c| c.get(&b.id))
                     .expect("warm + present by cheap_incremental_candidate");
                 if auth.parent_id == cached.parent_id && auth.tags == cached.tags {
-                    // Content-only: `IndexMap::insert` on an existing key keeps
-                    // its position, so sibling order is unchanged.
-                    self.doc_blocks
-                        .get_mut(doc_id)
+                    let cached_siblings: Vec<EntityUri> = self
+                        .doc_blocks
+                        .get(doc_id)
                         .expect("warm by cheap_incremental_candidate")
-                        .insert(auth.id.clone(), auth);
-                    return self.render_cached_doc(doc_id, path).await;
+                        .values()
+                        .filter(|blk| blk.parent_id == auth.parent_id)
+                        .map(|blk| blk.id.clone())
+                        .collect();
+                    let live_siblings = self
+                        .ordering
+                        .children(&auth.parent_id)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("ordering.children failed: {e}"))?;
+                    if live_siblings == cached_siblings {
+                        // Content-only, position-unchanged: `IndexMap::insert`
+                        // on an existing key keeps its position, so sibling
+                        // order is unchanged.
+                        self.doc_blocks
+                            .get_mut(doc_id)
+                            .expect("warm by cheap_incremental_candidate")
+                            .insert(auth.id.clone(), auth);
+                        return self.render_cached_doc(doc_id, path).await;
+                    }
+                    // Sibling order moved (a same-parent reorder) — fall
+                    // through to the full reseed below.
                 }
             }
         }
