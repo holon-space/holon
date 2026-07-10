@@ -11,6 +11,22 @@ pub trait Clock: Send + Sync + std::fmt::Debug {
     fn now_millis(&self) -> i64;
 }
 
+/// DI seam for the wall-clock authority the `ClockScheduler` ticks on.
+/// Production boot registers nothing and the engine factory falls back to
+/// [`SystemClock`]; a test wiring registers this newtype holding a controllable
+/// [`TestClock`] so the keystone `AdvanceDay` transition advances time through
+/// the real scheduler path (never a raw `clock`-relation write). A wrapper
+/// newtype (not a bare `Arc<dyn Clock>`) so fluxdi keys on one stable type both
+/// sides name.
+#[derive(Clone)]
+pub struct InjectedClock(pub Arc<dyn Clock>);
+
+impl std::fmt::Debug for InjectedClock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("InjectedClock").field(&self.0).finish()
+    }
+}
+
 /// Production clock: reads the real system time.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemClock;
@@ -95,6 +111,17 @@ impl CalendarDate {
     /// Canonical `YYYY-MM-DD` rendering — the `today` column value.
     pub fn ymd(self) -> String {
         self.0.format("%Y-%m-%d").to_string()
+    }
+
+    /// The calendar date `days` days after this one (negative goes backwards).
+    /// Used by the reference model to advance its `today` in lockstep with a
+    /// clock the SUT moves by whole days (ADR 0024 §6).
+    pub fn add_days(self, days: i64) -> Self {
+        Self(
+            self.0
+                .checked_add_signed(chrono::Duration::days(days))
+                .expect("CalendarDate::add_days out of range"),
+        )
     }
 
     /// Days since the Unix epoch (1970-01-01): a monotone integer temporal

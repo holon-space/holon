@@ -40,6 +40,8 @@ use holon_pbt_core::capabilities::RefBlockTree;
 use holon_pbt_core::capabilities::RefBlockTreeMut;
 use holon_pbt_core::capabilities::RefBoot;
 use holon_pbt_core::capabilities::RefBootMut;
+use holon_pbt_core::capabilities::RefClock;
+use holon_pbt_core::capabilities::RefClockMut;
 use holon_pbt_core::capabilities::RefDocuments;
 use holon_pbt_core::capabilities::RefDocumentsMut;
 use holon_pbt_core::capabilities::RefEditorMirror;
@@ -149,6 +151,23 @@ impl RefLifecycle for ReferenceState {
     }
     fn has_redo_history(&self) -> bool {
         !self.action.redo_stack.is_empty()
+    }
+}
+
+// ─── RefClock (ADR 0024 §6 AdvanceDay) ────────────────────────────────
+
+impl RefClock for ReferenceState {
+    fn today(&self) -> String {
+        self.clock.today.clone()
+    }
+    fn expected_journal_day_count(&self) -> usize {
+        self.clock.visited_days.len()
+    }
+}
+
+impl RefClockMut for ReferenceState {
+    fn advance_day(&mut self, days: i64) {
+        self.clock.advance_day(days);
     }
 }
 
@@ -2158,6 +2177,11 @@ impl holon_pbt_core::composition::CapProvider for ReferenceState {
         // slices: selection ANDs SUT∧ref cap sets, and only a slice supplying the
         // matching SUT advice-matview cap selects it.
         caps.insert(self.clone() as Arc<dyn RefAdvice>);
+        // `RefClock` carries the calendar-day model + predicted journal count the
+        // `AdvanceDay` journal-count invariant reads (ADR 0024 §6). Harmless to
+        // existing slices: selection ANDs SUT∧ref cap sets, and only a slice
+        // supplying the matching `SutJournalCount` selects it.
+        caps.insert(self.clone() as Arc<dyn RefClock>);
         caps.insert(self as Arc<dyn RefGlobalFocus>);
     }
 }

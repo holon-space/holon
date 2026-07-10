@@ -227,6 +227,7 @@ macro_rules! declare_e2e_transitions {
             + ::holon_pbt_core::capabilities::SutMutate
             + ::holon_pbt_core::capabilities::SutSeamMutate
             + ::holon_pbt_core::capabilities::SutBlockCreate
+            + ::holon_pbt_core::capabilities::SutClockAdvance
             + ::holon_pbt_core::capabilities::SutFixtureFs
             + ::holon_pbt_core::capabilities::SutAppLifecycle
             + $crate::pbt::transitions::apply_mutation::SutApplyMutation

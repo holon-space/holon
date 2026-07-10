@@ -79,6 +79,7 @@ pub fn model_chord_click_focus<
     state.open_active_editor(block_id.clone(), content, caret);
 }
 
+mod advance_day;
 pub mod apply_mutation;
 mod arrow_navigate;
 pub mod bulk_external_add;
@@ -131,6 +132,7 @@ mod deliver_block_content;
 mod switch_view_mode;
 mod toggle_drawer;
 
+pub use advance_day::AdvanceDay;
 pub use apply_mutation::ApplyMutation;
 pub use arrow_navigate::ArrowNavigate;
 pub use bulk_external_add::BulkExternalAdd;
@@ -196,6 +198,7 @@ crate::declare_e2e_transitions! {
         // Every variant below MUST have a sibling
         // `transitions/<snake_case_name>.rs` file. Enforced by the
         // unit tests in `arch_tests` below the macro invocation.
+        AdvanceDay(AdvanceDay),
         ApplyMutation(ApplyMutation),
         ArrowNavigate(ArrowNavigate),
         NavigateBack(NavigateBack),
