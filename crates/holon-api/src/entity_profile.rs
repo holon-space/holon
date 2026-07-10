@@ -17,11 +17,17 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use rhai::{Engine as RhaiEngine, Scope};
+use rhai::Engine as RhaiEngine;
+use rhai::Scope;
 
+use crate::CompiledExpr;
+use crate::EntityName;
+use crate::Value;
 use crate::predicate::Predicate;
-use crate::render_types::{OperationDescriptor, RenderExpr, RenderProfile, RenderVariant};
-use crate::{CompiledExpr, EntityName, Value};
+use crate::render_types::OperationDescriptor;
+use crate::render_types::RenderExpr;
+use crate::render_types::RenderProfile;
+use crate::render_types::RenderVariant;
 
 /// A computed field: name + pre-compiled Rhai expression.
 pub type CompiledComputedField = (String, CompiledExpr);
@@ -97,7 +103,8 @@ impl EntityProfile {
     }
 
     /// Resolve profile AND return computed field values.
-    /// Single Rhai evaluation pass — use this when you need computed values in row data.
+    /// Single Rhai evaluation pass — use this when you need computed values in
+    /// row data.
     pub fn resolve_with_computed(
         &self,
         row: &HashMap<String, Value>,
@@ -153,7 +160,8 @@ impl EntityProfile {
         scope: &mut Scope<'_>,
     ) -> Option<Arc<StoredProfile>> {
         // Variants are sorted by priority desc.
-        // First match wins — conditionless variants (empty condition_source) always match.
+        // First match wins — conditionless variants (empty condition_source) always
+        // match.
         for variant in &self.variants {
             if variant.condition_source.is_empty()
                 || eval_bool_source(engine, &variant.condition_source, scope)
@@ -295,6 +303,32 @@ pub trait ProfileResolving: Send + Sync {
     ) -> (Arc<RenderProfile>, HashMap<String, Value>) {
         // Default: fall back to single-variant resolution
         self.resolve_with_computed(row)
+    }
+
+    /// Resolve a row that the caller DECLARES must be entity-shaped.
+    ///
+    /// This is the CONTRACT seam (Martin ruling 2026-07-11). Most render paths
+    /// accept either row shape and call [`Self::resolve_with_computed`], where
+    /// a value row (no entity `id`) is a legitimate display case rendered
+    /// plainly. But an entity TEMPLATE / entity-id-dependent widget (e.g.
+    /// click-to-open the entity) genuinely REQUIRES an entity row: handing
+    /// it a value row is a contract violation, not a display case. Such
+    /// callers route through this method, which returns a loud `Err`
+    /// instead of silently rendering a value row — the fail-loud path for a
+    /// declared expectation.
+    fn resolve_entity_required(
+        &self,
+        row: &HashMap<String, Value>,
+    ) -> anyhow::Result<(Arc<RenderProfile>, HashMap<String, Value>)> {
+        if crate::RowIdentity::of_row(row).is_value() {
+            anyhow::bail!(
+                "widget declared it requires an ENTITY row but received a VALUE row (no \
+                 entity-shaped `id`): {row:?}. Entity templates / entity-id click handling cannot \
+                 resolve a synthetic value row — project a real `... AS id` or render this query \
+                 through a value-row-tolerant widget"
+            );
+        }
+        Ok(self.resolve_with_computed(row))
     }
 
     /// Get virtual child config for an entity type, if declared in its profile.
