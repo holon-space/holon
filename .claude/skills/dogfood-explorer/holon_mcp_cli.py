@@ -20,6 +20,12 @@ def _post(url, sid, payload):
     if sid: h["Mcp-Session-Id"] = sid
     r = requests.post(url, headers=h, data=json.dumps(payload), timeout=60)
     r.raise_for_status()
+    # Defense against charset-less servers: `requests` falls back to Latin-1
+    # for a bare `text/event-stream`/`application/json` Content-Type (no
+    # `charset` param), mojibaking every multibyte character in the body.
+    # The MCP server response is always UTF-8; force it explicitly rather
+    # than trusting the (possibly charset-less) header.
+    r.encoding = "utf-8"
     sid = r.headers.get("Mcp-Session-Id", sid)
     body, result = r.text, None
     if body.strip().startswith("{"):
