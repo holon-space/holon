@@ -447,6 +447,35 @@ pub trait RefFocusMut: RefFocus {
     fn close_active_editor(&mut self) {}
 }
 
+// ─── Reference-side: calendar clock (ADR 0024 §6 AdvanceDay) ─────────
+
+/// Reference-side view of the ambient calendar day and the journal-rule
+/// output it predicts. The `AdvanceDay` transition advances the injected fake
+/// clock; the model advances `today` in lockstep and predicts exactly one
+/// journal block per distinct day the clock has visited (the boot day plus
+/// every advanced-to day), idempotent under same-day re-ticks. `#[capmap_adapter]`
+/// hosts the read side on the ref `CapMap` so a journal-count invariant can read
+/// it; the mutation is a plain `RefClockMut` (mutations are not capmap-hosted —
+/// `apply_to_ref` drives the concrete `ReferenceState`).
+#[holon_macros::capmap_adapter]
+pub trait RefClock {
+    /// The model's current local calendar day, `YYYY-MM-DD`.
+    fn today(&self) -> String;
+
+    /// How many distinct journal day-blocks the rule should have produced so
+    /// far: the boot day plus every distinct day the clock has advanced to.
+    fn expected_journal_day_count(&self) -> usize;
+}
+
+/// Mutating half of [`RefClock`] — advancing the model's calendar day. Not
+/// capmap-hosted (like `RefBlockTreeMut`): `apply_to_ref` mutates the concrete
+/// `ReferenceState`.
+pub trait RefClockMut: RefClock {
+    /// Advance the model day by `days` (`0` = same-day re-tick, which the
+    /// deterministic-id rule makes a no-op) and record the new distinct day.
+    fn advance_day(&mut self, days: i64);
+}
+
 // ─── Reference-side: Lifecycle (admin gates) ─────────────────────────
 
 /// Setup/lifecycle predicates that wide-PBT transitions gate on.
@@ -2373,6 +2402,20 @@ pub trait SutBlockCreate {
         content: &str,
         id: Option<&EntityUri>,
     );
+}
+
+/// SUT capability: advance the injected fake wall clock and let the production
+/// `ClockScheduler` propagate the new day through its own reconcile path — the
+/// keystone `AdvanceDay` transition's driver (ADR 0024 §6). NEVER a raw
+/// `clock`-relation UPDATE behind the scheduler's back (WP1's clock-injection
+/// race): the impl advances a `TestClock` the scheduler already reads via DI,
+/// then invokes the scheduler's own `reconcile_clock`, so the day-rollover CDC
+/// re-fires the journal rule exactly as a real day rollover would. Hosted only
+/// where a controllable clock was injected (the frontend arm), so `AdvanceDay`
+/// auto-narrows to those configs. Returns the new local `YYYY-MM-DD` date.
+#[holon_macros::capmap_adapter]
+pub trait SutClockAdvance {
+    async fn advance_clock_days(&self, days: i64) -> String;
 }
 
 /// SUT capability: app lifecycle for the wide PBT — boot, restart, document

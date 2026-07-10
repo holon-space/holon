@@ -26,12 +26,12 @@ use holon_api::entity_uri::EntityUri;
 use holon_api::{ContentType, EdgeFieldUpdate, Region, SourceLanguage};
 use holon_pbt_core::capabilities::{
     AdviceExpectation, CapCursor, CapRegion, RefAdvice, RefApplyMutationMut, RefBackend,
-    RefBlockTree, RefBlockTreeMut, RefBoot, RefBootMut, RefDocuments, RefDocumentsMut,
-    RefEditorMirror, RefEditorMirrorMut, RefFocus, RefFocusMut, RefFocusRoots, RefGlobalFocus,
-    RefLayout, RefLayoutInteract, RefLayoutMutate, RefLifecycle, RefNavHistory, RefNavHistoryMut,
-    RefPeers, RefPeersMut, RefPins, RefPinsMut, RefRenderExpr, RefSqlCardinality, RefTaskState,
-    RefToggle, RefToggleMut, RefViewSelection, RefViewSelectionMut, RefWatch, RefWatchesMut,
-    RefWiring, WatchRow,
+    RefBlockTree, RefBlockTreeMut, RefBoot, RefBootMut, RefClock, RefClockMut, RefDocuments,
+    RefDocumentsMut, RefEditorMirror, RefEditorMirrorMut, RefFocus, RefFocusMut, RefFocusRoots,
+    RefGlobalFocus, RefLayout, RefLayoutInteract, RefLayoutMutate, RefLifecycle, RefNavHistory,
+    RefNavHistoryMut, RefPeers, RefPeersMut, RefPins, RefPinsMut, RefRenderExpr, RefSqlCardinality,
+    RefTaskState, RefToggle, RefToggleMut, RefViewSelection, RefViewSelectionMut, RefWatch,
+    RefWatchesMut, RefWiring, WatchRow,
 };
 
 use crate::pbt::types::MutationApply;
@@ -112,6 +112,23 @@ impl RefLifecycle for ReferenceState {
     }
     fn has_redo_history(&self) -> bool {
         !self.action.redo_stack.is_empty()
+    }
+}
+
+// ─── RefClock (ADR 0024 §6 AdvanceDay) ────────────────────────────────
+
+impl RefClock for ReferenceState {
+    fn today(&self) -> String {
+        self.clock.today.clone()
+    }
+    fn expected_journal_day_count(&self) -> usize {
+        self.clock.visited_days.len()
+    }
+}
+
+impl RefClockMut for ReferenceState {
+    fn advance_day(&mut self, days: i64) {
+        self.clock.advance_day(days);
     }
 }
 
@@ -2113,6 +2130,11 @@ impl holon_pbt_core::composition::CapProvider for ReferenceState {
         // slices: selection ANDs SUT∧ref cap sets, and only a slice supplying the
         // matching SUT advice-matview cap selects it.
         caps.insert(self.clone() as Arc<dyn RefAdvice>);
+        // `RefClock` carries the calendar-day model + predicted journal count the
+        // `AdvanceDay` journal-count invariant reads (ADR 0024 §6). Harmless to
+        // existing slices: selection ANDs SUT∧ref cap sets, and only a slice
+        // supplying the matching `SutJournalCount` selects it.
+        caps.insert(self.clone() as Arc<dyn RefClock>);
         caps.insert(self as Arc<dyn RefGlobalFocus>);
     }
 }

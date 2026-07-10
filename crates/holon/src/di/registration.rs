@@ -123,6 +123,7 @@ async fn create_initialized_engine(
     ui_info: holon_api::UiInfo,
     graph_schema_registry: GraphSchemaRegistry,
     type_registry: &TypeRegistry,
+    clock: Arc<dyn holon_api::Clock>,
 ) -> BackendEngine {
     let backend_guard = backend.read().await;
     let db_handle = backend_guard.handle().clone();
@@ -176,8 +177,8 @@ async fn create_initialized_engine(
     // embedder resolves through this shared path, so spawning it here covers GPUI,
     // iOS, dioxus-web worker, and headless tests. Boot guard below fails loud if the
     // seed did not land. The production wiring uses the real `SystemClock`; the
-    // keystone `AdvanceDay` transition injects a fake clock instead (§6).
-    let clock: Arc<dyn holon_api::Clock> = Arc::new(holon_api::SystemClock);
+    // keystone `AdvanceDay` transition injects a fake clock (via `InjectedClock`,
+    // resolved in the factory below) instead (§6).
     let clock_scheduler = crate::sync::clock_scheduler::spawn_clock_scheduler(
         db_handle.clone(),
         clock,
@@ -504,6 +505,16 @@ pub fn register_core_services_with_backend(
                 let type_registry = inj.resolve::<TypeRegistry>();
                 let graph_schema_registry = build_graph_schema_registry(&type_registry);
 
+                // Clock DI seam (ADR 0024 §6): the `ClockScheduler` ticks on the
+                // injected wall clock. Production registers nothing → real
+                // `SystemClock`; a test wiring registers `InjectedClock` holding a
+                // controllable `TestClock` so `AdvanceDay` advances time through the
+                // scheduler's own reconcile path, never a raw `clock`-relation write.
+                let clock: Arc<dyn holon_api::Clock> = inj
+                    .try_resolve::<holon_api::InjectedClock>()
+                    .map(|c| c.0.clone())
+                    .unwrap_or_else(|_| Arc::new(holon_api::SystemClock));
+
                 Shared::new(
                     create_initialized_engine(
                         backend,
@@ -511,6 +522,7 @@ pub fn register_core_services_with_backend(
                         ui_info,
                         graph_schema_registry,
                         &type_registry,
+                        clock,
                     )
                     .await,
                 )
