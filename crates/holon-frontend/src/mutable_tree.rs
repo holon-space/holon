@@ -600,17 +600,23 @@ fn wrap_tree_item(
     for (k, v) in overrides {
         props.insert(k.clone(), v.clone());
     }
+    // Collapse is DOCUMENT state (Martin ruling 2026-07-11): seed the fold
+    // from the block row's `collapsed` column instead of a hardcoded
+    // "expanded". Stored as SQLite INTEGER 0/1 on the read path
+    // (`turso_value_to_value` never yields Boolean); Boolean accepted for
+    // synthetic rows. Because `MutableTree::update` re-wraps on every CDC
+    // row update, an external `set_field(collapsed)` re-seeds the fresh
+    // `Mutable` from the new row — that is the DB→UI reaction path.
+    let row = widget.entity();
+    let collapsed = match row.get("collapsed") {
+        Some(Value::Integer(i)) => *i != 0,
+        Some(Value::Boolean(b)) => *b,
+        _ => false,
+    };
     ReactiveViewModel {
         children: vec![widget.clone()],
-        data: futures_signals::signal::Mutable::new(widget.entity()).read_only(),
-        // Per-instance collapse state. `true = expanded` (default — children
-        // visible). Two `tree_item`s wrapping the same widget id get
-        // independent `Mutable`s, so collapsing one doesn't collapse the
-        // other. Preserved across structural rebuilds via
-        // `with_update`'s `expanded: self.expanded.clone()` chain — the
-        // `Mutable` handle is itself an `Arc` so the cell survives even
-        // when the wrapping `ReactiveViewModel` is replaced.
-        expanded: Some(futures_signals::signal::Mutable::new(true)),
+        data: futures_signals::signal::Mutable::new(row).read_only(),
+        expanded: Some(futures_signals::signal::Mutable::new(!collapsed)),
         ..ReactiveViewModel::from_widget("tree_item", props)
     }
 }
@@ -648,6 +654,61 @@ mod tests {
 
         assert_eq!(tree.flat_ids(), vec![eu("a"), eu("b")]);
         assert_eq!(flat.lock_ref().len(), 2);
+    }
+
+    /// Widget whose entity row carries a `collapsed` column, as the block
+    /// matview pipeline delivers it (SQLite INTEGER 0/1 on the read path).
+    fn widget_with_collapsed(name: &str, id: &str, collapsed: i64) -> Arc<ReactiveViewModel> {
+        let mut row: holon_api::widget_spec::DataRow = HashMap::new();
+        row.insert("id".to_string(), Value::String(format!("block:{id}")));
+        row.insert("collapsed".to_string(), Value::Integer(collapsed));
+        Arc::new(ReactiveViewModel::text(name).with_entity(Arc::new(row)))
+    }
+
+    /// Collapse is document state: `wrap_tree_item` seeds the fold gate from
+    /// the row's `collapsed` column (so `set_field collapsed=1` — external
+    /// device, undo, MCP — folds the outline on the CDC re-wrap), instead of
+    /// hardcoding "expanded".
+    #[test]
+    fn tree_item_expanded_seeds_from_row_collapsed() {
+        let (mut tree, flat) = make_tree();
+        tree.insert(
+            eu("folded"),
+            None,
+            "0.0".into(),
+            widget_with_collapsed("Folded", "folded", 1),
+            HashMap::new(),
+        );
+        tree.insert(
+            eu("open"),
+            None,
+            "1.0".into(),
+            widget_with_collapsed("Open", "open", 0),
+            HashMap::new(),
+        );
+
+        let items = flat.lock_ref();
+        let folded = items[0].expanded.as_ref().expect("tree_item has gate");
+        let open = items[1].expanded.as_ref().expect("tree_item has gate");
+        assert!(!folded.get(), "collapsed=1 row must render folded");
+        assert!(open.get(), "collapsed=0 row must render expanded");
+        drop(items);
+
+        // A CDC row update flipping `collapsed` re-wraps with the new value —
+        // the DB→UI reaction path for an external `set_field(collapsed)`.
+        tree.update(
+            &eu("open"),
+            None,
+            "1.0".into(),
+            widget_with_collapsed("Open", "open", 1),
+            HashMap::new(),
+        );
+        let items = flat.lock_ref();
+        let now_folded = items[1].expanded.as_ref().expect("tree_item has gate");
+        assert!(
+            !now_folded.get(),
+            "external collapsed=1 update must fold the row"
+        );
     }
 
     #[test]
