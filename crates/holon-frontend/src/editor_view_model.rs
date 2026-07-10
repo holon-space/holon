@@ -308,6 +308,35 @@ impl EditorViewModel {
         }
     }
 
+    /// Enter in a creation slot (`RowOrigin::CreationPlaceholder` id): commit
+    /// the typed text as the `{entity}.create` intent and re-baseline the slot
+    /// to EMPTY. Enter in a slot must ONLY create — the slot has no real block,
+    /// so no structural op may be chained after it (see
+    /// [`structural_block_action`]'s placeholder assert).
+    ///
+    /// The re-baseline matters: `pending_commit_intent` re-baselines change
+    /// tracking to the COMMITTED text (correct for a real block, whose editor
+    /// keeps showing it), but the slot's editor is cleared back to the
+    /// placeholder after the commit, so its baseline must return to `""` —
+    /// otherwise retyping the identical text would diff as "unchanged" and
+    /// silently create nothing.
+    pub fn commit_creation_slot(&mut self, live_text: &str) -> Option<OperationIntent> {
+        assert!(
+            self.handler.context_id().is_some_and(
+                |id| crate::row_origin::RowOrigin::from_id(id).is_creation_placeholder()
+            ),
+            "commit_creation_slot called on a non-placeholder editor (id {:?})",
+            self.handler.context_id()
+        );
+        let intent = self.pending_commit_intent(live_text)?;
+        let rebaseline = self.pending_commit_intent("");
+        assert!(
+            rebaseline.is_none(),
+            "re-baselining a creation slot to empty must not produce an intent"
+        );
+        Some(intent)
+    }
+
     /// Called when a navigation key is pressed (Up/Down/Enter/Escape).
     ///
     /// If the popup is active, the key is routed to the popup.
@@ -480,6 +509,16 @@ pub fn structural_block_action(
     target_id: &str,
     cursor_byte: usize,
 ) -> Option<OperationIntent> {
+    // A creation slot (`block:__virtual:<parent>`) has no real block —
+    // dispatching split/join/indent/outdent against it can only fail
+    // ("Block not found"). Enter there must route to
+    // `EditorViewModel::commit_creation_slot`; reaching this table with a
+    // placeholder id is a frontend routing bug, not user input.
+    assert!(
+        !crate::row_origin::RowOrigin::from_id(target_id).is_creation_placeholder(),
+        "structural {key:?} dispatched against creation-slot id {target_id:?} — virtual slots \
+         have no real block; route Enter to commit_creation_slot instead"
+    );
     let intent = |op: &str, position: Option<i64>| {
         let mut params = HashMap::new();
         params.insert("id".to_string(), Value::String(target_id.to_string()));
@@ -861,5 +900,67 @@ mod tests {
         let marks = vec![MarkSpan::new(0, 5, InlineMark::Bold)];
         let active = selection_marks(&marks, 5..5);
         assert!(active.contains(&InlineMark::Bold));
+    }
+
+    fn slot_vm(slot_id: &str) -> EditorViewModel {
+        let context_params =
+            HashMap::from([("id".to_string(), Value::String(slot_id.to_string()))]);
+        EditorViewModel::new(
+            Vec::new(),
+            Vec::new(),
+            context_params,
+            "content".to_string(),
+            String::new(),
+        )
+    }
+
+    /// Enter in the creation slot dispatches exactly ONE `block.create` — the
+    /// dogfood 2026-07-10 defect chained a `split_block` on the virtual id
+    /// after the create ("split_block failed: Block not found").
+    #[test]
+    fn creation_slot_commit_yields_single_create_intent() {
+        let slot_id = "block:__virtual:page-1";
+        let mut vm = slot_vm(slot_id);
+        let intent = vm
+            .commit_creation_slot("hello")
+            .expect("typed slot text must commit as a create");
+        assert_eq!(intent.op_name, "create");
+        assert_eq!(
+            intent.params["parent_id"],
+            Value::String("block:page-1".into())
+        );
+        assert_eq!(intent.params["content"], Value::String("hello".into()));
+    }
+
+    /// After the commit the slot editor is cleared back to the placeholder, so
+    /// its change-tracking baseline must be empty again: retyping the IDENTICAL
+    /// text must create a second block, and an empty slot must never create.
+    #[test]
+    fn creation_slot_commit_rebaselines_to_empty() {
+        let mut vm = slot_vm("block:__virtual:page-1");
+        vm.commit_creation_slot("hello").expect("first create");
+        assert!(
+            vm.commit_creation_slot("").is_none(),
+            "empty slot must not create"
+        );
+        let again = vm
+            .commit_creation_slot("hello")
+            .expect("identical retype after clear must create AGAIN");
+        assert_eq!(again.op_name, "create");
+    }
+
+    #[test]
+    #[should_panic(expected = "non-placeholder editor")]
+    fn creation_slot_commit_rejects_real_block_ids() {
+        slot_vm("block:real-1").commit_creation_slot("hello");
+    }
+
+    /// A structural op on the virtual slot id is a frontend routing bug — the
+    /// slot has no real block to split/join/indent. Fail loud, not
+    /// "split_block failed: Block not found" downstream.
+    #[test]
+    #[should_panic(expected = "creation-slot id")]
+    fn structural_action_panics_on_creation_slot_id() {
+        structural_block_action(EditorKey::Enter, "block:__virtual:page-1", 0);
     }
 }
