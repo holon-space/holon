@@ -1592,7 +1592,14 @@ impl HolonMcpServer {
     }
 }
 
-#[tool_router(router = tool_router_ui, vis = "pub(crate)")]
+/// Debug-only live-inspection tools, isolated in their own `#[tool_router]`
+/// impl so the whole router (methods + macro-generated registration) compiles
+/// out together in release — rmcp's `#[tool_router]` does not honour a
+/// per-method `#[cfg]`, so a gated tool inside a shared router leaves dangling
+/// `*_tool_attr` references and breaks the release build (same pattern as
+/// `tool_router_reset` above).
+#[cfg(debug_assertions)]
+#[tool_router(router = tool_router_debug, vis = "pub(crate)")]
 impl HolonMcpServer {
     /// Block-until-quiescent: the MCP-facing twin of the composed PBT's
     /// `converge_projections` combined-fixed-point settle. Waits — capped at
@@ -1603,7 +1610,6 @@ impl HolonMcpServer {
     /// naming the still-moving signal(s) — a non-converged wait is NEVER reported
     /// as success. Reads the swappable `live_debug` handles, so it follows a
     /// `reset_vault` onto the fresh session.
-    #[cfg(debug_assertions)]
     #[tool(
         description = "TEST-ONLY: block until the live session reaches a combined fixed point (Turso CDC + Loro frontier + org idle tick all quiet for one floor), capped at budget_ms (default 30000). Errors naming the still-moving signal(s) if the budget is exhausted."
     )]
@@ -1736,7 +1742,6 @@ impl HolonMcpServer {
     /// flag, lamport height, and per-parent child lists. The block source is the
     /// swappable `block_query_source` — fail loud (no silent SQL substitute) if
     /// it is unwired. Follows a `reset_vault` onto the fresh session.
-    #[cfg(debug_assertions)]
     #[tool(
         description = "TEST-ONLY: snapshot the live CDC-mirrored blocks (LiveData, not matview SQL), focus-roots, and Loro tree state (had_errors, lamport_height, per-parent children). Errors if no block_query_source is wired."
     )]
@@ -1826,7 +1831,10 @@ impl HolonMcpServer {
             result.to_string(),
         )]))
     }
+}
 
+#[tool_router(router = tool_router_ui, vis = "pub(crate)")]
+impl HolonMcpServer {
     #[tool(
         description = "List all loaded Loro documents with their file paths and UUID→path alias mappings. Requires Loro to be enabled."
     )]
