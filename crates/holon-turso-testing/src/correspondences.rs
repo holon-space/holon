@@ -23,7 +23,7 @@
 //! [`CapMap`] only — never the central concrete `ReferenceState`. A guard test
 //! (`tests/no_ref_state_dep.rs`) fails the build if this crate ever reaches for it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
 
@@ -141,12 +141,16 @@ fn extract_matview<'a>(
 }
 
 fn compare_matview_fields(sut: &Vec<Block>, ref_: &Vec<Block>) -> Result<(), String> {
-    compare_block_fields("inv-blocks-match-ref/matview", sut, ref_)
+    let label = "inv-blocks-match-ref/matview";
+    check_block_id_set(label, sut, ref_)?;
+    compare_block_fields(label, sut, ref_)
 }
 
 fn compare_block_raw_subset(sut: &Vec<Block>, ref_: &Vec<Block>) -> Result<(), String> {
+    let label = "inv-blocks-match-ref/block_raw";
+    check_block_id_set(label, sut, ref_)?;
     match compare_block_subset(
-        "inv-blocks-match-ref/block_raw",
+        label,
         sut,
         ref_,
         &[BlockFacet::Content, BlockFacet::Properties],
@@ -156,9 +160,86 @@ fn compare_block_raw_subset(sut: &Vec<Block>, ref_: &Vec<Block>) -> Result<(), S
         // `compare_block_subset` never skips; a Skip here would be a harness
         // bug hidden inside a comparator — surface it as a failure.
         InvariantResult::Skipped(reason) => Err(format!(
-            "[inv-blocks-match-ref/block_raw] unexpected Skip from compare_block_subset: {reason}"
+            "[{label}] unexpected Skip from compare_block_subset: {reason}"
         )),
     }
+}
+
+/// The block-id-set half of the `inv-blocks-match-ref/*` SQL-projection arms,
+/// checked as TWO independently-reported, independently-scopable directions
+/// BEFORE the field comparison. Splitting the directions is what makes this
+/// invariant "powerful": a ref-expected id that never landed reads as loud
+/// INGEST DATA LOSS, distinct from a projection carrying an extra id.
+///
+/// The id-set is the same non-seed set both sides already filtered to (the
+/// extractors drop `seed_block_ids`); `normalize_block` never touches `id`, so
+/// comparing raw ids here matches the key space the field comparators use.
+fn check_block_id_set(label: &str, sut: &[Block], ref_: &[Block]) -> Result<(), String> {
+    let sut_ids: BTreeSet<EntityUri> = sut.iter().map(|b| b.id.clone()).collect();
+    let ref_ids: BTreeSet<EntityUri> = ref_.iter().map(|b| b.id.clone()).collect();
+    // MISSING first, then SPURIOUS. The two checks are separate functions on
+    // purpose (requirement of the consolidation ruling): the missing-side one
+    // takes NO filter and never will, so no future scoping can ever weaken the
+    // data-loss direction — see `check_no_missing_ids`.
+    check_no_missing_ids(label, &sut_ids, &ref_ids)?;
+    // The spurious direction alone is filterable. Today `|_| true` admits every
+    // spurious id (no exclusion applied); a future keystone-wiring fork may pass
+    // a real predicate here — see `check_no_spurious_ids`.
+    check_no_spurious_ids(label, &sut_ids, &ref_ids, |_| true)
+}
+
+/// MISSING-in-SUT — the INGEST DATA LOSS direction. Every reference-expected
+/// non-seed block id must be PRESENT in the SUT projection; one that was parsed
+/// but never landed is silent ingest data loss (e.g. a forward
+/// `:REQUIRES:`/`:BLOCKED-BY:` target-FK abort dropping every block from the
+/// offending one onward — dogfood 2026-07-10 P0).
+///
+/// This function takes NO filter, BY DESIGN: the missing direction is
+/// structurally unscopable. There is never a legitimate reason for a
+/// reference-ingested block to be absent from the projection, so — unlike the
+/// spurious direction — no future exclusion may ever be threaded through it.
+fn check_no_missing_ids(
+    label: &str,
+    sut_ids: &BTreeSet<EntityUri>,
+    ref_ids: &BTreeSet<EntityUri>,
+) -> Result<(), String> {
+    let missing: Vec<&EntityUri> = ref_ids.difference(sut_ids).collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "[{label}] INGEST DATA LOSS: {} reference-expected block id(s) were parsed but never \
+         landed in the SUT projection (a forward `:REQUIRES:`/`:BLOCKED-BY:` target-FK abort \
+         silently drops every block from the offending one onward), missing: {:?}",
+        missing.len(),
+        missing.iter().take(10).collect::<Vec<_>>(),
+    ))
+}
+
+/// SPURIOUS-in-SUT — an id present in the projection but absent from the
+/// reference. Keeps the pre-consolidation reporting.
+///
+/// Unlike the missing direction, this one takes a `keep` predicate so a future
+/// keystone-wiring fork (the AdvanceDay capstone) can EXCLUDE rule-produced
+/// blocks — which are legitimately absent from the ref model — from the spurious
+/// set. The exclusion is confined to THIS direction by construction: the missing
+/// side takes no filter, so it is physically impossible to weaken the data-loss
+/// direction the same way. The rule-block exclusion itself is NOT implemented
+/// here — today every caller passes `|_| true`.
+fn check_no_spurious_ids(
+    label: &str,
+    sut_ids: &BTreeSet<EntityUri>,
+    ref_ids: &BTreeSet<EntityUri>,
+    keep: impl Fn(&EntityUri) -> bool,
+) -> Result<(), String> {
+    let spurious: Vec<&EntityUri> = sut_ids.difference(ref_ids).filter(|id| keep(id)).collect();
+    if spurious.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "[{label}] block id set diverges from reference\n  spurious in {label}: {:?}",
+        spurious.iter().take(10).collect::<Vec<_>>(),
+    ))
 }
 
 // ─── Observable: per-block content (the `inv-block-content/*` family) ────────
