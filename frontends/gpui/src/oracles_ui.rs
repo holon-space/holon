@@ -257,14 +257,19 @@ pub fn render_banner(
                 .child("dismiss ✕")
                 .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                     // Latency violations are sticky → clear them. Structural
-                    // violations re-appear on the next runner cycle if the
-                    // data is still broken (loud, not silenceable).
+                    // violations are NOT dismissible (loud, never fake) — so
+                    // reflect the true post-dismissal state (global snapshot)
+                    // rather than blanking the banner: if only latency
+                    // violations were showing it disappears; if structural
+                    // ones remain, the banner stays, honestly.
                     OracleStatus::global().dismiss_latency();
+                    let remaining = OracleStatus::global().snapshot();
                     oracle_state.update(cx, |s, cx| {
-                        s.violations.clear();
+                        s.violations = remaining;
                         cx.emit(NotifyOracleUi);
                         cx.notify();
                     });
+                    cx.stop_propagation();
                 }),
         );
 
