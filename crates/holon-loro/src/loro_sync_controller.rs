@@ -1131,6 +1131,13 @@ fn block_diff_params(old: &SnapshotBlock, new: &SnapshotBlock) -> holon_api::Sto
             },
         );
     }
+    // `collapsed` is a typed Block field: `read_block_from_tree` lifts it out
+    // of the Loro properties map, so the properties diff below can never see
+    // it — compare it explicitly here (in lockstep with `blocks_differ`'s
+    // plain `!=` over the whole Block).
+    if old.collapsed != new.collapsed {
+        params.insert("collapsed".into(), Value::Boolean(new.collapsed));
+    }
     if old_sort_key != new_sort_key {
         params.insert("sort_key".into(), Value::String(new_sort_key.clone()));
     }

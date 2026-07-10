@@ -339,6 +339,13 @@ pub struct Block {
     #[jsonb]
     pub marks: Option<Vec<MarkSpan>>,
 
+    /// Outline fold state: children hidden when `true`. Document state (Martin
+    /// ruling 2026-07-11) — shared, synced, survives restart — NOT per-device
+    /// view state, so it lives on the domain `Block` like any other field and
+    /// round-trips through org/Loro/SQL like `completed`. Backed by the SQL
+    /// `collapsed` column (`BLOCK_RAW_COLUMNS`).
+    pub collapsed: bool,
+
     // --- Timestamps (flattened from BlockMetadata) ---
     /// Unix timestamp (milliseconds) when block was created
     pub created_at: i64,
@@ -362,6 +369,7 @@ impl Default for Block {
             source_name: None,
             properties: HashMap::new(),
             marks: None,
+            collapsed: false,
             created_at: now,
             updated_at: now,
         }
@@ -740,6 +748,26 @@ fn require_i64(row: &crate::StorageEntity, col: &str, id: &EntityUri) -> anyhow:
         .ok_or_else(|| anyhow::anyhow!("block {id}: column '{col}' must be an integer, got {v:?}"))
 }
 
+/// Read a `NOT NULL DEFAULT 0` SQLite boolean column (`collapsed`). Reads
+/// always come back as `Value::Integer` (0/1) — `turso_value_to_value` never
+/// produces `Value::Boolean` on the read path — but `Value::Boolean` is
+/// accepted too since some in-memory / test stores construct rows directly
+/// with it. Absent/Null defaults to `false` (matches the column's own SQL
+/// default) rather than failing loud like `tags`/`requires`: unlike those
+/// edge fields there is no cross-reader COALESCE contract for `collapsed`,
+/// and it is new enough that many synthetic row fixtures across the repo
+/// don't (and needn't) construct it explicitly.
+fn optional_bool(row: &crate::StorageEntity, col: &str, id: &EntityUri) -> anyhow::Result<bool> {
+    match row.get(col) {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Integer(i)) => Ok(*i != 0),
+        Some(Value::Boolean(b)) => Ok(*b),
+        Some(other) => anyhow::bail!(
+            "block {id}: column '{col}' must be an integer (0/1) or boolean, got {other:?}"
+        ),
+    }
+}
+
 /// Strict decode of a projection-guaranteed string-array column
 /// (`tags`/`requires`): every reader COALESCEs these to `'[]'` (matview) or
 /// synthesizes them from the junction tables (block_raw readers), so an
@@ -834,6 +862,7 @@ impl TryFrom<crate::StorageEntity> for Block {
                 "block {id}: column 'properties' must be a JSON object, got {other:?}"
             ),
         };
+        let collapsed = optional_bool(&row, "collapsed", &id)?;
         let created_at = require_i64(&row, "created_at", &id)?;
         let updated_at = require_i64(&row, "updated_at", &id)?;
         let tags = Tags::from(require_string_array(&row, "tags", &id)?);
@@ -882,6 +911,7 @@ impl TryFrom<crate::StorageEntity> for Block {
             source_name,
             properties,
             marks,
+            collapsed,
             created_at,
             updated_at,
         })
@@ -890,8 +920,10 @@ impl TryFrom<crate::StorageEntity> for Block {
 
 /// Metadata associated with a block.
 ///
-/// Note: UI state like `collapsed` is NOT stored here - it's kept locally
-/// in the frontend to avoid cross-user UI churn in collaborative sessions.
+/// Note: `collapsed` is document state (Martin ruling 2026-07-11 — shared,
+/// synced, survives restart, NOT per-device view state) and lives as a real
+/// field on [`Block`] itself, not here — `BlockMetadata` only carries the
+/// timestamps that don't have their own dedicated Block field.
 /// flutter_rust_bridge:non_opaque
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct BlockMetadata {
@@ -997,6 +1029,10 @@ pub struct BlockWire {
     pub properties: HashMap<String, Value>,
     #[serde(default)]
     pub marks: Option<Vec<MarkSpan>>,
+    /// Outline fold state. `#[serde(default)]` so pre-milestone fixtures
+    /// (written before collapse became document state) parse as expanded.
+    #[serde(default)]
+    pub collapsed: bool,
     pub created_at: i64,
     pub updated_at: i64,
     /// Junction-derived edge field, carried explicitly (disclosed legacy
@@ -1022,6 +1058,7 @@ impl From<&Block> for BlockWire {
             source_name: b.source_name.clone(),
             properties: b.properties.clone(),
             marks: b.marks.clone(),
+            collapsed: b.collapsed,
             created_at: b.created_at,
             updated_at: b.updated_at,
             tags: b.tags.to_vec(),
@@ -1045,6 +1082,7 @@ impl From<BlockWire> for Block {
             source_name: w.source_name,
             properties: w.properties,
             marks: w.marks,
+            collapsed: w.collapsed,
             created_at: w.created_at,
             updated_at: w.updated_at,
         }
@@ -1340,6 +1378,7 @@ mod mutation_gap_tests {
                 ("tags", Value::Array(vec![Value::String("a".to_string())])),
                 ("requires", Value::Array(vec![])),
                 ("advice_suppressed", Value::Array(vec![])),
+                ("collapsed", Value::Integer(0)),
             ]
             .into_iter()
             .map(|(k, v)| (std::sync::Arc::<str>::from(k), v))
@@ -1353,7 +1392,29 @@ mod mutation_gap_tests {
         assert!(ok.tags.contains("a"));
         assert!(ok.requires.is_empty());
         assert!(ok.advice_suppressed.is_empty());
+        assert!(!ok.collapsed);
         assert!(ok.parent_id.as_block_id().is_none());
+
+        // `collapsed` is stored as SQLite INTEGER 0/1 (turso_value_to_value
+        // never produces Value::Boolean on read) — a folded row must parse true.
+        let mut folded = base_row();
+        folded.insert(std::sync::Arc::<str>::from("collapsed"), Value::Integer(1));
+        assert!(
+            Block::try_from(folded)
+                .expect("folded row parses")
+                .collapsed
+        );
+
+        // Absent collapsed column defaults to expanded (unlike tags/requires,
+        // there's no cross-reader COALESCE contract for this new scalar
+        // column — see `optional_bool`).
+        let mut no_collapsed = base_row();
+        no_collapsed.remove("collapsed");
+        assert!(
+            !Block::try_from(no_collapsed)
+                .expect("parses without collapsed")
+                .collapsed
+        );
 
         // Absent advice_suppressed column = broken projection, must error.
         let mut no_advice = base_row();

@@ -1,5 +1,11 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use futures_signals::signal::Mutable;
+use holon_api::Value;
+use holon_frontend::OperationIntent;
 use holon_frontend::expand_toggle_id_for;
+use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
 
 use super::prelude::*;
@@ -47,10 +53,39 @@ fn bullet_dot(ctx: &GpuiRenderContext) -> Div {
         )
 }
 
+/// Resolve the row's profile and confirm it carries a `set_field` op,
+/// returning the owning entity name for a typed intent (same pattern as
+/// `board::resolve_row_op_entity`). Logs and returns `None` when the row has
+/// no profile / op — the chevron then folds view-locally only (disclosed
+/// degraded mode for static contexts like the design gallery).
+fn resolve_set_field_entity(
+    services: &Arc<dyn BuilderServices>,
+    row_id: &str,
+) -> Option<holon_api::EntityName> {
+    let mut probe: HashMap<String, Value> = HashMap::new();
+    probe.insert("id".into(), Value::String(row_id.to_string()));
+    let Some(profile) = services.resolve_profile(&probe) else {
+        tracing::warn!(
+            "tree_item chevron: resolve_profile None for row_id={row_id}; collapse will not \
+             persist"
+        );
+        return None;
+    };
+    let Some(op) = profile.operations.iter().find(|o| o.name == "set_field") else {
+        tracing::warn!(
+            "tree_item chevron: set_field op not on profile for row_id={row_id}; collapse will \
+             not persist"
+        );
+        return None;
+    };
+    Some(op.entity_name.clone())
+}
+
 fn collapse_chevron(
     collapsed: bool,
     el_id: String,
     expanded: Mutable<bool>,
+    persist: Option<(Arc<dyn BuilderServices>, String)>,
     ctx: &GpuiRenderContext,
 ) -> gpui::Stateful<Div> {
     let chevron = if collapsed {
@@ -72,7 +107,25 @@ fn collapse_chevron(
         .text_size(px(ctx.style().tree_chevron_font_size))
         .text_color(color)
         .on_mouse_down(gpui::MouseButton::Left, move |_, window, _cx| {
-            expanded.set(!expanded.get());
+            let new_expanded = !expanded.get();
+            expanded.set(new_expanded);
+            // Collapse is document state: persist through the normal op path
+            // (dispatcher → engine) so it is undoable, provenance-tagged
+            // (set_field origin = User) and synced. The local gate flip above
+            // keeps the fold instant; the CDC echo re-wraps the tree_item
+            // with the same value.
+            if let Some((services, row_id)) = &persist {
+                if let Some(entity_name) = resolve_set_field_entity(services, row_id) {
+                    let intent = OperationIntent::set_field(
+                        &entity_name,
+                        "set_field",
+                        row_id,
+                        "collapsed",
+                        Value::Boolean(!new_expanded),
+                    );
+                    services.dispatch_intent(intent);
+                }
+            }
             window.refresh();
         })
         .child(chevron.to_string())
@@ -164,7 +217,10 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
         // `expanded` field — the chevron still renders but click toggles
         // a detached cell. In practice `wrap_tree_item` always sets one.
         let mutable = expanded_handle.unwrap_or_else(|| Mutable::new(true));
-        let chevron_el = collapse_chevron(collapsed, el_id, mutable, ctx);
+        // Persist through set_field(collapsed) when the row is identifiable;
+        // rows without an id (synthetic gallery items) fold view-locally.
+        let persist = id.clone().map(|row_id| (ctx.services.clone(), row_id));
+        let chevron_el = collapse_chevron(collapsed, el_id, mutable, persist, ctx);
         if let Some(target_id) = explicit_target.as_deref() {
             // Register the chevron in the bounds registry under the
             // canonical id so layout-PBT `ToggleCollapse` transitions

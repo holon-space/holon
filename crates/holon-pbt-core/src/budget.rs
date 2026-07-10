@@ -156,5 +156,25 @@ macro_rules! reactive_view_budget {
 }
 reactive_view_budget!(DeliverBlockContent);
 reactive_view_budget!(SwitchViewMode);
-reactive_view_budget!(ToggleCollapse);
 reactive_view_budget!(ToggleDrawer);
+
+// ToggleCollapse is no longer a pure reactive-view flip: collapse is document
+// state (2026-07-11 ruling), so the chevron click also dispatches
+// `set_field(collapsed)` — one block-update's worth of SQL on top of the
+// reactive base.
+impl SqlBudget for ToggleCollapse {
+    fn expected_sql<R: RefSqlCardinality>(&self, state: &R) -> ExpectedSql {
+        let update = expected_sql_for_kind(
+            MutationKind::Update,
+            state.active_watch_count(),
+            state.block_count(),
+            state.document_count(),
+        );
+        ExpectedSql {
+            reads: REACTIVE_BASE + 10 + update.reads,
+            writes: update.writes,
+            ddl: 0,
+            tolerance: docs_tolerance(state) + 5 + update.tolerance,
+        }
+    }
+}
