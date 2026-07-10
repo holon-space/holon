@@ -7,7 +7,18 @@ SELECT
     b.properties,
     query_src.content AS query_source,
     query_src.source_language AS query_language,
-    render_src.content AS render_source
+    render_src.content AS render_source,
+    -- WP3 / C-revised ruling: is this query-source child actually a rule's
+    -- TRIGGER (a sibling of a `holon_rule`/`action` head)? Such a block is
+    -- program machinery — the action watcher is its sole evaluator — and must
+    -- NEVER be compiled into a display matview. `render_entity` fails loud on a
+    -- truthy flag instead of running `query_and_watch` on the trigger.
+    EXISTS (
+        SELECT 1 FROM block_raw rh
+        WHERE rh.parent_id = query_src.parent_id
+            AND rh.content_type = 'source'
+            AND (rh.source_language = 'holon_rule' OR rh.source_language = 'action')
+    ) AS query_src_is_rule_trigger
 -- Read from `block_raw` (the writable base table), not the `block`
 -- matview. None of the projected columns require the matview's
 -- `tags`/`blocked_by` hydration, and reading the matview during a
