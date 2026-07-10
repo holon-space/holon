@@ -42,6 +42,8 @@
 //! `matview` arms (Phase 2).
 
 pub mod component;
+#[cfg(test)]
+mod convergence_pbt;
 pub mod invariants;
 pub mod peer_ops;
 pub mod quiescence;
