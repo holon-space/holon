@@ -66,14 +66,36 @@ impl Clock for TestClock {
     }
 }
 
-/// Temporal granularity of a `clock` relation row. Only `Day` is materialized
-/// today; finer grains stay reserved so the `clock` schema and the scheduler
-/// grow without a stringly `grain` column (parse-don't-validate).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Temporal granularity of a `clock` relation row (ADR 0024 P5; C6). `Day` is
+/// always materialized (always-on, one write/day). `Hour`/`Minute` are finer
+/// grains materialized only while at least one net reads them
+/// (subscription-counted — see `ClockSchedulerHandle::subscribe`), so a net
+/// that never asks for minute resolution never pays for minute-rollover writes.
+///
+/// A parse-don't-validate enum, never a stringly `grain` column: the only way
+/// to name a grain is a variant, and [`Grain::sample`] is the single place that
+/// maps a wall-clock instant to the `(epoch_day, today)` the relation stores.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Grain {
     Day,
-    // Hour,   // reserved
-    // Minute, // reserved
+    Hour,
+    Minute,
+}
+
+/// The two `clock`-relation column values for one grain at one instant: the
+/// monotone integer tick (stored in the `epoch_day` column — a misnomer kept
+/// for day back-compat; for finer grains it holds epoch-hours / epoch-minutes)
+/// and the human label (stored in the `today` column).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrainSample {
+    /// Monotone integer count of grain-units since the Unix epoch, in local
+    /// wall-clock time. Goes backwards on a backwards clock change (DST /
+    /// travel west), which is exactly what lets temporal guards
+    /// re-converge.
+    pub tick: i64,
+    /// Human label of the truncated instant (`YYYY-MM-DD` for day,
+    /// `YYYY-MM-DDThh` for hour, `YYYY-MM-DDThh:mm` for minute).
+    pub label: String,
 }
 
 impl Grain {
@@ -81,6 +103,129 @@ impl Grain {
     pub fn as_str(self) -> &'static str {
         match self {
             Grain::Day => "day",
+            Grain::Hour => "hour",
+            Grain::Minute => "minute",
+        }
+    }
+
+    /// Whole seconds in one grain-unit — the divisor turning epoch-seconds into
+    /// a monotone per-grain tick.
+    fn unit_seconds(self) -> i64 {
+        match self {
+            Grain::Day => 86_400,
+            Grain::Hour => 3_600,
+            Grain::Minute => 60,
+        }
+    }
+
+    /// `chrono` format string for this grain's label (truncates finer fields).
+    fn label_fmt(self) -> &'static str {
+        match self {
+            Grain::Day => "%Y-%m-%d",
+            Grain::Hour => "%Y-%m-%dT%H",
+            Grain::Minute => "%Y-%m-%dT%H:%M",
+        }
+    }
+
+    /// The `(tick, label)` pair for this grain at the injected clock's *local*
+    /// instant. For [`Grain::Day`] `tick` equals [`CalendarDate::epoch_day`]
+    /// and `label` equals [`CalendarDate::ymd`], so the day path is
+    /// byte-for-byte the pre-C6 behaviour.
+    pub fn sample(self, clock: &dyn Clock) -> GrainSample {
+        let dt = chrono::DateTime::from_timestamp_millis(clock.now_millis())
+            .expect("clock now_millis out of DateTime range");
+        let naive = dt.with_timezone(&chrono::Local).naive_local();
+        // Treat the local wall-clock reading as if UTC to get a monotone integer
+        // that ticks at each *local* grain boundary. `div_euclid` floors toward
+        // negative infinity so pre-epoch instants still land in the right bucket.
+        let secs = naive.and_utc().timestamp();
+        GrainSample {
+            tick: secs.div_euclid(self.unit_seconds()),
+            label: naive.format(self.label_fmt()).to_string(),
+        }
+    }
+}
+
+/// A parsed `every(<interval>)` recurrence: `count` units of `grain` (ADR 0024
+/// P5, time-as-data). It carries no engine polling — [`Recurrence::desugar`]
+/// turns it into a read arc on the `clock` relation, so a periodic transition
+/// is an ordinary reactive guard that re-fires when the grain's row updates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Recurrence {
+    /// How many grain-units per period (`every 2 hours` -> 2). Always `>= 1`.
+    pub count: u32,
+    /// The clock grain the recurrence reads.
+    pub grain: Grain,
+}
+
+/// The read-arc desugaring of a [`Recurrence`]: the grain to subscribe plus a
+/// SQL `SELECT` over the `clock` relation that yields exactly one row on the
+/// periods where the recurrence fires (and none otherwise).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecurrenceReadArc {
+    /// The grain whose ticking the recurrence depends on — the caller must hold
+    /// a subscription for it (fine grains do not tick otherwise).
+    pub grain: Grain,
+    /// A `SELECT epoch_day AS tick, today AS label FROM clock WHERE ...`
+    /// yielding a row only on firing periods. Joined into a transition
+    /// guard by the compiler.
+    pub read_arc_sql: String,
+}
+
+impl Recurrence {
+    /// Parse an interval like `1d` / `2h` / `30m` / `day` / `2 hours` /
+    /// `hourly` / `1w` into a [`Recurrence`]. Fails loud on anything else —
+    /// including recurrences coarser than a day (`year` / `month`), which need
+    /// an anniversary predicate the day grain cannot express and are out of
+    /// C6 scope.
+    pub fn parse(s: &str) -> anyhow::Result<Self> {
+        let raw = s.trim();
+        let raw = raw.strip_prefix("every").map(str::trim).unwrap_or(raw);
+        // Split an optional leading integer from the unit word.
+        let (count, unit) = match raw.find(|c: char| c.is_alphabetic()) {
+            Some(0) => (1u32, raw),
+            Some(idx) => {
+                let count: u32 = raw[..idx].trim().parse().with_context(|| {
+                    format!("recurrence count in {s:?} is not a positive integer")
+                })?;
+                (count, raw[idx..].trim())
+            }
+            None => anyhow::bail!("recurrence {s:?} has no time unit (expected day/hour/minute)"),
+        };
+        if count == 0 {
+            anyhow::bail!("recurrence {s:?} has a zero count");
+        }
+        let (grain, multiplier) = match unit.to_ascii_lowercase().as_str() {
+            "d" | "day" | "days" | "daily" => (Grain::Day, 1),
+            "w" | "week" | "weeks" | "weekly" => (Grain::Day, 7),
+            "h" | "hour" | "hours" | "hourly" => (Grain::Hour, 1),
+            "m" | "min" | "mins" | "minute" | "minutes" => (Grain::Minute, 1),
+            "y" | "year" | "years" | "yearly" | "annually" | "month" | "months" | "monthly" => {
+                anyhow::bail!(
+                    "recurrence {s:?} is coarser than a day; year/month need an anniversary \
+                     predicate the clock grain cannot express (C6 supports minute/hour/day/week)"
+                )
+            }
+            other => anyhow::bail!("unknown recurrence unit {other:?} in {s:?}"),
+        };
+        Ok(Recurrence {
+            count: count * multiplier,
+            grain,
+        })
+    }
+
+    /// Desugar to a read arc on the `clock` relation. The `epoch_day % count =
+    /// 0` predicate gates multi-unit periods (`every 2 hours` -> even
+    /// epoch-hours); `count == 1` fires on every boundary.
+    pub fn desugar(self) -> RecurrenceReadArc {
+        RecurrenceReadArc {
+            grain: self.grain,
+            read_arc_sql: format!(
+                "SELECT epoch_day AS tick, today AS label FROM clock WHERE grain = '{}' AND \
+                 epoch_day % {} = 0",
+                self.grain.as_str(),
+                self.count,
+            ),
         }
     }
 }
@@ -198,7 +343,109 @@ mod tests {
     }
 
     #[test]
-    fn grain_day_stringifies() {
+    fn grain_stringifies() {
         assert_eq!(Grain::Day.as_str(), "day");
+        assert_eq!(Grain::Hour.as_str(), "hour");
+        assert_eq!(Grain::Minute.as_str(), "minute");
+    }
+
+    #[test]
+    fn day_sample_matches_calendar_date() {
+        // The C6 grain sampler must reproduce the pre-C6 day values exactly.
+        let millis = chrono::NaiveDate::from_ymd_opt(2026, 7, 11)
+            .unwrap()
+            .and_hms_opt(9, 37, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_millis();
+        let clock = TestClock::new(millis);
+        let s = Grain::Day.sample(&clock);
+        let cal = CalendarDate::from_clock(&clock);
+        assert_eq!(s.label, cal.ymd());
+        assert_eq!(s.tick, cal.epoch_day());
+    }
+
+    #[test]
+    fn hour_and_minute_samples_truncate_and_tick() {
+        // 2026-07-11 09:37:42 UTC (noon-robust across TZ is not needed here: we
+        // compare the sampler against itself under a fixed offset via Local).
+        let base = chrono::NaiveDate::from_ymd_opt(2026, 7, 11)
+            .unwrap()
+            .and_hms_opt(9, 37, 42)
+            .unwrap();
+        let clock = TestClock::new(base.and_utc().timestamp_millis());
+        let hour = Grain::Hour.sample(&clock);
+        let minute = Grain::Minute.sample(&clock);
+        // Labels truncate to their grain (rendered in Local; assert shape+prefix).
+        assert!(hour.label.starts_with("2026-07-11T"), "hour label {hour:?}");
+        assert_eq!(hour.label.len(), "2026-07-11T09".len());
+        assert_eq!(minute.label.len(), "2026-07-11T09:37".len());
+        // One hour later -> tick advances by exactly 1; one minute -> +1.
+        clock.set(
+            (base + chrono::Duration::hours(1))
+                .and_utc()
+                .timestamp_millis(),
+        );
+        assert_eq!(Grain::Hour.sample(&clock).tick, hour.tick + 1);
+        clock.set(
+            (base + chrono::Duration::minutes(1))
+                .and_utc()
+                .timestamp_millis(),
+        );
+        assert_eq!(Grain::Minute.sample(&clock).tick, minute.tick + 1);
+    }
+
+    #[test]
+    fn recurrence_parses_all_supported_forms() {
+        let cases = [
+            ("1d", 1, Grain::Day),
+            ("day", 1, Grain::Day),
+            ("daily", 1, Grain::Day),
+            ("every 3 days", 3, Grain::Day),
+            ("1w", 7, Grain::Day),
+            ("2 weeks", 14, Grain::Day),
+            ("h", 1, Grain::Hour),
+            ("2h", 2, Grain::Hour),
+            ("every 2 hours", 2, Grain::Hour),
+            ("30m", 30, Grain::Minute),
+            ("15 minutes", 15, Grain::Minute),
+        ];
+        for (input, count, grain) in cases {
+            let r = Recurrence::parse(input).unwrap_or_else(|e| panic!("parse {input:?}: {e:#}"));
+            assert_eq!(r, Recurrence { count, grain }, "input {input:?}");
+        }
+    }
+
+    #[test]
+    fn recurrence_rejects_coarse_and_garbage() {
+        for bad in [
+            "year",
+            "every month",
+            "annually",
+            "fortnight",
+            "0 days",
+            "3 blorks",
+            "",
+        ] {
+            assert!(
+                Recurrence::parse(bad).is_err(),
+                "expected {bad:?} to fail loud"
+            );
+        }
+    }
+
+    #[test]
+    fn recurrence_desugars_to_clock_read_arc() {
+        let arc = Recurrence::parse("every 2 hours").unwrap().desugar();
+        assert_eq!(arc.grain, Grain::Hour);
+        assert!(arc.read_arc_sql.contains("grain = 'hour'"), "{arc:?}");
+        assert!(arc.read_arc_sql.contains("epoch_day % 2 = 0"), "{arc:?}");
+        // count == 1 still emits a modulo (always true), so the shape is uniform.
+        let daily = Recurrence::parse("day").unwrap().desugar();
+        assert!(
+            daily.read_arc_sql.contains("epoch_day % 1 = 0"),
+            "{daily:?}"
+        );
+        assert!(daily.read_arc_sql.contains("grain = 'day'"), "{daily:?}");
     }
 }
