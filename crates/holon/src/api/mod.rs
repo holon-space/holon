@@ -31,6 +31,7 @@ pub mod types;
 pub mod backend_engine;
 pub mod block_domain;
 pub mod history_store;
+pub mod holon_rule_watcher;
 pub mod holon_service;
 pub mod loro_ui_watcher;
 pub mod operation_dispatcher;

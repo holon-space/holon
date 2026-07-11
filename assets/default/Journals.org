@@ -10,9 +10,10 @@ sort {-content}
 list(#{sortkey: "-content", item_template: selectable(row(icon("calendar"), spacer(6), text(col("content"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})})})
 #+END_SRC
 ** Journal Auto-Create
-#+BEGIN_SRC holon_sql :id journals::trigger::0
-SELECT today as name FROM clock WHERE grain = 'day'
-#+END_SRC
 #+BEGIN_SRC holon_rule :id journals::action::0
-block.create(#{parent_id: "block:journals", content: col("name")})
+name: daily_journal
+when: 'not block_exists("Journals/{today}")'
+emit:
+  place: journals
+  name: "{today}"
 #+END_SRC

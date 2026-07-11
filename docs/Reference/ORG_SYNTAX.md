@@ -36,6 +36,31 @@ SELECT * FROM blocks
 - Renderer writes `block.id.id()` (path part only)
 - Fallback ID (when no `:id` header arg): `{parent_id}::src::{index}` (e.g., `abc-123::src::0`)
 
+### Rule blocks (`holon_rule`)
+
+A `holon_rule` source block is a self-contained reactive rule (ADR 0024 §7.2):
+its **body is YAML** carrying both the guard and the effect — no separate trigger
+block. This supersedes the legacy query+action *pair* (a `holon_sql` trigger next
+to a Rhai `block.create(...)` action). The default journal-auto-create rule:
+
+```org
+#+BEGIN_SRC holon_rule :id journals::action::0
+name: daily_journal
+when: 'not block_exists("Journals/{today}")'
+emit:
+  place: journals
+  name: "{today}"
+#+END_SRC
+```
+
+- `when:` — a guard string parsed by the dual-evaluated `Pattern` AST
+  (`block_exists`, `has_tag`, `and`/`or`/`not`; `{today}` interpolates the clock).
+- `emit:` — a ratcheted create: `place` (a parent block id root; `journals` →
+  `block:journals`) + `name` (`{today}`-interpolated leaf content).
+- The block is **program-marked** (`is_program`) so it renders as a rule card, not
+  as query content. A malformed body surfaces a loud `RuleStatus::ParseError` on
+  the card. The parser is `holon_advice::holon_rule::parse_holon_rule`.
+
 ### Why bare IDs?
 
 1. **Human readability** — org files are edited in Emacs/vim, scheme prefixes are noise
