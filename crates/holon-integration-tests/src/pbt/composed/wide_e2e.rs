@@ -315,30 +315,50 @@ pub fn journals_trigger_block() -> EntityUri {
 /// table projecting `name` only, so every result row is id-less (value-shaped).
 pub const JOURNALS_TRIGGER_SQL: &str = "SELECT today as name FROM clock WHERE grain = 'day'";
 
-/// `Journals.org` extended with the id-less-aggregate TRIGGER source block,
-/// used as the SUT boot org in place of the bare shell when the oracle carries
-/// the machinery. Matches the packaged asset's `:id`-tagged `holon_sql` src
-/// block so the org round-trip stays faithful.
-pub const JOURNALS_MACHINERY_ORG: &str = "#+ID: journals\n#+BEGIN_SRC holon_sql :id \
-                                          journals::trigger::0\nSELECT today as name FROM clock \
-                                          WHERE grain = 'day'\n#+END_SRC\n";
+/// The headline hosting the trigger source block. The org parser only extracts
+/// source blocks from a HEADLINE's section (`process_headlines` →
+/// `extract_section_content`) — a top-level `#+BEGIN_SRC` under `#+ID:` is
+/// silently ignored — so the machinery needs a heading host, mirroring the
+/// packaged asset's `** Journal Auto-Create`.
+pub fn journals_machinery_host() -> EntityUri {
+    EntityUri::block("journals-machinery")
+}
 
-/// Seed the journals TRIGGER source block into `state` as a NON-seed source
-/// child of the seed `block:journals` page — the reference half that makes the
+/// `Journals.org` extended with the id-less-aggregate TRIGGER source block
+/// (hosted under a pinned-`:ID:` heading — see [`journals_machinery_host`]),
+/// used as the SUT boot org in place of the bare shell when the oracle carries
+/// the machinery.
+pub const JOURNALS_MACHINERY_ORG: &str =
+    "#+ID: journals\n* Journal Auto-Create\n:PROPERTIES:\n:ID: \
+     journals-machinery\n:END:\n#+BEGIN_SRC holon_sql :id journals::trigger::0\nSELECT today as \
+     name FROM clock WHERE grain = 'day'\n#+END_SRC\n";
+
+/// Seed the journals machinery into `state` as NON-seed blocks under the seed
+/// `block:journals` page: the `Journal Auto-Create` heading host + its
+/// `holon_sql` TRIGGER source child — the reference half that makes the
 /// block-comparison invariants expect the machinery in the SUT projection.
 /// Mirrors [`seed_forward_edge_corpus`]. Called by [`wide_e2e_ref_for`] ONLY
 /// for a frontend wiring with the env gate on; [`boot_and_seed_wide`] keys the
-/// org seed on the block being present in the ref.
+/// org seed on the trigger being present in the ref.
 pub fn seed_journals_machinery(state: &mut ReferenceState) {
     let journals = EntityUri::parse("block:journals").expect("journals id");
+    let host = journals_machinery_host();
+    let mut host_block = Block::new_text(host.clone(), journals.clone(), "Journal Auto-Create");
+    host_block.set_sequence(0);
+    state
+        .domain
+        .block_state
+        .blocks
+        .insert(host.clone(), host_block);
+
     let trigger = journals_trigger_block();
     let mut block = Block::new_source(
         trigger.clone(),
-        journals.clone(),
+        host.clone(),
         "holon_sql",
         JOURNALS_TRIGGER_SQL,
     );
-    block.set_sequence(0);
+    block.set_sequence(1);
     state
         .domain
         .block_state
@@ -674,7 +694,7 @@ pub async fn boot_and_seed_wide(
     let tree: BTreeSet<EntityUri> = [ids.parent.clone(), ids.c1.clone(), ids.c2.clone()]
         .into_iter()
         .chain(FORWARD_EDGE_IDS.into_iter().map(EntityUri::block))
-        .chain(std::iter::once(journals_trigger_block()))
+        .chain([journals_machinery_host(), journals_trigger_block()])
         .collect();
     let booted = sut_ids(&caps).await;
     let ref_ids: BTreeSet<EntityUri> = ref_state
