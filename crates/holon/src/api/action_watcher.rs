@@ -54,7 +54,15 @@ pub async fn start_action_watchers(engine: Arc<BackendEngine>) -> Result<()> {
         .context("Failed to subscribe to action discovery matview")?;
 
     let status = engine.rule_status().clone();
-    crate::util::spawn_actor(run_discovery_loop(engine, status, discovery_stream));
+    crate::util::spawn_actor(run_discovery_loop(engine.clone(), status, discovery_stream));
+
+    // Single-block `holon_rule` rules (ADR 0024 §7.2): the unified surface where
+    // one YAML block carries both guard and effect. Spawned alongside the legacy
+    // query+action pair watcher; the two never fire the same block (a single-block
+    // rule has no sibling trigger, which the pair discovery requires).
+    crate::api::holon_rule_watcher::start_holon_rule_watchers(engine)
+        .await
+        .context("Failed to start holon_rule watchers")?;
     Ok(())
 }
 
