@@ -30,6 +30,7 @@ pub mod types;
 
 pub mod backend_engine;
 pub mod block_domain;
+pub mod history_store;
 pub mod holon_service;
 pub mod loro_ui_watcher;
 pub mod operation_dispatcher;
@@ -47,6 +48,8 @@ pub mod undo_persistence;
 // Re-export render engine types for FFI
 pub use backend_engine::BackendEngine;
 pub use block_domain::BlockDomain;
+pub use history_store::DegradedHistoryStore;
+pub use history_store::TursoHistoryStore;
 pub use holon_api::SnapshotBlock;
 // Re-export streaming types from holon-api (moved from streaming module)
 pub use holon_api::{
