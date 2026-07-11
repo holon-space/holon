@@ -108,6 +108,16 @@ impl FileFormatAdapter for OrgFormatAdapter {
             false
         }
     }
+
+    fn check_writeback_lossless(
+        &self,
+        path: &Path,
+        source: &str,
+        rendered: &str,
+        root: &Path,
+    ) -> Result<()> {
+        crate::writeback_guard::ensure_ingest_lossless(path, source, rendered, root)
+    }
 }
 
 #[cfg(test)]
