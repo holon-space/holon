@@ -311,6 +311,9 @@ pub struct HolonMcpServer {
     pub debug: Arc<DebugServices>,
     pub watches: Arc<Mutex<HashMap<String, WatchState>>>,
     pub(crate) tool_router: ToolRouter<HolonMcpServer>,
+    /// Stable identity of this MCP server instance — the agent-session id
+    /// stamped as provenance on every op the agent drives (C2a supervision).
+    session_id: String,
 }
 
 impl HolonMcpServer {
@@ -365,6 +368,7 @@ impl HolonMcpServer {
             debug,
             watches: Arc::new(Mutex::new(HashMap::new())),
             tool_router,
+            session_id: format!("mcp-session:{}", uuid::Uuid::new_v4()),
         }
     }
 
@@ -386,8 +390,20 @@ impl HolonMcpServer {
     /// The shared service layer over the live engine. Cheap: `HolonService` is
     /// a thin `Arc<BackendEngine>` wrapper, rebuilt per call from the live
     /// cell.
+    ///
+    /// The facade carries an [`OpOrigin::Agent`] provenance: this server's
+    /// stable `session_id` plus a fresh per-call `tool_call_id`, so every
+    /// block an agent creates/updates over MCP is stamped for the
+    /// supervision view (C2a). One `service()` call maps to one tool
+    /// invocation, so the minted id is the revert-whole-call handle.
     pub(crate) fn service(&self) -> HolonService {
-        HolonService::new(self.engine())
+        HolonService::new_with_origin(
+            self.engine(),
+            holon_api::OpOrigin::Agent {
+                session_id: self.session_id.clone(),
+                tool_call_id: format!("tool-call:{}", uuid::Uuid::new_v4()),
+            },
+        )
     }
 
     /// The live builder services (cloned from the swappable cell), if present.
