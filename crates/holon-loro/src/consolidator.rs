@@ -101,7 +101,22 @@ impl BlockConsolidator {
             }
             Err(why) => {
                 self.divergences.fetch_add(1, Ordering::SeqCst);
-                tracing::error!("[BlockConsolidator] intent DIVERGENCE: {why}");
+                let detail: Vec<String> = ops
+                    .iter()
+                    .map(|(name, params)| {
+                        let id = params
+                            .get("id")
+                            .and_then(holon_api::Value::as_string)
+                            .unwrap_or("<no-id>");
+                        let mut keys: Vec<&str> = params.keys().map(|k| &**k).collect();
+                        keys.sort_unstable();
+                        format!("{name}:{id}{{{}}}", keys.join(","))
+                    })
+                    .collect();
+                tracing::error!(
+                    "[BlockConsolidator] intent DIVERGENCE: {why} :: ops=[{}]",
+                    detail.join(", ")
+                );
             }
         }
 
