@@ -21,8 +21,6 @@ use tokio_stream::Stream;
 use tracing;
 
 use super::traits::IntoEntity;
-use super::traits::Predicate;
-use super::traits::Queryable;
 use super::traits::Result;
 use super::traits::TryFromEntity;
 use super::traits::TypeDefinition;
@@ -1036,54 +1034,6 @@ where
     }
 }
 
-#[async_trait]
-impl<T> Queryable<T> for QueryableCache<T>
-where
-    T: IntoEntity + TryFromEntity + Send + Sync + 'static,
-{
-    async fn query<P>(&self, predicate: P) -> Result<Vec<T>>
-    where
-        P: Predicate<T> + Send + 'static,
-    {
-        if let Some(sql_pred) = predicate.to_sql() {
-            let type_def = self.type_def.clone();
-            let sql = format!("SELECT * FROM {} WHERE {}", type_def.name, sql_pred.sql);
-
-            let params: Vec<turso::Value> = sql_pred.params.iter().map(value_to_turso).collect();
-
-            let rows = self
-                .db_handle
-                .query_positional(&sql, params)
-                .await
-                .map_err(|e| format!("Failed to execute query: {}", e))?;
-
-            let mut results = Vec::with_capacity(rows.len());
-            for storage_entity in rows {
-                let entity = DynamicEntity {
-                    type_name: type_def.name.clone(),
-                    fields: storage_entity,
-                };
-                let item = T::from_entity(entity).map_err(|e| {
-                    format!(
-                        "[QueryableCache::query] from_entity failed for type {}: {}",
-                        type_def.name, e
-                    )
-                })?;
-                results.push(item);
-            }
-
-            return Ok(results);
-        }
-
-        // Fall back to in-memory filtering if no SQL predicate
-        let all_items = self.get_all().await?;
-        Ok(all_items
-            .into_iter()
-            .filter(|item| predicate.test(item))
-            .collect())
-    }
-}
-
 // Implement ChangeNotifications<StorageEntity> via TursoBackend
 // TODO: Option A - Each QueryableCache filters by table name
 // This is inefficient when multiple caches share the same backend (all receive
@@ -1346,11 +1296,12 @@ mod tests {
     use holon_api::Change;
     use holon_api::ChangeOrigin;
     use holon_api::Value;
+    use holon_api::computation::Computation;
+    use holon_api::predicate::Predicate;
     use tempfile::tempdir;
 
     use super::*;
     use crate::core::traits::FieldSchema;
-    use crate::core::traits::SqlPredicate;
 
     #[derive(Debug, Clone, PartialEq)]
     struct TestTask {
@@ -1392,23 +1343,6 @@ mod tests {
                     FieldSchema::new("priority", "INTEGER"),
                 ],
             )
-        }
-    }
-
-    struct PriorityPredicate {
-        min: i64,
-    }
-
-    impl Predicate<TestTask> for PriorityPredicate {
-        fn test(&self, item: &TestTask) -> bool {
-            item.priority >= self.min
-        }
-
-        fn to_sql(&self) -> Option<SqlPredicate> {
-            Some(SqlPredicate::new(
-                "priority >= ?".to_string(),
-                vec![Value::Integer(self.min)],
-            ))
         }
     }
 
@@ -1549,9 +1483,17 @@ mod tests {
         cache.upsert_to_cache(&task1).await.unwrap();
         cache.upsert_to_cache(&task2).await.unwrap();
 
-        let results = cache.query(PriorityPredicate { min: 5 }).await.unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].title, "High Priority");
+        // The old `Queryable::query(Predicate<T>)` path is gone; the SQL filter is
+        // now produced by `Computation::compile_sql` (disclosed) and fed to the
+        // actually-used `query_raw`.
+        let frag = Computation::Predicate(Predicate::Gte {
+            field: "priority".to_string(),
+            value: Value::Integer(5),
+        })
+        .compile_sql()
+        .expect("Gte lowers to SQL");
+        let rows = cache.query_raw(&frag.sql, frag.params).await.unwrap();
+        assert_eq!(rows.len(), 1);
     }
 
     #[tokio::test]
