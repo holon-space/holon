@@ -818,8 +818,11 @@ fn dispatch_structural_as_commit_point(
 ///   empty — the SplitBlock-at-wrong-position bug). Leave an unseeded caret
 ///   alone.
 ///
-/// `peek_caret_seed` is non-destructive, so applying an armed seed from
-/// both callers is idempotent.
+/// `peek_caret_seed` is non-destructive, but this fn CONSUMES the seed after
+/// applying it (see the tail). The seed is single-use: whichever of the sync
+/// first-mount grab or the async focus-subscription runs first applies it and
+/// clears it; the other sees no seed and leaves the placed caret alone. This is
+/// what stops a later user click from re-applying a stale split/join offset.
 fn grab_focus_and_seed_caret(
     input: &Entity<InputState>,
     window: &mut Window,
@@ -850,6 +853,18 @@ fn grab_focus_and_seed_caret(
             state.set_cursor_position(pos, window, cx);
         }
     });
+    // Single-use: once applied, drop the seed so a LATER user click on this
+    // same block derives its caret from the click position, not the stale
+    // op-follow-up offset. Without this the split/join seed lingered in
+    // `pending_caret_seed` (aged only by a focus MOVE to a different block) and
+    // a re-click after a "failed click elsewhere" re-applied it, yanking the
+    // caret to 0 → typing prepended (BugFunnel 2026-07-11 row 80). Consuming
+    // here (not in the non-destructive `peek`) keeps the sync first-mount grab
+    // and the async focus-subscription idempotent: whichever runs first applies
+    // and clears; the other sees no seed and leaves the placed caret alone.
+    if seed.is_some() {
+        services.consume_caret_seed(row);
+    }
 }
 
 impl EditorView {
