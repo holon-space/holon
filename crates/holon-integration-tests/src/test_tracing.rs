@@ -125,6 +125,30 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ErrorCaptureLayer 
 
 static GLOBAL_COLLECTOR: OnceLock<SpanCollector> = OnceLock::new();
 
+/// The PBT driver thread (the proptest/libtest thread running the harness).
+/// A panic on THIS thread is never "swallowed" — it unwinds straight into the
+/// test runner and fails the run loudly — so the panic hook must NOT capture
+/// it as an observed problem. Capturing it created a feedback loop during
+/// proptest shrinking: the harness's own divergence `assert!` panic (which
+/// Debug-embeds the failing invariant messages) was recorded, the next shrink
+/// iteration's `inv-no-observed-errors` embedded it (re-escaped) in a NEW
+/// divergence panic, and the message doubled every iteration — gigabytes of
+/// backslashes, runaway RSS, and a full disk (2026-07-11).
+static DRIVER_THREAD: std::sync::Mutex<Option<std::thread::ThreadId>> = std::sync::Mutex::new(None);
+
+/// Mark the calling thread as the PBT driver thread — its panics are loud by
+/// construction and excluded from swallowed-panic capture. Call at case init.
+pub fn mark_driver_thread() {
+    *DRIVER_THREAD.lock().expect("DRIVER_THREAD lock") = Some(std::thread::current().id());
+}
+
+fn is_driver_thread() -> bool {
+    DRIVER_THREAD
+        .lock()
+        .map(|g| *g == Some(std::thread::current().id()))
+        .unwrap_or(false)
+}
+
 /// Holds the `tracing-chrome` flush guard for the lifetime of the
 /// process. Dropping it flushes the trace file. We park it in a static
 /// so it lives until process exit — `_log_guard`-style stack guards
@@ -177,6 +201,14 @@ impl SpanCollector {
                 let sink = problems.clone();
                 let prev_hook = std::panic::take_hook();
                 std::panic::set_hook(Box::new(move |info| {
+                    // Driver-thread panics unwind into the test runner and fail
+                    // the run loudly — not swallowed, not captured (see
+                    // `DRIVER_THREAD`; capturing them recursed during shrinking).
+                    if is_driver_thread() {
+                        flush_chrome_trace();
+                        prev_hook(info);
+                        return;
+                    }
                     let message = info
                         .payload()
                         .downcast_ref::<&str>()
@@ -976,6 +1008,43 @@ mod capture_tests {
             got[0].message.contains("captured boom"),
             "message captured: {:?}",
             got[0].message
+        );
+    }
+
+    /// Driver-thread panics are LOUD (they unwind into the test runner), so the
+    /// panic hook must not record them as swallowed problems — capturing them
+    /// recursed during proptest shrinking (each iteration's divergence panic
+    /// re-entered the next iteration's `inv-no-observed-errors` message,
+    /// doubling the escaped text every round). Background-thread panics stay
+    /// captured — that is the invariant's whole point.
+    #[test]
+    fn driver_thread_panics_are_not_captured_but_background_panics_are() {
+        let collector = SpanCollector::global();
+
+        // Background thread panic (unique marker) IS captured.
+        let bg = std::thread::Builder::new()
+            .name("bg-panic-probe".into())
+            .spawn(|| panic!("bg-swallowed-marker-7f3a"))
+            .expect("spawn");
+        assert!(bg.join().is_err());
+
+        // Driver-thread panic (this thread, marked) is NOT captured.
+        mark_driver_thread();
+        let caught = std::panic::catch_unwind(|| panic!("driver-loud-marker-7f3a"));
+        assert!(caught.is_err());
+
+        let problems = collector.captured_problems();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.message.contains("bg-swallowed-marker-7f3a")),
+            "background panic must be captured; got {problems:?}"
+        );
+        assert!(
+            !problems
+                .iter()
+                .any(|p| p.message.contains("driver-loud-marker-7f3a")),
+            "driver-thread panic must NOT be captured; got {problems:?}"
         );
     }
 }

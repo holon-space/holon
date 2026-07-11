@@ -285,6 +285,10 @@ impl<S: ComposedSlice> ComposedSut<S> {
         rt: tokio::runtime::Runtime,
         settle: SettleHook,
     ) -> Self {
+        // Same per-case observability isolation as `init_test` (the windowed
+        // harness constructs the SUT through this entry point instead).
+        crate::test_tracing::mark_driver_thread();
+        crate::test_tracing::SpanCollector::global().reset();
         Self {
             caps,
             handle,
@@ -349,6 +353,15 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
     type Reference = S::Machine;
 
     fn init_test(ref_state: &ReferenceState) -> Self {
+        // Per-case observability isolation: this thread's panics are loud (they
+        // unwind into proptest), so exclude them from swallowed-panic capture,
+        // and clear any problems left over from a previous case/shrink
+        // iteration so `inv-no-observed-errors` only ever sees THIS case's
+        // window. Both halves guard against the shrink-time feedback loop
+        // where the harness's own divergence panic re-entered the next
+        // iteration's failure message (exponential escape blowup, 2026-07-11).
+        crate::test_tracing::mark_driver_thread();
+        crate::test_tracing::SpanCollector::global().reset();
         let rt = if S::MULTI_THREAD {
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
