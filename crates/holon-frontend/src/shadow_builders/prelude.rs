@@ -46,9 +46,16 @@ pub(crate) fn virtual_child_slot_from_arg(
     let uri = holon_api::EntityUri::from_raw(&vp);
     let entity_name = uri.scheme().to_string();
     let config = ba.services.virtual_child_config(&entity_name)?;
+    // `creation_slot: true` opts a widget into the top-level "create a new root
+    // entity" slot for a flat `no_parent` forest (e.g. an editable top-level
+    // page list). Read-only navigation lists (the Pages sidebar) omit it, so
+    // they render no phantom `sentinel:__virtual:no_parent` row (BugFunnel #61).
+    // The main-panel single-root slot does not depend on this flag.
+    let allow_root_creation = ba.args.get_bool("creation_slot").unwrap_or(false);
     Some(crate::reactive_view::VirtualChildSlot {
         defaults: config.defaults,
         parent_id: uri,
+        allow_root_creation,
     })
 }
 
@@ -93,7 +100,11 @@ pub(crate) fn interpret_virtual_child(
     // Bug 2A: parent the creation slot at the query's focus root (resolved from
     // the rendered rows), not the static container `slot.parent_id`. `None`
     // (empty / not-yet-resolvable) → no slot rather than a silent mis-parent.
-    let parent = crate::row_origin::resolve_creation_parent(&ba.ctx.data_rows, &slot.parent_id)?;
+    let parent = crate::row_origin::resolve_creation_parent(
+        &ba.ctx.data_rows,
+        &slot.parent_id,
+        slot.allow_root_creation,
+    )?;
     let row = virtual_child_row(&parent, &slot.defaults);
     let row_ctx = ba.ctx.with_row(row);
     Some((ba.interpret)(template, &row_ctx))

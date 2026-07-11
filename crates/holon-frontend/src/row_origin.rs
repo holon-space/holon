@@ -122,14 +122,21 @@ impl RowOrigin {
 /// - empty / not-yet-resolvable rowset → `None` (the streaming path shows no
 ///   slot rather than silently mis-parenting; the panel's `0..N` query always
 ///   returns its root, so a focused page is never truly empty here);
-/// - a multi-root forest with no single query focus root (e.g. the journal
-///   rule-infra page, whose rule/trigger/query/render blocks form several
-///   disjoint roots) → `None` with a loud `warn!`: no creation slot is offered
-///   rather than silently mis-parenting a new block, and the worker never
-///   panics. This is a legitimate shape, not an impossible one.
+/// - a structurally impossible rowset (several disjoint roots) → `panic!`,
+///   since a hidden wrong-parent is worse than a loud failure.
+///
+/// `allow_root_creation` gates the ONE ambiguous shape — the flat forest of
+/// top-level entities each parented to the `no_parent` sentinel (BugFunnel #61:
+/// the Pages sidebar). A creation slot there would make a NEW TOP-LEVEL PAGE,
+/// which is only wanted for editable list widgets that explicitly opt in via
+/// `creation_slot: true`. A read-only navigation list (the sidebar) leaves it
+/// `false` and gets NO slot, so it no longer renders a phantom
+/// `sentinel:__virtual:no_parent` row. The single-root (main panel focus root)
+/// and flat-container shapes are unaffected — they never needed the opt-in.
 pub fn resolve_creation_parent(
     rows: &[std::sync::Arc<holon_api::widget_spec::DataRow>],
     container: &EntityUri,
+    allow_root_creation: bool,
 ) -> Option<EntityUri> {
     use holon_api::widget_spec::data_row_parent_id;
 
@@ -181,30 +188,25 @@ pub fn resolve_creation_parent(
         many => {
             // Top-level-pages list (e.g. the Pages sidebar `WHERE tag='Page'`):
             // a flat forest whose every root is parented to the `no_parent`
-            // sentinel. The creation slot here makes a NEW TOP-LEVEL PAGE, so
-            // resolve to the sentinel. Any other multi-root shape (roots with
-            // real-but-absent or mixed parents) is a genuinely corrupt rowset.
+            // sentinel. The creation slot here would make a NEW TOP-LEVEL PAGE,
+            // which is only offered when the widget opts in via
+            // `creation_slot: true` (BugFunnel #61). Without opt-in the
+            // read-only navigation sidebar gets NO slot (no phantom row). Any
+            // other multi-root shape (roots with real-but-absent or mixed
+            // parents) is a genuinely corrupt rowset → loud panic regardless.
             let no_parent = EntityUri::no_parent();
             if many.iter().all(|r| {
                 data_row_parent_id(r)
                     .map(|p| p == no_parent)
                     .unwrap_or(false)
             }) {
-                return Some(no_parent);
+                return allow_root_creation.then(|| no_parent.clone());
             }
-            // A genuine multi-root forest with no single query focus root — e.g.
-            // the journal rule-infra page (rule/trigger/query/render blocks).
-            // This is a legal rowset shape, not a corrupt one: there is simply
-            // no unambiguous parent for a new block, so DON'T offer a creation
-            // slot here. Fail loud in the log, degrade visibly (no slot), never
-            // panic the render worker.
-            tracing::warn!(
-                container = %container,
-                root_count = many.len(),
-                "creation slot: multi-root forest with no single query focus root — \
-                 no creation slot offered for this rowset"
-            );
-            None
+            panic!(
+                "creation slot: rowset has {} disjoint root rows (container={container}); cannot \
+                 resolve a single query focus root — malformed query or render spec",
+                many.len()
+            )
         }
     }
 }
@@ -276,8 +278,8 @@ mod tests {
             row("block:c1", Some("block:page")),
             row("block:c2", Some("block:page")),
         ];
-        let parent =
-            resolve_creation_parent(&rows, &uri("block:default-main-panel")).expect("resolvable");
+        let parent = resolve_creation_parent(&rows, &uri("block:default-main-panel"), false)
+            .expect("resolvable");
         assert_eq!(parent.as_str(), "block:page");
     }
 
@@ -286,8 +288,8 @@ mod tests {
     #[test]
     fn empty_focused_page_resolves_to_the_page() {
         let rows = vec![row("block:page", Some("block:root-layout"))];
-        let parent =
-            resolve_creation_parent(&rows, &uri("block:default-main-panel")).expect("resolvable");
+        let parent = resolve_creation_parent(&rows, &uri("block:default-main-panel"), false)
+            .expect("resolvable");
         assert_eq!(parent.as_str(), "block:page");
     }
 
@@ -299,7 +301,8 @@ mod tests {
             row("block:a", Some("block:container")),
             row("block:b", Some("block:container")),
         ];
-        let parent = resolve_creation_parent(&rows, &uri("block:container")).expect("resolvable");
+        let parent =
+            resolve_creation_parent(&rows, &uri("block:container"), false).expect("resolvable");
         assert_eq!(parent.as_str(), "block:container");
     }
 
@@ -308,7 +311,8 @@ mod tests {
     #[test]
     fn flat_single_child_resolves_to_container() {
         let rows = vec![row("block:only", Some("block:container"))];
-        let parent = resolve_creation_parent(&rows, &uri("block:container")).expect("resolvable");
+        let parent =
+            resolve_creation_parent(&rows, &uri("block:container"), false).expect("resolvable");
         assert_eq!(parent.as_str(), "block:container");
     }
 
@@ -316,7 +320,7 @@ mod tests {
     /// mis-parent). On the streaming path this shows no slot until data loads.
     #[test]
     fn empty_rowset_is_unresolvable() {
-        assert!(resolve_creation_parent(&[], &uri("block:container")).is_none());
+        assert!(resolve_creation_parent(&[], &uri("block:container"), false).is_none());
     }
 
     /// An already-appended creation-slot row is ignored (idempotent).
@@ -326,53 +330,53 @@ mod tests {
             row("block:page", Some("block:root-layout")),
             row("block:__virtual:page", Some("block:page")),
         ];
-        let parent =
-            resolve_creation_parent(&rows, &uri("block:default-main-panel")).expect("resolvable");
+        let parent = resolve_creation_parent(&rows, &uri("block:default-main-panel"), false)
+            .expect("resolvable");
         assert_eq!(parent.as_str(), "block:page");
     }
 
     /// The Pages sidebar (`WHERE tag='Page'`) renders a flat forest of all
-    /// top-level pages, each parented to the `no_parent` sentinel. None is a
-    /// child of the container hint → the slot creates a NEW TOP-LEVEL PAGE, so
-    /// it resolves to the sentinel, NOT a panic.
+    /// top-level pages, each parented to the `no_parent` sentinel. This is a
+    /// read-only navigation list that does NOT opt in (`allow_root_creation =
+    /// false`), so it gets NO creation slot — no phantom
+    /// `sentinel:__virtual:no_parent` row (BugFunnel #61).
     #[test]
-    fn top_level_pages_list_resolves_to_no_parent() {
+    fn top_level_pages_list_without_optin_gets_no_slot() {
         let sentinel = EntityUri::no_parent();
         let rows = vec![
             row("block:pageA", Some(sentinel.as_str())),
             row("block:pageB", Some(sentinel.as_str())),
             row("block:pageC", Some(sentinel.as_str())),
         ];
-        let parent = resolve_creation_parent(&rows, &uri("block:journals")).expect("resolvable");
+        assert!(resolve_creation_parent(&rows, &uri("block:journals"), false).is_none());
+    }
+
+    /// An editable top-level-pages list that DOES opt in
+    /// (`creation_slot: true`) resolves the forest-root slot to the `no_parent`
+    /// sentinel — a "create a new top-level page" slot.
+    #[test]
+    fn top_level_pages_list_with_optin_resolves_to_no_parent() {
+        let sentinel = EntityUri::no_parent();
+        let rows = vec![
+            row("block:pageA", Some(sentinel.as_str())),
+            row("block:pageB", Some(sentinel.as_str())),
+            row("block:pageC", Some(sentinel.as_str())),
+        ];
+        let parent =
+            resolve_creation_parent(&rows, &uri("block:journals"), true).expect("resolvable");
         assert_eq!(parent, sentinel);
     }
 
     /// A multi-root rowset whose roots have real-but-absent (dangling) parents
-    /// — NOT the sentinel — is a legal forest shape (e.g. the journal
-    /// rule-infra page). There is no single query focus root, so NO
-    /// creation slot is offered (`None`) rather than a silent wrong-parent
-    /// or a worker panic.
+    /// — NOT the sentinel — is a genuinely corrupt rowset → loud panic, never a
+    /// silent wrong-parent.
     #[test]
-    fn disjoint_roots_offer_no_slot() {
+    #[should_panic(expected = "disjoint root rows")]
+    fn disjoint_roots_panic() {
         let rows = vec![
             row("block:p1", Some("block:outsideA")),
             row("block:p2", Some("block:outsideB")),
         ];
-        assert!(resolve_creation_parent(&rows, &uri("block:default-main-panel")).is_none());
-    }
-
-    /// Regression (dogfood 2026-07-10): navigating to the journal rule-infra
-    /// page renders a forest of 4 disjoint roots (rule/trigger/query/render
-    /// blocks, each parented under distinct absent infra containers). This must
-    /// NOT panic the render worker — it resolves to `None` (no creation slot).
-    #[test]
-    fn rule_infra_page_four_root_forest_offers_no_slot() {
-        let rows = vec![
-            row("block:rule", Some("block:infra-rules")),
-            row("block:trigger", Some("block:infra-triggers")),
-            row("block:query", Some("block:infra-queries")),
-            row("block:render", Some("block:infra-renders")),
-        ];
-        assert!(resolve_creation_parent(&rows, &uri("block:journals-infra")).is_none());
+        let _ = resolve_creation_parent(&rows, &uri("block:default-main-panel"), false);
     }
 }
