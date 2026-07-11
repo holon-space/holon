@@ -629,19 +629,42 @@ impl SchemaModule for LinkSchemaModule {
     }
 
     fn provides(&self) -> Vec<Resource> {
-        vec![Resource::schema("block_link")]
+        vec![
+            Resource::schema("block_links"),
+            Resource::schema("backlinks"),
+        ]
     }
 
     fn requires(&self) -> Vec<Resource> {
-        vec![Resource::schema("block")]
+        vec![Resource::schema("block_raw")]
     }
 
     async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
-        tracing::info!("[LinkSchemaModule] Creating block_link table");
+        tracing::info!("[LinkSchemaModule] Creating block_links junction + backlinks matview");
+        // The pre-increment-2 `block_link` table (LiveData-subscriber-fed,
+        // content-regex extraction) is gone: links now derive from
+        // `block.marks` at the SQL write boundary.
+        db_handle
+            .execute_ddl("DROP TABLE IF EXISTS block_link")
+            .await?;
         for stmt in sql_statements(include_str!("../sql/schema/block_links.sql")) {
             db_handle.execute_ddl(stmt).await?;
         }
-        tracing::info!("[LinkSchemaModule] block_link table created");
+        // backlinks: entity-shaped (carries the source block's `id`) IVM
+        // matview over base tables only (block_links ⋈ block_raw — no
+        // matview-on-matview hazard). One row per resolved link: which block
+        // references `target_id`, with enough of the source block to render a
+        // backlink entry.
+        reconcile_named_view(
+            db_handle,
+            "backlinks",
+            "SELECT bl.resolved_id AS target_id, b.id AS id, b.parent_id AS parent_id, b.content \
+             AS content, b.content_type AS content_type FROM block_links bl JOIN block_raw b ON \
+             b.id = bl.source_block_id WHERE bl.resolved_id IS NOT NULL",
+        )
+        .await
+        .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+        tracing::info!("[LinkSchemaModule] block_links + backlinks ready");
         Ok(())
     }
 
@@ -657,10 +680,10 @@ impl SchemaModule for LinkSchemaModule {
             edge_name: "LINKS_TO".into(),
             source_label: Some("block".into()),
             target_label: None,
-            fk_table: "block_link".into(),
-            fk_column: "target_id".into(),
-            target_table: "block_link".into(),
-            target_id_column: "target_id".into(),
+            fk_table: "block_links".into(),
+            fk_column: "resolved_id".into(),
+            target_table: "block_links".into(),
+            target_id_column: "resolved_id".into(),
         }];
 
         (vec![], edges)

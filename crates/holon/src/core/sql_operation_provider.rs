@@ -880,10 +880,151 @@ impl SqlOperationProvider {
             id.replace('\'', "''")
         ));
 
+        // block_links (links increment 2) has NO FK (soft targets), so clean
+        // up explicitly for every cascaded id: drop the deleted block's own
+        // link rows, and un-resolve inbound links that pointed at it — the
+        // target is gone, those links are dangling again (re-resolvable when
+        // a matching page reappears).
+        let mut edge_statements = Vec::new();
+        if self.entity_name == "block" {
+            for gone in all_ids.iter().chain(std::iter::once(&id.to_string())) {
+                let g = gone.replace('\'', "''");
+                edge_statements.push(format!(
+                    "DELETE FROM block_links WHERE source_block_id = '{g}'"
+                ));
+                edge_statements.push(format!(
+                    "UPDATE block_links SET resolved_id = NULL WHERE resolved_id = '{g}'"
+                ));
+            }
+        }
+
         Ok(PreparedOp {
             row_statements,
-            edge_statements: Vec::new(),
+            edge_statements,
         })
+    }
+
+    // ─── block_links junction (links increment 2) ────────────────────────
+    //
+    // Rows derive from the block's `marks` Link spans at THIS write boundary,
+    // in the same transaction as the block row and the other junctions.
+    // Soft targets: dangling (`resolved_id` NULL) is representable, no FK —
+    // pages are created lazily, never as placeholders.
+
+    /// Statement set replacing `source_id`'s `block_links` rows with the
+    /// links derived from the `marks` param (JSON string; Null = no marks).
+    /// Name-form (`kind='page'`) targets are resolved NOW against existing
+    /// Page-tagged blocks; unresolved targets stay dangling.
+    async fn block_link_statements(
+        &self,
+        source_id: &str,
+        marks_value: &Value,
+    ) -> Result<Vec<String>> {
+        let marks: Vec<holon_api::MarkSpan> = match marks_value {
+            Value::Null => Vec::new(),
+            Value::Json(s) | Value::String(s) => {
+                if s.is_empty() {
+                    Vec::new()
+                } else {
+                    holon_api::marks_from_json(s).map_err(|e| {
+                        format!("block_links: 'marks' param holds invalid JSON {s:?}: {e}")
+                    })?
+                }
+            }
+            other => {
+                return Err(format!(
+                    "block_links: 'marks' param must be a JSON string or Null, got {other:?}"
+                )
+                .into());
+            }
+        };
+        let sid = source_id.replace('\'', "''");
+        let mut stmts = vec![format!(
+            "DELETE FROM block_links WHERE source_block_id = '{sid}'"
+        )];
+        for link in holon_api::derive_block_links(&marks) {
+            let resolved = match &link.resolved {
+                Some(id) => Some(id.as_str().to_string()),
+                None => self.resolve_page_name(&link.target).await?,
+            };
+            let resolved_sql = match resolved {
+                Some(r) => format!("'{}'", r.replace('\'', "''")),
+                None => "NULL".to_string(),
+            };
+            stmts.push(format!(
+                "INSERT OR REPLACE INTO block_links (source_block_id, target, kind, resolved_id) \
+                 VALUES ('{sid}', '{}', '{}', {resolved_sql})",
+                link.target.replace('\'', "''"),
+                link.kind.as_str(),
+            ));
+        }
+        Ok(stmts)
+    }
+
+    /// Resolve a wiki-name target (possibly a `parent/leaf` chain) to an
+    /// existing Page-tagged block. Suffix semantics: the LEAF names the page;
+    /// a preceding segment is a disambiguation HINT preferring candidates
+    /// whose parent block carries that name. Deterministic (ties by id).
+    /// `None` = no matching page yet — the link stays dangling until
+    /// `page_reresolve_statements` fires on a matching Page write.
+    async fn resolve_page_name(&self, target: &str) -> Result<Option<String>> {
+        let mut segs = target.rsplit('/');
+        let leaf = segs.next().unwrap_or(target).trim();
+        if leaf.is_empty() {
+            return Ok(None);
+        }
+        let parent_hint = segs.next().map(|s| s.trim().to_string());
+        let leaf_sql = leaf.replace('\'', "''");
+        let sql = match &parent_hint {
+            Some(hint) => format!(
+                "SELECT b.id FROM block_raw b JOIN block_tags t ON t.block_id = b.id AND t.tag = \
+                 'Page' LEFT JOIN block_raw p ON p.id = b.parent_id WHERE b.content = \
+                 '{leaf_sql}' ORDER BY CASE WHEN p.content = '{}' THEN 0 ELSE 1 END, b.id LIMIT 1",
+                hint.replace('\'', "''"),
+            ),
+            None => format!(
+                "SELECT b.id FROM block_raw b JOIN block_tags t ON t.block_id = b.id AND t.tag = \
+                 'Page' WHERE b.content = '{leaf_sql}' ORDER BY b.id LIMIT 1"
+            ),
+        };
+        let rows = self
+            .db_handle
+            .query(&sql, HashMap::new())
+            .await
+            .map_err(|e| format!("block_links page resolution query failed: {e}"))?;
+        Ok(rows.into_iter().next().and_then(|r| {
+            r.get("id")
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_string())
+        }))
+    }
+
+    /// The dangling→resolved trigger: when a Page-tagged block is written,
+    /// dangling name links it satisfies resolve to it (leaf-suffix match —
+    /// target equal to the page name or a chain ending in `/<name>`). This is
+    /// the cheapest correct re-resolution point: dangling rows are touched
+    /// exactly when a page that could satisfy them appears.
+    fn page_reresolve_statements(id: &str, name: &str) -> Vec<String> {
+        if name.is_empty() {
+            return Vec::new();
+        }
+        let idq = id.replace('\'', "''");
+        let eq = name.replace('\'', "''");
+        let like = name
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+            .replace('\'', "''");
+        vec![format!(
+            "UPDATE block_links SET resolved_id = '{idq}' WHERE resolved_id IS NULL AND kind = \
+             'page' AND (target = '{eq}' OR target LIKE '%/{like}' ESCAPE '\\')"
+        )]
+    }
+
+    /// True when a block-write param set tags the block as a Page.
+    fn params_tag_page(params: &StorageEntity) -> bool {
+        matches!(params.get("tags"), Some(Value::Array(tags))
+            if tags.iter().any(|t| t.as_string() == Some("Page")))
     }
 
     /// Read the current value of `field` for row `id` so an inverse
@@ -1309,6 +1450,21 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     return Err(format!("Failed to execute SQL: {}", msg).into());
                 }
 
+                // block_links junction (links increment 2): a marks write
+                // replaces the source's derived link rows.
+                if field == "marks" && self.entity_name == "block" {
+                    let stmts: Vec<(String, Vec<turso::Value>)> = self
+                        .block_link_statements(id, raw_value)
+                        .await?
+                        .into_iter()
+                        .map(|s| (s, vec![]))
+                        .collect();
+                    self.db_handle
+                        .transaction(stmts)
+                        .await
+                        .map_err(|e| format!("set_field(marks) block_links update failed: {e}"))?;
+                }
+
                 if field == "content" {
                     let verify_sql = format!(
                         "SELECT content FROM {} WHERE id = '{}'",
@@ -1371,6 +1527,21 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     }
                 };
                 let prepared = self.prepare_create(&params);
+                // block_links junction (links increment 2): derived from the
+                // marks param, written in the SAME transaction as the row +
+                // edge junctions. A Page-tagged create also re-resolves
+                // dangling name links it satisfies.
+                let mut link_statements: Vec<String> = Vec::new();
+                if self.entity_name == "block" {
+                    if let Some(marks) = params.get("marks") {
+                        link_statements.extend(self.block_link_statements(&id, marks).await?);
+                    }
+                    if Self::params_tag_page(&params) {
+                        if let Some(content) = params.get("content").and_then(|v| v.as_string()) {
+                            link_statements.extend(Self::page_reresolve_statements(&id, content));
+                        }
+                    }
+                }
                 // Run the create atomically in one transaction. The block parent
                 // FK is DEFERRABLE INITIALLY DEFERRED, so it is checked at COMMIT.
                 // A transaction (unlike an autocommit statement) ROLLS BACK the
@@ -1382,6 +1553,7 @@ impl OriginTaggedWrites for SqlOperationProvider {
                         .row_statements
                         .iter()
                         .chain(&prepared.edge_statements)
+                        .chain(&link_statements)
                         .map(|s| (s.clone(), vec![])),
                 );
                 if let Err(e) = self.db_handle.transaction(stmts).await {
@@ -1508,7 +1680,35 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 Ok(result)
             }
             "update" => {
-                if let Some(prepared) = self.prepare_update(&params).await? {
+                let mut prepared = self.prepare_update(&params).await?;
+                // block_links junction (links increment 2): a marks-carrying
+                // update replaces the source's rows (idempotent DELETE+INSERT
+                // — a same-value rewrite is a net-zero IVM delta); a
+                // Page-tagged update re-resolves dangling links it satisfies.
+                if self.entity_name == "block" {
+                    let id = params
+                        .get("id")
+                        .and_then(|v| v.as_string())
+                        .ok_or_else(|| "Missing 'id' parameter".to_string())?;
+                    let mut link_statements: Vec<String> = Vec::new();
+                    if let Some(marks) = params.get("marks") {
+                        link_statements.extend(self.block_link_statements(id, marks).await?);
+                    }
+                    if Self::params_tag_page(&params) {
+                        if let Some(content) = params.get("content").and_then(|v| v.as_string()) {
+                            link_statements.extend(Self::page_reresolve_statements(id, content));
+                        }
+                    }
+                    if !link_statements.is_empty() {
+                        let mut p = prepared.unwrap_or(PreparedOp {
+                            row_statements: Vec::new(),
+                            edge_statements: Vec::new(),
+                        });
+                        p.edge_statements.extend(link_statements);
+                        prepared = Some(p);
+                    }
+                }
+                if let Some(prepared) = prepared {
                     self.execute_prepared(prepared).await?;
                 }
                 Ok(OperationResult::irreversible(Vec::new()))

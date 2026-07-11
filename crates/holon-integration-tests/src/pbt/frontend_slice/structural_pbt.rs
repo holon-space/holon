@@ -879,6 +879,7 @@ mod teeth {
             "non-vacuity: the org lens must extract a Link mark from {C2_RAW:?}, got {c2_marks:?}"
         );
         assert_eq!(c2_content, "See Linked Page here");
+        let ref_c2_marks = c2_marks.clone();
         {
             let b = oracle
                 .domain
@@ -917,6 +918,66 @@ mod teeth {
             report.failures().is_empty(),
             "org-ingested [[Linked Page]] must survive as block.marks in every store: {:?}",
             report.failures()
+        );
+
+        // Links increment 2 — keystone-machinery consistency arm: the SUT's
+        // block_links junction must equal the links DERIVED FROM THE
+        // REFERENCE's marks (shared oracle: holon_api::derive_block_links).
+        // `Linked Page` names no existing page, so the row is DANGLING
+        // (resolved_id NULL — lazy page creation, no placeholder) and the
+        // backlinks matview stays empty.
+        let expected: Vec<(String, String)> = holon_api::derive_block_links(
+            ref_c2_marks
+                .as_ref()
+                .expect("ref c2 marks asserted Some above"),
+        )
+        .into_iter()
+        .map(|l| (l.target, l.kind.as_str().to_string()))
+        .collect();
+        assert!(
+            !expected.is_empty(),
+            "non-vacuity: ref marks must derive at least one link"
+        );
+        let rows = engine
+            .db_handle()
+            .query(
+                "SELECT target, kind, resolved_id FROM block_links WHERE source_block_id = \
+                 'block:c2' ORDER BY target, kind",
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("block_links query");
+        let actual: Vec<(String, String)> = rows
+            .iter()
+            .map(|r| {
+                assert!(
+                    matches!(r.get("resolved_id"), None | Some(holon_api::Value::Null)),
+                    "no page named 'Linked Page' exists — the link must stay dangling, got {r:?}"
+                );
+                (
+                    r.get("target")
+                        .and_then(|v| v.as_string())
+                        .expect("target")
+                        .to_string(),
+                    r.get("kind")
+                        .and_then(|v| v.as_string())
+                        .expect("kind")
+                        .to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            actual, expected,
+            "SUT block_links must equal the reference-derived link set"
+        );
+        let backlink_rows = engine
+            .db_handle()
+            .query("SELECT id FROM backlinks", std::collections::HashMap::new())
+            .await
+            .expect("backlinks query");
+        assert!(
+            backlink_rows.is_empty(),
+            "dangling links must not surface in the backlinks matview: {backlink_rows:?}"
         );
     }
 

@@ -126,6 +126,13 @@ pub fn mark_from_loro_value(key: &str, value: &loro::LoroValue) -> Option<holon_
                         id: EntityUri::from_raw(&id_str),
                     }
                 }
+                "name" => {
+                    let name = map.get("name").and_then(|v| match v {
+                        loro::LoroValue::String(s) => Some(s.to_string()),
+                        _ => None,
+                    })?;
+                    EntityRef::Name { name }
+                }
                 _ => return None,
             };
             Some(InlineMark::Link { target, label })
@@ -201,9 +208,9 @@ pub fn read_marks_from_text(text: &loro::LoroText) -> Vec<holon_api::MarkSpan> {
 /// For boolean marks (Bold/Italic/.../Sub/Super) the value is `true` — Loro
 /// requires *some* value, and `true` is the canonical "this mark is present"
 /// payload across the spike and the Loro test fixtures. For `Link`, the value
-/// is a `LoroValue::Map` carrying `{ "type": "external"|"internal", "url"|"id":
-/// ..., "label": ... }` so the render layer can reconstruct the full
-/// `EntityRef`+label without going back to `Block.marks`.
+/// is a `LoroValue::Map` carrying `{ "type": "external"|"internal"|"name",
+/// "url"|"id"|"name": ..., "label": ... }` so the render layer can reconstruct
+/// the full `EntityRef`+label without going back to `Block.marks`.
 pub fn mark_to_loro_value(mark: &holon_api::InlineMark) -> loro::LoroValue {
     use holon_api::EntityRef;
     use holon_api::InlineMark;
@@ -227,6 +234,10 @@ pub fn mark_to_loro_value(mark: &holon_api::InlineMark) -> loro::LoroValue {
                 EntityRef::Internal { id } => {
                     map.insert("type".to_string(), loro::LoroValue::from("internal"));
                     map.insert("id".to_string(), loro::LoroValue::from(id.as_str()));
+                }
+                EntityRef::Name { name } => {
+                    map.insert("type".to_string(), loro::LoroValue::from("name"));
+                    map.insert("name".to_string(), loro::LoroValue::from(name.as_str()));
                 }
             }
             loro::LoroValue::from(map)

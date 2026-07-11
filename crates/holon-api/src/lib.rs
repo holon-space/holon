@@ -125,7 +125,8 @@ pub use entity_uri::EntityUri;
 pub use holon_expr::CompiledExpr;
 // Re-export inline-mark types (rich text)
 pub use inline_mark::{
-    EntityRef, InlineMark, MarkSpan, canonicalize_marks, marks_from_json, marks_to_json,
+    DerivedLink, EntityRef, InlineMark, LinkKind, MarkSpan, canonicalize_marks, derive_block_links,
+    marks_from_json, marks_to_json,
 };
 // Re-export input types
 pub use input_types::{Key, KeyChord};

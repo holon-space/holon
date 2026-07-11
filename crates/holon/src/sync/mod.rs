@@ -18,7 +18,6 @@ pub mod turso_block_query_source;
 pub use advice_reconciler::AdviceReconcilerHandle;
 pub use advice_reconciler::spawn_advice_reconciler;
 pub use event_infra_module::EventInfraModule;
-pub use event_infra_module::LinkEventSubscriberHandle;
 // Re-export live_data module and the LiveData type (moved to holon-api earlier)
 pub use holon_api::live_data;
 pub use holon_api::live_data::LiveData;
