@@ -178,11 +178,21 @@ impl Default for ReferenceState {
                 deleted_ids: HashMap::new(),
             },
             Err(_) => {
-                // Use current_thread runtime for fork-safety with proptest
-                // Multi-threaded runtime is fork-unsafe and causes "failed in other process"
-                // errors
+                // MULTI-thread runtime is required here: the harness bridges its
+                // sync proptest body into tokio via `block_in_place(|| handle
+                // .block_on(...))`. `block_in_place` moves the current worker's
+                // other tasks onto sibling workers — on a `new_current_thread`
+                // runtime there ARE no siblings, so the DatabaseActor task the
+                // `block_on` future is waiting on can never be polled and the
+                // test deadlocks (BugFunnel: turso-storage PBT harness deadlock).
+                // This path only runs under the plain `#[test]`
+                // `test_turso_backend_state_machine`, which sets `fork: false`,
+                // so the old "fork-unsafe" concern about a multi-thread runtime
+                // does not apply (the runtime is built inside the test body, not
+                // across a proptest fork).
                 let runtime = Arc::new(
-                    tokio::runtime::Builder::new_current_thread()
+                    tokio::runtime::Builder::new_multi_thread()
+                        .worker_threads(4)
                         .enable_all()
                         .build()
                         .unwrap(),
