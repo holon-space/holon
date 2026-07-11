@@ -82,6 +82,10 @@ fn build_action_engine() -> RhaiEngine {
         "update",
         "delete",
         "cycle_task_state",
+        // Engine-level compound (docs/Proposals/Templating-2026-07-12.md): a
+        // rule effect may instantiate a template subtree. The operation itself
+        // owns deterministic ids + fail-loud binding checks.
+        "instantiate_template",
     ] {
         let op_str = op.to_string();
         engine.register_fn(

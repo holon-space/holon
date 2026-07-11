@@ -2,6 +2,7 @@ pub mod operation_log;
 pub mod queryable_cache;
 pub mod sql_block_operations;
 pub mod sql_operation_provider;
+pub mod template_instantiation;
 pub mod traits;
 
 // Re-export DynamicEntity from holon_api (single source of truth)

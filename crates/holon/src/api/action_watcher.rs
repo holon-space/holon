@@ -466,6 +466,99 @@ mod tests {
         }
     }
 
+    /// Rule-driven template instantiation through the EXISTING watcher
+    /// machinery (docs/Proposals/Templating-2026-07-12.md §6): the clock
+    /// trigger fires `block.instantiate_template`, the operation derives
+    /// deterministic instance ids from `(template_id, context_key)`, so the
+    /// same-day re-fire converges and the rollover day mints a second
+    /// instance. (The ratified ADR 0024 YAML rule grammar is the yaml-rule
+    /// stream's integration point; this proves the effect seam it will call.)
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rule_fired_template_instantiation_converges_per_day() {
+        let engine = block_engine().await;
+        seed_journals_parent(&engine).await;
+
+        // Seed a one-child template.
+        for (id, parent, content, props) in [
+            ("block:day-tpl", None, "{{date}}", Some(("daily", "date"))),
+            (
+                "block:day-tpl-c1",
+                Some("block:day-tpl"),
+                "Agenda for {{date}}",
+                None,
+            ),
+        ] {
+            let mut params = StorageEntity::new();
+            params.insert("id".into(), Value::String(id.to_string()));
+            params.insert("content".into(), Value::String(content.to_string()));
+            if let Some(p) = parent {
+                params.insert("parent_id".into(), Value::String(p.to_string()));
+            }
+            if let Some((name, vars)) = props {
+                params.insert("template".into(), Value::String(name.to_string()));
+                params.insert("template_vars".into(), Value::String(vars.to_string()));
+            }
+            engine
+                .execute_operation(
+                    &EntityName::new("block"),
+                    "create",
+                    params,
+                    holon_api::OpOrigin::User,
+                )
+                .await
+                .unwrap();
+        }
+
+        const TEMPLATE_ACTION: &str = "block.instantiate_template(#{template_id: \"block:day-tpl\", target_parent: \
+             \"block:journals\", context_key: col(\"name\"), bindings: #{date: col(\"name\")}})";
+        let parsed = parse_action_dsl(TEMPLATE_ACTION).unwrap();
+        let entity = EntityName::new(&parsed.entity);
+        let rule = RuleId::new("journals::template::0");
+
+        for _ in 0..2 {
+            fire_action(
+                &engine,
+                engine.rule_status(),
+                &entity,
+                &parsed,
+                &rule,
+                &name_row("2026-07-12"),
+            )
+            .await;
+        }
+        assert_eq!(
+            count_journal_children(&engine).await,
+            1,
+            "same-day re-fire must converge to one instance root"
+        );
+
+        fire_action(
+            &engine,
+            engine.rule_status(),
+            &entity,
+            &parsed,
+            &rule,
+            &name_row("2026-07-13"),
+        )
+        .await;
+        assert_eq!(
+            count_journal_children(&engine).await,
+            2,
+            "day rollover mints the next day's instance"
+        );
+
+        // The instance carries the substituted child.
+        let rows = engine
+            .db_handle()
+            .query(
+                "SELECT content FROM block_raw WHERE content = 'Agenda for 2026-07-12'",
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "child substituted exactly once per day");
+    }
+
     /// The rollover extension end-to-end: the clock-backed journal rule fires
     /// on the initial `Created` row, then re-fires on the day-rollover
     /// `Updated` (rowid-stable UPDATE of the `clock` row) to create the

@@ -91,6 +91,28 @@ pub fn deterministic_block_id(rule: &RuleId, key: &FiringKey, slot: &OutputSlot)
     EntityUri::block(&uuid.to_string())
 }
 
+/// Fixed, checked-in namespace for template-instance block ids. Distinct from
+/// [`HOLON_RULE_NAMESPACE`] so a template instantiation and a plain rule create
+/// can never collide even with pathological inputs.
+pub const HOLON_TEMPLATE_NAMESPACE: Uuid = Uuid::from_u128(0x3d2c1b0a_9e8f_4d7c_b6a5_4f3e2d1c0b9a);
+
+/// Mint the deterministic id for one node of a template instantiation
+/// (ADR 0024 P4 applied to templating): the same `(template, context key,
+/// source node)` triple yields the same block id on every replica and on every
+/// re-fire, so rule-driven instantiation converges by naming discipline. The
+/// `context_key` is the rule's firing key (rule path) or a caller-minted fresh
+/// key (manual path — each manual instantiation is deliberately a new
+/// instance).
+pub fn deterministic_instance_id(
+    template_id: &str,
+    context_key: &str,
+    source_node_id: &str,
+) -> EntityUri {
+    let name = format!("{template_id}\x1f{context_key}\x1f{source_node_id}");
+    let uuid = Uuid::new_v5(&HOLON_TEMPLATE_NAMESPACE, name.as_bytes());
+    EntityUri::block(&uuid.to_string())
+}
+
 /// Typed, deterministic rendering of a value for the firing key. The type tag
 /// prevents `Integer(1)` and `String("1")` from producing the same key; nested
 /// objects are rendered with sorted keys so map iteration order never leaks in.
