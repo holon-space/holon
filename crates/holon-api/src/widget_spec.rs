@@ -198,19 +198,26 @@ pub enum RowIdentity {
 }
 
 impl RowIdentity {
-    /// Classify a row into its identity shape. Uses the SAME authority the
-    /// profile resolver uses ([`crate::row_id`]): a row whose `id` column
-    /// parses to a valid `EntityUri` is entity-shaped; anything else (missing,
-    /// empty, or non-URI `id`) is value-shaped. Keeping this classification in
-    /// one place guarantees the store key and the render profile agree on which
-    /// rows are value rows.
+    /// Classify a row into its identity shape: a row carrying a non-empty
+    /// string `id` column is entity-shaped, keyed through
+    /// [`entity_uri_from_id_str`] — the pipeline's `from_raw` boundary that
+    /// normalizes bare ids like `b` to `block:b`, the SAME normalization the
+    /// `Updated`/`Deleted`/`FieldsChanged` CDC arms apply to their id strings,
+    /// so `Created` and `Updated` agree on the store key. A row with no usable
+    /// `id` is value-shaped, keyed on its content hash. (Deliberately NOT the
+    /// profile resolver's strict [`crate::row_id`] parse: that rejects bare
+    /// ids, which the CDC pipeline legitimately carries.)
     pub fn of_row<K>(row: &HashMap<K, Value>) -> Self
     where
-        K: std::borrow::Borrow<str> + std::hash::Hash + Eq + std::fmt::Debug,
+        K: std::borrow::Borrow<str> + std::hash::Hash + Eq,
     {
-        match crate::row_id(row) {
-            Ok(uri) => RowIdentity::Entity(uri),
-            Err(_) => RowIdentity::Value(RowContentHash::of_row(row)),
+        match row
+            .get("id")
+            .and_then(|v| v.as_string())
+            .filter(|s| !s.is_empty())
+        {
+            Some(id) => RowIdentity::Entity(entity_uri_from_id_str(id)),
+            None => RowIdentity::Value(RowContentHash::of_row(row)),
         }
     }
 
