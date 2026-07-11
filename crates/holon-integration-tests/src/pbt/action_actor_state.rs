@@ -6,7 +6,7 @@
 //! action engine isn't wired — isolating it here lets a reduced wiring drop
 //! the fragment instead of carrying dead state.
 
-use super::reference_state::BlockState;
+use super::block_state::BlockState;
 
 /// Action-engine actor state extracted from `ReferenceState` (ADR 0004 Phase
 /// 4).

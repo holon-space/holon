@@ -15,8 +15,8 @@ use holon_api::EntityName;
 use holon_api::entity_uri::EntityUri;
 use holon_api::render_types::RenderExpr;
 
-use super::reference_state::BlockState;
-use super::reference_state::LayoutBlockInfo;
+use super::block_state::BlockState;
+use super::block_state::LayoutBlockInfo;
 
 /// Tier-1 domain data extracted from `ReferenceState` (ADR 0004 Phase 2).
 ///

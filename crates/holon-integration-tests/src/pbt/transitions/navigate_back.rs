@@ -99,9 +99,9 @@ mod tests {
     use holon_api::Region;
 
     use super::*;
-    use crate::pbt::reference_state::NavigationHistory;
     use crate::pbt::reference_state::ReferenceState;
     use crate::pbt::transitions::E2ETransition;
+    use crate::pbt::ui_types::NavigationHistory;
 
     fn make_state_with_back_history() -> ReferenceState {
         let interp = Arc::new(holon_frontend::render_interpreter::RenderInterpreter::new());
