@@ -1,20 +1,23 @@
 //! Property-based tests for TursoBackend using proptest-state-machine
 //!
-//! This module tests the TursoBackend implementation against an in-memory reference model
-//! to ensure correctness of all StorageBackend operations.
+//! This module tests the TursoBackend implementation against an in-memory
+//! reference model to ensure correctness of all StorageBackend operations.
 //!
 //! ## Coverage
 //!
 //! The PBT suite covers the following operations:
 //! - **Schema Management**: CreateEntity
 //! - **CRUD Operations**: Insert, Update, Delete, Get
-//! - **Query Operations**: Query with all filter types (Eq, In, And, Or, IsNull, IsNotNull)
+//! - **Query Operations**: Query with all filter types (Eq, In, And, Or,
+//!   IsNull, IsNotNull)
 //! - **Dirty Tracking**: MarkDirty, MarkClean, GetDirty
 //! - **Version Management**: SetVersion, GetVersion
 //! - **CDC Operations**: Enable CDC, track changes, verify CDC records
-//! - **Materialized Views**: Create views, verify incremental updates on insert/update/delete
+//! - **Materialized Views**: Create views, verify incremental updates on
+//!   insert/update/delete
 //! - **View Change Notifications**: Create change streams, verify notifications
-//! - **Concurrency**: Parallel write operations targeting same materialized views
+//! - **Concurrency**: Parallel write operations targeting same materialized
+//!   views
 //! - **Transactions**: Explicit BEGIN/COMMIT transaction batches
 //! - **Recursive CTEs**: Materialized views with recursive CTEs and JOINs
 //!
@@ -28,12 +31,14 @@
 //! - Tests CDC integration with base table operations
 //! - Tests materialized view consistency across operations
 //! - Tests view change notification delivery
-//! - **Concurrent operations**: Runs batches of writes in parallel to detect race conditions
+//! - **Concurrent operations**: Runs batches of writes in parallel to detect
+//!   race conditions
 //!
 //! ## Concurrency Testing
 //!
-//! The concurrent tests are designed to detect bugs like the IVM (Incremental View Maintenance)
-//! race condition where multiple concurrent writes to tables with materialized views can cause:
+//! The concurrent tests are designed to detect bugs like the IVM (Incremental
+//! View Maintenance) race condition where multiple concurrent writes to tables
+//! with materialized views can cause:
 //! - B-tree overflow cell ordering violations (panic in debug builds)
 //! - Silent data corruption (in release builds)
 //!
@@ -42,30 +47,42 @@
 //! ## What This Replaces
 //!
 //! These property-based tests replace the following unit tests:
-//! - `filter_building_tests` - All filter types now tested through random query generation
+//! - `filter_building_tests` - All filter types now tested through random query
+//!   generation
 //! - Basic CRUD tests - Covered through random operation sequences
 //! - `cdc_tests` - CDC tracking for insert/update/delete covered by PBT
-//! - `incremental_view_maintenance_tests` - Materialized view updates covered by PBT
+//! - `incremental_view_maintenance_tests` - Materialized view updates covered
+//!   by PBT
 //! - `view_change_stream_tests` - View change notifications covered by PBT
 //!
 //! ## What's NOT Covered
 //!
-//! The following are intentionally NOT covered by PBT and should have targeted unit tests:
+//! The following are intentionally NOT covered by PBT and should have targeted
+//! unit tests:
 //! - SQL injection prevention (has dedicated unit tests)
 //! - Value conversion edge cases (has dedicated property tests)
-//! - Complex CDC-specific scenarios like batch operations and conflict detection
+//! - Complex CDC-specific scenarios like batch operations and conflict
+//!   detection
 //! - Complex view scenarios like filtered views with triggers
+
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use holon::api::ChangeOrigin;
 use holon::storage::backend::StorageBackend;
-use holon::storage::turso::{ChangeData, RowChange, TursoBackend};
+use holon::storage::turso::ChangeData;
+use holon::storage::turso::RowChange;
+use holon::storage::turso::TursoBackend;
+use holon_api::FieldSchema;
+use holon_api::TypeDefinition;
 use holon_api::Value;
-use holon_api::{FieldSchema, TypeDefinition};
-use holon_core::storage::types::{Filter, StorageEntity};
+use holon_core::storage::types::Filter;
+use holon_core::storage::types::StorageEntity;
 use proptest::prelude::*;
-use proptest_state_machine::{ReferenceStateMachine, StateMachineTest};
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use proptest_state_machine::ReferenceStateMachine;
+use proptest_state_machine::StateMachineTest;
 use tokio_stream::StreamExt;
 
 /// Recursive CTE materialized view that triggers Turso's JoinOperator
@@ -114,9 +131,11 @@ pub struct ReferenceState {
     /// View streams: view_name -> collected changes (expected)
     pub view_stream_changes: HashMap<String, Arc<Mutex<Vec<RowChange>>>>,
     pub handle: tokio::runtime::Handle,
-    /// Optional runtime - Some when we own the runtime (standalone tests), None when using existing runtime
+    /// Optional runtime - Some when we own the runtime (standalone tests), None
+    /// when using existing runtime
     pub _runtime: Option<Arc<tokio::runtime::Runtime>>,
-    /// Whether the recursive CTE view has been created (triggers JoinOperator in IVM)
+    /// Whether the recursive CTE view has been created (triggers JoinOperator
+    /// in IVM)
     pub recursive_cte_view_created: bool,
     /// Entity name -> set of deleted IDs (to verify absence in Turso)
     pub deleted_ids: HashMap<String, HashSet<String>>,
@@ -159,10 +178,21 @@ impl Default for ReferenceState {
                 deleted_ids: HashMap::new(),
             },
             Err(_) => {
-                // Use current_thread runtime for fork-safety with proptest
-                // Multi-threaded runtime is fork-unsafe and causes "failed in other process" errors
+                // MULTI-thread runtime is required here: the harness bridges its
+                // sync proptest body into tokio via `block_in_place(|| handle
+                // .block_on(...))`. `block_in_place` moves the current worker's
+                // other tasks onto sibling workers — on a `new_current_thread`
+                // runtime there ARE no siblings, so the DatabaseActor task the
+                // `block_on` future is waiting on can never be polled and the
+                // test deadlocks (BugFunnel: turso-storage PBT harness deadlock).
+                // This path only runs under the plain `#[test]`
+                // `test_turso_backend_state_machine`, which sets `fork: false`,
+                // so the old "fork-unsafe" concern about a multi-thread runtime
+                // does not apply (the runtime is built inside the test body, not
+                // across a proptest fork).
                 let runtime = Arc::new(
-                    tokio::runtime::Builder::new_current_thread()
+                    tokio::runtime::Builder::new_multi_thread()
+                        .worker_threads(4)
                         .enable_all()
                         .build()
                         .unwrap(),
@@ -248,8 +278,10 @@ pub enum BatchMode {
 
 /// A batch of transitions to execute.
 /// - Single: one operation executed alone
-/// - Concurrent: multiple operations executed in parallel (to detect race conditions)
-/// - Transaction: multiple operations wrapped in BEGIN IMMEDIATE TRANSACTION / COMMIT
+/// - Concurrent: multiple operations executed in parallel (to detect race
+///   conditions)
+/// - Transaction: multiple operations wrapped in BEGIN IMMEDIATE TRANSACTION /
+///   COMMIT
 #[derive(Clone, Debug)]
 pub struct TransitionBatch {
     /// Operations to execute
@@ -284,14 +316,16 @@ impl TransitionBatch {
 /// System under test - wraps TursoBackend
 pub struct StorageTest {
     pub backend: Arc<TursoBackend>,
-    /// CDC-enabled connection (kept for backward compatibility, now managed by TursoBackend)
+    /// CDC-enabled connection (kept for backward compatibility, now managed by
+    /// TursoBackend)
     pub cdc_connection: Option<turso::Connection>,
     // Note: view_stream_connections removed - connections now managed by TursoBackend.write_conn
     /// View stream change collectors: view_name -> Arc<Mutex<Vec<RowChange>>>
     pub view_stream_changes: HashMap<String, Arc<Mutex<Vec<RowChange>>>>,
     /// View stream handles to keep tasks alive
     pub view_stream_handles: HashMap<String, tokio::task::JoinHandle<()>>,
-    /// Temp dir that owns the database file — dropped after StorageTest, releasing the file lock.
+    /// Temp dir that owns the database file — dropped after StorageTest,
+    /// releasing the file lock.
     _temp_dir: Option<tempfile::TempDir>,
 }
 
@@ -318,7 +352,8 @@ impl StorageTest {
     }
 
     /// Create a new StorageTest with a temp file backend.
-    /// Each instance gets its own temp directory, preventing file lock conflicts between PBT cases.
+    /// Each instance gets its own temp directory, preventing file lock
+    /// conflicts between PBT cases.
     pub fn new(handle: &tokio::runtime::Handle) -> Self {
         let temp_dir = tempfile::tempdir().expect("Failed to create temp dir for PBT");
         let db_path = temp_dir.path().join("test.db");
@@ -370,8 +405,9 @@ impl StorageTest {
         }
 
         // Multiple operations - execute concurrently
-        // Note: We can't use a Barrier with single-threaded runtime as it causes deadlock.
-        // Instead, we spawn all tasks and use join_all to drive them concurrently.
+        // Note: We can't use a Barrier with single-threaded runtime as it causes
+        // deadlock. Instead, we spawn all tasks and use join_all to drive them
+        // concurrently.
         let panic_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
         let mut futures = Vec::new();
@@ -416,9 +452,9 @@ impl StorageTest {
     /// This exercises the JoinOperator::commit path in Turso's IVM when
     /// a recursive CTE view with JOINs exists.
     ///
-    /// IMPORTANT: All operations must use the SAME connection for the transaction
-    /// to work. We execute SQL directly rather than calling apply_to_turso_inner
-    /// which would use separate connections.
+    /// IMPORTANT: All operations must use the SAME connection for the
+    /// transaction to work. We execute SQL directly rather than calling
+    /// apply_to_turso_inner which would use separate connections.
     ///
     /// Returns Ok(()) if transaction succeeds, or Err with the error message.
     pub async fn execute_transaction_batch(
@@ -456,7 +492,8 @@ impl StorageTest {
     }
 
     /// Execute a single operation directly on a connection.
-    /// Used for transaction batches where all operations must use the same connection.
+    /// Used for transaction batches where all operations must use the same
+    /// connection.
     async fn execute_operation_on_connection(
         &self,
         conn: &turso::Connection,
@@ -538,7 +575,9 @@ fn get_test_schema(name: &str) -> TypeDefinition {
         name,
         vec![
             FieldSchema::new("id", "TEXT").primary_key().indexed(),
-            FieldSchema::new("parent_id", "TEXT").nullable().indexed(), // Indexed for efficient JOIN lookups in recursive CTE
+            FieldSchema::new("parent_id", "TEXT").nullable().indexed(), /* Indexed for efficient
+                                                                         * JOIN lookups in
+                                                                         * recursive CTE */
             FieldSchema::new("value", "TEXT"),
         ],
     )
@@ -672,7 +711,8 @@ fn apply_to_reference(
                 {
                     let updated_data = entities.get(id).unwrap().clone();
                     // Look up the ROWID for this entity in this view
-                    // In concurrent batches, the ROWID may not exist if entity was inserted after view creation
+                    // In concurrent batches, the ROWID may not exist if entity was inserted after
+                    // view creation
                     let Some(rowid) = state
                         .view_rowids
                         .get(view_name)
@@ -849,7 +889,8 @@ fn apply_to_reference(
                 .insert(view_name.clone(), (entity.clone(), count));
 
             // Assign ROWIDs to all existing entities in this view
-            // ROWIDs are assigned when rows enter the materialized view (at view creation time)
+            // ROWIDs are assigned when rows enter the materialized view (at view creation
+            // time)
             if let Some(entities) = state.entities.get(entity) {
                 let mut rowid = 1i64;
                 // Sort keys to ensure deterministic ROWID assignment
@@ -1410,7 +1451,8 @@ fn generate_transitions(state: &ReferenceState) -> BoxedStrategy<StorageTransiti
     })
     .boxed();
 
-    // Collect existing IDs for parent_id generation (do this before using in insert strategy)
+    // Collect existing IDs for parent_id generation (do this before using in insert
+    // strategy)
     let entity_existing_ids: Vec<String> = state
         .entities
         .get("entity")
@@ -1567,8 +1609,8 @@ fn generate_transitions(state: &ReferenceState) -> BoxedStrategy<StorageTransiti
         strategies.push((3, create_stream));
     }
 
-    // Add recursive CTE view creation if not already created and "entity" table exists
-    // This view exercises the JoinOperator in Turso's IVM
+    // Add recursive CTE view creation if not already created and "entity" table
+    // exists This view exercises the JoinOperator in Turso's IVM
     if !state.recursive_cte_view_created && state.entities.contains_key("entity") {
         let create_recursive_view = Just(StorageTransition::CreateRecursiveCTEView).boxed();
         strategies.push((8, create_recursive_view)); // Higher weight to increase coverage
@@ -1580,24 +1622,30 @@ fn generate_transitions(state: &ReferenceState) -> BoxedStrategy<StorageTransiti
 /// Generate a batch of transitions to execute.
 /// The batch size and mode is biased based on the current state:
 /// - Without views: 80% single, 15% concurrent size 2, 5% concurrent size 3
-/// - With views and entities: mix of single, concurrent, and transaction batches
-/// - With recursive CTE view: higher weight for transaction batches (to exercise JoinOperator)
+/// - With views and entities: mix of single, concurrent, and transaction
+///   batches
+/// - With recursive CTE view: higher weight for transaction batches (to
+///   exercise JoinOperator)
 ///
-/// Operations that require test state (CDC, ViewStream) are always single batches.
+/// Operations that require test state (CDC, ViewStream) are always single
+/// batches.
 fn generate_transition_batch(state: &ReferenceState) -> BoxedStrategy<TransitionBatch> {
     let has_views = !state.materialized_views.is_empty();
     let has_entities = state.entities.values().any(|e| !e.is_empty());
     let has_recursive_cte = state.recursive_cte_view_created;
 
-    // Generate the base operation strategy first (captures state by value via generate_transitions)
+    // Generate the base operation strategy first (captures state by value via
+    // generate_transitions)
     let base_op_strategy = generate_transitions(state);
 
-    // When recursive CTE view exists, include Transaction batches to exercise JoinOperator commit
+    // When recursive CTE view exists, include Transaction batches to exercise
+    // JoinOperator commit
     if has_recursive_cte && has_entities {
         // Batch size strategy with Transaction mode for JoinOperator testing:
         // - 30% single operations
         // - 20% concurrent batches (size 2-3)
-        // - 50% transaction batches (size 2-5) - high weight to trigger JoinOperator::commit
+        // - 50% transaction batches (size 2-5) - high weight to trigger
+        //   JoinOperator::commit
         prop::strategy::Union::new_weighted(vec![
             (
                 30u32,
@@ -1731,9 +1779,10 @@ fn check_batch_preconditions(state: &ReferenceState, batch: &TransitionBatch) ->
         }
     }
 
-    // When CDC is enabled, Insert/Update/Delete operations must use the CDC connection
-    // to capture events. Concurrent/Transaction batches use apply_to_turso_inner which doesn't
-    // have access to the CDC connection, so we can't allow these ops in such batches.
+    // When CDC is enabled, Insert/Update/Delete operations must use the CDC
+    // connection to capture events. Concurrent/Transaction batches use
+    // apply_to_turso_inner which doesn't have access to the CDC connection, so
+    // we can't allow these ops in such batches.
     if state.cdc_enabled && batch.operations.len() > 1 {
         let has_cdc_tracked_ops = batch.operations.iter().any(|op| {
             matches!(
@@ -1749,15 +1798,16 @@ fn check_batch_preconditions(state: &ReferenceState, batch: &TransitionBatch) ->
     }
 
     // Check all operations pass preconditions
-    // Note: For concurrent/transaction batches, we check preconditions against initial state.
-    // This may reject some valid batches but ensures safety.
+    // Note: For concurrent/transaction batches, we check preconditions against
+    // initial state. This may reject some valid batches but ensures safety.
     batch
         .operations
         .iter()
         .all(|op| check_preconditions(state, op))
 }
 
-/// ReferenceStateMachine implementation using TransitionBatch for concurrent testing
+/// ReferenceStateMachine implementation using TransitionBatch for concurrent
+/// testing
 impl ReferenceStateMachine for ReferenceState {
     type State = Self;
     type Transition = TransitionBatch;
@@ -1896,9 +1946,8 @@ impl StateMachineTest for StorageTest {
 
                 if panics > 0 {
                     panic!(
-                        "Detected {} panics during concurrent execution of {} operations. \
-                         This likely indicates a race condition in Turso IVM.\n\
-                         Operations: {:?}",
+                        "Detected {} panics during concurrent execution of {} operations. This \
+                         likely indicates a race condition in Turso IVM.\nOperations: {:?}",
                         panics, num_ops, operations
                     );
                 }
@@ -1922,9 +1971,8 @@ impl StateMachineTest for StorageTest {
                     Ok(_) => {}
                     Err(e) => {
                         panic!(
-                            "Transaction batch of {} operations failed: {}\n\
-                             Operations: {:?}\n\
-                             This may indicate a JoinOperator bug in Turso IVM.",
+                            "Transaction batch of {} operations failed: {}\nOperations: \
+                             {:?}\nThis may indicate a JoinOperator bug in Turso IVM.",
                             num_ops, e, operations
                         );
                     }
@@ -1984,11 +2032,9 @@ impl StateMachineTest for StorageTest {
 
             if !matched {
                 panic!(
-                    "\n\n=== View Change Stream Timeout for '{}' ===\n\
-                     Expected {} changes but stream only delivered {} after 50ms\n\
-                     Expected changes:\n{:#?}\n\n\
-                     Actual changes:\n{:#?}\n\
-                     ===========================================\n",
+                    "\n\n=== View Change Stream Timeout for '{}' ===\nExpected {} changes but \
+                     stream only delivered {} after 50ms\nExpected changes:\n{:#?}\n\nActual \
+                     changes:\n{:#?}\n===========================================\n",
                     view_name,
                     expected_len,
                     actual_changes.len(),
@@ -2001,11 +2047,9 @@ impl StateMachineTest for StorageTest {
             assert_eq!(
                 actual_changes.len(),
                 expected_changes.len(),
-                "\n\n=== View Change Count Mismatch for '{}' ===\n\
-                 Expected {} changes, got {} changes\n\
-                 Expected changes:\n{:#?}\n\n\
-                 Actual changes:\n{:#?}\n\
-                 ==========================================\n",
+                "\n\n=== View Change Count Mismatch for '{}' ===\nExpected {} changes, got {} \
+                 changes\nExpected changes:\n{:#?}\n\nActual \
+                 changes:\n{:#?}\n==========================================\n",
                 view_name,
                 expected_changes.len(),
                 actual_changes.len(),
@@ -2091,12 +2135,9 @@ impl StateMachineTest for StorageTest {
                 assert_eq!(
                     expected_entity_id,
                     actual_entity_id,
-                    "\n\n=== View Change Entity ID Mismatch at index {} for '{}' ===\n\
-                     Expected entity ID: {:?}\n\
-                     Actual entity ID: {:?}\n\
-                     Expected change: {:?}\n\
-                     Actual change: {:?}\n\
-                     =================================================\n",
+                    "\n\n=== View Change Entity ID Mismatch at index {} for '{}' ===\nExpected \
+                     entity ID: {:?}\nActual entity ID: {:?}\nExpected change: {:?}\nActual \
+                     change: {:?}\n=================================================\n",
                     i,
                     view_name,
                     expected_entity_id,
@@ -2142,10 +2183,9 @@ impl StateMachineTest for StorageTest {
                     }
                     _ => {
                         panic!(
-                            "\n\n=== View Change Type Mismatch at index {} for '{}' ===\n\
-                             Expected: {:?}\n\
-                             Actual: {:?}\n\
-                             ======================================================\n",
+                            "\n\n=== View Change Type Mismatch at index {} for '{}' \
+                             ===\nExpected: {:?}\nActual: \
+                             {:?}\n======================================================\n",
                             i, view_name, expected.change, actual.change
                         );
                     }
@@ -2157,12 +2197,14 @@ impl StateMachineTest for StorageTest {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use proptest::test_runner::TestRunner;
     use proptest_state_machine::ReferenceStateMachine;
 
+    use super::*;
+
     /// Manual state machine test without fork mode.
-    /// Runs the state machine test directly using proptest strategies but without fork.
+    /// Runs the state machine test directly using proptest strategies but
+    /// without fork.
     #[test]
     fn test_turso_backend_state_machine() {
         let config = ProptestConfig {
@@ -2194,8 +2236,8 @@ mod tests {
 
     /// Test that view change stream receives events from backend operations.
     ///
-    /// With the internal actor pattern, all operations go through a single actor,
-    /// so CDC events should be properly captured.
+    /// With the internal actor pattern, all operations go through a single
+    /// actor, so CDC events should be properly captured.
     #[tokio::test]
     async fn test_view_change_stream_receives_events_from_backend_operations() {
         use holon_api::Value;
@@ -2284,12 +2326,13 @@ mod tests {
         let collected_changes = changes.lock().unwrap();
 
         // We expect 3 events: INSERT (id2), UPDATE (id1), DELETE (id2)
-        // With the DatabaseActor pattern, all writes go through a single actor so CDC callbacks fire
+        // With the DatabaseActor pattern, all writes go through a single actor so CDC
+        // callbacks fire
         assert_eq!(
             collected_changes.len(),
             3,
-            "Expected 3 view change events (INSERT, UPDATE, DELETE) but got {}. \
-             With the DatabaseActor pattern, all operations should trigger CDC callbacks.",
+            "Expected 3 view change events (INSERT, UPDATE, DELETE) but got {}. With the \
+             DatabaseActor pattern, all operations should trigger CDC callbacks.",
             collected_changes.len()
         );
 

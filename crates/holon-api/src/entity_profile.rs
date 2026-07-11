@@ -117,6 +117,25 @@ impl EntityProfile {
         (profile, computed)
     }
 
+    /// Evaluate ONLY the computed fields for a row — no variant resolution.
+    ///
+    /// Callers that need the computed-field map but NOT a resolved profile (the
+    /// enrichment boundary, `enrich_row`) must use this instead of discarding
+    /// the profile from [`Self::resolve_with_computed`]. Running full
+    /// variant resolution there evaluated every variant's condition —
+    /// including UI-bearing ones like `is_source && is_focused` — against a
+    /// raw storage row that carries no such bindings, emitting spurious
+    /// eval errors. Computing the fields directly (build scope → extract
+    /// computed) skips that entirely.
+    pub fn compute_fields_only(
+        &self,
+        row: &HashMap<String, Value>,
+        engine: &RhaiEngine,
+    ) -> HashMap<String, Value> {
+        let scope = self.build_scope(row, engine);
+        self.extract_computed_values(&scope)
+    }
+
     /// Resolve ALL matching candidates for a row (multi-variant mode).
     ///
     /// Evaluates each variant's `data_condition` via Rhai. Returns all variants
@@ -138,7 +157,7 @@ impl EntityProfile {
         for variant in &self.variants {
             let data_matches = match &variant.data_condition {
                 None => true, // No data condition = always matches on data side
-                Some(dc) => eval_bool_source(engine, dc, &mut scope),
+                Some(dc) => condition_holds(eval_bool_source(engine, dc, &mut scope), dc),
             };
             if data_matches {
                 candidates.push((variant, variant.profile.clone()));
@@ -164,7 +183,10 @@ impl EntityProfile {
         // match.
         for variant in &self.variants {
             if variant.condition_source.is_empty()
-                || eval_bool_source(engine, &variant.condition_source, scope)
+                || condition_holds(
+                    eval_bool_source(engine, &variant.condition_source, scope),
+                    &variant.condition_source,
+                )
             {
                 return Some(variant.profile.clone());
             }
@@ -236,16 +258,68 @@ pub fn dynamic_to_value(d: &rhai::Dynamic) -> Value {
     }
 }
 
-fn eval_bool_source(engine: &RhaiEngine, source: &str, scope: &mut Scope) -> bool {
+/// Outcome of evaluating a boolean profile condition against a row scope.
+///
+/// Distinguishes a legitimate NON-MATCH from a genuine failure. Profile
+/// variants are tried against heterogeneous rows (different entity types expose
+/// different columns), so a condition that references a variable ABSENT from
+/// the scope is a legitimate non-match, not an error. Any OTHER Rhai error — a
+/// type mismatch such as `() && ...`, a non-bool result, a syntax error — is a
+/// real authoring/data bug and must be surfaced LOUDLY, never silently
+/// collapsed to `false` (repo rule: errors must not silently become falsy).
+enum BoolCondition {
+    /// The condition evaluated to this boolean.
+    Matched(bool),
+    /// A referenced variable was not bound in scope — a legitimate non-match.
+    Unbound(String),
+    /// A genuine evaluation error (type mismatch / non-bool result / syntax).
+    Failed(String),
+}
+
+fn eval_bool_source(engine: &RhaiEngine, source: &str, scope: &mut Scope) -> BoolCondition {
     match engine.eval_with_scope::<bool>(scope, source) {
-        Ok(val) => val,
+        Ok(val) => BoolCondition::Matched(val),
         Err(e) => {
             let msg = format!("{e}");
-            if msg.contains("Variable not found") || msg.contains("Output type incorrect") {
-                tracing::trace!("[eval_bool_source] '{source}': {e}");
+            if msg.contains("Variable not found") {
+                BoolCondition::Unbound(msg)
             } else {
-                tracing::warn!("[eval_bool_source] '{source}' failed: {e}");
+                BoolCondition::Failed(msg)
             }
+        }
+    }
+}
+
+/// Reduce a [`BoolCondition`] to a match/no-match decision, disclosing
+/// failures.
+///
+/// A genuine [`BoolCondition::Failed`] is surfaced VISIBLY (WARN) and the
+/// variant is treated as non-matching — a disclosed, degraded fallback (the
+/// repo's "falls back visibly" tier), NOT a silent `false`. It is deliberately
+/// WARN, not ERROR: a single profile condition that cannot evaluate must
+/// degrade this one variant, never crash/abort the render (the keystone's
+/// `inv-no-observed-errors` treats ERROR as a run-aborting hidden failure — a
+/// per-row condition fallback is not that). An [`BoolCondition::Unbound`] is a
+/// legitimate non-match (heterogeneous rows expose different columns), logged
+/// at debug only.
+fn condition_holds(outcome: BoolCondition, source: &str) -> bool {
+    match outcome {
+        BoolCondition::Matched(b) => b,
+        BoolCondition::Unbound(msg) => {
+            tracing::debug!(
+                condition = source,
+                "profile condition references a variable not bound for this row — treated as \
+                 non-match: {msg}"
+            );
+            false
+        }
+        BoolCondition::Failed(msg) => {
+            tracing::warn!(
+                condition = source,
+                "profile condition failed to evaluate (NOT a missing variable) — treated as \
+                 non-match, this variant is DEGRADED. Fix the condition or the row data producing \
+                 it: {msg}"
+            );
             false
         }
     }
@@ -290,6 +364,19 @@ pub trait ProfileResolving: Send + Sync {
         &self,
         row: &HashMap<String, Value>,
     ) -> (Arc<RenderProfile>, HashMap<String, Value>);
+
+    /// Compute a row's computed-field values WITHOUT resolving its render
+    /// profile.
+    ///
+    /// The enrichment boundary needs only the computed fields; resolving the
+    /// profile there evaluates variant conditions against rows that lack the
+    /// bindings those conditions reference (e.g. UI-state variables on a raw
+    /// storage row), producing spurious eval errors. Real resolvers override
+    /// this with the resolution-free path; the default falls back to the
+    /// full pass so mock/test resolvers keep working unchanged.
+    fn resolve_computed_only(&self, row: &HashMap<String, Value>) -> HashMap<String, Value> {
+        self.resolve_with_computed(row).1
+    }
 
     fn resolve_batch(&self, rows: &[HashMap<String, Value>]) -> Vec<Arc<RenderProfile>>;
 

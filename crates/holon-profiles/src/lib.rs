@@ -906,6 +906,29 @@ impl ProfileResolving for ProfileResolver {
         (self.materialize(&stored, row), computed)
     }
 
+    fn resolve_computed_only(
+        &self,
+        row: &HashMap<String, holon_api::Value>,
+    ) -> HashMap<String, holon_api::Value> {
+        // Mirror the short-circuits of `resolve_with_computed` (value rows and
+        // unregistered entities carry no computed fields) but SKIP variant
+        // resolution — the enrichment boundary wants only computed fields, and
+        // resolving here evaluated UI-bearing variant conditions against
+        // UI-less storage rows (spurious eval errors). See
+        // `EntityProfile::compute_fields_only`.
+        let entity_uri = match row_id(row) {
+            Ok(uri) => uri,
+            Err(_) => return HashMap::new(),
+        };
+        let cache = self.cache_signal.get_cloned();
+        let entity_profile = match cache.get(&EntityName::new(entity_uri.scheme())) {
+            Some(profile) => profile.clone(),
+            None => return HashMap::new(),
+        };
+        let engine = self.rhai_engine.read().unwrap().clone();
+        entity_profile.compute_fields_only(row, &engine)
+    }
+
     fn resolve_batch(&self, rows: &[HashMap<String, holon_api::Value>]) -> Vec<Arc<RenderProfile>> {
         rows.iter()
             .map(|row| ProfileResolving::resolve(self, row))
