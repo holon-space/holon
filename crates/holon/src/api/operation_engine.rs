@@ -22,8 +22,12 @@ use holon_api::EntityName;
 use holon_api::OpOrigin;
 use holon_api::Operation;
 use holon_api::OperationDescriptor;
+use holon_api::PROVENANCE_PROPERTY;
+use holon_api::ProvenanceStamp;
 use holon_api::UndoOutcome;
 use holon_api::Value;
+use holon_api::clock::Clock;
+use holon_api::clock::SystemClock;
 pub use holon_api::operation_engine::OperationEngine;
 use holon_core::OperationProvider;
 use holon_core::Precondition;
@@ -93,6 +97,34 @@ pub struct DispatchingOperationEngine {
     /// Snapshot persistence. `None` for an in-memory-only stack.
     store: Option<Arc<dyn UndoStore>>,
     seq: AtomicI64,
+    /// Wall-clock authority for provenance stamps (ADR 0024 P8 / C2a). Defaults
+    /// to [`SystemClock`]; a test wiring overrides it via [`Self::with_clock`]
+    /// so stamp timestamps are deterministic. Never a raw `SystemTime::now`.
+    clock: Arc<dyn Clock>,
+}
+
+/// Op names whose params are a block field-map written to `block_raw`, so an
+/// injected `_provenance` property lands in the row's `properties` JSON through
+/// the existing "unknown fields pack into properties" provider path (zero
+/// provider edits). These are the *authoring* ops the vision cares about
+/// (rule/agent-created and updated blocks). Chord ops (split/join/move) and the
+/// single-field `set_field` shape are covered by the history relation (C2b),
+/// not by this property stamp.
+const PROVENANCE_STAMPED_OPS: &[&str] = &["create", "update"];
+
+/// Inject the `_provenance` property into an authoring op's params. Pure and
+/// clock-free (the timestamp is passed in) so it is directly unit-testable.
+fn stamp_params(
+    op_name: &str,
+    mut params: StorageEntity,
+    origin: &OpOrigin,
+    now_millis: i64,
+) -> StorageEntity {
+    if PROVENANCE_STAMPED_OPS.contains(&op_name) {
+        let stamp = ProvenanceStamp::from_origin(origin, now_millis);
+        params.insert(Arc::from(PROVENANCE_PROPERTY), stamp.to_value());
+    }
+    params
 }
 
 impl DispatchingOperationEngine {
@@ -106,7 +138,15 @@ impl DispatchingOperationEngine {
             reader: None,
             store: None,
             seq: AtomicI64::new(0),
+            clock: Arc::new(SystemClock),
         }
+    }
+
+    /// Override the provenance-stamp clock (test determinism). Production keeps
+    /// the [`SystemClock`] default so stamps carry real wall-clock time.
+    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock = clock;
+        self
     }
 
     /// Build a persistent engine. Loads any prior stack snapshot from `store`
@@ -130,6 +170,7 @@ impl DispatchingOperationEngine {
             reader: Some(reader),
             store: Some(store),
             seq: AtomicI64::new(seq),
+            clock: Arc::new(SystemClock),
         })
     }
 
@@ -146,6 +187,19 @@ impl DispatchingOperationEngine {
             store.save(&json, seq).await?;
         }
         Ok(())
+    }
+
+    /// Inject the `_provenance` stamp into an authoring op's params. For
+    /// non-authoring ops (or a `set_field`/chord shape) the params pass through
+    /// unchanged — those are covered by the C2b history relation, not the block
+    /// property stamp. The timestamp is read from the injected clock seam.
+    fn stamp_provenance(
+        &self,
+        op_name: &str,
+        params: StorageEntity,
+        origin: &OpOrigin,
+    ) -> StorageEntity {
+        stamp_params(op_name, params, origin, self.clock.now_millis())
     }
 
     /// Dispatch a stored op verbatim (used for inverse/forward replay). Never
@@ -194,6 +248,13 @@ impl OperationEngine for DispatchingOperationEngine {
         params: StorageEntity,
         origin: OpOrigin,
     ) -> Result<Option<Value>> {
+        // Provenance stamping (ADR 0024 P8 / C2a): the dispatcher drops `origin`
+        // before the write, so this is the last place holding it. For authoring
+        // ops we inject a `_provenance` property into the params; it travels as
+        // ordinary block-field data down the existing write path and lands in
+        // `block_raw.properties`, with no provider edits.
+        let params = self.stamp_provenance(op_name, params, &origin);
+
         let forward_op = Operation::new(
             entity_name.clone(),
             op_name,
@@ -306,5 +367,61 @@ impl OperationEngine for DispatchingOperationEngine {
 
     async fn can_redo(&self) -> bool {
         self.undo_stack.read().await.can_redo()
+    }
+}
+
+#[cfg(test)]
+mod provenance_stamp_tests {
+    use super::*;
+
+    fn params_with(fields: &[(&str, Value)]) -> StorageEntity {
+        fields
+            .iter()
+            .map(|(k, v)| (Arc::from(*k), v.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn create_op_gets_rule_provenance_stamped() {
+        let params = params_with(&[("content", Value::String("hi".into()))]);
+        let origin = OpOrigin::Rule {
+            transition_id: "rule:journal".into(),
+        };
+        let stamped = stamp_params("create", params, &origin, 1234);
+
+        let prov = stamped
+            .get(PROVENANCE_PROPERTY)
+            .expect("create op must carry a _provenance property");
+        let parsed = ProvenanceStamp::from_value(prov).unwrap();
+        assert_eq!(parsed.origin, "rule");
+        assert_eq!(parsed.transition_id.as_deref(), Some("rule:journal"));
+        assert_eq!(parsed.at_millis, 1234);
+        // Original field preserved.
+        assert!(stamped.contains_key("content"));
+    }
+
+    #[test]
+    fn update_op_gets_agent_provenance_stamped() {
+        let origin = OpOrigin::Agent {
+            session_id: "mcp-session:s".into(),
+            tool_call_id: "tool-call:c".into(),
+        };
+        let stamped = stamp_params("update", StorageEntity::default(), &origin, 7);
+        let parsed =
+            ProvenanceStamp::from_value(stamped.get(PROVENANCE_PROPERTY).unwrap()).unwrap();
+        assert_eq!(parsed.origin, "agent");
+        assert_eq!(parsed.session_id.as_deref(), Some("mcp-session:s"));
+        assert_eq!(parsed.tool_call_id.as_deref(), Some("tool-call:c"));
+    }
+
+    #[test]
+    fn non_authoring_ops_are_not_stamped() {
+        for op in ["set_field", "move_block", "split_block", "delete", "focus"] {
+            let stamped = stamp_params(op, StorageEntity::default(), &OpOrigin::User, 1);
+            assert!(
+                !stamped.contains_key(PROVENANCE_PROPERTY),
+                "op '{op}' must not be provenance-stamped (covered by the history relation)"
+            );
+        }
     }
 }

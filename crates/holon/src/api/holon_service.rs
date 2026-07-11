@@ -57,11 +57,25 @@ pub struct ColumnDef {
 /// introspection, etc.
 pub struct HolonService {
     engine: Arc<BackendEngine>,
+    /// The provenance origin stamped on operations dispatched through this
+    /// facade. A human frontend/web-worker session uses [`OpOrigin::User`]; the
+    /// embedded MCP server constructs the facade with [`OpOrigin::Agent`] so
+    /// agent-driven ops carry their session/tool-call identity (C2a).
+    origin: holon_api::OpOrigin,
 }
 
 impl HolonService {
+    /// A human-session facade (UI / web-worker): ops are stamped
+    /// [`OpOrigin::User`].
     pub fn new(engine: Arc<BackendEngine>) -> Self {
-        Self { engine }
+        Self::new_with_origin(engine, holon_api::OpOrigin::User)
+    }
+
+    /// A facade whose dispatched ops carry `origin` (e.g. the MCP server passes
+    /// an [`OpOrigin::Agent`] carrying the driving agent's session/tool-call
+    /// id).
+    pub fn new_with_origin(engine: Arc<BackendEngine>, origin: holon_api::OpOrigin) -> Self {
+        Self { engine, origin }
     }
 
     pub fn engine(&self) -> &Arc<BackendEngine> {
@@ -177,10 +191,11 @@ impl HolonService {
         op_name: &str,
         params: StorageEntity,
     ) -> Result<Option<Value>> {
-        // HolonService is a user-session facade (MCP tools, dioxus-web worker);
-        // rule/sync/ingest ops do not route through it.
+        // HolonService is a session facade (human web-worker/UI, or the MCP
+        // server acting for an agent); its configured `origin` states which.
+        // Rule/sync/ingest ops do not route through it.
         self.engine
-            .execute_operation(entity_name, op_name, params, holon_api::OpOrigin::User)
+            .execute_operation(entity_name, op_name, params, self.origin.clone())
             .await
             .context(format!(
                 "Failed to execute operation '{}' on entity '{}'",
