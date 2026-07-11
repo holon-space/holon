@@ -1179,9 +1179,27 @@ where
         // follow-up): the frontend reads it off the result and moves the
         // in-memory focus authority in-process, so focus never round-trips
         // through the Turso `editor_cursor` cache (ADR 0010).
-        // TODO: Return inverse operation (combine set_field inverses + delete for new
-        // block)
-        Ok(OperationResult::irreversible(changes).with_response(focus_response(&new_block_id, 0)))
+        //
+        // Inverse: collapse the split. `restore_join` deletes the new block and
+        // resets the original block's content to its EXACT pre-split value
+        // (`content_owned`, captured before the prefix/suffix whitespace trim) —
+        // so the untrimmed original is restored byte-for-byte, not the trimmed
+        // `content_before`. Its own returned inverse re-splits deterministically
+        // (same new-block id) so redo re-applies.
+        use crate::__operations_block_operations;
+        Ok(OperationResult::new(
+            changes,
+            __operations_block_operations::restore_join_op(
+                // OperationDispatcher overwrites this with the resolved entity_name
+                // (see operation_dispatcher.rs:588). Valid placeholder scheme so
+                // EntityName::new's debug-assert passes.
+                "placeholder",
+                id,
+                content_owned.clone(),
+                &new_block_uri,
+            ),
+        )
+        .with_response(focus_response(&new_block_id, 0)))
     }
 
     /// Join a block into its merge target.
@@ -1261,6 +1279,10 @@ where
                 .map(|c| c.id().clone())
                 .collect(),
         };
+        // Captured before `block_children` is consumed by the re-parent loop:
+        // the undo inverse is only exact for the leaf case (see the inverse
+        // construction at the tail of this method).
+        let block_had_children = !block_children.is_empty();
 
         // Case-B refusal (Phase 3.5): joining a first-child block into its
         // parent when it has children of its own would orphan or reposition
@@ -1341,12 +1363,258 @@ where
             reg.on_entity_deleted(&join_block_uri);
         }
 
+        // Inverse: re-split the merge. `restore_split` recreates the merged-away
+        // block at its recorded slot (after the merge target in the prev-sibling
+        // case, or as first child in the child→parent case) and resets the merge
+        // target's content to its EXACT pre-join value (`target_content`).
+        //
+        // Only the leaf case is reversible: when the merged-away block had its
+        // own children they were re-parented under the target, and this single
+        // inverse cannot restore that subtree placement exactly. Declare it
+        // irreversible (fail loud rather than ship a lossy inverse) — the
+        // caret-position no-ops (position != 0), the refused
+        // case-B-with-children, and this case-A-with-children all stay
+        // irreversible by construction.
+        let inverse: UndoAction = if !block_had_children {
+            let block_parent = block
+                .parent_id()
+                .cloned()
+                .unwrap_or_else(EntityUri::no_parent);
+            // Slot anchor: the merged-away block sat directly after the merge
+            // target in the prev-sibling case; in the child→parent case it was
+            // the parent's first child (anchor `None`).
+            let after: Option<EntityUri> = if into_parent {
+                None
+            } else {
+                Some(target_uri.clone())
+            };
+            use crate::__operations_block_operations;
+            UndoAction::Undo(__operations_block_operations::restore_split_op(
+                // OperationDispatcher overwrites this placeholder (see split_block).
+                "placeholder",
+                &target_uri,
+                target_content.clone(),
+                id,
+                block_content.clone(),
+                &block_parent,
+                block.depth(),
+                after.as_ref(),
+            ))
+        } else {
+            UndoAction::DeclaredIrreversible(
+                "join_block: merged-away block had children re-parented under the target; a flat \
+                 inverse cannot restore that subtree placement",
+            )
+        };
+
         // Focus moves to the merge target at the join boundary. Returned in
         // the op response (see `split_block`) rather than dispatched as a
         // backend `editor_focus` follow-up — the frontend applies it in
         // process, no Turso `editor_cursor` round-trip (ADR 0010).
-        Ok(OperationResult::irreversible(changes)
-            .with_response(focus_response(&target_id, join_offset as i64)))
+        Ok(OperationResult {
+            changes,
+            undo: inverse,
+            response: Some(focus_response(&target_id, join_offset as i64)),
+            follow_ups: vec![],
+        })
+    }
+
+    /// Inverse primitive — recreate a block and reset a sibling's content.
+    ///
+    /// The exact inverse of [`restore_join`]. Recreates `block_id` under
+    /// `block_parent` (positioned directly after `after_id`, or as the first
+    /// child when `after_id` is `None`) with `block_content`, then resets
+    /// `target_id`'s content to `target_content`.
+    ///
+    /// This is the machine-generated inverse behind undo/redo of
+    /// `split_block` / `join_block`; it is not a user-facing editor action.
+    /// Positioning goes through the SAME create seam those ops use: the Loro
+    /// cell registry when present (preserving sibling ORDER — the projection
+    /// oracle's contract — while the fractional index is re-derived), and the
+    /// `OrderKeyMinting` order owner otherwise (SqlOnly / synthetic stores),
+    /// which for a deterministic minter reproduces the original `sort_key`
+    /// byte-for-byte between the same neighbours.
+    #[holon_macros::affects("content", "parent_id", "sort_key")]
+    async fn restore_split(
+        &self,
+        target_id: &EntityUri,
+        target_content: String,
+        block_id: &EntityUri,
+        block_content: String,
+        block_parent: &EntityUri,
+        block_depth: i64,
+        after_id: Option<&EntityUri>,
+    ) -> Result<OperationResult> {
+        // Capture the target's current content so the returned inverse can put
+        // it back on redo.
+        let target_prior = match read_content_via_cells(self.cells(), target_id) {
+            Some(c) => c,
+            None => self
+                .get_by_id(target_id.as_str())
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("restore_split: target {target_id} not found"))?
+                .content()
+                .to_string(),
+        };
+
+        // Recreate the block. Prefer the Loro cell seam (positions after
+        // `after_id`); fall back to a SQL create with an explicitly-minted
+        // positional key for byte-identical restoration in SqlOnly / synthetic
+        // stores. Mirrors `split_block`'s two create branches.
+        let wrote_via_cell = create_block_via_cells(
+            self.cells(),
+            block_parent,
+            after_id,
+            block_id,
+            holon_api::BlockContent::text(block_content.clone()),
+        )
+        .await?;
+
+        let mut changes = Vec::new();
+        if !wrote_via_cell {
+            // ALLOW(fallback): SqlOnly / synthetic store — no Loro authority.
+            let minter = self.order_key_minter().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "restore_split's SqlOnly create path requires an OrderKeyMinting seam (the \
+                     Store consolidator's order owner) — this BlockOperations impl returned None \
+                     from order_key_minter()"
+                )
+            })?;
+            let new_sort_key = minter // ALLOW(order_minting): routed through the sibling-set owner's OrderKeyMinting seam
+                .new_child_anchor(block_parent, after_id)
+                .await?;
+            let mut fields = crate::storage::types::StorageEntity::new();
+            fields.insert("id".into(), Value::String(block_id.as_str().to_string()));
+            fields.insert("content".into(), Value::String(block_content.clone()));
+            fields.insert(
+                "parent_id".into(),
+                Value::String(block_parent.as_str().to_string()),
+            );
+            fields.insert("sort_key".into(), Value::String(new_sort_key));
+            fields.insert("depth".into(), Value::Integer(block_depth));
+            let (_new_id, create_result) = self.create(fields).await?;
+            changes.extend(create_result.changes);
+        }
+
+        // Reset the target's content.
+        let content_result = self
+            .set_field(target_id.as_str(), "content", Value::String(target_content))
+            .await?;
+        changes.extend(content_result.changes);
+
+        // Inverse: collapse again (delete `block_id`, restore the target's
+        // pre-restore content).
+        use crate::__operations_block_operations;
+        Ok(OperationResult::new(
+            changes,
+            __operations_block_operations::restore_join_op(
+                "placeholder",
+                target_id,
+                target_prior,
+                block_id,
+            ),
+        ))
+    }
+
+    /// Inverse primitive — delete a leaf block and reset a sibling's content.
+    ///
+    /// The exact inverse of [`restore_split`]. Deletes `deleted_id` and resets
+    /// `target_id`'s content to `target_content`. `deleted_id` MUST be a leaf:
+    /// a block with children cannot be deleted and later restored by this
+    /// single primitive (its subtree would be orphaned), so that is a loud
+    /// error rather than a lossy inverse. `split_block`'s new block is always a
+    /// leaf, and `join_block` only chooses this inverse for the leaf case, so
+    /// the guard never trips on the sanctioned paths.
+    #[holon_macros::affects("content", "parent_id", "sort_key")]
+    async fn restore_join(
+        &self,
+        target_id: &EntityUri,
+        target_content: String,
+        deleted_id: &EntityUri,
+    ) -> Result<OperationResult> {
+        let block = self
+            .get_by_id(deleted_id.as_str())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("restore_join: block {deleted_id} not found"))?;
+
+        // Leaf-only guard.
+        let children: Vec<EntityUri> = match self.ordering() {
+            Some(ordering) => ordering.children(deleted_id).await?,
+            None => self
+                .get_children(deleted_id)
+                .await?
+                .iter()
+                .map(|c| c.id().clone())
+                .collect(),
+        };
+        if !children.is_empty() {
+            return Err(anyhow::anyhow!(
+                "restore_join: block {deleted_id} has {} children; the leaf-only inverse cannot \
+                 restore a subtree",
+                children.len()
+            )
+            .into());
+        }
+
+        // Capture the block's full pre-delete state + its slot so the returned
+        // inverse (restore_split) can recreate it exactly.
+        let block_content = read_content_via_cells(self.cells(), deleted_id)
+            .unwrap_or_else(|| block.content().to_string());
+        let block_parent = block
+            .parent_id()
+            .cloned()
+            .unwrap_or_else(EntityUri::no_parent);
+        let block_depth = block.depth();
+        let after = self
+            .get_prev_sibling(deleted_id)
+            .await?
+            .map(|p| p.id().clone());
+
+        // Capture the target's current content for the redo inverse.
+        let target_prior = match read_content_via_cells(self.cells(), target_id) {
+            Some(c) => c,
+            None => self
+                .get_by_id(target_id.as_str())
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("restore_join: target {target_id} not found"))?
+                .content()
+                .to_string(),
+        };
+
+        // Delete the block through the same seam split/join use.
+        let mut changes = Vec::new();
+        let wrote_via_cell = delete_block_via_cells(self.cells(), deleted_id).await?;
+        if !wrote_via_cell {
+            // ALLOW(fallback): SqlOnly / synthetic store — no Loro authority.
+            let delete_result = self.delete(deleted_id.as_str()).await?;
+            changes.extend(delete_result.changes);
+        }
+        if let Some(reg) = self.cells() {
+            reg.on_entity_deleted(deleted_id);
+        }
+
+        // Reset the target's content.
+        let content_result = self
+            .set_field(target_id.as_str(), "content", Value::String(target_content))
+            .await?;
+        changes.extend(content_result.changes);
+
+        // Inverse: expand again (recreate `deleted_id` at its slot, restore the
+        // target's pre-restore content).
+        use crate::__operations_block_operations;
+        Ok(OperationResult::new(
+            changes,
+            __operations_block_operations::restore_split_op(
+                "placeholder",
+                target_id,
+                target_prior,
+                deleted_id,
+                block_content,
+                &block_parent,
+                block_depth,
+                after.as_ref(),
+            ),
+        ))
     }
 
     /// Move a block up (swap with previous sibling)

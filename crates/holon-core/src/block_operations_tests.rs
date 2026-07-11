@@ -1023,6 +1023,266 @@ mod tests {
         assert_eq!(store.get("E").unwrap().depth, 2);
     }
 
+    // ---- U4: split_block / join_block compound inverses ---------------------
+
+    /// A byte-comparable snapshot of the whole block table: every block's
+    /// (id, parent_id, sort_key, depth, content), sorted by id. Undo must
+    /// restore this EXACTLY (the U4 contract).
+    fn snapshot(store: &MemStore) -> Vec<(String, Option<String>, String, i64, String)> {
+        let mut rows: Vec<_> = store
+            .blocks
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|b| {
+                (
+                    b.id.as_str().to_string(),
+                    b.parent_id.as_ref().map(|p| p.as_str().to_string()),
+                    b.sort_key.clone(),
+                    b.depth,
+                    b.content.clone(),
+                )
+            })
+            .collect();
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        rows
+    }
+
+    /// Dispatch an inverse `Operation` (from `OperationResult::undo`) back
+    /// through the generated block-operations dispatcher — the same path the
+    /// production undo engine (`OperationEngine::undo`) uses to re-execute an
+    /// inverse. Returns the executed inverse's OWN result (whose `.undo` is the
+    /// redo operation).
+    async fn apply_inverse(store: &MemStore, undo: &UndoAction) -> OperationResult {
+        let op = match undo {
+            UndoAction::Undo(op) => op,
+            other => panic!("expected reversible op, got {other:?}"),
+        };
+        let params: crate::storage::types::StorageEntity = op
+            .params
+            .iter()
+            .map(|(k, v)| (std::sync::Arc::from(k.as_str()), v.clone()))
+            .collect();
+        crate::__operations_block_operations::dispatch_operation::<MemStore, TestBlock>(
+            store,
+            &op.op_name,
+            &params,
+        )
+        .await
+        .expect("inverse dispatch failed")
+    }
+
+    #[tokio::test]
+    async fn split_block_undo_restores_exact_pre_op_state_and_redo_reapplies() {
+        let store = MemStore::new();
+        insert_block(&store, "P", None, None);
+        store.insert(TestBlock {
+            id: EntityUri::block("A"),
+            parent_id: Some(EntityUri::block("P")),
+            sort_key: gen_key_between(None, None).unwrap(),
+            depth: 1,
+            // Whitespace at the split point that the trim discards — the undo
+            // must still restore the UNtrimmed original, proving the inverse
+            // uses the recorded pre-split content, not `content_before`.
+            content: "Hello World".to_string(),
+        });
+
+        let before = snapshot(&store);
+
+        // Split "Hello World" at position 5 ("Hello| World"): A -> "Hello",
+        // new block -> "World" (leading space trimmed).
+        let split = store.split_block(&EntityUri::block("A"), 5).await.unwrap();
+        assert_eq!(store.get("A").unwrap().content, "Hello");
+        let after_split = snapshot(&store);
+        assert_ne!(before, after_split, "split must change state");
+
+        // Undo: delete the new block, restore A's exact original content.
+        let undo_result = apply_inverse(&store, &split.undo).await;
+        assert_eq!(
+            snapshot(&store),
+            before,
+            "undo of split_block must restore byte-identical pre-op state"
+        );
+
+        // Redo: re-split deterministically (same new-block id, same content).
+        apply_inverse(&store, &undo_result.undo).await;
+        assert_eq!(
+            snapshot(&store),
+            after_split,
+            "redo must re-apply the split byte-identically"
+        );
+    }
+
+    #[tokio::test]
+    async fn split_block_at_start_undo_restores_exact_pre_op_state() {
+        // Boundary: split at 0 truncates A to "" and puts all content in the new
+        // block. Undo must delete the new block and restore A's content.
+        let store = MemStore::new();
+        insert_block(&store, "P", None, None);
+        store.insert(TestBlock {
+            id: EntityUri::block("A"),
+            parent_id: Some(EntityUri::block("P")),
+            sort_key: gen_key_between(None, None).unwrap(),
+            depth: 1,
+            content: "Hello".to_string(),
+        });
+        let before = snapshot(&store);
+
+        let split = store.split_block(&EntityUri::block("A"), 0).await.unwrap();
+        assert_eq!(store.get("A").unwrap().content, "");
+
+        apply_inverse(&store, &split.undo).await;
+        assert_eq!(snapshot(&store), before);
+    }
+
+    #[tokio::test]
+    async fn join_block_into_prev_sibling_undo_restores_exact_pre_op_state_and_redo_reapplies() {
+        let store = MemStore::new();
+        insert_block(&store, "P", None, None);
+        store.insert(TestBlock {
+            id: EntityUri::block("A"),
+            parent_id: Some(EntityUri::block("P")),
+            sort_key: gen_key_between(None, None).unwrap(),
+            depth: 1,
+            content: "foo".to_string(),
+        });
+        let key_a = store.sorted_children("P").last().unwrap().sort_key.clone();
+        store.insert(TestBlock {
+            id: EntityUri::block("B"),
+            // B minted directly after A between (key_a, None) — the same slot
+            // `restore_split` re-mints on undo, so B's sort_key comes back
+            // byte-identical (deterministic fractional index).
+            parent_id: Some(EntityUri::block("P")),
+            sort_key: gen_key_between(Some(&key_a), None).unwrap(),
+            depth: 1,
+            content: "bar".to_string(),
+        });
+        let before = snapshot(&store);
+
+        // Join B into A: A -> "foobar", B deleted.
+        let join = store.join_block(&EntityUri::block("B"), 0).await.unwrap();
+        assert_eq!(store.get("A").unwrap().content, "foobar");
+        assert!(store.get("B").is_none());
+        let after_join = snapshot(&store);
+
+        // Undo: recreate B at its slot with its exact fields, restore A.
+        let undo_result = apply_inverse(&store, &join.undo).await;
+        assert_eq!(
+            snapshot(&store),
+            before,
+            "undo of join_block must restore byte-identical pre-op state (incl. B's sort_key)"
+        );
+
+        // Redo: re-join deterministically.
+        apply_inverse(&store, &undo_result.undo).await;
+        assert_eq!(
+            snapshot(&store),
+            after_join,
+            "redo must re-apply the join byte-identically"
+        );
+    }
+
+    #[tokio::test]
+    async fn join_block_into_parent_first_child_undo_restores_order_and_content() {
+        // Child->parent join (B has no prev sibling): B merges into parent P,
+        // B deleted. Undo recreates B as P's first child. In this case B's
+        // sort_key is re-minted against different neighbours, so we assert the
+        // observable contract the projection oracle enforces: sibling ORDER +
+        // content + ids + parent, rather than the raw key bytes.
+        let store = MemStore::new();
+        insert_block(&store, "P", None, None);
+        store.insert(TestBlock {
+            id: EntityUri::block("B"),
+            parent_id: Some(EntityUri::block("P")),
+            sort_key: gen_key_between(None, None).unwrap(),
+            depth: 1,
+            content: "child".to_string(),
+        });
+        let key_b = store.sorted_children("P").last().unwrap().sort_key.clone();
+        store.insert(TestBlock {
+            id: EntityUri::block("C"),
+            parent_id: Some(EntityUri::block("P")),
+            sort_key: gen_key_between(Some(&key_b), None).unwrap(),
+            depth: 1,
+            content: "sib".to_string(),
+        });
+        // Give the parent content so the join boundary is observable.
+        store
+            .set_field("block:P", "content", Value::String("parent".to_string()))
+            .await
+            .unwrap();
+
+        let order_before: Vec<String> = store
+            .sorted_children("P")
+            .iter()
+            .map(|b| b.content.clone())
+            .collect();
+        assert_eq!(order_before, vec!["child", "sib"]);
+
+        let join = store.join_block(&EntityUri::block("B"), 0).await.unwrap();
+        assert_eq!(store.get("P").unwrap().content, "parentchild");
+        assert!(store.get("B").is_none());
+
+        apply_inverse(&store, &join.undo).await;
+        // P content restored, B back as first child, order preserved.
+        assert_eq!(store.get("P").unwrap().content, "parent");
+        let order_after: Vec<(String, String)> = store
+            .sorted_children("P")
+            .iter()
+            .map(|b| (b.id.as_str().to_string(), b.content.clone()))
+            .collect();
+        assert_eq!(
+            order_after,
+            vec![
+                ("block:B".to_string(), "child".to_string()),
+                ("block:C".to_string(), "sib".to_string()),
+            ]
+        );
+        assert_eq!(store.get("B").unwrap().depth, 1);
+        assert_eq!(
+            store.get("B").unwrap().parent_id,
+            Some(EntityUri::block("P"))
+        );
+    }
+
+    #[tokio::test]
+    async fn join_block_with_children_stays_irreversible() {
+        // A subtree join (B has its own child) re-parents the child under A;
+        // one flat inverse cannot restore that placement, so the op must fail
+        // loud as Irreversible rather than ship a lossy inverse.
+        let store = MemStore::new();
+        insert_block(&store, "P", None, None);
+        store.insert(TestBlock {
+            id: EntityUri::block("A"),
+            parent_id: Some(EntityUri::block("P")),
+            sort_key: gen_key_between(None, None).unwrap(),
+            depth: 1,
+            content: "foo".to_string(),
+        });
+        let key_a = store.sorted_children("P").last().unwrap().sort_key.clone();
+        store.insert(TestBlock {
+            id: EntityUri::block("B"),
+            parent_id: Some(EntityUri::block("P")),
+            sort_key: gen_key_between(Some(&key_a), None).unwrap(),
+            depth: 1,
+            content: "bar".to_string(),
+        });
+        store.insert(TestBlock {
+            id: EntityUri::block("B1"),
+            parent_id: Some(EntityUri::block("B")),
+            sort_key: gen_key_between(None, None).unwrap(),
+            depth: 2,
+            content: "grandchild".to_string(),
+        });
+
+        let join = store.join_block(&EntityUri::block("B"), 0).await.unwrap();
+        assert!(
+            matches!(join.undo, UndoAction::DeclaredIrreversible(_)),
+            "join with re-parented children must stay DeclaredIrreversible, got {:?}",
+            join.undo
+        );
+    }
+
     /// Store that relies on the DEFAULT `DataSource`/`BlockQueryHelpers`
     /// impls (only `children_ordered` provided, as required) so the default
     /// sibling-navigation logic in traits.rs is exercised, not overridden.
