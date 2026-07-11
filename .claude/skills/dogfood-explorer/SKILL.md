@@ -159,6 +159,15 @@ piping to a JSON parser, or read stdout only with `2>/dev/null`.
    is harness-only.) At tiny fresh-boot scale expect single-digit ms (e.g. set_field e2e p95 ~8ms);
    latency bugs need vault scale to surface.
 
+**Gotchas from dogfood #3 (2026-07-11):**
+- `screenshot` returns a STALE CACHED FRAME whenever the app window is not OS-frontmost —
+  re-front via the §1 osascript before EVERY capture, not just once at launch. Verify
+  liveness by hashing two screenshots across a known visual change.
+- `execute_operation navigation.focus` does NOT reliably repaint the main panel; only a
+  real sidebar `click` reliably navigates. Prefer click-based navigation for verification.
+- `block_links` junction columns are `source_block_id`/`target`/`kind`/`resolved_id`
+  (not `block_id`) — wrong column = swallowed generic SQL error.
+
 ## 3. Exploration heuristics — vary seeds, replay known-breakers
 
 **Seeds (fresh sandbox per seed):**
