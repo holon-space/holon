@@ -4,16 +4,21 @@
 //! and `holon_org_format::org_renderer::OrgRenderer` so the sync controller
 //! can call parse/render through the trait without knowing the format.
 
-use anyhow::Result;
-use holon_api::block::Block;
-use holon_api::{EntityUri, StorageEntity};
-use holon_core::file_format::{FileFormatAdapter, FileFormatParseResult};
 use std::path::Path;
 
+use anyhow::Result;
+use holon_api::EntityUri;
+use holon_api::StorageEntity;
+use holon_api::block::Block;
+use holon_core::file_format::FileFormatAdapter;
+use holon_core::file_format::FileFormatParseResult;
+
 use crate::block_params::build_block_params;
-use crate::models::{OrgBlockExt, OrgDocumentExt};
+use crate::models::OrgBlockExt;
+use crate::models::OrgDocumentExt;
 use crate::org_renderer::OrgRenderer;
-use crate::parser::{parse_doc_id, parse_org_file};
+use crate::parser::parse_doc_id;
+use crate::parser::parse_org_file;
 
 pub struct OrgFormatAdapter;
 
@@ -89,9 +94,9 @@ impl FileFormatAdapter for OrgFormatAdapter {
             || a.deadline() != b.deadline()
             || a.drawer_properties() != b.drawer_properties()
             || a.sequence() != b.sequence()
-        // Sibling order is no longer a per-block field (ADR 0005): it is derived
-        // from document position and applied via `place_all`, so it is not part
-        // of this content-equivalence check.
+        // Sibling order is no longer a per-block field (ADR 0005): it is
+        // derived from document position and applied via `place_all`,
+        // so it is not part of this content-equivalence check.
     }
 
     fn sync_document_metadata(&self, parsed: &Block, persisted: &mut Block) -> bool {
@@ -103,12 +108,23 @@ impl FileFormatAdapter for OrgFormatAdapter {
             false
         }
     }
+
+    fn check_writeback_lossless(
+        &self,
+        path: &Path,
+        source: &str,
+        rendered: &str,
+        root: &Path,
+    ) -> Result<()> {
+        crate::writeback_guard::ensure_ingest_lossless(path, source, rendered, root)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::path::PathBuf;
+
+    use super::*;
 
     #[test]
     fn parse_returns_same_document_and_blocks_as_underlying_parser() {

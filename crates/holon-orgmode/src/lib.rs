@@ -12,14 +12,16 @@
 //!
 //! This crate handles file watching, bidirectional sync between org files and
 //! the block store, and DI wiring. Format-level concerns (parsing, rendering,
-//! diffing) live in `holon-org-format` and are re-exported here so external // ALLOW(compatibility): re-export bridge during the org-format split
+//! diffing) live in `holon-org-format` and are re-exported here so external //
+//! ALLOW(compatibility): re-export bridge during the org-format split
 //! callers keep working through the crate split.
 //!
 //! # Type System
 //!
 //! This crate uses the generic `Block` type from the core holon crate,
-//! with org-specific fields stored in the `properties` JSON field. Extension traits
-//! (`OrgDocumentExt`, `OrgBlockExt`) provide accessors for these org-specific fields.
+//! with org-specific fields stored in the `properties` JSON field. Extension
+//! traits (`OrgDocumentExt`, `OrgBlockExt`) provide accessors for these
+//! org-specific fields.
 //!
 //! - `Block` (with `name` set) + `OrgDocumentExt`: Represents an org file
 //! - `Block` + `OrgBlockExt`: Represents an org headline
@@ -42,38 +44,43 @@ pub mod file_io;
 pub mod file_sync_controller;
 pub mod file_watcher;
 pub mod orgmode_sync_provider;
+pub mod writeback_guard;
 
 // Re-export key types
-#[cfg(feature = "di")]
-pub use di::{FileWatcherReadySignal, OrgModeConfig, OrgSyncIdleSignal};
-
-// Core types
-// Note: Block is NOT re-exported here to avoid duplicate type issues with flutter_rust_bridge
-// Use holon_api::block::Block directly instead
-pub use holon_filesystem::directory::{Directory, ROOT_ID};
-
-// Extension traits for org-specific functionality (forwarded from holon-org-format)
-pub use models::org_props;
-pub use models::ParsedSectionContent;
-pub use models::{
-    find_document_id, get_block_file_path, render_document_header, BlockResolver,
-    HashMapBlockResolver,
-};
-pub use models::{OrgBlockExt, OrgDocumentExt, SourceBlock, ToOrg};
-
-// Sync providers and adapters
-pub use file_format::OrgFormatAdapter;
-pub use file_watcher::OrgFileWatcher;
-pub use org_renderer::OrgRenderer;
-pub use orgmode_sync_provider::OrgModeSyncProvider;
-pub use parser::{parse_org_file, ParseResult};
-
 // build_block_params for seeding default layouts (no di feature needed)
 pub use block_params::build_block_params;
-
+#[cfg(feature = "di")]
+pub use di::FileWatcherReadySignal;
+#[cfg(feature = "di")]
+pub use di::OrgModeConfig;
+#[cfg(feature = "di")]
+pub use di::OrgSyncIdleSignal;
+// Sync providers and adapters
+pub use file_format::OrgFormatAdapter;
 // File I/O utilities for org-mode files
 pub use file_io::{
     delete_source_block, format_api_source_block, format_block_result, format_header_args,
     format_header_args_from_values, format_org_source_block, insert_source_block,
     update_source_block, value_to_header_arg_string,
 };
+pub use file_watcher::OrgFileWatcher;
+// Core types
+// Note: Block is NOT re-exported here to avoid duplicate type issues with flutter_rust_bridge
+// Use holon_api::block::Block directly instead
+pub use holon_filesystem::directory::{Directory, ROOT_ID};
+pub use models::BlockResolver;
+pub use models::HashMapBlockResolver;
+pub use models::OrgBlockExt;
+pub use models::OrgDocumentExt;
+pub use models::ParsedSectionContent;
+pub use models::SourceBlock;
+pub use models::ToOrg;
+pub use models::find_document_id;
+pub use models::get_block_file_path;
+// Extension traits for org-specific functionality (forwarded from holon-org-format)
+pub use models::org_props;
+pub use models::render_document_header;
+pub use org_renderer::OrgRenderer;
+pub use orgmode_sync_provider::OrgModeSyncProvider;
+pub use parser::ParseResult;
+pub use parser::parse_org_file;

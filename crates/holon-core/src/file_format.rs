@@ -10,10 +10,12 @@
 //! lives here (in `holon-core`) so future format crates can implement it
 //! without taking a dependency on `holon-orgmode`.
 
-use anyhow::Result;
-use holon_api::block::Block;
-use holon_api::{EntityUri, StorageEntity};
 use std::path::Path;
+
+use anyhow::Result;
+use holon_api::EntityUri;
+use holon_api::StorageEntity;
+use holon_api::block::Block;
 
 /// Result of parsing a structured-text file. Format-neutral.
 ///
@@ -108,4 +110,28 @@ pub trait FileFormatAdapter: Send + Sync {
     /// and returns whether it changed; the controller persists via
     /// `update_metadata` only when `true`.
     fn sync_document_metadata(&self, parsed: &Block, persisted: &mut Block) -> bool;
+
+    /// Refuse a write-back that would SILENTLY drop blocks present on disk.
+    ///
+    /// Called at the ingest→write-back boundary: `source` is the file that was
+    /// just ingested, `rendered` is the projection about to be written back
+    /// over it. Returns `Err` (loud, naming the file + dropped blocks) when
+    /// a block present in `source` did NOT survive into `rendered` — the
+    /// ingest silently dropped it and writing `rendered` would delete it
+    /// from disk permanently (BugFunnel row 28, P0 data-loss class). The
+    /// controller quarantines the file on `Err` so no write-back path
+    /// rewrites the truncated state.
+    ///
+    /// A LEGAL canonical reformat (reordered header args, injected id,
+    /// whitespace normalization) and a 3-way text merge both return
+    /// `Ok(())` — the anchor is block preservation, not byte equality.
+    /// `root` is the vault root used for stable file-id derivation while
+    /// parsing.
+    fn check_writeback_lossless(
+        &self,
+        path: &Path,
+        source: &str,
+        rendered: &str,
+        root: &Path,
+    ) -> Result<()>;
 }
