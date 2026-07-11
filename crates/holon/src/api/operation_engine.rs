@@ -107,7 +107,15 @@ pub struct DispatchingOperationEngine {
     /// op appends its field deltas to the stream. `None` on a wiring without a
     /// query substrate (the block `_provenance` stamp still lands regardless).
     history: Option<Arc<dyn HistoryStore>>,
+    /// Read capability for `instantiate_template`
+    /// (docs/Proposals/Templating-2026-07-12.md). `None` on a wiring without a
+    /// queryable block projection — the operation then fails loud, disclosed.
+    template_source: Option<Arc<dyn crate::api::template_source::TemplateSource>>,
 }
+
+/// The engine-level compound operation name: expands into `create` ops routed
+/// through whatever provider owns `block` creation in this session's wiring.
+const INSTANTIATE_TEMPLATE_OP: &str = "instantiate_template";
 
 /// Op names whose params are a block field-map written to `block_raw`, so an
 /// injected `_provenance` property lands in the row's `properties` JSON through
@@ -190,6 +198,7 @@ impl DispatchingOperationEngine {
             seq: AtomicI64::new(0),
             clock: Arc::new(SystemClock),
             history: None,
+            template_source: None,
         }
     }
 
@@ -204,6 +213,16 @@ impl DispatchingOperationEngine {
     /// appends its field deltas to the stream.
     pub fn with_history_store(mut self, history: Arc<dyn HistoryStore>) -> Self {
         self.history = Some(history);
+        self
+    }
+
+    /// Wire the template read capability, enabling the engine-level
+    /// `instantiate_template` operation on the `block` entity.
+    pub fn with_template_source(
+        mut self,
+        source: Arc<dyn crate::api::template_source::TemplateSource>,
+    ) -> Self {
+        self.template_source = Some(source);
         self
     }
 
@@ -230,6 +249,7 @@ impl DispatchingOperationEngine {
             seq: AtomicI64::new(seq),
             clock: Arc::new(SystemClock),
             history: None,
+            template_source: None,
         })
     }
 
@@ -295,6 +315,92 @@ impl DispatchingOperationEngine {
         Ok(())
     }
 
+    /// Execute `instantiate_template`
+    /// (docs/Proposals/Templating-2026-07-12.md): load the template
+    /// subtree, build the deterministic instantiation plan, and dispatch
+    /// one `create` per node through the NORMAL operation path —
+    /// so C2a provenance stamping, the C2b history relation, and per-create
+    /// undo classification all apply unchanged. Returns the instance root id.
+    async fn run_instantiate_template(
+        &self,
+        params: &StorageEntity,
+        origin: &OpOrigin,
+    ) -> Result<Option<Value>> {
+        use crate::core::template_instantiation::InstantiateRequest;
+        use crate::core::template_instantiation::plan_instantiation;
+
+        let source = self.template_source.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "instantiate_template requires a template source — not wired in this session (no \
+                 queryable block projection)"
+            )
+        })?;
+        let request = InstantiateRequest::from_params(params)?;
+        let nodes = source.load_subtree(&request.template_id).await?;
+        let plan = plan_instantiation(&nodes, &request)?;
+
+        let block_entity = EntityName::new("block");
+        for create_params in plan.creates {
+            // Boxed for async recursion (this IS execute_operation calling
+            // itself one level deep; a nested instantiate cannot occur —
+            // the plan only emits `create`).
+            Box::pin(OperationEngine::execute_operation(
+                self,
+                &block_entity,
+                "create",
+                create_params,
+                origin.clone(),
+            ))
+            .await?;
+        }
+        Ok(Some(Value::String(plan.root_id)))
+    }
+
+    /// The synthetic descriptor advertising the engine-level
+    /// `instantiate_template` op so MCP/UI discover it like any provider op.
+    fn instantiate_template_descriptor() -> OperationDescriptor {
+        use holon_api::render_types::TypeHint;
+        let param = |name: &str, hint: TypeHint, description: &str| holon_api::OperationParam {
+            name: name.to_string(),
+            type_hint: hint,
+            description: description.to_string(),
+        };
+        OperationDescriptor {
+            entity_name: EntityName::new("block"),
+            entity_short_name: "block".to_string(),
+            id_column: "id".to_string(),
+            name: INSTANTIATE_TEMPLATE_OP.to_string(),
+            display_name: "Instantiate template".to_string(),
+            description: "Deep-copy a template block subtree under target_parent, substituting \
+                          {{var}} slots from bindings. Instance ids are deterministic per \
+                          (template_id, context_key), so rule re-fires converge. Fails loud on \
+                          missing bindings."
+                .to_string(),
+            required_params: vec![
+                param(
+                    "template_id",
+                    TypeHint::String,
+                    "Id of the template root block (must carry the 'template' property)",
+                ),
+                param(
+                    "target_parent",
+                    TypeHint::String,
+                    "Block id the instance root is created under",
+                ),
+                param(
+                    "context_key",
+                    TypeHint::String,
+                    "Idempotence key: rules pass their firing key; manual callers a fresh key",
+                ),
+            ],
+            affected_fields: vec![],
+            param_mappings: vec![],
+            trigger: None,
+            bound_params: Default::default(),
+            precondition: None,
+        }
+    }
+
     /// Verify a precondition against live state. With no reader wired (an
     /// in-memory, single-writer session that has no external-mutation surface)
     /// verification is skipped — disclosed, not a silent fake. When a reader is
@@ -324,6 +430,13 @@ impl OperationEngine for DispatchingOperationEngine {
         params: StorageEntity,
         origin: OpOrigin,
     ) -> Result<Option<Value>> {
+        // Engine-level compound: expand a template instantiation into ordinary
+        // `create` dispatches (each re-enters this method and gets stamping /
+        // history / undo classification like any other op).
+        if op_name == INSTANTIATE_TEMPLATE_OP && entity_name.as_str() == "block" {
+            return self.run_instantiate_template(&params, &origin).await;
+        }
+
         // Provenance stamping (ADR 0024 P8 / C2a): the dispatcher drops `origin`
         // before the write, so this is the last place holding it. For authoring
         // ops we inject a `_provenance` property into the params; it travels as
@@ -389,14 +502,25 @@ impl OperationEngine for DispatchingOperationEngine {
     }
 
     async fn available_operations(&self, entity_name: &str) -> Vec<OperationDescriptor> {
-        self.dispatcher
+        let mut ops: Vec<OperationDescriptor> = self
+            .dispatcher
             .operations()
             .into_iter()
             .filter(|op| op.entity_name == entity_name)
-            .collect()
+            .collect();
+        if entity_name == "block" && self.template_source.is_some() {
+            ops.push(Self::instantiate_template_descriptor());
+        }
+        ops
     }
 
     async fn has_operation(&self, entity_name: &str, op_name: &str) -> bool {
+        if entity_name == "block"
+            && op_name == INSTANTIATE_TEMPLATE_OP
+            && self.template_source.is_some()
+        {
+            return true;
+        }
         self.dispatcher
             .operations()
             .into_iter()
@@ -453,6 +577,265 @@ impl OperationEngine for DispatchingOperationEngine {
 
     async fn can_redo(&self) -> bool {
         self.undo_stack.read().await.can_redo()
+    }
+}
+
+#[cfg(test)]
+mod instantiate_template_tests {
+    use std::collections::HashMap;
+
+    use super::*;
+    use crate::core::sql_operation_provider::SqlOperationProvider;
+    use crate::di::test_helpers::create_test_engine_with_providers;
+    use crate::storage::BLOCK_WRITE_TABLE;
+
+    /// A test engine with the `block` SQL operation provider registered,
+    /// mirroring the `action_watcher` test harness. `BackendEngine::new` wires
+    /// the Turso [`TemplateSource`] automatically.
+    async fn block_engine() -> Arc<BackendEngine> {
+        create_test_engine_with_providers(":memory:".into(), |module| {
+            module.with_operation_provider_factory(|backend| {
+                let db_handle =
+                    tokio::task::block_in_place(|| backend.blocking_read().handle().clone());
+                Arc::new(SqlOperationProvider::new(
+                    db_handle,
+                    BLOCK_WRITE_TABLE.to_string(),
+                    "block".to_string(),
+                    "block".to_string(),
+                ))
+            })
+        })
+        .await
+        .unwrap()
+    }
+
+    async fn create_block(engine: &BackendEngine, fields: &[(&str, Value)]) {
+        let params: StorageEntity = fields
+            .iter()
+            .map(|(k, v)| (Arc::from(*k), v.clone()))
+            .collect();
+        engine
+            .execute_operation(&EntityName::new("block"), "create", params, OpOrigin::User)
+            .await
+            .unwrap();
+    }
+
+    /// Seed: target parent + a two-level template (root with marker props and
+    /// a `{{date}}` slot, one child with a `{{mood}}` slot and a link mark).
+    async fn seed_template(engine: &BackendEngine) {
+        create_block(
+            engine,
+            &[
+                ("id", Value::String("block:target".into())),
+                ("content", Value::String("Target".into())),
+            ],
+        )
+        .await;
+        create_block(
+            engine,
+            &[
+                ("id", Value::String("block:tpl".into())),
+                ("content", Value::String("{{date}}".into())),
+                ("template", Value::String("daily".into())),
+                ("template_vars", Value::String("date, mood=neutral".into())),
+            ],
+        )
+        .await;
+        // Child content "see {{date}} now" with a bold mark on "see" (0..3).
+        create_block(
+            engine,
+            &[
+                ("id", Value::String("block:tpl-c1".into())),
+                ("parent_id", Value::String("block:tpl".into())),
+                ("content", Value::String("see {{date}} now".into())),
+                (
+                    "marks",
+                    Value::String(r#"[{"start":0,"end":3,"kind":"Bold"}]"#.into()),
+                ),
+            ],
+        )
+        .await;
+    }
+
+    fn instantiate_params(context_key: &str, bindings: &[(&str, &str)]) -> StorageEntity {
+        let mut params = StorageEntity::new();
+        params.insert("template_id".into(), Value::String("block:tpl".into()));
+        params.insert("target_parent".into(), Value::String("block:target".into()));
+        params.insert("context_key".into(), Value::String(context_key.into()));
+        if !bindings.is_empty() {
+            params.insert(
+                "bindings".into(),
+                Value::Object(
+                    bindings
+                        .iter()
+                        .map(|(k, v)| (k.to_string(), Value::String(v.to_string())))
+                        .collect(),
+                ),
+            );
+        }
+        params
+    }
+
+    async fn instance_roots(engine: &BackendEngine) -> Vec<StorageEntity> {
+        engine
+            .db_handle()
+            .query(
+                "SELECT * FROM block_raw WHERE parent_id = 'block:target' AND id != 'block:tpl' \
+                 ORDER BY id",
+                HashMap::new(),
+            )
+            .await
+            .unwrap()
+    }
+
+    fn str_field<'a>(row: &'a StorageEntity, key: &str) -> &'a str {
+        match row.get(key) {
+            Some(Value::String(s)) => s,
+            other => panic!("field '{key}': expected string, got {other:?}"),
+        }
+    }
+
+    /// Read a row's `properties` as a JSON object regardless of whether the
+    /// query hands it back as a raw JSON string or an already-parsed
+    /// `Value::Object` (`DbHandle::query` may do either).
+    fn props_of(row: &StorageEntity) -> serde_json::Value {
+        match row.get("properties") {
+            Some(Value::String(s)) | Some(Value::Json(s)) => {
+                serde_json::from_str(s).expect("properties is valid JSON")
+            }
+            Some(obj @ Value::Object(_)) => {
+                serde_json::to_value(obj).expect("Value serialization is total")
+            }
+            other => panic!("properties: expected object or JSON string, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn instantiate_is_idempotent_per_context_key_and_substitutes() {
+        let engine = block_engine().await;
+        seed_template(&engine).await;
+        let entity = EntityName::new("block");
+
+        let root_id = engine
+            .execute_operation(
+                &entity,
+                "instantiate_template",
+                instantiate_params("2026-07-12", &[("date", "2026-07-12")]),
+                OpOrigin::Rule {
+                    transition_id: "rule:test-template".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let Some(Value::String(root_id)) = root_id else {
+            panic!("instantiate_template must return the instance root id");
+        };
+
+        // Same context key again → converged, still exactly one instance.
+        engine
+            .execute_operation(
+                &entity,
+                "instantiate_template",
+                instantiate_params("2026-07-12", &[("date", "2026-07-12")]),
+                OpOrigin::Rule {
+                    transition_id: "rule:test-template".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let roots = instance_roots(&engine).await;
+        assert_eq!(
+            roots.len(),
+            1,
+            "re-fire with same context_key must converge"
+        );
+        let root = &roots[0];
+        assert_eq!(str_field(root, "id"), root_id);
+        assert_eq!(str_field(root, "content"), "2026-07-12", "substituted");
+        let props = props_of(root);
+        assert_eq!(props["instance_of"], "block:tpl");
+        assert!(props.get("template").is_none(), "marker stripped");
+        assert_eq!(
+            props["_provenance"]["origin"], "rule",
+            "creates carry rule provenance (C2a)"
+        );
+
+        // The child: substituted content, marks survived as real marks.
+        let children = engine
+            .db_handle()
+            .query(
+                &format!(
+                    "SELECT * FROM block_raw WHERE parent_id = '{}'",
+                    root_id.replace('\'', "''")
+                ),
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(str_field(&children[0], "content"), "see 2026-07-12 now");
+        let marks_json = match children[0].get("marks") {
+            Some(Value::String(s)) | Some(Value::Json(s)) => s.clone(),
+            Some(arr @ Value::Array(_)) => serde_json::to_string(arr).unwrap(),
+            other => panic!("marks: expected array or JSON string, got {other:?}"),
+        };
+        let marks = holon_api::marks_from_json(&marks_json).unwrap();
+        assert_eq!((marks[0].start, marks[0].end), (0, 3), "bold mark intact");
+
+        // A different context key mints a second, distinct instance.
+        engine
+            .execute_operation(
+                &entity,
+                "instantiate_template",
+                instantiate_params("2026-07-13", &[("date", "2026-07-13")]),
+                OpOrigin::Rule {
+                    transition_id: "rule:test-template".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            instance_roots(&engine).await.len(),
+            2,
+            "a new context_key is a new instance"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn missing_binding_fails_loud_and_creates_nothing() {
+        let engine = block_engine().await;
+        seed_template(&engine).await;
+
+        let err = engine
+            .execute_operation(
+                &EntityName::new("block"),
+                "instantiate_template",
+                instantiate_params("k1", &[]),
+                OpOrigin::User,
+            )
+            .await
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("missing bindings"), "got: {msg}");
+        assert!(msg.contains("date"), "got: {msg}");
+        assert_eq!(
+            instance_roots(&engine).await.len(),
+            0,
+            "failed instantiation must create nothing"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn advertised_in_available_operations() {
+        let engine = block_engine().await;
+        let ops = OperationEngine::available_operations(engine.as_ref(), "block").await;
+        assert!(
+            ops.iter().any(|op| op.name == "instantiate_template"),
+            "instantiate_template must be discoverable (MCP/UI)"
+        );
+        assert!(
+            OperationEngine::has_operation(engine.as_ref(), "block", "instantiate_template").await
+        );
     }
 }
 

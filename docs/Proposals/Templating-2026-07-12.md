@@ -256,8 +256,13 @@ the existing content pipeline, no template-specific handling.
 - `crates/holon/src/api/operation_engine.rs` — `TemplateSource` trait,
   interception in `execute_operation`, synthetic descriptor in
   `available_operations` / `has_operation`.
-- `crates/holon/src/api/backend_engine.rs` — Turso `TemplateSource`
-  (BFS over `block_raw`) wired at both engine constructions.
+- `crates/holon/src/api/template_source.rs` — `TemplateSource` trait +
+  `TursoTemplateSource` (BFS over `block_raw`). Note: `DbHandle::query`
+  deserializes JSON TEXT columns (`properties`, `marks`) into structured
+  `Value::Object`/`Value::Array`, so the row reader re-serializes them to the
+  JSON string the planner re-parses (`json_column_to_string`).
+- `crates/holon/src/api/backend_engine.rs` — `TursoTemplateSource` wired at
+  both engine constructions.
 - Tests: planning unit tests (bindings, defaults, missing/unknown bindings
   fail loud, deterministic ids, mark offsets); engine integration tests
   (instantiate twice same `context_key` → converged, different key → second

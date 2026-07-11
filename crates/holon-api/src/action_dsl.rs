@@ -6,10 +6,15 @@
 //! actor call the same parser rather than each owning a private one. Built on
 //! the Tier-1 render DSL engine ([`crate::render_dsl`]).
 
-use anyhow::{Context, Result};
-use rhai::{Dynamic, Engine as RhaiEngine, Map as RhaiMap, Scope};
+use anyhow::Context;
+use anyhow::Result;
+use rhai::Dynamic;
+use rhai::Engine as RhaiEngine;
+use rhai::Map as RhaiMap;
+use rhai::Scope;
 
-use crate::render_dsl::{create_render_engine, dynamic_to_render_expr};
+use crate::render_dsl::create_render_engine;
+use crate::render_dsl::dynamic_to_render_expr;
 use crate::render_types::Arg;
 
 /// A parsed action invocation: which entity, which operation, with what args.
@@ -77,6 +82,10 @@ fn build_action_engine() -> RhaiEngine {
         "update",
         "delete",
         "cycle_task_state",
+        // Engine-level compound (docs/Proposals/Templating-2026-07-12.md): a
+        // rule effect may instantiate a template subtree. The operation itself
+        // owns deterministic ids + fail-loud binding checks.
+        "instantiate_template",
     ] {
         let op_str = op.to_string();
         engine.register_fn(

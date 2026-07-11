@@ -38,6 +38,7 @@ pub mod operation_dispatcher;
 pub mod operation_engine;
 pub mod query_engine;
 pub mod rule_status;
+pub mod template_source;
 pub mod ui_watcher;
 pub mod undo_persistence;
 
