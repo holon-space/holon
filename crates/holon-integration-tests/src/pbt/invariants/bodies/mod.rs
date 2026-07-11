@@ -25,6 +25,7 @@ pub mod no_errors;
 pub mod no_orphan_blocks;
 pub mod no_parent_cycles;
 pub mod org_render_fixed_point;
+pub mod sidebar_page_tag_preserved;
 pub mod source_language_iff_source;
 pub mod sql_budget;
 pub mod task_state_storage_coherence;

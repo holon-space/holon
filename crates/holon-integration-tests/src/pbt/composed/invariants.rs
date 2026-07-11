@@ -43,6 +43,7 @@ pub mod no_errors;
 pub mod no_orphan;
 pub mod no_parent_cycles;
 pub mod org_render_fixed_point;
+pub mod sidebar_page_tag_preserved;
 pub mod source_language;
 /// `inv-sql-budget` — `otel-testing`-gated (the budget body + composed host
 /// both require the OTel span collector; the `pbt` feature always enables it).

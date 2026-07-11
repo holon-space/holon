@@ -35,6 +35,10 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // frontend slice supplies it (production CacheBlockReader + OrgRenderer).
         invariants::org_render_fixed_point::wire(),
         invariants::no_orphan::wire(),
+        // Sidebar page-tag preservation: a ref `Page` doc-root must keep its
+        // `Page` tag in the SUT projection (folder-companion demotion class,
+        // dogfood 2026-07-12). Needs `SutBackend` + `RefBlockTree`.
+        invariants::sidebar_page_tag_preserved::wire(),
         invariants::no_errors::wire(),
         invariants::viewmodel_no_error_widgets::wire(),
         invariants::task_state_storage_coherence::wire(),
