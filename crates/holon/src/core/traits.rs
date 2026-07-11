@@ -1,98 +1,20 @@
 use std::fmt::Debug;
-use std::sync::Arc;
 
-use async_trait::async_trait;
 use holon_api::Value;
-use holon_api::predicate::Predicate as PredicateEnum;
 // Re-export schema types from holon_api to avoid duplication
 pub use holon_api::{DynamicEntity, FieldSchema, IntoEntity, TryFromEntity, TypeDefinition};
 use turso;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-/// Generate SQL from a `Predicate` enum.
-///
-/// Separate from the `Predicate` type (which lives in holon-api) because
-/// SQL generation depends on the turso crate (in holon, not holon-api).
-pub trait ToSql {
-    fn to_sql_predicate(&self) -> Option<SqlPredicate>;
-}
-
-impl ToSql for PredicateEnum {
-    fn to_sql_predicate(&self) -> Option<SqlPredicate> {
-        match self {
-            PredicateEnum::Eq { field, value } => Some(SqlPredicate::new(
-                format!("{field} = ?"),
-                vec![value.clone()],
-            )),
-            PredicateEnum::Ne { field, value } => {
-                if value.is_null() {
-                    Some(SqlPredicate::new(format!("{field} IS NOT NULL"), vec![]))
-                } else {
-                    Some(SqlPredicate::new(
-                        format!("{field} != ?"),
-                        vec![value.clone()],
-                    ))
-                }
-            }
-            PredicateEnum::Gt { field, value } => Some(SqlPredicate::new(
-                format!("{field} > ?"),
-                vec![value.clone()],
-            )),
-            PredicateEnum::Lt { field, value } => Some(SqlPredicate::new(
-                format!("{field} < ?"),
-                vec![value.clone()],
-            )),
-            PredicateEnum::Gte { field, value } => Some(SqlPredicate::new(
-                format!("{field} >= ?"),
-                vec![value.clone()],
-            )),
-            PredicateEnum::Lte { field, value } => Some(SqlPredicate::new(
-                format!("{field} <= ?"),
-                vec![value.clone()],
-            )),
-            PredicateEnum::IsNotNull(field) => {
-                Some(SqlPredicate::new(format!("{field} IS NOT NULL"), vec![]))
-            }
-            PredicateEnum::Var(field) => Some(SqlPredicate::new(
-                format!("{field} IS NOT NULL AND {field} != '' AND {field} != 0"),
-                vec![],
-            )),
-            PredicateEnum::Not(inner) => inner
-                .to_sql_predicate()
-                .map(|p| SqlPredicate::new(format!("NOT ({})", p.sql), p.params)),
-            PredicateEnum::And(preds) => {
-                let parts: Vec<SqlPredicate> =
-                    preds.iter().filter_map(|p| p.to_sql_predicate()).collect();
-                if parts.len() != preds.len() {
-                    return None;
-                }
-                let sql = parts
-                    .iter()
-                    .map(|p| format!("({})", p.sql))
-                    .collect::<Vec<_>>()
-                    .join(" AND ");
-                let params = parts.into_iter().flat_map(|p| p.params).collect();
-                Some(SqlPredicate::new(sql, params))
-            }
-            PredicateEnum::Or(preds) => {
-                let parts: Vec<SqlPredicate> =
-                    preds.iter().filter_map(|p| p.to_sql_predicate()).collect();
-                if parts.len() != preds.len() {
-                    return None;
-                }
-                let sql = parts
-                    .iter()
-                    .map(|p| format!("({})", p.sql))
-                    .collect::<Vec<_>>()
-                    .join(" OR ");
-                let params = parts.into_iter().flat_map(|p| p.params).collect();
-                Some(SqlPredicate::new(sql, params))
-            }
-            PredicateEnum::Always => None,
-        }
-    }
-}
+// NOTE: the enum `Predicate` → SQL path formerly lived here as `trait ToSql` /
+// `impl ToSql for Predicate`. It silently returned `None` for `Always` and for
+// any And/Or containing a non-compilable child (via `filter_map`), so a valid
+// predicate could yield no WHERE clause — a latent data-widening bug (C4
+// ruling: "must become disclosed"). It had zero production callers. Replaced by
+// `holon_api::computation::Computation::compile_sql` / `predicate_to_sql`,
+// which return a typed `Result<SqlFragment, SqlUnsupported>` (fail-loud, never
+// silent).
 
 /// Convert a holon_api::Value to turso::Value for database operations.
 /// This handles all Value variants including Object and Array by serializing
@@ -109,175 +31,15 @@ pub fn value_to_turso(value: &Value) -> turso::Value {
     }
 }
 
-pub trait Lens<T, U>: Clone + Send + Sync + 'static {
-    fn get(&self, source: &T) -> Option<U>;
-    fn set(&self, source: &mut T, value: U);
-    fn sql_column(&self) -> &'static str {
-        self.field_name()
-    }
-    fn field_name(&self) -> &'static str;
-}
-
-pub trait Predicate<T>: Send + Sync {
-    fn test(&self, item: &T) -> bool;
-    fn to_sql(&self) -> Option<SqlPredicate>;
-
-    fn and<P>(self, other: P) -> And<T, Self, P>
-    where
-        Self: Sized,
-        P: Predicate<T>,
-    {
-        And {
-            left: self,
-            right: other,
-            _phantom: std::marker::PhantomData,
-        }
-    }
-
-    fn or<P>(self, other: P) -> Or<T, Self, P>
-    where
-        Self: Sized,
-        P: Predicate<T>,
-    {
-        Or {
-            left: self,
-            right: other,
-            _phantom: std::marker::PhantomData,
-        }
-    }
-
-    fn not(self) -> Not<T, Self>
-    where
-        Self: Sized,
-    {
-        Not {
-            inner: self,
-            _phantom: std::marker::PhantomData,
-        }
-    }
-}
-
-impl<T> Predicate<T> for Arc<dyn Predicate<T>>
-where
-    T: Send + Sync,
-{
-    fn test(&self, item: &T) -> bool {
-        (**self).test(item)
-    }
-
-    fn to_sql(&self) -> Option<SqlPredicate> {
-        (**self).to_sql()
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct SqlPredicate {
-    pub sql: String,
-    pub params: Vec<Value>,
-}
-
-impl SqlPredicate {
-    pub fn new(sql: String, params: Vec<Value>) -> Self {
-        Self { sql, params }
-    }
-
-    pub fn to_params(&self) -> Vec<turso::Value> {
-        self.params.iter().map(value_to_turso).collect()
-    }
-}
-
-pub struct And<T, L, R> {
-    left: L,
-    right: R,
-    _phantom: std::marker::PhantomData<T>,
-}
-
-impl<T, L, R> Predicate<T> for And<T, L, R>
-where
-    T: Send + Sync,
-    L: Predicate<T>,
-    R: Predicate<T>,
-{
-    fn test(&self, item: &T) -> bool {
-        self.left.test(item) && self.right.test(item)
-    }
-
-    fn to_sql(&self) -> Option<SqlPredicate> {
-        match (self.left.to_sql(), self.right.to_sql()) {
-            (Some(left), Some(right)) => {
-                let mut params = left.params;
-                params.extend(right.params);
-                Some(SqlPredicate::new(
-                    format!("({}) AND ({})", left.sql, right.sql),
-                    params,
-                ))
-            }
-            _ => None,
-        }
-    }
-}
-
-pub struct Or<T, L, R> {
-    left: L,
-    right: R,
-    _phantom: std::marker::PhantomData<T>,
-}
-
-impl<T, L, R> Predicate<T> for Or<T, L, R>
-where
-    T: Send + Sync,
-    L: Predicate<T>,
-    R: Predicate<T>,
-{
-    fn test(&self, item: &T) -> bool {
-        self.left.test(item) || self.right.test(item)
-    }
-
-    fn to_sql(&self) -> Option<SqlPredicate> {
-        match (self.left.to_sql(), self.right.to_sql()) {
-            (Some(left), Some(right)) => {
-                let mut params = left.params;
-                params.extend(right.params);
-                Some(SqlPredicate::new(
-                    format!("({}) OR ({})", left.sql, right.sql),
-                    params,
-                ))
-            }
-            _ => None,
-        }
-    }
-}
-
-pub struct Not<T, P> {
-    inner: P,
-    _phantom: std::marker::PhantomData<T>,
-}
-
-impl<T, P> Predicate<T> for Not<T, P>
-where
-    T: Send + Sync,
-    P: Predicate<T>,
-{
-    fn test(&self, item: &T) -> bool {
-        !self.inner.test(item)
-    }
-
-    fn to_sql(&self) -> Option<SqlPredicate> {
-        self.inner
-            .to_sql()
-            .map(|pred| SqlPredicate::new(format!("NOT ({})", pred.sql), pred.params))
-    }
-}
-
-#[async_trait]
-pub trait Queryable<T>: Send + Sync
-where
-    T: Send + Sync + 'static,
-{
-    async fn query<P>(&self, predicate: P) -> Result<Vec<T>>
-    where
-        P: Predicate<T> + Send + 'static;
-}
+// DELETED (C4 ruling, "generalize the Predicate trait"): the static-dispatch
+// `Predicate<T>` trait, its `And`/`Or`/`Not` combinator structs, `Lens<T,U>`,
+// `SqlPredicate`, and the `Queryable<T>` trait. This was the old
+// generic-over-item query abstraction; its `Queryable::query<P: Predicate<T>>`
+// method had no production callers (only a self-test on `QueryableCache`). The
+// unified, function-shape-keyed replacement is
+// `holon_api::computation::Computation` (in-memory `eval` + disclosed
+// `compile_sql`). `QueryableCache` retains its actually-used `query_raw` /
+// `query_ordered` / `DataSource` / `EntityCache` surface.
 
 /// Result of an incremental sync operation
 #[derive(Debug, Clone)]
@@ -298,57 +60,6 @@ pub struct SyncResult<T, Token> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    struct TestItem {
-        value: i64,
-    }
-
-    struct TestPredicate;
-
-    impl Predicate<TestItem> for TestPredicate {
-        fn test(&self, item: &TestItem) -> bool {
-            item.value > 10
-        }
-
-        fn to_sql(&self) -> Option<SqlPredicate> {
-            Some(SqlPredicate::new(
-                "value > ?".to_string(),
-                vec![Value::Integer(10)],
-            ))
-        }
-    }
-
-    #[test]
-    fn test_predicate_and() {
-        let item = TestItem { value: 15 };
-
-        let pred = TestPredicate.and(TestPredicate);
-        assert!(pred.test(&item));
-    }
-
-    #[test]
-    fn test_predicate_or() {
-        let item = TestItem { value: 5 };
-
-        let pred = TestPredicate.or(TestPredicate);
-        assert!(!pred.test(&item));
-    }
-
-    #[test]
-    fn test_predicate_not() {
-        let item = TestItem { value: 5 };
-
-        let pred = TestPredicate.not();
-        assert!(pred.test(&item));
-    }
-
-    #[test]
-    fn test_sql_generation() {
-        let pred = TestPredicate.and(TestPredicate);
-        let sql = pred.to_sql().unwrap();
-        assert_eq!(sql.sql, "(value > ?) AND (value > ?)");
-        assert_eq!(sql.params.len(), 2);
-    }
 
     #[test]
     fn test_type_definition_to_sql() {
