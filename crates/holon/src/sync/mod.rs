@@ -17,7 +17,6 @@ pub mod turso_block_query_source;
 // Re-export wiring modules that stayed in holon
 pub use advice_reconciler::{AdviceReconcilerHandle, spawn_advice_reconciler};
 pub use event_infra_module::EventInfraModule;
-pub use event_infra_module::LinkEventSubscriberHandle;
 // Re-export live_data module and the LiveData type (moved to holon-api earlier)
 pub use holon_api::live_data;
 pub use holon_api::live_data::LiveData;

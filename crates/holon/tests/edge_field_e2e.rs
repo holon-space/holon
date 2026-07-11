@@ -3,11 +3,11 @@
 //! Verifies, against a real Turso DB, that the new third partition in
 //! `SqlOperationProvider`:
 //!   1. routes `Value::Array` payloads on a registered edge field through
-//!      DELETE+INSERT against the junction table (NOT into the JSON
-//!      properties blob);
+//!      DELETE+INSERT against the junction table (NOT into the JSON properties
+//!      blob);
 //!   2. handles create / update / set_field / delete uniformly;
-//!   3. relies on FK CASCADE so a parent-block delete drops incident
-//!      junction rows.
+//!   3. relies on FK CASCADE so a parent-block delete drops incident junction
+//!      rows.
 //!
 //! Mirrors H1's harness shape (see
 //! `crates/holon/examples/turso_ivm_junction_gating_repro.rs`) — but here
@@ -17,9 +17,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use holon::core::SqlOperationProvider;
-use holon::storage::schema_module::{EdgeFieldDescriptor, SchemaModule};
+use holon::storage::schema_module::EdgeFieldDescriptor;
+use holon::storage::schema_module::SchemaModule;
 use holon::storage::turso::TursoBackend;
-use holon_api::{EntityName, Value};
+use holon_api::EntityName;
+use holon_api::Value;
 use holon_core::OperationProvider;
 use holon_turso::schema_modules::BlockSchemaModule;
 
@@ -82,6 +84,20 @@ async fn setup_schema(handle: &holon::storage::turso::DbHandle) {
         )
         .await
         .expect("block_tags table");
+    // Links increment 2: block delete cleans `block_links` explicitly (soft
+    // targets, no FK), so every block-provider fixture needs the table.
+    handle
+        .execute_ddl(
+            "CREATE TABLE block_links (
+                source_block_id TEXT NOT NULL,
+                target TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                resolved_id TEXT,
+                PRIMARY KEY (source_block_id, target, kind)
+            )",
+        )
+        .await
+        .expect("block_links table");
 }
 
 async fn read_requires(handle: &holon::storage::turso::DbHandle, block_id: &str) -> Vec<String> {

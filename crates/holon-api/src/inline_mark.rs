@@ -17,8 +17,9 @@
 //! - PRQL queries that surface marks alongside content,
 //! - the FRB bridge to Flutter (which round-trips the JSON string).
 //!
-//! Loro `LoroValue::Map` conversion lives in `crates/holon/src/api/loro_backend.rs`
-//! where the Loro dependency is in scope.
+//! Loro `LoroValue::Map` conversion lives in
+//! `crates/holon/src/api/loro_backend.rs` where the Loro dependency is in
+//! scope.
 //!
 //! # Boundary expansion
 //!
@@ -27,20 +28,31 @@
 //! once at LoroDoc creation. See `loro_backend.rs` for the policy
 //! (Bold/Italic/Code/Strike/Underline/Sub/Super = After; Link/Verbatim = None).
 
-use crate::{EntityUri, Value};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
+
+use crate::EntityUri;
+use crate::Value;
 
 /// Target of a `Link` mark.
 ///
 /// `Internal` references a block by its `EntityUri` (so renames update the
 /// label via a Phase 6 hook). `External` carries a raw URL string — we don't
 /// pull in the `url` crate since the URL is presented verbatim in both org
-/// `[[uri][label]]` and the editor's link popover.
+/// `[[uri][label]]` and the editor's link popover. `Name` is a DANGLING
+/// wiki-name target (links increment 2): the page it names may not exist yet
+/// — pages are created lazily, never as placeholders — so the mark keeps the
+/// user's exact target string (`[[Linked Page]]`, or a `parent/leaf`
+/// name-chain used as a suffix resolution hint). Resolution state lives in
+/// the `block_links` junction (`resolved_id`); the dangling→resolved mark
+/// upgrade rides the org writeback (which emits the resolved `[[id][label]]`
+/// form) and the normal re-ingest of that file.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum EntityRef {
     External { url: String },
     Internal { id: EntityUri },
+    Name { name: String },
 }
 
 /// One inline mark kind. The `Link` variant carries its target inline so a
@@ -81,9 +93,10 @@ impl InlineMark {
         }
     }
 
-    /// All `loro_key` values in a stable order. `loro_backend::config_text_style`
-    /// iterates this to install the per-key `ExpandType` policy at LoroDoc
-    /// creation. Keep this in sync with `expand_after` below.
+    /// All `loro_key` values in a stable order.
+    /// `loro_backend::config_text_style` iterates this to install the
+    /// per-key `ExpandType` policy at LoroDoc creation. Keep this in sync
+    /// with `expand_after` below.
     pub fn all_loro_keys() -> &'static [&'static str] {
         &[
             "bold",
@@ -199,6 +212,81 @@ impl TryFrom<Value> for MarkSpan {
         let json: serde_json::Value = v.into();
         serde_json::from_value(json).map_err(|e| Box::new(e) as Self::Error)
     }
+}
+
+// --- block_links derivation (links increment 2) ---
+
+/// Kind of a `block_links` junction row. Stored as its `as_str` form in the
+/// `block_links.kind` column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkKind {
+    /// Wiki-name target (`[[Page Name]]` / `[[parent/leaf]]`): names a page.
+    Page,
+    /// Direct entity-id target (`[[block:...][label]]`).
+    Block,
+    /// Tag target (`tag:` scheme).
+    Tag,
+}
+
+impl LinkKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LinkKind::Page => "page",
+            LinkKind::Block => "block",
+            LinkKind::Tag => "tag",
+        }
+    }
+}
+
+/// One derived `block_links` row (source id supplied by the writer).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DerivedLink {
+    /// The target as authored: a wiki name / name-chain for `Page`, the full
+    /// schemed URI string for `Block`/`Tag`.
+    pub target: String,
+    pub kind: LinkKind,
+    /// Already-resolved target id (id-form links resolve trivially; name-form
+    /// links start dangling — the SQL write boundary fills this by page-name
+    /// lookup).
+    pub resolved: Option<EntityUri>,
+}
+
+/// Derive the `block_links` rows implied by a block's inline marks.
+///
+/// External URL links are NOT block links (they never resolve to an entity)
+/// and are skipped. Duplicate `(target, kind)` pairs collapse to one row
+/// (junction PK is `(source, target, kind)`).
+pub fn derive_block_links(marks: &[MarkSpan]) -> Vec<DerivedLink> {
+    let mut out: Vec<DerivedLink> = Vec::new();
+    for span in marks {
+        let derived = match &span.mark {
+            InlineMark::Link { target, .. } => match target {
+                EntityRef::External { .. } => continue,
+                EntityRef::Internal { id } => DerivedLink {
+                    target: id.as_str().to_string(),
+                    kind: if id.scheme() == "tag" {
+                        LinkKind::Tag
+                    } else {
+                        LinkKind::Block
+                    },
+                    resolved: Some(id.clone()),
+                },
+                EntityRef::Name { name } => DerivedLink {
+                    target: name.clone(),
+                    kind: LinkKind::Page,
+                    resolved: None,
+                },
+            },
+            _ => continue,
+        };
+        if !out
+            .iter()
+            .any(|d| d.target == derived.target && d.kind == derived.kind)
+        {
+            out.push(derived);
+        }
+    }
+    out
 }
 
 #[cfg(test)]

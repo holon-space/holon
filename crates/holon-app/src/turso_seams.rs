@@ -130,6 +130,92 @@ impl CacheBlockReader {
     }
 }
 
+impl CacheBlockReader {
+    /// Links increment 2 — org-writeback resolved-link substitution.
+    ///
+    /// Upgrades dangling `Name` link marks to `Internal` for blocks whose
+    /// `block_links` row has resolved, so the NEXT file render emits the
+    /// ratified `[[<id>][<label>]]` form; re-ingest of that file then carries
+    /// the `Internal` mark through the normal write path, upgrading every
+    /// store. Render-time only — the stored marks are untouched here, and an
+    /// unresolved link keeps rendering as `[[<label>]]` (byte-stable).
+    async fn substitute_resolved_links(&self, blocks: &mut [Block]) -> anyhow::Result<()> {
+        use holon_api::EntityRef;
+        use holon_api::InlineMark;
+        let sources: Vec<String> = blocks
+            .iter()
+            .filter(|b| {
+                b.marks.as_ref().is_some_and(|ms| {
+                    ms.iter().any(|m| {
+                        matches!(
+                            &m.mark,
+                            InlineMark::Link {
+                                target: EntityRef::Name { .. },
+                                ..
+                            }
+                        )
+                    })
+                })
+            })
+            .map(|b| b.id.to_string())
+            .collect();
+        if sources.is_empty() {
+            return Ok(());
+        }
+        let in_list = sources
+            .iter()
+            .map(|s| format!("'{}'", s.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT source_block_id, target, resolved_id FROM block_links WHERE kind = 'page' AND \
+             resolved_id IS NOT NULL AND source_block_id IN ({in_list})"
+        );
+        let rows = self
+            .cache
+            .db_handle()
+            .query(&sql, std::collections::HashMap::new())
+            .await
+            .map_err(|e| anyhow::anyhow!("[CacheBlockReader] block_links read failed: {e}"))?;
+        let mut resolved: std::collections::HashMap<(String, String), String> =
+            std::collections::HashMap::new();
+        for row in rows {
+            let get = |k: &str| -> anyhow::Result<String> {
+                row.get(k)
+                    .and_then(|v| v.as_string())
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("block_links row missing string column '{k}': {row:?}")
+                    })
+            };
+            resolved.insert(
+                (get("source_block_id")?, get("target")?),
+                get("resolved_id")?,
+            );
+        }
+        for b in blocks {
+            let bid = b.id.to_string();
+            let Some(marks) = b.marks.as_mut() else {
+                continue;
+            };
+            for span in marks {
+                if let InlineMark::Link { target, .. } = &mut span.mark {
+                    if let EntityRef::Name { name } = &*target {
+                        if let Some(rid) = resolved.get(&(bid.clone(), name.clone())) {
+                            // ALLOW(entity_uri_from_raw): block_links.resolved_id is a schemed id
+                            // written by us
+                            *target = EntityRef::Internal {
+                                id: EntityUri::from_raw(rid),
+                            };
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 #[async_trait::async_trait]
 impl BlockReader for CacheBlockReader {
     async fn get_blocks(&self, doc_id: &EntityUri) -> anyhow::Result<Vec<Block>> {
@@ -175,7 +261,8 @@ impl BlockReader for CacheBlockReader {
         // Same Block::try_from path as load_all_blocks_with_hydration — the
         // derived TryFromEntity would silently leave `tags` empty because
         // of `#[serde(skip, default)]`. See block_two_deserializers memory.
-        rows.into_iter()
+        let mut blocks: Vec<Block> = rows
+            .into_iter()
             .map(|row| {
                 Block::try_from(row).map_err(|e| {
                     anyhow::anyhow!(
@@ -183,7 +270,9 @@ impl BlockReader for CacheBlockReader {
                     )
                 })
             })
-            .collect()
+            .collect::<anyhow::Result<Vec<Block>>>()?;
+        self.substitute_resolved_links(&mut blocks).await?;
+        Ok(blocks)
     }
 
     async fn get_block_authoritative(&self, id: &EntityUri) -> anyhow::Result<Option<Block>> {
@@ -219,17 +308,25 @@ impl BlockReader for CacheBlockReader {
             })?;
 
         match rows.into_iter().next() {
-            Some(row) => Ok(Some(Block::try_from(row).map_err(|e| {
-                anyhow::anyhow!(
-                    "[CacheBlockReader::get_block_authoritative] Block::try_from row failed: {e}"
-                )
-            })?)),
+            Some(row) => {
+                let block = Block::try_from(row).map_err(|e| {
+                    anyhow::anyhow!(
+                        "[CacheBlockReader::get_block_authoritative] Block::try_from row failed: \
+                         {e}"
+                    )
+                })?;
+                let mut one = [block];
+                self.substitute_resolved_links(&mut one).await?;
+                let [block] = one;
+                Ok(Some(block))
+            }
             None => Ok(None),
         }
     }
 
     async fn iter_documents_with_blocks(&self) -> anyhow::Result<Vec<(EntityUri, Vec<Block>)>> {
-        let all_blocks = self.load_all_blocks_with_hydration().await?;
+        let mut all_blocks = self.load_all_blocks_with_hydration().await?;
+        self.substitute_resolved_links(&mut all_blocks).await?;
         Ok(blocks_by_document(&all_blocks))
     }
 

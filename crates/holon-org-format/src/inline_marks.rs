@@ -232,7 +232,12 @@ fn strip_link(raw: &str) -> (String, InlineMark) {
     let target = match classify_link(&uri) {
         LinkTarget::External(s) => EntityRef::External { url: s },
         LinkTarget::Resolved(uri) => EntityRef::Internal { id: uri },
-        LinkTarget::CreationIntent { target_id, .. } => EntityRef::Internal { id: target_id },
+        // Links increment 2: a wiki-name target stays DANGLING (`Name`) — no
+        // deterministic-id minting into the mark at parse time. Pages are
+        // created lazily; the exact target string (possibly a `parent/leaf`
+        // suffix-resolution chain) is preserved for `block_links` resolution
+        // and byte-stable re-render (`[[name]]` / `[[name][label]]`).
+        LinkTarget::CreationIntent { path, .. } => EntityRef::Name { name: path },
     };
     let mark = InlineMark::Link {
         target,
@@ -325,10 +330,18 @@ fn open_delim(mark: &InlineMark) -> String {
         InlineMark::Strike => "+".into(),
         InlineMark::Sub => "_{".into(),
         InlineMark::Super => "^{".into(),
-        InlineMark::Link { target, .. } => {
+        InlineMark::Link { target, label } => {
             let uri = match target {
                 EntityRef::External { url } => url.clone(),
                 EntityRef::Internal { id } => id.as_str().to_string(),
+                // Dangling wiki link: `[[name]]` when the label IS the name
+                // (the bare form the user typed), `[[name][label]]` otherwise.
+                EntityRef::Name { name } => {
+                    if name == label {
+                        return "[[".into();
+                    }
+                    name.clone()
+                }
             };
             format!("[[{uri}][")
         }
@@ -491,6 +504,57 @@ mod tests {
             }
             other => panic!("expected Link, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn link_bare_wiki_name_stays_dangling_and_byte_stable() {
+        // Links increment 2: a bare wiki-name link is a DANGLING `Name`
+        // target (no deterministic-id minting at parse) and re-renders
+        // byte-identically as `[[name]]` until it resolves.
+        let (out, marks) = extract("see [[Linked Page]] here");
+        assert_eq!(out, "see Linked Page here");
+        assert_eq!(marks.len(), 1);
+        match &marks[0].mark {
+            InlineMark::Link { target, label } => {
+                assert_eq!(label, "Linked Page");
+                match target {
+                    EntityRef::Name { name } => assert_eq!(name, "Linked Page"),
+                    other => panic!("expected dangling Name, got {other:?}"),
+                }
+            }
+            other => panic!("expected Link, got {other:?}"),
+        }
+        let re = render_inline_marks(&out, &marks);
+        assert_eq!(
+            re, "see [[Linked Page]] here",
+            "dangling bare form must be a fixed point"
+        );
+    }
+
+    #[test]
+    fn link_name_chain_with_label_round_trips() {
+        // `parent/leaf` name chains are kept verbatim as the suffix
+        // resolution hint; labelled form re-renders as `[[chain][label]]`.
+        let (out, marks) = extract("[[Projects/Linked Page][the label]]");
+        assert_eq!(out, "the label");
+        match &marks[0].mark {
+            InlineMark::Link { target, label } => {
+                assert_eq!(label, "the label");
+                match target {
+                    EntityRef::Name { name } => assert_eq!(name, "Projects/Linked Page"),
+                    other => panic!("expected dangling Name, got {other:?}"),
+                }
+            }
+            other => panic!("expected Link, got {other:?}"),
+        }
+        let re = render_inline_marks(&out, &marks);
+        assert_eq!(re, "[[Projects/Linked Page][the label]]");
+        let (out2, marks2) = extract_inline_marks(&re);
+        assert_eq!(
+            (out2, marks2),
+            (out, marks),
+            "render∘extract must be a fixed point"
+        );
     }
 
     #[test]
