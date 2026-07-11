@@ -32,12 +32,21 @@ use crate::Value;
 /// the "who caused this" question is answered by the compiler, not guessed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OpOrigin {
-    /// A direct user gesture (UI edit, MCP tool call). The only origin that
-    /// pushes undo entries.
+    /// A direct human gesture in a frontend (UI edit, web-worker session). The
+    /// only origin that pushes undo entries.
     User,
     /// Fired by a rule/transition. `transition_id` is ADR 0024's `fired-by`
     /// provenance slot. Never enters the user undo stack.
     Rule { transition_id: String },
+    /// Executed on behalf of an AI agent driving the system over the embedded
+    /// MCP server. `session_id`/`tool_call_id` are the supervision-view /
+    /// revert-whole-call slots (ADR 0024 P8, VisionGapAnalysis C2a). Agent
+    /// actions are reverted through the supervision surface, so they do NOT
+    /// enter the human undo stack.
+    Agent {
+        session_id: String,
+        tool_call_id: String,
+    },
     /// Applied by a CRDT sync merge from a peer replica.
     Sync,
     /// Applied by org-file / external ingest at the boundary.
@@ -50,11 +59,12 @@ impl OpOrigin {
         matches!(self, OpOrigin::User)
     }
 
-    /// Short tag for logs / persistence.
+    /// Short tag for logs / persistence / the provenance stamp discriminator.
     pub fn tag(&self) -> &str {
         match self {
             OpOrigin::User => "user",
             OpOrigin::Rule { .. } => "rule",
+            OpOrigin::Agent { .. } => "agent",
             OpOrigin::Sync => "sync",
             OpOrigin::Ingest => "ingest",
         }
