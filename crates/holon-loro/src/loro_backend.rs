@@ -415,11 +415,62 @@ fn read_properties_from_meta(meta: &loro::LoroMap) -> HashMap<String, Value> {
     // params (avoids the `SqlOperationProvider` edge-partition panic) AND
     // self-heals storage: the read-merge-write update paths re-persist without
     // the stray keys.
+    //
+    // Same treatment for the first-class block COLUMNS (`created_at`,
+    // `updated_at`, …): each is a typed `Block` field read from its own
+    // top-level meta key (`created_at`/`updated_at` via `get_typed` below;
+    // `id`/`content`/`parent`/`sort_key` via their own readers), and the SQL
+    // sink stores each in its own column — NEVER in the `properties` JSON blob.
+    // But org ingest lifts drawer keys (`:UPDATED_AT:`, `:CREATED_AT:`, …) into
+    // `block.properties`, which then land in the Loro PROPERTIES_MAP. Left in,
+    // the Loro-read block's `properties` carries e.g. `{"updated_at": …}` while
+    // the SQL-read block's is `{}` — so `blocks_differ` fires spuriously, yet
+    // `block_diff_params` can't represent the change (`updated_at` collides with
+    // the always-emitted bookkeeping `updated_at` via `or_insert`), producing a
+    // bookkeeping-only update that decodes to zero typed ops and trips the
+    // consolidator's `agrees_with_ops` divergence. Stripping here makes Loro's
+    // `properties` agree with SQL's by construction. (`RESERVED_PROPERTY_KEYS`
+    // mirrors `schema_modules::BLOCK_RAW_COLUMNS`.)
+    //
+    // Edge-typed fields (junction tables, not raw columns) get the same
+    // treatment for the same reason — they leak in as `Array([])` and, being
+    // absent from the SQL `properties` blob, trip the identical divergence.
     props.remove("tags");
     props.remove("requires");
     props.remove("advice_suppressed");
+    for key in RESERVED_PROPERTY_KEYS {
+        props.remove(*key);
+    }
     props
 }
+
+/// Block columns / typed fields that must never appear in the generic
+/// `properties` map — each has a dedicated typed `Block` slot and SQL column.
+/// Mirrors `holon_turso::schema_modules::BLOCK_RAW_COLUMNS` (minus `properties`
+/// itself). Edge fields (`tags`/`requires`/`advice_suppressed`) are stripped
+/// separately above. Kept as a local const (rather than a cross-crate import)
+/// to match the existing hardcoded edge strip in this module.
+///
+/// `collapsed` is deliberately EXCLUDED: unlike the other columns it IS stored
+/// in the Loro properties map (a `set_field(collapsed)` scalar), and
+/// `read_block_from_tree` lifts it out of `properties` into the typed slot
+/// itself — stripping it here would make that lift always read the default.
+const RESERVED_PROPERTY_KEYS: &[&str] = &[
+    "id",
+    "parent_id",
+    "depth",
+    "sort_key",
+    "content",
+    "content_type",
+    "source_language",
+    "source_name",
+    "marks",
+    "completed",
+    "block_type",
+    "created_at",
+    "updated_at",
+    "_change_origin",
+];
 
 /// Read the stable ID from a node's metadata.
 fn read_stable_id(meta: &loro::LoroMap) -> Option<String> {
@@ -3984,6 +4035,72 @@ mod h3_property_convergence_tests {
         assert!(
             read_properties_from_meta(&meta).is_empty(),
             "empty set clears all"
+        );
+    }
+
+    /// Regression (intent-divergence): reserved block COLUMNS (`updated_at`,
+    /// `created_at`, `id`, …) must NEVER survive as generic properties. Org
+    /// ingest lifts drawer keys like `:UPDATED_AT:` into `block.properties`,
+    /// which land in the Loro PROPERTIES_MAP. Left in, the Loro-read block's
+    /// `properties` carries `{"updated_at": …}` while the SQL-read block's
+    /// stays `{}` (SQL routes each to its own column) — so `blocks_differ`
+    /// fires, yet `block_diff_params` can't represent it (`updated_at`
+    /// collides with the always-emitted bookkeeping `updated_at` via
+    /// `or_insert`), producing a bookkeeping-only update that decodes to
+    /// zero typed ops and trips the consolidator's `agrees_with_ops`
+    /// divergence. The read boundary strips them so Loro's `properties`
+    /// agrees with SQL's by construction.
+    #[test]
+    fn reserved_column_keys_are_stripped_from_properties() {
+        let doc = LoroDoc::new();
+        let node = seed_node(
+            &doc,
+            &HashMap::from([
+                ("updated_at".to_string(), Value::Integer(1783768599379)),
+                ("created_at".to_string(), Value::Integer(1783768500000)),
+                ("id".to_string(), s("block:leaked")),
+                ("sort_key".to_string(), s("A0")),
+                // Edge fields leak in as empty `Array([])` and trip the same
+                // divergence — they must be stripped too.
+                ("tags".to_string(), Value::Array(vec![])),
+                ("requires".to_string(), Value::Array(vec![])),
+                ("advice_suppressed".to_string(), Value::Array(vec![])),
+                // `collapsed` is deliberately NOT stripped here — it lives in
+                // properties and `read_block_from_tree` lifts it to the typed slot.
+                ("collapsed".to_string(), Value::Boolean(true)),
+                // A genuine domain property must survive untouched.
+                ("sequence".to_string(), Value::Integer(1)),
+            ]),
+        );
+        let props = read_props(&doc, node);
+        assert_eq!(
+            props.get("updated_at"),
+            None,
+            "reserved `updated_at` stripped"
+        );
+        assert_eq!(
+            props.get("created_at"),
+            None,
+            "reserved `created_at` stripped"
+        );
+        assert_eq!(props.get("id"), None, "reserved `id` stripped");
+        assert_eq!(props.get("sort_key"), None, "reserved `sort_key` stripped");
+        assert_eq!(props.get("tags"), None, "edge `tags` stripped");
+        assert_eq!(props.get("requires"), None, "edge `requires` stripped");
+        assert_eq!(
+            props.get("advice_suppressed"),
+            None,
+            "edge `advice_suppressed` stripped"
+        );
+        assert_eq!(
+            props.get("collapsed"),
+            Some(&Value::Boolean(true)),
+            "`collapsed` kept for read_block_from_tree to lift into the typed slot"
+        );
+        assert_eq!(
+            props.get("sequence"),
+            Some(&Value::Integer(1)),
+            "genuine domain property survives"
         );
     }
 }

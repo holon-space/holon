@@ -1180,6 +1180,47 @@ fn block_diff_params(old: &SnapshotBlock, new: &SnapshotBlock) -> holon_api::Sto
         params.insert("marks".into(), val);
     }
 
+    // DIAGNOSTIC (intent-divergence hunt): a params map carrying ONLY the
+    // bookkeeping keys means `blocks_differ` said the pair differs but no
+    // representable field was emitted — the update decodes to zero typed ops
+    // and trips the consolidator's `agrees_with_ops` divergence. Dump the two
+    // blocks field-by-field so the asymmetric field is unambiguous.
+    // `id` + `updated_at` are always inserted; len == 2 ⟺ no representable field.
+    if params.len() == 2 {
+        tracing::error!(
+            "[block_diff_params] BOOKKEEPING-ONLY update for {} — blocks_differ true but no field \
+             emitted. sort_key: {:?} vs {:?} | content: {:?} vs {:?} | parent: {:?} vs {:?} | \
+             content_type: {:?} vs {:?} | source_language: {:?} vs {:?} | source_name: {:?} vs \
+             {:?} | tags: {:?} vs {:?} | requires: {:?} vs {:?} | advice_suppressed: {:?} vs {:?} \
+             | collapsed: {} vs {} | properties: {:?} vs {:?} | marks: {:?} vs {:?}",
+            new.id,
+            old_sort_key,
+            new_sort_key,
+            old.content,
+            new.content,
+            old.parent_id,
+            new.parent_id,
+            old.content_type,
+            new.content_type,
+            old.source_language,
+            new.source_language,
+            old.source_name,
+            new.source_name,
+            old.tags,
+            new.tags,
+            old.requires,
+            new.requires,
+            old.advice_suppressed,
+            new.advice_suppressed,
+            old.collapsed,
+            new.collapsed,
+            old.properties,
+            new.properties,
+            old.marks,
+            new.marks,
+        );
+    }
+
     params
 }
 
