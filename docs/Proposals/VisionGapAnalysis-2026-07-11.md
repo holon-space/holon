@@ -113,7 +113,13 @@ Increment 2 — one ruling each, then fleet-executable:
   design = generalize the existing Predicate trait to a Computation trait evaluable in memory AND
   compilable to SQL. Pipeline seat still open behind that interface.
 - C3 function registry. RULED (Martin 2026-07-11): TURSO for FTS (in-fork extension). Embeddings
-  question deferred (fulltext-first).
+  question deferred (fulltext-first). SCOUT UPDATE: fork ALREADY has Tantivy-backed FTS
+  (core/index_method/fts.rs, fts_match/fts_score/fts_highlight in Func resolution, feature `fts`,
+  non-wasm) + a sparse-vector index method (future similar()). Remaining scope: enable feature
+  through holon dep graph (off for wasm32), verify index-maintenance contract, registry seam.
+  REGISTRY RULED (Martin): generalize the fork's Func-enum resolution path; by shape —
+  scalar/predicate funcs via Func enum, set-valued funcs via matview/TVF declaration path
+  (note: advice is matview+IVM anti-join, NOT a UDF — earlier premise corrected).
 
 Increment 3:
 - C1 connectors. RULED (Martin 2026-07-11): Todoist-class connectors are ALREADY EXPRESSIBLE today
