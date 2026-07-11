@@ -54,6 +54,14 @@ use rhai::Dynamic;
 use rhai::Engine as RhaiEngine;
 use rhai::Scope;
 
+mod parser;
+pub use parser::DEFAULT_VERB_DICT;
+pub use parser::Executor;
+pub use parser::ParsedTask;
+pub use parser::Verb;
+pub use parser::VerbOp;
+pub use parser::ViaRoute;
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -647,14 +655,15 @@ pub fn is_prototype_block(block: &Block) -> bool {
 // Parsing
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug, PartialEq)]
-pub enum Executor {
-    SelfExec,
-    Delegated { person: String },
-}
-
 /// Parse content prefixes in order: `>`, `@[[Person]]:`, `?`.
 /// Returns (cleaned_content, has_sequential_dep, executor, is_question).
+///
+/// This is the narrow, materialization-facing slice of the richer boundary
+/// parser in [`mod@parser`] ([`ParsedTask`]): it detects the leading prefixes
+/// and executor while preserving the full (possibly multi-line) content body
+/// verbatim, so the existing `wiki_links` extraction path is unaffected. The
+/// reference-role classification, verb dictionary, `via:` routes and recurrence
+/// live on [`ParsedTask`] for the next materialization-wiring step.
 pub fn parse_content_prefixes(raw: &str) -> (String, bool, Executor, bool) {
     let mut content = raw.trim().to_string();
     let mut has_sequential_dep = false;
@@ -1123,7 +1132,10 @@ fn build_task_transitions(
     let mut creates = Vec::new();
 
     match &task.executor {
-        Executor::SelfExec => {
+        // `@agent:` async firing is not yet wired; until then an agent-executed
+        // task borrows Self exactly like a self transition (PetriNet.md defers the
+        // async agent sub-net). It never crashes — the task still materializes.
+        Executor::SelfExec | Executor::Agent { .. } => {
             inputs.push(InputArc {
                 bind: "self".to_string(),
                 token_type: "person".to_string(),
