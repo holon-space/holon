@@ -1,17 +1,18 @@
-//! `holon_rule` YAML front-end (ADR 0024 Phase-2 spike) — guard extraction
-//! only.
+//! `holon_rule` YAML front-end (ADR 0024 Phase-2/3, plan §7.2) — the
+//! single-block rule surface: a guard (`when:` / arc `input:`) **and** its
+//! effect (`emit:` / arc `output:`), parsed at the boundary into a closed typed
+//! representation ([`HolonRule`]). Mirrors the ADR 0022 discipline
+//! (`parse_advice_rule` + typed error enum + newtypes; `deny_unknown_fields` so
+//! malformed rules fail loud).
 //!
 //! A `holon_rule` block is valid YAML in the `holon_advice_rule_yaml` family
 //! (ADR 0024 Amendment: "Rule blocks get a `holon_rule` source language … Rule
 //! bodies are valid YAML, with guard expressions as strings parsed by the
-//! Pattern parser"). This module parses the daily-journal rule in **two**
-//! authoring forms and desugars both to the *same* [`Guard`]:
+//! Pattern parser"). Two authoring forms desugar to the *same* [`HolonRule`]:
 //!
-//! - **sugar** — a single `when:` guard string plus an `emit:` marking delta:
+//! - **sugar** — top-level `when:` guard string + `emit:` marking delta:
 //!   ```yaml name: daily_journal when: 'not block_exists("Journals/{today}")'
-//!   emit:
-//!     - name: "Journals/{today}" type: journal
-//!   ```
+//!   emit: place: journals name: "{today}" ```
 //! - **canonical arc-array** — explicit read / inhibitor input arcs + output
 //!   arcs (ADR 0024 "guards are on arcs"; `absent: true` = the inhibitor arc, a
 //!   `type: clock` arc = the read arc that makes the rule clock-driven):
@@ -20,26 +21,40 @@
 //!     - bind: j type: journal when: 'block_exists("Journals/{today}")' absent:
 //!       true
 //!   output:
-//!     - name: "Journals/{today}" type: journal
+//!     - emit: place: journals name: "{today}"
 //!   ```
 //!
-//! Scope: this extracts the **guard** (the matching path). Firing/effects
-//! (`emit`/`output`/`consume`) are parsed for shape only and NOT wired — that
-//! is plan §7.2, not the spike. Errors are typed and carried, mirroring
-//! [`crate::AdviceRuleParseError`].
+//! ## What is lowered vs deferred (plan §7.2 scope)
+//!
+//! - **Guard** — fully lowered to the dual-evaluated [`Guard`] (matching path).
+//! - **Effect** — the *ratcheted create* emission (`emit: {place, name}`) is
+//!   lowered to a typed [`Emit`]: a canonical placement + a
+//!   `{today}`-interpolated name template. This is the journal-auto-create
+//!   shape.
+//! - **Deferred (documented, not silently dropped):** display placement
+//!   (`place: display(...)`, the advice/maintained-view side — stays ADR 0022);
+//!   `consume:` input arcs (delete/move effects); multi-arc (`OutputSlot > 0`)
+//!   emission. A rule that requests any of these parses its guard but carries
+//!   no [`Emit`]; the operate watcher surfaces a loud status rather than firing
+//!   a half-understood effect.
 
+use holon_api::pattern::BuiltinRef;
 use holon_api::pattern::Guard;
 use holon_api::pattern::GuardParseError;
 use holon_api::pattern::Pattern;
+use holon_api::pattern::parse_builtin;
 use holon_api::pattern::parse_guard_body;
 use serde::Deserialize;
 use thiserror::Error;
 
-/// A parsed `holon_rule` — the spike only surfaces its name + extracted guard.
+/// A parsed `holon_rule`: its name, the extracted [`Guard`] (matching path),
+/// and the lowered [`Emit`] effect if this is a ratcheted-create ("operate")
+/// rule. Advice / guard-only rules carry `emit: None`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HolonRule {
     pub name: RuleName,
     pub guard: Guard,
+    pub emit: Option<Emit>,
 }
 
 /// A stable rule slug ([a-z0-9_]). Same discipline as [`crate::RuleSlug`].
@@ -52,17 +67,142 @@ impl RuleName {
     }
 
     fn parse(raw: &str) -> Result<Self, HolonRuleParseError> {
-        let ok = !raw.is_empty()
-            && raw
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
-        if ok {
+        if is_slug(raw) {
             Ok(Self(raw.to_string()))
         } else {
             Err(HolonRuleParseError::Name {
                 name: raw.to_string(),
             })
         }
+    }
+}
+
+fn is_slug(raw: &str) -> bool {
+    !raw.is_empty()
+        && raw
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+// ─── Effect (emission) ─────────────────────────────────────────────────────
+
+/// A ratcheted **create** emission (ADR 0024 "emission into a canonical place
+/// is ratcheted — the block persists once fired"). The output arc `create` =
+/// "the emitted token *is* the new block". Compiled by the operate watcher to a
+/// `block.create` intent stamped with rule provenance.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Emit {
+    /// Where the created block is placed (its parent).
+    pub place: Place,
+    /// The created block's leaf name/content, `{today}`-interpolated per
+    /// firing.
+    pub name: NameTemplate,
+}
+
+/// A canonical placement: a parent block id root. `place: journals` names the
+/// parent block `block:journals` (the scheme is added at the intent boundary,
+/// per the org-syntax convention). Display placement (`display(under: x)`) is
+/// the advice/maintained side and is **not** parsed here (ADR 0024 — stays ADR
+/// 0022).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Place(String);
+
+impl Place {
+    /// Parse a canonical place. Rejects the `display(...)` form loudly
+    /// (deferred) and any non-slug root (so it can never break out of the
+    /// id it becomes).
+    pub fn parse(raw: &str) -> Result<Self, HolonRuleParseError> {
+        if raw.starts_with("display(") {
+            return Err(HolonRuleParseError::DisplayPlacementDeferred {
+                place: raw.to_string(),
+            });
+        }
+        // A place may already carry the `block:` scheme; accept and strip it so
+        // the stored root is scheme-free (ORG_SYNTAX: bare ids on disk).
+        let root = raw.strip_prefix("block:").unwrap_or(raw);
+        if is_slug(root) {
+            Ok(Self(root.to_string()))
+        } else {
+            Err(HolonRuleParseError::Place {
+                place: raw.to_string(),
+            })
+        }
+    }
+
+    /// The scheme-free placement root (e.g. `journals`).
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The parent block id the emit creates under (`block:journals`).
+    pub fn parent_id(&self) -> String {
+        format!("block:{}", self.0)
+    }
+}
+
+/// A `name:` template — literal text with `{today}` / `{clock.today}`
+/// interpolation, resolved against the firing binding at fire time.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NameTemplate {
+    pub segments: Vec<TemplateSegment>,
+}
+
+/// One segment of a [`NameTemplate`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum TemplateSegment {
+    Lit(String),
+    Builtin(BuiltinRef),
+}
+
+impl NameTemplate {
+    /// Parse a `"Journal {today}"`-style template. `{name}` is a builtin
+    /// reference; unescaped braces are a loud error (never a silent literal).
+    pub fn parse(raw: &str) -> Result<Self, HolonRuleParseError> {
+        if raw.is_empty() {
+            return Err(HolonRuleParseError::EmptyName);
+        }
+        let mut segments = Vec::new();
+        let mut rest = raw;
+        while let Some(open) = rest.find('{') {
+            if open > 0 {
+                segments.push(TemplateSegment::Lit(rest[..open].to_string()));
+            }
+            let after = &rest[open + 1..];
+            let close = after
+                .find('}')
+                .ok_or_else(|| HolonRuleParseError::NameTemplate {
+                    template: raw.to_string(),
+                    reason: "unterminated `{` interpolation".to_string(),
+                })?;
+            let inner = &after[..close];
+            let builtin = parse_builtin(inner).map_err(|_| HolonRuleParseError::NameTemplate {
+                template: raw.to_string(),
+                reason: format!("unknown builtin {{{inner}}} (expected `today`)"),
+            })?;
+            segments.push(TemplateSegment::Builtin(builtin));
+            rest = &after[close + 1..];
+        }
+        if rest.contains('}') {
+            return Err(HolonRuleParseError::NameTemplate {
+                template: raw.to_string(),
+                reason: "unmatched `}`".to_string(),
+            });
+        }
+        if !rest.is_empty() {
+            segments.push(TemplateSegment::Lit(rest.to_string()));
+        }
+        Ok(Self { segments })
+    }
+
+    /// Render the template against the firing's `today` value.
+    pub fn render(&self, today: &str) -> String {
+        self.segments
+            .iter()
+            .map(|s| match s {
+                TemplateSegment::Lit(t) => t.as_str(),
+                TemplateSegment::Builtin(BuiltinRef::Today) => today,
+            })
+            .collect()
     }
 }
 
@@ -91,6 +231,21 @@ pub enum HolonRuleParseError {
         bind: Option<String>,
         arc_type: Option<String>,
     },
+    #[error("a holon_rule declares its effect once: `emit:` (sugar) or `output:` arcs — not both")]
+    EmitAndOutput,
+    #[error(
+        "emit place {place:?} is not a valid placement root ([a-z0-9_], optional `block:` scheme)"
+    )]
+    Place { place: String },
+    #[error(
+        "emit place {place:?} uses display placement — the maintained/advice side (ADR 0024) is \
+         not lowered by the operate front-end; use an advice rule"
+    )]
+    DisplayPlacementDeferred { place: String },
+    #[error("emit name template is empty")]
+    EmptyName,
+    #[error("emit name template {template:?} is malformed: {reason}")]
+    NameTemplate { template: String, reason: String },
     #[error(transparent)]
     Guard(#[from] GuardParseError),
 }
@@ -108,9 +263,10 @@ struct RuleWire {
     #[serde(default)]
     output: Option<Vec<OutputArcWire>>,
     #[serde(default)]
-    emit: Option<Vec<OutputArcWire>>,
-    /// Effect-kind marker (ADR 0024 `advise` | `operate`). The spike reads only
-    /// the guard, so the value is accepted and ignored beyond shape.
+    emit: Option<EmitWire>,
+    /// Effect-kind marker (ADR 0024 `advise` | `operate`). The operate
+    /// front-end reads the guard only for advice rules; the value is
+    /// accepted for shape.
     #[serde(default)]
     #[allow(dead_code)]
     advise: Option<serde_yaml::Value>,
@@ -136,20 +292,33 @@ struct InputArcWire {
     consume: bool,
 }
 
-/// An output (emit) arc — parsed for shape only; effects are not wired (§7.2).
+/// A canonical `output:` arc — carries the `emit:` marking delta.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-#[allow(dead_code)]
 struct OutputArcWire {
+    emit: EmitWire,
+}
+
+/// The `emit:` marking delta (ratcheted create): a place + a name template.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmitWire {
+    place: String,
     name: String,
-    #[serde(rename = "type", default)]
-    arc_type: Option<String>,
-    #[serde(default)]
-    after: Option<String>,
+}
+
+impl EmitWire {
+    fn lower(&self) -> Result<Emit, HolonRuleParseError> {
+        Ok(Emit {
+            place: Place::parse(&self.place)?,
+            name: NameTemplate::parse(&self.name)?,
+        })
+    }
 }
 
 /// Parse a `holon_rule` YAML block (either authoring form) into a
-/// [`HolonRule`], or a typed error. Both forms desugar to the same [`Guard`].
+/// [`HolonRule`], or a typed error. Both forms desugar to the same [`Guard`]
+/// and [`Emit`].
 pub fn parse_holon_rule(yaml: &str) -> Result<HolonRule, HolonRuleParseError> {
     let wire: RuleWire =
         serde_yaml::from_str(yaml).map_err(|e| HolonRuleParseError::Yaml(e.to_string()))?;
@@ -161,11 +330,19 @@ pub fn parse_holon_rule(yaml: &str) -> Result<HolonRule, HolonRuleParseError> {
         (None, Some(arcs)) => guard_from_arcs(arcs)?,
     };
 
-    // Effect deltas are validated for shape (deny_unknown_fields already ran) but
-    // not lowered — firing is plan §7.2, out of the spike's guard-only scope.
-    let _ = (&wire.output, &wire.emit);
+    let emit = match (&wire.emit, &wire.output) {
+        (Some(_), Some(_)) => return Err(HolonRuleParseError::EmitAndOutput),
+        (Some(e), None) => Some(e.lower()?),
+        // Canonical output: lower the first arc's emit (single-output Phase-2
+        // scope; multi-arc OutputSlot emission is deferred, see module docs).
+        (None, Some(arcs)) => match arcs.first() {
+            Some(arc) => Some(arc.emit.lower()?),
+            None => None,
+        },
+        (None, None) => None,
+    };
 
-    Ok(HolonRule { name, guard })
+    Ok(HolonRule { name, guard, emit })
 }
 
 /// Build a guard body from the canonical input arcs: each non-clock arc's
@@ -210,8 +387,8 @@ mod tests {
 name: daily_journal
 when: 'not block_exists("Journals/{today}")'
 emit:
-  - name: "Journals/{today}"
-    type: journal
+  place: journals
+  name: "{today}"
 "#;
 
     const CANONICAL: &str = r#"
@@ -224,8 +401,9 @@ input:
     when: 'block_exists("Journals/{today}")'
     absent: true
 output:
-  - name: "Journals/{today}"
-    type: journal
+  - emit:
+      place: journals
+      name: "{today}"
 "#;
 
     const ADVICE: &str = r#"
@@ -237,20 +415,42 @@ advise:
 "#;
 
     #[test]
-    fn both_forms_desugar_to_the_same_guard() {
+    fn both_forms_desugar_to_the_same_rule() {
         let sugar = parse_holon_rule(SUGAR).expect("sugar parses");
         let canonical = parse_holon_rule(CANONICAL).expect("canonical parses");
         assert_eq!(sugar.name.as_str(), "daily_journal");
         assert_eq!(canonical.name.as_str(), "daily_journal");
         assert_eq!(sugar.guard, canonical.guard, "the two forms must agree");
         assert_eq!(sugar.guard.subject, Subject::Clock);
+        assert_eq!(
+            sugar.emit, canonical.emit,
+            "the two effect forms must agree"
+        );
+        let emit = sugar.emit.expect("operate rule carries an emit");
+        assert_eq!(emit.place.parent_id(), "block:journals");
+        assert_eq!(emit.name.render("2026-07-10"), "2026-07-10");
     }
 
     #[test]
-    fn advice_when_extracts_block_guard() {
+    fn emit_place_accepts_block_scheme_and_strips_it() {
+        let yaml = "name: r\nwhen: 'not block_exists(\"A/{today}\")'\nemit:\n  place: \
+                    \"block:journals\"\n  name: \"{today}\"\n";
+        let rule = parse_holon_rule(yaml).expect("scheme-prefixed place parses");
+        assert_eq!(rule.emit.unwrap().place.as_str(), "journals");
+    }
+
+    #[test]
+    fn name_template_interpolates_literal_and_builtin() {
+        let t = NameTemplate::parse("Journal {today}").unwrap();
+        assert_eq!(t.render("2026-07-10"), "Journal 2026-07-10");
+    }
+
+    #[test]
+    fn advice_when_carries_no_emit() {
         let rule = parse_holon_rule(ADVICE).expect("advice sugar parses");
         assert_eq!(rule.guard.subject, Subject::Block);
         assert_eq!(rule.guard.body, Pattern::HasTag("project".to_string()));
+        assert_eq!(rule.emit, None, "an advice rule has no ratcheted emit");
     }
 
     #[test]
@@ -265,6 +465,45 @@ advise:
             parse_holon_rule(neither).unwrap_err(),
             HolonRuleParseError::GuardSource
         );
+    }
+
+    #[test]
+    fn emit_and_output_together_is_rejected() {
+        let yaml = "name: r\nwhen: 'not block_exists(\"A/{today}\")'\nemit:\n  place: a\n  name: \
+                    \"{today}\"\noutput:\n  - emit:\n      place: a\n      name: \"{today}\"\n";
+        assert_eq!(
+            parse_holon_rule(yaml).unwrap_err(),
+            HolonRuleParseError::EmitAndOutput
+        );
+    }
+
+    #[test]
+    fn display_placement_is_a_loud_deferral() {
+        let yaml = "name: r\nwhen: 'has_tag(\"x\")'\nemit:\n  place: \"display(under: x)\"\n  \
+                    name: \"{today}\"\n";
+        assert!(matches!(
+            parse_holon_rule(yaml).unwrap_err(),
+            HolonRuleParseError::DisplayPlacementDeferred { .. }
+        ));
+    }
+
+    #[test]
+    fn malformed_name_template_is_a_typed_error() {
+        let yaml = "name: r\nwhen: 'not block_exists(\"A/{today}\")'\nemit:\n  place: a\n  name: \
+                    \"{tomorrow}\"\n";
+        assert!(matches!(
+            parse_holon_rule(yaml).unwrap_err(),
+            HolonRuleParseError::NameTemplate { .. }
+        ));
+    }
+
+    #[test]
+    fn unknown_field_is_rejected() {
+        let yaml = "name: r\nwhen: 'has_tag(\"x\")'\nfrobnicate: true\n";
+        assert!(matches!(
+            parse_holon_rule(yaml).unwrap_err(),
+            HolonRuleParseError::Yaml(_)
+        ));
     }
 
     #[test]
