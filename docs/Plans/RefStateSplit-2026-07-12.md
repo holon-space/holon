@@ -153,6 +153,12 @@ assembler (intentionally concrete); `apply_mutation.rs` — **already de-concret
 this history). None of these blocks the split: they hold `&mut ReferenceState` and the
 composition root keeps inherent mirrors/delegators, so they compile unchanged.
 
+> **Staleness guard (each implementer, at increment start):** this residual audit was
+> taken on the plan's base rev. Before touching transitions, re-run
+> `rg -l "ReferenceState" crates/holon-integration-tests/src/pbt/transitions/` and diff
+> against the list above — the Phase 1a sweep and adjacent streams keep de-concreting
+> residuals, so a file may have dropped off (cheap; catches drift).
+
 ---
 
 ## 3. Migration sequence (small increments, keystone green after each)
@@ -165,6 +171,16 @@ cargo nextest run -p holon-integration-tests -E 'test(general_e2e_composed_pbt)'
   > /tmp/refsplit-keystone.log   # bounded default case count; plus the persisted regression seeds
 cargo nextest run -p holon-loro-testing > /tmp/refsplit-loro.log   # increments 5–6 only
 ```
+
+**The gate is the HEADLESS keystone (`general_e2e_composed_pbt`) + the persisted
+regression seeds.** The WINDOWED variant (`gpui_composed_windowed_loop`) carries a
+**pre-existing RED** — `inv-watch-rows-match-ref` misses 4 forward-edge `fe-*` blocks
+(the fe-* forward-edge gap, tracked separately), unrelated to this refactor — so it is
+**excluded-with-reason** from the DONE gate until that fix lands. Do NOT chase it green
+here. The one obligation: **Increment 4 (ui methods) must confirm the windowed failure
+signature is UNCHANGED** — same 4 `fe-*` blocks, same invariant — not that it passes.
+A *different* windowed signature after Inc 4 means the ui-fragment method push-down
+perturbed focus/nav prediction and must be investigated before merge.
 
 ### Increment 1 — type extraction (pure moves)
 Move type **definitions + their inherent impls** out of `reference_state.rs`:
@@ -273,7 +289,7 @@ plumbed through a typemap) that needs a Martin ruling with options laid out. Inc
 |---|---|---|---|
 | R1 | Iteration-order / determinism drift: `BlockState.blocks` BTreeMap ordering feeds sequence-number canonicalization; any accidental map-type or key change shifts every generated case and invalidates persisted regression seeds | 1,4,5 | Pure moves only; run the persisted seeds explicitly in the DONE gate |
 | R2 | Editor↔blocks commit contract (ADR 0012 §5.1/§5.2): `blur_active_editor` / dirty-gating moved or split by mistake reintroduces the 2026-06-11 Full/Loro divergence family | 4 | Contract methods pinned to the composition root (§1 list); reviewer checks the list, CI keystone exercises it |
-| R3 | Undo snapshot seam: `ActionActorState` stacks clone `BlockState` across the action↔domain boundary; the ACTIVE undo workstream (U1, C-shaped substrate, 2026-07-10) touches the same code | 1,4 | Coordinate: land Inc 1 fast (it moves `BlockState`'s *definition*, which undo work imports); freeze Inc 4's undo-adjacent methods until U1 lands or rebase deliberately |
+| R3 | Undo snapshot seam: `ActionActorState` stacks clone `BlockState` across the action↔domain boundary. Undo U1 (foundation) and U4 (split/join compound inverses) have **LANDED** on integration; the remaining collision is the **QUEUED U5 keystone-undo-rung stream**, which will touch `push_undo_snapshot` / `reference_state.rs` when spawned | 1,4 | Sequence Inc 1+2 (and ideally Inc 4's undo-adjacent method decisions) **before U5 spawns**, or hand U5's implementer the post-split layout so it targets the new fragment structure directly. No freeze needed — U1/U4 are already in; this is forward-coordination with a not-yet-started stream |
 | R4 | Loro ext extraction changes peer-merge ordering semantics (fi-tie/sort_key oracles) or the shared-clock-cell Clone semantics | 5 | Port as inherent-method move, no logic edits; soak with raised case count; review gate |
 | R5 | Merge conflicts with concurrent streams (links/marks oracle work, RowIdentity, undo) all landing in `reference_state.rs` | all | Small increments, land within a day each, sequence Inc 1–2 first (they *reduce* future conflict surface) |
 | R6 | `Resolved` witness weakening: `remapped_doc_uris` must keep remapping exactly blocks + block_documents after fields move | 1,5 | Method stays on root; compile-witness (`Resolved`) unchanged; `exp3_unreconciled_split_is_caught` covers the under-reconciled case |
@@ -300,3 +316,24 @@ commit-point contract, and the shadow-mesh Lamport padding.
 Sequencing: 1 → 2 can run in parallel workspaces (disjoint files); 3 → 4 sequential
 after 1; 5 after 4. Every increment is independently landable and independently
 valuable — stopping after any increment leaves the tree strictly better.
+
+### Execution mechanics (workspace / weave protocol)
+
+Each increment runs in its **own fresh jj workspace cut from the CURRENT integration
+tip**, and **lands (weaves) before the next *dependent* increment starts** — so each
+dependent increment builds on already-integrated work, never on a sibling's unlanded
+draft. Concretely:
+
+- **Inc 1 ∥ Inc 2 in parallel workspaces is fine** (disjoint files: Inc 1 touches
+  `reference_state.rs` + type-importers; Inc 2 touches `reference_capabilities.rs` →
+  `ref_caps/`). BUT they overlap in `pbt/mod.rs` (module declarations + re-exports), so
+  **whichever lands second MUST rebase-verify against the first's weave** — re-run the
+  full DONE gate on the rebased tree, not just on its own workspace — before it lands.
+  The `mod.rs` module list is the one shared edit point; treat it as the conflict
+  surface and reconcile there.
+- **Inc 3, 4, 5 each cut fresh from the tip AFTER their predecessor has woven.** No
+  parallel execution across the 3→4→5 chain — they share `refstate/mod.rs` and the
+  fragment structs.
+- Land within a day each (R5): the longer an increment's workspace lags the integration
+  tip, the more it conflicts with the concurrent links/marks, RowIdentity, and undo
+  streams also editing `reference_state.rs`.
