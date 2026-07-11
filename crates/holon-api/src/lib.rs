@@ -27,6 +27,7 @@ pub mod entity;
 pub mod entity_profile;
 pub mod entity_uri;
 mod hashmap_value_conversions;
+pub mod history;
 pub mod inline_mark;
 pub mod input_types;
 /// flutter_rust_bridge:ignore
@@ -58,6 +59,10 @@ pub use entity_profile::EntityProfile;
 pub use entity_profile::ProfileCache;
 pub use entity_profile::ProfileResolving;
 pub use entity_profile::VirtualChildConfig;
+pub use history::HistoryEvent;
+pub use history::HistoryFidelity;
+pub use history::HistoryQuery;
+pub use history::HistoryStore;
 pub use operation_engine::OpOrigin;
 pub use operation_engine::OperationEngine;
 pub use operation_engine::UndoOutcome;
