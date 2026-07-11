@@ -145,12 +145,16 @@ impl WidgetStateModel {
                 }
             }
             ChangeData::Deleted { id, .. } => {
-                self.rows.shift_remove(id);
+                // Keys are normalized store keys; normalize the CDC id string
+                // the same way prod's Deleted arm does (`entity_uri_from_id_str`).
+                self.rows
+                    .shift_remove(holon_api::entity_uri_from_id_str(id).as_str());
             }
             ChangeData::FieldsChanged {
                 entity_id, fields, ..
             } => {
-                if let Some(row) = self.rows.get_mut(entity_id) {
+                let key = holon_api::entity_uri_from_id_str(entity_id);
+                if let Some(row) = self.rows.get_mut(key.as_str()) {
                     for (field, _old, new) in fields {
                         row.insert(field.as_str().into(), new.clone());
                     }
