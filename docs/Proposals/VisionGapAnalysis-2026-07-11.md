@@ -112,13 +112,16 @@ Increment 2 — one ruling each, then fleet-executable:
 - C4 derived fields. RULED (Martin 2026-07-11, direction): hide behind an interface; candidate
   design = generalize the existing Predicate trait to a Computation trait evaluable in memory AND
   compilable to SQL. Pipeline seat still open behind that interface.
-- C3 function registry. RULING: index substrate — Tantivy sidecar from CDC vs in-Turso FTS
-  extension (we own the fork); embeddings in v1 or fulltext-first?
+- C3 function registry. RULED (Martin 2026-07-11): TURSO for FTS (in-fork extension). Embeddings
+  question deferred (fulltext-first).
 
 Increment 3:
-- C1 connectors. RULINGS: (a) YAML-sidecar twin-definition schema as authoring surface; (b) first
-  target (Todoist per Vision Phase 2?); (c) leases before or with first read-write connector —
-  read-only twin first de-risks.
+- C1 connectors. RULED (Martin 2026-07-11): Todoist-class connectors are ALREADY EXPRESSIBLE today
+  via MCP + yaml sidecar (working examples: assets/queries/todoist.yaml, claude-history.yaml,
+  todoist_hierarchy.prql) — C1 demotes to generalization: document the recipe, then add a second
+  transport where the sidecar describes direct HTTP-API interaction instead of a server — UTCP
+  manuals / OpenAPI-derived (UTCP can also describe MCP, so transports stay plural:
+  mcp | http(UTCP/OpenAPI) | graphql-later). Leases/read-write question unchanged.
 - C5 trust gate. RULING: literally "sub-threshold origins coerced to display-place emission", or a
   separate permission check at the dispatcher? (Recommended: the former.)
 
