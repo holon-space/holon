@@ -117,8 +117,11 @@ impl BackendEngine {
             db_handle.clone(),
             holon_api::HistoryFidelity::Loro,
         ));
-        let op_engine =
-            DispatchingOperationEngine::new(dispatcher.clone()).with_history_store(history);
+        let op_engine = DispatchingOperationEngine::new(dispatcher.clone())
+            .with_history_store(history)
+            .with_template_source(Arc::new(
+                crate::api::template_source::TursoTemplateSource::new(db_handle.clone()),
+            ));
         Ok(Self {
             db_handle,
             dispatcher,
@@ -784,7 +787,10 @@ impl BackendEngine {
             store,
         )
         .await?
-        .with_history_store(history);
+        .with_history_store(history)
+        .with_template_source(Arc::new(
+            crate::api::template_source::TursoTemplateSource::new(self.db_handle.clone()),
+        ));
         Ok(())
     }
 
