@@ -383,8 +383,12 @@ pub fn enrich_row(
 ) -> EnrichedRow {
     let resolver = resolver.clone();
     EnrichedRow::from_storage(data, |row| {
-        let (_profile, computed) = ProfileResolving::resolve_with_computed(resolver.as_ref(), row);
-        computed
+        // Computed fields only — do NOT resolve the render profile here. The
+        // profile was discarded anyway, and resolving it evaluated UI-bearing
+        // variant conditions against this raw storage row (no UI-state bindings),
+        // emitting spurious `eval_bool_source` errors. See
+        // `ProfileResolving::resolve_computed_only`.
+        resolver.resolve_computed_only(row)
     })
 }
 

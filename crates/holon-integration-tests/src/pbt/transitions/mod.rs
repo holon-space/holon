@@ -330,6 +330,22 @@ mod arch_tests {
         );
 
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/pbt/transitions");
+        // The peer-sync transitions were co-located into `holon-loro-testing`
+        // (Phase-1a Step 4 — see the `pub use holon_loro_testing::transitions::…`
+        // re-export above). Their dedicated files live in that crate's
+        // `src/transitions/` dir, not here. The file-per-transition invariant
+        // still holds — it just spans the crate seam, so these variants are
+        // searched for in the co-located crate instead.
+        let loro_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../holon-loro-testing/src/transitions");
+        let relocated_to_loro: &[&str] = &[
+            "AddPeer",
+            "CreateStaleLoro",
+            "MergeFromPeer",
+            "PeerCharEdit",
+            "PeerEdit",
+            "SyncWithPeer",
+        ];
         let mut missing: Vec<String> = Vec::new();
         for name in &variant_names {
             let mut snake = String::new();
@@ -339,7 +355,12 @@ mod arch_tests {
                 }
                 snake.push(c.to_ascii_lowercase());
             }
-            let path = dir.join(format!("{snake}.rs"));
+            let search_dir = if relocated_to_loro.contains(&name.as_str()) {
+                &loro_dir
+            } else {
+                &dir
+            };
+            let path = search_dir.join(format!("{snake}.rs"));
             if !path.exists() {
                 missing.push(format!("{name} → expected {}", path.display()));
             }

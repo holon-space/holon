@@ -84,6 +84,52 @@ Nextest works well with `cargo-llvm-cov` for coverage reporting:
 cargo llvm-cov nextest --html --output-dir target/coverage-report
 ```
 
+### Feature-gated test suites (and the empty-binary trap)
+
+A test file whose first line is `#![cfg(feature = "X")]` compiles to an
+**empty** binary — `0 tests, 0 benchmarks` — whenever `X` is off. An empty test
+binary is a *green* test binary, so a gated suite silently stops running the
+moment nothing enables its feature. BugFunnel row 78: `holon-orgmode`'s
+`sync_controller_mutation_pbt.rs` is `#![cfg(feature = "di")]`-gated, `di` is
+non-default, and the default `cargo test --workspace` compiled it to 0 tests —
+so it rotted for weeks with a real round-trip data-loss bug hidden inside it.
+
+Two mechanisms keep this from recurring:
+
+1. **Coverage** — every gated suite must actually run *somewhere*:
+   - `pbt`-gated suites live in `holon-integration-tests`, where `pbt` is a
+     **default** feature, so `cargo test --workspace` (CI `rust-checks`) runs them.
+   - `di`-gated suites (`holon-orgmode`) are run explicitly, because `di` is
+     **non-default**:
+     ```bash
+     cargo nextest run -p holon-orgmode --features di
+     ```
+     CI does this in the `gated-suites` job (`.github/workflows/ci.yml`).
+
+2. **Anti-rot guard** — `scripts/check-gated-test-suites.sh` auto-discovers every
+   `#![cfg(feature=...)]`-gated file under a `tests/` dir and classifies each by
+   whether its gating feature is in the crate's **default** feature set:
+   - Feature IS default (e.g. `pbt` in holon-integration-tests) → the default
+     `cargo test --workspace` already compiles+runs it. Not at risk; reported only.
+   - Feature is **non-default** (e.g. `di`) → at risk. The guard **fails loud**
+     unless BOTH hold: (a) some `.github/workflows/` step runs that crate with
+     that feature (catches the unwired-suite gap — row 78 itself), and (b) the
+     binary lists >0 tests with the feature on (catches an emptied / renamed /
+     moved-out suite). It also fails on any `cfg` form it can't parse, rather
+     than silently skipping it.
+
+   Only the non-default-gated suites are compiled, so it stays cheap. It is
+   self-maintaining — a newly-added gated suite is picked up automatically. Run:
+   ```bash
+   bash scripts/check-gated-test-suites.sh
+   ```
+   CI runs it in the same `gated-suites` job.
+
+**When you add a `#![cfg(feature=...)]`-gated test file with a non-default
+feature:** add a CI step that runs it with that feature — the guard will fail
+until you do. The guard proves the binary is non-empty and wired; only the
+actual run (step 1) proves the tests pass.
+
 ## Code Coverage
 
 Code coverage helps identify dead code for elimination. We use `cargo-llvm-cov` to collect coverage data from tests.
