@@ -563,3 +563,72 @@ impl Element for BoundsTracker {
         self.child.as_mut().unwrap().paint(window, cx);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use holon_frontend::geometry::GeometryProvider;
+
+    use super::*;
+
+    fn elem(entity: &str) -> ElementInfo {
+        ElementInfo {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 20.0,
+            widget_type: Arc::from("live_block"),
+            entity_id: Some(Arc::from(entity)),
+            has_content: true,
+            parent_id: None,
+            displayed_text: None,
+            focused: None,
+            expected_size: SizeBounds::default(),
+        }
+    }
+
+    /// Promotion-timing invariant that `click_entity`'s retry-until-committed
+    /// depends on: once cold start is over, a freshly `record()`ed element is
+    /// invisible to plain committed reads until the next `begin_pass`/`flush`
+    /// — yet a `FlushOnReadGeometry` read promotes it immediately. A
+    /// single-shot click on such a just-rendered `:__virtual:` slot would miss
+    /// on the plain read (the dogfood #3 race); the driver must either read
+    /// flush-on-read or retry across a commit to see it.
+    #[test]
+    fn fresh_record_invisible_until_promoted_but_flush_on_read_sees_it() {
+        let reg = BoundsRegistry::new();
+        // Leave cold start: the first non-empty rotation clears `cold`, after
+        // which records hit staged only (real double-buffering).
+        reg.record("render-entity-block:warmup".into(), elem("block:warmup"));
+        reg.begin_pass();
+        assert!(
+            GeometryProvider::element_info(&reg, "render-entity-block:warmup").is_some(),
+            "warmup element must be committed after its begin_pass rotation"
+        );
+
+        // A brand-new creation slot appears in THIS frame (staged only).
+        let slot = "render-entity-block:__virtual:default-main-panel";
+        reg.record(slot.into(), elem("block:__virtual:default-main-panel"));
+
+        // Plain committed read races the promotion: not yet visible.
+        assert!(
+            GeometryProvider::element_info(&reg, slot).is_none(),
+            "post-cold record must stay staged until the next begin_pass/flush — \
+             this is the race that made the single-shot click fail"
+        );
+
+        // Flush-on-read promotes the last frame's staged bounds on demand, so
+        // the freshly-rendered slot becomes clickable without a second pass.
+        let flush = FlushOnReadGeometry(reg.clone());
+        let gen_before = GeometryProvider::generation(&reg);
+        assert!(
+            GeometryProvider::element_info(&flush, slot).is_some(),
+            "flush-on-read must promote the just-rendered creation slot"
+        );
+        assert_eq!(
+            GeometryProvider::generation(&reg),
+            gen_before + 1,
+            "flush must rotate committed_gen so retry loops waking on `changed()`/generation \
+             observe the new frame"
+        );
+    }
+}
