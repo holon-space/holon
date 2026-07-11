@@ -1137,7 +1137,14 @@ impl TursoBackend {
             .to_str()
             .ok_or_else(|| StorageError::DatabaseError("Invalid path".to_string()))?;
 
-        let opts = DatabaseOpts::default().with_views(true);
+        // `with_index_method(true)` unlocks the experimental `CREATE INDEX ..
+        // USING <method>` surface (the Tantivy-backed `fts` method and the
+        // sparse-vector method). Native-only: this block is `cfg(unix)`; the
+        // wasm `open_database` below leaves it off (fts is cfg'd out of
+        // turso_core on wasm anyway).
+        let opts = DatabaseOpts::default()
+            .with_views(true)
+            .with_index_method(true);
 
         let db = if db_path_str.starts_with(":memory:") {
             let io = Arc::new(MemoryIO::new());

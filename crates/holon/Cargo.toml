@@ -133,6 +133,10 @@ name = "turso_storage_repros"
 required-features = ["test-helpers"]
 
 [[test]]
+name = "fts_e2e"
+required-features = ["test-helpers"]
+
+[[test]]
 name = "api_pbt"
 required-features = ["test-helpers"]
 
