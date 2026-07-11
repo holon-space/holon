@@ -44,6 +44,33 @@ use crate::views::RenderEntityView;
 /// window hits an unmeasured row that needs a synchronous layout pass.
 const LIST_OVERDRAW_PX: f32 = 1000.0;
 
+/// Bottom "scroll-past-end" padding on the panel list, in px.
+///
+/// WORKAROUND for a gpui `list` end-of-list shortfall (dogfood #3, Martin):
+/// at maximum wheel scroll the last block is left ~90% clipped and the trailing
+/// creation slot is unreachable — the list's `summary().height` under-counts
+/// the final item(s), so `scroll_max = summary - viewport` stops ~one item
+/// short of the true content bottom. The undercount is fixed and
+/// CONTENT-INDEPENDENT (a one-word last block clips the same as a tall
+/// multi-line one — verified via short-tail vs tall-tail seeds), and our
+/// measure wiring feeds the correct `bounds.size.width` to both the measure and
+/// paint passes, so the fault is in gpui's list internals, not here.
+/// `padding.bottom` feeds the wheel clamp `scroll_max` (`list.rs::scroll`), so
+/// this padding buys exactly enough extra scroll range to bring the last block
+/// + creation slot fully into view; the blank only shows when scrolled to the
+/// very end. Sized to clear one tall block
+/// + the slot, kept as small as that allows.
+///
+/// (More evidence of the upstream inconsistency: the wheel clamp `scroll`
+/// INCLUDES `padding.bottom` but `max_scroll_offset` EXCLUDES it, so a headless
+/// sub-viewport fixture can't observe the padded scroll room — the effect only
+/// manifests at real prod geometry. A regression test therefore belongs with
+/// the real fix in the gpui fork, not here.)
+///
+/// The true fix (measure the last item at full height) stays OPEN — see
+/// BugFunnel.
+const LIST_SCROLL_PAST_END_PX: f32 = 280.0;
+
 /// Unified GPUI shell for reactive views (blocks and collections).
 ///
 /// Subscribes to a `ReactiveView`'s `MutableVec` via `signal_vec_cloned()`.
@@ -857,6 +884,10 @@ impl Render for ReactiveShell {
             .with_sizing_behavior(ListSizingBehavior::Auto)
             .w_full()
             .h_full()
+            // Scroll-past-end room so the last block + creation slot clear the
+            // fold despite gpui's end-of-list `summary().height` undercount.
+            // See `LIST_SCROLL_PAST_END_PX`.
+            .pb(px(LIST_SCROLL_PAST_END_PX))
             .into_any_element()
     }
 }
