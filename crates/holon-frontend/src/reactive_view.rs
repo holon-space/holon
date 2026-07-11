@@ -94,6 +94,13 @@ pub struct ReactiveView {
 pub struct VirtualChildSlot {
     pub defaults: std::collections::HashMap<String, holon_api::Value>,
     pub parent_id: holon_api::EntityUri,
+    /// Opt-in (`creation_slot: true`) that permits the top-level "create a new
+    /// root entity" slot for a flat forest parented to the `no_parent`
+    /// sentinel. Read-only navigation lists (the Pages sidebar) leave this
+    /// `false` so they render no phantom `sentinel:__virtual:no_parent` row
+    /// (BugFunnel #61). The single-root main-panel slot is unaffected by
+    /// this flag.
+    pub allow_root_creation: bool,
 }
 
 /// Where an [`AppendedRowsProvider`]'s suffix row comes from — the only thing
@@ -111,6 +118,7 @@ enum SuffixSource {
     CreationSlot {
         defaults: std::collections::HashMap<String, holon_api::Value>,
         container: holon_api::EntityUri,
+        allow_root_creation: bool,
         inner: Arc<dyn ReactiveRowProvider>,
     },
     /// A LIVE row derived from a canonical block's row cell (ADR 0015 P2
@@ -164,10 +172,14 @@ impl SuffixSource {
             SuffixSource::CreationSlot {
                 defaults,
                 container,
+                allow_root_creation,
                 inner,
             } => {
-                match crate::row_origin::resolve_creation_parent(&inner.rows_snapshot(), container)
-                {
+                match crate::row_origin::resolve_creation_parent(
+                    &inner.rows_snapshot(),
+                    container,
+                    *allow_root_creation,
+                ) {
                     Some(parent) => vec![creation_slot_keyed_row(&parent, defaults)],
                     None => vec![],
                 }
@@ -204,16 +216,22 @@ impl SuffixSource {
             SuffixSource::CreationSlot {
                 defaults,
                 container,
+                allow_root_creation,
                 inner,
             } => {
                 let defaults = defaults.clone();
                 let container = container.clone();
+                let allow_root_creation = *allow_root_creation;
                 Box::pin(
                     inner
                         .rows_signal_vec()
                         .to_signal_cloned()
                         .map(move |rows| {
-                            match crate::row_origin::resolve_creation_parent(&rows, &container) {
+                            match crate::row_origin::resolve_creation_parent(
+                                &rows,
+                                &container,
+                                allow_root_creation,
+                            ) {
                                 Some(parent) => {
                                     vec![creation_slot_keyed_row(&parent, &defaults)]
                                 }
@@ -278,6 +296,7 @@ impl AppendedRowsProvider {
             suffix: SuffixSource::CreationSlot {
                 defaults: slot.defaults.clone(),
                 container: slot.parent_id.clone(),
+                allow_root_creation: slot.allow_root_creation,
                 inner,
             },
         }
@@ -2203,6 +2222,91 @@ mod tests {
         }
     }
 
+    fn row_with_parent(id: &str, parent: &str) -> Arc<DataRow> {
+        let mut r = DataRow::new();
+        r.insert("id".to_string(), Value::String(id.to_string()));
+        r.insert("parent_id".to_string(), Value::String(parent.to_string()));
+        Arc::new(r)
+    }
+
+    fn appended_row_count(inner: Vec<Arc<DataRow>>, slot: &VirtualChildSlot) -> usize {
+        let inner_len = inner.len();
+        let provider = AppendedRowsProvider::creation_slot(Arc::new(FixedRows(inner)), slot);
+        provider.rows_snapshot().len() - inner_len
+    }
+
+    /// BugFunnel #61: the Pages sidebar is a read-only navigation list — a flat
+    /// forest of top-level pages each parented to the `no_parent` sentinel —
+    /// that does NOT opt in (`allow_root_creation = false`). Its rendered
+    /// rowset must equal its backing rows: NO virtual
+    /// `sentinel:__virtual:no_parent` row is appended.
+    #[test]
+    fn sidebar_forest_without_optin_appends_no_creation_slot() {
+        let sentinel = holon_api::EntityUri::no_parent();
+        let inner = vec![
+            row_with_parent("block:pageA", sentinel.as_str()),
+            row_with_parent("block:pageB", sentinel.as_str()),
+        ];
+        let slot = VirtualChildSlot {
+            defaults: HashMap::new(),
+            parent_id: holon_api::EntityUri::block("journals"),
+            allow_root_creation: false,
+        };
+        assert_eq!(appended_row_count(inner, &slot), 0);
+    }
+
+    /// The main panel is a single focus-rooted tree; its creation slot is
+    /// PRESERVED regardless of the `allow_root_creation` opt-in — the fix must
+    /// not regress it (BugFunnel #61).
+    #[test]
+    fn main_panel_single_root_still_appends_creation_slot() {
+        let inner = vec![
+            row_with_parent("block:page", "block:root-layout"), // focus root
+            row_with_parent("block:c1", "block:page"),
+        ];
+        let slot = VirtualChildSlot {
+            defaults: HashMap::new(),
+            parent_id: holon_api::EntityUri::block("default-main-panel"),
+            allow_root_creation: false,
+        };
+        assert_eq!(appended_row_count(inner, &slot), 1);
+        // The appended row is a creation placeholder parented to the focus root.
+        let provider = AppendedRowsProvider::creation_slot(
+            Arc::new(FixedRows(vec![row_with_parent(
+                "block:page",
+                "block:root-layout",
+            )])),
+            &slot,
+        );
+        let snap = provider.rows_snapshot();
+        let slot_row = snap
+            .iter()
+            .find(|r| crate::row_origin::RowOrigin::from_row(r).is_creation_placeholder())
+            .expect("main-panel creation slot present");
+        assert_eq!(
+            slot_row.get("parent_id").and_then(|v| v.as_string()),
+            Some("block:page")
+        );
+    }
+
+    /// An editable top-level-pages list that DOES opt in (`creation_slot:
+    /// true`) keeps the "create a new top-level page" slot at the
+    /// `no_parent` sentinel.
+    #[test]
+    fn forest_with_optin_appends_root_creation_slot() {
+        let sentinel = holon_api::EntityUri::no_parent();
+        let inner = vec![
+            row_with_parent("block:pageA", sentinel.as_str()),
+            row_with_parent("block:pageB", sentinel.as_str()),
+        ];
+        let slot = VirtualChildSlot {
+            defaults: HashMap::new(),
+            parent_id: holon_api::EntityUri::block("journals"),
+            allow_root_creation: true,
+        };
+        assert_eq!(appended_row_count(inner, &slot), 1);
+    }
+
     fn enriched(row: DataRow) -> EnrichedRow {
         EnrichedRow::from_raw(row, |_| HashMap::new())
     }
@@ -2267,6 +2371,7 @@ mod tests {
             let slot = VirtualChildSlot {
                 defaults: HashMap::new(),
                 parent_id: EntityUri::block("parent-under-test"),
+                allow_root_creation: false,
             };
             // The creation slot resolves its parent from `inner`'s rows (bug 2A):
             // seed one row that is a direct child of the container so the flat
