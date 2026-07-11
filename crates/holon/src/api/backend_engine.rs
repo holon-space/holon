@@ -78,9 +78,9 @@ pub struct BackendEngine {
     /// error in place. Empty until action watchers run.
     rule_status: crate::api::rule_status::RuleStatusHandle,
     /// Keeps the advice reconciler's background tasks alive (mirrors how the
-    /// profile watcher / `LinkEventSubscriberHandle` stay alive by being
-    /// held on the engine). `None` in configs that never install one
-    /// (tests, no-advice sessions).
+    /// profile watcher / `advice reconciler` stay alive by being held on
+    /// the engine). `None` in configs that never install one (tests,
+    /// no-advice sessions).
     _advice_reconciler: Option<Arc<crate::sync::AdviceReconcilerHandle>>,
     /// Keeps the clock scheduler's ticking task alive (ADR 0024 P5,
     /// time-as-data). `None` until installed in

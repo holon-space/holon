@@ -84,6 +84,20 @@ async fn setup_schema(handle: &holon::storage::turso::DbHandle) {
         )
         .await
         .expect("block_tags table");
+    // Links increment 2: block delete cleans `block_links` explicitly (soft
+    // targets, no FK), so every block-provider fixture needs the table.
+    handle
+        .execute_ddl(
+            "CREATE TABLE block_links (
+                source_block_id TEXT NOT NULL,
+                target TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                resolved_id TEXT,
+                PRIMARY KEY (source_block_id, target, kind)
+            )",
+        )
+        .await
+        .expect("block_links table");
 }
 
 async fn read_requires(handle: &holon::storage::turso::DbHandle, block_id: &str) -> Vec<String> {

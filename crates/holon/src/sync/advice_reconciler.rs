@@ -41,8 +41,8 @@ use crate::storage::turso::DbHandle;
 use crate::sync::MatviewManager;
 
 /// Keeps the reconciler's two background tasks alive. Dropping it aborts them
-/// (mirrors `LinkEventSubscriberHandle` / the profile watcher staying alive by
-/// being held on the engine).
+/// (mirrors the profile watcher staying alive by being
+/// held on the engine).
 pub struct AdviceReconcilerHandle {
     _aborts: ActorAbortGuard,
 }

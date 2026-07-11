@@ -18,9 +18,7 @@ use crate::core::sql_operation_provider::SqlOperationProvider;
 use crate::di::DbHandleProvider;
 use crate::storage::BLOCK_WRITE_TABLE;
 use crate::storage::schema_module::SchemaModule;
-use crate::storage::turso_block_link_indexer::TursoBlockLinkIndexer;
 use crate::sync::PublishErrorTracker;
-use crate::sync::link_event_subscriber::LinkEventSubscriber;
 use crate::sync::live_data::LiveData;
 use holon_api::block::Block;
 use holon_api::capability::SessionCapabilities;
@@ -56,10 +54,6 @@ fn sql_cell_set_field_writer(
         }) as futures::future::BoxFuture<'static, anyhow::Result<()>>
     })
 }
-
-/// Marker type for the LinkEventSubscriber background wiring.
-/// Resolving this from DI triggers the LiveData<Block> → block_link subscription.
-pub struct LinkEventSubscriberHandle;
 
 // The BlockFeed newtype itself lives in holon-api (live_data) so backend-blind
 // consumers (holon-orgmode) can resolve it without a `holon` dependency; this
@@ -204,20 +198,6 @@ impl Module for EventInfraModule {
                 .with_capabilities(caps);
             Arc::new(block_ops) as Arc<dyn BlockOrdering>
         }));
-
-        injector.provide::<LinkEventSubscriberHandle>(Provider::root_async(
-            |resolver| async move {
-                let db_handle_provider = resolver.resolve::<dyn DbHandleProvider>();
-                let block_feed = resolver.resolve_async::<BlockFeed>().await;
-
-                let indexer =
-                    std::sync::Arc::new(TursoBlockLinkIndexer::new(db_handle_provider.handle()));
-                let subscriber = LinkEventSubscriber::new(indexer);
-                subscriber.start_from_live_data(block_feed.0.clone());
-
-                Shared::new(LinkEventSubscriberHandle)
-            },
-        ));
 
         Ok(())
     }
