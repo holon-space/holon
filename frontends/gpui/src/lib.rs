@@ -1826,6 +1826,26 @@ pub fn setup_interaction_pump(
                             window.refresh();
                             scrolled.map(|s| (s, None))
                         }
+                        InteractionEvent::ScrollList { entity_id, dy, .. } => {
+                            // Drive the target panel's `ListState::scroll_by`
+                            // directly — the reliable path a synthetic
+                            // `ScrollWheel` can't take (hover-gate no-op).
+                            let scrolled =
+                                scroll_list_by(entity_id, *dy, &entity_cache_for_pump, cx);
+                            window.refresh();
+                            match scrolled {
+                                Ok(true) => Ok((true, None)),
+                                Ok(false) => Ok((
+                                    false,
+                                    Some(format!(
+                                        "scroll: no scrollable list reached for {entity_id:?} — \
+                                         the entity is neither a rendered `block:default-*` panel \
+                                         with a virtualized list nor a block inside one"
+                                    )),
+                                )),
+                                Err(detail) => Err(detail),
+                            }
+                        }
                         _ => {
                             // Synthetic key events route through the window's
                             // focus tree: when this window is not the key
@@ -1971,6 +1991,73 @@ fn scroll_entity_into_view(
                      `before` offset means something resets the viewport between frames)",
                     before
                 );
+                cx.notify();
+            });
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Scroll a virtualized panel list by a pixel `dy`, driving its
+/// `ListState::scroll_by` directly. Counterpart to [`scroll_entity_into_view`]
+/// (which reveals a specific row); this applies a relative wheel/trackpad-style
+/// delta without going through the platform `ScrollWheel` path, which no-ops
+/// for a synthetic off-cursor event (gpui's `should_handle_scroll` hover gate).
+///
+/// `entity_id` is resolved against the same panel walk as
+/// `scroll_entity_into_view`: a `block:default-*` panel scrolls its primary
+/// (first) list-mode shell; any other block scrolls the list shell that
+/// contains it (`visible_index_of` hit). Returns `Ok(false)` when no scrollable
+/// list matches — the caller turns that into a loud error rather than a silent
+/// success.
+///
+/// `pub` for the fail-loud regression test (`tests/mcp_scroll_fail_loud.rs`),
+/// which exercises the unreachable-target → `Ok(false)` contract.
+pub fn scroll_list_by(
+    entity_id: &str,
+    dy: f32,
+    entity_cache: &entity_view_registry::EntityCache,
+    cx: &mut App,
+) -> Result<bool, String> {
+    use crate::entity_view_registry::CacheKey;
+    use crate::views::ReactiveShell;
+
+    let entity_uri = holon_api::EntityUri::parse(entity_id)
+        .map_err(|e| format!("scroll_list_by: {entity_id:?} is not an EntityUri: {e}"))?;
+    for panel_id in [
+        "block:default-left-sidebar",
+        "block:default-main-panel",
+        "block:default-right-sidebar",
+    ] {
+        let panel_shell: Option<gpui::Entity<ReactiveShell>> = {
+            let cache = entity_cache.read().unwrap();
+            cache
+                .get(&CacheKey::LiveBlock(panel_id.to_string()))
+                .and_then(|any| any.clone().downcast::<ReactiveShell>().ok()) // ALLOW(ok): downcast Err = cached Any wasn't a ReactiveShell; treat as miss
+        };
+        let Some(panel_shell) = panel_shell else {
+            continue;
+        };
+        // Targeting the panel itself scrolls its primary list; targeting a
+        // block scrolls whichever of the panel's list shells contains it.
+        let target_is_panel = entity_id == panel_id;
+        let panel_cache = panel_shell.read(cx).entity_cache_clone();
+        let list_shells: Vec<gpui::Entity<ReactiveShell>> = {
+            let cache = panel_cache.read().unwrap();
+            cache
+                .values()
+                .filter_map(|any| any.clone().downcast::<ReactiveShell>().ok()) // ALLOW(ok): non-ReactiveShell entries are skipped, not errors
+                .collect()
+        };
+        for list_shell in list_shells {
+            let matches =
+                target_is_panel || list_shell.read(cx).visible_index_of(&entity_uri).is_some();
+            if !matches {
+                continue;
+            }
+            list_shell.update(cx, |shell, cx| {
+                shell.list_state_handle().scroll_by(gpui::px(dy));
                 cx.notify();
             });
             return Ok(true);
@@ -2199,10 +2286,12 @@ pub fn interaction_event_to_platform_inputs(
                 touch_phase: gpui::TouchPhase::default(),
             })]
         }
-        InteractionEvent::ScrollEntityIntoView { .. } | InteractionEvent::InsertText { .. } => {
-            // Handled directly by `dispatch_interaction`'s match arms
-            // (`scroll_entity_into_view` / `dispatch_insert_text`), not by
-            // synthesizing a platform input. Returning an empty vec keeps
+        InteractionEvent::ScrollEntityIntoView { .. }
+        | InteractionEvent::ScrollList { .. }
+        | InteractionEvent::InsertText { .. } => {
+            // Handled directly by the interaction pump's match arms
+            // (`scroll_entity_into_view` / `scroll_list_by` / `dispatch_insert_text`),
+            // not by synthesizing a platform input. Returning an empty vec keeps
             // this fn's callers (which iterate inputs) a no-op for these
             // variants.
             vec![]

@@ -111,6 +111,19 @@ pub enum InteractionEvent {
     /// prepaint, viewport or not. Used by `wait_for_entity_bounds` after
     /// a short polling window when bounds haven't appeared yet.
     ScrollEntityIntoView { entity_id: String },
+    /// Scroll a virtualized list by a pixel delta, driving the target panel's
+    /// `ListState::scroll_by` DIRECTLY (like `ScrollEntityIntoView`) rather
+    /// than synthesizing a `ScrollWheel` platform input. A synthetic
+    /// `ScrollWheelEvent` dispatched off-cursor does not satisfy gpui's
+    /// `Hitbox::should_handle_scroll` hover gate, so it silently no-ops even
+    /// though the list is scrollable (dogfood #3: the tool reported success
+    /// while nothing moved). `entity_id` names either a panel
+    /// (`block:default-*`, scrolls its primary list) or a block inside one
+    /// (scrolls the list that contains it). `dy` is a pixel delta
+    /// (positive = down / toward the end); `dx` is reserved. The GPUI handler
+    /// reports `handled=false` when no scrollable list is reachable, so the
+    /// driver can fail loud instead of faking success.
+    ScrollList { entity_id: String, dx: f32, dy: f32 },
 }
 
 /// Result of dispatching an interaction event through the GPUI window.
