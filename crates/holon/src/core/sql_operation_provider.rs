@@ -1879,10 +1879,29 @@ impl OriginTaggedWrites for SqlOperationProvider {
         );
         let _tx_t0 = std::time::Instant::now();
         let _sql_count = all_sql.len();
-        self.db_handle
-            .transaction(all_sql)
-            .await
-            .map_err(|e| format!("Batch transaction failed: {}", e))?;
+        self.db_handle.transaction(all_sql).await.map_err(|e| {
+            // Enrich with the op/id manifest — a deferred-FK failure only
+            // surfaces at COMMIT with no row context, which made the
+            // 2026-07-11 keystone FK RED undiagnosable from the log alone.
+            let manifest: Vec<String> = operations
+                .iter()
+                .take(40)
+                .map(|(op, p)| {
+                    let id = p.get("id").and_then(|v| v.as_string()).unwrap_or("?");
+                    let parent = p
+                        .get("parent_id")
+                        .and_then(|v| v.as_string())
+                        .unwrap_or("-");
+                    format!("{op}:{id}<-{parent}")
+                })
+                .collect();
+            format!(
+                "Batch transaction failed: {} (ops[{}]: {})",
+                e,
+                count,
+                manifest.join(", ")
+            )
+        })?;
         tracing::info!(
             "[SqlOperationProvider] batch timing: {} ops, {} sql stmts → tx {}ms",
             count,
