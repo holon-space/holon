@@ -6,6 +6,8 @@
 pub mod action_actor_state;
 pub mod advice_expectation;
 pub mod bisect_driver;
+pub mod block_state;
+pub mod clock_state;
 pub mod composed;
 pub mod convergence;
 pub mod driver_input;
@@ -22,6 +24,7 @@ pub mod mcp_server_actor_state;
 pub mod memory_slice;
 pub mod op_write_cap;
 pub mod panic_diag;
+pub mod peer_ref_state;
 // `peer_ops` co-located to `holon-loro-testing` (Phase-1a Step 4); re-exported
 // here so central `crate::pbt::peer_ops::*` / `super::peer_ops::*` call sites
 // (reference_state, state_machine, shadow_mesh, …) keep resolving unchanged.
@@ -50,6 +53,7 @@ pub mod types;
 pub mod ui_actor_state;
 pub mod ui_harness;
 pub mod ui_interaction;
+pub mod ui_types;
 pub mod value_fn_invariants;
 pub mod vm_snapshot;
 pub mod window_slice;

@@ -76,12 +76,12 @@ use super::advice_expectation::active_rule;
 use super::advice_expectation::expectation_for;
 use super::advice_expectation::matview_rows_for;
 use super::peer_ops::PeerBlock;
-use super::reference_state::CursorPosition;
-use super::reference_state::OpenPinEntry;
-use super::reference_state::PeerRefState;
+use super::peer_ref_state::PeerRefState;
 use super::reference_state::ReferenceState;
 use super::reference_state::Resolved;
 use super::state_machine::merge_peer_blocks_into_primary;
+use super::ui_types::CursorPosition;
+use super::ui_types::OpenPinEntry;
 use crate::pbt::types::MutationApply;
 
 // ─── Helpers ──────────────────────────────────────────────────────────
@@ -397,7 +397,7 @@ impl RefBlockTreeMut for ReferenceState {
             self.ui
                 .tab
                 .focused_cursor
-                .insert(region, super::reference_state::CursorPosition::start());
+                .insert(region, super::ui_types::CursorPosition::start());
         }
     }
 
@@ -414,7 +414,7 @@ impl RefBlockTreeMut for ReferenceState {
             self.ui
                 .tab
                 .focused_cursor
-                .insert(region, super::reference_state::CursorPosition::start());
+                .insert(region, super::ui_types::CursorPosition::start());
         }
     }
 }
@@ -546,7 +546,7 @@ impl RefFocusMut for ReferenceState {
     }
 
     fn open_active_editor(&mut self, id: EntityUri, content: String, cursor_byte: usize) {
-        self.ui.tab.active_editor = Some(super::reference_state::ActiveEditor {
+        self.ui.tab.active_editor = Some(super::ui_types::ActiveEditor {
             block_id: id,
             in_memory_content: content,
             cursor_byte,
@@ -1617,8 +1617,8 @@ impl RefApplyMutationMut for ReferenceState {
 
 impl RefLayoutMutate for ReferenceState {
     fn apply_click_focus(&mut self, region: Region, block_id: &EntityUri) {
-        use crate::pbt::reference_state::CursorPosition;
-        use crate::pbt::reference_state::OpenPinEntry;
+        use crate::pbt::ui_types::CursorPosition;
+        use crate::pbt::ui_types::OpenPinEntry;
         // A real click outside the active editor blurs it (real-editor-only commit
         // via `blur_active_editor`). Same-block clicks don't blur.
         if self
@@ -1941,7 +1941,7 @@ impl holon_pbt_core::capabilities::RefArrowNav for ReferenceState {
         use holon_frontend::navigation::CursorHint;
         use holon_frontend::navigation::NavDirection;
 
-        use super::reference_state::CursorPosition;
+        use super::ui_types::CursorPosition;
 
         let mut current_id = self
             .ui

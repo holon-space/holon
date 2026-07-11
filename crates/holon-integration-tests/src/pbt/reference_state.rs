@@ -14,17 +14,21 @@ use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
 use holon_api::render_types::Arg;
 use holon_api::render_types::RenderExpr;
-use holon_frontend::editor_caret;
 use holon_pbt_core::Wiring;
 
 use super::action_actor_state::ActionActorState;
+use super::block_state::BlockState;
+use super::block_state::LayoutBlockInfo;
+use super::clock_state::ClockState;
 use super::file_adapter_state::FileAdapterState;
 use super::mcp_server_actor_state::MCPServerActorState;
+use super::peer_ref_state::PeerRefState;
 use super::query::QuerySource;
 use super::query::TestQuery;
 use super::query::WatchSpec;
 use super::reference_domain_state::ReferenceDomainState;
 use super::ui_actor_state::UIActorState;
+use super::ui_types::CursorPosition;
 use crate::pbt::types::MutationApply;
 
 pub type ShadowInterpreter =
@@ -265,122 +269,6 @@ pub static VALID_PROFILE_YAMLS: std::sync::LazyLock<Vec<String>> = std::sync::La
     yamls
 });
 
-/// Typed classification of layout block IDs in index.org.
-///
-/// Layout blocks are split into three categories with different mutation rules:
-/// - **headline_ids**: The text headline blocks that parent query/render
-///   sources. These can have content, task_state, priority, tags mutated.
-/// - **query_source_ids**: PRQL/GQL/SQL source blocks. These are truly
-///   immutable because changing them would break `initial_widget()`.
-/// - **render_source_ids**: Render DSL source blocks. These can have their
-///   content changed to any valid render expression.
-#[derive(Debug, Clone, Default)]
-pub struct LayoutBlockInfo {
-    pub headline_ids: HashSet<EntityUri>,
-    pub query_source_ids: HashSet<EntityUri>,
-    pub render_source_ids: HashSet<EntityUri>,
-}
-
-impl LayoutBlockInfo {
-    /// Returns true if the block is part of the layout at all.
-    pub fn contains(&self, id: &EntityUri) -> bool {
-        self.headline_ids.contains(id)
-            || self.query_source_ids.contains(id)
-            || self.render_source_ids.contains(id)
-    }
-
-    /// Returns true if the block must never be mutated (query sources only).
-    pub fn is_immutable(&self, id: &EntityUri) -> bool {
-        self.query_source_ids.contains(id)
-    }
-
-    /// Returns true if the block is focusable — i.e. it has an EditableText
-    /// node. Source blocks (query/render) are NOT focusable. Headline
-    /// blocks (parents of source blocks) ARE focusable in the current
-    /// reference model because the PBT uses them as navigation targets;
-    /// marking them non-focusable would break ClickBlock generation
-    /// entirely (see note in the editable transition generation).
-    pub fn is_focusable(&self, id: &EntityUri) -> bool {
-        !self.query_source_ids.contains(id) && !self.render_source_ids.contains(id)
-    }
-
-    /// Remove a block from all sets.
-    pub fn remove(&mut self, id: &EntityUri) {
-        self.headline_ids.remove(id);
-        self.query_source_ids.remove(id);
-        self.render_source_ids.remove(id);
-    }
-}
-
-/// Block-related state that is affected by undo/redo operations.
-/// Extracted so snapshots can be taken via `.clone()` before UI mutations.
-#[derive(Debug, Clone)]
-pub struct BlockState {
-    /// Canonical block state (using production Block struct).
-    ///
-    /// `BTreeMap` (not `HashMap`) so iteration order is deterministic across
-    /// process instantiations. The PBT canonicalizer (`apply_mutation`,
-    /// `recanon_and_rebuild`) builds a `Vec<Block>` from these values and the
-    /// resulting sequence numbers depend on iteration order — `HashMap`'s
-    /// random seed made the same proptest seed produce different reference
-    /// states across runs.
-    pub blocks: BTreeMap<EntityUri, Block>,
-
-    /// Mapping of block_id → doc_uri (persists even after blocks are deleted).
-    /// `BTreeMap` for the same determinism reason as `blocks`.
-    pub block_documents: BTreeMap<EntityUri, EntityUri>,
-
-    /// ID counter for generating unique block IDs
-    pub next_id: usize,
-}
-
-impl BlockState {
-    /// Return a clone with every block's `id`/`parent_id` and the
-    /// `block_documents` keys remapped through `map` (synthetic doc URI →
-    /// real SUT UUID). URIs absent from `map` (i.e. all content-block IDs,
-    /// which the ref and SUT already share) pass through unchanged.
-    ///
-    /// Instead of every invariant translating IDs at each comparison point,
-    /// the reference model is mapped *once* into the SUT's ID space so
-    /// capability-bound invariant bodies can compare directly. Only doc URIs
-    /// differ, and only block `id`/`parent_id` + `block_documents` keys carry
-    /// them, so this resolves exactly `block.id`, `block.parent_id`, and the
-    /// `block_documents` keys.
-    pub fn remapped_doc_uris(&self, map: &BTreeMap<EntityUri, EntityUri>) -> BlockState {
-        let resolve = |u: &EntityUri| map.get(u).cloned().unwrap_or_else(|| u.clone());
-        let blocks = self
-            .blocks
-            .values()
-            .map(|b| {
-                let mut b = b.clone();
-                b.id = resolve(&b.id);
-                b.parent_id = resolve(&b.parent_id);
-                // `requires` is an edge field of block-id references; remap its
-                // targets into SUT ID space too so an edge-field comparison
-                // (e.g. `/matview`) matches when a dependency points at a
-                // minted (split-reconciled) block, not just a stable seed id.
-                b.requires = b.requires.iter().map(|u| resolve(u)).collect();
-                // `advice_suppressed` is likewise an edge field of block-id
-                // references (ADR 0021 dismissal set); remap its targets the
-                // same way, or a dismissal pointing at a split-reconciled block
-                // keeps the synthetic id and diverges from the SUT's resolved id.
-                b.advice_suppressed = b.advice_suppressed.iter().map(|u| resolve(u)).collect();
-                (b.id.clone(), b)
-            })
-            .collect();
-        let block_documents = self
-            .block_documents
-            .iter()
-            .map(|(id, doc)| (resolve(id), doc.clone()))
-            .collect();
-        BlockState {
-            blocks,
-            block_documents,
-            next_id: self.next_id,
-        }
-    }
-}
-
 /// Reference state tracking all expected data (uses production Block struct)
 #[derive(Debug, Clone)]
 pub struct ReferenceState {
@@ -479,196 +367,6 @@ pub struct ReferenceState {
 
     /// Calendar-clock model for the `AdvanceDay` transition (ADR 0024 §6).
     pub clock: ClockState,
-}
-
-/// The fixed wall-clock instant the composed frontend boot injects (local noon
-/// on 2026-01-15, timezone-robust). Both the SUT's `TestClock` and the
-/// reference model derive the boot day from this, so they agree by construction
-/// without a side channel.
-pub const KEYSTONE_CLOCK_BOOT_MS: i64 = 1_768_478_400_000; // 2026-01-15T12:00:00Z
-
-/// Reference-side calendar-clock model (ADR 0024 §6). Tracks the model's
-/// current day and the set of distinct days the clock has visited, from which
-/// it predicts the journal-rule output: exactly one journal block per distinct
-/// day.
-#[derive(Debug, Clone)]
-pub struct ClockState {
-    /// The model's current local calendar day, `YYYY-MM-DD`.
-    pub today: String,
-    /// Every distinct day the clock has been at (the boot day plus each
-    /// advanced-to day). Its cardinality is the predicted journal count;
-    /// same-day re-ticks are idempotent (set insert is a no-op).
-    pub visited_days: std::collections::BTreeSet<String>,
-}
-
-impl ClockState {
-    /// Seed from the fixed boot instant, so the boot day is already visited
-    /// (the rule fires once at boot).
-    pub fn new() -> Self {
-        let boot =
-            holon_api::CalendarDate::from_clock(&holon_api::TestClock::new(KEYSTONE_CLOCK_BOOT_MS))
-                .ymd();
-        let mut visited_days = std::collections::BTreeSet::new();
-        visited_days.insert(boot.clone());
-        Self {
-            today: boot,
-            visited_days,
-        }
-    }
-
-    /// Advance the model day by `days` calendar days and record the new day.
-    /// `days == 0` re-ticks the same day (idempotent).
-    pub fn advance_day(&mut self, days: i64) {
-        let next = holon_api::CalendarDate::parse(&self.today)
-            .expect("clock today is a valid YYYY-MM-DD")
-            .add_days(days);
-        self.today = next.ymd();
-        self.visited_days.insert(self.today.clone());
-    }
-}
-
-impl Default for ClockState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Reference state for a Loro-only peer.
-#[derive(Debug, Clone)]
-pub struct PeerRefState {
-    pub peer_id: u64,
-    pub blocks: HashMap<String, super::peer_ops::PeerBlock>,
-    /// Stable IDs this peer has deleted since its last sync with the
-    /// primary. Propagated by `SyncWithPeer`/`MergeFromPeer` so the
-    /// primary's reference block map reflects the delete the production
-    /// controller just applied via `subscribe_root`.
-    pub deleted_stable_ids: std::collections::HashSet<String>,
-    /// Stable IDs explicitly modified by PeerEdit::Update since AddPeer.
-    /// Used by `merge_peer_blocks_into_primary` to distinguish peer edits
-    /// from inherited-at-AddPeer blocks.
-    pub modified_stable_ids: std::collections::HashSet<String>,
-    /// Stable IDs created by PeerEdit::Create since the last sync. Only
-    /// these are added to the primary on merge — inherited-at-AddPeer
-    /// blocks the primary may have since deleted must NOT be re-added,
-    /// because the actual Loro CRDT keeps primary-side deletes.
-    pub created_stable_ids: std::collections::HashSet<String>,
-}
-
-/// Cursor position within a focused block. Tracks line and column to predict
-/// whether arrow keys cause cross-block navigation or intra-block movement.
-#[derive(Debug, Clone, Copy)]
-pub struct CursorPosition {
-    pub line: usize,
-    pub column: usize,
-}
-
-impl CursorPosition {
-    pub fn start() -> Self {
-        Self { line: 0, column: 0 }
-    }
-}
-
-/// Mirror of the GPUI editor's live `InputState`: the in-memory text of the
-/// currently focused EditableText, plus the cursor offset within that text.
-/// Diverges from `block.content` whenever the user has typed/deleted without
-/// blurring — exactly the divergence that surfaces split-with-pending-edit
-/// (and similar) bugs.
-#[derive(Debug, Clone)]
-pub struct ActiveEditor {
-    pub block_id: EntityUri,
-    /// What the GPUI `InputState.text()` currently shows.
-    pub in_memory_content: String,
-    /// Byte offset of the caret within `in_memory_content`.
-    pub cursor_byte: usize,
-    /// True once modeled typing/deleting touched `in_memory_content` since
-    /// the editor opened (or since the last commit). Mirrors what prod's
-    /// commit paths observe: a DIRTY editor's text is user-authored and
-    /// commits on blur / at a structural commit point; a clean editor whose
-    /// text merely diverged from `block.content` is STALE against an
-    /// external change (prod's data subscription refreshes idle editors) —
-    /// committing it would write old text into the ref.
-    pub dirty: bool,
-}
-
-impl ActiveEditor {
-    /// Insert text at the cursor and advance. Delegates caret/text math to the
-    /// **shared** `editor_caret` primitive — the SAME one the SUT's
-    /// `InMemEditorComponent` drives — so ref and SUT cannot diverge on the
-    /// text primitive itself (multibyte-safe).
-    pub fn type_chars(&mut self, text: &str) {
-        debug_assert!(self.cursor_byte <= self.in_memory_content.len());
-        self.cursor_byte =
-            editor_caret::insert_at(&mut self.in_memory_content, self.cursor_byte, text);
-        self.dirty = true;
-    }
-
-    /// Delete `count` chars before the cursor (Backspace ×count). Stops at
-    /// start.
-    pub fn delete_backward(&mut self, count: usize) {
-        if count == 0 {
-            return;
-        }
-        self.cursor_byte =
-            editor_caret::delete_back(&mut self.in_memory_content, self.cursor_byte, count);
-        self.dirty = true;
-    }
-
-    /// Move the caret to a clamped byte position. Snaps to the nearest char
-    /// boundary at or before the target (a raw byte target — home/end/a click —
-    /// may land mid-codepoint); `clamp_boundary` keeps the caret legal.
-    pub fn move_cursor(&mut self, position: usize) {
-        self.cursor_byte = editor_caret::clamp_boundary(&self.in_memory_content, position);
-    }
-}
-
-/// Navigation history for a region (for back/forward navigation)
-#[derive(Debug, Clone)]
-pub struct NavigationHistory {
-    /// History entries: None = home view, Some(id) = focused on block
-    pub entries: Vec<Option<EntityUri>>,
-    /// Current cursor position in history
-    pub cursor: usize,
-}
-
-/// One open `navigation_history` row (`closed_at IS NULL`). Mirrors the
-/// open-rows projection that drives the `focus_roots` matview.
-///
-/// `block_id = None` represents a home row (block_id NULL in SQL); home
-/// rows are kept here because they bump `next_history_id` and contribute
-/// to move-to-top dedup, but they are excluded from `expected_focus_root_ids`
-/// (they're filtered out by the consumer GQL JOIN on `root.id = fr.root_id`).
-#[derive(Debug, Clone)]
-pub struct OpenPinEntry {
-    pub history_id: i64,
-    pub block_id: Option<EntityUri>,
-    pub added_ts_logical: u64,
-}
-
-impl Default for NavigationHistory {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl NavigationHistory {
-    pub fn new() -> Self {
-        Self {
-            entries: vec![None],
-            cursor: 0,
-        }
-    }
-
-    pub fn can_go_back(&self) -> bool {
-        self.cursor > 0
-    }
-
-    pub fn can_go_forward(&self) -> bool {
-        self.cursor < self.entries.len().saturating_sub(1)
-    }
-
-    pub fn current_focus(&self) -> Option<EntityUri> {
-        self.entries.get(self.cursor).cloned().flatten()
-    }
 }
 
 /// Witness that a [`ReferenceState`]'s ids live in the SUT's id space — either

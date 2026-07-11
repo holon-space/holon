@@ -57,7 +57,7 @@ pub fn advice_rule_blocks(blocks: &BTreeMap<EntityUri, Block>) -> Vec<(EntityUri
 /// ALL blocks — the seed is inactive and contributes nothing, and a
 /// user-activated seed rule must not be invisible to the oracle.
 pub fn non_seed_advice_rule_blocks(
-    block_state: &crate::pbt::reference_state::BlockState,
+    block_state: &crate::pbt::block_state::BlockState,
 ) -> Vec<(EntityUri, &Block)> {
     advice_rule_blocks(&block_state.blocks)
         .into_iter()

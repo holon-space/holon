@@ -25,10 +25,10 @@ use std::collections::HashSet;
 use holon_api::Region;
 use holon_api::entity_uri::EntityUri;
 
-use super::reference_state::ActiveEditor;
-use super::reference_state::CursorPosition;
-use super::reference_state::NavigationHistory;
-use super::reference_state::OpenPinEntry;
+use super::ui_types::ActiveEditor;
+use super::ui_types::CursorPosition;
+use super::ui_types::NavigationHistory;
+use super::ui_types::OpenPinEntry;
 
 /// Per-tab, ephemeral UI state — focus, cursor, widget open-state, and the
 /// per-region navigation history. Never synced; recreated per viewport.
