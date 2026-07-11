@@ -62,6 +62,15 @@ pub struct GpuiUserDriver {
     engine: Arc<ReactiveEngine>,
 }
 
+/// The three default layout panels, each a `live_block` whose block-mode
+/// shell hosts a virtualized list. Used to resolve a scroll point/entity to a
+/// scrollable target.
+const DEFAULT_PANEL_IDS: [&str; 3] = [
+    "block:default-left-sidebar",
+    "block:default-main-panel",
+    "block:default-right-sidebar",
+];
+
 impl GpuiUserDriver {
     pub fn new(
         tx: Sender<InteractionCommand>,
@@ -261,6 +270,31 @@ impl GpuiUserDriver {
     /// error with enough context for test authors to understand whether
     /// the element was never rendered or simply hasn't been promoted from
     /// the staged buffer yet.
+    /// Dispatch a [`ScrollList`](InteractionEvent::ScrollList) and fail loud
+    /// when nothing scrolled. The GPUI handler drives the target's
+    /// `ListState::scroll_by` directly and reports `handled=false` when no
+    /// scrollable list matches; we surface that as an error rather than the
+    /// old silent-success no-op (dogfood #3).
+    async fn scroll_list(&self, entity_id: &str, dx: f32, dy: f32) -> Result<()> {
+        let response = self
+            .dispatch_event(InteractionEvent::ScrollList {
+                entity_id: entity_id.to_string(),
+                dx,
+                dy,
+            })
+            .await?;
+        if !response.handled {
+            anyhow::bail!(
+                "scroll: nothing scrolled for {entity_id:?}{detail}",
+                detail = match &response.detail {
+                    Some(d) => format!(" — {d}"),
+                    None => String::new(),
+                }
+            );
+        }
+        Ok(())
+    }
+
     fn require_element_center(&self, entity_id: &str, verb: &str) -> Result<(f32, f32)> {
         self.element_center(entity_id).with_context(|| {
             format!(
@@ -704,25 +738,49 @@ impl UserDriver for GpuiUserDriver {
         Ok(true)
     }
 
-    /// Turn the scroll wheel at a window coordinate via the interaction
-    /// channel. `dx` / `dy` are line-based deltas (positive `dy` = down).
+    /// Scroll the virtualized list at a window coordinate. `dy` is a pixel
+    /// delta (positive = down / toward the end); `dx` is reserved.
+    ///
+    /// Resolves which `block:default-*` panel's recorded bounds contain
+    /// `(x, y)` and drives that panel's `ListState::scroll_by` directly
+    /// (see [`scroll_entity`]). Fails loud when the point is over no panel,
+    /// or when the resolved panel has no scrollable list — a synthetic
+    /// `ScrollWheel` used to be dispatched here and silently no-opped
+    /// (dogfood #3).
     async fn scroll_at(&self, x: f32, y: f32, dx: f32, dy: f32) -> Result<()> {
-        self.dispatch_event(InteractionEvent::ScrollWheel {
-            position: (x, y),
-            delta: (dx, dy),
-            modifiers: Vec::new(),
-        })
-        .await?;
-        Ok(())
+        let mut panel: Option<&str> = None;
+        for p in DEFAULT_PANEL_IDS {
+            if let Some(info) = self.geometry.find_by_entity_id(p) {
+                if x >= info.x
+                    && x <= info.x + info.width
+                    && y >= info.y
+                    && y <= info.y + info.height
+                {
+                    panel = Some(p);
+                    break;
+                }
+            }
+        }
+        let panel = panel.ok_or_else(|| {
+            anyhow::anyhow!(
+                "scroll_at({x}, {y}): no default panel's bounds contain the point — pass \
+                 `entity_id` to target a specific panel/block, or verify the coordinates are \
+                 inside the window"
+            )
+        })?;
+        self.scroll_list(panel, dx, dy).await
     }
 
-    /// Scroll over an entity — looks up its window-space center via the
-    /// `GeometryProvider` and delegates to `scroll_at`. Fails loud when
-    /// bounds aren't available; MCP clients now receive an error
-    /// instead of a silent no-op (observable behavior change).
+    /// Scroll the virtualized list associated with `entity_id` by a pixel
+    /// `dy` (positive = down). `entity_id` is a `block:default-*` panel (its
+    /// primary list scrolls) or a block inside one (its containing list
+    /// scrolls). Drives `ListState::scroll_by` DIRECTLY via `ScrollList` —
+    /// NOT a synthetic `ScrollWheel`, which no-ops for an off-cursor event
+    /// (gpui's `should_handle_scroll` hover gate) and used to report success
+    /// while nothing moved (dogfood #3). Fails loud when no scrollable list
+    /// is reachable.
     async fn scroll_entity(&self, entity_id: &EntityUri, dx: f32, dy: f32) -> Result<()> {
-        let (cx, cy) = self.require_element_center(entity_id.as_str(), "scroll_entity")?;
-        self.scroll_at(cx, cy, dx, dy).await
+        self.scroll_list(entity_id.as_str(), dx, dy).await
     }
 
     /// Drag the source block onto the target via real pointer events:
