@@ -20,6 +20,8 @@ pub mod block_write_field;
 pub mod capability;
 pub mod change_set;
 pub mod clock;
+/// flutter_rust_bridge:ignore
+pub mod computation;
 pub mod computed;
 pub mod edge_field;
 pub mod effect_id;
