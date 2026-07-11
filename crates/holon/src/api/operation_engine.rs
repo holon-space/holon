@@ -19,6 +19,8 @@ use std::sync::atomic::Ordering;
 use anyhow::Result;
 use async_trait::async_trait;
 use holon_api::EntityName;
+use holon_api::HistoryEvent;
+use holon_api::HistoryStore;
 use holon_api::OpOrigin;
 use holon_api::Operation;
 use holon_api::OperationDescriptor;
@@ -101,6 +103,10 @@ pub struct DispatchingOperationEngine {
     /// to [`SystemClock`]; a test wiring overrides it via [`Self::with_clock`]
     /// so stamp timestamps are deterministic. Never a raw `SystemTime::now`.
     clock: Arc<dyn Clock>,
+    /// Optional op/effect history relation (C2b). When wired, every successful
+    /// op appends its field deltas to the stream. `None` on a wiring without a
+    /// query substrate (the block `_provenance` stamp still lands regardless).
+    history: Option<Arc<dyn HistoryStore>>,
 }
 
 /// Op names whose params are a block field-map written to `block_raw`, so an
@@ -127,6 +133,50 @@ fn stamp_params(
     params
 }
 
+/// Build the history events for one completed op — one per field delta, with
+/// provenance ids derived from `origin` via [`ProvenanceStamp`] so the stream
+/// and the block stamp never disagree. Pure and clock-free (unit-testable).
+fn history_events_for(
+    op_name: &str,
+    origin: &OpOrigin,
+    changes: &[holon_core::FieldDelta],
+    now_millis: i64,
+) -> Vec<HistoryEvent> {
+    let stamp = ProvenanceStamp::from_origin(origin, now_millis);
+    changes
+        .iter()
+        .map(|delta| HistoryEvent {
+            block_id: delta.entity_id.clone(),
+            op_name: op_name.to_string(),
+            origin: stamp.origin.clone(),
+            transition_id: stamp.transition_id.clone(),
+            session_id: stamp.session_id.clone(),
+            tool_call_id: stamp.tool_call_id.clone(),
+            field: Some(delta.field.clone()),
+            new_value: Some(render_value(&delta.new_value)),
+            at_millis: stamp.at_millis,
+        })
+        .collect()
+}
+
+/// Render a field value to the `new_value` string the history relation stores.
+/// Scalars render naturally; structured values fall back to JSON so a query can
+/// still match on them (disclosed, lossless-enough for state-transition
+/// counts).
+fn render_value(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Integer(i) => i.to_string(),
+        Value::Float(f) => f.to_string(),
+        Value::Boolean(b) => b.to_string(),
+        Value::DateTime(s) | Value::Json(s) => s.clone(),
+        Value::Null => "null".to_string(),
+        Value::Array(_) | Value::Object(_) => {
+            serde_json::to_string(v).unwrap_or_else(|_| format!("{v:?}"))
+        }
+    }
+}
+
 impl DispatchingOperationEngine {
     /// Build an in-memory engine over the given dispatcher (no persistence, no
     /// staleness reader). Used by Loro-only sessions whose reversible ops carry
@@ -139,6 +189,7 @@ impl DispatchingOperationEngine {
             store: None,
             seq: AtomicI64::new(0),
             clock: Arc::new(SystemClock),
+            history: None,
         }
     }
 
@@ -146,6 +197,13 @@ impl DispatchingOperationEngine {
     /// the [`SystemClock`] default so stamps carry real wall-clock time.
     pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
         self.clock = clock;
+        self
+    }
+
+    /// Wire the op/effect history relation (C2b). Every successful op then
+    /// appends its field deltas to the stream.
+    pub fn with_history_store(mut self, history: Arc<dyn HistoryStore>) -> Self {
+        self.history = Some(history);
         self
     }
 
@@ -171,6 +229,7 @@ impl DispatchingOperationEngine {
             store: Some(store),
             seq: AtomicI64::new(seq),
             clock: Arc::new(SystemClock),
+            history: None,
         })
     }
 
@@ -200,6 +259,23 @@ impl DispatchingOperationEngine {
         origin: &OpOrigin,
     ) -> StorageEntity {
         stamp_params(op_name, params, origin, self.clock.now_millis())
+    }
+
+    /// Append one [`HistoryEvent`] per field delta of a completed op to the
+    /// history relation. Provenance ids are derived from `origin` (reusing the
+    /// same [`ProvenanceStamp`] extraction as the block stamp, so the two
+    /// surfaces never disagree). The timestamp is the injected clock.
+    async fn record_history(
+        &self,
+        history: &dyn HistoryStore,
+        op_name: &str,
+        origin: &OpOrigin,
+        changes: &[holon_core::FieldDelta],
+    ) -> Result<()> {
+        for event in history_events_for(op_name, origin, changes, self.clock.now_millis()) {
+            history.record(event).await?;
+        }
+        Ok(())
     }
 
     /// Dispatch a stored op verbatim (used for inverse/forward replay). Never
@@ -297,6 +373,16 @@ impl OperationEngine for DispatchingOperationEngine {
                 self.undo_stack.write().await.push(entry);
                 self.persist().await?;
             }
+        }
+
+        // History relation (ADR 0024 P8 / C2b): append the op's field deltas to
+        // the queryable op/effect stream. This is the append-only complement to
+        // the block `_provenance` stamp — it captures set_field/delete/etc. that
+        // the property stamp does not, and answers "postponed N times". Fails
+        // loud (the relation is rebuildable but errors are never swallowed).
+        if let Some(history) = &self.history {
+            self.record_history(history.as_ref(), op_name, &origin, &result.changes)
+                .await?;
         }
 
         Ok(result.response)
@@ -423,5 +509,50 @@ mod provenance_stamp_tests {
                 "op '{op}' must not be provenance-stamped (covered by the history relation)"
             );
         }
+    }
+
+    fn delta(entity: &str, field: &str, new_value: Value) -> holon_core::FieldDelta {
+        holon_core::FieldDelta {
+            entity_id: entity.to_string(),
+            field: field.to_string(),
+            old_value: Value::Null,
+            new_value,
+        }
+    }
+
+    #[test]
+    fn history_events_carry_origin_and_deltas() {
+        let changes = vec![
+            delta("A", "status", Value::String("postponed".into())),
+            delta("A", "count", Value::Integer(7)),
+        ];
+        let origin = OpOrigin::Rule {
+            transition_id: "rule:postpone".into(),
+        };
+        let events = history_events_for("set_field", &origin, &changes, 999);
+
+        assert_eq!(events.len(), 2, "one event per field delta");
+        assert_eq!(events[0].block_id, "A");
+        assert_eq!(events[0].op_name, "set_field");
+        assert_eq!(events[0].origin, "rule");
+        assert_eq!(events[0].transition_id.as_deref(), Some("rule:postpone"));
+        assert_eq!(events[0].field.as_deref(), Some("status"));
+        assert_eq!(events[0].new_value.as_deref(), Some("postponed"));
+        assert_eq!(events[0].at_millis, 999);
+        // Non-string values render for query matching.
+        assert_eq!(events[1].new_value.as_deref(), Some("7"));
+    }
+
+    #[test]
+    fn history_events_carry_agent_identity() {
+        let changes = vec![delta("B", "content", Value::String("hi".into()))];
+        let origin = OpOrigin::Agent {
+            session_id: "mcp-session:s".into(),
+            tool_call_id: "tool-call:c".into(),
+        };
+        let events = history_events_for("create", &origin, &changes, 1);
+        assert_eq!(events[0].origin, "agent");
+        assert_eq!(events[0].session_id.as_deref(), Some("mcp-session:s"));
+        assert_eq!(events[0].tool_call_id.as_deref(), Some("tool-call:c"));
     }
 }
