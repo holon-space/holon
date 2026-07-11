@@ -44,6 +44,7 @@ pub mod file_io;
 pub mod file_sync_controller;
 pub mod file_watcher;
 pub mod orgmode_sync_provider;
+pub mod writeback_guard;
 
 // Re-export key types
 // build_block_params for seeding default layouts (no di feature needed)

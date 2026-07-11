@@ -1746,6 +1746,26 @@ impl FileSyncController {
             path.display(),
         );
 
+        // Ingest→write-back data-loss guard (BugFunnel row 28, P0). `rendered`
+        // is the re-projection of the blocks that ACTUALLY landed. If ingest
+        // silently dropped blocks (e.g. an FK rollback that aborted part of the
+        // file without surfacing an error), `rendered` is a TRUNCATED prefix and
+        // writing it below would delete those lines from the user's file. Refuse
+        // loudly when the projection lost a block present on disk; the `?`
+        // propagates to `on_file_changed`, whose Err arm QUARANTINES the file so
+        // no write-back path renders the truncated state over disk. A legal
+        // canonical reformat / 3-way merge preserves every block and passes.
+        self.format
+            .check_writeback_lossless(path, &disk_content, &rendered, &self.root_dir)
+            .with_context(|| {
+                format!(
+                    "[FileSyncController] REFUSING write-back of {} — ingest was lossy (see the \
+                     INGEST DATA LOSS error). The on-disk file is left intact; the file is \
+                     quarantined until a clean re-ingest.",
+                    path.display()
+                )
+            })?;
+
         if rendered != disk_content {
             // TOCTOU guard: re-read the disk NOW. If it changed since we parsed
             // it, a concurrent external write has landed new content — writing
