@@ -546,7 +546,11 @@ impl ReactiveEngineDriver {
             // container). This is the SAME call the render's `interpret_virtual_child`
             // (static path) / `AppendedRowsProvider::creation_slot` (streaming path)
             // makes, so the parent matches the rendered slot id exactly.
-            if let Some(parent) = crate::row_origin::resolve_creation_parent(&rows, &main_panel) {
+            // The main panel is always a single focus-rooted tree, so the
+            // `no_parent` forest-root opt-in never applies here (`false`).
+            if let Some(parent) =
+                crate::row_origin::resolve_creation_parent(&rows, &main_panel, false)
+            {
                 break parent;
             }
             if tokio::time::Instant::now() >= deadline {
