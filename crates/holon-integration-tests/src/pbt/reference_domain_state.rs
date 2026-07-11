@@ -1,19 +1,22 @@
 //! Tier-1 domain fragment of the PBT reference model (ADR 0004 / 0005).
 //!
-//! `ReferenceDomainState` is the **PBT reference oracle for the domain**, not the
-//! production domain itself. The production domain stays a *logical canonical
-//! projection* — the consensus across wired adapters after quiescence; no struct
-//! "holds" it (ADR-0004 canonicity reframing). This struct isolates the
-//! sort_key-free, adapter-independent domain data so it can be the single
-//! fragment shared across all wirings.
+//! `ReferenceDomainState` is the **PBT reference oracle for the domain**, not
+//! the production domain itself. The production domain stays a *logical
+//! canonical projection* — the consensus across wired adapters after
+//! quiescence; no struct "holds" it (ADR-0004 canonicity reframing). This
+//! struct isolates the sort_key-free, adapter-independent domain data so it can
+//! be the single fragment shared across all wirings.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::collections::HashSet;
 
 use holon_api::EntityName;
 use holon_api::entity_uri::EntityUri;
 use holon_api::render_types::RenderExpr;
 
-use super::reference_state::{BlockState, LayoutBlockInfo};
+use super::block_state::BlockState;
+use super::block_state::LayoutBlockInfo;
 
 /// Tier-1 domain data extracted from `ReferenceState` (ADR 0004 Phase 2).
 ///
@@ -29,23 +32,26 @@ pub struct ReferenceDomainState {
     /// Typed layout block classification for index.org.
     pub layout_blocks: LayoutBlockInfo,
 
-    /// Profile block IDs (blocks with source_language = holon_entity_profile_yaml)
+    /// Profile block IDs (blocks with source_language =
+    /// holon_entity_profile_yaml)
     pub profile_block_ids: HashSet<EntityUri>,
 
     /// Current active profile YAML index per entity_name.
     pub active_profiles: HashMap<EntityName, (EntityUri, usize)>,
 
-    /// Active render expressions per render source block (block_id → RenderExpr).
-    /// Updated when render source blocks are created or mutated.
-    /// `BTreeMap` for deterministic iteration (see `BlockState::blocks`).
+    /// Active render expressions per render source block (block_id →
+    /// RenderExpr). Updated when render source blocks are created or
+    /// mutated. `BTreeMap` for deterministic iteration (see
+    /// `BlockState::blocks`).
     pub render_expressions: BTreeMap<EntityUri, RenderExpr>,
 
     /// Parsed entity profile from the seed YAML (or custom org file).
     /// Used by `BuilderServices::resolve_profile` for ViewModel construction.
     pub seed_profile: Option<holon::entity_profile::EntityProfile>,
 
-    /// Block entity operations (set_field, create, update, delete, cycle_task_state).
-    /// Used by `BuilderServices::resolve_profile` to inject operations into RowProfile.
+    /// Block entity operations (set_field, create, update, delete,
+    /// cycle_task_state). Used by `BuilderServices::resolve_profile` to
+    /// inject operations into RowProfile.
     pub block_operations: Vec<holon_api::render_types::OperationDescriptor>,
 }
 
@@ -74,7 +80,9 @@ impl Default for ReferenceDomainState {
 }
 
 fn default_block_operations() -> Vec<holon_api::render_types::OperationDescriptor> {
-    use holon_api::render_types::{OperationDescriptor, OperationParam, TypeHint};
+    use holon_api::render_types::OperationDescriptor;
+    use holon_api::render_types::OperationParam;
+    use holon_api::render_types::TypeHint;
 
     let entity_name = "block".to_string();
     let entity_short_name = "block".to_string();

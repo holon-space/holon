@@ -19,12 +19,16 @@
 //! production UI state — this is the PBT reference model's prediction of UI
 //! actor state.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 
 use holon_api::Region;
 use holon_api::entity_uri::EntityUri;
 
-use super::reference_state::{ActiveEditor, CursorPosition, NavigationHistory, OpenPinEntry};
+use super::ui_types::ActiveEditor;
+use super::ui_types::CursorPosition;
+use super::ui_types::NavigationHistory;
+use super::ui_types::OpenPinEntry;
 
 /// Per-tab, ephemeral UI state — focus, cursor, widget open-state, and the
 /// per-region navigation history. Never synced; recreated per viewport.

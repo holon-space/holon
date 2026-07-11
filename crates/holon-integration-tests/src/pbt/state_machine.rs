@@ -150,7 +150,7 @@ pub struct ReferenceMachine;
 ///   child order — the clock-padded shadow reproduces the op-id tie-break
 ///   exactly (`clock_parity_spike`).
 pub(crate) fn merge_peer_blocks_into_primary(
-    block_state: &mut super::reference_state::BlockState,
+    block_state: &mut super::block_state::BlockState,
     peer_blocks: &[super::peer_ops::PeerBlock],
     modified_stable_ids: &std::collections::HashSet<String>,
     created_stable_ids: &std::collections::HashSet<String>,
