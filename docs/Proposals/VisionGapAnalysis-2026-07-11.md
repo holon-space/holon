@@ -106,10 +106,12 @@ Increment 1 — no ruling needed (inside ratified scope / fully specified):
 - Continue ADR 0024 Phases 2-3 as planned (prerequisite for authoring personalities as rules).
 
 Increment 2 — one ruling each, then fleet-executable:
-- C2b history projection. RULING: Turso-projected op/effect relation acceptable as disclosed
-  ephemeral cache? Degraded form in org-only vaults: jj-commit granularity or none?
-- C4 derived fields. RULING: pipeline seat — compile = props to matview expressions, system rule
-  emitting attribute updates, or CDC-incremental materializer?
+- C2b history projection. RULED (Martin 2026-07-11): Turso cache APPROVED; abstract behind an
+  interface if at all possible (unless directly exposed as SQL query). Org-standalone operates in
+  DEGRADED MODE with reduced functionality (precedent: CRDT vs LWW).
+- C4 derived fields. RULED (Martin 2026-07-11, direction): hide behind an interface; candidate
+  design = generalize the existing Predicate trait to a Computation trait evaluable in memory AND
+  compilable to SQL. Pipeline seat still open behind that interface.
 - C3 function registry. RULING: index substrate — Tantivy sidecar from CDC vs in-Turso FTS
   extension (we own the fork); embeddings in v1 or fulltext-first?
 
