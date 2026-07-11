@@ -31,7 +31,12 @@ pub mod peer_ref_state;
 pub use holon_loro_testing::peer_ops;
 pub mod query;
 pub mod query_ast;
-pub mod reference_capabilities;
+pub mod ref_caps;
+// `reference_capabilities` split into `ref_caps/` (RefStateSplit Increment 2,
+// docs/Plans/RefStateSplit-2026-07-12.md §3); this alias keeps the existing
+// `crate::pbt::reference_capabilities::reference_state_ref_caps` call sites
+// resolving unchanged.
+pub use ref_caps as reference_capabilities;
 pub mod reference_domain_state;
 pub mod reference_state;
 pub mod shadow_mesh;
