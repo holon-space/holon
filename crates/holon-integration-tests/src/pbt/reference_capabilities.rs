@@ -621,6 +621,14 @@ impl RefPeersMut for ReferenceState {
             shadow_peer_id, peer_id,
             "shadow peer id must match the ref/SUT peer id scheme (100 + idx)"
         );
+        // Layout-classified source blocks (query/render machinery like
+        // `journals::src::0` / `journals::render::0`) are excluded from the
+        // peer model, mirroring the UI mutation arms' `no_content_update`
+        // exclusion: peer content edits on them are not modeled (the oracle's
+        // `render_expressions` would go stale), and a non-frontend wiring never
+        // boots them into the global Loro doc at all — the SUT peer fork (a
+        // snapshot of that doc) lacks the node and `peer_update_block` panics
+        // (keystone fresh-case RED, 2026-07-11).
         let peer_blocks: std::collections::HashMap<String, PeerBlock> = self
             .domain
             .block_state
@@ -633,7 +641,7 @@ impl RefPeersMut for ReferenceState {
                     .block_documents
                     .get(&b.id)
                     .is_some_and(|doc| doc.is_no_parent() || doc.is_sentinel());
-                !is_seed && !b.is_page()
+                !is_seed && !b.is_page() && !self.domain.layout_blocks.contains(&b.id)
             })
             .map(|b| {
                 let pb = PeerBlock {
@@ -781,7 +789,8 @@ impl RefPeersMut for ReferenceState {
 
         // Primary → peer reflect-back: insert any non-seed, non-page
         // primary blocks into the peer (overwrite content so the peer
-        // sees post-merge truth).
+        // sees post-merge truth). Layout machinery excluded — same rule as
+        // the fork in `add_peer_from_primary_snapshot`.
         let primary_as_peer: Vec<PeerBlock> = self
             .domain
             .block_state
@@ -794,7 +803,7 @@ impl RefPeersMut for ReferenceState {
                     .block_documents
                     .get(&b.id)
                     .is_some_and(|doc| doc.is_no_parent() || doc.is_sentinel());
-                !is_seed && !b.is_page()
+                !is_seed && !b.is_page() && !self.domain.layout_blocks.contains(&b.id)
             })
             .map(|b| PeerBlock {
                 stable_id: b.id.id().to_string(),

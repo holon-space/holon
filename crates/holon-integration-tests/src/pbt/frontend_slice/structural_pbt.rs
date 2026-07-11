@@ -1649,6 +1649,38 @@ mod teeth {
         );
     }
 
+    /// DIAGNOSTIC (journals-machinery peer RED, 2026-07-11): is the
+    /// programmatically-seeded journals display machinery (`::src::0` /
+    /// `::render::0`) Loro-backed under a Loro wiring? The oracle's peer fork
+    /// includes them (non-seed, non-page), so `ApplyMutation(LoroPeer)` draws
+    /// them as update targets; `peer_update_block` then panics if the peer's
+    /// forked doc (a snapshot of the GLOBAL doc) lacks them.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn journals_machinery_is_loro_backed_under_loro_wiring() {
+        use holon_pbt_core::capabilities::SutLoroLog;
+
+        let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
+        let bundle = compose_sut_seeded(
+            &ComponentSet::full_headless(),
+            &resolver,
+            &[("structural-page.org", WIDE_TREE_ORG)],
+            &[],
+        )
+        .await;
+        let caps = bundle.caps;
+        let kids = caps
+            .expect::<dyn SutLoroLog>()
+            .loro_children_of("block:journals")
+            .await;
+        assert!(
+            kids.as_ref()
+                .is_some_and(|k| k.iter().any(|c| c.contains("journals::src::0"))
+                    && k.iter().any(|c| c.contains("journals::render::0"))),
+            "journals display machinery must be Loro-backed (peer forks snapshot the global doc; \
+             the oracle's peer model includes these blocks): got {kids:?}"
+        );
+    }
+
     /// Peer-merge sibling-order projection guard: two blocks concurrently
     /// peer-created under one parent must show the SAME order in the SQL
     /// projection (`sorted_children`, ORDER BY sort_key) as in Loro's tree
