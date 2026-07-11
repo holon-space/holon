@@ -18,6 +18,7 @@
 pub mod block_table_names;
 pub mod durable_state;
 pub mod dynamic_schema_module;
+pub mod engine_functions;
 pub mod graph_schema;
 pub mod matview_manager;
 pub mod schema_module;

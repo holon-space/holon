@@ -161,8 +161,12 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 
 # === External git deps ===
 # Local path overrides in .cargo/config.toml (not checked in)
-turso = { git = "https://github.com/nightscape/turso.git", branch = "holon", default-features = false }
-turso_core = { git = "https://github.com/nightscape/turso.git", branch = "holon", default-features = false, features = ["json"] }
+# `fts` (Tantivy full-text index method + fts_match/fts_score/fts_highlight) is
+# native-only by construction: the wasm frontends (holon-worker, dioxus-web) are
+# excluded from this workspace with their own dep graphs, and turso_core
+# additionally cfg-gates all fts code behind `not(target_family = "wasm")`.
+turso = { git = "https://github.com/nightscape/turso.git", branch = "holon", default-features = false, features = ["fts"] }
+turso_core = { git = "https://github.com/nightscape/turso.git", branch = "holon", default-features = false, features = ["json", "fts"] }
 turso_sdk_kit = { git = "https://github.com/nightscape/turso.git", branch = "holon", default-features = false }
 turso_ext = { git = "https://github.com/nightscape/turso.git", branch = "holon", default-features = false }
 prqlc = { git = "https://github.com/nightscape/prql.git", branch = "main" }
