@@ -108,7 +108,17 @@ impl BackendEngine {
         let ddl_mutex = Arc::new(tokio::sync::Mutex::new(()));
         let matview_manager = crate::sync::MatviewManager::new(db_handle.clone(), ddl_mutex);
         let graph_schema = graph_schema_registry.clone().build();
-        let op_engine = DispatchingOperationEngine::new(dispatcher.clone());
+        // Wire the op/effect history relation (C2b): a Turso-backed, disclosed
+        // ephemeral cache over this engine's db handle. Fidelity defaults to the
+        // production (Loro-projected) configuration; exact per-session
+        // derivation from `SessionCapabilities` is a follow-up. Org-standalone
+        // (no-Turso) wirings get `DegradedHistoryStore` instead.
+        let history = Arc::new(crate::api::history_store::TursoHistoryStore::new(
+            db_handle.clone(),
+            holon_api::HistoryFidelity::Loro,
+        ));
+        let op_engine =
+            DispatchingOperationEngine::new(dispatcher.clone()).with_history_store(history);
         Ok(Self {
             db_handle,
             dispatcher,
@@ -764,12 +774,17 @@ impl BackendEngine {
             crate::storage::BLOCK_WRITE_TABLE,
         ));
         let store = Arc::new(SqlUndoStore::new(self.db_handle.clone()));
+        let history = Arc::new(crate::api::history_store::TursoHistoryStore::new(
+            self.db_handle.clone(),
+            holon_api::HistoryFidelity::Loro,
+        ));
         self.op_engine = crate::api::operation_engine::DispatchingOperationEngine::new_persistent(
             self.dispatcher.clone(),
             reader,
             store,
         )
-        .await?;
+        .await?
+        .with_history_store(history);
         Ok(())
     }
 
