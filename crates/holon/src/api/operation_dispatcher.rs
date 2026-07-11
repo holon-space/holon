@@ -578,6 +578,7 @@ impl OperationProvider for OperationDispatcher {
                 // ordering authority's own writes don't pass through the
                 // dispatcher (they call the SQL provider / CRUD seam directly),
                 // so this rejects exactly the smuggling path.
+                let mut params = params;
                 if resolved_entity_name == "block" && op_name == "set_field" {
                     let field = params
                         .get("field")
@@ -586,6 +587,57 @@ impl OperationProvider for OperationDispatcher {
                     holon_api::BlockWriteField::parse(field)
                         .map_err(|e| format!("intent boundary: {e}"))?;
                 }
+
+                // Links increment 3 — parse inline markup at the UI intent boundary.
+                //
+                // A live editor commit sends the block's content as RAW org markup
+                // (`[[Page]]`, `((block))`, `*bold*`) via `set_field("content")`.
+                // Ingest already splits such text into a stripped `content` label +
+                // a `marks` set at its own boundary (`extract_inline_marks` →
+                // `build_block_params`); the live-edit path did not, so typed links
+                // persisted as raw text with NULL `marks` and no `block_links`
+                // junction row — backlinks never populated for UI-authored links.
+                //
+                // Parse here with the SAME extractor ingest uses, then store the
+                // identical shape: the rendered label in `content` and the mark set
+                // in `marks`. The follow-up `marks` write drives the `block_links`
+                // junction (create/update/set_field arms of the SQL provider) and
+                // the Loro Peritext render, in both SqlOnly and Loro modes. Org-sync
+                // writes bypass this dispatcher (they call the CRUD seam directly
+                // with an already-stripped label + a separate `marks` param), so
+                // this only ever sees raw UI input — no double-strip, no clobber of
+                // ingest's marks. An empty mark set writes `marks = Null`, which
+                // clears a stale junction row when an edit REMOVES a link.
+                let content_marks_followup: Option<(String, holon_api::Value)> =
+                    if resolved_entity_name == "block"
+                        && op_name == "set_field"
+                        && params.get("field").and_then(|v| v.as_string()) == Some("content")
+                    {
+                        match params
+                            .get("value")
+                            .and_then(|v| v.as_string())
+                            .map(str::to_string)
+                        {
+                            Some(raw) => {
+                                let (label, marks) = holon_org_format::extract_inline_marks(&raw);
+                                let marks_value = if marks.is_empty() {
+                                    holon_api::Value::Null
+                                } else {
+                                    holon_api::Value::String(holon_api::marks_to_json(&marks))
+                                };
+                                let id = params
+                                    .get("id")
+                                    .and_then(|v| v.as_string())
+                                    .ok_or("block set_field(content): missing 'id' parameter")?
+                                    .to_string();
+                                params.insert("value".into(), holon_api::Value::String(label));
+                                Some((id, marks_value))
+                            }
+                            None => None,
+                        }
+                    } else {
+                        None
+                    };
 
                 if !available_ops
                     .iter()
@@ -632,6 +684,28 @@ impl OperationProvider for OperationDispatcher {
                 let mut operation_result = provider
                     .execute_operation(&resolved_entity_name_typed, op_name, params)
                     .await?;
+
+                // Links increment 3 — the marks write derived from a content edit.
+                // Routed straight through the same provider (not re-entering this
+                // dispatcher): marks are a DERIVED consequence of the content edit,
+                // so they must not spawn a second observer notification or a
+                // separate undo entry (one user edit = one undoable content step).
+                // In Loro mode this lands via `update_block_marked` (Peritext) and
+                // the outbound projector carries `marks` to SQL, deriving the
+                // junction in the `update` arm; in SqlOnly mode it hits
+                // `set_field("marks")` directly, deriving the junction there.
+                if let Some((id, marks_value)) = content_marks_followup {
+                    let mut marks_params = StorageEntity::new();
+                    marks_params.insert("id".into(), holon_api::Value::String(id));
+                    marks_params.insert("field".into(), holon_api::Value::String("marks".into()));
+                    marks_params.insert("value".into(), marks_value);
+                    provider
+                        .execute_operation(&resolved_entity_name_typed, "set_field", marks_params)
+                        .await
+                        .map_err(|e| {
+                            format!("links increment 3: marks write after content edit failed: {e}")
+                        })?;
+                }
                 // Set entity_name on the inverse operation if present
                 operation_result.undo = match operation_result.undo {
                     UndoAction::Undo(mut op) => {
