@@ -303,6 +303,17 @@ pub trait BuilderServices: Send + Sync {
         None
     }
 
+    /// Consume (clear) the caret seed armed for `block`, once the mounting
+    /// editor has applied it. The seed is a one-shot op-follow-up placement
+    /// (split → 0, join → boundary, nav → offset); leaving it armed lets a
+    /// LATER user click on the same block re-apply the stale offset, yanking
+    /// the caret away from where the click landed (caret-0 → prepend
+    /// corruption after split+join, BugFunnel 2026-07-11 row 80). Consuming on
+    /// application makes it strictly single-use: a click always derives the
+    /// caret from the current buffer. No-op when the armed seed targets a
+    /// different block. Headless/stub services have no seed to consume.
+    fn consume_caret_seed(&self, _: &EntityUri) {}
+
     /// Get a [`Cell<String>`] handle for collaborative editing of a block
     /// field. Resolves through the `BlockCellRegistry` (Loro-backed when
     /// LoroModule is loaded). Returns `Err` for headless/stub services
@@ -1150,6 +1161,23 @@ impl UiState {
         match self.pending_caret_seed.get_cloned() {
             Some((ref b, offset)) if b == block => Some(offset),
             _ => None,
+        }
+    }
+
+    /// Consume (clear) the caret seed if it targets `block`. Called by the
+    /// mounting editor the moment it applies the seed, making the seed strictly
+    /// single-use so a later click cannot re-apply the stale op-follow-up offset
+    /// (the caret-0/prepend corruption after split+join, BugFunnel 2026-07-11
+    /// row 80). A no-op when the armed seed targets a different block — that
+    /// block's mount will consume its own seed. Unlike [`set_focus`]'s aging
+    /// (which only clears on a focus MOVE to a different block), this clears
+    /// even while focus stays put, closing the window where a "failed click
+    /// elsewhere" leaves the seed armed for a re-click.
+    pub fn consume_caret_seed(&self, block: &EntityUri) {
+        if let Some((ref seed_block, _)) = self.pending_caret_seed.get_cloned() {
+            if seed_block == block {
+                self.pending_caret_seed.set(None);
+            }
         }
     }
 
@@ -2405,6 +2433,10 @@ impl BuilderServices for ReactiveEngine {
         self.ui_state.peek_caret_seed(block)
     }
 
+    fn consume_caret_seed(&self, block: &EntityUri) {
+        self.ui_state.consume_caret_seed(block);
+    }
+
     fn provider_cache(&self) -> Option<Arc<crate::provider_cache::ProviderCache>> {
         Some(self.provider_cache.clone())
     }
@@ -3073,6 +3105,76 @@ mod tests {
         ui.set_focus(Some(b.clone()));
         assert_eq!(ui.peek_caret_seed(&a), None);
         assert_eq!(ui.peek_caret_seed(&b), None);
+    }
+
+    /// Regression (BugFunnel 2026-07-11 row 80): the click-places-caret
+    /// contract broke after a split→join sequence. The structural op armed a
+    /// one-shot caret seed (split → 0, join → boundary); the mounting editor
+    /// applied it, but the seed was NEVER consumed — it lingered in
+    /// `pending_caret_seed`, aged only by a focus MOVE to a *different* block.
+    /// After a "failed click elsewhere" (window blur without a focused-block
+    /// change) the seed stayed armed for the same block, and the next click on
+    /// it re-applied the stale offset (0 after an undone/redone split), yanking
+    /// the caret to 0 so typing PREPENDED.
+    ///
+    /// `consume_caret_seed` makes the seed strictly single-use: once the mount
+    /// applies it, `peek` returns `None` even while focus stays put, so a later
+    /// click derives its caret from the current buffer (click position / end),
+    /// never the stale op-follow-up offset. This models the exact sequence GPUI
+    /// `grab_focus_and_seed_caret` drives at the seed-lifecycle seam (the caret
+    /// APPLY itself needs a GPUI window; the lifecycle is the bug).
+    #[test]
+    fn caret_seed_is_single_use_so_a_later_click_is_not_yanked() {
+        let ui = UiState::new();
+        let a = EntityUri::block("a");
+        let b = EntityUri::block("b");
+
+        // split(a) → new block b focused, seed (b, 0).
+        ui.set_focus_with_caret(b.clone(), 0);
+        assert_eq!(ui.peek_caret_seed(&b), Some(0));
+
+        // join(b) → merges back into a at the join boundary; seed (a, 5).
+        ui.set_focus_with_caret(a.clone(), 5);
+        assert_eq!(ui.peek_caret_seed(&a), Some(5));
+        // The split's (b, 0) seed was overwritten by the join, not left behind.
+        assert_eq!(ui.peek_caret_seed(&b), None);
+
+        // The merged editor mounts / gains focus and APPLIES the seed once.
+        // The mount consumes it — this is the fix.
+        assert_eq!(ui.peek_caret_seed(&a), Some(5));
+        ui.consume_caret_seed(&a);
+
+        // "Failed click elsewhere": window focus leaves the editor but the
+        // focused-block signal stays on `a` (no `set_focus`), so the OLD aging
+        // path would NOT have cleared the seed. With single-use consumption it
+        // is already gone.
+        assert_eq!(ui.focused_block(), Some(a.clone()));
+        assert_eq!(
+            ui.peek_caret_seed(&a),
+            None,
+            "consumed seed must not survive to be re-applied on a re-click"
+        );
+
+        // Subsequent fresh click on `a`: the editor sees no seed and derives
+        // the caret from the click / buffer end — no yank to 0, no prepend.
+        ui.set_focus(Some(a.clone()));
+        assert_eq!(ui.peek_caret_seed(&a), None);
+    }
+
+    /// Consuming a seed armed for one block must not clear a seed armed for
+    /// another — each block's mount consumes only its own.
+    #[test]
+    fn consume_caret_seed_is_scoped_to_its_block() {
+        let ui = UiState::new();
+        let a = EntityUri::block("a");
+        let b = EntityUri::block("b");
+        ui.set_focus_with_caret(a.clone(), 3);
+        // A no-op for a block that doesn't own the seed.
+        ui.consume_caret_seed(&b);
+        assert_eq!(ui.peek_caret_seed(&a), Some(3));
+        // Consuming the owner clears it.
+        ui.consume_caret_seed(&a);
+        assert_eq!(ui.peek_caret_seed(&a), None);
     }
 
     #[test]
