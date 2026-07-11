@@ -42,6 +42,16 @@ use holon_mcp::server::InteractionCommand;
 use holon_mcp::server::InteractionEvent;
 use holon_mcp::server::InteractionResponse;
 
+/// How long `click_entity` waits for a just-rendered element's bounds to be
+/// promoted staged → committed before failing loud. `BoundsRegistry` commits
+/// a frame's bounds at the *next* `begin_pass` (or an on-read `flush`), so an
+/// element that first appears in the frame a preceding state change triggered
+/// (e.g. a `:__virtual:` creation slot that materialises when its container
+/// empties) has no committed bounds for a frame or two. Generous enough to
+/// cover idle/occluded windows that only paint when driven; a real
+/// never-rendered element still fails at the deadline.
+const CLICK_BOUNDS_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Channel-based `UserDriver` for GPUI. Sends `InteractionCommand`s on
 /// the shared `interaction_tx` channel; the GPUI interaction pump drains
 /// them on the main thread and dispatches real `PlatformInput` events
@@ -336,6 +346,43 @@ impl GpuiUserDriver {
         }
         best.map(|info| info.center())
     }
+
+    /// Resolve the click-target center, waiting up to `timeout` for a
+    /// just-rendered element's bounds to be promoted staged → committed.
+    ///
+    /// `BoundsRegistry` commits a frame's bounds at the *next* `begin_pass`
+    /// (or an on-read `flush`), so an element that first appears in the frame
+    /// a preceding state change triggered — e.g. a `:__virtual:<parent>`
+    /// creation slot that materialises when its container empties — has no
+    /// committed bounds for a frame or two after the caller learns its id.
+    /// A single-shot lookup fails on that race. Wake on each committed frame
+    /// (with a short poll fallback for idle windows, whose `changed()` may not
+    /// fire until something drives a paint) and re-resolve; then surface the
+    /// rich fail-loud error.
+    ///
+    /// This is the driver-level equivalent of the test-only
+    /// `wait_for_element_bounds`, so real MCP callers get the same
+    /// retry-until-committed the PBT harness has always wrapped clicks in.
+    async fn resolve_click_center_until(
+        &self,
+        entity_id: &str,
+        region: &str,
+        verb: &str,
+        timeout: Duration,
+    ) -> Result<(f32, f32)> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            // `require_click_center` reads via `FlushOnReadGeometry`, which
+            // promotes the last completed render's staged buffer before every
+            // lookup — so this succeeds as soon as the producing frame paints.
+            match self.require_click_center(entity_id, region, verb) {
+                Ok(center) => return Ok(center),
+                Err(e) if tokio::time::Instant::now() >= deadline => return Err(e),
+                Err(_) => {}
+            }
+            let _ = tokio::time::timeout(Duration::from_millis(50), self.geometry.changed()).await;
+        }
+    }
 }
 
 #[async_trait]
@@ -371,7 +418,38 @@ impl UserDriver for GpuiUserDriver {
         // The geometry/bounds registry is string-keyed (element ids, not
         // routing): render one stable string at the seam.
         let entity_id = entity_id.as_str();
-        let (cx, cy) = self.require_click_center(entity_id, region, "click_entity")?;
+        // Wait for a freshly-rendered element's bounds to commit rather than
+        // failing on the first miss (dogfood #3: clicking a just-rendered
+        // `:__virtual:` creation slot raced the staged → committed promotion).
+        let (cx, cy) = match self
+            .resolve_click_center_until(entity_id, region, "click_entity", CLICK_BOUNDS_TIMEOUT)
+            .await
+        {
+            Ok(center) => center,
+            Err(e) => {
+                // Fail loud AND defuse the stale-focus trap. The click never
+                // dispatched, so window + engine focus still sit on whatever
+                // the user last edited. Returning `Err` while leaving that
+                // focus intact is the dogfood #3 hazard: a following `type` /
+                // key MCP call lands its text in the OLD block and silently
+                // splits it — no error surfaced anywhere user-visible. Clear
+                // `focused_block` so the stale editor blurs and later
+                // keystrokes go unhandled (fail loud in `key_down_until_handled`)
+                // instead of corrupting content invisibly.
+                self.engine.ui_state().focused_block_mutable().set(None);
+                eprintln!(
+                    "[ui-event] click_entity({entity_id:?}) FAILED to resolve bounds within \
+                     {CLICK_BOUNDS_TIMEOUT:?}; cleared stale focus so subsequent typing cannot \
+                     silently mutate the previously-focused block"
+                );
+                return Err(e).with_context(|| {
+                    format!(
+                        "click_entity({entity_id:?}): element bounds never committed; stale focus \
+                         cleared to prevent silent mis-targeted typing"
+                    )
+                });
+            }
+        };
         // Hit-test BEFORE dispatching so the log captures the layout the
         // synthetic MouseDown will see. The topmost (smallest containing)
         // element is logged first; up to 4 candidates total. If the topmost

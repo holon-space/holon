@@ -166,26 +166,17 @@ impl LiveMcp {
     }
 
     async fn focus_editor(&self, resolved: &EntityUri, ctx: &str) {
-        // The MCP twin of `wait_for_element_bounds`: a freshly-(re)rendered
-        // element has no committed bounds for a frame or two, so retry the
-        // click on exactly that error (bounded — anything else fails loud
-        // immediately, and a never-rendered element still fails at budget).
+        // Drive the SAME single `click_entity` call real MCP dogfooding does.
+        // The retry-until-committed for a freshly-(re)rendered element (e.g. a
+        // `:__virtual:` creation slot that has no committed bounds for a frame
+        // or two) now lives INSIDE `click_entity` — not in this test-only
+        // wrapper. Keeping the retry here would let the E2E paper over a prod
+        // regression the way the dogfood #3 bug escaped: real MCP callers
+        // never had the wrapper's retry, so the bug only reproduced outside
+        // the test. Any failure now is a genuine driver failure — fail loud.
         let budget = Duration::from_secs(10);
-        let start = std::time::Instant::now();
-        loop {
-            match self.driver.click_entity(resolved, "main").await {
-                Ok(_) => break,
-                Err(e) if format!("{e:#}").contains("no bounds recorded") => {
-                    if start.elapsed() > budget {
-                        panic!(
-                            "[{ctx}] focus {resolved} over MCP failed: no bounds within \
-                             {budget:?} (element never rendered/committed): {e:#}"
-                        );
-                    }
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-                Err(e) => panic!("[{ctx}] focus {resolved} over MCP failed: {e:#}"),
-            }
+        if let Err(e) = self.driver.click_entity(resolved, "main").await {
+            panic!("[{ctx}] focus {resolved} over MCP failed: {e:#}");
         }
 
         // The click's editor focus lands a frame LATER on iOS (idle rendering:
