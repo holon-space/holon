@@ -1315,10 +1315,19 @@ pub fn incremental_block_changes(
     let mut deleted: HashSet<loro::TreeID> = HashSet::new();
     let mut dirty_scopes: HashSet<loro::TreeParentId> = HashSet::new();
 
+    // Structural facts are routed ORDER-AWARE, last fact per target wins: one
+    // import event can carry `Delete(X)` followed by `Create(X)` for the SAME
+    // TreeID — Loro's encoding of a sibling re-slot when a concurrent peer
+    // create merges in front of an already-present node. Treating `deleted` as
+    // terminal for the batch (the old `reread.retain(!deleted)`) projected that
+    // still-alive node as a DELETE (peer-merge row loss), or — if it had never
+    // been projected, so `tid_index` couldn't map it — silently dropped its
+    // create while its children's creates flowed (deferred-FK batch reject).
     for change in pending {
         match change {
             PendingChange::Create { parent, target } => {
                 dirty_scopes.insert(*parent);
+                deleted.remove(target);
                 reread.insert(*target);
             }
             PendingChange::Move {
@@ -1328,10 +1337,12 @@ pub fn incremental_block_changes(
             } => {
                 dirty_scopes.insert(*parent);
                 dirty_scopes.insert(*old_parent);
+                deleted.remove(target);
                 reread.insert(*target);
             }
             PendingChange::Delete { old_parent, target } => {
                 dirty_scopes.insert(*old_parent);
+                reread.remove(target);
                 deleted.insert(*target);
             }
             PendingChange::Container(cid) => {
@@ -1352,6 +1363,18 @@ pub fn incremental_block_changes(
     // A node explicitly deleted this interval is handled by `deleted`, never
     // re-read as live.
     reread.retain(|t| !deleted.contains(t));
+    // Fail-safe liveness recheck: a target whose LAST structural fact was a
+    // delete but which is alive in the CURRENT tree was re-slotted (delete +
+    // create split across drained batches), not removed — reread it instead of
+    // emitting a false delete for a live block.
+    deleted.retain(|t| {
+        if is_node_alive(&tree, *t) {
+            reread.insert(*t);
+            false
+        } else {
+            true
+        }
+    });
 
     let mut group_keys: HashMap<loro::TreeParentId, HashMap<loro::TreeID, Option<String>>> =
         HashMap::new();
@@ -4313,5 +4336,88 @@ mod incremental_tests {
             !settled,
             "a live node the per-node reader withholds marks the pass unsettled"
         );
+    }
+
+    /// Regression — peer-merge re-slot loses the re-slotted block. A peer
+    /// import whose concurrent sibling create merges IN FRONT of an
+    /// already-present node arrives as ONE DiffEvent carrying `Delete(X)`
+    /// followed by `Create(X)` for the SAME TreeID (observed fact stream of
+    /// `peer_merge_sibling_order_sql_matches_loro`:
+    /// `[Delete{X}, Create{Z}, Create{X}, Container…]`). Routing facts into
+    /// unordered sets with delete-wins semantics projected live X as a DELETE
+    /// (SQL row loss) — or, when X had never been projected (bulk import),
+    /// silently dropped its create while its children's creates flowed into
+    /// the batch (deferred-FK reject). Facts are ordered; the LAST structural
+    /// fact per target must win.
+    #[test]
+    fn delete_then_recreate_same_target_in_one_batch_is_a_live_reread() {
+        let doc = new_fi_doc();
+        let p = create_node(&doc, None, "P", "parent");
+        let x = create_node(&doc, Some(p), "X", "reslotted");
+        let z = create_node(&doc, Some(p), "Z", "merged-in-front");
+
+        let mut tid_index: HashMap<loro::TreeID, String> = HashMap::new();
+        tid_index.insert(x, schemed("X"));
+
+        let scope = loro::TreeParentId::Node(p);
+        let pending = vec![
+            PendingChange::Delete {
+                old_parent: scope,
+                target: x,
+            },
+            PendingChange::Create {
+                parent: scope,
+                target: z,
+            },
+            PendingChange::Create {
+                parent: scope,
+                target: x,
+            },
+        ];
+
+        let (changed, settled) = incremental_block_changes(&doc, &pending, &mut tid_index).unwrap();
+
+        assert!(settled, "all nodes are meta-complete → settled");
+        assert!(
+            matches!(changed.get(&schemed("X")), Some(Some(_))),
+            "re-slotted X (delete + create of the same target) is a LIVE reread, never a delete; \
+             changed = {changed:?}"
+        );
+        assert!(
+            matches!(changed.get(&schemed("Z")), Some(Some(_))),
+            "the merged-in-front create Z is read as live; changed = {changed:?}"
+        );
+        assert!(
+            tid_index.contains_key(&x),
+            "X stays indexed — it was never actually deleted"
+        );
+    }
+
+    /// Regression (fail-safe half): a lone `Delete(X)` fact whose target is
+    /// alive in the CURRENT tree (the matching re-create landed in a commit
+    /// whose facts sit in a later drain) must be rerouted to a live reread —
+    /// the tree at drain time is the authority, not the stale fact.
+    #[test]
+    fn stale_delete_fact_for_alive_node_rereads_instead_of_tombstoning() {
+        let doc = new_fi_doc();
+        let p = create_node(&doc, None, "P", "parent");
+        let x = create_node(&doc, Some(p), "X", "alive");
+
+        let mut tid_index: HashMap<loro::TreeID, String> = HashMap::new();
+        tid_index.insert(x, schemed("X"));
+
+        let pending = vec![PendingChange::Delete {
+            old_parent: loro::TreeParentId::Node(p),
+            target: x,
+        }];
+
+        let (changed, settled) = incremental_block_changes(&doc, &pending, &mut tid_index).unwrap();
+
+        assert!(settled);
+        assert!(
+            matches!(changed.get(&schemed("X")), Some(Some(_))),
+            "an alive node is never tombstoned off a stale delete fact; changed = {changed:?}"
+        );
+        assert!(tid_index.contains_key(&x));
     }
 }
