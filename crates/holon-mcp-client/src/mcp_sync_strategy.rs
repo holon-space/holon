@@ -5,16 +5,15 @@ use async_trait::async_trait;
 use holon_api::StreamPosition;
 use holon_api::Value;
 use holon_core::SyncTokenStore;
-use rmcp::RoleClient;
 use rmcp::model::CallToolRequestParam;
 use rmcp::model::ReadResourceRequestParam;
 use rmcp::model::ResourceContents;
-use rmcp::service::Peer;
 use tracing::Instrument;
 use tracing::debug;
 use tracing::info;
 use tracing::info_span;
 
+use crate::mcp_call_surface::McpCallSurface;
 use crate::mcp_sidecar::CursorConfig;
 
 /// Convert a serde_json::Value to holon_api::Value, preserving nested objects
@@ -46,17 +45,24 @@ pub struct FetchResult {
     pub new_cursor: Option<String>,
 }
 
-/// Abstracts over how records are fetched from an MCP server.
+/// Abstracts over how records are fetched from a data source.
 ///
 /// Two implementations:
-/// - `ToolSync` — calls `peer.call_tool()` and extracts records via a JSON path
-/// - `ResourceSync` — calls `peer.read_resource(uri)` and parses as JSON array
+/// - `ToolSync` — calls `surface.call_tool()` and extracts records via a JSON
+///   path
+/// - `ResourceSync` — calls `surface.read_resource(uri)` and parses as JSON
+///   array
+///
+/// The `surface` is any [`McpCallSurface`] — an rmcp `Peer` for the MCP
+/// transports, or a `RestCallSurface` for the direct HTTP-API transport. The
+/// fetch logic is identical across transports; only the leaf call surface
+/// differs.
 #[async_trait]
 pub trait SyncStrategy: Send + Sync {
-    /// Fetch records from the MCP server.
+    /// Fetch records from the data source via `surface`.
     async fn fetch_records(
         &self,
-        peer: &Peer<RoleClient>,
+        surface: &dyn McpCallSurface,
         token_store: &dyn SyncTokenStore,
         token_key: &str,
     ) -> anyhow::Result<FetchResult>;
@@ -79,7 +85,7 @@ pub struct ToolSync {
 impl SyncStrategy for ToolSync {
     async fn fetch_records(
         &self,
-        peer: &Peer<RoleClient>,
+        surface: &dyn McpCallSurface,
         token_store: &dyn SyncTokenStore,
         token_key: &str,
     ) -> anyhow::Result<FetchResult> {
@@ -118,7 +124,7 @@ impl SyncStrategy for ToolSync {
 
         info!("[ToolSync] Calling tool '{}'", self.list_tool);
 
-        let result = peer
+        let result = surface
             .call_tool(CallToolRequestParam {
                 name: Cow::Owned(self.list_tool.clone()),
                 arguments: Some(params),
@@ -178,7 +184,7 @@ pub struct ResourceSync {
 impl SyncStrategy for ResourceSync {
     async fn fetch_records(
         &self,
-        peer: &Peer<RoleClient>,
+        surface: &dyn McpCallSurface,
         _: &dyn SyncTokenStore,
         _: &str,
     ) -> anyhow::Result<FetchResult> {
@@ -186,7 +192,7 @@ impl SyncStrategy for ResourceSync {
         async {
             info!("reading resource");
 
-            let result = peer
+            let result = surface
                 .read_resource(ReadResourceRequestParam {
                     uri: self.uri.clone(),
                 })
