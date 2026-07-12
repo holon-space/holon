@@ -58,6 +58,7 @@ pub mod types;
 pub mod ui_watcher;
 pub mod widget_meta;
 pub mod widget_spec;
+pub mod write_seq;
 
 pub use entity_profile::EntityProfile;
 pub use entity_profile::ProfileCache;
