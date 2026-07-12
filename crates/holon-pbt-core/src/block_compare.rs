@@ -36,6 +36,16 @@ use crate::sibling_order::compare_sibling_order;
 /// Properties that are internal bookkeeping (never part of an org round-trip)
 /// and must be stripped before comparing a reference block against a
 /// store-projected one.
+///
+/// `_provenance` (ADR 0024 P8 / C2a) is the engine's authorship stamp
+/// (`origin`/`at_millis`/firing ids), written onto every create/update block by
+/// `DispatchingOperationEngine`. Like `created_at`/`updated_at`/`id` it is
+/// system-authored metadata, not user content: the org drawer serializer strips
+/// all `_`-prefixed keys so it never round-trips through org, and the reference
+/// model does not (and should not) re-derive it. Stripping it here is the same
+/// normalization class as the timestamps — stamping *correctness* is owned by
+/// the dedicated C2a unit/integration tests (`provenance_stamp_tests`,
+/// `provenance::tests`), not by this oracle.
 pub const INTERNAL_PROPS: &[&str] = &[
     "sequence",
     "level",
@@ -45,6 +55,7 @@ pub const INTERNAL_PROPS: &[&str] = &[
     "updated_at",
     "document_id",
     "todo_keywords",
+    holon_api::PROVENANCE_PROPERTY,
 ];
 
 /// The block's ordering key, read straight off its `properties` map (pure
