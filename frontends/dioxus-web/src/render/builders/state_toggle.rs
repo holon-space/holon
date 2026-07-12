@@ -22,6 +22,12 @@ pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
     } else {
         label.clone()
     };
+    // A block with no task state has an empty label AND empty current — GPUI
+    // renders nothing there. Emitting the pill anyway paints a stray bordered
+    // box next to every plain block, so collapse it entirely.
+    if display.trim().is_empty() {
+        return rsx! {};
+    }
 
     let intent = (|| {
         let op = holon_frontend::operations::find_set_field_op(field, &node.operations)?;
