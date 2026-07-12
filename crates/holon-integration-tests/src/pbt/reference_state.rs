@@ -1483,6 +1483,22 @@ impl ReferenceState {
     ) {
         use holon_orgmode::models::OrgBlockExt;
 
+        // Undo-stack correspondence: CreateBlockUnderFocus dispatches a
+        // User-origin `block.create`, and the engine records an undo entry for
+        // every User-origin reversible op (operation_engine.rs — genuine insert
+        // journals a `delete` inverse). The ref MUST snapshot here to stay 1:1
+        // with that journal; without it, a later UndoLastMutation pops the ref's
+        // *previous* snapshot (e.g. a split) while the engine pops the create
+        // inverse, undoing different ops and diverging. This is the sole choke
+        // point for create-under-focus (`create_block_under` delegates here).
+        //
+        // No reversibility gate is needed while every caller supplies a FRESH
+        // id (always a genuine insert → always journaled). If a duplicate-id
+        // create is ever introduced, the engine IGNORES the insert and declares
+        // it irreversible — that path would then need to skip this snapshot to
+        // match, mirroring the join/slash-delete leaf gates.
+        self.push_undo_snapshot();
+
         let mut new_block = Block::new_text(new_id.clone(), parent.clone(), content.to_string());
         let max_seq = self
             .domain
