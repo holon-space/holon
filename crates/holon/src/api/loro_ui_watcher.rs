@@ -335,6 +335,13 @@ fn derive_render_expr(
     snapshot: &holon_core::storage::BlockSnapshot,
     block_id: &EntityUri,
 ) -> RenderExpr {
+    // ROOT display slot: resolved via a query over data (the
+    // active-perspective pointer is the degenerate slot query) — the no-Turso
+    // counterpart of `BlockDomain::render_root_slot`.
+    if *block_id == holon_api::root_layout_block_uri() {
+        return derive_root_slot_expr(snapshot, block_id);
+    }
+
     let children = snapshot.children_ordered(block_id);
 
     let query_child = children.iter().find_map(|child| {
@@ -355,6 +362,54 @@ fn derive_render_expr(
 
     // No query engine in this wiring → offer only the `source` view mode.
     BlockDomain::source_editor_expr(&query_src.content, query_language)
+}
+
+/// Resolve the ROOT display slot from the snapshot: follow the
+/// active-perspective pointer on the root-layout block and synthesize the
+/// layout from the resolved perspective's panels. The poll loop re-derives on
+/// every Loro change, so a pointer `set_field` (or a panel edit) re-fires
+/// this naturally.
+///
+/// A snapshot without a root-layout block renders as a leaf (mirrors the
+/// Turso arm's disclosed fallback); a broken pointer/perspective fails loud
+/// as a red `error(...)` node.
+fn derive_root_slot_expr(
+    snapshot: &holon_core::storage::BlockSnapshot,
+    root_id: &EntityUri,
+) -> RenderExpr {
+    use holon_api::perspective;
+
+    let Some(root_block) = snapshot.block_by_id(root_id) else {
+        tracing::warn!(
+            "[derive_root_slot_expr] no {root_id} block in this snapshot — rendering the root \
+             slot as a plain leaf (no layout to resolve)"
+        );
+        return RenderExpr::FunctionCall {
+            name: "render_entity".to_string(),
+            args: Vec::new(),
+        };
+    };
+
+    let active =
+        match perspective::active_perspective_id(root_id, std::slice::from_ref(&root_block)) {
+            Ok(active) => active,
+            Err(e) => return error_render_expr(&format!("root slot: {e:#}")),
+        };
+
+    let mut blocks = vec![root_block];
+    if let Some(persp) = snapshot.block_by_id(&active) {
+        if active != *root_id {
+            blocks.push(persp);
+        }
+    }
+    blocks.extend(snapshot.descendants_ordered(&active));
+
+    match perspective::resolve_active_perspective(root_id, &blocks)
+        .and_then(|spec| spec.layout_expr())
+    {
+        Ok(expr) => expr,
+        Err(e) => error_render_expr(&format!("root slot: {e:#}")),
+    }
 }
 
 /// Convert a [`Block`] into the row map the reactive engine consumes.
@@ -654,5 +709,99 @@ mod tests {
             "Turso-free resolver must seed the built-in collection variants (tree/table/board); \
              got none — render would degrade to table()"
         );
+    }
+
+    // ── Root display slot resolution (no-Turso arm) ────────────────────────
+
+    use holon_core::storage::BlockSnapshot;
+
+    fn snap_block(id: &str, parent: &EntityUri) -> holon_api::Block {
+        holon_api::Block::new_text(EntityUri::block(id), parent.clone(), id)
+    }
+
+    fn sql_source(id: &str, parent: &str, query: &str) -> holon_api::Block {
+        let mut b =
+            holon_api::Block::new_text(EntityUri::block(id), EntityUri::block(parent), query);
+        b.source_language = Some(holon_api::SourceLanguage::Query(
+            holon_api::QueryLanguage::HolonSql,
+        ));
+        b
+    }
+
+    fn expr_debug(expr: &RenderExpr) -> String {
+        format!("{expr:?}")
+    }
+
+    /// Default (no pointer): the root slot resolves to the root-layout block's
+    /// own panels — the degenerate perspective — and synthesizes the columns
+    /// layout from them.
+    #[test]
+    fn root_slot_default_synthesizes_layout_from_root_children() {
+        let root_uri = holon_api::root_layout_block_uri();
+        let root = holon_api::Block::new_text(root_uri.clone(), EntityUri::no_parent(), "layout");
+        let main = snap_block("default-main-panel", &root_uri);
+        let src = sql_source("main-src", "default-main-panel", "SELECT 1");
+        let snapshot = BlockSnapshot::from_ordered(vec![root, main, src], vec![]);
+
+        let expr = derive_render_expr(&snapshot, &root_uri);
+        let dbg = expr_debug(&expr);
+        assert!(
+            dbg.contains("if_space") && dbg.contains("block:default-main-panel"),
+            "expected synthesized layout with the main panel, got: {dbg}"
+        );
+    }
+
+    /// Pointer set: the slot resolves the pointed-to perspective's panels
+    /// instead of the root-layout's own children — switching is pure data.
+    #[test]
+    fn root_slot_follows_active_perspective_pointer() {
+        let root_uri = holon_api::root_layout_block_uri();
+        let mut root =
+            holon_api::Block::new_text(root_uri.clone(), EntityUri::no_parent(), "layout");
+        holon_api::perspective::set_active_perspective(&mut root, &EntityUri::block("tasks"));
+
+        let old_main = snap_block("default-main-panel", &root_uri);
+        let old_src = sql_source("old-src", "default-main-panel", "SELECT 1");
+
+        let tasks =
+            holon_api::Block::new_text(EntityUri::block("tasks"), EntityUri::no_parent(), "Tasks");
+        let tasks_main = snap_block("tasks-main-panel", &EntityUri::block("tasks"));
+        let tasks_src = sql_source("tasks-src", "tasks-main-panel", "SELECT 2");
+
+        let snapshot = BlockSnapshot::from_ordered(
+            vec![root, old_main, old_src, tasks, tasks_main, tasks_src],
+            vec![],
+        );
+
+        let expr = derive_render_expr(&snapshot, &root_uri);
+        let dbg = expr_debug(&expr);
+        assert!(
+            dbg.contains("block:tasks-main-panel"),
+            "expected the pointed-to perspective's panel, got: {dbg}"
+        );
+        assert!(
+            !dbg.contains("block:default-main-panel"),
+            "root-layout's own panels must NOT render when the pointer targets another \
+             perspective, got: {dbg}"
+        );
+    }
+
+    /// A dangling pointer fails loud as a visible error node, never a silent
+    /// fallback to the default layout.
+    #[test]
+    fn root_slot_dangling_pointer_renders_error_node() {
+        let root_uri = holon_api::root_layout_block_uri();
+        let mut root =
+            holon_api::Block::new_text(root_uri.clone(), EntityUri::no_parent(), "layout");
+        holon_api::perspective::set_active_perspective(&mut root, &EntityUri::block("gone"));
+        let main = snap_block("default-main-panel", &root_uri);
+        let src = sql_source("main-src", "default-main-panel", "SELECT 1");
+        let snapshot = BlockSnapshot::from_ordered(vec![root, main, src], vec![]);
+
+        let expr = derive_render_expr(&snapshot, &root_uri);
+        let RenderExpr::FunctionCall { name, .. } = &expr else {
+            panic!("expected error FunctionCall, got: {expr:?}");
+        };
+        assert_eq!(name, "error", "dangling pointer must render loud: {expr:?}");
     }
 }

@@ -439,6 +439,19 @@ pub trait ProfileResolving: Send + Sync {
         Vec::new()
     }
 
+    /// Collection-level variants resolved through a NAMED profile instead of
+    /// the default `collection` profile — the seam a perspective's
+    /// `profile_override` drives (a "Kanban perspective" points its panels at
+    /// a profile whose collection variants default to `board`).
+    ///
+    /// Returns `None` when no profile of that name is in the cache, so the
+    /// caller can disclose the degraded fallback to the default variants
+    /// (fail-visible, not fail-silent).
+    // ALLOW(unused_param): trait shape; default impl (mocks) has no cache
+    fn resolve_collection_variants_named(&self, _name: &EntityName) -> Option<Vec<RenderVariant>> {
+        None
+    }
+
     /// Mutable holding the current profile cache snapshot.
     ///
     /// Each rebuild swaps in a fresh `Arc<ProfileCache>`, so consumers can
