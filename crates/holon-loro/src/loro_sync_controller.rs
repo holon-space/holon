@@ -754,6 +754,20 @@ impl LoroProjection {
         before_len: usize,
         mode: &str,
     ) -> Result<()> {
+        // FK-safe create ordering — the single write chokepoint's guarantee.
+        // The `block_raw.parent_id` self-FK is DEFERRABLE INITIALLY DEFERRED, but
+        // the Turso fork only *decrements* the deferred-FK counter on a parent-key
+        // UPDATE probe, never on a plain parent-row INSERT (see the fork's
+        // translate/fkeys.rs — both `emit_parent_key_change_probes` callers are
+        // UPDATE-path). So inserting a child row before its parent's INSERT
+        // increments the counter with no matching decrement, and the batch's
+        // COMMIT trips `deferred foreign key constraint failed on commit` even
+        // though the final row set is FK-consistent. The full reseed path already
+        // topo-sorts its creates (`diff_snapshots_to_ops`); the incremental fast
+        // path emitted `changed` in arbitrary HashMap order — the residual
+        // keystone deferred-FK RED. Ordering every batch parent-before-child here
+        // makes both paths safe regardless of how the op vec was built.
+        let ops = fk_order_creates_parent_first(ops);
         if !ops.is_empty() {
             let op_summary: Vec<String> = ops
                 .iter()
@@ -1025,6 +1039,81 @@ fn topological_sort_creates<'a>(
     result
 }
 
+/// Reorder a batch so every `create` precedes any co-batched `create` of one of
+/// its `block_raw.parent_id` ancestors (parent-before-child), keeping all
+/// non-create ops in their original relative order after the creates.
+///
+/// Why this is load-bearing: the `parent_id` self-FK is DEFERRABLE INITIALLY
+/// DEFERRED, so a child inserted before its parent is legal *by SQL semantics*
+/// — the check defers to COMMIT. But the Turso fork only decrements the
+/// deferred-FK violation counter on a parent-key UPDATE probe, never on a plain
+/// parent-row INSERT, so a child-before-parent INSERT increments the counter
+/// with no matching decrement and the COMMIT fails even though the final rows
+/// are consistent. The full reseed path sidesteps this by topo-sorting its
+/// creates (`topological_sort_creates`); the incremental fast path built ops in
+/// `HashMap` order. Applying this at the `emit_ops` chokepoint makes EVERY
+/// batch FK-safe, independent of the builder.
+///
+/// Only intra-batch parent edges are ordered — a parent already committed in
+/// the sink is a valid FK target at any position. A malformed create (no `id`)
+/// keeps its arrival position and is left for the sink to reject loudly.
+fn fk_order_creates_parent_first(
+    ops: Vec<(String, holon_api::StorageEntity)>,
+) -> Vec<(String, holon_api::StorageEntity)> {
+    let mut creates: Vec<(String, holon_api::StorageEntity)> = Vec::new();
+    let mut tail: Vec<(String, holon_api::StorageEntity)> = Vec::new();
+    for op in ops {
+        if op.0 == "create" {
+            creates.push(op);
+        } else {
+            tail.push(op);
+        }
+    }
+
+    let mut idx_of: HashMap<String, usize> = HashMap::new();
+    for (i, (_, e)) in creates.iter().enumerate() {
+        if let Some(id) = e.get("id").and_then(|v| v.as_string()) {
+            idx_of.insert(id.to_string(), i);
+        }
+    }
+
+    fn visit(
+        i: usize,
+        creates: &[(String, holon_api::StorageEntity)],
+        idx_of: &HashMap<String, usize>,
+        visited: &mut [bool],
+        order: &mut Vec<usize>,
+    ) {
+        if visited[i] {
+            return;
+        }
+        visited[i] = true;
+        if let Some(pid) = creates[i].1.get("parent_id").and_then(|v| v.as_string())
+            && let Some(&pi) = idx_of.get(pid)
+            && pi != i
+        {
+            visit(pi, creates, idx_of, visited, order);
+        }
+        order.push(i);
+    }
+
+    let n = creates.len();
+    let mut visited = vec![false; n];
+    let mut order: Vec<usize> = Vec::with_capacity(n);
+    for i in 0..n {
+        visit(i, &creates, &idx_of, &mut visited, &mut order);
+    }
+
+    let mut slots: Vec<Option<(String, holon_api::StorageEntity)>> =
+        creates.into_iter().map(Some).collect();
+    let mut result: Vec<(String, holon_api::StorageEntity)> = Vec::with_capacity(n + tail.len());
+    for i in order {
+        result.push(slots[i].take().expect("each create visited exactly once"));
+    }
+    result.extend(tail);
+    result
+}
+
 /// Topologically sort deletes so children precede parents (leaves first).
 fn topological_sort_deletes<'a>(
     deletes: Vec<&'a SnapshotBlock>,
@@ -1033,6 +1122,104 @@ fn topological_sort_deletes<'a>(
     let mut creates_order = topological_sort_creates(deletes.clone(), all);
     creates_order.reverse();
     creates_order
+}
+
+#[cfg(test)]
+mod fk_order_tests {
+    use super::*;
+
+    fn create(id: &str, parent: &str) -> (String, holon_api::StorageEntity) {
+        let mut e = holon_api::StorageEntity::new();
+        e.insert("id".into(), Value::String(id.into()));
+        e.insert("parent_id".into(), Value::String(parent.into()));
+        ("create".to_string(), e)
+    }
+    fn other(kind: &str, id: &str) -> (String, holon_api::StorageEntity) {
+        let mut e = holon_api::StorageEntity::new();
+        e.insert("id".into(), Value::String(id.into()));
+        (kind.to_string(), e)
+    }
+    fn ids(ops: &[(String, holon_api::StorageEntity)]) -> Vec<String> {
+        ops.iter()
+            .map(|(n, e)| format!("{n}:{}", e.get("id").unwrap().as_string().unwrap()))
+            .collect()
+    }
+    fn pos(ordered: &[(String, holon_api::StorageEntity)], id: &str) -> usize {
+        ordered
+            .iter()
+            .position(|(_, e)| e.get("id").unwrap().as_string() == Some(id))
+            .unwrap()
+    }
+
+    /// A child emitted before its intra-batch parent (the exact keystone
+    /// deferred-FK shape: `create c<-p` at index 0, `create p<-sink` at index
+    /// 1) must be reordered parent-before-child.
+    #[test]
+    fn child_before_parent_is_reordered() {
+        let ops = vec![
+            create("block:c", "block:p"),
+            create("block:p", "block:sink-root"),
+        ];
+        let out = fk_order_creates_parent_first(ops);
+        assert!(
+            pos(&out, "block:p") < pos(&out, "block:c"),
+            "{:?}",
+            ids(&out)
+        );
+    }
+
+    /// Transitive chain a<-b<-c fed in reverse still lands root-first.
+    #[test]
+    fn transitive_chain_ordered_root_first() {
+        let ops = vec![
+            create("block:c", "block:b"),
+            create("block:b", "block:a"),
+            create("block:a", "block:sink"),
+        ];
+        let out = fk_order_creates_parent_first(ops);
+        assert!(pos(&out, "block:a") < pos(&out, "block:b"));
+        assert!(pos(&out, "block:b") < pos(&out, "block:c"));
+    }
+
+    /// Non-create ops keep their relative order and follow all creates.
+    #[test]
+    fn non_creates_kept_after_creates_in_order() {
+        let ops = vec![
+            other("update", "block:u1"),
+            create("block:c", "block:p"),
+            create("block:p", "block:sink"),
+            other("delete", "block:d1"),
+            other("update", "block:u2"),
+        ];
+        let out = fk_order_creates_parent_first(ops);
+        let labels = ids(&out);
+        // creates first (both), then the tail in original order.
+        assert_eq!(
+            &labels[2..],
+            &["update:block:u1", "delete:block:d1", "update:block:u2"]
+        );
+        assert!(pos(&out, "block:p") < pos(&out, "block:c"));
+    }
+
+    /// A parent already in the sink (not co-batched) imposes no ordering; the
+    /// batch is returned effectively as-is (creates stable).
+    #[test]
+    fn sink_parent_needs_no_reorder() {
+        let ops = vec![
+            create("block:a", "block:sink"),
+            create("block:b", "block:sink"),
+        ];
+        let out = fk_order_creates_parent_first(ops);
+        assert_eq!(ids(&out), vec!["create:block:a", "create:block:b"]);
+    }
+
+    /// A self-parent cycle must not infinite-loop.
+    #[test]
+    fn self_parent_terminates() {
+        let ops = vec![create("block:x", "block:x")];
+        let out = fk_order_creates_parent_first(ops);
+        assert_eq!(ids(&out), vec!["create:block:x"]);
+    }
 }
 
 /// Withhold "orphan" creates whose `parent_id` chain does not bottom out in the
