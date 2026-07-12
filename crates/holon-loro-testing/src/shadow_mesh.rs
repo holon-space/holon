@@ -20,12 +20,13 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use holon::sync::multi_peer::{self, TREE_NAME};
+use holon::sync::multi_peer::TREE_NAME;
+use holon::sync::multi_peer::{self};
+use holon_api::Block;
 use holon_api::EntityUri;
 use loro::LoroDoc;
 
-use super::peer_ops;
-use holon_api::Block;
+use crate::peer_ops;
 
 /// One shadow Loro doc pinned to a fixed peer id.
 ///

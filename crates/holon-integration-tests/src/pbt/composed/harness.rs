@@ -118,7 +118,7 @@ pub(crate) async fn feed_sut_clock(caps: &CapMap, ref_state: &ReferenceState) {
     if let Some(log) = caps.get::<dyn SutLoroLog>()
         && let Some(h) = log.loro_lamport_height().await
     {
-        *ref_state.clock_feed.lock().expect("clock_feed lock") = Some(h);
+        *ref_state.loro.clock_feed.lock().expect("clock_feed lock") = Some(h);
     }
 }
 

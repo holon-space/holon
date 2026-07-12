@@ -14,6 +14,7 @@ use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
 use holon_api::render_types::Arg;
 use holon_api::render_types::RenderExpr;
+use holon_loro_testing::ref_ext::LoroRefExt;
 use holon_pbt_core::Wiring;
 
 use super::action_actor_state::ActionActorState;
@@ -22,7 +23,6 @@ use super::block_state::LayoutBlockInfo;
 use super::clock_state::ClockState;
 use super::file_adapter_state::FileAdapterState;
 use super::mcp_server_actor_state::MCPServerActorState;
-use super::peer_ref_state::PeerRefState;
 use super::query::QuerySource;
 use super::query::TestQuery;
 use super::query::WatchSpec;
@@ -281,9 +281,9 @@ pub static VALID_PROFILE_YAMLS: std::sync::LazyLock<Vec<String>> = std::sync::La
 /// (cheap clone, shared cell) while `wiring`/`cap_set`/`real_editor` are plain
 /// values that clone by copy.
 ///
-/// `clock_feed` deliberately stays on [`ReferenceState`] (not here): its
-/// `Clone`-SHARES-the-cell seam moves with the Loro extension in a later
-/// increment, where its documentation lives.
+/// `clock_feed` is NOT here: it moved with the Loro extension into
+/// [`LoroRefExt`] (RefStateSplit Inc 5), where its `Clone`-SHARES-the-cell seam
+/// is documented alongside the shadow mesh it drives.
 #[derive(Debug, Clone)]
 pub struct HarnessEnv {
     /// Runtime for async operations. `Arc`-shared across clones.
@@ -356,26 +356,13 @@ pub struct ReferenceState {
     /// [`HarnessEnv`].
     pub harness: HarnessEnv,
 
-    /// Loro-only peer instances for multi-instance sync testing.
-    pub peers: Vec<PeerRefState>,
-
-    /// E-solid shadow Loro peer mesh — the oracle-side CRDT predictor for
-    /// peer-merge outcomes (tie-break sibling order, concurrent-text
-    /// interleaving). Created lazily at the first `AddPeer`, seeded from the
-    /// ref block map at that moment. `Clone` deep-forks every shadow doc
-    /// (proptest clones per step and per case). See [`super::shadow_mesh`].
-    pub shadow_mesh: Option<super::shadow_mesh::ShadowMesh>,
-
-    /// Clock side-channel (the `IdResolver` pattern): the composed harness
-    /// writes the SUT's scalar Lamport height
-    /// (`SutLoroLog::loro_lamport_height`) here after every apply+settle
-    /// (and once after build); the ref pads the shadow primary to it before
-    /// boundary ops. `Clone` SHARES the cell — it is a harness seam, not
-    /// model state. Empty/stale during proptest's generation phase, which
-    /// is harmless: generation consumes no clock-dependent predictions and
-    /// execution re-evolves the ref fresh (padding is lenient — see
-    /// `ShadowMesh::pad_primary_to`).
-    pub clock_feed: Arc<std::sync::Mutex<Option<u32>>>,
+    /// Loro-private extension (RefStateSplit Inc 5): peer instances, the
+    /// E-solid shadow CRDT mesh, and the Lamport `clock_feed` side-channel.
+    /// Co-located in `holon-loro-testing` ([`LoroRefExt`]); the `RefPeers(Mut)`
+    /// cap impls in `ref_caps/peers.rs` delegate here (orphan rule). The two
+    /// Clone seams (`clock_feed` shares the cell; `shadow_mesh` deep-forks) are
+    /// documented at that home.
+    pub loro: LoroRefExt,
 
     /// Calendar-clock model for the `AdvanceDay` transition (ADR 0024 §6).
     pub clock: ClockState,
@@ -526,9 +513,7 @@ impl ReferenceState {
                 real_editor: false,
                 interpreter,
             },
-            peers: Vec::new(),
-            shadow_mesh: None,
-            clock_feed: Arc::new(std::sync::Mutex::new(None)),
+            loro: LoroRefExt::default(),
             clock: ClockState::new(),
         }
     }
@@ -1053,12 +1038,9 @@ impl ReferenceState {
     }
 
     /// Stable IDs of blocks any peer has modified. JoinBlock excludes these
-    /// to avoid edit/peer interleaving races.
+    /// to avoid edit/peer interleaving races. Delegates to the Loro ext.
     pub fn peer_modified_stable_ids(&self) -> std::collections::HashSet<String> {
-        self.peers
-            .iter()
-            .flat_map(|p| p.modified_stable_ids.iter().cloned())
-            .collect()
+        self.loro.all_modified_stable_ids()
     }
 
     /// The focused Main-region block, if it is a valid edit target:
@@ -1616,13 +1598,8 @@ impl ReferenceState {
     /// shadow's concurrent-merge interleaving prediction exact (walking
     /// skeleton #2, `shadow_mesh_predicts_concurrent_primary_peer_merge`).
     pub fn shadow_catch_up_primary(&self) {
-        let Some(mesh) = &self.shadow_mesh else {
-            return;
-        };
-        if let Some(h) = *self.clock_feed.lock().expect("clock_feed lock") {
-            mesh.pad_primary_to(h);
-        }
-        mesh.catch_up_primary(&self.domain.block_state.blocks);
+        self.loro
+            .shadow_catch_up_primary(&self.domain.block_state.blocks);
     }
 
     /// Re-canonicalize sequences and rebuild profile tracking.
