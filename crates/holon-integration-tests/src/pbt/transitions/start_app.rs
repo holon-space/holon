@@ -205,7 +205,7 @@ pub(crate) fn seed_booted_layout_into_ref(state: &mut ReferenceState, fresh: boo
                         .layout_blocks
                         .headline_ids
                         .insert(block.parent_id.clone());
-                    if let Ok(expr) = state.interpreter.parse_dsl(&block.content) {
+                    if let Ok(expr) = state.harness.interpreter.parse_dsl(&block.content) {
                         state
                             .domain
                             .render_expressions
@@ -276,7 +276,7 @@ pub(crate) fn seed_booted_layout_into_ref(state: &mut ReferenceState, fresh: boo
                 && b.source_language
                     .as_ref()
                     .is_some_and(|sl| matches!(sl, SourceLanguage::Render))
-                && let Ok(expr) = state.interpreter.parse_dsl(&b.content)
+                && let Ok(expr) = state.harness.interpreter.parse_dsl(&b.content)
             {
                 state
                     .domain
