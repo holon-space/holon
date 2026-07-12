@@ -1,31 +1,39 @@
 //! Shared per-case windowed `ComposedSut<WideE2E>` boot/teardown helper.
 //!
 //! Extracted from `gpui_compose_sut_windowed.rs` (increment 3b) so the windowed
-//! generated-sequence proptest loop (`gpui_composed_windowed_loop.rs`, increment 4b)
-//! and the hand-built 3b tests share ONE copy of the intricate gpui-thread window
-//! setup + `SimUserDriver` construction + leak-on-teardown contract. This is
-//! deletion-scheduled scaffolding (Phase 1/2), so keeping a single source avoids two
-//! copies drifting.
+//! generated-sequence proptest loop (`gpui_composed_windowed_loop.rs`,
+//! increment 4b) and the hand-built 3b tests share ONE copy of the intricate
+//! gpui-thread window setup + `SimUserDriver` construction + leak-on-teardown
+//! contract. This is deletion-scheduled scaffolding (Phase 1/2), so keeping a
+//! single source avoids two copies drifting.
 
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::AssertUnwindSafe;
+use std::panic::catch_unwind;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use std::time::Instant;
 
-use gpui::{AssetSource, PlatformTextSystem, TestApp};
+use gpui::AssetSource;
+use gpui::PlatformTextSystem;
+use gpui::TestApp;
 use holon_frontend::geometry::GeometryProvider;
 use holon_frontend::user_driver::UserDriver;
 use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::launch_holon_window_rebindable;
 use holon_gpui::navigation_state::NavigationState;
-use holon_integration_tests::pbt::composed::harness::{ComposedSut, SettleHook};
-use holon_integration_tests::pbt::composed::wide_e2e::{
-    boot_and_seed_wide_windowed_base, wide_e2e_ref, windowed_composed_sut, WideE2E, WideE2EMachine,
-    WideHandle,
-};
-use holon_integration_tests::pbt::fixtures::{replay_steps, NamedFixture};
+use holon_integration_tests::pbt::ReferenceState;
+use holon_integration_tests::pbt::composed::harness::ComposedSut;
+use holon_integration_tests::pbt::composed::harness::SettleHook;
+use holon_integration_tests::pbt::composed::wide_e2e::WideE2E;
+use holon_integration_tests::pbt::composed::wide_e2e::WideE2EMachine;
+use holon_integration_tests::pbt::composed::wide_e2e::WideHandle;
+use holon_integration_tests::pbt::composed::wide_e2e::boot_and_seed_wide_windowed_base;
+use holon_integration_tests::pbt::composed::wide_e2e::wide_e2e_ref;
+use holon_integration_tests::pbt::composed::wide_e2e::windowed_composed_sut;
+use holon_integration_tests::pbt::fixtures::NamedFixture;
+use holon_integration_tests::pbt::fixtures::replay_steps;
 use holon_integration_tests::pbt::op_write_cap::IdResolver;
 use holon_integration_tests::pbt::window_slice::builders::overlay_windowed_caps;
-use holon_integration_tests::pbt::ReferenceState;
 
 use super::sim_windowed_replay::SimUserDriver;
 
@@ -33,8 +41,9 @@ pub fn real_text_system() -> Arc<dyn PlatformTextSystem> {
     gpui_platform::current_platform(true).text_system()
 }
 
-/// Cross-runtime fixed-point settle (the proven `gpui_window_slice` pattern): pump
-/// until the element count is stable and no `"loading"` placeholders remain.
+/// Cross-runtime fixed-point settle (the proven `gpui_window_slice` pattern):
+/// pump until the element count is stable and no `"loading"` placeholders
+/// remain.
 pub fn settle_to_fixed_point(
     app: &mut TestApp,
     bounds: &BoundsRegistry,
@@ -72,33 +81,37 @@ pub fn settle_to_fixed_point(
 }
 
 /// `*const TestApp` behind a `Send` newtype so the window-settle closure (a
-/// `SettleHook = Box<dyn Fn() + Send>`) can hold it. SAFETY: the closure is only ever
-/// called on the gpui thread that owns the window, and `app` is pinned for the driver's
-/// lifetime — the same single-thread contract `SimUserDriver` relies on.
+/// `SettleHook = Box<dyn Fn() + Send>`) can hold it. SAFETY: the closure is
+/// only ever called on the gpui thread that owns the window, and `app` is
+/// pinned for the driver's lifetime — the same single-thread contract
+/// `SimUserDriver` relies on.
 struct SendApp(*const TestApp);
 unsafe impl Send for SendApp {}
 impl SendApp {
-    // A `&self` accessor so a `move` closure captures the whole `SendApp` (Send) rather than
-    // disjoint-capturing the raw-pointer field (2021 edition), which would be !Send.
+    // A `&self` accessor so a `move` closure captures the whole `SendApp` (Send)
+    // rather than disjoint-capturing the raw-pointer field (2021 edition),
+    // which would be !Send.
     fn app(&self) -> &TestApp {
         unsafe { &*self.0 }
     }
 }
 
-/// Boot the wide-seeded windowed `ComposedSut<WideE2E>` (a gpui window renderer over a
-/// `compose_sut` session + the wide-seeded backend caps + the window's `SimUserDriver`
-/// gesture caps, assembled by `overlay_windowed_caps`), hand it to `run` to drive/check,
-/// then tear the window down. `app` stays pinned on this frame for the whole call, so the
-/// `*const TestApp` the settle hook / `SimUserDriver` hold stays valid. `run` takes the SUT
-/// by value and returns it (so it can call the by-value `StateMachineTest::apply`). It also
-/// receives the harness's default `wide_e2e_ref()` oracle — the windowed loop IGNORES that
-/// and supplies its own windowed-cap-set oracle (same tree, narrower cap set), which is
-/// sound because the seed tree is identical.
+/// Boot the wide-seeded windowed `ComposedSut<WideE2E>` (a gpui window renderer
+/// over a `compose_sut` session + the wide-seeded backend caps + the window's
+/// `SimUserDriver` gesture caps, assembled by `overlay_windowed_caps`), hand it
+/// to `run` to drive/check, then tear the window down. `app` stays pinned on
+/// this frame for the whole call, so the `*const TestApp` the settle hook /
+/// `SimUserDriver` hold stays valid. `run` takes the SUT by value and returns
+/// it (so it can call the by-value `StateMachineTest::apply`). It also receives
+/// the harness's default `wide_e2e_ref()` oracle — the windowed loop IGNORES
+/// that and supplies its own windowed-cap-set oracle (same tree, narrower cap
+/// set), which is sound because the seed tree is identical.
 ///
-/// `run` returns `Option<ComposedSut>`: `Some(sut)` is leaked on teardown (avoids the gpui
-/// leak detector + a runtime drop in async context); `None` means the caller already
-/// consumed/dropped the SUT (e.g. a caught panic inside a `catch_unwind` drive loop), so
-/// teardown just leaks the app. ⚠ `--test-threads=1` mandatory (gpui not parallel-safe).
+/// `run` returns `Option<ComposedSut>`: `Some(sut)` is leaked on teardown
+/// (avoids the gpui leak detector + a runtime drop in async context); `None`
+/// means the caller already consumed/dropped the SUT (e.g. a caught panic
+/// inside a `catch_unwind` drive loop), so teardown just leaks the app. ⚠
+/// `--test-threads=1` mandatory (gpui not parallel-safe).
 pub fn with_windowed_wide_sut(
     run: impl FnOnce(ComposedSut<WideE2E>, &ReferenceState) -> Option<ComposedSut<WideE2E>>,
 ) {
@@ -110,7 +123,8 @@ pub fn with_windowed_wide_sut(
     let resolver: IdResolver = Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()));
     let oracle = wide_e2e_ref();
 
-    // Boot the WIDE-seeded, driver-DEFERRED base (session/reactive surfaced for the window).
+    // Boot the WIDE-seeded, driver-DEFERRED base (session/reactive surfaced for the
+    // window).
     let (bundle, scaffold) =
         runtime.block_on(async { boot_and_seed_wide_windowed_base(&resolver, &oracle).await });
     let session = bundle
@@ -122,8 +136,8 @@ pub fn with_windowed_wide_sut(
         .clone()
         .expect("full_headless -> booted ReactiveEngine");
 
-    // Attach the window over the booted session/reactive; Some(debug) so the interaction
-    // pump populates interaction_tx for the SimUserDriver.
+    // Attach the window over the booted session/reactive; Some(debug) so the
+    // interaction pump populates interaction_tx for the SimUserDriver.
     let debug = Arc::new(holon_mcp::server::DebugServices::default());
     let bounds = BoundsRegistry::new();
     let nav = NavigationState::new();
@@ -164,15 +178,16 @@ pub fn with_windowed_wide_sut(
         .frontend
         .clone()
         .expect("full_headless → booted HeadlessFrontendComponent");
-    // Capture the settle handle (engine + frontend) before `bundle.caps` is moved, so the
-    // windowed per-apply settle converges CDC + Loro + org like the headless path.
+    // Capture the settle handle (engine + frontend) before `bundle.caps` is moved,
+    // so the windowed per-apply settle converges CDC + Loro + org like the
+    // headless path.
     let handle = WideHandle::from_bundle(&bundle);
     let overlaid = overlay_windowed_caps(bundle.caps, frontend, geometry, engine.clone(), driver);
 
     // The window-settle hook the ComposedSut pumps before each check (mirror sim
-    // `pump_cycle`: real wall-clock time for backend watchers on their own worker threads,
-    // drain gpui, fire fake timers, promote staged bounds — no block_on, driver methods may
-    // already be inside a tokio context).
+    // `pump_cycle`: real wall-clock time for backend watchers on their own worker
+    // threads, drain gpui, fire fake timers, promote staged bounds — no
+    // block_on, driver methods may already be inside a tokio context).
     let settle_app = SendApp(app_ptr);
     let settle_bounds = bounds.clone();
     let settle: SettleHook = Box::new(move || {
@@ -201,25 +216,30 @@ pub fn with_windowed_wide_sut(
         panic!("windowed settle hook never reached a fixed point");
     });
 
-    // A dedicated runtime drives the apply/check leaf futures; the booted backend keeps
-    // running on `runtime`'s worker threads (kept alive by the outer Arc). The gpui thread
-    // is NOT runtime-entered, so `rt.block_on` inside the harness is legal here.
+    // A dedicated runtime drives the apply/check leaf futures; the booted backend
+    // keeps running on `runtime`'s worker threads (kept alive by the outer
+    // Arc). The gpui thread is NOT runtime-entered, so `rt.block_on` inside the
+    // harness is legal here.
     let composed_rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("composed runtime");
 
-    // Assemble the windowed SUT (the initial page-root focus is already established on the
-    // base by `boot_and_seed_wide_windowed_base` via the engine's `dispatch_intent_sync`).
+    // Assemble the windowed SUT (the initial page-root focus is already established
+    // on the base by `boot_and_seed_wide_windowed_base` via the engine's
+    // `dispatch_intent_sync`).
     let sut = windowed_composed_sut(overlaid, handle, resolver, scaffold, composed_rt, settle);
 
-    // Hand the live SUT to the caller to drive + check, then take it back for teardown.
+    // Hand the live SUT to the caller to drive + check, then take it back for
+    // teardown.
     let sut = run(sut, &oracle);
 
-    // Teardown (see the 3b tests): release window entities, shut down, leak the !Send app
-    // + the SUT (which transitively holds the session + the composed runtime) so no Drop runs
-    // the gpui leak detector or shuts a runtime down in an async context. If the caller
-    // already consumed the SUT (`None`), only the app is leaked.
+    // Teardown (see the 3b tests): release window entities, shut down, leak the
+    // !Send app
+    // + the SUT (which transitively holds the session + the composed runtime) so no
+    //   Drop runs
+    // the gpui leak detector or shuts a runtime down in an async context. If the
+    // caller already consumed the SUT (`None`), only the app is leaked.
     drop(rebind);
     app.update(|cx| cx.shutdown());
     app.run_until_parked();
@@ -241,17 +261,19 @@ pub fn payload_signature_match(payload: &(dyn std::any::Any + Send), needle: &st
     msg.contains(needle)
 }
 
-/// Replay a post-boot fixture (capture JSON / `.feature` scenario) through a freshly
-/// booted windowed `ComposedSut<WideE2E>` — the composed successor of the phased
-/// driver-sync replay spine (increment 4c). The base is the
-/// pre-booted, wide-seeded `full_headless` window (no `StartApp` / org-seed ceremony —
-/// the wide seed IS the boot org), so fixtures must be POST-BOOT, matching
-/// composed-keystone captures and re-authored `.feature`s; a fixture that still encodes
-/// `StartApp`/seed steps fails loud at the precondition assert inside `replay_steps`.
+/// Replay a post-boot fixture (capture JSON / `.feature` scenario) through a
+/// freshly booted windowed `ComposedSut<WideE2E>` — the composed successor of
+/// the phased driver-sync replay spine (increment 4c). The base is the
+/// pre-booted, wide-seeded `full_headless` window (no `StartApp` / org-seed
+/// ceremony — the wide seed IS the boot org), so fixtures must be POST-BOOT,
+/// matching composed-keystone captures and re-authored `.feature`s; a fixture
+/// that still encodes `StartApp`/seed steps fails loud at the precondition
+/// assert inside `replay_steps`.
 ///
-/// Returns `Err(panic payload)` on the first step/invariant failure so ddmin oracles
-/// (the windowed minimizer) can classify the signature; replay binaries re-raise it.
-/// ⚠ `--test-threads=1` semantics apply (one gpui window per process at a time).
+/// Returns `Err(panic payload)` on the first step/invariant failure so ddmin
+/// oracles (the windowed minimizer) can classify the signature; replay binaries
+/// re-raise it. ⚠ `--test-threads=1` semantics apply (one gpui window per
+/// process at a time).
 pub fn replay_fixture_windowed(
     label: &'static str,
     fixture: &NamedFixture,
@@ -259,13 +281,14 @@ pub fn replay_fixture_windowed(
     let mut result: Result<(), Box<dyn std::any::Any + Send + 'static>> = Ok(());
     with_windowed_wide_sut(|sut, oracle| {
         // The composed windowed base is full_headless-wired; a capture recorded under a
-        // different wiring would replay against the wrong oracle — fail loud, don't fake.
+        // different wiring would replay against the wrong oracle — fail loud, don't
+        // fake.
         if let Some(recorded) = &fixture.wiring {
             assert_eq!(
-                *recorded, oracle.wiring,
-                "[{label}] fixture {:?} was recorded under wiring {recorded:?}, but the \
-                 windowed composed base is fixed to {:?} — re-record or replay headless",
-                fixture.name, oracle.wiring
+                *recorded, oracle.harness.wiring,
+                "[{label}] fixture {:?} was recorded under wiring {recorded:?}, but the windowed \
+                 composed base is fixed to {:?} — re-record or replay headless",
+                fixture.name, oracle.harness.wiring
             );
         }
         match catch_unwind(AssertUnwindSafe(|| {

@@ -1,9 +1,9 @@
 //! Windowed capture *minimizer* — greedy ddmin of a failing capture through the
 //! composed windowed path (increment 4c: repointed off the phased
-//! `windowed_replay` rebind service onto per-candidate `replay_fixture_windowed`
-//! boots). The faithful, window-coupled counterpart of the headless
-//! `bisection_pbt::minimize_capture_from_env` (which can't reproduce a
-//! runner-coupled failure at all).
+//! `windowed_replay` rebind service onto per-candidate
+//! `replay_fixture_windowed` boots). The faithful, window-coupled counterpart
+//! of the headless `bisection_pbt::minimize_capture_from_env` (which can't
+//! reproduce a runner-coupled failure at all).
 //!
 //! Each ddmin candidate boots a fresh windowed `ComposedSut<WideE2E>` (window +
 //! wide seed + settle, ~10s — the same per-case cost the 4b loop pays), replays
@@ -19,16 +19,19 @@
 mod pbt_harness;
 
 use holon_integration_tests::pbt::composed::wide_e2e::wide_e2e_ref;
-use holon_integration_tests::pbt::fixtures::{json, FixtureStep, NamedFixture};
+use holon_integration_tests::pbt::fixtures::FixtureStep;
+use holon_integration_tests::pbt::fixtures::NamedFixture;
+use holon_integration_tests::pbt::fixtures::json;
 use holon_integration_tests::pbt::transitions::E2ETransition;
-
-use pbt_harness::windowed_wide::{payload_signature_match, replay_fixture_windowed};
+use pbt_harness::windowed_wide::payload_signature_match;
+use pbt_harness::windowed_wide::replay_fixture_windowed;
 
 fn capture_path() -> String {
     std::env::var("HOLON_CAPTURE").unwrap_or_else(|_| {
         concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../crates/holon-integration-tests/tests/.captures/general_e2e_composed_pbt.captured.json"
+            "/../../crates/holon-integration-tests/tests/.captures/general_e2e_composed_pbt.\
+             captured.json"
         )
         .to_string()
     })
@@ -53,7 +56,7 @@ fn main() {
     if let Some(recorded) = &fixture.wiring {
         assert_eq!(
             *recorded,
-            wide_e2e_ref().wiring,
+            wide_e2e_ref().harness.wiring,
             "[minimize-window] capture {path} was recorded under wiring {recorded:?}, but the \
              windowed composed base is fixed to full_headless — minimize headless instead"
         );
@@ -93,8 +96,8 @@ fn main() {
     let mut seq = full.clone();
     if !reproduces(&seq) {
         eprintln!(
-            "[minimize-window] capture does NOT reproduce in-window with signature \
-             {signature:?} — nothing to minimize"
+            "[minimize-window] capture does NOT reproduce in-window with signature {signature:?} \
+             — nothing to minimize"
         );
         return;
     }
