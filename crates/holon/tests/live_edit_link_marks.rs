@@ -268,6 +268,54 @@ async fn live_content_edit_removing_link_clears_junction() {
     );
 }
 
+/// BugFunnel #66 — the blur/refocus wipe. After a link is typed and committed,
+/// the SqlOnly editor hydrates its buffer from the stored (stripped) `content`
+/// and re-commits THAT on blur — a `set_field("content")` carrying the label
+/// with NO `[[…]]` syntax. The old follow-up nulled marks on every content
+/// commit, so this second, mark-free commit replaced the live `[[link]]` with
+/// plain text (marks + junction wiped). The follow-up must now recognise the
+/// re-commit of the already-stored label and leave the marks untouched.
+#[tokio::test(flavor = "multi_thread")]
+async fn blur_recommit_of_stripped_label_preserves_marks() {
+    let (_backend, handle) = TursoBackend::new_in_memory()
+        .await
+        .expect("in-memory turso");
+    setup_schema(&handle).await;
+    let d = dispatcher(handle.clone());
+    let entity: EntityName = ENTITY.to_string().into();
+
+    create_block(&d, &entity, "src", "").await;
+
+    // The user types a wiki-name link; it commits with marks + a junction row.
+    set_content(&d, &entity, "src", "[[Kept Page]]").await;
+    let (content, marks) = read_content_marks(&handle, "src").await;
+    assert_eq!(content, "Kept Page");
+    assert!(marks.is_some(), "the initial commit must populate marks");
+    assert_eq!(
+        links_rows(&handle, "src").await,
+        vec![("Kept Page".to_string(), "page".to_string(), None)],
+    );
+
+    // Blur/refocus re-commit: the editor sends back the STRIPPED label (exactly
+    // the stored `content`, no markup) — this must be a no-op for marks.
+    set_content(&d, &entity, "src", "Kept Page").await;
+
+    let (content, marks) = read_content_marks(&handle, "src").await;
+    assert_eq!(content, "Kept Page", "content unchanged by the re-commit");
+    let marks = marks.expect(
+        "marks must SURVIVE a blur re-commit of the stripped label (was NULLed by the \
+         over-dispatching follow-up — BugFunnel #66)",
+    );
+    let parsed: Vec<MarkSpan> = holon_api::marks_from_json(&marks).expect("marks JSON round-trips");
+    assert_eq!(parsed.len(), 1, "the single link mark is still present");
+    assert!(matches!(parsed[0].mark, InlineMark::Link { .. }));
+    assert_eq!(
+        links_rows(&handle, "src").await,
+        vec![("Kept Page".to_string(), "page".to_string(), None)],
+        "the junction row must survive the blur re-commit too",
+    );
+}
+
 /// A `[[block:id][label]]` id-link resolves trivially (kind=block, resolved).
 #[tokio::test(flavor = "multi_thread")]
 async fn live_content_edit_id_link_resolves() {
