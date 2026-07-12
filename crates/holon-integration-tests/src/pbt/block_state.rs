@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 use std::collections::HashSet;
 
+use holon_api::ContentType;
 use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
 
@@ -119,6 +120,87 @@ impl BlockState {
             blocks,
             block_documents,
             next_id: self.next_id,
+        }
+    }
+
+    /// Find a page block by its title (first line of content, e.g. "index").
+    pub fn doc_uri_by_name(&self, title: &str) -> Option<EntityUri> {
+        self.blocks
+            .values()
+            .find(|b| b.is_page() && b.title() == title)
+            .map(|b| b.id.clone())
+    }
+
+    /// Get IDs of text blocks only (not source blocks).
+    pub fn text_block_ids(&self) -> Vec<EntityUri> {
+        self.blocks
+            .iter()
+            .filter(|(_, b)| b.content_type == ContentType::Text)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    // ── Block hierarchy query helpers ──────────────────────────────────
+
+    /// Children of parent sorted by sequence then ID (matching canonical
+    /// ordering).
+    pub fn sorted_children_of(&self, parent_id: &EntityUri) -> Vec<&Block> {
+        use holon_orgmode::models::OrgBlockExt;
+        let mut children: Vec<&Block> = self
+            .blocks
+            .values()
+            .filter(|b| b.parent_id == *parent_id)
+            .collect();
+        children.sort_by(|a, b| {
+            a.sequence()
+                .cmp(&b.sequence())
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        children
+    }
+
+    /// Predicted ordered child ids of `parent_id`. Mirrors what
+    /// `BlockOrdering::children(parent_id)` should return on the live
+    /// side. The encoding-free child-id list is the contract — both
+    /// sides produce a `Vec<EntityUri>`, no `sort_key` / `sequence`
+    /// strings cross the boundary.
+    pub fn children_of(&self, parent_id: &EntityUri) -> Vec<EntityUri> {
+        self.sorted_children_of(parent_id)
+            .into_iter()
+            .map(|b| b.id.clone())
+            .collect()
+    }
+
+    /// Previous sibling of block_id (same parent, immediately before in
+    /// sequence order).
+    pub fn previous_sibling(&self, block_id: &EntityUri) -> Option<EntityUri> {
+        let block = self.blocks.get(block_id)?;
+        let children = self.sorted_children_of(&block.parent_id);
+        let idx = children.iter().position(|b| b.id == *block_id)?;
+        if idx > 0 {
+            Some(children[idx - 1].id.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Next sibling of block_id (same parent, immediately after in sequence
+    /// order).
+    pub fn next_sibling(&self, block_id: &EntityUri) -> Option<EntityUri> {
+        let block = self.blocks.get(block_id)?;
+        let children = self.sorted_children_of(&block.parent_id);
+        let idx = children.iter().position(|b| b.id == *block_id)?;
+        children.get(idx + 1).map(|b| b.id.clone())
+    }
+
+    /// Grandparent of block_id (parent's parent). None if at root level.
+    pub fn grandparent(&self, block_id: &EntityUri) -> Option<EntityUri> {
+        let block = self.blocks.get(block_id)?;
+        let parent = self.blocks.get(&block.parent_id)?;
+        if parent.parent_id.is_no_parent() || parent.parent_id.is_sentinel() {
+            None
+        } else {
+            Some(parent.parent_id.clone())
         }
     }
 }
