@@ -2,18 +2,22 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use rmcp::RoleClient;
-use rmcp::model::{CallToolRequestParam, ReadResourceRequestParam, ResourceContents};
-use rmcp::service::Peer;
-use tracing::{Instrument, debug, info, info_span};
-
 use holon_api::StreamPosition;
 use holon_api::Value;
 use holon_core::SyncTokenStore;
+use rmcp::model::CallToolRequestParam;
+use rmcp::model::ReadResourceRequestParam;
+use rmcp::model::ResourceContents;
+use tracing::Instrument;
+use tracing::debug;
+use tracing::info;
+use tracing::info_span;
 
+use crate::mcp_call_surface::McpCallSurface;
 use crate::mcp_sidecar::CursorConfig;
 
-/// Convert a serde_json::Value to holon_api::Value, preserving nested objects as JSON text.
+/// Convert a serde_json::Value to holon_api::Value, preserving nested objects
+/// as JSON text.
 pub fn json_value_to_holon_value(v: &serde_json::Value) -> Value {
     match v {
         serde_json::Value::Null => Value::Null,
@@ -32,7 +36,8 @@ pub fn json_value_to_holon_value(v: &serde_json::Value) -> Value {
     }
 }
 
-/// A fetched record batch from an MCP server, with optional new cursor position.
+/// A fetched record batch from an MCP server, with optional new cursor
+/// position.
 pub struct FetchResult {
     /// JSON objects representing individual records.
     pub records: Vec<serde_json::Map<String, serde_json::Value>>,
@@ -40,17 +45,24 @@ pub struct FetchResult {
     pub new_cursor: Option<String>,
 }
 
-/// Abstracts over how records are fetched from an MCP server.
+/// Abstracts over how records are fetched from a data source.
 ///
 /// Two implementations:
-/// - `ToolSync` — calls `peer.call_tool()` and extracts records via a JSON path
-/// - `ResourceSync` — calls `peer.read_resource(uri)` and parses as JSON array
+/// - `ToolSync` — calls `surface.call_tool()` and extracts records via a JSON
+///   path
+/// - `ResourceSync` — calls `surface.read_resource(uri)` and parses as JSON
+///   array
+///
+/// The `surface` is any [`McpCallSurface`] — an rmcp `Peer` for the MCP
+/// transports, or a `RestCallSurface` for the direct HTTP-API transport. The
+/// fetch logic is identical across transports; only the leaf call surface
+/// differs.
 #[async_trait]
 pub trait SyncStrategy: Send + Sync {
-    /// Fetch records from the MCP server.
+    /// Fetch records from the data source via `surface`.
     async fn fetch_records(
         &self,
-        peer: &Peer<RoleClient>,
+        surface: &dyn McpCallSurface,
         token_store: &dyn SyncTokenStore,
         token_key: &str,
     ) -> anyhow::Result<FetchResult>;
@@ -73,7 +85,7 @@ pub struct ToolSync {
 impl SyncStrategy for ToolSync {
     async fn fetch_records(
         &self,
-        peer: &Peer<RoleClient>,
+        surface: &dyn McpCallSurface,
         token_store: &dyn SyncTokenStore,
         token_key: &str,
     ) -> anyhow::Result<FetchResult> {
@@ -112,7 +124,7 @@ impl SyncStrategy for ToolSync {
 
         info!("[ToolSync] Calling tool '{}'", self.list_tool);
 
-        let result = peer
+        let result = surface
             .call_tool(CallToolRequestParam {
                 name: Cow::Owned(self.list_tool.clone()),
                 arguments: Some(params),
@@ -172,7 +184,7 @@ pub struct ResourceSync {
 impl SyncStrategy for ResourceSync {
     async fn fetch_records(
         &self,
-        peer: &Peer<RoleClient>,
+        surface: &dyn McpCallSurface,
         _: &dyn SyncTokenStore,
         _: &str,
     ) -> anyhow::Result<FetchResult> {
@@ -180,7 +192,7 @@ impl SyncStrategy for ResourceSync {
         async {
             info!("reading resource");
 
-            let result = peer
+            let result = surface
                 .read_resource(ReadResourceRequestParam {
                     uri: self.uri.clone(),
                 })
@@ -242,7 +254,8 @@ pub fn json_array_to_records(
         .collect()
 }
 
-/// Expand a URI template by replacing `{key}` placeholders with values from params.
+/// Expand a URI template by replacing `{key}` placeholders with values from
+/// params.
 ///
 /// Returns an error if any placeholder remains unresolved.
 pub fn expand_uri_template(
@@ -265,7 +278,8 @@ pub fn expand_uri_template(
 /// Inverse of `expand_uri_template`: given a template and a concrete URI,
 /// extract the parameter values. Returns `None` if the URI doesn't match.
 ///
-/// Example: `match_uri_template("x/{a}/y/{b}", "x/1/y/2")` → `Some({"a": "1", "b": "2"})`
+/// Example: `match_uri_template("x/{a}/y/{b}", "x/1/y/2")` → `Some({"a": "1",
+/// "b": "2"})`
 pub fn match_uri_template(template: &str, uri: &str) -> Option<HashMap<String, String>> {
     let mut params = HashMap::new();
     let mut template_pos = 0;

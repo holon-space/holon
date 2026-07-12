@@ -2,21 +2,38 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::Context;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 
-use crate::mcp_integration::{AuthMode, McpIntegrationConfig, McpTransport};
-use crate::mcp_sidecar::{EntityConfig, McpSidecar, ToolConfig};
+use crate::mcp_integration::AuthMode;
+use crate::mcp_integration::McpIntegrationConfig;
+use crate::mcp_integration::McpTransport;
+use crate::mcp_sidecar::EntityConfig;
+use crate::mcp_sidecar::McpSidecar;
+use crate::mcp_sidecar::ToolConfig;
 
 /// Transport configuration as declared in the YAML file.
 ///
-/// Exactly one of `child_process` or `http` must be set.
+/// Exactly one of the variants must be set. Two of them reach a server that
+/// *speaks MCP* (`child_process` = stdio, `http` = MCP-over-Streamable-HTTP);
+/// the third, `rest`, reaches a plain HTTP/JSON API *directly* via a
+/// UTCP-manual-style description (see [`RestTransport`]). All three plug into
+/// the same connector engine behind the
+/// [`crate::mcp_call_surface::McpCallSurface`] seam — one engine, plural
+/// transports.
+///
+/// Note on naming: `http` here is historical and means *MCP over HTTP*, not a
+/// generic REST call. The direct-API transport is `rest`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct TransportConfig {
     pub child_process: Option<ChildProcessTransport>,
     pub http: Option<HttpTransport>,
+    pub rest: Option<RestTransport>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChildProcessTransport {
     pub command: String,
     #[serde(default)]
@@ -26,8 +43,59 @@ pub struct ChildProcessTransport {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct HttpTransport {
     pub uri: String,
+}
+
+/// Direct HTTP-API transport (UTCP-manual style). Describes a plain JSON API by
+/// its base URL and a set of named `calls`, each a GET endpoint. A
+/// [`crate::rest_transport::RestCallSurface`] serves these calls behind the
+/// same [`McpCallSurface`](crate::mcp_call_surface::McpCallSurface) seam the
+/// MCP transports use, so the rest of the connector engine is unchanged.
+///
+/// Read-only for now: only `GET` methods are accepted (write/mutation and lease
+/// semantics are out of scope).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestTransport {
+    /// Base URL; may be `${VAR}`-expanded. No trailing slash required.
+    pub base_url: String,
+    /// Optional auth header sent on every request. NEVER inline a secret —
+    /// reference an env/keychain name via `${VAR}` in `value`.
+    #[serde(default)]
+    pub auth: Option<RestAuthConfig>,
+    /// Named endpoints, keyed by the tool name referenced from
+    /// `sync.list_tool`.
+    pub calls: HashMap<String, RestCallConfig>,
+}
+
+/// A single auth header, e.g. `{ header: Authorization, value: "Bearer
+/// ${TOKEN}" }`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestAuthConfig {
+    pub header: String,
+    /// Header value; `${VAR}`-expanded at startup. Keep the secret out of YAML.
+    pub value: String,
+}
+
+/// A single GET endpoint. `path` and `query` values may contain `{arg}`
+/// placeholders filled from the tool-call arguments at request time.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestCallConfig {
+    /// HTTP method. Only `GET` is supported today (fails loud otherwise).
+    pub method: String,
+    /// Path appended to `base_url`, e.g. `/posts` or `/users/{id}/posts`.
+    pub path: String,
+    /// Query parameters; values may be literals or `{arg}` placeholders.
+    #[serde(default)]
+    pub query: HashMap<String, String>,
+    /// If set, a non-object JSON body is wrapped as `{ result_key: <body> }` so
+    /// a `sync.extract_path` can select it (bare-array responses → object).
+    #[serde(default)]
+    pub result_key: Option<String>,
 }
 
 /// Authentication configuration (only meaningful for HTTP transport).
@@ -40,7 +108,8 @@ pub struct AuthConfig {
     pub oauth: bool,
 }
 
-/// Top-level structure of a provider YAML file in `~/.config/holon/integrations/`.
+/// Top-level structure of a provider YAML file in
+/// `~/.config/holon/integrations/`.
 ///
 /// Combines transport config with the sidecar entity/tool declarations.
 /// The provider name is derived from the filename (stem without `.yaml`).
@@ -56,7 +125,8 @@ pub struct IntegrationFileConfig {
     pub entities: HashMap<String, EntityConfig>,
     #[serde(default)]
     pub tools: HashMap<String, ToolConfig>,
-    /// Sidecar-declared derived views (see [`crate::mcp_sidecar::McpSidecar::views`]).
+    /// Sidecar-declared derived views (see
+    /// [`crate::mcp_sidecar::McpSidecar::views`]).
     #[serde(default)]
     pub views: Vec<crate::mcp_sidecar::ViewConfig>,
 }
@@ -88,8 +158,7 @@ impl std::fmt::Display for UnresolvedVar {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Variable '{}' referenced in config is not set \
-             (checked environment and settings)",
+            "Variable '{}' referenced in config is not set (checked environment and settings)",
             self.var
         )
     }
@@ -112,9 +181,10 @@ impl IntegrationFileConfig {
         self.into_mcp_config_with(provider_name, &env_var_lookup)
     }
 
-    /// Like [`into_mcp_config`](Self::into_mcp_config) but with a caller-supplied
-    /// variable resolver, so a frontend can layer app settings on top of the
-    /// environment (e.g. resolve `${TODOIST_API_KEY}` from a `todoist.api_key`
+    /// Like [`into_mcp_config`](Self::into_mcp_config) but with a
+    /// caller-supplied variable resolver, so a frontend can layer app
+    /// settings on top of the environment (e.g. resolve
+    /// `${TODOIST_API_KEY}` from a `todoist.api_key`
     /// setting). `holon-mcp-client` stays agnostic of where values come from.
     pub fn into_mcp_config_with(
         self,
@@ -139,8 +209,30 @@ impl IntegrationFileConfig {
             McpTransport::Http {
                 uri: expand_vars(&http.uri, lookup)?,
             }
+        } else if let Some(rest) = self.transport.rest {
+            let auth_header = match rest.auth {
+                Some(a) => Some((a.header, expand_vars(&a.value, lookup)?)),
+                None => None,
+            };
+            let mut calls = HashMap::with_capacity(rest.calls.len());
+            for (name, c) in rest.calls {
+                calls.insert(
+                    name,
+                    crate::rest_transport::RestCall {
+                        method: c.method,
+                        path: c.path,
+                        query: c.query,
+                        result_key: c.result_key,
+                    },
+                );
+            }
+            McpTransport::Rest(crate::rest_transport::RestManual {
+                base_url: expand_vars(&rest.base_url, lookup)?,
+                auth_header,
+                calls,
+            })
         } else {
-            anyhow::bail!("TransportConfig must have either child_process or http set");
+            anyhow::bail!("TransportConfig must set exactly one of child_process, http, or rest");
         };
 
         let auth_mode = match self.auth {
@@ -197,9 +289,11 @@ fn expand_vars(input: &str, lookup: &VarLookup<'_>) -> anyhow::Result<String> {
     Ok(out)
 }
 
-/// Scan a directory for `*.yaml` provider config files and return `(name, config)` pairs.
+/// Scan a directory for `*.yaml` provider config files and return `(name,
+/// config)` pairs.
 ///
-/// The provider name is the file stem (e.g., `claude-history.yaml` -> `"claude-history"`).
+/// The provider name is the file stem (e.g., `claude-history.yaml` ->
+/// `"claude-history"`).
 ///
 /// A missing integrations directory means "no integrations configured" and
 /// returns `Ok(vec![])` (disclosed via a debug log). Files without a
@@ -213,7 +307,8 @@ pub fn load_integration_configs(
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             tracing::debug!(
-                "[load_integration_configs] Integrations directory '{}' does not exist — no integrations configured",
+                "[load_integration_configs] Integrations directory '{}' does not exist — no \
+                 integrations configured",
                 dir.display()
             );
             return Ok(vec![]);

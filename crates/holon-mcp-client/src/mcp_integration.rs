@@ -2,28 +2,41 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Context;
-use tokio::sync::{Mutex, mpsc};
-use tokio::task::JoinHandle;
-use tracing::{Instrument, info, warn};
-
 use holon_api::DynamicEntity;
+use holon_core::CacheFactory;
+use holon_core::EntityCache;
 use holon_core::SyncTokenStore;
-use holon_core::{CacheFactory, EntityCache};
 use holon_turso::turso::DbHandle;
+use tokio::sync::Mutex;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tracing::Instrument;
+use tracing::info;
+use tracing::warn;
 
 use crate::credential_store::TursoCredentialStore;
-use crate::mcp_notification_handler::{NotifyingClientHandler, ResourceUpdateReceiver};
-use crate::mcp_provider::{
-    EntityFieldReader, McpOperationProvider, McpRunningService, connect_mcp_child_with_handler,
-    connect_mcp_oauth_with_handler, connect_mcp_with_handler,
-};
+use crate::mcp_notification_handler::NotifyingClientHandler;
+use crate::mcp_notification_handler::ResourceUpdateReceiver;
+use crate::mcp_provider::EntityFieldReader;
+use crate::mcp_provider::McpOperationProvider;
+use crate::mcp_provider::McpRunningService;
+use crate::mcp_provider::connect_mcp_child_with_handler;
+use crate::mcp_provider::connect_mcp_oauth_with_handler;
+use crate::mcp_provider::connect_mcp_with_handler;
 use crate::mcp_resource_discovery::parse_resource_template_meta;
-use crate::mcp_sidecar::{EntityConfig, McpSidecar, SyncConfig};
+use crate::mcp_sidecar::EntityConfig;
+use crate::mcp_sidecar::McpSidecar;
+use crate::mcp_sidecar::SyncConfig;
 use crate::mcp_sync_engine::McpSyncEngine;
 use crate::mcp_sync_strategy::SyncStrategy;
 use crate::sync_freshness::ProbedResourceCapabilities;
 
-/// Transport configuration for connecting to an MCP server.
+/// Transport configuration for connecting to a data source.
+///
+/// `Http`/`ChildProcess` reach a server that speaks MCP; `Rest` reaches a plain
+/// HTTP/JSON API directly via a UTCP-style manual (same connector engine,
+/// served behind the
+/// [`McpCallSurface`](crate::mcp_call_surface::McpCallSurface) seam).
 #[derive(Debug)]
 pub enum McpTransport {
     Http {
@@ -34,6 +47,7 @@ pub enum McpTransport {
         args: Vec<String>,
         env: HashMap<String, String>,
     },
+    Rest(crate::rest_transport::RestManual),
 }
 
 /// Authentication mode for MCP HTTP transport.
@@ -84,7 +98,8 @@ pub enum McpConnectionResult {
     },
 }
 
-/// Result of building an MCP integration: operation provider, sync engine, and running service.
+/// Result of building an MCP integration: operation provider, sync engine, and
+/// running service.
 pub struct McpIntegration {
     pub operation_provider: McpOperationProvider,
     pub sync_engine: Arc<McpSyncEngine>,
@@ -127,7 +142,8 @@ impl McpIntegration {
     }
 
     /// Register all entity types from the sidecar config into the TypeRegistry.
-    /// Called by frontends after building the integration so GQL graph includes MCP entities.
+    /// Called by frontends after building the integration so GQL graph includes
+    /// MCP entities.
     pub fn register_entity_types(&self, type_registry: &holon_profiles::TypeRegistry) {
         let sidecar = self.sync_engine.sidecar();
         for (entity_name, entity_config) in &sidecar.entities {
@@ -178,7 +194,8 @@ impl PendingOAuthFlows {
         self.flows.lock().await.remove(key)
     }
 
-    /// Complete an OAuth flow after the frontend captured the authorization code.
+    /// Complete an OAuth flow after the frontend captured the authorization
+    /// code.
     ///
     /// Exchanges the code for a token, connects to the MCP server, and returns
     /// the fully-wired `McpIntegration`.
@@ -190,8 +207,8 @@ impl PendingOAuthFlows {
     ) -> anyhow::Result<McpIntegration> {
         let pending = self.take(provider_name).await.ok_or_else(|| {
             anyhow::anyhow!(
-                "No pending OAuth flow for provider '{provider_name}'. \
-                 Was build_mcp_integration called first?"
+                "No pending OAuth flow for provider '{provider_name}'. Was build_mcp_integration \
+                 called first?"
             )
         })?;
 
@@ -305,10 +322,27 @@ pub async fn build_mcp_integration(
             .await?;
             Ok(McpConnectionResult::Connected(integration))
         }
+        McpTransport::Rest(_manual) => {
+            // The `rest` transport's read path is exercised through the shared
+            // `SyncStrategy`/`McpCallSurface` seam (see
+            // `crate::rest_transport::RestCallSurface`), but the production
+            // background runner is built around MCP resource *subscriptions*
+            // (`Peer::subscribe`), which a plain HTTP API cannot serve. Wiring
+            // rest into a poll-only background runner — and the leases /
+            // read-write question — are the remaining steps. Fail loud rather
+            // than silently registering an integration that never syncs.
+            anyhow::bail!(
+                "provider '{}': the `rest` transport is not yet wired into the background \
+                 integration runner (poll-only runner + lease/read-write are the open steps). Its \
+                 read path is available directly via RestCallSurface + SyncStrategy.",
+                config.provider_name
+            )
+        }
     }
 }
 
-/// Attempt OAuth connection: use stored tokens if available, otherwise return NeedsAuth.
+/// Attempt OAuth connection: use stored tokens if available, otherwise return
+/// NeedsAuth.
 async fn build_oauth_integration(
     uri: String,
     credential_store: Arc<TursoCredentialStore>,
@@ -352,7 +386,8 @@ async fn build_oauth_integration(
     info!("[OAuth] No stored credentials for '{uri}', initiating OAuth flow");
 
     // Use a custom URL scheme for flutter_web_auth_2 callback interception.
-    // The OS hands the redirect URL back to Flutter without needing a localhost server.
+    // The OS hands the redirect URL back to Flutter without needing a localhost
+    // server.
     let redirect_uri = "holon://oauth/callback";
     let client_config = auth_manager
         .register_client("holon", redirect_uri)
@@ -390,7 +425,8 @@ async fn build_oauth_integration(
     })
 }
 
-/// Common integration finalization: build caches, discover resources, build strategies, subscribe.
+/// Common integration finalization: build caches, discover resources, build
+/// strategies, subscribe.
 async fn finish_integration(
     peer: rmcp::service::Peer<rmcp::RoleClient>,
     service: McpRunningService,
@@ -427,7 +463,8 @@ async fn finish_integration(
                 let existing = sidecar.entities.get_mut(&yaml_key).unwrap();
                 if existing.schema.is_empty() {
                     info!(
-                        "[finish_integration] Merging auto-discovered schema into sidecar entity '{}' (source: '{}')",
+                        "[finish_integration] Merging auto-discovered schema into sidecar entity \
+                         '{}' (source: '{}')",
                         yaml_key, meta.entity_name
                     );
                     existing.schema = meta.fields;
@@ -518,7 +555,8 @@ async fn finish_integration(
 
             if columns.is_empty() {
                 warn!(
-                    "[finish_integration] Entity '{}' has vtable config but no schema — skipping foreign table",
+                    "[finish_integration] Entity '{}' has vtable config but no schema — skipping \
+                     foreign table",
                     entity_name
                 );
                 continue;
@@ -581,11 +619,10 @@ async fn finish_integration(
             .await
             .with_context(|| {
                 format!(
-                    "sidecar view '{}' of provider '{provider_name}': \
-                     CREATE MATERIALIZED VIEW '{view_name}' failed — fix the `views:` \
-                     SQL in the provider's sidecar YAML (IVM dialect: single-level \
-                     GROUP BY aggregates incl. substr(MAX(ts || '|' || col), N); no \
-                     correlated subqueries, self-joins, or non-equijoin LEFT JOINs)",
+                    "sidecar view '{}' of provider '{provider_name}': CREATE MATERIALIZED VIEW \
+                     '{view_name}' failed — fix the `views:` SQL in the provider's sidecar YAML \
+                     (IVM dialect: single-level GROUP BY aggregates incl. substr(MAX(ts || '|' || \
+                     col), N); no correlated subqueries, self-joins, or non-equijoin LEFT JOINs)",
                     view.name
                 )
             })?;
@@ -655,15 +692,15 @@ async fn finish_integration(
         if resource_capabilities.subscribe {
             sync_engine.subscribe_all().await.with_context(|| {
                 format!(
-                    "provider '{provider_name}': server advertises resources.subscribe \
-                     but subscribing failed"
+                    "provider '{provider_name}': server advertises resources.subscribe but \
+                     subscribing failed"
                 )
             })?;
         } else if poll_entities.is_empty() {
             warn!(
-                "provider {provider_name}: no resources.subscribe capability and no \
-                 sync.interval configured — caches will be STALE after the initial sync \
-                 (add `sync: {{ interval: 60s }}` to entities in the sidecar YAML to poll)"
+                "provider {provider_name}: no resources.subscribe capability and no sync.interval \
+                 configured — caches will be STALE after the initial sync (add `sync: {{ \
+                 interval: 60s }}` to entities in the sidecar YAML to poll)"
             );
         } else {
             let cadences: Vec<String> = poll_entities
@@ -671,8 +708,7 @@ async fn finish_integration(
                 .map(|(name, d)| format!("{name}@{}s", d.as_secs()))
                 .collect();
             warn!(
-                "provider {provider_name}: no resources.subscribe — falling back to \
-                 polling at {}",
+                "provider {provider_name}: no resources.subscribe — falling back to polling at {}",
                 cadences.join(", ")
             );
         }

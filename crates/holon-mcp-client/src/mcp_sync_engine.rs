@@ -1,23 +1,34 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use holon_api::Change;
+use holon_api::ChangeOrigin;
+use holon_api::DynamicEntity;
+use holon_api::EntityUri;
+use holon_api::StreamPosition;
+use holon_api::Value;
+use holon_core::EntityCache;
+use holon_core::MatviewHook;
+use holon_core::Result;
+use holon_core::SyncTokenStore;
+use holon_core::SyncableProvider;
+use holon_turso::turso::DbHandle;
 use rmcp::RoleClient;
 use rmcp::model::SubscribeRequestParam;
 use rmcp::service::Peer;
-use tracing::{Instrument, debug, info, info_span, warn};
-
-use holon_api::StreamPosition;
-use holon_api::{Change, ChangeOrigin, DynamicEntity, EntityUri, Value};
-use holon_core::EntityCache;
-use holon_core::MatviewHook;
-use holon_core::{Result, SyncTokenStore, SyncableProvider};
-use holon_turso::turso::DbHandle;
+use tracing::Instrument;
+use tracing::debug;
+use tracing::info;
+use tracing::info_span;
+use tracing::warn;
 
 use crate::mcp_sidecar::McpSidecar;
-use crate::mcp_sync_strategy::{
-    SyncStrategy, expand_uri_template, json_value_to_holon_value, match_uri_template,
-};
+use crate::mcp_sync_strategy::SyncStrategy;
+use crate::mcp_sync_strategy::expand_uri_template;
+use crate::mcp_sync_strategy::json_value_to_holon_value;
+use crate::mcp_sync_strategy::match_uri_template;
 
 /// Scheme-prefix a record id value. Single source of truth for id prefixing so
 /// `record_to_entity` and `record_id` can never diverge (a divergence makes the
@@ -45,7 +56,8 @@ fn fetched_matches_cached(fetched: &DynamicEntity, cached: &DynamicEntity) -> bo
     true
 }
 
-/// Describes an FDW-backed vtable entity that should be refreshed on resource notifications.
+/// Describes an FDW-backed vtable entity that should be refreshed on resource
+/// notifications.
 pub struct VtableSubscription {
     /// URI template, e.g. `"claude-history://sessions/{session_id}/messages"`
     pub uri_template: String,
@@ -55,7 +67,8 @@ pub struct VtableSubscription {
     pub param_columns: Vec<String>,
 }
 
-/// Generic MCP sync engine that pulls data from any MCP server into local cache tables.
+/// Generic MCP sync engine that pulls data from any MCP server into local cache
+/// tables.
 ///
 /// Uses `SyncStrategy` to abstract over tool-based and resource-based fetching.
 /// Also handles vtable-backed entities via FDW cache refresh on notifications.
@@ -109,8 +122,8 @@ impl McpSyncEngine {
         }
     }
 
-    /// Convert a fetched JSON record into a `DynamicEntity`, prefixing the ID column
-    /// with the entity's URI scheme.
+    /// Convert a fetched JSON record into a `DynamicEntity`, prefixing the ID
+    /// column with the entity's URI scheme.
     fn record_to_entity(
         &self,
         entity_name: &str,
@@ -149,8 +162,8 @@ impl McpSyncEngine {
     /// Sync a single entity using its strategy.
     ///
     /// For incremental sync (cursor present), all fetched records are appended.
-    /// For full sync (no cursor), diffs against the cache to only insert new records,
-    /// delete removed records, and skip unchanged ones.
+    /// For full sync (no cursor), diffs against the cache to only insert new
+    /// records, delete removed records, and skip unchanged ones.
     async fn sync_entity(
         &self,
         entity_name: &str,
@@ -172,7 +185,11 @@ impl McpSyncEngine {
         let token_key = format!("{}.{}", self.provider_name, entity_name);
 
         let fetch_result = strategy
-            .fetch_records(&self.peer, self.token_store.as_ref(), &token_key)
+            .fetch_records(
+                &self.peer as &dyn crate::mcp_call_surface::McpCallSurface,
+                self.token_store.as_ref(),
+                &token_key,
+            )
             .await
             .map_err(|e| format!("sync_entity '{entity_name}': {e}"))?;
 
@@ -229,8 +246,9 @@ impl McpSyncEngine {
             let removed_ids: HashSet<&EntityUri> = existing_ids.difference(&fetched_ids).collect();
             let overlapping_count = fetched_ids.len() - new_ids.len();
 
-            // If there are overlapping IDs, we need full rows to detect field-level changes.
-            // If it's purely append + delete (no overlap), skip the expensive get_all.
+            // If there are overlapping IDs, we need full rows to detect field-level
+            // changes. If it's purely append + delete (no overlap), skip the
+            // expensive get_all.
             let (mut changes, updated_count) = if overlapping_count > 0 {
                 let existing: Vec<DynamicEntity> = cache.get_all().await?;
                 let existing_by_id: HashMap<EntityUri, &DynamicEntity> = existing
@@ -241,7 +259,8 @@ impl McpSyncEngine {
                             Some(Value::Integer(n)) => n.to_string(),
                             _ => return None,
                         };
-                        // ALLOW(entity_uri_from_raw): DynamicEntity id-column string from cache.get_all (no typed id)
+                        // ALLOW(entity_uri_from_raw): DynamicEntity id-column string from
+                        // cache.get_all (no typed id)
                         Some((EntityUri::from_raw(&id_str), e))
                     })
                     .collect();
@@ -315,7 +334,8 @@ impl McpSyncEngine {
         Ok(())
     }
 
-    /// Subscribe to resource update notifications for all sync + vtable entities.
+    /// Subscribe to resource update notifications for all sync + vtable
+    /// entities.
     pub async fn subscribe_all(&self) -> anyhow::Result<()> {
         for (uri, entity_name) in &self.uri_to_entity {
             info!(
@@ -349,7 +369,8 @@ impl McpSyncEngine {
                     })?;
             } else {
                 info!(
-                    "[McpSyncEngine] Vtable '{}' has dynamic params {:?} — relying on broadcast notifications",
+                    "[McpSyncEngine] Vtable '{}' has dynamic params {:?} — relying on broadcast \
+                     notifications",
                     sub.fdw_table, sub.param_columns
                 );
             }
@@ -359,7 +380,8 @@ impl McpSyncEngine {
     }
 
     /// Re-sync a single entity identified by its subscription URI.
-    /// Tries the sync path first (exact URI match), then the vtable path (template match).
+    /// Tries the sync path first (exact URI match), then the vtable path
+    /// (template match).
     pub async fn resync_by_uri(&self, uri: &str) -> anyhow::Result<()> {
         // Try sync path (exact URI match)
         if let Some(entity_name) = self.uri_to_entity.get(uri) {
@@ -390,8 +412,9 @@ impl McpSyncEngine {
         Ok(())
     }
 
-    /// Refresh an FDW-backed cache table by matching the URI against vtable templates.
-    /// Returns `true` if a template matched and the refresh was attempted.
+    /// Refresh an FDW-backed cache table by matching the URI against vtable
+    /// templates. Returns `true` if a template matched and the refresh was
+    /// attempted.
     async fn resync_vtable_by_uri(&self, uri: &str) -> anyhow::Result<bool> {
         let db_handle = match &self.db_handle {
             Some(h) => h,
@@ -460,7 +483,8 @@ impl McpSyncEngine {
             .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
-    /// Sync all entities. Convenience wrapper around the SyncableProvider trait.
+    /// Sync all entities. Convenience wrapper around the SyncableProvider
+    /// trait.
     pub async fn sync_all(&self) -> anyhow::Result<()> {
         self.sync(StreamPosition::Beginning)
             .await
@@ -515,13 +539,14 @@ impl MatviewHook for McpSyncEngine {
             None => return,
         };
 
-        // If the template has no dynamic params, it's already subscribed via subscribe_all.
+        // If the template has no dynamic params, it's already subscribed via
+        // subscribe_all.
         if sub.param_columns.is_empty() {
             return;
         }
 
-        // Extract param values from the FDW SQL WHERE clause to reconstruct the concrete URI.
-        // Parse simple "column = 'value'" patterns from the SQL.
+        // Extract param values from the FDW SQL WHERE clause to reconstruct the
+        // concrete URI. Parse simple "column = 'value'" patterns from the SQL.
         let mut params = HashMap::new();
         for col in &sub.param_columns {
             let pattern = format!("{col} = '");
@@ -558,7 +583,8 @@ impl SyncableProvider for McpSyncEngine {
         &self.provider_name
     }
 
-    // ALLOW(unused_param): _position required by trait shape — full sync ignores stream position
+    // ALLOW(unused_param): _position required by trait shape — full sync ignores
+    // stream position
     async fn sync(&self, _position: StreamPosition) -> Result<StreamPosition> {
         let span = info_span!("mcp_full_sync", provider = %self.provider_name);
         async {

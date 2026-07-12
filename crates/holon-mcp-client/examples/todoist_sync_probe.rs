@@ -4,16 +4,21 @@
 //! `structured_content`), and a cursor round-trip to a second page.
 //!
 //! Usage:
-//!   TODOIST_API_KEY=... cargo run -p holon-mcp-client --example todoist_sync_probe -- \
-//!     docs/integrations/todoist.yaml
+//!   TODOIST_API_KEY=... cargo run -p holon-mcp-client --example
+//! todoist_sync_probe -- \     docs/integrations/todoist.yaml
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Context;
+use anyhow::Result;
+use anyhow::bail;
 use holon_api::StreamPosition;
 use holon_core::SyncTokenStore;
-use holon_mcp_client::{AuthMode, IntegrationFileConfig, McpTransport, connect_mcp};
+use holon_mcp_client::AuthMode;
+use holon_mcp_client::IntegrationFileConfig;
+use holon_mcp_client::McpTransport;
+use holon_mcp_client::connect_mcp;
 
 struct MemTokenStore {
     tokens: tokio::sync::Mutex<HashMap<String, StreamPosition>>,
@@ -91,7 +96,11 @@ async fn main() -> Result<()> {
 
         // ----- Page 1 (no cursor yet) -----
         let page1 = strategy
-            .fetch_records(&peer, &store, &key)
+            .fetch_records(
+                &peer as &dyn holon_mcp_client::mcp_call_surface::McpCallSurface,
+                &store,
+                &key,
+            )
             .await
             .with_context(|| format!("fetch page 1 for {entity_name}"))?;
         let first_ids = sample_ids(&page1.records, entity.id_column.as_deref().unwrap_or("id"));
@@ -116,14 +125,19 @@ async fn main() -> Result<()> {
                 .await
                 .ok();
             let page2 = strategy
-                .fetch_records(&peer, &store, &key)
+                .fetch_records(
+                    &peer as &dyn holon_mcp_client::mcp_call_surface::McpCallSurface,
+                    &store,
+                    &key,
+                )
                 .await
                 .with_context(|| format!("fetch page 2 for {entity_name}"))?;
             let second_ids =
                 sample_ids(&page2.records, entity.id_column.as_deref().unwrap_or("id"));
             let advanced = second_ids.iter().all(|id| !first_ids.contains(id));
             println!(
-                "{entity_name}: page2 = {} records | cursor advanced (no overlap) = {advanced} | sample = {:?}",
+                "{entity_name}: page2 = {} records | cursor advanced (no overlap) = {advanced} | \
+                 sample = {:?}",
                 page2.records.len(),
                 second_ids,
             );

@@ -123,11 +123,22 @@ Increment 2 — one ruling each, then fleet-executable:
 
 Increment 3:
 - C1 connectors. RULED (Martin 2026-07-11): Todoist-class connectors are ALREADY EXPRESSIBLE today
-  via MCP + yaml sidecar (working examples: assets/queries/todoist.yaml, claude-history.yaml,
-  todoist_hierarchy.prql) — C1 demotes to generalization: document the recipe, then add a second
-  transport where the sidecar describes direct HTTP-API interaction instead of a server — UTCP
-  manuals / OpenAPI-derived (UTCP can also describe MCP, so transports stay plural:
+  via MCP + yaml sidecar (working examples: docs/integrations/todoist.yaml, claude-history.yaml,
+  assets/queries/todoist_hierarchy.prql) — C1 demotes to generalization: document the recipe, then
+  add a second transport where the sidecar describes direct HTTP-API interaction instead of a
+  server — UTCP manuals / OpenAPI-derived (UTCP can also describe MCP, so transports stay plural:
   mcp | http(UTCP/OpenAPI) | graphql-later). Leases/read-write question unchanged.
+  LANDED (2026-07-12): (1) connector recipe documented — docs/integrations/README.md (resource→
+  block-shape, op→tool, sync policy, transports; Todoist walked through). (2) Transport plurality:
+  `transport: rest` added to the sidecar schema (serde deny_unknown_fields, typed, `${VAR}`-only
+  secrets) alongside the existing `child_process`/`http`(=MCP-over-HTTP) MCP transports; a
+  `RestCallSurface` serves a UTCP-style manual (base_url + GET `calls` + `{arg}`/`result_key`
+  mapping) behind the SAME `McpCallSurface`/`SyncStrategy` read seam — one engine, plural
+  transports (holon-mcp-client/src/rest_transport.rs). (3) Read-only example jsonplaceholder.yaml +
+  end-to-end test against a LOCAL mock server (holon-mcp-client/tests/rest_transport_mock.rs, no
+  network). STILL OPEN (unchanged): leases/read-write; and `rest` background-runner wiring (prod
+  runner is built on MCP resource subscriptions, which a plain HTTP API can't serve — poll-only
+  runner is the remaining step; build_mcp_integration fails loud for a `rest` sidecar until then).
 - C5 trust gate. RULING: literally "sub-threshold origins coerced to display-place emission", or a
   separate permission check at the dispatcher? (Recommended: the former.)
 
