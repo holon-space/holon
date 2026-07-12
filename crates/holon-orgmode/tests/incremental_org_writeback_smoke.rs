@@ -212,8 +212,36 @@ fn make_doc_and_blocks() -> (Block, Vec<Block>) {
     (doc, vec![b1, b2, b3])
 }
 
+/// A `Page` doc with `n` leaf children `b0..b{n-1}` (content `heading {i}`) —
+/// used by the mass-truncation tripwire test, which needs enough blocks that
+/// dropping a large fraction crosses the threshold.
+fn make_doc_and_n_blocks(n: usize) -> (Block, Vec<Block>) {
+    let doc_id = EntityUri::block("doc-1");
+    let mut doc = Block::new_text(doc_id.clone(), EntityUri::no_parent(), "My Document");
+    doc.set_page(true);
+    let blocks = (0..n)
+        .map(|i| {
+            Block::new_text(
+                EntityUri::block(&format!("b{i}")),
+                doc_id.clone(),
+                &format!("heading {i}"),
+            )
+        })
+        .collect();
+    (doc, blocks)
+}
+
 fn build_harness() -> Harness {
     let (doc, blocks) = make_doc_and_blocks();
+    build_harness_from(doc, blocks)
+}
+
+fn build_harness_with_blocks(n: usize) -> Harness {
+    let (doc, blocks) = make_doc_and_n_blocks(n);
+    build_harness_from(doc, blocks)
+}
+
+fn build_harness_from(doc: Block, blocks: Vec<Block>) -> Harness {
     let reader = Arc::new(CountingBlockReader::new(doc.id.clone(), blocks));
     let doc_manager = Arc::new(StubDocManager { doc: doc.clone() });
     let tmp = tempfile::tempdir().unwrap();
@@ -426,5 +454,175 @@ async fn remove_takes_full_reseed() {
         h.reader.get_blocks_calls(),
         baseline + 1,
         "a Remove must take the full reseed (get_blocks)"
+    );
+}
+
+/// **Fork B B1' (RED-first): a SINGLE ungrounded drop on the block-driven path
+/// passes SILENTLY (below the mass-truncation tripwire).** After the file is on
+/// disk with b1/b2/b3, the store loses b2 and a reseed renders b1/b3. On this
+/// path a single ungrounded drop is indistinguishable from a routine deletion —
+/// the block feed collapses every removal to a full re-render and delivers NO
+/// delete op here (see `di.rs`). The mass-truncation tripwire fires only on the
+/// row-28 signature (a large fraction of the file), so this 1-of-3 drop
+/// PROCEEDS (disk shrinks to b1/b3), the file is NOT quarantined, and no loud
+/// error is emitted (else routine deletions would flood
+/// `inv-no-observed-errors`). Hard grounding of every drop is deferred to the
+/// C2b history relation / removal-op delivery.
+#[tokio::test]
+async fn block_driven_writeback_small_drop_passes_silently() {
+    let mut h = build_harness();
+    let all = h.reader.blocks.lock().unwrap().clone();
+    let (b1, b3) = (all[0].clone(), all[2].clone());
+
+    // Seed disk with the full doc (b1/b2/b3).
+    h.controller
+        .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b1.clone()))
+        .await
+        .unwrap();
+    let on_disk = std::fs::read_to_string(&h.path).unwrap();
+    assert!(
+        on_disk.contains("Second heading"),
+        "precondition: b2 must be on disk; got {on_disk:?}"
+    );
+
+    // The store loses b2. Force a reseed via a tags change on b1 so the render is
+    // b1/b3 — b2 dropped, delta is an Upsert (no delete op, no sibling →
+    // ungrounded).
+    h.reader.set_blocks(vec![b1.clone(), b3.clone()]);
+    let mut b1_tagged = b1.clone();
+    let mut tags = Tags::default();
+    tags.insert("Page");
+    b1_tagged.tags = tags;
+    h.reader.set_block(b1_tagged.clone());
+
+    h.controller
+        .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b1_tagged))
+        .await
+        .expect("a single ungrounded drop is below the tripwire — proceeds, never Err");
+
+    // The write proceeded — disk converged to b1/b3 (a routine deletion must reach
+    // disk; the small-drop case passes the tripwire silently).
+    let after = std::fs::read_to_string(&h.path).unwrap();
+    assert!(
+        !after.contains("Second heading"),
+        "the small drop must be written (deletion converges), not vetoed; got {after:?}"
+    );
+
+    // NOT quarantined: a later edit still writes normally.
+    let mut b1_v2 = b1.clone();
+    b1_v2.content = "First heading edited".to_string();
+    h.reader.set_blocks(vec![b1_v2.clone(), b3.clone()]);
+    h.controller
+        .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b1_v2))
+        .await
+        .expect("a non-quarantined file keeps accepting writes");
+    let after_edit = std::fs::read_to_string(&h.path).unwrap();
+    assert!(
+        after_edit.contains("First heading edited"),
+        "the file is not quarantined — later edits still land; got {after_edit:?}"
+    );
+}
+
+/// **Fork B B1' (RED-first): a MASS TRUNCATION (row-28 signature) VETOES +
+/// quarantines.** A 20-block doc is on disk; the store then loses 15 of them
+/// (an FK-rollback-style truncation — NOT a user delete: the delta is an
+/// `Upsert` and none has a sibling file). A reseed renders only 5 blocks;
+/// writing it would DELETE 15 lines from disk. 15 dropped > `max(3, 20/4=5)=5`
+/// → the mass-truncation tripwire fires: the write is REFUSED (Err), disk is
+/// left intact, and the file is quarantined so a later edit is skipped too.
+/// This is the row-28 protection on the block-driven path.
+#[tokio::test]
+async fn block_driven_writeback_vetoes_mass_truncation() {
+    let mut h = build_harness_with_blocks(20);
+    let all = h.reader.blocks.lock().unwrap().clone();
+    let b0 = all[0].clone();
+
+    // Seed disk with all 20 blocks.
+    h.controller
+        .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b0.clone()))
+        .await
+        .unwrap();
+    let seeded = std::fs::read_to_string(&h.path).unwrap();
+    assert!(
+        seeded.contains("heading 19"),
+        "precondition: all 20 blocks on disk; got {seeded:?}"
+    );
+
+    // The store TRUNCATES to the first 5 blocks (15 lost). Force a reseed via a
+    // tags change on b0 — delta is an Upsert (no sanctioned removal).
+    let keep: Vec<Block> = all[..5].to_vec();
+    h.reader.set_blocks(keep);
+    let mut b0_tagged = b0.clone();
+    let mut tags = Tags::default();
+    tags.insert("Page");
+    b0_tagged.tags = tags;
+    h.reader.set_block(b0_tagged.clone());
+
+    let veto = h
+        .controller
+        .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b0_tagged))
+        .await;
+    assert!(
+        veto.is_err(),
+        "a 15-of-20 mass truncation must VETO the write-back (Err), not write 5 blocks"
+    );
+    let msg = format!("{:#}", veto.unwrap_err());
+    assert!(
+        msg.contains("MASS TRUNCATION"),
+        "veto error must name the mass-truncation tripwire; got {msg}"
+    );
+
+    // Disk is intact — the truncated projection was refused.
+    let after_veto = std::fs::read_to_string(&h.path).unwrap();
+    assert!(
+        after_veto.contains("heading 19"),
+        "the vetoed write must leave all 20 blocks on disk; got {after_veto:?}"
+    );
+
+    // Quarantined: a subsequent benign edit is skipped (no write over disk).
+    h.controller
+        .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b0))
+        .await
+        .expect("a quarantined file's later edit is skipped (Ok), not an error");
+    let after_second = std::fs::read_to_string(&h.path).unwrap();
+    assert!(
+        after_second.contains("heading 19"),
+        "the file stays quarantined — no truncated write over disk; got {after_second:?}"
+    );
+}
+
+/// **Fork B B1' (RED-first): a GENUINE user deletion writes the shrunken file
+/// WITHOUT any drop warning.** Same drop shape as above, but the triggering
+/// delta is `Remove(b2)` — an op that SANCTIONS b2's disappearance (ADR 0025).
+/// The guard grounds b2 in the delta's `Remove` set, so the shrunken b1/b3 file
+/// is written cleanly (no drop surfaced). This is the controller's own Remove
+/// path (the production feed does not emit it today, but the mechanism is
+/// correct).
+#[tokio::test]
+async fn block_driven_writeback_writes_sanctioned_deletion() {
+    let mut h = build_harness();
+    let all = h.reader.blocks.lock().unwrap().clone();
+    let (b1, b3) = (all[0].clone(), all[2].clone());
+
+    h.controller
+        .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b1.clone()))
+        .await
+        .unwrap();
+
+    // The user deletes b2: the store loses it AND the delta carries Remove(b2).
+    h.reader.set_blocks(vec![b1, b3]);
+    h.controller
+        .on_block_changed(&h.doc.id, &BlockDelta::Remove(EntityUri::block("b2")))
+        .await
+        .expect("a sanctioned deletion (Remove delta) must write, never veto");
+
+    let written = std::fs::read_to_string(&h.path).unwrap();
+    assert!(
+        !written.contains("Second heading"),
+        "the sanctioned deletion of b2 must shrink the file; got {written:?}"
+    );
+    assert!(
+        written.contains("First heading") && written.contains("Third heading"),
+        "the surviving blocks b1/b3 must remain; got {written:?}"
     );
 }
