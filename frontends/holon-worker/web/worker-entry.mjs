@@ -166,6 +166,30 @@ self.addEventListener('message', async (e) => {
       case 'engineInit':
         value = mod.engineInit(args[0]) ?? null
         break
+      case 'engineResetStorage': {
+        // B2: clear local data. Tear the engine down first (Rust releases the
+        // Turso OPFS file handles), THEN close the sync-access handles and
+        // delete the files. Deleting while sync handles are open throws
+        // NoModificationAllowedError, so ordering is load-bearing. args = [dbPath].
+        const dbPath = args[0]
+        mod.engineResetStorage()
+        for (const f of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+          await opfs.unregisterFile(f)
+        }
+        const root = await navigator.storage.getDirectory()
+        for (const f of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+          try {
+            await root.removeEntry(f)
+          } catch (e) {
+            // NotFoundError is fine (file may not exist); anything else — e.g.
+            // NoModificationAllowedError — means a handle is still open, which
+            // is a real bug we must surface, not swallow.
+            if (e && e.name !== 'NotFoundError') throw e
+          }
+        }
+        value = null
+        break
+      }
       case 'engineExecuteSql':
         value = Number(mod.engineExecuteSql(args[0]))
         break
