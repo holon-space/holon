@@ -51,24 +51,11 @@ variants:
     priority: 2
     condition: 'role == "page_title"'
     render: 'text(col("content"), #{style: "h1"})'
-  - name: root_layout
-    priority: 1
-    condition: 'id == "block:root-layout"'
-    # Narrow-viewport branch (≤600 px) stacks the phone three-panel
-    # columns above a bottom-docked action bar composed from primitives —
-    # no specialized widget. `bottom_dock` pins the bar to the bottom
-    # inset; `chain_ops(0)` emits one row per operation registered on the
-    # focused block's URI scheme; each row renders as a tappable
-    # `op_button`. Wider branches keep the existing 3-column layout (no
-    # bar — there's plenty of room for inline operation menus).
-    render: >-
-      if_space(600,
-        bottom_dock(
-          columns(drawer("block:default-left-sidebar", live_block("block:default-left-sidebar"), #{mode: "overlay"}), live_block("block:default-main-panel"), drawer("block:default-right-sidebar", live_block("block:default-right-sidebar"), #{mode: "overlay"})),
-          columns(#{gap: 8, collection: chain_ops(0), item_template: op_button(col("name"))})),
-        if_space(1000,
-          columns(drawer("block:default-left-sidebar", live_block("block:default-left-sidebar"), #{mode: "shrink"}), live_block("block:default-main-panel"), drawer("block:default-right-sidebar", live_block("block:default-right-sidebar"), #{mode: "overlay"})),
-          columns(drawer("block:default-left-sidebar", live_block("block:default-left-sidebar"), #{mode: "shrink"}), live_block("block:default-main-panel"), drawer("block:default-right-sidebar", live_block("block:default-right-sidebar"), #{mode: "shrink"}))))
+  # NOTE: the former `root_layout` variant (hardcoded 3-column layout keyed on
+  # `id == "block:root-layout"`) is GONE: the ROOT display slot's layout is now
+  # synthesized from perspective/panel DATA by both render-derivation arms
+  # (`BlockDomain::render_root_slot` / `loro_ui_watcher::derive_root_slot_expr`
+  # via `PerspectiveSpec::layout_expr`). See holon_api::perspective.
   # Program blocks (rule heads + their trigger siblings, ADR 0024 WP3) render as
   # the rule card, NEVER as a query result or raw source text. Priority 0 wins
   # over the whole -1 variant cluster (holon_source spacer, source query_result),
