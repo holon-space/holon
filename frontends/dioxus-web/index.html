@@ -7,34 +7,216 @@
     <link data-trunk rel="rust" data-bin="holon-dioxus-web" data-wasm-opt="z" />
     <style>
       :root {
-        --bg: #121212;
-        --bg-sidebar: #1e1e1e;
-        --surface: #1a1a1a;
-        --surface-elevated: #2a2a2a;
-        --border: #333333;
-        --text-primary: #e0e0e0;
-        --text-secondary: #b0b0b0;
-        --text-muted: #808080;
-        --accent: #7b9fff;
+        /* ── Palette (dark, Notion/Linear-flavoured) ─────────────────── */
+        --bg:              #191919;
+        --bg-sidebar:      #1c1c1c;
+        --bg-titlebar:     #1c1c1e;
+        --bg-banner:       #202022;
+        --surface:         #1f1f1f;
+        --surface-elevated:#252527;
+        --surface-hover:   rgba(255, 255, 255, 0.045);
+        --border:          rgba(255, 255, 255, 0.09);
+        --border-strong:   rgba(255, 255, 255, 0.14);
+        --indent-guide:    rgba(255, 255, 255, 0.08);
+
+        --text-primary:    #e4e4e6;
+        --text-secondary:  #a2a2a6;
+        --text-muted:      #6d6d72;
+        --text-faint:      #4d4d52;
+
+        --accent:          #4a9eda;
+        --accent-hover:    #5aa9e0;
+        --accent-soft:     rgba(74, 158, 218, 0.16);
+        --selection:       rgba(74, 158, 218, 0.30);
+        --danger:          #e5666b;
+
+        --reading-width:   740px;
+        --sidebar-width:   240px;
+
+        --radius:          6px;
+        --radius-sm:       4px;
+
+        color-scheme: dark;
       }
+
       html, body {
         margin: 0;
         padding: 0;
+        height: 100%;
         background: var(--bg);
         color: var(--text-primary);
-        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        font-size: 14px;
-        line-height: 1.5;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter",
+                     system-ui, "Helvetica Neue", Arial, sans-serif;
+        font-size: 15px;
+        line-height: 1.6;
         -webkit-font-smoothing: antialiased;
+        text-rendering: optimizeLegibility;
       }
       * { box-sizing: border-box; }
+
+      ::selection { background: var(--selection); }
+      :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+
+      /* ── Scrollbars ──────────────────────────────────────────────────── */
+      * { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+      ::-webkit-scrollbar { width: 10px; height: 10px; }
+      ::-webkit-scrollbar-track { background: transparent; }
+      ::-webkit-scrollbar-thumb {
+        background: var(--border-strong);
+        border-radius: 6px;
+        border: 2px solid transparent;
+        background-clip: content-box;
+      }
+      ::-webkit-scrollbar-thumb:hover { background: var(--text-faint); background-clip: content-box; }
+
+      /* ── Top banner ──────────────────────────────────────────────────── */
       .holon-banner {
-        background: var(--surface-elevated);
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        background: var(--bg-banner);
         border-bottom: 1px solid var(--border);
-        padding: 8px 16px;
+        padding: 6px 16px;
         font-size: 12px;
         color: var(--text-muted);
       }
+      .holon-banner::before {
+        content: "";
+        width: 6px; height: 6px;
+        border-radius: 50%;
+        background: var(--accent);
+        opacity: 0.7;
+        flex-shrink: 0;
+      }
+
+      /* ── App shell: columns / sidebar / reading column ──────────────── */
+      .holon-columns {
+        display: flex;
+        flex-direction: row;
+        align-items: stretch;
+        width: 100%;
+        min-height: 100%;
+        gap: 0;
+      }
+      .holon-col-sidebar {
+        flex: 0 0 var(--sidebar-width);
+        min-width: 0;
+        align-self: stretch;
+        background: var(--bg-sidebar);
+        border-right: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 10px 8px;
+        overflow-y: auto;
+      }
+      .holon-col-main {
+        flex: 1 1 0;
+        min-width: 0;
+        display: flex;
+        justify-content: center;
+        padding: 4px 24px 64px;
+      }
+      .holon-col-main > * {
+        width: 100%;
+        max-width: var(--reading-width);
+      }
+      /* right rail: sizes to its content and collapses to nothing when the
+         panel's query is empty (the seed's default right sidebar). */
+      .holon-col-rail {
+        flex: 0 1 auto;
+        min-width: 0;
+      }
+      /* single-column layouts (narrow viewports) still get a centred column */
+      .holon-columns > .holon-col-main:only-child { padding-top: 8px; }
+
+      /* ── Sidebar navigation items ───────────────────────────────────── */
+      .holon-col-sidebar [data-role="selectable"] {
+        display: flex;
+        align-items: center;
+        padding: 4px 8px;
+        border-radius: var(--radius-sm);
+        color: var(--text-secondary);
+        transition: background 90ms ease, color 90ms ease;
+      }
+      .holon-col-sidebar [data-role="selectable"]:hover {
+        background: var(--surface-hover);
+        color: var(--text-primary);
+      }
+      .holon-col-sidebar [data-role="selectable"] span { line-height: 1.4; }
+
+      /* ── Bullets / source-language icon (reveal on row hover) ───────── */
+      [data-role="draggable"] { position: relative; transition: opacity 90ms ease; }
+      [data-role="draggable"]:hover { cursor: grab; }
+      .holon-icon {
+        display: inline-block;
+        width: 14px;                /* fixed bullet slot — no layout shift */
+        font-size: 0;               /* hide the literal "·lang" text */
+        color: var(--text-muted);
+        vertical-align: baseline;
+        white-space: nowrap;
+      }
+      .holon-icon::before {
+        content: "•";
+        font-size: 15px;
+        line-height: 1;
+        color: var(--text-faint);
+      }
+      /* On block-row hover, reveal the source-language label floated into the
+         gutter to the left of the bullet, so revealing it shifts nothing. */
+      .holon-row:hover [data-role="draggable"] .holon-icon {
+        position: absolute;
+        right: calc(100% + 6px);
+        top: 0;
+        width: auto;
+        font-size: 0.68em;
+        color: var(--text-faint);
+      }
+      .holon-row:hover [data-role="draggable"] .holon-icon::before { content: ""; }
+
+      /* ── Block rows: hover affordance + rhythm ──────────────────────── */
+      .holon-row {
+        border-radius: var(--radius-sm);
+        transition: background 80ms ease;
+      }
+      .holon-row:hover { background: var(--surface-hover); }
+      /* Block body fills the row beside the bullet and wraps in place instead
+         of dropping to its own line under the bullet on narrow widths. */
+      .holon-row > [data-role="rendered-text"],
+      .holon-row > [data-role="editor-cell"] { flex: 1 1 0; min-width: 0; }
+
+      /* ── Editable / rendered text: caret + placeholder ──────────────── */
+      [data-role="rendered-text"], [data-role="editor-cell"] {
+        caret-color: var(--accent);
+        border-radius: 3px;
+      }
+      [data-role="editor-cell"]:focus,
+      [data-role="editor-cell"]:focus-visible { outline: none; }
+
+      /* ── Drop zone highlight (drag feedback) ────────────────────────── */
+      [data-role="drop-zone"] { transition: background 80ms ease, height 80ms ease; }
+
+      /* ── Document title (first block of the focused reading column) ──── */
+      .holon-col-main > [data-block-id] > *:first-child > div:first-child {
+        margin-bottom: 6px;
+      }
+      .holon-col-main > [data-block-id] > *:first-child > div:first-child > span,
+      .holon-col-main > [data-block-id] > *:first-child > div:first-child > [data-role="rendered-text"],
+      .holon-col-main > [data-block-id] > *:first-child > div:first-child > [data-role="editor-cell"] {
+        font-size: 1.75em;
+        font-weight: 700;
+        line-height: 1.25;
+        color: var(--text-primary);
+        letter-spacing: -0.01em;
+      }
+
+      /* ── Narrow viewports ───────────────────────────────────────────── */
+      @media (max-width: 640px) {
+        :root { --sidebar-width: 200px; }
+        .holon-col-main { padding: 4px 14px 48px; }
+        .holon-col-sidebar { padding: 8px 6px; }
+      }
+
+      /* ── Full-screen states (boot / empty) inherit these ────────────── */
+      #main { height: 100%; }
     </style>
   </head>
   <body>

@@ -8,7 +8,8 @@ pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
     };
     rsx! {
         div {
-            style: "display: flex; flex-direction: column; gap: 0px;",
+            class: "holon-outline",
+            style: "display: flex; flex-direction: column; gap: 2px;",
             for (key, child) in keyed_children(&children.items) {
                 RenderNode { key: "{key}", node: child.clone() }
             }
