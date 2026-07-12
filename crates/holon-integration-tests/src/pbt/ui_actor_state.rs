@@ -97,6 +97,39 @@ impl UITabState {
     }
 }
 
+impl UITabState {
+    pub fn current_focus(&self, region: Region) -> Option<EntityUri> {
+        self.navigation_history
+            .get(&region)
+            .and_then(|h| h.current_focus())
+    }
+
+    pub fn can_go_back(&self, region: Region) -> bool {
+        self.navigation_history
+            .get(&region)
+            .map(|h| h.can_go_back())
+            .unwrap_or(false)
+    }
+
+    pub fn can_go_forward(&self, region: Region) -> bool {
+        self.navigation_history
+            .get(&region)
+            .map(|h| h.can_go_forward())
+            .unwrap_or(false)
+    }
+
+    /// Whether any region currently has a focused entity (required for
+    /// ArrowNavigate).
+    pub fn has_focus(&self) -> bool {
+        !self.focused_entity_id.is_empty()
+    }
+
+    /// Get the focused entity in a region (set by ClickBlock).
+    pub fn focused_entity(&self, region: Region) -> Option<&EntityUri> {
+        self.focused_entity_id.get(&region)
+    }
+}
+
 impl Default for UITabState {
     fn default() -> Self {
         Self::new()
@@ -125,6 +158,12 @@ impl UIUserState {
             next_pin_ts: 1,
             current_view: "all".to_string(),
         }
+    }
+}
+
+impl UIUserState {
+    pub fn current_view(&self) -> String {
+        self.current_view.clone()
     }
 }
 
