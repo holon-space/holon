@@ -1789,13 +1789,15 @@ pub trait RefLayout {
     fn all_block_ids(&self) -> BTreeSet<EntityUri>;
 
     /// The blocks the reactive root layout is *expected* to surface for
-    /// `region`: non-source blocks that are descendants of the region's
-    /// expected focus roots. Used by
-    /// `inv-matview-consistent-with-ref/root_layout` to detect rows the
-    /// matview is missing. Wide PBT filters `block_state.blocks` by
-    /// `content_type != Source` and
-    /// `is_descendant_of_any(expected_focus_root_ids(region))`; pure
-    /// slice: empty.
+    /// `region`: every block that descends from the region's expected focus
+    /// roots. Source blocks are included — per the fork-A program-rendering
+    /// ruling they render as visible rows (rule cards / query results), not
+    /// hidden; staleness is a cross-root property, so the descendant gate alone
+    /// defines the allowed set. Used by `inv-main-panel-rows-match-focus` to
+    /// detect rows from a *previous* focus root lingering after navigation.
+    /// Wide PBT filters `block_state.blocks` by
+    /// `is_descendant_of_any(expected_focus_root_ids(region))`; pure slice:
+    /// empty.
     fn expected_visible_content_ids(&self, region: CapRegion) -> BTreeSet<EntityUri>;
 
     /// True when the reference model has at least one user document. Gates the
