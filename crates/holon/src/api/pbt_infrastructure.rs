@@ -1,52 +1,66 @@
 //! Public PBT infrastructure for testing CoreOperations implementations
 //!
-//! This module extracts the core property-based testing logic from loro_backend_pbt.rs
-//! so it can be reused to test other CoreOperations implementations like Flutter UI.
+//! This module extracts the core property-based testing logic from
+//! loro_backend_pbt.rs so it can be reused to test other CoreOperations
+//! implementations like Flutter UI.
 
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-use super::memory_backend::MemoryBackend;
-use super::repository::{CoreOperations, Lifecycle};
-use super::types::NewBlock;
-use holon_api::{ApiError, Block, BlockContent, ContentType, EntityUri};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use std::sync::Arc;
 
+use holon_api::ApiError;
+use holon_api::Block;
+use holon_api::BlockContent;
+use holon_api::ContentType;
+use holon_api::EntityUri;
 // Re-export proptest types for convenience
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub use proptest::prelude::*;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-pub use proptest_state_machine::{ReferenceStateMachine, StateMachineTest};
+pub use proptest_state_machine::ReferenceStateMachine;
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub use proptest_state_machine::StateMachineTest;
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+use super::memory_backend::MemoryBackend;
+use super::repository::CoreOperations;
+use super::repository::Lifecycle;
+use super::types::NewBlock;
 
 pub type WatcherId = usize;
 
-/// Whether property-based testing infrastructure has full runtime support on this target.
+/// Whether property-based testing infrastructure has full runtime support on
+/// this target.
 pub const fn is_pbt_supported() -> bool {
     !cfg!(all(target_arch = "wasm32", target_os = "unknown"))
 }
 
 /// Static reason string for targets where PBT cannot run yet.
-pub const PBT_UNSUPPORTED_REASON: &str = "Property-based testing is currently available only on native targets because the \
-tokio runtime and proptest runners rely on OS threading APIs that don't compile to wasm32.";
+pub const PBT_UNSUPPORTED_REASON: &str =
+    "Property-based testing is currently available only on native targets because the tokio \
+     runtime and proptest runners rely on OS threading APIs that don't compile to wasm32.";
 
 /// Reference state wraps MemoryBackend (our reference implementation)
 ///
-/// Note: This simplified version doesn't support watchers to avoid dependencies on futures crate.
-/// For full watcher support, use the test-only version in loro_backend_pbt.rs.
+/// Note: This simplified version doesn't support watchers to avoid dependencies
+/// on futures crate. For full watcher support, use the test-only version in
+/// loro_backend_pbt.rs.
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 #[derive(Debug)]
 pub struct ReferenceState {
     pub backend: MemoryBackend,
     pub handle: tokio::runtime::Handle,
-    /// Optional runtime - Some when we own the runtime (standalone tests), None when using existing runtime (Flutter)
+    /// Optional runtime - Some when we own the runtime (standalone tests), None
+    /// when using existing runtime (Flutter)
     pub _runtime: Option<Arc<tokio::runtime::Runtime>>,
 }
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 impl Default for ReferenceState {
     fn default() -> Self {
-        // Try to use current runtime handle if available (when called from async context),
-        // otherwise create a new runtime (for standalone/sync tests)
+        // Try to use current runtime handle if available (when called from async
+        // context), otherwise create a new runtime (for standalone/sync tests)
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
                 let backend = tokio::task::block_in_place(|| {
@@ -102,10 +116,12 @@ pub enum BlockTransition {
     UnwatchChanges { watcher_id: WatcherId },
 }
 
-/// System under test - generic over any backend implementing CoreOperations + Lifecycle
+/// System under test - generic over any backend implementing CoreOperations +
+/// Lifecycle
 ///
-/// Note: This simplified version doesn't support watchers to avoid dependencies on futures crate.
-/// For full watcher support, use the test-only version in loro_backend_pbt.rs.
+/// Note: This simplified version doesn't support watchers to avoid dependencies
+/// on futures crate. For full watcher support, use the test-only version in
+/// loro_backend_pbt.rs.
 pub struct BlockTreeTest<R: CoreOperations + Lifecycle> {
     pub backend: R,
     /// ID mapping: MemoryBackend ID → Backend ID
@@ -114,7 +130,8 @@ pub struct BlockTreeTest<R: CoreOperations + Lifecycle> {
 
 /// Helper to translate a single ID from MemoryBackend → Backend
 ///
-/// Document URIs and sentinel URIs are never translated - they're the same in all backends
+/// Document URIs and sentinel URIs are never translated - they're the same in
+/// all backends
 pub fn translate_id(mem_id: &str, id_map: &HashMap<String, String>) -> Option<String> {
     // ALLOW(entity_uri_from_raw): mem_id String key of PBT id-translation map
     let pr = EntityUri::from_raw(mem_id);
@@ -233,7 +250,6 @@ pub async fn apply_transition<R: CoreOperations>(
                     content: BlockContent::text(content),
                     id: None,
                     after: None,
-                    content_type_override: None,
                 })
                 .collect();
             let created = backend.create_blocks(new_blocks).await?;
@@ -267,11 +283,12 @@ impl std::fmt::Display for ComparableBlock {
     }
 }
 
-/// Verify that two backends have structurally identical state using field-by-field comparison.
+/// Verify that two backends have structurally identical state using
+/// field-by-field comparison.
 ///
-/// Compares `(depth, parent_id, content, content_type, source_language)` for every block.
-/// Block lists are sorted by a stable key so that ordering differences between backends
-/// do not cause false negatives.
+/// Compares `(depth, parent_id, content, content_type, source_language)` for
+/// every block. Block lists are sorted by a stable key so that ordering
+/// differences between backends do not cause false negatives.
 pub fn verify_backends_match<R1, R2>(
     reference: &R1,
     system_under_test: &R2,
@@ -307,8 +324,9 @@ pub fn verify_backends_match<R1, R2>(
 
     // Translate parent_ids to depth-relative form so that backend-specific IDs
     // don't cause spurious mismatches. We keep the parent_id only when it is a
-    // well-known sentinel (document URI or sentinel:no_parent); otherwise we store a
-    // canonical "parent_depth=<n>" placeholder derived from looking up the parent.
+    // well-known sentinel (document URI or sentinel:no_parent); otherwise we store
+    // a canonical "parent_depth=<n>" placeholder derived from looking up the
+    // parent.
     fn normalize_parent(block: &Block, all_blocks: &[Block]) -> String {
         if block.parent_id.is_no_parent() || block.parent_id.is_sentinel() {
             return "@doc_root".to_string();
@@ -352,8 +370,8 @@ pub fn verify_backends_match<R1, R2>(
     assert_eq!(
         ref_comparable.len(),
         sut_comparable.len(),
-        "Block count mismatch: reference has {} blocks, SUT has {} blocks\n\
-         Reference blocks:\n{}\n\nSUT blocks:\n{}",
+        "Block count mismatch: reference has {} blocks, SUT has {} blocks\nReference \
+         blocks:\n{}\n\nSUT blocks:\n{}",
         ref_comparable.len(),
         sut_comparable.len(),
         ref_comparable
@@ -382,7 +400,8 @@ pub fn verify_backends_match<R1, R2>(
 /// initial child blocks (e.g., "local://0" in MemoryBackend).
 ///
 /// This function maps these initial blocks between reference and SUT backends
-/// by matching top-level blocks (those with document URI parents) with the same content.
+/// by matching top-level blocks (those with document URI parents) with the same
+/// content.
 pub async fn populate_initial_id_map<R1: CoreOperations, R2: CoreOperations>(
     id_map: &mut HashMap<String, String>,
     ref_backend: &R1,
@@ -395,7 +414,8 @@ pub async fn populate_initial_id_map<R1: CoreOperations, R2: CoreOperations>(
     let sut_blocks = sut_backend.get_all_blocks(Traversal::ALL).await?;
 
     // Map initial child blocks by matching parent_id and content
-    // We match top-level blocks (those with document URI parents) with the same content
+    // We match top-level blocks (those with document URI parents) with the same
+    // content
     for ref_block in &ref_blocks {
         let ref_is_root = ref_block.parent_id.is_no_parent() || ref_block.parent_id.is_sentinel();
         if ref_is_root
@@ -527,8 +547,9 @@ pub fn update_id_map_after_create(
 
 /// Generate CRUD transition strategies given a list of blocks
 ///
-/// This is the core transition generator that can be reused by different test implementations.
-/// Returns a strategy that generates CreateBlock, UpdateBlock, DeleteBlock, MoveBlock, CreateBlocks, and DeleteBlocks transitions.
+/// This is the core transition generator that can be reused by different test
+/// implementations. Returns a strategy that generates CreateBlock, UpdateBlock,
+/// DeleteBlock, MoveBlock, CreateBlocks, and DeleteBlocks transitions.
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub fn generate_crud_transitions(
     all_ids: Vec<String>,
@@ -607,8 +628,9 @@ pub fn generate_crud_transitions(
 
 /// Check preconditions for a BlockTransition using the backend's logic
 ///
-/// This async version delegates cycle detection to the backend's `get_ancestor_chain`,
-/// ensuring consistent tree traversal logic across the codebase.
+/// This async version delegates cycle detection to the backend's
+/// `get_ancestor_chain`, ensuring consistent tree traversal logic across the
+/// codebase.
 pub async fn check_transition_preconditions<B: CoreOperations>(
     transition: &BlockTransition,
     backend: &B,
@@ -659,7 +681,8 @@ pub async fn check_transition_preconditions<B: CoreOperations>(
 
 /// ReferenceStateMachine implementation for MemoryBackend
 ///
-/// This generates random transitions and validates them against the reference implementation.
+/// This generates random transitions and validates them against the reference
+/// implementation.
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 impl ReferenceStateMachine for ReferenceState {
     type State = Self;

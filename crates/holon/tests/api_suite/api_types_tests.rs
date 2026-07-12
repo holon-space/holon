@@ -4,8 +4,14 @@
 //! and implement the required traits.
 
 use holon::api::types::*;
+use holon_api::ApiError;
+use holon_api::Block;
+use holon_api::BlockContent;
+use holon_api::BlockMetadata;
+use holon_api::Change;
+use holon_api::ChangeOrigin;
+use holon_api::EntityUri;
 use holon_api::block::BlockWire;
-use holon_api::{ApiError, Block, BlockContent, BlockMetadata, Change, ChangeOrigin, EntityUri};
 
 #[test]
 fn test_block_serialization() {
@@ -67,7 +73,6 @@ fn test_new_block_serialization() {
         content: BlockContent::text("New block content"),
         after: Some(EntityUri::block("sibling-456")),
         id: Some(EntityUri::parse("todoist://task/789").unwrap()),
-        content_type_override: None,
     };
 
     let json = serde_json::to_string(&new_block).expect("Failed to serialize");
@@ -115,7 +120,8 @@ fn test_block_change_serialization() {
     ];
 
     for change in changes {
-        // `Change<Block>` reaches the wire via `Change<BlockWire>` (Block is serde-free).
+        // `Change<Block>` reaches the wire via `Change<BlockWire>` (Block is
+        // serde-free).
         let wire = change.map(|b| BlockWire::from(&b));
         let json = serde_json::to_string(&wire).expect("Failed to serialize change");
         let _deserialized: Change<BlockWire> =

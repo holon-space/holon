@@ -380,7 +380,7 @@ fn read_content_from_meta(meta: &loro::LoroMap) -> BlockContent {
         }
         Some("image") => {
             let path = read_text_content(meta);
-            BlockContent::Text { raw: path }
+            BlockContent::Image { path }
         }
         Some("text") | None => {
             let raw = read_text_content(meta);
@@ -624,15 +624,13 @@ fn update_text_field(meta: &loro::LoroMap, key: &str, new_text: &str) -> anyhow:
     Ok(())
 }
 
-fn write_content_to_meta(
-    meta: &loro::LoroMap,
-    content: &BlockContent,
-    content_type_override: Option<ContentType>,
-) -> anyhow::Result<()> {
+fn write_content_to_meta(meta: &loro::LoroMap, content: &BlockContent) -> anyhow::Result<()> {
     match content {
         BlockContent::Text { raw } => {
-            let ct = content_type_override.unwrap_or(ContentType::Text);
-            meta.insert(CONTENT_TYPE, loro::LoroValue::from(ct.to_string().as_str()))?;
+            meta.insert(
+                CONTENT_TYPE,
+                loro::LoroValue::from(ContentType::Text.to_string().as_str()),
+            )?;
             update_text_field(meta, CONTENT_RAW, raw)?;
         }
         BlockContent::RichText { text, marks: _ } => {
@@ -640,9 +638,18 @@ fn write_content_to_meta(
             // mark application is wired in Task 5 (`update_block_marked`). The
             // marks JSON projection lives in the SQL `marks` column (Task 4),
             // sourced from `Block.marks` directly.
-            let ct = content_type_override.unwrap_or(ContentType::Text);
-            meta.insert(CONTENT_TYPE, loro::LoroValue::from(ct.to_string().as_str()))?;
+            meta.insert(
+                CONTENT_TYPE,
+                loro::LoroValue::from(ContentType::Text.to_string().as_str()),
+            )?;
             update_text_field(meta, CONTENT_RAW, text)?;
+        }
+        BlockContent::Image { path } => {
+            meta.insert(
+                CONTENT_TYPE,
+                loro::LoroValue::from(ContentType::Image.to_string().as_str()),
+            )?;
+            update_text_field(meta, CONTENT_RAW, path)?;
         }
         BlockContent::Source(source) => {
             meta.insert(CONTENT_TYPE, loro::LoroValue::from("source"))?;
@@ -2394,7 +2401,7 @@ impl LoroBackend {
                 let node = tree.create(parent_tree_id)?;
                 let meta = tree.get_meta(node)?;
                 meta.insert(STABLE_ID, loro::LoroValue::from(stable_id.as_str()))?;
-                write_content_to_meta(&meta, &content, None)?;
+                write_content_to_meta(&meta, &content)?;
                 replace_properties_in_meta(&meta, properties)?;
                 // Tags are edge fields (block_tags), stored in Loro meta as a
                 // JSON list under "tags" (mirrors `set_block_tags`). Carrying
@@ -3516,7 +3523,7 @@ impl CoreOperations for LoroBackend {
             .with_write(|doc| {
                 let tree = doc.get_tree(TREE_NAME);
                 let meta = tree.get_meta(tree_id)?;
-                write_content_to_meta(&meta, &content, None)?;
+                write_content_to_meta(&meta, &content)?;
                 meta.insert("updated_at", loro::LoroValue::from(self.now_millis()))?;
                 doc.commit();
                 Ok(())
@@ -3778,11 +3785,7 @@ impl CoreOperations for LoroBackend {
                     let node = tree.create(parent_tree_id)?;
                     let meta = tree.get_meta(node)?;
                     meta.insert(STABLE_ID, loro::LoroValue::from(stable_id.as_str()))?;
-                    write_content_to_meta(
-                        &meta,
-                        &new_block.content,
-                        new_block.content_type_override,
-                    )?;
+                    write_content_to_meta(&meta, &new_block.content)?;
                     meta.insert("created_at", loro::LoroValue::from(now))?;
                     meta.insert("updated_at", loro::LoroValue::from(now))?;
 
@@ -4146,6 +4149,57 @@ mod diff_checkout_race_tests {
             .unwrap();
     }
 
+    /// Regression (keystone `inv-blocks-match-ref/org` RED, 2026-07-12): an
+    /// image block created through the Loro backend must read back as
+    /// `ContentType::Image`, not collapse to `Text`. Before the
+    /// `BlockContent::Image` variant, `write_content_to_meta` stored the block
+    /// as `content_type = "text"` (the ingest path built `BlockContent::text`)
+    /// and `read_content_from_meta` re-hydrated `image` meta into
+    /// `BlockContent::Text` — either loss turned an org `[[file:…]]` child into
+    /// a plain Text headline on the disk round-trip (image-ness permanently
+    /// lost).
+    #[tokio::test]
+    async fn image_block_survives_loro_create_read_round_trip() {
+        let (_doc, backend) = make_backend().await;
+        backend
+            .create_block_with_properties(
+                EntityUri::no_parent(),
+                BlockContent::text("parent"),
+                Some(EntityUri::block("parent")),
+                &HashMap::new(),
+                &Tags::default(),
+                &[],
+                &[],
+            )
+            .await
+            .unwrap();
+
+        let created = backend
+            .create_block(
+                EntityUri::block("parent"),
+                BlockContent::image("attachments/foo.png"),
+                Some(EntityUri::block("img1")),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            created.content_type,
+            ContentType::Image,
+            "create echo must carry Image, got {:?}",
+            created.content_type
+        );
+        assert_eq!(created.content, "attachments/foo.png");
+
+        let read = backend.get_block(created.id.as_str()).await.unwrap();
+        assert_eq!(
+            read.content_type,
+            ContentType::Image,
+            "Loro read must preserve Image (was collapsing to Text), got {:?}",
+            read.content_type
+        );
+        assert_eq!(read.content, "attachments/foo.png");
+    }
+
     /// MECHANISM PROOF (diagnostic, `#[ignore]`d in CI because it asserts a
     /// race *occurs* and is therefore timing-dependent): hammering
     /// `doc.diff` across an interval whose `from` predates the child checks
@@ -4306,7 +4360,6 @@ mod incremental_tests {
             &BlockContent::Text {
                 raw: content.to_string(),
             },
-            None,
         )
         .unwrap();
         doc.commit();

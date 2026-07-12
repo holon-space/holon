@@ -5,7 +5,8 @@
 //!
 //! # Trait Architecture
 //!
-//! The API is split into 4 focused traits that backends can implement selectively:
+//! The API is split into 4 focused traits that backends can implement
+//! selectively:
 //!
 //! - `CoreOperations`: CRUD and batch operations (required for all backends)
 //! - `Lifecycle`: Document creation and disposal (required for all backends)
@@ -16,10 +17,14 @@
 //! Backends implementing all four automatically satisfy `DocumentRepository`.
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 
+use crate::ApiError;
+use crate::Block;
+use crate::BlockContent;
+use crate::EntityUri;
 use crate::streaming::ChangeNotifications;
-use crate::{ApiError, Block, BlockContent, ContentType, EntityUri};
 
 /// Configuration for filtering blocks by tree depth when traversing.
 ///
@@ -84,11 +89,6 @@ pub struct NewBlock {
     pub after: Option<EntityUri>,
     /// Optional custom ID (None = generate local URI)
     pub id: Option<EntityUri>,
-    /// Override the content_type written to Loro metadata. Used for image blocks
-    /// where content is `BlockContent::Text { raw: path }` but content_type
-    /// must be "image" not "text".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content_type_override: Option<ContentType>,
 }
 
 impl NewBlock {
@@ -99,7 +99,6 @@ impl NewBlock {
             content: BlockContent::text(text),
             after: None,
             id: None,
-            content_type_override: None,
         }
     }
 
@@ -114,7 +113,6 @@ impl NewBlock {
             content: BlockContent::source(language, source),
             after: None,
             id: None,
-            content_type_override: None,
         }
     }
 
@@ -122,10 +120,9 @@ impl NewBlock {
     pub fn image(parent_id: EntityUri, path: impl Into<String>) -> Self {
         Self {
             parent_id,
-            content: BlockContent::text(path),
+            content: BlockContent::image(path),
             after: None,
             id: None,
-            content_type_override: Some(ContentType::Image),
         }
     }
 
@@ -155,8 +152,9 @@ pub trait CoreOperations: Send + Sync {
 
     /// Get ancestor chain by traversing parent_id links.
     ///
-    /// Returns a vector of parent IDs from immediate parent up to (but not including) the root.
-    /// Stops when encountering a sentinel URI (`EntityUri::is_no_parent()`) or the root block itself.
+    /// Returns a vector of parent IDs from immediate parent up to (but not
+    /// including) the root. Stops when encountering a sentinel URI
+    /// (`EntityUri::is_no_parent()`) or the root block itself.
     async fn get_ancestor_chain(&self, id: &str) -> Result<Vec<String>, ApiError> {
         let mut ancestors = Vec::new();
         let mut current_id = id.to_string();
@@ -268,8 +266,8 @@ pub trait Lifecycle: Send + Sync {
 
 /// Peer-to-peer networking and synchronization.
 ///
-/// This trait provides P2P connectivity for distributed document synchronization.
-/// Backends that support networking implement this trait.
+/// This trait provides P2P connectivity for distributed document
+/// synchronization. Backends that support networking implement this trait.
 #[async_trait]
 pub trait P2POperations: Send + Sync {
     /// Get this node's P2P identifier.
@@ -284,9 +282,10 @@ pub trait P2POperations: Send + Sync {
 
 /// Complete repository interface combining all capabilities.
 ///
-/// This is a convenience supertrait that combines `CoreOperations`, `Lifecycle`,
-/// `ChangeNotifications`, and `P2POperations`. Any type implementing all four
-/// automatically satisfies this trait via the blanket implementation.
+/// This is a convenience supertrait that combines `CoreOperations`,
+/// `Lifecycle`, `ChangeNotifications`, and `P2POperations`. Any type
+/// implementing all four automatically satisfies this trait via the blanket
+/// implementation.
 pub trait DocumentRepository:
     CoreOperations + Lifecycle + ChangeNotifications<Block> + P2POperations
 {
