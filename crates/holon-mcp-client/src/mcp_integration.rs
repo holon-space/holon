@@ -31,7 +31,12 @@ use crate::mcp_sync_engine::McpSyncEngine;
 use crate::mcp_sync_strategy::SyncStrategy;
 use crate::sync_freshness::ProbedResourceCapabilities;
 
-/// Transport configuration for connecting to an MCP server.
+/// Transport configuration for connecting to a data source.
+///
+/// `Http`/`ChildProcess` reach a server that speaks MCP; `Rest` reaches a plain
+/// HTTP/JSON API directly via a UTCP-style manual (same connector engine,
+/// served behind the
+/// [`McpCallSurface`](crate::mcp_call_surface::McpCallSurface) seam).
 #[derive(Debug)]
 pub enum McpTransport {
     Http {
@@ -42,6 +47,7 @@ pub enum McpTransport {
         args: Vec<String>,
         env: HashMap<String, String>,
     },
+    Rest(crate::rest_transport::RestManual),
 }
 
 /// Authentication mode for MCP HTTP transport.
@@ -315,6 +321,22 @@ pub async fn build_mcp_integration(
             )
             .await?;
             Ok(McpConnectionResult::Connected(integration))
+        }
+        McpTransport::Rest(_manual) => {
+            // The `rest` transport's read path is exercised through the shared
+            // `SyncStrategy`/`McpCallSurface` seam (see
+            // `crate::rest_transport::RestCallSurface`), but the production
+            // background runner is built around MCP resource *subscriptions*
+            // (`Peer::subscribe`), which a plain HTTP API cannot serve. Wiring
+            // rest into a poll-only background runner — and the leases /
+            // read-write question — are the remaining steps. Fail loud rather
+            // than silently registering an integration that never syncs.
+            anyhow::bail!(
+                "provider '{}': the `rest` transport is not yet wired into the background \
+                 integration runner (poll-only runner + lease/read-write are the open steps). Its \
+                 read path is available directly via RestCallSurface + SyncStrategy.",
+                config.provider_name
+            )
         }
     }
 }
