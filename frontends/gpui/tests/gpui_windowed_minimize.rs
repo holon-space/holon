@@ -56,7 +56,7 @@ fn main() {
     if let Some(recorded) = &fixture.wiring {
         assert_eq!(
             *recorded,
-            wide_e2e_ref().wiring,
+            wide_e2e_ref().harness.wiring,
             "[minimize-window] capture {path} was recorded under wiring {recorded:?}, but the \
              windowed composed base is fixed to full_headless — minimize headless instead"
         );

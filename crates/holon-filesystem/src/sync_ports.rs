@@ -82,6 +82,19 @@ pub trait BlockReader: Send + Sync {
         true
     }
 
+    /// How many of `block_ids` are currently present in the convergent feed.
+    ///
+    /// Powers the controller's progress-grounded feed barrier
+    /// (`FileSyncController::wait_for_feed_progress`): as long as this count
+    /// keeps rising between `wait_for_blocks_in_feed` slices, the barrier keeps
+    /// waiting — completion is grounded in the feed's own progress/quiescence,
+    /// never in total wall-clock elapsed (the fixed 2s ceiling expired early on
+    /// real-vault cold boots, BugFunnel 2026-07-12). Backends without a feed
+    /// report all present, matching the `wait_for_blocks_in_feed` default.
+    async fn blocks_in_feed_count(&self, block_ids: &[String]) -> usize {
+        block_ids.len()
+    }
+
     /// Check if any of the given block IDs already exist under a DIFFERENT
     /// document. Returns Vec<(block_id, owning_doc_uri)> for conflicts
     /// found.

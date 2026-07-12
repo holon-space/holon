@@ -185,6 +185,17 @@ impl BlockReader for LoroBlockReader {
         true
     }
 
+    /// Synchronous tree — presence-count via the same `get_block` probe.
+    async fn blocks_in_feed_count(&self, block_ids: &[String]) -> usize {
+        let mut present = 0;
+        for id in block_ids {
+            if self.backend.get_block(id).await.is_ok() {
+                present += 1;
+            }
+        }
+        present
+    }
+
     // find_foreign_blocks: trait default over iter_documents_with_blocks is
     // correct.
 }

@@ -381,6 +381,16 @@ impl BlockReader for CacheBlockReader {
         }
     }
 
+    async fn blocks_in_feed_count(&self, block_ids: &[String]) -> usize {
+        match &self.block_feed {
+            Some(feed) => {
+                let m = feed.read();
+                block_ids.iter().filter(|id| m.contains_key(*id)).count()
+            }
+            None => block_ids.len(),
+        }
+    }
+
     async fn persist_file_hash(
         &self,
         file_id: &holon_api::EntityUri,
