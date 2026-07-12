@@ -1237,13 +1237,25 @@ fn read_one_node_snapshot(
             );
             return None;
         }
-        tracing::error!(
+        // A live, non-deleted node whose fractional index has not yet landed in
+        // THIS O(changed) observation window. Returning `None` sets the pass
+        // `settled=false`, which routes it to the full-snapshot reseed — a
+        // DISCLOSED RETRY, not a swallowed failure. The reseed's full-walk reader
+        // (`snapshot_blocks_from_doc_settled`) is the AUTHORITATIVE persistent
+        // check: if the fi is genuinely missing (a real ADR-0005 violation) it
+        // still logs ERROR there and fails `inv-no-observed-errors`. A transient
+        // mid-mutation fi (the fi op commits microseconds after the node becomes
+        // visible) resolves by the reseed and never reaches that ERROR. So WARN
+        // here (visible, attributable) and let the reseed be the arbiter of
+        // persistence — an incremental first-observation must not itself trip the
+        // no-swallowed-errors gate on what is a normal retry window.
+        tracing::warn!(
             block_id = %stable_id,
             ?scope,
             node = ?node,
-            "loro incremental projection: live node has no fractional index (ADR \
-             0005 ordering-invariant violation); withholding rather than faking \
-             an A0 sort key"
+            "loro incremental projection: live node has no fractional index in this \
+             O(changed) window; withholding and reseeding (disclosed retry). The \
+             full-snapshot reseed is the authoritative persistent-violation check."
         );
         return None;
     };
