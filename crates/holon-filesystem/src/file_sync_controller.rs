@@ -34,6 +34,7 @@ use holon_core::CanonicalPath;
 use holon_core::DownstreamProjection;
 use holon_core::block_ordering::BlockOrdering;
 use holon_core::file_format::FileFormatAdapter;
+use holon_core::file_format::WritebackDropVerdict;
 use holon_core::fractional_index::default_sort_key;
 use indexmap::IndexMap;
 use tracing::debug;
@@ -72,6 +73,16 @@ pub enum BlockDelta {
     /// from the feed, so the controller takes the full re-render path).
     Remove(EntityUri),
 }
+
+/// Mass-truncation tripwire (Fork B B1' / ADR 0025): the block-driven
+/// write-back path vetoes only when the ungrounded-drop count exceeds
+/// `max(TRIPWIRE_MIN_DROP_BLOCKS, block_count / TRIPWIRE_DROP_FRACTION_DENOM)`.
+/// `3` and `4` (= 25%) are chosen so the row-28 loss class (an FK-rollback that
+/// aborted ~20 contiguous blocks) fires while routine single-block deletions /
+/// splits never do. TEMPORARY: tighten toward zero once removals are grounded
+/// in ops (per-block `Remove` delivery / the ADR-0025 C2b history relation).
+const TRIPWIRE_MIN_DROP_BLOCKS: usize = 3;
+const TRIPWIRE_DROP_FRACTION_DENOM: usize = 4;
 
 pub struct FileSyncController {
     /// What we last wrote to (or confirmed on) disk, per file.
@@ -1842,8 +1853,19 @@ impl FileSyncController {
         // propagates to `on_file_changed`, whose Err arm QUARANTINES the file so
         // no write-back path renders the truncated state over disk. A legal
         // canonical reformat / 3-way merge preserves every block and passes.
+        //
+        // ADR 0025: this ingest re-project is one of the two irreducibly
+        // intent-less boundaries — it holds no op, so it grounds ONLY via the
+        // file's own projection (no sibling union, no sanctioned removals).
         self.format
-            .check_writeback_lossless(path, &disk_content, &rendered, &self.root_dir)
+            .check_writeback_lossless(
+                path,
+                &disk_content,
+                &rendered,
+                &[],
+                &HashSet::new(),
+                &self.root_dir,
+            )
             .with_context(|| {
                 format!(
                     "[FileSyncController] REFUSING write-back of {} — ingest was lossy (see the \
@@ -1983,7 +2005,7 @@ impl FileSyncController {
             self.on_file_changed(&path).await?;
         }
 
-        let rendered = self.render_with_cache(doc_id, &path, delta).await?;
+        let (rendered, reseeded) = self.render_with_cache(doc_id, &path, delta).await?;
 
         let current_last = self
             .last_projection
@@ -2014,6 +2036,26 @@ impl FileSyncController {
         if self.is_quarantined(&path) {
             return Ok(true);
         }
+
+        // Fork B B1' / ADR 0025: mass-truncation tripwire on the block-driven path
+        // (previously UNGUARDED — a P0 hole: this path could SILENTLY drop a large
+        // chunk present on disk). Only a reseed can shrink the block set, so the
+        // cheap content-only path skips the check (no per-keystroke re-parse).
+        // Grounding = the delta's `Remove` id (a sanctioned deletion) UNION the
+        // sibling files a de-inlined child page moved into; the tripwire vetoes
+        // only on the row-28 mass-truncation signature (single/small drops pass
+        // silently — removals are not delivered as ops here yet; see
+        // `tripwire_mass_truncation`). On veto the file is quarantined and the Err
+        // propagates to `on_block_feed` (di.rs), which logs it.
+        if reseeded {
+            let sanctioned_removals = match delta {
+                BlockDelta::Remove(id) => HashSet::from([id.as_str().to_string()]),
+                BlockDelta::Upsert(_) => HashSet::new(),
+            };
+            self.tripwire_mass_truncation(&path, &disk_at_write, &rendered, &sanctioned_removals)
+                .await?;
+        }
+
         if let Some(parent) = path.parent() {
             self.fs.create_dir_all(parent).await?;
         }
@@ -2064,12 +2106,19 @@ impl FileSyncController {
     /// `ordering.children(parent)` read (O(siblings), not O(doc)) is compared
     /// against the cached sibling order to detect this before trusting the
     /// cheap path.
+    /// Returns `(rendered, reseeded)`. `reseeded` is `true` when this render
+    /// took the authoritative full-doc reseed (`get_blocks`) — the only
+    /// path whose block set can SHRINK relative to disk (a de-inline, a
+    /// delete, a `Page` re-partition). The cheap content-only path
+    /// (`false`) refreshes one block in place and provably preserves the id
+    /// set, so the write-back guard can skip it (Fork B B1' latency gate:
+    /// no per-keystroke re-parse of disk).
     async fn render_with_cache(
         &mut self,
         doc_id: &EntityUri,
         path: &Path,
         delta: &BlockDelta,
-    ) -> Result<String> {
+    ) -> Result<(String, bool)> {
         let cheap_incremental_candidate = match delta {
             BlockDelta::Upsert(b) => self
                 .doc_blocks
@@ -2111,7 +2160,7 @@ impl FileSyncController {
                             .get_mut(doc_id)
                             .expect("warm by cheap_incremental_candidate")
                             .insert(auth.id.clone(), auth);
-                        return self.render_cached_doc(doc_id, path).await;
+                        return Ok((self.render_cached_doc(doc_id, path).await?, false));
                     }
                     // Sibling order moved (a same-parent reorder) — fall
                     // through to the full reseed below.
@@ -2120,7 +2169,7 @@ impl FileSyncController {
         }
 
         self.reseed_doc_blocks(doc_id).await?;
-        self.render_cached_doc(doc_id, path).await
+        Ok((self.render_cached_doc(doc_id, path).await?, true))
     }
 
     /// Reseed the per-doc block cache from the authoritative doc-scoped read
@@ -2279,6 +2328,18 @@ impl FileSyncController {
 
     /// Re-render all tracked files (used for events where the doc_id is
     /// unknown, e.g. block.deleted, block.fields_changed).
+    ///
+    /// ADR 0025: this is a RECOVERY path — state-driven by nature (like a
+    /// reseed), it holds no per-block op. Its write-back guard grounds
+    /// absences only via the sibling-file union (`sanctioned_removals`
+    /// empty) and, because it cannot distinguish a routine deletion from
+    /// loss, fires the MASS-TRUNCATION tripwire
+    /// only (see `tripwire_mass_truncation`): a child page de-inlined into its
+    /// own file passes, a single/small drop passes, and only a
+    /// row-28-shaped mass truncation vetoes + quarantines that one file.
+    /// Follow-up named by ADR 0025: feed it the C2b history relation so
+    /// recovery can ground EVERY removal and the tripwire can tighten
+    /// toward zero.
     pub async fn re_render_all_tracked(&mut self) -> Result<()> {
         let keys: Vec<CanonicalPath> = self.last_projection.keys().cloned().collect();
 
@@ -2408,6 +2469,32 @@ impl FileSyncController {
             if self.is_quarantined(&path) {
                 continue;
             }
+
+            // ADR 0025 recovery-path tripwire: ground absences via the
+            // sibling-file union only (no op → no sanctioned removals). This is
+            // where EVERY block removal lands (the feed routes all removals to
+            // `OrgRerender::All`, di.rs), so single/small drops here are usually
+            // legitimate deletions and pass silently; only a MASS truncation (the
+            // row-28 signature) vetoes+quarantines that one file. A parse/IO defect
+            // propagates (loud); a tripwire veto skips just this file and the batch
+            // continues. Hard grounding of removals is the ADR-0025 C2b follow-up.
+            if let Err(e) = self
+                .tripwire_mass_truncation(&path, &disk_content, &rendered, &HashSet::new())
+                .await
+            {
+                if self.is_quarantined(&path) {
+                    // Tripwire fired (already quarantined + logged): skip this file.
+                    continue;
+                }
+                // A real parse/IO defect — surface it loudly.
+                return Err(e).with_context(|| {
+                    format!(
+                        "[re_render_all_tracked] write-back guard failed for {}",
+                        path.display()
+                    )
+                });
+            }
+
             if let Some(parent) = path.parent() {
                 self.fs.create_dir_all(parent).await?;
             }
@@ -2694,6 +2781,158 @@ impl FileSyncController {
                 }
             }
         });
+    }
+
+    /// Fork B B1' / ADR 0025: compute the ungrounded drops a block-driven
+    /// write-back of `rendered` over `source` would cause, as DATA.
+    ///
+    /// `source` is the on-disk content about to be overwritten; `rendered` is
+    /// the projection about to be written. Grounds each absence via the
+    /// sibling-file union (see
+    /// [`writeback_sibling_grounding`](Self::writeback_sibling_grounding))
+    /// plus `sanctioned_removals` (the triggering delta's `Remove` ids; empty
+    /// on recovery/ingest paths). Returns the verdict (dropped `id:
+    /// excerpt` list + source block count for the tripwire threshold); real
+    /// parse/IO defects propagate as `Err` (never swallowed).
+    async fn writeback_drops(
+        &self,
+        path: &Path,
+        source: &str,
+        rendered: &str,
+        sanctioned_removals: &HashSet<String>,
+    ) -> Result<WritebackDropVerdict> {
+        let siblings = self
+            .writeback_sibling_grounding(path, source, rendered, sanctioned_removals)
+            .await?;
+        let sibling_refs: Vec<(&Path, &str)> = siblings
+            .iter()
+            .map(|(p, c)| (p.as_path(), c.as_str()))
+            .collect();
+        self.format.writeback_drops(
+            path,
+            source,
+            rendered,
+            &sibling_refs,
+            sanctioned_removals,
+            &self.root_dir,
+        )
+    }
+
+    /// Collect the sibling-file grounding for the write-back guard: the on-disk
+    /// content of the own-file page that each block present in `source` but
+    /// absent from `rendered` (and not `sanctioned_removals`) de-inlined
+    /// into. A legitimate de-inline (a child page that moved to its own
+    /// materialized file) resolves to a DISTINCT sibling file whose content
+    /// grounds the absence; a genuine drop resolves to no distinct sibling
+    /// and stays ungrounded so the guard vetoes. Only absent blocks pay a
+    /// file read — the hot no-absence case (content edit, addition) does
+    /// none.
+    async fn writeback_sibling_grounding(
+        &self,
+        path: &Path,
+        source: &str,
+        rendered: &str,
+        sanctioned_removals: &HashSet<String>,
+    ) -> Result<Vec<(PathBuf, String)>> {
+        let parent = EntityUri::no_parent();
+        let source_parsed = self.format.parse(path, source, &parent, &self.root_dir)?;
+        let rendered_parsed = self.format.parse(path, rendered, &parent, &self.root_dir)?;
+        let rendered_ids: HashSet<&str> = rendered_parsed
+            .blocks
+            .iter()
+            .map(|b| b.id.as_str())
+            .collect();
+
+        let self_canonical = CanonicalPath::new(path);
+        let mut siblings: Vec<(PathBuf, String)> = Vec::new();
+        let mut seen: HashSet<CanonicalPath> = HashSet::new();
+        for block in &source_parsed.blocks {
+            let id = block.id.as_str();
+            if rendered_ids.contains(id) || sanctioned_removals.contains(id) {
+                continue;
+            }
+            let Some(sibling) = self.doc_id_to_path(&block.id).await else {
+                continue;
+            };
+            let sibling_canonical = CanonicalPath::new(&sibling);
+            if sibling_canonical == self_canonical || !seen.insert(sibling_canonical) {
+                continue;
+            }
+            let content = read_disk_or_empty(&self.fs, &sibling).await?;
+            if !content.trim().is_empty() {
+                siblings.push((sibling, content));
+            }
+        }
+        Ok(siblings)
+    }
+
+    /// Fork B B1' / ADR 0025 recovery-path MASS-TRUNCATION tripwire.
+    ///
+    /// The block-driven write-back paths cannot yet ground removals in ops —
+    /// the block feed collapses every removal to `OrgRerender::All` and
+    /// delivers no delete id here (di.rs), so a SINGLE ungrounded drop is
+    /// indistinguishable from a routine deletion; vetoing it would break
+    /// normal deletions and flood the log. So this tripwire fires ONLY on
+    /// the row-28 loss SIGNATURE — a MASS truncation, where an FK-rollback
+    /// aborted a large contiguous chunk (~20 blocks) at once. It
+    /// vetoes+quarantines when the ungrounded-drop count
+    /// exceeds `max(TRIPWIRE_MIN_DROP_BLOCKS, 25% of the file's block count)`,
+    /// and lets single/small drops pass SILENTLY (no log — else routine
+    /// deletions flood `inv-no-observed-errors`).
+    ///
+    /// Returns `Ok(())` to proceed with the write, `Err` (after quarantining)
+    /// to refuse it. Real parse/IO defects propagate as `Err` WITHOUT
+    /// quarantining (they are bugs to surface, not truncations). This is
+    /// ADR 0025's "recovery paths carry the guard as tripwire" posture.
+    /// TEMPORARY: once removals are grounded (per-block `Remove` delivery /
+    /// the C2b history relation) the guard widens to ground EVERY drop and
+    /// the fraction can drop toward zero.
+    async fn tripwire_mass_truncation(
+        &mut self,
+        path: &Path,
+        source: &str,
+        rendered: &str,
+        sanctioned_removals: &HashSet<String>,
+    ) -> Result<()> {
+        let verdict = self
+            .writeback_drops(path, source, rendered, sanctioned_removals)
+            .await?;
+        let threshold = std::cmp::max(
+            TRIPWIRE_MIN_DROP_BLOCKS,
+            verdict.source_block_count / TRIPWIRE_DROP_FRACTION_DENOM,
+        );
+        if verdict.dropped.len() > threshold {
+            let err = anyhow::anyhow!(
+                "MASS TRUNCATION on the block-driven write-back path: {} of {} on-disk block(s) \
+                 would be DELETED, grounded by neither a sibling materialized file nor a \
+                 sanctioned removal — the row-28 loss signature (threshold {}). Dropped: {:?}",
+                verdict.dropped.len(),
+                verdict.source_block_count,
+                threshold,
+                verdict.dropped,
+            );
+            self.quarantine_writeback(path, &err);
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    /// Quarantine `path` from write-back after a mass-truncation tripwire fire
+    /// (Fork B B1', row-28 posture): the store projection would DELETE a large
+    /// chunk of blocks present on disk, grounded by nothing — refuse the write
+    /// and skip this file until a clean re-ingest clears the quarantine.
+    /// Loud + disclosed (an ERROR here means a real truncation was caught,
+    /// not routine noise — single/small drops never reach this).
+    fn quarantine_writeback(&mut self, path: &Path, err: &anyhow::Error) {
+        if self.quarantined.insert(CanonicalPath::new(path)) {
+            tracing::error!(
+                path = %path.display(),
+                error = %format!("{err:#}"),
+                "[FileSyncController] block-driven write-back VETOED (mass-truncation tripwire) — \
+                 QUARANTINING this file so its truncated projection is not rendered over disk. \
+                 Un-quarantines on the next fully-successful ingest.",
+            );
+        }
     }
 
     /// Resolve a doc_id to a filesystem path via DocumentManager.
