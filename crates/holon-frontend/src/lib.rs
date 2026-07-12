@@ -81,7 +81,10 @@ pub const JOURNALS_PAGE_ID: &str = "block:journals";
 pub const JOURNALS_SRC_ID: &str = "block:journals::src::0";
 pub const JOURNALS_RENDER_ID: &str = "block:journals::render::0";
 pub const JOURNALS_AUTO_CREATE_ID: &str = "block:journals::auto-create";
-pub const JOURNALS_TRIGGER_ID: &str = "block:journals::trigger::0";
+/// The single-block `holon_rule` (ADR 0024 §7.2) that auto-creates today's
+/// journal. Named `::action::0` to match the ratified
+/// `assets/default/Journals.org` asset (and so its `RuleId` — the block id — is
+/// stable across the disk/programmatic seed paths).
 pub const JOURNALS_ACTION_ID: &str = "block:journals::action::0";
 
 /// The `block:journals` page, as programmatic blocks (no org document). The
@@ -121,10 +124,13 @@ pub fn journals_page_blocks() -> Vec<holon_api::block::Block> {
 }
 
 /// The journal auto-create RULE: a "Journal Auto-Create" heading owning a
-/// trigger (`::trigger::0`, holon_sql `SELECT today …`) and an action
-/// (`::action::0`, holon_rule `block.create(…)`). The two share the heading as
-/// parent (not `block:journals`) so `action_discovery.sql`'s same-parent join
-/// pairs THEM and not the page's display query.
+/// SINGLE `holon_rule` YAML block (ADR 0024 §7.2 ratified form — guard + emit
+/// in one block, matching `assets/default/Journals.org`). The
+/// `holon_rule_watcher` discovers it (the legacy `holon_sql`-trigger +
+/// `block.create`-action pairing is gone — no sibling source, so the old
+/// `action_watcher` leaves it alone), reads the `clock` day for its `{today}`
+/// binding, evaluates the `when:` inhibitor, and emits today's journal under
+/// the journals page via a WP2 deterministic id.
 ///
 /// Seeded on every boot by [`FrontendSession::build_default_layout_blocks`]
 /// (dogfood #4 fix, 2026-07-12): the clock-day trigger fires the action so real
@@ -146,21 +152,22 @@ pub fn journals_auto_create_blocks() -> Vec<holon_api::block::Block> {
 
     let auto = Block::new_text(auto_create.clone(), journals, "Journal Auto-Create");
 
-    let trigger = Block::new_source(
-        uri(JOURNALS_TRIGGER_ID),
-        auto_create.clone(),
-        "holon_sql",
-        "SELECT today as name FROM clock WHERE grain = 'day'",
-    );
-
-    let action = Block::new_source(
+    // Single-block holon_rule (sugar form): `when:` = clock-day inhibitor arc
+    // (`not block_exists("Journals/{today}")`), `emit:` = ratcheted create of the
+    // `{today}` block under the journals page. Byte-identical to the ratified
+    // `assets/default/Journals.org` rule so the disk and programmatic seeds agree.
+    let rule = Block::new_source(
         uri(JOURNALS_ACTION_ID),
         auto_create,
         "holon_rule",
-        "block.create(#{parent_id: \"block:journals\", content: col(\"name\")})",
+        // No trailing newline: the block store normalizes it away (like every
+        // other seed block), so the reference — which models this exact content —
+        // must match `block_raw`/sql without one.
+        "name: daily_journal\nwhen: 'not block_exists(\"Journals/{today}\")'\nemit:\n  place: \
+         journals\n  name: \"{today}\"",
     );
 
-    vec![auto, trigger, action]
+    vec![auto, rule]
 }
 pub mod command_provider;
 pub mod config;
@@ -873,38 +880,43 @@ mod journals_seed_tests {
         ));
 
         // `journals_page_blocks` is the page-display spec only: the auto-create
-        // rule (trigger/action) is a separate spec (`journals_auto_create_blocks`),
-        // both seeded by `build_default_layout_blocks`. The page-display spec
-        // itself carries no trigger.
+        // rule is a separate spec (`journals_auto_create_blocks`), both seeded by
+        // `build_default_layout_blocks`. The page-display spec carries no rule.
         assert!(
-            !blocks.iter().any(|b| b.id.as_str() == JOURNALS_TRIGGER_ID),
-            "the page-display spec carries no trigger (it lives in the rule spec)"
+            !blocks.iter().any(|b| b.id.as_str() == JOURNALS_ACTION_ID),
+            "the page-display spec carries no rule (it lives in the rule spec)"
         );
     }
 
     #[test]
-    fn journals_auto_create_rule_spec_pairs_trigger_and_action() {
+    fn journals_auto_create_is_a_single_block_holon_rule() {
         let blocks = journals_auto_create_blocks();
-        // The trigger + action share the `auto-create` parent (NOT block:journals)
-        // so `action_discovery.sql`'s same-parent join pairs THEM.
+        // A "Journal Auto-Create" heading hosting ONE self-contained holon_rule
+        // block (ADR 0024 §7.2) — no legacy holon_sql trigger sibling.
         let auto = find(&blocks, JOURNALS_AUTO_CREATE_ID);
         assert_eq!(auto.parent_id.as_str(), JOURNALS_PAGE_ID);
-        for id in [JOURNALS_TRIGGER_ID, JOURNALS_ACTION_ID] {
-            assert_eq!(
-                find(&blocks, id).parent_id.as_str(),
-                JOURNALS_AUTO_CREATE_ID,
-                "{id} shares the auto-create parent so discovery pairs the rule"
-            );
-        }
+        // Exactly two blocks: the heading + the rule. No holon_sql trigger sibling.
+        assert_eq!(
+            blocks.len(),
+            2,
+            "single-block rule: heading + one holon_rule"
+        );
+        assert!(
+            blocks
+                .iter()
+                .filter(|b| b.content_type == ContentType::Source)
+                .all(|b| b.source_language == Some(SourceLanguage::HolonRule)),
+            "the only source block is the holon_rule (no holon_sql trigger)"
+        );
+        let rule = find(&blocks, JOURNALS_ACTION_ID);
+        assert_eq!(rule.parent_id.as_str(), JOURNALS_AUTO_CREATE_ID);
         assert!(matches!(
-            find(&blocks, JOURNALS_ACTION_ID).source_language,
+            rule.source_language,
             Some(SourceLanguage::HolonRule)
         ));
-        assert!(
-            find(&blocks, JOURNALS_ACTION_ID)
-                .content
-                .contains("parent_id: \"block:journals\"")
-        );
+        // The ratified sugar form: `when:` guard + `emit:` place/name.
+        assert!(rule.content.contains("when:") && rule.content.contains("emit:"));
+        assert!(rule.content.contains("place: journals"));
     }
 
     #[test]
@@ -930,7 +942,6 @@ mod journals_seed_tests {
                 JOURNALS_SRC_ID,
                 JOURNALS_RENDER_ID,
                 JOURNALS_AUTO_CREATE_ID,
-                JOURNALS_TRIGGER_ID,
                 JOURNALS_ACTION_ID,
             ] {
                 assert!(
