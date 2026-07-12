@@ -657,6 +657,9 @@ pub async fn run_file_sync_controller(
         if let Err(e) = controller.finish_initial_scan(30_000).await {
             error!("[OrgMode] initial-scan feed convergence failed: {}", e);
             failures.push((root_directory.clone(), e));
+        } else if let Err(e) = controller.materialize_missing_page_files().await {
+            error!("[OrgMode] fileless-page materialization failed: {}", e);
+            failures.push((root_directory.clone(), e));
         }
         tracing::debug!(
             target: "holon_latency",

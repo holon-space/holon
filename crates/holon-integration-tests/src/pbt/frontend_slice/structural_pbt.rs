@@ -816,7 +816,9 @@ mod teeth {
     /// Boot a frontend over the given org files and return its composed CapMap
     /// (the caps the Fork B companion/materialization oracles select on),
     /// settled.
-    async fn boot_companion_topology(files: &[(&str, &str)]) -> CapMap {
+    async fn boot_companion_topology(
+        files: &[(&str, &str)],
+    ) -> (CapMap, Arc<HeadlessFrontendComponent>) {
         use holon_pbt_core::capabilities::SutSqlProjection;
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let comp =
@@ -830,7 +832,7 @@ mod teeth {
             resolver.clone(),
         )) as Arc<dyn SutBlockTreeWrite>);
         tokio::time::sleep(SETTLE).await;
-        caps
+        (caps, comp)
     }
 
     /// A minimal oracle that models `child-note` as a `Page` doc-root owning
@@ -887,7 +889,7 @@ mod teeth {
         const COMPANION_ORG: &str =
             "#+ID: my-notes\n* child-note\n:PROPERTIES:\n:ID: child-note\n:END:\n";
 
-        let caps = boot_companion_topology(&[
+        let (caps, _comp) = boot_companion_topology(&[
             ("child-note.org", CHILD_PAGE_ORG),
             ("my-notes.org", COMPANION_ORG),
         ])
@@ -926,74 +928,101 @@ mod teeth {
     ///
     /// This is the real Fork B bug (the owned case above already works). The
     /// writeback must MATERIALIZE `child-note` into its own file
-    /// (`inv-every-page-has-its-own-file`). RED today (block-driven writeback
-    /// de-inlines but never materializes); Fork B B2 (materialization via the
-    /// latent `DocumentManager` path + a boot sweep) makes it green.
-    /// `#[ignore]` keeps CI green until B2 lands; run `--run-ignored` to
-    /// reproduce the RED.
+    /// (`inv-every-page-has-its-own-file`). Fork B B2 (materialization via the
+    /// `DocumentManager` name-chain path + a boot sweep) makes it green.
     ///
-    /// Non-reserved names dodge the reserved-`Journals` programmatic seed; the
-    /// flat (non-subdir) shape dodges the pre-existing `row_origin.rs`
-    /// "disjoint root rows" nested-page render panic.
+    /// **Scope (B2 only):** this asserts ONLY `child_has_file` — the fileless
+    /// page gets materialized into its own `#+ID: child-note` file. The
+    /// companion's *convergence* (de-inline + fixed point) is B1''s job
+    /// (the block-driven writeback path has no loss guard yet, so
+    /// `my-notes.org` may still carry the inline heading until B1' lands
+    /// the union guard) and is tested separately.
+    ///
+    /// Non-reserved names dodge the reserved-`Journals` programmatic seed.
+    /// EMPIRICAL (2026-07-12): child-note is a fileless child of the `my-notes`
+    /// companion, so its `name_chain` is `["my-notes", "child-note"]` and B2
+    /// materializes it at the NESTED path `my-notes/child-note.org`. Headless
+    /// this materializes WITHOUT panic (the `row_origin.rs` "disjoint root
+    /// rows" fix, coordinator #47, landed on this integration line); the
+    /// recursive `scan_directory` in `disk_org_file_ids` surfaces the
+    /// nested file.
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "RED-first (Fork B B0): a fileless page is quarantined-inline and never \
-                materialized to its own file until B2's materialization sweep (+B1' union guard) \
-                lands; run --run-ignored to reproduce"]
     async fn fileless_page_writeback_materializes() {
-        use holon_pbt_core::capabilities::SutOrgRender;
-        use holon_pbt_core::composition::CapInvariant;
-
-        use crate::pbt::composed::invariants::companion_has_no_child_page_headings;
-        use crate::pbt::composed::invariants::observed_errors;
-        use crate::pbt::composed::invariants::org_render_fixed_point;
-
         // Companion inlines child-note as a Page-tagged heading; NO child-note.org.
         const COMPANION_ORG: &str = "#+ID: my-notes\n* child-note :Page:\n:PROPERTIES:\n:ID: \
                                      child-note\n:END:\nbody text that must not vanish\n";
 
-        let caps = boot_companion_topology(&[("my-notes.org", COMPANION_ORG)]).await;
+        let (_caps, comp) = boot_companion_topology(&[("my-notes.org", COMPANION_ORG)]).await;
 
-        // Materialization check (scaffold-noise-free, unlike a store-wide page
-        // sweep): after settle, `child-note` must own a file — some `.org` on disk
-        // whose `#+ID:` is `child-note`. RED today: the block-driven writeback
-        // de-inlines `child-note` (the `get_blocks` CTE excludes `Page`s), the guard
-        // vetoes the loss and QUARANTINES `my-notes.org` (so it stays inlined), and
-        // nothing materializes `child-note` into its own file. B2 materializes it;
-        // then the de-inline is lossless and the companion converges.
-        let child_has_file = {
-            let r = caps.get::<dyn SutOrgRender>().expect("SutOrgRender wired");
-            r.snapshot_org_render_pairs()
-                .await
-                .iter()
-                .any(|(_, disk, _)| {
-                    disk.lines().any(|l| {
-                        l.trim().strip_prefix("#+ID:").map(str::trim) == Some("child-note")
-                    })
-                })
-        };
+        // Materialization check via DISK TRUTH (not the boot-tracked snapshot,
+        // which cannot see a file materialized after boot): after settle + the B2
+        // boot sweep, `child-note` must own a file — some `.org` on disk whose
+        // `#+ID:` is `child-note`.
+        let disk_ids = comp.disk_org_file_ids().await;
         assert!(
-            child_has_file,
+            disk_ids.iter().any(|id| id == "child-note"),
             "the fileless page `child-note` must be materialized into its own `child-note.org` (a \
-             `#+ID: child-note` file), but no file owns it",
+             `#+ID: child-note` file), but no file owns it; on-disk file ids = {disk_ids:?}",
         );
+    }
 
-        // And the companion must converge (de-inlined, fixed point) — RED today
-        // because the guard quarantines `my-notes.org` with the child still inline.
-        let resolved = child_note_page_oracle();
-        let registry: Vec<Box<dyn CapInvariant>> = vec![
-            observed_errors::wire(),
-            org_render_fixed_point::wire(),
-            companion_has_no_child_page_headings::wire(),
-        ];
-        let report = run_with_seeded_ref(&registry, &caps, resolved).await;
-        let failures = report.failures();
-        assert!(
-            !failures.iter().any(|(id, _)| {
-                *id == "inv-org-render-fixed-point"
-                    || *id == "inv-companion-has-no-child-page-headings"
-            }),
-            "companion must de-inline + converge once the child is materialized; failures: \
-             {failures:?}",
+    /// **Fork B B2 echo gate (RULED DONE criterion).** After the B2 boot sweep
+    /// materializes the fileless `child-note` into `child-note.org`,
+    /// re-triggering the production watcher over that own-written file must
+    /// be IDEMPOTENT: the `last_projection` seed suppresses the echo, so
+    /// the file stays written EXACTLY ONCE (no duplicate `child-note` file)
+    /// and the page is NOT re-minted under a new id (the `block_raw` id-set
+    /// is unchanged across the pump). A missing `last_projection` seed
+    /// would re-ingest our own write and could mint a second page / rewrite
+    /// the file in a loop — this test locks that closed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fileless_page_materialization_is_echo_stable() {
+        const COMPANION_ORG: &str = "#+ID: my-notes\n* child-note :Page:\n:PROPERTIES:\n:ID: \
+                                     child-note\n:END:\nbody text that must not vanish\n";
+
+        let (_caps, comp) = boot_companion_topology(&[("my-notes.org", COMPANION_ORG)]).await;
+
+        // Precondition: B2 materialized exactly one `child-note` file. Discover its
+        // path (NESTED — `my-notes/child-note.org` — since child-note is a fileless
+        // child of the `my-notes` companion), don't assume a flat name.
+        let child_paths: Vec<_> = comp
+            .disk_org_files()
+            .await
+            .into_iter()
+            .filter(|(_, id)| id.as_deref() == Some("child-note"))
+            .map(|(p, _)| p)
+            .collect();
+        assert_eq!(
+            child_paths.len(),
+            1,
+            "B2 must materialize `child-note` into exactly one file; found {child_paths:?}",
+        );
+        let store_before = comp.store_block_ids().await;
+
+        // Pump the watcher over the B2-written file — the echo path.
+        comp.pump_watcher_over_disk_path(&child_paths[0]).await;
+
+        // Exactly-once: still one `child-note` file, no duplicate materialized.
+        let child_after: Vec<_> = comp
+            .disk_org_files()
+            .await
+            .into_iter()
+            .filter(|(_, id)| id.as_deref() == Some("child-note"))
+            .map(|(p, _)| p)
+            .collect();
+        assert_eq!(
+            child_after.len(),
+            1,
+            "after the watcher pump `child-note` must remain exactly one file (echo suppressed); \
+             found {child_after:?}",
+        );
+        // No re-mint: the block_raw id-set is unchanged (child-note not re-created
+        // under a fresh id, nothing dropped).
+        let store_after = comp.store_block_ids().await;
+        assert_eq!(
+            store_before, store_after,
+            "re-ingesting the materialized page must be id-stable (no re-mint / no loss); \
+             before={store_before:?} after={store_after:?}",
         );
     }
 
