@@ -210,6 +210,14 @@ pub struct FileSyncController {
     /// returns `Ok`), which clears the entry. Keyed by
     /// the same `CanonicalPath` as `last_projection`.
     quarantined: HashSet<CanonicalPath>,
+    /// Quarantined files whose write-back skip has already been logged at
+    /// ERROR once. Repeat skips log at `debug` — one loud disclosure per
+    /// quarantine episode, not an ERROR flood on every subsequent write-back
+    /// attempt (real-vault boot 2026-07-12: hundreds of identical lines).
+    /// Cleared alongside `quarantined` when a clean re-ingest lifts the
+    /// quarantine. Interior mutability because `is_quarantined` is a `&self`
+    /// read used from immutable contexts.
+    quarantine_skip_logged: std::sync::Mutex<HashSet<CanonicalPath>>,
 }
 
 impl FileSyncController {
@@ -248,6 +256,7 @@ impl FileSyncController {
             text_merge: None,
             scan_feed_ids: None,
             quarantined: HashSet::new(),
+            quarantine_skip_logged: std::sync::Mutex::new(HashSet::new()),
         }
     }
 
@@ -267,13 +276,16 @@ impl FileSyncController {
         self.scan_feed_ids.is_some()
     }
 
-    /// Leave initial-scan mode: do exactly ONE `wait_for_blocks_in_feed` over
-    /// the union of every id the scan's deferred barriers buffered, then
-    /// reset to steady state. Fail loud (never silently continue) if the
-    /// `block`-matview feed has not converged within `budget_ms` — a
-    /// stalled projection/CDC is a real bug. Called before `signal_ready`
-    /// so a stall becomes a scan failure.
-    pub async fn finish_initial_scan(&mut self, budget_ms: u64) -> Result<()> {
+    /// Leave initial-scan mode: do exactly ONE feed-convergence wait over the
+    /// union of every id the scan's deferred barriers buffered, then reset to
+    /// steady state. Fail loud (never silently continue) if the `block`-matview
+    /// feed goes QUIESCENT while ids are still missing — a stalled
+    /// projection/CDC is a real bug. `stall_ms` is a no-progress window, not a
+    /// wall-clock ceiling: as long as the feed keeps landing expected ids the
+    /// wait continues (a real-vault cold boot legitimately takes minutes; the
+    /// old fixed budget expired early under load, BugFunnel 2026-07-12).
+    /// Called before `signal_ready` so a genuine stall becomes a scan failure.
+    pub async fn finish_initial_scan(&mut self, stall_ms: u64) -> Result<()> {
         let mut ids = self.scan_feed_ids.take().unwrap_or_default();
         ids.sort();
         ids.dedup();
@@ -281,9 +293,7 @@ impl FileSyncController {
         let caught_up = if ids.is_empty() {
             true
         } else {
-            self.block_reader
-                .wait_for_blocks_in_feed(&ids, budget_ms)
-                .await
+            self.wait_for_feed_progress(&ids, stall_ms).await
         };
         tracing::debug!(
             target: "holon_latency",
@@ -299,13 +309,52 @@ impl FileSyncController {
             "scan_feed_ids must be None after finish_initial_scan"
         );
         if !caught_up {
+            let present = self.block_reader.blocks_in_feed_count(&ids).await;
             anyhow::bail!(
-                "[finish_initial_scan] block feed did not converge within {budget_ms}ms for {} \
-                 expected id(s) — projection/CDC stalled during the initial scan",
+                "[finish_initial_scan] block feed did not converge — no progress for {stall_ms}ms \
+                 with {} of {} expected id(s) still missing — projection/CDC stalled during the \
+                 initial scan",
+                ids.len() - present,
                 ids.len()
             );
         }
         Ok(())
+    }
+
+    /// Progress-grounded feed wait (replaces the fixed wall-clock ceiling).
+    ///
+    /// Waits in `stall_ms` slices via `wait_for_blocks_in_feed`; after each
+    /// unsuccessful slice it re-counts how many expected ids are present. As
+    /// long as that count is rising the feed is alive and the wait continues —
+    /// there is deliberately NO total-elapsed cap, because total ingest time is
+    /// a function of vault size, not of health. Returns `false` only when a
+    /// full `stall_ms` window passes with zero new expected ids (feed quiescent
+    /// AND incomplete) — that is a real projection/CDC defect, never a "vault
+    /// too big" artifact. Never fakes progress: `true` requires every id
+    /// present.
+    async fn wait_for_feed_progress(&self, ids: &[String], stall_ms: u64) -> bool {
+        let mut present = self.block_reader.blocks_in_feed_count(ids).await;
+        loop {
+            if self
+                .block_reader
+                .wait_for_blocks_in_feed(ids, stall_ms)
+                .await
+            {
+                return true;
+            }
+            let now = self.block_reader.blocks_in_feed_count(ids).await;
+            if now <= present {
+                return false;
+            }
+            tracing::debug!(
+                target: "holon_latency",
+                stage = "boot_feed_progress",
+                present = now as u64,
+                expected = ids.len() as u64,
+                "holon_latency",
+            );
+            present = now;
+        }
     }
 
     /// The initial-scan feed barrier (sites A and C). During the scan
@@ -330,10 +379,12 @@ impl FileSyncController {
             );
             return true;
         }
-        // Steady-state path — byte-identical to the pre-batching per-file wait.
+        // Steady-state path: progress-grounded wait with a 2s STALL window
+        // (not a 2s total ceiling — a busy projection that is still landing
+        // rows keeps the wait alive).
         debug_assert!(self.scan_feed_ids.is_none());
         let t = std::time::Instant::now();
-        let caught_up = self.block_reader.wait_for_blocks_in_feed(ids, 2000).await;
+        let caught_up = self.wait_for_feed_progress(ids, 2000).await;
         tracing::debug!(
             target: "holon_latency",
             stage = "boot_feed_wait",
@@ -672,6 +723,10 @@ impl FileSyncController {
         match self.ingest_file(path).await {
             Ok(()) => {
                 if self.quarantined.remove(&canonical) {
+                    self.quarantine_skip_logged
+                        .lock()
+                        .expect("quarantine_skip_logged poisoned")
+                        .remove(&canonical);
                     info!(
                         "[FileSyncController] write-back quarantine CLEARED for {} (ingest fully \
                          succeeded)",
@@ -684,7 +739,13 @@ impl FileSyncController {
                 // Partial ingest: the DB now holds only a PREFIX of this file's
                 // blocks. Quarantine it so write-back never renders that prefix
                 // over the intact on-disk file. Loud + disclosed.
-                if self.quarantined.insert(canonical) {
+                if self.quarantined.insert(canonical.clone()) {
+                    // New quarantine episode: re-arm the once-per-episode
+                    // skip-log so the first write-back skip is loud again.
+                    self.quarantine_skip_logged
+                        .lock()
+                        .expect("quarantine_skip_logged poisoned")
+                        .remove(&canonical);
                     tracing::error!(
                         path = %path.display(),
                         error = %format!("{e:#}"),
@@ -704,14 +765,28 @@ impl FileSyncController {
     /// prefix over the intact on-disk file. See
     /// [`quarantined`](Self::quarantined).
     fn is_quarantined(&self, path: &Path) -> bool {
-        if self.quarantined.contains(&CanonicalPath::new(path)) {
-            tracing::error!(
-                path = %path.display(),
-                "[FileSyncController] SKIPPING write-back for quarantined file — its last \
-                 ingest failed partway, so the DB holds only a truncated prefix of its \
-                 blocks; rendering it over disk would DESTROY the un-ingested lines. \
-                 The on-disk file is left intact until a clean re-ingest clears the quarantine.",
-            );
+        let canonical = CanonicalPath::new(path);
+        if self.quarantined.contains(&canonical) {
+            let first_skip = self
+                .quarantine_skip_logged
+                .lock()
+                .expect("quarantine_skip_logged poisoned")
+                .insert(canonical);
+            if first_skip {
+                tracing::error!(
+                    path = %path.display(),
+                    "[FileSyncController] SKIPPING write-back for quarantined file — its last \
+                     ingest failed partway, so the DB holds only a truncated prefix of its \
+                     blocks; rendering it over disk would DESTROY the un-ingested lines. \
+                     The on-disk file is left intact until a clean re-ingest clears the \
+                     quarantine. (Further skips of this file log at debug.)",
+                );
+            } else {
+                tracing::debug!(
+                    path = %path.display(),
+                    "[FileSyncController] write-back skipped again for quarantined file",
+                );
+            }
             true
         } else {
             false
@@ -1080,6 +1155,48 @@ impl FileSyncController {
             );
         }
 
+        // File-authority extends to the WHOLE inlined subtree, not just the
+        // page root (real-vault cold-boot escape, 2026-07-12: a folder-companion
+        // `Journals.org` inlining 3 page-files' roots + their 14 descendants
+        // re-parented those descendants into itself, and the ingest gate then
+        // expected blocks that `get_blocks`'s Page-boundary walk can NEVER
+        // return — permanent count-check failure, file quarantined, retry
+        // flood). Every parsed block whose parsed parent chain passes through a
+        // foreign page root belongs to that page's own document: never create,
+        // update, re-parent, or place it from this file. `new_blocks_vec` is
+        // DFS document order (parents before children), so one forward pass
+        // reaches the transitive closure.
+        let mut foreign_subtree_ids = foreign_page_ids.clone();
+        for block in &new_blocks_vec {
+            if foreign_subtree_ids.contains(&block.parent_id) {
+                foreign_subtree_ids.insert(block.id.clone());
+            }
+        }
+        if foreign_subtree_ids.len() > foreign_page_ids.len() {
+            info!(
+                "[FileSyncController] Skipping {} descendant block(s) of foreign page root(s) \
+                 inlined in {} — the owning page-file(s) stay authoritative for their subtrees.",
+                foreign_subtree_ids.len() - foreign_page_ids.len(),
+                path.display(),
+            );
+        }
+
+        // Blocks the post-ingest gate must NOT expect from `get_blocks(doc)`:
+        // its recursive walk stops at `Page`-tagged boundaries, so the skipped
+        // foreign subtrees AND any parsed block that itself carries a `Page`
+        // tag (plus its parsed descendants) are structurally invisible to the
+        // doc walk even when their rows land. Counting them made the gate
+        // unsatisfiable and quarantined the file forever.
+        let mut gate_excluded_ids = foreign_subtree_ids.clone();
+        for block in &new_blocks_vec {
+            if block.id == document_uri || block.id == new_parse.document.id {
+                continue;
+            }
+            if block.is_page() || gate_excluded_ids.contains(&block.parent_id) {
+                gate_excluded_ids.insert(block.id.clone());
+            }
+        }
+
         // Collect all block operations into a batch
         let mut operations: Vec<(String, holon_api::StorageEntity)> = Vec::new();
         let mut has_structural_changes = false;
@@ -1148,10 +1265,10 @@ impl FileSyncController {
         let mut last_block_per_parent: HashMap<EntityUri, EntityUri> = HashMap::new();
         let mut predecessors: HashMap<EntityUri, Option<EntityUri>> = HashMap::new();
         for block in &new_blocks_vec {
-            // A foreign page doc-root is not placed in THIS file's tree, so it
+            // A foreign page subtree is not placed in THIS file's tree, so it
             // must not anchor a later sibling's `after_block_id` — skip it so the
             // cursor stays on the previous real sibling.
-            if foreign_page_ids.contains(&block.id) {
+            if foreign_subtree_ids.contains(&block.id) {
                 continue;
             }
             let parent_id = if block.parent_id == new_parse.document.id {
@@ -1180,9 +1297,10 @@ impl FileSyncController {
         // batch — so they are excluded from the site-A feed catch-up set below.
         let mut consolidator_create_ids: Vec<String> = Vec::new();
         for block in &new_blocks_vec {
-            // Foreign page doc-root: owned by another page-file, inlined here as
-            // a heading. Never create/re-seed/re-parent it (that is the demote).
-            if foreign_page_ids.contains(&block.id) {
+            // Foreign page subtree: owned by another page-file, inlined here as
+            // headings. Never create/re-seed/re-parent it (root: that is the
+            // demote; descendants: that is the steal).
+            if foreign_subtree_ids.contains(&block.id) {
                 continue;
             }
             // Upgrade-path re-seed: a PRE-EXISTING row (SQL populated by a
@@ -1328,10 +1446,11 @@ impl FileSyncController {
         // scrambling the children list.
         for new_block in &new_blocks_vec {
             let id = &new_block.id;
-            // Foreign page doc-root inlined as a heading: the owning page-file is
-            // authoritative — never emit an update that would strip its `Page`
-            // tag or rewrite its identity/parent.
-            if foreign_page_ids.contains(id) {
+            // Foreign page subtree inlined as headings: the owning page-file is
+            // authoritative — never emit an update that would strip the root's
+            // `Page` tag, rewrite identities/parents, or clobber descendant
+            // content.
+            if foreign_subtree_ids.contains(id) {
                 continue;
             }
             if let Some(old_block) = old_blocks.get(id) {
@@ -1441,8 +1560,15 @@ impl FileSyncController {
         // `create_in_tree` — their sink rows are written by the downstream flush
         // below, not here. Exclude them from the post-apply cache-catch-up
         // expectation; the full "every block present" check happens after the
-        // flush.
-        let expected_block_count = new_blocks.len() - consolidator_creates;
+        // flush. `gate_excluded_ids` (foreign page subtrees + Page-tagged parse
+        // blocks) are structurally invisible to `get_blocks`'s Page-boundary
+        // walk, so expecting them made the gate unsatisfiable (2026-07-12
+        // quarantined-vault escape).
+        let expected_block_count = new_blocks_vec
+            .iter()
+            .filter(|b| !gate_excluded_ids.contains(&b.id))
+            .count()
+            - consolidator_creates;
         tracing::debug!(
             target: "holon_latency",
             stage = "boot_parse",
@@ -1505,6 +1631,7 @@ impl FileSyncController {
             // check below is then guaranteed and kept as the ground-truth gate.
             let expected_present_ids: Vec<String> = new_blocks_vec
                 .iter()
+                .filter(|b| !gate_excluded_ids.contains(&b.id))
                 .map(|b| b.id.to_string())
                 .filter(|id| !consolidator_create_ids.contains(id))
                 .collect();
@@ -1517,12 +1644,20 @@ impl FileSyncController {
             let caught_up = self.feed_barrier(&expected_present_ids, "updates").await;
             let cached_blocks = self.block_reader.get_blocks(&document_uri).await?;
             if cached_blocks.len() < expected_block_count {
+                let present: HashSet<&str> = cached_blocks.iter().map(|b| b.id.as_str()).collect();
+                let missing: Vec<&String> = expected_present_ids
+                    .iter()
+                    .filter(|id| !present.contains(id.as_str()))
+                    .take(10)
+                    .collect();
                 anyhow::bail!(
-                    "[on_file_changed] block feed did not catch up within 2s for {} (expected {} \
-                     blocks, cache has {}, feed_caught_up={})",
-                    path.display(),
-                    expected_block_count,
+                    "[on_file_changed] doc walk (`get_blocks`) returned {} of {} expected blocks \
+                     after ingest of {} (doc {}, feed_caught_up={}) — blocks failed to land under \
+                     this document; first missing: {missing:?}",
                     cached_blocks.len(),
+                    expected_block_count,
+                    path.display(),
+                    document_uri,
                     caught_up
                 );
             }
@@ -1634,9 +1769,9 @@ impl FileSyncController {
                 // no-ops cheaply when already positioned, so doc-order placement
                 // is order-correct regardless of the initial layout.
                 for new_block in &new_blocks_vec {
-                    // Foreign page doc-root: it lives in its OWN page-file's tree,
+                    // Foreign page subtree: it lives in its OWN page-file's tree,
                     // not this companion's — never place it here.
-                    if foreign_page_ids.contains(&new_block.id) {
+                    if foreign_subtree_ids.contains(&new_block.id) {
                         continue;
                     }
                     // Source / image children are grouped ahead of text by
@@ -1713,10 +1848,10 @@ impl FileSyncController {
                 let mut per_parent: Vec<(EntityUri, Vec<EntityUri>)> = Vec::new();
                 let mut parent_slot: HashMap<EntityUri, usize> = HashMap::new();
                 for new_block in &new_blocks_vec {
-                    // Foreign page doc-root: owned by its own page-file — exclude
+                    // Foreign page subtree: owned by its own page-file — exclude
                     // from this companion's per-parent order (a `place_all` here
-                    // would re-key it under the companion's parent).
-                    if foreign_page_ids.contains(&new_block.id) {
+                    // would re-key it under the companion's parents).
+                    if foreign_subtree_ids.contains(&new_block.id) {
                         continue;
                     }
                     if !matches!(new_block.content_type, holon_api::ContentType::Text) {
@@ -1794,8 +1929,8 @@ impl FileSyncController {
             let feed_caught_up = self.feed_barrier(&created_ids, "creates").await;
             if !feed_caught_up {
                 anyhow::bail!(
-                    "[on_file_changed] LiveData<Block> feed did not contain all {} created id(s) \
-                     within 2s for {} — projection/CDC stalled",
+                    "[on_file_changed] LiveData<Block> feed went quiescent with created id(s) \
+                     still missing ({} expected) for {} — projection/CDC stalled",
                     created_ids.len(),
                     path.display()
                 );
@@ -1825,6 +1960,28 @@ impl FileSyncController {
         // never converge). The re-render below reads the merged store content
         // and writes it back to disk.
         if !has_structural_changes && !needs_id_writeback && !did_text_merge {
+            self.last_projection
+                .insert(canonical.clone(), disk_content.to_string());
+            self.persist_disk_hash_for(&canonical, rel_path, &disk_hash)
+                .await;
+            return Ok(());
+        }
+
+        // Foreign-page subtrees were skipped above, so a re-render from this
+        // document's blocks would rewrite the file WITHOUT the inlined
+        // page-owned headings — a silent de-inline of the user's file, which is
+        // the writeback-side workstream's decision (de-inline + materialization),
+        // not this ingest's. Defer the write-back: disk already reflects every
+        // block this ingest processed (the ops came FROM this parse), so
+        // recording it as the projection is sound. ALLOW(fallback): disclosed.
+        if !foreign_subtree_ids.is_empty() && !did_text_merge {
+            info!(
+                "[FileSyncController] Deferring write-back of {} — it inlines {} block(s) owned \
+                 by other page-files; rewriting now would de-inline them. Disk left as-is; DB \
+                 state for this document is complete.",
+                path.display(),
+                foreign_subtree_ids.len(),
+            );
             self.last_projection
                 .insert(canonical.clone(), disk_content.to_string());
             self.persist_disk_hash_for(&canonical, rel_path, &disk_hash)
@@ -3022,6 +3179,10 @@ impl FileSyncController {
     /// not routine noise — single/small drops never reach this).
     fn quarantine_writeback(&mut self, path: &Path, err: &anyhow::Error) {
         if self.quarantined.insert(CanonicalPath::new(path)) {
+            self.quarantine_skip_logged
+                .lock()
+                .expect("quarantine_skip_logged poisoned")
+                .remove(&CanonicalPath::new(path));
             tracing::error!(
                 path = %path.display(),
                 error = %format!("{err:#}"),

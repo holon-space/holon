@@ -2504,7 +2504,9 @@ mod initial_scan_batched_barrier_tests {
 
     /// A BlockReader that delegates reads to the shared store but whose feed
     /// NEVER converges — models a stalled projection/CDC. Drives the
-    /// `finish_initial_scan` fail-loud path.
+    /// `finish_initial_scan` fail-loud path. `blocks_in_feed_count` reports 0
+    /// (no progress ever) so the progress-grounded barrier declares a stall
+    /// after ONE no-progress window.
     struct StallingReader {
         store: Arc<InMemoryBlockStore>,
     }
@@ -2523,6 +2525,49 @@ mod initial_scan_batched_barrier_tests {
         async fn wait_for_blocks_in_feed(&self, _: &[String], _: u64) -> bool {
             false // feed never converges
         }
+        async fn blocks_in_feed_count(&self, _: &[String]) -> usize {
+            0 // and never makes progress
+        }
+    }
+
+    /// A BlockReader whose feed converges SLOWLY: every
+    /// `wait_for_blocks_in_feed` slice "times out" (returns false) but
+    /// releases another chunk of ids, so `blocks_in_feed_count` keeps
+    /// rising. Models a healthy projection under cold-boot load — exactly
+    /// the condition where the old fixed wall-clock budget expired early
+    /// (real vault 2026-07-12). The progress-grounded barrier must keep
+    /// waiting to completion; the pre-fix single fixed-budget wait fails on
+    /// the first slice. Deterministic: progress is per-CALL, not
+    /// per-elapsed-time, so the test is not tuned to timing.
+    struct SlowFeedReader {
+        store: Arc<InMemoryBlockStore>,
+        released: std::sync::atomic::AtomicUsize,
+        chunk: usize,
+    }
+
+    #[async_trait]
+    impl BlockReader for SlowFeedReader {
+        async fn get_blocks(&self, doc_id: &EntityUri) -> Result<Vec<Block>> {
+            self.store.get_blocks(doc_id).await
+        }
+        async fn get_block_authoritative(&self, id: &EntityUri) -> Result<Option<Block>> {
+            self.store.get_block_authoritative(id).await
+        }
+        async fn iter_documents_with_blocks(&self) -> Result<Vec<(EntityUri, Vec<Block>)>> {
+            self.store.iter_documents_with_blocks().await
+        }
+        async fn wait_for_blocks_in_feed(&self, ids: &[String], _: u64) -> bool {
+            let now = self
+                .released
+                .fetch_add(self.chunk, std::sync::atomic::Ordering::SeqCst)
+                + self.chunk;
+            now >= ids.len()
+        }
+        async fn blocks_in_feed_count(&self, ids: &[String]) -> usize {
+            self.released
+                .load(std::sync::atomic::Ordering::SeqCst)
+                .min(ids.len())
+        }
     }
 
     fn build_scan_controller(
@@ -2530,7 +2575,15 @@ mod initial_scan_batched_barrier_tests {
         reader: Arc<dyn BlockReader>,
         store: Arc<InMemoryBlockStore>,
     ) -> FileSyncController {
-        let doc_manager = Arc::new(MockDocumentManager::new());
+        build_scan_controller_with_docs(root, reader, store, Arc::new(MockDocumentManager::new()))
+    }
+
+    fn build_scan_controller_with_docs(
+        root: &Path,
+        reader: Arc<dyn BlockReader>,
+        store: Arc<InMemoryBlockStore>,
+        doc_manager: Arc<MockDocumentManager>,
+    ) -> FileSyncController {
         let ordering = Arc::new(ScanOrderingStub { store });
         new_org_sync_controller(
             reader,
@@ -2658,5 +2711,151 @@ mod initial_scan_batched_barrier_tests {
             .await
             .expect("empty scan converges trivially");
         assert!(!controller.in_initial_scan(), "off after finish");
+    }
+
+    /// Real-vault cold-boot escape (2026-07-12, Martin's vault): a
+    /// folder-companion file (`Journals.org`, `#+ID: journals`) inlines OTHER
+    /// page-files' doc-roots as headings TOGETHER WITH their child blocks. The
+    /// pre-fix ingest (a) re-parented/updated those children into the
+    /// companion's document — stealing them from the owning page-file — and
+    /// (b) counted the whole inlined subtree in the post-ingest `get_blocks`
+    /// gate, which the Page-boundary doc walk can structurally NEVER return
+    /// ("expected 22 blocks, cache has 5"), so the file failed ingest forever,
+    /// was quarantined from write-back, and every retry flooded the log.
+    ///
+    /// With file-authority extended to the whole inlined subtree: ingest
+    /// succeeds, the owner's blocks are untouched (stale companion copies do
+    /// NOT clobber them), the companion doc holds exactly its own blocks, and
+    /// the file on disk is left byte-identical (write-back deferred, no
+    /// de-inline from this path).
+    #[tokio::test]
+    async fn companion_inlining_foreign_page_subtree_ingests_clean() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(InMemoryBlockStore::new());
+        let doc_manager = Arc::new(MockDocumentManager::new());
+
+        // Pre-existing page-file document `block:d1` (as the scan would have
+        // created from `Journals/2026-07-10.org`) with two children.
+        let d1 = EntityUri::from_raw("block:d1");
+        let mut page = Block::new_text(d1.clone(), EntityUri::no_parent(), "2026-07-10");
+        page.set_page(true);
+        doc_manager.add_document(page);
+        let c1 = Block::new_text(EntityUri::from_raw("block:c1"), d1.clone(), "entry one");
+        let c2 = Block::new_text(EntityUri::from_raw("block:c2"), d1.clone(), "entry two");
+        store.seed_blocks("block:d1", vec![c1, c2]);
+
+        let mut controller = build_scan_controller_with_docs(
+            temp_dir.path(),
+            store.clone(),
+            store.clone(),
+            doc_manager,
+        );
+        controller.initialize().await.expect("initialize");
+
+        // Companion file: two own blocks + the foreign page root inlined as a
+        // heading with STALE copies of its children.
+        let companion = "#+ID: journals\n\n* Own block A\n:PROPERTIES:\n:ID: own-a\n:END:\n\n* \
+                         2026-07-10\n:PROPERTIES:\n:ID: d1\n:END:\n\n** entry one \
+                         STALE\n:PROPERTIES:\n:ID: c1\n:END:\n\n** entry two \
+                         STALE\n:PROPERTIES:\n:ID: c2\n:END:\n\n* Own block B\n:PROPERTIES:\n:ID: \
+                         own-b\n:END:\n";
+        let p = temp_dir.path().join("Journals.org");
+        tokio::fs::write(&p, companion).await.unwrap();
+        let p = p.canonicalize().expect("canonicalize");
+
+        controller.begin_initial_scan();
+        controller
+            .on_file_changed(&p)
+            .await
+            .expect("companion ingest must succeed — the inlined foreign subtree is skipped");
+        controller
+            .finish_initial_scan(30_000)
+            .await
+            .expect("scan converges");
+
+        // Owner authoritative: the page-file's blocks are untouched — the
+        // companion's stale copies did not clobber content or re-parent.
+        let owner_blocks = store.get_all_blocks("block:d1");
+        let contents: BTreeSet<String> = owner_blocks.iter().map(|b| b.content.clone()).collect();
+        assert!(
+            contents.contains("entry one") && contents.contains("entry two"),
+            "owner page-file blocks must survive un-clobbered, got {contents:?}"
+        );
+
+        // Companion doc holds exactly its own blocks.
+        let journal_blocks = store.get_all_blocks("block:journals");
+        let ids: BTreeSet<String> = journal_blocks
+            .iter()
+            .map(|b| b.id.id().to_string())
+            .collect();
+        assert!(
+            ids.contains("own-a") && ids.contains("own-b"),
+            "companion's own blocks must land, got {ids:?}"
+        );
+        assert!(
+            !ids.contains("c1") && !ids.contains("c2") && !ids.contains("d1"),
+            "foreign page subtree must NOT be stolen into the companion doc, got {ids:?}"
+        );
+
+        // Disk byte-identical: this ingest never de-inlines the user's file.
+        let disk_after = tokio::fs::read_to_string(&p).await.unwrap();
+        assert_eq!(disk_after, companion, "companion file must be left as-is");
+
+        // No quarantine: a subsequent external change ingests fine too.
+        controller
+            .on_file_changed(&p)
+            .await
+            .expect("re-ingest of the unchanged companion stays clean");
+    }
+
+    /// Scaled cold boot: hundreds of files (thousands of blocks) over a feed
+    /// that is HEALTHY but SLOW — every wait slice "times out" while ids keep
+    /// landing. The old fixed wall-clock budget (`wait_for_blocks_in_feed(ids,
+    /// budget)` once) fails on the first slice; the progress-grounded barrier
+    /// must ride the progress to completion. Progress is per-call, not
+    /// per-elapsed-time, so the test is deterministic and the fix cannot be
+    /// "tuned" to its timing.
+    #[tokio::test]
+    async fn scaled_cold_boot_slow_feed_converges_via_progress() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(InMemoryBlockStore::new());
+        let reader = Arc::new(SlowFeedReader {
+            store: store.clone(),
+            released: std::sync::atomic::AtomicUsize::new(0),
+            chunk: 37, // ids released per wait slice; many slices needed
+        });
+        let mut controller = build_scan_controller(temp_dir.path(), reader, store.clone());
+        controller.initialize().await.expect("initialize");
+
+        const FILES: usize = 250;
+        const BLOCKS: usize = 5;
+        let mut paths = Vec::new();
+        for i in 0..FILES {
+            let p = temp_dir.path().join(format!("page-{i}.org"));
+            tokio::fs::write(&p, org_file(i, BLOCKS)).await.unwrap();
+            paths.push(p.canonicalize().expect("canonicalize"));
+        }
+
+        controller.begin_initial_scan();
+        for p in &paths {
+            controller
+                .on_file_changed(p)
+                .await
+                .unwrap_or_else(|e| panic!("on_file_changed {}: {e:#}", p.display()));
+        }
+        // Small stall window: irrelevant to a feed that keeps progressing.
+        controller
+            .finish_initial_scan(50)
+            .await
+            .expect("a slow-but-progressing feed must converge, not time out");
+
+        for i in 0..FILES {
+            let doc_blocks = store.get_all_blocks(&format!("block:file-{i}"));
+            assert_eq!(
+                doc_blocks.len(),
+                BLOCKS,
+                "file {i}: all blocks must land at scale"
+            );
+        }
     }
 }
