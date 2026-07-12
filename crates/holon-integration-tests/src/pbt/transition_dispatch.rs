@@ -317,7 +317,7 @@ macro_rules! declare_e2e_transitions {
                 if <$ty as ::holon_pbt_core::TransitionFactory<
                     $crate::pbt::reference_state::ReferenceState,
                 >>::required_wiring()
-                    .satisfied_by(&state.wiring)
+                    .satisfied_by(&state.harness.wiring)
                     && state.caps_available(&<$ty as ::holon_pbt_core::TransitionFactory<
                         $crate::pbt::reference_state::ReferenceState,
                     >>::required_caps())

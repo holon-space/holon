@@ -270,48 +270,24 @@ pub static VALID_PROFILE_YAMLS: std::sync::LazyLock<Vec<String>> = std::sync::La
     yamls
 });
 
-/// Reference state tracking all expected data (uses production Block struct)
+/// Harness-environment residue of the reference model (RefStateSplit Inc 3).
+///
+/// These fields are **not model state** — they are the async runtime, the
+/// wiring manifest, the composed cap set, the real-editor driver flag, and the
+/// shadow interpreter that the *harness* threads through the reference.
+/// Gathering them here (rather than leaving them loose on [`ReferenceState`])
+/// puts their `Clone` semantics in one visible place: proptest clones the
+/// reference per step and per case, so `runtime`/`interpreter` are `Arc`-shared
+/// (cheap clone, shared cell) while `wiring`/`cap_set`/`real_editor` are plain
+/// values that clone by copy.
+///
+/// `clock_feed` deliberately stays on [`ReferenceState`] (not here): its
+/// `Clone`-SHARES-the-cell seam moves with the Loro extension in a later
+/// increment, where its documentation lives.
 #[derive(Debug, Clone)]
-pub struct ReferenceState {
-    /// Tier-1 domain fragment (ADR 0004 Phase 2): block tree, layout/profile
-    /// classification, author-intent render config, seed profile, block ops.
-    /// Extracted so it can be the single domain fragment shared across wirings.
-    pub domain: ReferenceDomainState,
-
-    /// Action-engine actor fragment (ADR 0004/0006 Phase 4): lifecycle flag,
-    /// doc-id allocator, last-transition tag, undo/redo stacks. Vanishes when
-    /// the action engine isn't wired.
-    pub action: ActionActorState,
-
-    /// MCP server actor fragment (ADR 0004/0006 Phase 4): active query watches.
-    /// Vanishes when the MCP server isn't wired.
-    pub mcp: MCPServerActorState,
-
-    /// Org/Markdown adapter file-state fragment (ADR 0004 Phase 5): the
-    /// doc_uri -> filename mapping. An adapter concern (how org/markdown
-    /// persist a document on disk), distinct from domain identity.
-    pub files: FileAdapterState,
-
-    /// Tier-3 UI actor fragment (ADR 0004/0006 Phase 3): navigation history,
-    /// pins, per-region focus + cursor, view selection, drawer/toggle
-    /// open-state, active-editor mirror. Extracted so a non-UI wiring drops
-    /// the whole fragment instead of carrying dead fields.
-    pub ui: UIActorState,
-
-    /// Runtime for async operations
+pub struct HarnessEnv {
+    /// Runtime for async operations. `Arc`-shared across clones.
     pub runtime: Arc<tokio::runtime::Runtime>,
-
-    /// Pre-startup directories created (relative paths)
-    pub pre_startup_directories: Vec<String>,
-
-    /// Whether git has been initialized
-    pub git_initialized: bool,
-
-    /// Whether jj has been initialized
-    pub jj_initialized: bool,
-
-    /// Number of pre-startup org files created (for weighting StartApp)
-    pub pre_startup_file_count: usize,
 
     /// The wiring manifest this reference run was built for (which storage
     /// adapters, sync adapters, and actors are present). Drives the
@@ -331,15 +307,54 @@ pub struct ReferenceState {
 
     /// Whether a **real editor** (a live `InputState` driven by the GPUI/TUI
     /// `UserDriver`) — not the headless `HeadlessEditorMirror` — drives the
-    /// SUT. Set by the real-editor driver harness (`phased.rs`), which
-    /// builds the reference state directly. When true,
-    /// [`Self::blur_active_editor`] commits the editor's dirty buffer to
-    /// block content on blur, mirroring prod's `on_blur` →
+    /// SUT. Set by the real-editor driver harness, which builds the
+    /// reference state directly. When true,
+    /// [`ReferenceState::blur_active_editor`] commits the editor's dirty
+    /// buffer to block content on blur, mirroring prod's `on_blur` →
     /// `set_field("content")`. Replaces the former process-global
     /// `PBT_REAL_EDITOR` env gate — the property now lives on the state the
     /// driver constructs, so it is deterministic and capture/replay-faithful
     /// without an env-var side channel. Headless slices leave it `false`.
     pub real_editor: bool,
+
+    /// Shadow interpreter resolved from FluxDI — source of truth for widget
+    /// names and render DSL parsing. `Arc`-shared across clones.
+    pub interpreter: Arc<ShadowInterpreter>,
+}
+
+/// Reference state tracking all expected data (uses production Block struct)
+#[derive(Debug, Clone)]
+pub struct ReferenceState {
+    /// Tier-1 domain fragment (ADR 0004 Phase 2): block tree, layout/profile
+    /// classification, author-intent render config, seed profile, block ops.
+    /// Extracted so it can be the single domain fragment shared across wirings.
+    pub domain: ReferenceDomainState,
+
+    /// Action-engine actor fragment (ADR 0004/0006 Phase 4): lifecycle flag,
+    /// doc-id allocator, last-transition tag, undo/redo stacks. Vanishes when
+    /// the action engine isn't wired.
+    pub action: ActionActorState,
+
+    /// MCP server actor fragment (ADR 0004/0006 Phase 4): active query watches.
+    /// Vanishes when the MCP server isn't wired.
+    pub mcp: MCPServerActorState,
+
+    /// Org/Markdown adapter file-state fragment (ADR 0004 Phase 5): the
+    /// doc_uri -> filename mapping plus pre-startup file/VCS boot flags. An
+    /// adapter concern (how org/markdown persist a document on disk), distinct
+    /// from domain identity.
+    pub files: FileAdapterState,
+
+    /// Tier-3 UI actor fragment (ADR 0004/0006 Phase 3): navigation history,
+    /// pins, per-region focus + cursor, view selection, drawer/toggle
+    /// open-state, active-editor mirror. Extracted so a non-UI wiring drops
+    /// the whole fragment instead of carrying dead fields.
+    pub ui: UIActorState,
+
+    /// Harness environment (RefStateSplit Inc 3): runtime, wiring, cap set,
+    /// real-editor flag, shadow interpreter. NOT model state — see
+    /// [`HarnessEnv`].
+    pub harness: HarnessEnv,
 
     /// Loro-only peer instances for multi-instance sync testing.
     pub peers: Vec<PeerRefState>,
@@ -361,10 +376,6 @@ pub struct ReferenceState {
     /// execution re-evolves the ref fresh (padding is lenient — see
     /// `ShadowMesh::pad_primary_to`).
     pub clock_feed: Arc<std::sync::Mutex<Option<u32>>>,
-
-    /// Shadow interpreter resolved from FluxDI — source of truth for widget
-    /// names and render DSL parsing.
-    pub interpreter: Arc<ShadowInterpreter>,
 
     /// Calendar-clock model for the `AdvanceDay` transition (ADR 0024 §6).
     pub clock: ClockState,
@@ -508,18 +519,16 @@ impl ReferenceState {
             mcp: MCPServerActorState::new(),
             files: FileAdapterState::new(),
             ui: UIActorState::new(),
-            runtime: Arc::new(tokio::runtime::Runtime::new().unwrap()),
-            pre_startup_directories: Vec::new(),
-            git_initialized: false,
-            jj_initialized: false,
-            pre_startup_file_count: 0,
-            wiring,
-            cap_set: None,
-            real_editor: false,
+            harness: HarnessEnv {
+                runtime: Arc::new(tokio::runtime::Runtime::new().unwrap()),
+                wiring,
+                cap_set: None,
+                real_editor: false,
+                interpreter,
+            },
             peers: Vec::new(),
             shadow_mesh: None,
             clock_feed: Arc::new(std::sync::Mutex::new(None)),
-            interpreter,
             clock: ClockState::new(),
         }
     }
@@ -529,17 +538,17 @@ impl ReferenceState {
     /// auto-narrows to the transitions whose caps the `CapMap` actually
     /// supplies. Concrete-SUT runs leave it `None`.
     pub fn with_cap_set(mut self, cap_set: holon_pbt_core::composition::CapSet) -> Self {
-        self.cap_set = Some(cap_set);
+        self.harness.cap_set = Some(cap_set);
         self
     }
 
     /// Whether the active SUT supplies every cap in `required` — the cap gate
-    /// mirroring `RequiredWiring::satisfied_by(&self.wiring)`. Unrestricted
-    /// (`cap_set == None`) always passes, so concrete-SUT runs gate nothing
-    /// (regression-safe). **Necessary, not sufficient**, exactly like the
-    /// wiring gate.
+    /// mirroring `RequiredWiring::satisfied_by(&self.harness.wiring)`.
+    /// Unrestricted (`cap_set == None`) always passes, so concrete-SUT runs
+    /// gate nothing (regression-safe). **Necessary, not sufficient**,
+    /// exactly like the wiring gate.
     pub fn caps_available(&self, required: &[holon_pbt_core::composition::CapId]) -> bool {
-        match &self.cap_set {
+        match &self.harness.cap_set {
             None => true,
             Some(set) => required.iter().all(|cap| set.contains(cap)),
         }
@@ -550,7 +559,8 @@ impl ReferenceState {
     /// trait method so transition bodies that hold a concrete
     /// `&ReferenceState` can read it without importing the trait.
     pub fn enable_loro(&self) -> bool {
-        self.wiring
+        self.harness
+            .wiring
             .has_storage(holon_pbt_core::StorageAdapter::Loro)
     }
 
@@ -562,7 +572,7 @@ impl ReferenceState {
     /// from the wiring's UI actor (the editor's `InputState`/buffer host),
     /// not Loro-as-storage or an env var.
     pub fn has_editor_buffer(&self) -> bool {
-        self.wiring.has_actor(holon_pbt_core::Actor::UI)
+        self.harness.wiring.has_actor(holon_pbt_core::Actor::UI)
     }
 
     pub fn mutable_text_enabled() -> bool {
@@ -583,7 +593,7 @@ impl ReferenceState {
         // authority-left arm — deterministic, window-activation-independent).
         // A clean mirror that merely diverged from block.content is stale
         // against an external change and must not be committed.
-        if self.real_editor && self.ui.tab.active_editor.as_ref().is_some_and(|e| e.dirty) {
+        if self.harness.real_editor && self.ui.tab.active_editor.as_ref().is_some_and(|e| e.dirty) {
             self.commit_active_editor_if_changed();
         }
         self.ui.tab.active_editor = None;
@@ -1918,7 +1928,7 @@ impl holon_frontend::reactive::BuilderServices for ReferenceState {
         expr: &RenderExpr,
         ctx: &holon_frontend::RenderContext,
     ) -> holon_frontend::ReactiveViewModel {
-        self.interpreter.interpret(expr, ctx, self)
+        self.harness.interpreter.interpret(expr, ctx, self)
     }
 
     fn get_block_data(

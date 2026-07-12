@@ -1168,7 +1168,7 @@ mod tests {
     ///   `SutApplyMutation` and its gate names `SutLoro` (the implemented
     ///   LoroPeer arm), which `full_headless` provides. The composed generator
     ///   restricts its source set to the implemented arms
-    ///   (`state.cap_set.is_some()` → LoroPeer only for now).
+    ///   (`state.harness.cap_set.is_some()` → LoroPeer only for now).
     /// - `BulkExternalAdd` is NOW cap-feasible too: `HeadlessFrontendComponent`
     ///   provides a real composed `SutSeamMutate` (org write via the live
     ///   FileSyncController), which is its gate.

@@ -12,7 +12,7 @@ use super::from_cap_region;
 
 impl RefWiring for ReferenceState {
     fn has_cap_set(&self) -> bool {
-        self.cap_set.is_some()
+        self.harness.cap_set.is_some()
     }
 
     fn caps_available(&self, caps: &[holon_pbt_core::composition::CapId]) -> bool {
