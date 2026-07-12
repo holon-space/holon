@@ -44,6 +44,13 @@ pub enum BlockContent {
 
     /// Source code block (language-agnostic)
     Source(SourceBlock),
+
+    /// Image block: `path` is the relative file path to the image asset
+    /// (e.g. `attachments/photo.png`). A distinct variant so image-ness
+    /// survives every `Block` ↔ `BlockContent` conversion — previously an
+    /// image collapsed to `Text` here, silently dropping `ContentType::Image`
+    /// on the Loro create/read round-trip (org `[[file:…]]` data loss).
+    Image { path: String },
 }
 
 impl Default for BlockContent {
@@ -61,6 +68,7 @@ impl std::fmt::Display for BlockContent {
                 let lang = sb.language.as_deref().unwrap_or("unknown");
                 write!(f, "[{}] {}", lang, sb.source)
             }
+            BlockContent::Image { path } => write!(f, "{}", path),
         }
     }
 }
@@ -74,6 +82,11 @@ impl BlockContent {
     /// Create a source block with minimal fields (Tier 1)
     pub fn source(language: impl Into<String>, source: impl Into<String>) -> Self {
         BlockContent::Source(SourceBlock::new(language, source))
+    }
+
+    /// Create an image block. `path` is the relative file path to the asset.
+    pub fn image(path: impl Into<String>) -> Self {
+        BlockContent::Image { path: path.into() }
     }
 
     /// Get the raw text if this is a Text variant
@@ -101,6 +114,7 @@ impl BlockContent {
             BlockContent::Text { raw } => raw,
             BlockContent::RichText { text, .. } => text,
             BlockContent::Source(sb) => &sb.source,
+            BlockContent::Image { path } => path,
         }
     }
 }
@@ -495,6 +509,7 @@ impl Block {
                 sb.name,
                 None,
             ),
+            BlockContent::Image { path } => (path, ContentType::Image, None, None, None),
         };
 
         Self {
@@ -520,10 +535,13 @@ impl Block {
                 name: self.source_name.clone(),
                 header_args: HashMap::new(),
             }),
-            // Image blocks store a file path in `content` — return as Text
-            // since BlockContent has no Image variant. The caller should check
-            // `content_type` to distinguish.
-            ContentType::Text | ContentType::Image => match &self.marks {
+            // Image blocks store the file path in `content`; the dedicated
+            // variant carries `ContentType::Image` losslessly through the
+            // conversion (no `content_type` side-channel needed).
+            ContentType::Image => BlockContent::Image {
+                path: self.content.clone(),
+            },
+            ContentType::Text => match &self.marks {
                 Some(marks) => BlockContent::RichText {
                     text: self.content.clone(),
                     marks: marks.clone(),
@@ -558,6 +576,13 @@ impl Block {
                 self.content_type = ContentType::Source;
                 self.source_language = sb.language.map(|l| l.parse::<SourceLanguage>().unwrap());
                 self.source_name = sb.name;
+                self.marks = None;
+            }
+            BlockContent::Image { path } => {
+                self.content = path;
+                self.content_type = ContentType::Image;
+                self.source_language = None;
+                self.source_name = None;
                 self.marks = None;
             }
         }

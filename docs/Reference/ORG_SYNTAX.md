@@ -61,6 +61,35 @@ emit:
   as query content. A malformed body surfaces a loud `RuleStatus::ParseError` on
   the card. The parser is `holon_advice::holon_rule::parse_holon_rule`.
 
+### Image blocks
+
+An image child block renders as a single `[[file:…]]` link line inside its
+parent heading's section:
+
+```org
+* Heading
+:PROPERTIES:
+:ID: abc-123
+:END:
+[[file:attachments/photo.png]]
+```
+
+- Canonical form: `[[file:<relative-path>]]` on its own line, where the path
+  ends in a known image extension (`png`, `jpg`, `jpeg`, `gif`, `webp`, `svg`,
+  `bmp`, `ico`, `tiff`, `tif`). The extension is what classifies the block as
+  `ContentType::Image` at the **parse boundary** (`is_image_path`) — a
+  `[[file:…]]` link to a non-image target (e.g. `.pdf`) stays inline text with a
+  `Link` mark, it does NOT become an image block.
+- `block.content` stores the bare path (no `file:` scheme, no brackets); the
+  renderer re-adds `[[file:…]]` on write (`Block::to_org`).
+- Fallback ID (images carry no `:id`): `{parent_id}::img::{index}` (e.g.
+  `abc-123::img::0`), assigned by the parser in document order.
+- Image blocks carry `marks = None` and `source_language = None`; the
+  image-ness lives solely in `content_type = Image`, which every storage layer
+  (org ⇄ SQL ⇄ Loro) must preserve. In Loro this is a first-class
+  `BlockContent::Image { path }` variant so the create/read round-trip cannot
+  silently collapse it to `Text`.
+
 ### Why bare IDs?
 
 1. **Human readability** — org files are edited in Emacs/vim, scheme prefixes are noise
