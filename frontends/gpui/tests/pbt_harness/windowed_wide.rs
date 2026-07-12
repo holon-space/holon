@@ -285,10 +285,10 @@ pub fn replay_fixture_windowed(
         // fake.
         if let Some(recorded) = &fixture.wiring {
             assert_eq!(
-                *recorded, oracle.wiring,
+                *recorded, oracle.harness.wiring,
                 "[{label}] fixture {:?} was recorded under wiring {recorded:?}, but the windowed \
                  composed base is fixed to {:?} — re-record or replay headless",
-                fixture.name, oracle.wiring
+                fixture.name, oracle.harness.wiring
             );
         }
         match catch_unwind(AssertUnwindSafe(|| {
