@@ -171,7 +171,8 @@ pub fn marks_from_json(s: &str) -> Result<Vec<MarkSpan>, serde_json::Error> {
 }
 
 /// Sort marks into a canonical order: by `(start, end)`, then mark kind, then
-/// full serialized form as a total-order tiebreaker.
+/// full serialized form as a total-order tiebreaker. Zero-width marks
+/// (`start == end`) are DROPPED.
 ///
 /// Storage backends emit equal mark *sets* in different *orders* — the Loro
 /// Peritext reader closes overlapping runs in `HashMap` iteration order, while
@@ -180,7 +181,16 @@ pub fn marks_from_json(s: &str) -> Result<Vec<MarkSpan>, serde_json::Error> {
 /// faithful round-trips of the same block would diff spuriously and fire a
 /// redundant update. Canonicalizing at every read boundary makes that compare
 /// order-insensitive.
-pub fn canonicalize_marks(marks: &mut [MarkSpan]) {
+///
+/// Dropping zero-width marks here is the choke point for the "zero-width mark
+/// must not survive an edit" invariant: when a user deletes the entire text
+/// under a link (or any mark), the Loro Peritext layer retains a collapsed
+/// `start == end` anchor. Every read boundary (`read_marks_from_text`,
+/// `marks_from_json`, the PBT block-compare normalizer) routes through here,
+/// so a collapsed mark is stripped before it can reach any projection or the
+/// org writeback that would otherwise serialize it as reversed brackets.
+pub fn canonicalize_marks(marks: &mut Vec<MarkSpan>) {
+    marks.retain(|m| m.start != m.end);
     marks.sort_by(|a, b| {
         (a.start, a.end)
             .cmp(&(b.start, b.end))
@@ -328,6 +338,38 @@ mod tests {
         assert_eq!(a_canon[0], MarkSpan::new(0, 5, InlineMark::Bold));
         assert_eq!(a_canon[1], MarkSpan::new(0, 5, InlineMark::Underline));
         assert_eq!(a_canon[2], MarkSpan::new(6, 11, InlineMark::Italic));
+    }
+
+    #[test]
+    fn canonicalize_drops_zero_width_marks() {
+        // A collapsed mark (start == end) is left behind when an edit deletes
+        // the entire text under a mark (e.g. a link's label). Every read
+        // boundary routes through canonicalize_marks, which must strip it so it
+        // never reaches a projection or the org writeback (`]][[` root cause).
+        let mut marks = vec![
+            MarkSpan::new(0, 4, InlineMark::Bold),
+            MarkSpan::new(2, 2, InlineMark::Italic),
+            MarkSpan::new(
+                4,
+                4,
+                InlineMark::Link {
+                    target: EntityRef::Name {
+                        name: String::new(),
+                    },
+                    label: String::new(),
+                },
+            ),
+        ];
+        canonicalize_marks(&mut marks);
+        assert_eq!(marks, vec![MarkSpan::new(0, 4, InlineMark::Bold)]);
+
+        // marks_from_json (a read boundary) inherits the drop.
+        let json = marks_to_json(&[MarkSpan::new(0, 0, InlineMark::Bold)]);
+        let back = marks_from_json(&json).expect("parse");
+        assert!(
+            back.is_empty(),
+            "zero-width mark survived json read: {back:?}"
+        );
     }
 
     #[test]

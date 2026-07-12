@@ -318,3 +318,31 @@ impl MutationApply for Mutation {
         }
     }
 }
+
+#[cfg(test)]
+mod org_roundtrip_tests {
+    use holon_api::ContentType;
+
+    use super::normalize_content_for_org_roundtrip;
+
+    #[test]
+    fn empty_link_normalizes_to_clean_fixed_point_no_reversed_brackets() {
+        // Ref-model oracle STRENGTHENING (dogfood #4): before the fix the ref
+        // delegated to a renderer that emitted `]][[` for an empty link and so
+        // CODIFIED the corruption — the SUT and ref agreed on the broken form,
+        // hiding the bug. The renderer/extractor now drop the zero-width link,
+        // so the ref's expected on-disk form is clean; a SUT that reintroduces
+        // `]][[` would now DIVERGE and fail the keystone.
+        for input in ["[[]]", "[[][]]", "a[[]]b"] {
+            let (content, marks) = normalize_content_for_org_roundtrip(input, ContentType::Text);
+            assert!(
+                !content.contains("]]["),
+                "ref model still codifies reversed brackets for {input:?}: {content:?}"
+            );
+            assert!(
+                marks.is_none(),
+                "empty link must carry no marks for {input:?}, got {marks:?}"
+            );
+        }
+    }
+}
