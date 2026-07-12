@@ -14,6 +14,7 @@ pub use holon_turso::sql_utils;
 pub use holon_turso::turso;
 pub use holon_turso::turso_actor_stats;
 
+pub mod local_state;
 pub mod sync_token_store;
 pub mod turso_sink_reader;
 
