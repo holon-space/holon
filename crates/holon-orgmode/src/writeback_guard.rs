@@ -34,19 +34,22 @@
 //!   edit, so ANY ungrounded drop is loss → [`ensure_ingest_lossless`] →
 //!   quarantine. Grounds only via the file's own projection; a permanent
 //!   tripwire, exempt from "delete defensive code" sweeps.
-//! - **`on_block_changed` / `re_render_all_tracked`** are MID-FLIGHT,
-//!   state-driven paths. The block feed collapses every removal to a full
-//!   re-render and delivers NO delete op here (di.rs), so a *single* ungrounded
-//!   drop is indistinguishable from a routine deletion. These paths therefore
-//!   run a MASS-TRUNCATION tripwire off the [`WritebackDrops`] verdict
+//! - **`on_block_changed` / `on_block_removed` / `re_render_all_tracked`** are
+//!   MID-FLIGHT, state-driven paths. Since the ADR 0025 ROOT-ITEM threading the
+//!   feed preserves per-block `Remove` identity end-to-end (di.rs): a feed
+//!   removal is routed to the owning file (`on_block_removed`, reverse lookup
+//!   over the tracked projections) with the id as a sanctioned removal, and the
+//!   ids no single file could consume accumulate into the sanctioned set the
+//!   debounced `re_render_all_tracked` pass receives — every op-delivered
+//!   deletion is grounded. What remains ungroundable are shrinks with no
+//!   delivered op (cross-doc moves, TOCTOU-spent sanctions, matview-lag races),
+//!   so these paths still run a MASS-TRUNCATION tripwire off the
+//!   [`WritebackDrops`] verdict
 //!   (`FileSyncController::tripwire_mass_truncation`): veto+quarantine only
-//!   when the drop count exceeds a fraction of the block count (the row-28
-//!   signature), letting single/small drops pass. `on_block_changed` still
-//!   grounds a delta's `Remove` id and a de-inline via the sibling union;
-//!   `re_render_all_tracked` grounds only via the union. ADR 0025 names the
-//!   follow-up that lets these paths ground EVERY removal (and tighten the
-//!   tripwire toward zero): feed them the C2b history relation / per-block
-//!   `Remove` deltas.
+//!   when the ungrounded-drop count exceeds a fraction of the block count (the
+//!   row-28 signature), letting single/small drops pass. ADR 0025 names the
+//!   follow-up that grounds those last classes (and tightens the tripwire
+//!   toward zero): the C2b history relation.
 //!
 //! ## Canonical reformat is NOT loss
 //!

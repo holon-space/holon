@@ -465,13 +465,32 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                                                 None => OrgRerender::All,
                                             }
                                         }
-                                        // A removed block is gone from the feed, so its owning
-                                        // document can't be resolved here → reseed every file.
-                                        // (`BlockDelta::Remove` exists for the controller's own
-                                        // classification; the feed can't route it to a doc.)
-                                        MapDiff::Remove { .. }
-                                        | MapDiff::Replace { .. }
-                                        | MapDiff::Clear {} => OrgRerender::All,
+                                        // ADR 0025 ROOT ITEM: a removed block is gone from the
+                                        // feed, so its owning document can't be resolved HERE —
+                                        // but the per-block Remove identity must not be
+                                        // discarded. Carry the id; the controller reverse-looks
+                                        // up the owning file in `last_projection` and re-renders
+                                        // it with the removal SANCTIONED (op-grounded).
+                                        MapDiff::Remove { key } => {
+                                            match EntityUri::parse(&key) {
+                                                Ok(id) => OrgRerender::Remove { id },
+                                                Err(e) => {
+                                                    // A feed key that is not a valid EntityUri is
+                                                    // a defect — surface it, then fall back to the
+                                                    // (disclosed) bulk recovery path.
+                                                    tracing::error!(
+                                                        "[OrgMode] block feed Remove key {key:?} \
+                                                         is not a valid EntityUri: {e} — falling \
+                                                         back to full re-render"
+                                                    );
+                                                    OrgRerender::All
+                                                }
+                                            }
+                                        }
+                                        // Bulk state resets carry no per-block intent → recovery.
+                                        MapDiff::Replace { .. } | MapDiff::Clear {} => {
+                                            OrgRerender::All
+                                        }
                                     };
                                     let _ = tx.send(msg);
                                 }
@@ -519,7 +538,15 @@ pub enum OrgRerender {
         doc: EntityUri,
         delta: holon_filesystem::BlockDelta,
     },
-    /// Document could not be resolved (matview lag, deleted block, etc.) —
+    /// A block disappeared from the feed (`MapDiff::Remove`). Its owning
+    /// document cannot be resolved from the feed (the block is gone), so the
+    /// controller reverse-looks it up in its tracked projections and re-renders
+    /// exactly that file with the removal SANCTIONED. If no projection contains
+    /// the block, the id is accumulated into the sanctioned set the debounced
+    /// `re_render_all_tracked` pass consumes (ADR 0025: per-block Remove
+    /// identity is preserved end-to-end instead of collapsing to `All`).
+    Remove { id: EntityUri },
+    /// Document could not be resolved (matview lag, bulk feed reset, etc.) —
     /// reseed via a debounced re-render of every tracked file.
     All,
 }
@@ -783,6 +810,13 @@ pub async fn run_file_sync_controller(
     // initial scans. The flag is set in the event arm; a
     // 50ms ticker drains it with a single re-render pass.
     let mut pending_full_rerender = false;
+    // ADR 0025: per-block `Remove` ids the feed delivered that could not be
+    // routed to a single file (deleted page owning its own file, cold
+    // projection cache). The debounced `re_render_all_tracked` pass consumes
+    // them as sanctioned removals, so even the bulk path grounds these
+    // deletions in the ops that authorized them.
+    let mut pending_sanctioned_removals: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
     let mut rerender_flush_tick = tokio::time::interval(tokio::time::Duration::from_millis(50));
     rerender_flush_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -860,6 +894,24 @@ pub async fn run_file_sync_controller(
                                 }
                             }
                         }
+                        OrgRerender::Remove { id } => {
+                            match controller.on_block_removed(&id).await {
+                                Ok(true) => {}
+                                // No tracked projection contains the block (deleted page
+                                // owning its own file / cold cache) → bulk recovery pass,
+                                // CARRYING the id so the removal stays op-grounded.
+                                Ok(false) => {
+                                    pending_sanctioned_removals.insert(id.as_str().to_string());
+                                    pending_full_rerender = true;
+                                }
+                                Err(e) => {
+                                    error!(
+                                        "[OrgMode] Block removal error for {}: {}",
+                                        id, e
+                                    );
+                                }
+                            }
+                        }
                         OrgRerender::All => { pending_full_rerender = true; }
                     }
                 }.instrument(span).await;
@@ -867,7 +919,8 @@ pub async fn run_file_sync_controller(
             }
             _ = rerender_flush_tick.tick(), if pending_full_rerender => {
                 pending_full_rerender = false;
-                if let Err(e) = controller.re_render_all_tracked().await {
+                let sanctioned = std::mem::take(&mut pending_sanctioned_removals);
+                if let Err(e) = controller.re_render_all_tracked(&sanctioned).await {
                     error!("[OrgMode] re_render_all_tracked (debounced) error: {}", e);
                 }
             }

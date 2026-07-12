@@ -596,8 +596,8 @@ async fn block_driven_writeback_vetoes_mass_truncation() {
 /// delta is `Remove(b2)` — an op that SANCTIONS b2's disappearance (ADR 0025).
 /// The guard grounds b2 in the delta's `Remove` set, so the shrunken b1/b3 file
 /// is written cleanly (no drop surfaced). This is the controller's own Remove
-/// path (the production feed does not emit it today, but the mechanism is
-/// correct).
+/// path — the production feed reaches it through `on_block_removed` (ADR 0025
+/// root item).
 #[tokio::test]
 async fn block_driven_writeback_writes_sanctioned_deletion() {
     let mut h = build_harness();
@@ -624,5 +624,115 @@ async fn block_driven_writeback_writes_sanctioned_deletion() {
     assert!(
         written.contains("First heading") && written.contains("Third heading"),
         "the surviving blocks b1/b3 must remain; got {written:?}"
+    );
+}
+
+/// **ADR 0025 ROOT ITEM: a feed removal (`MapDiff::Remove` →
+/// `on_block_removed`) is reverse-routed to the one file whose projection shows
+/// the block, and the file shrinks with the removal SANCTIONED** — no tripwire,
+/// no quarantine, no full-vault re-render. This is the end-to-end shape of the
+/// production feed path after di.rs stopped collapsing removals to
+/// `OrgRerender::All`.
+#[tokio::test]
+async fn on_block_removed_routes_to_owning_file() {
+    let mut h = build_harness();
+    let b1 = h.reader.blocks.lock().unwrap()[0].clone();
+
+    // Warm the projection (cache + last_projection) with the full b1/b2/b3 doc.
+    h.controller
+        .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b1))
+        .await
+        .unwrap();
+    assert!(
+        std::fs::read_to_string(&h.path)
+            .unwrap()
+            .contains("Second heading")
+    );
+
+    // The user deletes b2: the authoritative store loses it, THEN the feed
+    // delivers the bare Remove (the block is already gone from the feed map).
+    let remaining: Vec<Block> = h
+        .reader
+        .blocks
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|b| b.id != EntityUri::block("b2"))
+        .cloned()
+        .collect();
+    h.reader.set_blocks(remaining);
+
+    let routed = h
+        .controller
+        .on_block_removed(&EntityUri::block("b2"))
+        .await
+        .expect("routing a sanctioned removal must never error");
+    assert!(routed, "the removal must be routed to the owning file");
+
+    let written = std::fs::read_to_string(&h.path).unwrap();
+    assert!(
+        !written.contains("Second heading"),
+        "the sanctioned removal of b2 must shrink the file; got {written:?}"
+    );
+    assert_eq!(
+        written,
+        full_render_oracle(&h),
+        "the shrunken file must match the authoritative full render"
+    );
+}
+
+/// **ADR 0025: a `Remove` for a block STILL PRESENT in the authoritative store
+/// is matview churn/lag, not a deletion** — `on_block_removed` treats it as
+/// moot (routed, nothing written) instead of re-rendering or sanctioning.
+#[tokio::test]
+async fn on_block_removed_of_live_block_is_moot() {
+    let mut h = build_harness();
+    let b1 = h.reader.blocks.lock().unwrap()[0].clone();
+    h.controller
+        .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b1))
+        .await
+        .unwrap();
+    let before = std::fs::read_to_string(&h.path).unwrap();
+    let baseline = h.reader.get_blocks_calls();
+
+    let routed = h
+        .controller
+        .on_block_removed(&EntityUri::block("b2"))
+        .await
+        .unwrap();
+    assert!(routed, "a live block's Remove is moot but handled");
+    assert_eq!(
+        std::fs::read_to_string(&h.path).unwrap(),
+        before,
+        "a moot Remove must not touch the file"
+    );
+    assert_eq!(
+        h.reader.get_blocks_calls(),
+        baseline,
+        "a moot Remove must not pay a reseed"
+    );
+}
+
+/// **ADR 0025: a `Remove` for a block NO tracked projection contains returns
+/// `Ok(false)`** — the caller (di.rs) then falls back to the debounced bulk
+/// pass CARRYING the id in its sanctioned set, so even the fallback stays
+/// op-grounded.
+#[tokio::test]
+async fn on_block_removed_unknown_block_falls_back() {
+    let mut h = build_harness();
+    let b1 = h.reader.blocks.lock().unwrap()[0].clone();
+    h.controller
+        .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b1))
+        .await
+        .unwrap();
+
+    let routed = h
+        .controller
+        .on_block_removed(&EntityUri::block("never-projected"))
+        .await
+        .unwrap();
+    assert!(
+        !routed,
+        "an unroutable removal must report false so the caller sanctions the bulk pass"
     );
 }

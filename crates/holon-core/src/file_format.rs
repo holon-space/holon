@@ -164,13 +164,14 @@ pub trait FileFormatAdapter: Send + Sync {
     /// verdict).
     ///
     /// Lets a caller apply a NON-quarantine policy to a drop. The block-driven
-    /// write-back paths cannot yet ground removals (removals are not delivered
-    /// as ops there; ADR 0025 C2b follow-up), so instead of vetoing every
-    /// drop — which would break routine deletions — they run a
-    /// MASS-TRUNCATION tripwire off the verdict: veto+quarantine only when
-    /// the drop count exceeds a fraction of `source_block_count` (the
-    /// row-28 loss signature), letting single/small drops pass. The
-    /// intent-bearing ingest boundary keeps using
+    /// write-back paths ground every op-delivered removal (per-block `Remove`
+    /// deltas are threaded end-to-end into `sanctioned_removals`; ADR 0025 root
+    /// item), but state-driven renders can still shrink a file without a
+    /// delivered op (cross-doc moves, matview-lag races), so instead of vetoing
+    /// every ungrounded drop they run a MASS-TRUNCATION tripwire off the
+    /// verdict: veto+quarantine only when the drop count exceeds a fraction of
+    /// `source_block_count` (the row-28 loss signature), letting single/small
+    /// drops pass. The intent-bearing ingest boundary keeps using
     /// `check_writeback_lossless` to quarantine any drop.
     fn writeback_drops(
         &self,
