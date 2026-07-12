@@ -116,6 +116,14 @@ const { napiModule: __napiModule } = __emnapiInstantiateNapiModuleSync(__wasmFil
     return importObject
   },
   beforeInit({ instance }) {
+    // Initialize the main thread's WASI thread-pointer / pthread state BEFORE
+    // any napi registration touches thread-local destructors. napi builds this
+    // crate as a wasm library, so crt1-reactor's `_initialize` (which would run
+    // `__wasi_init_tp()`) is never exported/called (rust-lang/rust#146843).
+    // Without this, the main thread's pthread key subsystem is uninitialized
+    // and the first thread-local-destructor registration deadlocks in
+    // `pthread_key_create`. See holon_init_main_thread() in src/lib.rs.
+    instance.exports.holon_init_main_thread()
     for (const name of Object.keys(instance.exports)) {
       if (name.startsWith('__napi_register__')) {
         instance.exports[name]()
