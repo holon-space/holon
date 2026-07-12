@@ -21,6 +21,7 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
+use holon_api::computation::PlantedColumn;
 use holon_core::storage::resource::Resource;
 use holon_core::storage::types::Result;
 use holon_core::storage::types::StorageError;
@@ -270,12 +271,33 @@ fn edge_agg_view_select(descriptor: &EdgeFieldDescriptor) -> String {
 /// `holon-advice/tests/matview_build.
 /// rs::probe_multi_junction_fanout_fix_shapes`.
 fn block_matview_select(descriptors: &[EdgeFieldDescriptor]) -> String {
+    block_matview_select_with_computed(descriptors, &[])
+}
+
+/// SELECT for the `block` matview, extended with C4 **SQL-planted derived-field
+/// columns** (seat A). Each [`PlantedColumn`] is appended as `{sql} AS {name}`
+/// — an inlined, parameter-free scalar expression over `b.*` columns — so
+/// Turso's IVM maintains the derived value O(delta) alongside the block row.
+///
+/// `computed` is empty on the boot path (prototype-block declarations are user
+/// data loaded *after* schema init). The remaining production wire is: when a
+/// prototype block's derived-field set changes, re-`plan` it and re-reconcile
+/// the `block` matview with the resulting columns (`reconcile_named_view`
+/// already DROP+CREATEs only on a SELECT change). See
+/// docs/Proposals/ComputationTrait.
+fn block_matview_select_with_computed(
+    descriptors: &[EdgeFieldDescriptor],
+    computed: &[PlantedColumn],
+) -> String {
     let mut columns: Vec<String> = BLOCK_RAW_COLUMNS.iter().map(|c| format!("b.{c}")).collect();
     let mut joins = Vec::new();
     for d in descriptors {
         let agg = edge_agg_view_name(d);
         columns.push(format!("COALESCE({agg}.vals, '[]') AS {}", d.field));
         joins.push(format!("LEFT OUTER JOIN {agg} ON {agg}.source_id = b.id"));
+    }
+    for c in computed {
+        columns.push(format!("({}) AS {}", c.sql, c.name));
     }
     // Exclude the self-parented `sentinel:no_parent` FK-anchor row — it exists
     // only to satisfy the block_raw parent FK and must never surface as a real

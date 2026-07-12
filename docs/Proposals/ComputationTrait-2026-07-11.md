@@ -150,24 +150,61 @@ shares `CompiledExpr` with `Computation::Script`, and its resolver can delegate 
 mirrors the loop — it deserves its own verified pass rather than being rushed, and
 it does **not** block the C4 interface, which is landed.
 
-## Pipeline seat — the one thing still OPEN (per ruling)
+## Pipeline seat — LANDED as a HYBRID seat (2026-07-12)
 
-The ruling explicitly leaves open *where in the reactive pipeline* a computed
-field is recomputed/retracted on input change. `Computation` is the **interface**
-that makes that seat pluggable; it does not decide the seat. Two candidates,
-recorded for the next ruling:
+The ruling left open *where in the reactive pipeline* a computed field is
+recomputed/retracted on input change. Resolved: **both** candidate seats, unified
+behind one routing type keyed on `compile_sql()`. `Computation` is the interface;
+`DerivedFieldPlan` is the seat.
 
-- **A. Turso matview column** — `compile_sql()` emits the field as a computed
-  column; IVM maintains it. Fast, incremental, but only for SQL-compilable shapes
-  (`Script` falls to degraded mode).
-- **B. Reactive projection stage** — recompute via `eval` in the row pipeline
-  when inputs change (analogue of ADR 0024 maintained display emission). Total
-  (handles `Script`) but not IVM-incremental unless we track input deps.
+`DerivedFieldPlan::plan(fields)` (`holon-api/src/computation.rs`) classifies each
+declared `DerivedField` PER FIELD:
 
-The end-to-end proof below exercises seat B (total, in-memory) because it covers
-every shape and is the one with an existing home (`row_pipeline`); seat A is the
-SQL-push-down optimization gated on the compile path, proven separately by the
-`compile_sql` round-trip test.
+- **A. Turso matview column** — `compile_sql()` **Ok** → the field is planted as a
+  matview column. `SqlFragment::inline_sql()` renders the parameter-free column
+  expression (bind params inlined — a `CREATE MATERIALIZED VIEW` cannot carry
+  `?`), and `block_matview_select_with_computed`
+  (`holon-turso/src/schema_modules.rs`) appends `({sql}) AS {name}` to the `block`
+  matview SELECT. Turso IVM then maintains and RETRACTS the derived value O(delta)
+  for free. Proven end-to-end against real Turso IVM by
+  `holon-turso/tests/derived_field_matview.rs` (insert → maintain, update input →
+  replace-not-stack, delete → retract).
+- **B. Reactive projection stage** — `compile_sql()` **Err(SqlUnsupported)** (a
+  `Script`, or a non-inlinable fragment) → the field is evaluated via
+  `Computation::eval` in the projection stage over the row's CDC-fed context
+  (`DerivedFieldPlan::evaluate_stage`). Total (handles `Script`), retraction-correct
+  by overwrite (recompute replaces the prior value; it never stacks), and
+  **fail-loud** — unlike the legacy `resolve_computed_fields`, a missing input or
+  eval error surfaces as a named `ComputeError`, not a substituted `Null`.
+
+**Disclosure (never silent):** `plan()` logs every field routed to seat B at
+`info` with its name and the `SqlUnsupported` reason, and the reason is retained
+in `StageField::reason` so a caller can annotate the UI. This is the disclosed
+degraded-mode contract from the C2b/CRDT-vs-LWW precedent. The split is an
+implementation detail the user may inspect (`DerivedFieldPlan`) but must not
+depend on — same declaration surface, same observable value.
+
+**The existing seat-B home in production** is the enrich boundary
+(`holon/src/api/ui_watcher.rs` `enrich_row` → `resolve_computed_only` →
+`resolve_computed_fields`), which already evaluates profile-declared `= Rhai`
+computed fields per row over the CDC stream. That path is the mirror of ADR 0024
+maintained display emission for field values.
+
+### What remains (deferred, does NOT block the seat)
+
+1. **Feed user-declared prototype-block derived fields into `plan()` at reconcile
+   time.** `block_matview_select_with_computed` takes the planted columns but the
+   boot path passes `&[]` (prototype blocks are user data loaded after schema
+   init). The production wire: on a prototype block's derived-field set changing,
+   re-`plan` and re-`reconcile_named_view("block", …)` (which already DROP+CREATEs
+   only on a SELECT change). Seat A's mechanism is proven; only this trigger wire
+   is open.
+2. **Route the production enrich path through `Computation`/`DerivedFieldPlan`**
+   so profile + prototype fields share one fail-loud evaluator. This changes the
+   enrich path's error semantics (fail-loud vs the current `Null` substitution)
+   and touches the keystone render path, so it deserves its own verified pass
+   rather than being folded in here.
+3. **`rank_tasks` convergence** — see below.
 
 ## Proof of correctness (deliverables)
 
