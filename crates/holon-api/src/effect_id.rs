@@ -113,6 +113,28 @@ pub fn deterministic_instance_id(
     EntityUri::block(&uuid.to_string())
 }
 
+/// Fixed, checked-in namespace for trust-gate proposal block ids
+/// (VisionGapAnalysis C5). Distinct from [`HOLON_RULE_NAMESPACE`] and
+/// [`HOLON_TEMPLATE_NAMESPACE`] so a coerced proposal can never collide with a
+/// rule effect or a template instance even with pathological inputs.
+pub const HOLON_PROPOSAL_NAMESPACE: Uuid = Uuid::from_u128(0x7a6b5c4d_3e2f_4c1b_9a8d_7e6f5a4b3c2d);
+
+/// Mint the deterministic block id for one coerced proposal (ADR 0024 P4
+/// applied to the trust gate): the same `(origin identity, entity, op, params
+/// firing key)` yields the same proposal id on every replica and on every
+/// re-fire, so a repeated sub-threshold dispatch upserts one proposal instead
+/// of stacking duplicates.
+pub fn deterministic_proposal_id(
+    origin_key: &str,
+    entity: &str,
+    op_name: &str,
+    key: &FiringKey,
+) -> EntityUri {
+    let name = format!("{origin_key}\x1f{entity}\x1f{op_name}\x1f{}", key.0);
+    let uuid = Uuid::new_v5(&HOLON_PROPOSAL_NAMESPACE, name.as_bytes());
+    EntityUri::block(&uuid.to_string())
+}
+
 /// Typed, deterministic rendering of a value for the firing key. The type tag
 /// prevents `Integer(1)` and `String("1")` from producing the same key; nested
 /// objects are rendered with sorted keys so map iteration order never leaks in.

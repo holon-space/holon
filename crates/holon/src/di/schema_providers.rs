@@ -8,22 +8,30 @@
 //!
 //! ## Compile-time vs runtime schemas
 //!
-//! Core schemas known at compile time use typed markers (`DbReady<CoreTables>`).
-//! User-defined schemas from YAML/MCP use FluxDI dynamic providers with string
+//! Core schemas known at compile time use typed markers
+//! (`DbReady<CoreTables>`). User-defined schemas from YAML/MCP use FluxDI
+//! dynamic providers with string
 //! keys and `depends_on_static::<DbReady<CoreTables>>()`.
 
 use std::marker::PhantomData;
 
-use fluxdi::{Injector, Provider, Shared};
-
-use crate::storage::turso::DbHandle;
-use holon_turso::schema_modules::{
-    BlockHierarchySchemaModule, BlockMatviewSchemaModule, BlockRequirementEdgesSchemaModule,
-    BlockSchemaModule, CoreSchemaModule, IdentitySchemaModule, LinkSchemaModule,
-    NavigationSchemaModule, OperationsSchemaModule, SyncStateSchemaModule,
-};
+use fluxdi::Injector;
+use fluxdi::Provider;
+use fluxdi::Shared;
+use holon_turso::schema_modules::BlockHierarchySchemaModule;
+use holon_turso::schema_modules::BlockMatviewSchemaModule;
+use holon_turso::schema_modules::BlockRequirementEdgesSchemaModule;
+use holon_turso::schema_modules::BlockSchemaModule;
+use holon_turso::schema_modules::CoreSchemaModule;
+use holon_turso::schema_modules::IdentitySchemaModule;
+use holon_turso::schema_modules::LinkSchemaModule;
+use holon_turso::schema_modules::NavigationSchemaModule;
+use holon_turso::schema_modules::OperationsSchemaModule;
+use holon_turso::schema_modules::SyncStateSchemaModule;
+use holon_turso::schema_modules::TrustProposalsSchemaModule;
 
 use super::DbHandleProvider;
+use crate::storage::turso::DbHandle;
 
 // ---------------------------------------------------------------------------
 // Phantom type infrastructure
@@ -87,13 +95,18 @@ impl DbResource for BlockTables {}
 pub struct LinkTables;
 impl DbResource for LinkTables {}
 
-/// `canonical_entity`, `entity_alias`, `proposal_queue` tables for cross-system identity.
+/// `canonical_entity`, `entity_alias`, `proposal_queue` tables for cross-system
+/// identity.
 pub struct IdentityTables;
 impl DbResource for IdentityTables {}
 
 /// `graph_eav` schema.
 pub struct GraphEavSchema;
 impl DbResource for GraphEavSchema {}
+
+/// `trust_proposals` supervision matview (C5 trust gate; FROM `block_raw`).
+pub struct TrustProposalsView;
+impl DbResource for TrustProposalsView {}
 
 // ---------------------------------------------------------------------------
 // Helper: run a SchemaModule's DDL via DbHandle
@@ -141,7 +154,8 @@ pub fn register_schema_providers(injector: &Injector) {
         Shared::new(DbReady::<CoreTables>::new())
     }));
 
-    // -- BlockMatviewView (depends on CoreTables + BlockTables: matview JOINs block_raw + junctions) --
+    // -- BlockMatviewView (depends on CoreTables + BlockTables: matview JOINs
+    // block_raw + junctions) --
     injector.provide::<DbReady<BlockMatviewView>>(
         Provider::root_async(|inj| async move {
             let _core = inj.resolve_async::<DbReady<CoreTables>>().await;
@@ -156,7 +170,8 @@ pub fn register_schema_providers(injector: &Injector) {
         .with_dependency::<DbReady<BlockTables>>(),
     );
 
-    // -- BlockHierarchyView (block_with_path: FROM block — chained on the matview) --
+    // -- BlockHierarchyView (block_with_path: FROM block — chained on the matview)
+    // --
     injector.provide::<DbReady<BlockHierarchyView>>(
         Provider::root_async(|inj| async move {
             let _bm = inj.resolve_async::<DbReady<BlockMatviewView>>().await;
@@ -184,7 +199,8 @@ pub fn register_schema_providers(injector: &Injector) {
         .with_dependency::<DbReady<BlockTables>>(),
     );
 
-    // -- NavigationTables (focus_roots matview JOINs block — chained on the matview) --
+    // -- NavigationTables (focus_roots matview JOINs block — chained on the
+    // matview) --
     injector.provide::<DbReady<NavigationTables>>(
         Provider::root_async(|inj| async move {
             let _bm = inj.resolve_async::<DbReady<BlockMatviewView>>().await;
@@ -215,7 +231,8 @@ pub fn register_schema_providers(injector: &Injector) {
         Shared::new(DbReady::<OperationTables>::new())
     }));
 
-    // -- BlockTables (depends on CoreTables: junction FKs reference block_raw.id) --
+    // -- BlockTables (depends on CoreTables: junction FKs reference block_raw.id)
+    // --
     injector.provide::<DbReady<BlockTables>>(
         Provider::root_async(|inj| async move {
             let _core = inj.resolve_async::<DbReady<CoreTables>>().await;
@@ -250,6 +267,19 @@ pub fn register_schema_providers(injector: &Injector) {
         Shared::new(DbReady::<IdentityTables>::new())
     }));
 
+    // -- TrustProposalsView (FROM block_raw — depends on CoreTables only) --
+    injector.provide::<DbReady<TrustProposalsView>>(
+        Provider::root_async(|inj| async move {
+            let _core = inj.resolve_async::<DbReady<CoreTables>>().await;
+            let db = inj.resolve::<dyn DbHandleProvider>();
+            run_schema_module(&TrustProposalsSchemaModule, &db.handle())
+                .await
+                .expect("TrustProposalsView schema init failed");
+            Shared::new(DbReady::<TrustProposalsView>::new())
+        })
+        .with_dependency::<DbReady<CoreTables>>(),
+    );
+
     // -- GraphEavSchema (depends on CoreTables) --
     injector.provide::<DbReady<GraphEavSchema>>(
         Provider::root_async(|inj| async move {
@@ -282,5 +312,6 @@ pub fn all_schema_roots() -> Vec<std::any::TypeId> {
         TypeId::of::<DbReady<OperationTables>>(),
         TypeId::of::<DbReady<LinkTables>>(),
         TypeId::of::<DbReady<GraphEavSchema>>(),
+        TypeId::of::<DbReady<TrustProposalsView>>(),
     ]
 }
