@@ -813,6 +813,190 @@ mod teeth {
         );
     }
 
+    /// Boot a frontend over the given org files and return its composed CapMap
+    /// (the caps the Fork B companion/materialization oracles select on),
+    /// settled.
+    async fn boot_companion_topology(files: &[(&str, &str)]) -> CapMap {
+        use holon_pbt_core::capabilities::SutSqlProjection;
+        let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
+        let comp =
+            Arc::new(HeadlessFrontendComponent::new(files, Duration::from_millis(600)).await);
+        let engine = comp.engine();
+        let mut caps = CapMap::new();
+        comp.clone().register(&mut caps);
+        caps.insert(comp.clone() as Arc<dyn SutSqlProjection>);
+        caps.replace(Arc::new(OpDispatchWriter::with_resolver(
+            engine.clone(),
+            resolver.clone(),
+        )) as Arc<dyn SutBlockTreeWrite>);
+        tokio::time::sleep(SETTLE).await;
+        caps
+    }
+
+    /// A minimal oracle that models `child-note` as a `Page` doc-root owning
+    /// `child-note.org` (mirrors `wide_e2e::seed_folder_companion`), so
+    /// `is_page_block(child-note)` drives the ref-consuming Fork B oracles. The
+    /// SUT-only oracles (`inv-every-page-has-its-own-file`, fixed-point) ignore
+    /// the ref; the base `structural_ref` blocks this topology doesn't boot
+    /// are inert because these tests run no full block-id-set compare.
+    fn child_note_page_oracle() -> crate::pbt::reference_state::Resolved<ReferenceState> {
+        let mut oracle = structural_ref();
+        let page = EntityUri::block("child-note");
+        let mut page_block = Block::new_text(page.clone(), EntityUri::no_parent(), "child-note");
+        page_block.set_page(true);
+        oracle
+            .domain
+            .block_state
+            .blocks
+            .insert(page.clone(), page_block);
+        oracle
+            .domain
+            .block_state
+            .block_documents
+            .insert(page.clone(), EntityUri::no_parent());
+        oracle
+            .files
+            .documents
+            .insert(page.clone(), "child-note.org".to_string());
+        let resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
+        drop_ref_off_thread(oracle);
+        resolved
+    }
+
+    /// GREEN regression lock: the companion writeback de-inlines an OWNED child
+    /// page LOSSLESSLY. `child-note.org` is a bare page-file (`#+ID:
+    /// child-note`); `my-notes.org` inlines its id as a heading. After
+    /// settle, `my-notes.org` converges to the bare `#+ID: my-notes` shell
+    /// (the `get_blocks` CTE excludes the `Page`-tagged child) while
+    /// `child-note` survives in its own file — no guard veto (the
+    /// block-driven writeback path never calls `ensure_ingest_lossless`;
+    /// empirical Fork B finding 2026-07-12), no loss. This documents that
+    /// the de-inline ALREADY works when the page owns a file — the plan's
+    /// original B1 guard-veto premise does not hold here.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn folder_companion_deinlines_owned_child_page() {
+        use holon_pbt_core::capabilities::SutSqlProjection;
+        use holon_pbt_core::composition::CapInvariant;
+
+        use crate::pbt::composed::invariants::companion_has_no_child_page_headings;
+        use crate::pbt::composed::invariants::observed_errors;
+        use crate::pbt::composed::invariants::org_render_fixed_point;
+        use crate::pbt::composed::invariants::sidebar_page_tag_preserved;
+
+        const CHILD_PAGE_ORG: &str = "#+ID: child-note\n";
+        const COMPANION_ORG: &str =
+            "#+ID: my-notes\n* child-note\n:PROPERTIES:\n:ID: child-note\n:END:\n";
+
+        let caps = boot_companion_topology(&[
+            ("child-note.org", CHILD_PAGE_ORG),
+            ("my-notes.org", COMPANION_ORG),
+        ])
+        .await;
+        let resolved = child_note_page_oracle();
+        let registry: Vec<Box<dyn CapInvariant>> = vec![
+            observed_errors::wire(),
+            sidebar_page_tag_preserved::wire(),
+            org_render_fixed_point::wire(),
+            companion_has_no_child_page_headings::wire(),
+        ];
+        let report = run_with_seeded_ref(&registry, &caps, resolved).await;
+        assert!(
+            report.failures().is_empty(),
+            "owned-page de-inline must be lossless + fixed-point green: {:?}",
+            report.failures(),
+        );
+        assert!(
+            report
+                .ran_ids()
+                .iter()
+                .any(|id| *id == "inv-companion-has-no-child-page-headings"),
+            "companion oracle must select + run (ran: {:?})",
+            report.ran_ids(),
+        );
+    }
+
+    /// **Fork B B0 (RED-first): a FILELESS page must be MATERIALIZED into its
+    /// own file.** `my-notes.org` inlines `child-note` as a `Page`-tagged
+    /// heading (`* child-note :Page:`) with body text, and there is NO
+    /// `child-note.org`. After settle, `child-note` is a `Page` in the
+    /// store, correctly de-inlined from the companion (`my-notes.org` →
+    /// bare `#+ID: my-notes`) — but it owns NO file on disk, so its content
+    /// ("body text") exists only in the store and vanishes on any
+    /// store-rebuild-from-disk: silent loss.
+    ///
+    /// This is the real Fork B bug (the owned case above already works). The
+    /// writeback must MATERIALIZE `child-note` into its own file
+    /// (`inv-every-page-has-its-own-file`). RED today (block-driven writeback
+    /// de-inlines but never materializes); Fork B B2 (materialization via the
+    /// latent `DocumentManager` path + a boot sweep) makes it green.
+    /// `#[ignore]` keeps CI green until B2 lands; run `--run-ignored` to
+    /// reproduce the RED.
+    ///
+    /// Non-reserved names dodge the reserved-`Journals` programmatic seed; the
+    /// flat (non-subdir) shape dodges the pre-existing `row_origin.rs`
+    /// "disjoint root rows" nested-page render panic.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "RED-first (Fork B B0): a fileless page is quarantined-inline and never \
+                materialized to its own file until B2's materialization sweep (+B1' union guard) \
+                lands; run --run-ignored to reproduce"]
+    async fn fileless_page_writeback_materializes() {
+        use holon_pbt_core::capabilities::SutOrgRender;
+        use holon_pbt_core::composition::CapInvariant;
+
+        use crate::pbt::composed::invariants::companion_has_no_child_page_headings;
+        use crate::pbt::composed::invariants::observed_errors;
+        use crate::pbt::composed::invariants::org_render_fixed_point;
+
+        // Companion inlines child-note as a Page-tagged heading; NO child-note.org.
+        const COMPANION_ORG: &str = "#+ID: my-notes\n* child-note :Page:\n:PROPERTIES:\n:ID: \
+                                     child-note\n:END:\nbody text that must not vanish\n";
+
+        let caps = boot_companion_topology(&[("my-notes.org", COMPANION_ORG)]).await;
+
+        // Materialization check (scaffold-noise-free, unlike a store-wide page
+        // sweep): after settle, `child-note` must own a file — some `.org` on disk
+        // whose `#+ID:` is `child-note`. RED today: the block-driven writeback
+        // de-inlines `child-note` (the `get_blocks` CTE excludes `Page`s), the guard
+        // vetoes the loss and QUARANTINES `my-notes.org` (so it stays inlined), and
+        // nothing materializes `child-note` into its own file. B2 materializes it;
+        // then the de-inline is lossless and the companion converges.
+        let child_has_file = {
+            let r = caps.get::<dyn SutOrgRender>().expect("SutOrgRender wired");
+            r.snapshot_org_render_pairs()
+                .await
+                .iter()
+                .any(|(_, disk, _)| {
+                    disk.lines().any(|l| {
+                        l.trim().strip_prefix("#+ID:").map(str::trim) == Some("child-note")
+                    })
+                })
+        };
+        assert!(
+            child_has_file,
+            "the fileless page `child-note` must be materialized into its own `child-note.org` (a \
+             `#+ID: child-note` file), but no file owns it",
+        );
+
+        // And the companion must converge (de-inlined, fixed point) — RED today
+        // because the guard quarantines `my-notes.org` with the child still inline.
+        let resolved = child_note_page_oracle();
+        let registry: Vec<Box<dyn CapInvariant>> = vec![
+            observed_errors::wire(),
+            org_render_fixed_point::wire(),
+            companion_has_no_child_page_headings::wire(),
+        ];
+        let report = run_with_seeded_ref(&registry, &caps, resolved).await;
+        let failures = report.failures();
+        assert!(
+            !failures.iter().any(|(id, _)| {
+                *id == "inv-org-render-fixed-point"
+                    || *id == "inv-companion-has-no-child-page-headings"
+            }),
+            "companion must de-inline + converge once the child is materialized; failures: \
+             {failures:?}",
+        );
+    }
+
     /// **Increment-3 fresh-drive + ORG-SEED probe — the full catalog is green
     /// over `compose_sut(frontend)`.** The store-only
     /// seed left the working tree absent from the org files `SutOrgRead`
