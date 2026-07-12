@@ -496,7 +496,7 @@ impl LoroProjection {
                     // write succeeds — a failed apply (e.g. an FK reject that rolls
                     // the whole batch back) must not advance the base, which would
                     // silently drop the change; instead we reseed and retry.
-                    let (ops, staging, before_len, after_len) = {
+                    let (ops, staging, before_len, after_len, has_orphan) = {
                         let live = self.live.lock().unwrap();
                         let before_len = live.len();
                         let mut ops: Vec<(String, holon_api::StorageEntity)> = Vec::new();
@@ -534,50 +534,103 @@ impl LoroProjection {
                             }
                         }
                         let after_len = before_len + creates - deletes;
-                        (ops, staging, before_len, after_len)
-                    };
-                    let snapshot_ms = t0.elapsed().as_millis();
-                    match self
-                        .emit_ops(
-                            ops,
-                            current,
-                            &t0,
-                            snapshot_ms,
-                            after_len,
-                            before_len,
-                            "incremental",
-                        )
-                        .await
-                    {
-                        Ok(()) => {
-                            // Sink write committed — now advance the diff base.
-                            let mut live = self.live.lock().unwrap();
-                            for (id, v) in staging {
-                                match v {
-                                    Some(nb) => {
-                                        live.insert(id, nb);
+                        // Orphan-create guard: a create whose parent block is
+                        // NEITHER already in the sink base (`live`) NOR created by
+                        // this same batch will FK-reject at COMMIT and roll the
+                        // whole batch back — silently dropping every co-batched
+                        // row. The incremental fast path reads only the CHANGED
+                        // nodes, so an ancestor that changed in an earlier, already-
+                        // drained interval (whose facts were consumed by a prior
+                        // pass) can be missing from this batch while its descendants
+                        // are present. When that happens we must NOT emit the
+                        // partial batch; fall through to the full reseed below,
+                        // which reads the WHOLE current tree and re-emits the
+                        // subtree with its parent. (Seed layout / `sentinel`
+                        // non-`block:` parents are always satisfiable.)
+                        let has_orphan = {
+                            let batch_created: std::collections::HashSet<&str> = ops
+                                .iter()
+                                .filter(|(name, _)| name == "create")
+                                .filter_map(|(_, e)| e.get("id").and_then(|v| v.as_string()))
+                                .collect();
+                            ops.iter().any(|(name, e)| {
+                                if name != "create" {
+                                    return false;
+                                }
+                                match e.get("parent_id").and_then(|v| v.as_string()) {
+                                    Some(pid) if pid.starts_with("block:") => {
+                                        !live.contains_key(pid) && !batch_created.contains(pid)
                                     }
-                                    None => {
-                                        live.remove(&id);
+                                    _ => false,
+                                }
+                            })
+                        };
+                        (ops, staging, before_len, after_len, has_orphan)
+                    };
+                    if has_orphan {
+                        // Do not commit an FK-doomed partial batch. Force the base
+                        // to be rebuilt from SINK TRUTH (`read_sql_snapshot`), not
+                        // the in-memory `live` diff base: `live` may itself have
+                        // drifted to hold the missing parent while `block_raw` does
+                        // not, in which case a reseed diffed against `live` would
+                        // re-omit the parent and FK-fail again. Clearing `seeded`
+                        // makes the reseed below diff the full tree against the
+                        // actual sink, so the parent's create is (re)emitted with
+                        // its subtree. (The reseed reads sink truth unconditionally
+                        // now, but clearing the flag keeps `seeded` honest — the
+                        // in-memory `live` base is not trustworthy until the reseed
+                        // re-establishes it.)
+                        self.seeded.store(false, Ordering::SeqCst);
+                        tracing::warn!(
+                            "[LoroProjection] incremental batch has orphan create(s) (a changed \
+                             node's parent is absent from this O(changed) batch); reseeding from \
+                             sink truth to re-emit the subtree with its parent"
+                        );
+                    } else {
+                        let snapshot_ms = t0.elapsed().as_millis();
+                        match self
+                            .emit_ops(
+                                ops,
+                                current,
+                                &t0,
+                                snapshot_ms,
+                                after_len,
+                                before_len,
+                                "incremental",
+                            )
+                            .await
+                        {
+                            Ok(()) => {
+                                // Sink write committed — now advance the diff base.
+                                let mut live = self.live.lock().unwrap();
+                                for (id, v) in staging {
+                                    match v {
+                                        Some(nb) => {
+                                            live.insert(id, nb);
+                                        }
+                                        None => {
+                                            live.remove(&id);
+                                        }
                                     }
                                 }
+                                return Ok(());
                             }
-                            return Ok(());
-                        }
-                        Err(e) => {
-                            // The sink write failed (batch rolled back). Leave
-                            // `live`/`last_synced` untouched and force a full reseed
-                            // next pass so the base is rebuilt from truth and the
-                            // change retried — never silently dropped (Q9: reseed,
-                            // not requeue).
-                            self.seeded.store(false, Ordering::SeqCst);
-                            return Err(e);
+                            Err(e) => {
+                                // The sink write failed (batch rolled back). Leave
+                                // `live`/`last_synced` untouched and force a full
+                                // reseed next pass so the base is rebuilt from truth
+                                // and the change retried — never silently dropped
+                                // (Q9: reseed, not requeue).
+                                self.seeded.store(false, Ordering::SeqCst);
+                                return Err(e);
+                            }
                         }
                     }
+                } else {
+                    tracing::warn!(
+                        "[LoroProjection] incremental pass unsettled; reseeding from full snapshot"
+                    );
                 }
-                tracing::warn!(
-                    "[LoroProjection] incremental pass unsettled; reseeding from full snapshot"
-                );
             }
             // Not a bounded incremental batch (or unsettled) → drop through to
             // the full reseed path below, which reads current state (no
@@ -585,18 +638,25 @@ impl LoroProjection {
         }
 
         // ── Full walk — cold-boot seed / reseed-on-unsettled / bootstrap ONLY ──
-        // "after" = the full Loro authority snapshot. "before" = the last-emitted
-        // `live` state once seeded, else the SQL sink read as the cold-boot seed.
-        // This path no longer runs in steady state; it exists to (re)seed `live`.
+        // "after" = the full Loro authority snapshot. "before" = the ACTUAL SQL
+        // sink state (read fresh), NOT the in-memory `live` base. This path is the
+        // recovery/reseed path; it must reconcile the sink against Loro from
+        // GROUND TRUTH. Diffing against `live` here was a latent silent-drift trap:
+        // a reseed emits `diff(before, after)` but then sets `live = after`, so if
+        // `live` ever diverged from `block_raw` (e.g. `live` holding a parent whose
+        // sink row is absent), a `live`-based reseed would re-emit the delta
+        // relative to the drifted base — never re-creating the missing parent —
+        // while its descendants' creates FK-reject at COMMIT, wedging the projector
+        // in a permanent error/reseed storm (keystone forward-edge/BulkExternalAdd
+        // deferred-FK RED). Reading the sink makes every reseed converge
+        // `block_raw` → Loro and re-establishes `live == block_raw` on success.
+        // This path is not steady-state (cold boot / unsettled / orphan / oversized
+        // bootstrap), so the extra sink read is not on the hot path.
         let (after, after_settled): (HashMap<String, SnapshotBlock>, bool) = {
             let doc = &*doc_arc;
             snapshot_blocks_from_doc_settled(doc)
         };
-        let before: Arc<HashMap<String, SnapshotBlock>> = if seeded {
-            Arc::new(self.live.lock().unwrap().clone())
-        } else {
-            Arc::new(self.read_sql_snapshot().await?)
-        };
+        let before: Arc<HashMap<String, SnapshotBlock>> = Arc::new(self.read_sql_snapshot().await?);
         let snapshot_ms = t0.elapsed().as_millis();
 
         let mut ops = diff_snapshots_to_ops(&before, &after);
@@ -618,12 +678,20 @@ impl LoroProjection {
                 );
             }
         }
-        // Orphan-create gate. On an unsettled (torn) snapshot a create's parent
-        // block may itself have been withheld from `after`; emitting the child
-        // alone FK-rejects at the SQL sink and the whole batch (row included) is
-        // lost. Withhold such creates — the writer's commit that tore this walk
-        // retriggers a settled pass that re-emits them with their parents.
-        if !after_settled {
+        // Orphan-create gate (UNCONDITIONAL). A create whose parent block is in
+        // NEITHER the projected snapshot (`after`) nor the current sink base
+        // (`before`) FK-rejects at COMMIT — and the whole batch (the child row
+        // included) rolls back. Two ways this arises:
+        //   * a torn (unsettled) walk withheld the parent from `after`; or
+        //   * a settled walk legitimately projects a child whose parent was dropped
+        //     from the sink base earlier and is not in this snapshot (the incremental
+        //     fast path funnels such a case here on purpose).
+        // Withhold the orphan rather than crash the pass — the writer's next
+        // commit retriggers a pass that re-emits it once its parent is present.
+        // Applies to BOTH settled and torn snapshots: a settled snapshot is no
+        // guarantee the PARENT made it into the sink base, and one FK-doomed
+        // batch loses every co-batched row.
+        {
             let n = ops.len();
             ops.retain(|(name, entity)| {
                 if name != "create" {
@@ -645,8 +713,9 @@ impl LoroProjection {
             if withheld > 0 {
                 tracing::warn!(
                     "[LoroProjection] withholding {} orphan create(s) whose parent is absent from \
-                     the torn snapshot (snapshot_settled=false)",
+                     both the snapshot and the sink base (snapshot_settled={})",
                     withheld,
+                    after_settled,
                 );
             }
         }
