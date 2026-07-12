@@ -678,42 +678,25 @@ impl LoroProjection {
                 );
             }
         }
-        // Orphan-create gate (UNCONDITIONAL). A create whose parent block is in
-        // NEITHER the projected snapshot (`after`) nor the current sink base
-        // (`before`) FK-rejects at COMMIT — and the whole batch (the child row
-        // included) rolls back. Two ways this arises:
+        // Orphan-create gate (UNCONDITIONAL, TRANSITIVE). A create whose parent
+        // `block_raw` row will not exist at COMMIT trips the deferred `parent_id`
+        // self-FK and rolls the whole batch back — losing every co-batched row.
+        // The parent is missing at COMMIT when it is neither in the sink base
+        // (`before`) nor emitted by this batch. Two ways this arises:
         //   * a torn (unsettled) walk withheld the parent from `after`; or
         //   * a settled walk legitimately projects a child whose parent was dropped
         //     from the sink base earlier and is not in this snapshot (the incremental
         //     fast path funnels such a case here on purpose).
-        // Withhold the orphan rather than crash the pass — the writer's next
-        // commit retriggers a pass that re-emits it once its parent is present.
-        // Applies to BOTH settled and torn snapshots: a settled snapshot is no
-        // guarantee the PARENT made it into the sink base, and one FK-doomed
-        // batch loses every co-batched row.
+        // Crucially the check is TRANSITIVE: withholding an orphan parent must
+        // also withhold its descendants, or a grandchild whose parent is present
+        // in `after` (but itself withheld) FK-fails. `retain_grounded_creates`
+        // grounds each create in the sink + the closure of grounded creates.
         {
-            let n = ops.len();
-            ops.retain(|(name, entity)| {
-                if name != "create" {
-                    return true;
-                }
-                let parent_in_sink = |pid: &str| {
-                    !pid.starts_with("block:")
-                        || after.contains_key(pid)
-                        || before.contains_key(pid)
-                };
-                match entity.get("parent_id").and_then(|v| v.as_string()) {
-                    Some(pid) => parent_in_sink(&pid),
-                    // A create without parent_id params is malformed; let it
-                    // flow so the sink fails loudly rather than hiding it.
-                    None => true,
-                }
-            });
-            let withheld = n - ops.len();
+            let withheld = retain_grounded_creates(&mut ops, &before);
             if withheld > 0 {
                 tracing::warn!(
-                    "[LoroProjection] withholding {} orphan create(s) whose parent is absent from \
-                     both the snapshot and the sink base (snapshot_settled={})",
+                    "[LoroProjection] withholding {} ungrounded orphan create(s) whose parent_id \
+                     chain does not reach the sink base (snapshot_settled={})",
                     withheld,
                     after_settled,
                 );
@@ -1050,6 +1033,79 @@ fn topological_sort_deletes<'a>(
     let mut creates_order = topological_sort_creates(deletes.clone(), all);
     creates_order.reverse();
     creates_order
+}
+
+/// Withhold "orphan" creates whose `parent_id` chain does not bottom out in the
+/// sink base (`before`) or a non-`block:` sentinel, returning the count
+/// removed.
+///
+/// A create's `block_raw.parent_id` self-FK is DEFERRABLE INITIALLY DEFERRED,
+/// so it is checked at COMMIT. Emitting a create whose parent row is neither
+/// pre-existing in the sink nor inserted by this same batch trips that FK and
+/// rolls back the WHOLE batch — losing every co-batched row (the
+/// forward-edge/BulkExternalAdd deferred-FK RED).
+///
+/// The check MUST be a fixpoint over the surviving-create set, not a
+/// single-level "is the parent somewhere in the projected snapshot" lookup. A
+/// parent's mere presence in the Loro snapshot (`after`) does NOT mean a row
+/// will be inserted for it: a torn/unsettled walk may have withheld the parent,
+/// or the parent may itself be a transitively-orphaned create that this gate
+/// withholds. In both cases the parent is in `after` yet never lands in
+/// `block_raw`, so a child admitted merely because `after.contains(parent)`
+/// FK-fails at COMMIT. Ground each create in the SINK plus the transitive
+/// closure of grounded creates instead: `before` rows and non-`block:`
+/// sentinels are the axioms; a create is grounded once its parent is grounded;
+/// anything left ungrounded is withheld (re-emitted on a later pass once its
+/// parent actually reaches the sink).
+fn retain_grounded_creates(
+    ops: &mut Vec<(String, holon_api::StorageEntity)>,
+    before: &HashMap<String, SnapshotBlock>,
+) -> usize {
+    // id -> parent_id for every create in the batch. A create with no `id` param
+    // is malformed; it is left in `ops` (grounded-by-default below) so the sink
+    // fails loudly on it rather than this gate hiding it.
+    let create_parents: Vec<(String, String)> = ops
+        .iter()
+        .filter(|(name, _)| name == "create")
+        .filter_map(|(_, e)| {
+            let id = e.get("id").and_then(|v| v.as_string())?;
+            let pid = e.get("parent_id").and_then(|v| v.as_string()).unwrap_or("");
+            Some((id.to_string(), pid.to_string()))
+        })
+        .collect();
+
+    // A non-`block:` parent (seed layout / `sentinel` root) is always satisfiable;
+    // a parent already in the sink base is always a valid FK target.
+    let parent_satisfiable = |grounded: &std::collections::HashSet<String>, pid: &str| {
+        !pid.starts_with("block:") || before.contains_key(pid) || grounded.contains(pid)
+    };
+
+    // Fixpoint: admit any create whose parent is grounded, until none remain.
+    let mut grounded: std::collections::HashSet<String> = std::collections::HashSet::new();
+    loop {
+        let mut added = false;
+        for (id, pid) in &create_parents {
+            if !grounded.contains(id) && parent_satisfiable(&grounded, pid) {
+                grounded.insert(id.clone());
+                added = true;
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+
+    let n = ops.len();
+    ops.retain(|(name, e)| {
+        if name != "create" {
+            return true;
+        }
+        match e.get("id").and_then(|v| v.as_string()) {
+            Some(id) => grounded.contains(id),
+            None => true,
+        }
+    });
+    n - ops.len()
 }
 
 pub fn block_to_params(snap: &SnapshotBlock) -> holon_api::StorageEntity {
@@ -1577,5 +1633,167 @@ mod marks_outbound_tests {
         let s = new_val.as_string().expect("marks is String");
         let parsed: Vec<MarkSpan> = holon_api::marks_from_json(s).expect("parse new");
         assert_eq!(parsed, new_marks);
+    }
+}
+
+#[cfg(test)]
+mod orphan_gate_tests {
+    //! Transitive orphan-create gate (`retain_grounded_creates`).
+    //!
+    //! Regression for the forward-edge / BulkExternalAdd deferred-FK RED: a
+    //! projection batch that emits a child create while WITHHOLDING its parent
+    //! create trips the deferred `block_raw.parent_id` self-FK at COMMIT and
+    //! rolls the whole batch back. The old single-level gate (parent present in
+    //! `after` OR `before`) admitted such descendants because the withheld
+    //! parent was still present in the projected snapshot. Grounding must be
+    //! transitive: a create survives only if its parent chain reaches the sink.
+
+    use holon_api::EntityUri;
+
+    use super::*;
+
+    fn create_op(id: &str, parent: &str) -> (String, holon_api::StorageEntity) {
+        let mut e = holon_api::StorageEntity::new();
+        e.insert("id".into(), Value::String(id.to_string()));
+        e.insert("parent_id".into(), Value::String(parent.to_string()));
+        ("create".to_string(), e)
+    }
+
+    fn sink(ids: &[&str]) -> HashMap<String, SnapshotBlock> {
+        ids.iter()
+            .map(|id| {
+                let block = Block::new_text(
+                    EntityUri::block(id.trim_start_matches("block:")),
+                    EntityUri::no_parent(),
+                    String::new(),
+                );
+                (
+                    id.to_string(),
+                    SnapshotBlock {
+                        block,
+                        sort_key: "A0".to_string(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn kept_ids(ops: &[(String, holon_api::StorageEntity)]) -> Vec<String> {
+        ops.iter()
+            .filter(|(n, _)| n == "create")
+            .map(|(_, e)| e.get("id").and_then(|v| v.as_string()).unwrap().to_string())
+            .collect()
+    }
+
+    /// The shrunk keystone topology. `forward-edge-page` and `block:bulk-6-3`
+    /// are the two roots; when they are ABSENT from the sink base (torn
+    /// walk withheld them / not yet projected), their whole subtrees must
+    /// be withheld — not just the roots. The old gate kept `bulk-6-1`
+    /// (parent `forward-edge-page` ∈ `after`) and `bulk-6-4`/`bulk-6-8`
+    /// (parent `bulk-6-3` ∈ `after`), FK-failing.
+    #[test]
+    fn shrunk_topology_withholds_whole_subtree_when_roots_absent() {
+        let mut ops = vec![
+            create_op("block:bulk-6-1", "block:forward-edge-page"),
+            create_op("block:bulk-6-6", "block:forward-edge-page"),
+            create_op("block:bulk-6-7", "block:bulk-6-1"),
+            create_op("block:bulk-6-5", "block:bulk-6-4"),
+            create_op("block:bulk-6-4", "block:bulk-6-3"),
+            create_op("block:bulk-6-8", "block:bulk-6-3"),
+        ];
+        // Neither root is in the sink and neither is a create in this batch.
+        let before = sink(&[]);
+        let withheld = retain_grounded_creates(&mut ops, &before);
+        assert_eq!(
+            withheld,
+            6,
+            "every create is ungrounded; kept: {:?}",
+            kept_ids(&ops)
+        );
+        assert!(kept_ids(&ops).is_empty());
+    }
+
+    /// Same topology, but both roots ARE in the sink base: every create is
+    /// grounded (parent chain reaches `before`) and nothing is withheld.
+    #[test]
+    fn shrunk_topology_admits_all_when_roots_in_sink() {
+        let mut ops = vec![
+            create_op("block:bulk-6-1", "block:forward-edge-page"),
+            create_op("block:bulk-6-6", "block:forward-edge-page"),
+            create_op("block:bulk-6-7", "block:bulk-6-1"),
+            create_op("block:bulk-6-5", "block:bulk-6-4"),
+            create_op("block:bulk-6-4", "block:bulk-6-3"),
+            create_op("block:bulk-6-8", "block:bulk-6-3"),
+        ];
+        let before = sink(&["block:forward-edge-page", "block:bulk-6-3"]);
+        let withheld = retain_grounded_creates(&mut ops, &before);
+        assert_eq!(withheld, 0, "all grounded; withheld {withheld}");
+        assert_eq!(kept_ids(&ops).len(), 6);
+    }
+
+    /// Chain of 3 (grandparent → parent → child) with the grandparent WITHHELD:
+    /// a single-level gate keeps `parent` (its parent `gp` ∈ `after`) and
+    /// `child` (its parent `parent` ∈ `after`), both FK-doomed. Transitive
+    /// grounding withholds the entire chain when `gp` is absent.
+    #[test]
+    fn chain_of_three_absent_grandparent_withholds_all() {
+        let mut ops = vec![
+            create_op("block:child", "block:parent"),
+            create_op("block:parent", "block:gp"),
+            // gp is NOT a create here and NOT in the sink → ungrounded root.
+        ];
+        let before = sink(&[]);
+        let withheld = retain_grounded_creates(&mut ops, &before);
+        assert_eq!(withheld, 2, "kept: {:?}", kept_ids(&ops));
+        assert!(kept_ids(&ops).is_empty());
+    }
+
+    /// Chain of 3 fully in-batch with the grandparent GROUNDED in the sink: the
+    /// batch order is deliberately child-first, proving grounding is
+    /// order-free.
+    #[test]
+    fn chain_of_three_grounded_grandparent_admits_all_regardless_of_order() {
+        let mut ops = vec![
+            create_op("block:child", "block:parent"),
+            create_op("block:parent", "block:gp"),
+        ];
+        let before = sink(&["block:gp"]);
+        let withheld = retain_grounded_creates(&mut ops, &before);
+        assert_eq!(withheld, 0);
+        assert_eq!(kept_ids(&ops).len(), 2);
+    }
+
+    /// A non-`block:` sentinel parent (seed layout root) is always satisfiable.
+    #[test]
+    fn sentinel_parent_is_always_grounded() {
+        let mut ops = vec![
+            create_op("block:root", "layout:main"),
+            create_op("block:leaf", "block:root"),
+        ];
+        let before = sink(&[]);
+        let withheld = retain_grounded_creates(&mut ops, &before);
+        assert_eq!(withheld, 0, "sentinel-rooted subtree must survive");
+        assert_eq!(kept_ids(&ops).len(), 2);
+    }
+
+    /// Updates and deletes flow untouched; only ungrounded creates are
+    /// withheld.
+    #[test]
+    fn non_creates_pass_through() {
+        let mut update = holon_api::StorageEntity::new();
+        update.insert("id".into(), Value::String("block:u".into()));
+        let mut delete = holon_api::StorageEntity::new();
+        delete.insert("id".into(), Value::String("block:d".into()));
+        let mut ops = vec![
+            ("update".to_string(), update),
+            ("delete".to_string(), delete),
+            create_op("block:orphan", "block:missing"),
+        ];
+        let before = sink(&[]);
+        let withheld = retain_grounded_creates(&mut ops, &before);
+        assert_eq!(withheld, 1);
+        assert_eq!(ops.len(), 2);
+        assert!(ops.iter().any(|(n, _)| n == "update"));
+        assert!(ops.iter().any(|(n, _)| n == "delete"));
     }
 }
