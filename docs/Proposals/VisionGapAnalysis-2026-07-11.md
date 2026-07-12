@@ -44,7 +44,7 @@ A = expressible today as data - B = pending decided track - C = missing primitiv
 | Agent provenance per block, revert-whole-call, supervision view | C2 mostly | OpOrigin exists but does not reach block properties; then supervision = one query |
 | Re-executable source blocks | A partial | execute_source_block MCP tool exists; provenance stamping of outputs = C2; MCP-proxy = C1 |
 | Self DT dynamics (energy/focus/flow_depth), emergent Pomodoro | C4+C6+C1 | Computed decay fields + fine clock + signal connectors |
-| Three UI modes as adaptable perspectives | C8 minor | Profiles/queries cover content; named layout/perspective blocks don't exist |
+| Three UI modes as adaptable perspectives | C8 partial | Perspective-as-data primitive landed (`holon_api::perspective`: typed `PerspectiveSpec`, active-perspective pointer, resolver); reactive render consumption across the two render-derivation arms deferred — see `docs/Proposals/PerspectivesAsData-C8.md` |
 | Sharing subtrees, team features | park | Loro sync exists; scoped permissions = Phase-7 vision, no track |
 | Behaviour-tree policy layer | rejected/parked | PetriNet.md explicitly defers |
 
@@ -90,7 +90,14 @@ verb-object / bare-noun parser (fully specified in PetriNet.md incl. safe defaul
 and via:-routing rules are blocks, user-extensible at runtime. Risk low.
 
 C8 — Perspectives/layouts as data (minor). Named mode = block declaring panel queries, profile
-overrides, concealment parameters. Rank last.
+overrides, concealment parameters. Rank last. PARTIALLY LANDED: the data primitive exists
+(`holon_api::perspective` — typed `PerspectiveSpec`/`PanelSpec`/`ConcealmentParams` parsed
+parse-don't-validate at the boundary, an `active_perspective` pointer property on the root-layout
+block that persists like collapse state, and `resolve_active_perspective`). Deferred: wiring the
+`activate_perspective` op into the dispatcher and teaching the two reactive render-derivation arms
+(`BlockDomain::render_entity` Turso / `loro_ui_watcher::derive_render_expr` no-Turso) to resolve
+panels through that pointer so the live layout swaps without restart. Full design + exact seam:
+`docs/Proposals/PerspectivesAsData-C8.md`.
 
 NOT proposed (already decided/rejected): behaviour trees (parked), execution-log-as-dedup
 (rejected ADR 0024), position-marking as default (rejected), second rule language (rejected), any
