@@ -247,7 +247,9 @@ impl EditorView {
                                 }
                                 this.previous_text = text;
                             }
-                        } else if text != this.previous_text {
+                        } else if text != this.previous_text
+                            && !RowOrigin::from_id(&this.row_id).is_creation_placeholder()
+                        {
                             // No Cell<String> attached (SqlOnly / no-Loro
                             // mode). The per-keystroke Loro pipeline is
                             // absent — fall back to `set_field("content")`
@@ -256,6 +258,14 @@ impl EditorView {
                             // only mutate the local InputState and are
                             // silently lost when the ReactiveRowSet rebuilds
                             // (e.g. on a later SplitBlock on another row).
+                            //
+                            // NEVER for a creation slot (`block:__virtual:<parent>`):
+                            // it has no real block, so this `set_field` is a
+                            // silent no-op write against a nonexistent id that
+                            // ALSO poisons the undo stack with a virtual-id entry
+                            // (BugFunnel dogfood #4). The slot's text is committed
+                            // via `create` on Enter (`commit_creation_slot`); it
+                            // must not be persisted per-keystroke.
                             let mut params = std::collections::HashMap::new();
                             params
                                 .insert("id".into(), holon_api::Value::String(this.row_id.clone()));
