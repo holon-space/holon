@@ -39,7 +39,7 @@ A = expressible today as data - B = pending decided track - C = missing primitiv
 | Guide: Shadow Work, postponement counts, patterns over time | C2 | Fundamentally history-shaped |
 | Integrator: confirmation-driven edge proposals, entity resolution | B + C3/C5 | Emission-into-display + suppression anti-join right shape; candidate generation + confirm-promotes missing |
 | Unified / semantic search | C3 | ABSENT: no Tantivy, no embeddings, no FTS in workspace |
-| AI Trust Ladder, autonomy per transition | C5 | No trust metadata; ADR 0024 place kinds are the natural enforcement lever |
+| AI Trust Ladder, autonomy per transition | C5 (landed 2026-07-12) | Trust gate at the dispatch boundary: coerced proposal emission + accept/reject promotion + `trust_proposals` supervision matview |
 | Third-party systems first-class, Digital Twins, bi-dir sync | C1 | Zero integration code; Layer-1 slot reserved; mcp-yaml-sidecars directive points the way |
 | Agent provenance per block, revert-whole-call, supervision view | C2 mostly | OpOrigin exists but does not reach block properties; then supervision = one query |
 | Re-executable source blocks | A partial | execute_source_block MCP tool exists; provenance stamping of outputs = C2; MCP-proxy = C1 |
@@ -80,6 +80,16 @@ C5 — Autonomy/trust enforcement at the intent boundary. Representation trivial
 engine-level. Elegant form: below-threshold origins may only emit into display/proposal places
 (maintained, retractable); confirmation = ordinary intent re-emitting into canonical place. Derives
 the safety property instead of asserting it. Risk low; shape needs ruling.
+LANDED 2026-07-12 (coerced-emission form, pending ratification): `TrustPolicy` in holon-profiles
+(typed origin-class/entity/operation rules, first match wins, no match = trusted; YAML
+parse-don't-validate); gate at `DispatchingOperationEngine::execute_operation` coerces
+sub-threshold dispatches into proposal blocks under `block:proposals` (deterministic proposal id
+per ADR 0024 P4 — re-fires converge; `_proposal` carries the wrapped op verbatim; `_provenance`
+names the proposer); `accept_proposal` re-dispatches the wrapped op with the confirmer's origin
+(dual provenance: `_provenance` = confirmer, `_proposed_by` = proposer), `reject_proposal`
+retracts to a terminal status; supervision = `trust_proposals` matview (IVM over block_raw) +
+`TRUST_PROPOSAL_STATS_SQL` aggregate. Deferred: loading a policy from vault profile blocks (the
+default is trust-all, so the gate is a no-op until configured); UI surfaces.
 
 C6 — Clock generalization: hour/minute grains + recurrence builtins (every(...) desugars to
 read-arcs on clock relation). Pure extension of landed Phase-1 code. Risk low (watch fine-grain
@@ -148,6 +158,8 @@ Increment 3:
   runner is the remaining step; build_mcp_integration fails loud for a `rest` sidecar until then).
 - C5 trust gate. RULING: literally "sub-threshold origins coerced to display-place emission", or a
   separate permission check at the dispatcher? (Recommended: the former.)
+  BUILT 2026-07-12 as the recommended form — coerced emission, not a dispatcher permission check
+  (see §3 C5 LANDED note). Awaiting Martin's ratification of the ruling wording.
 
 Through-line: after Increment 2, all three AI personalities become authorable as vault data —
 Watcher = rules + clock + display emissions; Guide = rules over the history relation; Integrator =
