@@ -119,6 +119,16 @@ fn emit_mark(node: SyntaxNode, kind_hint: MarkKindHint, state: &mut ExtractState
     match kind_hint {
         MarkKindHint::Link => {
             let (text, mark) = strip_link(&raw);
+            // Empty link (`[[]]` / `[[][]]`): the rendered label is empty, so
+            // the mark would span zero characters (start == end). A zero-width
+            // Link mark is an illegal state — it has no visible content and no
+            // meaningful target, and it renders back as reversed brackets
+            // (`]][[`), the on-disk corruption confirmed by dogfood #4. Parse,
+            // don't validate: drop it at the boundary so it is never created,
+            // emitting no mark and no content for the empty literal.
+            if text.is_empty() {
+                return;
+            }
             push_with_inner_marks(state, &text, vec![], mark);
         }
         MarkKindHint::Sub | MarkKindHint::Super => {
@@ -267,17 +277,28 @@ fn strip_link(raw: &str) -> (String, InlineMark) {
 pub fn render_inline_marks(text: &str, marks: &[MarkSpan]) -> String {
     use std::collections::BTreeMap;
 
+    // A zero-length span (start == end) wraps no content: it has nothing to
+    // delimit. Emitting its events at a single position would push the CLOSE
+    // delimiter before the OPEN (`emit_events` closes-then-opens), producing
+    // reversed output like `]][[` for an empty link (the on-disk corruption
+    // class from dogfood #4, which then COMPOUNDS across writeback cycles).
+    // Such marks carry nothing, so dropping them at render loses nothing and
+    // is the inverse of parsing: `extract_inline_marks` never yields them and
+    // `canonicalize_marks` strips them at every read boundary — this is the
+    // final safety net so no zero-width mark can ever reach disk.
+    let marks: Vec<&MarkSpan> = marks.iter().filter(|m| m.start != m.end).collect();
+
     if marks.is_empty() {
         return text.to_string();
     }
 
-    detect_crossing_marks(marks);
+    detect_crossing_marks(marks.iter().copied());
 
     // Bucket events by char position. At each position we may emit several
     // closes (in inverse opening order) and several opens (outer-first).
     let mut opens_at: BTreeMap<usize, Vec<&MarkSpan>> = BTreeMap::new();
     let mut closes_at: BTreeMap<usize, Vec<&MarkSpan>> = BTreeMap::new();
-    for m in marks {
+    for &m in &marks {
         opens_at.entry(m.start).or_default().push(m);
         closes_at.entry(m.end).or_default().push(m);
     }
@@ -363,7 +384,8 @@ fn close_delim(mark: &InlineMark) -> String {
 
 /// Log a tracing warning if `marks` contains crossing pairs (A.start <
 /// B.start < A.end < B.end). Org can't represent crossing inline marks.
-fn detect_crossing_marks(marks: &[MarkSpan]) {
+fn detect_crossing_marks<'a>(marks: impl Iterator<Item = &'a MarkSpan>) {
+    let marks: Vec<&MarkSpan> = marks.collect();
     for (i, a) in marks.iter().enumerate() {
         for b in marks.iter().skip(i + 1) {
             if a.start < b.start && b.start < a.end && a.end < b.end {
@@ -528,6 +550,93 @@ mod tests {
         assert_eq!(
             re, "see [[Linked Page]] here",
             "dangling bare form must be a fixed point"
+        );
+    }
+
+    #[test]
+    fn empty_link_is_dropped_at_extraction_no_zero_width_mark() {
+        // `[[]]` and `[[][]]` have an empty label — the Link mark would span
+        // zero characters. Parse, don't validate: the boundary drops them so a
+        // zero-width Link mark is never created (the dogfood #4 `]][[` root).
+        for input in ["[[]]", "[[][]]"] {
+            let (out, marks) = extract(input);
+            assert_eq!(out, "", "empty link `{input}` must leave no content");
+            assert!(
+                marks.is_empty(),
+                "empty link `{input}` must produce no mark, got {marks:?}"
+            );
+        }
+        // Surrounding text is preserved; only the empty link contributes nothing.
+        let (out, marks) = extract("a[[]]b");
+        assert_eq!(out, "ab");
+        assert!(marks.is_empty(), "got {marks:?}");
+    }
+
+    #[test]
+    fn render_zero_length_link_span_emits_nothing_never_reversed_brackets() {
+        // A zero-width Link mark (e.g. left behind when an edit deletes a
+        // link's entire text before `canonicalize_marks` strips it) must NOT
+        // render as `]][[` (close-before-open). It carries no content, so it
+        // renders to nothing.
+        let zl = vec![MarkSpan::new(
+            0,
+            0,
+            InlineMark::Link {
+                target: EntityRef::Name {
+                    name: String::new(),
+                },
+                label: String::new(),
+            },
+        )];
+        assert_eq!(render_inline_marks("", &zl), "");
+        assert_eq!(render_inline_marks("abcd", &zl), "abcd");
+
+        // Mid-string zero-width span must not corrupt the surrounding text.
+        let mid = vec![MarkSpan::new(
+            2,
+            2,
+            InlineMark::Link {
+                target: EntityRef::Name {
+                    name: "Page".into(),
+                },
+                label: "Page".into(),
+            },
+        )];
+        let out = render_inline_marks("abcd", &mid);
+        assert_eq!(out, "abcd");
+        assert!(!out.contains("]]["), "reversed brackets in {out:?}");
+
+        // A zero-width mark alongside a real one: only the real one renders.
+        let mixed = vec![
+            MarkSpan::new(0, 4, InlineMark::Bold),
+            MarkSpan::new(4, 4, InlineMark::Italic),
+        ];
+        assert_eq!(render_inline_marks("word", &mixed), "*word*");
+    }
+
+    #[test]
+    fn empty_link_typed_round_trip_is_stable_no_doubling() {
+        // The dogfood #4 compounding class: `[[]]` typed → disk → re-ingest →
+        // disk must reach a fixed point WITHOUT growing `]][[` each cycle.
+        let mut text = "[[]]".to_string();
+        let mut marks: Vec<MarkSpan> = Vec::new();
+        let mut seen = Vec::new();
+        for _ in 0..5 {
+            let on_disk = render_inline_marks(&text, &marks);
+            assert!(
+                !on_disk.contains("]]["),
+                "reversed-bracket corruption on disk: {on_disk:?}"
+            );
+            seen.push(on_disk.clone());
+            let (rt, sp) = extract(&on_disk);
+            text = rt;
+            marks = sp;
+        }
+        // Converged and never doubled: every disk iterate after the first is
+        // identical (empty), so no growth across cycles.
+        assert!(
+            seen.iter().skip(1).all(|d| d == &seen[1]),
+            "disk form not stable across cycles: {seen:?}"
         );
     }
 
