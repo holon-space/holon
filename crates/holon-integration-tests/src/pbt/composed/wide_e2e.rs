@@ -628,13 +628,13 @@ pub async fn boot_and_seed_wide(
     // pins `full_headless`). Disclose the draw per case so a run log yields
     // per-wiring case counts (grep "wide-e2e wiring") -- the drawn grid is
     // auditable, not assumed.
-    let set = set_for_wiring(&ref_state.wiring);
+    let set = set_for_wiring(&ref_state.harness.wiring);
     eprintln!(
         "[wide-e2e wiring] drawn: storage={:?} sync={:?} actors={:?} -> booted storage={:?} \
          projections={:?}",
-        ref_state.wiring.storage_adapters,
-        ref_state.wiring.sync_adapters,
-        ref_state.wiring.actors,
+        ref_state.harness.wiring.storage_adapters,
+        ref_state.harness.wiring.sync_adapters,
+        ref_state.harness.wiring.actors,
         set.wiring.storage_adapters,
         set.projections,
     );
@@ -847,7 +847,7 @@ pub async fn boot_and_seed_wide_windowed_base(
     crate::pbt::composed::builder::ComposedSut,
     BTreeSet<EntityUri>,
 ) {
-    let set = set_for_wiring(&ref_state.wiring);
+    let set = set_for_wiring(&ref_state.harness.wiring);
     assert!(
         set.has_projection(Projection::ViewModel),
         "the windowed wide base needs a frontend (ViewModel) session for the window to render; \
@@ -1038,7 +1038,7 @@ pub fn full_headless_cap_set() -> CapSet {
 pub fn wide_e2e_ref_for(wiring: &Wiring) -> ReferenceState {
     let set = set_for_wiring(wiring);
     let mut state = wide_ref();
-    state.wiring = set.wiring.clone();
+    state.harness.wiring = set.wiring.clone();
     // Forward-edge ingest corpus (dogfood 2026-07-10 P0): a Turso-ingest-only
     // regression, so seed it ONLY for a frontend draw. `boot_and_seed_wide` keys
     // the `forward-edge-page.org` seed on this corpus being present in the
@@ -1099,7 +1099,7 @@ pub fn wide_e2e_ref() -> ReferenceState {
 /// transitions by hand and never generate, so the cap_set — a
 /// generator-narrowing hint — is irrelevant to them.
 pub fn frontend_wired(mut state: ReferenceState) -> ReferenceState {
-    state.wiring = ComponentSet::full_headless().wiring.clone();
+    state.harness.wiring = ComponentSet::full_headless().wiring.clone();
     state
 }
 
@@ -1251,6 +1251,7 @@ impl ComposedSlice for WideE2E {
     /// selects. Neither needs a hand-maintained per-invariant-id list.
     fn required_invariants(ref_state: &ReferenceState) -> Vec<InvariantId> {
         let sut_caps = ref_state
+            .harness
             .cap_set
             .clone()
             .expect("composed wide draw must carry a cap_set (set by wide_e2e_ref_for)");

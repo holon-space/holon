@@ -16,7 +16,8 @@ impl RefLifecycle for ReferenceState {
         self.is_properly_setup()
     }
     fn enable_loro(&self) -> bool {
-        self.wiring
+        self.harness
+            .wiring
             .has_storage(holon_pbt_core::StorageAdapter::Loro)
     }
     fn has_editor_buffer(&self) -> bool {
@@ -44,16 +45,16 @@ impl RefLifecycle for ReferenceState {
 
 impl RefBoot for ReferenceState {
     fn pre_startup_directory_count(&self) -> usize {
-        self.pre_startup_directories.len()
+        self.files.pre_startup_directories.len()
     }
     fn pre_startup_file_count(&self) -> usize {
-        self.pre_startup_file_count
+        self.files.pre_startup_file_count
     }
     fn git_initialized(&self) -> bool {
-        self.git_initialized
+        self.files.git_initialized
     }
     fn jj_initialized(&self) -> bool {
-        self.jj_initialized
+        self.files.jj_initialized
     }
     fn root_layout_block_id(&self) -> Option<EntityUri> {
         ReferenceState::root_layout_block_id(self)
@@ -62,14 +63,14 @@ impl RefBoot for ReferenceState {
 
 impl RefBootMut for ReferenceState {
     fn push_pre_startup_directory(&mut self, path: &str) {
-        self.pre_startup_directories.push(path.to_string());
+        self.files.pre_startup_directories.push(path.to_string());
     }
     fn mark_git_initialized(&mut self) {
-        self.git_initialized = true;
+        self.files.git_initialized = true;
     }
     fn mark_jj_initialized(&mut self) {
-        self.jj_initialized = true;
-        self.git_initialized = true; // jj git init also creates .git
+        self.files.jj_initialized = true;
+        self.files.git_initialized = true; // jj git init also creates .git
     }
     fn boot_app(&mut self) {
         use crate::pbt::transitions::start_app::SEEDED_SIDEBAR_WATCH_ID;

@@ -155,7 +155,9 @@ pub fn run_sequence<S: Stepper>(
 /// `E2ETransition::required_wiring` + `required_caps` added in
 /// `transition_dispatch.rs`.
 fn transition_applicable(ref_state: &ReferenceState, transition: &E2ETransition) -> bool {
-    transition.required_wiring().satisfied_by(&ref_state.wiring)
+    transition
+        .required_wiring()
+        .satisfied_by(&ref_state.harness.wiring)
         && ref_state.caps_available(&transition.required_caps())
 }
 
