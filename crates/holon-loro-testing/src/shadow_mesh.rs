@@ -26,7 +26,7 @@ use holon_api::Block;
 use holon_api::EntityUri;
 use loro::LoroDoc;
 
-use super::peer_ops;
+use crate::peer_ops;
 
 /// One shadow Loro doc pinned to a fixed peer id.
 ///
