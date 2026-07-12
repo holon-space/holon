@@ -226,6 +226,7 @@ const BLOCK_RAW_COLUMNS: &[&str] = &[
     "created_at",
     "updated_at",
     "_change_origin",
+    "write_seq",
 ];
 
 /// The `block` entity's edge-field descriptors — the single registry both the
