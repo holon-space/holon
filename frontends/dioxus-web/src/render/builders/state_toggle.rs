@@ -1,5 +1,6 @@
-use super::prelude::*;
 use holon_frontend::view_model::ViewKind;
+
+use super::prelude::*;
 
 /// Task-state pill. Left-click cycles the state and dispatches the same
 /// `set_field(task_state, <next>)` write the GPUI widget and the headless
@@ -21,6 +22,12 @@ pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
     } else {
         label.clone()
     };
+    // A block with no task state has an empty label AND empty current — GPUI
+    // renders nothing there. Emitting the pill anyway paints a stray bordered
+    // box next to every plain block, so collapse it entirely.
+    if display.trim().is_empty() {
+        return rsx! {};
+    }
 
     let intent = (|| {
         let op = holon_frontend::operations::find_set_field_op(field, &node.operations)?;
@@ -40,7 +47,8 @@ pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
         // Disclose the degraded (display-only) pill: without op wiring or
         // a row id a click can't dispatch — same nodes GPUI renders inert.
         tracing::warn!(
-            "[state_toggle] no set_field op wiring or row id for field '{field}' — rendering display-only"
+            "[state_toggle] no set_field op wiring or row id for field '{field}' — rendering \
+             display-only"
         );
     }
 
