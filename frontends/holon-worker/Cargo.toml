@@ -74,22 +74,33 @@ holon-frontend = { path = "../../crates/holon-frontend", default-features = fals
 [patch.crates-io]
 symlink = { path = "patches/symlink" }
 
-# Point the turso git dependency at the local checkout (git source, branch
-# holon-wasm-load-extension) so the wasm fix in sdk-kit/src/rsapi.rs (gate
-# `load_extension` off wasm) takes effect. Using a git (not path) source keeps
-# turso's own workspace-hack git-sourced so it doesn't collide with holon's
-# path-sourced workspace-hack. All turso crates are redirected together so the
-# graph stays coherent. Drop this block once the fix lands upstream.
+# Point the turso git dependency at the local checkout (git source). Pinned to
+# rev 84bb233a = e2737c65 (the wasm-buildable line this worker already pinned:
+# `load_extension` off wasm, git-sourced so turso's workspace-hack doesn't
+# collide with holon's path-sourced one) + a SURGICAL cherry-pick of the two IVM
+# matview-reopen fixes' source files ONLY:
+#   * 8517e30647 antijoin TryAdvance ghost row + unconsolidated JoinOperator deltas
+#   * ce1504b8   deterministic MergeOperator rowids — stop matview dup after reopen
+# We cherry-pick (not bump to the fork's current `holon` tip) because that tip
+# pulls newer turso deps that re-enable tokio net/fs on wasm and break the
+# worker build; e2737c65's dep graph is proven wasm-buildable. The two fixes are
+# what the native/root build already runs (root patches turso to the working-tree
+# path). Without them, edit→reload BRICKED the browser vault: the `block` IVM
+# matview desynced from the intact `block_raw` base on reopen (rows dropped incl.
+# `block:root-layout`, others tripled — non-deterministic DBSP MergeOperator
+# rowids). BugFunnel 2026-07-13 "Edit+reload permanently loses root-layout".
+# The cherry-pick commit lives in the local turso repo's shared object store
+# (created via `git worktree`); re-create/bump it when the fork advances.
 [patch."https://github.com/nightscape/turso.git"]
-turso = { git = "file:///Users/martin/Workspaces/bigdata/turso", branch = "holon-wasm-fix2" }
-turso_core = { git = "file:///Users/martin/Workspaces/bigdata/turso", branch = "holon-wasm-fix2" }
-turso_ext = { git = "file:///Users/martin/Workspaces/bigdata/turso", branch = "holon-wasm-fix2" }
-turso_macros = { git = "file:///Users/martin/Workspaces/bigdata/turso", branch = "holon-wasm-fix2" }
-turso_parser = { git = "file:///Users/martin/Workspaces/bigdata/turso", branch = "holon-wasm-fix2" }
-turso_sdk_kit = { git = "file:///Users/martin/Workspaces/bigdata/turso", branch = "holon-wasm-fix2" }
-turso_sdk_kit_macros = { git = "file:///Users/martin/Workspaces/bigdata/turso", branch = "holon-wasm-fix2" }
-turso_sync_engine = { git = "file:///Users/martin/Workspaces/bigdata/turso", branch = "holon-wasm-fix2" }
-turso_sync_sdk_kit = { git = "file:///Users/martin/Workspaces/bigdata/turso", branch = "holon-wasm-fix2" }
+turso = { git = "file:///Users/martin/Workspaces/bigdata/turso", rev = "84bb233a00a29be30f1204b46c912b34f43f090b" }
+turso_core = { git = "file:///Users/martin/Workspaces/bigdata/turso", rev = "84bb233a00a29be30f1204b46c912b34f43f090b" }
+turso_ext = { git = "file:///Users/martin/Workspaces/bigdata/turso", rev = "84bb233a00a29be30f1204b46c912b34f43f090b" }
+turso_macros = { git = "file:///Users/martin/Workspaces/bigdata/turso", rev = "84bb233a00a29be30f1204b46c912b34f43f090b" }
+turso_parser = { git = "file:///Users/martin/Workspaces/bigdata/turso", rev = "84bb233a00a29be30f1204b46c912b34f43f090b" }
+turso_sdk_kit = { git = "file:///Users/martin/Workspaces/bigdata/turso", rev = "84bb233a00a29be30f1204b46c912b34f43f090b" }
+turso_sdk_kit_macros = { git = "file:///Users/martin/Workspaces/bigdata/turso", rev = "84bb233a00a29be30f1204b46c912b34f43f090b" }
+turso_sync_engine = { git = "file:///Users/martin/Workspaces/bigdata/turso", rev = "84bb233a00a29be30f1204b46c912b34f43f090b" }
+turso_sync_sdk_kit = { git = "file:///Users/martin/Workspaces/bigdata/turso", rev = "84bb233a00a29be30f1204b46c912b34f43f090b" }
 
 [build-dependencies]
 napi-build = "2.3.1"
