@@ -4,10 +4,21 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[features]
+# `engine` = the engine-side matview synthesis (src/synthesis.rs), which pulls
+# holon-turso (→ turso, native-only). Default-on so native/wasi builds are
+# unchanged. The wasm32-unknown-unknown page renderer (holon-frontend) turns it
+# OFF (default-features = false): it only needs the pure rule surface
+# (GET_ADVICE_RULES_SQL, parse_discovered_rule, rule types) and never runs
+# engine-side advice — its ReactiveEngine lives in the worker. Gating keeps the
+# turso storage engine out of the page's wasm graph.
+default = ["engine"]
+engine = ["dep:holon-turso"]
+
 [dependencies]
 anyhow.workspace = true
 holon-api.workspace = true
-holon-turso.workspace = true
+holon-turso = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
