@@ -407,6 +407,26 @@ mod backend {
         Ok(())
     }
 
+    /// Reset local storage (B2): drop the entire engine so Turso closes its
+    /// connection and releases every OPFS file reference. The JS caller then
+    /// closes the sync-access handles (`unregisterFile`) and `removeEntry`s the
+    /// db + wal files — a step that fails with `NoModificationAllowedError`
+    /// while the worker still holds sync handles, which is exactly why this
+    /// must run worker-side before the page deletes the files. This does NOT
+    /// touch OPFS itself (that is the JS side's job); it only tears down the
+    /// in-memory engine so the handles are free.
+    pub(super) fn reset_storage() -> napi::Result<()> {
+        // Take() drops EngineState (reactive → session → engine → runtime),
+        // which drops the Turso Database/Connection and its OPFS File Arcs.
+        let taken = slot().lock().take();
+        drop(taken);
+        // MCP watch tasks hold clones of engine capabilities; clear them too so
+        // nothing keeps a live handle into the torn-down engine.
+        mcp_watches().lock().clear();
+        tracing::info!("[engine_reset_storage] engine torn down; OPFS handles released");
+        Ok(())
+    }
+
     /// B2 validation: call `watch_live` on the root layout block and return
     /// a summary string. Logs the kind of the root node to confirm the
     /// reactive pipeline is wired end-to-end.
@@ -1259,6 +1279,16 @@ mod engine_exports {
     #[napi_derive::napi]
     pub fn engine_init(db_path: String) -> napi::Result<()> {
         backend::init(db_path)
+    }
+
+    /// Tear down the engine so Turso releases its OPFS file handles (B2). Call
+    /// this from JS BEFORE closing the OPFS sync-access handles and deleting
+    /// the db/wal files — deleting them while the worker holds sync handles
+    /// fails with `NoModificationAllowedError`. The page should reload
+    /// afterwards.
+    #[napi_derive::napi]
+    pub fn engine_reset_storage() -> napi::Result<()> {
+        backend::reset_storage()
     }
 
     #[napi_derive::napi]
