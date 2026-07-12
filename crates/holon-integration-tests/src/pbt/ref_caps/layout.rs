@@ -48,14 +48,21 @@ impl RefLayout for ReferenceState {
 
     fn expected_visible_content_ids(&self, region: CapRegion) -> BTreeSet<EntityUri> {
         let focus_roots = self.expected_focus_root_ids(from_cap_region(region));
+        // A block is legitimately in the region's main panel iff it descends from
+        // the current focus root — regardless of how it renders. Per the fork-A
+        // program-rendering ruling (block_profile.yaml), source blocks are NOT
+        // display-hidden: a rule/program source renders as a `rule_card`, a plain
+        // source (e.g. python) renders as the `source`→`query_result` variant, and
+        // only the `holon_source` spacer(0) case is invisible. All of these are
+        // valid rows for the current root, so none are "stale". The former
+        // `content_type != Source` exclusion wrongly reported the visible plain-
+        // source row as stale; staleness is a cross-ROOT property, gated purely by
+        // `is_descendant_of_any(focus_roots)` here.
         self.domain
             .block_state
             .blocks
             .values()
-            .filter(|b| {
-                b.content_type != holon_api::ContentType::Source
-                    && self.is_descendant_of_any(&b.id, &focus_roots)
-            })
+            .filter(|b| self.is_descendant_of_any(&b.id, &focus_roots))
             .map(|b| cap_id(&b.id))
             .collect()
     }
