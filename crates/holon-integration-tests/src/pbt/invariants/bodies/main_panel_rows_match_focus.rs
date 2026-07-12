@@ -2,9 +2,11 @@
 //!
 //! **No stale rows after navigation**: every reference-known block rendered
 //! inside the MAIN PANEL widget subtree must belong to the Main region's
-//! *current* focus-root subtree (`RefLayout::expectedvisible_content_ids`,
-//! which is "non-source descendants of the region's expected focus roots") or
-//! be layout/profile scaffolding. A block that is ref-known but outside that
+//! *current* focus-root subtree (`RefLayout::expected_visible_content_ids`,
+//! which is "descendants of the region's expected focus roots" — including
+//! source blocks, which render as visible rule-card / query-result rows per the
+//! fork-A program-rendering ruling) or be layout/profile scaffolding. A block
+//! that is ref-known but outside that
 //! set is a STALE ROW — the cross-frontend "previous root's row lingers after
 //! navigating" prod bug (dioxus-web `w4-web-05`, GPUI stale sidebar family):
 //! the main panel's watch view is a matview chained on the `focus_roots`
