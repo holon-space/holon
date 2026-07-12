@@ -199,3 +199,15 @@ ever wanted). Loss of local state on a DB rebuild is consistent with the C2b
    exists).
 3. Saved-view blocks + switcher-as-sugar; `view_mode` promoted from transient
    UI state to data (synced by default; local override via 2).
+
+### Clarification (Martin Q, 2026-07-13): no query duplication across views
+
+A saved-view block's `source` is a REFERENCE to the query-bearing block, never
+a copy — the query lives once (on the collection block, as today) and all
+sibling views point at it; editing the query updates every view. Renderer
+needs (board group-by, table columns) are view `params` composing over the
+shared source; view-local filter/sort refinements are later optional
+COMPOSITION, never duplication (a view wanting a different query is a
+different source). Views materialize LAZILY: zero view blocks in the default
+case (profile-default renderer); the switcher mints one only on a non-default
+choice — no block explosion.
