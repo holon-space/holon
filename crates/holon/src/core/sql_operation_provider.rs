@@ -205,6 +205,7 @@ const BLOCKS_KNOWN_COLUMNS: &[&str] = &[
     "created_at",
     "updated_at",
     "_change_origin",
+    "write_seq",
 ];
 
 /// A prepared operation, split into two FK-ordered phases so a batch can apply
@@ -1370,12 +1371,26 @@ impl OriginTaggedWrites for SqlOperationProvider {
 
                 let old_value = self.read_field_old_value(id, field).await?;
 
+                // Editor echo-suppression ordering token. The gpui editor stamps
+                // `write_seq` on each content keystroke (holon_api::write_seq) so
+                // it can later drop stale/reordered CDC echoes of earlier
+                // keystrokes. Persisted alongside the field write in the SAME
+                // UPDATE so the row's content and its ordering token can never
+                // diverge. Absent (all non-editor writers) → the column keeps its
+                // prior value, so those writers' echoes carry `seq == last_local`
+                // and still converge (they change `content`, not `write_seq`).
+                let write_seq_pair = params
+                    .get("write_seq")
+                    .and_then(|v| v.as_i64())
+                    .map(|seq| format!(", {} = {}", Self::quote_identifier("write_seq"), seq));
+
                 let sql = if self.known_columns.contains(field) {
                     format!(
-                        "UPDATE {} SET {} = {} WHERE id = '{}'",
+                        "UPDATE {} SET {} = {}{} WHERE id = '{}'",
                         self.table_name,
                         Self::quote_identifier(field),
                         sql_value,
+                        write_seq_pair.as_deref().unwrap_or(""),
                         id.replace('\'', "''")
                     )
                 } else if matches!(value, Value::Null) {

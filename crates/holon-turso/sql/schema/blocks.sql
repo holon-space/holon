@@ -19,6 +19,11 @@ CREATE TABLE IF NOT EXISTS block_raw (
     created_at INTEGER NOT NULL DEFAULT 0,
     updated_at INTEGER NOT NULL DEFAULT 0,
     _change_origin TEXT,
+    -- Monotonic per-write ordering token (holon_api::write_seq). Ordering-only,
+    -- stamped by the editor on each content write so the gpui editor can drop
+    -- stale/reordered CDC echoes of earlier keystrokes. Default 0 = never
+    -- editor-written; every editor write is > 0.
+    write_seq INTEGER NOT NULL DEFAULT 0,
     -- Every block's parent must be a real row in this table. Roots reference
     -- the self-parented `sentinel:no_parent` row (seeded in CoreSchemaModule).
     -- DEFERRABLE INITIALLY DEFERRED so a batch/consolidator transaction that
