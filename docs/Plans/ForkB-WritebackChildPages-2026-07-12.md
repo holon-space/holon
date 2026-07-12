@@ -118,9 +118,9 @@ path given by its `name_chain`. Every consumer already agrees on this predicate:
 **Contract Fork A + Fork B pin together:** Fork A guarantees ingest never *demotes* a block
 that is (or should be) a page to a plain heading; Fork B relies on `is_page()` remaining the
 sole predicate. Neither stream may introduce a second notion of "is a page" (e.g. a path-based
-or file-existence-based test). **Open question OQ1 (§7): Fork A's exact rule for deciding an
-inlined heading "should be" a page on ingest — Fork B needs that rule to be the identity
-`is_page()`, applied after Fork A's protection, or the two streams disagree at the boundary.**
+or file-existence-based test). **RULED (§7, OQ1): `is_page()` is the sole predicate. Fork A makes
+the tag truthful; Fork B reads only the tag. If a spot is found where the tag alone is
+insufficient, STOP and report rather than adding a parallel predicate.**
 The id/scheme handling is per `docs/Reference/ORG_SYNTAX.md`: on disk the page's identity is
 its `#+ID:` (bare, no `block:`); the renderer strips the scheme, the parser re-adds it. A
 materialized child file is a normal page file — `#+ID:` = the page block's bare id, `#+TITLE:`
@@ -319,12 +319,17 @@ cargo nextest run -p holon-orgmode -E 'test(writeback_guard) + test(sync_control
 cargo nextest run -p holon-integration-tests -E 'test(general_e2e_composed_pbt)' | tee /tmp/forkb-keystone.log
 ```
 
-- **B0 — red keystone (no prod change).** Add the migration seed variant (inlined companion +
-  fileless child) and the four oracles (§5) with the oracle *predicting* de-inlined companions +
-  materialized files. Confirm the keystone goes **RED** against today's inlining prod (reproduces
-  the bug). DONE: documented red signature (which invariant, which blocks). **Flag for review:
-  the oracle's file-attribution change — it is the spec of correct behavior; get it right before
-  writing prod.** Tier: executor.
+- **B0 — red keystone (no prod change). BASE DEPENDENCY (blocking):** B0 must reuse Fork A's
+  folder-companion + subdirectory page-file seeding, NOT build a duplicate seam (senior ruling).
+  As of this base rev that seeding is **NOT present** (`wide_e2e.rs` has only `forward-edge-page`
+  and a bare `Journals.org` machinery seed — no Page-under-Page-inlined-into-companion topology,
+  no fileless child page). **Action: request the coordinator sequence Fork A's seeding onto the
+  Fork B base before B0 starts.** Then add the migration seed *variant* (inlined companion +
+  fileless child) on top of Fork A's topology, and the four oracles (§5) with the oracle
+  *predicting* de-inlined companions + materialized files. Confirm the keystone goes **RED**
+  against today's inlining prod (reproduces the bug). DONE: documented red signature (which
+  invariant, which blocks). **Flag for review: the oracle's file-attribution change — it is the
+  spec of correct behavior; get it right before writing prod.** Tier: executor.
 - **B1 — subtree-scoped guard.** Refactor `ensure_ingest_lossless` to
   `SurvivingProjection` (§4.2); per-file callers pass their own file's set (no behavior change —
   the existing guard unit tests in `writeback_guard.rs:174-329` must stay green verbatim). Add
@@ -335,10 +340,14 @@ cargo nextest run -p holon-integration-tests -E 'test(general_e2e_composed_pbt)'
   mandatory verifier pass.**
 - **B2 — fileless-page materialization sweep + watcher seeding.** Enumerate Page blocks with no
   file; drive `on_block_changed`; seed `last_projection` and tracking on new-file writes (§4.4).
-  DONE: `inv-fileless-page-materialized` green; no re-ingest loop (assert the child file is
-  written exactly once per convergence — a soak with raised `PROPTEST_CASES`). **Flag for review:
-  the echo-suppression seeding (§4.4) — the one shared-state touch; a miss is an infinite
-  ingest↔writeback loop.** Tier: executor, escalate to Opus if the loop proves subtle.
+  DONE: `inv-fileless-page-materialized` green; no re-ingest loop. **Explicit echo test
+  (RULED-required, DONE gate — not just a soak):** a dedicated test materializes a fileless page,
+  pumps the watcher, and asserts the child file is written **exactly once** and the page is NOT
+  re-minted under a new id (the self-induced write is recognized as an echo via the seeded
+  `last_projection` baseline). Plus the raised-cases soak. **Flag for review: the echo-suppression
+  seeding (§4.4) — the one shared-state touch; a miss is an infinite ingest/writeback loop.**
+  Tier: executor, escalate to Opus if the loop proves subtle; fresh-context verifier on the echo
+  test.
 - **B3 — migration convergence green.** With B1+B2 in, the B0 red turns green: companion
   de-inlines, children materialize, guard passes via union, block set invariant holds. DONE: all
   §5 invariants green on both the steady-state and migration seed variants; the persisted
@@ -371,27 +380,21 @@ convergence ordering, so serialize to avoid a merge on the ordering code.
 shared-state seeding). B0's oracle attribution is a correctness-spec decision worth a senior eye
 even though it is test-only.
 
-**Open questions for senior review:**
-- **OQ1 — Fork A's page-decision rule.** What EXACTLY makes Fork A tag an inlined heading a page
-  on ingest (foreign-doc-root protection)? Fork B assumes the result is expressed as
-  `is_page()==true` and nothing else. If Fork A uses a separate signal (a `block_documents`
-  ownership row, a path check), Fork B must read that same signal in the CTE/guard — confirm the
-  single predicate before B1.
-- **OQ2 — title→filename policy.** Is there an existing sanitization anywhere for
-  `doc_id_to_path`? (Recon found none — titles are joined raw.) Confirm the fail-loud reject +
-  suffix-on-collision policy (§2) is acceptable, or whether a slug scheme is preferred (affects
-  round-trip: the file name is not the identity, `#+ID:` is, so a slug is safe but changes what
-  the user sees on disk).
-- **OQ3 — companion "link line" retention.** The ruling says the companion becomes empty of
-  child pages (LogSeq parity). Confirm we retain *nothing* — not even a `[[2026-07-11]]` back-link
-  line — so writeback never fabricates content the block store doesn't own. (Recommendation:
-  retain nothing; a back-link, if wanted, is a user-authored mark, per links-as-marks.)
-- **OQ4 — sweep vs. CDC-only.** B2 adds an explicit sweep so migration converges without waiting
-  for a fresh edit. Is the sweep acceptable as a boot-time convergence pass (cost: one
-  `get_blocks` per fileless page), or should materialization stay purely CDC-driven and migration
-  rely on Fork A emitting a synthetic tag-change delta per re-tagged date? The sweep is more
-  robust (covers any missed delivery); the CDC-only path is cheaper but couples migration
-  convergence to Fork A's event emission.
+**RULED (senior review, 2026-07-12) — the four open questions are decided:**
+- **OQ1 → RULED: `is_page()` is the sole child-page predicate.** The `Page` tag IS the authority
+  signal; Fork A's entire job is making that tag *truthful* (survive the foreign-file reconcile).
+  Fork B reads NO second signal — no `block_documents` ownership row, no path/file-existence
+  check. Fork A and Fork B meet at exactly `is_page()`. **If any spot is found where the tag alone
+  is insufficient, STOP and report — do NOT add a parallel predicate.** (§1.3 is authoritative.)
+- **OQ2 → RULED: fail-loud reject of `/` + control chars, suffix-on-collision, no silent
+  slugging** (§2 as written). The file name is not the identity (`#+ID:` is), but we still do not
+  silently rewrite what the user sees on disk.
+- **OQ3 → RULED: the companion retains literally NOTHING of child pages.** No heading, no
+  back-link line. LogSeq parity; a backlink, if wanted, is a user-authored `[[…]]` mark
+  (links-as-marks), never a writeback artifact.
+- **OQ4 → RULED: the boot-time SWEEP is the migration mechanism** (B2, §4.2). Robustness wins for
+  migration correctness. Fork A's CDC tag-change deltas are treated as a *bonus accelerant, never
+  a dependency* — migration convergence must hold with the sweep alone even if no delta arrives.
 
 ---
 
