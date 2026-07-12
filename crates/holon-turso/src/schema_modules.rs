@@ -390,6 +390,48 @@ impl SchemaModule for BlockRequirementEdgesSchemaModule {
     }
 }
 
+/// Supervision view for the C5 trust gate: one row per proposal block
+/// (coerced sub-threshold emission under `block:proposals`), keyed by the
+/// proposer's provenance. IVM maintains it from `block_raw` CDC, so
+/// "proposals by agent/rule with acceptance stats" is ONE query away — see
+/// [`TRUST_PROPOSAL_STATS_SQL`] for the aggregation.
+pub struct TrustProposalsSchemaModule;
+
+/// Acceptance stats per proposer over the `trust_proposals` matview — the C2
+/// "supervision = one query" payoff. Kept as a plain aggregate query (not a
+/// second matview) so no aggregating-matview IVM constraint applies.
+pub const TRUST_PROPOSAL_STATS_SQL: &str = "SELECT origin, transition_id, session_id, COUNT(*) AS proposals, SUM(CASE WHEN status = \
+     'accepted' THEN 1 ELSE 0 END) AS accepted, SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 \
+     END) AS rejected, SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending FROM \
+     trust_proposals GROUP BY origin, transition_id, session_id";
+
+#[async_trait]
+impl SchemaModule for TrustProposalsSchemaModule {
+    fn name(&self) -> &str {
+        "trust_proposals"
+    }
+
+    fn provides(&self) -> Vec<Resource> {
+        vec![Resource::schema("trust_proposals")]
+    }
+
+    fn requires(&self) -> Vec<Resource> {
+        vec![Resource::schema("block_raw")]
+    }
+
+    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
+        tracing::info!("[TrustProposalsSchemaModule] Reconciling trust_proposals matview");
+        reconcile_named_view(
+            db_handle,
+            "trust_proposals",
+            include_str!("../sql/schema/trust_proposals_matview.sql"),
+        )
+        .await
+        .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+        Ok(())
+    }
+}
+
 /// Block hierarchy schema module providing the block_with_path materialized
 /// view.
 ///

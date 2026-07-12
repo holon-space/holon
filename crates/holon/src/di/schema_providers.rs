@@ -28,6 +28,7 @@ use holon_turso::schema_modules::LinkSchemaModule;
 use holon_turso::schema_modules::NavigationSchemaModule;
 use holon_turso::schema_modules::OperationsSchemaModule;
 use holon_turso::schema_modules::SyncStateSchemaModule;
+use holon_turso::schema_modules::TrustProposalsSchemaModule;
 
 use super::DbHandleProvider;
 use crate::storage::turso::DbHandle;
@@ -102,6 +103,10 @@ impl DbResource for IdentityTables {}
 /// `graph_eav` schema.
 pub struct GraphEavSchema;
 impl DbResource for GraphEavSchema {}
+
+/// `trust_proposals` supervision matview (C5 trust gate; FROM `block_raw`).
+pub struct TrustProposalsView;
+impl DbResource for TrustProposalsView {}
 
 // ---------------------------------------------------------------------------
 // Helper: run a SchemaModule's DDL via DbHandle
@@ -262,6 +267,19 @@ pub fn register_schema_providers(injector: &Injector) {
         Shared::new(DbReady::<IdentityTables>::new())
     }));
 
+    // -- TrustProposalsView (FROM block_raw — depends on CoreTables only) --
+    injector.provide::<DbReady<TrustProposalsView>>(
+        Provider::root_async(|inj| async move {
+            let _core = inj.resolve_async::<DbReady<CoreTables>>().await;
+            let db = inj.resolve::<dyn DbHandleProvider>();
+            run_schema_module(&TrustProposalsSchemaModule, &db.handle())
+                .await
+                .expect("TrustProposalsView schema init failed");
+            Shared::new(DbReady::<TrustProposalsView>::new())
+        })
+        .with_dependency::<DbReady<CoreTables>>(),
+    );
+
     // -- GraphEavSchema (depends on CoreTables) --
     injector.provide::<DbReady<GraphEavSchema>>(
         Provider::root_async(|inj| async move {
@@ -294,5 +312,6 @@ pub fn all_schema_roots() -> Vec<std::any::TypeId> {
         TypeId::of::<DbReady<OperationTables>>(),
         TypeId::of::<DbReady<LinkTables>>(),
         TypeId::of::<DbReady<GraphEavSchema>>(),
+        TypeId::of::<DbReady<TrustProposalsView>>(),
     ]
 }

@@ -21,6 +21,7 @@
 //! and compiles on-demand during resolution. Compilation is fast for small
 //! expressions (<1µs each).
 
+pub mod trust;
 pub mod type_registry;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -41,6 +42,11 @@ use holon_api::render_types::RenderExpr;
 use holon_api::render_types::RenderVariant;
 use holon_api::row_id;
 use rhai::Engine as RhaiEngine;
+pub use trust::OriginClass;
+pub use trust::TrustDecision;
+pub use trust::TrustPolicy;
+pub use trust::TrustPolicyParseError;
+pub use trust::TrustRule;
 pub use type_registry::TypeRegistry;
 pub use type_registry::create_default_registry;
 pub use type_registry::type_profiles_from_registry;

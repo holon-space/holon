@@ -18,18 +18,28 @@ use std::sync::atomic::Ordering;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use holon_api::ACCEPT_PROPOSAL_OP;
 use holon_api::EntityName;
 use holon_api::HistoryEvent;
 use holon_api::HistoryStore;
 use holon_api::OpOrigin;
 use holon_api::Operation;
 use holon_api::OperationDescriptor;
+use holon_api::PROPOSAL_PROPERTY;
+use holon_api::PROPOSALS_ROOT_ID;
+use holon_api::PROPOSED_BY_PROPERTY;
 use holon_api::PROVENANCE_PROPERTY;
+use holon_api::ProposalRecord;
+use holon_api::ProposalStatus;
 use holon_api::ProvenanceStamp;
+use holon_api::REJECT_PROPOSAL_OP;
 use holon_api::UndoOutcome;
 use holon_api::Value;
 use holon_api::clock::Clock;
 use holon_api::clock::SystemClock;
+use holon_api::effect_id::FiringKey;
+use holon_api::effect_id::deterministic_proposal_id;
+use holon_api::entity_uri::EntityUri;
 pub use holon_api::operation_engine::OperationEngine;
 use holon_core::OperationProvider;
 use holon_core::Precondition;
@@ -40,6 +50,8 @@ use holon_core::UndoStateReader;
 use holon_core::UndoStore;
 use holon_core::storage::types::StorageEntity;
 use holon_core::verify_precondition;
+use holon_profiles::trust::TrustDecision;
+use holon_profiles::trust::TrustPolicy;
 use tokio::sync::RwLock;
 
 use crate::api::BackendEngine;
@@ -111,6 +123,11 @@ pub struct DispatchingOperationEngine {
     /// (docs/Proposals/Templating-2026-07-12.md). `None` on a wiring without a
     /// queryable block projection — the operation then fails loud, disclosed.
     template_source: Option<Arc<dyn crate::api::template_source::TemplateSource>>,
+    /// Trust policy (VisionGapAnalysis C5): decides per (origin, entity, op)
+    /// whether a dispatch executes against canonical state or is coerced into
+    /// a proposal emission. Defaults to [`TrustPolicy::trust_all`] — the gate
+    /// is a no-op until a policy is configured.
+    trust_policy: Arc<TrustPolicy>,
 }
 
 /// The engine-level compound operation name: expands into `create` ops routed
@@ -185,6 +202,39 @@ fn render_value(v: &Value) -> String {
     }
 }
 
+/// The origin's identity rendered for the deterministic proposal id: the
+/// origin class plus its per-instance ids, so distinct sessions/tool calls/
+/// rules mint distinct proposals while a re-fire of the SAME dispatch
+/// converges (unit separators, same discipline as `deterministic_block_id`).
+fn origin_identity_key(origin: &OpOrigin) -> String {
+    match origin {
+        OpOrigin::User | OpOrigin::Sync | OpOrigin::Ingest => origin.tag().to_string(),
+        OpOrigin::Rule { transition_id } => format!("rule\x1f{transition_id}"),
+        OpOrigin::Agent {
+            session_id,
+            tool_call_id,
+        } => format!("agent\x1f{session_id}\x1f{tool_call_id}"),
+    }
+}
+
+/// Normalize a block `properties` column value to its object form. The reader
+/// may hand back raw JSON TEXT (`String`/`Json`) or an already-structured
+/// `Object`; anything else is a loud error.
+fn properties_object(value: &Value) -> Result<std::collections::HashMap<String, Value>> {
+    match value {
+        Value::Object(map) => Ok(map.clone()),
+        Value::String(s) | Value::Json(s) => {
+            let json: serde_json::Value = serde_json::from_str(s)
+                .map_err(|e| anyhow::anyhow!("properties JSON parse failed: {e}"))?;
+            match Value::from_json_value(json) {
+                Value::Object(map) => Ok(map),
+                other => anyhow::bail!("properties JSON is not an object, got {other:?}"),
+            }
+        }
+        other => anyhow::bail!("properties column is neither JSON text nor an object: {other:?}"),
+    }
+}
+
 impl DispatchingOperationEngine {
     /// Build an in-memory engine over the given dispatcher (no persistence, no
     /// staleness reader). Used by Loro-only sessions whose reversible ops carry
@@ -199,6 +249,7 @@ impl DispatchingOperationEngine {
             clock: Arc::new(SystemClock),
             history: None,
             template_source: None,
+            trust_policy: Arc::new(TrustPolicy::trust_all()),
         }
     }
 
@@ -213,6 +264,21 @@ impl DispatchingOperationEngine {
     /// appends its field deltas to the stream.
     pub fn with_history_store(mut self, history: Arc<dyn HistoryStore>) -> Self {
         self.history = Some(history);
+        self
+    }
+
+    /// Wire a live-state reader without undo persistence. The trust gate uses
+    /// it for proposal idempotence checks and `accept_/reject_proposal` reads;
+    /// undo preconditions benefit too.
+    pub fn with_state_reader(mut self, reader: Arc<dyn UndoStateReader>) -> Self {
+        self.reader = Some(reader);
+        self
+    }
+
+    /// Configure the trust policy (VisionGapAnalysis C5). Without this the
+    /// default [`TrustPolicy::trust_all`] keeps the gate a no-op.
+    pub fn with_trust_policy(mut self, policy: Arc<TrustPolicy>) -> Self {
+        self.trust_policy = policy;
         self
     }
 
@@ -250,6 +316,7 @@ impl DispatchingOperationEngine {
             clock: Arc::new(SystemClock),
             history: None,
             template_source: None,
+            trust_policy: Arc::new(TrustPolicy::trust_all()),
         })
     }
 
@@ -401,6 +468,252 @@ impl DispatchingOperationEngine {
         }
     }
 
+    /// Coerce a sub-trust-threshold dispatch into a proposal emission
+    /// (VisionGapAnalysis C5). The wrapped op never reaches canonical state:
+    /// it is recorded verbatim in a proposal block under `block:proposals`,
+    /// stamped with the proposer's provenance. The proposal id is
+    /// deterministic per (origin identity, entity, op, params) — a re-fire
+    /// converges on the same proposal instead of stacking duplicates
+    /// (ADR 0024 P4). Anything that cannot be recorded as a proposal is a
+    /// loud error, never a silent drop.
+    async fn coerce_to_proposal(
+        &self,
+        entity_name: &EntityName,
+        op_name: &str,
+        params: StorageEntity,
+        origin: &OpOrigin,
+    ) -> Result<Option<Value>> {
+        use anyhow::Context;
+
+        let proposal_id = deterministic_proposal_id(
+            &origin_identity_key(origin),
+            entity_name.as_str(),
+            op_name,
+            &FiringKey::from_row(&params),
+        );
+
+        let disclosed = |status: &str| {
+            let mut response = std::collections::HashMap::new();
+            response.insert(
+                "proposal_id".to_string(),
+                Value::String(proposal_id.as_str().to_string()),
+            );
+            response.insert("status".to_string(), Value::String(status.to_string()));
+            Ok(Some(Value::Object(response)))
+        };
+
+        // Idempotent re-fire: the deterministic id already exists → nothing to
+        // create. Without a reader the create itself must be id-convergent
+        // (Loro upsert semantics), so the check is skipped, disclosed by type.
+        if let Some(reader) = &self.reader
+            && reader
+                .field_value(proposal_id.as_str(), "id")
+                .await
+                .context("trust gate: proposal existence check")?
+                .is_some()
+        {
+            return disclosed("already_proposed");
+        }
+
+        self.ensure_proposals_root(origin).await?;
+
+        let record = ProposalRecord::pending(
+            entity_name.clone(),
+            op_name,
+            params
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+        );
+        let mut create: StorageEntity = StorageEntity::new();
+        create.insert("id".into(), Value::String(proposal_id.as_str().to_string()));
+        create.insert(
+            "parent_id".into(),
+            Value::String(EntityUri::block(PROPOSALS_ROOT_ID).as_str().to_string()),
+        );
+        create.insert(
+            "content".into(),
+            Value::String(format!(
+                "Proposal: {op_name} on {entity_name} (by {})",
+                origin.tag()
+            )),
+        );
+        create.insert(Arc::from(PROPOSAL_PROPERTY), record.to_value());
+        // The proposal block's `_provenance` names the PROPOSER — that is the
+        // fact the supervision view groups by.
+        let create = self.stamp_provenance("create", create, origin);
+
+        let result = self
+            .dispatcher
+            .execute_operation(&EntityName::new("block"), "create", create)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "trust gate: coercing '{op_name}' on '{entity_name}' from origin '{}' into a \
+                     proposal failed: {e}",
+                    origin.tag()
+                )
+            })?;
+
+        if let Some(history) = &self.history {
+            self.record_history(history.as_ref(), "create", origin, &result.changes)
+                .await?;
+        }
+
+        disclosed("proposed")
+    }
+
+    /// Ensure the proposal place root (`block:proposals`) exists. With a
+    /// reader the check is a direct read; without one the create relies on
+    /// deterministic-id upsert semantics (same id, same content — convergent).
+    async fn ensure_proposals_root(&self, origin: &OpOrigin) -> Result<()> {
+        use anyhow::Context;
+
+        let root_uri = EntityUri::block(PROPOSALS_ROOT_ID);
+        if let Some(reader) = &self.reader
+            && reader
+                .field_value(root_uri.as_str(), "id")
+                .await
+                .context("trust gate: proposals root existence check")?
+                .is_some()
+        {
+            return Ok(());
+        }
+        let mut create: StorageEntity = StorageEntity::new();
+        create.insert("id".into(), Value::String(root_uri.as_str().to_string()));
+        create.insert(
+            "parent_id".into(),
+            Value::String(EntityUri::no_parent().as_str().to_string()),
+        );
+        create.insert("content".into(), Value::String("Proposals".to_string()));
+        let create = self.stamp_provenance("create", create, origin);
+        self.dispatcher
+            .execute_operation(&EntityName::new("block"), "create", create)
+            .await
+            .map_err(|e| anyhow::anyhow!("trust gate: creating proposals root failed: {e}"))?;
+        Ok(())
+    }
+
+    /// Resolve a pending proposal: `accept` re-dispatches the wrapped op with
+    /// the CONFIRMER's origin through the normal path (gate, stamping, undo,
+    /// history), preserving the proposer's stamp as `_proposed_by`; `reject`
+    /// retracts without executing. Both flip the proposal to a terminal
+    /// status carrying the resolver's provenance, so the supervision view
+    /// keeps acceptance stats per origin.
+    async fn run_resolve_proposal(
+        &self,
+        params: &StorageEntity,
+        origin: &OpOrigin,
+        accept: bool,
+    ) -> Result<Option<Value>> {
+        use anyhow::Context;
+
+        let verb = if accept { "accept" } else { "reject" };
+        let proposal_id = params
+            .get("id")
+            .and_then(|v| v.as_string())
+            .ok_or_else(|| anyhow::anyhow!("{verb}_proposal requires an 'id' param"))?
+            .to_string();
+        let reader = self.reader.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "{verb}_proposal requires a live-state reader — not wired in this session"
+            )
+        })?;
+
+        let properties = reader
+            .field_value(&proposal_id, "properties")
+            .await
+            .with_context(|| format!("{verb}_proposal: reading proposal '{proposal_id}'"))?
+            .ok_or_else(|| {
+                anyhow::anyhow!("{verb}_proposal: proposal '{proposal_id}' not found")
+            })?;
+        let properties = properties_object(&properties).with_context(|| {
+            format!("{verb}_proposal: proposal '{proposal_id}' properties malformed")
+        })?;
+        let record =
+            ProposalRecord::from_value(properties.get(PROPOSAL_PROPERTY).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{verb}_proposal: block '{proposal_id}' carries no '{PROPOSAL_PROPERTY}' \
+                     property — not a proposal"
+                )
+            })?)?;
+        if record.status != ProposalStatus::Pending {
+            anyhow::bail!(
+                "{verb}_proposal: proposal '{proposal_id}' is already {}",
+                record.status.as_str()
+            );
+        }
+
+        let resolver_stamp =
+            ProvenanceStamp::from_origin(origin, self.clock.now_millis()).to_value();
+
+        let response = if accept {
+            let proposer_stamp = properties.get(PROVENANCE_PROPERTY).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "accept_proposal: proposal '{proposal_id}' carries no proposer \
+                     '{PROVENANCE_PROPERTY}' stamp — refusing to promote without provenance"
+                )
+            })?;
+            let mut wrapped: StorageEntity = record
+                .params
+                .iter()
+                .map(|(k, v)| (Arc::from(k.as_str()), v.clone()))
+                .collect();
+            if PROVENANCE_STAMPED_OPS.contains(&record.op_name.as_str()) {
+                wrapped.insert(Arc::from(PROPOSED_BY_PROPERTY), proposer_stamp.clone());
+            }
+            // Boxed for async recursion: promotion IS an ordinary dispatch
+            // with the confirmer's origin — gate, `_provenance` stamp, undo
+            // classification, and history all apply unchanged.
+            Box::pin(OperationEngine::execute_operation(
+                self,
+                &record.entity.clone(),
+                &record.op_name.clone(),
+                wrapped,
+                origin.clone(),
+            ))
+            .await
+            .with_context(|| {
+                format!(
+                    "accept_proposal: promoting proposal '{proposal_id}' ('{}' on '{}') failed",
+                    record.op_name, record.entity
+                )
+            })?
+        } else {
+            let mut response = std::collections::HashMap::new();
+            response.insert(
+                "proposal_id".to_string(),
+                Value::String(proposal_id.clone()),
+            );
+            response.insert(
+                "status".to_string(),
+                Value::String(ProposalStatus::Rejected.as_str().to_string()),
+            );
+            Some(Value::Object(response))
+        };
+
+        let status = if accept {
+            ProposalStatus::Accepted
+        } else {
+            ProposalStatus::Rejected
+        };
+        let resolved = record.resolved(status, resolver_stamp);
+        let mut update: StorageEntity = StorageEntity::new();
+        update.insert("id".into(), Value::String(proposal_id.clone()));
+        update.insert(Arc::from(PROPOSAL_PROPERTY), resolved.to_value());
+        self.dispatcher
+            .execute_operation(&EntityName::new("block"), "update", update)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "{verb}_proposal: marking proposal '{proposal_id}' {} failed: {e}",
+                    status.as_str()
+                )
+            })?;
+
+        Ok(response)
+    }
+
     /// Verify a precondition against live state. With no reader wired (an
     /// in-memory, single-writer session that has no external-mutation surface)
     /// verification is skipped — disclosed, not a silent fake. When a reader is
@@ -430,6 +743,30 @@ impl OperationEngine for DispatchingOperationEngine {
         params: StorageEntity,
         origin: OpOrigin,
     ) -> Result<Option<Value>> {
+        // Trust gate (VisionGapAnalysis C5): a sub-threshold (origin, entity,
+        // op) never reaches canonical state — it is coerced into a proposal
+        // emission under `block:proposals`. This runs FIRST so every shape
+        // (plain ops, compounds, even accept/reject themselves) is governed by
+        // the same place-topology rule; a trusted origin falls through with
+        // zero behavior change.
+        if self.trust_policy.decide(&origin, entity_name, op_name) == TrustDecision::Propose {
+            return self
+                .coerce_to_proposal(entity_name, op_name, params, &origin)
+                .await;
+        }
+
+        // Engine-level compounds: proposal confirmation (C5). Acceptance
+        // re-dispatches the wrapped op with the CONFIRMER's origin; rejection
+        // retracts without executing.
+        if entity_name.as_str() == "block" {
+            if op_name == ACCEPT_PROPOSAL_OP {
+                return self.run_resolve_proposal(&params, &origin, true).await;
+            }
+            if op_name == REJECT_PROPOSAL_OP {
+                return self.run_resolve_proposal(&params, &origin, false).await;
+            }
+        }
+
         // Engine-level compound: expand a template instantiation into ordinary
         // `create` dispatches (each re-enters this method and gets stamping /
         // history / undo classification like any other op).
