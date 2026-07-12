@@ -96,6 +96,54 @@ fn soak_deadline(default: Duration) -> Duration {
     }
 }
 
+/// The fixed wall-clock instant every composed keystone frontend boot injects
+/// as its `TestClock`, so "today" — and therefore the boot auto-create rule's
+/// journal date and its deterministic id — is identical across runs and host
+/// timezones. Noon UTC 2026-01-15 is timezone-robust (noon UTC lands on the
+/// same civil date from UTC-12..+12), matching the directed AdvanceDay
+/// capstone's `noon_millis`.
+pub fn keystone_boot_ms() -> i64 {
+    chrono::NaiveDate::from_ymd_opt(2026, 1, 15)
+        .expect("valid keystone boot date")
+        .and_hms_opt(12, 0, 0)
+        .expect("valid keystone boot time")
+        .and_utc()
+        .timestamp_millis()
+}
+
+/// A fresh [`holon_api::TestClock`] pinned at [`keystone_boot_ms`] — the clock
+/// the composed frontend boot injects so the production `ClockScheduler` seeds
+/// the `clock` day row at a deterministic date.
+pub fn keystone_boot_clock() -> Arc<holon_api::TestClock> {
+    Arc::new(holon_api::TestClock::new(keystone_boot_ms()))
+}
+
+/// The civil date (`YYYY-MM-DD`) the keystone boot clock reports as "today" —
+/// the `content` of the journal day-block the boot rule creates.
+pub fn keystone_boot_journal_date() -> String {
+    holon_api::CalendarDate::from_clock(keystone_boot_clock().as_ref()).ymd()
+}
+
+/// The deterministic id of the journal day-block the boot auto-create rule
+/// fires for [`keystone_boot_journal_date`]. Computed with the SAME
+/// `holon-api::effect_id` functions the production `action_watcher` uses
+/// (`RuleId` = the action block's stored id, `FiringKey` over the trigger's
+/// `{name: today}` row, first output slot), so the reference model places the
+/// block in the SUT id space exactly.
+pub fn keystone_boot_journal_id() -> EntityUri {
+    use holon_api::effect_id::FiringKey;
+    use holon_api::effect_id::OutputSlot;
+    use holon_api::effect_id::RuleId;
+    use holon_api::effect_id::deterministic_block_id;
+    let rule = RuleId::new(holon_frontend::JOURNALS_ACTION_ID);
+    let row: holon_api::entity::StorageEntity = std::iter::once((
+        Arc::<str>::from("name"),
+        holon_api::Value::String(keystone_boot_journal_date()),
+    ))
+    .collect();
+    deterministic_block_id(&rule, &FiringKey::from_row(&row), &OutputSlot::first())
+}
+
 /// A composition component wrapping a real headless frontend stack. Owns the
 /// `TempDir`, `FrontendSession`, and `ReactiveEngine` so background tasks and
 /// the on-disk (in-memory FS) org root stay alive for the component's lifetime.
@@ -2984,17 +3032,6 @@ mod tests {
         }
     }
 
-    /// The FULL journal rule seed: `#+ID: journals` fixes the page id to
-    /// `block:journals`; the trigger/action pair lives under a `Journal
-    /// Auto-Create` heading (same parent, so `action_discovery` joins them)
-    /// and NOT directly under journals, so the day-blocks the action
-    /// creates are the only date-content children.
-    const JOURNAL_RULE_ORG: &str = "#+ID: journals\n* Journal Auto-Create\n#+BEGIN_SRC holon_sql \
-                                    :id journals::trigger::0\nSELECT today as name FROM clock \
-                                    WHERE grain = 'day'\n#+END_SRC\n#+BEGIN_SRC holon_rule :id \
-                                    journals::action::0\nblock.create(#{parent_id: \
-                                    \"block:journals\", content: col(\"name\")})\n#+END_SRC\n";
-
     #[tokio::test(flavor = "multi_thread")]
     async fn advance_day_fires_one_journal_per_distinct_day_idempotently() {
         use holon_pbt_core::capabilities::SutClockAdvance;
@@ -3003,8 +3040,13 @@ mod tests {
         let clock = Arc::new(holon_api::TestClock::new(boot_ms));
         let boot_date = holon_api::CalendarDate::from_clock(clock.as_ref()).ymd();
 
+        // The journal auto-create RULE (trigger + action) is now seeded on every
+        // boot by prod's `build_default_layout_blocks` (dogfood #4 fix), so this
+        // test boots on a BARE `Journals.org` shell and exercises the SHIPPED
+        // programmatic rule — no disk rule org (which would double-seed the same
+        // `block:journals::{trigger,action}::0` ids under a second heading).
         let comp = HeadlessFrontendComponent::new_with_clock(
-            &[("Journals.org", JOURNAL_RULE_ORG)],
+            &[("Journals.org", "#+ID: journals\n")],
             Duration::from_millis(500),
             false, // SqlOnly-shaped: no Loro. The rule path is storage-agnostic.
             clock.clone(),
@@ -3195,8 +3237,10 @@ mod tests {
         let boot_ms = noon_millis(2026, 1, 15);
         let clock = Arc::new(holon_api::TestClock::new(boot_ms));
 
+        // Bare shell: the rule (trigger + action) is seeded programmatically by
+        // prod's `build_default_layout_blocks` (dogfood #4 fix).
         let comp = HeadlessFrontendComponent::new_with_clock(
-            &[("Journals.org", JOURNAL_RULE_ORG)],
+            &[("Journals.org", "#+ID: journals\n")],
             Duration::from_millis(500),
             false,
             clock.clone(),
