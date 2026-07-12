@@ -122,17 +122,31 @@ impl RowOrigin {
 /// - empty / not-yet-resolvable rowset → `None` (the streaming path shows no
 ///   slot rather than silently mis-parenting; the panel's `0..N` query always
 ///   returns its root, so a focused page is never truly empty here);
-/// - a structurally impossible rowset (several disjoint roots) → `panic!`,
-///   since a hidden wrong-parent is worse than a loud failure.
+/// - a single forest root → parent to that root;
+/// - a multi-root forest → gated by `allow_root_creation` (below).
 ///
-/// `allow_root_creation` gates the ONE ambiguous shape — the flat forest of
-/// top-level entities each parented to the `no_parent` sentinel (BugFunnel #61:
-/// the Pages sidebar). A creation slot there would make a NEW TOP-LEVEL PAGE,
-/// which is only wanted for editable list widgets that explicitly opt in via
-/// `creation_slot: true`. A read-only navigation list (the sidebar) leaves it
-/// `false` and gets NO slot, so it no longer renders a phantom
-/// `sentinel:__virtual:no_parent` row. The single-root (main panel focus root)
-/// and flat-container shapes are unaffected — they never needed the opt-in.
+/// `allow_root_creation` gates the multi-root forest — a list of top-level
+/// entities. Two legitimate multi-root shapes exist: a flat top-level-pages
+/// list (every root at the `no_parent` sentinel) and a NESTED-PAGE forest where
+/// a page is parented to another page filtered out of this rowset (BugFunnel
+/// #67: a subdir page-file roots the date page under a non-`Page` folder-page).
+/// Per the links-ruling nested pages are a REPRESENTABLE state, so a mixed
+/// forest is legal data, not corruption.
+/// - `allow_root_creation = false` (read-only navigation list, e.g. the Pages
+///   sidebar): ANY multi-root forest → `None`. No creation slot, so no parent
+///   needs resolving; the list no longer renders a phantom
+///   `sentinel:__virtual:no_parent` row and no longer PANICS on a nested-page
+///   forest at boot (BugFunnel #61 + #67).
+/// - `allow_root_creation = true` (editable list opting in via `creation_slot:
+///   true`): a new item is a NEW TOP-LEVEL PAGE parented to the `no_parent`
+///   sentinel, resolved whenever the forest carries at least one
+///   sentinel-rooted anchor (mixed nested-page forests included). A
+///   creation-enabled forest whose EVERY root dangles to a real-but-absent
+///   parent has no top-level anchor → `panic!` (genuinely malformed
+///   query/render spec; fail-loud remains right for truly impossible states).
+///
+/// The single-root (main panel focus root) and flat-container shapes are
+/// unaffected — they never needed the opt-in.
 pub fn resolve_creation_parent(
     rows: &[std::sync::Arc<holon_api::widget_spec::DataRow>],
     container: &EntityUri,
@@ -186,25 +200,44 @@ pub fn resolve_creation_parent(
         // Every real row's parent is present → a cycle; not resolvable yet.
         [] => None,
         many => {
-            // Top-level-pages list (e.g. the Pages sidebar `WHERE tag='Page'`):
-            // a flat forest whose every root is parented to the `no_parent`
-            // sentinel. The creation slot here would make a NEW TOP-LEVEL PAGE,
-            // which is only offered when the widget opts in via
-            // `creation_slot: true` (BugFunnel #61). Without opt-in the
-            // read-only navigation sidebar gets NO slot (no phantom row). Any
-            // other multi-root shape (roots with real-but-absent or mixed
-            // parents) is a genuinely corrupt rowset → loud panic regardless.
+            // A multi-root forest. Two legitimate shapes reach here:
+            //  - a top-level-pages list (e.g. the Pages sidebar `WHERE tag='Page'`), whose
+            //    roots are parented to the `no_parent` sentinel; and
+            //  - a NESTED-PAGE forest, where a page is parented to another page that this
+            //    rowset filters out (BugFunnel #67: a subdir page-file
+            //    `Journals/2026-07-10.org` roots the date page under the `journals`
+            //    folder-page, which is not itself a `Page` and so is absent from `WHERE
+            //    tag='Page'`). Per the links-ruling nested pages are a REPRESENTABLE state
+            //    (anchored by id), so a mixed forest — some roots at the sentinel, some
+            //    dangling to an absent-but-real parent — is legal data, NOT a corrupt
+            //    rowset.
+            //
+            // A read-only navigation list (`allow_root_creation = false`, e.g.
+            // the sidebar) never offers a creation slot, so it does not need to
+            // resolve a parent at all: ANY multi-root forest → `None` (no slot,
+            // no panic). This is the fix for the boot panic.
+            if !allow_root_creation {
+                return None;
+            }
+            // Creation-enabled list (`creation_slot: true`): a new item is a NEW
+            // TOP-LEVEL PAGE, parented to the `no_parent` sentinel. This is only
+            // meaningful when the forest actually carries a top-level anchor (at
+            // least one sentinel-rooted row); mixed forests with nested pages
+            // still resolve here. A creation-enabled forest whose EVERY root
+            // dangles to a real-but-absent parent has no top-level to create
+            // under → genuinely malformed query/render spec → loud panic.
             let no_parent = EntityUri::no_parent();
-            if many.iter().all(|r| {
+            if many.iter().any(|r| {
                 data_row_parent_id(r)
                     .map(|p| p == no_parent)
                     .unwrap_or(false)
             }) {
-                return allow_root_creation.then(|| no_parent.clone());
+                return Some(no_parent);
             }
             panic!(
-                "creation slot: rowset has {} disjoint root rows (container={container}); cannot \
-                 resolve a single query focus root — malformed query or render spec",
+                "creation slot: rowset has {} disjoint root rows (container={container}); \
+                 creation enabled but no top-level (no_parent) anchor — malformed query or render \
+                 spec",
                 many.len()
             )
         }
@@ -367,16 +400,64 @@ mod tests {
         assert_eq!(parent, sentinel);
     }
 
-    /// A multi-root rowset whose roots have real-but-absent (dangling) parents
-    /// — NOT the sentinel — is a genuinely corrupt rowset → loud panic, never a
-    /// silent wrong-parent.
+    /// A read-only list (`allow_root_creation = false`) that renders a
+    /// multi-root forest with dangling (real-but-absent) parents — the
+    /// shape that used to PANIC — now gets NO slot (`None`). A navigation
+    /// list never creates, so a multi-root forest is expected, never
+    /// corrupt.
     #[test]
-    #[should_panic(expected = "disjoint root rows")]
-    fn disjoint_roots_panic() {
+    fn read_only_disjoint_roots_get_no_slot() {
         let rows = vec![
             row("block:p1", Some("block:outsideA")),
             row("block:p2", Some("block:outsideB")),
         ];
-        let _ = resolve_creation_parent(&rows, &uri("block:default-main-panel"), false);
+        assert!(resolve_creation_parent(&rows, &uri("block:default-main-panel"), false).is_none());
+    }
+
+    /// BugFunnel #67 reproduction at the unit level: a NESTED-PAGE forest. The
+    /// Pages sidebar (`WHERE tag='Page'`) renders top-level pages at the
+    /// `no_parent` sentinel PLUS a date page parented to the `journals`
+    /// folder-page, which is not itself a `Page` and so is absent from the
+    /// rowset. That mixed forest (some sentinel roots, one dangling root) used
+    /// to PANIC at boot. Read-only (`allow_root_creation = false`) →
+    /// `None`, no panic.
+    #[test]
+    fn nested_page_forest_read_only_gets_no_slot() {
+        let sentinel = EntityUri::no_parent();
+        let rows = vec![
+            row("block:pageA", Some(sentinel.as_str())),
+            row("block:journal-2026-07-10", Some("block:journals")), // parent filtered out
+        ];
+        assert!(resolve_creation_parent(&rows, &uri("block:journals-sidebar"), false).is_none());
+    }
+
+    /// The SAME mixed nested-page forest on an editable list that opts in
+    /// (`allow_root_creation = true`) resolves the new-item slot to the
+    /// `no_parent` sentinel (a "create a new top-level page" slot), because the
+    /// forest carries at least one sentinel-rooted anchor.
+    #[test]
+    fn nested_page_forest_with_optin_resolves_to_no_parent() {
+        let sentinel = EntityUri::no_parent();
+        let rows = vec![
+            row("block:pageA", Some(sentinel.as_str())),
+            row("block:journal-2026-07-10", Some("block:journals")),
+        ];
+        let parent = resolve_creation_parent(&rows, &uri("block:journals-sidebar"), true)
+            .expect("resolvable");
+        assert_eq!(parent, sentinel);
+    }
+
+    /// A creation-enabled forest whose EVERY root dangles to a real-but-absent
+    /// parent (NO sentinel anchor at all) has nothing top-level to create under
+    /// — a genuinely malformed query/render spec → loud panic (fail-loud
+    /// for truly impossible states).
+    #[test]
+    #[should_panic(expected = "no top-level")]
+    fn creation_enabled_all_dangling_roots_panic() {
+        let rows = vec![
+            row("block:p1", Some("block:outsideA")),
+            row("block:p2", Some("block:outsideB")),
+        ];
+        let _ = resolve_creation_parent(&rows, &uri("block:default-main-panel"), true);
     }
 }
