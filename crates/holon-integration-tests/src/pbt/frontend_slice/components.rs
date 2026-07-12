@@ -126,10 +126,11 @@ pub fn keystone_boot_journal_date() -> String {
 
 /// The deterministic id of the journal day-block the boot auto-create rule
 /// fires for [`keystone_boot_journal_date`]. Computed with the SAME
-/// `holon-api::effect_id` functions the production `action_watcher` uses
-/// (`RuleId` = the action block's stored id, `FiringKey` over the trigger's
-/// `{name: today}` row, first output slot), so the reference model places the
-/// block in the SUT id space exactly.
+/// `holon-api::effect_id` functions the production `holon_rule_watcher` uses:
+/// `RuleId` = the holon_rule block's stored id (`JOURNALS_ACTION_ID`),
+/// `FiringKey` over the clock binding row `SELECT today AS today FROM clock`
+/// (so the key column is `today`, not `name`), first output slot — so the
+/// reference model places the block in the SUT id space exactly.
 pub fn keystone_boot_journal_id() -> EntityUri {
     use holon_api::effect_id::FiringKey;
     use holon_api::effect_id::OutputSlot;
@@ -137,7 +138,7 @@ pub fn keystone_boot_journal_id() -> EntityUri {
     use holon_api::effect_id::deterministic_block_id;
     let rule = RuleId::new(holon_frontend::JOURNALS_ACTION_ID);
     let row: holon_api::entity::StorageEntity = std::iter::once((
-        Arc::<str>::from("name"),
+        Arc::<str>::from("today"),
         holon_api::Value::String(keystone_boot_journal_date()),
     ))
     .collect();
@@ -3132,11 +3133,12 @@ mod tests {
             .and_then(|r| r.get("id").and_then(|v| v.as_string()).map(str::to_string))
             .expect("a holon_rule block exists");
         eprintln!("[advance-day] discovered rule id: {rule_id}");
-        // The firing row is the trigger matview row: `{name: <date>, _rowid: 1}`
-        // (the clock relation holds a single day-row, so `_rowid` is stably 1).
+        // The firing row is the holon_rule clock binding `SELECT today AS today
+        // FROM clock` — `{today: <date>, _rowid: 1}` (the clock relation holds a
+        // single day-row; `_rowid` is excluded from the FiringKey, so it is stable).
         let expect_id_for = |date: &str| -> String {
             let mut row = holon_api::StorageEntity::new();
-            row.insert("name".into(), Value::String(date.to_string()));
+            row.insert("today".into(), Value::String(date.to_string()));
             row.insert("_rowid".into(), Value::Integer(1));
             holon_api::effect_id::deterministic_block_id(
                 &holon_api::effect_id::RuleId::new(rule_id.clone()),
@@ -3248,21 +3250,22 @@ mod tests {
         )
         .await;
 
-        // The rule fired on boot — the action watcher IS the evaluator (rule live).
+        // The rule fired on boot — the holon_rule_watcher IS the evaluator (rule live).
         wait_for_journal_days(&comp, 1, Duration::from_secs(10)).await;
 
-        // Discover the trigger (holon_sql source) and its parent = the machinery
-        // heading. The heading owns exactly one query-source child (the trigger),
-        // so it is the block that would wrongly resolve a display query.
+        // Discover the single-block holon_rule (program machinery) and its parent =
+        // the `Journal Auto-Create` heading. The heading owns the rule block, so it
+        // is the block that would wrongly resolve a display query if the program
+        // machinery leaked onto the display path.
         let trigger_rows = comp
             .engine
             .db_handle()
             .query(
-                "SELECT id, parent_id FROM block_raw WHERE source_language = 'holon_sql'",
+                "SELECT id, parent_id FROM block_raw WHERE source_language = 'holon_rule'",
                 std::collections::HashMap::new(),
             )
             .await
-            .expect("trigger-block query");
+            .expect("holon_rule-block query");
         let heading_id = trigger_rows
             .first()
             .and_then(|r| {
@@ -3270,27 +3273,28 @@ mod tests {
                     .and_then(|v| v.as_string())
                     .map(str::to_string)
             })
-            .expect("the holon_sql trigger has a parent heading");
+            .expect("the holon_rule block has a parent heading");
         let heading_uri = EntityUri::parse(&heading_id).expect("heading id parses");
 
-        // render_entity on the heading MUST fail loud (the guard), never run
-        // `query_and_watch` on the trigger. A silent fallback to a leaf/collection
-        // render would mean the trigger leaked onto the display path.
+        // render_entity on the rule-machinery heading must NOT panic or fail: the
+        // single-block `holon_rule` is not a query language, so — unlike the retired
+        // `holon_sql` trigger — it can never be compiled into a display matview (the
+        // boot-critical `SELECT today` / id-less-row panic class, BugFunnel row 62).
+        // The rule stays live (the boot day-block above proves the holon_rule_watcher
+        // is the evaluator); its heading renders normally, the `holon_rule` source
+        // child excluded from the display collection like any source block.
         let result = comp
             .engine
             .blocks()
             .render_entity(&heading_uri, &None)
             .await;
-        let err = result.expect_err(
-            "render_entity on a rule-machinery heading must fail loud, not resolve the trigger as \
-             a display query",
-        );
-        let msg = format!("{err:#}");
         assert!(
-            msg.contains("rule TRIGGER") || msg.contains("program machinery"),
-            "guard error must name the program-machinery/rule-trigger cause, got: {msg}"
+            result.is_ok(),
+            "render_entity on a single-block holon_rule heading must render (the rule is not a \
+             query, so there is no trigger to leak onto the display path), got: {:#}",
+            result.err().map(|e| format!("{e:#}")).unwrap_or_default()
         );
-        eprintln!("[rule-guard] render_entity({heading_id}) failed loud as required: {msg}");
+        eprintln!("[rule-guard] render_entity({heading_id}) rendered without a display-query leak");
     }
 
     /// Step 0 make-or-break PROBE (SutHandle decomposition / NavigateFocus):
