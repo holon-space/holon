@@ -79,6 +79,13 @@ impl<'a> BlockDomain<'a> {
         block_id: &EntityUri,
         preferred_variant: &Option<String>,
     ) -> Result<(RenderExpr, RowChangeStream)> {
+        // ROOT display slot: its content is resolved by a query over data
+        // (the active-perspective pointer is the degenerate slot query), not
+        // by a hardcoded layout. See holon_api::perspective module docs.
+        if *block_id == holon_api::root_layout_block_uri() {
+            return self.render_root_slot(block_id).await;
+        }
+
         let block_info = match self.load_block_with_query_source(block_id).await {
             Ok(info) => info,
             Err(_) => return self.render_leaf_block(block_id).await,
@@ -144,7 +151,16 @@ impl<'a> BlockDomain<'a> {
         let result_expr = if has_render_source {
             Self::parse_render_source(&block_info)
         } else {
-            Self::collection_render_from_profile(self.engine.profile_resolver().as_ref(), block_id)
+            // A panel of the active perspective resolves its collection
+            // variants through the perspective's profile_override (when set):
+            // switching perspective re-points which variants / default view
+            // mode every collection panel offers, not just which queries run.
+            let profile_override = self.active_perspective_profile_override(block_id).await?;
+            Self::collection_render_from_profile(
+                self.engine.profile_resolver().as_ref(),
+                block_id,
+                profile_override.as_ref(),
+            )
         };
 
         let render_expr = Self::wrap_in_query_source_switcher(
@@ -166,8 +182,25 @@ impl<'a> BlockDomain<'a> {
     pub(crate) fn collection_render_from_profile(
         resolver: &dyn crate::entity_profile::ProfileResolving,
         entity_uri: &holon_api::EntityUri,
+        profile_override: Option<&holon_api::EntityName>,
     ) -> RenderExpr {
-        let variants = resolver.resolve_collection_variants();
+        let variants = match profile_override {
+            Some(name) => match resolver.resolve_collection_variants_named(name) {
+                Some(variants) => variants,
+                None => {
+                    // Disclosed degraded mode: the perspective points at a
+                    // profile that is not (yet) in the cache. Fall back to the
+                    // default collection variants, loudly.
+                    tracing::warn!(
+                        "[collection_render_from_profile] perspective profile_override {name:?} \
+                         not found in profile cache for {entity_uri} — falling back to default \
+                         `collection` variants"
+                    );
+                    resolver.resolve_collection_variants()
+                }
+            },
+            None => resolver.resolve_collection_variants(),
+        };
 
         tracing::info!(
             "[collection_render_from_profile] entity_uri={entity_uri}, variants_count={}, \
@@ -325,6 +358,116 @@ impl<'a> BlockDomain<'a> {
     /// property-only changes (e.g. `task_state` cycling) are picked up by the
     /// data matview and forwarded as `UiEvent::Data` without requiring a
     /// structural re-render.
+    /// Render the ROOT display slot: resolve which perspective the slot shows
+    /// via a query over data (the `active_perspective` pointer property on the
+    /// root-layout block — the degenerate slot query) and synthesize the
+    /// layout from the resolved perspective's panels.
+    ///
+    /// The returned stream watches the root-layout row itself, so consumers
+    /// keep the leaf-stream shape; the structural re-render on pointer writes
+    /// comes from `watch_ui`'s structural matview (which watches the root row).
+    ///
+    /// A vault without a root-layout block (some test vaults) renders as a
+    /// plain leaf — disclosed via `warn!`. A pointer to a missing/broken
+    /// perspective fails loud (surfaces as a red error node).
+    async fn render_root_slot(
+        &self,
+        block_id: &EntityUri,
+    ) -> Result<(RenderExpr, RowChangeStream)> {
+        let blocks = self.load_perspective_blocks(block_id).await?;
+        if blocks.iter().all(|b| &b.id != block_id) {
+            tracing::warn!(
+                "[render_root_slot] no {block_id} block in this vault — rendering the root slot \
+                 as a plain leaf (no layout to resolve)"
+            );
+            return self.render_leaf_block(block_id).await;
+        }
+
+        let spec = holon_api::perspective::resolve_active_perspective(block_id, &blocks)
+            .with_context(|| format!("root slot: resolving active perspective for {block_id}"))?;
+        let render_expr = spec.layout_expr().with_context(|| {
+            format!("root slot: synthesizing layout for perspective {}", spec.id)
+        })?;
+
+        let sql = format!(
+            "SELECT * FROM {table} WHERE id = $block_id",
+            table = crate::storage::BLOCK_READ_TABLE,
+        );
+        let mut params = HashMap::new();
+        params.insert("block_id".to_string(), Value::String(block_id.to_string()));
+        let change_stream = self.engine.query_and_watch(sql, params, None).await?;
+
+        Ok((render_expr, change_stream))
+    }
+
+    /// Load the block set the slot-resolution query needs: the root-layout row
+    /// (pointer carrier) plus the pointed-to perspective's two-level subtree
+    /// (panels + their source children). Returns an empty vec when the vault
+    /// has no root-layout block.
+    async fn load_perspective_blocks(&self, root_id: &EntityUri) -> Result<Vec<holon_api::Block>> {
+        let root_sql = format!(
+            "SELECT * FROM {table} WHERE id = $id",
+            table = crate::storage::BLOCK_READ_TABLE,
+        );
+        let mut params = HashMap::new();
+        params.insert("id".to_string(), Value::String(root_id.to_string()));
+        let root_rows = self.engine.execute_query(root_sql, params, None).await?;
+        let Some(root_row) = root_rows.into_iter().next() else {
+            return Ok(Vec::new());
+        };
+        let root_block = holon_api::Block::try_from(root_row)
+            .with_context(|| format!("root slot: parsing {root_id} row"))?;
+
+        let active = holon_api::perspective::active_perspective_id(
+            root_id,
+            std::slice::from_ref(&root_block),
+        )?;
+
+        let closure_sql = format!(
+            "SELECT * FROM {table} WHERE id = $p OR parent_id = $p OR parent_id IN (SELECT id \
+             FROM {table} WHERE parent_id = $p)",
+            table = crate::storage::BLOCK_READ_TABLE,
+        );
+        let mut params = HashMap::new();
+        params.insert("p".to_string(), Value::String(active.to_string()));
+        let rows = self.engine.execute_query(closure_sql, params, None).await?;
+
+        let mut blocks = vec![root_block];
+        for row in rows {
+            let block = holon_api::Block::try_from(row)
+                .with_context(|| format!("root slot: parsing perspective subtree of {active}"))?;
+            if blocks.iter().all(|b| b.id != block.id) {
+                blocks.push(block);
+            }
+        }
+        Ok(blocks)
+    }
+
+    /// The active perspective's `profile_override`, when `block_id` is one of
+    /// its panels. `None` for every other block, for vaults without a
+    /// root-layout, and for perspectives that declare no override. A broken
+    /// active perspective is NOT swallowed here — it propagates so the panel
+    /// render fails as loudly as the root slot does.
+    async fn active_perspective_profile_override(
+        &self,
+        block_id: &EntityUri,
+    ) -> Result<Option<holon_api::EntityName>> {
+        let root_id = holon_api::root_layout_block_uri();
+        let blocks = self.load_perspective_blocks(&root_id).await?;
+        if blocks.iter().all(|b| b.id != root_id) {
+            return Ok(None);
+        }
+        let spec = holon_api::perspective::resolve_active_perspective(&root_id, &blocks)
+            .with_context(|| {
+                format!("panel {block_id}: resolving active perspective for profile override")
+            })?;
+        if spec.profile_override.is_some() && spec.panels.iter().any(|p| &p.id == block_id) {
+            Ok(spec.profile_override)
+        } else {
+            Ok(None)
+        }
+    }
+
     async fn render_leaf_block(
         &self,
         block_id: &EntityUri,
