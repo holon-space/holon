@@ -86,8 +86,8 @@ use crate::pbt::composed::subsystem_seed::run_with_seeded_ref;
 // consume it: page_root/SETTLE/WIDE_TREE_ORG/structural_ref{,_wired}/wide_ref/
 // boot_and_seed_wide/full_headless_cap_set/wide_e2e_ref/WideE2E{,Machine}.
 use crate::pbt::composed::wide_e2e::{
-    SETTLE, WIDE_TREE_ORG, boot_and_seed_wide, frontend_wired, page_root, structural_ref,
-    wide_e2e_ref, wide_ref,
+    SETTLE, WIDE_TREE_ORG, boot_and_seed_wide, folder_journal_page, frontend_wired, page_root,
+    seed_folder_companion, structural_ref, wide_e2e_ref, wide_ref,
 };
 use crate::pbt::frontend_slice::components::HeadlessFrontendComponent;
 use crate::pbt::is_synthetic_ref_id;
@@ -725,6 +725,92 @@ mod teeth {
         std::thread::spawn(move || drop(state))
             .join()
             .expect("drop ReferenceState off the async executor");
+    }
+
+    /// **Companion cold-boot page-authority GREEN-lock (dogfood 2026-07-12,
+    /// Fork A).** Deterministic boot (no transitions) of a
+    /// folder-page-duplication vault through the REAL keystone boot
+    /// (`boot_and_seed_wide`): a top-level page- file `2026-07-10.org` (a
+    /// `Page` doc-root) whose id is ALSO inlined as a plain, untagged
+    /// heading in the `Journals.org` COMPANION, ingested LAST. Asserts the
+    /// companion boot stays clean — no swallowed ERROR
+    /// (`inv-no-observed-errors`) and no `Page`-tag demotion
+    /// (`inv-sidebar-page-tag-preserved`, non-vacuously) — locking the foreign-
+    /// page protection at the real keystone boot layer.
+    ///
+    /// SCOPE NOTE — this flat top-level shape is a GREEN regression LOCK, not a
+    /// RED→GREEN reproduction. The deterministic RED-catch of the demotion
+    /// oracle lives in the invariant's own fixture triad
+    /// (`composed::invariants::sidebar_page_tag_preserved::tests::catches_demoted_page`).
+    /// The real ingest FAILURE reproduces only with a SUBDIR page-file
+    /// (`Journals/2026-07-10.org`), where the page nests under the `journals`
+    /// folder-page and the Loro `create_in_tree` of the already-rooted id
+    /// times out + quarantines — but the subdir ALSO trips a SEPARATE
+    /// nested-page Pages-sidebar render PANIC
+    /// (`holon-frontend/src/row_origin.rs` "disjoint root rows") at boot,
+    /// so it cannot boot green with the tag-authority fix alone. Both the
+    /// subdir keystone reproduction and the render panic are covered in the
+    /// Fork-A report / BugFunnel. Runs a REDUCED registry (the two
+    /// Fork-A oracles) since the companion is intentionally lossy on org round-
+    /// trip (`inv-org-render-fixed-point` — Fork B's writeback-oracle work).
+    /// Seeds the topology directly (env-independent), not via
+    /// `folder_companion_enabled`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn folder_companion_cold_boot_preserves_page_authority() {
+        use holon_pbt_core::composition::CapInvariant;
+
+        use crate::pbt::composed::invariants::observed_errors;
+        use crate::pbt::composed::invariants::sidebar_page_tag_preserved;
+
+        let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
+        // Minimal proven-green base (no forward-edge) + the companion topology.
+        let mut oracle = frontend_wired(structural_ref());
+        seed_folder_companion(&mut oracle);
+        assert!(
+            oracle
+                .domain
+                .block_state
+                .blocks
+                .contains_key(&folder_journal_page()),
+            "topology precondition: the date page must be seeded into the oracle"
+        );
+
+        let (caps, _handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
+        tokio::time::sleep(SETTLE).await;
+
+        let mut resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
+        drop_ref_off_thread(oracle);
+        inject_scaffold_seed(&mut resolved, &scaffold_ids);
+        let registry: Vec<Box<dyn CapInvariant>> =
+            vec![observed_errors::wire(), sidebar_page_tag_preserved::wire()];
+        let report = run_with_seeded_ref(&registry, &caps, resolved).await;
+
+        let failures = report.failures();
+        // The companion must ingest CLEANLY — no quarantine / no swallowed ERROR.
+        assert!(
+            !failures
+                .iter()
+                .any(|(id, _)| *id == "inv-no-observed-errors"),
+            "folder-companion cold boot must not quarantine the companion ingest (foreign-page \
+             protection missing?); failures: {failures:?}",
+        );
+        // The page-file's `Page` tag must SURVIVE the companion reconcile.
+        assert!(
+            !failures
+                .iter()
+                .any(|(id, _)| *id == "inv-sidebar-page-tag-preserved"),
+            "folder-companion cold boot must not demote the page-file's Page tag; failures: \
+             {failures:?}",
+        );
+        // Non-vacuity: the sidebar page-tag oracle actually ran over the seeded page.
+        assert!(
+            report
+                .ran_ids()
+                .iter()
+                .any(|id| *id == "inv-sidebar-page-tag-preserved"),
+            "inv-sidebar-page-tag-preserved must select + run over the seeded page (ran: {:?})",
+            report.ran_ids(),
+        );
     }
 
     /// **Increment-3 fresh-drive + ORG-SEED probe — the full catalog is green
