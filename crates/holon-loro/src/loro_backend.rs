@@ -633,16 +633,38 @@ fn write_content_to_meta(meta: &loro::LoroMap, content: &BlockContent) -> anyhow
             )?;
             update_text_field(meta, CONTENT_RAW, raw)?;
         }
-        BlockContent::RichText { text, marks: _ } => {
-            // Phase 1.1 stub: write text via the existing Text path; Loro Peritext
-            // mark application is wired in Task 5 (`update_block_marked`). The
-            // marks JSON projection lives in the SQL `marks` column (Task 4),
-            // sourced from `Block.marks` directly.
+        BlockContent::RichText { text, marks } => {
+            // Write the text, then apply the inline marks as Loro Peritext — the
+            // SAME write `update_block_marked` performs. Without this, a block
+            // CREATED with rich content (e.g. an org-ingested `[[link]]` whose
+            // `to_block_content()` yields `RichText`) would land in the tree as
+            // plain text: the Peritext marks would never exist, so readback
+            // (`read_text_marks`) returns `None`, the SQL `marks` column projects
+            // NULL, and write-back re-renders the stripped label — destroying the
+            // link syntax on disk (`inv-blocks-match-ref/org` marks divergence).
             meta.insert(
                 CONTENT_TYPE,
                 loro::LoroValue::from(ContentType::Text.to_string().as_str()),
             )?;
             update_text_field(meta, CONTENT_RAW, text)?;
+            let loro_text = meta.get_or_create_container(CONTENT_RAW, loro::LoroText::new())?;
+            // Clear every known mark key over the full range first so a re-write
+            // with fewer marks drops the stale ones, then set the current spans.
+            let len_chars = loro_text.len_unicode();
+            if len_chars > 0 {
+                for key in holon_api::InlineMark::all_loro_keys() {
+                    loro_text
+                        .unmark(0..len_chars, key)
+                        .map_err(|e| anyhow::anyhow!("LoroText unmark {key}: {:?}", e))?;
+                }
+            }
+            for span in marks {
+                let key = span.mark.loro_key();
+                let value: loro::LoroValue = mark_to_loro_value(&span.mark);
+                loro_text
+                    .mark(span.start..span.end, key, value)
+                    .map_err(|e| anyhow::anyhow!("LoroText mark {key}: {:?}", e))?;
+            }
         }
         BlockContent::Image { path } => {
             meta.insert(
