@@ -134,6 +134,90 @@ impl SqlFragment {
             params,
         }
     }
+
+    /// Render this fragment as a **parameter-free** SQL expression by inlining
+    /// each `?` placeholder as a SQL literal, left-to-right.
+    ///
+    /// This is what seat A (matview-column planting) needs: a `CREATE
+    /// MATERIALIZED VIEW … AS SELECT <expr> AS field` cannot carry bind
+    /// parameters, so the literals from the *derived-field declaration*
+    /// (not user free-text — they come from the prototype block's `= Rhai`
+    /// / arithmetic constants) are inlined directly. String literals are
+    /// single-quote escaped; non-scalar params ([`Value::Array`]/
+    /// [`Value::Object`]) are an error, never silently dropped.
+    pub fn inline_sql(&self) -> Result<String, InlineError> {
+        let mut out = String::with_capacity(self.sql.len());
+        let mut params = self.params.iter();
+        for ch in self.sql.chars() {
+            if ch == '?' {
+                let v = params.next().ok_or(InlineError::PlaceholderParamMismatch {
+                    sql: self.sql.clone(),
+                    params: self.params.len(),
+                })?;
+                out.push_str(&value_to_sql_literal(v)?);
+            } else {
+                out.push(ch);
+            }
+        }
+        if params.next().is_some() {
+            return Err(InlineError::PlaceholderParamMismatch {
+                sql: self.sql.clone(),
+                params: self.params.len(),
+            });
+        }
+        Ok(out)
+    }
+}
+
+/// Failure inlining a [`SqlFragment`] into a parameter-free expression (seat
+/// A).
+#[derive(Debug, Clone, PartialEq)]
+pub enum InlineError {
+    /// A `?` count / params-length mismatch, or a non-scalar param.
+    PlaceholderParamMismatch { sql: String, params: usize },
+    /// A [`Value::Array`]/[`Value::Object`]/[`Value::Null`]-shaped literal
+    /// cannot be inlined as a scalar column expression.
+    NonScalarLiteral { value: Value },
+}
+
+impl fmt::Display for InlineError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            InlineError::PlaceholderParamMismatch { sql, params } => write!(
+                f,
+                "cannot inline SQL fragment `{sql}`: `?` placeholders do not match {params} \
+                 param(s)"
+            ),
+            InlineError::NonScalarLiteral { value } => {
+                write!(
+                    f,
+                    "cannot inline non-scalar literal into SQL column: {value:?}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for InlineError {}
+
+fn value_to_sql_literal(v: &Value) -> Result<String, InlineError> {
+    Ok(match v {
+        Value::Integer(i) => i.to_string(),
+        Value::Float(f) => format!("{f}"),
+        Value::Boolean(b) => {
+            if *b {
+                "1".into()
+            } else {
+                "0".into()
+            }
+        }
+        Value::String(s) | Value::DateTime(s) | Value::Json(s) => {
+            format!("'{}'", s.replace('\'', "''"))
+        }
+        Value::Null | Value::Array(_) | Value::Object(_) => {
+            return Err(InlineError::NonScalarLiteral { value: v.clone() });
+        }
+    })
 }
 
 /// A [`Computation`] shape that cannot be lowered to SQL. **Disclosed** — the
@@ -300,6 +384,130 @@ fn join_predicates(preds: &[Predicate], sep: &str) -> Result<SqlFragment, SqlUns
         params.extend(frag.params);
     }
     Ok(SqlFragment::new(parts.join(&format!(" {sep} ")), params))
+}
+
+// ---------------------------------------------------------------------------
+// C4 hybrid seat — the routing decision the ruling left open.
+//
+// A derived field is DECLARED once (a `= Rhai` / arithmetic property on a
+// prototype block) and parsed into a `Computation`. The seat decides, PER FIELD
+// and by `compile_sql()` alone, WHERE it is maintained:
+//
+//   compile_sql() -> Ok  => planted as an IVM matview column (seat A). Turso's
+//                           IVM recomputes/retracts it O(delta) for free.
+//   compile_sql() -> Err  => evaluated in the projection stage (seat B) over
+// the                           row's CDC-fed context. TOTAL (handles `Script`)
+// but                           DISCLOSED as the degraded path — never silent.
+//
+// The split is an implementation detail the user may inspect
+// (`DerivedFieldPlan`) but must not depend on: same declaration surface, same
+// observable result.
+// ---------------------------------------------------------------------------
+
+/// A derived field declared on a prototype block: a name and the computation
+/// that produces its value. Parsed at the boundary (`= Rhai` →
+/// [`Computation::Script`], arithmetic/comparison → the structured shapes) —
+/// never a raw string here.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DerivedField {
+    pub name: String,
+    pub computation: Computation,
+}
+
+impl DerivedField {
+    pub fn new(name: impl Into<String>, computation: Computation) -> Self {
+        DerivedField {
+            name: name.into(),
+            computation,
+        }
+    }
+}
+
+/// A derived field that lowered to SQL and can be planted as a matview column.
+/// `sql` is the inlined, parameter-free column expression (`{sql} AS {name}`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlantedColumn {
+    pub name: String,
+    pub sql: String,
+}
+
+/// The hybrid-seat routing decision for a set of derived fields (see the module
+/// note). Inspectable, not depend-able: `sql_planted` + `stage_evaluated`
+/// together always cover every input field exactly once.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct DerivedFieldPlan {
+    /// Fields whose `compile_sql()` succeeded — planted as IVM matview columns.
+    pub sql_planted: Vec<PlantedColumn>,
+    /// Fields that fell to the disclosed projection-stage path (`Script`, or a
+    /// fragment that could not be inlined). Carried with the *reason* they
+    /// fell.
+    pub stage_evaluated: Vec<StageField>,
+}
+
+/// A stage-evaluated field plus the disclosed reason it could not be planted.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StageField {
+    pub field: DerivedField,
+    pub reason: String,
+}
+
+impl DerivedFieldPlan {
+    /// Classify each declared field into its seat. **Discloses** the stage
+    /// path: every field routed to seat B is logged at `info` with its name
+    /// and the reason it could not lower to SQL. This is the
+    /// anti-silent-degradation guarantee — a caller can also read
+    /// `stage_evaluated` to annotate the UI.
+    pub fn plan(fields: Vec<DerivedField>) -> Self {
+        let mut sql_planted = Vec::new();
+        let mut stage_evaluated = Vec::new();
+        for field in fields {
+            let reason = match field.computation.compile_sql() {
+                Ok(frag) => match frag.inline_sql() {
+                    Ok(sql) => {
+                        sql_planted.push(PlantedColumn {
+                            name: field.name.clone(),
+                            sql,
+                        });
+                        continue;
+                    }
+                    Err(e) => e.to_string(),
+                },
+                Err(e) => e.to_string(),
+            };
+            tracing::info!(
+                field = %field.name,
+                reason = %reason,
+                "C4 derived field routed to DISCLOSED projection-stage evaluation \
+                 (not SQL-plantable); IVM will not maintain it incrementally"
+            );
+            stage_evaluated.push(StageField { field, reason });
+        }
+        DerivedFieldPlan {
+            sql_planted,
+            stage_evaluated,
+        }
+    }
+
+    /// Seat B: evaluate the stage-only fields against `ctx`, writing each
+    /// result back into `ctx` so later fields can depend on earlier ones
+    /// (topological caller responsibility, same contract as
+    /// `resolve_computed_fields`).
+    ///
+    /// **Retraction-correct**: each field's value is *inserted*, overwriting
+    /// any prior value for that name — recomputation replaces, never
+    /// stacks. On an input change the caller re-invokes with the fresh
+    /// `ctx` and the derived values are wholly recomputed.
+    ///
+    /// **Fail-loud**: an eval error surfaces as [`ComputeError`] naming the
+    /// field — unlike the legacy `resolve_computed_fields`, which
+    /// substituted `Null`.
+    pub fn evaluate_stage(&self, ctx: &mut Context) -> Result<(), ComputeError> {
+        for StageField { field, .. } in &self.stage_evaluated {
+            let value = field.computation.eval(ctx)?;
+            ctx.insert(field.name.clone(), value);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -513,6 +721,119 @@ mod tests {
         );
         assert_ne!(after["priority_weight"], before["priority_weight"]);
         assert_ne!(after["task_weight"], before["task_weight"]);
+    }
+
+    #[test]
+    fn inline_sql_inlines_literals_no_placeholders() {
+        let frag = Computation::Arith {
+            op: ArithOp::Mul,
+            lhs: Box::new(Computation::Field("priority".into())),
+            rhs: Box::new(Computation::Lit(Value::Integer(2))),
+        }
+        .compile_sql()
+        .unwrap();
+        // Parameterized form keeps `?`; inlined form is DDL-safe (no bind params).
+        assert_eq!(frag.sql, "(priority * ?)");
+        assert_eq!(frag.inline_sql().unwrap(), "(priority * 2)");
+    }
+
+    #[test]
+    fn inline_sql_escapes_string_literals() {
+        let frag = SqlFragment::new("name = ?", vec![Value::String("O'Brien".into())]);
+        assert_eq!(frag.inline_sql().unwrap(), "name = 'O''Brien'");
+    }
+
+    #[test]
+    fn inline_sql_rejects_non_scalar() {
+        let frag = SqlFragment::new("x = ?", vec![Value::Array(vec![Value::Integer(1)])]);
+        assert!(matches!(
+            frag.inline_sql(),
+            Err(InlineError::NonScalarLiteral { .. })
+        ));
+    }
+
+    #[test]
+    fn plan_splits_sql_plantable_from_script() {
+        // `weight * 2` lowers to SQL (seat A); a switch script does not (seat B).
+        let sql_field = DerivedField::new(
+            "boosted",
+            Computation::Arith {
+                op: ArithOp::Mul,
+                lhs: Box::new(Computation::Field("weight".into())),
+                rhs: Box::new(Computation::Lit(Value::Integer(2))),
+            },
+        );
+        let script_field = DerivedField::new(
+            "priority_weight",
+            Computation::Script(
+                CompiledExpr::compile(&engine(), "switch priority { 3.0 => 100.0, _ => 1.0 }")
+                    .unwrap(),
+            ),
+        );
+        let plan = DerivedFieldPlan::plan(vec![sql_field, script_field]);
+
+        assert_eq!(plan.sql_planted.len(), 1);
+        assert_eq!(plan.sql_planted[0].name, "boosted");
+        assert_eq!(plan.sql_planted[0].sql, "(weight * 2)");
+
+        assert_eq!(plan.stage_evaluated.len(), 1);
+        assert_eq!(plan.stage_evaluated[0].field.name, "priority_weight");
+        // Disclosed reason names the offending shape.
+        assert!(
+            plan.stage_evaluated[0].reason.contains("Rhai script"),
+            "reason must disclose why it fell to the stage: {}",
+            plan.stage_evaluated[0].reason
+        );
+    }
+
+    #[test]
+    fn plan_stage_eval_is_live_and_retracts_cleanly() {
+        // A Rhai-only derived field, maintained via seat B. Changing the input
+        // recomputes it and REPLACES the old value (never stacks).
+        let script_field = DerivedField::new(
+            "priority_weight",
+            Computation::Script(
+                CompiledExpr::compile(
+                    &engine(),
+                    "switch priority { 3.0 => 100.0, 2.0 => 40.0, _ => 1.0 }",
+                )
+                .unwrap(),
+            ),
+        );
+        let plan = DerivedFieldPlan::plan(vec![script_field]);
+        assert!(plan.sql_planted.is_empty());
+
+        let mut c = ctx(&[("priority", Value::Float(2.0))]);
+        plan.evaluate_stage(&mut c).unwrap();
+        assert_eq!(c["priority_weight"], Value::Float(40.0));
+
+        // Input changes: same map re-evaluated. The derived value is replaced,
+        // and there is exactly one entry for the field (no stacking).
+        c.insert("priority".into(), Value::Float(3.0));
+        plan.evaluate_stage(&mut c).unwrap();
+        assert_eq!(c["priority_weight"], Value::Float(100.0));
+        assert_eq!(
+            c.keys().filter(|k| *k == "priority_weight").count(),
+            1,
+            "recomputation must replace, not stack"
+        );
+    }
+
+    #[test]
+    fn plan_stage_eval_is_fail_loud_on_missing_input() {
+        // Unlike legacy resolve_computed_fields (which substitutes Null), the seat
+        // surfaces a named error for a missing input.
+        let field = DerivedField::new("d", Computation::Field("absent".into()));
+        // Field-only computations DO lower to SQL, so force the stage path with a
+        // script that references the missing input.
+        let script = DerivedField::new(
+            "d",
+            Computation::Script(CompiledExpr::compile(&engine(), "absent + 1.0").unwrap()),
+        );
+        let _ = field;
+        let plan = DerivedFieldPlan::plan(vec![script]);
+        let mut c = ctx(&[]);
+        assert!(plan.evaluate_stage(&mut c).is_err());
     }
 
     #[test]
