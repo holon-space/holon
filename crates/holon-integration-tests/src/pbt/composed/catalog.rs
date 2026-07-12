@@ -217,6 +217,8 @@ const CENTRAL_INVARIANT_IDS_HEAD: &[&str] = &[
     "inv-source-language-iff-source",
     "inv-org-render-fixed-point",
     "inv-no-orphan-blocks",
+    "inv-sidebar-page-tag-preserved",
+    "inv-companion-has-no-child-page-headings",
     "inv-no-errors",
     "inv-viewmodel-no-error-widgets",
     "inv-task-state-storage-coherence",
