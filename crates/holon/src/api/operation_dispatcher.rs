@@ -600,15 +600,20 @@ impl OperationProvider for OperationDispatcher {
                 //
                 // Parse here with the SAME extractor ingest uses, then store the
                 // identical shape: the rendered label in `content` and the mark set
-                // in `marks`. The follow-up `marks` write drives the `block_links`
-                // junction (create/update/set_field arms of the SQL provider) and
-                // the Loro Peritext render, in both SqlOnly and Loro modes. Org-sync
-                // writes bypass this dispatcher (they call the CRUD seam directly
-                // with an already-stripped label + a separate `marks` param), so
-                // this only ever sees raw UI input — no double-strip, no clobber of
-                // ingest's marks. An empty mark set writes `marks = Null`, which
-                // clears a stale junction row when an edit REMOVES a link.
-                let content_marks_followup: Option<(String, holon_api::Value)> =
+                // in `marks`. Stripping the raw markup into the label ALWAYS happens
+                // (it is idempotent — re-stripping an already-stripped label is a
+                // no-op), so `content` never holds `[[…]]` syntax. Org-sync writes
+                // bypass this dispatcher (they call the CRUD seam directly with an
+                // already-stripped label + a separate `marks` param), so this only
+                // ever sees raw UI input — no double-strip, no clobber of ingest's
+                // marks.
+                //
+                // The `marks` write itself is DERIVED and is decided further down,
+                // once the CRUD-authority provider is resolved, by comparing the
+                // extracted marks against the block's currently-stored marks (see
+                // `content_marks_followup`). That comparison — not this extraction —
+                // is what keeps the follow-up from firing spuriously.
+                let content_edit: Option<(String, String, Vec<holon_api::MarkSpan>)> =
                     if resolved_entity_name == "block"
                         && op_name == "set_field"
                         && params.get("field").and_then(|v| v.as_string()) == Some("content")
@@ -620,18 +625,16 @@ impl OperationProvider for OperationDispatcher {
                         {
                             Some(raw) => {
                                 let (label, marks) = holon_org_format::extract_inline_marks(&raw);
-                                let marks_value = if marks.is_empty() {
-                                    holon_api::Value::Null
-                                } else {
-                                    holon_api::Value::String(holon_api::marks_to_json(&marks))
-                                };
                                 let id = params
                                     .get("id")
                                     .and_then(|v| v.as_string())
                                     .ok_or("block set_field(content): missing 'id' parameter")?
                                     .to_string();
-                                params.insert("value".into(), holon_api::Value::String(label));
-                                Some((id, marks_value))
+                                params.insert(
+                                    "value".into(),
+                                    holon_api::Value::String(label.clone()),
+                                );
+                                Some((id, label, marks))
                             }
                             None => None,
                         }
@@ -679,6 +682,76 @@ impl OperationProvider for OperationDispatcher {
                         .map(|(k, v)| (k.to_string(), v.clone()))
                         .collect();
                 let resolved_entity_name_typed = EntityName::new(resolved_entity_name);
+
+                // Links increment 3 — decide the DERIVED `marks` write for a
+                // content edit, BEFORE the content write lands (so we read the
+                // block's PRIOR stored state, not the value we are about to write).
+                //
+                // Contract (marks = truth, per links-ruling): fire the follow-up
+                // EXACTLY when the marks extracted from the new content differ from
+                // the block's currently-stored marks. It must NOT fire when the
+                // content commit carried no mark-relevant change, and must NEVER
+                // null a block's marks merely because the editor re-committed the
+                // already-stripped label without re-supplying markup.
+                //
+                // The over-dispatch bug (BugFunnel #66) fired a `marks = Null`
+                // follow-up on EVERY block `set_field("content")`. On the editor's
+                // blur/refocus re-commit — which sends back the stripped label with
+                // NO `[[…]]` syntax (SqlOnly hydrates `content` from the matview) —
+                // that nulled the real marks, replacing a live `[[link]]` with plain
+                // text (the LIVE bug). It also spuriously doubled the dispatch count
+                // on plain-text edits, inflating the undo replay tally.
+                //
+                // - Readable provider (SQL CRUD authority): compare against ground truth. Skip
+                //   when the mark set is unchanged, and skip a null-producing re-commit whose
+                //   stripped label already equals the stored content (the blur path). Otherwise
+                //   dispatch — including a legitimate `marks = Null` when an edit genuinely
+                //   REMOVED the link (new label differs from the stored content).
+                // - Unreadable provider (Loro CRUD authority, test stubs): fail safe — dispatch
+                //   only when the new content actually yields marks (a link was typed); never
+                //   null on an unknown prior state.
+                let content_marks_followup: Option<(String, holon_api::Value)> =
+                    if let Some((id, label, extracted)) = content_edit {
+                        let marks_value = |marks: &[holon_api::MarkSpan]| {
+                            if marks.is_empty() {
+                                holon_api::Value::Null
+                            } else {
+                                holon_api::Value::String(holon_api::marks_to_json(marks))
+                            }
+                        };
+                        match provider.read_block_content_marks(&id).await? {
+                            Some((stored_content, stored_marks_value)) => {
+                                let stored_marks: Vec<holon_api::MarkSpan> =
+                                    match &stored_marks_value {
+                                        holon_api::Value::String(s) if !s.is_empty() => {
+                                            holon_api::marks_from_json(s).map_err(|e| {
+                                                format!(
+                                                    "links increment 3: stored marks JSON for \
+                                                     {id} is corrupt: {e}"
+                                                )
+                                            })?
+                                        }
+                                        _ => Vec::new(),
+                                    };
+                                if extracted == stored_marks {
+                                    None
+                                } else if extracted.is_empty() && label == stored_content {
+                                    None
+                                } else {
+                                    Some((id, marks_value(&extracted)))
+                                }
+                            }
+                            None => {
+                                if extracted.is_empty() {
+                                    None
+                                } else {
+                                    Some((id, marks_value(&extracted)))
+                                }
+                            }
+                        }
+                    } else {
+                        None
+                    };
 
                 // Execute operation and get result with changes and undo action
                 let mut operation_result = provider

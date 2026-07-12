@@ -1253,6 +1253,24 @@ impl OperationProvider for SqlOperationProvider {
         )
         .await
     }
+
+    /// This SQL backend owns readable block rows, so it answers the
+    /// dispatcher's live-edit follow-up with ground truth: the stored
+    /// stripped-label `content` and the `marks` column value. A missing row
+    /// reads back as `Ok(None)` (unknown → the caller fails safe), matching
+    /// the "never null on unknown" contract on the trait method.
+    async fn read_block_content_marks(&self, id: &str) -> Result<Option<(String, Value)>> {
+        let content = self.read_field_old_value(id, "content").await?;
+        let marks = self.read_field_old_value(id, "marks").await?;
+        match content {
+            Value::String(s) => Ok(Some((s, marks))),
+            Value::Null => Ok(None),
+            other => Err(format!(
+                "read_block_content_marks({id}): content column is not text: {other:?}"
+            )
+            .into()),
+        }
+    }
 }
 
 #[async_trait]
