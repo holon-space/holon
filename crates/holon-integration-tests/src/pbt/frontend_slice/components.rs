@@ -18,6 +18,7 @@
 
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -181,6 +182,90 @@ impl HeadlessFrontendComponent {
     /// storage) — the navigation/structural slices don't need the CRDT layer.
     pub async fn new(org_files: &[(&str, &str)], settle: Duration) -> Self {
         Self::new_with_loro(org_files, settle, false).await
+    }
+
+    /// Fork B — disk-truth enumeration of the `#+ID:` header of every `.org`
+    /// file currently on disk in the watched vault root, via the production
+    /// `scan_directory` port (NOT the boot-time tracked `documents` list).
+    ///
+    /// A file MATERIALIZED after boot — e.g. B2's fileless-page sweep writes a
+    /// fresh `<page>.org` for a page that owned no file — is invisible to
+    /// `snapshot_org_render_pairs`, which iterates only files tracked at boot.
+    /// A test asserting that materialization actually landed on disk must
+    /// read the disk directly. Returns each org file's bare `#+ID:` value;
+    /// files with no `#+ID:` line are skipped.
+    pub async fn disk_org_file_ids(&self) -> Vec<String> {
+        self.disk_org_files()
+            .await
+            .into_iter()
+            .filter_map(|(_, id)| id)
+            .collect()
+    }
+
+    /// Fork B — every `.org` file on disk in the watched root paired with its
+    /// bare `#+ID:` header value (absolute path, `None` id if the file has
+    /// no `#+ID:`). The path is where B2 actually materialized a page —
+    /// which for a fileless child of a companion is NESTED
+    /// (`<companion>/<child>.org`, e.g. `my-notes/child-note.org`), not a
+    /// flat top-level file — so a test must DISCOVER the path by id rather
+    /// than assume it.
+    pub async fn disk_org_files(&self) -> Vec<(PathBuf, Option<String>)> {
+        use holon_filesystem::FileSystem;
+        let scanned = FileSystem::scan_directory(self.org_fs.as_ref(), &self.org_root)
+            .await
+            .expect("Fork B disk_org_files: scan_directory failed");
+        let mut out = Vec::new();
+        for path in scanned.files {
+            if path.extension().and_then(|e| e.to_str()) != Some("org") {
+                continue;
+            }
+            let content = FileSystem::read_to_string(self.org_fs.as_ref(), &path)
+                .await
+                .expect("Fork B disk_org_files: read org file");
+            let id = content
+                .lines()
+                .find_map(|l| l.trim().strip_prefix("#+ID:").map(|v| v.trim().to_string()));
+            out.push((path, id));
+        }
+        out
+    }
+
+    /// Fork B echo-test helper — re-trigger the production `FileSyncController`
+    /// watcher over an absolute on-disk path (tracked or freshly materialized),
+    /// by the same touch-then-restore dance `simulate_restart` uses for
+    /// tracked files: append a space, settle, restore, then wait for the
+    /// `block_raw` id-set to stabilize. Used to prove that re-ingesting a
+    /// B2-materialized page file is idempotent (the `last_projection` seed
+    /// suppresses the echo — no re-mint, no re-write).
+    pub async fn pump_watcher_over_disk_path(&self, path: &Path) {
+        use holon_filesystem::FileSystem;
+        let content = FileSystem::read_to_string(self.org_fs.as_ref(), path)
+            .await
+            .unwrap_or_else(|e| {
+                panic!("[pump_watcher_over_disk_path] read {path:?} failed: {e:#}")
+            });
+        FileSystem::write(self.org_fs.as_ref(), path, format!("{content} ").as_bytes())
+            .await
+            .unwrap_or_else(|e| {
+                panic!("[pump_watcher_over_disk_path] touch {path:?} failed: {e:#}")
+            });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        FileSystem::write(self.org_fs.as_ref(), path, content.as_bytes())
+            .await
+            .unwrap_or_else(|e| {
+                panic!("[pump_watcher_over_disk_path] restore {path:?} failed: {e:#}")
+            });
+        self.settle_block_ids_stable(Duration::from_secs(5)).await;
+    }
+
+    /// Fork B echo-test helper — the current `block_raw` id-set. Set equality
+    /// before/after a watcher pump proves no page was re-minted under a new id.
+    pub async fn store_block_ids(&self) -> std::collections::BTreeSet<String> {
+        self.all_blocks()
+            .await
+            .into_iter()
+            .map(|b| b.id.to_string())
+            .collect()
     }
 
     /// Like [`Self::new_with_loro`] but injects a controllable [`TestClock`]
