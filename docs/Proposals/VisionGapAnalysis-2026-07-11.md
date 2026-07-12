@@ -71,10 +71,17 @@ instantiating a Layer-1 replica with own base, diffed intent, lease-governed ext
 0024 P4 taxonomy, ratified). Matches mcp-yaml-sidecars directive + existing mcp-client crate.
 Largest vision surface; risk high but architecture slot pre-reserved.
 
-C4 — Maintained derived fields (computed = properties in the reactive pipeline). Prototype-block
-machinery exists only in holon-petri at materialize time (rank_tasks). Needed: view semantics
-(recompute/retract on input change) so any matview/profile selects computed fields live. Field-value
-analogue of ADR 0024 maintained display emission. Risk medium (IVM interaction).
+C4 — Maintained derived fields (computed = properties in the reactive pipeline). SEAT LANDED
+2026-07-12: hybrid seat behind the `Computation` interface. `DerivedFieldPlan::plan`
+(holon-api/src/computation.rs) routes each declared field by `compile_sql()` — Ok → planted as an
+IVM-maintained matview column (`block_matview_select_with_computed`, proven O(delta)
+maintain/replace/retract against real Turso in holon-turso/tests/derived_field_matview.rs); Err →
+DISCLOSED projection-stage evaluation via `Computation::eval` (`evaluate_stage`, fail-loud,
+retraction-by-overwrite). Field-value analogue of ADR 0024 maintained display emission; the
+production seat-B home is the enrich boundary (ui_watcher `resolve_computed_fields`). REMAINING
+(non-blocking): (1) trigger wire feeding prototype-block-declared fields into `plan()` at reconcile
+time; (2) routing the production enrich path through the fail-loud `Computation` evaluator;
+(3) `rank_tasks` convergence. See docs/Proposals/ComputationTrait-2026-07-11.md.
 
 C5 — Autonomy/trust enforcement at the intent boundary. Representation trivial; enforcement
 engine-level. Elegant form: below-threshold origins may only emit into display/proposal places
@@ -128,7 +135,10 @@ Increment 2 — one ruling each, then fleet-executable:
   DEGRADED MODE with reduced functionality (precedent: CRDT vs LWW).
 - C4 derived fields. RULED (Martin 2026-07-11, direction): hide behind an interface; candidate
   design = generalize the existing Predicate trait to a Computation trait evaluable in memory AND
-  compilable to SQL. Pipeline seat still open behind that interface.
+  compilable to SQL. Pipeline seat still open behind that interface. SEAT LANDED 2026-07-12 as a
+  HYBRID: `DerivedFieldPlan` routes by `compile_sql()` → IVM matview column (seat A) or disclosed
+  projection-stage `eval` (seat B). Both halves proven; remaining = trigger/enrich wiring +
+  rank_tasks convergence (see ComputationTrait doc).
 - C3 function registry. RULED (Martin 2026-07-11): TURSO for FTS (in-fork extension). Embeddings
   question deferred (fulltext-first). SCOUT UPDATE: fork ALREADY has Tantivy-backed FTS
   (core/index_method/fts.rs, fts_match/fts_score/fts_highlight in Func resolution, feature `fts`,
