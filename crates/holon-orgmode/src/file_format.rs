@@ -116,7 +116,9 @@ impl FileFormatAdapter for OrgFormatAdapter {
         rendered: &str,
         root: &Path,
     ) -> Result<()> {
-        crate::writeback_guard::ensure_ingest_lossless(path, source, rendered, root)
+        let surviving =
+            crate::writeback_guard::SurvivingProjection::from_rendered(path, rendered, root)?;
+        crate::writeback_guard::ensure_ingest_lossless(path, source, &surviving, root)
     }
 }
 
