@@ -93,7 +93,58 @@ needed — but the change touches profile-driven render derivation on the Turso 
 which is why it is a cross-cutting follow-up rather than part of this increment.
 
 Consuming `ConcealmentParams` and `profile_override` in the render is a further
-step on top of that seam.
+step on top of that seam — see "Relationship to the view-mode-switcher" for what
+`profile_override` must drive.
+
+## Relationship to the view-mode-switcher (two axes, one naming trap)
+
+Perspectives and the existing **view-mode-switcher** are different altitudes of
+the same render stack; they compose, they do not compete.
+
+- **view-mode-switcher = intra-panel (how ONE result set is drawn).** Built by
+  `BlockDomain::view_mode_switcher` (`crates/holon/src/api/block_domain.rs`):
+  `render_entity` wraps a single block's query results in a switcher over the
+  **collection variants resolved from that entity's profile** — tree / table /
+  board — via `resolver.resolve_collection_variants()`, rendered by
+  `crates/holon-frontend/src/shadow_builders/view_mode_switcher.rs` as
+  `ViewKind::ViewModeSwitcher` (with a `pick_active_variant` fast-path for
+  intra-variant switches). Scope: **one collection block** (a single panel's data
+  source). The active variant is per-block UI state (rides `ui_generation` /
+  `view_mode`), resolved at render — not a persisted, first-class declared mode.
+  It answers: *"draw THIS list as a table or a board?"*
+- **perspective = inter-panel (which panels, which queries, which profile).**
+  `PerspectiveSpec` declares the whole multi-panel layout, persisted as data. It
+  answers: *"which panels, showing which queries, under which profile and
+  concealment?"*
+
+A perspective is the **outer** container; a view-mode-switcher is **inner** — one
+per collection panel. Activating a perspective changes which panels/queries
+render; each collection panel *still* renders its own tree/table/board switcher
+inside itself. Orthogonal axes: perspective = "which lists," view mode = "how each
+list looks." Perspectives therefore do **not** subsume or replace the
+view-mode-switcher — they sit above it.
+
+**The bridge: `profile_override` ↔ `resolve_collection_variants`.** The switcher's
+available variants and default mode come entirely from the resolved **profile**.
+So `PerspectiveSpec.profile_override` is exactly the lever that steers the switcher
+across all of a perspective's panels: a "Kanban perspective" is a perspective
+whose profile makes collection panels default to `board`; a "Reading perspective"
+defaults them to `tree`. The per-panel switcher still lets the user override on top.
+
+**The naming trap to avoid.** "view **mode**" (tree/table/board, per list) and "UI
+**mode** / perspective" (named app-wide layout) are two different axes that both
+got called "mode." The vision's "three UI modes as adaptable perspectives" (C8)
+maps to **perspectives**, not to the tree/table/board switcher; the switcher
+already existed and covers only the intra-list display form. Keep the two words
+distinct in code and docs (`view_mode` vs `perspective`).
+
+**Render-seam requirement.** The deferred render-seam increment (#2 above) must
+make `profile_override` actually drive the panels' resolved variants: when a
+panel renders under an active perspective, its collection render must resolve
+`resolve_collection_variants` through the perspective's `profile_override` (when
+set) rather than only the panel entity's own profile — so switching perspective
+re-points which variants/default view mode every collection panel offers, not just
+which queries they run.
 
 ## Recommended next increment
 
