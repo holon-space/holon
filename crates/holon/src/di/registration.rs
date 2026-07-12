@@ -183,6 +183,14 @@ async fn create_initialized_engine(
         .await
         .expect("Failed to enable undo persistence");
 
+    // Local, non-syncing UI state (C8 ruling): the `local_ui_state` table
+    // backs per-device view choices; slot queries COALESCE it over the
+    // synced choice. Local-only — outside every projection/reseed path.
+    engine
+        .ensure_local_state()
+        .await
+        .expect("Failed to create local_ui_state table");
+
     // Advice-rule reconciler (ADR 0022): discover `holon_advice_rule_yaml` blocks
     // and keep their `advice_rule_{slug}` matviews synthesized/diffed/torn-down
     // as the rule blocks are edited — the exact profile-resolver pattern, one

@@ -1,6 +1,9 @@
 # Perspectives / Layouts as Data (Vision Gap C8)
 
-Status: **primitive landed, reactive render seam deferred** (2026-07-12).
+Status: **RULING increments 1+2 LANDED** (2026-07-13) — slot resolution via
+ordinary query in both render arms + `LocalStateStore` with COALESCE
+precedence. Increment 3 (view-mode-as-data) is design-note-only; see
+"Implementation status" at the end.
 
 ## Goal
 
@@ -229,3 +232,81 @@ Three layers, and view blocks live only in the third:
    state pairs (scope → template ref). A source-bound saved view is the
    degenerate pairing. No duplication in either direction: queries are never
    copied into views, views are never copied per query.
+
+## Implementation status (2026-07-13, ruling execution)
+
+### Increment 1 — LANDED: slot resolution via ordinary query
+
+- **Both arms resolve the ROOT slot through the data query.**
+  `BlockDomain::render_entity` short-circuits `block:root-layout` into
+  `render_root_slot` (Turso arm); `loro_ui_watcher::derive_render_expr`
+  short-circuits into `derive_root_slot_expr` (no-Turso arm). Each resolves
+  the active perspective (`holon_api::perspective`) and returns
+  `PerspectiveSpec::layout_expr()` — the layout synthesized from panel DATA
+  (`collapse_to`, panel order, displayability = has source/render child).
+- **The hardcoded `root_layout` variant in `block_profile.yaml` is DELETED**
+  (no-old-code-paths). Its exact responsive shape (≤600 bottom-docked op bar
+  + overlay drawers; ≤1000 leading drawer shrink / trailing overlay; wide all
+  shrink) is reproduced by the synthesizer and pinned by
+  `layout_dsl_reproduces_bundled_default_shape` (holon-api) and the
+  `bottom_dock.rs` frontend tests.
+- **No `activate_perspective` op.** Switching = ordinary
+  `set_field(active_perspective)` on the root-layout block; the root
+  watcher's structural matview (`id = root OR parent_id = root`) re-fires on
+  the property write. `resolve_active_perspective` remains as the degenerate
+  slot query — it IS the slot resolution now, not a special case waiting to
+  be consumed.
+- **`profile_override` drives panel variants.** Re-typed from `EntityUri` to
+  `EntityName` (the profile-cache key — profiles are keyed by declared
+  `entity_name`, so pointing at a name is the natural join; the field had no
+  consumer before this change). A panel of the active perspective resolves
+  `resolve_collection_variants_named(override)`; a missing override profile
+  falls back to the default `collection` variants with a loud `warn!`
+  (disclosed degraded mode).
+- Directed tests: `perspective_slot_resolution.rs` (Turso arm: default →
+  set_field switch → panels AND collection-variant default switch);
+  `loro_ui_watcher` unit tests (default synthesis, pointer follow, dangling
+  pointer → loud error node).
+- **Known limitation:** on the Turso arm, adding/removing a panel under a
+  *named* (non-root) active perspective does not restructure the root watch
+  (the structural matview watches only the root row + its direct children;
+  the pointer flip itself always re-fires). The no-Turso arm re-derives on
+  every tree change and has no such gap. Panel content/query edits are
+  unaffected (each panel has its own watcher).
+
+### Increment 2 — LANDED: LocalStateStore
+
+- `local_ui_state(scope_block_id, key, value)` — a LOCAL-ONLY Turso table
+  behind `crates/holon/src/storage/local_state.rs::LocalStateStore`
+  (`BackendEngine::local_state()`), created at DI init next to `undo_log`.
+  Never columns/rows on replicated block tables (ADR 0025); the
+  projection/reseed paths reconcile only the block sink tables, so reseeds
+  leave it intact (proven by
+  `local_ui_state_precedence.rs::local_override_wins_until_cleared_and_survives_reboot_reseed`,
+  which reboots over the same DB). DB rebuild loses local state — disclosed
+  (C2b ephemeral-cache doctrine), documented on the module.
+- **Precedence IS in the slot query**: `load_perspective_blocks` resolves
+  `COALESCE((SELECT value FROM local_ui_state …), json_extract(properties,
+  '$.active_perspective'), root_id)` — local override wins until cleared.
+- **Known limitation:** a local-override write does not itself re-fire the
+  root structural watch (it is not CDC-visible). The next structural
+  re-render picks it up; the UI affordance that writes local state (part of
+  increment 3's switcher-as-sugar) should nudge a re-render on write.
+  No-Turso sessions have no local_ui_state (no Turso) — synced choice only.
+
+### Increment 3 — NOT LANDED (design note only)
+
+No code was written for view-mode-as-data; the ruled three-layer design
+stands as specified above (menu computed / plain choice as selection state /
+view templates as blocks). Concrete next steps when it lands:
+1. Plain choice: reuse `local_ui_state` (scope → `view_mode` key, value =
+   renderer id) for the local tier and a scope-block property for the synced
+   tier, COALESCEd in the panel's variant resolution exactly like the
+   perspective pointer (the seam now exists in
+   `collection_render_from_profile`).
+2. View templates: parse-don't-validate boundary analogous to
+   `PerspectiveSpec` (`ViewTemplateSpec { renderer, params, shape_req }`),
+   selection state as (scope → template ref) pairs.
+3. ViewModeSwitcher demotes to sugar that writes the selection state (and
+   mints template blocks only on non-default parameterizations — lazy, no
+   block explosion).

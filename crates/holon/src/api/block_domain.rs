@@ -374,16 +374,15 @@ impl<'a> BlockDomain<'a> {
         &self,
         block_id: &EntityUri,
     ) -> Result<(RenderExpr, RowChangeStream)> {
-        let blocks = self.load_perspective_blocks(block_id).await?;
-        if blocks.iter().all(|b| &b.id != block_id) {
+        let Some((active, blocks)) = self.load_perspective_blocks(block_id).await? else {
             tracing::warn!(
                 "[render_root_slot] no {block_id} block in this vault — rendering the root slot \
                  as a plain leaf (no layout to resolve)"
             );
             return self.render_leaf_block(block_id).await;
-        }
+        };
 
-        let spec = holon_api::perspective::resolve_active_perspective(block_id, &blocks)
+        let spec = holon_api::perspective::PerspectiveSpec::parse(&active, &blocks)
             .with_context(|| format!("root slot: resolving active perspective for {block_id}"))?;
         let render_expr = spec.layout_expr().with_context(|| {
             format!("root slot: synthesizing layout for perspective {}", spec.id)
@@ -400,11 +399,15 @@ impl<'a> BlockDomain<'a> {
         Ok((render_expr, change_stream))
     }
 
-    /// Load the block set the slot-resolution query needs: the root-layout row
-    /// (pointer carrier) plus the pointed-to perspective's two-level subtree
-    /// (panels + their source children). Returns an empty vec when the vault
-    /// has no root-layout block.
-    async fn load_perspective_blocks(&self, root_id: &EntityUri) -> Result<Vec<holon_api::Block>> {
+    /// Run the ROOT slot-resolution query and load the block set it needs:
+    /// the active perspective id (COALESCE precedence, see below) plus the
+    /// root-layout row and the active perspective's two-level subtree
+    /// (panels + their source children). Returns `None` when the vault has
+    /// no root-layout block.
+    async fn load_perspective_blocks(
+        &self,
+        root_id: &EntityUri,
+    ) -> Result<Option<(EntityUri, Vec<holon_api::Block>)>> {
         let root_sql = format!(
             "SELECT * FROM {table} WHERE id = $id",
             table = crate::storage::BLOCK_READ_TABLE,
@@ -413,15 +416,39 @@ impl<'a> BlockDomain<'a> {
         params.insert("id".to_string(), Value::String(root_id.to_string()));
         let root_rows = self.engine.execute_query(root_sql, params, None).await?;
         let Some(root_row) = root_rows.into_iter().next() else {
-            return Ok(Vec::new());
+            return Ok(None);
         };
         let root_block = holon_api::Block::try_from(root_row)
             .with_context(|| format!("root slot: parsing {root_id} row"))?;
 
-        let active = holon_api::perspective::active_perspective_id(
-            root_id,
-            std::slice::from_ref(&root_block),
-        )?;
+        // Slot precedence resolved IN the query (C8 ruling): COALESCE(local
+        // override, synced choice, default). The local arm reads the
+        // local-only `local_ui_state` table (never replicated block tables —
+        // ADR 0025); the synced arm is the `active_perspective` block
+        // property; the default is the root-layout block itself. A local
+        // override wins until cleared.
+        let active_sql = format!(
+            "SELECT COALESCE( (SELECT value FROM {local} WHERE scope_block_id = $id AND key = \
+             '{key}'), json_extract(b.properties, '$.{key}'), b.id) AS active FROM {table} b \
+             WHERE b.id = $id",
+            local = crate::storage::local_state::LOCAL_UI_STATE_TABLE,
+            key = holon_api::perspective::ACTIVE_PERSPECTIVE_PROPERTY,
+            table = crate::storage::BLOCK_READ_TABLE,
+        );
+        let mut params = HashMap::new();
+        params.insert("id".to_string(), Value::String(root_id.to_string()));
+        let active_rows = self.engine.execute_query(active_sql, params, None).await?;
+        let active_raw = active_rows
+            .first()
+            .and_then(|r| r.get("active"))
+            .and_then(|v| v.as_string())
+            .ok_or_else(|| {
+                anyhow::anyhow!("root slot: active-perspective COALESCE returned no value")
+            })?
+            .to_string();
+        let active = EntityUri::parse(&active_raw).map_err(|e| {
+            anyhow::anyhow!("root slot: active perspective {active_raw:?} is not a valid id: {e}")
+        })?;
 
         let closure_sql = format!(
             "SELECT * FROM {table} WHERE id = $p OR parent_id = $p OR parent_id IN (SELECT id \
@@ -440,7 +467,7 @@ impl<'a> BlockDomain<'a> {
                 blocks.push(block);
             }
         }
-        Ok(blocks)
+        Ok(Some((active, blocks)))
     }
 
     /// The active perspective's `profile_override`, when `block_id` is one of
@@ -453,14 +480,12 @@ impl<'a> BlockDomain<'a> {
         block_id: &EntityUri,
     ) -> Result<Option<holon_api::EntityName>> {
         let root_id = holon_api::root_layout_block_uri();
-        let blocks = self.load_perspective_blocks(&root_id).await?;
-        if blocks.iter().all(|b| b.id != root_id) {
+        let Some((active, blocks)) = self.load_perspective_blocks(&root_id).await? else {
             return Ok(None);
-        }
-        let spec = holon_api::perspective::resolve_active_perspective(&root_id, &blocks)
-            .with_context(|| {
-                format!("panel {block_id}: resolving active perspective for profile override")
-            })?;
+        };
+        let spec = holon_api::perspective::PerspectiveSpec::parse(&active, &blocks).with_context(
+            || format!("panel {block_id}: resolving active perspective for profile override"),
+        )?;
         if spec.profile_override.is_some() && spec.panels.iter().any(|p| &p.id == block_id) {
             Ok(spec.profile_override)
         } else {

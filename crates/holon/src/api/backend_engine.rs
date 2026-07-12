@@ -261,6 +261,19 @@ impl BackendEngine {
         BlockDomain::new(self)
     }
 
+    /// Local, non-syncing UI state (the `local_ui_state` table). Per-device
+    /// view choices live here, never on replicated block tables (ADR 0025);
+    /// slot queries COALESCE these overrides over the synced choice. Lost on
+    /// DB rebuild — disclosed (C2b ephemeral-cache doctrine).
+    pub fn local_state(&self) -> crate::storage::local_state::LocalStateStore {
+        crate::storage::local_state::LocalStateStore::new(self.db_handle.clone())
+    }
+
+    /// Ensure the local-UI-state table exists. Called once during DI init.
+    pub async fn ensure_local_state(&self) -> Result<()> {
+        crate::storage::local_state::ensure_local_ui_state(&self.db_handle).await
+    }
+
     /// Pre-create materialized views for the given SQL queries.
     ///
     /// This should be called during initialization, BEFORE any data loading or
