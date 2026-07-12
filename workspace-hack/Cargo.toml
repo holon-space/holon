@@ -26,7 +26,7 @@ publish = false
 # are managed by hakari.
 
 ### BEGIN HAKARI SECTION
-[dependencies]
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 aho-corasick = { version = "1" }
 arrayvec = { version = "0.7" }
 bitflags = { version = "2", default-features = false, features = ["std"] }
@@ -115,7 +115,7 @@ zerofrom = { version = "0.1", default-features = false, features = ["alloc", "de
 zerotrie = { version = "0.2", default-features = false, features = ["alloc", "yoke", "zerofrom"] }
 zerovec = { version = "0.11", default-features = false, features = ["alloc", "derive", "yoke"] }
 
-[build-dependencies]
+[target.'cfg(not(target_arch = "wasm32"))'.build-dependencies]
 aho-corasick = { version = "1" }
 arrayvec = { version = "0.7" }
 bitflags = { version = "2", default-features = false, features = ["std"] }
