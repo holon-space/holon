@@ -207,6 +207,7 @@ pub mod row_pipeline;
 pub mod shadow_builders;
 pub mod size_expectation;
 pub mod theme;
+pub mod tour;
 pub mod user_driver;
 pub mod value_fns;
 pub(crate) mod view_event_handler;
