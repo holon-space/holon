@@ -1036,22 +1036,26 @@ impl ProfileResolving for ProfileResolver {
     }
 
     fn resolve_collection_variants(&self) -> Vec<RenderVariant> {
-        let cache = self.cache_signal.get_cloned();
-        let collection_name = EntityName::new("collection");
-        let Some(collection_profile) = cache.get(&collection_name) else {
-            return Vec::new();
-        };
+        self.resolve_collection_variants_named(&EntityName::new("collection"))
+            .unwrap_or_default()
+    }
 
-        collection_profile
-            .variants
-            .iter()
-            .map(|v| RenderVariant {
-                name: v.name.clone(),
-                render: v.profile.render.clone(),
-                operations: Vec::new(),
-                condition: v.ui_condition.clone(),
-            })
-            .collect()
+    fn resolve_collection_variants_named(&self, name: &EntityName) -> Option<Vec<RenderVariant>> {
+        let cache = self.cache_signal.get_cloned();
+        let profile = cache.get(name)?;
+
+        Some(
+            profile
+                .variants
+                .iter()
+                .map(|v| RenderVariant {
+                    name: v.name.clone(),
+                    render: v.profile.render.clone(),
+                    operations: Vec::new(),
+                    condition: v.ui_condition.clone(),
+                })
+                .collect(),
+        )
     }
 
     fn virtual_child_config(&self, entity_name: &str) -> Option<VirtualChildConfig> {

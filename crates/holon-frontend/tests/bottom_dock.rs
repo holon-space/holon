@@ -9,11 +9,15 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use holon_api::render_types::{Arg, RenderExpr};
-use holon_api::widget_spec::DataRow;
 use holon_api::Value;
+use holon_api::render_types::Arg;
+use holon_api::render_types::RenderExpr;
+use holon_api::widget_spec::DataRow;
+use holon_frontend::AvailableSpace;
+use holon_frontend::ReactiveViewModel;
+use holon_frontend::RenderContext;
+use holon_frontend::StubBuilderServices;
 use holon_frontend::reactive::BuilderServices;
-use holon_frontend::{AvailableSpace, ReactiveViewModel, RenderContext, StubBuilderServices};
 
 fn lit(name: &str) -> RenderExpr {
     RenderExpr::FunctionCall {
@@ -134,10 +138,12 @@ fn op_button_falls_back_display_name_to_op_name() {
 
 // ── Viewport-switching: root_layout DSL at mobile vs desktop ───────────
 
-/// The root_layout render expression from `block_profile.yaml`. Kept in
-/// sync with the mobile-bar PR — breaking this test means the profile
-/// branches no longer produce a `bottom_dock` on narrow viewports, or
-/// the desktop branch accidentally picked one up.
+/// The root-slot layout expression for the bundled default panels — the
+/// shape `holon_api::perspective::PerspectiveSpec::layout_expr` synthesizes
+/// (pinned there by `layout_dsl_reproduces_bundled_default_shape`). Breaking
+/// this test means the synthesized branches no longer produce a
+/// `bottom_dock` on narrow viewports, or the desktop branch accidentally
+/// picked one up.
 const ROOT_LAYOUT_DSL: &str = r#"
 if_space(600,
   bottom_dock(
@@ -226,8 +232,8 @@ fn root_layout_desktop_viewport_has_no_bottom_dock() {
     let vm = interpret_at(&expr, 1200.0, 900.0);
     assert!(
         find_bottom_dock(&vm).is_none(),
-        "root_layout at 1200px viewport must NOT contain a BottomDock node \
-         (bar is gated on if_space(<600))"
+        "root_layout at 1200px viewport must NOT contain a BottomDock node (bar is gated on \
+         if_space(<600))"
     );
 }
 
