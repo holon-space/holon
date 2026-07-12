@@ -60,6 +60,7 @@ pub use mcp_sync_strategy::SyncStrategy;
 pub use mcp_sync_strategy::ToolSync;
 pub use mcp_vtable::McpForeignDataWrapper;
 pub use mcp_vtable::VtableConfig;
+pub use rest_transport::ResponseFormat;
 pub use rest_transport::RestCall;
 pub use rest_transport::RestCallSurface;
 pub use rest_transport::RestManual;
