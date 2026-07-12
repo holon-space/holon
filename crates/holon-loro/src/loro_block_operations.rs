@@ -38,6 +38,7 @@ use holon_core::BlockQueryHelpers;
 use holon_core::CompletionStateInfo;
 use holon_core::CrudOperations;
 use holon_core::DataSource;
+use holon_core::FieldDelta;
 use holon_core::MarkOperations;
 use holon_core::OperationProvider;
 use holon_core::OperationRegistry;
@@ -241,21 +242,61 @@ impl CrudOperations<Block> for LoroBlockOperations {
     async fn set_field(&self, id: &str, field: &str, value: Value) -> Result<OperationResult> {
         let (doc_path, backend) = self.find_doc_for_block(id).await?;
 
-        // Capture a provably-correct inverse for the plain-string content edit
-        // (restore the prior text). Rich content (with marks), mark-only edits,
-        // and property writes stay irreversible until their inverses exist.
-        let undo: Option<Operation> = if field == "content" && matches!(value, Value::String(_)) {
-            let prior = backend
-                .get_block(id)
-                .await
-                .map_err(|e| format!("set_field('content'): capture prior content: {e}"))?;
-            let mut params = HashMap::new();
-            params.insert("id".to_string(), Value::String(id.to_string()));
-            params.insert("field".to_string(), Value::String("content".to_string()));
-            params.insert("value".to_string(), Value::String(prior.content));
-            Some(block_op("set_field", params))
-        } else {
-            None
+        // Capture the prior block state ONCE, up front, so we can build both a
+        // provably-correct inverse AND a staleness fingerprint (`changes`) for
+        // the field being written. Two dogfood #4 data-integrity bugs traced
+        // here:
+        //   * `task_state` writes (from `cycle_task_state`) had NO inverse, so the op
+        //     was `DeclaredIrreversible` → no undo entry was pushed → undo silently
+        //     consumed an unrelated entry (a "no-op" cycle undo).
+        //   * `content` writes returned EMPTY `changes`, so a `split_block` that
+        //     delegates here inherited an empty precondition — disabling the
+        //     stale-guard entirely and letting an undo-after-delete replay a stale
+        //     inverse that destroyed unrelated blocks (P1 data loss).
+        // Rich content (Object with marks) and mark-only edits stay irreversible.
+        let prior = backend
+            .get_block(id)
+            .await
+            .map_err(|e| format!("set_field('{field}'): capture prior state: {e}"))?;
+
+        let (undo, changes): (Option<Operation>, Vec<FieldDelta>) = match field {
+            "content" if matches!(value, Value::String(_)) => {
+                let old = Value::String(prior.content.clone());
+                let mut params = HashMap::new();
+                params.insert("id".to_string(), Value::String(id.to_string()));
+                params.insert("field".to_string(), Value::String("content".to_string()));
+                params.insert("value".to_string(), old.clone());
+                // `content` is a projected column the `SqlUndoStateReader` can
+                // read, so a real fingerprint arms the stale-guard: an undo that
+                // runs after the block was deleted/edited reads a divergent (or
+                // absent) value and is dropped loudly instead of replaying a
+                // stale inverse.
+                (
+                    Some(block_op("set_field", params)),
+                    vec![FieldDelta::new(
+                        id.to_string(),
+                        "content",
+                        old,
+                        value.clone(),
+                    )],
+                )
+            }
+            "task_state" => {
+                let old = match prior.get_property_str("task_state") {
+                    Some(s) => Value::String(s),
+                    None => Value::Null,
+                };
+                let mut params = HashMap::new();
+                params.insert("id".to_string(), Value::String(id.to_string()));
+                params.insert("field".to_string(), Value::String("task_state".to_string()));
+                params.insert("value".to_string(), old);
+                // `task_state` lives in the `properties` JSON blob, not a column,
+                // so the column-only reader can't fingerprint it — empty
+                // `changes` (single-writer safe). The inverse is still real, so
+                // a cycle now pushes an undoable entry.
+                (Some(block_op("set_field", params)), Vec::new())
+            }
+            _ => (None, Vec::new()),
         };
 
         match field {
@@ -386,11 +427,13 @@ impl CrudOperations<Block> for LoroBlockOperations {
         self.save_doc(&doc_path).await?;
 
         // Propagation to downstream consumers is handled by `LoroSyncController`
-        // via `doc.subscribe_root`.
-        Ok(undo.map_or_else(
-            || OperationResult::irreversible(vec![]),
-            |op| OperationResult::new(vec![], op),
-        ))
+        // via `doc.subscribe_root`. `changes` is NOT a second write path (the
+        // dispatcher ignores it) — it feeds the engine's precondition
+        // fingerprint + history relation only.
+        Ok(match undo {
+            Some(op) => OperationResult::new(changes, op),
+            None => OperationResult::irreversible(changes),
+        })
     }
 
     async fn create(&self, fields: holon_api::StorageEntity) -> Result<(String, OperationResult)> {
@@ -995,6 +1038,64 @@ mod advice_dismiss_tests {
             read.content_type
         );
         assert_eq!(read.content, "attachments/foo.png");
+    }
+
+    use holon_core::traits::UndoAction;
+
+    /// Regression (BugFunnel dogfood #4, cycle-undo no-op): in Loro mode
+    /// `set_field` only built an inverse for `content`, so a `task_state` write
+    /// (the substrate of `cycle_task_state`) returned `DeclaredIrreversible` —
+    /// no undo entry was pushed and pressing undo silently consumed an
+    /// unrelated entry. A cycle must now be reversible with an inverse that
+    /// targets `task_state` (NOT `content`).
+    #[tokio::test]
+    async fn cycle_task_state_is_reversible_and_targets_task_state() {
+        let (ops, _dir, anchor) = ops_with_anchor().await;
+
+        let result = ops.cycle_task_state(&anchor).await.expect("cycle");
+        match &result.undo {
+            UndoAction::Undo(op) => {
+                assert_eq!(op.op_name, "set_field");
+                assert_eq!(
+                    op.params.get("field").and_then(|v| v.as_string()),
+                    Some("task_state"),
+                    "cycle's inverse must restore task_state, not content — got {:?}",
+                    op.params
+                );
+                // Prior task_state was absent → inverse restores Null (removal).
+                assert!(matches!(op.params.get("value"), Some(Value::Null)));
+            }
+            other => panic!("cycle_task_state must be reversible, got {other:?}"),
+        }
+    }
+
+    /// Regression (BugFunnel dogfood #4, P1 stale-guard gap): in Loro mode
+    /// `set_field("content")` returned EMPTY `changes`, so `split_block` (which
+    /// delegates here) inherited an empty precondition and the staleness guard
+    /// never fired — letting an undo-after-delete replay a stale inverse that
+    /// destroyed unrelated blocks. The content write must now emit a real
+    /// FieldDelta so the engine can fingerprint (and re-verify) the projected
+    /// `content` column.
+    #[tokio::test]
+    async fn content_set_field_emits_fingerprint_delta() {
+        let (ops, _dir, anchor) = ops_with_anchor().await;
+
+        let result = ops
+            .set_field(&anchor, "content", Value::String("edited".into()))
+            .await
+            .expect("set_field content");
+
+        assert_eq!(result.changes.len(), 1, "expected one content FieldDelta");
+        let delta = &result.changes[0];
+        assert_eq!(delta.entity_id, anchor);
+        assert_eq!(delta.field, "content");
+        assert_eq!(delta.old_value, Value::String("a task".into()));
+        assert_eq!(delta.new_value, Value::String("edited".into()));
+        assert!(
+            matches!(&result.undo, UndoAction::Undo(op)
+                if op.params.get("value").and_then(|v| v.as_string()) == Some("a task")),
+            "inverse must restore the prior content"
+        );
     }
 
     fn dismiss_params(anchor_id: &str, lesson_id: &str) -> StorageEntity {

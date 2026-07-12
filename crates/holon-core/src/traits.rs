@@ -1156,6 +1156,20 @@ where
 
             let (_new_block_id, create_result) = self.create(new_block_fields).await?;
             changes.extend(create_result.changes);
+        } else {
+            // Loro (cell) create path emits no FieldDelta of its own. Fingerprint
+            // the new block's post-split content so the split's inverse
+            // (`restore_join`, which DELETES this block) is dropped LOUDLY if the
+            // block was deleted or edited under a later undo — closing the
+            // stale-guard gap that let an undo-after-delete destroy unrelated
+            // blocks (BugFunnel dogfood #4). `content` is a projected column the
+            // `SqlUndoStateReader` can read.
+            changes.push(FieldDelta::new(
+                new_block_id.clone(),
+                "content",
+                Value::Null,
+                Value::String(content_after.clone()),
+            ));
         }
 
         // Update current block with truncated content. Prefer writing

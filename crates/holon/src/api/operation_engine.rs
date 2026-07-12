@@ -475,6 +475,21 @@ impl OperationEngine for DispatchingOperationEngine {
         // Ingest ops mutate state but never enter the user history.
         if origin.is_user() {
             if let UndoAction::Undo(inverse_op) = &result.undo {
+                // Redo identity-stability: a `create` whose caller omitted `id`
+                // has one MINTED by the provider (interactive block creation,
+                // Rhai `block.create`). The stored forward (redo) op is built
+                // from the ORIGINAL params, which lack that id — so a redo would
+                // re-mint a fresh uuid, dangling every ref/link/junction that
+                // targeted the original (BugFunnel dogfood #4). The create's
+                // inverse is `delete{id: <minted>}`, so the minted id is
+                // authoritative there; graft it onto the redo op so redo
+                // recreates the SAME block.
+                let mut forward_op = forward_op;
+                if op_name == "create" && !forward_op.params.contains_key("id") {
+                    if let Some(minted) = inverse_op.params.get("id") {
+                        forward_op.params.insert("id".to_string(), minted.clone());
+                    }
+                }
                 let entry = UndoEntry {
                     ops: vec![forward_op],
                     inverse_ops: vec![inverse_op.clone()],
