@@ -2044,9 +2044,10 @@ impl FileSyncController {
         // Grounding = the delta's `Remove` id (a sanctioned deletion) UNION the
         // sibling files a de-inlined child page moved into; the tripwire vetoes
         // only on the row-28 mass-truncation signature (single/small drops pass
-        // silently — removals are not delivered as ops here yet; see
-        // `tripwire_mass_truncation`). On veto the file is quarantined and the Err
-        // propagates to `on_block_feed` (di.rs), which logs it.
+        // silently — cross-doc moves and matview-lag races still shrink a file
+        // without a `Remove` op; see `tripwire_mass_truncation`). On veto the
+        // file is quarantined and the Err propagates to `on_block_feed`
+        // (di.rs), which logs it.
         if reseeded {
             let sanctioned_removals = match delta {
                 BlockDelta::Remove(id) => HashSet::from([id.as_str().to_string()]),
@@ -2078,6 +2079,85 @@ impl FileSyncController {
         );
 
         Ok(true)
+    }
+
+    /// ADR 0025 ROOT ITEM: route a per-block `Remove` delta from the block feed
+    /// to the one file whose projection still shows the block, with the removal
+    /// SANCTIONED. The feed itself cannot resolve the owning document (the
+    /// block is already gone from the feed map), so THIS is the reverse lookup:
+    /// the per-doc render cache (`doc_blocks`) first, then the tracked
+    /// `last_projection` strings (bare-id prefilter, parse-confirmed — a bare
+    /// id substring alone would also match `[[links]]` to the block).
+    ///
+    /// Returns `Ok(true)` when the removal was routed (the owning file was
+    /// re-rendered through [`on_block_changed`](Self::on_block_changed) with
+    /// the delta's `Remove` id as a sanctioned removal) or proven moot (the
+    /// block still exists in the authoritative store — matview churn/lag, the
+    /// paired upsert re-renders). Returns `Ok(false)` when no tracked
+    /// projection contains the block: the caller falls back to the bulk
+    /// recovery path CARRYING this id (di.rs accumulates it into the
+    /// `sanctioned_removals` set passed to
+    /// [`re_render_all_tracked`](Self::re_render_all_tracked)), so even the
+    /// fallback stays op-grounded.
+    #[tracing::instrument(skip(self), name = "org.on_block_removed", fields(block_id = %block_id))]
+    pub async fn on_block_removed(&mut self, block_id: &EntityUri) -> Result<bool> {
+        if self
+            .block_reader
+            .get_block_authoritative(block_id)
+            .await?
+            .is_some()
+        {
+            // Still present in the authoritative store: not a deletion (a
+            // matview delete+insert pair or lag). Nothing to sanction; the
+            // paired upsert delta re-renders the file.
+            return Ok(true);
+        }
+
+        let doc = match self.owning_doc_of_projected_block(block_id)? {
+            Some(doc) => doc,
+            None => return Ok(false),
+        };
+        if doc == *block_id {
+            // The removed block IS a document root (a deleted page owning its
+            // own file). Rendering a deleted doc is undefined; let the bulk
+            // recovery path handle it with the id sanctioned.
+            return Ok(false);
+        }
+        self.on_block_changed(&doc, &BlockDelta::Remove(block_id.clone()))
+            .await
+    }
+
+    /// Reverse lookup for [`on_block_removed`](Self::on_block_removed): which
+    /// document's projection currently shows `block_id`? Checks the per-doc
+    /// render cache first (cheap), then parses the `last_projection` entries
+    /// whose text contains the bare id (the prefilter never skips a real
+    /// containment; parse confirmation rejects mere `[[links]]` hits).
+    fn owning_doc_of_projected_block(&self, block_id: &EntityUri) -> Result<Option<EntityUri>> {
+        for (doc, blocks) in &self.doc_blocks {
+            if blocks.contains_key(block_id) {
+                return Ok(Some(doc.clone()));
+            }
+        }
+        let bare = block_id.id();
+        for (canonical, content) in &self.last_projection {
+            if !content.contains(bare) {
+                continue;
+            }
+            let path: PathBuf = (**canonical).to_path_buf();
+            let parsed = self
+                .format
+                .parse(&path, content, &EntityUri::no_parent(), &self.root_dir)
+                .with_context(|| {
+                    format!(
+                        "[on_block_removed] re-parsing tracked projection of {} failed",
+                        path.display()
+                    )
+                })?;
+            if parsed.document.id == *block_id || parsed.blocks.iter().any(|b| b.id == *block_id) {
+                return Ok(Some(parsed.document.id.clone()));
+            }
+        }
+        Ok(None)
     }
 
     /// Render `doc_id`'s file, serving the block list from the per-doc
@@ -2330,17 +2410,23 @@ impl FileSyncController {
     /// unknown, e.g. block.deleted, block.fields_changed).
     ///
     /// ADR 0025: this is a RECOVERY path — state-driven by nature (like a
-    /// reseed), it holds no per-block op. Its write-back guard grounds
-    /// absences only via the sibling-file union (`sanctioned_removals`
-    /// empty) and, because it cannot distinguish a routine deletion from
-    /// loss, fires the MASS-TRUNCATION tripwire
-    /// only (see `tripwire_mass_truncation`): a child page de-inlined into its
-    /// own file passes, a single/small drop passes, and only a
-    /// row-28-shaped mass truncation vetoes + quarantines that one file.
-    /// Follow-up named by ADR 0025: feed it the C2b history relation so
-    /// recovery can ground EVERY removal and the tripwire can tighten
-    /// toward zero.
-    pub async fn re_render_all_tracked(&mut self) -> Result<()> {
+    /// reseed). Since the ROOT-ITEM threading it is no longer op-BLIND:
+    /// `sanctioned_removals` carries every per-block `Remove` id the feed
+    /// delivered since the last flush that could not be routed to a single
+    /// file (deleted pages owning their own file, cold `last_projection`),
+    /// so a deletion landing here is grounded exactly like on the per-block
+    /// path. Absences are additionally grounded via the sibling-file union
+    /// (a de-inlined child page). What remains UNGROUNDED here are absences
+    /// with no delivered op at all — for those the guard fires
+    /// the MASS-TRUNCATION tripwire only (see `tripwire_mass_truncation`): a
+    /// single/small ungrounded drop passes, a row-28-shaped mass truncation
+    /// vetoes + quarantines that one file. Follow-up named by ADR 0025: feed it
+    /// the C2b history relation so EVERY removal is grounded and the tripwire
+    /// tightens toward zero.
+    pub async fn re_render_all_tracked(
+        &mut self,
+        sanctioned_removals: &HashSet<String>,
+    ) -> Result<()> {
         let keys: Vec<CanonicalPath> = self.last_projection.keys().cloned().collect();
 
         for canonical in keys {
@@ -2470,16 +2556,18 @@ impl FileSyncController {
                 continue;
             }
 
-            // ADR 0025 recovery-path tripwire: ground absences via the
-            // sibling-file union only (no op → no sanctioned removals). This is
-            // where EVERY block removal lands (the feed routes all removals to
-            // `OrgRerender::All`, di.rs), so single/small drops here are usually
-            // legitimate deletions and pass silently; only a MASS truncation (the
-            // row-28 signature) vetoes+quarantines that one file. A parse/IO defect
-            // propagates (loud); a tripwire veto skips just this file and the batch
-            // continues. Hard grounding of removals is the ADR-0025 C2b follow-up.
+            // ADR 0025 recovery-path tripwire: absences are grounded via the
+            // accumulated per-block `Remove` ids (`sanctioned_removals`, delivered
+            // by the feed and routed here when no single file could consume them)
+            // plus the sibling-file union. Removals with no delivered op remain
+            // indistinguishable from loss, so single/small ungrounded drops pass
+            // silently; only a MASS truncation (the row-28 signature)
+            // vetoes+quarantines that one file. A parse/IO defect propagates
+            // (loud); a tripwire veto skips just this file and the batch
+            // continues. Grounding those last removals is the ADR-0025 C2b
+            // history-relation follow-up.
             if let Err(e) = self
-                .tripwire_mass_truncation(&path, &disk_content, &rendered, &HashSet::new())
+                .tripwire_mass_truncation(&path, &disk_content, &rendered, sanctioned_removals)
                 .await
             {
                 if self.is_quarantined(&path) {
@@ -2868,25 +2956,34 @@ impl FileSyncController {
 
     /// Fork B B1' / ADR 0025 recovery-path MASS-TRUNCATION tripwire.
     ///
-    /// The block-driven write-back paths cannot yet ground removals in ops —
-    /// the block feed collapses every removal to `OrgRerender::All` and
-    /// delivers no delete id here (di.rs), so a SINGLE ungrounded drop is
-    /// indistinguishable from a routine deletion; vetoing it would break
-    /// normal deletions and flood the log. So this tripwire fires ONLY on
-    /// the row-28 loss SIGNATURE — a MASS truncation, where an FK-rollback
-    /// aborted a large contiguous chunk (~20 blocks) at once. It
-    /// vetoes+quarantines when the ungrounded-drop count
+    /// Since the ADR 0025 ROOT-ITEM threading the block-driven paths DO receive
+    /// per-block `Remove` ids: `on_block_changed` sanctions its delta's
+    /// `Remove`, `on_block_removed` routes a feed removal to the owning
+    /// file, and `re_render_all_tracked` consumes the accumulated ids no
+    /// single file could (di.rs). Every op-delivered deletion is therefore
+    /// grounded. The residual UNGROUNDED-drop tolerance below exists
+    /// because state-driven renders can still legitimately shrink a file
+    /// without a delivered `Remove` op:
+    /// - a cross-doc MOVE — the block leaves this file on an Upsert routed to
+    ///   the DESTINATION doc; the source file's next render sees an ungrounded
+    ///   absence (the 97-false-fire history of a hard veto);
+    /// - a sanction consumed by a render whose write was TOCTOU-skipped — the
+    ///   id is spent, the shrink reappears on a later state-driven render;
+    /// - matview-lag races between store truth and the delta that triggered the
+    ///   render.
+    /// So this tripwire fires ONLY on the row-28 loss SIGNATURE — a MASS
+    /// truncation, where an FK-rollback aborted a large contiguous chunk (~20
+    /// blocks) at once. It vetoes+quarantines when the ungrounded-drop count
     /// exceeds `max(TRIPWIRE_MIN_DROP_BLOCKS, 25% of the file's block count)`,
     /// and lets single/small drops pass SILENTLY (no log — else routine
-    /// deletions flood `inv-no-observed-errors`).
+    /// moves/races flood `inv-no-observed-errors`).
     ///
     /// Returns `Ok(())` to proceed with the write, `Err` (after quarantining)
     /// to refuse it. Real parse/IO defects propagate as `Err` WITHOUT
     /// quarantining (they are bugs to surface, not truncations). This is
     /// ADR 0025's "recovery paths carry the guard as tripwire" posture.
-    /// TEMPORARY: once removals are grounded (per-block `Remove` delivery /
-    /// the C2b history relation) the guard widens to ground EVERY drop and
-    /// the fraction can drop toward zero.
+    /// Tightening toward zero needs the classes above grounded too — the
+    /// C2b history relation follow-up.
     async fn tripwire_mass_truncation(
         &mut self,
         path: &Path,
