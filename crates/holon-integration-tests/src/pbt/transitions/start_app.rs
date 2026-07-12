@@ -11,6 +11,7 @@ use holon_api::QueryLanguage;
 use holon_api::SourceLanguage;
 use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
+use holon_orgmode::OrgBlockExt;
 use holon_pbt_core::TransitionFactory;
 use holon_pbt_core::TransitionImpl;
 use holon_pbt_core::TransitionRef;
@@ -167,9 +168,10 @@ pub(crate) fn seed_booted_layout_into_ref(state: &mut ReferenceState, fresh: boo
     // `inv-blocks-match-ref` sees the identical booted set. The page block
     // documents itself (`block_documents[journals]=journals`, NON-seed: the
     // wide oracle asserts the user-visible first-boot page); its children
-    // belong to the journals page document. (The auto-create RULE is not yet
-    // seeded — see `holon_frontend::journals_auto_create_blocks` — so it is not
-    // modeled here.)
+    // belong to the journals page document. The auto-create RULE is modeled
+    // just after this loop (also seeded by `build_default_layout_blocks`); the
+    // boot-FIRED journal day-block is modeled only for the composed frontend
+    // arm (see `wide_e2e`), since only a Turso + ActionEngine boot fires it.
     let journals_uri = EntityUri::parse(holon_frontend::JOURNALS_PAGE_ID).expect("journals id");
     for block in holon_frontend::journals_page_blocks() {
         let block_id = block.id.clone();
@@ -219,6 +221,42 @@ pub(crate) fn seed_booted_layout_into_ref(state: &mut ReferenceState, fresh: boo
             .block_state
             .block_documents
             .insert(block_id.clone(), doc);
+        state.domain.block_state.blocks.insert(block_id, block);
+    }
+
+    // The auto-create RULE (`journals_auto_create_blocks`: `Journal Auto-Create`
+    // heading + `holon_sql` trigger + `holon_rule` action), also seeded on every
+    // boot by prod's `build_default_layout_blocks`. Modeled as NON-seed children of
+    // the journals page (`block_documents=journals`) so the block-comparison
+    // invariants expect them in the SUT projection. The trigger/action are program
+    // (`is_program`) blocks — never display-evaluated — so they are NOT classified
+    // as query/render layout sources; the heading hosts them.
+    //
+    // Assign a per-parent `sequence` matching the boot seed order so the oracle's
+    // `(sibling_order_group, sequence, id)` sort (ADR 0005) reproduces the SUT's
+    // fractional-index order — otherwise the trigger/action tie-break by id
+    // (`action` < `trigger`) and diverge `inv-{live,loro}-children-match-ref` +
+    // `inv-blocks-match-ref/org` under `block:journals::auto-create`.
+    let mut seq_by_parent: std::collections::HashMap<EntityUri, i64> =
+        std::collections::HashMap::new();
+    for mut block in holon_frontend::journals_auto_create_blocks() {
+        let block_id = block.id.clone();
+        let seq = seq_by_parent.entry(block.parent_id.clone()).or_insert(0);
+        block.set_sequence(*seq);
+        *seq += 1;
+        if block.content_type == ContentType::Text {
+            // The `Journal Auto-Create` heading hosts the rule pair.
+            state
+                .domain
+                .layout_blocks
+                .headline_ids
+                .insert(block_id.clone());
+        }
+        state
+            .domain
+            .block_state
+            .block_documents
+            .insert(block_id.clone(), journals_uri.clone());
         state.domain.block_state.blocks.insert(block_id, block);
     }
 

@@ -364,90 +364,53 @@ pub fn seed_folder_companion(state: &mut ReferenceState) {
         .insert(page.clone(), "2026-07-10.org".to_string());
 }
 
-// ── Journals-machinery keystone closure (dogfood 2026-07-10 P0) ──────────────
+// ── Journals boot auto-create closure (dogfood #4, 2026-07-12) ───────────────
 //
-// The dogfood id-less-row worker panic: the journals machinery's `holon_sql`
-// TRIGGER source block (`SELECT today AS name FROM clock`) produces rows with
-// NO entity `id`. When the frontend watches that machinery headless, those
-// VALUE rows reach `ReactiveRowSet::apply_change`, whose `Created` arm used to
-// `.expect("... 'id' column")` and PANIC the render worker — a panic
-// `inv-no-observed-errors` captures. `boot_and_seed_wide`'s bare `Journals.org`
-// SHELL omits the machinery, so the headless keystone never rendered an id-less
-// row and structurally could not see this class. This seeds the machinery into
-// BOTH the SUT boot org and the oracle, mirroring `seed_forward_edge_corpus`.
+// Prod's `build_default_layout_blocks` seeds the journal auto-create RULE (a
+// `holon_sql` trigger `SELECT today FROM clock` + a `holon_rule` action
+// `block.create`) on every boot. On a Turso + ActionEngine frontend boot the
+// production `ClockScheduler` seeds the `clock` day row, the trigger matview
+// fires, and the `action_watcher` mints ONE journal day-block under
+// `block:journals` with a WP2 deterministic id. The rule blocks themselves are
+// modeled in `seed_booted_layout_into_ref` (they are seeded on every boot); the
+// boot-FIRED journal day-block is modeled here because only a Turso +
+// ActionEngine boot fires it. The keystone frontend boot injects the fixed
+// `keystone_boot_clock` (Fork A) so the date + id are deterministic.
 //
-// GATING: env `HOLON_JOURNALS_MACHINERY_SEED=1` AND a frontend draw. Kept OFF
-// by default (unlike forward-edge's always-on-for-frontend) pending a live
-// keystone run confirming the render-worker reproduction end-to-end; the
-// panic→no-panic behaviour itself is proven at the unit layer by
-// `reactive::tests::id_less_value_row_does_not_panic_apply_change`. Promote to
-// always-on-for-frontend (drop the env gate) once verified.
+// This subsumes the retired env-gated `HOLON_JOURNALS_MACHINERY_SEED`
+// trigger-only id-less-render closure: the real rule is now always seeded, so
+// the id-less VALUE row travels the render path on every frontend boot (the
+// panic→no-panic behaviour is also pinned at the unit layer by
+// `reactive::tests::id_less_value_row_does_not_panic_apply_change`).
 
-/// True when the journals-machinery closure is activated for this run.
-pub fn journals_machinery_enabled() -> bool {
-    std::env::var("HOLON_JOURNALS_MACHINERY_SEED").is_ok()
-}
-
-/// The journals TRIGGER source block id — `journals::trigger::0` in the
-/// packaged `assets/default/Journals.org`. Its `holon_sql` body is an aggregate
-/// whose result rows carry no entity `id` (the value-row shape).
-pub fn journals_trigger_block() -> EntityUri {
-    EntityUri::block("journals::trigger::0")
-}
-
-/// The `holon_sql` body of the journals trigger — an aggregate over the `clock`
-/// table projecting `name` only, so every result row is id-less (value-shaped).
-pub const JOURNALS_TRIGGER_SQL: &str = "SELECT today as name FROM clock WHERE grain = 'day'";
-
-/// The headline hosting the trigger source block. The org parser only extracts
-/// source blocks from a HEADLINE's section (`process_headlines` →
-/// `extract_section_content`) — a top-level `#+BEGIN_SRC` under `#+ID:` is
-/// silently ignored — so the machinery needs a heading host, mirroring the
-/// packaged asset's `** Journal Auto-Create`.
-pub fn journals_machinery_host() -> EntityUri {
-    EntityUri::block("journals-machinery")
-}
-
-/// `Journals.org` extended with the id-less-aggregate TRIGGER source block
-/// (hosted under a pinned-`:ID:` heading — see [`journals_machinery_host`]),
-/// used as the SUT boot org in place of the bare shell when the oracle carries
-/// the machinery.
-pub const JOURNALS_MACHINERY_ORG: &str =
-    "#+ID: journals\n* Journal Auto-Create\n:PROPERTIES:\n:ID: \
-     journals-machinery\n:END:\n#+BEGIN_SRC holon_sql :id journals::trigger::0\nSELECT today as \
-     name FROM clock WHERE grain = 'day'\n#+END_SRC\n";
-
-/// Seed the journals machinery into `state` as NON-seed blocks under the seed
-/// `block:journals` page: the `Journal Auto-Create` heading host + its
-/// `holon_sql` TRIGGER source child — the reference half that makes the
-/// block-comparison invariants expect the machinery in the SUT projection.
-/// Mirrors [`seed_forward_edge_corpus`]. Called by [`wide_e2e_ref_for`] ONLY
-/// for a frontend wiring with the env gate on; [`boot_and_seed_wide`] keys the
-/// org seed on the trigger being present in the ref.
-pub fn seed_journals_machinery(state: &mut ReferenceState) {
+/// Seed the boot-fired journal day-block into `state` as a NON-seed child of
+/// the seed `block:journals` page: the reference half that makes the
+/// block-comparison invariants expect the auto-created journal in the SUT
+/// projection. Its id is the deterministic effect id the production
+/// `action_watcher` mints for the fixed keystone clock day
+/// (`keystone_boot_journal_id`), so the ref lands in the SUT id space exactly.
+/// Called by [`wide_e2e_ref_for`] for a frontend wiring whose
+/// `Actor::ActionEngine` is present (implies Turso); the SUT fires it live.
+pub fn seed_boot_journal(state: &mut ReferenceState) {
+    use crate::pbt::frontend_slice::components::keystone_boot_journal_date;
+    use crate::pbt::frontend_slice::components::keystone_boot_journal_id;
     let journals = EntityUri::parse("block:journals").expect("journals id");
-    let host = journals_machinery_host();
-    let mut host_block = Block::new_text(host.clone(), journals.clone(), "Journal Auto-Create");
-    host_block.set_sequence(0);
-    state
-        .domain
-        .block_state
-        .blocks
-        .insert(host.clone(), host_block);
-
-    let trigger = journals_trigger_block();
-    let mut block = Block::new_source(
-        trigger.clone(),
-        host.clone(),
-        "holon_sql",
-        JOURNALS_TRIGGER_SQL,
-    );
+    let id = keystone_boot_journal_id();
+    let mut block = Block::new_text(id.clone(), journals.clone(), &keystone_boot_journal_date());
+    // The action creates the journal AFTER the boot seed, so the SUT's fractional
+    // index appends it after the seeded `Journal Auto-Create` heading (both are
+    // Text-group siblings of `block:journals`). The oracle orders siblings by
+    // `(sibling_order_group, sequence, id)` (ADR 0005); the heading has sequence 0,
+    // so give the journal sequence 1 to match the SUT's created-last order (else
+    // the id tie-break sorts the UUID-named journal first and diverges
+    // `inv-{live,loro}-children-match-ref` + `inv-blocks-match-ref/org`).
     block.set_sequence(1);
+    state.domain.block_state.blocks.insert(id.clone(), block);
     state
         .domain
         .block_state
-        .blocks
-        .insert(trigger.clone(), block);
+        .block_documents
+        .insert(id, journals);
 }
 
 /// The page-rooted leaf-sibling oracle (`parent`/`c1`/`c2` re-rooted under a
@@ -664,12 +627,11 @@ pub async fn boot_and_seed_wide(
     // page IS journals), so the `/org` snapshot observes it and matches the
     // reference's `org_blocks` (non-seed, non-page journals child). Mirrors the
     // `live_mcp` sibling harness's `Journals.org` seed, extended to also track it.
-    // `Journals.org`: the bare page shell, OR (when the oracle carries the
-    // journals machinery — the id-less-aggregate trigger source block, seeded
-    // by `seed_journals_machinery` for a frontend draw with the env gate on)
-    // the machinery org, so the SUT actually ingests and watches the id-less
-    // source headless. Keyed on the block being present in the ref, exactly like
-    // the forward-edge org seed below.
+    // `Journals.org`: the bare page shell. The journal auto-create RULE (trigger +
+    // action) is seeded PROGRAMMATICALLY by prod's `build_default_layout_blocks`
+    // (not via this disk file), so the disk `Journals.org` stays a bare `#+ID:`
+    // shell — matching prod, where `DEFAULT_ASSETS` is empty and journals is a
+    // programmatic seed. (Non-machinery variant kept for the folder-companion.)
     // Companion demotion closure: when the oracle carries the date page
     // (`seed_folder_companion`, a frontend draw), `Journals.org` becomes the
     // COMPANION that inlines the page-file's id as a plain heading, and the
@@ -681,14 +643,7 @@ pub async fn boot_and_seed_wide(
         .block_state
         .blocks
         .contains_key(&folder_journal_page());
-    let journals_org: &str = if ref_state
-        .domain
-        .block_state
-        .blocks
-        .contains_key(&journals_trigger_block())
-    {
-        JOURNALS_MACHINERY_ORG
-    } else if carries_folder_companion {
+    let journals_org: &str = if carries_folder_companion {
         FOLDER_COMPANION_JOURNALS_ORG
     } else {
         "#+ID: journals\n"
@@ -738,6 +693,34 @@ pub async fn boot_and_seed_wide(
         converge_projections(&handle, crate::pbt::composed::soak_seed::soak_settle()).await;
     }
 
+    // Fork B (dogfood #4): the boot auto-create rule fires today's journal
+    // day-block ASYNCHRONOUSLY off the clock CDC (fixed keystone clock → `clock`
+    // day row → trigger matview → `action_watcher` → `block.create`). The flat
+    // 300ms boot settle can return before that chain lands, so await the journal
+    // in `block_raw` BEFORE the scaffold snapshot / invariant checks — else a
+    // not-yet-fired journal false-diverges `inv-blocks-match-ref` as "missing in
+    // SQL". Only an ActionEngine (⇒ Turso) frontend boot fires it; fail loud on
+    // timeout so a genuinely-dropped firing is a RED, not a hang.
+    if has_frontend
+        && set
+            .wiring
+            .has_actor(holon_pbt_core::wiring::Actor::ActionEngine)
+    {
+        let journal_id = crate::pbt::frontend_slice::components::keystone_boot_journal_id();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            converge_projections(&handle, Duration::from_millis(300)).await;
+            if sut_ids(&caps).await.contains(&journal_id) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "[boot journal] auto-create rule did not fire journal {journal_id} within budget"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
     // `inv-sql-budget` coverage: a span-metrics provider hosting the SAME
     // `MetricsSut` the native E2ESut uses, exposed through `ComposedBudget`
     // (the read) + `SutMetricsLifecycle` (the `ComposedSut` harness drives
@@ -784,15 +767,23 @@ pub async fn boot_and_seed_wide(
     // (they are in neither `booted` nor `ref_ids` there); for a frontend draw
     // it keeps them non-seed so a dropped `fe-blocked`/`fe-target` diverges the
     // block-id sets and fires `inv-blocks-match-ref/{block_raw,matview}` as
-    // INGEST DATA LOSS. The journals TRIGGER source block (id-less-aggregate
-    // machinery) is a non-seed source child of journals when seeded — kept
-    // compared, like the forward-edge children. Listed unconditionally: a no-op
-    // when the machinery is not seeded (absent from both `booted` and
-    // `ref_ids`).
+    // INGEST DATA LOSS. The journal auto-create RULE blocks (`Journal
+    // Auto-Create` heading + `holon_sql` trigger + `holon_rule` action, seeded
+    // on every boot) and the boot-FIRED journal day-block are non-seed children
+    // of journals — kept compared, like the forward-edge children, so a dropped
+    // rule block or a missing/duplicate boot journal fires
+    // `inv-blocks-match-ref`. Listed unconditionally: a no-op for a draw where
+    // an id is in neither `booted` nor `ref_ids` (e.g. the boot journal on a
+    // non-ActionEngine draw).
     let tree: BTreeSet<EntityUri> = [ids.parent.clone(), ids.c1.clone(), ids.c2.clone()]
         .into_iter()
         .chain(FORWARD_EDGE_IDS.into_iter().map(EntityUri::block))
-        .chain([journals_machinery_host(), journals_trigger_block()])
+        .chain([
+            EntityUri::parse(holon_frontend::JOURNALS_AUTO_CREATE_ID).expect("auto-create id"),
+            EntityUri::parse(holon_frontend::JOURNALS_TRIGGER_ID).expect("trigger id"),
+            EntityUri::parse(holon_frontend::JOURNALS_ACTION_ID).expect("action id"),
+            crate::pbt::frontend_slice::components::keystone_boot_journal_id(),
+        ])
         .collect();
     let booted = sut_ids(&caps).await;
     let ref_ids: BTreeSet<EntityUri> = ref_state
@@ -1054,7 +1045,7 @@ pub fn wide_e2e_ref_for(wiring: &Wiring) -> ReferenceState {
         // ingest topology); `boot_and_seed_wide` keys the file seed on this page
         // being in the ref.
         //
-        // ENV-gated OFF by default (mirrors `journals_machinery_enabled`): the
+        // ENV-gated OFF by default (`folder_companion_enabled`): the
         // page-authority FIX (foreign-page protection) is required for a clean
         // boot, but POST-fix the companion's inlined heading is intentionally
         // lossy on org round-trip (the heading belongs to the page-file, so
@@ -1066,10 +1057,13 @@ pub fn wide_e2e_ref_for(wiring: &Wiring) -> ReferenceState {
         if folder_companion_enabled() {
             seed_folder_companion(&mut state);
         }
-        // Journals-machinery closure: id-less-aggregate trigger source block.
-        // Frontend-only (Turso+ViewModel watch path) AND env-gated OFF by default.
-        if journals_machinery_enabled() {
-            seed_journals_machinery(&mut state);
+        // Journals boot auto-create closure (dogfood #4): a Turso + ActionEngine
+        // frontend boot fires the seeded rule once for the fixed keystone clock
+        // day, minting ONE journal day-block under `block:journals`. Model it as a
+        // non-seed child. Gated on `Actor::ActionEngine` (implies Turso — a
+        // frontend draw without the action watcher never fires the rule).
+        if wiring.has_actor(holon_pbt_core::wiring::Actor::ActionEngine) {
+            seed_boot_journal(&mut state);
         }
     }
     state.with_cap_set(cap_set_for_wiring(wiring))
