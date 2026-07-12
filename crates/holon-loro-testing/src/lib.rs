@@ -48,6 +48,8 @@ mod convergence_pbt;
 pub mod invariants;
 pub mod peer_ops;
 pub mod quiescence;
+pub mod ref_ext;
+pub mod shadow_mesh;
 pub mod sut_loro;
 pub mod transitions;
 

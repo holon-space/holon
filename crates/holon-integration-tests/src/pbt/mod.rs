@@ -24,11 +24,15 @@ pub mod mcp_server_actor_state;
 pub mod memory_slice;
 pub mod op_write_cap;
 pub mod panic_diag;
-pub mod peer_ref_state;
+// `PeerRefState` + the new `LoroRefExt` co-located to `holon-loro-testing`
+// (RefStateSplit Inc 5, docs/Plans/RefStateSplit-2026-07-12.md §3); re-exported
+// as `peer_ref_state` so existing `super::peer_ref_state::PeerRefState` call
+// sites keep resolving unchanged.
 // `peer_ops` co-located to `holon-loro-testing` (Phase-1a Step 4); re-exported
 // here so central `crate::pbt::peer_ops::*` / `super::peer_ops::*` call sites
 // (reference_state, state_machine, shadow_mesh, …) keep resolving unchanged.
 pub use holon_loro_testing::peer_ops;
+pub use holon_loro_testing::ref_ext as peer_ref_state;
 pub mod query;
 pub mod query_ast;
 pub mod ref_caps;
@@ -39,7 +43,11 @@ pub mod ref_caps;
 pub use ref_caps as reference_capabilities;
 pub mod reference_domain_state;
 pub mod reference_state;
-pub mod shadow_mesh;
+// `shadow_mesh` co-located to `holon-loro-testing` (RefStateSplit Inc 5);
+// re-exported so `super::shadow_mesh::ShadowMesh` /
+// `crate::pbt::shadow_mesh::*` call sites (state_machine, reference_state,
+// ref_caps/peers) keep resolving.
+pub use holon_loro_testing::shadow_mesh;
 pub mod sql_loro_slice;
 pub mod sql_slice;
 pub mod state_machine;
