@@ -308,12 +308,22 @@ async fn compose_sut_seeded_impl(
         // is why the editor arm below uses these caps instead of the
         // `InMemEditorComponent` stand-in. Loro OFF for non-editor frontend
         // configs (the Loro read caps, when `has_loro`, still come from the
-        // separate Loro arm below).
+        // separate Loro arm below). Inject the fixed keystone clock (Fork A) so
+        // the production ClockScheduler seeds the `clock` day row at a
+        // DETERMINISTIC date on every composed frontend boot. The boot
+        // auto-create rule (`journals_auto_create_blocks`,
+        // seeded by `build_default_layout_blocks`) then fires ONE journal day-block
+        // whose content + deterministic id are known to the oracle
+        // (`keystone_boot_journal_id`). Without a fixed clock the boot journal's
+        // date would be the wall-clock day — non-deterministic, midnight-racy.
+        // `SutClockAdvance` is intentionally NOT registered (AdvanceDay stays
+        // dormant), so the clock never advances past boot in the keystone.
         let comp = Arc::new(
-            HeadlessFrontendComponent::new_with_loro(
+            HeadlessFrontendComponent::new_with_clock(
                 frontend_seed_org,
                 Duration::from_millis(300),
                 has_editor,
+                crate::pbt::frontend_slice::components::keystone_boot_clock(),
             )
             .await,
         );

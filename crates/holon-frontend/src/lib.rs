@@ -126,18 +126,17 @@ pub fn journals_page_blocks() -> Vec<holon_api::block::Block> {
 /// parent (not `block:journals`) so `action_discovery.sql`'s same-parent join
 /// pairs THEM and not the page's display query.
 ///
-/// NOT YET seeded by [`FrontendSession::build_default_layout_blocks`].
-/// Co-locating this rule onto `block:journals` — the fix for the daily-journal
-/// auto-create (dogfood 2026-07-10, real vaults never get a journal) — is
-/// blocked on the deferred render bug (BugFunnel 2026-07-09 "navigating to the
-/// seeded Journals page renders a blank panel"): the main-panel render executes
-/// the trigger's `SELECT today as name` (a tableless, no-`id` matview) as a
-/// display query and panics in `ReactiveView::apply_change` ("Created event
-/// must have 'id'"). Because `block:journals` is the boot landing page, seeding
-/// the trigger here makes that panic fire on EVERY boot. Land this together
-/// with the render fix (action-rule blocks render as `spacer(0)`, never as a
-/// display collection) and a deterministic-clock reference model for the
-/// boot-fired journal.
+/// Seeded on every boot by [`FrontendSession::build_default_layout_blocks`]
+/// (dogfood #4 fix, 2026-07-12): the clock-day trigger fires the action so real
+/// vaults get today's journal. The prior render-panic blocker is resolved — the
+/// trigger/action are `is_program` blocks (fork-A: `rule_sibling` profile
+/// exclusion + `RowIdentity`-keyed reactive rows), so they are never
+/// display-evaluated as a collection and the id-less trigger row no longer
+/// panics the render worker. The end-to-end firing (clock scheduler seeds the
+/// `clock` day row → trigger matview → action watcher → deterministic-id
+/// `block.create`) is pinned by the directed capstone
+/// `advance_day_fires_one_journal_per_distinct_day_idempotently` and, in the
+/// composed keystone, by the fixed-clock boot-journal model in `wide_e2e`.
 pub fn journals_auto_create_blocks() -> Vec<holon_api::block::Block> {
     use holon_api::block::Block;
 
@@ -662,6 +661,12 @@ impl<T> FrontendSession<T> {
         // idempotent (deterministic ids), so a re-seed never duplicates the page
         // and never clobbers user-created journal entries.
         entries.extend(crate::journals_page_blocks());
+        // The auto-create RULE (trigger + action). Seeded on every boot so the
+        // clock-day trigger fires `block.create` and the vault gets today's
+        // journal (dogfood #4: real vaults never got one). The trigger/action are
+        // `is_program` blocks — profile routing keeps them out of display-query
+        // evaluation, so they never render as a collection (fork-A safeguards).
+        entries.extend(crate::journals_auto_create_blocks());
 
         if fresh {
             // The `__default__` page that owns the 3-column layout.
@@ -867,11 +872,13 @@ mod journals_seed_tests {
             Some(SourceLanguage::Render)
         ));
 
-        // The auto-create rule is NOT co-located on the landing page yet (blocked
-        // on the trigger-render panic); it lives in the deferred spec.
+        // `journals_page_blocks` is the page-display spec only: the auto-create
+        // rule (trigger/action) is a separate spec (`journals_auto_create_blocks`),
+        // both seeded by `build_default_layout_blocks`. The page-display spec
+        // itself carries no trigger.
         assert!(
             !blocks.iter().any(|b| b.id.as_str() == JOURNALS_TRIGGER_ID),
-            "auto-create trigger must not be seeded on the journals landing page yet"
+            "the page-display spec carries no trigger (it lives in the rule spec)"
         );
     }
 
@@ -918,7 +925,14 @@ mod journals_seed_tests {
                 FrontendSession::<()>::build_default_layout_blocks(fresh).expect("build layout");
             let entry_ids: std::collections::HashSet<String> =
                 entries.iter().map(|b| b.id.as_str().to_string()).collect();
-            for id in [JOURNALS_PAGE_ID, JOURNALS_SRC_ID, JOURNALS_RENDER_ID] {
+            for id in [
+                JOURNALS_PAGE_ID,
+                JOURNALS_SRC_ID,
+                JOURNALS_RENDER_ID,
+                JOURNALS_AUTO_CREATE_ID,
+                JOURNALS_TRIGGER_ID,
+                JOURNALS_ACTION_ID,
+            ] {
                 assert!(
                     entry_ids.contains(id),
                     "fresh={fresh}: journals block {id} must be seeded"
