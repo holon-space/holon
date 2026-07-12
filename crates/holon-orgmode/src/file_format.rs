@@ -114,11 +114,49 @@ impl FileFormatAdapter for OrgFormatAdapter {
         path: &Path,
         source: &str,
         rendered: &str,
+        sibling_renders: &[(&Path, &str)],
+        sanctioned_removals: &std::collections::HashSet<String>,
         root: &Path,
     ) -> Result<()> {
-        let surviving =
+        let mut surviving =
             crate::writeback_guard::SurvivingProjection::from_rendered(path, rendered, root)?;
-        crate::writeback_guard::ensure_ingest_lossless(path, source, &surviving, root)
+        for (sibling_path, sibling_rendered) in sibling_renders {
+            surviving.union_rendered(sibling_path, sibling_rendered, root)?;
+        }
+        crate::writeback_guard::ensure_ingest_lossless(
+            path,
+            source,
+            &surviving,
+            sanctioned_removals,
+            root,
+        )
+    }
+
+    fn writeback_drops(
+        &self,
+        path: &Path,
+        source: &str,
+        rendered: &str,
+        sibling_renders: &[(&Path, &str)],
+        sanctioned_removals: &std::collections::HashSet<String>,
+        root: &Path,
+    ) -> Result<holon_core::file_format::WritebackDropVerdict> {
+        let mut surviving =
+            crate::writeback_guard::SurvivingProjection::from_rendered(path, rendered, root)?;
+        for (sibling_path, sibling_rendered) in sibling_renders {
+            surviving.union_rendered(sibling_path, sibling_rendered, root)?;
+        }
+        let drops = crate::writeback_guard::writeback_drops(
+            path,
+            source,
+            &surviving,
+            sanctioned_removals,
+            root,
+        )?;
+        Ok(holon_core::file_format::WritebackDropVerdict {
+            dropped: drops.dropped,
+            source_block_count: drops.source_block_count,
+        })
     }
 }
 
