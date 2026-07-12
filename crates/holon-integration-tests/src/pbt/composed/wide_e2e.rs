@@ -280,35 +280,53 @@ pub fn seed_forward_edge_corpus(state: &mut ReferenceState) {
     }
 }
 
-// ── Folder-companion page-tag demotion keystone closure (dogfood 2026-07-12)
-// ──
+// ── Companion page-tag demotion keystone closure (dogfood 2026-07-12) ────────
 //
-// Real Logseq-shaped vaults carry FOLDER-PAGE DUPLICATION: a subdirectory of
-// per-page files (`Journals/2026-07-10.org` — each a page-file whose `#+ID:`
-// doc-root gets the `Page` tag) AND a same-named folder-COMPANION file
-// (`Journals.org`) that inlines those SAME block ids as plain headings (no
-// `Page` tag). Cold boot ingests the page-files FIRST and the companion LAST
-// (path order — `Journals/<date>.org` sorts before `Journals.org` in the seed
+// Real Logseq-shaped vaults carry FOLDER-PAGE DUPLICATION: a per-page file
+// (`2026-07-10.org` — a page-file whose `#+ID:` doc-root gets the `Page` tag)
+// AND a COMPANION file (`Journals.org`) that inlines that SAME block id as a
+// plain heading (no `Page` tag). Cold boot ingests the page-file FIRST and the
+// companion LAST (`2026-07-10.org` sorts before `Journals.org` in the seed
 // vec). When the companion's inlined heading (tags=[]) reconciles against the
-// already-created page-file doc-root (tags=[Page]), the update pass STRIPS the
-// `Page` tag — a one-time last-writer-wins on scan order — and the page
-// vanishes from the sidebar (`tag='Page'` set). The oracle here models the
-// CORRECT post-fix state (the date page STAYS a `Page` doc-root, page-file
-// authoritative), so a demoting SUT diverges `inv-sidebar-page-tag-preserved`.
-// Mirrors `seed_forward_edge_corpus`: seeded ONLY for a frontend draw (the
-// Turso org-ingest path is where the bug lives), keyed into
-// `boot_and_seed_wide` by the page being present in the ref.
+// already- created page-file doc-root (tags=[Page]), the ingest either STRIPS
+// the `Page` tag (SqlOnly — silent demotion) or, in Loro mode, its
+// `create_in_tree` of the already-rooted id never lands under the companion's
+// parent and the whole `Journals.org` ingest times out + quarantines. The
+// oracle here models the CORRECT post-fix state (the date page STAYS a `Page`
+// doc-root, page-file authoritative), so a demoting SUT diverges
+// `inv-sidebar-page-tag-preserved` and a quarantining SUT diverges
+// `inv-no-observed-errors`. Mirrors `seed_forward_edge_corpus`: seeded ONLY for
+// a frontend draw, keyed into `boot_and_seed_wide` by the page being present in
+// the ref.
+//
+// NOTE — the page-file is at vault ROOT (a top-level page), NOT under a
+// `Journals/` subdirectory. A subdir page-file (`Journals/2026-07-10.org`)
+// roots the date page UNDER the `journals` folder-page (path→name-chain), and a
+// page NESTED under another page trips a SEPARATE Pages-sidebar render PANIC
+// (`holon-frontend/src/row_origin.rs` "disjoint root rows" — the Pages list
+// asserts every page root is `no_parent`) at BOOT. That nested-page render bug
+// is distinct from this foreign-page tag-authority bug and is reported
+// separately; the flat page-file isolates the Fork-A concern so this closure
+// boots green once the tag-authority fix lands.
 
-/// The `#+ID:` doc-root id of the folder-companion date page-file
-/// (`Journals/2026-07-10.org`). Its heading twin is inlined in `Journals.org`.
+/// True when the companion closure is activated for a random keystone draw. OFF
+/// by default (see `wide_e2e_ref_for`): post-fix the companion is lossy on org
+/// round-trip (Fork B writeback-oracle territory). The dedicated deterministic
+/// boot test seeds the topology directly instead of via this gate.
+pub fn folder_companion_enabled() -> bool {
+    std::env::var("HOLON_FOLDER_COMPANION_SEED").is_ok()
+}
+
+/// The `#+ID:` doc-root id of the companion date page-file (`2026-07-10.org`).
+/// Its heading twin is inlined in `Journals.org`.
 pub fn folder_journal_page() -> EntityUri {
     EntityUri::block("journal-2026-07-10")
 }
 
-/// The date PAGE-FILE (`Journals/2026-07-10.org`): a bare `#+ID:` doc-root
-/// whose page title is the filename `2026-07-10`. Ingested FIRST (subdir path
-/// sorts before the flat companion), so it creates the `Page`-tagged doc-root
-/// that the companion later tries (buggily) to demote.
+/// The date PAGE-FILE (`2026-07-10.org`): a bare `#+ID:` doc-root whose page
+/// title is the filename `2026-07-10`. Ingested FIRST (sorts before the
+/// companion), so it creates the `Page`-tagged doc-root that the companion
+/// later tries (buggily) to demote.
 pub const FOLDER_JOURNAL_PAGE_ORG: &str = "#+ID: journal-2026-07-10\n";
 
 /// `Journals.org` extended into the folder COMPANION: the bare `#+ID: journals`
@@ -318,10 +336,10 @@ pub const FOLDER_JOURNAL_PAGE_ORG: &str = "#+ID: journal-2026-07-10\n";
 pub const FOLDER_COMPANION_JOURNALS_ORG: &str =
     "#+ID: journals\n* 2026-07-10\n:PROPERTIES:\n:ID: journal-2026-07-10\n:END:\n";
 
-/// Seed the folder-companion date page into `state` as a seed `Page` doc-root
+/// Seed the companion date page into `state` as a seed `Page` doc-root
 /// (`block_documents[page]=no_parent`, filtered from the block-id comparison;
 /// `is_page()=true` so `inv-sidebar-page-tag-preserved` expects the SUT to keep
-/// the `Page` tag). Its org file is `Journals/2026-07-10.org`. Mirrors
+/// the `Page` tag). Its org file is `2026-07-10.org`. Mirrors
 /// [`seed_forward_edge_corpus`]; called by [`wide_e2e_ref_for`] ONLY for a
 /// frontend wiring. The companion heading in `Journals.org` references the SAME
 /// id (no new block), so the ref models exactly ONE block — the page-file
@@ -343,7 +361,7 @@ pub fn seed_folder_companion(state: &mut ReferenceState) {
     state
         .files
         .documents
-        .insert(page.clone(), "Journals/2026-07-10.org".to_string());
+        .insert(page.clone(), "2026-07-10.org".to_string());
 }
 
 // ── Journals-machinery keystone closure (dogfood 2026-07-10 P0) ──────────────
@@ -652,12 +670,12 @@ pub async fn boot_and_seed_wide(
     // the machinery org, so the SUT actually ingests and watches the id-less
     // source headless. Keyed on the block being present in the ref, exactly like
     // the forward-edge org seed below.
-    // Folder-companion demotion closure: when the oracle carries the date page
+    // Companion demotion closure: when the oracle carries the date page
     // (`seed_folder_companion`, a frontend draw), `Journals.org` becomes the
     // COMPANION that inlines the page-file's id as a plain heading, and the
-    // page-file `Journals/2026-07-10.org` is seeded FIRST (subdir path sorts
-    // before the flat companion → cold-boot ingests the `Page` doc-root before
-    // the demoting companion reconcile). Keyed on the ref like forward-edge.
+    // top-level page-file `2026-07-10.org` is seeded FIRST (it sorts before the
+    // `Journals.org` companion → cold-boot ingests the `Page` doc-root before the
+    // demoting companion reconcile). Keyed on the ref like forward-edge.
     let carries_folder_companion = ref_state
         .domain
         .block_state
@@ -677,7 +695,7 @@ pub async fn boot_and_seed_wide(
     };
     let mut seed_files: Vec<(&str, &str)> = vec![("structural-page.org", WIDE_TREE_ORG)];
     if carries_folder_companion {
-        seed_files.push(("Journals/2026-07-10.org", FOLDER_JOURNAL_PAGE_ORG));
+        seed_files.push(("2026-07-10.org", FOLDER_JOURNAL_PAGE_ORG));
     }
     seed_files.push(("Journals.org", journals_org));
     // Forward-edge ingest corpus (dogfood 2026-07-10 P0): seed
@@ -1030,12 +1048,24 @@ pub fn wide_e2e_ref_for(wiring: &Wiring) -> ReferenceState {
     // (no `SutSqlProjection`).
     if set.has_projection(Projection::ViewModel) {
         seed_forward_edge_corpus(&mut state);
-        // Folder-companion page-tag demotion closure (dogfood 2026-07-12): a
-        // subdir page-file (`Journals/2026-07-10.org`) whose `Page` doc-root is
-        // inlined as a plain heading in the `Journals.org` companion. Always-on
-        // for a frontend draw (like forward-edge) — a Turso org-ingest topology;
-        // `boot_and_seed_wide` keys the file seed on this page being in the ref.
-        seed_folder_companion(&mut state);
+        // Companion page-tag demotion closure (dogfood 2026-07-12): a top-level
+        // page-file (`2026-07-10.org`) whose `Page` doc-root is inlined as a plain
+        // heading in the `Journals.org` companion. Frontend-only (a Turso org-
+        // ingest topology); `boot_and_seed_wide` keys the file seed on this page
+        // being in the ref.
+        //
+        // ENV-gated OFF by default (mirrors `journals_machinery_enabled`): the
+        // page-authority FIX (foreign-page protection) is required for a clean
+        // boot, but POST-fix the companion's inlined heading is intentionally
+        // lossy on org round-trip (the heading belongs to the page-file, so
+        // `Journals.org` no longer renders it) — an `inv-org-render-fixed-point`
+        // divergence whose oracle is Fork B's writeback work. Promote to
+        // always-on-for-frontend once Fork B's companion-writeback oracle lands.
+        // The dedicated deterministic boot test seeds this directly (env-
+        // independent) and asserts only the ingest/tag invariants.
+        if folder_companion_enabled() {
+            seed_folder_companion(&mut state);
+        }
         // Journals-machinery closure: id-less-aggregate trigger source block.
         // Frontend-only (Turso+ViewModel watch path) AND env-gated OFF by default.
         if journals_machinery_enabled() {

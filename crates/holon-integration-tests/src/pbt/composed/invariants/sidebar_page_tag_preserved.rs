@@ -30,3 +30,72 @@ pub fn wire() -> Box<dyn CapInvariant> {
         },
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::pbt::composed::fixtures::*;
+    use crate::pbt::composed::subsystem_seed::run_with_seeded_ref;
+    use crate::pbt::composed::subsystem_seed::seed_ref;
+
+    fn page(id: &str) -> Block {
+        let mut b = Block::new_text(uri(id), EntityUri::no_parent(), id);
+        b.set_page(true);
+        b
+    }
+
+    /// Catch (doc §6 gate): a block the reference models as a `Page` doc-root
+    /// is present in the SUT WITHOUT its `Page` tag (the folder-companion
+    /// demotion) — caught by `inv-sidebar-page-tag-preserved`.
+    #[tokio::test]
+    async fn catches_demoted_page() {
+        let page_id = uri("local://journal");
+        // SUT: the same block, but its `Page` tag was stripped (demoted).
+        let sut = fixture_slice(vec![Block::new_text(
+            page_id.clone(),
+            EntityUri::no_parent(),
+            "journal",
+        )]);
+        // Ref: the block IS a page.
+        let ref_state = seed_ref(vec![page("local://journal")]);
+
+        let report = run_with_seeded_ref(
+            &composed_invariant_catalog(),
+            &sut,
+            crate::pbt::reference_state::Resolved::identity(ref_state),
+        )
+        .await;
+
+        let failures = report.failures();
+        assert!(
+            failures
+                .iter()
+                .any(|(id, _)| *id == "inv-sidebar-page-tag-preserved"),
+            "a demoted page must be caught by inv-sidebar-page-tag-preserved; \
+             failures={failures:?}",
+        );
+    }
+
+    /// Positive: a page that stays a page on BOTH sides does not fire the
+    /// oracle.
+    #[tokio::test]
+    async fn preserved_page_passes() {
+        let sut = fixture_slice(vec![page("local://journal")]);
+        let ref_state = seed_ref(vec![page("local://journal")]);
+
+        let report = run_with_seeded_ref(
+            &composed_invariant_catalog(),
+            &sut,
+            crate::pbt::reference_state::Resolved::identity(ref_state),
+        )
+        .await;
+
+        assert!(
+            !report
+                .failures()
+                .iter()
+                .any(|(id, _)| *id == "inv-sidebar-page-tag-preserved"),
+            "a page tagged on both sides must NOT fire the oracle; failures={:?}",
+            report.failures(),
+        );
+    }
+}
