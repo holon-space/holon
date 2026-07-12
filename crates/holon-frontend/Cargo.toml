@@ -31,7 +31,12 @@ tracing.workspace = true
 holon-core.workspace = true
 holon-macros.workspace = true
 holon-api.workspace = true
-holon-advice.workspace = true
+# default-features = false drops holon-advice's `engine` feature (→ holon-turso →
+# turso, native-only) so this shared renderer stays wasm-clean for the
+# dioxus-web page. holon-frontend only uses the pure rule surface
+# (GET_ADVICE_RULES_SQL, parse_discovered_rule). Native/wasi builds that also
+# pull the `holon` engine re-enable `engine` via feature unification.
+holon-advice = { path = "../holon-advice", default-features = false }
 holon-oracles.workspace = true
 holon-pbt-core = { path = "../holon-pbt-core", optional = true }
 async-trait.workspace = true

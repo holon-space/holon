@@ -2,7 +2,16 @@
 # Declares its own empty [workspace] to opt out of the holon root workspace —
 # web-sys/js-sys are not available on native targets so `cargo check --workspace`
 # (native) would fail. Same pattern as frontends/holon-worker.
+#
+# resolver = "2" is REQUIRED (same reason as frontends/holon-worker): with an
+# explicit `[workspace]` table cargo defaults to resolver v1, which unifies
+# features across ALL targets and hosts — so the proc-macro `holon-macros`
+# pulls `workspace-hack` for the host, and v1 leaks its native-only crates
+# (rmcp → reqwest → hyper → tokio `net` → mio) into the wasm32-unknown-unknown
+# target graph, tripping mio's `compile_error!` ("This wasm target is
+# unsupported by mio"). v2 keeps host/proc-macro deps off the wasm target.
 [workspace]
+resolver = "2"
 
 [package]
 name = "holon-dioxus-web"
