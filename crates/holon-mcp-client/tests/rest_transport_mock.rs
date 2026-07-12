@@ -29,7 +29,41 @@ struct MockServer {
     requests: Arc<Mutex<Vec<String>>>,
 }
 
-/// Route a request path to a canned JSON body. Returns the body text.
+const ATOM_BODY: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Mock Atom</title>
+  <entry>
+    <id>urn:uuid:a1</id>
+    <title>Atom one</title>
+    <updated>2026-07-12T10:00:00Z</updated>
+    <author><name>Ada</name></author>
+    <link rel="alternate" href="https://example.com/a1"/>
+    <content>Body A</content>
+  </entry>
+  <entry>
+    <id>urn:uuid:a2</id>
+    <title>Atom two</title>
+    <updated>2026-07-11T09:00:00Z</updated>
+    <link href="https://example.com/a2"/>
+    <summary>Summary B</summary>
+  </entry>
+</feed>"#;
+
+const RSS_BODY: &str = r#"<?xml version="1.0"?>
+<rss version="2.0">
+  <channel>
+    <title>Mock RSS</title>
+    <item>
+      <guid>r-1</guid>
+      <title>RSS one</title>
+      <pubDate>Sat, 12 Jul 2026 10:00:00 GMT</pubDate>
+      <link>https://example.com/r1</link>
+      <description>RSS body one</description>
+    </item>
+  </channel>
+</rss>"#;
+
+/// Route a request path to a canned body (JSON or XML). Returns the body text.
 fn route(path: &str) -> String {
     if path.starts_with("/posts") {
         // Bare array — the real JSONPlaceholder shape; exercises `result_key`.
@@ -40,6 +74,10 @@ fn route(path: &str) -> String {
         .to_string()
     } else if path.contains("/users/") {
         serde_json::json!([{"userId": 7, "id": 99, "title": "scoped", "body": "b"}]).to_string()
+    } else if path.starts_with("/feed.atom") {
+        ATOM_BODY.to_string()
+    } else if path.starts_with("/feed.rss") {
+        RSS_BODY.to_string()
     } else {
         serde_json::json!([]).to_string()
     }
@@ -201,6 +239,105 @@ tools: {{}}
     assert!(
         reqs.iter().any(|r| r.starts_with("GET /posts")),
         "mock never saw GET /posts; saw {reqs:?}"
+    );
+}
+
+async fn fetch_feed(
+    format: &str,
+    path: &str,
+    base: &str,
+) -> Vec<serde_json::Map<String, serde_json::Value>> {
+    let yaml = format!(
+        r#"
+transport:
+  rest:
+    base_url: {base}
+    calls:
+      list-feed:
+        method: GET
+        path: {path}
+        format: {format}
+        result_key: entries
+entities:
+  feed_items:
+    id_column: id
+    schema:
+      - {{ name: id, sql_type: TEXT, primary_key: true }}
+      - {{ name: title, sql_type: TEXT }}
+      - {{ name: updated, sql_type: TEXT }}
+      - {{ name: author, sql_type: TEXT }}
+      - {{ name: link, sql_type: TEXT }}
+      - {{ name: content, sql_type: TEXT }}
+    sync:
+      list_tool: list-feed
+      extract_path: entries
+tools: {{}}
+"#
+    );
+    let cfg: IntegrationFileConfig = serde_yaml::from_str(&yaml).expect("parse");
+    let strategy = cfg.entities["feed_items"]
+        .sync
+        .as_ref()
+        .expect("sync")
+        .into_strategy()
+        .expect("strategy");
+    let surface = surface_from(&yaml, "feed", &|_| None);
+    strategy
+        .fetch_records(&surface, &NoopTokenStore, "feed.feed_items")
+        .await
+        .expect("fetch feed")
+        .records
+}
+
+#[tokio::test]
+async fn rest_transport_decodes_atom_feed_via_shared_sync_path() {
+    let mock = start_mock().await;
+    let records = fetch_feed("atom", "/feed.atom", &mock.base_url).await;
+    assert_eq!(records.len(), 2, "expected two atom entries");
+    assert_eq!(
+        records[0].get("id").and_then(|v| v.as_str()),
+        Some("urn:uuid:a1")
+    );
+    assert_eq!(
+        records[0].get("title").and_then(|v| v.as_str()),
+        Some("Atom one")
+    );
+    assert_eq!(
+        records[0].get("author").and_then(|v| v.as_str()),
+        Some("Ada")
+    );
+    assert_eq!(
+        records[0].get("link").and_then(|v| v.as_str()),
+        Some("https://example.com/a1")
+    );
+    assert_eq!(
+        records[0].get("content").and_then(|v| v.as_str()),
+        Some("Body A")
+    );
+    // Second entry falls back to <summary>.
+    assert_eq!(
+        records[1].get("content").and_then(|v| v.as_str()),
+        Some("Summary B")
+    );
+}
+
+#[tokio::test]
+async fn rest_transport_decodes_rss_feed_via_shared_sync_path() {
+    let mock = start_mock().await;
+    let records = fetch_feed("rss", "/feed.rss", &mock.base_url).await;
+    assert_eq!(records.len(), 1, "expected one rss item");
+    assert_eq!(records[0].get("id").and_then(|v| v.as_str()), Some("r-1"));
+    assert_eq!(
+        records[0].get("title").and_then(|v| v.as_str()),
+        Some("RSS one")
+    );
+    assert_eq!(
+        records[0].get("link").and_then(|v| v.as_str()),
+        Some("https://example.com/r1")
+    );
+    assert_eq!(
+        records[0].get("content").and_then(|v| v.as_str()),
+        Some("RSS body one")
     );
 }
 

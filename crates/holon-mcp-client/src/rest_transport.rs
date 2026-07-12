@@ -30,6 +30,8 @@ use rmcp::model::ErrorData;
 use rmcp::model::ReadResourceRequestParam;
 use rmcp::model::ReadResourceResult;
 use rmcp::service::ServiceError;
+use serde::Deserialize;
+use serde::Serialize;
 
 use crate::mcp_call_surface::McpCallSurface;
 
@@ -44,11 +46,36 @@ pub struct RestCall {
     pub method: String,
     pub path: String,
     pub query: HashMap<String, String>,
-    /// If set, a non-object JSON body (e.g. a bare array) is wrapped as
+    /// How to decode the response body before extraction. `json` is the default
+    /// (back-compat); `atom`/`rss` decode a syndication feed into the same
+    /// record shape (see [`ResponseFormat`]).
+    pub format: ResponseFormat,
+    /// For `json`: if set, a non-object body (e.g. a bare array) is wrapped as
     /// `{ result_key: <body> }` so a `sync.extract_path` can select it. This is
     /// the response→block-shape adapter: REST APIs return arbitrary top-level
     /// shapes, the tool-response contract wants an object.
+    ///
+    /// For `atom`/`rss`: the decoded entry array is always wrapped under this
+    /// key (a feed is inherently a collection); defaults to `entries` when
+    /// unset.
     pub result_key: Option<String>,
+}
+
+/// How a [`RestCall`] response body is decoded into records.
+///
+/// `Json` is the default and back-compatible. `Atom`/`Rss` decode a syndication
+/// feed (a fixed, standardized schema — RFC 4287 for Atom, RSS 2.0) into an
+/// array of record objects with the same field-per-column contract the JSON
+/// path uses, so the transport axis (mcp | rest) stays orthogonal to the body
+/// codec (json | atom | rss). Parse-don't-validate: the codec is chosen at the
+/// boundary and malformed input fails loud.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ResponseFormat {
+    #[default]
+    Json,
+    Atom,
+    Rss,
 }
 
 /// A UTCP-manual, resolved and ready to serve calls. Built by
@@ -145,19 +172,34 @@ impl RestCallSurface {
             anyhow::bail!("rest transport: GET {url} returned HTTP {status}: {preview}");
         }
 
-        let parsed: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
-            let preview: String = body.chars().take(200).collect();
-            anyhow::anyhow!("rest transport: GET {url} body is not JSON: {e} (body: {preview})")
-        })?;
-
-        // Wrap non-object bodies so a `sync.extract_path` can select them.
-        let structured = match &call.result_key {
-            Some(key) => {
+        let structured = match call.format {
+            ResponseFormat::Json => {
+                let parsed: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+                    let preview: String = body.chars().take(200).collect();
+                    anyhow::anyhow!(
+                        "rest transport: GET {url} body is not JSON: {e} (body: {preview})"
+                    )
+                })?;
+                // Wrap non-object bodies so a `sync.extract_path` can select them.
+                match &call.result_key {
+                    Some(key) => {
+                        let mut obj = serde_json::Map::new();
+                        obj.insert(key.clone(), parsed);
+                        serde_json::Value::Object(obj)
+                    }
+                    None => parsed,
+                }
+            }
+            ResponseFormat::Atom | ResponseFormat::Rss => {
+                let entries = parse_feed(call.format, &body)
+                    .map_err(|e| anyhow::anyhow!("rest transport: GET {url}: {e}"))?;
+                // A feed is inherently a collection; always wrap under the key so
+                // `sync.extract_path` can select it (default `entries`).
+                let key = call.result_key.as_deref().unwrap_or("entries");
                 let mut obj = serde_json::Map::new();
-                obj.insert(key.clone(), parsed);
+                obj.insert(key.to_string(), serde_json::Value::Array(entries));
                 serde_json::Value::Object(obj)
             }
-            None => parsed,
         };
         Ok(structured)
     }
@@ -235,6 +277,130 @@ fn fill_placeholders(
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// Syndication-feed codecs (Atom RFC 4287 / RSS 2.0)
+//
+// Both decode a standardized, fixed-schema XML document into the SAME record
+// shape the JSON path produces — a Vec of objects with stable keys
+// (id/title/updated/author/link/content) — so a feed maps onto block-shape
+// columns exactly like a JSON API. Parse-don't-validate: the root element is
+// asserted to be a feed at the boundary; anything else fails loud. An empty
+// feed (zero entries) is legitimate and yields an empty array.
+// ---------------------------------------------------------------------------
+
+fn parse_feed(format: ResponseFormat, body: &str) -> anyhow::Result<Vec<serde_json::Value>> {
+    let doc = roxmltree::Document::parse(body).map_err(|e| {
+        let preview: String = body.chars().take(200).collect();
+        anyhow::anyhow!("malformed XML feed: {e} (body: {preview})")
+    })?;
+    let root = doc.root_element().tag_name().name().to_string();
+
+    let records = match format {
+        ResponseFormat::Atom => {
+            if root != "feed" {
+                anyhow::bail!("expected an Atom <feed> root element, got <{root}>");
+            }
+            doc.descendants()
+                .filter(|n| n.is_element() && n.tag_name().name() == "entry")
+                .map(atom_entry_to_record)
+                .collect()
+        }
+        ResponseFormat::Rss => {
+            if root != "rss" {
+                anyhow::bail!("expected an RSS <rss> root element, got <{root}>");
+            }
+            doc.descendants()
+                .filter(|n| n.is_element() && n.tag_name().name() == "item")
+                .map(rss_item_to_record)
+                .collect()
+        }
+        ResponseFormat::Json => unreachable!("parse_feed is only called for atom/rss"),
+    };
+    Ok(records)
+}
+
+/// Map an Atom `<entry>` (RFC 4287) to a record object.
+fn atom_entry_to_record(entry: roxmltree::Node<'_, '_>) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    put(&mut obj, "id", child_text(entry, "id"));
+    put(&mut obj, "title", child_text(entry, "title"));
+    put(&mut obj, "updated", child_text(entry, "updated"));
+    // <author> is an element carrying a <name> child.
+    let author = entry
+        .children()
+        .find(|c| c.is_element() && c.tag_name().name() == "author")
+        .and_then(|a| child_text(a, "name"));
+    put(&mut obj, "author", author);
+    put(&mut obj, "link", atom_link(entry));
+    // Prefer full <content>, fall back to <summary>.
+    put(
+        &mut obj,
+        "content",
+        child_text(entry, "content").or_else(|| child_text(entry, "summary")),
+    );
+    serde_json::Value::Object(obj)
+}
+
+/// Atom links are `<link href="..." rel="..."/>`; prefer `alternate` (or no
+/// rel).
+fn atom_link(entry: roxmltree::Node<'_, '_>) -> Option<String> {
+    let links: Vec<_> = entry
+        .children()
+        .filter(|c| c.is_element() && c.tag_name().name() == "link")
+        .collect();
+    links
+        .iter()
+        .find(|l| l.attribute("rel").is_none_or(|r| r == "alternate"))
+        .or_else(|| links.first())
+        .and_then(|l| l.attribute("href"))
+        .map(|s| s.to_string())
+}
+
+/// Map an RSS 2.0 `<item>` to the same record shape as
+/// [`atom_entry_to_record`].
+fn rss_item_to_record(item: roxmltree::Node<'_, '_>) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    // guid is the stable id; fall back to the link.
+    put(
+        &mut obj,
+        "id",
+        child_text(item, "guid").or_else(|| child_text(item, "link")),
+    );
+    put(&mut obj, "title", child_text(item, "title"));
+    put(&mut obj, "updated", child_text(item, "pubDate"));
+    // <author>, or the widely-used <dc:creator> (local name "creator").
+    put(
+        &mut obj,
+        "author",
+        child_text(item, "author").or_else(|| child_text(item, "creator")),
+    );
+    // In RSS the link is element text (not an attribute).
+    put(&mut obj, "link", child_text(item, "link"));
+    // <description>, or <content:encoded> (local name "encoded").
+    put(
+        &mut obj,
+        "content",
+        child_text(item, "description").or_else(|| child_text(item, "encoded")),
+    );
+    serde_json::Value::Object(obj)
+}
+
+/// Text of the first child element with the given local name
+/// (namespace-agnostic), trimmed; `None` when absent or empty.
+fn child_text(node: roxmltree::Node<'_, '_>, local: &str) -> Option<String> {
+    node.children()
+        .find(|c| c.is_element() && c.tag_name().name() == local)
+        .and_then(|c| c.text())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn put(obj: &mut serde_json::Map<String, serde_json::Value>, key: &str, val: Option<String>) {
+    if let Some(v) = val {
+        obj.insert(key.to_string(), serde_json::Value::String(v));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,5 +434,105 @@ mod tests {
     fn fill_placeholders_unterminated_fails_loud() {
         let err = fill_placeholders("/users/{id", &args(&[("id", "1")])).unwrap_err();
         assert!(err.to_string().contains("unterminated"), "{err}");
+    }
+
+    const ATOM_SAMPLE: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Example Feed</title>
+  <entry>
+    <id>urn:uuid:1</id>
+    <title>First post</title>
+    <updated>2026-07-12T10:00:00Z</updated>
+    <author><name>Ada</name></author>
+    <link rel="alternate" href="https://example.com/1"/>
+    <content type="html">Body one</content>
+  </entry>
+  <entry>
+    <id>urn:uuid:2</id>
+    <title>Second post</title>
+    <updated>2026-07-11T09:00:00Z</updated>
+    <link href="https://example.com/2"/>
+    <summary>Just a summary</summary>
+  </entry>
+</feed>"#;
+
+    const RSS_SAMPLE: &str = r#"<?xml version="1.0"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Example Channel</title>
+    <item>
+      <guid>post-1</guid>
+      <title>RSS first</title>
+      <pubDate>Sat, 12 Jul 2026 10:00:00 GMT</pubDate>
+      <dc:creator>Grace</dc:creator>
+      <link>https://example.com/r1</link>
+      <description>RSS body one</description>
+    </item>
+    <item>
+      <title>RSS second</title>
+      <link>https://example.com/r2</link>
+    </item>
+  </channel>
+</rss>"#;
+
+    #[test]
+    fn parse_atom_extracts_entries() {
+        let entries = parse_feed(ResponseFormat::Atom, ATOM_SAMPLE).unwrap();
+        assert_eq!(entries.len(), 2);
+        let e0 = &entries[0];
+        assert_eq!(e0["id"], "urn:uuid:1");
+        assert_eq!(e0["title"], "First post");
+        assert_eq!(e0["updated"], "2026-07-12T10:00:00Z");
+        assert_eq!(e0["author"], "Ada");
+        assert_eq!(e0["link"], "https://example.com/1");
+        assert_eq!(e0["content"], "Body one");
+        // Second entry: no author/content — falls back to <summary>, link has no rel.
+        let e1 = &entries[1];
+        assert_eq!(e1["content"], "Just a summary");
+        assert_eq!(e1["link"], "https://example.com/2");
+        assert!(e1.get("author").is_none());
+    }
+
+    #[test]
+    fn parse_rss_extracts_items() {
+        let items = parse_feed(ResponseFormat::Rss, RSS_SAMPLE).unwrap();
+        assert_eq!(items.len(), 2);
+        let i0 = &items[0];
+        assert_eq!(i0["id"], "post-1");
+        assert_eq!(i0["title"], "RSS first");
+        assert_eq!(i0["updated"], "Sat, 12 Jul 2026 10:00:00 GMT");
+        assert_eq!(i0["author"], "Grace"); // dc:creator
+        assert_eq!(i0["link"], "https://example.com/r1");
+        assert_eq!(i0["content"], "RSS body one");
+        // Second item: no guid → id falls back to link.
+        assert_eq!(items[1]["id"], "https://example.com/r2");
+    }
+
+    #[test]
+    fn parse_feed_malformed_xml_fails_loud() {
+        let err = parse_feed(ResponseFormat::Atom, "<feed><entry>unclosed").unwrap_err();
+        assert!(err.to_string().contains("malformed XML"), "{err}");
+    }
+
+    #[test]
+    fn parse_feed_wrong_root_fails_loud() {
+        let err = parse_feed(ResponseFormat::Atom, "<html><body>nope</body></html>").unwrap_err();
+        assert!(err.to_string().contains("expected an Atom <feed>"), "{err}");
+        let err = parse_feed(ResponseFormat::Rss, ATOM_SAMPLE).unwrap_err();
+        assert!(err.to_string().contains("expected an RSS <rss>"), "{err}");
+    }
+
+    #[test]
+    fn empty_feed_is_legitimate() {
+        let empty = r#"<feed xmlns="http://www.w3.org/2005/Atom"><title>x</title></feed>"#;
+        let entries = parse_feed(ResponseFormat::Atom, empty).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn response_format_defaults_to_json() {
+        assert_eq!(ResponseFormat::default(), ResponseFormat::Json);
+        let f: ResponseFormat = serde_yaml::from_str("atom").unwrap();
+        assert_eq!(f, ResponseFormat::Atom);
     }
 }
