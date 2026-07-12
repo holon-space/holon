@@ -2421,6 +2421,56 @@ impl FileSyncController {
         Ok(())
     }
 
+    /// Fork B B2 — materialize every page (document root) that owns NO file on
+    /// disk into its own `<name-chain>.org`. A FILELESS page (a `Page` block
+    /// that exists in the store but backs no file — e.g. a rule-created
+    /// journal date, or a companion-inlined page-heading the CTE
+    /// de-inlines) otherwise vanishes on store-rebuild-from-disk and is
+    /// invisible to file-based sync/backup.
+    ///
+    /// Runs after the initial scan so migration converges without waiting for a
+    /// per-page CDC edit (OQ4 RULED: the boot sweep is the migration
+    /// mechanism). Idempotent: a page already owning a file (tracked or
+    /// present on disk) is skipped. New-file writes seed `last_projection`
+    /// (echo suppression) so the watcher event for our own write is not
+    /// re-ingested.
+    pub async fn materialize_missing_page_files(&mut self) -> Result<()> {
+        let docs = self.block_reader.iter_documents_with_blocks().await?;
+        for (doc_id, blocks) in docs {
+            if blocks.is_empty() {
+                continue;
+            }
+            let path = match self.doc_id_to_path(&doc_id).await {
+                Some(p) => p,
+                None => continue,
+            };
+            let canonical = CanonicalPath::new(&path);
+            if self.last_projection.contains_key(&canonical) {
+                continue;
+            }
+            let disk = read_disk_or_empty(&self.fs, &path).await?;
+            if !disk.is_empty() {
+                continue;
+            }
+            let rendered = self.render_doc_blocks(&doc_id, &path, &blocks).await?;
+            if rendered.trim().is_empty() {
+                continue;
+            }
+            if let Some(parent) = path.parent() {
+                self.fs.create_dir_all(parent).await?;
+            }
+            self.fs.write(&path, rendered.as_bytes()).await?;
+            self.run_post_write_hook(&path);
+            self.last_projection.insert(canonical, rendered);
+            info!(
+                "[FileSyncController] Materialized fileless page {} -> {}",
+                doc_id,
+                path.display()
+            );
+        }
+        Ok(())
+    }
+
     /// Render blocks for a document by its ID.
     ///
     /// Fetches the Document to preserve file-level metadata (e.g. `#+TODO:`
