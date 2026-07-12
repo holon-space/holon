@@ -40,6 +40,7 @@ pub mod link_parser;
 pub mod live_data;
 pub mod operation_engine;
 pub mod pattern;
+pub mod perspective;
 pub mod predicate;
 pub mod provenance;
 pub mod query_context;
