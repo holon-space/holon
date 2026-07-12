@@ -71,6 +71,23 @@ impl ReferenceDomainState {
             block_operations: default_block_operations(),
         }
     }
+
+    /// Block IDs whose `content` must NEVER be mutated by an edit transition:
+    /// query / render source blocks (would corrupt the active layout) and
+    /// entity-profile blocks (typed YAML, not free-form text).
+    pub fn no_content_update_set(&self) -> HashSet<EntityUri> {
+        self.layout_blocks
+            .render_source_ids
+            .iter()
+            .chain(self.layout_blocks.query_source_ids.iter())
+            .chain(self.profile_block_ids.iter())
+            .cloned()
+            .collect()
+    }
+
+    pub fn has_blocks_profile(&self) -> bool {
+        self.active_profiles.contains_key("block")
+    }
 }
 
 impl Default for ReferenceDomainState {
