@@ -1024,6 +1024,51 @@ impl FileSyncController {
             );
         }
 
+        // Foreign PAGE doc-root protection (dogfood 2026-07-12). A block that is
+        // CURRENTLY a `Page` owned by a DIFFERENT page-file is authoritatively
+        // that page. A folder-companion / aggregating file (e.g. `Journals.org`)
+        // that inlines the page-file's doc-root as a plain heading must NOT
+        // create, update, re-parent, or delete it — above all it must not strip
+        // its `Page` tag. The page-file stays the SOLE authority for the page's
+        // identity, content, tags, and placement; letting the companion write
+        // would be a silent last-writer-wins between two on-disk representations
+        // of the SAME logical page (SqlOnly: the `Page` tag is stripped; Loro:
+        // the re-`create_in_tree` of an already-rooted id never lands under the
+        // companion's parent and the whole ingest times out + quarantines).
+        //
+        // Contract (externally visible): the `Page` tag stays truthful — a
+        // foreign file inlining a doc-root as a heading cannot demote it. The
+        // discriminator is `doc_manager.get_by_id`, which reads the Page matview
+        // (`tag='Page'`) — the tag IS the page-authority signal, no second
+        // ownership/path predicate leaks to any consumer.
+        //
+        // Why not `find_foreign_blocks`: its `blocks_by_document` attribution
+        // CANNOT see a doc-root (page blocks are excluded from every document's
+        // descendant list, and a page is never a member of its own document), so
+        // the create-path conflict re-parent above never fires for exactly this
+        // topology. The Page matview answers "is this id a page RIGHT NOW"
+        // authoritatively regardless of that attribution gap.
+        let mut foreign_page_ids: std::collections::HashSet<EntityUri> =
+            std::collections::HashSet::new();
+        for block in &new_blocks_vec {
+            if block.id == document_uri || block.id == new_parse.document.id {
+                continue;
+            }
+            if self.doc_manager.get_by_id(&block.id).await?.is_some() {
+                foreign_page_ids.insert(block.id.clone());
+            }
+        }
+        if !foreign_page_ids.is_empty() {
+            info!(
+                "[FileSyncController] Skipping {} foreign PAGE doc-root(s) inlined as headings in \
+                 {} — the owning page-file stays authoritative for their Page identity (no demote \
+                 / re-parent): {:?}",
+                foreign_page_ids.len(),
+                path.display(),
+                foreign_page_ids,
+            );
+        }
+
         // Collect all block operations into a batch
         let mut operations: Vec<(String, holon_api::StorageEntity)> = Vec::new();
         let mut has_structural_changes = false;
@@ -1092,6 +1137,12 @@ impl FileSyncController {
         let mut last_block_per_parent: HashMap<EntityUri, EntityUri> = HashMap::new();
         let mut predecessors: HashMap<EntityUri, Option<EntityUri>> = HashMap::new();
         for block in &new_blocks_vec {
+            // A foreign page doc-root is not placed in THIS file's tree, so it
+            // must not anchor a later sibling's `after_block_id` — skip it so the
+            // cursor stays on the previous real sibling.
+            if foreign_page_ids.contains(&block.id) {
+                continue;
+            }
             let parent_id = if block.parent_id == new_parse.document.id {
                 &document_uri
             } else {
@@ -1118,6 +1169,11 @@ impl FileSyncController {
         // batch — so they are excluded from the site-A feed catch-up set below.
         let mut consolidator_create_ids: Vec<String> = Vec::new();
         for block in &new_blocks_vec {
+            // Foreign page doc-root: owned by another page-file, inlined here as
+            // a heading. Never create/re-seed/re-parent it (that is the demote).
+            if foreign_page_ids.contains(&block.id) {
+                continue;
+            }
             // Upgrade-path re-seed: a PRE-EXISTING row (SQL populated by a
             // pre-Loro session) whose block the authoritative tree never
             // adopted. `new_blocks_vec` is DFS document order, so parents
@@ -1261,6 +1317,12 @@ impl FileSyncController {
         // scrambling the children list.
         for new_block in &new_blocks_vec {
             let id = &new_block.id;
+            // Foreign page doc-root inlined as a heading: the owning page-file is
+            // authoritative — never emit an update that would strip its `Page`
+            // tag or rewrite its identity/parent.
+            if foreign_page_ids.contains(id) {
+                continue;
+            }
             if let Some(old_block) = old_blocks.get(id) {
                 // No-store conflict path: when the disk content for this block
                 // diverged from the base AND the store holds a competing edit,
@@ -1328,6 +1390,20 @@ impl FileSyncController {
         // Deletes
         for id in old_blocks.keys() {
             if !new_blocks.contains_key(id) {
+                // Never delete a foreign page doc-root. If a companion file
+                // stops inlining a page's heading, that page still lives in its
+                // own page-file — its deletion is that file's concern, not ours.
+                // (`foreign_page_ids` is built from the NEW parse, so an id that
+                // vanished from this file isn't in it — re-check the Page matview.)
+                if *id != document_uri && self.doc_manager.get_by_id(id).await?.is_some() {
+                    info!(
+                        "[FileSyncController] NOT deleting {} on ingest of {} — it is a Page \
+                         doc-root owned by its own page-file (was inlined here).",
+                        id,
+                        path.display(),
+                    );
+                    continue;
+                }
                 has_structural_changes = true;
                 let mut params: holon_api::StorageEntity = HashMap::new();
                 params.insert("id".into(), Value::String(id.to_string()));
@@ -1547,6 +1623,11 @@ impl FileSyncController {
                 // no-ops cheaply when already positioned, so doc-order placement
                 // is order-correct regardless of the initial layout.
                 for new_block in &new_blocks_vec {
+                    // Foreign page doc-root: it lives in its OWN page-file's tree,
+                    // not this companion's — never place it here.
+                    if foreign_page_ids.contains(&new_block.id) {
+                        continue;
+                    }
                     // Source / image children are grouped ahead of text by
                     // `OrgRenderer::render_entity_tree` regardless of sort_key
                     // (see assertions.rs `render_group`). They also don't land
@@ -1621,6 +1702,12 @@ impl FileSyncController {
                 let mut per_parent: Vec<(EntityUri, Vec<EntityUri>)> = Vec::new();
                 let mut parent_slot: HashMap<EntityUri, usize> = HashMap::new();
                 for new_block in &new_blocks_vec {
+                    // Foreign page doc-root: owned by its own page-file — exclude
+                    // from this companion's per-parent order (a `place_all` here
+                    // would re-key it under the companion's parent).
+                    if foreign_page_ids.contains(&new_block.id) {
+                        continue;
+                    }
                     if !matches!(new_block.content_type, holon_api::ContentType::Text) {
                         continue;
                     }
