@@ -637,20 +637,11 @@ impl ReferenceState {
     }
 
     pub fn current_focus(&self, region: Region) -> Option<EntityUri> {
-        self.ui
-            .tab
-            .navigation_history
-            .get(&region)
-            .and_then(|h| h.current_focus())
+        self.ui.tab.current_focus(region)
     }
 
     pub fn can_go_back(&self, region: Region) -> bool {
-        self.ui
-            .tab
-            .navigation_history
-            .get(&region)
-            .map(|h| h.can_go_back())
-            .unwrap_or(false)
+        self.ui.tab.can_go_back(region)
     }
 
     /// If `block_id` is the focused entity in any region, reset the cursor to
@@ -702,25 +693,20 @@ impl ReferenceState {
     /// Whether any region currently has a focused entity (required for
     /// ArrowNavigate).
     pub fn has_focus(&self) -> bool {
-        !self.ui.tab.focused_entity_id.is_empty()
+        self.ui.tab.has_focus()
     }
 
     /// Get the focused entity in a region (set by ClickBlock).
     pub fn focused_entity(&self, region: Region) -> Option<&EntityUri> {
-        self.ui.tab.focused_entity_id.get(&region)
+        self.ui.tab.focused_entity(region)
     }
 
     pub fn can_go_forward(&self, region: Region) -> bool {
-        self.ui
-            .tab
-            .navigation_history
-            .get(&region)
-            .map(|h| h.can_go_forward())
-            .unwrap_or(false)
+        self.ui.tab.can_go_forward(region)
     }
 
     pub fn current_view(&self) -> String {
-        self.ui.user.current_view.clone()
+        self.ui.user.current_view()
     }
 
     /// Returns expected query results for a watch using the TestQuery
@@ -740,12 +726,7 @@ impl ReferenceState {
 
     /// Find a page block by its title (first line of content, e.g. "index").
     pub fn doc_uri_by_name(&self, title: &str) -> Option<EntityUri> {
-        self.domain
-            .block_state
-            .blocks
-            .values()
-            .find(|b| b.is_page() && b.title() == title)
-            .map(|b| b.id.clone())
+        self.domain.block_state.doc_uri_by_name(title)
     }
 
     /// Whether the system has a valid root layout (from seed blocks or
@@ -1067,14 +1048,7 @@ impl ReferenceState {
     /// query / render source blocks (would corrupt the active layout) and
     /// entity-profile blocks (typed YAML, not free-form text).
     pub fn no_content_update_set(&self) -> std::collections::HashSet<EntityUri> {
-        self.domain
-            .layout_blocks
-            .render_source_ids
-            .iter()
-            .chain(self.domain.layout_blocks.query_source_ids.iter())
-            .chain(self.domain.profile_block_ids.iter())
-            .cloned()
-            .collect()
+        self.domain.no_content_update_set()
     }
 
     /// Stable IDs of blocks any peer has modified. JoinBlock excludes these
@@ -1200,13 +1174,7 @@ impl ReferenceState {
 
     /// Get IDs of text blocks only (not source blocks).
     pub fn text_block_ids(&self) -> Vec<EntityUri> {
-        self.domain
-            .block_state
-            .blocks
-            .iter()
-            .filter(|(_, b)| b.content_type == ContentType::Text)
-            .map(|(id, _)| id.clone())
-            .collect()
+        self.domain.block_state.text_block_ids()
     }
 
     // ── Block hierarchy query helpers ──────────────────────────────────
@@ -1214,20 +1182,7 @@ impl ReferenceState {
     /// Children of parent sorted by sequence then ID (matching canonical
     /// ordering).
     pub fn sorted_children_of(&self, parent_id: &EntityUri) -> Vec<&Block> {
-        use holon_orgmode::models::OrgBlockExt;
-        let mut children: Vec<&Block> = self
-            .domain
-            .block_state
-            .blocks
-            .values()
-            .filter(|b| b.parent_id == *parent_id)
-            .collect();
-        children.sort_by(|a, b| {
-            a.sequence()
-                .cmp(&b.sequence())
-                .then_with(|| a.id.cmp(&b.id))
-        });
-        children
+        self.domain.block_state.sorted_children_of(parent_id)
     }
 
     /// Predicted ordered child ids of `parent_id`. Mirrors what
@@ -1236,43 +1191,24 @@ impl ReferenceState {
     /// sides produce a `Vec<EntityUri>`, no `sort_key` / `sequence`
     /// strings cross the boundary.
     pub fn children_of(&self, parent_id: &EntityUri) -> Vec<EntityUri> {
-        self.sorted_children_of(parent_id)
-            .into_iter()
-            .map(|b| b.id.clone())
-            .collect()
+        self.domain.block_state.children_of(parent_id)
     }
 
     /// Previous sibling of block_id (same parent, immediately before in
     /// sequence order).
     pub fn previous_sibling(&self, block_id: &EntityUri) -> Option<EntityUri> {
-        let block = self.domain.block_state.blocks.get(block_id)?;
-        let children = self.sorted_children_of(&block.parent_id);
-        let idx = children.iter().position(|b| b.id == *block_id)?;
-        if idx > 0 {
-            Some(children[idx - 1].id.clone())
-        } else {
-            None
-        }
+        self.domain.block_state.previous_sibling(block_id)
     }
 
     /// Next sibling of block_id (same parent, immediately after in sequence
     /// order).
     pub fn next_sibling(&self, block_id: &EntityUri) -> Option<EntityUri> {
-        let block = self.domain.block_state.blocks.get(block_id)?;
-        let children = self.sorted_children_of(&block.parent_id);
-        let idx = children.iter().position(|b| b.id == *block_id)?;
-        children.get(idx + 1).map(|b| b.id.clone())
+        self.domain.block_state.next_sibling(block_id)
     }
 
     /// Grandparent of block_id (parent's parent). None if at root level.
     pub fn grandparent(&self, block_id: &EntityUri) -> Option<EntityUri> {
-        let block = self.domain.block_state.blocks.get(block_id)?;
-        let parent = self.domain.block_state.blocks.get(&block.parent_id)?;
-        if parent.parent_id.is_no_parent() || parent.parent_id.is_sentinel() {
-            None
-        } else {
-            Some(parent.parent_id.clone())
-        }
+        self.domain.block_state.grandparent(block_id)
     }
 
     // ── Block hierarchy mutation helpers ─────────────────────────────
@@ -1752,7 +1688,7 @@ impl ReferenceState {
     }
 
     pub fn has_blocks_profile(&self) -> bool {
-        self.domain.active_profiles.contains_key("block")
+        self.domain.has_blocks_profile()
     }
 
     /// Rebuild profile tracking from current blocks state.
