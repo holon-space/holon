@@ -645,6 +645,43 @@ impl ReferenceState {
         }
     }
 
+    /// If a CLEAN active editor is open on `block_id`, refresh its in-memory
+    /// text to the block's current content. Mirrors prod's data subscription:
+    /// the live editor cell (`editable_text(block, "content").current()`, the
+    /// exact source `editor_live_text` reads) IS the block's content container,
+    /// so an EXTERNAL content change to an idle (never-typed) editor surfaces
+    /// in the live text immediately. A DIRTY editor holds user-authored
+    /// pending text that prod's subscription does NOT clobber (the
+    /// split-with-pending-edit contract), so it is left untouched. Without
+    /// this, a clean editor opened at a split product (e.g. content "2")
+    /// then hit by an external `Update{content:"a"}` leaves the ref's
+    /// `active_editor.in_memory_content` stale at "2" while the SUT cell
+    /// already reads "a" — the `inv-editor-text/mirror` residual (editor
+    /// stale-buffer family).
+    ///
+    /// Only the live TEXT is refreshed, not the caret: the SUT's caret mirror
+    /// (`HeadlessEditorMirror::tracked_cursor`) is advanced solely by
+    /// keystrokes, so an external content change (no keystroke) leaves it
+    /// untouched — the ref must do the same or `inv-editor-caret/mirror` would
+    /// diverge on a `MoveCursor`-then-external-update sequence.
+    pub fn refresh_clean_active_editor(&mut self, block_id: &EntityUri) {
+        let Some(new_content) = self
+            .domain
+            .block_state
+            .blocks
+            .get(block_id)
+            .map(|b| b.content.clone())
+        else {
+            return;
+        };
+        if let Some(editor) = self.ui.tab.active_editor.as_mut()
+            && &editor.block_id == block_id
+            && !editor.dirty
+        {
+            editor.in_memory_content = new_content;
+        }
+    }
+
     /// If `block_id` is the focused entity in any region, clear the focus
     /// (the block was deleted — can't be focused anymore).
     pub fn clear_focus_if_deleted(&mut self, block_id: &EntityUri) {
