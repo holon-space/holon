@@ -2255,6 +2255,40 @@ mod tests {
         assert_eq!(appended_row_count(inner, &slot), 0);
     }
 
+    /// BugFunnel #67: a NESTED-PAGE forest reaches the SAME read-only sidebar
+    /// render path. A subdir page-file (`Journals/2026-07-10.org`) roots the
+    /// date page under the `journals` folder-page, which is not itself a
+    /// `Page`, so the `WHERE tag='Page'` rowset shows a mix: top-level
+    /// pages at the `no_parent` sentinel PLUS a date page whose parent is
+    /// filtered out. This USED TO PANIC at boot ("disjoint root rows").
+    /// Read-only (`allow_root_creation = false`) must resolve to NO slot
+    /// without panicking, and both pages stay in the rendered rowset.
+    #[test]
+    fn nested_page_sidebar_forest_boots_without_panic() {
+        let sentinel = holon_api::EntityUri::no_parent();
+        let inner = vec![
+            row_with_parent("block:pageA", sentinel.as_str()),
+            row_with_parent("block:journal-2026-07-10", "block:journals"), // parent filtered out
+        ];
+        let slot = VirtualChildSlot {
+            defaults: HashMap::new(),
+            parent_id: holon_api::EntityUri::block("journals-sidebar"),
+            allow_root_creation: false,
+        };
+        // No panic; no creation slot appended.
+        let provider =
+            AppendedRowsProvider::creation_slot(Arc::new(FixedRows(inner.clone())), &slot);
+        let snap = provider.rows_snapshot();
+        assert_eq!(snap.len(), inner.len(), "no virtual row appended");
+        // Both real pages survive into the rendered rowset.
+        let ids: Vec<Option<&str>> = snap
+            .iter()
+            .map(|r| r.get("id").and_then(|v| v.as_string()))
+            .collect();
+        assert!(ids.contains(&Some("block:pageA")));
+        assert!(ids.contains(&Some("block:journal-2026-07-10")));
+    }
+
     /// The main panel is a single focus-rooted tree; its creation slot is
     /// PRESERVED regardless of the `allow_root_creation` opt-in — the fix must
     /// not regress it (BugFunnel #61).
