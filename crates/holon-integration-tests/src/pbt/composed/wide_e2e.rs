@@ -780,8 +780,7 @@ pub async fn boot_and_seed_wide(
         .chain(FORWARD_EDGE_IDS.into_iter().map(EntityUri::block))
         .chain([
             EntityUri::parse(holon_frontend::JOURNALS_AUTO_CREATE_ID).expect("auto-create id"),
-            EntityUri::parse(holon_frontend::JOURNALS_TRIGGER_ID).expect("trigger id"),
-            EntityUri::parse(holon_frontend::JOURNALS_ACTION_ID).expect("action id"),
+            EntityUri::parse(holon_frontend::JOURNALS_ACTION_ID).expect("holon_rule id"),
             crate::pbt::frontend_slice::components::keystone_boot_journal_id(),
         ])
         .collect();
