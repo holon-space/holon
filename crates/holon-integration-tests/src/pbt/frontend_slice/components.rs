@@ -390,9 +390,23 @@ impl HeadlessFrontendComponent {
                 &org_root,
             )
             .expect("cache doc ids: parse org file");
-            if let Some(doc_id) = parsed.blocks.first().map(|b| b.parent_id.clone()) {
-                documents.push((doc_id, path.clone()));
-            }
+            // Register the file's tracked doc id. A file WITH headline blocks
+            // takes the doc id from the first block's `parent_id` (the doc root
+            // the parser reconstructs from `#+ID:`). A file with ZERO headline
+            // blocks — a bare page-file like `<page>.org` = `#+ID: <page>\n`, the
+            // on-disk form of a page that owns its own file — must STILL be
+            // tracked: its doc root is `parsed.document.id`, and `SutOrgRender`
+            // has to surface it so the writeback oracles can observe that the page
+            // has its own file and that a folder companion de-inlined it (Fork B).
+            // Skipping zero-block files (the old behavior) made every page-file
+            // invisible to the org readers, so a companion could silently keep or
+            // drop it with no oracle able to see either.
+            let doc_id = parsed
+                .blocks
+                .first()
+                .map(|b| b.parent_id.clone())
+                .unwrap_or_else(|| parsed.document.id.clone());
+            documents.push((doc_id, path.clone()));
         }
 
         let driver = Arc::new(ReactiveEngineDriver::new(reactive.clone()));

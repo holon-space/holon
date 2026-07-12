@@ -39,6 +39,12 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // `Page` tag in the SUT projection (folder-companion demotion class,
         // dogfood 2026-07-12). Needs `SutBackend` + `RefBlockTree`.
         invariants::sidebar_page_tag_preserved::wire(),
+        // Companion writeback de-inline (Fork B B0): the writeback-side twin of
+        // `sidebar_page_tag_preserved` — a companion `.org` must retain no heading
+        // for a `Page` doc-root that owns its own file. Needs `SutOrgRender` +
+        // `RefBlockTree`. Inert unless a companion inlines a ref-page id; RED today
+        // (per-file guard refuses the de-inline) until Fork B B1's union guard.
+        invariants::companion_has_no_child_page_headings::wire(),
         invariants::no_errors::wire(),
         invariants::viewmodel_no_error_widgets::wire(),
         invariants::task_state_storage_coherence::wire(),

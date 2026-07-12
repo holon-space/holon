@@ -310,52 +310,105 @@ the folder-page inlining bug before Fork B fixes it.**
 
 ---
 
-## 6. Increments (each keystone-green before the next)
+## 6. Increments — RE-SCOPED 2026-07-12 after empirical B0 findings
 
-Gate for every increment:
+### Empirical findings that re-scope the plan (verified in this tree)
+
+Two findings from building B0 (both via `HeadlessFrontendComponent` boots + on-disk dumps)
+overturn the plan's original guard-veto premise:
+
+1. **The companion de-inline ALREADY works, losslessly, for a page that owns its own file — no
+   Fork B fix needed.** Seed `child-note.org` (`#+ID: child-note`, a Page) + `my-notes.org`
+   inlining its id; after settle `my-notes.org` → bare `#+ID: my-notes` (de-inlined), the page
+   survives in `child-note.org`, all oracles green. Root cause: Fork A re-homes the page's
+   doc-root to `no_parent` (owned by its file), so it is never a child of the companion → the
+   companion's `get_blocks` render is naturally bare → nothing is dropped → clean. (Green
+   regression lock: `structural_pbt::folder_companion_deinlines_owned_child_page`.)
+
+2. **The ingest-loss guard runs on exactly ONE site — the ingest reproject path
+   (`file_sync_controller.rs:1821`), NOT the block-driven writeback (`on_block_changed` /
+   `re_render_all_tracked`).** So the plan's original premise ("the guard vetoes the de-inline;
+   B1's union lifts the veto") is false for the steady-state block-driven path. But it IS the
+   crux of the FILELESS case: a companion inlining a `Page`-tagged heading with NO backing file
+   (`* child-note :Page:`, no `child-note.org`) makes the page a child of the companion; the
+   ingest reproject de-inlines it (CTE excludes Page), the guard at :1821 sees the drop and
+   **quarantines** the companion (row 28 protection — content preserved on disk, inline, but the
+   file can never converge), and nothing materializes the page into its own file. (RED-first:
+   `structural_pbt::fileless_page_writeback_materializes`, `#[ignore]`d.)
+
+**Consequence:** the real bug is **fileless-page materialization (B2)**, not a de-inline veto.
+The `SurvivingProjection` union guard is resurrected with a *better* purpose (B1', below): the
+finding that the block-driven writeback path writes files with NO loss guard is itself a
+**P0-class coverage hole** — that path could silently drop user blocks with zero protection, row
+28 covering only the ingest site. Extending the guard there is where the union becomes
+load-bearing (it lets a legitimate de-inline pass — the block survives in a sibling/materialized
+file — while a real drop still vetoes).
+
+### Increment gate
 ```
-cargo check -p holon-filesystem -p holon-orgmode -p holon-org-format --all-targets | tee /tmp/forkb-check.log
-cargo nextest run -p holon-orgmode -E 'test(writeback_guard) + test(sync_controller_mutation_pbt)' | tee /tmp/forkb-unit.log
+cargo check -p holon-integration-tests --features pbt --all-targets | tee /tmp/forkb-check.log
+cargo nextest run -p holon-orgmode -E 'test(writeback_guard)' | tee /tmp/forkb-guard.log
+cargo nextest run -p holon-integration-tests --features pbt \
+  -E 'test(folder_companion_deinlines_owned_child_page) + test(fileless_page_writeback_materializes) + test(companion_has_no_child_page_headings)' | tee /tmp/forkb-b0.log
 cargo nextest run -p holon-integration-tests -E 'test(general_e2e_composed_pbt)' | tee /tmp/forkb-keystone.log
 ```
 
-- **B0 — red keystone (no prod change). BASE DEPENDENCY (blocking):** B0 must reuse Fork A's
-  folder-companion + subdirectory page-file seeding, NOT build a duplicate seam (senior ruling).
-  As of this base rev that seeding is **NOT present** (`wide_e2e.rs` has only `forward-edge-page`
-  and a bare `Journals.org` machinery seed — no Page-under-Page-inlined-into-companion topology,
-  no fileless child page). **Action: request the coordinator sequence Fork A's seeding onto the
-  Fork B base before B0 starts.** Then add the migration seed *variant* (inlined companion +
-  fileless child) on top of Fork A's topology, and the four oracles (§5) with the oracle
-  *predicting* de-inlined companions + materialized files. Confirm the keystone goes **RED**
-  against today's inlining prod (reproduces the bug). DONE: documented red signature (which
-  invariant, which blocks). **Flag for review: the oracle's file-attribution change — it is the
-  spec of correct behavior; get it right before writing prod.** Tier: executor.
-- **B1 — subtree-scoped guard.** Refactor `ensure_ingest_lossless` to
-  `SurvivingProjection` (§4.2); per-file callers pass their own file's set (no behavior change —
-  the existing guard unit tests in `writeback_guard.rs:174-329` must stay green verbatim). Add
-  the union assembly in `FileSyncController` for the companion path, ordered per §4.3. DONE:
-  `writeback_guard` units green unchanged + a new unit proving a de-inlined-but-materialized
-  block passes and a truly-vanished block still refuses. **Flag for review: this is the P0
-  data-loss guard — a weakening here silently re-opens row 28.** Tier: **Opus executor +
-  mandatory verifier pass.**
-- **B2 — fileless-page materialization sweep + watcher seeding.** Enumerate Page blocks with no
-  file; drive `on_block_changed`; seed `last_projection` and tracking on new-file writes (§4.4).
-  DONE: `inv-fileless-page-materialized` green; no re-ingest loop. **Explicit echo test
-  (RULED-required, DONE gate — not just a soak):** a dedicated test materializes a fileless page,
-  pumps the watcher, and asserts the child file is written **exactly once** and the page is NOT
-  re-minted under a new id (the self-induced write is recognized as an echo via the seeded
-  `last_projection` baseline). Plus the raised-cases soak. **Flag for review: the echo-suppression
-  seeding (§4.4) — the one shared-state touch; a miss is an infinite ingest/writeback loop.**
-  Tier: executor, escalate to Opus if the loop proves subtle; fresh-context verifier on the echo
-  test.
-- **B3 — migration convergence green.** With B1+B2 in, the B0 red turns green: companion
-  de-inlines, children materialize, guard passes via union, block set invariant holds. DONE: all
-  §5 invariants green on both the steady-state and migration seed variants; the persisted
-  regression seed for this scenario added. Tier: executor.
+- **B0 — red-first repro + oracle + observability fix. DONE (this commit).**
+  - `inv-companion-has-no-child-page-headings` (body + composed wiring + catalog; body units
+    green) — a companion `.org` must retain no heading for a ref-modeled `Page`. Dormant on the
+    default keystone (inert unless a companion inlines a ref-page id).
+  - **Observability fix** (`components.rs`): register zero-block page-file docs via
+    `parsed.document.id` so `SutOrgRender::snapshot_org_render_pairs` surfaces page-files +
+    companions (was: only files with headline blocks → every page-file invisible to the org
+    readers). Verified: `child-note.org` + `my-notes.org` now both surface.
+  - **Topology: NON-RESERVED, FLAT** (`child-note.org` / `my-notes.org`), chosen over Fork A's
+    `Journals.org` seed: `Journals` is the app's reserved page — seeded programmatically then
+    written back as the journals-view machinery, which erases seeded companion content before an
+    oracle sees it (empirically confirmed); and the subdir shape trips the pre-existing
+    `row_origin.rs` "disjoint root rows" render panic. Fork-B-owned seed; Fork A's seed untouched.
+  - GREEN lock (`folder_companion_deinlines_owned_child_page`) + RED-first
+    (`fileless_page_writeback_materializes`, `#[ignore]`d: asserts `child-note` owns a file AND
+    the companion converges — both fail today).
+  - **Data-loss verdict (from the probe, no BugFunnel spawn):** the programmatic-journals
+    writeback is a superset MERGE, not an overwrite — a user's non-page content in `Journals.org`
+    survives (proven). The fileless-page loss vector is Fork B's own target (B2), covered here.
+- **B2 (PRIMARY FIX) — fileless-page materialization sweep + watcher seeding.** Materialize every
+  `Page` block that owns no file into its own `<name>.org` via the latent `on_block_changed` →
+  `doc_id_to_path` → write path (§2), plus a boot-time sweep (OQ4 RULED) that enumerates
+  file-less pages so migration converges without waiting for a fresh edit. Seed `last_projection`
+  + tracking on new-file writes (§4.4). DONE: `fileless_page_writeback_materializes` flips GREEN
+  (child-note gets `child-note.org`; the companion then de-inlines + converges — fixed-point +
+  companion-heading go green as a consequence). **Explicit echo test (RULED, DONE gate):**
+  materialize a fileless page, pump the watcher, assert the file is written exactly once and the
+  page is NOT re-minted. **Subdir caveat:** a fileless page nested under a folder page
+  materializes to `<folder>/<name>.org` — the same subdir shape that trips the `row_origin.rs`
+  nested-page render panic. B2 must confirm whether headless materialization hits it; if so,
+  coordinate the `row_origin.rs` fix (separately filed) as a B2 dependency. **Flag for review:
+  the echo-suppression seeding (§4.4) — the one shared-state touch; a miss is an infinite
+  ingest/writeback loop.** Tier: executor → Opus if the loop/subdir proves subtle; verifier on
+  the echo test.
+- **B1' — extend the ingest-loss guard to the block-driven writeback path (union becomes
+  load-bearing). AFTER B2.** The mechanical `SurvivingProjection` refactor already landed
+  (`ssqtmslr`) and is now the right substrate — not latent. Add the guard call at the
+  `on_block_changed` / `re_render_all_tracked` write sites, with the surviving set = union across
+  the file being written + the sibling files the same convergence pass materialized (§4.2–4.3),
+  so a legitimate de-inline (block moved to its own materialized file) passes while a genuine
+  drop still vetoes + quarantines. **Own red-first: a synthetic block-driven writeback that drops
+  a block with no sibling home must VETO** (today that path writes it unguarded — the P0 hole).
+  DONE: the new veto test is red-before/green-after; existing `writeback_guard` units unchanged;
+  owned + fileless B0 tests stay green. **Flag: P0 data-loss guard — a weakening re-opens row 28
+  on a second path.** Tier: **Opus executor + mandatory verifier.**
+- **B3 — migration convergence green + keystone wiring.** Fold the companion topology into the
+  keystone catalog run (behind a seed gate, like Fork A's `sidebar_page_tag_preserved`); confirm
+  the composed keystone is green post-B2/B1' on both owned + fileless variants; add the persisted
+  regression seed. Re-evaluate wiring `inv-every-page-has-its-own-file` into the catalog once a
+  full-topology seed gives every scaffold page a file (it was dropped from B0 for scaffold-noise;
+  the SUT+SUT+RefBlockTree body is designed and recoverable from this commit's history). Tier:
+  executor.
 - **B4 — hardening + real-vault dry run.** Run the migration on a COPY of the real vault
   (`Journals.org` + `Projects.org`) via a scratch instance (NEVER the user's vault, NEVER port
-  8520); assert convergence + zero block loss by id-set diff. Update
-  `docs/Architecture/Sync.md` (companion de-inline + materialization as the documented model).
+  8520); assert convergence + zero block loss by id-set diff. Update `docs/Architecture/Sync.md`
+  (companion de-inline + fileless materialization + the two-site guard as the documented model).
   Tier: executor; **verifier confirms the id-set diff on the vault copy.**
 
 Sequencing: B0 → B1 → B2 → B3 → B4, strictly serial (all touch the writeback path + oracles).
