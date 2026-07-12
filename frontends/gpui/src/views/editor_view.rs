@@ -38,6 +38,59 @@ use crate::geometry::BoundsRegistry;
 use crate::navigation_state::NavigationState;
 use crate::share_ui::ShareTrigger;
 
+/// Outcome of applying the op-versioned echo-suppression rule to one data-sync
+/// emission. Pure and side-effect-free so the convergence policy is unit-tested
+/// directly (see the `echo_suppression` tests) without a live gpui window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EchoDecision {
+    /// Echo equals the editor's current InputState — nothing to change. If the
+    /// echo carried a sequence, advance the high-water mark to it so a later
+    /// reordered echo of an even earlier keystroke is still recognised as
+    /// stale.
+    InSync { advance_to: Option<i64> },
+    /// Converge InputState to the echo and adopt `seq` as the new high-water.
+    Converge { seq: i64 },
+    /// A reordered/lagged echo of an edit strictly older than the editor's last
+    /// local write. Drop it — this is the "typing resets the block" fix.
+    DropStale,
+    /// Content changed but the row carried no `write_seq` ordering token — a
+    /// schema/projection regression. Drop and report loudly (never converge
+    /// blindly: that is the stale-echo data loss we are preventing).
+    DropNoSeq,
+}
+
+/// Op-versioned echo suppression for the SqlOnly data-sync path.
+///
+/// Converge to an authority state only when it is **at least as new** as the
+/// editor's last local write (`echo_seq >= last_local_seq`). A stale/reordered
+/// echo of an earlier keystroke (`echo_seq < last_local_seq`) is dropped; a
+/// `split_block` truncation or peer edit issued after the last keystroke
+/// carries a greater-or-equal seq and still converges. Content equality
+/// short-circuits (the editor's own latest echo, or a redundant emit). Ordering
+/// — not content — is authoritative because the dispatcher's inline-mark
+/// stripping rewrites the stored value, so an editor's own echo legitimately
+/// differs from what it typed.
+pub(crate) fn evaluate_data_sync_echo(
+    current: &str,
+    new_value: &str,
+    echo_seq: Option<i64>,
+    last_local_seq: i64,
+) -> EchoDecision {
+    if current == new_value {
+        return EchoDecision::InSync {
+            advance_to: echo_seq,
+        };
+    }
+    let Some(seq) = echo_seq else {
+        return EchoDecision::DropNoSeq;
+    };
+    if seq < last_local_seq {
+        EchoDecision::DropStale
+    } else {
+        EchoDecision::Converge { seq }
+    }
+}
+
 /// A persistent GPUI view for an editable text field.
 ///
 /// Thin wrapper around `EditorViewModel` (framework-agnostic logic).
@@ -63,6 +116,17 @@ pub struct EditorView {
     /// Used to compute the delta on `InputEvent::Change`. The
     /// `MutableText` itself lives on the `EditorViewModel`.
     previous_text: String,
+    /// Highest [`holon_api::write_seq::WriteSeq`] this editor has authored (via
+    /// a content keystroke) or accepted (from a converged external write).
+    /// The data-sync convergence guard drops any echo whose `write_seq` is
+    /// strictly less than this — a stale/reordered CDC echo of an earlier
+    /// keystroke — while still converging genuinely newer authority states
+    /// (a `split_block` truncation issued after the last keystroke carries
+    /// a greater seq). Starts at `WriteSeq::ZERO`: before the user types,
+    /// every echo converges (correct seeding). See `holon_api::write_seq`
+    /// for why content comparison cannot substitute (inline-mark stripping
+    /// rewrites the stored value).
+    last_local_seq: i64,
     /// Cancelled on drop. Subscribes to `MutableText.remote_deltas()`
     /// and splices remote edits into InputState via
     /// `replace_text_in_range_silent`.
@@ -266,6 +330,17 @@ impl EditorView {
                             // (BugFunnel dogfood #4). The slot's text is committed
                             // via `create` on Enter (`commit_creation_slot`); it
                             // must not be persisted per-keystroke.
+                            // Stamp a monotonic ordering token on this content
+                            // write and record it as our last local sequence.
+                            // The provider persists it into `block_raw.write_seq`
+                            // (same UPDATE as `content`), it echoes back through
+                            // CDC, and the data-sync guard below drops any echo
+                            // whose seq is older than this — the fix for the
+                            // vault-scale "typing resets the block" reset. Must
+                            // be set BEFORE dispatch so a fast echo can't race a
+                            // not-yet-recorded seq.
+                            let seq = holon_api::write_seq::next();
+                            this.last_local_seq = seq.get();
                             let mut params = std::collections::HashMap::new();
                             params
                                 .insert("id".into(), holon_api::Value::String(this.row_id.clone()));
@@ -274,6 +349,7 @@ impl EditorView {
                                 holon_api::Value::String("content".to_string()),
                             );
                             params.insert("value".into(), holon_api::Value::String(text.clone()));
+                            params.insert("write_seq".into(), holon_api::Value::Integer(seq.get()));
                             services_clone.dispatch_intent(
                                 holon_frontend::operations::OperationIntent::new(
                                     "block".into(),
@@ -332,34 +408,37 @@ impl EditorView {
             let signal = data_handle
                 .signal_cloned()
                 .map(move |row| {
-                    row.get(&field_for_stream)
+                    let content = row
+                        .get(&field_for_stream)
                         .and_then(|v| v.as_string())
                         .unwrap_or("")
-                        .to_string()
+                        .to_string();
+                    // Ordering token stamped by content writes
+                    // (`holon_api::write_seq`), projected verbatim from
+                    // `block_raw.write_seq`. `None` ONLY if the column is
+                    // missing/mistyped — a plumbing regression the loop reports
+                    // loudly and treats as "drop", never a silent converge.
+                    let echo_seq = row.get("write_seq").and_then(|v| v.as_i64());
+                    (content, echo_seq)
                 })
                 .dedupe_cloned();
             cx.spawn(async move |this, cx| {
                 use futures::StreamExt;
                 let mut stream = signal.to_stream();
-                // No unconditional initial drop: when this EditorView is
-                // reused from cache for a row whose content changed, the
-                // first emission is the *new* value, and dropping it would
-                // strand the widget on stale text. The loop body's
-                // value-equality guard already makes redundant emissions a
-                // no-op, so let the same gate apply to the first one.
-                //
-                // `last_synced` tracks the last value we *ourselves* set
-                // (or observed-and-skipped because state already matched).
-                // Comparing current InputState against `last_synced` lets
-                // us tell apart "user has typed since the last sync" (state
-                // diverged) from "user is focused but idle" (state equals
-                // last sync). External updates apply in the idle case
-                // regardless of focus — that's how post-`split_block`
-                // truncations and other structural mutations land while the
-                // editor still owns focus, without ever yanking text the
-                // user is mid-typing.
-                let mut last_synced: Option<String> = None;
-                while let Some(new_value) = stream.next().await {
+                // OP-VERSIONED ECHO SUPPRESSION (replaces the old
+                // `user_idle`/`last_synced` heuristic, which mistook the moment
+                // between two keystrokes for "idle" and therefore let a stale
+                // echo overwrite in-flight typing — the vault-scale
+                // "typing resets the block" P1). Each emission carries the
+                // authority content AND its `write_seq` ordering token. We
+                // converge only to a state at least as new as our last local
+                // write; an older echo (a reordered/lagged CDC delivery of an
+                // earlier keystroke) is dropped. A `split_block` truncation or
+                // other structural mutation issued *after* the last keystroke
+                // carries a greater-or-equal seq, so it still converges while
+                // the editor owns focus — the property the old heuristic
+                // existed to preserve.
+                while let Some((new_value, echo_seq)) = stream.next().await {
                     if this.upgrade().is_none() {
                         // EditorView dropped (e.g. row removed by
                         // collection driver). Stop the loop — the `Task`
@@ -368,8 +447,6 @@ impl EditorView {
                         // spin while the Drop runs.
                         break;
                     }
-                    let prev_synced = last_synced.clone();
-                    let mut applied = false;
                     cx.update(|cx| {
                         let Some(view) = this.upgrade() else {
                             return;
@@ -381,60 +458,74 @@ impl EditorView {
                             let _ = window_handle.update(cx, |_, window, cx| {
                                 view.update(cx, |this, cx| {
                                     let input = this.input.clone();
-                                    let (current, focused) = {
-                                        let state = input.read(cx);
-                                        (
-                                            state.value().to_string(),
-                                            state.focus_handle(cx).is_focused(window),
-                                        )
-                                    };
-                                    if current == new_value {
-                                        // Already in sync (CDC echo of our
-                                        // own write or a redundant emit).
-                                        applied = true;
-                                        return;
-                                    }
-                                    // "User is idle": InputState matches the
-                                    // last-seen committed value, so any
-                                    // typing they had pending was already
-                                    // flushed. External updates safe.
-                                    let user_idle =
-                                        prev_synced.as_deref() == Some(current.as_str());
-                                    if focused && !user_idle {
-                                        // Mid-typing — skip to avoid cursor
-                                        // yank. `last_synced` deliberately
-                                        // not advanced; we'll catch up on
-                                        // the next emission once the user
-                                        // commits or the values reconverge.
-                                        if caret_probe() {
-                                            eprintln!(
-                                                "[data-sync] SKIP (focused, not idle) \
-                                                 current={current:?} new={new_value:?} \
-                                                 prev_synced={prev_synced:?}"
+                                    let current = input.read(cx).value().to_string();
+                                    match evaluate_data_sync_echo(
+                                        &current,
+                                        &new_value,
+                                        echo_seq,
+                                        this.last_local_seq,
+                                    ) {
+                                        EchoDecision::InSync { advance_to } => {
+                                            // Echo of our own latest write (or a
+                                            // redundant emit). Advance the
+                                            // high-water mark so a later reordered
+                                            // echo of an even earlier keystroke is
+                                            // still seen as stale.
+                                            if let Some(s) = advance_to {
+                                                this.last_local_seq = this.last_local_seq.max(s);
+                                            }
+                                        }
+                                        EchoDecision::DropNoSeq => {
+                                            // Content changed but the row carries
+                                            // no `write_seq` token — a schema /
+                                            // projection regression. Fail LOUD and
+                                            // DROP: converging blindly here is
+                                            // exactly the stale-echo data loss we
+                                            // are fixing.
+                                            tracing::error!(
+                                                target: "editor.data_sync",
+                                                row_id = %this.row_id,
+                                                current = %current,
+                                                new = %new_value,
+                                                "data-sync echo has no write_seq column; \
+                                                 dropping (schema/projection regression)"
                                             );
                                         }
-                                        return;
+                                        EchoDecision::DropStale => {
+                                            if caret_probe() {
+                                                eprintln!(
+                                                    "[data-sync] DROP stale echo seq={echo_seq:?} \
+                                                     < last_local={} current={current:?} \
+                                                     new={new_value:?}",
+                                                    this.last_local_seq
+                                                );
+                                            }
+                                        }
+                                        EchoDecision::Converge { seq } => {
+                                            if caret_probe() {
+                                                eprintln!(
+                                                    "[data-sync] apply seq={seq} last_local={} \
+                                                     current={current:?} new={new_value:?}",
+                                                    this.last_local_seq
+                                                );
+                                            }
+                                            // Adopt the authority's seq as our new
+                                            // high-water mark and converge. Keeps
+                                            // `previous_text` in lockstep so the
+                                            // re-entrant Change writes nothing back.
+                                            this.last_local_seq = seq;
+                                            this.converge_input(
+                                                "data_sync",
+                                                &new_value,
+                                                window,
+                                                cx,
+                                            );
+                                        }
                                     }
-                                    if caret_probe() {
-                                        eprintln!(
-                                            "[data-sync] apply current={current:?} \
-                                             new={new_value:?}"
-                                        );
-                                    }
-                                    // Absolute convergence to the authority
-                                    // (the Loro cell when attached, else this
-                                    // SQL DataRow value for SqlOnly mode).
-                                    // Keeps `previous_text` in lockstep so the
-                                    // re-entrant Change writes nothing back.
-                                    this.converge_input("data_sync", &new_value, window, cx);
-                                    applied = true;
                                 });
                             });
                         }
                     });
-                    if applied {
-                        last_synced = Some(new_value);
-                    }
                 }
             })
         });
@@ -565,6 +656,7 @@ impl EditorView {
             _focus_subscription,
             previous_text,
             _remote_delta_subscription,
+            last_local_seq: holon_api::write_seq::WriteSeq::ZERO.get(),
             prev_focused: std::cell::Cell::new(false),
             focus_gen: std::cell::Cell::new(0),
         }
@@ -1567,5 +1659,113 @@ fn execute_action<T: 'static>(
         // UpdatePopup, Dismissed, InsertText, None, Propagate — no action needed
         // in the no-window context (subscribe callbacks). The caller handles cx.notify().
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod echo_suppression {
+    //! Directed regression tests for the op-versioned data-sync echo guard —
+    //! the fix for the vault-scale P1 "typing `[[` (or any edit) resets the
+    //! whole block to its pre-typing content".
+    //!
+    //! The failure is a focused editor converging to a STALE/reordered CDC echo
+    //! of an earlier keystroke. These exercise the pure decision function
+    //! [`evaluate_data_sync_echo`] the data-sync closure delegates to,
+    //! modelling an INJECTED-DELAY, in-flight-typing timeline
+    //! deterministically (no gpui window, no real latency needed).
+    //!
+    //! RED-FIRST equivalence: the old policy converged whenever the editor was
+    //! "idle" (`prev_synced == current`), which is true the instant a keystroke
+    //! settles — so `stale_echo_while_typing_ahead_is_dropped` below would have
+    //! CONVERGED (reset the block) under the old code. The seq guard makes it a
+    //! drop.
+
+    use super::EchoDecision;
+    use super::evaluate_data_sync_echo;
+
+    // A block seeded at boot carries write_seq 0 (the column default) until the
+    // editor writes it. The editor's own keystrokes carry strictly-increasing
+    // process-global sequences (holon_api::write_seq::next()).
+    const SEED: i64 = 0;
+
+    #[test]
+    fn stale_echo_while_typing_ahead_is_dropped() {
+        // Timeline: user typed "ab" (seq 10) then "abc" (seq 11); InputState is
+        // now "abc" and last_local_seq is 11. The CDC echo of the EARLIER "ab"
+        // write (seq 10) arrives late. It must be DROPPED — converging would
+        // reset the visible text backwards to "ab". This is the exact P1.
+        let d = evaluate_data_sync_echo("abc", "ab", Some(10), 11);
+        assert_eq!(d, EchoDecision::DropStale);
+    }
+
+    #[test]
+    fn pre_typing_stale_echo_is_dropped() {
+        // The reported symptom: block content is "Block 07-010 ..." pre-typing.
+        // The user types, advancing last_local_seq to 600. A lagged echo of the
+        // pre-typing content (an older, smaller seq) must not resurrect it.
+        let d = evaluate_data_sync_echo(
+            "Block 07-010 ...hello",
+            "Block 07-010 ...", // pre-typing content
+            Some(305),
+            600,
+        );
+        assert_eq!(d, EchoDecision::DropStale);
+    }
+
+    #[test]
+    fn split_truncation_after_last_keystroke_still_converges() {
+        // A split_block issued AFTER the last keystroke gets a greater seq, so
+        // the surviving (reused) editor still converges to the truncated content
+        // while it owns focus — the property the old idle-heuristic preserved and
+        // the seq guard must keep.
+        let d = evaluate_data_sync_echo("hello world", "hello", Some(12), 11);
+        assert_eq!(d, EchoDecision::Converge { seq: 12 });
+    }
+
+    #[test]
+    fn equal_seq_external_write_converges() {
+        // Non-editor writers (split/join/org) don't bump write_seq, so the row
+        // retains the editor's last seq; their echo carries seq == last_local and
+        // a DIFFERENT value → converge (they changed content, not the token).
+        let d = evaluate_data_sync_echo("hello world", "hello", Some(11), 11);
+        assert_eq!(d, EchoDecision::Converge { seq: 11 });
+    }
+
+    #[test]
+    fn self_echo_is_in_sync_and_advances_high_water() {
+        // The confirming echo of our own latest write equals current InputState.
+        let d = evaluate_data_sync_echo("abc", "abc", Some(11), 11);
+        assert_eq!(
+            d,
+            EchoDecision::InSync {
+                advance_to: Some(11)
+            }
+        );
+    }
+
+    #[test]
+    fn pre_typing_editor_converges_to_external_seed() {
+        // Before the user types (last_local_seq == SEED == 0) every external
+        // state is at least as new → converge. This is correct seeding: a
+        // freshly focused editor adopts the authority content.
+        let d = evaluate_data_sync_echo("stale", "fresh from peer", Some(1), SEED);
+        assert_eq!(d, EchoDecision::Converge { seq: 1 });
+    }
+
+    #[test]
+    fn missing_seq_on_changed_content_fails_loud_and_drops() {
+        // A content change with no write_seq token is a schema/projection
+        // regression: drop (never converge blindly) — the loud tracing::error!
+        // lives at the call site.
+        let d = evaluate_data_sync_echo("abc", "different", None, 11);
+        assert_eq!(d, EchoDecision::DropNoSeq);
+    }
+
+    #[test]
+    fn missing_seq_but_in_sync_is_noop_without_advance() {
+        // No token, but the echo equals current — a benign redundant emit. In
+        // sync, and there is no seq to advance the high-water mark to.
+        let d = evaluate_data_sync_echo("abc", "abc", None, 11);
+        assert_eq!(d, EchoDecision::InSync { advance_to: None });
     }
 }
