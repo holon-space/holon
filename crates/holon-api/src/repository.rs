@@ -23,7 +23,6 @@ use serde::Serialize;
 use crate::ApiError;
 use crate::Block;
 use crate::BlockContent;
-use crate::ContentType;
 use crate::EntityUri;
 use crate::streaming::ChangeNotifications;
 
@@ -90,11 +89,6 @@ pub struct NewBlock {
     pub after: Option<EntityUri>,
     /// Optional custom ID (None = generate local URI)
     pub id: Option<EntityUri>,
-    /// Override the content_type written to Loro metadata. Used for image
-    /// blocks where content is `BlockContent::Text { raw: path }` but
-    /// content_type must be "image" not "text".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content_type_override: Option<ContentType>,
 }
 
 impl NewBlock {
@@ -105,7 +99,6 @@ impl NewBlock {
             content: BlockContent::text(text),
             after: None,
             id: None,
-            content_type_override: None,
         }
     }
 
@@ -120,7 +113,6 @@ impl NewBlock {
             content: BlockContent::source(language, source),
             after: None,
             id: None,
-            content_type_override: None,
         }
     }
 
@@ -128,10 +120,9 @@ impl NewBlock {
     pub fn image(parent_id: EntityUri, path: impl Into<String>) -> Self {
         Self {
             parent_id,
-            content: BlockContent::text(path),
+            content: BlockContent::image(path),
             after: None,
             id: None,
-            content_type_override: Some(ContentType::Image),
         }
     }
 

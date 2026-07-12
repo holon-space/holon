@@ -437,12 +437,17 @@ impl CrudOperations<Block> for LoroBlockOperations {
             source_language
         );
 
-        // Build the appropriate BlockContent based on content_type
-        let block_content = if content_type == ContentType::Source {
-            let lang = source_language.as_deref().unwrap_or("text");
-            BlockContent::source(lang, content.clone())
-        } else {
-            BlockContent::text(content.clone())
+        // Build the appropriate BlockContent based on content_type. Image must
+        // map to the dedicated variant — otherwise the block is stored in Loro
+        // as `content_type = "text"` and the org `[[file:…]]` image classification
+        // is lost on the create round-trip.
+        let block_content = match content_type {
+            ContentType::Source => {
+                let lang = source_language.as_deref().unwrap_or("text");
+                BlockContent::source(lang, content.clone())
+            }
+            ContentType::Image => BlockContent::image(content.clone()),
+            ContentType::Text => BlockContent::text(content.clone()),
         };
 
         let backend = self.get_backend(&doc_id).await?;
@@ -951,6 +956,45 @@ mod advice_dismiss_tests {
         ops.save_doc("").await.expect("save");
         let anchor_id = anchor.id.to_string();
         (ops, dir, anchor_id)
+    }
+
+    /// Regression (keystone `inv-blocks-match-ref/org` RED, 2026-07-12): the
+    /// org-ingest → Loro create path (`LoroBlockOperations::create`) receives
+    /// `content_type = "image"` in its params (org `[[file:…]]`
+    /// classification). It must store and read the block back as
+    /// `ContentType::Image`. Before the `BlockContent::Image` variant it
+    /// built `BlockContent::text(...)` here, so the block was persisted as
+    /// `content_type = "text"` and the image classification was lost on the
+    /// org round-trip.
+    #[tokio::test]
+    async fn image_content_type_survives_ingest_create() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(RwLock::new(LoroDocumentStore::new(
+            dir.path().to_path_buf(),
+        )));
+        let ops = LoroBlockOperations::new(store);
+        let backend = ops.get_backend("").await.expect("backend");
+        let root = backend.create_placeholder_root("root").await.expect("root");
+
+        let mut fields: StorageEntity = HashMap::new();
+        fields.insert("id".into(), Value::String("block:h1::img::0".into()));
+        fields.insert("parent_id".into(), Value::String(root.clone()));
+        fields.insert(
+            "content".into(),
+            Value::String("attachments/foo.png".into()),
+        );
+        fields.insert("content_type".into(), Value::String("image".into()));
+
+        let (block_id, _) = ops.create(fields).await.expect("ingest create");
+
+        let read = backend.get_block(&block_id).await.expect("read back");
+        assert_eq!(
+            read.content_type,
+            ContentType::Image,
+            "org-ingested image must persist as Image (was collapsing to Text), got {:?}",
+            read.content_type
+        );
+        assert_eq!(read.content, "attachments/foo.png");
     }
 
     fn dismiss_params(anchor_id: &str, lesson_id: &str) -> StorageEntity {

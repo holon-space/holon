@@ -250,7 +250,6 @@ pub async fn apply_transition<R: CoreOperations>(
                     content: BlockContent::text(content),
                     id: None,
                     after: None,
-                    content_type_override: None,
                 })
                 .collect();
             let created = backend.create_blocks(new_blocks).await?;
