@@ -203,7 +203,7 @@ pub(crate) fn build_started_ref(subsystems: &BTreeSet<Subsystem>) -> ReferenceSt
     // and ToggleState never generates (see `load_seed_profile_into_ref`).
     crate::pbt::transitions::start_app::load_seed_profile_into_ref(&mut state);
     seed_ref_tree(&mut state);
-    if state.wiring.has_actor(Actor::UI) {
+    if state.harness.wiring.has_actor(Actor::UI) {
         let c1 = fixed_ids().c1;
         let caret = C1.len();
         // Seed navigation focus on `c1` — this is what `current_focus(Main)`

@@ -210,7 +210,7 @@ impl RefDocumentsMut for ReferenceState {
                         .layout_blocks
                         .render_source_ids
                         .insert(block_uri.clone());
-                    if let Ok(expr) = self.interpreter.parse_dsl(block.content.as_str()) {
+                    if let Ok(expr) = self.harness.interpreter.parse_dsl(block.content.as_str()) {
                         self.domain
                             .render_expressions
                             .insert(block_uri.clone(), expr);
@@ -232,6 +232,6 @@ impl RefDocumentsMut for ReferenceState {
             all_blocks.into_iter().map(|b| (b.id.clone(), b)).collect();
 
         self.rebuild_profile_tracking();
-        self.pre_startup_file_count += 1;
+        self.files.pre_startup_file_count += 1;
     }
 }

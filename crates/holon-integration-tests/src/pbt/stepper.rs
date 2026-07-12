@@ -21,16 +21,17 @@
 //! lives in `frontends/gpui` and is sketched in the doc comment there.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
-use proptest_state_machine::{ReferenceStateMachine, StateMachineTest};
-
-use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::state_machine::ReferenceMachine;
-use crate::pbt::transitions::E2ETransition;
+use proptest_state_machine::ReferenceStateMachine;
+use proptest_state_machine::StateMachineTest;
 
 use crate::pbt::composed::harness::ComposedSut;
 use crate::pbt::composed::wide_e2e::WideE2E;
+use crate::pbt::reference_state::ReferenceState;
+use crate::pbt::state_machine::ReferenceMachine;
+use crate::pbt::transitions::E2ETransition;
 
 /// Whether a replayed transition that the current wiring gates out is a hard
 /// error (the existing `replay_steps` behaviour) or a deterministic skip
@@ -62,8 +63,9 @@ pub enum StepOutcome {
 /// thread work into a blocking round-trip, which the sequential engine
 /// tolerates by construction.
 pub trait Stepper {
-    /// Build/initialise the SUT for a fresh case (≡ `StateMachineTest::init_test`).
-    /// For GPUI this may bind to the already-running main-thread window.
+    /// Build/initialise the SUT for a fresh case (≡
+    /// `StateMachineTest::init_test`). For GPUI this may bind to the
+    /// already-running main-thread window.
     fn init(&mut self, ref_state: &ReferenceState);
 
     /// Apply one transition to the SUT. `ref_state` has already been advanced
@@ -147,12 +149,15 @@ pub fn run_sequence<S: Stepper>(
     outcomes
 }
 
-/// Is this transition offered under `ref_state`'s wiring AND cap set? Mirrors the
-/// alphabet gate in `aggregate_transitions` (`transition_dispatch.rs`), but value-level
-/// so it can be evaluated during replay. Relies on the value-level
-/// `E2ETransition::required_wiring` + `required_caps` added in `transition_dispatch.rs`.
+/// Is this transition offered under `ref_state`'s wiring AND cap set? Mirrors
+/// the alphabet gate in `aggregate_transitions` (`transition_dispatch.rs`), but
+/// value-level so it can be evaluated during replay. Relies on the value-level
+/// `E2ETransition::required_wiring` + `required_caps` added in
+/// `transition_dispatch.rs`.
 fn transition_applicable(ref_state: &ReferenceState, transition: &E2ETransition) -> bool {
-    transition.required_wiring().satisfied_by(&ref_state.wiring)
+    transition
+        .required_wiring()
+        .satisfied_by(&ref_state.harness.wiring)
         && ref_state.caps_available(&transition.required_caps())
 }
 
@@ -214,8 +219,8 @@ impl StepTimingAgg {
         let mean_ms = self.total_ms / self.steps as u128;
         if step_timing_enabled() || step_budget_ms().is_some() {
             eprintln!(
-                "[step_timing] {label}: {} transition(s), total={}ms, \
-                 mean={mean_ms}ms/transition (StartApp excluded)",
+                "[step_timing] {label}: {} transition(s), total={}ms, mean={mean_ms}ms/transition \
+                 (StartApp excluded)",
                 self.steps, self.total_ms
             );
         }
@@ -223,8 +228,8 @@ impl StepTimingAgg {
             assert!(
                 mean_ms <= budget,
                 "[{label}] per-transition budget exceeded: mean {mean_ms}ms > \
-                 HOLON_PBT_STEP_BUDGET_MS={budget}ms over {} transition(s) \
-                 (apply+check, StartApp excluded)",
+                 HOLON_PBT_STEP_BUDGET_MS={budget}ms over {} transition(s) (apply+check, StartApp \
+                 excluded)",
                 self.steps
             );
         }
@@ -271,13 +276,14 @@ impl Stepper for NullStepper {
 // Bisection stepper — the headless lattice-node oracle (ADR 0009 §3/§4).
 //
 // `SmtStepper<E2ESut>` cannot serve a lattice node: `E2ESut::init_test` is
-// hard-wired to `StorageSelector::Turso` (it calls `E2ESut::new`), so it ignores
-// the node's wiring. `BisectionStepper` wraps the SAME composed `ComposedSut<WideE2E>`
-// the keystone `general_e2e_composed_pbt` drives: it builds a per-node composed `CapMap`
-// from the node's wiring and runs the full composed catalog via `run_selected`. The same
-// captured `Vec<E2ETransition>` can then replay against every node via
-// `run_sequence(.., SkipGated)`: transitions the node gates out become `SkippedByGating`
-// no-ops; everything else applies through the composed dispatch and is checked.
+// hard-wired to `StorageSelector::Turso` (it calls `E2ESut::new`), so it
+// ignores the node's wiring. `BisectionStepper` wraps the SAME composed
+// `ComposedSut<WideE2E>` the keystone `general_e2e_composed_pbt` drives: it
+// builds a per-node composed `CapMap` from the node's wiring and runs the full
+// composed catalog via `run_selected`. The same captured `Vec<E2ETransition>`
+// can then replay against every node via `run_sequence(.., SkipGated)`:
+// transitions the node gates out become `SkippedByGating` no-ops; everything
+// else applies through the composed dispatch and is checked.
 // ---------------------------------------------------------------------------
 
 #[derive(Default)]
@@ -288,8 +294,9 @@ pub struct BisectionStepper {
 impl Stepper for BisectionStepper {
     fn init(&mut self, ref_state: &ReferenceState) {
         // Build the composed `CapMap` for *this node's* wiring — the whole point of
-        // bisection. `ComposedSut::init_test` runs `compose_sut` for `ref_state.wiring`,
-        // and dropping any previous SUT here releases its DB/session Arcs.
+        // bisection. `ComposedSut::init_test` runs `compose_sut` for
+        // `ref_state.wiring`, and dropping any previous SUT here releases its
+        // DB/session Arcs.
         self.sut = Some(ComposedSut::<WideE2E>::init_test(ref_state));
     }
 
@@ -315,25 +322,25 @@ impl Stepper for BisectionStepper {
 // Integration points:
 //
 // 1. Proptest-macro path (slice.rs). DONE — both `__declare_pbt_slice_wrapper!`
-//    and `__declare_pbt_full_slice!` override `StateMachineTest::test_sequential`
-//    to call `run_via_state_machine_test::<Self>(..)`, so every blessed slice's
+//    and `__declare_pbt_full_slice!` override
+//    `StateMachineTest::test_sequential` to call
+//    `run_via_state_machine_test::<Self>(..)`, so every blessed slice's
 //    per-case loop now runs through `run_sequence`. Generation, shrinking, and
 //    `.proptest-regressions` replay are unchanged (they live in
 //    `sequential_strategy`, above the loop).
 //
 // 2. Live windowed generators (increment 4c): the composed windowed loop
 //    (`frontends/gpui/tests/gpui_composed_windowed_loop.rs`) and the TUI
-//    composed runner (`frontends/tui/tests/common/pbt_main.rs`) drive
-//    generated sequences directly through `ComposedSut::<WideE2E>::apply` /
-//    `check_invariants` over a windowed boot — the phased GPUI generator
-//    they replaced was hand-rolled and is deletion-scheduled with phased.rs
-//    (Phase 2).
+//    composed runner (`frontends/tui/tests/common/pbt_main.rs`) drive generated
+//    sequences directly through `ComposedSut::<WideE2E>::apply` /
+//    `check_invariants` over a windowed boot — the phased GPUI generator they
+//    replaced was hand-rolled and is deletion-scheduled with phased.rs (Phase
+//    2).
 //
 // 3. GPUI replay + bisection (ADR 0009 §3/§5). `GpuiReplayStepper` re-checks a
-//    captured `Vec<E2ETransition>` on a launched window:
-//        let mut s = GpuiReplayStepper::new(&runtime, &mut sut, driver);
-//        run_sequence(&mut s, ref0, captured, None, ReplayMode::SkipGated);
-//    The same capture replays across a ComponentSet lattice (headless nodes via
-//    `SmtStepper`, the UI node via `GpuiReplayStepper`) to localise the smallest
-//    reproducing set.
+//    captured `Vec<E2ETransition>` on a launched window: let mut s =
+//    GpuiReplayStepper::new(&runtime, &mut sut, driver); run_sequence(&mut s,
+//    ref0, captured, None, ReplayMode::SkipGated); The same capture replays
+//    across a ComponentSet lattice (headless nodes via `SmtStepper`, the UI
+//    node via `GpuiReplayStepper`) to localise the smallest reproducing set.
 // ---------------------------------------------------------------------------
