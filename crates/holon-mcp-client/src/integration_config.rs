@@ -14,14 +14,26 @@ use crate::mcp_sidecar::ToolConfig;
 
 /// Transport configuration as declared in the YAML file.
 ///
-/// Exactly one of `child_process` or `http` must be set.
+/// Exactly one of the variants must be set. Two of them reach a server that
+/// *speaks MCP* (`child_process` = stdio, `http` = MCP-over-Streamable-HTTP);
+/// the third, `rest`, reaches a plain HTTP/JSON API *directly* via a
+/// UTCP-manual-style description (see [`RestTransport`]). All three plug into
+/// the same connector engine behind the
+/// [`crate::mcp_call_surface::McpCallSurface`] seam — one engine, plural
+/// transports.
+///
+/// Note on naming: `http` here is historical and means *MCP over HTTP*, not a
+/// generic REST call. The direct-API transport is `rest`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct TransportConfig {
     pub child_process: Option<ChildProcessTransport>,
     pub http: Option<HttpTransport>,
+    pub rest: Option<RestTransport>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChildProcessTransport {
     pub command: String,
     #[serde(default)]
@@ -31,8 +43,59 @@ pub struct ChildProcessTransport {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct HttpTransport {
     pub uri: String,
+}
+
+/// Direct HTTP-API transport (UTCP-manual style). Describes a plain JSON API by
+/// its base URL and a set of named `calls`, each a GET endpoint. A
+/// [`crate::rest_transport::RestCallSurface`] serves these calls behind the
+/// same [`McpCallSurface`](crate::mcp_call_surface::McpCallSurface) seam the
+/// MCP transports use, so the rest of the connector engine is unchanged.
+///
+/// Read-only for now: only `GET` methods are accepted (write/mutation and lease
+/// semantics are out of scope).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestTransport {
+    /// Base URL; may be `${VAR}`-expanded. No trailing slash required.
+    pub base_url: String,
+    /// Optional auth header sent on every request. NEVER inline a secret —
+    /// reference an env/keychain name via `${VAR}` in `value`.
+    #[serde(default)]
+    pub auth: Option<RestAuthConfig>,
+    /// Named endpoints, keyed by the tool name referenced from
+    /// `sync.list_tool`.
+    pub calls: HashMap<String, RestCallConfig>,
+}
+
+/// A single auth header, e.g. `{ header: Authorization, value: "Bearer
+/// ${TOKEN}" }`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestAuthConfig {
+    pub header: String,
+    /// Header value; `${VAR}`-expanded at startup. Keep the secret out of YAML.
+    pub value: String,
+}
+
+/// A single GET endpoint. `path` and `query` values may contain `{arg}`
+/// placeholders filled from the tool-call arguments at request time.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestCallConfig {
+    /// HTTP method. Only `GET` is supported today (fails loud otherwise).
+    pub method: String,
+    /// Path appended to `base_url`, e.g. `/posts` or `/users/{id}/posts`.
+    pub path: String,
+    /// Query parameters; values may be literals or `{arg}` placeholders.
+    #[serde(default)]
+    pub query: HashMap<String, String>,
+    /// If set, a non-object JSON body is wrapped as `{ result_key: <body> }` so
+    /// a `sync.extract_path` can select it (bare-array responses → object).
+    #[serde(default)]
+    pub result_key: Option<String>,
 }
 
 /// Authentication configuration (only meaningful for HTTP transport).
@@ -146,8 +209,30 @@ impl IntegrationFileConfig {
             McpTransport::Http {
                 uri: expand_vars(&http.uri, lookup)?,
             }
+        } else if let Some(rest) = self.transport.rest {
+            let auth_header = match rest.auth {
+                Some(a) => Some((a.header, expand_vars(&a.value, lookup)?)),
+                None => None,
+            };
+            let mut calls = HashMap::with_capacity(rest.calls.len());
+            for (name, c) in rest.calls {
+                calls.insert(
+                    name,
+                    crate::rest_transport::RestCall {
+                        method: c.method,
+                        path: c.path,
+                        query: c.query,
+                        result_key: c.result_key,
+                    },
+                );
+            }
+            McpTransport::Rest(crate::rest_transport::RestManual {
+                base_url: expand_vars(&rest.base_url, lookup)?,
+                auth_header,
+                calls,
+            })
         } else {
-            anyhow::bail!("TransportConfig must have either child_process or http set");
+            anyhow::bail!("TransportConfig must set exactly one of child_process, http, or rest");
         };
 
         let auth_mode = match self.auth {

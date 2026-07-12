@@ -22,6 +22,7 @@ pub mod mcp_sidecar;
 pub mod mcp_sync_engine;
 pub mod mcp_sync_strategy;
 pub mod mcp_vtable;
+pub mod rest_transport;
 pub mod sync_freshness;
 
 pub use integration_config::IntegrationFileConfig;
@@ -59,6 +60,9 @@ pub use mcp_sync_strategy::SyncStrategy;
 pub use mcp_sync_strategy::ToolSync;
 pub use mcp_vtable::McpForeignDataWrapper;
 pub use mcp_vtable::VtableConfig;
+pub use rest_transport::RestCall;
+pub use rest_transport::RestCallSurface;
+pub use rest_transport::RestManual;
 pub use sync_freshness::FreshnessPlan;
 pub use sync_freshness::ProbedResourceCapabilities;
 pub use sync_freshness::freshness_plan;

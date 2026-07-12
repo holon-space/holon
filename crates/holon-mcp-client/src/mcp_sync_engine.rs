@@ -185,7 +185,11 @@ impl McpSyncEngine {
         let token_key = format!("{}.{}", self.provider_name, entity_name);
 
         let fetch_result = strategy
-            .fetch_records(&self.peer, self.token_store.as_ref(), &token_key)
+            .fetch_records(
+                &self.peer as &dyn crate::mcp_call_surface::McpCallSurface,
+                self.token_store.as_ref(),
+                &token_key,
+            )
             .await
             .map_err(|e| format!("sync_entity '{entity_name}': {e}"))?;
 
