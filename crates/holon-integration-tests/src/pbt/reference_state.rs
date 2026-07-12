@@ -1785,26 +1785,48 @@ impl ReferenceState {
 
     /// Snapshot current block state before a UI mutation and clear redo stack.
     ///
-    /// Currently a no-op: the engine's SqlOperationProvider returns
-    /// `OperationResult::irreversible()` for all operations, so the real
-    /// undo stack is never populated. Re-enable once the provider produces
-    /// inverse operations.
+    /// Composition-root method: clones `domain.block_state` onto the
+    /// `action.undo_stack`, crossing the action↔domain fragment boundary, so it
+    /// must live on `ReferenceState` (not on either fragment alone). Enabling
+    /// this (was a no-op while the engine returned
+    /// `OperationResult::irreversible()` for every operation) activates the
+    /// keystone undo rung: the 8 mutating transitions that call it now
+    /// record snapshots, and `UndoLastMutation`
+    /// (gated on `has_undo_history`) can pop them back.
     pub fn push_undo_snapshot(&mut self) {
-        // self.undo_stack.push(self.block_state.clone());
-        // self.redo_stack.clear();
+        self.action.undo_stack.push(self.domain.block_state.clone());
+        self.action.redo_stack.clear();
     }
 
     /// Undo: snapshot current state onto redo stack, restore from undo stack.
+    ///
+    /// Id-minting is MONOTONIC across undo/redo: prod never reuses a burned
+    /// block id, so restoring an earlier tree must not roll back the synthetic
+    /// id-mint high-water mark (`block_state.next_id`, source of `split-N` /
+    /// `create-N`). Rolling it back re-mints an id the insert-only harness
+    /// resolver still maps to a now-deleted real block, tripping the
+    /// `per-tick reconcile: one synthetic per minted real id` desync
+    /// (SplitBlock → UndoLastMutation → SplitBlock). This mirrors
+    /// `next_doc_id`, which already lives outside the snapshotted
+    /// `block_state` for the same reason.
     pub fn pop_undo_to_redo(&mut self) {
         self.action.redo_stack.push(self.domain.block_state.clone());
-        self.domain.block_state = self.action.undo_stack.pop().expect("undo stack is empty");
+        let id_hwm = self.domain.block_state.next_id;
+        let mut restored = self.action.undo_stack.pop().expect("undo stack is empty");
+        restored.next_id = restored.next_id.max(id_hwm);
+        self.domain.block_state = restored;
         self.recompute_derived();
     }
 
     /// Redo: snapshot current state onto undo stack, restore from redo stack.
+    /// Preserves the monotonic id-mint high-water mark — see
+    /// [`Self::pop_undo_to_redo`].
     pub fn pop_redo_to_undo(&mut self) {
         self.action.undo_stack.push(self.domain.block_state.clone());
-        self.domain.block_state = self.action.redo_stack.pop().expect("redo stack is empty");
+        let id_hwm = self.domain.block_state.next_id;
+        let mut restored = self.action.redo_stack.pop().expect("redo stack is empty");
+        restored.next_id = restored.next_id.max(id_hwm);
+        self.domain.block_state = restored;
         self.recompute_derived();
     }
 
