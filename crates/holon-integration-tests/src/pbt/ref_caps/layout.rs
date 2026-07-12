@@ -214,7 +214,13 @@ impl RefLayoutMutate for ReferenceState {
         use holon_pbt_core::types::Mutation;
         use holon_pbt_core::types::MutationEvent;
         use holon_pbt_core::types::MutationSource;
-        self.push_undo_snapshot();
+        // Leaf-reversibility gate (same DeclaredIrreversible rule as join_block):
+        // the engine's block `delete` only produces a create-inverse for a leaf;
+        // a delete that CASCADES to descendants is declared irreversible. Snapshot
+        // only for leaves, else the ref undo stack desyncs from the engine's.
+        if self.sorted_children_of(block_id).is_empty() {
+            self.push_undo_snapshot();
+        }
         self.apply_mutation(&MutationEvent {
             source: MutationSource::UI,
             mutation: Mutation::Delete {
