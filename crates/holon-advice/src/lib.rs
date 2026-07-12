@@ -16,6 +16,9 @@ pub mod lowering;
 pub mod reconcile_plan;
 pub mod rule;
 pub mod status;
+// Engine-side matview synthesis; pulls holon-turso (native-only). Gated so the
+// wasm page renderer can depend on the pure rule surface without the engine.
+#[cfg(feature = "engine")]
 pub mod synthesis;
 
 pub use discovery::ADVICE_RULE_SOURCE_LANGUAGE;
@@ -48,10 +51,15 @@ pub use rule::TagOverlapRecencySpec;
 pub use rule::parse_advice_rule;
 pub use status::AdviceRuleStatus;
 pub use status::AdviceRuleStatusHandle;
+#[cfg(feature = "engine")]
 pub use synthesis::AdviceSynthesisError;
+#[cfg(feature = "engine")]
 pub use synthesis::ReconcileOutcome;
+#[cfg(feature = "engine")]
 pub use synthesis::SynthesizedMatview;
+#[cfg(feature = "engine")]
 pub use synthesis::reconcile_advice_rule;
+#[cfg(feature = "engine")]
 pub use synthesis::synthesize_matview;
 
 /// The bundled lessons-for-tasks rule (ADR 0022 v1 cut). Shipped here as a
