@@ -607,10 +607,23 @@ async fn compose_sut_seeded_impl(
              CoreOperations path here); a non-frontend Turso config cannot be seeded this way",
         );
         for nb in seed_tree {
-            backend
+            let created = backend
                 .create_block(nb.parent_id.clone(), nb.content.clone(), nb.id.clone())
                 .await
                 .expect("seed non-frontend working tree block");
+            // Doc-root ⟹ `Page`. The FRONTEND arm gets this for free from the org
+            // boot (`WIDE_TREE_ORG`'s `#+ID:` head → parser `set_page(true)` on the
+            // doc-root, parser.rs). The direct Loro seed here bypasses org, so a
+            // page-rooted seed block would boot WITHOUT its `Page` tag — the
+            // sidebar `tag='Page'` projection (and `inv-sidebar-page-tag-preserved`)
+            // then correctly report it DEMOTED at boot. Mirror the parser's rule so
+            // the Loro-only SUT seed is prod-faithful (every doc-root is a page).
+            if nb.parent_id.is_no_parent() || nb.parent_id.is_sentinel() {
+                backend
+                    .set_block_tags(created.id.as_str(), &["Page".to_string()])
+                    .await
+                    .expect("tag seed doc-root as Page");
+            }
         }
     }
 
