@@ -211,3 +211,21 @@ COMPOSITION, never duplication (a view wanting a different query is a
 different source). Views materialize LAZILY: zero view blocks in the default
 case (profile-default renderer); the switcher mints one only on a non-default
 choice — no block explosion.
+
+### Clarification 2 (Martin Q, 2026-07-13): no view-block duplication across sources; applicability stays shape-universal
+
+Three layers, and view blocks live only in the third:
+1. **Variant menu = computed, never stored.** Renderers declare shape
+   requirements; profiles resolve applicable variants per entity kind
+   (`resolve_collection_variants`, unchanged). Every query block gets the
+   full menu with zero per-source artifacts; a new renderer is instantly
+   offered everywhere its shape fits.
+2. **Plain choice = selection state, not a block.** "table, default params"
+   is a property on the scope block (synced) or a `local_ui_state` row
+   (local): value = renderer id. No view block minted.
+3. **View blocks = source-INDEPENDENT view templates** `{renderer, params,
+   shape requirement}` — named parameterizations ("Kanban by assignee"),
+   defined once, applicable to every source whose shape fits; selection
+   state pairs (scope → template ref). A source-bound saved view is the
+   degenerate pairing. No duplication in either direction: queries are never
+   copied into views, views are never copied per query.
