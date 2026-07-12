@@ -92,8 +92,14 @@ pub struct RestCallConfig {
     /// Query parameters; values may be literals or `{arg}` placeholders.
     #[serde(default)]
     pub query: HashMap<String, String>,
+    /// Response body codec: `json` (default), `atom`, or `rss`. `atom`/`rss`
+    /// decode a syndication feed into the same record shape as JSON.
+    #[serde(default)]
+    pub format: crate::rest_transport::ResponseFormat,
     /// If set, a non-object JSON body is wrapped as `{ result_key: <body> }` so
-    /// a `sync.extract_path` can select it (bare-array responses → object).
+    /// a `sync.extract_path` can select it (bare-array responses → object). For
+    /// `atom`/`rss` the decoded entry array is wrapped under this key (default
+    /// `entries`).
     #[serde(default)]
     pub result_key: Option<String>,
 }
@@ -222,6 +228,7 @@ impl IntegrationFileConfig {
                         method: c.method,
                         path: c.path,
                         query: c.query,
+                        format: c.format,
                         result_key: c.result_key,
                     },
                 );

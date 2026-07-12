@@ -199,6 +199,64 @@ Worked read-only example: **`jsonplaceholder.yaml`** — the public
 end-to-end against a local mock server in
 `crates/holon-mcp-client/tests/rest_transport_mock.rs`.
 
+#### Response formats: `json` | `atom` | `rss` (feeds)
+
+A `rest` call decodes its response body per a `format:` codec (default `json`,
+back-compatible). The transport axis (how you reach the source) stays orthogonal
+to the body codec (how the response is shaped), so **syndication feeds need no
+new transport** — an Atom/RSS feed is fetched exactly like any GET, only the
+codec differs:
+
+- `format: json` (default) — the JSON path described above.
+- `format: atom` — decodes an Atom feed (RFC 4287); each `<entry>` →
+  `{ id, title, updated, author, link, content }` (falls back to `<summary>`
+  when there is no `<content>`).
+- `format: rss` — decodes RSS 2.0; each `<item>` → the same record shape
+  (`<guid>`→id falling back to `<link>`, `<pubDate>`→updated,
+  `<author>`/`<dc:creator>`→author, `<description>`/`<content:encoded>`→content).
+
+Because a feed is inherently a collection, the decoded entry array is always
+wrapped under `result_key` (default `entries`), so `sync.extract_path` selects
+it just like the JSON case. The codecs are parse-don't-validate at the boundary:
+the root element is asserted to be a feed and malformed XML fails loud; an empty
+feed (zero entries) is legitimate.
+
+Feed example sidecar (a blog's Atom feed, no auth):
+
+```yaml
+transport:
+  rest:
+    base_url: https://blog.example.com
+    calls:
+      list-posts:
+        method: GET
+        path: /feed.atom
+        format: atom          # or: rss
+        result_key: entries
+
+entities:
+  blog_posts:
+    short_name: post
+    id_column: id
+    schema:
+      - { name: id,      sql_type: TEXT, primary_key: true }
+      - { name: title,   sql_type: TEXT }
+      - { name: updated, sql_type: TEXT }
+      - { name: author,  sql_type: TEXT }
+      - { name: link,    sql_type: TEXT }
+      - { name: content, sql_type: TEXT }
+    sync:
+      list_tool: list-posts
+      extract_path: entries
+
+tools: {}
+```
+
+Both codecs are exercised end-to-end against a local mock server (Atom + RSS
+fixtures, no network) in `crates/holon-mcp-client/tests/rest_transport_mock.rs`.
+XML is decoded with `roxmltree` (a lightweight read-only DOM parser already in
+the dependency tree).
+
 ---
 
 ## Open questions
