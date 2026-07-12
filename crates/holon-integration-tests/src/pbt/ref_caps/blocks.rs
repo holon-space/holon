@@ -314,6 +314,12 @@ impl RefApplyMutationMut for ReferenceState {
             && fields.contains_key("content")
         {
             self.reset_cursor_if_focused(id);
+            // Prod's data subscription refreshes an idle (clean) active editor
+            // from its live content cell — the exact source `editor_live_text`
+            // reads. Mirror that so `inv-editor-text/mirror` sees the refreshed
+            // content, not a stale pre-update buffer (dirty editors keep their
+            // pending user text; the split-with-pending-edit contract).
+            self.refresh_clean_active_editor(id);
         }
     }
 }
