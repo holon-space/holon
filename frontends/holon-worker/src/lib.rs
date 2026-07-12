@@ -40,6 +40,35 @@ use holon::storage::BLOCK_READ_TABLE;
 use napi_derive::napi;
 use parking_lot::Mutex;
 
+/// Initialize the main thread's WASI thread-pointer / pthread state.
+///
+/// When this crate is built as a wasm **library** (napi cdylib) for
+/// `wasm32-wasip1-threads`, `crt1-reactor.o`'s `_initialize` — which would
+/// call `__wasi_init_tp()` to set up the main thread's pthread subsystem — is
+/// never exported nor invoked (rust-lang/rust#146843). Without it the main
+/// thread's pthread key/TSD subsystem is uninitialized, so the first
+/// thread-local-**destructor** registration (`pthread_key_create` →
+/// `pthread_rwlock_wrlock`) deadlocks. That deadlock manifests deep inside
+/// napi's module registration (`REGISTERED_CLASSES` thread-local) and again in
+/// tokio's runtime thread-locals, so the worker never emits `ready`.
+///
+/// The JS glue must call this export **once**, on the main worker thread,
+/// before any napi registration / thread-local-destructor registration runs
+/// (see `web/worker-entry.mjs` `beforeInit`). Ctors (`__wasm_call_ctors`) are
+/// already run by napi-rs's per-export `.command_export` wrappers, so we only
+/// need the missing thread-pointer init here.
+#[cfg(all(target_arch = "wasm32", feature = "browser"))]
+#[no_mangle]
+pub extern "C" fn holon_init_main_thread() {
+    unsafe extern "C" {
+        fn __wasi_init_tp();
+    }
+    // SAFETY: called once on the main worker thread before any pthread/TLS-dtor
+    // use, matching the reactor `_initialize` contract that the library build
+    // omits.
+    unsafe { __wasi_init_tp() };
+}
+
 /// H4 step 1 — tokio timers work inside a `#[napi] async fn`.
 ///
 /// Sleeps 50ms on whatever runtime napi's `tokio_rt` feature installs, then
