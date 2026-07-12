@@ -125,7 +125,13 @@ pub fn join_block_apply_to_ref<R: RefBlockTree + RefBlockTreeMut + RefFocusMut>(
     block_id: &EntityUri,
     state: &mut R,
 ) {
-    state.push_undo_snapshot();
+    // Leaf-reversibility gate (matches U4's DeclaredIrreversible rule): the
+    // engine only produces a compound inverse for a leaf join. Joining a block
+    // that still has children is declared irreversible, so snapshotting here
+    // would desync the ref undo stack from the engine's. Push only for leaves.
+    if state.sorted_children(block_id).is_empty() {
+        state.push_undo_snapshot();
+    }
     // Determine the merge target before mutation: prev sibling if
     // present, otherwise the parent block (child→parent join).
     let target_id = state.previous_sibling(block_id).unwrap_or_else(|| {
