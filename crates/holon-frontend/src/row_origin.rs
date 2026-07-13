@@ -98,6 +98,45 @@ impl RowOrigin {
     pub fn is_creation_placeholder(&self) -> bool {
         matches!(self, RowOrigin::CreationPlaceholder { .. })
     }
+
+    /// Whether this row is a display-placed occurrence of a real block (ADR
+    /// 0015 P2).
+    pub fn is_display_placed(&self) -> bool {
+        matches!(self, RowOrigin::DisplayPlaced { .. })
+    }
+
+    /// Parse origin from a row's `id` AND its [`Occurrence`] context (the
+    /// widened row-identity key, ADR 0016 §1). When the occurrence is
+    /// [`Placed`](Occurrence::Placed), the row is a display-placed
+    /// occurrence regardless of its id — the id is the canonical id (rule
+    /// 4: never an id-infix). `from_id` / `from_row` alone
+    /// cannot distinguish this because the id is a legitimate canonical
+    /// `EntityUri`.
+    pub fn from_row_with_occurrence(
+        row: &holon_api::widget_spec::DataRow,
+        occurrence: &Occurrence,
+    ) -> Self {
+        match occurrence {
+            Occurrence::Placed(occ) => {
+                let id = row
+                    .get("id")
+                    .and_then(|v| v.as_string())
+                    .unwrap_or_default();
+                let canonical_id = if let Ok(uri) = EntityUri::parse(id) {
+                    uri
+                } else {
+                    // ALLOW(entity_uri_from_raw): id column from a render row (render-pipeline/row
+                    // boundary)
+                    EntityUri::from_raw(id)
+                };
+                RowOrigin::DisplayPlaced {
+                    canonical_id,
+                    occurrence: occ.clone(),
+                }
+            }
+            Occurrence::Canonical => Self::from_row(row),
+        }
+    }
 }
 
 /// Resolve the parent a creation slot must dispatch `block.create` under, from
@@ -277,6 +316,113 @@ mod tests {
     #[test]
     fn occurrence_defaults_to_canonical() {
         assert_eq!(Occurrence::default(), Occurrence::Canonical);
+    }
+
+    #[test]
+    fn canonical_row_with_canonical_occurrence_is_canonical() {
+        let mut r = std::collections::HashMap::new();
+        r.insert(
+            "id".to_string(),
+            holon_api::Value::String("block:abc".into()),
+        );
+        let origin = RowOrigin::from_row_with_occurrence(&r, &Occurrence::Canonical);
+        assert_eq!(origin, RowOrigin::Canonical);
+    }
+
+    #[test]
+    fn canonical_row_with_placed_occurrence_is_display_placed() {
+        let canonical = EntityUri::block("some-block");
+        let anchor = EntityUri::block("anchor");
+        let occ = OccurrenceId::for_placement(&canonical, &anchor);
+        let mut r = std::collections::HashMap::new();
+        r.insert(
+            "id".to_string(),
+            holon_api::Value::String(canonical.as_str().into()),
+        );
+        let origin = RowOrigin::from_row_with_occurrence(&r, &Occurrence::Placed(occ.clone()));
+        assert!(origin.is_display_placed());
+        match origin {
+            RowOrigin::DisplayPlaced {
+                canonical_id,
+                occurrence,
+            } => {
+                assert_eq!(canonical_id, canonical);
+                assert_eq!(occurrence, occ);
+            }
+            other => panic!("expected DisplayPlaced, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn is_display_placed_returns_false_for_canonical() {
+        assert!(!RowOrigin::Canonical.is_display_placed());
+        let parent = EntityUri::block("p");
+        assert!(
+            !RowOrigin::CreationPlaceholder {
+                entity_type: "block".into(),
+                parent: parent.clone(),
+            }
+            .is_display_placed()
+        );
+    }
+
+    /// No-write guard (Phase 1a): a display-placed row bears the canonical
+    /// block id — NOT a synthetic id like `:__virtual:`.
+    /// `RowOrigin::from_id` returns `Canonical` for it, because there is no
+    /// infix signature. This is the structural write guard: there is no
+    /// id-based "materialize on edit" path for display-placed rows (unlike
+    /// `CreationPlaceholder`, whose `:__virtual:` infix triggers
+    /// `block.create` in the event handler). Any future serialization path
+    /// that accidentally writes a display-placed row would collide with the
+    /// existing canonical block row — failing loud at the DB constraint
+    /// level (unique id).
+    #[test]
+    fn display_placed_row_has_canonical_id_not_synthetic() {
+        let canonical = EntityUri::block("real-block");
+        // A display-placed row renders under the canonical id (ADR 0015 rule 4:
+        // never an id-infix). `from_id` sees it as canonical — there is no
+        // `:__virtual:` infix to trigger materialization.
+        let origin = RowOrigin::from_id(canonical.as_str());
+        assert_eq!(origin, RowOrigin::Canonical);
+        assert!(!origin.is_display_placed());
+        assert!(!origin.is_creation_placeholder());
+
+        // Only through the occurrence context does the distinction become
+        // visible (from_row_with_occurrence). This is the typed path — the
+        // display-origin marker is metadata, never id-encoding.
+        let mut r = std::collections::HashMap::new();
+        r.insert(
+            "id".to_string(),
+            holon_api::Value::String(canonical.as_str().into()),
+        );
+        let anchor = EntityUri::block("anchor");
+        let occ = OccurrenceId::for_placement(&canonical, &anchor);
+        let placed = RowOrigin::from_row_with_occurrence(&r, &Occurrence::Placed(occ));
+        assert!(placed.is_display_placed());
+    }
+
+    /// No-write guard (Phase 1a): verify that the `DisplayPlaced` variant
+    /// carries the canonical id, not a synthetic one. The id is always a
+    /// real `EntityUri`, so any accidental write would refer to an existing
+    /// block.
+    #[test]
+    fn display_placed_variant_carries_real_entity_uri() {
+        let canonical = EntityUri::block("real-block");
+        let anchor = EntityUri::block("anchor");
+        let occ = OccurrenceId::for_placement(&canonical, &anchor);
+        let origin = RowOrigin::DisplayPlaced {
+            canonical_id: canonical.clone(),
+            occurrence: occ,
+        };
+        // The canonical_id IS the real block's id — a genuine EntityUri, not a
+        // synthetic string. No `:__virtual:` infix, no `block.create` trigger.
+        assert_eq!(origin.is_display_placed(), true);
+        match origin {
+            RowOrigin::DisplayPlaced { canonical_id, .. } => {
+                assert_eq!(canonical_id, canonical);
+            }
+            _ => unreachable!(),
+        }
     }
 
     // ─── resolve_creation_parent (bug 2A) ───────────────────────────────────
