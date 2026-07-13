@@ -1903,6 +1903,20 @@ impl HolonMcpServer {
     }
 }
 
+/// Fail-loud decision for `type_text` (dogfood #5 row 147): given `total`
+/// keystrokes of which `handled` were consumed by a focused editor (or a bound
+/// action), return the number `dropped`, or `Err(total)` when EVERY keystroke
+/// was dropped — no focus consumed any of them, so the input silently vanished
+/// and the caller must fail loud instead of reporting a fake `keystrokes_sent`.
+/// An empty keystroke set is a vacuous success (`Ok(0)`), never a drop.
+fn type_text_drop_outcome(total: usize, handled: usize) -> Result<usize, usize> {
+    if total > 0 && handled == 0 {
+        Err(total)
+    } else {
+        Ok(total - handled)
+    }
+}
+
 #[tool_router(router = tool_router_ui, vis = "pub(crate)")]
 impl HolonMcpServer {
     #[tool(
@@ -2686,6 +2700,13 @@ impl HolonMcpServer {
             params.text.chars().map(|c| c.to_string()).collect()
         };
 
+        // Track how many keystrokes were actually CONSUMED. GPUI's
+        // `dispatch_keystroke` returns `false` for a plain character when no
+        // input handler is installed — i.e. no editor is focused — so the
+        // keystroke is dropped on the floor (dogfood #5 row 147: 22 keystrokes
+        // vanished after a failed click cleared focus, yet the tool reported
+        // success). We must fail loud on that instead of faking `keystrokes_sent`.
+        let mut handled_count = 0usize;
         for key in &keystrokes {
             let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
             tx.clone()
@@ -2700,14 +2721,36 @@ impl HolonMcpServer {
                     rmcp::ErrorData::internal_error("GPUI interaction channel disconnected", None)
                 })?;
 
-            resp_rx.await.map_err(|_| {
+            let response = resp_rx.await.map_err(|_| {
                 rmcp::ErrorData::internal_error("GPUI did not respond to key event", None)
             })?;
+            if response.handled {
+                handled_count += 1;
+            }
         }
+
+        // No keystroke was consumed by anything (no focused editor, no matching
+        // action) — the input silently vanished. Fail loud like `click` does,
+        // rather than returning a success payload the caller will trust.
+        let dropped = match type_text_drop_outcome(keystrokes.len(), handled_count) {
+            Ok(dropped) => dropped,
+            Err(total) => {
+                return Err(rmcp::ErrorData::internal_error(
+                    format!(
+                        "type_text dropped all {total} keystroke(s): no focused editor (or bound \
+                         action) consumed them. Focus an editor first (e.g. click a block), then \
+                         retry."
+                    ),
+                    None,
+                ));
+            }
+        };
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::json!({
                 "keystrokes_sent": keystrokes.len(),
+                "keystrokes_handled": handled_count,
+                "dropped": dropped,
             })
             .to_string(),
         )]))
@@ -3115,6 +3158,34 @@ mod tests {
     fn json_to_holon_string() {
         let v = json_to_holon_value(serde_json::json!("hello"));
         assert_eq!(v, Value::String("hello".into()));
+    }
+
+    // ── type_text fail-loud contract (dogfood #5 row 147) ────────────────────
+
+    #[test]
+    fn type_text_all_keystrokes_dropped_fails_loud() {
+        // No focused editor → GPUI reports handled=false for every keystroke.
+        // The tool must fail loud (Err) rather than report a fake success.
+        assert_eq!(type_text_drop_outcome(22, 0), Err(22));
+        assert_eq!(type_text_drop_outcome(1, 0), Err(1));
+    }
+
+    #[test]
+    fn type_text_all_handled_reports_zero_dropped() {
+        assert_eq!(type_text_drop_outcome(5, 5), Ok(0));
+    }
+
+    #[test]
+    fn type_text_partial_handling_reports_dropped_count() {
+        // At least one keystroke landed, so this is not the "no focus" case;
+        // report the shortfall instead of failing the whole call.
+        assert_eq!(type_text_drop_outcome(5, 3), Ok(2));
+    }
+
+    #[test]
+    fn type_text_empty_input_is_vacuous_success() {
+        // A special-key expansion that produced nothing must not be a "drop".
+        assert_eq!(type_text_drop_outcome(0, 0), Ok(0));
     }
 
     #[test]
