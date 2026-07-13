@@ -25,7 +25,11 @@ pub fn dispatch_operation(
     // point; `holon_api::latency_e2e` closes it when the target's row lands
     // in a LiveData mirror (stage="e2e").
     if let Some(target) = params.get("id").and_then(|v| v.as_string()) {
-        holon_api::latency_e2e::interaction_dispatched(&op_name, target);
+        holon_api::latency_e2e::interaction_dispatched(
+            &op_name,
+            target,
+            holon_api::latency_e2e::write_seq_from_params(&params),
+        );
     }
     handle.spawn(async move {
         if let Err(e) = session
