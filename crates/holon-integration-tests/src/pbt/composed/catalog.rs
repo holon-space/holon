@@ -108,6 +108,13 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // `ReactiveEngine` `widget_tree_snapshot`) supplies the SUT cap.
         invariants::viewmodel_snapshot::wire(),
         invariants::viewmodel_tree_virtual_slots::wire(),
+        // Display-placement inertness (Phase 1a — ADR 0015 §Evidence):
+        // proves a display-placed row does not perturb canonical projections
+        // (block-id set, org render, consolidation). Needs SutBackend +
+        // SutOrgRender + SutRenderer. The injection seam is gated by
+        // HOLON_PBT_DISPLAY_PLACED; unset → invariant fails non-vacuity
+        // (no display-placed node in the tree).
+        invariants::display_placement_canonical_inert::wire(),
         // Advice weave (ADR 0021/0022/0023): the rendered tree must weave each
         // anchor's top-K suppression-filtered advice rows. Needs `SutRenderer` +
         // `RefAdvice`. EXPECTED RED between the generator arm (step 4) and the
@@ -241,6 +248,7 @@ const CENTRAL_INVARIANT_IDS_HEAD: &[&str] = &[
     "inv-value-fn-provider-arg-variance-13",
     "inv-viewmodel-snapshot",
     "inv-viewmodel-tree-virtual-slots",
+    "inv-display-placement-canonical-inert",
     "inv-advice-rows-woven",
     "inv-editable-text-has-draggable",
     "inv-viewmodel-root-matches-render-expr",

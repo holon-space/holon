@@ -23,6 +23,7 @@
 
 pub mod advice_rows_woven;
 pub mod companion_has_no_child_page_headings;
+pub mod display_placement_canonical_inert;
 pub mod displayed_text;
 pub mod editable_text_has_draggable;
 pub mod focus_matches_ref;
