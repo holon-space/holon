@@ -757,29 +757,54 @@ impl EntityCellRegistry for BlockCellRegistry {
                     .await
                     .map_err(|e| anyhow!("update_block_position({new_id}): {e:#}"))?;
             }
+            // Reconcile the requested edge fields against the existing node — but
+            // only WRITE when the tree's current value differs from the request.
+            //
             // The existing node may be a tagless placeholder root, auto-created
             // (below) when a child's `create_in_tree` reached this id before its
-            // own create call. Reconcile the requested tags so a page document
-            // keeps its `Page` marker in Loro — otherwise the outbound projector
-            // diffs Loro(no tag) against SQL(Page) and wipes the SQL tag.
-            if !tags.is_empty() {
+            // own create call: reconciling its tags keeps a page document's `Page`
+            // marker in Loro (otherwise the outbound projector diffs Loro(no tag)
+            // against SQL(Page) and wipes the SQL tag). But re-asserting a value
+            // the node ALREADY carries still emits a Loro op → DiffEvent → SQL
+            // junction DELETE+INSERT: gratuitous churn on every boot re-seed and
+            // org re-scan, and — on a restart, where the persisted matview keeps a
+            // tag its emptied base table no longer holds — the delta that DOUBLES
+            // the matview tag row. Comparing against the Loro tree (the authority,
+            // fully loaded before the seed runs) makes the skip deterministic,
+            // unlike diffing the lagging SQL projection during boot.
+            let current =
+                if !tags.is_empty() || !requires.is_empty() || !advice_suppressed.is_empty() {
+                    Some(
+                        backend.get_block(new_id.id()).await.map_err(|e| {
+                            anyhow!("get_block({new_id}) for edge reconcile: {e:#}")
+                        })?,
+                    )
+                } else {
+                    None
+                };
+            if !tags.is_empty() && current.as_ref().is_none_or(|b| b.tags != *tags) {
                 backend
                     .set_block_tags(new_id.id(), &tags.to_vec())
                     .await
                     .map_err(|e| anyhow!("set_block_tags({new_id}): {e:#}"))?;
             }
-            // Reconcile the `requires` edge field too (mirrors tags): a re-scan
-            // of an already-placed block must re-assert its org-edna deps so the
-            // projection writes `block_requires`. Skipped when empty to avoid
-            // clobbering deps set elsewhere with an empty list.
-            if !requires.is_empty() {
+            // Skipped when empty to avoid clobbering deps set elsewhere with an
+            // empty list; otherwise written only when the request differs.
+            if !requires.is_empty()
+                && current
+                    .as_ref()
+                    .is_none_or(|b| b.requires.as_slice() != requires)
+            {
                 backend
                     .set_block_requires(new_id.id(), requires)
                     .await
                     .map_err(|e| anyhow!("set_block_requires({new_id}): {e:#}"))?;
             }
-            // Reconcile the advice-suppression set too (mirrors requires).
-            if !advice_suppressed.is_empty() {
+            if !advice_suppressed.is_empty()
+                && current
+                    .as_ref()
+                    .is_none_or(|b| b.advice_suppressed.as_slice() != advice_suppressed)
+            {
                 backend
                     .set_block_advice_suppressed(new_id.id(), advice_suppressed)
                     .await
@@ -1116,6 +1141,85 @@ mod tests {
         let err = res.err().expect("expected an error for missing block");
         let msg = format!("{:#}", err);
         assert!(msg.contains("not found in Loro tree"), "msg = {msg}");
+    }
+
+    /// Task #65 (boot re-seed churn): re-running `create_entity` for a block
+    /// that already exists with byte-identical edge fields must emit NO
+    /// Loro op. The existing-node reconcile guards each `set_block_*`
+    /// behind a compare against the tree's current value; an unconditional
+    /// re-assert would commit an op (`set_block_tags` always `meta.insert`
+    /// + `doc.commit()`) that projects to a junction DELETE+INSERT — the
+    /// gratuitous boot/org-rescan churn, and the delta that doubles a
+    /// persisted matview tag on restart. Observed at the Loro
+    /// authority (deterministic) via the oplog frontier watermark.
+    #[tokio::test]
+    async fn create_entity_is_idempotent_for_unchanged_edge_fields() -> Result<()> {
+        use std::collections::HashMap;
+
+        let doc = make_loro_doc_with_block("parent");
+        let registry = BlockCellRegistry::with_loro_doc(doc.clone());
+        let parent = EntityUri::block("parent");
+        let child = EntityUri::block("journals");
+        let page_tags = Tags::from(vec!["Page".to_string()]);
+
+        // First create: mints the node and sets the `Page` tag.
+        let wrote = registry
+            .create_entity(
+                &parent,
+                None,
+                &child,
+                holon_api::BlockContent::text("Journals"),
+                &HashMap::new(),
+                &page_tags,
+                &[],
+                &[],
+            )
+            .await?;
+        assert!(wrote, "loro-mode create must persist");
+
+        // Re-seed with byte-identical edge fields → no new Loro op.
+        let before = doc.oplog_frontiers();
+        let wrote2 = registry
+            .create_entity(
+                &parent,
+                None,
+                &child,
+                holon_api::BlockContent::text("Journals"),
+                &HashMap::new(),
+                &page_tags,
+                &[],
+                &[],
+            )
+            .await?;
+        assert!(wrote2, "existing-node reconcile still returns true");
+        assert_eq!(
+            before,
+            doc.oplog_frontiers(),
+            "re-seeding an unchanged block must emit NO Loro op (boot re-seed churn)"
+        );
+
+        // Control: a genuinely different tag set must still be written.
+        let changed_tags = Tags::from(vec!["Page".to_string(), "Task".to_string()]);
+        let after_noop = doc.oplog_frontiers();
+        let wrote3 = registry
+            .create_entity(
+                &parent,
+                None,
+                &child,
+                holon_api::BlockContent::text("Journals"),
+                &HashMap::new(),
+                &changed_tags,
+                &[],
+                &[],
+            )
+            .await?;
+        assert!(wrote3);
+        assert_ne!(
+            after_noop,
+            doc.oplog_frontiers(),
+            "a changed tag set must still be written through"
+        );
+        Ok(())
     }
 
     #[test]
