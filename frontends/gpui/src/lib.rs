@@ -453,6 +453,12 @@ pub struct HolonApp {
     /// Compared against the session's selected theme on every render so a
     /// theme change (settings dropdown, or any other path) re-applies live.
     applied_theme: String,
+    /// Last-observed `UiState::main_nav_generation`. When it advances, a page
+    /// navigation landed in the main region — the main panel's scroll is reset
+    /// to the top so the new page opens above the fold (LogSeq parity, dogfood
+    /// #5 row 146). Same-page block clicks move `focused_block` but NOT this
+    /// counter, so they leave the scroll position untouched.
+    last_main_nav_gen: u64,
 }
 
 impl Render for HolonApp {
@@ -484,6 +490,28 @@ impl Render for HolonApp {
         if desired_theme != self.applied_theme {
             apply_holon_theme(&self.session, cx);
             self.applied_theme = desired_theme;
+        }
+        // Reset main-panel scroll to the top when a page navigation lands in the
+        // main region (LogSeq parity, dogfood #5 row 146). `main_nav_generation`
+        // advances only on `navigation.focus`(region=main)/`go_home`, NOT on
+        // same-page block clicks, so mid-page editing keeps its scroll offset.
+        let main_nav_gen = self
+            .app_model
+            .read(cx)
+            .engine
+            .ui_state()
+            .main_nav_generation();
+        if main_nav_gen != self.last_main_nav_gen {
+            self.last_main_nav_gen = main_nav_gen;
+            if let Some(main_panel) = self
+                .app_model
+                .read(cx)
+                .root_live_blocks
+                .get("block:default-main-panel")
+                .cloned()
+            {
+                scroll_reactive_shell_tree_to_top(&main_panel, cx);
+            }
         }
         let (view_model, shadow_ctx, services, show_settings, show_widget_gallery) = {
             let model = self.app_model.read(cx);
@@ -1547,6 +1575,7 @@ fn launch_holon_window_impl(
                 #[cfg(debug_assertions)]
                 oracle_ui: oracle_ui_entity.clone(),
                 applied_theme: String::new(),
+                last_main_nav_gen: 0,
             }
         });
         let any_view: AnyView = view.into();
@@ -2014,6 +2043,36 @@ fn scroll_entity_into_view(
 ///
 /// `pub` for the fail-loud regression test (`tests/mcp_scroll_fail_loud.rs`),
 /// which exercises the unreachable-target → `Ok(false)` contract.
+/// Reset a panel shell and every list-mode shell nested under it back to the
+/// top. Used on cross-page navigation into the main region so the new page
+/// opens above the fold (LogSeq parity). `panel_shell` is the block-mode shell
+/// (its own `list_state` is a no-op); the scrollable state lives in the nested
+/// list shells cached under it — the same descent `scroll_list_by` uses.
+fn scroll_reactive_shell_tree_to_top(
+    panel_shell: &gpui::Entity<views::ReactiveShell>,
+    cx: &mut App,
+) {
+    use crate::views::ReactiveShell;
+    let panel_cache = panel_shell.read(cx).entity_cache_clone();
+    let list_shells: Vec<gpui::Entity<ReactiveShell>> = {
+        let cache = panel_cache.read().unwrap();
+        cache
+            .values()
+            .filter_map(|any| any.clone().downcast::<ReactiveShell>().ok()) // ALLOW(ok): non-ReactiveShell entries are skipped, not errors
+            .collect()
+    };
+    for list_shell in list_shells {
+        list_shell.update(cx, |shell, cx| {
+            shell.scroll_to_top();
+            cx.notify();
+        });
+    }
+    panel_shell.update(cx, |shell, cx| {
+        shell.scroll_to_top();
+        cx.notify();
+    });
+}
+
 pub fn scroll_list_by(
     entity_id: &str,
     dy: f32,

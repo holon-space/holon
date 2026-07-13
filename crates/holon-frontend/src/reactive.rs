@@ -1064,6 +1064,13 @@ pub struct UiState {
     /// WITHOUT widening `focused_block`'s type (which would ripple through ~10
     /// readers + all four frontends — ADR 0010's reserved graduation).
     focused_occurrence: Mutable<Option<u32>>,
+    /// Monotonic counter bumped ONLY when navigation opens a *different page* in
+    /// the `main` region (`navigation.focus` region=main, or `navigation.go_home`).
+    /// Read by the GPUI frontend to reset the main panel's scroll to the top on
+    /// page change — distinct from `focused_block`, which also moves on same-page
+    /// block clicks (which must NOT reset scroll). Not a render signal; polled
+    /// during render.
+    main_nav_generation: Mutable<u64>,
 }
 
 impl UiState {
@@ -1074,7 +1081,20 @@ impl UiState {
             viewport: Mutable::new(None),
             pending_caret_seed: Mutable::new(None),
             focused_occurrence: Mutable::new(None),
+            main_nav_generation: Mutable::new(0),
         }
+    }
+
+    /// Current main-region navigation generation. Bumped on each page change in
+    /// the `main` region; see [`Self::bump_main_nav`].
+    pub fn main_nav_generation(&self) -> u64 {
+        self.main_nav_generation.get()
+    }
+
+    /// Record that a *page navigation* landed in the `main` region. Bumps
+    /// [`Self::main_nav_generation`] so the frontend resets main-panel scroll.
+    fn bump_main_nav(&self) {
+        self.main_nav_generation.set(self.main_nav_generation.get() + 1);
     }
 
     /// SPIKE: set the focused occurrence alongside the focused block. `None`
@@ -2749,9 +2769,24 @@ fn maybe_mirror_navigation_focus(ui_state: &UiState, intent: &crate::operations:
                 .map(|s| EntityUri::from_raw(s));
             // ALLOW(direct_focus_mutation): mirror of navigation.focus into UiState for value-fn graph; intentional, see surrounding comment.
             ui_state.set_focus(block_id);
+            // A page navigation into the main region resets main-panel scroll
+            // (LogSeq parity). Region-scoped so a right-sidebar pin (region=right)
+            // leaves the main scroll alone. An absent region defaults to main
+            // (the sidebar/journal nav actions all target region=main).
+            let region = intent
+                .params
+                .get("region")
+                .and_then(|v| v.as_string())
+                .unwrap_or("main");
+            if region == "main" {
+                ui_state.bump_main_nav();
+            }
         }
         // ALLOW(direct_focus_mutation): mirror of navigation.go_home into UiState for value-fn graph.
-        Ok(NavigationOp::GoHome) => ui_state.set_focus(None),
+        Ok(NavigationOp::GoHome) => {
+            ui_state.set_focus(None);
+            ui_state.bump_main_nav();
+        }
         // `focus_pin` / `close` / `go_back` / `go_forward` would require reading
         // `navigation_history` to know the target — leave them alone until the
         // backend grows a synchronous "current focus" accessor. `Err` is a
@@ -3199,6 +3234,42 @@ mod tests {
         // Deleting the focused block clears it.
         maybe_clear_focus_on_delete(&ui, &focus_intent("delete", "block:a"));
         assert_eq!(ui.focused_block(), None);
+    }
+
+    /// Build a `navigation.focus` intent targeting `region` at page `block_id`.
+    fn nav_focus_intent(region: &str, block_id: &str) -> crate::operations::OperationIntent {
+        let mut params = HashMap::new();
+        params.insert("region".to_string(), Value::String(region.to_string()));
+        params.insert("block_id".to_string(), Value::String(block_id.to_string()));
+        crate::operations::OperationIntent::new("navigation".into(), "focus".to_string(), params)
+    }
+
+    /// The main-panel scroll-reset signal (dogfood #5 row 146): a page
+    /// navigation into the `main` region bumps `main_nav_generation`; a
+    /// right-sidebar pin (region=right) leaves it alone so the main scroll is
+    /// preserved. `go_home` bumps it (returns to the home page).
+    #[test]
+    fn main_nav_generation_bumps_only_on_main_region_navigation() {
+        let ui = UiState::new();
+        assert_eq!(ui.main_nav_generation(), 0);
+
+        // Navigating a page into the main region bumps the counter.
+        maybe_mirror_navigation_focus(&ui, &nav_focus_intent("main", "block:page-a"));
+        assert_eq!(ui.main_nav_generation(), 1);
+
+        // Every subsequent main navigation advances it.
+        maybe_mirror_navigation_focus(&ui, &nav_focus_intent("main", "block:page-b"));
+        assert_eq!(ui.main_nav_generation(), 2);
+
+        // A right-sidebar pin must NOT reset the main panel's scroll.
+        maybe_mirror_navigation_focus(&ui, &nav_focus_intent("right", "block:page-c"));
+        assert_eq!(ui.main_nav_generation(), 2);
+
+        // go_home returns to the main region's home page → bump.
+        let go_home =
+            crate::operations::OperationIntent::new("navigation".into(), "go_home".to_string(), HashMap::new());
+        maybe_mirror_navigation_focus(&ui, &go_home);
+        assert_eq!(ui.main_nav_generation(), 3);
     }
 
     fn make_row(id: &str, content: &str) -> DataRow {
