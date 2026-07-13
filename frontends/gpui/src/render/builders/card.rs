@@ -35,12 +35,16 @@ fn parse_hex_u32(hex: &str) -> u32 {
     (r << 24) | (g << 16) | (b << 8) | 0xFF
 }
 
-const CARD_BG: u32 = 0x2A2A27FF;
+/// Pack a theme `Hsla` into the `0xRRGGBBAA` u32 the tint blender operates on,
+/// so the card base surface follows the active theme (readable in light AND
+/// dark) instead of a hardcoded dark constant.
+fn hsla_to_u32(color: gpui::Hsla) -> u32 {
+    let rgba: gpui::Rgba = color.into();
+    let to_u8 = |f: f32| (f.clamp(0.0, 1.0) * 255.0).round() as u32;
+    (to_u8(rgba.r) << 24) | (to_u8(rgba.g) << 16) | (to_u8(rgba.b) << 8) | 0xFF
+}
 
-pub fn render(
-    node: &holon_frontend::ReactiveViewModel,
-    ctx: &GpuiRenderContext,
-) -> Div {
+pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
     let accent = node.prop_str("accent").unwrap_or_default();
     let children = &node.children;
     let s = ctx.style();
@@ -52,7 +56,8 @@ pub fn render(
 
     let accent_u32 = parse_hex_u32(&accent);
     let accent_color = hex_to_hsla(&accent);
-    let tinted = tint_rgba(accent_u32, CARD_BG);
+    let card_bg = hsla_to_u32(tc(ctx, |t| t.secondary));
+    let tinted = tint_rgba(accent_u32, card_bg);
 
     let mut container = div()
         .w_full()
