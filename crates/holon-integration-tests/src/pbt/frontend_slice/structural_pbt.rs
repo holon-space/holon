@@ -87,7 +87,8 @@ use crate::pbt::composed::subsystem_seed::run_with_seeded_ref;
 // boot_and_seed_wide/full_headless_cap_set/wide_e2e_ref/WideE2E{,Machine}.
 use crate::pbt::composed::wide_e2e::{
     SETTLE, WIDE_TREE_ORG, boot_and_seed_wide, folder_journal_page, frontend_wired, page_root,
-    seed_folder_companion, structural_ref, wide_e2e_ref, wide_ref,
+    seed_folder_companion, seed_folder_companion_subdir, structural_ref, subdir_journal_page,
+    wide_e2e_ref, wide_ref,
 };
 use crate::pbt::frontend_slice::components::HeadlessFrontendComponent;
 use crate::pbt::is_synthetic_ref_id;
@@ -813,6 +814,98 @@ mod teeth {
         );
     }
 
+    /// **BugFunnel row 137 PERSISTED REGRESSION SEED — the SUBDIR fileless
+    /// journals topology converges with zero loss on the composed keystone.**
+    ///
+    /// The real row-137 shape (distinct from the flat top-level
+    /// `folder_companion_cold_boot_preserves_page_authority` above, which is
+    /// Fork A's page-tag closure): `Journals.org` inlines a `:Page:`-tagged
+    /// date heading (`* 2026-07-11 :Page:`) with body text, and there is NO
+    /// `Journals/2026-07-11.org` on disk — the date page is FILELESS. Booted
+    /// through the REAL keystone boot (`boot_and_seed_wide`, subdir closure
+    /// keyed on `seed_folder_companion_subdir`). After settle, four things
+    /// must hold, and this test asserts all of them GREEN and NON-INERT:
+    ///
+    /// 1. `inv-every-page-has-its-own-file` — the fileless date page is
+    ///    MATERIALIZED into its own subdir file `Journals/2026-07-11.org`
+    ///    (`#+ID: journal-2026-07-11`). PRE-B2 this was RED: the page owned no
+    ///    file and its body lived only in the store (the row-137 loss).
+    /// 2. `inv-companion-has-no-child-page-headings` — `Journals.org`
+    ///    DE-INLINES the child-page heading (the `get_blocks` CTE excludes the
+    ///    `Page`-tagged child, and the ADR-0025 sibling-grounded union guard
+    ///    admits the de-inline because the child now survives in its own file).
+    ///    PRE-B1' this was RED: the per-file guard refused the de-inline as
+    ///    apparent block loss.
+    /// 3. `inv-no-page-under-non-page` — the topology is legal (date →
+    ///    `journals` (a page at `no_parent`) → root, all pages).
+    /// 4. `inv-org-render-fixed-point` + `inv-no-observed-errors` — the whole
+    ///    thing stabilizes (disk == render(SQL)) with no swallowed ERROR /
+    ///    quarantine.
+    ///
+    /// This is the deterministic, env-independent (not via
+    /// `folder_companion_enabled`) composed-keystone reproduction the
+    /// plan's §5 item 4 / §7 item 4 calls for. The date `2026-07-11` is off
+    /// the fixed keystone boot clock (`2026-01-15`) so the auto-create rule
+    /// never touches it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn folder_companion_subdir_fileless_materializes_and_deinlines() {
+        use holon_pbt_core::composition::CapInvariant;
+
+        use crate::pbt::composed::invariants::companion_has_no_child_page_headings;
+        use crate::pbt::composed::invariants::every_page_has_its_own_file;
+        use crate::pbt::composed::invariants::no_page_under_non_page;
+        use crate::pbt::composed::invariants::observed_errors;
+        use crate::pbt::composed::invariants::org_render_fixed_point;
+        use crate::pbt::composed::invariants::sidebar_page_tag_preserved;
+
+        let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
+        let mut oracle = frontend_wired(structural_ref());
+        seed_folder_companion_subdir(&mut oracle);
+        assert!(
+            oracle
+                .domain
+                .block_state
+                .blocks
+                .contains_key(&subdir_journal_page()),
+            "topology precondition: the fileless subdir date page must be seeded"
+        );
+
+        let (caps, _handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
+        tokio::time::sleep(SETTLE).await;
+
+        let mut resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
+        drop_ref_off_thread(oracle);
+        inject_scaffold_seed(&mut resolved, &scaffold_ids);
+        let registry: Vec<Box<dyn CapInvariant>> = vec![
+            observed_errors::wire(),
+            sidebar_page_tag_preserved::wire(),
+            org_render_fixed_point::wire(),
+            companion_has_no_child_page_headings::wire(),
+            every_page_has_its_own_file::wire(),
+            no_page_under_non_page::wire(),
+        ];
+        let report = run_with_seeded_ref(&registry, &caps, resolved).await;
+
+        assert!(
+            report.failures().is_empty(),
+            "the subdir fileless journals topology must converge with zero loss (materialize + \
+             de-inline + legal topology + fixed point): {:?}",
+            report.failures(),
+        );
+        // Non-inert: the two Fork-B oracles must actually select + run over the
+        // seeded fileless page (else this would pass vacuously — the row-137 trap).
+        for id in [
+            "inv-every-page-has-its-own-file",
+            "inv-companion-has-no-child-page-headings",
+        ] {
+            assert!(
+                report.ran_ids().iter().any(|r| *r == id),
+                "{id} must select + run over the seeded subdir journals topology (ran: {:?})",
+                report.ran_ids(),
+            );
+        }
+    }
+
     /// Boot a frontend over the given org files and return its composed CapMap
     /// (the caps the Fork B companion/materialization oracles select on),
     /// settled.
@@ -877,7 +970,6 @@ mod teeth {
     /// original B1 guard-veto premise does not hold here.
     #[tokio::test(flavor = "multi_thread")]
     async fn folder_companion_deinlines_owned_child_page() {
-        use holon_pbt_core::capabilities::SutSqlProjection;
         use holon_pbt_core::composition::CapInvariant;
 
         use crate::pbt::composed::invariants::companion_has_no_child_page_headings;

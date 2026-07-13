@@ -1564,11 +1564,23 @@ impl FileSyncController {
         // blocks) are structurally invisible to `get_blocks`'s Page-boundary
         // walk, so expecting them made the gate unsatisfiable (2026-07-12
         // quarantined-vault escape).
+        // The blocks expected present in `block_raw` (site-A cache) after this
+        // apply: every parsed block that is NEITHER gate-excluded (foreign page
+        // subtrees + Page-tagged parse blocks — structurally invisible to
+        // `get_blocks`'s Page-boundary walk) NOR consolidator-persisted (their
+        // sink rows flush downstream at site B). Computed with the SAME double
+        // predicate as `expected_present_ids` below so the count and the id-set
+        // never disagree. NB the two sets OVERLAP (a newly-ingested `:Page:`-tagged
+        // child is BOTH gate-excluded AND a consolidator create), so the former
+        // `count(non-gate-excluded) - consolidator_creates` underflowed (subtracting
+        // a create that was never in the count) — the row-137 subdir fileless
+        // journals topology tripped exactly that. This double-filter cannot
+        // underflow and equals `expected_present_ids.len()` by construction.
         let expected_block_count = new_blocks_vec
             .iter()
             .filter(|b| !gate_excluded_ids.contains(&b.id))
-            .count()
-            - consolidator_creates;
+            .filter(|b| !consolidator_create_ids.contains(&b.id.to_string()))
+            .count();
         tracing::debug!(
             target: "holon_latency",
             stage = "boot_parse",
@@ -2133,8 +2145,22 @@ impl FileSyncController {
         delta: &BlockDelta,
     ) -> Result<bool> {
         let path = match self.doc_id_to_path(doc_id).await {
-            Some(p) => p,
-            None => return Ok(false),
+            Ok(Some(p)) => p,
+            Ok(None) => return Ok(false),
+            Err(e) => {
+                // §3.1 Finding A / R11: name_chain failed loud (e.g. a
+                // prohibited page-under-non-page topology). Do NOT swallow this
+                // into a silent no-op — surface it, then skip only THIS block's
+                // write so the sync loop keeps serving every other document.
+                tracing::error!(
+                    doc_id = %doc_id,
+                    error = %format!("{e:#}"),
+                    "[FileSyncController] on_block_changed: could not resolve doc to a \
+                     page-file path (name_chain failed loud) — SKIPPING this document's \
+                     write-back; all other documents continue.",
+                );
+                return Ok(false);
+            }
         };
         let canonical = CanonicalPath::new(&path);
 
@@ -2773,8 +2799,21 @@ impl FileSyncController {
                 continue;
             }
             let path = match self.doc_id_to_path(&doc_id).await {
-                Some(p) => p,
-                None => continue,
+                Ok(Some(p)) => p,
+                Ok(None) => continue,
+                Err(e) => {
+                    // §3.1 Finding A / R11: name_chain failed loud for this
+                    // document. Surface it and skip only this one — the boot
+                    // sweep continues materializing every other fileless page.
+                    tracing::error!(
+                        doc_id = %doc_id,
+                        error = %format!("{e:#}"),
+                        "[FileSyncController] materialize_missing_page_files: could not \
+                         resolve doc to a page-file path (name_chain failed loud) — \
+                         SKIPPING this document; sweep continues.",
+                    );
+                    continue;
+                }
             };
             let canonical = CanonicalPath::new(&path);
             if self.last_projection.contains_key(&canonical) {
@@ -3096,8 +3135,29 @@ impl FileSyncController {
             if rendered_ids.contains(id) || sanctioned_removals.contains(id) {
                 continue;
             }
-            let Some(sibling) = self.doc_id_to_path(&block.id).await else {
-                continue;
+            let sibling = match self.doc_id_to_path(&block.id).await {
+                Ok(Some(p)) => p,
+                Ok(None) => continue,
+                Err(e) => {
+                    // §3.1 Finding A / R11: this absent block's own-file path
+                    // could not be resolved (name_chain failed loud — a
+                    // prohibited topology). Previously this was an unlogged
+                    // `None => continue`, which silently treated the block as
+                    // "no sibling home" and let the mass-truncation tripwire
+                    // fire on an unrelated companion. Surface it loudly; the
+                    // block stays ungrounded (honest — we genuinely cannot prove
+                    // where it went), so the tripwire's refusal is the SAFE
+                    // outcome rather than a silent truncation.
+                    tracing::error!(
+                        block_id = %block.id,
+                        path = %path.display(),
+                        error = %format!("{e:#}"),
+                        "[FileSyncController] writeback_sibling_grounding: could not resolve \
+                         an absent block's own-file path (name_chain failed loud) — leaving it \
+                         UNGROUNDED (guard may veto this write, which is the safe outcome).",
+                    );
+                    continue;
+                }
             };
             let sibling_canonical = CanonicalPath::new(&sibling);
             if sibling_canonical == self_canonical || !seen.insert(sibling_canonical) {
@@ -3194,23 +3254,35 @@ impl FileSyncController {
     }
 
     /// Resolve a doc_id to a filesystem path via DocumentManager.
-    async fn doc_id_to_path(&self, doc_id: &EntityUri) -> Option<PathBuf> {
+    ///
+    /// Return-type contract (Fork B B1 / §3.1 Finding A — do NOT collapse the
+    /// two `None`-like cases into one):
+    /// - `Ok(Some(path))` — the doc resolved to a page-file path.
+    /// - `Ok(None)` — the doc is **legitimately not a page** (empty
+    ///   name-chain). A silent skip is correct here (a non-page block owns no
+    ///   file).
+    /// - `Err(e)` — `name_chain` FAILED LOUD (e.g. the no-pages-under-non-pages
+    ///   assertion tripped, or a hierarchy read errored). This is a real,
+    ///   previously-unseen condition and MUST NOT be swallowed into the same
+    ///   bucket as "not a page". Every caller `tracing::error!`s it and skips
+    ///   only THIS document (bounded blast radius — never crash the sync loop).
+    async fn doc_id_to_path(&self, doc_id: &EntityUri) -> Result<Option<PathBuf>> {
         // Try alias registrar first (fastest path)
         if let Some(ref registrar) = self.alias_registrar {
             if let Some(path) = registrar.resolve_alias_to_path(doc_id).await {
-                return Some(path);
+                return Ok(Some(path));
             }
         }
 
-        // Walk the Document hierarchy to compute the path
-        match self.doc_manager.name_chain(doc_id).await {
-            Ok(chain) if !chain.is_empty() => {
-                let path = self.root_dir.join(chain.join("/")).with_extension("org");
-                Some(path)
-            }
-            Ok(_) => None,
-            Err(_) => None,
+        // Walk the Document hierarchy to compute the path. An error here
+        // (no-pages-under-non-pages assertion, missing ancestor) propagates
+        // loudly — the callers decide the bounded blast radius.
+        let chain = self.doc_manager.name_chain(doc_id).await?;
+        if chain.is_empty() {
+            return Ok(None);
         }
+        let path = self.root_dir.join(chain.join("/")).with_extension("org");
+        Ok(Some(path))
     }
 }
 

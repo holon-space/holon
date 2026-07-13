@@ -170,9 +170,27 @@ pub trait DocumentManager: Send + Sync {
     async fn update_metadata(&self, doc: &Block) -> Result<()>;
 
     /// Walk parent chain to root, return title segments: ["projects", "todo"]
+    ///
+    /// **No-pages-under-non-pages (2026-07-13 interim ruling,
+    /// `docs/Proposals/PageHierarchy-2026-07-13.md`; enforced Fork B B1):** a
+    /// page's structural ancestors, up to a root, must themselves all be pages.
+    /// Every ancestor iteration (NOT the starting `doc_id` itself — that block
+    /// is asserted `is_page()` separately by the one caller that matters,
+    /// `doc_id_to_path`, so a non-page `doc_id` fails loud there rather than
+    /// silently truncating its own segment here) that is not a page is a
+    /// **fail-loud error**, never a silent skip — mirrors the existing
+    /// `seed_routing_doc` precedent (`holon-app/src/seed.rs`) which asserts the
+    /// same invariant for the seed set. A caller must not reparent, coerce, or
+    /// slug around this; propagate the error (see `doc_id_to_path`).
+    ///
+    /// Root stop recognizes BOTH `no_parent()` and the broader `is_sentinel()`
+    /// (synthetic ids) as valid roots — matching the loop's own break
+    /// condition, so a legitimate sentinel-rooted chain is never mistaken for a
+    /// non-page ancestor.
     async fn name_chain(&self, doc_id: &EntityUri) -> Result<Vec<String>> {
         let mut chain = Vec::new();
         let mut current_id = doc_id.clone();
+        let mut is_self = true;
 
         loop {
             if current_id == EntityUri::no_parent() || current_id.is_sentinel() {
@@ -185,7 +203,15 @@ pub trait DocumentManager: Send + Sync {
 
             if doc.is_page() {
                 chain.push(doc.title());
+            } else if !is_self {
+                anyhow::bail!(
+                    "name_chain({doc_id}): non-page ancestor '{current_id}' found while walking \
+                     to root — pages under non-pages are prohibited (interim ruling 2026-07-13); \
+                     chain so far (root-to-here, reversed at return) = {:?}",
+                    chain
+                );
             }
+            is_self = false;
             current_id = doc.parent_id.clone();
         }
 
@@ -297,4 +323,120 @@ pub trait ThreeWayTextMerge: Send + Sync {
     /// `base` (a genuine concurrent edit); the non-conflict cases never reach
     /// here.
     fn merge_text(&self, base: &str, theirs: &str, mine: &str) -> Result<String>;
+}
+
+#[cfg(test)]
+mod name_chain_tests {
+    //! Red-first coverage for the no-pages-under-non-pages ruling
+    //! (`docs/Proposals/PageHierarchy-2026-07-13.md`, Fork B B1, §3/§5 item 1).
+    //!
+    //! Before the fix, `name_chain` SILENTLY dropped a non-page ancestor from
+    //! the path (`if doc.is_page() { push }` with no `else`), so
+    //! `A(page) > b1(non-page) > P(page)` returned `Ok(["A","P"])` — a
+    //! plausible-looking path that collides with any sibling of `b1`. These
+    //! tests pin the fail-loud replacement.
+
+    use std::collections::HashMap;
+
+    use super::*;
+
+    /// Minimal in-memory `DocumentManager` whose only real method is
+    /// `get_by_id` — the sole method `name_chain`'s default impl calls.
+    struct MockDocManager {
+        by_id: HashMap<EntityUri, Block>,
+    }
+
+    impl MockDocManager {
+        fn new(blocks: Vec<Block>) -> Self {
+            Self {
+                by_id: blocks.into_iter().map(|b| (b.id.clone(), b)).collect(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl DocumentManager for MockDocManager {
+        async fn find_by_parent_and_name(
+            &self,
+            _parent_id: &EntityUri,
+            _title: &str,
+        ) -> Result<Option<Block>> {
+            unimplemented!("not exercised by name_chain")
+        }
+
+        async fn create(&self, _doc: Block) -> Result<Block> {
+            unimplemented!("not exercised by name_chain")
+        }
+
+        async fn get_by_id(&self, id: &EntityUri) -> Result<Option<Block>> {
+            Ok(self.by_id.get(id).cloned())
+        }
+
+        async fn update_metadata(&self, _doc: &Block) -> Result<()> {
+            unimplemented!("not exercised by name_chain")
+        }
+    }
+
+    fn page(id: &str, parent: EntityUri, title: &str) -> Block {
+        let mut b = Block::new_text(EntityUri::block(id), parent, title.to_string());
+        b.set_page(true);
+        b
+    }
+
+    fn non_page(id: &str, parent: EntityUri, title: &str) -> Block {
+        Block::new_text(EntityUri::block(id), parent, title.to_string())
+    }
+
+    /// A well-formed chain of pages rooted at `no_parent()` resolves normally.
+    #[tokio::test]
+    async fn well_formed_page_chain_resolves() {
+        let a = page("A", EntityUri::no_parent(), "projects");
+        let p = page("P", a.id.clone(), "todo");
+        let mgr = MockDocManager::new(vec![a, p.clone()]);
+        let chain = mgr
+            .name_chain(&p.id)
+            .await
+            .expect("well-formed chain resolves");
+        assert_eq!(chain, vec!["projects".to_string(), "todo".to_string()]);
+    }
+
+    /// `A(page) > b1(non-page) > P(page)` — the prohibited topology. Before the
+    /// fix this returned `Ok(["A","P"])`; now it fails loud naming `b1`.
+    #[tokio::test]
+    async fn non_page_ancestor_fails_loud() {
+        let a = page("A", EntityUri::no_parent(), "projects");
+        let b1 = non_page("b1", a.id.clone(), "a plain heading");
+        let p = page("P", b1.id.clone(), "todo");
+        let mgr = MockDocManager::new(vec![a, b1.clone(), p.clone()]);
+
+        let err = mgr
+            .name_chain(&p.id)
+            .await
+            .expect_err("a page under a non-page ancestor must fail loud, not coerce a path");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("non-page ancestor") && msg.contains(b1.id.as_str()),
+            "error must name the offending non-page ancestor '{}'; got: {msg}",
+            b1.id
+        );
+    }
+
+    /// A chain rooted at a NON-`no_parent` sentinel (a synthetic root that is
+    /// still `is_sentinel()`) is a valid root stop — it must NOT be mistaken
+    /// for a non-page ancestor (Finding B: the root check matches both
+    /// predicates).
+    #[tokio::test]
+    async fn sentinel_rooted_chain_is_a_valid_root() {
+        let synthetic_root = EntityUri::new("sentinel", "synthetic_root");
+        assert!(synthetic_root.is_sentinel() && synthetic_root != EntityUri::no_parent());
+        // The page's parent is the synthetic sentinel directly — the loop breaks
+        // at the sentinel before ever trying to read it as a (non-page) block.
+        let p = page("P", synthetic_root, "todo");
+        let mgr = MockDocManager::new(vec![p.clone()]);
+        let chain = mgr
+            .name_chain(&p.id)
+            .await
+            .expect("a sentinel-rooted chain resolves without a false non-page-ancestor bail");
+        assert_eq!(chain, vec!["todo".to_string()]);
+    }
 }

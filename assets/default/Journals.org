@@ -14,6 +14,6 @@ list(#{sortkey: "-content", item_template: selectable(row(icon("calendar"), spac
 name: daily_journal
 when: 'not block_exists("Journals/{today}")'
 emit:
-  place: journals
+  place: page(journals)
   name: "{today}"
 #+END_SRC
