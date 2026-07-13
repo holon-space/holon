@@ -11,7 +11,7 @@
 tree(#{parent_id: col("parent_id"), sortkey: col("sort_key"), item_template: selectable(row(icon("notebook"), spacer(6), text(col("content"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})})})
 #+END_SRC
 #+BEGIN_SRC holon_sql :id left_sidebar::src::0
-SELECT b.* FROM block b JOIN block_tags bt ON bt.block_id = b.id WHERE bt.tag = 'Page' AND b.id != 'block:__default__'
+SELECT b.* FROM block b JOIN block_tags bt ON bt.block_id = b.id WHERE bt.tag = 'Page' AND b.id != 'block:__default__' ORDER BY b.content ASC
 #+END_SRC
 ** Main Panel
 :PROPERTIES:
