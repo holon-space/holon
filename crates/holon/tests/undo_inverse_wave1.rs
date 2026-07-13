@@ -35,11 +35,16 @@ async fn block_engine() -> Arc<BackendEngine> {
             .with_operation_provider_factory(|backend| {
                 let db_handle =
                     tokio::task::block_in_place(|| backend.blocking_read().handle().clone());
-                Arc::new(SqlOperationProvider::new(
+                // Edge-aware, exactly as prod wires the CRUD authority
+                // (`event_infra_module`): a `set_field` on an edge field
+                // (`requires`/`tags`) must route to the junction table and
+                // build a whole-set-restore inverse, not land in `properties`.
+                Arc::new(SqlOperationProvider::with_edge_fields(
                     db_handle,
                     BLOCK_WRITE_TABLE.to_string(),
                     "block".to_string(),
                     "block".to_string(),
+                    BlockSchemaModule.edge_fields(),
                 )) as Arc<dyn OperationProvider>
             })
             .with_operation_provider_factory(|backend| {
@@ -373,6 +378,161 @@ async fn delete_leaf_undo_resurrects_identical_row() {
     assert!(
         !row_exists(&engine, "block:leaf").await,
         "redo re-deletes the leaf"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// edge fields (requires / tags) — inverse restores the PRIOR full SET
+// (edge writes are a whole-set replace, so the inverse is a set-restore, not
+// an element-wise diff). These journal an undo entry through the engine even
+// though they report no column FieldDelta.
+// ---------------------------------------------------------------------------
+
+async fn set_edge(
+    engine: &BackendEngine,
+    id: &str,
+    field: &str,
+    targets: &[&str],
+    origin: OpOrigin,
+) {
+    let mut params: StorageEntity = HashMap::new();
+    params.insert("id".into(), Value::String(id.to_string()));
+    params.insert("field".into(), Value::String(field.to_string()));
+    params.insert(
+        "value".into(),
+        Value::Array(
+            targets
+                .iter()
+                .map(|t| Value::String(t.to_string()))
+                .collect(),
+        ),
+    );
+    engine
+        .execute_operation(&EntityName::new("block"), "set_field", params, origin)
+        .await
+        .unwrap_or_else(|e| panic!("set_field {id}.{field}: {e:#}"));
+}
+
+async fn read_edge(engine: &BackendEngine, table: &str, target_col: &str, id: &str) -> Vec<String> {
+    let rows = engine
+        .db_handle()
+        .query(
+            &format!(
+                "SELECT {target_col} AS t FROM {table} WHERE block_id = '{}' ORDER BY {target_col}",
+                id.replace('\'', "''")
+            ),
+            HashMap::new(),
+        )
+        .await
+        .expect("edge query");
+    rows.into_iter()
+        .filter_map(|r| r.get("t").and_then(|v| v.as_string()).map(str::to_string))
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn set_field_requires_undo_restores_prior_set_then_redo() {
+    let engine = block_engine().await;
+    for id in ["block:e", "block:d1", "block:d2"] {
+        create_block(&engine, id, "sentinel:no_parent", 0, "x", OpOrigin::Sync).await;
+    }
+
+    // Prior set (Sync — establishes state without a journal entry).
+    set_edge(
+        &engine,
+        "block:e",
+        "requires",
+        &["block:d1"],
+        OpOrigin::Sync,
+    )
+    .await;
+    assert_eq!(
+        read_edge(&engine, "block_requires", "required_id", "block:e").await,
+        vec!["block:d1".to_string()]
+    );
+
+    // User edit: replace the whole set with {d1, d2}.
+    set_edge(
+        &engine,
+        "block:e",
+        "requires",
+        &["block:d1", "block:d2"],
+        OpOrigin::User,
+    )
+    .await;
+    assert_eq!(
+        read_edge(&engine, "block_requires", "required_id", "block:e").await,
+        vec!["block:d1".to_string(), "block:d2".to_string()]
+    );
+    assert!(
+        engine.can_undo().await,
+        "edge set_field must push an undo entry"
+    );
+
+    // Undo restores the PRIOR full set {d1}, not an element-wise removal.
+    assert_eq!(engine.undo().await.expect("undo"), UndoOutcome::Applied);
+    assert_eq!(
+        read_edge(&engine, "block_requires", "required_id", "block:e").await,
+        vec!["block:d1".to_string()],
+        "undo must restore the previous requires set"
+    );
+
+    assert_eq!(engine.redo().await.expect("redo"), UndoOutcome::Applied);
+    assert_eq!(
+        read_edge(&engine, "block_requires", "required_id", "block:e").await,
+        vec!["block:d1".to_string(), "block:d2".to_string()],
+        "redo must re-apply the edge write"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn set_field_tags_undo_restores_prior_set_then_redo() {
+    let engine = block_engine().await;
+    create_block(
+        &engine,
+        "block:tg",
+        "sentinel:no_parent",
+        0,
+        "x",
+        OpOrigin::Sync,
+    )
+    .await;
+
+    set_edge(&engine, "block:tg", "tags", &["alpha"], OpOrigin::Sync).await;
+    assert_eq!(
+        read_edge(&engine, "block_tags", "tag", "block:tg").await,
+        vec!["alpha".to_string()]
+    );
+
+    set_edge(
+        &engine,
+        "block:tg",
+        "tags",
+        &["alpha", "beta"],
+        OpOrigin::User,
+    )
+    .await;
+    assert_eq!(
+        read_edge(&engine, "block_tags", "tag", "block:tg").await,
+        vec!["alpha".to_string(), "beta".to_string()]
+    );
+    assert!(
+        engine.can_undo().await,
+        "tags set_field must push an undo entry"
+    );
+
+    assert_eq!(engine.undo().await.expect("undo"), UndoOutcome::Applied);
+    assert_eq!(
+        read_edge(&engine, "block_tags", "tag", "block:tg").await,
+        vec!["alpha".to_string()],
+        "undo must restore the previous tags set"
+    );
+
+    assert_eq!(engine.redo().await.expect("redo"), UndoOutcome::Applied);
+    assert_eq!(
+        read_edge(&engine, "block_tags", "tag", "block:tg").await,
+        vec!["alpha".to_string(), "beta".to_string()],
+        "redo must re-apply the tags write"
     );
 }
 
