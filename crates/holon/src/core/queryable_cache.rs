@@ -5,9 +5,7 @@ use tokio::sync::broadcast;
 use tokio_stream::Stream;
 use tracing;
 
-use super::traits::{
-    IntoEntity, Result, TryFromEntity, TypeDefinition, value_to_turso,
-};
+use super::traits::{IntoEntity, Result, TryFromEntity, TypeDefinition, value_to_turso};
 use crate::storage::DbHandle;
 use holon_api::DynamicEntity;
 use holon_api::streaming::ChangeNotifications;

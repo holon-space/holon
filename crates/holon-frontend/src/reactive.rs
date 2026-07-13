@@ -1094,7 +1094,8 @@ impl UiState {
     /// Record that a *page navigation* landed in the `main` region. Bumps
     /// [`Self::main_nav_generation`] so the frontend resets main-panel scroll.
     fn bump_main_nav(&self) {
-        self.main_nav_generation.set(self.main_nav_generation.get() + 1);
+        self.main_nav_generation
+            .set(self.main_nav_generation.get() + 1);
     }
 
     /// SPIKE: set the focused occurrence alongside the focused block. `None`
@@ -3266,8 +3267,11 @@ mod tests {
         assert_eq!(ui.main_nav_generation(), 2);
 
         // go_home returns to the main region's home page → bump.
-        let go_home =
-            crate::operations::OperationIntent::new("navigation".into(), "go_home".to_string(), HashMap::new());
+        let go_home = crate::operations::OperationIntent::new(
+            "navigation".into(),
+            "go_home".to_string(),
+            HashMap::new(),
+        );
         maybe_mirror_navigation_focus(&ui, &go_home);
         assert_eq!(ui.main_nav_generation(), 3);
     }

@@ -1,17 +1,17 @@
-use super::prelude::*;
 use holon_api::EntityUri;
+
+use super::prelude::*;
 
 /// Read-only sibling of `editable_text`. Renders the block's content as
 /// static text. A click calls `services.set_focus` (ADR 0010: focus is pure
 /// in-memory state), which flips the `is_focused` variant in
 /// `block_profile.yaml` and swaps in `editable_text` on the next render. The
 /// freshly-mounted editor grabs window focus off the `focused_block` signal.
-pub fn render(
-    node: &holon_frontend::ReactiveViewModel,
-    ctx: &GpuiRenderContext,
-) -> AnyElement {
+pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     let content = node.prop_str("content").unwrap_or_default();
-    let field = node.prop_str("field").unwrap_or_else(|| "content".to_string());
+    let field = node
+        .prop_str("field")
+        .unwrap_or_else(|| "content".to_string());
 
     let Some(row_id) = node.row_id() else {
         return static_inner(&content, ctx).into_any_element();
@@ -29,7 +29,8 @@ pub fn render(
     // offset via `WrappedLine::closest_index_for_position`. The plain
     // `div().child(string)` text element used here doesn't surface
     // that layout to event handlers.
-    // ALLOW(entity_uri_from_raw): render-spec rendered_text node row_id (boundary, parsed once for the click target)
+    // ALLOW(entity_uri_from_raw): render-spec rendered_text node row_id (boundary,
+    // parsed once for the click target)
     let block_uri = EntityUri::from_raw(&row_id);
     let inner = click_to_focus(
         &el_id,
@@ -66,7 +67,7 @@ fn static_inner(content: &str, _: &GpuiRenderContext) -> Div {
     let display: String = if content.is_empty() {
         // Mirror `editable_text`'s empty-placeholder hint so unfocused
         // empty blocks still read as clickable instead of "nothing here".
-        "Type here to add a new block".to_string()
+        "Type here".to_string()
     } else {
         content.to_string()
     };
