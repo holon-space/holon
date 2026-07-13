@@ -30,6 +30,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use holon::api::BackendEngine;
+use holon::sync::LoroDocumentStore;
 use holon_api::EdgeFieldUpdate;
 use holon_api::EntityUri;
 use holon_api::StorageEntity;
@@ -37,6 +38,7 @@ use holon_api::Value;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive::ReactiveEngine;
 use holon_frontend::user_driver::UserDriver;
+use holon_loro::LoroBackend;
 use holon_pbt_core::capabilities::SutBlockTreeWrite;
 use holon_pbt_core::capabilities::SutEdgeFieldWrite;
 
@@ -347,26 +349,28 @@ impl SutBlockTreeWrite for KeystrokeBlockTreeWriter {
 }
 
 /// `SutEdgeFieldWrite` realization for a Loro-authority composed config (the
-/// `full_headless` frontend). Dispatches the edge-field write as a production
-/// `block` `set_field` op through the real [`BackendEngine`] — the SAME path
-/// content/structural writes take (and the same `OpDispatchWriter` uses) — so
-/// the write is journaled on the engine's undo stack and `UndoLastMutation` can
-/// retract it. In Loro-authority mode `set_field` routes the edge value to the
-/// production `set_block_{tags,requires,advice_suppressed}` setters over the
-/// authority doc → `project()` → SQL, exactly as before, PLUS the undo entry
-/// (whole-set-restore inverse) the raw-`LoroBackend` path could never record.
+/// `full_headless` frontend). Writes a block edge field (`tags` / `requires`)
+/// through the production `LoroBackend` setters (`set_block_tags` /
+/// `set_block_requires`) over the frontend's authority doc — the SAME functions
+/// the org re-scan reconciliation calls, so the write flows Loro → `project()`
+/// → SQL exactly as production does. That is what lets the composed `/matview`
+/// invariant observe whether an edge-field change re-projects (H12 =
+/// `blocks_differ` dropping `requires` from its change gate).
 ///
 /// Resolves oracle ids through the shared [`IdResolver`] (like
-/// [`OpDispatchWriter`]) so the write — and each `requires` dependency target —
+/// [`OpDispatchWriter`]) so a write — and each `requires` dependency target —
 /// hits the real (split-reconciled) block, not a synthetic oracle id.
 pub struct EdgeFieldWriter {
-    engine: Arc<BackendEngine>,
+    doc_store: LoroDocumentStore,
     resolver: IdResolver,
 }
 
 impl EdgeFieldWriter {
-    pub fn new(engine: Arc<BackendEngine>, resolver: IdResolver) -> Self {
-        Self { engine, resolver }
+    pub fn new(doc_store: LoroDocumentStore, resolver: IdResolver) -> Self {
+        Self {
+            doc_store,
+            resolver,
+        }
     }
 
     fn resolve(&self, id: &EntityUri) -> EntityUri {
@@ -378,41 +382,46 @@ impl EdgeFieldWriter {
             .unwrap_or_else(|| id.clone())
     }
 
-    /// Edge targets travel as a `Value::Array` of id strings — the shape the
-    /// `set_field` edge-field partition (SQL provider) and the Loro cell
-    /// registry both consume.
-    fn resolved_targets(&self, targets: &[EntityUri]) -> Value {
-        Value::Array(
-            targets
-                .iter()
-                .map(|t| Value::String(self.resolve(t).to_string()))
-                .collect(),
-        )
+    /// A `LoroBackend` over the frontend's authority doc — the same
+    /// construction the production `LoroBlockOperations::get_backend` uses
+    /// (`from_document` over the global doc), so the write targets the doc
+    /// the op pipeline and the outbound projector share.
+    async fn backend(&self) -> LoroBackend {
+        let collab_doc = self
+            .doc_store
+            .get_global_doc()
+            .await
+            .unwrap_or_else(|e| panic!("EdgeFieldWriter: get_global_doc failed: {e:#}"));
+        LoroBackend::from_document(collab_doc)
     }
 }
 
 #[async_trait::async_trait(?Send)]
 impl SutEdgeFieldWrite for EdgeFieldWriter {
     async fn apply_set_edge_field(&self, id: &EntityUri, update: &EdgeFieldUpdate) {
+        let backend = self.backend().await;
         let rid = self.resolve(id);
-        let (field, value) = match update {
-            EdgeFieldUpdate::Tags(tags) => (
-                "tags",
-                Value::Array(tags.to_vec().into_iter().map(Value::String).collect()),
-            ),
-            EdgeFieldUpdate::Requires(reqs) => ("requires", self.resolved_targets(reqs)),
-            EdgeFieldUpdate::AdviceSuppressed(reqs) => {
-                ("advice_suppressed", self.resolved_targets(reqs))
+        match update {
+            EdgeFieldUpdate::Tags(tags) => {
+                backend
+                    .set_block_tags(rid.as_str(), &tags.to_vec())
+                    .await
+                    .unwrap_or_else(|e| panic!("set_block_tags({rid}) failed: {e:#}"));
             }
-        };
-        let mut params: StorageEntity = HashMap::new();
-        params.insert("id".into(), Value::String(rid.to_string()));
-        params.insert("field".into(), Value::String(field.to_string()));
-        params.insert("value".into(), value);
-        let entity = "block".to_string().into();
-        self.engine
-            .execute_operation(&entity, "set_field", params, holon_api::OpOrigin::User)
-            .await
-            .unwrap_or_else(|e| panic!("block/set_field({field}) on {rid} failed: {e:#}"));
+            EdgeFieldUpdate::Requires(reqs) => {
+                let resolved: Vec<EntityUri> = reqs.iter().map(|t| self.resolve(t)).collect();
+                backend
+                    .set_block_requires(rid.as_str(), &resolved)
+                    .await
+                    .unwrap_or_else(|e| panic!("set_block_requires({rid}) failed: {e:#}"));
+            }
+            EdgeFieldUpdate::AdviceSuppressed(reqs) => {
+                let resolved: Vec<EntityUri> = reqs.iter().map(|t| self.resolve(t)).collect();
+                backend
+                    .set_block_advice_suppressed(rid.as_str(), &resolved)
+                    .await
+                    .unwrap_or_else(|e| panic!("set_block_advice_suppressed({rid}) failed: {e:#}"));
+            }
+        }
     }
 }
