@@ -1004,6 +1004,9 @@ mod backend {
                     holon_api::UndoOutcome::StaleDropped { reason } => {
                         format!("Undo skipped (stale): {reason}")
                     }
+                    holon_api::UndoOutcome::NoChange => {
+                        "Undo made no change (the entry's inverse was a no-op)".to_string()
+                    }
                 };
                 Ok(serde_json::json!({ "success": success, "message": message }))
             }
@@ -1015,6 +1018,9 @@ mod backend {
                     holon_api::UndoOutcome::Empty => "Nothing to redo".to_string(),
                     holon_api::UndoOutcome::StaleDropped { reason } => {
                         format!("Redo skipped (stale): {reason}")
+                    }
+                    holon_api::UndoOutcome::NoChange => {
+                        "Redo made no change (the entry's forward op was a no-op)".to_string()
                     }
                 };
                 Ok(serde_json::json!({ "success": success, "message": message }))

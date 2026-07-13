@@ -41,6 +41,7 @@ use holon_api::effect_id::FiringKey;
 use holon_api::effect_id::deterministic_proposal_id;
 use holon_api::entity_uri::EntityUri;
 pub use holon_api::operation_engine::OperationEngine;
+use holon_core::FieldDelta;
 use holon_core::OperationProvider;
 use holon_core::Precondition;
 use holon_core::UndoAction;
@@ -367,8 +368,15 @@ impl DispatchingOperationEngine {
 
     /// Dispatch a stored op verbatim (used for inverse/forward replay). Never
     /// pushes an undo entry — replays bypass the push path by construction.
-    async fn replay(&self, op: &Operation) -> Result<()> {
-        self.dispatcher
+    /// Replay one undo/redo op through the dispatcher, returning the field
+    /// deltas it produced. The caller aggregates these to decide whether the
+    /// whole entry made an observable change (see
+    /// [`Self::changes_are_vacuous`]): a provably-vacuous replay
+    /// (identical-content set_field) must be reported
+    /// as [`UndoOutcome::NoChange`], never as `Applied`.
+    async fn replay(&self, op: &Operation) -> Result<Vec<FieldDelta>> {
+        let result = self
+            .dispatcher
             .execute_operation(
                 &op.entity_name,
                 &op.op_name,
@@ -379,7 +387,18 @@ impl DispatchingOperationEngine {
             )
             .await
             .map_err(|e| anyhow::anyhow!("undo/redo replay of '{}' failed: {e}", op.op_name))?;
-        Ok(())
+        Ok(result.changes)
+    }
+
+    /// Whether a set of replayed field deltas PROVES the operation changed
+    /// nothing: at least one delta was reported AND every reported delta is
+    /// vacuous (`old_value == new_value`). An empty delta set is NOT provably
+    /// vacuous — property/edge writes report no column deltas yet are real
+    /// changes — so it conservatively reads as "changed" (single-writer safe).
+    /// Column set_field always reports a delta, so an identical-content write
+    /// (the poison entry this classifier exists to catch) is provably vacuous.
+    fn changes_are_vacuous(changes: &[FieldDelta]) -> bool {
+        !changes.is_empty() && changes.iter().all(|d| d.old_value == d.new_value)
     }
 
     /// Execute `instantiate_template`
@@ -810,7 +829,18 @@ impl OperationEngine for DispatchingOperationEngine {
 
         // Ruling #1: only User-origin operations push undo entries. Rule/Sync/
         // Ingest ops mutate state but never enter the user history.
-        if origin.is_user() {
+        //
+        // No-op writes never enter the log (BugFunnel 2026-07-13 undo row):
+        // a provably-vacuous forward op (every reported field delta has
+        // `old_value == new_value`, e.g. an identical-content `set_field`) is a
+        // reversible-but-inert write. Journaling it poisons the stack with an
+        // entry whose undo is itself a no-op, so consecutive undo presses get
+        // eaten while a real target underneath stays unreachable. Bug A stops
+        // the frontend from dispatching these; this is the defense-in-depth
+        // complement — any provider that reports a vacuous change is not
+        // journaled. (An empty delta set is NOT vacuous here — property/edge
+        // writes report no column deltas but are real; they still journal.)
+        if origin.is_user() && !Self::changes_are_vacuous(&result.changes) {
             if let UndoAction::Undo(inverse_op) = &result.undo {
                 // Redo identity-stability: a `create` whose caller omitted `id`
                 // has one MINTED by the provider (interactive block creation,
@@ -894,11 +924,20 @@ impl OperationEngine for DispatchingOperationEngine {
             return Ok(UndoOutcome::StaleDropped { reason });
         }
 
+        let mut changes = Vec::new();
         for op in &entry.inverse_ops {
-            self.replay(op).await?;
+            changes.extend(self.replay(op).await?);
         }
+        // Fail-loud (CLAUDE.md): the entry is consumed either way — a stale-top
+        // poison entry must not be re-attempted — but if the inverse replay
+        // proved no observable change, report `NoChange` so the caller never
+        // claims "undone" for a no-op press (BugFunnel 2026-07-13 undo row).
         self.undo_stack.write().await.commit_undo();
         self.persist().await?;
+        if Self::changes_are_vacuous(&changes) {
+            tracing::warn!("undo: inverse replay produced no observable change (no-op entry)");
+            return Ok(UndoOutcome::NoChange);
+        }
         Ok(UndoOutcome::Applied)
     }
 
@@ -915,11 +954,16 @@ impl OperationEngine for DispatchingOperationEngine {
             return Ok(UndoOutcome::StaleDropped { reason });
         }
 
+        let mut changes = Vec::new();
         for op in &entry.ops {
-            self.replay(op).await?;
+            changes.extend(self.replay(op).await?);
         }
         self.undo_stack.write().await.commit_redo();
         self.persist().await?;
+        if Self::changes_are_vacuous(&changes) {
+            tracing::warn!("redo: forward replay produced no observable change (no-op entry)");
+            return Ok(UndoOutcome::NoChange);
+        }
         Ok(UndoOutcome::Applied)
     }
 

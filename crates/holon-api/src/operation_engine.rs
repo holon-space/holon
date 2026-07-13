@@ -121,6 +121,16 @@ pub enum UndoOutcome {
     /// The top entry's precondition no longer matches current state; the entry
     /// was dropped. `reason` is user-surfaceable.
     StaleDropped { reason: String },
+    /// The entry was consumed but its inverse (or forward, on redo) replay
+    /// produced NO observable state change — every reported field delta was
+    /// vacuous (`old_value == new_value`). Distinguished from [`Self::Applied`]
+    /// so the caller never claims "undone" for a press that changed nothing
+    /// (fail-loud contract, CLAUDE.md): the entry is dropped and the outcome is
+    /// surfaced to the user (MCP result + UI toast) as a no-op, not success.
+    /// This closes the BugFunnel 2026-07-13 gap where consecutive undo calls
+    /// reported success while a poison identical-content entry sat on top and
+    /// the targeted delete stayed unreachable.
+    NoChange,
 }
 
 impl UndoOutcome {

@@ -732,6 +732,18 @@ impl EditorView {
             let vm = self.controller.lock().unwrap();
             vm.current_text().unwrap_or_else(|| sql_default.to_string())
         };
+        // Re-baseline the blur-commit change tracking to the authority we are
+        // converging onto. `converge_input` is the single convergence entry
+        // point and only fires at safe (non-mid-typing) points, so the buffer
+        // is never a pending user edit here — it either already mirrors the
+        // authority (early-return below) or is about to be re-seeded to it.
+        // Without this, a re-seed leaves `original_value` at a stale
+        // (mark-reconstructed) form and the NEXT blur diffs the re-seeded
+        // (stripped) buffer as "changed", firing a spurious identical-content
+        // `set_field("content")` that nulls live link marks and pollutes the
+        // undo stack (BugFunnel 2026-07-13 defect (a)). Pure baseline update:
+        // it dispatches nothing and does NOT advance `last_local_seq`.
+        self.controller.lock().unwrap().rebaseline(&target);
         let input = self.input.clone();
         let current = input.read(cx).value().to_string();
         if current == target {
