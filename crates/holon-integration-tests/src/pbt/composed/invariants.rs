@@ -26,6 +26,7 @@ pub mod companion_has_no_child_page_headings;
 pub mod display_placement_canonical_inert;
 pub mod displayed_text;
 pub mod editable_text_has_draggable;
+pub mod every_page_has_its_own_file;
 pub mod focus_matches_ref;
 pub mod focus_roots;
 pub mod frontend_bounds_rendered;
@@ -43,6 +44,7 @@ pub mod observed_errors;
 // wiring + body files were deleted.
 pub mod no_errors;
 pub mod no_orphan;
+pub mod no_page_under_non_page;
 pub mod no_parent_cycles;
 pub mod org_render_fixed_point;
 pub mod sidebar_page_tag_preserved;
