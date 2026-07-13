@@ -77,6 +77,19 @@ pub async fn seed_default_layout(
         }
     }
 
+    // The org document each seed block belongs to = its nearest `Page`-tagged
+    // ancestor within the seed set. Resolved ONCE up front so the SqlOnly
+    // routing hint (`build_block_params`'s `document_uri`) agrees with the
+    // runtime writeback resolver, which walks the same parent chain
+    // (`holon_orgmode::di::resolve_doc_for_block`). Fails loud on a block whose
+    // chain has no `Page` root — an unroutable seed block (dogfood #5).
+    let by_id: HashMap<&EntityUri, &holon_api::block::Block> =
+        entries.iter().map(|b| (&b.id, b)).collect();
+    let routing_docs: HashMap<EntityUri, EntityUri> = entries
+        .iter()
+        .map(|b| Ok((b.id.clone(), seed_routing_doc(b, &by_id)?)))
+        .collect::<Result<_>>()?;
+
     for block in &entries {
         let persisted = ordering
             .create_in_tree(
@@ -105,11 +118,7 @@ pub async fn seed_default_layout(
                 .await?
                 .is_empty();
             if !exists {
-                let doc_uri = if block.parent_id.is_no_parent() {
-                    &block.id
-                } else {
-                    &default_doc_uri
-                };
+                let doc_uri = &routing_docs[&block.id];
                 let params = holon_orgmode::build_block_params(block, &block.parent_id, doc_uri);
                 // First-boot seeding is system-authored boundary ingest —
                 // never user-undoable.
@@ -153,4 +162,127 @@ pub async fn seed_default_layout(
         );
     }
     Ok(())
+}
+
+/// The org document a seed block belongs to: its nearest `Page`-tagged ancestor
+/// within the seed set (the block itself when it is a `Page`), walking
+/// `parent_id`. This MIRRORS the runtime org-writeback resolver
+/// (`holon_orgmode::di::resolve_doc_for_block`) so the SqlOnly seed's routing
+/// hint agrees with the document a block's parent chain actually leads to.
+///
+/// Dogfood #5 restart-loss: the previous rule routed EVERY non-root block to
+/// `block:__default__`, so `block:journals::src::0` / `::render::0` (children
+/// of the `block:journals` Page) were tagged for a document their parent chain
+/// never reaches — a routing-doc / parent-doc disagreement that stranded them
+/// in no org file, deleting them on the next boot's file-authority ingest.
+///
+/// Fails loud (`Err`) on a block whose chain leaves the seed set without a
+/// `Page` root: such a block cannot be routed to any file and must never be
+/// seeded silently.
+fn seed_routing_doc(
+    block: &holon_api::block::Block,
+    by_id: &HashMap<&EntityUri, &holon_api::block::Block>,
+) -> Result<EntityUri> {
+    let mut current = block;
+    // Depth-bounded like the runtime resolver (guards a malformed cycle).
+    for _ in 0..50 {
+        if current.is_page() {
+            return Ok(current.id.clone());
+        }
+        match by_id.get(&current.parent_id) {
+            Some(parent) => current = parent,
+            None => break,
+        }
+    }
+    anyhow::bail!(
+        "seed block {} has no Page ancestor in the seed set (parent chain ends at {}); it cannot \
+         be routed to an org document — refusing to seed an unroutable block (dogfood #5 \
+         restart-loss class)",
+        block.id,
+        current.parent_id
+    )
+}
+
+#[cfg(test)]
+mod routing_tests {
+    use std::collections::HashMap;
+
+    use holon_api::EntityUri;
+    use holon_api::block::Block;
+    use holon_frontend::FrontendSession;
+
+    use super::seed_routing_doc;
+
+    /// The class-closing invariant for dogfood #5 (BugFunnel row 144): EVERY
+    /// seeded non-`Page` block's routing document is its nearest `Page`
+    /// ancestor in the seed set — i.e. it renders into exactly ONE org file,
+    /// the file its parent chain leads to. The pre-fix rule routed
+    /// `block:journals::src::0` / `::render::0` to `block:__default__` while
+    /// their parent is the `block:journals` Page; this asserts the agreement.
+    #[test]
+    fn every_seed_block_routes_to_its_page_ancestor() {
+        // `fresh` seeds the full layout (journals page + `__default__` +
+        // index.org sidebars/sources) — the widest entry set.
+        let entries = FrontendSession::<()>::build_default_layout_blocks(true)
+            .expect("build default layout blocks");
+        let by_id: HashMap<&EntityUri, &Block> = entries.iter().map(|b| (&b.id, b)).collect();
+
+        for block in &entries {
+            let doc = seed_routing_doc(block, &by_id)
+                .unwrap_or_else(|e| panic!("seed block {} is unroutable: {e}", block.id));
+
+            // The routing doc must be a Page in the seed set (or the block
+            // itself when it is a Page).
+            let doc_block = by_id
+                .get(&doc)
+                .unwrap_or_else(|| panic!("routing doc {doc} for {} not in seed set", block.id));
+            assert!(
+                doc_block.is_page(),
+                "routing doc {doc} for {} is not a Page",
+                block.id
+            );
+
+            // The routing doc must be reachable from the block via parent_id —
+            // i.e. it genuinely OWNS the block (no cross-page misrouting).
+            let mut cur = block;
+            let mut reached = false;
+            for _ in 0..50 {
+                if cur.id == doc {
+                    reached = true;
+                    break;
+                }
+                match by_id.get(&cur.parent_id) {
+                    Some(p) => cur = p,
+                    None => break,
+                }
+            }
+            assert!(
+                reached,
+                "routing doc {doc} is not an ancestor of {} — cross-page misroute",
+                block.id
+            );
+        }
+    }
+
+    /// The specific dogfood #5 blocks: the journals view definition routes to
+    /// the `block:journals` page, NOT `block:__default__`.
+    #[test]
+    fn journals_view_blocks_route_to_journals_not_default() {
+        let entries = FrontendSession::<()>::build_default_layout_blocks(true)
+            .expect("build default layout blocks");
+        let by_id: HashMap<&EntityUri, &Block> = entries.iter().map(|b| (&b.id, b)).collect();
+
+        for id in ["block:journals::src::0", "block:journals::render::0"] {
+            let uri = EntityUri::parse(id).expect("parse id");
+            let block = by_id
+                .get(&uri)
+                .unwrap_or_else(|| panic!("{id} missing from seed set"));
+            let doc = seed_routing_doc(block, &by_id).expect("route journals view block");
+            assert_eq!(
+                doc.as_str(),
+                "block:journals",
+                "{id} must route to the journals page, not {doc}"
+            );
+        }
+    }
 }
