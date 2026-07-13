@@ -270,9 +270,25 @@ or (b) write ping-pong — each app rewriting the other's output differently, fo
    opaque blocks/inline spans and re-emitted verbatim.
 4. **Fidelity is testable against the real apps.** Golden corpus of files actually
    written by LogSeq/Obsidian (the two seeded test vaults are the seed); CI asserts
-   parse→serialize is byte-stable on the corpus. Feasibility of invoking headless
-   LogSeq (mldoc/graph-parser via node) or driving the installed real apps for a
-   periodic golden refresh is under evaluation (2026-07-13).
+   parse→serialize is byte-stable on the corpus. Feasibility EVALUATED 2026-07-13:
+   - **Tier 1 (BUILD, ~0.5-1 day): hermetic mldoc CI oracle.** `mldoc@1.5.9` (LogSeq's
+     OWN OCaml parser compiled to JS) runs under node; proven against the real test
+     vaults. `parseJson` = parse-fidelity check; `astExportMarkdown(parseJson(x)) == x`
+     = the fixed-point oracle for this section's property 1. Already surfaced real
+     normalizations (`:LOGBOOK:`→lowercase, embed/query brace forms, tabs-not-spaces,
+     fence-info spacing). Vendored node sidecar, no GUI/network. Caveat: mldoc's
+     exporter ≈ but ≠ the running app's outliner file-writer — real app keeps residual
+     authority.
+   - **Tier 2 (CONDITIONAL): presence-gated real-LogSeq golden-refresh script** to close
+     the mldoc-vs-real-writer gap; only after Tier 1 flags a disagreement (LogSeq only
+     rewrites blocks on EDIT, so oscillation needs a scripted edit).
+   - **Tier 3 (DON'T automate): headless Obsidian.** No faithful headless parser exists
+     (npm `obsidian` = type stubs; community parsers are approximations that are least
+     trustworthy exactly on callouts/embeds/anchors). Obsidian preserves unedited bytes;
+     its only real normalization vector is the Properties/frontmatter editor → do a
+     ONE-TIME manual golden capture of that and encode it as a static Tier-1 fixture.
+   Spike artifacts: /Users/martin/.claude/jobs/ceb646ab/tmp/foreign-app-eval/ (mldoc
+   installed + working parse/reserialize driver).
 
 The normal form (bullet char, indent width, property syntax, task keywords, link style,
 file placement policy) is exactly what the per-dialect YAML of O2 declares.
