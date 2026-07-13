@@ -62,6 +62,9 @@ impl OperationProvider for StubProvider {
             self.descriptor("edit"),
             self.descriptor("set_field"),
             self.descriptor("noundo"),
+            self.descriptor("noop_forward"),
+            self.descriptor("edit_vacuous_inverse"),
+            self.descriptor("vacuous_replay"),
         ]
     }
 
@@ -95,6 +98,61 @@ impl OperationProvider for StubProvider {
             }
             "set_field" => Ok(OperationResult::irreversible(Vec::new())),
             "noundo" => Ok(OperationResult::from_undo(UndoAction::Undeclared)),
+            // A reversible-but-INERT write: reports a delta whose old==new (an
+            // identical-content set_field). Classified `Undo`, so a naive push
+            // would journal it — the engine must skip it as provably vacuous.
+            "noop_forward" => {
+                let changes = vec![FieldDelta::new(
+                    BLOCK_ID,
+                    FIELD,
+                    Value::String(OLD.to_string()),
+                    Value::String(OLD.to_string()),
+                )];
+                let mut inv_params = HashMap::new();
+                inv_params.insert("id".to_string(), Value::String(BLOCK_ID.to_string()));
+                inv_params.insert("field".to_string(), Value::String(FIELD.to_string()));
+                inv_params.insert("value".to_string(), Value::String(OLD.to_string()));
+                let inverse =
+                    holon_api::Operation::new("block", "set_field", "Restore content", inv_params);
+                Ok(OperationResult::new(changes, inverse))
+            }
+            // A genuine forward edit (OLD→NEW, so it IS journaled) whose inverse
+            // replays into `vacuous_replay` — modelling an entry whose undo turns
+            // out to change nothing (the state already matched the inverse's
+            // target by undo time).
+            "edit_vacuous_inverse" => {
+                let changes = vec![FieldDelta::new(
+                    BLOCK_ID,
+                    FIELD,
+                    Value::String(OLD.to_string()),
+                    Value::String(NEW.to_string()),
+                )];
+                let mut inv_params = HashMap::new();
+                inv_params.insert("id".to_string(), Value::String(BLOCK_ID.to_string()));
+                inv_params.insert("field".to_string(), Value::String(FIELD.to_string()));
+                inv_params.insert("value".to_string(), Value::String(OLD.to_string()));
+                let inverse = holon_api::Operation::new(
+                    "block",
+                    "vacuous_replay",
+                    "No-op restore",
+                    inv_params,
+                );
+                Ok(OperationResult::new(changes, inverse))
+            }
+            // Replay target that reports a vacuous delta (old==new) — the inverse
+            // whose replay proves the undo changed nothing.
+            "vacuous_replay" => {
+                let changes = vec![FieldDelta::new(
+                    BLOCK_ID,
+                    FIELD,
+                    Value::String(OLD.to_string()),
+                    Value::String(OLD.to_string()),
+                )];
+                Ok(OperationResult::declared_irreversible(
+                    changes,
+                    "replay target",
+                ))
+            }
             other => Err(format!("StubProvider: unknown op {other}").into()),
         }
     }
@@ -406,4 +464,62 @@ async fn stale_after_reload_drops_loudly() {
     );
     assert_eq!(replay_count(&fx.log), 0);
     assert!(!engine2.can_undo().await);
+}
+
+/// BugFunnel 2026-07-13 undo row, part 2 — a provably-vacuous forward write (a
+/// reported delta whose `old_value == new_value`, e.g. an identical-content
+/// `set_field`) must NOT enter the undo log. Journaling it poisons the stack
+/// with an entry whose undo is itself a no-op, so consecutive undo presses get
+/// eaten while a real target underneath stays unreachable.
+#[tokio::test]
+async fn vacuous_forward_write_is_not_journaled() {
+    let fx = fixture().await;
+    fx.engine
+        .execute_operation(
+            &EntityName::new("block"),
+            "noop_forward",
+            edit_params(),
+            OpOrigin::User,
+        )
+        .await
+        .expect("noop_forward dispatch");
+    assert!(
+        !fx.engine.can_undo().await,
+        "an identical-content (vacuous) write must not push an undo entry"
+    );
+}
+
+/// BugFunnel 2026-07-13 undo row, part 1 — fail-loud contract. An undo whose
+/// inverse replay produces NO observable change (every delta vacuous) must
+/// report `NoChange`, never `Applied`: the caller (MCP result / UI toast) must
+/// not claim success for a press that changed nothing.
+#[tokio::test]
+async fn undo_with_vacuous_inverse_reports_no_change() {
+    let fx = fixture().await;
+    // Forward is a genuine OLD→NEW edit, so it IS journaled; its stored inverse
+    // replays into `vacuous_replay`. Satisfy the forward precondition so the
+    // entry is not dropped as stale before we reach the replay.
+    fx.reader.set(BLOCK_ID, FIELD, NEW);
+    fx.engine
+        .execute_operation(
+            &EntityName::new("block"),
+            "edit_vacuous_inverse",
+            edit_params(),
+            OpOrigin::User,
+        )
+        .await
+        .expect("edit_vacuous_inverse dispatch");
+    assert!(
+        fx.engine.can_undo().await,
+        "genuine forward edit is journaled"
+    );
+
+    let outcome = fx.engine.undo().await.expect("undo call");
+    assert_eq!(
+        outcome,
+        UndoOutcome::NoChange,
+        "an undo whose inverse changed nothing must report NoChange, not Applied"
+    );
+    // The poison entry is consumed, not left to eat the next press.
+    assert!(!fx.engine.can_undo().await);
 }

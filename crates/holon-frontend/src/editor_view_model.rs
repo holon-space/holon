@@ -167,6 +167,17 @@ impl EditorViewModel {
         self.cell.is_some()
     }
 
+    /// Re-baseline the blur-commit change tracking to an authority re-seed.
+    ///
+    /// Pass-through to [`ViewEventHandler::set_baseline`]. Called by the
+    /// frontend right after it absolutely re-seeds the visible buffer from the
+    /// backend authority (`converge_input`) so an unmodified, re-seeded editor
+    /// does not diff as dirty and fire a spurious identical-content
+    /// `set_field` on the next blur. Not a local write — advances no write-seq.
+    pub fn rebaseline(&mut self, text: &str) {
+        self.handler.set_baseline(text.to_string());
+    }
+
     /// Borrow the attached [`Cell<String>`]. Returns `None` if unattached.
     /// Most frontends should prefer the pass-through methods below; this
     /// is the escape hatch for spawning long-lived async consumers (e.g.
@@ -962,5 +973,59 @@ mod tests {
     #[should_panic(expected = "creation-slot id")]
     fn structural_action_panics_on_creation_slot_id() {
         structural_block_action(EditorKey::Enter, "block:__virtual:page-1", 0);
+    }
+
+    /// BugFunnel 2026-07-13 defect (a) — spurious identical-content blur commit
+    /// after refocus. When `converge_input` absolutely re-seeds the visible
+    /// buffer from the STORED (stripped) content it re-baselines change
+    /// tracking via [`EditorViewModel::rebaseline`]; the next blur of that
+    /// unmodified, re-seeded editor must NOT commit. Before the fix the
+    /// baseline still held the raw typed markup (`[[Some Page]]`), so the
+    /// blur diffed the stripped buffer (`Some Page`) as "changed" and fired
+    /// a `set_field("content")` with text identical to storage — which
+    /// nulled live link marks and polluted the undo stack.
+    #[test]
+    fn reseed_rebaseline_suppresses_spurious_blur_commit() {
+        let mut vm = test_controller();
+        // User typed `[[Some Page]]`; the first blur commits it once and
+        // re-baselines the handler to the raw typed markup.
+        assert!(
+            matches!(vm.on_blur("[[Some Page]]"), EditorAction::Execute(_)),
+            "first blur after a genuine edit must commit once"
+        );
+
+        // Refocus: converge_input re-seeds the buffer to the stored STRIPPED
+        // content and re-baselines to it.
+        vm.rebaseline("Some Page");
+
+        // Blur of the re-seeded, unmodified editor: NO commit.
+        assert!(
+            matches!(vm.on_blur("Some Page"), EditorAction::None),
+            "blur of a re-seeded, unmodified editor must NOT commit (spurious identical-content \
+             set_field wipes marks / poisons undo)"
+        );
+    }
+
+    /// The reseed re-baseline must not swallow a GENUINE post-reseed edit:
+    /// typing after a reseed still commits exactly once, and a follow-up blur
+    /// with the same text is idempotent.
+    #[test]
+    fn typed_change_after_reseed_commits_once() {
+        let mut vm = test_controller();
+        vm.rebaseline("Some Page");
+        match vm.on_blur("Some Page edited") {
+            EditorAction::Execute(intent) => {
+                assert_eq!(intent.op_name, "set_field");
+                assert_eq!(
+                    intent.params["value"],
+                    Value::String("Some Page edited".into())
+                );
+            }
+            other => panic!("a real edit after reseed must commit once, got {:?}", other),
+        }
+        assert!(
+            matches!(vm.on_blur("Some Page edited"), EditorAction::None),
+            "second blur with unchanged text must not re-commit"
+        );
     }
 }

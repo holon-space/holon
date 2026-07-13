@@ -782,6 +782,10 @@ impl HolonMcpServer {
                     holon_api::UndoOutcome::StaleDropped { reason } => {
                         (false, format!("Undo skipped (stale): {reason}"))
                     }
+                    holon_api::UndoOutcome::NoChange => (
+                        false,
+                        "Undo made no change (the entry's inverse was a no-op)".to_string(),
+                    ),
                 };
                 let undo_result = UndoRedoResult { success, message };
                 Ok(CallToolResult::success(vec![Content::text(
@@ -814,6 +818,10 @@ impl HolonMcpServer {
                     holon_api::UndoOutcome::StaleDropped { reason } => {
                         (false, format!("Redo skipped (stale): {reason}"))
                     }
+                    holon_api::UndoOutcome::NoChange => (
+                        false,
+                        "Redo made no change (the entry's forward op was a no-op)".to_string(),
+                    ),
                 };
                 let redo_result = UndoRedoResult { success, message };
                 Ok(CallToolResult::success(vec![Content::text(
