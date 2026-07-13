@@ -1,8 +1,15 @@
 # Assimilation — external items becoming native blocks (2026-07-12)
 
-**Status:** PROPOSAL (needs Martin's ruling on R1–R4 below). No code in this increment —
-the C5 trust-gate stream this design composes with is still in its own workspace,
-pending ratification; building a parallel mechanism now was explicitly rejected.
+**Status:** RATIFIED 2026-07-13 (Martin ruled R1–R4, see §9). C5 is woven and its
+coerced-proposal-emission wording is ratified; G1 (identity mapping + fixture-based
+directed test, §10) is the first implementation increment.
+
+**Rulings (2026-07-13):** R1 = `assimilated_from` round-trips through org. R2 =
+candidates are a maintained view only, no pre-minted proposal blocks (replica tables
+stay directly SQL-queryable and usable via reference blocks rendering live from the
+replica row). R3 = default disposition `complete`. R4 = C5-D1 multi-op payload as a
+follow-up after the C5 weave. Field mapping (status/due/priority etc.) is §5's
+`assimilation.template` sidecar section — G1's directed test must assert those fields.
 
 **Driving workflow (Martin):** the Todoist Inbox is the universal capture point (links,
 ideas, anything). During triage each item takes one of three exits:
