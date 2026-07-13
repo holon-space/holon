@@ -946,6 +946,15 @@ fn source_block_to_org(block: &Block) -> String {
         result.push_str(v);
     }
 
+    // Tags: a Source block has no headline to carry `:tag:` notation, so route
+    // them through a `:TAGS <space-joined>` header arg (symmetric with the
+    // `:REQUIRES`/`:ADVICE_SUPPRESSED` edge-field lift). Without this a tag on a
+    // rule/source block is destroyed on org re-ingest.
+    if !block.tags.is_empty() {
+        result.push_str(" :TAGS ");
+        result.push_str(&block.tags.to_vec().join(" "));
+    }
+
     result.push('\n');
 
     // Source code, with org-mode comma-escape applied so lines starting with

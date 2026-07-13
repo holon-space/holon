@@ -6,6 +6,7 @@ use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
 use holon_api::types::ContentType;
 use holon_api::types::SourceLanguage;
+use holon_api::types::Tags;
 use holon_api::types::TaskState;
 use orgize::ParseConfig;
 use orgize::SyntaxKind;
@@ -560,6 +561,18 @@ fn process_headlines(
                                 .map(EntityUri::from_raw)
                                 .collect();
                         }
+                    } else if k.eq_ignore_ascii_case("TAGS") {
+                        // `:TAGS <space-joined>` is emitted by `source_block_to_org`
+                        // because a Source block has no headline to carry `:tag:`
+                        // notation. Lift it back into the typed `block.tags` set so
+                        // tags survive the org round-trip on rule/source blocks.
+                        if let Some(s) = v.as_string() {
+                            src_block.tags = Tags::from_tag_iter(
+                                s.split(|c: char| c == ',' || c.is_whitespace())
+                                    .filter(|s| !s.is_empty())
+                                    .map(|s| s.to_string()),
+                            );
+                        }
                     } else if let Some(s) = v.as_string() {
                         src_block.set_property(&k, holon_api::Value::String(s.to_string()));
                     }
@@ -1016,6 +1029,48 @@ mod tests {
         assert!(
             !parsed.properties.contains_key("REQUIRES"),
             "`REQUIRES` must NOT leak into properties as a raw string; found: {:?}",
+            parsed.properties
+        );
+    }
+
+    #[test]
+    fn test_source_block_tags_survive_org_roundtrip() {
+        // A Source block has no headline to carry `:tag:` notation, so its tags
+        // ride a `:TAGS <space-joined>` header arg on the #+BEGIN_SRC line and
+        // the parser must lift them back into `block.tags`. (Regression: keystone
+        // red on inv-blocks-match-ref/org — a `task` tag added to the journals
+        // holon_rule block was destroyed on org re-ingest.)
+        let mut src = Block {
+            id: EntityUri::block("journals::action::0"),
+            parent_id: EntityUri::block("journals::auto-create"),
+            content: "name: daily_journal".to_string(),
+            content_type: ContentType::Source,
+            source_language: Some("holon_rule".parse::<SourceLanguage>().unwrap()),
+            tags: Tags::from_tag_iter(["task".to_string(), "urgent".to_string()]),
+            ..Block::default()
+        };
+        src.set_sequence(0);
+
+        use crate::models::ToOrg;
+        let org = format!(
+            "* Rule\n:PROPERTIES:\n:ID: journals::auto-create\n:END:\n{}",
+            src.to_org()
+        );
+        let result = parse_test_org(&org);
+
+        let parsed = result
+            .blocks
+            .iter()
+            .find(|b| b.content_type == ContentType::Source)
+            .expect("source block must survive re-parse");
+        assert_eq!(
+            parsed.tags,
+            Tags::from_tag_iter(["task".to_string(), "urgent".to_string()]),
+            "source-block tags must survive the org round-trip"
+        );
+        assert!(
+            !parsed.properties.contains_key("TAGS"),
+            "`TAGS` must NOT leak into properties as a raw string; found: {:?}",
             parsed.properties
         );
     }
