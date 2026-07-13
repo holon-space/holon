@@ -184,7 +184,7 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
                     })
                     .text_size(px(15.0))
                     .line_height(px(22.0))
-                    .child("Type here to add a new block"),
+                    .child("Type here"),
             )
             .child(inner)
             .into_any_element()
