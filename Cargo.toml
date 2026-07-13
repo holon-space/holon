@@ -166,10 +166,10 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 # native-only by construction: the wasm frontends (holon-worker, dioxus-web) are
 # excluded from this workspace with their own dep graphs, and turso_core
 # additionally cfg-gates all fts code behind `not(target_family = "wasm")`.
-turso = { git = "https://github.com/nightscape/turso.git", branch = "holon", default-features = false, features = ["fts"] }
-turso_core = { git = "https://github.com/nightscape/turso.git", branch = "holon", default-features = false, features = ["json", "fts"] }
-turso_sdk_kit = { git = "https://github.com/nightscape/turso.git", branch = "holon", default-features = false }
-turso_ext = { git = "https://github.com/nightscape/turso.git", branch = "holon", default-features = false }
+turso = { git = "https://github.com/nightscape/turso.git", rev = "3dd5d689f76b97b7d558a7403c024992d8246441", default-features = false, features = ["fts"] }
+turso_core = { git = "https://github.com/nightscape/turso.git", rev = "3dd5d689f76b97b7d558a7403c024992d8246441", default-features = false, features = ["json", "fts"] }
+turso_sdk_kit = { git = "https://github.com/nightscape/turso.git", rev = "3dd5d689f76b97b7d558a7403c024992d8246441", default-features = false }
+turso_ext = { git = "https://github.com/nightscape/turso.git", rev = "3dd5d689f76b97b7d558a7403c024992d8246441", default-features = false }
 prqlc = { git = "https://github.com/nightscape/prql.git", branch = "main" }
 prqlc-parser = { git = "https://github.com/nightscape/prql.git", branch = "main" }
 gql-parser = { git = "https://github.com/holon-space/gql-to-sql.git", branch = "main" }
@@ -293,12 +293,3 @@ gpui-mobile = { git = "https://github.com/holon-space/gpui-mobile.git", branch =
 # Until then the local `path` is intentionally retained so this machine builds.
 [patch."https://github.com/holon-space/gpui-component"]
 gpui-component = { path = "/Users/martin/Workspaces/rust/gpui-component/crates/ui" }
-
-# TEMP (turso-fix session 2026-07-07): local turso override to develop/verify
-# the cross-junction LEFT JOIN duplicate fix. Remove once the fix is pushed
-# and the git pin is bumped.
-[patch."https://github.com/nightscape/turso.git"]
-turso = { path = "/Users/martin/Workspaces/bigdata/turso/bindings/rust" }
-turso_core = { path = "/Users/martin/Workspaces/bigdata/turso/core" }
-turso_sdk_kit = { path = "/Users/martin/Workspaces/bigdata/turso/sdk-kit" }
-turso_ext = { path = "/Users/martin/Workspaces/bigdata/turso/extensions/core" }
