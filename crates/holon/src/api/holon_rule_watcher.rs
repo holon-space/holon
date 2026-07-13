@@ -398,10 +398,11 @@ mod tests {
 
     /// The journal rule exercised here uses PAGE-FILE placement
     /// (`place: page(journals)`) so the watcher tags the day-block `Page` — the
-    /// mechanism this module implements (ADR 0024 §7.2). (The shipped default
-    /// seed still uses inline `place: journals` pending Fork B B1; the
-    /// parser supports both, and this const pins the page-file path
-    /// directly.)
+    /// mechanism this module implements (ADR 0024 §7.2). As of Fork B B1 the
+    /// shipped default seed (`assets/default/Journals.org`) ALSO uses
+    /// `place: page(journals)` — this const now mirrors prod rather than
+    /// anticipating it. (The parser still supports the legacy inline
+    /// `place: journals` form.)
     const JOURNAL_RULE: &str = r#"
 name: daily_journal
 when: 'not block_exists("Journals/{today}")'

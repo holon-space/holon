@@ -45,6 +45,18 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // `RefBlockTree`. Inert unless a companion inlines a ref-page id; RED today
         // (per-file guard refuses the de-inline) until Fork B B1's union guard.
         invariants::companion_has_no_child_page_headings::wire(),
+        // Materialization-side twin (Fork B B1): every non-seed `Page` doc-root must
+        // own EXACTLY ONE file after settle (`#+ID: <page-id>`) — neither fileless
+        // (row 137, the core Fork B loss) nor double-homed. Needs `SutOrgRender` +
+        // `RefBlockTree`. Vacuously green on a draw modeling no non-seed page (the
+        // default keystone), so it adds no false RED.
+        invariants::every_page_has_its_own_file::wire(),
+        // No-pages-under-non-pages ref-boundary tripwire (Fork B B1 / R8): a
+        // non-seed page's structural ancestors up to a root must all be pages.
+        // `RefBlockTree` only — the ref always provides it, so this selects on
+        // every draw and RED-catches a generator/seed regression at the ref
+        // boundary before `name_chain` bail!s in writeback.
+        invariants::no_page_under_non_page::wire(),
         invariants::no_errors::wire(),
         invariants::viewmodel_no_error_widgets::wire(),
         invariants::task_state_storage_coherence::wire(),
@@ -226,6 +238,8 @@ const CENTRAL_INVARIANT_IDS_HEAD: &[&str] = &[
     "inv-no-orphan-blocks",
     "inv-sidebar-page-tag-preserved",
     "inv-companion-has-no-child-page-headings",
+    "inv-every-page-has-its-own-file",
+    "inv-no-page-under-non-page",
     "inv-no-errors",
     "inv-viewmodel-no-error-widgets",
     "inv-task-state-storage-coherence",

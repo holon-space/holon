@@ -245,11 +245,20 @@ pub fn resolve_creation_parent(
             //  - a NESTED-PAGE forest, where a page is parented to another page that this
             //    rowset filters out (BugFunnel #67: a subdir page-file
             //    `Journals/2026-07-10.org` roots the date page under the `journals`
-            //    folder-page, which is not itself a `Page` and so is absent from `WHERE
-            //    tag='Page'`). Per the links-ruling nested pages are a REPRESENTABLE state
-            //    (anchored by id), so a mixed forest — some roots at the sentinel, some
-            //    dangling to an absent-but-real parent — is legal data, NOT a corrupt
-            //    rowset.
+            //    folder-page). CORRECTION (Fork B B1 senior review, 2026-07-13, Finding C):
+            //    `block:journals` IS itself a `Page` (unconditional assertion,
+            //    `holon-frontend/src/lib.
+            //    rs::journals_page_blocks_shell_owns_query_and_render`, `parent_id ==
+            //    no_parent()`) — the original comment here claiming it is "not itself a
+            //    Page" was wrong. The real reason a nested date's parent can still be
+            //    absent from a `WHERE tag='Page'` rowset is a QUERY-SCOPE filter (e.g. a
+            //    per-folder or single-level listing) excluding the ancestor row, not the
+            //    ancestor lacking the tag. Per the links-ruling nested pages are a
+            //    REPRESENTABLE state (anchored by id), so a mixed forest — some roots at
+            //    the sentinel, some dangling to an absent-but-real (scope-filtered) parent
+            //    — is legal data, NOT a corrupt rowset. Per the 2026-07-13 page-hierarchy
+            //    interim ruling, a nested page's ancestors up to root must themselves all
+            //    be pages (or the root) — `journals` qualifies.
             //
             // A read-only navigation list (`allow_root_creation = false`, e.g.
             // the sidebar) never offers a creation slot, so it does not need to

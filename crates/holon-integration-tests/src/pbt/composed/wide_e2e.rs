@@ -364,6 +364,83 @@ pub fn seed_folder_companion(state: &mut ReferenceState) {
         .insert(page.clone(), "2026-07-10.org".to_string());
 }
 
+// ── Row-137 SUBDIR fileless-journal closure (Fork B B1) ──────────────────────
+//
+// The REAL BugFunnel row-137 shape (distinct from the flat top-level
+// `seed_folder_companion` above, which is Fork A's page-tag-demotion closure):
+// a journal DATE PAGE that is NESTED under the `journals` folder-page and is
+// FILELESS — it exists ONLY as a `:Page:`-tagged heading inlined in the
+// `Journals.org` companion, with NO date file of its own on disk. On boot the
+// ingest creates the `Page`-tagged date block under `block:journals`; writeback
+// must then (a) MATERIALIZE it into its OWN subdir file
+// `Journals/2026-07-11.org` (`name_chain(date) = ["Journals","2026-07-11"]`,
+// because the nearest ancestor page is `journals`) — else its body lives only
+// in the store and vanishes on any store-rebuild-from-disk (the row-137 loss) —
+// and (b) DE-INLINE the heading from `Journals.org` (the `get_blocks` CTE
+// excludes the `Page`-tagged child). The ADR-0025 sibling-grounded union guard
+// admits the de-inline (the child survives in its own now-materialized file),
+// and the B2 boot sweep does the materialization + `last_projection` echo-seed.
+//
+// The date `2026-07-11` is chosen to NOT collide with the fixed keystone boot
+// clock (`2026-01-15`, `keystone_boot_journal_date`) so the auto-create rule's
+// `when: 'not block_exists("Journals/{today}")'` never touches it.
+
+/// The `#+ID:` doc-root id of the fileless SUBDIR journal date page — nested
+/// under `block:journals`, inlined (fileless) in the `Journals.org` companion.
+pub fn subdir_journal_page() -> EntityUri {
+    EntityUri::block("journal-2026-07-11")
+}
+
+/// `Journals.org` as the row-137 companion: the bare `#+ID: journals` page
+/// shell PLUS a `:Page:`-tagged heading (`* 2026-07-11 :Page:`) carrying the
+/// date page's `:ID:`, with body text that must not vanish. There is NO
+/// `Journals/2026-07-11.org` on disk — writeback must materialize it (the loss
+/// row 137 reports).
+pub const SUBDIR_COMPANION_JOURNALS_ORG: &str =
+    "#+ID: journals\n* 2026-07-11 :Page:\n:PROPERTIES:\n:ID: journal-2026-07-11\n:END:\nbody text \
+     that must materialize into its own subdir file\n";
+
+/// Seed the fileless subdir journal date page into `state` as a NON-SEED `Page`
+/// doc-root nested under `block:journals`:
+/// - `is_page()=true` — the two Fork-B oracles
+///   (`inv-companion-has-no-child-page-headings`,
+///   `inv-every-page-has-its-own-file`) treat it as a child page.
+/// - `parent_id = block:journals` — nesting that drives `name_chain` to the
+///   subdir path and satisfies `inv-no-page-under-non-page` (date→journals→root
+///   all pages).
+/// - `block_documents[page] = page` (self-documenting, NON-seed) so it is
+///   INCLUDED in `all_non_seed_block_ids` — the `every-page-has-its-own-file`
+///   oracle checks it (a seed-classified page would be skipped, leaving the
+///   oracle inert on row 137).
+/// - `files.documents[page] = "Journals/2026-07-11.org"` — the subdir file it
+///   must own.
+///
+/// Mirrors [`seed_folder_companion`]; `block_and_seed_wide` keys the fileless
+/// `Journals.org` companion seed on this page being present in the ref.
+pub fn seed_folder_companion_subdir(state: &mut ReferenceState) {
+    let journals = EntityUri::parse("block:journals").expect("journals id");
+    let page = subdir_journal_page();
+    let mut page_block = Block::new_text(page.clone(), journals.clone(), "2026-07-11");
+    page_block.set_page(true);
+    state
+        .domain
+        .block_state
+        .blocks
+        .insert(page.clone(), page_block);
+    // NON-seed: the page is its own document root (owns its own file), so the
+    // block-doc is the page itself — NOT `no_parent`/sentinel (which would seed-
+    // classify it and hide it from `all_non_seed_block_ids`).
+    state
+        .domain
+        .block_state
+        .block_documents
+        .insert(page.clone(), page.clone());
+    state
+        .files
+        .documents
+        .insert(page.clone(), "Journals/2026-07-11.org".to_string());
+}
+
 // ── Journals boot auto-create closure (dogfood #4, 2026-07-12) ───────────────
 //
 // Prod's `build_default_layout_blocks` seeds the journal auto-create RULE (a
@@ -643,7 +720,19 @@ pub async fn boot_and_seed_wide(
         .block_state
         .blocks
         .contains_key(&folder_journal_page());
-    let journals_org: &str = if carries_folder_companion {
+    // Row-137 subdir fileless closure (Fork B B1): when the oracle carries the
+    // NESTED fileless date page (`seed_folder_companion_subdir`), `Journals.org`
+    // becomes the row-137 companion that inlines it as a `:Page:` heading with NO
+    // date file of its own — writeback must materialize `Journals/2026-07-11.org`
+    // and de-inline the heading. Mutually exclusive with the flat Fork-A closure.
+    let carries_subdir_companion = ref_state
+        .domain
+        .block_state
+        .blocks
+        .contains_key(&subdir_journal_page());
+    let journals_org: &str = if carries_subdir_companion {
+        SUBDIR_COMPANION_JOURNALS_ORG
+    } else if carries_folder_companion {
         FOLDER_COMPANION_JOURNALS_ORG
     } else {
         "#+ID: journals\n"
@@ -652,6 +741,8 @@ pub async fn boot_and_seed_wide(
     if carries_folder_companion {
         seed_files.push(("2026-07-10.org", FOLDER_JOURNAL_PAGE_ORG));
     }
+    // NB the subdir closure seeds NO date file on purpose (fileless — the loss
+    // row 137 reports; writeback materializes it).
     seed_files.push(("Journals.org", journals_org));
     // Forward-edge ingest corpus (dogfood 2026-07-10 P0): seed
     // `forward-edge-page.org` through the REAL FileSyncController ingest ONLY
