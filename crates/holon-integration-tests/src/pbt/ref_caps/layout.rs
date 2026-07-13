@@ -231,6 +231,13 @@ impl RefLayoutMutate for ReferenceState {
     }
 
     fn set_edge_field_value(&mut self, id: &EntityUri, update: &EdgeFieldUpdate) {
+        // A SetEdgeField is its own User-origin undo step: the engine journals a
+        // whole-set-restore inverse for the edge write (edge fields are always
+        // reversible — no leaf/cascade gate like delete), so the ref records a
+        // snapshot to keep its undo stack in correspondence with the SUT's. Omit
+        // it and a later UndoLastMutation pops mismatched steps (SUT retracts the
+        // edge; ref reaches past it to the prior mutation → block-count skew).
+        self.push_undo_snapshot();
         let block = self
             .domain
             .block_state

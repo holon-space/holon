@@ -380,9 +380,12 @@ async fn compose_sut_seeded_impl(
         // `set_block_{tags,requires}` over that doc → `project()` → SQL, so the
         // composed `/matview` invariant catches a dropped edge-field re-projection
         // (H12). Absent Loro → not hosted → `SetEdgeField` honestly narrows out.
-        if let Some(loro_store) = comp.loro_doc_store() {
+        // Hosted only when a Loro authority doc is present (edge-field writes are
+        // Loro-authority-mode only). Routed through the production engine's
+        // `set_field` op so the write is journaled for undo (`UndoLastMutation`).
+        if comp.loro_doc_store().is_some() {
             caps.insert(Arc::new(crate::pbt::op_write_cap::EdgeFieldWriter::new(
-                loro_store,
+                comp.engine(),
                 resolver.clone(),
             )) as Arc<dyn SutEdgeFieldWrite>);
         }

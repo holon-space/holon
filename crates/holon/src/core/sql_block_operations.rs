@@ -26,7 +26,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use holon_api::EntityName;
 use holon_api::EntityUri;
-use holon_api::Operation;
 use holon_api::OperationDescriptor;
 use holon_api::Tags;
 use holon_api::Value;
@@ -847,18 +846,6 @@ impl CrudOperations<Block> for SqlBlockOperations {
         // scramble, `inv-live-children-match-ref`).
         // ALLOW(entity_uri_from_raw): set_field id &str from CrudOperations API surface
         let uri = EntityUri::from_raw(id);
-        // Edge fields (tags/requires/advice_suppressed) are set-valued: a write
-        // is a whole-set replace, so the inverse is "restore the previous full
-        // set". Capture that prior set from the Loro authority BEFORE the write.
-        // `None` in SqlOnly mode (the SQL provider builds its own edge inverse)
-        // or for non-edge fields.
-        let edge_prior = self
-            .cell_registry
-            .capture_edge_prior(&uri, field)
-            .await
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                format!("BlockCellRegistry::capture_edge_prior({field}): {e:#}").into()
-            })?;
         let routed = self
             .cell_registry
             .write_field(&uri, field, value.clone())
@@ -867,26 +854,12 @@ impl CrudOperations<Block> for SqlBlockOperations {
                 format!("BlockCellRegistry::write_field({field}): {e:#}").into()
             })?;
         if routed {
-            // Edge-field write: journal a real whole-set-restore inverse so the
-            // engine's undo stack can retract it (edge writes report no column
-            // FieldDelta, but they are real — the undo entry carries an empty
-            // precondition, single-writer safe). Non-edge Loro-routed fields
-            // stay irreversible: the outbound projector emits the SQL UPDATE and
-            // the resulting CDC event produces the FieldDelta, with no synchronous
-            // change to surface here.
-            if let Some(prior) = edge_prior {
-                let inverse = Operation::from_params(
-                    EntityName::new(Block::entity_name()),
-                    "set_field",
-                    "set_field",
-                    [
-                        ("id".to_string(), Value::String(id.to_string())),
-                        ("field".to_string(), Value::String(field.to_string())),
-                        ("value".to_string(), prior),
-                    ],
-                );
-                return Ok(OperationResult::new(Vec::new(), inverse));
-            }
+            // The Loro outbound projector emits the SQL UPDATE and the resulting
+            // CDC event produces the FieldDelta; there is no synchronous change
+            // to surface here. This is the org-reingest / structural seam — user
+            // CRUD `set_field` (which needs an undo inverse) is served by the
+            // Loro CRUD authority (`LoroBlockOperations`) under Loro authority,
+            // and by `SqlOperationProvider` in SqlOnly mode.
             return Ok(OperationResult::irreversible(Vec::new()));
         }
 
