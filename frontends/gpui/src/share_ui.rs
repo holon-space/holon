@@ -478,6 +478,26 @@ fn dispatch_undo_redo(
                 Ok(Ok(holon_api::UndoOutcome::Empty)) => {
                     tracing::debug!("[{label}] stack empty — no-op");
                 }
+                Ok(Ok(holon_api::UndoOutcome::NoChange)) => {
+                    // Fail-loud: the entry was consumed but changed nothing
+                    // (its inverse/forward replay was a no-op). Surface it so
+                    // the press never reads as a silent success — otherwise a
+                    // poison no-op entry silently eats undo presses while the
+                    // real target underneath stays unreachable (BugFunnel
+                    // 2026-07-13 undo row).
+                    tracing::warn!("[{label}] entry made no observable change (no-op)");
+                    let _ = cx.update_window(window_handle, |_, _window, cx| {
+                        share_state.update(cx, |s, cx| {
+                            s.push_toast(DegradedToast {
+                                kind: DegradedKind::UndoFailed,
+                                shared_tree_id: "undo".into(),
+                                detail: format!("{label}: entry made no change (no-op)"),
+                            });
+                            cx.emit(NotifyShareUi);
+                            cx.notify();
+                        });
+                    });
+                }
                 Ok(Ok(holon_api::UndoOutcome::StaleDropped { reason })) => {
                     tracing::error!("[{label}] entry stale — dropped: {reason}");
                     let _ = cx.update_window(window_handle, |_, _window, cx| {
