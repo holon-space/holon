@@ -169,7 +169,7 @@ Increment 3:
 - C5 trust gate. RULING: literally "sub-threshold origins coerced to display-place emission", or a
   separate permission check at the dispatcher? (Recommended: the former.)
   BUILT 2026-07-12 as the recommended form — coerced emission, not a dispatcher permission check
-  (see §3 C5 LANDED note). Awaiting Martin's ratification of the ruling wording.
+  (see §3 C5 LANDED note). RATIFIED by Martin 2026-07-13 (coerced proposal emission wording).
 
 Through-line: after Increment 2, all three AI personalities become authorable as vault data —
 Watcher = rules + clock + display emissions; Guide = rules over the history relation; Integrator =

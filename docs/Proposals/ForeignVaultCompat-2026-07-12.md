@@ -241,7 +241,43 @@ Each increment is independently landable, green, and disclosed. Increments 1–3
 
 ---
 
-## 6. Open questions for Martin (ruling needed)
+## 6. Open questions — RULED 2026-07-13
+
+Rulings: **O1** Inc 1 (LogSeq-org shim) then Inc 2 (LogSeq-md); Obsidian is the biggest
+userbase but we get there incrementally. **O2** single `holon-markdown` crate — with the
+added requirement that dialects are DECLARATIVE: Obsidian-compat and LogSeq-compat are
+each one YAML config file over one engine (dialect-as-data), split crates only if they
+truly diverge. **O3** new `Highlight` `InlineMark` variant. **O4** read AND write for
+both dialects, WITHOUT source-byte spans — see §6a for the ratified design. **O5**
+single-vault now, multi-vault long-term; keep the single-vault path free of decisions
+that would make multi-root a rewrite.
+
+### 6a. O4 ratified design: convergent canonical form (no byte spans)
+
+Constraints (Martin): files need NOT stay byte-identical to what the foreign app keeps;
+what must never happen is (a) LogSeq/Obsidian can no longer read a Holon-written file,
+or (b) write ping-pong — each app rewriting the other's output differently, forever.
+
+1. **No-oscillation is a fixed-point property, not a preservation property.** Holon's
+   serializer targets the FOREIGN APP'S OWN NORMAL FORM — write what LogSeq/Obsidian
+   would themselves write after an edit. Then the foreign app re-saving our file is
+   byte-identical (fixed point in ≤1 normalization pass from either side). LogSeq
+   already normalizes on edit, so one initial normalization pass is acceptable.
+2. **Never write without a semantic change.** Rewrite a file only when parsed content
+   (AST) differs; byte diffs never trigger writes. Kills churn on files Holon only read.
+3. **Opaque preservation at construct granularity replaces byte spans.** Unmodeled
+   syntax (plugin blocks, dataview queries, unknown frontmatter keys) is carried as
+   opaque blocks/inline spans and re-emitted verbatim.
+4. **Fidelity is testable against the real apps.** Golden corpus of files actually
+   written by LogSeq/Obsidian (the two seeded test vaults are the seed); CI asserts
+   parse→serialize is byte-stable on the corpus. Feasibility of invoking headless
+   LogSeq (mldoc/graph-parser via node) or driving the installed real apps for a
+   periodic golden refresh is under evaluation (2026-07-13).
+
+The normal form (bullet char, indent width, property syntax, task keywords, link style,
+file placement policy) is exactly what the per-dialect YAML of O2 declares.
+
+### 6b. Original open questions (superseded by the rulings above)
 
 - **O1 — Ship order:** LogSeq-org shim (Inc 1) first, or straight to LogSeq-md (Inc 2)? Inc 1 is
   cheaper and proves the pipeline; Inc 2 is the bigger user-visible win. Recommend Inc 1 then Inc 2.
