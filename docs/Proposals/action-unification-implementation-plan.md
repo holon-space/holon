@@ -476,7 +476,15 @@ are token operations / builtins interpolate"; P8 "firing history is provenance."
   Pattern parser), `emit:`/`consume:` marking deltas. **Builtin interpolation**
   `{today}`/`{clock.today}` are environment references the *compiler* desugars
   into read arcs on the clock relation (not pattern variables — no `as` binding).
-  `block_exists("Journals/{today}")` path sugar. Mirrors
+  `block_exists("Journals/{today}")` path sugar. **Placement kind** lives in the
+  `emit.place` value (the axis `display(under: x)` sits on): `place: <root>` = an
+  inline child of `block:<root>`; `place: page(<root>)` = a page-file child
+  (`Page`-tagged → materializes to its own `<name-chain>.org` via the fileless-page
+  sweep — the journal `Journals/{today}.org` intent). Grammar + watcher LANDED; the
+  default seed flip to `page(journals)` is deferred to Fork B B1 (companion
+  de-inline — a rule-created child page is otherwise inlined into the `Journals.org`
+  companion, `inv-companion-has-no-child-page-headings` /
+  `inv-sidebar-page-tag-preserved` red-first pending it). Mirrors
   `holon_advice_rule_yaml` (one authoring family, effect kinds `advise` |
   `operate`, per the ADR — `operate` is this WP; `advise` stays ADR 0022).
 - **Parser** — model on `holon-advice/src/rule.rs` (`parse_advice_rule` +

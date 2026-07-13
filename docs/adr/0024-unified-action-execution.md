@@ -357,7 +357,7 @@ input:
   when: parent_is("journals") and name == day.today
 output:
 - emit:
-    place: journals            # canonical → ratcheted
+    place: page(journals)          # canonical → ratcheted; own page-file
     name: "{day.today}"
 #+end_src
 ```
@@ -367,10 +367,35 @@ output:
 name: daily-journal
 when: not block_exists("Journals/{today}")
 emit:
-  place: journals
+  place: page(journals)
   name: "{today}"
 #+end_src
 ```
+
+**Emission placement grammar (§7.2).** The `place:` value carries the placement
+*kind*, the same axis on which `display(under: x)` sits — three canonical
+(ratcheted) forms plus the maintained one:
+
+- `place: <root>` (e.g. `journals`) — an **inline child** of `block:<root>`; the
+  emitted block renders in the parent's own org file (`* {today}` under the
+  journals page).
+- `place: page(<root>)` — a **page-file child**: the emitted block is `Page`-tagged,
+  so the fileless-page sweep (`materialize_missing_page_files`) writes it to its
+  OWN `<name-chain>.org` (the journal lands in `Journals/{today}.org`). Parent
+  resolution reuses the bare-root logic (`journals` → `block:journals`), so the
+  page's name-chain is `[Journals, {today}]` — exactly what the guard's
+  `block_exists("Journals/{today}")` matches, keeping guard ⇔ emission
+  correspondence intact. Colon-free (not `page(under: journals)`) so it stays a
+  plain unquoted YAML scalar. **Grammar + watcher landed** (`Place::is_page` /
+  `holon_rule_watcher::fire_emit` tags the block `Page`); the **default journal
+  seed flip to `page(journals)` is deferred to Fork B B1** (companion de-inline):
+  a rule-created child page is currently INLINED into the `Journals.org` companion
+  by the block-driven writeback — the de-inline is vetoed as apparent block-loss
+  until B1's `SurvivingProjection` union lands (`inv-companion-has-no-child-page-headings`
+  / `inv-sidebar-page-tag-preserved` are red-first pending it). Flip the one seed
+  line once B1 is in.
+- `place: display(under: x)` — the maintained/advice side (ADR 0022), not lowered
+  by the operate front-end.
 
 How the one-language claim holds up:
 

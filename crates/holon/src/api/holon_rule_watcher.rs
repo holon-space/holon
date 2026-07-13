@@ -301,6 +301,16 @@ async fn fire_emit(
     params.insert("id".into(), Value::String(id.as_str().to_string()));
     params.insert("parent_id".into(), Value::String(parent_id));
     params.insert("content".into(), Value::String(content));
+    // Page-file placement (`place: page(<root>)`): tag the emitted block `Page` so
+    // the fileless-page sweep materializes it into its own `<name-chain>.org`
+    // (ADR 0024 §7.2). `tags` is the block_tags edge field; it must carry a
+    // `Value::Array`.
+    if emit.place.is_page() {
+        params.insert(
+            "tags".into(),
+            Value::Array(vec![Value::String("Page".to_string())]),
+        );
+    }
 
     info!(
         "[holon_rule_watcher] {} emitting block.create params={params:?}",
@@ -386,12 +396,17 @@ mod tests {
     use crate::di::test_helpers::create_test_engine_with_providers;
     use crate::storage::BLOCK_WRITE_TABLE;
 
-    /// The migrated journal rule, single-block YAML form (ADR 0024 §7.2).
+    /// The journal rule exercised here uses PAGE-FILE placement
+    /// (`place: page(journals)`) so the watcher tags the day-block `Page` — the
+    /// mechanism this module implements (ADR 0024 §7.2). (The shipped default
+    /// seed still uses inline `place: journals` pending Fork B B1; the
+    /// parser supports both, and this const pins the page-file path
+    /// directly.)
     const JOURNAL_RULE: &str = r#"
 name: daily_journal
 when: 'not block_exists("Journals/{today}")'
 emit:
-  place: journals
+  place: page(journals)
   name: "{today}"
 "#;
 
@@ -400,11 +415,21 @@ emit:
             module.with_operation_provider_factory(|backend| {
                 let db_handle =
                     tokio::task::block_in_place(|| backend.blocking_read().handle().clone());
-                Arc::new(SqlOperationProvider::new(
+                // Register the `tags` edge field so a page-file emission's `Page`
+                // tag lands in the `block_tags` junction (not folded into
+                // properties JSON), exactly like the prod schema module.
+                Arc::new(SqlOperationProvider::with_edge_fields(
                     db_handle,
                     BLOCK_WRITE_TABLE.to_string(),
                     "block".to_string(),
                     "block".to_string(),
+                    vec![crate::storage::EdgeFieldDescriptor {
+                        entity: "block".to_string(),
+                        field: "tags".to_string(),
+                        join_table: "block_tags".to_string(),
+                        source_col: "block_id".to_string(),
+                        target_col: "tag".to_string(),
+                    }],
                 ))
             })
         })
@@ -554,7 +579,47 @@ emit:
         assert_eq!(rule.guard.subject, Subject::Clock);
         let emit = rule.emit.expect("operate rule");
         assert_eq!(emit.place.parent_id(), "block:journals");
+        assert!(
+            emit.place.is_page(),
+            "page-file journal rule places the day-block as its own page-file"
+        );
         assert_eq!(emit.name.render("2026-07-10"), "2026-07-10");
+    }
+
+    /// The page-file emission tags the created day-block `Page` (block_tags
+    /// junction), so the fileless-page sweep materializes it into its own file.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fire_emit_page_placement_tags_page() {
+        let engine = block_engine().await;
+        seed_journals_parent(&engine).await;
+        fire_emit(
+            &engine,
+            engine.rule_status(),
+            &RuleId::new("block:journals_rule"),
+            &journal_emit(),
+            &day_binding("2026-07-10"),
+        )
+        .await;
+
+        let children = journal_children(&engine).await;
+        assert_eq!(children.len(), 1);
+        let day_id = children[0].0.clone();
+        let tags = engine
+            .db_handle()
+            .query(
+                &format!(
+                    "SELECT tag FROM block_tags WHERE block_id = '{}'",
+                    day_id.replace('\'', "''")
+                ),
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            tags.iter()
+                .any(|r| r.get("tag").and_then(|v| v.as_string()) == Some("Page")),
+            "page-file journal day-block must carry the `Page` tag, got {tags:?}"
+        );
     }
 
     /// WP core: firing the same rule for the same day twice creates exactly one
