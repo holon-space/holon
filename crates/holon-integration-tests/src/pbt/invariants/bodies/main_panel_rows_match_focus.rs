@@ -121,7 +121,7 @@ where
             .map(|u| u.as_str().to_string())
             .collect();
 
-        let panel_ids = panel.collect_entity_ids();
+        let panel_ids = panel.collect_canonical_entity_ids();
         let stale: Vec<&String> = panel_ids
             .iter()
             .filter(|id| ref_known.contains(*id) && !allowed.contains(*id))

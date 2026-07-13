@@ -1010,6 +1010,81 @@ impl HeadlessFrontendComponent {
     }
 }
 
+/// Env-var gate for the Phase 1a display-placed injection seam. When set, every
+/// [`widget_tree_snapshot`] appends a `DisplayPlaced` `live_block` node for
+/// `block:parent` under the main-panel container, so invariants that walk
+/// entity ids encounter a ref-known display-only row. The new
+/// `inv-display-placement-canonical-inert` proves the canonical projection is
+/// bit-identical; the origin-aware invariants
+/// (`inv-main-panel-rows-match-focus`,
+/// `inv-viewmodel-decompiled-rows-match-query`) skip rows marked
+/// `DisplayPlaced`.
+pub const ENV_DISPLAY_PLACED: &str = "HOLON_PBT_DISPLAY_PLACED";
+
+/// Whether the Phase 1a display-placement injection is active for this process.
+fn display_placed_active() -> bool {
+    std::env::var(ENV_DISPLAY_PLACED).is_ok()
+}
+
+/// Inject a display-placed `live_block` node for `block:parent` into the widget
+/// tree as a child of the main-panel container. No-op when the env var
+/// `HOLON_PBT_DISPLAY_PLACED` is unset.
+///
+/// The injected node is structurally inert: it carries the canonical entity id
+/// and a `props["occurrence"]` marker (matching the production
+/// `view_model_to_snapshot` encoding for `Occurrence::Placed`), is a leaf
+/// (`live_block` without resolved children), and produces zero writes — the
+/// node is added post-snapshot, so no write path is touched.
+fn inject_display_placed(mut snap: WidgetSnapshot) -> WidgetSnapshot {
+    if !display_placed_active() {
+        return snap;
+    }
+    // The canonical block to display-place — always exists in the keystone seed.
+    let canonical_id = "block:parent";
+    let anchor_id = "block:default-main-panel";
+    let occ = holon_api::OccurrenceId::for_placement(
+        &EntityUri::block("parent"),
+        &EntityUri::parse(anchor_id).expect("static id"),
+    );
+    let placed_node = WidgetSnapshot {
+        kind: "live_block".into(),
+        entity_id: Some(canonical_id.to_string()),
+        props: std::collections::BTreeMap::from([("occurrence".into(), occ.key_suffix())]),
+        operations: Vec::new(),
+        children: Vec::new(),
+    };
+    // Pre-order mutable walk to find and append to the main-panel node.
+    let injected = inject_into_widget(&mut snap, anchor_id, placed_node);
+    if injected {
+        eprintln!(
+            "[HOLON_PBT_DISPLAY_PLACED] injected DisplayPlaced {canonical_id} occurrence={} under \
+             {anchor_id}",
+            occ.key_suffix(),
+        );
+    }
+    snap
+}
+
+/// Pre-order mutable traversal: if `node`'s entity_id matches `target_id`,
+/// append `to_append` to its children and return true. Otherwise recurse into
+/// children.
+fn inject_into_widget(
+    node: &mut WidgetSnapshot,
+    target_id: &str,
+    to_append: WidgetSnapshot,
+) -> bool {
+    if node.entity_id.as_deref() == Some(target_id) {
+        node.children.push(to_append);
+        return true;
+    }
+    for child in &mut node.children {
+        if inject_into_widget(child, target_id, to_append.clone()) {
+            return true;
+        }
+    }
+    false
+}
+
 #[async_trait::async_trait(?Send)]
 impl SutRenderer for HeadlessFrontendComponent {
     async fn render_tree_of(&self, id: &EntityUri) -> Option<String> {
@@ -1064,14 +1139,14 @@ impl SutRenderer for HeadlessFrontendComponent {
                 // the cautious exit (4 stable samples at 120 ms) so slow watch
                 // delivery isn't cut short.
                 if pending == 0 || stable >= 4 {
-                    return snap;
+                    return inject_display_placed(snap);
                 }
             } else {
                 stable = 0;
                 last = (total, pending);
             }
             if tokio::time::Instant::now() >= deadline {
-                return snap;
+                return inject_display_placed(snap);
             }
             // Keep the proven 120 ms cadence: each resample drives
             // `ensure_watching` (watch views + SQL), and sampling faster was

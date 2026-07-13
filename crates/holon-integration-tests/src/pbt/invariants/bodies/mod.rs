@@ -22,6 +22,7 @@ pub mod main_panel_rows_match_focus;
 // `navigation_focus` moved to `capability_pair!`'s `compare_navigation_focus`
 // in holon-pbt-core (auto-derived `inv-navigation-focus`); body file deleted.
 pub mod companion_has_no_child_page_headings;
+pub mod display_placement_canonical_inert;
 pub mod no_errors;
 pub mod no_orphan_blocks;
 pub mod no_parent_cycles;

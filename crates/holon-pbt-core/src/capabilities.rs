@@ -1402,6 +1402,27 @@ impl WidgetSnapshot {
         self.walk().filter_map(|n| n.entity_id.clone()).collect()
     }
 
+    /// Whether this node is a display-placed occurrence (ADR 0015 P2). The
+    /// production `view_model_to_snapshot` stamps `Occurrence::Placed` rows
+    /// with `props["occurrence"]`; non-placed rows carry no such prop. This
+    /// is typed detection, never an id-infix sniff.
+    pub fn is_display_placed(&self) -> bool {
+        self.props.contains_key("occurrence")
+    }
+
+    /// All non-None `entity_id` values reachable in the tree, deduped,
+    /// EXCLUDING nodes whose `is_display_placed()` returns true.
+    /// Display-placed rows carry a canonical entity id but are
+    /// display-only; invariants that judge entity-id membership (e.g.
+    /// `inv-main-panel-rows-match-focus`) must skip them to avoid flagging
+    /// a display-only occurrence as a "stale row."
+    pub fn collect_canonical_entity_ids(&self) -> BTreeSet<String> {
+        self.walk()
+            .filter(|n| !n.is_display_placed())
+            .filter_map(|n| n.entity_id.clone())
+            .collect()
+    }
+
     /// All nodes whose `kind` equals `kind`.
     pub fn collect_by_kind<'a>(&'a self, kind: &str) -> Vec<&'a WidgetSnapshot> {
         self.walk().filter(|n| n.kind == kind).collect()
