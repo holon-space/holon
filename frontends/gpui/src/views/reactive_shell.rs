@@ -141,6 +141,17 @@ impl ReactiveShell {
         self.list_state.clone()
     }
 
+    /// Reset this shell's virtualized list back to the very top. Called on
+    /// cross-page navigation so a new page opens with its title above the fold
+    /// (LogSeq parity) instead of inheriting the previous page's scroll offset.
+    /// A no-op in block mode (the block render path never builds the list).
+    pub fn scroll_to_top(&self) {
+        self.list_state.scroll_to(ListOffset {
+            item_ix: 0,
+            offset_in_item: px(0.),
+        });
+    }
+
     /// Clone the shell's local `EntityCache` so external callers can walk
     /// the cache hierarchy (e.g. PBT scroll-into-view needs to descend
     /// from a panel's block-mode shell into its nested list-mode shell
