@@ -331,6 +331,20 @@ impl BlockCellRegistry {
                     .map_err(|e| anyhow!("set_block_tags({id}): {e:#}"))?;
                 Ok(true)
             }
+            "requires" => {
+                backend
+                    .set_block_requires(&id, &Self::parse_edge_targets(field, &value)?)
+                    .await
+                    .map_err(|e| anyhow!("set_block_requires({id}): {e:#}"))?;
+                Ok(true)
+            }
+            "advice_suppressed" => {
+                backend
+                    .set_block_advice_suppressed(&id, &Self::parse_edge_targets(field, &value)?)
+                    .await
+                    .map_err(|e| anyhow!("set_block_advice_suppressed({id}): {e:#}"))?;
+                Ok(true)
+            }
             "sort_key" => {
                 // Sibling order is owned by `place()`/`tree.mov_after` and
                 // projected to SQL from the Loro fractional index by the outbound
@@ -416,6 +430,58 @@ impl BlockCellRegistry {
                 Ok(true)
             }
         }
+    }
+
+    /// Parse an edge-field write value (`Value::Array` of id strings, or
+    /// `Value::Null` for the empty set) into resolved [`EntityUri`] targets.
+    /// Fails loud on any non-string entry — an edge target that isn't a URI is
+    /// a boundary bug, not a value to coerce.
+    fn parse_edge_targets(field: &str, value: &Value) -> Result<Vec<EntityUri>> {
+        let items = match value {
+            Value::Array(items) => items.as_slice(),
+            Value::Null => &[],
+            other => {
+                return Err(anyhow!(
+                    "write_field({field}): expected Array of id strings, got {other:?}"
+                ));
+            }
+        };
+        items
+            .iter()
+            .map(|v| {
+                let s = v.as_string().ok_or_else(|| {
+                    anyhow!("write_field({field}): edge target entry not a string: {v:?}")
+                })?;
+                EntityUri::parse_owned(s.to_string())
+                    .map_err(|e| anyhow!("write_field({field}): invalid edge target {s:?}: {e:#}"))
+            })
+            .collect()
+    }
+
+    /// Read a block's CURRENT edge-field set (`tags` / `requires` /
+    /// `advice_suppressed`) as the `Value::Array` shape a `set_field` write
+    /// carries, so a caller can capture the prior value BEFORE an edge write
+    /// and build the undo inverse (whole-set restore). `Ok(None)` in
+    /// SqlOnly mode (the SQL provider builds the edge inverse itself) or
+    /// for a non-edge field. Fails loud if the block can't be read from the
+    /// Loro authority.
+    pub async fn capture_edge_prior(&self, uri: &EntityUri, field: &str) -> Result<Option<Value>> {
+        let Some(edge) = holon_api::EdgeField::ALL
+            .iter()
+            .copied()
+            .find(|e| e.column() == field)
+        else {
+            return Ok(None);
+        };
+        let backend = match &self.backing_source {
+            BackingSource::Loro { backend, .. } => backend.clone(),
+            BackingSource::SqlOnly { .. } => return Ok(None),
+        };
+        let block = backend
+            .get_block(&uri.to_string())
+            .await
+            .map_err(|e| anyhow!("capture_edge_prior({uri}, {field}): get_block: {e:#}"))?;
+        Ok(Some(edge.param_value(&block)))
     }
 }
 
