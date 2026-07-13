@@ -6,9 +6,10 @@ stage, all under the `holon_latency` tracing target:
 
   stage=dispatch      action=<op>  block=<id>            ms=<dispatch->op-applied>
   stage=projection    ops=<n> blocks=<n> snapshot_ms=<n> ms=<full projection pass>
-  stage=rows          source=<matview> rows=<n> seq=<n>  ms=<CDC batch apply>
-  stage=e2e           action=<op> block=<id> source=<m>  ms=<dispatch->row visible (PROD)>
-  stage=action_total  action=<kind>                      total_ms=<action->visible rows>
+  stage=rows            source=<matview> rows=<n> seq=<n>  ms=<CDC batch apply>
+  stage=e2e             action=<op> block=<id> source=<m>  ms=<dispatch->row visible (PROD)>
+  stage=action_total    action=<kind>                      total_ms=<action->visible rows>
+  stage=boot_feed_progress  present=<n> expected=<n>        (feed-convergence heartbeat; NO ms)
 
 `action_total` is the end-to-end wall time of one UI action driven through the
 REAL pipeline (dispatch -> Loro commit -> LoroProjection resample -> Turso/matview
@@ -83,6 +84,11 @@ def main():
     # much of the 2s per-file / 30s convergence budget actually binds.
     misc_by_stage = defaultdict(list)
     feed_timeouts = defaultdict(int)
+    # boot_feed_progress is a convergence heartbeat with present/expected counts
+    # and NO `ms` field, so the generic ms-bucket above silently drops it. Track
+    # it explicitly: how many heartbeats fired and the furthest progress reached.
+    feed_progress_ticks = 0
+    feed_progress_max = (0, 0)  # (present, expected) at the furthest tick
 
     for line in src:
         f = parse(line)
@@ -112,6 +118,11 @@ def main():
                 v = num(f, k)
                 if v is not None:
                     lst.append(v)
+        elif stage == "boot_feed_progress":
+            feed_progress_ticks += 1
+            present, expected = num(f, "present"), num(f, "expected")
+            if present is not None and present >= feed_progress_max[0]:
+                feed_progress_max = (present, expected or feed_progress_max[1])
         else:
             # Generic bucket — boot_parse / boot_write / boot_feed_wait /
             # boot_place_wait / boot_file / boot_ingest_total / boot_feed_converge
@@ -168,6 +179,12 @@ def main():
                       f"(caught_up=false)")
         else:
             print("  (all feed barriers converged; caught_up=true everywhere)")
+
+    if feed_progress_ticks:
+        pres, exp = feed_progress_max
+        print(f"\nfeed convergence: {feed_progress_ticks} progress heartbeat(s); "
+              f"furthest {pres:.0f}/{exp:.0f} blocks present "
+              f"(stage=boot_feed_progress — heartbeat, no per-tick ms)")
 
     if proj_blocks:
         print(f"\nprojection doc size: blocks p50={pct(sorted(proj_blocks),50):.0f} "
