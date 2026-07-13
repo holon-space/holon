@@ -27,7 +27,7 @@ fn RenderedTextNode(content: String, row_id: Option<String>) -> Element {
     // Mirror `editable_text`'s empty-placeholder hint so unfocused empty
     // blocks still read as clickable instead of "nothing here".
     let display = if empty {
-        "Type here to add a new block".to_string()
+        "Type here".to_string()
     } else {
         content.clone()
     };

@@ -67,7 +67,7 @@ fn static_inner(content: &str, _: &GpuiRenderContext) -> Div {
     let display: String = if content.is_empty() {
         // Mirror `editable_text`'s empty-placeholder hint so unfocused
         // empty blocks still read as clickable instead of "nothing here".
-        "Type here to add a new block".to_string()
+        "Type here".to_string()
     } else {
         content.to_string()
     };
