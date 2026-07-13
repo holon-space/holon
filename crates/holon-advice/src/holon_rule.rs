@@ -10,9 +10,14 @@
 //! bodies are valid YAML, with guard expressions as strings parsed by the
 //! Pattern parser"). Two authoring forms desugar to the *same* [`HolonRule`]:
 //!
-//! - **sugar** — top-level `when:` guard string + `emit:` marking delta:
-//!   ```yaml name: daily_journal when: 'not block_exists("Journals/{today}")'
-//!   emit: place: journals name: "{today}" ```
+//! - **sugar** — top-level `when:` guard string + `emit:` marking delta. The
+//!   `place:` value carries the placement kind: a bare root (`journals`) is an
+//!   inline child; `page(journals)` is a page-file child (the emitted block is
+//!   `Page`-tagged so it materializes into its own `Journals/{today}.org` — ADR
+//!   0024 §7.2 journal intent; grammar + watcher landed, default seed flip
+//!   deferred to Fork B B1 companion de-inline): ```yaml name: daily_journal
+//!   when: 'not block_exists("Journals/{today}")' emit: place: page(journals)
+//!   name: "{today}" ```
 //! - **canonical arc-array** — explicit read / inhibitor input arcs + output
 //!   arcs (ADR 0024 "guards are on arcs"; `absent: true` = the inhibitor arc, a
 //!   `type: clock` arc = the read arc that makes the rule clock-driven):
@@ -29,8 +34,9 @@
 //! - **Guard** — fully lowered to the dual-evaluated [`Guard`] (matching path).
 //! - **Effect** — the *ratcheted create* emission (`emit: {place, name}`) is
 //!   lowered to a typed [`Emit`]: a canonical placement + a
-//!   `{today}`-interpolated name template. This is the journal-auto-create
-//!   shape.
+//!   `{today}`-interpolated name template. The placement is either an inline
+//!   child (`place: journals`) or a page-file child (`place: page(journals)`,
+//!   `Place::is_page` true). This is the journal-auto-create shape.
 //! - **Deferred (documented, not silently dropped):** display placement
 //!   (`place: display(...)`, the advice/maintained-view side — stays ADR 0022);
 //!   `consume:` input arcs (delete/move effects); multi-arc (`OutputSlot > 0`)
@@ -99,44 +105,92 @@ pub struct Emit {
     pub name: NameTemplate,
 }
 
-/// A canonical placement: a parent block id root. `place: journals` names the
-/// parent block `block:journals` (the scheme is added at the intent boundary,
-/// per the org-syntax convention). Display placement (`display(under: x)`) is
-/// the advice/maintained side and is **not** parsed here (ADR 0024 — stays ADR
-/// 0022).
+/// A canonical placement: a parent block id root plus a *file granularity* — is
+/// the emitted block an inline child, or its own page-file?
+///
+/// Three authoring forms, all canonical (ratcheted) — the placement *kind*
+/// lives in the `place` value, exactly as the ADR models it (`display(under:
+/// x)` is the maintained sibling of these, not parsed here):
+///
+/// - `place: journals` — **inline child** of `block:journals`. The created
+///   block renders in the parent's own org file (`* {today}` under the journals
+///   page).
+/// - `place: page(journals)` — **page-file child** of `block:journals`. The
+///   created block is `Page`-tagged, so the fileless-page sweep materializes it
+///   into its OWN `Journals/{today}.org` (ADR 0024 §7.2 journal intent). Same
+///   `kind(arg)` shape as the ADR's `display(...)`, kept colon-free so it is a
+///   plain (unquoted) YAML scalar; parent resolution reuses the bare-root logic
+///   (`journals` → `block:journals`), so the page's name-chain is `[Journals,
+///   {today}]` — the very chain the guard's `block_exists("Journals/{today}")`
+///   matches.
+/// - `place: display(under: x)` — the advice/maintained side, **not** parsed
+///   here (ADR 0024 — stays ADR 0022).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Place(String);
+pub struct Place {
+    /// The scheme-free parent block id root (e.g. `journals` →
+    /// `block:journals`).
+    root: String,
+    /// Whether the emitted block is `Page`-tagged (own page-file) vs an inline
+    /// child. `place: page(<root>)` sets this; a bare `place: <root>` leaves it
+    /// false.
+    is_page: bool,
+}
 
 impl Place {
     /// Parse a canonical place. Rejects the `display(...)` form loudly
     /// (deferred) and any non-slug root (so it can never break out of the
-    /// id it becomes).
+    /// id it becomes). `page(<root>)` is the page-file form; a bare
+    /// `<root>` is inline.
     pub fn parse(raw: &str) -> Result<Self, HolonRuleParseError> {
+        let raw = raw.trim();
         if raw.starts_with("display(") {
             return Err(HolonRuleParseError::DisplayPlacementDeferred {
                 place: raw.to_string(),
             });
         }
+        if let Some(inner) = raw.strip_prefix("page(").and_then(|s| s.strip_suffix(')')) {
+            // `page(<root>)` — the page-file placement kind: the emitted block is a
+            // `Page`-tagged child of `block:<root>`. Colon-free (unlike the ADR's
+            // prose `display(under: x)`) so it is a plain YAML scalar needing no
+            // quoting; `<root>` names the parent block, resolved exactly like a
+            // bare `place: <root>`.
+            return Self::from_root(inner.trim(), true).ok_or_else(|| {
+                HolonRuleParseError::PagePlacement {
+                    place: raw.to_string(),
+                }
+            });
+        }
         // A place may already carry the `block:` scheme; accept and strip it so
         // the stored root is scheme-free (ORG_SYNTAX: bare ids on disk).
+        Self::from_root(raw, false).ok_or_else(|| HolonRuleParseError::Place {
+            place: raw.to_string(),
+        })
+    }
+
+    /// Build from a (possibly `block:`-scheme-prefixed) root, or `None` if the
+    /// stripped root is not a valid slug.
+    fn from_root(raw: &str, is_page: bool) -> Option<Self> {
         let root = raw.strip_prefix("block:").unwrap_or(raw);
-        if is_slug(root) {
-            Ok(Self(root.to_string()))
-        } else {
-            Err(HolonRuleParseError::Place {
-                place: raw.to_string(),
-            })
-        }
+        is_slug(root).then(|| Self {
+            root: root.to_string(),
+            is_page,
+        })
     }
 
     /// The scheme-free placement root (e.g. `journals`).
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.root
+    }
+
+    /// Whether the emitted block is `Page`-tagged — placed in its own page-file
+    /// rather than inline under its parent.
+    pub fn is_page(&self) -> bool {
+        self.is_page
     }
 
     /// The parent block id the emit creates under (`block:journals`).
     pub fn parent_id(&self) -> String {
-        format!("block:{}", self.0)
+        format!("block:{}", self.root)
     }
 }
 
@@ -242,6 +296,11 @@ pub enum HolonRuleParseError {
          not lowered by the operate front-end; use an advice rule"
     )]
     DisplayPlacementDeferred { place: String },
+    #[error(
+        "emit page placement {place:?} is malformed: expected `page(<root>)` where          \
+         <root> is a placement slug ([a-z0-9_], optional `block:` scheme)"
+    )]
+    PagePlacement { place: String },
     #[error("emit name template is empty")]
     EmptyName,
     #[error("emit name template {template:?} is malformed: {reason}")]
@@ -429,6 +488,59 @@ advise:
         let emit = sugar.emit.expect("operate rule carries an emit");
         assert_eq!(emit.place.parent_id(), "block:journals");
         assert_eq!(emit.name.render("2026-07-10"), "2026-07-10");
+    }
+
+    const PAGE_SUGAR: &str = r#"
+name: daily_journal
+when: 'not block_exists("Journals/{today}")'
+emit:
+  place: page(journals)
+  name: "{today}"
+"#;
+
+    #[test]
+    fn page_placement_parses_to_page_file_child() {
+        let rule = parse_holon_rule(PAGE_SUGAR).expect("page sugar parses");
+        let emit = rule.emit.expect("operate rule carries an emit");
+        assert!(
+            emit.place.is_page(),
+            "page(journals) must mark the emission a page-file child"
+        );
+        // Parent resolution is identical to a bare root: the page's name-chain is
+        // `[Journals, {today}]` — the chain the guard's block_exists matches.
+        assert_eq!(emit.place.parent_id(), "block:journals");
+        assert_eq!(emit.place.as_str(), "journals");
+        assert_eq!(emit.name.render("2026-07-10"), "2026-07-10");
+    }
+
+    #[test]
+    fn bare_place_is_not_a_page() {
+        let rule = parse_holon_rule(SUGAR).expect("bare sugar parses");
+        assert!(
+            !rule.emit.unwrap().place.is_page(),
+            "a bare `place: journals` is an inline child, not a page-file"
+        );
+    }
+
+    #[test]
+    fn page_placement_accepts_block_scheme_in_root() {
+        let p = Place::parse("page(block:journals)").expect("scheme in root parses");
+        assert!(p.is_page());
+        assert_eq!(p.as_str(), "journals");
+    }
+
+    #[test]
+    fn malformed_page_placement_is_a_typed_error() {
+        // Empty root.
+        assert!(matches!(
+            Place::parse("page()").unwrap_err(),
+            HolonRuleParseError::PagePlacement { .. }
+        ));
+        // Non-slug root inside.
+        assert!(matches!(
+            Place::parse("page(Bad-Root)").unwrap_err(),
+            HolonRuleParseError::PagePlacement { .. }
+        ));
     }
 
     #[test]

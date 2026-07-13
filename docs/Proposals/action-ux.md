@@ -39,7 +39,7 @@ One rule = one source block, same YAML-ish dialect family as
 #+begin_src holon_rule
 when: not block_exists("Journals/{today}")
 emit:
-  place: journals
+  place: page(journals)          # own Journals/{today}.org page-file
   name: "{today}"
 #+end_src
 ```
