@@ -2806,6 +2806,40 @@ impl LoroBackend {
         Ok(())
     }
 
+    // -- Edge fields (set-valued, junction-projected) --
+
+    /// Replace a set-valued **edge field** (`tags` / `requires` /
+    /// `advice_suppressed`) on a tree node's meta under its own `key`, so the
+    /// Loro→SQL projector reads it into the matching junction table. Values are
+    /// stored as a JSON string array (the same shape every edge field uses —
+    /// tag strings or id strings), so ONE generic writer serves every member of
+    /// [`holon_api::EdgeField`] without a per-field branch. An empty set
+    /// deletes the key entirely.
+    pub async fn set_block_edge_field(
+        &self,
+        tree_id_str: &str,
+        key: &str,
+        values: &[String],
+    ) -> anyhow::Result<()> {
+        let target = self
+            .resolve_write_target_checked(tree_id_str)
+            .await
+            .map_err(|e| anyhow::anyhow!("set_block_edge_field({key}): {e}"))?;
+        let (write_doc, tree_id) = self.target_doc(&target);
+        let serialized = serde_json::to_string(values)?;
+        write_doc.with_write(|doc| {
+            let tree = doc.get_tree(TREE_NAME);
+            let meta = tree.get_meta(tree_id)?;
+            if values.is_empty() {
+                meta.delete(key)?;
+            } else {
+                meta.insert(key, loro::LoroValue::from(serialized.as_str()))?;
+            }
+            doc.commit();
+            Ok(())
+        })
+    }
+
     // -- Tags (page marker + user tags) --
 
     /// Replace the `tags` list on a tree node. The literal `"Page"` tag in
@@ -4181,6 +4215,62 @@ mod diff_checkout_race_tests {
             )
             .await
             .unwrap();
+    }
+
+    /// PROJECTION-GAP PROBE (2026-07-13): a `set_block_tags` meta-map edit on
+    /// an EXISTING node must be captured by the DiffEvent → PendingChange →
+    /// `incremental_block_changes` path (the steady-state projector), carrying
+    /// the new tags. If `owning_tree_node` can't map the meta-map container
+    /// back to its TreeID, the edit is silently dropped and the tags never
+    /// project — the composed-keystone `SetEdgeField{Tags}` divergence.
+    #[tokio::test]
+    async fn incremental_projection_captures_tags_meta_edit() {
+        let (doc, backend) = make_backend().await;
+        backend
+            .create_block_with_properties(
+                EntityUri::no_parent(),
+                BlockContent::text("hello"),
+                Some(EntityUri::block("b1")),
+                &HashMap::new(),
+                &Tags::default(),
+                &[],
+                &[],
+            )
+            .await
+            .unwrap();
+
+        let captured: Arc<std::sync::Mutex<Vec<PendingChange>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cap2 = captured.clone();
+        let raw = doc.doc();
+        let _sub = raw.subscribe_root(Arc::new(move |event| {
+            let mut facts = extract_pending_changes(&event);
+            cap2.lock().unwrap().append(&mut facts);
+        }));
+
+        backend
+            .set_block_tags("block:b1", &["task".to_string()])
+            .await
+            .unwrap();
+
+        let pending = captured.lock().unwrap().clone();
+        assert!(
+            !pending.is_empty(),
+            "tags meta edit must produce at least one PendingChange (got none)"
+        );
+        let mut tid_index = HashMap::new();
+        let (changed, settled) = incremental_block_changes(&raw, &pending, &mut tid_index).unwrap();
+        assert!(settled, "incremental pass must settle");
+        let b1 = changed
+            .get("block:b1")
+            .and_then(|o| o.as_ref())
+            .expect("b1 must be re-read by the incremental projector after a tags edit");
+        assert_eq!(
+            b1.block.tags.to_vec(),
+            vec!["task".to_string()],
+            "incremental projection must carry the tags meta edit; got {:?}",
+            b1.block.tags
+        );
     }
 
     /// Regression (keystone `inv-blocks-match-ref/org` RED, 2026-07-12): an

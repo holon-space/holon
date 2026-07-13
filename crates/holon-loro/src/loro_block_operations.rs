@@ -203,6 +203,25 @@ fn block_op(op_name: &str, params: HashMap<String, Value>) -> Operation {
     Operation::new(EntityName::from("block"), op_name, "", params)
 }
 
+/// Parse an edge-field write value (`Value::Array` of strings, or `Value::Null`
+/// for the empty set) into owned strings. Fails loud on any non-string entry.
+fn edge_string_targets(value: &Value, field: &str) -> std::result::Result<Vec<String>, String> {
+    match value {
+        Value::Array(items) => items
+            .iter()
+            .map(|v| {
+                v.as_string().map(String::from).ok_or_else(|| {
+                    format!("set_field('{field}'): edge target entry not a string: {v:?}")
+                })
+            })
+            .collect(),
+        Value::Null => Ok(Vec::new()),
+        other => Err(format!(
+            "set_field('{field}'): expected Array of strings, got {other:?}"
+        )),
+    }
+}
+
 /// Hand-built descriptor for the `dismiss_advice` operation (ADR 0021/0022).
 ///
 /// Params: `anchor_id` (the block the advice is woven under) and `lesson_id`
@@ -294,6 +313,22 @@ impl CrudOperations<Block> for LoroBlockOperations {
                 // so the column-only reader can't fingerprint it — empty
                 // `changes` (single-writer safe). The inverse is still real, so
                 // a cycle now pushes an undoable entry.
+                (Some(block_op("set_field", params)), Vec::new())
+            }
+            f if holon_api::EdgeField::is_edge_column(f) => {
+                // Edge fields are set-valued: a write is a whole-set replace, so
+                // the inverse restores the PRIOR full set. The junction is not a
+                // column the `SqlUndoStateReader` fingerprints, so `changes` is
+                // empty (single-writer safe) while the inverse is still real.
+                let edge = holon_api::EdgeField::ALL
+                    .iter()
+                    .copied()
+                    .find(|e| e.column() == f)
+                    .expect("is_edge_column ⇒ a matching EdgeField");
+                let mut params = HashMap::new();
+                params.insert("id".to_string(), Value::String(id.to_string()));
+                params.insert("field".to_string(), Value::String(f.to_string()));
+                params.insert("value".to_string(), edge.param_value(&prior));
                 (Some(block_op("set_field", params)), Vec::new())
             }
             _ => (None, Vec::new()),
@@ -392,6 +427,18 @@ impl CrudOperations<Block> for LoroBlockOperations {
                     .update_parent_id(id, new_parent)
                     .await
                     .map_err(|e| format!("set_field(\"parent_id\") for {id}: {e}"))?;
+            }
+            f if holon_api::EdgeField::is_edge_column(f) => {
+                // Set-valued edge field: write the tree node's dedicated meta key
+                // so the Loro→SQL projector reads it into the matching junction
+                // table. Routing it into `properties` (the `_` arm) would be
+                // silently lost — the junction never sees it. Generic over every
+                // `EdgeField` member (no per-field branch).
+                let targets = edge_string_targets(&value, f)?;
+                backend
+                    .set_block_edge_field(id, f, &targets)
+                    .await
+                    .map_err(|e| format!("set_field('{f}') for {id}: {e:#}"))?;
             }
             _ => {
                 // Store in properties. A bare `task_state` keyword write gets
@@ -999,6 +1046,97 @@ mod advice_dismiss_tests {
         ops.save_doc("").await.expect("save");
         let anchor_id = anchor.id.to_string();
         (ops, dir, anchor_id)
+    }
+
+    /// Edge-field CRUD (composed-keystone `SetEdgeField{Tags/Requires}` RED,
+    /// 2026-07-13): a `set_field` on a set-valued edge field must (a) land in
+    /// the tree node's DEDICATED meta key so `get_block` reads it into the
+    /// junction (NOT the `properties` blob, where the projector never sees
+    /// it), and (b) carry a whole-set-restore inverse capturing the PRIOR
+    /// full set.
+    #[tokio::test]
+    async fn edge_field_set_field_hits_junction_meta_and_inverts() {
+        let (ops, _dir, anchor) = ops_with_anchor().await;
+        let backend = ops.get_backend("").await.expect("backend");
+
+        // requires: establish a prior set {dep1}.
+        ops.set_field(
+            &anchor,
+            "requires",
+            Value::Array(vec![Value::String("block:dep1".into())]),
+        )
+        .await
+        .expect("set requires");
+        let read = backend.get_block(&anchor).await.expect("read");
+        assert_eq!(
+            read.requires
+                .iter()
+                .map(|u| u.to_string())
+                .collect::<Vec<_>>(),
+            vec!["block:dep1".to_string()],
+            "requires must land in the junction meta, read back by get_block"
+        );
+
+        // Whole-set replace to {dep1, dep2}; the inverse must restore {dep1}.
+        let r2 = ops
+            .set_field(
+                &anchor,
+                "requires",
+                Value::Array(vec![
+                    Value::String("block:dep1".into()),
+                    Value::String("block:dep2".into()),
+                ]),
+            )
+            .await
+            .expect("set requires 2");
+        let inverse = match r2.undo {
+            holon_core::UndoAction::Undo(op) => op,
+            other => panic!("edge set_field must be reversible, got {other:?}"),
+        };
+        assert_eq!(inverse.op_name, "set_field");
+        assert_eq!(
+            inverse.params.get("field"),
+            Some(&Value::String("requires".into()))
+        );
+        assert_eq!(
+            inverse.params.get("value"),
+            Some(&Value::Array(vec![Value::String("block:dep1".into())])),
+            "inverse must restore the PRIOR full set (whole-set restore, not element diff)"
+        );
+
+        // Applying the inverse restores {dep1}.
+        ops.set_field(
+            &anchor,
+            "requires",
+            inverse.params.get("value").unwrap().clone(),
+        )
+        .await
+        .expect("apply inverse");
+        let read3 = backend.get_block(&anchor).await.expect("read3");
+        assert_eq!(
+            read3
+                .requires
+                .iter()
+                .map(|u| u.to_string())
+                .collect::<Vec<_>>(),
+            vec!["block:dep1".to_string()],
+            "undo (inverse replay) restores the prior requires set"
+        );
+
+        // tags travel the same generic path (no per-field branch).
+        ops.set_field(
+            &anchor,
+            "tags",
+            Value::Array(vec![Value::String("task".into())]),
+        )
+        .await
+        .expect("set tags");
+        let read_tags = backend.get_block(&anchor).await.expect("read tags");
+        assert_eq!(
+            read_tags.tags.to_vec(),
+            vec!["task".to_string()],
+            "tags must land in the junction meta"
+        );
     }
 
     /// Regression (keystone `inv-blocks-match-ref/org` RED, 2026-07-12): the
