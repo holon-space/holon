@@ -1,0 +1,312 @@
+* Plan my day
+:PROPERTIES:
+:ID: plan-my-day-tpl-0
+:TEMPLATE: plan-my-day
+:END:
+** TODO Start *Pomodoro* timer
+:PROPERTIES:
+:ID: plan-my-day-tpl-1
+:END:
+** TODO Turn on *focus music*
+:PROPERTIES:
+:ID: plan-my-day-tpl-2
+:END:
+** TODO Put desk in *standing* mode and turn *walking pad* on
+:PROPERTIES:
+:ID: plan-my-day-tpl-3
+:END:
+** TODO Connect devices to *charge*
+:PROPERTIES:
+:ID: plan-my-day-tpl-4
+:END:
+** TODO Capture *open loops*
+:PROPERTIES:
+:ID: plan-my-day-tpl-5
+:END:
+*** TODO WhatsApp
+:PROPERTIES:
+:ID: plan-my-day-tpl-6
+:END:
+*** TODO Signal
+:PROPERTIES:
+:ID: plan-my-day-tpl-7
+:END:
+*** TODO Was hat Kat gesagt?
+:PROPERTIES:
+:ID: plan-my-day-tpl-8
+:END:
+*** TODO Braucht Jonathan was für die Schule?
+:PROPERTIES:
+:ID: plan-my-day-tpl-9
+:END:
+*** TODO Braucht Toni was für die Schule?
+:PROPERTIES:
+:ID: plan-my-day-tpl-10
+:END:
+*** TODO Ist das Bringen und Holen der Kinder abgestimmt?
+:PROPERTIES:
+:ID: plan-my-day-tpl-11
+:END:
+*** TODO Ist die Betreuung der Kinder abgestimmt?
+:PROPERTIES:
+:ID: plan-my-day-tpl-12
+:END:
+*** TODO Was hab ich sonst noch im Kopf
+:PROPERTIES:
+:ID: plan-my-day-tpl-13
+:END:
+** TODO Process *physical inbox*
+:PROPERTIES:
+:ID: plan-my-day-tpl-14
+:END:
+** TODO Repeat [[Implementation Intention]]s out loud or silently
+:PROPERTIES:
+:ID: plan-my-day-tpl-15
+:END:
+*** TODO Whenever the Pomodoro timer is over, I drink something, stretch, check ~Current tasks~ in Todoist, and do something useful for my body or the household
+:PROPERTIES:
+:ID: plan-my-day-tpl-16
+:END:
+*** TODO Whenever I'm about to start a new topic, I first check if there's something I can finish
+:PROPERTIES:
+:ID: plan-my-day-tpl-17
+:END:
+** TODO *Close* not required applications and browser tabs
+:PROPERTIES:
+:ID: plan-my-day-tpl-18
+:END:
+** TODO Check *company calendar* and create alarms for important events
+:PROPERTIES:
+:ID: plan-my-day-tpl-19
+:END:
+** TODO Check *private calendar* and create alarms for important events
+:PROPERTIES:
+:ID: plan-my-day-tpl-20
+:END:
+** TODO Each *mail*
+:PROPERTIES:
+:ID: plan-my-day-tpl-21
+:END:
+*** Add to daily journal if important
+:PROPERTIES:
+:ID: plan-my-day-tpl-22
+:END:
+*** Add to Todoist if actionable
+:PROPERTIES:
+:ID: plan-my-day-tpl-23
+:END:
+*** Schedule if deadline
+:PROPERTIES:
+:ID: plan-my-day-tpl-24
+:END:
+** TODO Process each Signal/WhatsApp/Telegram *chat*
+:PROPERTIES:
+:ID: plan-my-day-tpl-25
+:END:
+*** Add to daily journal if important
+:PROPERTIES:
+:ID: plan-my-day-tpl-26
+:END:
+*** Add task if actionable
+:PROPERTIES:
+:ID: plan-my-day-tpl-27
+:END:
+*** Schedule if deadline
+:PROPERTIES:
+:ID: plan-my-day-tpl-28
+:END:
+** TODO Process each item in [[Inbox]]
+:PROPERTIES:
+:ID: plan-my-day-tpl-29
+:END:
+*** Add to daily journal if important
+:PROPERTIES:
+:ID: plan-my-day-tpl-30
+:END:
+*** Add task if actionable
+:PROPERTIES:
+:ID: plan-my-day-tpl-31
+:END:
+*** Schedule if deadline
+:PROPERTIES:
+:ID: plan-my-day-tpl-32
+:END:
+** TODO *Clean up* desk
+:PROPERTIES:
+:ID: plan-my-day-tpl-33
+:END:
+** TODO Categorize *1-2-3*
+:PROPERTIES:
+:ID: plan-my-day-tpl-34
+:END:
+** TODO *Smile*
+:PROPERTIES:
+:ID: plan-my-day-tpl-35
+:END:
+** *Highlight*
+:PROPERTIES:
+:ID: plan-my-day-tpl-36
+:END:
+*** What would I feel great about having achieved?
+:PROPERTIES:
+:ID: plan-my-day-tpl-37
+:END:
+** *Line Up*
+:PROPERTIES:
+:ID: plan-my-day-tpl-38
+:END:
+*** 2 additional tasks
+:PROPERTIES:
+:ID: plan-my-day-tpl-39
+:END:
+** *Others*
+:PROPERTIES:
+:ID: plan-my-day-tpl-40
+:END:
+* Monatswechsel {{date}}
+:PROPERTIES:
+:ID: new-month-tpl-0
+:TEMPLATE: new-month
+:TEMPLATE_VARS: date
+:text: Monatswechsel {{date}}
+:END:
+** Desired Outcomes
+:PROPERTIES:
+:ID: new-month-tpl-1
+:END:
+*** Buchungsabschluss Be Tse erstellt
+:PROPERTIES:
+:ID: new-month-tpl-2
+:END:
+*** Rechnungen erstellt und abgeschickt
+:PROPERTIES:
+:ID: new-month-tpl-3
+:END:
+*** Buchungen in LexOffice zugeordnet, wenn möglich mit PDF Anhang
+:PROPERTIES:
+:ID: new-month-tpl-4
+:END:
+*** Umsatzsteuervoranmeldung abgeschickt und überwiesen
+:PROPERTIES:
+:ID: new-month-tpl-5
+:END:
+** Tasks
+:PROPERTIES:
+:ID: new-month-tpl-6
+:END:
+*** TODO Buchungsabschluss Be Tse erstellen
+:PROPERTIES:
+:ID: new-month-tpl-7
+:END:
+**** TODO Wochen in BCS durchgehen, fehlenden Stunden nachtragen mit Kommentar
+:PROPERTIES:
+:ID: new-month-tpl-8
+:END:
+**** TODO Einen Tag für Mehr-Arbeit buchen
+:PROPERTIES:
+:ID: new-month-tpl-9
+:END:
+**** TODO Buchungsabschluss für Monat machen
+:PROPERTIES:
+:ID: new-month-tpl-10
+:END:
+**** TODO Anzahl Stunden aus Übersicht kopieren
+:PROPERTIES:
+:ID: new-month-tpl-11
+:END:
+*** TODO Rechnung DBG erstellen
+:PROPERTIES:
+:ID: new-month-tpl-12
+:END:
+**** TODO Neue Buchung erstellen
+:PROPERTIES:
+:ID: new-month-tpl-13
+:END:
+**** TODO Projekt EPV158_2025
+:PROPERTIES:
+:ID: new-month-tpl-14
+:END:
+**** TODO Datum, Stunden, Stundensatz 117,50 eintragen
+:PROPERTIES:
+:ID: new-month-tpl-15
+:END:
+**** TODO Buchung speichern
+:PROPERTIES:
+:ID: new-month-tpl-16
+:END:
+**** TODO Buchung per Mail abschicken
+:PROPERTIES:
+:ID: new-month-tpl-17
+:END:
+*** TODO Rechnung Qunaira erstellen
+:PROPERTIES:
+:ID: new-month-tpl-18
+:END:
+**** TODO Letzte Rechnung duplizieren
+:PROPERTIES:
+:ID: new-month-tpl-19
+:END:
+**** TODO Stunden updaten
+:PROPERTIES:
+:ID: new-month-tpl-20
+:END:
+**** TODO Flo fragen, ob es passt
+:PROPERTIES:
+:ID: new-month-tpl-21
+:END:
+**** TODO Rechnung schicken
+:PROPERTIES:
+:ID: new-month-tpl-22
+:END:
+*** TODO Buchungen in LexOffice zuordnen
+:PROPERTIES:
+:ID: new-month-tpl-23
+:END:
+**** TODO GMail Ordner "Steuererklärung 2025" öffnen
+:PROPERTIES:
+:ID: new-month-tpl-24
+:END:
+**** TODO LexOffice von ältestem zu neuestem Eintrag durchgehen
+:PROPERTIES:
+:ID: new-month-tpl-25
+:END:
+***** Entsprechende Mail suchen
+:PROPERTIES:
+:ID: new-month-tpl-26
+:END:
+***** PDF downloaden
+:PROPERTIES:
+:ID: new-month-tpl-27
+:END:
+***** [[https://payments.google.com/gp/w/home/activity][Google AI Rechnung downloaden]]
+:PROPERTIES:
+:ID: new-month-tpl-28
+:END:
+***** TODO Bei LexOffice hochladen und Typ (meistens Lizenzkosten) eintragen
+:PROPERTIES:
+:ID: new-month-tpl-29
+:END:
+*** TODO Umsatzsteuervoranmeldung durchführen
+:PROPERTIES:
+:ID: new-month-tpl-30
+:END:
+**** TODO Buchhaltung -> Elster
+:PROPERTIES:
+:ID: new-month-tpl-31
+:END:
+**** TODO Letzten Monat auswählen
+:PROPERTIES:
+:ID: new-month-tpl-32
+:END:
+**** TODO Werte auf Relevanz prüfen
+:PROPERTIES:
+:ID: new-month-tpl-33
+:END:
+**** TODO UstVA abschicken
+:PROPERTIES:
+:ID: new-month-tpl-34
+:END:
+**** TODO Checken, ob Finanzamt abgebucht hat
+:PROPERTIES:
+:ID: new-month-tpl-35
+:END:
