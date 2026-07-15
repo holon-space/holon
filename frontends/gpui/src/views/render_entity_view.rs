@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use gpui::*;
 use gpui_component::input::Enter;
+use holon_api::EntityName;
 use holon_api::EntityUri;
 use holon_frontend::RenderContext;
 use holon_frontend::input::Key;
@@ -155,7 +156,7 @@ impl Render for RenderEntityView {
                                     );
                                     services.dispatch_intent(
                                         holon_frontend::operations::OperationIntent::new(
-                                            entity_name,
+                                            EntityName::new(entity_name),
                                             operation.name,
                                             params,
                                         ),
