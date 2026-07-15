@@ -76,6 +76,14 @@ pub(crate) fn view_model_to_snapshot(
         ViewKind::Badge { label } => {
             props.insert("label".into(), label.clone());
         }
+        ViewKind::ExpandToggle {
+            target_id,
+            expanded,
+            ..
+        } => {
+            props.insert("target_id".into(), target_id.clone());
+            props.insert("expanded".into(), expanded.to_string());
+        }
         _ => {}
     }
 

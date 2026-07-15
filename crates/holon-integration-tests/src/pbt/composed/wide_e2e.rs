@@ -324,10 +324,20 @@ pub fn folder_journal_page() -> EntityUri {
 }
 
 /// The date PAGE-FILE (`2026-07-10.org`): a bare `#+ID:` doc-root whose page
-/// title is the filename `2026-07-10`. Ingested FIRST (sorts before the
-/// companion), so it creates the `Page`-tagged doc-root that the companion
-/// later tries (buggily) to demote.
-pub const FOLDER_JOURNAL_PAGE_ORG: &str = "#+ID: journal-2026-07-10\n";
+/// title is the filename `2026-07-10`, PLUS a child heading so "children not
+/// loaded" is observable for the `inv-embedded-page-collapsed-lazy` invariant.
+/// Ingested FIRST (sorts before the companion), so it creates the `Page`-tagged
+/// doc-root that the companion later tries (buggily) to demote.
+pub const FOLDER_JOURNAL_PAGE_ORG: &str =
+    "#+ID: journal-2026-07-10\n* A note on the journal date\n:PROPERTIES:\n:ID: journal-date-child-note\n:END:\nSome body text under the date page.\n";
+
+/// The `:ID:` of the child block nested under the date page in
+/// [`FOLDER_JOURNAL_PAGE_ORG`]. The invariant
+/// `inv-embedded-page-collapsed-lazy` asserts this child does NOT appear in the
+/// main-panel widget tree unless the date page's expand-toggle is expanded.
+pub fn folder_journal_page_child() -> EntityUri {
+    EntityUri::block("journal-date-child-note")
+}
 
 /// `Journals.org` extended into the folder COMPANION: the bare `#+ID: journals`
 /// page shell PLUS a plain heading (`* 2026-07-10`) carrying the SAME `:ID:` as
@@ -362,6 +372,26 @@ pub fn seed_folder_companion(state: &mut ReferenceState) {
         .files
         .documents
         .insert(page.clone(), "2026-07-10.org".to_string());
+
+    // Seed the child block nested under the date page so
+    // `inv-embedded-page-collapsed-lazy` has something to observe: a ref-known
+    // block whose presence in the main-panel widget tree signals eager rendering.
+    let child = folder_journal_page_child();
+    let child_block = Block::new_text(
+        child.clone(),
+        page.clone(),
+        "A note on the journal date",
+    );
+    state
+        .domain
+        .block_state
+        .blocks
+        .insert(child.clone(), child_block);
+    state
+        .domain
+        .block_state
+        .block_documents
+        .insert(child.clone(), page);
 }
 
 // ── Row-137 SUBDIR fileless-journal closure (Fork B B1) ──────────────────────
