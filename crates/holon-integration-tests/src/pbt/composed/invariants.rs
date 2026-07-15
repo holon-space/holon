@@ -26,6 +26,7 @@ pub mod companion_has_no_child_page_headings;
 pub mod display_placement_canonical_inert;
 pub mod displayed_text;
 pub mod editable_text_has_draggable;
+pub mod embedded_page_collapsed_lazy;
 pub mod every_page_has_its_own_file;
 pub mod focus_matches_ref;
 pub mod focus_roots;
