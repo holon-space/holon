@@ -24,6 +24,7 @@
 //!   mark — that's correct Org behavior.
 
 use holon_api::EntityRef;
+use holon_api::EntityUri;
 use holon_api::InlineMark;
 use holon_api::MarkSpan;
 use holon_api::link_parser::LinkTarget;
@@ -34,6 +35,7 @@ use orgize::SyntaxNode;
 use orgize::config::UseSubSuperscript;
 use orgize::rowan::NodeOrToken;
 use orgize::rowan::ast::AstNode;
+use uuid::Uuid;
 
 /// Parse `text` as inline org content. Returns `(rendered_text, marks)` where
 /// `rendered_text` has all mark delimiters stripped and `marks` carries
@@ -76,11 +78,58 @@ fn walk_node(node: &SyntaxNode, state: &mut ExtractState) {
                 }
             }
             NodeOrToken::Token(tok) => {
-                let txt = tok.text();
-                state.out.push_str(txt);
-                state.char_pos += txt.chars().count();
+                scan_text_for_block_refs(tok.text(), state);
             }
         }
+    }
+}
+
+/// Scan `text` for `((uuid))` block-ref patterns. Valid UUIDs become
+/// `InlineMark::Link` with `EntityRef::Internal`; non-UUID `((...))` is
+/// emitted as plain text.
+fn scan_text_for_block_refs(text: &str, state: &mut ExtractState) {
+    let mut pos = 0usize;
+    while let Some(open) = text[pos..].find("((") {
+        let abs_open = pos + open;
+        // Emit plain text before the `((`.
+        if open > 0 {
+            let before = &text[pos..abs_open];
+            state.out.push_str(before);
+            state.char_pos += before.chars().count();
+        }
+        // Look for `))` after the `((`.
+        let after_open = &text[abs_open + 2..];
+        if let Some(close) = after_open.find("))") {
+            let inner = after_open[..close].trim();
+            let abs_close = abs_open + 2 + close + 2;
+            if !inner.is_empty() && Uuid::parse_str(inner).is_ok() {
+                let label = format!("(({inner}))");
+                let mark = InlineMark::Link {
+                    target: EntityRef::Internal {
+                        id: EntityUri::block(inner),
+                    },
+                    label: label.clone(),
+                };
+                push_with_inner_marks(state, &label, vec![], mark);
+            } else {
+                // Emit the full `((...))` as plain text (non-UUID or empty).
+                let full = &text[abs_open..abs_close];
+                state.out.push_str(full);
+                state.char_pos += full.chars().count();
+            }
+            pos = abs_close;
+        } else {
+            // No closing `))` — emit `((` as plain text and continue.
+            state.out.push_str("((");
+            state.char_pos += 2;
+            pos = abs_open + 2;
+        }
+    }
+    // Emit remaining text.
+    let remainder = &text[pos..];
+    if !remainder.is_empty() {
+        state.out.push_str(remainder);
+        state.char_pos += remainder.chars().count();
     }
 }
 
@@ -340,7 +389,8 @@ pub fn render_inline_marks(text: &str, marks: &[MarkSpan]) -> String {
 }
 
 /// Open delimiter for a mark. For Link, this is `[[uri][` (the label and
-/// closing `]]` come at the close position).
+/// closing `]]` come at the close position). Block-refs (`((uuid))`) get
+/// `((` as open and `))` as close.
 fn open_delim(mark: &InlineMark) -> String {
     match mark {
         InlineMark::Bold => "*".into(),
@@ -352,6 +402,9 @@ fn open_delim(mark: &InlineMark) -> String {
         InlineMark::Sub => "_{".into(),
         InlineMark::Super => "^{".into(),
         InlineMark::Link { target, label } => {
+            if is_block_ref_link(mark) {
+                return String::new();
+            }
             let uri = match target {
                 EntityRef::External { url } => url.clone(),
                 EntityRef::Internal { id } => id.as_str().to_string(),
@@ -378,7 +431,35 @@ fn close_delim(mark: &InlineMark) -> String {
         InlineMark::Code => "~".into(),
         InlineMark::Strike => "+".into(),
         InlineMark::Sub | InlineMark::Super => "}".into(),
-        InlineMark::Link { .. } => "]]".into(),
+        InlineMark::Link { .. } => {
+            if is_block_ref_link(mark) {
+                return String::new();
+            }
+            "]]".into()
+        }
+    }
+}
+
+/// Returns `true` when the mark is a block-ref link: `EntityRef::Internal`
+/// whose label starts with `((`, ends with `))`, AND the inner text matches
+/// the id (stripped of its `block:` scheme). This heuristically distinguishes
+/// `((uuid))` from `[[block:uuid][label]]` for round-trip fidelity.
+fn is_block_ref_link(mark: &InlineMark) -> bool {
+    match mark {
+        InlineMark::Link {
+            target: EntityRef::Internal { id },
+            label,
+        } => {
+            if label.starts_with("((") && label.ends_with("))") && label.len() > 4 {
+                let inner = &label[2..label.len() - 2];
+                id.as_str()
+                    .strip_prefix("block:")
+                    .is_some_and(|uuid| inner.trim() == uuid)
+            } else {
+                false
+            }
+        }
+        _ => false,
     }
 }
 
@@ -864,5 +945,80 @@ mod tests {
             ]
         );
         assert_eq!(render_inline_marks(&text, &marks), "a_{sub} b^{sup}");
+    }
+
+    // -- Block-ref `((uuid))` tests ----------------------------------------
+
+    const BLOCK_REF_UUID: &str = "550e8400-e29b-41d4-a716-446655440000";
+    const BLOCK_REF_ORG: &str = "((550e8400-e29b-41d4-a716-446655440000))";
+
+    #[test]
+    fn block_ref_extracts_internal_link() {
+        let (out, marks) = extract_inline_marks(BLOCK_REF_ORG);
+        assert_eq!(out, BLOCK_REF_ORG, "rendered text includes the parens");
+        assert_eq!(marks.len(), 1);
+        let m = &marks[0];
+        assert_eq!(m.start, 0);
+        assert_eq!(m.end, BLOCK_REF_ORG.chars().count());
+        match &m.mark {
+            InlineMark::Link { target, label } => {
+                assert_eq!(label, BLOCK_REF_ORG);
+                match target {
+                    EntityRef::Internal { id } => {
+                        assert_eq!(id.as_str(), format!("block:{BLOCK_REF_UUID}"));
+                    }
+                    other => panic!("expected Internal, got {other:?}"),
+                }
+            }
+            other => panic!("expected Link, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn block_ref_round_trip_byte_stable() {
+        let (org, marks) = round_trip(BLOCK_REF_ORG);
+        assert_eq!(org, BLOCK_REF_ORG);
+        // Also verify direct render for correct delimiter choice.
+        let (text, _) = extract_inline_marks(BLOCK_REF_ORG);
+        assert_eq!(render_inline_marks(&text, &marks), BLOCK_REF_ORG);
+    }
+
+    #[test]
+    fn block_ref_surrounded_by_text() {
+        let input = format!("see {} here", BLOCK_REF_ORG);
+        let (out, marks) = extract_inline_marks(&input);
+        assert_eq!(out, input);
+        assert_eq!(marks.len(), 1);
+        let m = &marks[0];
+        assert_eq!(m.start, 4, "block-ref mark starts after 'see '");
+        assert_eq!(
+            m.end,
+            4 + BLOCK_REF_ORG.chars().count(),
+            "block-ref mark ends before ' here'"
+        );
+    }
+
+    #[test]
+    fn non_uuid_double_parens_stays_plain_text() {
+        let input = "((not a ref))";
+        let (out, marks) = extract_inline_marks(input);
+        assert_eq!(out, input);
+        assert!(marks.is_empty(), "non-UUID ((...)) must not produce a mark");
+    }
+
+    #[test]
+    fn empty_double_parens_plain_text() {
+        let input = "prefix (()) suffix";
+        let (out, marks) = extract_inline_marks(input);
+        assert_eq!(out, input);
+        assert!(marks.is_empty(), "empty (()) must not produce a mark");
+    }
+
+    #[test]
+    fn unclosed_double_paren_plain_text() {
+        let input = "before ((no-close after";
+        let (out, marks) = extract_inline_marks(input);
+        assert_eq!(out, input);
+        assert!(marks.is_empty(), "unclosed (( must stay plain text");
     }
 }
