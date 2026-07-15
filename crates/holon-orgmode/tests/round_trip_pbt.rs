@@ -1497,8 +1497,8 @@ fn planning_scheduled_and_deadline_share_one_line_and_round_trip_stably() {
             .blocks
             .iter()
             .any(|b| b.id.id() == "00000000-0000-0000-00d2-6a8b21a78458"),
-        "headline id must survive the round-trip, not get replaced by a fresh \
-         UUID from a misparsed drawer-as-body: {:?}",
+        "headline id must survive the round-trip, not get replaced by a fresh UUID from a \
+         misparsed drawer-as-body: {:?}",
         parsed.blocks
     );
 

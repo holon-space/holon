@@ -660,7 +660,8 @@ impl Block {
             .get("_source_header_args")
             .and_then(|v| {
                 if let Value::String(s) = v {
-                    serde_json::from_str(s).ok() // ALLOW(ok): properties may not be JSON
+                    serde_json::from_str(s).ok() // ALLOW(ok): properties may
+                // not be JSON
                 } else {
                     None
                 }

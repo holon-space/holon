@@ -128,10 +128,9 @@ pub async fn reconcile_named_view(
         }
         Err(e) if e.to_string().contains("already exists") => {
             tracing::warn!(
-                "[reconcile_named_view] View '{view_name}' collided with orphaned \
-                 backing objects left by a prior crash ({e}); dropping the derived \
-                 matview + orphaned DBSP state and recreating (base tables are \
-                 untouched — no data loss)"
+                "[reconcile_named_view] View '{view_name}' collided with orphaned backing objects \
+                 left by a prior crash ({e}); dropping the derived matview + orphaned DBSP state \
+                 and recreating (base tables are untouched — no data loss)"
             );
             drop_dependent_views(db_handle, view_name).await?;
             db_handle
@@ -146,12 +145,11 @@ pub async fn reconcile_named_view(
                 .await
                 .map_err(|e2| {
                     anyhow::anyhow!(
-                        "reconcile_named_view: matview '{view_name}' could not be \
-                         (re)created even after clearing orphaned backing objects \
-                         left by a prior crash: {e2}. The schema is genuinely \
-                         incompatible; failing loudly instead of boot-looping. Base \
-                         tables are intact — inspect the DB rather than clearing \
-                         user data."
+                        "reconcile_named_view: matview '{view_name}' could not be (re)created \
+                         even after clearing orphaned backing objects left by a prior crash: \
+                         {e2}. The schema is genuinely incompatible; failing loudly instead of \
+                         boot-looping. Base tables are intact — inspect the DB rather than \
+                         clearing user data."
                     )
                 })?;
             tracing::info!(
@@ -192,10 +190,9 @@ async fn drop_dependent_views(db_handle: &DbHandle, view_name: &str) -> Result<(
             continue;
         }
         tracing::warn!(
-            "[reconcile_named_view] Dropping matview '{name}' because its base \
-             matview '{view_name}' is being recreated; it will be rebuilt by its \
-             owning schema module (or on watch registration) — leaving it in \
-             place would corrupt it with duplicate rows"
+            "[reconcile_named_view] Dropping matview '{name}' because its base matview \
+             '{view_name}' is being recreated; it will be rebuilt by its owning schema module (or \
+             on watch registration) — leaving it in place would corrupt it with duplicate rows"
         );
         Box::pin(drop_dependent_views(db_handle, name)).await?;
         db_handle
@@ -571,9 +568,9 @@ impl MatviewManager {
             .map(|stmts| extract_table_refs(&stmts))
             .with_context(|| {
                 format!(
-                    "MatviewManager::ensure_view: failed to parse SELECT SQL for \
-                     matview '{view_name}' while extracting table dependencies; \
-                     mis-ordered DDL would hang on missing deps. SQL: {sql_for_view}"
+                    "MatviewManager::ensure_view: failed to parse SELECT SQL for matview \
+                     '{view_name}' while extracting table dependencies; mis-ordered DDL would \
+                     hang on missing deps. SQL: {sql_for_view}"
                 )
             })?;
 
@@ -805,8 +802,8 @@ impl MatviewManager {
             .map(|stmts| extract_table_refs(&stmts))
             .with_context(|| {
                 format!(
-                    "MatviewManager::prime_fdw_caches: failed to parse SQL while \
-                     extracting FDW-backed table references. SQL: {sql}"
+                    "MatviewManager::prime_fdw_caches: failed to parse SQL while extracting \
+                     FDW-backed table references. SQL: {sql}"
                 )
             })?;
 
@@ -871,8 +868,12 @@ mod tests {
 
     #[test]
     fn normalize_collapses_whitespace_and_lowercases() {
-        let stored = "CREATE MATERIALIZED VIEW current_focus AS\nSELECT\n    nc.region,\n    nh.block_id\nFROM navigation_cursor nc\nJOIN navigation_history nh ON nc.history_id = nh.id";
-        let desired = "CREATE MATERIALIZED VIEW current_focus AS SELECT nc.region, nh.block_id FROM navigation_cursor nc JOIN navigation_history nh ON nc.history_id = nh.id";
+        let stored = "CREATE MATERIALIZED VIEW current_focus AS\nSELECT\n    nc.region,\n    \
+                      nh.block_id\nFROM navigation_cursor nc\nJOIN navigation_history nh ON \
+                      nc.history_id = nh.id";
+        let desired = "CREATE MATERIALIZED VIEW current_focus AS SELECT nc.region, nh.block_id \
+                       FROM navigation_cursor nc JOIN navigation_history nh ON nc.history_id = \
+                       nh.id";
         assert_eq!(normalize_view_sql(stored), normalize_view_sql(desired));
     }
 

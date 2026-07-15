@@ -88,15 +88,16 @@ impl OrgRenderer {
         for b in blocks {
             let parent = b.parent_id.as_str();
             if parent == b.id.as_str() {
-                continue; // self-parented FK-anchor sentinel; never a real block
+                continue; // self-parented FK-anchor sentinel; never a real
+                // block
             }
             if parent != file_id_str && !ids.contains(parent) {
                 panic!(
                     "{}",
                     holon_api::ProjectionInvariantViolated {
                         detail: format!(
-                            "org render: block {} has dangling parent {} \
-                             (not the file root {} and not in the {}-block set)",
+                            "org render: block {} has dangling parent {} (not the file root {} \
+                             and not in the {}-block set)",
                             b.id.as_str(),
                             parent,
                             file_id_str,
@@ -143,9 +144,9 @@ impl OrgRenderer {
                     "{}",
                     holon_api::ProjectionInvariantViolated {
                         detail: format!(
-                            "org render: block {} (parent {}) is unreachable from \
-                             file root {} despite its parent being present — parent \
-                             cycle or disconnected component",
+                            "org render: block {} (parent {}) is unreachable from file root {} \
+                             despite its parent being present — parent cycle or disconnected \
+                             component",
                             b.id.as_str(),
                             b.parent_id.as_str(),
                             file_id.as_str()

@@ -188,8 +188,8 @@ impl<T: LoroScalarField> CellBacking<T> for LoroMetaCellBacking<T> {
                     ),
                     Err(_) => {
                         tracing::warn!(
-                            "LoroMetaCellBacking signal lagged ({block_id}, {field}); \
-                             consumer should call current() and resync"
+                            "LoroMetaCellBacking signal lagged ({block_id}, {field}); consumer \
+                             should call current() and resync"
                         );
                         None
                     }

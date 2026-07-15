@@ -102,7 +102,8 @@ where
         // we don't trip on the index step.
         if self.master_kind(table_name).await?.as_deref() == Some("view") {
             tracing::debug!(
-                "[QueryableCache] '{}' is a matview — schema owned by a SchemaModule; skipping CREATE TABLE/INDEX",
+                "[QueryableCache] '{}' is a matview — schema owned by a SchemaModule; skipping \
+                 CREATE TABLE/INDEX",
                 table_name
             );
             return Ok(());
@@ -401,7 +402,8 @@ where
                             );
                         } else {
                             tracing::debug!(
-                                "[QueryableCache] Successfully ingested batch of {} changes for table: {}",
+                                "[QueryableCache] Successfully ingested batch of {} changes for \
+                                 table: {}",
                                 change_count,
                                 table_name
                             );
@@ -544,7 +546,8 @@ where
                             );
                         } else {
                             tracing::debug!(
-                                "[QueryableCache] Successfully ingested batch of {} changes for table: {}",
+                                "[QueryableCache] Successfully ingested batch of {} changes for \
+                                 table: {}",
                                 change_count,
                                 table_name
                             );
@@ -605,7 +608,8 @@ where
                     if is_retryable && attempt < MAX_RETRIES {
                         let delay_ms = INITIAL_DELAY_MS * (1 << (attempt - 1)); // Exponential backoff
                         tracing::warn!(
-                            "[QueryableCache] Retryable error on attempt {}/{}: {}. Retrying in {}ms",
+                            "[QueryableCache] Retryable error on attempt {}/{}: {}. Retrying in \
+                             {}ms",
                             attempt,
                             MAX_RETRIES,
                             error_str,
@@ -663,7 +667,8 @@ where
                     if is_retryable && attempt < MAX_RETRIES {
                         let delay_ms = INITIAL_DELAY_MS * (1 << (attempt - 1));
                         tracing::warn!(
-                            "[QueryableCache] Retryable error on attempt {}/{}: {}. Retrying in {}ms",
+                            "[QueryableCache] Retryable error on attempt {}/{}: {}. Retrying in \
+                             {}ms",
                             attempt,
                             MAX_RETRIES,
                             error_str,
@@ -827,7 +832,8 @@ where
                             .map(|v| format!("{:?}", v))
                             .unwrap_or_else(|| "<none>".to_string());
                         tracing::trace!(
-                            "[CACHE_APPLY_TRACE] UPSERT block id={} content={:?} properties={} origin={:?}",
+                            "[CACHE_APPLY_TRACE] UPSERT block id={} content={:?} properties={} \
+                             origin={:?}",
                             id_val,
                             content_val,
                             props_val,
@@ -1095,8 +1101,8 @@ where
         // Filter batches by relation_name in metadata, then flatten to individual
         // RowChanges Use futures::stream::StreamExt for flat_map which has
         // better trait implementations
-        let filtered_stream = row_change_stream
-            .filter_map(move |batch: BatchWithMetadata<RowChange>| {
+        let filtered_stream =
+            row_change_stream.filter_map(move |batch: BatchWithMetadata<RowChange>| {
                 // Filter by relation_name in metadata
                 if batch.metadata.relation_name != table_name_clone {
                     return None;
@@ -1134,11 +1140,16 @@ where
 
                 if let Some(ref trace_ctx) = trace_context {
                     // Use tracing macros instead of record() for string values
-                    tracing::debug!("trace_id={}, span_id={}", trace_ctx.trace_id, trace_ctx.span_id);
+                    tracing::debug!(
+                        "trace_id={}, span_id={}",
+                        trace_ctx.trace_id,
+                        trace_ctx.span_id
+                    );
                 }
 
                 tracing::info!(
-                    "[QueryableCache] Emitting CDC batch: relation={}, changes={} (created={}, updated={}, deleted={})",
+                    "[QueryableCache] Emitting CDC batch: relation={}, changes={} (created={}, \
+                     updated={}, deleted={})",
                     relation_name,
                     change_count,
                     created_count,
@@ -1184,13 +1195,15 @@ where
                                 origin,
                             }
                         }
-                        ChangeData::FieldsChanged { entity_id, fields, origin } => {
-                            Change::FieldsChanged {
-                                entity_id,
-                                fields,
-                                origin,
-                            }
-                        }
+                        ChangeData::FieldsChanged {
+                            entity_id,
+                            fields,
+                            origin,
+                        } => Change::FieldsChanged {
+                            entity_id,
+                            fields,
+                            origin,
+                        },
                     };
                     results.push(result);
                 }

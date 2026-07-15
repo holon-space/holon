@@ -586,7 +586,8 @@ impl OrgBlockExt for Block {
     fn priority(&self) -> Option<Priority> {
         self.get_property(org_props::PRIORITY)
             .and_then(|v| v.as_i64())
-            .and_then(|i| Priority::from_int(i as i32).ok()) // ALLOW(ok): boundary parse
+            .and_then(|i| Priority::from_int(i as i32).ok()) // ALLOW(ok):
+        // boundary parse
     }
 
     fn set_priority(&mut self, priority: Option<Priority>) {

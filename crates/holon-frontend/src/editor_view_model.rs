@@ -216,7 +216,11 @@ impl EditorViewModel {
     pub fn anchor_cursor(&self, char_offset: usize, bias: CursorBias) -> Option<CursorAnchor> {
         self.cell
             .as_ref()
-            .and_then(|c| c.anchor_cursor(char_offset, bias).ok()) // ALLOW(ok): backings without text-rich support degrade to None
+            .and_then(|c| c.anchor_cursor(char_offset, bias).ok()) // ALLOW(ok):
+        // backings without
+        // text-rich support
+        // degrade to
+        // None
     }
 
     /// Resolve a previously-anchored cursor against the current CRDT state.
@@ -225,7 +229,10 @@ impl EditorViewModel {
     pub fn resolve_cursor(&self, anchor: &CursorAnchor) -> Option<usize> {
         self.cell
             .as_ref()
-            .and_then(|c| c.resolve_cursor(anchor).ok()) // ALLOW(ok): backings without text-rich support degrade to None
+            .and_then(|c| c.resolve_cursor(anchor).ok()) // ALLOW(ok): backings
+        // without text-rich
+        // support degrade to
+        // None
     }
 
     /// Build an EditorViewModel from an EditableText ViewModel node.

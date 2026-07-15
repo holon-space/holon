@@ -669,9 +669,9 @@ impl SutFrontendEmissions for GpuiFrontendEngineComponent {
             let live_ids: Vec<&String> = live_sibs.iter().collect();
             if live_ids != want_ids {
                 prop_diffs.push(format!(
-                    "  ORDER under parent {parent}: live renders {live_ids:?} but sort_key \
-                     order is {want_ids:?} — the reactive collection is not ordering by sort_key \
-                     (the fractional-index authority)"
+                    "  ORDER under parent {parent}: live renders {live_ids:?} but sort_key order \
+                     is {want_ids:?} — the reactive collection is not ordering by sort_key (the \
+                     fractional-index authority)"
                 ));
             }
         }

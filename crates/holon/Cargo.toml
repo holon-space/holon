@@ -105,7 +105,6 @@ web-time = "1"
 holon-block-roundtrip-testing.workspace = true
 holon-filesystem.workspace = true
 holon-loro.workspace = true
-holon-orgmode.workspace = true
 proptest.workspace = true
 proptest-state-machine.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
@@ -149,6 +148,3 @@ required-features = ["test-helpers"]
 name = "undo_inverse_wave1"
 required-features = ["test-helpers"]
 
-[[test]]
-name = "template_e2e_test"
-required-features = ["test-helpers"]
