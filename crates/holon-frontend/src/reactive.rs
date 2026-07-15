@@ -29,22 +29,22 @@ use futures_signals::signal::SignalExt;
 use futures_signals::signal_map::MutableBTreeMap;
 use futures_signals::signal_vec::SignalVec;
 use futures_signals::signal_vec::SignalVecExt;
+use holon_api::EntityUri;
+use holon_api::NavigationOp;
+use holon_api::QueryLanguage;
+use holon_api::ReactiveRowProvider;
 use holon_api::ptr_identity;
 use holon_api::render_types::RenderExpr;
 use holon_api::streaming::UiEvent;
 use holon_api::widget_spec::DataRow;
 use holon_api::widget_spec::EnrichedRow;
-use holon_api::EntityUri;
-use holon_api::NavigationOp;
-use holon_api::QueryLanguage;
-use holon_api::ReactiveRowProvider;
 
+use crate::FrontendSession;
+use crate::WidgetState;
 use crate::reactive_view_model::ReactiveViewModel;
 use crate::render_context::RenderContext;
 use crate::render_interpreter::RenderInterpreter;
 use crate::view_model::ViewModel;
-use crate::FrontendSession;
-use crate::WidgetState;
 
 // ── BuilderServices trait ───────────────────────────────────────────────
 
@@ -507,8 +507,8 @@ impl ReactiveRowSet {
     }
 
     /// Set the generation (invalidation token). Stale changes are discarded.
-    pub fn set_generation(&self, gen: u64) {
-        self.generation.set(gen);
+    pub fn set_generation(&self, generation: u64) {
+        self.generation.set(generation);
     }
 
     /// Current generation.
@@ -747,8 +747,8 @@ impl ReactiveRenderedRows {
     }
 
     /// Set the generation (invalidation token) on the inner row set.
-    pub fn set_generation(&self, gen: u64) {
-        self.rows.set_generation(gen);
+    pub fn set_generation(&self, generation: u64) {
+        self.rows.set_generation(generation);
     }
 
     /// Apply a UiEvent directly. Single entry point for all CDC events.
@@ -3133,7 +3133,7 @@ mod tests {
                 ("content".to_string(), Value::String(content.to_string())),
             ])
         }
-        fn data_event(gen: u64, rows: Vec<HashMap<String, Value>>) -> UiEvent {
+        fn data_event(generation: u64, rows: Vec<HashMap<String, Value>>) -> UiEvent {
             UiEvent::Data {
                 batch: WithMetadata {
                     inner: Batch {
@@ -3155,16 +3155,16 @@ mod tests {
                         seq: 0,
                     },
                 },
-                generation: gen,
+                generation,
             }
         }
-        fn structure_event(gen: u64) -> UiEvent {
+        fn structure_event(generation: u64) -> UiEvent {
             UiEvent::Structure {
                 render_expr: RenderExpr::Literal {
-                    value: holon_api::Value::String(format!("expr-{gen}")),
+                    value: holon_api::Value::String(format!("expr-{generation}")),
                 },
                 candidates: Vec::new(),
-                generation: gen,
+                generation,
             }
         }
         fn ids(rqr: &ReactiveRenderedRows) -> Vec<String> {
