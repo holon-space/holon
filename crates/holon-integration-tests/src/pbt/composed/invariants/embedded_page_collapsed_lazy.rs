@@ -1,5 +1,5 @@
 //! `inv-embedded-page-collapsed-lazy` wired into the composed catalog.
-//! `Needs RefBlockTree + RefLayout + RefViewSelection + RefFocus`
+//! `Needs RefBlockTree + RefLayout + RefViewSelection + RefFocus + RefToggle`
 //! (ref side) + `SutRenderer` (SUT). Only the frontend slice supplies the
 //! SUT cap; storage-only slices deselect honestly.
 
@@ -7,6 +7,7 @@ use holon_pbt_core::RunMode;
 use holon_pbt_core::capabilities::RefBlockTree;
 use holon_pbt_core::capabilities::RefFocus;
 use holon_pbt_core::capabilities::RefLayout;
+use holon_pbt_core::capabilities::RefToggle;
 use holon_pbt_core::capabilities::RefViewSelection;
 use holon_pbt_core::capabilities::SutRenderer;
 use holon_pbt_core::composition::BridgedInvariant;
@@ -28,6 +29,7 @@ pub fn wire() -> Box<dyn CapInvariant> {
                 CapId::of::<dyn RefLayout>(),
                 CapId::of::<dyn RefViewSelection>(),
                 CapId::of::<dyn RefFocus>(),
+                CapId::of::<dyn RefToggle>(),
             ],
         },
     ))

@@ -39,6 +39,7 @@ use holon_pbt_core::capabilities::RefFocus;
 use holon_pbt_core::capabilities::RefGlobalFocus;
 use holon_pbt_core::capabilities::RefLayout;
 use holon_pbt_core::capabilities::RefTaskState;
+use holon_pbt_core::capabilities::RefToggle;
 use holon_pbt_core::capabilities::RefViewSelection;
 use holon_pbt_core::capabilities::RefWatch;
 
@@ -144,6 +145,11 @@ impl holon_pbt_core::composition::CapProvider for ReferenceState {
         // Logic already on `ReferenceState`; harmless to existing slices (selection
         // ANDs SUT∧ref cap sets — only a `SutViewSelection` slice selects them).
         caps.insert(self.clone() as Arc<dyn RefTaskState>);
+        // `RefToggle` carries the expand/collapse (`is_expanded`) model the
+        // `inv-embedded-page-collapsed-lazy` invariant reads (Phase 4 ExpandToggle
+        // keystone). Harmless to existing slices: selection ANDs SUT∧ref cap sets,
+        // and only the frontend slice supplying `SutRenderer` selects it.
+        caps.insert(self.clone() as Arc<dyn RefToggle>);
         // `RefAdvice` carries the advice-weave expectation (ADR 0021/0022) the
         // `advice rows woven` keystone invariant reads. Harmless to existing
         // slices: selection ANDs SUT∧ref cap sets, and only a slice supplying the

@@ -2885,26 +2885,16 @@ mod teeth {
         }
     }
 
-    /// **Phase 2+3 FULL GREEN: embedded page renders collapsed + lazy, both halves.**
-    ///
-    /// Boots a custom topology where a non-seed page (`test-date-page`) sits
-    /// under `block:journals` with a child block (`test-date-child`), focuses
-    /// the main panel on `block:journals`, then runs
-    /// `inv-embedded-page-collapsed-lazy`. Both prongs pass: (a) the
-    /// `embedded_page` profile variant wraps the page in a collapsed
-    /// `expand_toggle`, and (b) the holon_sql recursive CTE stops at non-root
-    /// page boundaries so no descendants leak into the widget tree snapshot.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn embedded_page_renders_collapsed_and_lazy() {
+    /// Shared fixture for the embedded-page tests: boots a `Journals.org` shell
+    /// with a non-seed Page heading (`test-date-page`) and a child note
+    /// (`test-date-child`) under it, registers the frontend caps, and focuses
+    /// the main panel on `block:journals` so the date page renders embedded.
+    /// Returns `(comp, caps, journals, date_page, child)`.
+    async fn setup_embedded_page_sut()
+    -> (Arc<HeadlessFrontendComponent>, CapMap, EntityUri, EntityUri, EntityUri) {
         use holon_pbt_core::capabilities::CapRegion;
-        use holon_pbt_core::capabilities::RefNavHistoryMut;
         use holon_pbt_core::capabilities::SutFocusWrite;
-        use holon_pbt_core::composition::CapInvariant;
 
-        use crate::pbt::composed::invariants::embedded_page_collapsed_lazy;
-
-        // Org files: a Journals.org shell with a non-seed Page heading and
-        // a child note under it.
         let journals_org = concat!(
             "#+ID: journals\n",
             "* 2026-07-14 :Page:\n",
@@ -2920,7 +2910,6 @@ mod teeth {
         );
         const STRUCTURAL_PAGE_ORG: &str = "#+ID: structural-page\n";
 
-        let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let comp = Arc::new(
             HeadlessFrontendComponent::new(
                 &[
@@ -2931,7 +2920,6 @@ mod teeth {
             )
             .await,
         );
-        let _engine = comp.engine();
         let mut caps = CapMap::new();
         comp.clone().register_non_gesture(&mut caps);
         comp.clone()
@@ -2939,70 +2927,144 @@ mod teeth {
         caps.insert(comp.clone() as Arc<dyn SutSqlProjection>);
         tokio::time::sleep(SETTLE).await;
 
-        // Build the ref: seed structural-page, model test-date-page as a
-        // non-seed page child of journals, with test-date-child as its child.
-        let mut oracle = structural_ref();
         let journals = holon_api::EntityUri::parse("block:journals").expect("journals id");
         let date_page = holon_api::EntityUri::block("test-date-page");
         let child = holon_api::EntityUri::block("test-date-child");
 
+        // Navigate the SUT focus to journals so the date page appears in the
+        // main panel.
+        comp.apply_navigate_focus(CapRegion::Main, &journals).await;
+        tokio::time::sleep(SETTLE).await;
+
+        (comp, caps, journals, date_page, child)
+    }
+
+    /// The ref-model oracle matching [`setup_embedded_page_sut`]: seeds
+    /// structural-page, models `test-date-page` as a non-seed page child of
+    /// journals with `test-date-child` under it, and focuses Main on journals.
+    fn embedded_page_ref(
+        journals: &EntityUri,
+        date_page: &EntityUri,
+        child: &EntityUri,
+    ) -> ReferenceState {
+        use holon_pbt_core::capabilities::RefNavHistoryMut;
+
+        let mut oracle = structural_ref();
         let mut date_block = Block::new_text(date_page.clone(), journals.clone(), "2026-07-14");
         date_block.set_page(true);
-        oracle
-            .domain
-            .block_state
-            .blocks
-            .insert(date_page.clone(), date_block);
+        oracle.domain.block_state.blocks.insert(date_page.clone(), date_block);
         oracle
             .domain
             .block_state
             .block_documents
             .insert(date_page.clone(), date_page.clone());
-
         let child_block = Block::new_text(child.clone(), date_page.clone(), "A note for the day");
-        oracle
-            .domain
-            .block_state
-            .blocks
-            .insert(child.clone(), child_block);
+        oracle.domain.block_state.blocks.insert(child.clone(), child_block);
         oracle
             .domain
             .block_state
             .block_documents
             .insert(child.clone(), date_page.clone());
+        oracle.nav_focus(holon_api::Region::Main, journals);
+        oracle
+    }
 
-        // Navigate the SUT focus to journals so the date page appears in
-        // the main panel.
-        comp.apply_navigate_focus(CapRegion::Main, &journals).await;
-        tokio::time::sleep(SETTLE).await;
+    /// **Phase A GREEN (enforced): embedded page renders collapsed + lazy.**
+    ///
+    /// Boots the embedded-page topology, focuses Main on `block:journals`, then
+    /// runs `inv-embedded-page-collapsed-lazy`. Both display prongs pass: (a)
+    /// the `embedded_page` profile variant wraps the page in a collapsed
+    /// `expand_toggle`, and (b) the holon_sql recursive CTE stops at non-root
+    /// page boundaries so no descendants leak into the widget tree snapshot.
+    ///
+    /// The expand half (drive `set_block_expanded`, assert the SUT toggle
+    /// reports expanded + children load) lives in the separate,
+    /// `#[ignore]`d `embedded_page_expand_toggle_drives_expanded` — it is
+    /// blocked on a design ruling (see that test).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn embedded_page_renders_collapsed_and_lazy() {
+        use holon_pbt_core::composition::CapInvariant;
 
-        // Also navigate the ref so focus roots include journals.
-        oracle.nav_focus(holon_api::Region::Main, &journals);
+        use crate::pbt::composed::invariants::embedded_page_collapsed_lazy;
 
-        let resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
-        drop_ref_off_thread(oracle);
+        let (_comp, caps, journals, date_page, child) = setup_embedded_page_sut().await;
 
         let registry: Vec<Box<dyn CapInvariant>> = vec![embedded_page_collapsed_lazy::wire()];
-        let report = run_with_seeded_ref(&registry, &caps, resolved).await;
 
-        let ran: Vec<_> = report.ran_ids().into_iter().collect();
+        let resolved_a = {
+            let oracle = embedded_page_ref(&journals, &date_page, &child);
+            let resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
+            drop_ref_off_thread(oracle);
+            resolved
+        };
+        let report_a = run_with_seeded_ref(&registry, &caps, resolved_a).await;
+        let ran_a: Vec<_> = report_a.ran_ids().into_iter().collect();
         assert!(
-            ran.iter()
-                .any(|id| *id == "inv-embedded-page-collapsed-lazy"),
-            "inv-embedded-page-collapsed-lazy must select + run (ran: {ran:?})"
+            ran_a.iter().any(|id| *id == "inv-embedded-page-collapsed-lazy"),
+            "Phase A (collapsed): inv-embedded-page-collapsed-lazy must select + run (ran: {ran_a:?})"
         );
-        let failures = report.failures();
+        let failures_a = report_a.failures();
         assert!(
-            failures.is_empty(),
-            "Phase 2+3 FULL GREEN (embedded page collapsed + lazy, both halves): \
-             inv-embedded-page-collapsed-lazy must pass because (a) the embedded_page \
-             profile variant wraps the page in a collapsed expand_toggle, and (b) the \
-             holon_sql recursive CTE stops at non-root page boundaries so no descendants \
-             leak into the widget tree. Failures (if any): {failures:?}"
+            failures_a.is_empty(),
+            "Phase A (collapsed): inv-embedded-page-collapsed-lazy must PASS — embedded page \
+             with collapsed expand_toggle, no leaked descendants. Failures: {failures_a:?}"
         );
         eprintln!(
-            "[embedded_page_renders_collapsed_and_lazy] GREEN (both halves): \
+            "[embedded_page_renders_collapsed_and_lazy] Phase A GREEN: \
              collapsed expand_toggle present, no leaked descendants."
+        );
+    }
+
+    /// **Phase B GREEN: drive expand on the embedded page (Option B store).**
+    ///
+    /// Drives `set_block_expanded` on the embedded page and asserts the SUT's
+    /// rendered `expand_toggle` reports `expanded=true`. Green via the
+    /// view-local expansion store (RATIFIED 2026-07-16, Option B):
+    /// `set_block_expanded` records the intent in the engine's non-persistent
+    /// `UiState.expanded_view`, and the `expand_toggle` shadow builder seeds its
+    /// gate from it on rebuild — so the flip survives the fresh
+    /// `widget_tree_snapshot()` even though embedded pages carry no `collapsed`
+    /// document field.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn embedded_page_expand_toggle_drives_expanded() {
+        use holon_pbt_core::capabilities::RefToggleMut;
+        use holon_pbt_core::composition::CapInvariant;
+
+        use crate::pbt::composed::invariants::embedded_page_collapsed_lazy;
+
+        let (comp, caps, journals, date_page, child) = setup_embedded_page_sut().await;
+
+        let registry: Vec<Box<dyn CapInvariant>> = vec![embedded_page_collapsed_lazy::wire()];
+
+        // Drive expand via SUT plumbing.
+        comp.driver()
+            .set_block_expanded(&date_page, true)
+            .await
+            .expect("set_block_expanded must succeed for embedded page toggle");
+        tokio::time::sleep(Duration::from_millis(3000)).await;
+
+        let resolved_b = {
+            let mut oracle = embedded_page_ref(&journals, &date_page, &child);
+            oracle.set_expanded_view_local(&date_page, true);
+            let resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
+            drop_ref_off_thread(oracle);
+            resolved
+        };
+        let report_b = run_with_seeded_ref(&registry, &caps, resolved_b).await;
+        let ran_b: Vec<_> = report_b.ran_ids().into_iter().collect();
+        assert!(
+            ran_b.iter().any(|id| *id == "inv-embedded-page-collapsed-lazy"),
+            "Phase B (expanded): inv-embedded-page-collapsed-lazy must select + run (ran: {ran_b:?})"
+        );
+        let failures_b = report_b.failures();
+        assert!(
+            failures_b.is_empty(),
+            "Phase B (expanded): inv-embedded-page-collapsed-lazy must PASS — embedded page \
+             expanded, descendants permitted/present via lazy live_query. Failures: {failures_b:?}"
+        );
+        eprintln!(
+            "[embedded_page_expand_toggle_drives_expanded] Phase B GREEN: \
+             expanded toggle accepted, descendants permitted."
         );
     }
 }

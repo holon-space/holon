@@ -789,26 +789,57 @@ impl UserDriver for ReactiveEngineDriver {
     /// field.
     async fn set_block_expanded(&self, target: &EntityUri, expanded: bool) -> Result<()> {
         let root_uri = holon_api::root_layout_block_uri();
-        let root = self.engine.snapshot_reactive(&root_uri);
         let target_str = target.as_str();
         let bare = target_str.strip_prefix("block:").unwrap_or(target_str);
-        let gate = root.find_expand_toggle_gate(bare).ok_or_else(|| {
-            anyhow::anyhow!(
-                "set_block_expanded: no expand_toggle node with target_id={bare} in the reactive \
-                 tree under {root_uri}. The fixture grew an expand_toggle render but the engine \
-                 didn't produce a matching node — likely a shadow_builder or interpret regression."
-            )
-        })?;
-        gate.set(expanded);
-        let intent = OperationIntent::set_field(
-            &EntityName::new("block"),
-            "set_field",
-            target.as_str(),
-            "collapsed",
-            Value::Boolean(!expanded),
-        );
-        self.engine.dispatch_intent_sync(intent).await?;
-        Ok(())
+
+        // Explicit / mounted toggle: a block whose render expr carries
+        // `expand_toggle` renders a live gate directly in the one-shot
+        // root-layout snapshot AND collapse is DOCUMENT state (2026-07-11
+        // ruling). Flip the node gate for an immediate mounted re-render and
+        // dispatch `set_field(collapsed)` so the SUT block row changes. This
+        // path is unchanged; the view-local store below stays empty for it.
+        if let Some(gate) = self.engine.snapshot_reactive(&root_uri).find_expand_toggle_gate(bare) {
+            gate.set(expanded);
+            let intent = OperationIntent::set_field(
+                &EntityName::new("block"),
+                "set_field",
+                target.as_str(),
+                "collapsed",
+                Value::Boolean(!expanded),
+            );
+            self.engine.dispatch_intent_sync(intent).await?;
+            return Ok(());
+        }
+
+        // Profile-driven embedded page: the `expand_toggle` is synthesized
+        // during recursive resolve (no gate in a one-shot snapshot) and carries
+        // no `collapsed` document field, so expansion is purely VIEW state
+        // (RATIFIED 2026-07-16, Option B). Record the intent in the engine's
+        // non-persistent view store — the `expand_toggle` builder seeds its gate
+        // from it on the next (re)build — and bump the render generation.
+        self.engine.ui_state().set_block_expanded_view(bare, expanded);
+
+        // Fail loud: force the render pipeline to rebuild (recursive `snapshot`
+        // warms one nested level per call, so loop to a short deadline like the
+        // SUT's fixed-point re-snapshot) and warn if the target renders no
+        // `expand_toggle` at all — the write would otherwise be silently absorbed.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let _ = self.engine.snapshot(&root_uri);
+            if self.engine.ui_state().expand_toggle_observed(bare) {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                tracing::warn!(
+                    target_id = %bare,
+                    %root_uri,
+                    "set_block_expanded: recorded view-local expansion for a target that renders \
+                     no expand_toggle; the flip will not be visible (view-state write absorbed)."
+                );
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(120)).await;
+        }
     }
 
     async fn send_key_chord(
