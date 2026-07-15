@@ -618,11 +618,18 @@ fn process_headlines(
     Ok(())
 }
 
-/// Extract :ID: property from headline, or generate a new UUID
+/// Extract :ID: property from headline, or generate a new UUID.
+/// Lookup is case-insensitive so Logseq-written lowercase `:id:` is matched.
 /// Returns (id, needs_write_back)
 fn extract_or_generate_id(headline: &Headline) -> (String, bool) {
     if let Some(drawer) = headline.properties() {
-        if let Some(id_token) = drawer.get("ID") {
+        if let Some(id_token) = drawer.iter().find_map(|(k, v)| {
+            if k.trim().eq_ignore_ascii_case("ID") {
+                Some(v)
+            } else {
+                None
+            }
+        }) {
             let value = id_token.to_string().trim().to_string();
             if !value.is_empty() {
                 return (value, false);
@@ -1301,6 +1308,51 @@ mod tests {
 
         assert_eq!(result.blocks.len(), 1);
         assert!(!result.headlines_needing_ids.is_empty());
+    }
+
+    #[test]
+    fn test_parse_lowercase_id_property() {
+        let content = "* Headline\n:PROPERTIES:\n:id: lower-case-uuid\n:END:";
+        let result = parse_test_org(content);
+
+        assert_eq!(result.blocks.len(), 1);
+        assert_eq!(result.blocks[0].id.id(), "lower-case-uuid");
+        assert!(result.headlines_needing_ids.is_empty());
+    }
+
+    #[test]
+    fn test_parse_mixed_case_id_property() {
+        let content = "* Headline\n:PROPERTIES:\n:Id: mixed-case-uuid\n:END:";
+        let result = parse_test_org(content);
+
+        assert_eq!(result.blocks.len(), 1);
+        assert_eq!(result.blocks[0].id.id(), "mixed-case-uuid");
+        assert!(result.headlines_needing_ids.is_empty());
+    }
+
+    #[test]
+    fn test_case_insensitive_id_does_not_absorb_other_properties() {
+        let content = "* Headline\n:PROPERTIES:\n:id: my-id\n:Custom: val\n:END:";
+        let result = parse_test_org(content);
+
+        assert_eq!(result.blocks.len(), 1);
+        assert_eq!(result.blocks[0].id.id(), "my-id");
+        assert!(result.headlines_needing_ids.is_empty());
+        let props = &result.blocks[0].properties;
+        assert_eq!(
+            props.get("Custom").and_then(|v| v.as_string()),
+            Some("val"),
+            "custom property keyed 'Custom' must survive"
+        );
+        // The parser always stores the id under the canonical "ID" key
+        // (line ~473). The :id: property (any casing) is correctly extracted
+        // as the block ID and stored; it does NOT appear under its original
+        // casing.
+        assert_eq!(
+            props.get("ID").and_then(|v| v.as_string()),
+            Some("my-id"),
+            "ID must be stored under canonical key 'ID'"
+        );
     }
 
     #[test]
