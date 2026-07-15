@@ -1,5 +1,18 @@
 # Gesture-Scoped Parameter Providers
 
+## Status (2026-07-15)
+
+**LANDED (Phases 1-4).** Phase 1 (core infrastructure + `ParamMapping` in
+`crates/holon-api/src/render_types.rs`, `#[triggered_by]` macro) and Phases
+2-4 (Flutter core, widget integration, search-select) all shipped: see
+`param_provider.dart`, `gesture_context.dart`, `operation_matcher.dart`,
+`search_select_overlay.dart` in the Flutter frontend.
+
+Still open (Phase 5):
+- Disambiguation quick-menu
+- Keyboard modifiers
+- Priority configuration
+
 This document describes the architecture for dynamically wiring operation parameters from multiple UI widgets. It extends the existing Automatic Operation Discovery system to support operations like `move_block` that require parameters from different sources (e.g., `id` from the dragged item, `parent_id` and `after_block_id` from the drop target).
 
 ## Problem Statement

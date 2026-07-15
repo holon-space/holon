@@ -5,6 +5,19 @@ ordinary query in both render arms + `LocalStateStore` with COALESCE
 precedence. Increment 3 (view-mode-as-data) is design-note-only; see
 "Implementation status" at the end.
 
+## Status (2026-07-15)
+
+**PARTIALLY LANDED.** Increments 1 (slot resolution via query) and 2
+(`LocalStateStore`) are landed. The `PerspectiveSpec` typed boundary
+(`crates/holon-api/src/perspective.rs:118`) and `active_perspective`
+pointer on `block:root-layout` are in place.
+
+Still open (Increment 3):
+- `activate_perspective` wired as an entity op
+- Reactive render consumption in the Turso arm (`BlockDomain::render_entity`)
+  and no-Turso arm (`loro_ui_watcher::derive_render_expr`)
+- `ConcealmentParams` + `profile_override` consumption in render
+
 ## Goal
 
 A named UI mode ("perspective") should be data, not code: a block declaring its

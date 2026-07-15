@@ -8,6 +8,23 @@
 
 ---
 
+## Status (2026-07-15)
+
+**PARTIALLY LANDED.** Increment 0 registry + spike shipped: the `holon-markdown`
+crate with `LogseqMarkdownAdapter` (`crates/holon-markdown/src/logseq.rs`), flavor
+detection, and the mldoc CI oracle (§6a). O1-O5 were ruled 2026-07-13 (convergent
+canonical form, no byte spans).
+
+Still open:
+- Inc 1 LogSeq-org shim + fixture
+- Inc 2 LogSeq-md R/O adapter (spike done, not shipped as a product feature)
+- Inc 3 Obsidian-md R/O adapter
+- Inc 4 tier gate + disclosure
+- Inc 5 keystone integration test
+- Inc 6+ preserving write-back
+
+---
+
 ## TL;DR — recommendation up front
 
 **Ship a tier ladder, not a big-bang converter.** Users point Holon at an existing

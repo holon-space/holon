@@ -13,6 +13,24 @@ only (§8), awaiting ADR ratification.
 
 ---
 
+## Status (2026-07-15)
+
+**PARTIALLY LANDED.** Phase 1 (clock/effect-id/program-marking) is landed:
+`ClockSchedulerHandle` (`crates/holon/src/sync/clock_scheduler.rs`),
+`is_program` flag (`crates/holon-profiles/src/lib.rs`), `holon_rule` source
+language (`crates/holon-api/src/types.rs`), `Pattern` enum
+(`crates/holon-api/src/pattern.rs`), and the `holon-advice` crate. Phase 2
+spike + full promotion WP (grammar, parser, `action_watcher` consuming
+Pattern-compiled matviews, provenance stamping — §7.2) are not yet shipped
+(possibly WIP uncommitted). Phases 3–5 remain horizon markers.
+
+Still open:
+- Phase 2 full promotion WP (§7.2)
+- Phases 3–5 (unified rule+advice format, nets, deliberation)
+- Keystone `AdvanceDay` capstone transition
+
+---
+
 ## 0. Executive summary
 
 ADR 0024 says the three "when-condition-then-effect" machines converge onto one

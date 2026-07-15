@@ -2,6 +2,18 @@
 
 Spike design note. Status: DESIGN + de-risk. Ruling basis below.
 
+## Status (2026-07-15)
+
+**MOSTLY LANDED.** `DerivedFieldPlan` (`crates/holon-api/src/computation.rs:438`)
+and the hybrid pipeline seat landed 2026-07-12, with an E2E test in
+`crates/holon-turso/tests/derived_field_matview.rs`. The Computation enum's
+dual-evaluated (`evaluate()` / `to_sql()`) architecture is in place.
+
+Still open:
+- Trigger wire feeding prototype-block fields into `plan()` at reconcile
+- Routing the production enrich path through the fail-loud Computation evaluator
+- `rank_tasks` convergence on the new Computation substrate
+
 ## Ruling this implements
 
 `docs/Proposals/VisionGapAnalysis-2026-07-11.md` (RULED Martin 2026-07-11):

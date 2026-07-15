@@ -25,6 +25,20 @@ the Phase-1b spike detail).
 > structurally cannot produce a second occurrence, so the old standalone "fixture
 > phase" is now the **step-4 PBT change** of each increment that first needs it.
 
+## Status (2026-07-15)
+
+**LANDED through step 6.** All six increments A–F shipped: `RowOrigin`
+(`crates/holon-frontend/src/row_origin.rs`), `AdviceRule`
+(`crates/holon-advice/src/rule.rs`), `AdviceSidecar`
+(`crates/holon-frontend/src/advice_weaver.rs`),
+`EdgeField::AdviceSuppressed`. Advice suppression, weaver, and anti-join
+machinery are all in place.
+
+Still open:
+- Step 7 live-MCP gate
+- Increment G (editor content-sync consolidation, optional)
+- Increment H (app-layer reranker, ADR 0023)
+
 ## What advice actually is
 
 A **source block (P1)** anchored to a task, whose query selects lesson blocks via

@@ -6,6 +6,23 @@ the integration tree. Question answered (Martin's framing): the vision's workflo
 personalities must be definable AT RUNTIME AS DATA (blocks, profiles, queries, render DSL) — what
 fundamental generic functionality is still missing?
 
+## Status (2026-07-15)
+
+**MOSTLY LANDED.** C4 computed fields (`DerivedFieldPlan`, hybrid seat, 2026-07-12),
+C5 trust gate (`TrustPolicy`, `crates/holon-profiles/src/trust.rs:116`), C8 partial
+(`PerspectiveSpec`, `crates/holon-api/src/perspective.rs:118`), C1 rest transport
+(`holon_rest` crate), and C3 FTS+registry (`EngineFunctionDecl`,
+`crates/holon-turso/src/engine_functions.rs:43`) are all landed. Several C-gaps
+remain open or partially implemented.
+
+Still open:
+- C2a provenance stamping + C2b history projection
+- C4 trigger wire/enrich routing/`rank_tasks` convergence
+- C6 clock generalization (sub-day grains, recurrence)
+- C7 task-syntax boundary parser
+- C8 increment 3 (`activate_perspective` op + reactive render consumption)
+- C1 leases/read-write + rest background-runner wiring
+
 ## 1. What the vision actually demands from the substrate
 
 The vision never asks for features — it asks for a self-describing reactive world model:
