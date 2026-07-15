@@ -7,20 +7,28 @@
 //! re-expand reuse the cache (see `LazyReactiveSlot` in
 //! `holon_frontend::reactive_view_model`).
 //!
-//! Candidate set: blocks whose render expression mentions `expand_toggle`
-//! AND are currently collapsed. Today the default fixtures don't produce
-//! any such blocks (claude-history.yaml / GitHub.org-style integrations
-//! are out of scope for the PBT corpus), so the generator routinely
-//! rejects with `NoExpandToggleCandidates`. The skeleton is here so the
-//! transition activates the moment a fixture grows an expand_toggle
-//! render — no follow-up wiring needed at the state-machine level. SUT
-//! plumbing is live (`E2ESut::set_expand_toggle_gate` walks the engine's
-//! reactive tree and flips `.expanded`); it fails loud if the corpus
-//! produces a toggle render but the engine yields no matching node.
+//! Two candidate sources:
+//!
+//! 1. Explicit render-expression toggles: blocks whose render expression
+//!    mentions `expand_toggle` AND are currently collapsed. The generator first
+//!    checks these (original path).
+//!
+//! 2. Profile-driven toggles: non-seed page blocks that are strict descendants
+//!    of the main focus root (e.g. `embedded_page` profile variant wraps them
+//!    in `expand_toggle` with lazy live_query content). The generator
+//!    enumerates these via `RefBlockTree` without depending on
+//!    `render_expr_mentions` (which never matches profile-driven toggles).
+//!
+//! The two paths differ in apply semantics:
+//! - Explicit toggles: `set_expanded` also models `block.collapsed`.
+//! - Profile-driven: `set_expanded_view_local` — view-local only, no document
+//!   `collapsed` field mutation.
 
 use holon_api::EntityUri;
 use holon_pbt_core::TransitionFactory;
 use holon_pbt_core::TransitionRef;
+use holon_pbt_core::capabilities::CapRegion;
+use holon_pbt_core::capabilities::RefBlockTree;
 use holon_pbt_core::capabilities::RefLifecycle;
 use holon_pbt_core::capabilities::RefRenderExpr;
 use holon_pbt_core::capabilities::RefToggleMut;
@@ -43,53 +51,83 @@ pub struct ExpandToggle {
     pub block_id: EntityUri,
 }
 
-impl<R: RefLifecycle + RefRenderExpr + RefToggleMut> TransitionFactory<R> for ExpandToggle {
+impl<R> TransitionFactory<R> for ExpandToggle
+where
+    R: RefLifecycle + RefRenderExpr + RefToggleMut + RefBlockTree,
+{
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
         Self::declared_caps()
     }
 
     type Reason = Reason;
     fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
-        let candidates: Vec<EntityUri> = state
+        // Source 1: explicit render-expression toggles (original path).
+        let explicit: Vec<EntityUri> = state
             .render_expr_ids()
             .into_iter()
             .filter(|uri| {
                 state.render_expr_mentions(uri, "expand_toggle") && !state.is_expanded(uri)
             })
             .collect();
+
+        // Source 2: profile-driven toggles — non-seed pages that are strict
+        // descendants of the main focus root and not already expanded.
+        let main_roots = state.focus_root_ids(CapRegion::Main);
+        let profile: Vec<EntityUri> = if main_roots.is_empty() {
+            vec![]
+        } else {
+            state
+                .all_non_seed_block_ids()
+                .into_iter()
+                .filter(|id| {
+                    state.is_page_block(id)
+                        && state.is_descendant_of_any(id, &main_roots)
+                        && !main_roots.contains(id)
+                        && !state.is_expanded(id)
+                })
+                .collect()
+        };
+
+        let mut candidates = explicit;
+        candidates.extend(profile);
+        candidates.sort();
+        candidates.dedup();
+
         check(!candidates.is_empty(), Reason::NoExpandToggleCandidates).map(|_| {
             let strat = prop::sample::select(candidates)
                 .prop_map(|block_id| ExpandToggle { block_id })
                 .boxed();
-            // Weight 1 — until expand_toggle-bearing fixtures land,
-            // candidates are always empty; weight is academic. When the
-            // corpus grows toggles, raise alongside pin/click.
             (1, strat)
         })
     }
 }
 
-impl<R: RefLifecycle + RefRenderExpr + RefToggleMut> TransitionRef<R> for ExpandToggle {
+impl<R> TransitionRef<R> for ExpandToggle
+where
+    R: RefLifecycle + RefRenderExpr + RefToggleMut + RefBlockTree,
+{
     type Reason = Reason;
 
     fn preconditions(&self, state: &R) -> Validated<(), Reason> {
-        let mut checks: Vec<Validated<(), Reason>> = vec![
+        let has_explicit_toggle = state.has_render_expr(&self.block_id)
+            && state.render_expr_mentions(&self.block_id, "expand_toggle");
+        let is_profile_target = {
+            let main_roots = state.focus_root_ids(CapRegion::Main);
+            state.is_page_block(&self.block_id)
+                && state.is_descendant_of_any(&self.block_id, &main_roots)
+                && !main_roots.contains(&self.block_id)
+        };
+        let checks: Vec<Validated<(), Reason>> = vec![
             check(state.app_started(), Reason::AppNotStarted),
             check(
-                state.has_render_expr(&self.block_id),
+                has_explicit_toggle || is_profile_target,
                 Reason::FocusedBlockMissing,
             ),
+            check(
+                !state.is_expanded(&self.block_id),
+                Reason::ToggleAlreadyExpanded,
+            ),
         ];
-        if state.has_render_expr(&self.block_id) {
-            checks.push(check(
-                state.render_expr_mentions(&self.block_id, "expand_toggle"),
-                Reason::PreconditionFailed,
-            ));
-        }
-        checks.push(check(
-            !state.is_expanded(&self.block_id),
-            Reason::ToggleAlreadyExpanded,
-        ));
         checks
             .into_iter()
             .collect::<Validated<Vec<()>, _>>()
@@ -97,20 +135,23 @@ impl<R: RefLifecycle + RefRenderExpr + RefToggleMut> TransitionRef<R> for Expand
     }
 
     fn apply_to_ref(&self, state: &mut R) {
-        state.set_expanded(&self.block_id, true);
+        let has_explicit_toggle = state.has_render_expr(&self.block_id)
+            && state.render_expr_mentions(&self.block_id, "expand_toggle");
+        if has_explicit_toggle {
+            state.set_expanded(&self.block_id, true);
+        } else {
+            state.set_expanded_view_local(&self.block_id, true);
+        }
     }
 }
 
 crate::cap_transition! {
     ExpandToggle: SutBlockInteract,
-    where R: [ RefLifecycle + RefRenderExpr + RefToggleMut ],
+    where R: [ RefLifecycle + RefRenderExpr + RefToggleMut + RefBlockTree ],
     |me, _state, sut| {
         sut.expand_toggle(&me.block_id).await;
     }
     sql_budget: |_me, state| {
-        // The gate flip is frontend-local, but collapse is document state
-        // (2026-07-11 ruling): the toggle also dispatches
-        // `set_field(collapsed)` — one block update's worth of SQL.
         let update = crate::pbt::transition_budgets::expected_sql_for_kind(
             crate::pbt::transition_budgets::MutationKind::Update,
             state.active_watch_count(),

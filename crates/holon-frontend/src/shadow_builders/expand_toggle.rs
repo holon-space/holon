@@ -29,7 +29,13 @@ holon_macros::widget_builder! {
         // `set_field(collapsed)` on click, and the subscription below
         // folds/unfolds the gate when the field CHANGES externally.
         let initial_collapsed = row_collapsed(ba.ctx.row());
-        let expanded = futures_signals::signal::Mutable::new(false);
+        // Seed the gate from the engine's view-local expansion store (RATIFIED
+        // 2026-07-16, Option B) when the user has driven this toggle; otherwise
+        // keep the collapsed-until-clicked default (`false`). This is what makes
+        // a driven expand survive a fresh `snapshot()` for profile-driven
+        // embedded pages, which carry no `collapsed` document field.
+        let seed_expanded = ba.services.block_expanded_view(&target_id).unwrap_or(false);
+        let expanded = futures_signals::signal::Mutable::new(seed_expanded);
 
         let header = ba.args.get_template("header")
             .cloned()

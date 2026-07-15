@@ -35,6 +35,16 @@ impl RefToggleMut for ReferenceState {
             block.collapsed = !expanded;
         }
     }
+    fn set_expanded_view_local(&mut self, id: &EntityUri, expanded: bool) {
+        // View-local only — no `block.collapsed` field mutation. For
+        // profile-driven toggles (embedded_page) where the lazy gate is
+        // entirely visual and no `collapsed` column exists on the target.
+        if expanded {
+            self.ui.tab.expanded_toggles.insert(id.clone());
+        } else {
+            self.ui.tab.expanded_toggles.remove(id);
+        }
+    }
     fn toggle_drawer(&mut self, id: &str) {
         // Default-open, so an untracked drawer flips to closed.
         let current = holon_layout_testing::LayoutRefState::drawer_is_open(self, id);
