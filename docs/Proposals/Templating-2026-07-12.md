@@ -7,6 +7,21 @@ provenance, rules-as-blocks), ADR 0015 (canonical vs display placement),
 (content-with-marks truth + `block_links` junction), C2a provenance stamping,
 C2b history relation, C6 clock relation, C7 `ParsedTask` boundary parser.
 
+## Status (2026-07-15)
+
+**PARTIALLY LANDED.** The `template_instantiation` module
+(`crates/holon/src/core/template_instantiation.rs`), `deterministic_instance_id`
+(`crates/holon-api/src/effect_id.rs:106`), and `TemplateSource` trait
+(`crates/holon/src/api/template_source.rs`) are shipped. Template blocks are
+ordinary org subtrees with `:TEMPLATE:` / `:TEMPLATE_VARS:` properties.
+
+Still open (§9 v1 map):
+- `TemplateVars::parse` / `InstantiateRequest::from_params` /
+  `plan_instantiation` unit tests
+- Engine integration tests (idempotent re-instantiation, marks in created rows)
+- Rule-driven integration test (clock row -> rule fires -> instance exists)
+- Org round-trip of template blocks (§7)
+
 ## 1. First principles
 
 - **Everything is data on the block substrate.** A template is a block

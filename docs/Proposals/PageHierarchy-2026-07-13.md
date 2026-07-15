@@ -5,6 +5,16 @@
 (enforce/assume page parents are pages or roots). This sidesteps the path question
 below until the real discussion happens, and is an input to Fork B B1 (task #84).
 
+## Status (2026-07-15)
+
+**PARKED.** Awaiting a dedicated 30-minute design session with Martin. The
+interim prohibition on pages under non-pages was enforced in commit `079014efeb`.
+
+Still open:
+- All path schemes (A-D) undecided
+- All position-recording options (1-3) undecided
+- Whether FS hierarchy is a separate edge type from structural parent
+
 **Direction Martin stated:** every block that is a page should live in its own org
 file. The unresolved question is the file path when the structural ancestry mixes
 pages and non-pages (`A > b1 > b2 > P` with only A and P pages).
