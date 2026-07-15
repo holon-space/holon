@@ -870,6 +870,7 @@ impl ReferenceState {
             return TestQuery::layout(QuerySource::FocusRootDescendants {
                 region: "main".to_string(),
                 max_depth: 20,
+                stop_at_pages: false,
             });
         }
         let source = self
