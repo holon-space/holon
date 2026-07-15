@@ -1230,6 +1230,19 @@ impl OperationProvider for SqlOperationProvider {
                 affected_fields: vec!["task_state".to_string()],
                 ..Default::default()
             },
+            OperationDescriptor {
+                entity_name: self.entity_name.clone().into(),
+                entity_short_name: self.entity_short_name.clone(),
+                name: "create_page_from_link".to_string(),
+                display_name: "Create Page From Link".to_string(),
+                description: "Create a page chain from a wiki-link target".to_string(),
+                required_params: vec![OperationParam {
+                    name: "target".to_string(),
+                    type_hint: TypeHint::String,
+                    description: "Wiki-link target (e.g. Projects/X)".to_string(),
+                }],
+                ..Default::default()
+            },
         ]
     }
 
@@ -1840,6 +1853,111 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 set_params.insert("value".into(), Value::String(next));
                 self.execute_operation_with_origin(entity_name, "set_field", set_params, origin)
                     .await
+            }
+            "create_page_from_link" => {
+                let target = params
+                    .get("target")
+                    .and_then(|v| v.as_string())
+                    .ok_or_else(|| "Missing 'target' parameter".to_string())?
+                    .to_string();
+
+                if target.trim().is_empty() {
+                    return Err("create_page_from_link: target must not be empty".into());
+                }
+
+                let segments: Vec<&str> = target.split('/').collect();
+                let mut parent_id = "sentinel:no_parent".to_string();
+                let mut accumulated = String::new();
+                let mut leaf_id = String::new();
+
+                for (i, seg) in segments.iter().enumerate() {
+                    let trimmed = seg.trim();
+                    if trimmed.is_empty() {
+                        return Err(format!(
+                            "create_page_from_link: empty segment in target \
+                             '{target}'"
+                        )
+                        .into());
+                    }
+
+                    // Build the context-aware hint for resolve_page_name.
+                    // For the first segment, just pass the segment name.
+                    // For subsequent segments, include the accumulated prefix
+                    // so resolve_page_name prefers pages under the right parent.
+                    let hint = if i == 0 {
+                        trimmed.to_string()
+                    } else {
+                        format!("{}/{}", accumulated, trimmed)
+                    };
+
+                    // Check if page already exists with the right parent.
+                    let existing = self.resolve_page_name(&hint).await?;
+                    match existing {
+                        Some(page_id) => {
+                            parent_id = page_id.clone();
+                            leaf_id = page_id;
+                            accumulated = if accumulated.is_empty() {
+                                trimmed.to_string()
+                            } else {
+                                format!("{}/{}", accumulated, trimmed)
+                            };
+                            continue;
+                        }
+                        None => {
+                            // Create the page at this level.
+                            let id = format!("block:{}", uuid::Uuid::new_v4());
+                            let mut create_params: StorageEntity = HashMap::new();
+                            create_params.insert("id".into(), Value::String(id.clone()));
+                            create_params
+                                .insert("content".into(), Value::String(trimmed.to_string()));
+                            create_params
+                                .insert("parent_id".into(), Value::String(parent_id.clone()));
+                            create_params.insert(
+                                "tags".into(),
+                                Value::Array(vec![Value::String("Page".to_string())]),
+                            );
+                            self.execute_operation_with_origin(
+                                entity_name,
+                                "create",
+                                create_params,
+                                origin.clone(),
+                            )
+                            .await?;
+                            parent_id = id.clone();
+                            leaf_id = id;
+                            accumulated = if accumulated.is_empty() {
+                                trimmed.to_string()
+                            } else {
+                                format!("{}/{}", accumulated, trimmed)
+                            };
+                        }
+                    }
+                }
+
+                // Heal any dangling name-links to this page chain.
+                let link_stmts = Self::page_reresolve_statements(&leaf_id, &target);
+                if !link_stmts.is_empty() {
+                    let all_stmts: Vec<_> = link_stmts.into_iter().map(|s| (s, vec![])).collect();
+                    self.db_handle.transaction(all_stmts).await.map_err(|e| {
+                        format!(
+                            "create_page_from_link: failed to heal \
+                                 dangling links: {e}"
+                        )
+                    })?;
+                }
+
+                // Grafting a new page into the tree is reversible via
+                // `delete`, but we declare it irreversible because undo of
+                // a multi-segment page-chain creation + link healing is
+                // semantically noisy (undoing the chain creates dangling
+                // links pointing nowhere). When ADR 0024 effect retraction
+                // lands we can collapse this into a single undo entry.
+                Ok(OperationResult::declared_irreversible(
+                    Vec::new(),
+                    "create_page_from_link — page-chain creation + link \
+                     healing",
+                )
+                .with_response(Value::String(leaf_id)))
             }
             _ => Err(format!("Unknown operation: {}", op_name).into()),
         }
