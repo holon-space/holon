@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
 use gpui::*;
+use gpui_component::input::Enter;
 use holon_api::EntityUri;
 use holon_frontend::RenderContext;
+use holon_frontend::input::{Key, WidgetInput};
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
 
@@ -127,7 +129,51 @@ impl Render for RenderEntityView {
         let is_focused = gpui_ctx.services().focused_block().as_ref() == Some(id);
         if is_focused {
             self.editor_pending_evict = true;
-            return child_el;
+            // When focused but not editing, route key chords through the
+            // input router so Cmd+Enter dispatches cycle_task_state even
+            // without an active editor (dogfood Risk 2).
+            let nav = self.nav.clone();
+            let entity_id = id.clone();
+            let services = gpui_ctx.services.clone();
+            return div()
+                .child(child_el)
+                .capture_action(move |_: &Enter, window, cx| {
+                    if window.modifiers().platform {
+                        let input = WidgetInput::chord(
+                            &[Key::Cmd, Key::Enter],
+                        );
+                        if let Some(action) =
+                            nav.bubble_input(&entity_id, &input)
+                        {
+                            match action {
+                                holon_frontend::input::InputAction::ExecuteOperation {
+                                    entity_name,
+                                    operation,
+                                    entity_id,
+                                } => {
+                                    let mut params =
+                                        std::collections::HashMap::new();
+                                    params.insert(
+                                        "id".into(),
+                                        holon_api::Value::String(
+                                            entity_id.as_str().to_string(),
+                                        ),
+                                    );
+                                    services.dispatch_intent(
+                                        holon_frontend::operations::OperationIntent::new(
+                                            entity_name,
+                                            operation.name,
+                                            params,
+                                        ),
+                                    );
+                                    cx.stop_propagation();
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                })
+                .into_any_element();
         }
 
         let eviction_enabled = std::env::var("HOLON_EDITOR_EVICT")
