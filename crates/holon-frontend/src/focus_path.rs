@@ -1163,6 +1163,65 @@ mod tests {
         assert!(fp.bubble_input(&uri("entity-1"), &unmatched).is_none());
     }
 
+    /// Cmd+Enter on a focused-but-not-editing block must resolve to
+    /// `cycle_task_state` via the key chord routing. This tests the
+    /// headless routing path — the GPUI frontend must also wire
+    /// `capture_action(Enter)` in `render_entity_view` (dogfood Risk 2).
+    #[test]
+    fn cmd_enter_routes_to_cycle_task_state_non_editing() {
+        use holon_api::render_types::OperationDescriptor;
+        use holon_api::render_types::OperationWiring;
+        use holon_api::render_types::Trigger;
+
+        // Simulate a block rendered through the default (non-editing)
+        // profile, with operations joined from key_bindings.
+        let mut vm = make_row("entity-2");
+        vm.operations = vec![
+            // The state_toggle builder hardcodes set_field on click;
+            // cycle_task_state is key-chord-only (Cmd+Enter).
+            OperationWiring {
+                modified_param: "id".into(),
+                descriptor: OperationDescriptor {
+                    name: "set_field".into(),
+                    entity_name: "block".into(),
+                    trigger: None,
+                    ..Default::default()
+                },
+            },
+            OperationWiring {
+                modified_param: "id".into(),
+                descriptor: OperationDescriptor {
+                    name: "cycle_task_state".into(),
+                    entity_name: "block".into(),
+                    trigger: Some(Trigger::KeyChord {
+                        chord: KeyChord::new(&[crate::input::Key::Cmd, crate::input::Key::Enter]),
+                    }),
+                    ..Default::default()
+                },
+            },
+        ];
+
+        let tree = Arc::new(column(vec![vm]));
+        let fp = build_focus_path(&tree, &uri("entity-2")).expect("entity-2 not found");
+
+        let input = WidgetInput::chord(&[crate::input::Key::Cmd, crate::input::Key::Enter]);
+        match fp.bubble_input(&uri("entity-2"), &input) {
+            Some(InputAction::ExecuteOperation {
+                entity_name,
+                operation,
+                ..
+            }) => {
+                assert_eq!(entity_name, "block");
+                assert_eq!(operation.name, "cycle_task_state");
+            }
+            other => panic!("Cmd+Enter should resolve to cycle_task_state, got {other:?}"),
+        }
+
+        // click on state_toggle (no key chord) must NOT resolve to
+        // cycle_task_state — the click intent is separate.
+        assert!(find_click_intent_oneshot(&tree, &uri("entity-2")).is_none());
+    }
+
     #[test]
     fn nonexistent_entity_returns_none() {
         let tree = Arc::new(list(vec![make_row("a")]));
