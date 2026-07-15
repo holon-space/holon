@@ -23,33 +23,33 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use anyhow::Result;
-use holon_api::EntityUri;
-use holon_api::POSITION_AFTER_BLOCK_ID_PARAM;
-use holon_api::ROUTING_DOC_URI_KEY;
-use holon_api::SnapshotBlock;
-use holon_api::Value;
 use holon_api::block::Block;
 use holon_api::capability::Consolidator;
-use holon_core::CanonicalPath;
-use holon_core::DownstreamProjection;
+use holon_api::EntityUri;
+use holon_api::SnapshotBlock;
+use holon_api::Value;
+use holon_api::POSITION_AFTER_BLOCK_ID_PARAM;
+use holon_api::ROUTING_DOC_URI_KEY;
 use holon_core::block_ordering::BlockOrdering;
 use holon_core::file_format::FileFormatAdapter;
 use holon_core::file_format::WritebackDropVerdict;
 use holon_core::fractional_index::default_sort_key;
+use holon_core::CanonicalPath;
+use holon_core::DownstreamProjection;
 use indexmap::IndexMap;
 use tracing::debug;
 use tracing::info;
 use tracing::warn;
 
-use crate::BaseKey;
-use crate::BaseStore;
-use crate::FileSystem;
-use crate::SyncBaseStore;
 use crate::sync_ports::AliasRegistrar;
 use crate::sync_ports::BlockReader;
 use crate::sync_ports::DocumentManager;
 use crate::sync_ports::ImageDataProvider;
 use crate::sync_ports::ThreeWayTextMerge;
+use crate::BaseKey;
+use crate::BaseStore;
+use crate::FileSystem;
+use crate::SyncBaseStore;
 
 /// Bump when the org renderer changes in a way that alters the canonical
 /// projection bytes (formatting, property ordering, directive layout, …).

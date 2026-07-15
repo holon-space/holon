@@ -1,26 +1,40 @@
-use async_trait::async_trait;
 use std::marker::PhantomData;
 use std::pin::Pin;
+
+use async_trait::async_trait;
+use holon_api::ApiError;
+use holon_api::BatchMetadata;
+use holon_api::CHANGE_ORIGIN_COLUMN;
+use holon_api::Change;
+use holon_api::ChangeOrigin;
+use holon_api::DynamicEntity;
+use holon_api::StreamPosition;
+use holon_api::SyncTokenUpdate;
+use holon_api::WithMetadata;
+use holon_api::streaming::ChangeNotifications;
+use holon_core::DataSource;
+use holon_core::MaybeSendSync;
+use holon_core::UndoAction;
+use holon_core::storage::types::StorageEntity;
 use tokio::sync::broadcast;
 use tokio_stream::Stream;
 use tracing;
 
-use super::traits::{IntoEntity, Result, TryFromEntity, TypeDefinition, value_to_turso};
+use super::traits::IntoEntity;
+use super::traits::Result;
+use super::traits::TryFromEntity;
+use super::traits::TypeDefinition;
+use super::traits::value_to_turso;
 use crate::storage::DbHandle;
-use holon_api::DynamicEntity;
-use holon_api::streaming::ChangeNotifications;
-use holon_api::{ApiError, Change, StreamPosition};
-use holon_api::{BatchMetadata, CHANGE_ORIGIN_COLUMN, ChangeOrigin, SyncTokenUpdate, WithMetadata};
-use holon_core::storage::types::StorageEntity;
-use holon_core::{DataSource, MaybeSendSync, UndoAction};
 
 /// A queryable cache backed by DbHandle (SQLite via database actor).
 ///
-/// QueryableCache receives data exclusively through change streams (`ingest_stream`,
-/// `apply_batch`) and provides read access via `DataSource<T>` and `Queryable<T>`.
+/// QueryableCache receives data exclusively through change streams
+/// (`ingest_stream`, `apply_batch`) and provides read access via
+/// `DataSource<T>` and `Queryable<T>`.
 ///
-/// Operations (CRUD, Task, Block) are handled by separate operation structs that
-/// hold a reference to the cache for lookups.
+/// Operations (CRUD, Task, Block) are handled by separate operation structs
+/// that hold a reference to the cache for lookups.
 pub struct QueryableCache<T>
 where
     T: IntoEntity + TryFromEntity + Send + Sync + 'static,
@@ -88,7 +102,8 @@ where
         // we don't trip on the index step.
         if self.master_kind(table_name).await?.as_deref() == Some("view") {
             tracing::debug!(
-                "[QueryableCache] '{}' is a matview — schema owned by a SchemaModule; skipping CREATE TABLE/INDEX",
+                "[QueryableCache] '{}' is a matview — schema owned by a SchemaModule; skipping \
+                 CREATE TABLE/INDEX",
                 table_name
             );
             return Ok(());
@@ -274,7 +289,8 @@ where
     ///
     /// Used for full sync operations where all cached data should be pruned
     /// before re-syncing from the external system.
-    /// Return all primary key values as `EntityUri`s, without deserializing full rows.
+    /// Return all primary key values as `EntityUri`s, without deserializing
+    /// full rows.
     pub async fn get_all_ids(&self) -> Result<Vec<holon_api::EntityUri>> {
         let id_field = self
             .type_def
@@ -319,11 +335,12 @@ where
         Ok(())
     }
 
-    /// Wire up stream ingestion from a broadcast receiver (spawns background task)
+    /// Wire up stream ingestion from a broadcast receiver (spawns background
+    /// task)
     ///
-    /// This method subscribes to a broadcast channel and updates the local cache
-    /// as changes arrive from the provider. The background task runs until the
-    /// stream is closed or the cache is dropped.
+    /// This method subscribes to a broadcast channel and updates the local
+    /// cache as changes arrive from the provider. The background task runs
+    /// until the stream is closed or the cache is dropped.
     /// ExternalServiceDiscovery
     pub fn ingest_stream(&self, rx: broadcast::Receiver<Vec<Change<T>>>)
     where
@@ -340,9 +357,10 @@ where
             .expect("schema must have a primary_key field");
 
         // Spawn the ingestion task on the current runtime
-        // IMPORTANT: This must be called from an async context on a runtime that stays alive
-        // If called from a blocking thread with a temporary runtime, the task will be dropped
-        // when that runtime is dropped. The caller should ensure this is called from a persistent runtime.
+        // IMPORTANT: This must be called from an async context on a runtime that stays
+        // alive If called from a blocking thread with a temporary runtime, the
+        // task will be dropped when that runtime is dropped. The caller should
+        // ensure this is called from a persistent runtime.
         tokio::spawn(async move {
             let mut rx = rx;
             tracing::info!(
@@ -384,7 +402,8 @@ where
                             );
                         } else {
                             tracing::debug!(
-                                "[QueryableCache] Successfully ingested batch of {} changes for table: {}",
+                                "[QueryableCache] Successfully ingested batch of {} changes for \
+                                 table: {}",
                                 change_count,
                                 table_name
                             );
@@ -410,13 +429,16 @@ where
         });
     }
 
-    /// Wire up stream ingestion from a broadcast receiver with metadata (spawns background task)
+    /// Wire up stream ingestion from a broadcast receiver with metadata (spawns
+    /// background task)
     ///
-    /// Applies a batch of changes directly to the cache (synchronous, blocking).
+    /// Applies a batch of changes directly to the cache (synchronous,
+    /// blocking).
     ///
     /// This method is useful when you need to ensure ordering between different
-    /// entity types (e.g., directories before files before headlines for referential integrity).
-    /// Unlike `ingest_stream_with_metadata`, this method blocks until the batch is fully applied.
+    /// entity types (e.g., directories before files before headlines for
+    /// referential integrity). Unlike `ingest_stream_with_metadata`, this
+    /// method blocks until the batch is fully applied.
     pub async fn apply_batch(
         &self,
         changes: &[Change<T>],
@@ -451,12 +473,14 @@ where
         .await
     }
 
-    /// This method subscribes to a broadcast channel that includes metadata (sync tokens)
-    /// and updates the local cache as changes arrive from the provider. The sync token
-    /// is saved atomically with the data changes in a single transaction.
+    /// This method subscribes to a broadcast channel that includes metadata
+    /// (sync tokens) and updates the local cache as changes arrive from the
+    /// provider. The sync token is saved atomically with the data changes
+    /// in a single transaction.
     ///
-    /// This method is preferred over `ingest_stream` when using providers that include
-    /// sync tokens in their batch metadata (e.g., TodoistSyncProvider).
+    /// This method is preferred over `ingest_stream` when using providers that
+    /// include sync tokens in their batch metadata (e.g.,
+    /// TodoistSyncProvider).
     pub fn ingest_stream_with_metadata(
         &self,
         rx: broadcast::Receiver<WithMetadata<Vec<Change<T>>, BatchMetadata>>,
@@ -522,7 +546,8 @@ where
                             );
                         } else {
                             tracing::debug!(
-                                "[QueryableCache] Successfully ingested batch of {} changes for table: {}",
+                                "[QueryableCache] Successfully ingested batch of {} changes for \
+                                 table: {}",
                                 change_count,
                                 table_name
                             );
@@ -546,9 +571,10 @@ where
         });
     }
 
-    // Helper method for applying a batch of changes to cache in a single transaction
-    // This reduces database lock contention by processing all changes atomically
-    // Includes retry logic with exponential backoff for "database is locked" errors
+    // Helper method for applying a batch of changes to cache in a single
+    // transaction This reduces database lock contention by processing all
+    // changes atomically Includes retry logic with exponential backoff for
+    // "database is locked" errors
     async fn apply_batch_to_cache(
         db_handle: &DbHandle,
         schema: &TypeDefinition,
@@ -582,7 +608,8 @@ where
                     if is_retryable && attempt < MAX_RETRIES {
                         let delay_ms = INITIAL_DELAY_MS * (1 << (attempt - 1)); // Exponential backoff
                         tracing::warn!(
-                            "[QueryableCache] Retryable error on attempt {}/{}: {}. Retrying in {}ms",
+                            "[QueryableCache] Retryable error on attempt {}/{}: {}. Retrying in \
+                             {}ms",
                             attempt,
                             MAX_RETRIES,
                             error_str,
@@ -599,9 +626,10 @@ where
         }
     }
 
-    // Helper method for applying a batch of changes + sync token in a single transaction
-    // This ensures data and sync token are saved atomically, preventing lock contention
-    // and ensuring consistency (no partial updates on failure)
+    // Helper method for applying a batch of changes + sync token in a single
+    // transaction This ensures data and sync token are saved atomically,
+    // preventing lock contention and ensuring consistency (no partial updates
+    // on failure)
     async fn apply_batch_to_cache_with_token(
         db_handle: &DbHandle,
         schema: &TypeDefinition,
@@ -639,7 +667,8 @@ where
                     if is_retryable && attempt < MAX_RETRIES {
                         let delay_ms = INITIAL_DELAY_MS * (1 << (attempt - 1));
                         tracing::warn!(
-                            "[QueryableCache] Retryable error on attempt {}/{}: {}. Retrying in {}ms",
+                            "[QueryableCache] Retryable error on attempt {}/{}: {}. Retrying in \
+                             {}ms",
                             attempt,
                             MAX_RETRIES,
                             error_str,
@@ -655,8 +684,9 @@ where
         }
     }
 
-    // Inner implementation of batch application with sync token (called by retry wrapper)
-    // Uses the database actor for batch transactions to ensure CDC and serialization
+    // Inner implementation of batch application with sync token (called by retry
+    // wrapper) Uses the database actor for batch transactions to ensure CDC and
+    // serialization
     #[tracing::instrument(
         name = "atomic_transaction",
         skip(db_handle, changes, sync_token),
@@ -687,8 +717,8 @@ where
 
     /// Build batch statements for the actor transaction
     ///
-    /// Returns a vector of (SQL, params) tuples ready for the actor's transaction method.
-    /// The actor handles BEGIN/COMMIT automatically.
+    /// Returns a vector of (SQL, params) tuples ready for the actor's
+    /// transaction method. The actor handles BEGIN/COMMIT automatically.
     fn build_batch_statements(
         schema: &TypeDefinition,
         table_name: &str,
@@ -802,7 +832,8 @@ where
                             .map(|v| format!("{:?}", v))
                             .unwrap_or_else(|| "<none>".to_string());
                         tracing::trace!(
-                            "[CACHE_APPLY_TRACE] UPSERT block id={} content={:?} properties={} origin={:?}",
+                            "[CACHE_APPLY_TRACE] UPSERT block id={} content={:?} properties={} \
+                             origin={:?}",
                             id_val,
                             content_val,
                             props_val,
@@ -1011,8 +1042,9 @@ where
 
 // Implement ChangeNotifications<StorageEntity> via TursoBackend
 // TODO: Option A - Each QueryableCache filters by table name
-// This is inefficient when multiple caches share the same backend (all receive all events).
-// Consider optimizing to Option B (table-specific subscriptions) in the future.
+// This is inefficient when multiple caches share the same backend (all receive
+// all events). Consider optimizing to Option B (table-specific subscriptions)
+// in the future.
 #[async_trait]
 impl<T> ChangeNotifications<StorageEntity> for QueryableCache<T>
 where
@@ -1054,19 +1086,23 @@ where
         });
         let row_change_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
 
-        // TODO: Option A - Filter stream for this table and convert RowChange to Change<StorageEntity>
-        // This is inefficient when multiple QueryableCache instances share the same backend.
-        // Consider optimizing to Option B (table-specific subscriptions) in the future.
-        use crate::storage::turso::{ChangeData, RowChange};
+        // TODO: Option A - Filter stream for this table and convert RowChange to
+        // Change<StorageEntity> This is inefficient when multiple
+        // QueryableCache instances share the same backend. Consider optimizing
+        // to Option B (table-specific subscriptions) in the future.
         use holon_api::BatchWithMetadata;
         use tokio_stream::StreamExt;
 
+        use crate::storage::turso::ChangeData;
+        use crate::storage::turso::RowChange;
+
         let table_name_clone = table_name.clone();
 
-        // Filter batches by relation_name in metadata, then flatten to individual RowChanges
-        // Use futures::stream::StreamExt for flat_map which has better trait implementations
-        let filtered_stream = row_change_stream
-            .filter_map(move |batch: BatchWithMetadata<RowChange>| {
+        // Filter batches by relation_name in metadata, then flatten to individual
+        // RowChanges Use futures::stream::StreamExt for flat_map which has
+        // better trait implementations
+        let filtered_stream =
+            row_change_stream.filter_map(move |batch: BatchWithMetadata<RowChange>| {
                 // Filter by relation_name in metadata
                 if batch.metadata.relation_name != table_name_clone {
                     return None;
@@ -1104,11 +1140,16 @@ where
 
                 if let Some(ref trace_ctx) = trace_context {
                     // Use tracing macros instead of record() for string values
-                    tracing::debug!("trace_id={}, span_id={}", trace_ctx.trace_id, trace_ctx.span_id);
+                    tracing::debug!(
+                        "trace_id={}, span_id={}",
+                        trace_ctx.trace_id,
+                        trace_ctx.span_id
+                    );
                 }
 
                 tracing::info!(
-                    "[QueryableCache] Emitting CDC batch: relation={}, changes={} (created={}, updated={}, deleted={})",
+                    "[QueryableCache] Emitting CDC batch: relation={}, changes={} (created={}, \
+                     updated={}, deleted={})",
                     relation_name,
                     change_count,
                     created_count,
@@ -1154,13 +1195,15 @@ where
                                 origin,
                             }
                         }
-                        ChangeData::FieldsChanged { entity_id, fields, origin } => {
-                            Change::FieldsChanged {
-                                entity_id,
-                                fields,
-                                origin,
-                            }
-                        }
+                        ChangeData::FieldsChanged {
+                            entity_id,
+                            fields,
+                            origin,
+                        } => Change::FieldsChanged {
+                            entity_id,
+                            fields,
+                            origin,
+                        },
                     };
                     results.push(result);
                 }
@@ -1180,8 +1223,9 @@ where
 /// Generate CREATE TABLE SQL with automatic `_change_origin` column
 ///
 /// This wraps Schema's field definitions and adds the `_change_origin` column
-/// for trace context propagation. The column stores JSON-serialized `ChangeOrigin`
-/// which allows CDC callbacks to read trace context from each row.
+/// for trace context propagation. The column stores JSON-serialized
+/// `ChangeOrigin` which allows CDC callbacks to read trace context from each
+/// row.
 fn generate_create_table_sql_with_change_origin(type_def: &TypeDefinition) -> String {
     // Mirror `TypeDefinition::to_create_table_sql`: when multiple fields are
     // flagged `primary_key`, emit a table-level `PRIMARY KEY (a, b, …)`
@@ -1228,7 +1272,8 @@ fn generate_create_table_sql_with_change_origin(type_def: &TypeDefinition) -> St
 /// for an entity type. It's used for full sync operations where all cached data
 /// should be pruned before re-syncing from the external system.
 ///
-/// The `#[operations_trait]` macro auto-generates the `clear_cache` operation descriptor.
+/// The `#[operations_trait]` macro auto-generates the `clear_cache` operation
+/// descriptor.
 ///
 /// # Example
 /// ```ignore
@@ -1249,8 +1294,8 @@ where
 
     /// Clear all cached data for this entity
     ///
-    /// This method clears the cache table (DELETE FROM table) and is irreversible.
-    /// Used for full sync operations.
+    /// This method clears the cache table (DELETE FROM table) and is
+    /// irreversible. Used for full sync operations.
     async fn clear_cache(&self) -> Result<UndoAction> {
         self.get_cache().clear().await?;
         Ok(UndoAction::DeclaredIrreversible(
@@ -1261,12 +1306,15 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::core::traits::FieldSchema;
+    use holon_api::Change;
+    use holon_api::ChangeOrigin;
+    use holon_api::Value;
     use holon_api::computation::Computation;
     use holon_api::predicate::Predicate;
-    use holon_api::{Change, ChangeOrigin, Value};
     use tempfile::tempdir;
+
+    use super::*;
+    use crate::core::traits::FieldSchema;
 
     #[derive(Debug, Clone, PartialEq)]
     struct TestTask {

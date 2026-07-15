@@ -4,18 +4,18 @@ use gpui::*;
 use gpui_component::input::Enter;
 use holon_api::EntityName;
 use holon_api::EntityUri;
-use holon_frontend::RenderContext;
 use holon_frontend::input::{Key, WidgetInput};
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
+use holon_frontend::RenderContext;
 
 use crate::entity_view_registry::EntityCache;
 use crate::entity_view_registry::LiveBlockAncestors;
 use crate::entity_view_registry::LocalEntityScope;
 use crate::geometry::BoundsRegistry;
 use crate::navigation_state::NavigationState;
-use crate::render::builders::GpuiRenderContext;
 use crate::render::builders::prelude::click_to_focus;
+use crate::render::builders::GpuiRenderContext;
 use crate::render::builders::{self};
 
 /// A persistent GPUI view for a single rendered entity (collection row).

@@ -1,8 +1,8 @@
 use anyhow::Result;
 use gpui::*;
-use holon_frontend::FrontendSession;
 use holon_frontend::cli;
 use holon_frontend::reactive::ReactiveEngine;
+use holon_frontend::FrontendSession;
 use holon_gpui::di::GpuiModule;
 use holon_gpui::launch_holon_window_with_engine_and_share;
 use holon_mcp::server::DebugServices;

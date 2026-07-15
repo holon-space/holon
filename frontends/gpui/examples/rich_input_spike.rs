@@ -19,6 +19,14 @@
 
 use std::ops::Range;
 
+use gpui::actions;
+use gpui::div;
+use gpui::fill;
+use gpui::prelude::*;
+use gpui::px;
+use gpui::rgb;
+use gpui::size;
+use gpui::white;
 use gpui::App;
 use gpui::Application;
 use gpui::Bounds;
@@ -41,14 +49,6 @@ use gpui::Window;
 use gpui::WindowBounds;
 use gpui::WindowOptions;
 use gpui::WrappedLine;
-use gpui::actions;
-use gpui::div;
-use gpui::fill;
-use gpui::prelude::*;
-use gpui::px;
-use gpui::rgb;
-use gpui::size;
-use gpui::white;
 
 /// The minimal mark vocabulary the spike exercises (a subset of the planned
 /// full set).

@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::Value;
 use crate::interp_value::InterpValue;
 use crate::interp_value::ReactiveRowProvider;
 use crate::render_types::Arg;
@@ -9,6 +8,7 @@ use crate::render_types::BinaryOperator;
 use crate::render_types::RenderExpr;
 use crate::types::TaskState;
 use crate::widget_spec::DataRow;
+use crate::Value;
 
 // =========================================================================
 // Shared builder utilities

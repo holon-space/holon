@@ -22,12 +22,12 @@ use fluxdi::Injector;
 use fluxdi::Provider;
 use fluxdi::Shared;
 use holon_core::storage::BlockQuerySource;
-use holon_frontend::FrontendSession;
-use holon_frontend::SessionParts;
+use holon_frontend::reactive::make_interpret_fn;
 use holon_frontend::reactive::BuilderServicesSlot;
 use holon_frontend::reactive::RenderInterpreterInjectorExt;
-use holon_frontend::reactive::make_interpret_fn;
 use holon_frontend::render_services::register_render_services;
+use holon_frontend::FrontendSession;
+use holon_frontend::SessionParts;
 
 /// Register the block-query (Turso-free) `FrontendSession` + `ReactiveEngine`
 /// stack into `injector`.

@@ -6,10 +6,10 @@
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use anyhow::Result;
 use futures_signals::signal_map::MutableBTreeMap;

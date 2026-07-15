@@ -14,8 +14,8 @@
 #[path = "pbt_harness/mod.rs"]
 mod pbt_harness;
 
-use holon_integration_tests::pbt::fixtures::FixtureSource;
 use holon_integration_tests::pbt::fixtures::gherkin::GherkinFixtureSource;
+use holon_integration_tests::pbt::fixtures::FixtureSource;
 use pbt_harness::windowed_wide::replay_fixture_windowed;
 
 fn feature_path() -> String {

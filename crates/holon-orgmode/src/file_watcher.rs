@@ -127,8 +127,8 @@ mod tests {
 
     use holon_filesystem::NotifyWatcher;
     use tempfile::TempDir;
-    use tokio::time::Duration;
     use tokio::time::sleep;
+    use tokio::time::Duration;
 
     use super::*;
 

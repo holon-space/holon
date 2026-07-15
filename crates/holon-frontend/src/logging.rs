@@ -24,10 +24,10 @@
 //! `RUST_LOG` controls filtering for all destinations.
 // TODO: Why is this in holon-frontend? Logging is not frontend-specific. Is
 // there a duplicate implementation outside of holon-frontend?
-use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::EnvFilter;
 
 const HOLON_LOG_ENV: &str = "HOLON_LOG";
 const DEFAULT_FILTER: &str = "holon_gpui=info,holon=info,holon_tui=info";
@@ -244,11 +244,11 @@ fn install_panic_hook() {
 
 #[cfg(feature = "otel")]
 fn init_otlp_layer() -> impl tracing_subscriber::Layer<tracing_subscriber::Registry> + Send + Sync {
-    use opentelemetry::KeyValue;
     use opentelemetry::global;
+    use opentelemetry::KeyValue;
     use opentelemetry_otlp::WithExportConfig;
-    use opentelemetry_sdk::Resource;
     use opentelemetry_sdk::trace::SdkTracerProvider;
+    use opentelemetry_sdk::Resource;
 
     let service_name = std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "holon".to_string());
 

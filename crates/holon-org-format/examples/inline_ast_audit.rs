@@ -4,9 +4,9 @@
 //! Run: `cargo run -p holon-orgmode --example inline_ast_audit 2>&1 | tee
 //! /tmp/orgize-audit.log`
 
+use orgize::rowan::ast::AstNode;
 use orgize::Org;
 use orgize::SyntaxKind;
-use orgize::rowan::ast::AstNode;
 
 fn header(t: &str) {
     eprintln!("\n=== {t} ===");

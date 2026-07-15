@@ -1,8 +1,8 @@
 //! Publish-error accounting shared across event adapters.
 
-use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 /// Tracks publish errors from event adapters.
 ///

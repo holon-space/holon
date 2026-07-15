@@ -26,13 +26,13 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use holon_expr::CompiledExpr;
 use holon_expr::bounded_engine;
+use holon_expr::CompiledExpr;
 use rhai::Dynamic;
 use rhai::Scope;
 
-use crate::Value;
 use crate::predicate::Predicate;
+use crate::Value;
 
 /// A named-value evaluation context (row data, UI state, prior computed
 /// fields).

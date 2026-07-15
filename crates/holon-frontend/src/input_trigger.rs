@@ -279,11 +279,9 @@ mod tests {
         // Even with no operations, [[ trigger is present
         let triggers = default_triggers_for_operations(&[]);
         assert_eq!(triggers.len(), 1);
-        assert!(
-            triggers.iter().any(
-                |t| matches!(t, InputTrigger::TextPrefix { action, .. } if action == "doc_link")
-            )
-        );
+        assert!(triggers
+            .iter()
+            .any(|t| matches!(t, InputTrigger::TextPrefix { action, .. } if action == "doc_link")));
     }
 
     #[test]
@@ -306,10 +304,8 @@ mod tests {
         assert!(triggers.iter().any(
             |t| matches!(t, InputTrigger::TextPrefix { action, .. } if action == "command_menu")
         ));
-        assert!(
-            triggers.iter().any(
-                |t| matches!(t, InputTrigger::TextPrefix { action, .. } if action == "doc_link")
-            )
-        );
+        assert!(triggers
+            .iter()
+            .any(|t| matches!(t, InputTrigger::TextPrefix { action, .. } if action == "doc_link")));
     }
 }

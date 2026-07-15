@@ -11,10 +11,10 @@
 //! disclosure for *whole-block* unsupported constructs (callouts, embeds,
 //! queries) happens one layer up in the block parsers.
 
-use holon_api::EntityUri;
 use holon_api::inline_mark::EntityRef;
 use holon_api::inline_mark::InlineMark;
 use holon_api::inline_mark::MarkSpan;
+use holon_api::EntityUri;
 
 /// Result of scanning one block's inline text.
 pub struct InlineParse {

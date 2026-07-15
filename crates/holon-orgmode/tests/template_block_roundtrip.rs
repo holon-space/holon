@@ -104,22 +104,22 @@ fn template_subtree_round_trips_through_org_adapter() {
 
 // -- W3(a): template with TODO + bold marks + [[link]] marks in children ---
 
-const TPL_WITH_MARKS_ORG: &str = "\
-* {{greeting}}
-:PROPERTIES:
-:ID: tpl-marks-root
-:TEMPLATE: marks-template
-:TEMPLATE_VARS: greeting
-:END:
-** TODO Review *{{greeting}}* notes
-:PROPERTIES:
-:ID: tpl-marks-todo
-:END:
-** Check [[https://example.com][the docs]] for {{greeting}}
-:PROPERTIES:
-:ID: tpl-marks-link
-:END:
-";
+const TPL_WITH_MARKS_ORG: &str = concat!(
+    "* {{greeting}}\n",
+    ":PROPERTIES:\n",
+    ":ID: tpl-marks-root\n",
+    ":TEMPLATE: marks-template\n",
+    ":TEMPLATE_VARS: greeting\n",
+    ":END:\n",
+    "** TODO Review *{{greeting}}* notes\n",
+    ":PROPERTIES:\n",
+    ":ID: tpl-marks-todo\n",
+    ":END:\n",
+    "** Check [[https://example.com][the docs]] for {{greeting}}\n",
+    ":PROPERTIES:\n",
+    ":ID: tpl-marks-link\n",
+    ":END:\n",
+);
 
 #[test]
 fn template_with_marks_round_trips_stable() {
@@ -165,8 +165,7 @@ fn template_with_marks_round_trips_stable() {
         .find(|b| b.id.id() == "tpl-marks-root")
         .expect("template root");
     let file_id = EntityUri::from_raw(tpl_root.parent_id.as_str());
-    let rendered =
-        adapter.render_document(&first.document, &first.blocks, path, &file_id);
+    let rendered = adapter.render_document(&first.document, &first.blocks, path, &file_id);
     assert!(
         rendered.contains("{{greeting}}"),
         "slots must render verbatim, got:\n{rendered}"
@@ -233,8 +232,7 @@ fn template_with_underscore_var_round_trips_verbatim() {
     let tpl_root = first
         .blocks
         .iter()
-        .find(|b| b.content.contains("{{my_var}}")
-            && !b.content.contains("Value:"))
+        .find(|b| b.content.contains("{{my_var}}") && !b.content.contains("Value:"))
         .expect("template root");
     assert_eq!(
         tpl_root.content, "{{my_var}}",
@@ -242,8 +240,7 @@ fn template_with_underscore_var_round_trips_verbatim() {
     );
 
     let file_id = EntityUri::from_raw(tpl_root.parent_id.as_str());
-    let rendered =
-        adapter.render_document(&first.document, &first.blocks, path, &file_id);
+    let rendered = adapter.render_document(&first.document, &first.blocks, path, &file_id);
 
     // If the underscore gets mangled (e.g. _ → subscript), {{my_var}} would
     // no longer appear verbatim. This is the regression gate.
@@ -255,8 +252,8 @@ fn template_with_underscore_var_round_trips_verbatim() {
             .unwrap_or("(not found)");
         assert!(
             rendered.contains("{{my_var}}"),
-            "underscore placeholder must NOT be mangled by org renderer; \
-             line content: '{line_with_var}'\nfull render:\n{rendered}"
+            "underscore placeholder must NOT be mangled by org renderer; line content: \
+             '{line_with_var}'\nfull render:\n{rendered}"
         );
     }
 
@@ -320,8 +317,7 @@ fn template_without_vars_round_trips_and_has_no_template_vars_property() {
 
     // Round-trip: render → re-parse.
     let file_id = EntityUri::from_raw(tpl_root.parent_id.as_str());
-    let rendered =
-        adapter.render_document(&first.document, &first.blocks, path, &file_id);
+    let rendered = adapter.render_document(&first.document, &first.blocks, path, &file_id);
     assert!(
         rendered.to_ascii_uppercase().contains(":TEMPLATE:"),
         "TEMPLATE marker must survive render, got:\n{rendered}"

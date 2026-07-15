@@ -29,13 +29,13 @@
 
 use std::ops::Range;
 
+use gpui::px;
 use gpui::FontStyle;
 use gpui::FontWeight;
 use gpui::Hsla;
 use gpui::StrikethroughStyle;
 use gpui::TextRun;
 use gpui::UnderlineStyle;
-use gpui::px;
 use holon_api::InlineMark;
 use holon_api::MarkSpan;
 

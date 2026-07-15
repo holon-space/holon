@@ -98,8 +98,10 @@ where
             );
         }
 
-        let focus_root_strs: Vec<String> =
-            main_focus_roots.iter().map(|r| r.as_str().to_string()).collect();
+        let focus_root_strs: Vec<String> = main_focus_roots
+            .iter()
+            .map(|r| r.as_str().to_string())
+            .collect();
 
         for page in &embedded_pages {
             let page_str = page.as_str().to_string();
@@ -130,9 +132,9 @@ where
 
             if !has_collapsed_toggle && !descendants_in_panel.is_empty() {
                 return InvariantResult::Fail(format!(
-                    "[inv-embedded-page-collapsed-lazy] embedded page {page_str} (strict descendant \
-                     of main focus root{roots}) is rendered EAGER/EXPANDED: no collapsed \
-                     expand_toggle found for it and its ref-known descendants \
+                    "[inv-embedded-page-collapsed-lazy] embedded page {page_str} (strict \
+                     descendant of main focus root{roots}) is rendered EAGER/EXPANDED: no \
+                     collapsed expand_toggle found for it and its ref-known descendants \
                      {descendants_in_panel:?} are present in the main-panel widget tree, but \
                      expanded_toggles = {{}}. Embedded pages must render collapsed by default \
                      with children lazy-loaded on expand.",

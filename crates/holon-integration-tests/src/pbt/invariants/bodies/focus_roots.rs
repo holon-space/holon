@@ -96,16 +96,14 @@ where
             let base_truth = base.get(&region).cloned().unwrap_or_default();
 
             if base_truth == truth {
-                return InvariantResult::Fail(
-                    format!(
+                return InvariantResult::Fail(format!(
                         "[inv-focus-roots] region '{region}' focus_roots mismatch — the matview \
                          faithfully reflects the BASE navigation_history table, which itself \
                          disagrees with the reference. This is a holon close-path / \
                          reference-model bug, NOT a Turso IVM drift.\n  expected:        \
                          {expected:?}\n  mirror:          {actual:?}\n  matview:         \
                          {truth:?}\n  base(nav_history): {base_truth:?}"
-                    ),
-                );
+                    ));
             }
 
             return InvariantResult::Fail(format!(

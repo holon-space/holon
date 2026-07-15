@@ -13,6 +13,10 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 use anyhow::Result;
+use gpui::div;
+use gpui::point;
+use gpui::px;
+use gpui::size;
 use gpui::AppContext;
 use gpui::Bounds;
 use gpui::Context;
@@ -34,21 +38,17 @@ use gpui::Window;
 use gpui::WindowBounds;
 use gpui::WindowHandle;
 use gpui::WindowOptions;
-use gpui::div;
-use gpui::point;
-use gpui::px;
-use gpui::size;
+use holon_api::render_types::RenderExpr;
+use holon_api::widget_spec::DataRow;
 use holon_api::EntityUri;
 use holon_api::QueryLanguage;
 use holon_api::RenderProfile as RowProfile;
-use holon_api::render_types::RenderExpr;
-use holon_api::widget_spec::DataRow;
-use holon_frontend::QueryContext;
-use holon_frontend::RenderContext as FrontendRenderContext;
-use holon_frontend::WidgetState;
 use holon_frontend::operations::OperationIntent;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
+use holon_frontend::QueryContext;
+use holon_frontend::RenderContext as FrontendRenderContext;
+use holon_frontend::WidgetState;
 use holon_gpui::entity_view_registry::LocalEntityScope;
 use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::navigation_state::NavigationState;
@@ -59,9 +59,9 @@ use holon_gpui::render::builders::{self};
 // avoids per-binary warning spam.
 #[allow(unused_imports)]
 pub use holon_layout_testing::{
-    BlockTreeRegistry, BlockTreeThunk, BoundsSnapshot, VISIBLE_LEAF_TYPES, assert_all_nonzero,
-    assert_all_nonzero_except, assert_containment, assert_content_fidelity, assert_layout_ok,
-    assert_no_sibling_overlap, assert_nonempty,
+    assert_all_nonzero, assert_all_nonzero_except, assert_containment, assert_content_fidelity,
+    assert_layout_ok, assert_no_sibling_overlap, assert_nonempty, BlockTreeRegistry,
+    BlockTreeThunk, BoundsSnapshot, VISIBLE_LEAF_TYPES,
 };
 
 // ── Stub BuilderServices ───────────────────────────────────────────────

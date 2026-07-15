@@ -52,9 +52,9 @@ use rhai::Dynamic;
 use rhai::Engine as RhaiEngine;
 use rhai::Map as RhaiMap;
 
-use crate::Value;
 use crate::render_types::Arg;
 use crate::render_types::RenderExpr;
+use crate::Value;
 
 /// Global widget name registry. **Optional hint** populated by the frontend at
 /// startup via `register_widget_names()`. Callers that don't reach the
@@ -598,10 +598,9 @@ mod tests {
         if let RenderExpr::FunctionCall { name, args, .. } = &expr {
             assert_eq!(name, "columns");
             assert!(args.iter().any(|a| a.name.as_deref() == Some("gap")));
-            assert!(
-                args.iter()
-                    .any(|a| a.name.as_deref() == Some("item_template"))
-            );
+            assert!(args
+                .iter()
+                .any(|a| a.name.as_deref() == Some("item_template")));
         } else {
             panic!("Expected FunctionCall");
         }
@@ -691,10 +690,9 @@ mod tests {
             RenderExpr::FunctionCall { name, args } => {
                 assert_eq!(name, "kanban");
                 assert!(args.iter().any(|a| a.name.as_deref() == Some("group_by")));
-                assert!(
-                    args.iter()
-                        .any(|a| a.name.as_deref() == Some("item_template"))
-                );
+                assert!(args
+                    .iter()
+                    .any(|a| a.name.as_deref() == Some("item_template")));
             }
             other => panic!("Expected FunctionCall(kanban), got {other:?}"),
         }

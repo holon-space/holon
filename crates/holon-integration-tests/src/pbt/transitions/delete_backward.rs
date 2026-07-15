@@ -1,24 +1,32 @@
 //! Transition: delete characters backward in the active editor.
 //!
-//! Mirrors the legacy logic split across `state_machine.rs:1664-1680` (generator),
-//! `state_machine.rs:3552-3556` (precondition, shared arm),
+//! Mirrors the legacy logic split across `state_machine.rs:1664-1680`
+//! (generator), `state_machine.rs:3552-3556` (precondition, shared arm),
 //! `state_machine.rs:2966-2969` (ref-state apply),
 //! `sut.rs:4420-4429` (SUT apply), and
 //! `transition_budgets.rs:368-377` (expected SQL).
 
-use holon_pbt_core::capabilities::{
-    CapRegion, RefBlockTreeMut, RefEditorMirror, RefEditorMirrorMut, RefFocus, RefFocusMut,
-    RefLifecycle, SutEditorMirrorWrite, commit_active_editor_if_changed,
-};
-use holon_pbt_core::validation::{Reason, check};
+use holon_pbt_core::TransitionFactory;
+use holon_pbt_core::TransitionRef;
+use holon_pbt_core::capabilities::CapRegion;
+use holon_pbt_core::capabilities::RefBlockTreeMut;
+use holon_pbt_core::capabilities::RefEditorMirror;
+use holon_pbt_core::capabilities::RefEditorMirrorMut;
+use holon_pbt_core::capabilities::RefFocus;
+use holon_pbt_core::capabilities::RefFocusMut;
+use holon_pbt_core::capabilities::RefLifecycle;
+use holon_pbt_core::capabilities::SutEditorMirrorWrite;
+use holon_pbt_core::capabilities::commit_active_editor_if_changed;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::check;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use holon_pbt_core::{TransitionFactory, TransitionRef};
-
 #[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::{ExpectedSql, REACTIVE_BASE};
+use crate::pbt::transition_budgets::ExpectedSql;
+#[cfg(feature = "otel-testing")]
+use crate::pbt::transition_budgets::REACTIVE_BASE;
 
 /// Delete `count` characters backward in the active editor.
 /// Gated to `PBT_ATOMIC_EDITOR=1` runs.

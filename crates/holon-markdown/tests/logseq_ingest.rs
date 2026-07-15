@@ -3,16 +3,16 @@
 use std::path::Path;
 use std::path::PathBuf;
 
-use holon_api::EntityUri;
 use holon_api::block::Block;
 use holon_api::inline_mark::EntityRef;
 use holon_api::inline_mark::InlineMark;
+use holon_api::EntityUri;
 use holon_core::file_format::FileFormatAdapter;
 use holon_core::file_format::FileFormatParseResult;
-use holon_markdown::LogseqMarkdownAdapter;
-use holon_markdown::VaultFlavor;
 use holon_markdown::build::FOREIGN_OPAQUE_KEY;
 use holon_markdown::detect_flavor;
+use holon_markdown::LogseqMarkdownAdapter;
+use holon_markdown::VaultFlavor;
 use holon_org_format::OrgBlockExt;
 
 fn vault() -> PathBuf {
@@ -72,11 +72,9 @@ fn wikilink_and_tags_become_marks_and_tag_field() {
     let r = parse("pages/Compat.md");
     let b = find(&r.blocks, "A block with");
     // [[Page Link]] → Name link mark
-    assert!(
-        link_targets(b)
-            .iter()
-            .any(|t| matches!(t, EntityRef::Name { name } if name == "Page Link"))
-    );
+    assert!(link_targets(b)
+        .iter()
+        .any(|t| matches!(t, EntityRef::Name { name } if name == "Page Link")));
     // #compat and #[[multi word tag]] → tag edge field
     assert!(b.tags.contains("compat"), "tags: {:?}", b.tags);
     assert!(b.tags.contains("multi word tag"), "tags: {:?}", b.tags);
@@ -167,11 +165,9 @@ fn journal_file_recognized() {
     let r = parse("journals/2026_07_11.md");
     assert!(r.document.tags.contains("journal"), "journal not tagged");
     let entry = find(&r.blocks, "Journal entry");
-    assert!(
-        link_targets(entry)
-            .iter()
-            .any(|t| matches!(t, EntityRef::Name { name } if name == "Compat"))
-    );
+    assert!(link_targets(entry)
+        .iter()
+        .any(|t| matches!(t, EntityRef::Name { name } if name == "Compat")));
 }
 
 #[test]

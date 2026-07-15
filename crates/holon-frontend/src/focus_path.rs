@@ -11,8 +11,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use holon_api::EntityUri;
 use holon_api::render_types::OperationWiring;
+use holon_api::EntityUri;
 
 use crate::input::InputAction;
 use crate::input::KeyChord;
@@ -1304,10 +1304,10 @@ mod tests {
 
     #[test]
     fn find_click_intent_oneshot_returns_bound_action() {
-        use holon_api::EntityName;
         use holon_api::render_types::OperationDescriptor;
         use holon_api::render_types::OperationWiring;
         use holon_api::render_types::Trigger;
+        use holon_api::EntityName;
 
         // Sidebar-shaped tree: list → selectable(row(text(...))) per item.
         // Each selectable carries a click-bound `navigation.focus` op.
@@ -1354,11 +1354,11 @@ mod tests {
         // the Main panel wrapper has no operations. The unscoped walker
         // returns the LeftSidebar action regardless of clicked region —
         // we want the scoped walker to honor the region.
-        use holon_api::EntityName;
         use holon_api::render_types::OperationDescriptor;
         use holon_api::render_types::OperationWiring;
         use holon_api::render_types::Trigger;
         use holon_api::widget_spec::DataRow;
+        use holon_api::EntityName;
 
         use crate::view_model::ViewModel;
 

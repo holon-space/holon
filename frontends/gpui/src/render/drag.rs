@@ -1,16 +1,16 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use gpui::div;
+use gpui::prelude::*;
+use gpui::px;
 use gpui::Context;
 use gpui::Hsla;
 use gpui::Pixels;
 use gpui::Point;
 use gpui::Window;
-use gpui::div;
-use gpui::prelude::*;
-use gpui::px;
-use holon_api::Value;
 use holon_api::render_types::OperationWiring;
+use holon_api::Value;
 
 /// Payload carried during a block drag operation.
 /// Contains all data needed by drop_zone to dispatch a move_block operation.

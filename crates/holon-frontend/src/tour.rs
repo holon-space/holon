@@ -13,12 +13,12 @@
 //! is evaluated from counts the engine supplies, so the same code drives every
 //! frontend and every test rung.
 
+use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
-use anyhow::bail;
+use holon_api::block::Block;
 use holon_api::EntityUri;
 use holon_api::Value;
-use holon_api::block::Block;
 
 use crate::geometry::GeometryProvider;
 

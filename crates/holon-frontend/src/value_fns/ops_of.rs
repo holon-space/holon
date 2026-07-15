@@ -19,18 +19,18 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use holon_api::InterpValue;
-use holon_api::Value;
 use holon_api::render_eval::ResolvedArgs;
 use holon_api::render_types::OperationWiring;
 use holon_api::widget_spec::DataRow;
+use holon_api::InterpValue;
+use holon_api::Value;
 
-use crate::ReactiveViewModel;
 use crate::reactive::BuilderServices;
 use crate::render_context::RenderContext;
 use crate::render_interpreter::RenderInterpreter;
 use crate::render_interpreter::ValueFn;
 use crate::value_fns::synthetic::SyntheticRows;
+use crate::ReactiveViewModel;
 
 struct OpsOfValueFn;
 

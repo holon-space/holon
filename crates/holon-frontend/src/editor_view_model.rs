@@ -14,14 +14,14 @@ use std::ops::Range;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use anyhow::Result;
 use anyhow::anyhow;
+use anyhow::Result;
 use futures::stream::BoxStream;
+use holon_api::render_types::OperationWiring;
+use holon_api::types::EntityName;
 use holon_api::InlineMark;
 use holon_api::MarkSpan;
 use holon_api::Value;
-use holon_api::render_types::OperationWiring;
-use holon_api::types::EntityName;
 use holon_core::cell::Cell;
 use holon_core::cell::CursorAnchor;
 use holon_core::cell::CursorBias;
@@ -216,7 +216,11 @@ impl EditorViewModel {
     pub fn anchor_cursor(&self, char_offset: usize, bias: CursorBias) -> Option<CursorAnchor> {
         self.cell
             .as_ref()
-            .and_then(|c| c.anchor_cursor(char_offset, bias).ok()) // ALLOW(ok): backings without text-rich support degrade to None
+            .and_then(|c| c.anchor_cursor(char_offset, bias).ok()) // ALLOW(ok):
+                                                                   // backings without
+                                                                   // text-rich support
+                                                                   // degrade to
+                                                                   // None
     }
 
     /// Resolve a previously-anchored cursor against the current CRDT state.
@@ -225,7 +229,10 @@ impl EditorViewModel {
     pub fn resolve_cursor(&self, anchor: &CursorAnchor) -> Option<usize> {
         self.cell
             .as_ref()
-            .and_then(|c| c.resolve_cursor(anchor).ok()) // ALLOW(ok): backings without text-rich support degrade to None
+            .and_then(|c| c.resolve_cursor(anchor).ok()) // ALLOW(ok): backings
+                                                         // without text-rich
+                                                         // support degrade to
+                                                         // None
     }
 
     /// Build an EditorViewModel from an EditableText ViewModel node.

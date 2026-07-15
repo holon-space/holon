@@ -1,7 +1,8 @@
 //! Comprehensive Property-Based Tests for org-mode round-tripping.
 //!
 //! Uses a simple normalize-and-compare approach:
-//! 1. Generate valid Block hierarchies (via the shared `holon-block-roundtrip-testing` crate)
+//! 1. Generate valid Block hierarchies (via the shared
+//!    `holon-block-roundtrip-testing` crate)
 //! 2. Serialize to Org format
 //! 3. Parse back
 //! 4. Normalize both and compare for equality
@@ -10,24 +11,38 @@
 //! in `holon-block-roundtrip-testing` so the same surface drives the future
 //! Turso-storage round-trip PBT.
 
+use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::path::PathBuf;
+
 use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
 use holon_api::types::Timestamp;
+use holon_api::ContentType;
+use holon_api::Priority;
+use holon_api::Tags;
+use holon_api::TaskState;
 use holon_api::Value;
-use holon_api::{ContentType, Priority, Tags, TaskState};
-use holon_block_roundtrip_testing::{
-    assert_normalized_docs_equal, build_blocks, collect_explicit_ids, root_headlines_strategy,
-    valid_body, valid_property_value, valid_tag, valid_timestamp, valid_title, HeadlineSpec,
-    NormalizedDocument, PropertiesDrawer, SourceBlockSpec,
-};
-use holon_orgmode::models::{
-    OrgBlockExt, OrgDocumentExt, DEFAULT_ACTIVE_KEYWORDS, DEFAULT_DONE_KEYWORDS,
-};
+use holon_block_roundtrip_testing::assert_normalized_docs_equal;
+use holon_block_roundtrip_testing::build_blocks;
+use holon_block_roundtrip_testing::collect_explicit_ids;
+use holon_block_roundtrip_testing::root_headlines_strategy;
+use holon_block_roundtrip_testing::valid_body;
+use holon_block_roundtrip_testing::valid_property_value;
+use holon_block_roundtrip_testing::valid_tag;
+use holon_block_roundtrip_testing::valid_timestamp;
+use holon_block_roundtrip_testing::valid_title;
+use holon_block_roundtrip_testing::HeadlineSpec;
+use holon_block_roundtrip_testing::NormalizedDocument;
+use holon_block_roundtrip_testing::PropertiesDrawer;
+use holon_block_roundtrip_testing::SourceBlockSpec;
+use holon_orgmode::models::OrgBlockExt;
+use holon_orgmode::models::OrgDocumentExt;
+use holon_orgmode::models::DEFAULT_ACTIVE_KEYWORDS;
+use holon_orgmode::models::DEFAULT_DONE_KEYWORDS;
 use holon_orgmode::org_renderer::OrgRenderer;
 use holon_orgmode::parser::parse_org_file;
 use proptest::prelude::*;
-use std::collections::{BTreeSet, HashMap};
-use std::path::PathBuf;
 use uuid::Uuid;
 
 // ============================================================================
@@ -748,9 +763,10 @@ fn find_swappable_text_siblings(blocks: &[Block]) -> Option<(usize, usize)> {
 
 /// Reassign sequences to blocks in the order the renderer would output them.
 ///
-/// The renderer sorts: root blocks by (sequence, id), children by (content_type [source=0, text=1], sequence, id).
-/// The parser then assigns monotonic sequences in document order.
-/// This function replicates that assignment so expected state matches actual parsed state.
+/// The renderer sorts: root blocks by (sequence, id), children by (content_type
+/// [source=0, text=1], sequence, id). The parser then assigns monotonic
+/// sequences in document order. This function replicates that assignment so
+/// expected state matches actual parsed state.
 fn reassign_parser_sequences(blocks: &mut [Block]) {
     // Build parent→children mapping
     let ids: Vec<(EntityUri, EntityUri, ContentType, i64, String)> = blocks
@@ -1153,7 +1169,8 @@ fn remove_priority_from_headline(line: &str) -> String {
     result
 }
 
-/// Apply the equivalent semantic mutation to blocks that corresponds to a TextMutation.
+/// Apply the equivalent semantic mutation to blocks that corresponds to a
+/// TextMutation.
 fn apply_equivalent_block_mutation(
     blocks: &mut Vec<Block>,
     mutation: &TextMutation,
@@ -1444,7 +1461,9 @@ proptest! {
 /// re-render. Both keywords must render on one line.
 #[test]
 fn planning_scheduled_and_deadline_share_one_line_and_round_trip_stably() {
-    use holon_block_roundtrip_testing::{build_blocks, HeadlineSpec, PropertiesDrawer};
+    use holon_block_roundtrip_testing::build_blocks;
+    use holon_block_roundtrip_testing::HeadlineSpec;
+    use holon_block_roundtrip_testing::PropertiesDrawer;
     let hl = HeadlineSpec {
         block_id: EntityUri::block("00000000-0000-0000-00d2-6a8b21a78458"),
         properties_drawer: PropertiesDrawer {
@@ -1478,8 +1497,8 @@ fn planning_scheduled_and_deadline_share_one_line_and_round_trip_stably() {
             .blocks
             .iter()
             .any(|b| b.id.id() == "00000000-0000-0000-00d2-6a8b21a78458"),
-        "headline id must survive the round-trip, not get replaced by a fresh \
-         UUID from a misparsed drawer-as-body: {:?}",
+        "headline id must survive the round-trip, not get replaced by a fresh UUID from a \
+         misparsed drawer-as-body: {:?}",
         parsed.blocks
     );
 

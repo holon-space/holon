@@ -127,34 +127,26 @@ mod tests {
     #[test]
     fn eq_ne() {
         let c = ctx(&[("status", Value::String("active".into()))]);
-        assert!(
-            Predicate::Eq {
-                field: "status".into(),
-                value: Value::String("active".into())
-            }
-            .evaluate(&c)
-        );
-        assert!(
-            !Predicate::Eq {
-                field: "status".into(),
-                value: Value::String("inactive".into())
-            }
-            .evaluate(&c)
-        );
-        assert!(
-            Predicate::Ne {
-                field: "status".into(),
-                value: Value::String("inactive".into())
-            }
-            .evaluate(&c)
-        );
-        assert!(
-            !Predicate::Ne {
-                field: "status".into(),
-                value: Value::String("active".into())
-            }
-            .evaluate(&c)
-        );
+        assert!(Predicate::Eq {
+            field: "status".into(),
+            value: Value::String("active".into())
+        }
+        .evaluate(&c));
+        assert!(!Predicate::Eq {
+            field: "status".into(),
+            value: Value::String("inactive".into())
+        }
+        .evaluate(&c));
+        assert!(Predicate::Ne {
+            field: "status".into(),
+            value: Value::String("inactive".into())
+        }
+        .evaluate(&c));
+        assert!(!Predicate::Ne {
+            field: "status".into(),
+            value: Value::String("active".into())
+        }
+        .evaluate(&c));
     }
 
     #[test]
@@ -188,74 +180,58 @@ mod tests {
         ]);
 
         // Lt: float field < int rhs, coerced to f64.
-        assert!(
-            Predicate::Lt {
-                field: "width_px".into(),
-                value: Value::Integer(500)
-            }
-            .evaluate(&c)
-        );
-        assert!(
-            !Predicate::Lt {
-                field: "width_px".into(),
-                value: Value::Integer(400)
-            }
-            .evaluate(&c)
-        );
+        assert!(Predicate::Lt {
+            field: "width_px".into(),
+            value: Value::Integer(500)
+        }
+        .evaluate(&c));
+        assert!(!Predicate::Lt {
+            field: "width_px".into(),
+            value: Value::Integer(400)
+        }
+        .evaluate(&c));
 
         // Gt: int field > float rhs, coerced to f64.
-        assert!(
-            Predicate::Gt {
-                field: "count".into(),
-                value: Value::Float(2.5)
-            }
-            .evaluate(&c)
-        );
-        assert!(
-            !Predicate::Gt {
-                field: "count".into(),
-                value: Value::Float(3.0)
-            }
-            .evaluate(&c)
-        );
+        assert!(Predicate::Gt {
+            field: "count".into(),
+            value: Value::Float(2.5)
+        }
+        .evaluate(&c));
+        assert!(!Predicate::Gt {
+            field: "count".into(),
+            value: Value::Float(3.0)
+        }
+        .evaluate(&c));
 
         // Gte / Lte with equal values.
-        assert!(
-            Predicate::Gte {
-                field: "count".into(),
-                value: Value::Integer(3)
-            }
-            .evaluate(&c)
-        );
-        assert!(
-            Predicate::Lte {
-                field: "count".into(),
-                value: Value::Integer(3)
-            }
-            .evaluate(&c)
-        );
+        assert!(Predicate::Gte {
+            field: "count".into(),
+            value: Value::Integer(3)
+        }
+        .evaluate(&c));
+        assert!(Predicate::Lte {
+            field: "count".into(),
+            value: Value::Integer(3)
+        }
+        .evaluate(&c));
     }
 
     #[test]
     fn gt_lt_fail_shut_on_missing_or_type_mismatch() {
         // Missing field — fail-shut (false).
-        assert!(
-            !Predicate::Lt {
-                field: "absent".into(),
-                value: Value::Integer(9)
-            }
-            .evaluate(&HashMap::new())
-        );
+        assert!(!Predicate::Lt {
+            field: "absent".into(),
+            value: Value::Integer(9)
+        }
+        .evaluate(&HashMap::new()));
 
         // Type mismatch (string cannot coerce to f64) — fail-shut.
         let c = ctx(&[("x", Value::String("hello".into()))]);
-        assert!(
-            !Predicate::Gt {
-                field: "x".into(),
-                value: Value::Integer(1)
-            }
-            .evaluate(&c)
-        );
+        assert!(!Predicate::Gt {
+            field: "x".into(),
+            value: Value::Integer(1)
+        }
+        .evaluate(&c));
     }
 
     #[test]
@@ -288,21 +264,17 @@ mod tests {
     #[test]
     fn ne_null_semantics() {
         // Missing field != non-null value → true (SQL-like)
-        assert!(
-            Predicate::Ne {
-                field: "x".into(),
-                value: Value::Integer(1)
-            }
-            .evaluate(&HashMap::new())
-        );
+        assert!(Predicate::Ne {
+            field: "x".into(),
+            value: Value::Integer(1)
+        }
+        .evaluate(&HashMap::new()));
         // Missing field != NULL → false (NULL != NULL is false in SQL)
-        assert!(
-            !Predicate::Ne {
-                field: "x".into(),
-                value: Value::Null
-            }
-            .evaluate(&HashMap::new())
-        );
+        assert!(!Predicate::Ne {
+            field: "x".into(),
+            value: Value::Null
+        }
+        .evaluate(&HashMap::new()));
     }
 
     #[test]

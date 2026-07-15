@@ -3,11 +3,11 @@ use std::fmt::Write;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use holon_api::render_types::OperationWiring;
+use holon_api::widget_spec::DataRow;
 use holon_api::EntityName;
 use holon_api::EntityUri;
 use holon_api::Value;
-use holon_api::render_types::OperationWiring;
-use holon_api::widget_spec::DataRow;
 use serde::Deserialize;
 use serde::Serialize;
 

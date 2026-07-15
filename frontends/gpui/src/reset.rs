@@ -16,8 +16,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use holon::api::BackendEngine;
-use holon_frontend::FrontendSession;
 use holon_frontend::reactive::ReactiveEngine;
+use holon_frontend::FrontendSession;
 
 /// A freshly-booted, seeded SUT for an in-process rebind reset. Holds the
 /// `BackendEngine` so the retirement list (plan F) can keep it (and its temp
@@ -47,12 +47,12 @@ pub async fn build_fresh_sut(
     config_dir: PathBuf,
     settle: Duration,
 ) -> anyhow::Result<FreshSut> {
-    use holon_frontend::HolonConfig;
-    use holon_frontend::SessionConfig;
     use holon_frontend::config::VaultConfig;
     use holon_frontend::reactive::BuilderServices;
     use holon_frontend::reactive::BuilderServicesSlot;
     use holon_frontend::reactive::RenderInterpreterInjectorExt;
+    use holon_frontend::HolonConfig;
+    use holon_frontend::SessionConfig;
 
     let mut holon_config = HolonConfig {
         db_path: Some(db_path),

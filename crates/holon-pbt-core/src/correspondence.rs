@@ -54,13 +54,13 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
-use crate::RunMode;
 use crate::composition::CapInvariant;
 use crate::composition::CapMap;
 use crate::composition::Needs;
 use crate::invariant::InvariantId;
 use crate::invariant::InvariantResult;
 use crate::retry::retry_until_ok;
+use crate::RunMode;
 
 /// A logical observable: one named reference projection with an owned value
 /// type. `NAME` is the invariant-id family stem: each store emits

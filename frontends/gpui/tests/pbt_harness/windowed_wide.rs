@@ -7,8 +7,8 @@
 //! contract. This is deletion-scheduled scaffolding (Phase 1/2), so keeping a
 //! single source avoids two copies drifting.
 
-use std::panic::AssertUnwindSafe;
 use std::panic::catch_unwind;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -21,19 +21,19 @@ use holon_frontend::user_driver::UserDriver;
 use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::launch_holon_window_rebindable;
 use holon_gpui::navigation_state::NavigationState;
-use holon_integration_tests::pbt::ReferenceState;
 use holon_integration_tests::pbt::composed::harness::ComposedSut;
 use holon_integration_tests::pbt::composed::harness::SettleHook;
-use holon_integration_tests::pbt::composed::wide_e2e::WideE2E;
-use holon_integration_tests::pbt::composed::wide_e2e::WideE2EMachine;
-use holon_integration_tests::pbt::composed::wide_e2e::WideHandle;
 use holon_integration_tests::pbt::composed::wide_e2e::boot_and_seed_wide_windowed_base;
 use holon_integration_tests::pbt::composed::wide_e2e::wide_e2e_ref;
 use holon_integration_tests::pbt::composed::wide_e2e::windowed_composed_sut;
-use holon_integration_tests::pbt::fixtures::NamedFixture;
+use holon_integration_tests::pbt::composed::wide_e2e::WideE2E;
+use holon_integration_tests::pbt::composed::wide_e2e::WideE2EMachine;
+use holon_integration_tests::pbt::composed::wide_e2e::WideHandle;
 use holon_integration_tests::pbt::fixtures::replay_steps;
+use holon_integration_tests::pbt::fixtures::NamedFixture;
 use holon_integration_tests::pbt::op_write_cap::IdResolver;
 use holon_integration_tests::pbt::window_slice::builders::overlay_windowed_caps;
+use holon_integration_tests::pbt::ReferenceState;
 
 use super::sim_windowed_replay::SimUserDriver;
 

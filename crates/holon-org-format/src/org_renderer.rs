@@ -1,13 +1,18 @@
 //! Loro → Org-mode rendering
 //!
-//! Converts Loro document blocks to org-mode format using Block with OrgBlockExt.
+//! Converts Loro document blocks to org-mode format using Block with
+//! OrgBlockExt.
 
-use crate::models::{render_document_header, OrgBlockExt, ToOrg};
+use std::collections::HashMap;
+use std::path::Path;
+
 use holon_api::block::Block;
 use holon_api::EntityUri;
 use holon_api::Value;
-use std::collections::HashMap;
-use std::path::Path;
+
+use crate::models::render_document_header;
+use crate::models::OrgBlockExt;
+use crate::models::ToOrg;
 
 /// Render a Loro document (represented as blocks) to org-mode format.
 ///
@@ -52,7 +57,8 @@ impl OrgRenderer {
     ///
     /// # Returns
     /// Org-mode formatted string
-    // ALLOW(unused_param): file_path is documented public API; kept for OrgBlock metadata wiring
+    // ALLOW(unused_param): file_path is documented public API; kept for OrgBlock
+    // metadata wiring
     pub fn render_entitys(blocks: &[Block], _file_path: &Path, file_id: &EntityUri) -> String {
         let mut result = String::new();
 
@@ -82,15 +88,16 @@ impl OrgRenderer {
         for b in blocks {
             let parent = b.parent_id.as_str();
             if parent == b.id.as_str() {
-                continue; // self-parented FK-anchor sentinel; never a real block
+                continue; // self-parented FK-anchor sentinel; never a real
+                          // block
             }
             if parent != file_id_str && !ids.contains(parent) {
                 panic!(
                     "{}",
                     holon_api::ProjectionInvariantViolated {
                         detail: format!(
-                            "org render: block {} has dangling parent {} \
-                             (not the file root {} and not in the {}-block set)",
+                            "org render: block {} has dangling parent {} (not the file root {} \
+                             and not in the {}-block set)",
                             b.id.as_str(),
                             parent,
                             file_id_str,
@@ -137,9 +144,9 @@ impl OrgRenderer {
                     "{}",
                     holon_api::ProjectionInvariantViolated {
                         detail: format!(
-                            "org render: block {} (parent {}) is unreachable from \
-                             file root {} despite its parent being present — parent \
-                             cycle or disconnected component",
+                            "org render: block {} (parent {}) is unreachable from file root {} \
+                             despite its parent being present — parent cycle or disconnected \
+                             component",
                             b.id.as_str(),
                             b.parent_id.as_str(),
                             file_id.as_str()
@@ -164,7 +171,8 @@ impl OrgRenderer {
         // in `render_entitys` — free, we are already walking every reachable node.
         visited.insert(block.id.as_str());
 
-        // Prepare block for org rendering - transfer Loro properties to org_props format
+        // Prepare block for org rendering - transfer Loro properties to org_props
+        // format
         let mut prepared_block = block.clone();
         Self::prepare_block_for_org(&mut prepared_block, depth);
 
@@ -184,7 +192,8 @@ impl OrgRenderer {
         }
     }
 
-    /// Prepare a block for org rendering by transferring Loro properties to org_props format.
+    /// Prepare a block for org rendering by transferring Loro properties to
+    /// org_props format.
     fn prepare_block_for_org(block: &mut Block, depth: usize) {
         let properties = block.properties_map();
 
@@ -204,8 +213,8 @@ impl OrgRenderer {
                 let priority = match priority_val {
                     // ALLOW(ok): boundary parse — None valid for missing priority
                     Value::String(s) => holon_api::Priority::from_letter(s).ok(),
-                    Value::Integer(n) => holon_api::Priority::from_int(*n as i32).ok(), // ALLOW(ok): boundary parse
-                    Value::Float(f) => holon_api::Priority::from_int(*f as i32).ok(), // ALLOW(ok): boundary parse
+                    Value::Integer(n) => holon_api::Priority::from_int(*n as i32).ok(), /* ALLOW(ok): boundary parse */
+                    Value::Float(f) => holon_api::Priority::from_int(*f as i32).ok(), /* ALLOW(ok): boundary parse */
                     _ => None,
                 };
                 if let Some(p) = priority {
@@ -275,9 +284,11 @@ impl OrgRenderer {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use holon_api::types::{ContentType, SourceLanguage};
+    use holon_api::types::ContentType;
+    use holon_api::types::SourceLanguage;
     use holon_api::EntityUri;
+
+    use super::*;
 
     fn test_doc_uri() -> EntityUri {
         EntityUri::file("/test/file.org")

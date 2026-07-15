@@ -1,23 +1,28 @@
-//! Cross-cutting tests of the memory slice — the ones that assert over *several*
-//! invariants at once (selection counts, multi-invariant positives) and the
-//! sequence proptests that turn the slice from bug-*catching* into bug-*finding*.
-//! Single-invariant catch/positive/deselection triads live with their invariant
-//! in `super::invariants::*`.
+//! Cross-cutting tests of the memory slice — the ones that assert over
+//! *several* invariants at once (selection counts, multi-invariant positives)
+//! and the sequence proptests that turn the slice from bug-*catching* into
+//! bug-*finding*. Single-invariant catch/positive/deselection triads live with
+//! their invariant in `super::invariants::*`.
 
 use std::sync::Arc;
 
 use holon::api::MemoryBackend;
-use holon_api::repository::{CoreOperations, Lifecycle};
-use holon_pbt_core::capabilities::{RefEditorMirrorMut, SutEditorMirrorWrite};
+use holon_api::repository::CoreOperations;
+use holon_api::repository::Lifecycle;
+use holon_pbt_core::capabilities::RefEditorMirrorMut;
+use holon_pbt_core::capabilities::SutEditorMirrorWrite;
 use holon_pbt_core::composition::CapProvider;
 use proptest::prelude::*;
 
 use crate::pbt::composed::fixtures::*;
-use crate::pbt::composed::subsystem_seed::{
-    assert_ref_seeded, run_with_seeded_ref, seed_ref, seed_ref_with_editor,
-};
-use crate::pbt::memory_slice::builders::{memory_wide, memory_wide_with_editor};
-use crate::pbt::memory_slice::components::{InMemEditorComponent, MemoryBackendComponent};
+use crate::pbt::composed::subsystem_seed::assert_ref_seeded;
+use crate::pbt::composed::subsystem_seed::run_with_seeded_ref;
+use crate::pbt::composed::subsystem_seed::seed_ref;
+use crate::pbt::composed::subsystem_seed::seed_ref_with_editor;
+use crate::pbt::memory_slice::builders::memory_wide;
+use crate::pbt::memory_slice::builders::memory_wide_with_editor;
+use crate::pbt::memory_slice::components::InMemEditorComponent;
+use crate::pbt::memory_slice::components::MemoryBackendComponent;
 
 /// The vertical proof: a composed `CapMap` slice selects the two `SutBackend`-
 /// only structural invariants by capability presence and runs them over a real
@@ -279,9 +284,10 @@ proptest! {
 // The op-sequence proptest above checks the editor MIRROR against the ref. This
 // closes the loop to STORAGE: `take_commit()` writes the live text through the
 // production `MemoryBackend::update_block`, then `blocks-match-ref/block_raw`
-// re-reads it from the store and cross-checks against the independent reference.
-// A bug in the editor's text math OR in the commit path surfaces as a committed-
-// content divergence in an already-wired invariant — no new invariant needed.
+// re-reads it from the store and cross-checks against the independent
+// reference. A bug in the editor's text math OR in the commit path surfaces as
+// a committed- content divergence in an already-wired invariant — no new
+// invariant needed.
 
 /// Apply-phase glue: commit the editor's pending text into the backing store,
 /// exactly as a structural commit point would in production.

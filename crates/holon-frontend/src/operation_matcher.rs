@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
-use holon_api::EntityName;
-use holon_api::Value;
 use holon_api::render_types::OperationDescriptor;
 use holon_api::render_types::OperationParam;
 use holon_api::render_types::OperationWiring;
 use holon_api::render_types::TypeHint;
+use holon_api::EntityName;
+use holon_api::Value;
 
 /// Result of matching an operation against available parameters.
 #[derive(Debug, Clone)]

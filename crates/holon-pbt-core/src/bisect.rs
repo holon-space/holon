@@ -145,7 +145,7 @@ mod tests {
     fn upward_localizes_an_absent_component_bug() {
         let ceiling = ComponentSet::full_headless(); // has Turso
         let floor = ComponentSet::loro_vm_fast(); // no Turso
-        // Bug present iff Loro present AND Turso absent.
+                                                  // Bug present iff Loro present AND Turso absent.
         let oracle = |s: &ComponentSet| {
             s.has_storage(StorageAdapter::Loro) && !s.has_storage(StorageAdapter::Turso)
         };
@@ -159,11 +159,10 @@ mod tests {
                 assert!(!set.has_storage(StorageAdapter::Turso));
                 // Adding any valid parent (toward ceiling) stops reproduction —
                 // in particular adding Turso would.
-                assert!(
-                    set.valid_parents_within(&ComponentSet::full_headless())
-                        .iter()
-                        .all(|p| !oracle(p))
-                );
+                assert!(set
+                    .valid_parents_within(&ComponentSet::full_headless())
+                    .iter()
+                    .all(|p| !oracle(p)));
             }
             other => panic!("expected UpwardMinimal, got {other:?}"),
         }

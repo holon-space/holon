@@ -10,10 +10,10 @@
 //! was the H12 bug class — `blocks_differ` compared `tags` but not `requires`,
 //! so a `requires`-only edit never propagated to the SQL projection.)
 
-use crate::EntityUri;
-use crate::Value;
 use crate::block::Block;
 use crate::types::Tags;
+use crate::EntityUri;
+use crate::Value;
 
 /// The closed set of block edge fields. A write/projection that enumerates edge
 /// fields does so over [`EdgeField::ALL`] — adding a new edge field is a single

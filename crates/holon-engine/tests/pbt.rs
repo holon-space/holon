@@ -1,7 +1,5 @@
 use std::collections::BTreeMap;
 
-use holon_engine::Marking;
-use holon_engine::TokenState;
 use holon_engine::arc::CreateArc;
 use holon_engine::arc::InputArc;
 use holon_engine::arc::OutputArc;
@@ -15,6 +13,8 @@ use holon_engine::yaml::net::YamlNet;
 use holon_engine::yaml::net::YamlTransition;
 use holon_engine::yaml::state::YamlMarking;
 use holon_engine::yaml::state::YamlToken;
+use holon_engine::Marking;
+use holon_engine::TokenState;
 use proptest::prelude::*;
 
 const TOKEN_TYPES: &[&str] = &["person", "document", "asset", "monetary"];

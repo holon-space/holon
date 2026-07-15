@@ -2,21 +2,21 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use holon_api::EntityUri;
-use holon_api::InterpValue;
-use holon_api::Value;
-use holon_api::render_eval::CORE_VALUE_FN_LOOKUP;
-use holon_api::render_eval::OutlineTree;
-use holon_api::render_eval::ResolvedArgs;
-use holon_api::render_eval::ValueFnLookup;
 use holon_api::render_eval::column_ref_name;
 use holon_api::render_eval::eval_binary_op;
 use holon_api::render_eval::eval_to_value;
 use holon_api::render_eval::resolve_args;
 use holon_api::render_eval::resolve_args_with;
+use holon_api::render_eval::OutlineTree;
+use holon_api::render_eval::ResolvedArgs;
+use holon_api::render_eval::ValueFnLookup;
+use holon_api::render_eval::CORE_VALUE_FN_LOOKUP;
 use holon_api::render_types::OperationWiring;
 use holon_api::render_types::RenderExpr;
 use holon_api::widget_spec::DataRow;
+use holon_api::EntityUri;
+use holon_api::InterpValue;
+use holon_api::Value;
 
 /// Trait for attaching entity data to a widget node.
 /// Both `ViewModel` and `ReactiveViewModel` implement this.
@@ -24,8 +24,8 @@ pub trait WithEntity {
     fn attach_entity(&mut self, entity: std::sync::Arc<DataRow>);
 }
 
-use crate::RenderContext;
 use crate::reactive::BuilderServices;
+use crate::RenderContext;
 
 /// Arguments passed to every builder during interpretation.
 ///

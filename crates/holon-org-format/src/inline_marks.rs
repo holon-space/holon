@@ -23,17 +23,17 @@
 //! - Sub/Super only match orgize's `_{…}` / `^{…}` form; bare `_{` is not a
 //!   mark — that's correct Org behavior.
 
+use holon_api::link_parser::classify_link;
+use holon_api::link_parser::LinkTarget;
 use holon_api::EntityRef;
 use holon_api::InlineMark;
 use holon_api::MarkSpan;
-use holon_api::link_parser::LinkTarget;
-use holon_api::link_parser::classify_link;
+use orgize::config::UseSubSuperscript;
+use orgize::rowan::ast::AstNode;
+use orgize::rowan::NodeOrToken;
 use orgize::ParseConfig;
 use orgize::SyntaxKind;
 use orgize::SyntaxNode;
-use orgize::config::UseSubSuperscript;
-use orgize::rowan::NodeOrToken;
-use orgize::rowan::ast::AstNode;
 
 /// Parse `text` as inline org content. Returns `(rendered_text, marks)` where
 /// `rendered_text` has all mark delimiters stripped and `marks` carries

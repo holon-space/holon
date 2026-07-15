@@ -12,8 +12,8 @@
 //! adapter. Adapters MAY re-check (defense in depth) but MUST NOT be the sole
 //! guard.
 
-use crate::ApiError;
 use crate::entity_uri::EntityUri;
+use crate::ApiError;
 
 /// Read-only view of the block tree, supplied by an adapter so the domain can
 /// run structural preconditions (ancestry / sibling membership) without knowing

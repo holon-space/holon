@@ -282,12 +282,12 @@ pub async fn run_http_server(
     bind_address: SocketAddr,
     cancellation_token: CancellationToken,
 ) -> anyhow::Result<()> {
-    use axum::Router;
     use axum::response::Html;
     use axum::routing::get;
-    use rmcp::transport::StreamableHttpServerConfig;
+    use axum::Router;
     use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
     use rmcp::transport::streamable_http_server::tower::StreamableHttpService;
+    use rmcp::transport::StreamableHttpServerConfig;
 
     let cancellation_token_for_service = cancellation_token.clone();
 
@@ -543,11 +543,11 @@ impl McpInjectorExt for Injector {
 
 #[cfg(test)]
 mod content_type_charset_tests {
-    use axum::Router;
     use axum::body::Body;
     use axum::http::Request;
     use axum::http::StatusCode;
     use axum::routing::get;
+    use axum::Router;
     use tower::ServiceExt;
 
     use super::add_utf8_charset_to_content_type;

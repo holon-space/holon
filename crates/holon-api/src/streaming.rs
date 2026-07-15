@@ -6,13 +6,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde::Serialize;
-use tokio::sync::Mutex;
 use tokio::sync::mpsc;
+use tokio::sync::Mutex;
 use tokio_stream::Stream;
 
+use crate::render_types::RenderVariant;
 use crate::ApiError;
 use crate::RenderExpr;
-use crate::render_types::RenderVariant;
 
 // Task-local storage for trace context propagation through async call chains
 tokio::task_local! {
@@ -237,7 +237,8 @@ impl ChangeOrigin {
     ///
     /// flutter_rust_bridge:ignore
     pub fn from_json(json: &str) -> Option<Self> {
-        serde_json::from_str(json).ok() // ALLOW(ok): trace context may be malformed
+        serde_json::from_str(json).ok() // ALLOW(ok): trace context may be
+                                        // malformed
     }
 }
 

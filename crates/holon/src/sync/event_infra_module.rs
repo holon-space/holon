@@ -1,6 +1,7 @@
 //! Event infrastructure DI module.
 //!
-//! Registers the shared block pipeline services needed by both Loro and OrgMode:
+//! Registers the shared block pipeline services needed by both Loro and
+//! OrgMode:
 //! - `QueryableCache<Block>` — in-memory block cache fed by CDC
 //! - `BlockFeed` — the convergent `LiveData<Block>` over the `block` matview
 //! - `PublishErrorTracker` — tracks publish errors
@@ -9,8 +10,21 @@
 //! directly; downstream sinks (Loro→SQL controller, link indexer) react to the
 //! shared `BlockFeed`.
 
-use fluxdi::{Injector, Module, Provider, Shared};
 use std::sync::Arc;
+
+use fluxdi::Injector;
+use fluxdi::Module;
+use fluxdi::Provider;
+use fluxdi::Shared;
+use holon_api::EntityName;
+use holon_api::EntityUri;
+use holon_api::Value;
+use holon_api::block::Block;
+use holon_api::capability::SessionCapabilities;
+use holon_core::OperationProvider;
+use holon_core::OperationRegistry;
+use holon_core::block_ordering::BlockOrdering;
+use holon_turso::schema_modules::BlockSchemaModule;
 
 use crate::core::queryable_cache::QueryableCache;
 use crate::core::sql_block_operations::SqlBlockOperations;
@@ -20,20 +34,15 @@ use crate::storage::BLOCK_WRITE_TABLE;
 use crate::storage::schema_module::SchemaModule;
 use crate::sync::PublishErrorTracker;
 use crate::sync::live_data::LiveData;
-use holon_api::block::Block;
-use holon_api::capability::SessionCapabilities;
-use holon_api::{EntityName, EntityUri, Value};
-use holon_core::block_ordering::BlockOrdering;
-use holon_core::{OperationProvider, OperationRegistry};
-use holon_turso::schema_modules::BlockSchemaModule;
 
 /// Build the SqlOnly cell `set_field` write path over `SqlOperationProvider`.
 ///
 /// Routed straight to the SQL `set_field` operation (mirroring the fall-through
-/// branch of `SqlBlockOperations::set_field`, which is where every SqlOnly block
-/// write already lands). Deliberately does NOT go back through
-/// `BlockCellRegistry::write_field` / `SqlBlockOperations`: the registry is owned
-/// by `SqlBlockOperations`, so routing through it would form an `Arc` cycle.
+/// branch of `SqlBlockOperations::set_field`, which is where every SqlOnly
+/// block write already lands). Deliberately does NOT go back through
+/// `BlockCellRegistry::write_field` / `SqlBlockOperations`: the registry is
+/// owned by `SqlBlockOperations`, so routing through it would form an `Arc`
+/// cycle.
 fn sql_cell_set_field_writer(
     sql_ops: Arc<SqlOperationProvider>,
 ) -> crate::sync::block_cell_registry::SqlScalarWriteFn {

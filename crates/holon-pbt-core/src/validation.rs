@@ -154,7 +154,11 @@ pub fn map_nevec<A, B>(src: NEVec<A>, mut f: impl FnMut(A) -> B) -> NEVec<B> {
 /// Lift a boolean gate into a `Validated`: success carries `()`, failure
 /// carries the single named reason.
 pub fn check<E>(cond: bool, err: E) -> Validated<(), E> {
-    if cond { Good(()) } else { Validated::fail(err) }
+    if cond {
+        Good(())
+    } else {
+        Validated::fail(err)
+    }
 }
 
 /// Bridge for unmigrated transitions whose `weighted_generator` and

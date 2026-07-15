@@ -2,12 +2,12 @@
 //! inline line into a `Block` with marks, tags, task state, and (when a
 //! construct is unsupported) a disclosed opaque block.
 
+use holon_api::block::Block;
 use holon_api::EntityUri;
 use holon_api::Priority;
 use holon_api::StateCategory;
 use holon_api::TaskState;
 use holon_api::Timestamp;
-use holon_api::block::Block;
 use holon_org_format::OrgBlockExt;
 
 use crate::inline::scan_inline;

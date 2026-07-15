@@ -4,12 +4,12 @@ pub use holon_expr::CompiledExpr;
 use rhai::Engine;
 use rhai::Scope;
 
-use crate::InputArc;
-use crate::Marking;
-use crate::TokenState;
 use crate::arc::PostcondExpr;
 use crate::arc::PrecondSpec;
 use crate::value::Value;
+use crate::InputArc;
+use crate::Marking;
+use crate::TokenState;
 
 pub struct RhaiEvaluator {
     engine: Engine,

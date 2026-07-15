@@ -15,9 +15,9 @@ use std::sync::Arc;
 
 use futures_signals::signal_vec::SignalVec;
 
+use crate::widget_spec::DataRow;
 use crate::EntityUri;
 use crate::Value;
-use crate::widget_spec::DataRow;
 
 /// A value produced during render-expression interpretation.
 ///

@@ -1,11 +1,17 @@
-//! `inv-viewmodel-decompiled-rows-match-query` — the rendered rows decompile back
-//! to the reference's query/render-expr. `Needs SutRenderer + RefViewSelection`. The ref
-//! side is the production `ReferenceState`; selection ANDs the SUT and ref cap
-//! sets, so it only fires where a real renderer slice is wired (the frontend slice).
+//! `inv-viewmodel-decompiled-rows-match-query` — the rendered rows decompile
+//! back to the reference's query/render-expr. `Needs SutRenderer +
+//! RefViewSelection`. The ref side is the production `ReferenceState`;
+//! selection ANDs the SUT and ref cap sets, so it only fires where a real
+//! renderer slice is wired (the frontend slice).
 
 use holon_pbt_core::RunMode;
-use holon_pbt_core::capabilities::{RefViewSelection, SutQueryResults, SutRenderer};
-use holon_pbt_core::composition::{BridgedInvariant, CapId, CapInvariant, Needs};
+use holon_pbt_core::capabilities::RefViewSelection;
+use holon_pbt_core::capabilities::SutQueryResults;
+use holon_pbt_core::capabilities::SutRenderer;
+use holon_pbt_core::composition::BridgedInvariant;
+use holon_pbt_core::composition::CapId;
+use holon_pbt_core::composition::CapInvariant;
+use holon_pbt_core::composition::Needs;
 
 use crate::pbt::invariants::bodies::viewmodel_decompiled_rows_match_query::InvViewmodelDecompiledRowsMatchQuery;
 

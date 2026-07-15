@@ -3,16 +3,16 @@
 use std::path::Path;
 use std::path::PathBuf;
 
-use holon_api::EntityUri;
 use holon_api::block::Block;
 use holon_api::inline_mark::EntityRef;
 use holon_api::inline_mark::InlineMark;
+use holon_api::EntityUri;
 use holon_core::file_format::FileFormatAdapter;
 use holon_core::file_format::FileFormatParseResult;
-use holon_markdown::ObsidianMarkdownAdapter;
-use holon_markdown::VaultFlavor;
 use holon_markdown::build::FOREIGN_OPAQUE_KEY;
 use holon_markdown::detect_flavor;
+use holon_markdown::ObsidianMarkdownAdapter;
+use holon_markdown::VaultFlavor;
 use holon_org_format::OrgBlockExt;
 
 fn vault() -> PathBuf {
@@ -86,14 +86,12 @@ fn wikilinks_and_alias_and_inline_tag_in_paragraph() {
     let r = parse("Compat.md");
     let para = find(&r.blocks, "This note links");
     let ts = link_targets(para);
-    assert!(
-        ts.iter()
-            .any(|t| matches!(t, EntityRef::Name { name } if name == "Sample Project"))
-    );
-    assert!(
-        ts.iter()
-            .any(|t| matches!(t, EntityRef::Name { name } if name == "Dangling Target"))
-    );
+    assert!(ts
+        .iter()
+        .any(|t| matches!(t, EntityRef::Name { name } if name == "Sample Project")));
+    assert!(ts
+        .iter()
+        .any(|t| matches!(t, EntityRef::Name { name } if name == "Dangling Target")));
     assert!(
         para.tags.contains("compat"),
         "inline #compat not extracted: {:?}",

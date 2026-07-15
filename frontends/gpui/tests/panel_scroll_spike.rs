@@ -24,11 +24,11 @@ mod support;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use gpui::px;
+use gpui::size;
 use gpui::Pixels;
 use gpui::Size;
 use gpui::TestAppContext;
-use gpui::px;
-use gpui::size;
 use holon_api::Value;
 use holon_frontend::geometry::GeometryProvider;
 use holon_frontend::reactive_view::ReactiveView;

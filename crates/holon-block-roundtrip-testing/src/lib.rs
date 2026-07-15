@@ -24,14 +24,14 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 
+use holon_api::block::Block;
+use holon_api::entity_uri::EntityUri;
 use holon_api::ContentType;
 use holon_api::Priority;
 use holon_api::SourceLanguage;
 use holon_api::Tags;
 use holon_api::TaskState;
 use holon_api::Value;
-use holon_api::block::Block;
-use holon_api::entity_uri::EntityUri;
 // OrgBlockExt provides domain-level accessors (level/tags/priority/task_state/
 // scheduled/deadline/sequence/drawer_properties) plus their setters. Used
 // internally; not re-exported.

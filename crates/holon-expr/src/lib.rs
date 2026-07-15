@@ -5,8 +5,8 @@
 //! Compiled Rhai expressions — the shared vocabulary between holon-api entity
 //! definitions and the holon-engine Petri-net guard evaluator.
 
-use rhai::AST;
 use rhai::Engine;
+use rhai::AST;
 use serde::Deserialize;
 use serde::Serialize;
 

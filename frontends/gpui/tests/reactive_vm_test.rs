@@ -5,9 +5,9 @@
 //!
 //! Run: cargo test -p holon-gpui --test reactive_vm_test
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::Ordering;
 
 use futures_signals::signal::Mutable;
 use futures_signals::signal::SignalExt;
@@ -185,11 +185,9 @@ fn main() {
         });
         cx.run_until_parked();
 
-        assert!(
-            item0
-                .read_with(cx, |v, _| v.snapshot())
-                .contains("Buy oat milk")
-        );
+        assert!(item0
+            .read_with(cx, |v, _| v.snapshot())
+            .contains("Buy oat milk"));
         assert_eq!(item1.read_with(cx, |v, _| v.snapshot()), before_1);
     });
 

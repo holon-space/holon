@@ -1,9 +1,9 @@
 use std::collections::BTreeSet;
 
-use holon_api::EntityUri;
 // Re-export Key and KeyChord from holon-api (canonical definition)
 pub use holon_api::input_types::{Key, KeyChord};
 use holon_api::render_types::OperationDescriptor;
+use holon_api::EntityUri;
 
 use crate::navigation::CursorHint;
 use crate::navigation::CursorPlacement;

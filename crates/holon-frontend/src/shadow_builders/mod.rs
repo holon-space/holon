@@ -9,8 +9,8 @@ holon_macros::builder_registry!("src/shadow_builders",
     widget_metas
 );
 
-use crate::render_interpreter::RenderInterpreter;
 use crate::render_interpreter::shared_col_build;
+use crate::render_interpreter::RenderInterpreter;
 
 /// Build the shadow `RenderInterpreter<ReactiveViewModel>` from the
 /// macro-generated builder registry plus the manual `col` builder.

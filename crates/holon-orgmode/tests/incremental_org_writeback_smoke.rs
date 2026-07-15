@@ -19,10 +19,10 @@
 
 #![cfg(feature = "di")]
 
-use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 use holon_api::block::Block;
@@ -643,11 +643,9 @@ async fn on_block_removed_routes_to_owning_file() {
         .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b1))
         .await
         .unwrap();
-    assert!(
-        std::fs::read_to_string(&h.path)
-            .unwrap()
-            .contains("Second heading")
-    );
+    assert!(std::fs::read_to_string(&h.path)
+        .unwrap()
+        .contains("Second heading"));
 
     // The user deletes b2: the authoritative store loses it, THEN the feed
     // delivers the bare Remove (the block is already gone from the feed map).

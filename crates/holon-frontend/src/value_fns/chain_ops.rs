@@ -32,21 +32,21 @@ use futures_signals::signal::Mutable;
 use futures_signals::signal::SignalExt;
 use futures_signals::signal_vec::SignalVec;
 use futures_signals::signal_vec::SignalVecExt;
+use holon_api::ptr_identity;
+use holon_api::render_eval::ResolvedArgs;
+use holon_api::widget_spec::DataRow;
 use holon_api::EntityUri;
 use holon_api::InterpValue;
 use holon_api::ReactiveRowProvider;
 use holon_api::Value;
-use holon_api::ptr_identity;
-use holon_api::render_eval::ResolvedArgs;
-use holon_api::widget_spec::DataRow;
 
-use crate::ReactiveViewModel;
 use crate::reactive::BuilderServices;
 use crate::render_context::RenderContext;
 use crate::render_interpreter::RenderInterpreter;
 use crate::render_interpreter::ValueFn;
 use crate::value_fns::ops_of::ops_rows_for_uri;
 use crate::value_fns::synthetic::SyntheticRows;
+use crate::ReactiveViewModel;
 
 /// `ReactiveRowProvider` projecting the focused-block `Mutable` through
 /// the operation registry: one row per op registered for the scheme of

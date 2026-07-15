@@ -329,7 +329,8 @@ pub fn folder_journal_page() -> EntityUri {
 /// Ingested FIRST (sorts before the companion), so it creates the `Page`-tagged
 /// doc-root that the companion later tries (buggily) to demote.
 pub const FOLDER_JOURNAL_PAGE_ORG: &str =
-    "#+ID: journal-2026-07-10\n* A note on the journal date\n:PROPERTIES:\n:ID: journal-date-child-note\n:END:\nSome body text under the date page.\n";
+    "#+ID: journal-2026-07-10\n* A note on the journal date\n:PROPERTIES:\n:ID: \
+     journal-date-child-note\n:END:\nSome body text under the date page.\n";
 
 /// The `:ID:` of the child block nested under the date page in
 /// [`FOLDER_JOURNAL_PAGE_ORG`]. The invariant
@@ -377,11 +378,7 @@ pub fn seed_folder_companion(state: &mut ReferenceState) {
     // `inv-embedded-page-collapsed-lazy` has something to observe: a ref-known
     // block whose presence in the main-panel widget tree signals eager rendering.
     let child = folder_journal_page_child();
-    let child_block = Block::new_text(
-        child.clone(),
-        page.clone(),
-        "A note on the journal date",
-    );
+    let child_block = Block::new_text(child.clone(), page.clone(), "A note on the journal date");
     state
         .domain
         .block_state
@@ -1803,4 +1800,210 @@ mod tests {
              deliberate, lower N; otherwise a `wire()` line was lost."
         );
     }
+}
+/// Pinned deterministic gate: boot a test engine, seed the canned
+/// `block:tpl`/`block:tpl-c1` template blocks, dispatch
+/// `instantiate_template` through the engine, and verify both
+/// substitution and idempotency (same context_key twice -> no
+/// duplicates).
+#[tokio::test(flavor = "multi_thread")]
+async fn instantiate_template_deterministic_gate() {
+    use std::collections::HashMap;
+
+    use holon::core::SqlOperationProvider;
+    use holon::di::test_helpers::create_test_engine_with_providers;
+    use holon::storage::BLOCK_WRITE_TABLE;
+    use holon_api::EntityName;
+    use holon_api::OpOrigin;
+    use holon_api::Value;
+
+    let engine = create_test_engine_with_providers(":memory:".into(), |module| {
+        module.with_operation_provider_factory(|backend| {
+            let db_handle =
+                tokio::task::block_in_place(|| backend.blocking_read().handle().clone());
+            std::sync::Arc::new(SqlOperationProvider::new(
+                db_handle,
+                BLOCK_WRITE_TABLE.to_string(),
+                "block".to_string(),
+                "block".to_string(),
+            ))
+        })
+    })
+    .await
+    .expect("boot engine");
+
+    let block_entity = EntityName::new("block");
+
+    // Create a target parent.
+    engine
+        .execute_operation(
+            &block_entity,
+            "create",
+            {
+                let mut p = holon_api::StorageEntity::new();
+                p.insert("id".into(), Value::String("block:target".into()));
+                p.insert("content".into(), Value::String("Target".into()));
+                p
+            },
+            OpOrigin::User,
+        )
+        .await
+        .expect("create target parent");
+
+    // Seed the template blocks (same shape as seed_template in
+    // operation_engine.rs).
+    engine
+        .execute_operation(
+            &block_entity,
+            "create",
+            {
+                let mut p = holon_api::StorageEntity::new();
+                p.insert("id".into(), Value::String("block:tpl".into()));
+                p.insert("content".into(), Value::String("{{date}}".into()));
+                p.insert("template".into(), Value::String("t".into()));
+                p.insert(
+                    "template_vars".into(),
+                    Value::String("date, mood=neutral".into()),
+                );
+                p
+            },
+            OpOrigin::User,
+        )
+        .await
+        .expect("seed template root");
+
+    engine
+        .execute_operation(
+            &block_entity,
+            "create",
+            {
+                let mut p = holon_api::StorageEntity::new();
+                p.insert("id".into(), Value::String("block:tpl-c1".into()));
+                p.insert("parent_id".into(), Value::String("block:tpl".into()));
+                p.insert("content".into(), Value::String("see {{date}} now".into()));
+                p.insert(
+                    "marks".into(),
+                    Value::String(r#"[{"start":0,"end":3,"kind":"Bold"}]"#.into()),
+                );
+                p
+            },
+            OpOrigin::User,
+        )
+        .await
+        .expect("seed template child");
+
+    // Dispatch instantiate_template.
+    let context_key = "2026-07-15";
+    let root_id = engine
+        .execute_operation(
+            &block_entity,
+            "instantiate_template",
+            {
+                let mut p = holon_api::StorageEntity::new();
+                p.insert("template_id".into(), Value::String("block:tpl".into()));
+                p.insert("target_parent".into(), Value::String("block:target".into()));
+                p.insert("context_key".into(), Value::String(context_key.into()));
+                let mut bindings: HashMap<String, Value> = HashMap::new();
+                bindings.insert("date".into(), Value::String("2026-07-15".into()));
+                p.insert("bindings".into(), Value::Object(bindings));
+                p
+            },
+            OpOrigin::Rule {
+                transition_id: "rule:test-template".into(),
+            },
+        )
+        .await
+        .expect("instantiate_template");
+    let Some(Value::String(root_id)) = root_id else {
+        panic!("instantiate_template must return root id")
+    };
+
+    // Verify substituted heading content.
+    let rows = engine
+        .db_handle()
+        .query(
+            &format!(
+                "SELECT * FROM block_raw WHERE id = '{}'",
+                root_id.replace('\'', "''")
+            ),
+            HashMap::new(),
+        )
+        .await
+        .expect("query instance root");
+    let root = &rows[0];
+    assert_eq!(
+        root.get("content")
+            .and_then(|v| v.as_string())
+            .map(|s| s.to_string()),
+        Some("2026-07-15".to_string()),
+        "{{date}} substituted in heading"
+    );
+
+    // Verify child: substituted, marks survived.
+    let children = engine
+        .db_handle()
+        .query(
+            &format!(
+                "SELECT * FROM block_raw WHERE parent_id = '{}'",
+                root_id.replace('\'', "''")
+            ),
+            HashMap::new(),
+        )
+        .await
+        .expect("query instance children");
+    assert_eq!(children.len(), 1, "one child");
+    let child_content = children[0].get("content").and_then(|v| v.as_string());
+    assert_eq!(
+        child_content,
+        Some("see 2026-07-15 now"),
+        "{{date}} substituted in child"
+    );
+    let marks = children[0].get("marks");
+    assert!(marks.is_some(), "bold mark survived instantiation");
+
+    // Idempotency: second fire with same key converges.
+    let count_before = engine
+        .db_handle()
+        .query(
+            "SELECT 1 FROM block_raw WHERE parent_id = 'block:target'",
+            HashMap::new(),
+        )
+        .await
+        .expect("query count before")
+        .len();
+
+    engine
+        .execute_operation(
+            &block_entity,
+            "instantiate_template",
+            {
+                let mut p = holon_api::StorageEntity::new();
+                p.insert("template_id".into(), Value::String("block:tpl".into()));
+                p.insert("target_parent".into(), Value::String("block:target".into()));
+                p.insert("context_key".into(), Value::String(context_key.into()));
+                let mut bindings: HashMap<String, Value> = HashMap::new();
+                bindings.insert("date".into(), Value::String("2026-07-15".into()));
+                p.insert("bindings".into(), Value::Object(bindings));
+                p
+            },
+            OpOrigin::Rule {
+                transition_id: "rule:test-template".into(),
+            },
+        )
+        .await
+        .expect("second instantiate_template");
+
+    let count_after = engine
+        .db_handle()
+        .query(
+            "SELECT 1 FROM block_raw WHERE parent_id = 'block:target'",
+            HashMap::new(),
+        )
+        .await
+        .expect("query count after")
+        .len();
+    assert_eq!(
+        count_before, count_after,
+        "idempotent: same context_key must converge (no duplicates)"
+    );
 }

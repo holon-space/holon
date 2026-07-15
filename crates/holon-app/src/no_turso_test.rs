@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
+use holon_core::storage::from_sync;
 use holon_core::storage::BlockQuerySource;
 use holon_core::storage::BlockSnapshot;
 use holon_core::storage::FocusRoot;
-use holon_core::storage::from_sync;
 
 use crate::no_turso::from_block_query_source;
 

@@ -22,18 +22,18 @@
 
 mod support;
 
-use gpui::AvailableSpace;
-use gpui::TestAppContext;
-use gpui::UniformListScrollHandle;
 use gpui::point;
 use gpui::prelude::*;
 use gpui::px;
 use gpui::size;
+use gpui::AvailableSpace;
+use gpui::TestAppContext;
+use gpui::UniformListScrollHandle;
 use holon_gpui::geometry::BoundsRegistry;
+use support::simulate_wheel_at;
 use support::LayoutMode;
 use support::ReactiveFixtureView;
 use support::ScrollableListView;
-use support::simulate_wheel_at;
 
 const VIEWPORT_W: f32 = 600.0;
 const VIEWPORT_H: f32 = 400.0;

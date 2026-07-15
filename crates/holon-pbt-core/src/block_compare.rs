@@ -26,9 +26,9 @@
 //! facets apply, then call [`compare_blocks`]. The per-store `RunMode` and
 //! CDC-lag → `Skipped` decision live in the body/runner, not here.
 
+use holon_api::block::Block;
 use holon_api::ContentType;
 use holon_api::EntityUri;
-use holon_api::block::Block;
 
 use crate::invariant::InvariantResult;
 use crate::sibling_order::compare_sibling_order;

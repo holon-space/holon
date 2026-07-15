@@ -19,9 +19,9 @@
 mod pbt_harness;
 
 use holon_integration_tests::pbt::composed::wide_e2e::wide_e2e_ref;
+use holon_integration_tests::pbt::fixtures::json;
 use holon_integration_tests::pbt::fixtures::FixtureStep;
 use holon_integration_tests::pbt::fixtures::NamedFixture;
-use holon_integration_tests::pbt::fixtures::json;
 use holon_integration_tests::pbt::transitions::E2ETransition;
 use pbt_harness::windowed_wide::payload_signature_match;
 use pbt_harness::windowed_wide::replay_fixture_windowed;

@@ -1,25 +1,36 @@
 //! [`GpuiWindowComponent`] — the windowed `SutLayout` provider.
 //!
-//! Holds a `Box<dyn GeometryProvider>` (a live window's `BoundsRegistry` clone, a
-//! `Send` handle) and realizes the geometry caps by reading it — the same logic
-//! `E2ESut`'s `SutLayout` impl uses (it too reads an injected `GeometryProvider`,
-//! never the window directly). The `!Send` window + frame-pump stay in the test
-//! harness; this component is plain `Send` and hosts on a `CapMap` normally.
+//! Holds a `Box<dyn GeometryProvider>` (a live window's `BoundsRegistry` clone,
+//! a `Send` handle) and realizes the geometry caps by reading it — the same
+//! logic `E2ESut`'s `SutLayout` impl uses (it too reads an injected
+//! `GeometryProvider`, never the window directly). The `!Send` window +
+//! frame-pump stay in the test harness; this component is plain `Send` and
+//! hosts on a `CapMap` normally.
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use holon_api::EntityUri;
-use holon_frontend::geometry::{GeometryProvider, ProviderEvalCtx};
-use holon_frontend::reactive::{BuilderServices, ReactiveEngine};
-use holon_pbt_core::capabilities::{
-    FrontendRootVm, ProviderStabilityReport, RenderedElement, SutFrontendEmissions,
-    SutFrontendEngine, SutLayout, SutQueryResults, SutRenderer, SutViewSelection, ViewportHint,
-    WidgetSnapshot,
-};
-use holon_pbt_core::composition::{CapMap, CapProvider};
+use holon_frontend::geometry::GeometryProvider;
+use holon_frontend::geometry::ProviderEvalCtx;
+use holon_frontend::reactive::BuilderServices;
+use holon_frontend::reactive::ReactiveEngine;
+use holon_pbt_core::capabilities::FrontendRootVm;
+use holon_pbt_core::capabilities::ProviderStabilityReport;
+use holon_pbt_core::capabilities::RenderedElement;
+use holon_pbt_core::capabilities::SutFrontendEmissions;
+use holon_pbt_core::capabilities::SutFrontendEngine;
+use holon_pbt_core::capabilities::SutLayout;
+use holon_pbt_core::capabilities::SutQueryResults;
+use holon_pbt_core::capabilities::SutRenderer;
+use holon_pbt_core::capabilities::SutViewSelection;
+use holon_pbt_core::capabilities::ViewportHint;
+use holon_pbt_core::capabilities::WidgetSnapshot;
+use holon_pbt_core::composition::CapMap;
+use holon_pbt_core::composition::CapProvider;
 
 use crate::pbt::vm_snapshot::view_model_to_snapshot;
 
@@ -31,8 +42,9 @@ pub struct GpuiWindowComponent {
 
 impl GpuiWindowComponent {
     /// Wrap a geometry provider (a `BoundsRegistry` clone from a launched
-    /// window). The harness owns the window and pumps it to a fixed point before
-    /// the caps are read, so this component only ever *reads* committed bounds.
+    /// window). The harness owns the window and pumps it to a fixed point
+    /// before the caps are read, so this component only ever *reads*
+    /// committed bounds.
     pub fn new(geometry: Box<dyn GeometryProvider>) -> Self {
         Self { geometry }
     }
@@ -40,10 +52,10 @@ impl GpuiWindowComponent {
 
 #[async_trait::async_trait(?Send)]
 impl SutLayout for GpuiWindowComponent {
-    /// Snapshot the whole `BoundsRegistry` into the pbt-core [`RenderedElement`]
-    /// mirror — byte-for-byte the conversion `E2ESut::rendered_elements` runs
-    /// (`expected_size` verdict + `is_error_widget` computed here so bodies stay
-    /// pure).
+    /// Snapshot the whole `BoundsRegistry` into the pbt-core
+    /// [`RenderedElement`] mirror — byte-for-byte the conversion
+    /// `E2ESut::rendered_elements` runs (`expected_size` verdict +
+    /// `is_error_widget` computed here so bodies stay pure).
     async fn rendered_elements(&self) -> Vec<RenderedElement> {
         let all = self.geometry.all_elements();
         all.iter()
@@ -81,10 +93,11 @@ impl SutLayout for GpuiWindowComponent {
     // snapshot is already fresh when a cap reads it — no per-read frame pump (and
     // the single-threaded harness couldn't pump from inside an `&self` cap anyway).
 
-    /// No screenshot watcher is wired through the `GeometryProvider` port, so the
-    /// pixel-level `not-visually-empty` backstop is unavailable here — honest
-    /// `None` (the bounds invariant treats it as "skip the backstop", §5.1). The
-    /// `BoundsRegistry` geometry is the load-bearing signal and is fully present.
+    /// No screenshot watcher is wired through the `GeometryProvider` port, so
+    /// the pixel-level `not-visually-empty` backstop is unavailable here —
+    /// honest `None` (the bounds invariant treats it as "skip the
+    /// backstop", §5.1). The `BoundsRegistry` geometry is the load-bearing
+    /// signal and is fully present.
     async fn visual_content_fraction(&self) -> Option<f32> {
         None
     }
@@ -113,9 +126,10 @@ impl SutLayout for GpuiWindowComponent {
             .any(|(_, info)| info.widget_type.as_ref() == "error")
     }
 
-    /// Single-shot check against the already-settled frame (the harness pumps to
-    /// a fixed point before reads; there is no concurrent pump to *wait* on in the
-    /// single-threaded windowed harness, so a poll loop here would only spin).
+    /// Single-shot check against the already-settled frame (the harness pumps
+    /// to a fixed point before reads; there is no concurrent pump to *wait*
+    /// on in the single-threaded windowed harness, so a poll loop here
+    /// would only spin).
     async fn wait_for_bounds(&self, id: &EntityUri, _: Duration) -> Result<(), String> {
         if self.has_registered_bounds(id).await {
             Ok(())
@@ -169,25 +183,28 @@ impl CapProvider for GpuiWindowComponent {
     }
 }
 
-/// The windowed slice's `SutViewSelection` + `SutRenderer` provider over the **same**
-/// frontend [`ReactiveEngine`] the live window renders from (the engine passed to
-/// `launch_holon_window_rebindable`). This is the engine `E2ESut` reads as its
-/// `frontend_engine`, so the ViewModel the geometry invariants compare against and
-/// the geometry itself come from one render pipeline — not two.
+/// The windowed slice's `SutViewSelection` + `SutRenderer` provider over the
+/// **same** frontend [`ReactiveEngine`] the live window renders from (the
+/// engine passed to `launch_holon_window_rebindable`). This is the engine
+/// `E2ESut` reads as its `frontend_engine`, so the ViewModel the geometry
+/// invariants compare against and the geometry itself come from one render
+/// pipeline — not two.
 ///
 /// The engine is both the watch source *and* the [`BuilderServices`] for the
-/// independent re-interpret (the GPUI frontend wires `services = engine.clone()`;
-/// see `TestEnvironment` and `E2ESut::render_builder_services`'s LoroMemory arm).
-/// The root-VM reads are plain `&self` reads; the emission surfaces
-/// (`SutFrontendEmissions`) carry the same per-transition state E2ESut did — an
-/// intermediate-emission buffer fed by a background collector, and a persistent
-/// live ViewModel tree — so the value-fn / live-tree invariants have real teeth.
+/// independent re-interpret (the GPUI frontend wires `services =
+/// engine.clone()`; see `TestEnvironment` and
+/// `E2ESut::render_builder_services`'s LoroMemory arm). The root-VM reads are
+/// plain `&self` reads; the emission surfaces (`SutFrontendEmissions`) carry
+/// the same per-transition state E2ESut did — an intermediate-emission buffer
+/// fed by a background collector, and a persistent live ViewModel tree — so the
+/// value-fn / live-tree invariants have real teeth.
 pub struct GpuiFrontendEngineComponent {
     engine: Arc<ReactiveEngine>,
-    /// Intermediate ViewModel emissions captured across a transition (drain-once
-    /// per tick), fed by a background collector over `engine.watch(root)` spawned
-    /// at construction. Drives `inv-value-fn-provider-identity` — the transient
-    /// emissions a later structural re-render would mask.
+    /// Intermediate ViewModel emissions captured across a transition
+    /// (drain-once per tick), fed by a background collector over
+    /// `engine.watch(root)` spawned at construction. Drives
+    /// `inv-value-fn-provider-identity` — the transient emissions a later
+    /// structural re-render would mask.
     vm_emissions: Arc<Mutex<Vec<holon_frontend::ViewModel>>>,
     /// Persistent live ViewModel tree — lazily built, then REUSED across
     /// transitions (persistence is what lets it catch `set_data`-propagation
@@ -227,9 +244,9 @@ impl GpuiFrontendEngineComponent {
 
     /// Resolve a ready (non-loading) watch for `uri`, polling briefly since the
     /// reactive engine fills from background CDC tasks on the shared runtime
-    /// (mirrors `E2ESut::resolve_watch`). The window already watches the root, so
-    /// for the layout root this returns immediately. We never `unwatch` — the
-    /// live window owns these watches.
+    /// (mirrors `E2ESut::resolve_watch`). The window already watches the root,
+    /// so for the layout root this returns immediately. We never `unwatch`
+    /// — the live window owns these watches.
     async fn resolve_watch(
         &self,
         uri: &EntityUri,
@@ -255,8 +272,9 @@ impl GpuiFrontendEngineComponent {
 #[async_trait::async_trait(?Send)]
 impl SutViewSelection for GpuiFrontendEngineComponent {
     /// Count `Error` widget nodes in the rendered ViewModel tree (the
-    /// `inv-viewmodel-no-error-widgets` path). `None` while the root is loading /
-    /// a placeholder / interpret panics. Reads the same engine the window paints.
+    /// `inv-viewmodel-no-error-widgets` path). `None` while the root is loading
+    /// / a placeholder / interpret panics. Reads the same engine the window
+    /// paints.
     async fn headless_error_node_count(&self) -> Option<usize> {
         let root_uri = holon_api::root_layout_block_uri();
         let rqr = self.resolve_watch(&root_uri).await?;
@@ -290,9 +308,9 @@ impl SutViewSelection for GpuiFrontendEngineComponent {
 #[async_trait::async_trait(?Send)]
 impl SutFrontendEngine for GpuiFrontendEngineComponent {
     /// Resolve the frontend engine's root-layout ViewModel — the ordered entity
-    /// id list the geometry y-order / contiguity checks compare against. Faithful
-    /// port of `E2ESut::frontend_root_vm` (sans the `unwatch`, which the window
-    /// owns). `None` while the root is still loading.
+    /// id list the geometry y-order / contiguity checks compare against.
+    /// Faithful port of `E2ESut::frontend_root_vm` (sans the `unwatch`,
+    /// which the window owns). `None` while the root is still loading.
     async fn frontend_root_vm(&self) -> Option<FrontendRootVm> {
         let root_uri = holon_api::root_layout_block_uri();
         let rqr = self.engine.ensure_watching(&root_uri);
@@ -324,18 +342,21 @@ impl SutFrontendEngine for GpuiFrontendEngineComponent {
 
 #[async_trait::async_trait(?Send)]
 impl SutFrontendEmissions for GpuiFrontendEngineComponent {
-    /// Force `viewport`, interpret the reactive root layout twice, and report on
-    /// the streaming providers. Faithful port of `E2ESut::provider_stability_report`
-    /// over the live window engine (the root id falls back to the layout root, as
-    /// E2ESut's did). `None` while the root is a loading/spacer placeholder.
+    /// Force `viewport`, interpret the reactive root layout twice, and report
+    /// on the streaming providers. Faithful port of
+    /// `E2ESut::provider_stability_report` over the live window engine (the
+    /// root id falls back to the layout root, as E2ESut's did). `None`
+    /// while the root is a loading/spacer placeholder.
     async fn provider_stability_report(
         &self,
         viewport: ViewportHint,
     ) -> Option<ProviderStabilityReport> {
-        use crate::pbt::value_fn_invariants::{
-            collect_providers, count_bottom_docks, rhai_mentions,
-        };
-        use std::collections::{HashMap, HashSet};
+        use std::collections::HashMap;
+        use std::collections::HashSet;
+
+        use crate::pbt::value_fn_invariants::collect_providers;
+        use crate::pbt::value_fn_invariants::count_bottom_docks;
+        use crate::pbt::value_fn_invariants::rhai_mentions;
 
         let reactive = self.engine.clone();
 
@@ -451,9 +472,9 @@ impl SutFrontendEmissions for GpuiFrontendEngineComponent {
     }
 
     /// Drain the intermediate ViewModel emissions accumulated during the last
-    /// transition and extract every `StateToggle`'s `(block_id, current)`. Faithful
-    /// port of `E2ESut::drain_vm_emission_toggles` over the background collector's
-    /// buffer (drain-once per tick).
+    /// transition and extract every `StateToggle`'s `(block_id, current)`.
+    /// Faithful port of `E2ESut::drain_vm_emission_toggles` over the
+    /// background collector's buffer (drain-once per tick).
     async fn drain_vm_emission_toggles(&self) -> Vec<(EntityUri, String)> {
         let emissions: Vec<holon_frontend::ViewModel> =
             std::mem::take(&mut *self.vm_emissions.lock().expect("vm_emissions lock"));
@@ -473,12 +494,12 @@ impl SutFrontendEmissions for GpuiFrontendEngineComponent {
         out
     }
 
-    /// Compare the persistent live ViewModel tree against a fresh re-interpret of
-    /// the same rows. Faithful port of `E2ESut::live_vs_fresh_tree_diff` over the
-    /// live window engine (drops `ensure_reactive_engine` — the component already
-    /// holds the engine — and keeps the persistent `live_tree` cell, reused across
-    /// transitions). `None` (Skip) while the main panel is loading / empty / has no
-    /// item template.
+    /// Compare the persistent live ViewModel tree against a fresh re-interpret
+    /// of the same rows. Faithful port of `E2ESut::live_vs_fresh_tree_diff`
+    /// over the live window engine (drops `ensure_reactive_engine` — the
+    /// component already holds the engine — and keeps the persistent
+    /// `live_tree` cell, reused across transitions). `None` (Skip) while
+    /// the main panel is loading / empty / has no item template.
     async fn live_vs_fresh_tree_diff(&self) -> Option<Vec<String>> {
         use futures::StreamExt;
 
@@ -648,9 +669,9 @@ impl SutFrontendEmissions for GpuiFrontendEngineComponent {
             let live_ids: Vec<&String> = live_sibs.iter().collect();
             if live_ids != want_ids {
                 prop_diffs.push(format!(
-                    "  ORDER under parent {parent}: live renders {live_ids:?} but sort_key \
-                     order is {want_ids:?} — the reactive collection is not ordering by sort_key \
-                     (the fractional-index authority)"
+                    "  ORDER under parent {parent}: live renders {live_ids:?} but sort_key order \
+                     is {want_ids:?} — the reactive collection is not ordering by sort_key (the \
+                     fractional-index authority)"
                 ));
             }
         }

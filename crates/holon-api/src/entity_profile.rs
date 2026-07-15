@@ -20,14 +20,14 @@ use std::sync::Arc;
 use rhai::Engine as RhaiEngine;
 use rhai::Scope;
 
-use crate::CompiledExpr;
-use crate::EntityName;
-use crate::Value;
 use crate::predicate::Predicate;
 use crate::render_types::OperationDescriptor;
 use crate::render_types::RenderExpr;
 use crate::render_types::RenderProfile;
 use crate::render_types::RenderVariant;
+use crate::CompiledExpr;
+use crate::EntityName;
+use crate::Value;
 
 /// A computed field: name + pre-compiled Rhai expression.
 pub type CompiledComputedField = (String, CompiledExpr);

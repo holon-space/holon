@@ -17,8 +17,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::Weak;
 
-use anyhow::Result;
 use anyhow::anyhow;
+use anyhow::Result;
 use async_trait::async_trait;
 use holon_api::BlockContent;
 use holon_api::EntityUri;
@@ -390,21 +390,19 @@ mod tests {
         let parent = EntityUri::block("p");
 
         assert!(!registry.write_position(&uri, "p", None).await.unwrap());
-        assert!(
-            !registry
-                .create_entity(
-                    &parent,
-                    None,
-                    &uri,
-                    holon_api::BlockContent::text("x"),
-                    &std::collections::HashMap::new(),
-                    &holon_api::Tags::default(),
-                    &[],
-                    &[],
-                )
-                .await
-                .unwrap()
-        );
+        assert!(!registry
+            .create_entity(
+                &parent,
+                None,
+                &uri,
+                holon_api::BlockContent::text("x"),
+                &std::collections::HashMap::new(),
+                &holon_api::Tags::default(),
+                &[],
+                &[],
+            )
+            .await
+            .unwrap());
         assert!(!registry.delete_entity(&uri).await.unwrap());
     }
 }

@@ -32,9 +32,9 @@ use holon_filesystem::RealFileSystem;
 use holon_orgmode::file_sync_controller::new_org_sync_controller;
 use tracing::field::Field;
 use tracing::field::Visit;
-use tracing_subscriber::Layer;
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::Layer;
 
 // ---------------------------------------------------------------------------
 // ERROR-level tracing capture (dependency-free of any test-log crate).

@@ -23,12 +23,12 @@ use holon_api::EntityUri;
 use holon_api::KeyChord;
 use holon_api::Region;
 use holon_api::Value;
-use holon_frontend::OperationIntent;
-use holon_frontend::ReactiveViewModel;
 use holon_frontend::geometry::GeometryProvider;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive::ReactiveEngine;
 use holon_frontend::user_driver::UserDriver;
+use holon_frontend::OperationIntent;
+use holon_frontend::ReactiveViewModel;
 use holon_gpui::geometry::BoundsRegistry;
 
 /// One sim pump cycle: real tokio time for backend watchers, drain gpui

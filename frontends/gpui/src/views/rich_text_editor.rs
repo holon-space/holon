@@ -29,6 +29,11 @@
 use std::ops::Range;
 use std::sync::Arc;
 
+use gpui::fill;
+use gpui::prelude::*;
+use gpui::px;
+use gpui::rgb;
+use gpui::size;
 use gpui::Bounds;
 use gpui::Context;
 use gpui::ElementInputHandler;
@@ -46,11 +51,6 @@ use gpui::UTF16Selection;
 use gpui::Window;
 use gpui::WrappedLine;
 use gpui::WrappedLineLayout;
-use gpui::fill;
-use gpui::prelude::*;
-use gpui::px;
-use gpui::rgb;
-use gpui::size;
 use holon_api::InlineMark;
 use holon_api::MarkSpan;
 use holon_core::__operations_mark_operations;
@@ -59,9 +59,9 @@ use holon_frontend::operations::OperationIntent;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::rich_text_selection::RichTextSelection;
 
-use crate::render::rich_text_runs::RichTextStyle;
 use crate::render::rich_text_runs::marks_to_text_runs;
 use crate::render::rich_text_runs::scalar_range_to_bytes;
+use crate::render::rich_text_runs::RichTextStyle;
 
 /// State backing the rich-text editor view.
 ///
@@ -685,8 +685,8 @@ mod tests {
         assert_eq!(e.byte_to_scalar(99), 2, "past-end clamps to scalar count");
     }
 
-    use holon_api::Value;
     use holon_api::types::EntityName;
+    use holon_api::Value;
 
     /// Smoke-test that the macro-generated `*_op()` constructors produce
     /// the right `(entity_name, op_name, params)` for the editor's

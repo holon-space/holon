@@ -14,9 +14,9 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::Result;
+use holon_api::block::Block;
 use holon_api::EntityUri;
 use holon_api::StorageEntity;
-use holon_api::block::Block;
 
 /// Result of parsing a structured-text file. Format-neutral.
 ///

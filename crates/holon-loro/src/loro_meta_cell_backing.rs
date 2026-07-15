@@ -14,16 +14,22 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
-use futures::{StreamExt, future::BoxFuture, stream::BoxStream};
-use loro::{ContainerTrait, LoroDoc, LoroMap};
+use anyhow::Result;
+use anyhow::anyhow;
+use futures::StreamExt;
+use futures::future::BoxFuture;
+use futures::stream::BoxStream;
+use holon_api::Value;
+use holon_core::cell::CellBacking;
+use loro::ContainerTrait;
+use loro::LoroDoc;
+use loro::LoroMap;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 
-use holon_api::Value;
-use holon_core::cell::CellBacking;
-
-use crate::loro_backend::{LoroBackend, properties_map_container, read_scalar_field_from_meta};
+use crate::loro_backend::LoroBackend;
+use crate::loro_backend::properties_map_container;
+use crate::loro_backend::read_scalar_field_from_meta;
 
 /// The scalar Rust types a block field cell can present. Bridges between the
 /// typed `Cell<T>` surface and the `Value` a property is stored as. `Value`
@@ -31,7 +37,8 @@ use crate::loro_backend::{LoroBackend, properties_map_container, read_scalar_fie
 /// write through one cell path without re-dispatching on the variant.
 pub trait LoroScalarField: Clone + Send + Sync + 'static {
     /// Decode the stored property (`None` when the key is absent) into `T`.
-    /// A present value of the wrong shape is corruption/caller error — fail loud.
+    /// A present value of the wrong shape is corruption/caller error — fail
+    /// loud.
     fn decode(stored: Option<Value>) -> Result<Self>;
     /// Encode `self` into the `Value` persisted under the property key.
     /// `Value::Null` deletes the key (mirrors `update_block_fields`).
@@ -181,8 +188,8 @@ impl<T: LoroScalarField> CellBacking<T> for LoroMetaCellBacking<T> {
                     ),
                     Err(_) => {
                         tracing::warn!(
-                            "LoroMetaCellBacking signal lagged ({block_id}, {field}); \
-                             consumer should call current() and resync"
+                            "LoroMetaCellBacking signal lagged ({block_id}, {field}); consumer \
+                             should call current() and resync"
                         );
                         None
                     }
@@ -210,7 +217,8 @@ impl<T: LoroScalarField> CellBacking<T> for LoroMetaCellBacking<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::loro_backend::{STABLE_ID, TREE_NAME};
+    use crate::loro_backend::STABLE_ID;
+    use crate::loro_backend::TREE_NAME;
 
     fn doc_with_block(block_id: &str) -> (Arc<LoroDoc>, Arc<LoroBackend>) {
         let doc = Arc::new(LoroDoc::new());

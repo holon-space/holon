@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use holon_frontend::LiveBlock;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
+use holon_frontend::LiveBlock;
 
 /// A thunk that materialises a fresh `ReactiveViewModel` on demand.
 pub type BlockTreeThunk = Arc<dyn Fn() -> ReactiveViewModel + Send + Sync>;

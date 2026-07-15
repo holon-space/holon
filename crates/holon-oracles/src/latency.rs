@@ -26,11 +26,11 @@
 
 use std::time::SystemTime;
 
+use tracing::field::Field;
+use tracing::field::Visit;
 use tracing::Event;
 use tracing::Metadata;
 use tracing::Subscriber;
-use tracing::field::Field;
-use tracing::field::Visit;
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::layer::Layer;
 

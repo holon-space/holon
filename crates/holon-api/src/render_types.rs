@@ -1,6 +1,9 @@
-use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
+
+use serde::Deserialize;
+use serde::Serialize;
 
 use crate::predicate::Predicate;
 use crate::types::EntityName;
@@ -60,9 +63,9 @@ pub struct RuleSpec {
 
 /// Per-row UI template for heterogeneous data rendering.
 ///
-/// When a PRQL query uses `derive { ui = (render ...) }` after a `from <table>`,
-/// the compiler extracts the render expression and assigns it an index.
-/// The SQL output will have `<index> as ui` for that table's rows.
+/// When a PRQL query uses `derive { ui = (render ...) }` after a `from
+/// <table>`, the compiler extracts the render expression and assigns it an
+/// index. The SQL output will have `<index> as ui` for that table's rows.
 /// At render time, Flutter looks up `row['ui']` to find the right template.
 /// flutter_rust_bridge:non_opaque
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,7 +100,8 @@ pub struct RenderProfile {
     pub variants: Vec<RenderVariant>,
 }
 
-// ALLOW(compatibility): RowProfile is a deprecated alias still used by serialized fixtures
+// ALLOW(compatibility): RowProfile is a deprecated alias still used by
+// serialized fixtures
 /// Backward compatibility alias.
 pub type RowProfile = RenderProfile;
 
@@ -203,7 +207,8 @@ pub enum Trigger {
 pub struct OperationDescriptor {
     // Entity and table identification
     pub entity_name: EntityName, // "todoist_task", "block"
-    /// Short name for entity-typed params (e.g., "task" for task_id, "project" for project_id)
+    /// Short name for entity-typed params (e.g., "task" for task_id, "project"
+    /// for project_id)
     pub entity_short_name: String,
     pub id_column: String, // "id"
 
@@ -214,7 +219,8 @@ pub struct OperationDescriptor {
     pub required_params: Vec<OperationParam>,
     /// Fields that this operation affects (for pie menu auto-attachment)
     pub affected_fields: Vec<String>, // ["is_collapsed"], ["parent_id", "depth", "sort_key"], etc.
-    /// How to derive required params from alternative sources (e.g., tree_position → parent_id)
+    /// How to derive required params from alternative sources (e.g.,
+    /// tree_position → parent_id)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub param_mappings: Vec<ParamMapping>,
 
@@ -242,7 +248,8 @@ pub struct OperationDescriptor {
     pub precondition: Option<Arc<Box<PreconditionChecker>>>,
 }
 
-// Manual PartialEq: `precondition` is a `dyn Fn` which can't implement PartialEq.
+// Manual PartialEq: `precondition` is a `dyn Fn` which can't implement
+// PartialEq.
 impl PartialEq for OperationDescriptor {
     fn eq(&self, other: &Self) -> bool {
         self.entity_name == other.entity_name
@@ -388,7 +395,8 @@ impl Operation {
         }
     }
 
-    /// Set the entity name (useful when entity_name is not known at construction time)
+    /// Set the entity name (useful when entity_name is not known at
+    /// construction time)
     pub fn with_entity_name(mut self, entity_name: impl Into<EntityName>) -> Self {
         self.entity_name = entity_name.into();
         self
@@ -416,14 +424,16 @@ pub enum TypeHint {
     EntityId { entity_name: EntityName },
     /// One-of constraint: parameter must be one of the provided values
     ///
-    /// Example: `OneOf { values: [...] }` means this parameter must be one of the listed values.
-    /// Values can be strings, objects (like CompletionStateInfo), or any other Value type.
-    /// Used for state fields, priority levels, etc.
+    /// Example: `OneOf { values: [...] }` means this parameter must be one of
+    /// the listed values. Values can be strings, objects (like
+    /// CompletionStateInfo), or any other Value type. Used for state
+    /// fields, priority levels, etc.
     OneOf { values: Vec<Value> },
     /// Nested object with sub-fields.
     ///
     /// Produced from JSON Schema `"type": "object"` with `"properties"`.
-    /// Flutter UI rendering is a follow-up task; for now this enables schema introspection.
+    /// Flutter UI rendering is a follow-up task; for now this enables schema
+    /// introspection.
     Object { fields: Vec<OperationParam> },
     /// Unevaluated expression (lazy computation / template).
     /// Used by widget builders for args that should remain as RenderExpr
@@ -453,14 +463,16 @@ impl TypeHint {
                     .split(',')
                     .map(|v| v.trim().to_string())
                     .collect();
-                // ALLOW(compatibility): legacy enum:foo,bar form predates the structured Value::String list
-                // Convert string values to Value::String for backward compatibility
+                // ALLOW(compatibility): legacy enum:foo,bar form predates the structured
+                // Value::String list Convert string values to Value::String for
+                // backward compatibility
                 let values: Vec<Value> = string_values.into_iter().map(Value::String).collect();
                 TypeHint::OneOf { values }
             }
             "expr" | "expression" | "template" => TypeHint::Expr,
             "collection" | "items" => TypeHint::Collection,
-            _ => TypeHint::String, // Default fallback // ALLOW(fallback): legacy string-format conversion default
+            _ => TypeHint::String, /* Default fallback // ALLOW(fallback): legacy string-format
+                                    * conversion default */
         }
     }
 }
@@ -479,27 +491,31 @@ pub struct OperationParam {
 
 /// Describes how to derive required parameters from alternative sources.
 ///
-/// Enables auto-discovery: widgets provide generic params (like `tree_position` or `selected_id`),
-/// and operations declare how to map those to their specific `required_params`.
-/// flutter_rust_bridge:non_opaque
+/// Enables auto-discovery: widgets provide generic params (like `tree_position`
+/// or `selected_id`), and operations declare how to map those to their specific
+/// `required_params`. flutter_rust_bridge:non_opaque
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ParamMapping {
     /// Source param name from widget (e.g., "tree_position", "selected_id")
     pub from: String,
-    /// Which required params this source provides (e.g., ["parent_id", "predecessor"])
+    /// Which required params this source provides (e.g., ["parent_id",
+    /// "predecessor"])
     pub provides: Vec<String>,
     /// Default values for params not extractable from source
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub defaults: HashMap<String, Value>,
 }
 
-/// Custom deserializer for TypeHint that supports both old string format and new enum format
+/// Custom deserializer for TypeHint that supports both old string format and
+/// new enum format
 fn deserialize_type_hint<'de, D>(deserializer: D) -> Result<TypeHint, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    use serde::de::{self, Visitor};
     use std::fmt;
+
+    use serde::de::Visitor;
+    use serde::de::{self};
 
     struct TypeHintVisitor;
 
@@ -600,7 +616,8 @@ pub enum RenderExpr {
         name: String,
         args: Vec<Arg>,
     },
-    /// Reference to another block — frontend calls render_entity(block_id) to get its WidgetSpec
+    /// Reference to another block — frontend calls render_entity(block_id) to
+    /// get its WidgetSpec
     LiveBlock {
         block_id: String,
     },
@@ -627,7 +644,8 @@ impl RenderExpr {
     /// Serialize back to Rhai DSL syntax.
     ///
     /// Enables round-trip: `RenderExpr → to_rhai() → parse → RenderExpr`.
-    /// Used by PBT to generate render source block content from typed expressions.
+    /// Used by PBT to generate render source block content from typed
+    /// expressions.
     ///
     /// flutter_rust_bridge:ignore
     pub fn to_rhai(&self) -> String {

@@ -381,7 +381,11 @@ pub fn eval(expr: &Expr, ctx: &dyn EvalCtx) -> Option<f32> {
             let av = eval(a, ctx)?;
             let bv = eval(b, ctx)?;
             // Division by zero → unconstrained, not an exception.
-            if bv == 0.0 { None } else { Some(av / bv) }
+            if bv == 0.0 {
+                None
+            } else {
+                Some(av / bv)
+            }
         }
         Expr::MinN(items) => items.iter().filter_map(|e| eval(e, ctx)).reduce(f32::min),
         Expr::MaxN(items) => items.iter().filter_map(|e| eval(e, ctx)).reduce(f32::max),

@@ -10,26 +10,26 @@
 //! ⚠ `--test-threads=1` mandatory: gpui `TestApp` is not parallel-safe.
 
 use std::cell::RefCell;
-use std::panic::AssertUnwindSafe;
 use std::panic::catch_unwind;
-use std::sync::Arc;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Instant;
 
 use holon_api::EntityUri;
 use holon_api::Region;
-use holon_integration_tests::pbt::ReferenceState;
 use holon_integration_tests::pbt::composed::harness::ComposedSut;
-use holon_integration_tests::pbt::composed::wide_e2e::WideE2E;
-use holon_integration_tests::pbt::composed::wide_e2e::WideE2EMachine;
-use holon_integration_tests::pbt::composed::wide_e2e::WideE2EWindowedMachine;
 use holon_integration_tests::pbt::composed::wide_e2e::disclose_excluded;
 use holon_integration_tests::pbt::composed::wide_e2e::narrow_to_windowed_alphabet;
 use holon_integration_tests::pbt::composed::wide_e2e::set_windowed_cap_set;
 use holon_integration_tests::pbt::composed::wide_e2e::wide_e2e_windowed_ref;
+use holon_integration_tests::pbt::composed::wide_e2e::WideE2E;
+use holon_integration_tests::pbt::composed::wide_e2e::WideE2EMachine;
+use holon_integration_tests::pbt::composed::wide_e2e::WideE2EWindowedMachine;
 use holon_integration_tests::pbt::transitions::ClickBlock;
 use holon_integration_tests::pbt::transitions::E2ETransition;
+use holon_integration_tests::pbt::ReferenceState;
 use proptest::test_runner::Config;
 use proptest::test_runner::TestCaseError;
 use proptest::test_runner::TestRunner;

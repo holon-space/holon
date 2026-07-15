@@ -24,9 +24,9 @@
 
 use std::path::Path;
 
+use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
-use anyhow::bail;
 use holon_api::capability::ConsolidatorId;
 use holon_core::replica_state::DurableReplicaState;
 
@@ -172,8 +172,8 @@ fn wipe_durable_state(paths: &[std::path::PathBuf]) -> Result<()> {
 mod tests {
     use holon_api::capability::SessionCapabilities;
     use holon_loro::durable_state::LoroDurableState;
-    use holon_turso::durable_state::TursoDurableState;
     use holon_turso::durable_state::instance_state_root;
+    use holon_turso::durable_state::TursoDurableState;
 
     use super::*;
 

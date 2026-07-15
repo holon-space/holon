@@ -11,19 +11,24 @@
 //! This validates the `evaluate` semantics BEFORE they are wired into the
 //! state-machine PBT to replace the `is_descendant_of_any(focus_roots)` proxy.
 //!
-//! Run: `cargo test -p holon-integration-tests --features pbt --test query_equivalence_pbt`
+//! Run: `cargo test -p holon-integration-tests --features pbt --test
+//! query_equivalence_pbt`
 
 #![cfg(feature = "pbt")]
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::collections::HashMap;
 
 use holon::api::backend_engine::BackendEngine;
 use holon::di::test_helpers::create_test_engine;
 use holon::storage::BLOCK_WRITE_TABLE;
+use holon_api::EntityUri;
 use holon_api::QueryContext;
+use holon_api::QueryLanguage;
 use holon_api::block::Block;
-use holon_api::{EntityUri, QueryLanguage};
-use holon_integration_tests::pbt::query::{QuerySource, TestQuery};
+use holon_integration_tests::pbt::query::QuerySource;
+use holon_integration_tests::pbt::query::TestQuery;
 use proptest::prelude::*;
 use tokio::runtime::Runtime;
 use tokio_stream::StreamExt;
@@ -103,8 +108,8 @@ async fn seed_backend(engine: &BackendEngine, forest: &[GenBlock]) {
         .expect("seed block_raw");
 }
 
-/// Run `source` compiled to `lang` against the backend; return the id set of the
-/// first (initial) batch.
+/// Run `source` compiled to `lang` against the backend; return the id set of
+/// the first (initial) batch.
 async fn backend_ids(
     engine: &BackendEngine,
     query: &TestQuery,

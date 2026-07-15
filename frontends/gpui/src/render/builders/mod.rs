@@ -87,10 +87,10 @@ pub fn scrollable_list_wrapper<E: gpui::IntoElement>(
         .into_any_element()
 }
 
-use gpui::AnyElement;
-use gpui::Div;
 use gpui::div;
 use gpui::prelude::*;
+use gpui::AnyElement;
+use gpui::Div;
 
 use crate::entity_view_registry::LocalEntityScope;
 use crate::geometry::BoundsRegistry;

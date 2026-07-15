@@ -522,10 +522,9 @@ mod tests {
             boundary: Boundary::Top,
         };
         assert!(nav.navigate(&eu("only"), NavDirection::Up, &hint).is_none());
-        assert!(
-            nav.navigate(&eu("only"), NavDirection::Down, &hint)
-                .is_none()
-        );
+        assert!(nav
+            .navigate(&eu("only"), NavDirection::Down, &hint)
+            .is_none());
     }
 
     #[test]
@@ -536,14 +535,12 @@ mod tests {
             column: 0,
             boundary: Boundary::Top,
         };
-        assert!(
-            nav.navigate(&eu("ghost"), NavDirection::Up, &hint)
-                .is_none()
-        );
-        assert!(
-            nav.navigate(&eu("ghost"), NavDirection::Down, &hint)
-                .is_none()
-        );
+        assert!(nav
+            .navigate(&eu("ghost"), NavDirection::Up, &hint)
+            .is_none());
+        assert!(nav
+            .navigate(&eu("ghost"), NavDirection::Down, &hint)
+            .is_none());
     }
 
     // -- TreeNavigator --
@@ -605,10 +602,9 @@ mod tests {
         assert_eq!(t.placement, CursorPlacement::End);
 
         // Left from root → None (no parent)
-        assert!(
-            nav.navigate(&eu("root"), NavDirection::Left, &hint)
-                .is_none()
-        );
+        assert!(nav
+            .navigate(&eu("root"), NavDirection::Left, &hint)
+            .is_none());
     }
 
     #[test]
@@ -637,19 +633,16 @@ mod tests {
             column: 0,
             boundary: Boundary::Left,
         };
-        assert!(
-            nav.navigate(&eu("solo"), NavDirection::Left, &hint)
-                .is_none()
-        );
-        assert!(
-            nav.navigate(&eu("solo"), NavDirection::Right, &hint)
-                .is_none()
-        );
+        assert!(nav
+            .navigate(&eu("solo"), NavDirection::Left, &hint)
+            .is_none());
+        assert!(nav
+            .navigate(&eu("solo"), NavDirection::Right, &hint)
+            .is_none());
         assert!(nav.navigate(&eu("solo"), NavDirection::Up, &hint).is_none());
-        assert!(
-            nav.navigate(&eu("solo"), NavDirection::Down, &hint)
-                .is_none()
-        );
+        assert!(nav
+            .navigate(&eu("solo"), NavDirection::Down, &hint)
+            .is_none());
     }
 
     // -- TableNavigator --
@@ -683,10 +676,9 @@ mod tests {
         assert_eq!(t.placement, CursorPlacement::End);
 
         // Boundary: right from a2 → None
-        assert!(
-            nav.navigate(&eu("a2"), NavDirection::Right, &hint)
-                .is_none()
-        );
+        assert!(nav
+            .navigate(&eu("a2"), NavDirection::Right, &hint)
+            .is_none());
         // Boundary: down from b1 → None
         assert!(nav.navigate(&eu("b1"), NavDirection::Down, &hint).is_none());
     }
@@ -705,10 +697,9 @@ mod tests {
 
         // Down from missing cell position doesn't crash
         // Right from a0 → skips None, returns None (no cell at (0,1))
-        assert!(
-            nav.navigate(&eu("a0"), NavDirection::Right, &hint)
-                .is_none()
-        );
+        assert!(nav
+            .navigate(&eu("a0"), NavDirection::Right, &hint)
+            .is_none());
     }
 
     #[test]
@@ -720,17 +711,14 @@ mod tests {
             boundary: Boundary::Top,
         };
         assert!(nav.navigate(&eu("only"), NavDirection::Up, &hint).is_none());
-        assert!(
-            nav.navigate(&eu("only"), NavDirection::Down, &hint)
-                .is_none()
-        );
-        assert!(
-            nav.navigate(&eu("only"), NavDirection::Left, &hint)
-                .is_none()
-        );
-        assert!(
-            nav.navigate(&eu("only"), NavDirection::Right, &hint)
-                .is_none()
-        );
+        assert!(nav
+            .navigate(&eu("only"), NavDirection::Down, &hint)
+            .is_none());
+        assert!(nav
+            .navigate(&eu("only"), NavDirection::Left, &hint)
+            .is_none());
+        assert!(nav
+            .navigate(&eu("only"), NavDirection::Right, &hint)
+            .is_none());
     }
 }

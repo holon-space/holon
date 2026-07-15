@@ -6,9 +6,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use holon_api::render_types::OperationWiring;
 use holon_api::EntityName;
 use holon_api::Value;
-use holon_api::render_types::OperationWiring;
 
 use crate::command_provider::CommandProvider;
 use crate::input_trigger::ViewEvent;

@@ -13,11 +13,11 @@ mod support;
 
 use std::sync::Arc;
 
+use gpui::px;
+use gpui::size;
 use gpui::Pixels;
 use gpui::Size;
 use gpui::TestAppContext;
-use gpui::px;
-use gpui::size;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
 use support::assert_layout_ok;
 use support::render_fixture_sized;

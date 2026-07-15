@@ -4,7 +4,6 @@ use holon_macros::Entity;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::Value;
 use crate::entity_uri::EntityUri;
 use crate::inline_mark::MarkSpan;
 use crate::row_id;
@@ -12,6 +11,7 @@ use crate::types::ContentType;
 use crate::types::SourceLanguage;
 use crate::types::Tags;
 use crate::uri_from_row;
+use crate::Value;
 
 // =============================================================================
 // BlockContent - Discriminated union for block content types
@@ -660,7 +660,8 @@ impl Block {
             .get("_source_header_args")
             .and_then(|v| {
                 if let Value::String(s) = v {
-                    serde_json::from_str(s).ok() // ALLOW(ok): properties may not be JSON
+                    serde_json::from_str(s).ok() // ALLOW(ok): properties may
+                                                 // not be JSON
                 } else {
                     None
                 }

@@ -11,9 +11,9 @@
 
 use uuid::Uuid;
 
-use crate::Value;
 use crate::entity::StorageEntity;
 use crate::entity_uri::EntityUri;
+use crate::Value;
 
 /// Fixed, checked-in namespace for all Holon rule-effect UUIDs. Changing this
 /// re-homes every deterministic id, so it is a hard-coded constant, never

@@ -18,12 +18,12 @@ use std::collections::HashMap;
 use anyhow::Result;
 use async_trait::async_trait;
 
+use crate::query_context::QueryContext;
 use crate::EnrichedChangeStream;
 use crate::EntityUri;
 use crate::LinkCandidate;
 use crate::QueryLanguage;
 use crate::Value;
-use crate::query_context::QueryContext;
 
 /// Compile + execute + watch queries, behind storage-agnostic types.
 /// Implemented by the Turso `BackendEngine`; absent in a no-Turso wiring.

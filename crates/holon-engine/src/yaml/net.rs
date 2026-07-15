@@ -4,12 +4,12 @@ use std::path::Path;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::NetDef;
-use crate::TransitionDef;
 use crate::arc::CreateArc;
 use crate::arc::InputArc;
 use crate::arc::OutputArc;
 use crate::guard::CompiledExpr;
+use crate::NetDef;
+use crate::TransitionDef;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct YamlTransition {

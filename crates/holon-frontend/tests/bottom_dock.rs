@@ -9,15 +9,15 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use holon_api::Value;
 use holon_api::render_types::Arg;
 use holon_api::render_types::RenderExpr;
 use holon_api::widget_spec::DataRow;
+use holon_api::Value;
+use holon_frontend::reactive::BuilderServices;
 use holon_frontend::AvailableSpace;
 use holon_frontend::ReactiveViewModel;
 use holon_frontend::RenderContext;
 use holon_frontend::StubBuilderServices;
-use holon_frontend::reactive::BuilderServices;
 
 fn lit(name: &str) -> RenderExpr {
     RenderExpr::FunctionCall {

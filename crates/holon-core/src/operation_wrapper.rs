@@ -13,11 +13,11 @@ use holon_api::OperationDescriptor;
 use holon_api::StreamPosition;
 
 use crate::storage::types::StorageEntity;
+use crate::traits::generate_sync_operation;
 use crate::traits::OperationProvider;
 use crate::traits::OperationResult;
 use crate::traits::Result;
 use crate::traits::SyncableProvider;
-use crate::traits::generate_sync_operation;
 
 /// Wrapper that adds automatic sync after operation execution.
 ///

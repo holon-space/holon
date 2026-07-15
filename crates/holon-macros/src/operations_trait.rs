@@ -1,9 +1,15 @@
 use proc_macro2::TokenStream;
-use quote::{format_ident, quote};
-use syn::{FnArg, ItemTrait, Meta, Pat, Type};
+use quote::format_ident;
+use quote::quote;
+use syn::FnArg;
+use syn::ItemTrait;
+use syn::Meta;
+use syn::Pat;
+use syn::Type;
 
 pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
-    // Parse provider_name from attribute: #[operations_trait(provider_name = "todoist")]
+    // Parse provider_name from attribute: #[operations_trait(provider_name =
+    // "todoist")]
     let provider_name = parse_provider_name_str(attr);
 
     let trait_name = &trait_def.ident;
@@ -29,7 +35,8 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                     // Look for type bounds like `T: BlockEntity + Send + Sync`
                     if let syn::WherePredicate::Type(pred_type) = pred {
                         // Replace the type parameter name (T) with E in the predicate
-                        // This is a simplified approach - we assume the first generic param is the entity type
+                        // This is a simplified approach - we assume the first generic param is the
+                        // entity type
                         let mut new_pred = pred_type.clone();
                         // Replace T with E in the type path
                         if let syn::Type::Path(type_path) = &mut new_pred.bounded_ty
@@ -47,10 +54,12 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
         })
         .unwrap_or_default();
 
-    // Detect crate path for Result type and Value types (needed for dispatch function generation)
+    // Detect crate path for Result type and Value types (needed for dispatch
+    // function generation)
     let pkg_name = std::env::var("CARGO_PKG_NAME").unwrap_or_default();
-    // Only holon-core is "internal": the shared traits + Result/UnknownOperationError
-    // live there, and every other crate (including holon) reaches them via holon_core::.
+    // Only holon-core is "internal": the shared traits +
+    // Result/UnknownOperationError live there, and every other crate (including
+    // holon) reaches them via holon_core::.
     let is_internal = pkg_name == "holon-core";
     let crate_path = if is_internal {
         quote! { crate }
@@ -227,7 +236,8 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                 quote! { vec![#(#mapping_exprs),*] }
             };
 
-            // Construct entity_name: if provider_name is set, use "{provider_name}.{operation_name}", otherwise use passed entity_name
+            // Construct entity_name: if provider_name is set, use
+            // "{provider_name}.{operation_name}", otherwise use passed entity_name
             let entity_name_expr = if let Some(ref provider) = provider_name {
                 let provider_lit = provider.clone();
                 let operation_name_lit = name_lit.clone();
@@ -770,7 +780,8 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
         })
         .collect();
 
-    // Generate the dispatch function differently based on whether trait has generics
+    // Generate the dispatch function differently based on whether trait has
+    // generics
     let dispatch_fn = if has_generics {
         quote! {
             pub async fn dispatch_operation<DS, E>(
@@ -958,7 +969,8 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
     expanded
 }
 
-/// Parse provider_name from macro attribute string: #[operations_trait(provider_name = "todoist")]
+/// Parse provider_name from macro attribute string:
+/// #[operations_trait(provider_name = "todoist")]
 fn parse_provider_name_str(attr_str: &str) -> Option<String> {
     if attr_str.is_empty() {
         return None;
@@ -1075,7 +1087,9 @@ fn extract_require_precondition(attrs: &[syn::Attribute]) -> Option<proc_macro2:
     }
 }
 
-use crate::attr_parser::{self, ParsedEnumFrom, ParsedParamMapping};
+use crate::attr_parser::ParsedEnumFrom;
+use crate::attr_parser::ParsedParamMapping;
+use crate::attr_parser::{self};
 
 fn extract_param_mappings(attrs: &[syn::Attribute]) -> Vec<ParsedParamMapping> {
     attr_parser::extract_param_mappings(attrs)
@@ -1089,7 +1103,8 @@ fn extract_enum_from(attrs: &[syn::Attribute]) -> Option<ParsedEnumFrom> {
 fn generate_precondition_closure(
     method: &syn::TraitItemFn,
     precondition_tokens: &proc_macro2::TokenStream,
-    _crate_path: &proc_macro2::TokenStream, // ALLOW(unused_param): kept for symmetry with sibling generators
+    _crate_path: &proc_macro2::TokenStream, /* ALLOW(unused_param): kept for symmetry with
+                                             * sibling generators */
 ) -> proc_macro2::TokenStream {
     let mut param_declarations = Vec::new();
 
@@ -1270,8 +1285,8 @@ pub fn extract_param_name(pat: &Pat) -> String {
 /// OperationDescriptor param name or the StorageEntity keys used for dispatch
 /// and precondition lookup — otherwise a caller passing the logical name (`id`)
 /// could never match a binding generated from `_id`. The binding identifier
-/// keeps the underscore (so the unused-variable lint stays suppressed); only the
-/// key/name string is normalized here. The wildcard `_` is left untouched.
+/// keeps the underscore (so the unused-variable lint stays suppressed); only
+/// the key/name string is normalized here. The wildcard `_` is left untouched.
 fn param_wire_name(ident_name: &str) -> String {
     ident_name
         .strip_prefix('_')

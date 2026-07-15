@@ -16,8 +16,8 @@ mod support;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use holon_api::Value;
 use holon_api::render_types::OperationWiring;
+use holon_api::Value;
 use holon_frontend::editor_view_model::EditorAction;
 use holon_frontend::editor_view_model::EditorKey;
 use holon_frontend::editor_view_model::EditorViewModel;

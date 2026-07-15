@@ -12,6 +12,10 @@
 //!
 //! Run: `cargo test -p holon-gpui --test list_scroll_spike`
 
+use gpui::div;
+use gpui::list;
+use gpui::prelude::*;
+use gpui::px;
 use gpui::Context;
 use gpui::IntoElement;
 use gpui::ListAlignment;
@@ -19,10 +23,6 @@ use gpui::ListState;
 use gpui::Render;
 use gpui::TestAppContext;
 use gpui::Window;
-use gpui::div;
-use gpui::list;
-use gpui::prelude::*;
-use gpui::px;
 use holon_frontend::geometry::GeometryProvider;
 use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::geometry::TransparentTracker;

@@ -1696,7 +1696,8 @@ pub enum EngineFocus {
     Focused(EntityUri),
 }
 
-#[holon_macros::capmap_adapter] // mixed trait (7 async + 1 sync) → async-trait(?Send); emits CapName + `impl … for CapMap`
+#[holon_macros::capmap_adapter] // mixed trait (7 async + 1 sync) → async-trait(?Send); emits CapName + `impl …
+                                // for CapMap`
 pub trait SutDriver {
     async fn driver_send_key_chord(&self, chord: &str);
     async fn driver_click(&self, id: &EntityUri);
@@ -2520,4 +2521,21 @@ pub trait SutFixtureFs {
     async fn git_init(&self);
     async fn jj_git_init(&self);
     async fn create_stale_loro(&self, org_filename: &str, corruption_type: LoroCorruptionType);
+}
+
+/// SUT capability: instantiate a block template through the production
+/// `block.instantiate_template` operation. The template is canned inline
+/// (a `{{date}}` root with one `{{mood}}` child carrying a `Link` mark).
+/// Dispatched through the op-floor `DirectUserDriver` which first seeds
+/// the template blocks (idempotent `block.create`) then calls
+/// `instantiate_template` via the production engine.
+#[holon_macros::capmap_adapter]
+pub trait SutTemplateInstantiate {
+    async fn instantiate_template(
+        &self,
+        template_id: &EntityUri,
+        target_parent: &EntityUri,
+        context_key: &str,
+        bindings: &[(String, String)],
+    );
 }

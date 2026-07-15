@@ -15,6 +15,9 @@
 
 use std::sync::Arc;
 
+use gpui::div;
+use gpui::prelude::*;
+use gpui::px;
 use gpui::AnyElement;
 use gpui::AnyWindowHandle;
 use gpui::AsyncApp;
@@ -23,21 +26,18 @@ use gpui::EventEmitter;
 use gpui::IntoElement;
 use gpui::MouseButton;
 use gpui::SharedString;
-use gpui::div;
-use gpui::prelude::*;
-use gpui::px;
 use holon::api::backend_engine::BackendEngine;
 use holon::storage::BLOCK_READ_TABLE;
 use holon::storage::BLOCK_WRITE_TABLE;
 use holon_api::EntityUri;
-use holon_oracles::OracleMode;
 use holon_oracles::checks::ParentRow;
 use holon_oracles::checks::SourceLanguageRow;
+use holon_oracles::runner::run_oracle_loop;
 use holon_oracles::runner::OracleRunnerConfig;
 use holon_oracles::runner::OracleStateAccess;
-use holon_oracles::runner::run_oracle_loop;
 use holon_oracles::status::OracleStatus;
 use holon_oracles::status::Violation;
+use holon_oracles::OracleMode;
 
 // ─── Engine snapshot access ─────────────────────────────────────────────────
 

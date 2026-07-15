@@ -11,6 +11,7 @@
 // `StorageEntity` type they belong to (the write-path param contract is shared
 // kernel, not Loro-specific). Re-exported here for back-compat with the
 // `holon::sync::event_bus::*` consumers.
-pub use holon_api::{POSITION_AFTER_BLOCK_ID_PARAM, ROUTING_DOC_URI_KEY};
+pub use holon_api::POSITION_AFTER_BLOCK_ID_PARAM;
+pub use holon_api::ROUTING_DOC_URI_KEY;
 pub use holon_core::EventOrigin;
 pub use holon_core::PublishErrorTracker;

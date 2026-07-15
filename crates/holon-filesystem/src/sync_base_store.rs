@@ -24,9 +24,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use holon_api::SnapshotBlock;
 #[cfg(test)]
 use holon_api::block::Block;
+use holon_api::SnapshotBlock;
 use tracing::info;
 use tracing::warn;
 

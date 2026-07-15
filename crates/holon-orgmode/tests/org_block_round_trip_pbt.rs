@@ -28,11 +28,11 @@ use std::path::PathBuf;
 
 use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
-use holon_block_roundtrip_testing::NormalizedDocument;
 use holon_block_roundtrip_testing::assert_normalized_docs_equal;
 use holon_block_roundtrip_testing::build_blocks;
 use holon_block_roundtrip_testing::root_headlines_strategy;
 use holon_block_roundtrip_testing::valid_title;
+use holon_block_roundtrip_testing::NormalizedDocument;
 use holon_core::file_format::FileFormatAdapter;
 use holon_orgmode::file_format::OrgFormatAdapter;
 use holon_orgmode::models::OrgDocumentExt;

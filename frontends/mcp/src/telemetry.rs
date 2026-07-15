@@ -7,8 +7,8 @@
 use std::env;
 
 use anyhow::Result;
-use opentelemetry::KeyValue;
 use opentelemetry::global;
+use opentelemetry::KeyValue;
 use opentelemetry_sdk::Resource;
 
 /// Initialize OpenTelemetry providers
@@ -129,8 +129,8 @@ pub fn init_opentelemetry() -> Result<()> {
 ///
 /// Returns only the telemetry layer for now. Log bridge requires storing logger
 /// provider reference.
-pub fn create_opentelemetry_layer()
--> impl tracing_subscriber::Layer<tracing_subscriber::Registry> + Send + Sync {
+pub fn create_opentelemetry_layer(
+) -> impl tracing_subscriber::Layer<tracing_subscriber::Registry> + Send + Sync {
     // Get service name
     let service_name = env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "holon-mcp".to_string());
     let service_name_static: &'static str = Box::leak(service_name.into_boxed_str());

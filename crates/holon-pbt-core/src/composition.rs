@@ -899,24 +899,20 @@ mod poc {
             vec!["inv-no-orphan-blocks", "inv-editor-caret-matches-ref"],
         );
         // No renderer → neither render invariant selects.
-        assert!(
-            mem.deselected
-                .iter()
-                .any(|i| i.0 == "inv-decompiled-rows-rendered")
-        );
-        assert!(
-            mem.deselected
-                .iter()
-                .any(|i| i.0 == "inv-shows-source-when-no-query")
-        );
+        assert!(mem
+            .deselected
+            .iter()
+            .any(|i| i.0 == "inv-decompiled-rows-rendered"));
+        assert!(mem
+            .deselected
+            .iter()
+            .any(|i| i.0 == "inv-shows-source-when-no-query"));
 
         let degraded = block_on(run_selected(&reg, &gpui_memory_degraded(), &r));
         // Renderer present, query ABSENT → degraded twin selects, full does not.
-        assert!(
-            degraded
-                .ran_ids()
-                .contains(&"inv-shows-source-when-no-query")
-        );
+        assert!(degraded
+            .ran_ids()
+            .contains(&"inv-shows-source-when-no-query"));
         assert!(!degraded.ran_ids().contains(&"inv-decompiled-rows-rendered"));
 
         let full = block_on(run_selected(&reg, &full_e2e(), &r));

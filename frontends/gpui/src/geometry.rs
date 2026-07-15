@@ -1,35 +1,48 @@
-//! GPUI GeometryProvider — reads from a shared BoundsRegistry populated during render.
+//! GPUI GeometryProvider — reads from a shared BoundsRegistry populated during
+//! render.
 //!
-//! `BoundsTracker` is a transparent wrapper element that records the computed bounds
-//! of its child into the `BoundsRegistry` during the prepaint phase. Use `tracked()`
-//! to wrap any element that should be locatable for click-based PBT testing.
+//! `BoundsTracker` is a transparent wrapper element that records the computed
+//! bounds of its child into the `BoundsRegistry` during the prepaint phase. Use
+//! `tracked()` to wrap any element that should be locatable for click-based PBT
+//! testing.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use std::sync::RwLock;
 
-use gpui::{
-    AnyElement, App, Bounds, Element, ElementId, GlobalElementId, InspectorElementId, IntoElement,
-    LayoutId, Pixels, Window,
-};
-use holon_frontend::geometry::{ElementInfo, GeometryProvider};
+use gpui::AnyElement;
+use gpui::App;
+use gpui::Bounds;
+use gpui::Element;
+use gpui::ElementId;
+use gpui::GlobalElementId;
+use gpui::InspectorElementId;
+use gpui::IntoElement;
+use gpui::LayoutId;
+use gpui::Pixels;
+use gpui::Window;
+use holon_frontend::geometry::ElementInfo;
+use holon_frontend::geometry::GeometryProvider;
 use holon_frontend::size_expectation::SizeBounds;
 
 /// Shared registry of element metadata, populated during GPUI render passes.
 ///
 /// Double-buffered: writes during a render pass go to `staged`, reads come from
-/// `committed`. At the start of each render pass, `begin_pass()` atomically moves
-/// the previous `staged` into `committed` and resets `staged` for the new pass.
+/// `committed`. At the start of each render pass, `begin_pass()` atomically
+/// moves the previous `staged` into `committed` and resets `staged` for the new
+/// pass.
 ///
-/// This gives readers a consistent snapshot of the PREVIOUS fully-completed render:
+/// This gives readers a consistent snapshot of the PREVIOUS fully-completed
+/// render:
 ///   - Frame N writes populate `staged`.
 ///   - Frame N+1's `begin_pass()` moves frame N's data into `committed`.
 ///   - Readers see frame N's data until frame N+2 arrives.
 ///
 /// Note: readers see data that is one frame behind. This is fine because GPUI
-/// renders continuously and tests wait (sleep + settle) between state mutations,
-/// so `committed` reflects the stable "last complete render" by the time tests read.
-/// If the UI becomes empty in a re-render, that propagates to `committed` after the
-/// next pass, so empty-UI regressions are detected.
+/// renders continuously and tests wait (sleep + settle) between state
+/// mutations, so `committed` reflects the stable "last complete render" by the
+/// time tests read. If the UI becomes empty in a re-render, that propagates to
+/// `committed` after the next pass, so empty-UI regressions are detected.
 #[derive(Clone)]
 pub struct BoundsRegistry {
     inner: Arc<RwLock<BoundsState>>,
@@ -110,8 +123,9 @@ impl BoundsRegistry {
         s
     }
 
-    /// Begin a new render pass. Promotes staged → committed (if staged has data),
-    /// resets staged for the new pass, and resets the per-pass sequence counter.
+    /// Begin a new render pass. Promotes staged → committed (if staged has
+    /// data), resets staged for the new pass, and resets the per-pass
+    /// sequence counter.
     ///
     /// The first successful rotation (non-empty staged) clears the cold-start
     /// flag — from then on records only hit staged.
@@ -131,8 +145,9 @@ impl BoundsRegistry {
         }
     }
 
-    /// Number of committed-buffer rotations so far (see [`BoundsState::committed_gen`]).
-    /// Strictly increases on each non-empty `begin_pass`/`flush`.
+    /// Number of committed-buffer rotations so far (see
+    /// [`BoundsState::committed_gen`]). Strictly increases on each
+    /// non-empty `begin_pass`/`flush`.
     pub fn committed_generation(&self) -> u64 {
         self.inner.read().unwrap().committed_gen
     }
@@ -231,9 +246,9 @@ impl GeometryProvider for FlushOnReadGeometry {
 // recursing into children, popped after.
 //
 // This is single-threaded by construction: GPUI runs all render / layout /
-// paint on the main thread, and tests use `TestAppContext` which also serializes
-// work through a single dispatcher. The thread-local therefore always reflects
-// the current render pass's path without any locking.
+// paint on the main thread, and tests use `TestAppContext` which also
+// serializes work through a single dispatcher. The thread-local therefore
+// always reflects the current render pass's path without any locking.
 thread_local! {
     static RENDER_PATH: std::cell::RefCell<Vec<Arc<str>>> = const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -267,11 +282,11 @@ fn pop_parent() {
     });
 }
 
-/// Wrap an element so its computed bounds and metadata are recorded in `BoundsRegistry`
-/// during prepaint.
+/// Wrap an element so its computed bounds and metadata are recorded in
+/// `BoundsRegistry` during prepaint.
 ///
-/// The wrapper is transparent — it takes the same layout as its child and adds no
-/// visual or interactive behavior.
+/// The wrapper is transparent — it takes the same layout as its child and adds
+/// no visual or interactive behavior.
 pub fn tracked(
     el_id: impl Into<String>,
     child: AnyElement,
@@ -551,8 +566,9 @@ impl Element for BoundsTracker {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use holon_frontend::geometry::GeometryProvider;
+
+    use super::*;
 
     fn elem(entity: &str) -> ElementInfo {
         ElementInfo {
@@ -596,8 +612,8 @@ mod tests {
         // Plain committed read races the promotion: not yet visible.
         assert!(
             GeometryProvider::element_info(&reg, slot).is_none(),
-            "post-cold record must stay staged until the next begin_pass/flush — \
-             this is the race that made the single-shot click fail"
+            "post-cold record must stay staged until the next begin_pass/flush — this is the race \
+             that made the single-shot click fail"
         );
 
         // Flush-on-read promotes the last frame's staged bounds on demand, so

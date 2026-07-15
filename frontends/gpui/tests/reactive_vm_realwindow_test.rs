@@ -9,10 +9,10 @@
 //!
 //! Run: cargo test -p holon-gpui --test reactive_vm_realwindow_test
 
-use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::sync_channel;
+use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 

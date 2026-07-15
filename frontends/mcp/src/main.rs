@@ -5,10 +5,10 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use rmcp::ServiceExt;
-use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::{self};
 
 mod telemetry;
@@ -448,10 +448,14 @@ async fn main() -> Result<()> {
                         .ok()
                         .map(|ops| ops.shared_doc_store());
                     if let Some(store) = loro_doc_store {
-                        debug.loro_doc_store.set(store).ok(); // ALLOW(ok): OnceLock already set
+                        debug.loro_doc_store.set(store).ok(); // ALLOW(ok):
+                                                              // OnceLock already
+                                                              // set
                     }
                     if let Some(root) = orgmode_root {
-                        debug.orgmode_root.set(root).ok(); // ALLOW(ok): OnceLock already set
+                        debug.orgmode_root.set(root).ok(); // ALLOW(ok):
+                                                           // OnceLock already
+                                                           // set
                     }
 
                     Ok(())

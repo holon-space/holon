@@ -2923,7 +2923,10 @@ mod teeth {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let comp = Arc::new(
             HeadlessFrontendComponent::new(
-                &[("Journals.org", journals_org), ("structural-page.org", STRUCTURAL_PAGE_ORG)],
+                &[
+                    ("Journals.org", journals_org),
+                    ("structural-page.org", STRUCTURAL_PAGE_ORG),
+                ],
                 Duration::from_millis(600),
             )
             .await,
@@ -2931,7 +2934,8 @@ mod teeth {
         let _engine = comp.engine();
         let mut caps = CapMap::new();
         comp.clone().register_non_gesture(&mut caps);
-        comp.clone().register_gesture_writes(&mut caps, comp.driver());
+        comp.clone()
+            .register_gesture_writes(&mut caps, comp.driver());
         caps.insert(comp.clone() as Arc<dyn SutSqlProjection>);
         tokio::time::sleep(SETTLE).await;
 
@@ -2983,7 +2987,8 @@ mod teeth {
 
         let ran: Vec<_> = report.ran_ids().into_iter().collect();
         assert!(
-            ran.iter().any(|id| *id == "inv-embedded-page-collapsed-lazy"),
+            ran.iter()
+                .any(|id| *id == "inv-embedded-page-collapsed-lazy"),
             "inv-embedded-page-collapsed-lazy must select + run (ran: {ran:?})"
         );
         let failures = report.failures();

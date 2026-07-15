@@ -20,11 +20,11 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::streaming::ChangeNotifications;
 use crate::ApiError;
 use crate::Block;
 use crate::BlockContent;
 use crate::EntityUri;
-use crate::streaming::ChangeNotifications;
 
 /// Configuration for filtering blocks by tree depth when traversing.
 ///

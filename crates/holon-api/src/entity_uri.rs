@@ -102,9 +102,9 @@ impl EntityUri {
     // parsing and resolved to the page's `block:<uuid>` at startup.
 
     pub fn file(path: &str) -> Self {
-        use fluent_uri::encoding::EString;
         use fluent_uri::encoding::encoder::Data;
         use fluent_uri::encoding::encoder::Path;
+        use fluent_uri::encoding::EString;
         let mut buf = EString::<Path>::new();
         for (i, segment) in path.split('/').enumerate() {
             if i > 0 {

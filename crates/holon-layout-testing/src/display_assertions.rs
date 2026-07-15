@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::fmt::Write;
 
 use holon_api::Value;
-use holon_frontend::ViewModel;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
 use holon_frontend::view_model::ViewKind;
+use holon_frontend::ViewModel;
 
 // ── ReactiveViewModel helpers (F5) ───────────────────────────────────────
 //
@@ -480,7 +480,11 @@ fn extract_from_children(children: &[ViewModel]) -> Option<HashMap<String, Value
             _ => {}
         }
     }
-    if data.is_empty() { None } else { Some(data) }
+    if data.is_empty() {
+        None
+    } else {
+        Some(data)
+    }
 }
 
 /// Collect all nodes in the tree matching a predicate.

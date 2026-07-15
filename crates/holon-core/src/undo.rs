@@ -530,7 +530,7 @@ mod tests {
     fn backspace_run_is_its_own_group() {
         let mut stack = UndoStack::new();
         type_string(&mut stack, "b1", "content", "abc"); // group 1 (typing)
-        // delete c, b, a — one deletion run = one group
+                                                         // delete c, b, a — one deletion run = one group
         stack.push(edit_entry("b1", "content", "abc", "ab"));
         stack.push(edit_entry("b1", "content", "ab", "a"));
         stack.push(edit_entry("b1", "content", "a", ""));

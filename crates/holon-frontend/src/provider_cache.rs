@@ -19,8 +19,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::Weak;
 
-use holon_api::ReactiveRowProvider;
 use holon_api::render_eval::ResolvedArgs;
+use holon_api::ReactiveRowProvider;
 
 /// Cache key — function name + fingerprint of resolved args.
 ///
@@ -195,8 +195,8 @@ mod tests {
 
     use futures_signals::signal_vec::MutableVec;
     use futures_signals::signal_vec::SignalVec;
-    use holon_api::Value;
     use holon_api::widget_spec::DataRow;
+    use holon_api::Value;
 
     use super::*;
 

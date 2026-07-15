@@ -33,17 +33,17 @@ use geometry::BoundsRegistry;
 use gpui::prelude::*;
 use gpui::*;
 use holon_api::EntityName;
+use holon_frontend::input::InputAction;
+use holon_frontend::input::WidgetInput;
+// Re-export the shared interpret function for DI wiring
+pub use holon_frontend::reactive::make_interpret_fn;
+use holon_frontend::reactive::BuilderServices;
+use holon_frontend::reactive::ReactiveEngine;
+use holon_frontend::theme::ThemeRegistry;
+use holon_frontend::view_model::ViewModel;
 use holon_frontend::FrontendSession;
 use holon_frontend::ReactiveViewModel;
 use holon_frontend::RenderContext;
-use holon_frontend::input::InputAction;
-use holon_frontend::input::WidgetInput;
-use holon_frontend::reactive::BuilderServices;
-use holon_frontend::reactive::ReactiveEngine;
-// Re-export the shared interpret function for DI wiring
-pub use holon_frontend::reactive::make_interpret_fn;
-use holon_frontend::theme::ThemeRegistry;
-use holon_frontend::view_model::ViewModel;
 use navigation_state::NavigationState;
 use render::builders::GpuiRenderContext;
 
@@ -1381,9 +1381,9 @@ fn launch_holon_window_impl(
     // stays on the main thread and the outer cx.spawn wrapper (which
     // breaks on iOS) can be avoided.
     if let Some(ref engine) = existing_engine {
-        use futures::StreamExt;
-        use futures::future::Either;
         use futures::future::select;
+        use futures::future::Either;
+        use futures::StreamExt;
         use futures_signals::signal::SignalExt;
         let root_uri = holon_api::root_layout_block_uri();
         let signal = engine.watch_data_signal(&root_uri);

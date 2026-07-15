@@ -366,13 +366,11 @@ mod tests {
     fn is_display_placed_returns_false_for_canonical() {
         assert!(!RowOrigin::Canonical.is_display_placed());
         let parent = EntityUri::block("p");
-        assert!(
-            !RowOrigin::CreationPlaceholder {
-                entity_type: "block".into(),
-                parent: parent.clone(),
-            }
-            .is_display_placed()
-        );
+        assert!(!RowOrigin::CreationPlaceholder {
+            entity_type: "block".into(),
+            parent: parent.clone(),
+        }
+        .is_display_placed());
     }
 
     /// No-write guard (Phase 1a): a display-placed row bears the canonical

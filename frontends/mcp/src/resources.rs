@@ -1,8 +1,8 @@
 use holon_core::OperationProvider;
-use rmcp::ErrorData as McpError;
-use rmcp::RoleServer;
 use rmcp::model::*;
 use rmcp::service::RequestContext;
+use rmcp::ErrorData as McpError;
+use rmcp::RoleServer;
 
 use crate::server::HolonMcpServer;
 
@@ -37,10 +37,11 @@ impl HolonMcpServer {
             entity_names.insert(op.entity_name.to_string());
         }
 
-        let mut resources = vec![
-            RawResource::new("holon://operations", "Available Operations".to_string())
-                .no_annotation(),
-        ];
+        let mut resources =
+            vec![
+                RawResource::new("holon://operations", "Available Operations".to_string())
+                    .no_annotation(),
+            ];
 
         // Add a resource for each entity
         for entity_name in entity_names {

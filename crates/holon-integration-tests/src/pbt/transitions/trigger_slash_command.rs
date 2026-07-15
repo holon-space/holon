@@ -1,27 +1,36 @@
 //! Transition: trigger slash command (delete) on the currently-focused block.
 //!
-//! Mirrors the legacy logic split across `state_machine.rs:1057-1081` (generator),
-//! `state_machine.rs:3263-3277` (precondition),
+//! Mirrors the legacy logic split across `state_machine.rs:1057-1081`
+//! (generator), `state_machine.rs:3263-3277` (precondition),
 //! `state_machine.rs:2535-2545` (ref-state apply),
 //! `sut.rs:3250-3362` (SUT apply), and
 //! `transition_budgets.rs:284-286` (expected SQL).
 
-use proptest::prelude::*;
-use proptest::strategy::BoxedStrategy;
 use std::time::Duration;
-use validated::Validated;
-
-use holon_pbt_core::capabilities::{
-    CapRegion, RefBlockTree, RefFocusRoots, RefLayout, RefLayoutInteract, RefLayoutMutate,
-    RefLifecycle, SutBlockInteract, SutDriver, SutLayout,
-};
-use holon_pbt_core::validation::{Reason, check};
-use holon_pbt_core::{TransitionFactory, TransitionRef};
-
-#[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::{MutationKind, expected_sql_for_kind};
 
 use holon_api::EntityUri;
+use holon_pbt_core::TransitionFactory;
+use holon_pbt_core::TransitionRef;
+use holon_pbt_core::capabilities::CapRegion;
+use holon_pbt_core::capabilities::RefBlockTree;
+use holon_pbt_core::capabilities::RefFocusRoots;
+use holon_pbt_core::capabilities::RefLayout;
+use holon_pbt_core::capabilities::RefLayoutInteract;
+use holon_pbt_core::capabilities::RefLayoutMutate;
+use holon_pbt_core::capabilities::RefLifecycle;
+use holon_pbt_core::capabilities::SutBlockInteract;
+use holon_pbt_core::capabilities::SutDriver;
+use holon_pbt_core::capabilities::SutLayout;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::check;
+use proptest::prelude::*;
+use proptest::strategy::BoxedStrategy;
+use validated::Validated;
+
+#[cfg(feature = "otel-testing")]
+use crate::pbt::transition_budgets::MutationKind;
+#[cfg(feature = "otel-testing")]
+use crate::pbt::transition_budgets::expected_sql_for_kind;
 
 // ── Capability-bound free function (Phase C, Option A — real user input) ──
 //

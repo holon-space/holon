@@ -6,8 +6,8 @@ use chrono::Utc;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::Marking;
 use crate::value::Value;
+use crate::Marking;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AttrChange {

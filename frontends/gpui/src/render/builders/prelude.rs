@@ -1,13 +1,13 @@
+pub use gpui::div;
+pub use gpui::prelude::*;
+pub use gpui::px;
 pub use gpui::AnyElement;
 pub use gpui::Div;
 pub use gpui::ElementId;
 pub use gpui::Hsla;
-pub use gpui::div;
-pub use gpui::prelude::*;
-pub use gpui::px;
 
-pub(crate) use super::GpuiRenderContext;
 pub(crate) use super::render_children;
+pub(crate) use super::GpuiRenderContext;
 
 /// Shorthand: get a theme color from gpui-component's global ThemeColor.
 pub(crate) fn tc(

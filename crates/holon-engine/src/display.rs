@@ -1,7 +1,7 @@
-use crate::Marking;
-use crate::TokenState;
 use crate::engine::RankedTransition;
 use crate::yaml::history::History;
+use crate::Marking;
+use crate::TokenState;
 
 pub fn print_marking<M: Marking>(marking: &M) {
     println!("Clock: {}", marking.clock());

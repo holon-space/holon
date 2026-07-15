@@ -6,9 +6,9 @@
 
 use std::collections::HashMap;
 
+use crate::streaming::Change;
 use crate::EntityUri;
 use crate::Value;
-use crate::streaming::Change;
 
 /// A single row of query result data (may or may not be enriched).
 pub type DataRow = HashMap<String, Value>;
@@ -487,11 +487,10 @@ mod tests {
             },
         ]);
         assert_eq!(acc.len(), 1);
-        assert!(
-            acc.to_vec()
-                .iter()
-                .any(|r| { r.get("id").unwrap().as_string().unwrap() == "b" })
-        );
+        assert!(acc
+            .to_vec()
+            .iter()
+            .any(|r| { r.get("id").unwrap().as_string().unwrap() == "b" }));
     }
 
     fn value_row(name: &str) -> DataRow {

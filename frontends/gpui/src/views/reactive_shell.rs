@@ -10,20 +10,20 @@ use std::sync::Arc;
 
 use gpui::*;
 use holon_api::EntityUri;
-use holon_frontend::RenderContext;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive_view::ReactiveView;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
+use holon_frontend::RenderContext;
 
+use crate::entity_view_registry::wipe_ephemeral;
 use crate::entity_view_registry::CacheKey;
 use crate::entity_view_registry::EntityCache;
 use crate::entity_view_registry::LiveBlockAncestors;
 use crate::entity_view_registry::LocalEntityScope;
-use crate::entity_view_registry::wipe_ephemeral;
 use crate::geometry::BoundsRegistry;
 use crate::navigation_state::NavigationState;
-use crate::render::builders::GpuiRenderContext;
 use crate::render::builders::live_query_key;
+use crate::render::builders::GpuiRenderContext;
 use crate::render::builders::{self};
 use crate::views::RenderEntityView;
 

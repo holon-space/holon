@@ -68,6 +68,11 @@ pub use file_watcher::OrgFileWatcher;
 // Note: Block is NOT re-exported here to avoid duplicate type issues with flutter_rust_bridge
 // Use holon_api::block::Block directly instead
 pub use holon_filesystem::directory::{Directory, ROOT_ID};
+pub use models::find_document_id;
+pub use models::get_block_file_path;
+// Extension traits for org-specific functionality (forwarded from holon-org-format)
+pub use models::org_props;
+pub use models::render_document_header;
 pub use models::BlockResolver;
 pub use models::HashMapBlockResolver;
 pub use models::OrgBlockExt;
@@ -75,12 +80,7 @@ pub use models::OrgDocumentExt;
 pub use models::ParsedSectionContent;
 pub use models::SourceBlock;
 pub use models::ToOrg;
-pub use models::find_document_id;
-pub use models::get_block_file_path;
-// Extension traits for org-specific functionality (forwarded from holon-org-format)
-pub use models::org_props;
-pub use models::render_document_header;
 pub use org_renderer::OrgRenderer;
 pub use orgmode_sync_provider::OrgModeSyncProvider;
-pub use parser::ParseResult;
 pub use parser::parse_org_file;
+pub use parser::ParseResult;

@@ -23,8 +23,8 @@ use std::sync::Arc;
 
 use futures_signals::signal_vec::SignalVec;
 use futures_signals::signal_vec::SignalVecExt;
-use holon_api::ReactiveRowProvider;
 use holon_api::widget_spec::DataRow;
+use holon_api::ReactiveRowProvider;
 
 pub struct LaneFilteredProvider {
     upstream: Arc<dyn ReactiveRowProvider>,

@@ -12,10 +12,10 @@
 //! `holon-core::traits` — chord ops are purely positional.
 
 use async_trait::async_trait;
+use holon_api::capability::Consolidator;
 use holon_api::BlockContent;
 use holon_api::EntityUri;
 use holon_api::Tags;
-use holon_api::capability::Consolidator;
 
 use crate::traits::Result;
 

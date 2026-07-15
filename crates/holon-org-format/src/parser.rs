@@ -8,21 +8,21 @@ use holon_api::types::ContentType;
 use holon_api::types::SourceLanguage;
 use holon_api::types::Tags;
 use holon_api::types::TaskState;
-use orgize::ParseConfig;
-use orgize::SyntaxKind;
 use orgize::ast::Headline;
 use orgize::ast::SourceBlock as OrgizeSourceBlock;
 use orgize::rowan::ast::AstNode;
+use orgize::ParseConfig;
+use orgize::SyntaxKind;
 use sha2::Digest;
 use sha2::Sha256;
 use uuid::Uuid;
 
-use crate::models::DEFAULT_ACTIVE_KEYWORDS;
-use crate::models::DEFAULT_DONE_KEYWORDS;
+use crate::models::parse_header_args_from_str;
 use crate::models::OrgBlockExt;
 use crate::models::OrgDocumentExt;
 use crate::models::SourceBlock;
-use crate::models::parse_header_args_from_str;
+use crate::models::DEFAULT_ACTIVE_KEYWORDS;
+use crate::models::DEFAULT_DONE_KEYWORDS;
 
 /// Generate a directory ID from its path (ID is the relative path from root)
 pub fn generate_directory_id(path: &Path, root_directory: &Path) -> String {

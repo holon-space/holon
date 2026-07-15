@@ -27,8 +27,8 @@ use holon_api::Value;
 
 use crate::cell::TextOp;
 use crate::editor_caret;
-use crate::editor_view_model::EditorKey;
 use crate::editor_view_model::structural_block_action;
+use crate::editor_view_model::EditorKey;
 use crate::operations::OperationIntent;
 use crate::reactive::BuilderServices;
 use crate::reactive::ReactiveEngine;
@@ -363,9 +363,9 @@ impl HeadlessEditorMirror {
         use holon_api::render_types::OperationWiring;
 
         use crate::command_provider::CommandProvider;
-        use crate::input_trigger::ViewEvent;
         use crate::input_trigger::check_triggers;
         use crate::input_trigger::default_triggers_for_operations;
+        use crate::input_trigger::ViewEvent;
         use crate::popup_menu::PopupProvider;
         use crate::popup_menu::PopupResult;
 

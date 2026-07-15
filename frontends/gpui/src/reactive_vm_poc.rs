@@ -9,18 +9,18 @@
 //! self-interprets when any input changes. Changes push DOWN the tree —
 //! no external tree walks, no reconciliation.
 
-use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use futures_signals::signal::Mutable;
 use futures_signals::signal::SignalExt;
 use futures_signals::signal_vec::MutableVec;
 use gpui::prelude::*;
 use gpui::*;
-use holon_api::Value;
 use holon_api::render_types::Arg;
 use holon_api::render_types::RenderExpr;
+use holon_api::Value;
 
 pub type DataRow = holon_api::widget_spec::DataRow;
 

@@ -1,28 +1,36 @@
 //! End-to-end test helpers for BackendEngine
 //!
-//! This module provides high-level utilities for testing BackendEngine at the API level,
-//! including PRQL query execution, CDC stream watching, and operation execution.
+//! This module provides high-level utilities for testing BackendEngine at the
+//! API level, including PRQL query execution, CDC stream watching, and
+//! operation execution.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
 
 #[cfg(any(test, feature = "test-helpers"))]
 use anyhow::Context;
 use anyhow::Result;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
+use holon_api::BatchWithMetadata;
+use holon_api::QueryLanguage;
+use holon_api::Value;
+use holon_api::widget_spec::DataRow;
+use holon_core::storage::types::StorageEntity;
 use tokio::time::timeout;
 use tokio_stream::StreamExt;
 
 use crate::api::backend_engine::BackendEngine;
 use crate::api::holon_service::HolonService;
-#[cfg(any(test, feature = "test-helpers"))]
-use crate::di::test_helpers::{create_test_engine, create_test_engine_with_providers};
 // Re-export TestProviderModule for use in tests
 #[cfg(any(test, feature = "test-helpers"))]
 pub use crate::di::test_helpers::TestProviderModule;
-use crate::storage::turso::{ChangeData, RowChange, RowChangeStream};
-use holon_api::widget_spec::DataRow;
-use holon_api::{BatchWithMetadata, QueryLanguage, Value};
-use holon_core::storage::types::StorageEntity;
+#[cfg(any(test, feature = "test-helpers"))]
+use crate::di::test_helpers::create_test_engine;
+#[cfg(any(test, feature = "test-helpers"))]
+use crate::di::test_helpers::create_test_engine_with_providers;
+use crate::storage::turso::ChangeData;
+use crate::storage::turso::RowChange;
+use crate::storage::turso::RowChangeStream;
 
 /// End-to-end test context for BackendEngine testing.
 ///
@@ -139,12 +147,14 @@ impl E2ETestContext {
 
     /// Collect stream events with timeout
     ///
-    /// Collects events from a RowChangeStream up to a maximum number or until timeout.
+    /// Collects events from a RowChangeStream up to a maximum number or until
+    /// timeout.
     ///
     /// # Arguments
     /// * `stream` - The RowChangeStream to collect from
     /// * `timeout_duration` - Maximum time to wait for events
-    /// * `max_events` - Maximum number of events to collect (None = collect all until timeout)
+    /// * `max_events` - Maximum number of events to collect (None = collect all
+    ///   until timeout)
     ///
     /// # Returns
     /// Vector of BatchWithMetadata<RowChange> containing all collected events
@@ -210,7 +220,7 @@ impl ChangeType {
         match (self, change) {
             (ChangeType::Created, ChangeData::Created { .. }) => true,
             (ChangeType::Updated, ChangeData::Updated { .. }) => true,
-            (ChangeType::Updated, ChangeData::FieldsChanged { .. }) => true, // FieldsChanged counts as Update
+            (ChangeType::Updated, ChangeData::FieldsChanged { .. }) => true, /* FieldsChanged counts as Update */
             (ChangeType::Deleted, ChangeData::Deleted { .. }) => true,
             _ => false,
         }
@@ -222,7 +232,8 @@ impl ChangeType {
 /// # Arguments
 /// * `batches` - Collected stream events (from `collect_stream_events`)
 /// * `expected_type` - Expected change type
-/// * `entity_id` - Optional entity ID to filter by (checks `data.get("id")` for Created/Updated, or `id` field for Deleted)
+/// * `entity_id` - Optional entity ID to filter by (checks `data.get("id")` for
+///   Created/Updated, or `id` field for Deleted)
 ///
 /// # Returns
 /// Ok(()) if the change was found, Err with descriptive message otherwise
@@ -302,7 +313,8 @@ pub fn assert_change_type(
 
 /// Wait for a specific change type with timeout
 ///
-/// Collects events from the stream until the expected change is found or timeout occurs.
+/// Collects events from the stream until the expected change is found or
+/// timeout occurs.
 ///
 /// # Arguments
 /// * `stream` - The RowChangeStream to watch
@@ -382,12 +394,13 @@ pub async fn wait_for_change(
 
 /// Assert that a sequence of changes occurred in order
 ///
-/// Checks that the expected sequence of changes appears in the collected events,
-/// in the specified order (but not necessarily consecutively).
+/// Checks that the expected sequence of changes appears in the collected
+/// events, in the specified order (but not necessarily consecutively).
 ///
 /// # Arguments
 /// * `batches` - Collected stream events
-/// * `expected_sequence` - Vector of (ChangeType, Option<entity_id>) tuples representing expected changes
+/// * `expected_sequence` - Vector of (ChangeType, Option<entity_id>) tuples
+///   representing expected changes
 ///
 /// # Returns
 /// Ok(()) if sequence found, Err with descriptive message otherwise
@@ -404,7 +417,8 @@ pub fn assert_change_sequence(
                 ChangeData::Created { .. } => ChangeType::Created,
                 ChangeData::Updated { .. } => ChangeType::Updated,
                 ChangeData::Deleted { .. } => ChangeType::Deleted,
-                ChangeData::FieldsChanged { .. } => ChangeType::Updated, // Field changes count as updates
+                ChangeData::FieldsChanged { .. } => ChangeType::Updated, /* Field changes count
+                                                                          * as updates */
             };
 
             let entity_id: String = match &row_change.change {
@@ -445,7 +459,8 @@ pub fn assert_change_sequence(
 
     if expected_idx < expected_sequence.len() {
         return Err(anyhow::anyhow!(
-            "Expected sequence not found. Found {} changes, but only matched {}/{} expected changes",
+            "Expected sequence not found. Found {} changes, but only matched {}/{} expected \
+             changes",
             found_changes.len(),
             expected_idx,
             expected_sequence.len()

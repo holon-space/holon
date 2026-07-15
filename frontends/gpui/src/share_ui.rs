@@ -22,6 +22,9 @@
 
 use std::sync::Arc;
 
+use gpui::div;
+use gpui::prelude::*;
+use gpui::px;
 use gpui::AnyElement;
 use gpui::AnyWindowHandle;
 use gpui::AsyncApp;
@@ -33,16 +36,13 @@ use gpui::IntoElement;
 use gpui::MouseButton;
 use gpui::SharedString;
 use gpui::Stateful;
-use gpui::div;
-use gpui::prelude::*;
-use gpui::px;
 use holon::sync::ShareDegraded;
 use holon::sync::ShareDegradedReason;
 use holon_api::EntityName;
 use holon_api::Value;
-use holon_frontend::FrontendSession;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive::ReactiveEngine;
+use holon_frontend::FrontendSession;
 
 /// Threat-model sentences from `docs/Reference/SUBTREE_SHARING.md` (lines
 /// 34–35). Quoted verbatim — users of the share UI must see the exact wording

@@ -58,9 +58,9 @@
 //! load while no interaction is pending (the overwhelmingly common case).
 
 use std::collections::HashMap;
-use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
 

@@ -1,30 +1,37 @@
-//! Transition: drag the focused block onto a target, making it a child of the target.
+//! Transition: drag the focused block onto a target, making it a child of the
+//! target.
 //!
-//! Mirrors the legacy logic split across `state_machine.rs:1248-1319` (generator),
-//! `state_machine.rs:3374-3425` (precondition),
+//! Mirrors the legacy logic split across `state_machine.rs:1248-1319`
+//! (generator), `state_machine.rs:3374-3425` (precondition),
 //! `state_machine.rs:2679-2685` (ref-state apply),
 //! `sut.rs:3569-3598` (SUT apply), and
 //! `transition_budgets.rs:298-302` (expected SQL).
 
+use holon_api::EntityUri;
+use holon_pbt_core::TransitionFactory;
+use holon_pbt_core::TransitionRef;
+use holon_pbt_core::capabilities::CapRegion;
+use holon_pbt_core::capabilities::RefBlockTree;
+use holon_pbt_core::capabilities::RefBlockTreeMut;
+use holon_pbt_core::capabilities::RefFocusRoots;
+use holon_pbt_core::capabilities::RefLayout;
+use holon_pbt_core::capabilities::RefLayoutInteract;
+use holon_pbt_core::capabilities::RefLifecycle;
+use holon_pbt_core::capabilities::SutBlockInteract;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::check;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use holon_pbt_core::capabilities::{
-    CapRegion, RefBlockTree, RefBlockTreeMut, RefFocusRoots, RefLayout, RefLayoutInteract,
-    RefLifecycle, SutBlockInteract,
-};
-use holon_pbt_core::validation::{Reason, check};
-use holon_pbt_core::{TransitionFactory, TransitionRef};
-
-#[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::{MutationKind, expected_sql_for_kind};
-
 use crate::pbt::state_machine::DRAG_DROP_ENABLED;
-use holon_api::EntityUri;
+#[cfg(feature = "otel-testing")]
+use crate::pbt::transition_budgets::MutationKind;
+#[cfg(feature = "otel-testing")]
+use crate::pbt::transition_budgets::expected_sql_for_kind;
 
-/// Drag the currently-focused block onto a target block, re-parenting the source
-/// as a child of the target at the beginning (after=None).
+/// Drag the currently-focused block onto a target block, re-parenting the
+/// source as a child of the target at the beginning (after=None).
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct DragDropBlock {
     pub source: EntityUri,
@@ -97,22 +104,21 @@ impl<
             // main panel — the SUT's `drop_entity` grabs that node. Two
             // independent things must hold, both verified here:
             //
-            // 1. The active item template must *render* a draggable for the
-            //    source's row. Render it through the shadow interpreter and walk
-            //    the tree (the default `render_entity()` → block profile does;
-            //    a custom render like `row(text(...))` does not).
+            // 1. The active item template must *render* a draggable for the source's row. Render
+            //    it through the shadow interpreter and walk the tree (the default
+            //    `render_entity()` → block profile does; a custom render like `row(text(...))`
+            //    does not).
             check(
                 state.block_renders_draggable(&self.source),
                 Reason::SourceNotRendered,
             ),
-            // 2. The source must actually be in the active layout's query
-            //    rendered set — evaluated faithfully via `TestQuery::evaluate`
-            //    (the default `focus_root` query, or the recovered `QuerySource`
-            //    of a user `index.org`). A `from children` layout surfaces only
-            //    the layout block's direct children; an all-blocks layout
-            //    surfaces everything. Combined with the draggable-template check
-            //    above, this dissolves the old "block in tree but not rendered"
-            //    divergence without a blanket custom-layout exclusion.
+            // 2. The source must actually be in the active layout's query rendered set — evaluated
+            //    faithfully via `TestQuery::evaluate` (the default `focus_root` query, or the
+            //    recovered `QuerySource` of a user `index.org`). A `from children` layout surfaces
+            //    only the layout block's direct children; an all-blocks layout surfaces
+            //    everything. Combined with the draggable-template check above, this dissolves the
+            //    old "block in tree but not rendered" divergence without a blanket custom-layout
+            //    exclusion.
             check(
                 state.main_rendered_block_ids().contains(&self.source),
                 Reason::SourceNotRendered,

@@ -10,12 +10,12 @@
 
 use std::path::Path;
 
+use holon_api::block::Block;
 use holon_api::EntityUri;
 use holon_api::Value;
-use holon_api::block::Block;
-use holon_org_format::OrgRenderer;
 use holon_org_format::parse_org_file;
 use holon_org_format::parser::split_headline_tags;
+use holon_org_format::OrgRenderer;
 
 fn make_block(id: &str, parent: &EntityUri, content: &str) -> Block {
     let uri = EntityUri::block(id);

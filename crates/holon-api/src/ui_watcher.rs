@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use crate::EntityUri;
 use crate::streaming::WatchHandle;
+use crate::EntityUri;
 
 /// The UI-render/watch capability.
 ///

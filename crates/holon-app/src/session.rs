@@ -7,10 +7,10 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use holon::api::BackendEngine;
-use holon_frontend::FrontendSession;
 use holon_frontend::config::HolonConfig;
 use holon_frontend::config::SessionConfig;
 use holon_frontend::preferences::PrefKey;
+use holon_frontend::FrontendSession;
 
 use crate::wiring::FrontendInjectorExt;
 

@@ -20,9 +20,9 @@ use futures_signals::signal::SignalExt;
 use futures_signals::signal_vec::MutableVec;
 use futures_signals::signal_vec::SignalVecExt;
 use futures_signals::signal_vec::VecDiff;
+use holon_api::render_types::RenderExpr;
 use holon_api::EntityUri;
 use holon_api::ReactiveRowProvider;
-use holon_api::render_types::RenderExpr;
 
 use crate::reactive_view_model::CollectionVariant;
 use crate::reactive_view_model::InterpretFn;
@@ -417,9 +417,9 @@ fn placed_occurrence_row(
 /// - `selectable(action: navigation.focus)` — click-through to the canonical
 ///   lesson (`col("id")` is the canonical lesson id).
 pub(crate) fn advice_readonly_template() -> holon_api::render_types::RenderExpr {
-    use holon_api::Value;
     use holon_api::render_types::Arg;
     use holon_api::render_types::RenderExpr;
+    use holon_api::Value;
     fn call(name: &str, args: Vec<Arg>) -> RenderExpr {
         RenderExpr::FunctionCall {
             name: name.to_string(),
@@ -908,7 +908,8 @@ impl ReactiveView {
         let abortable = futures::future::Abortable::new(driver, abort_reg);
 
         rt.spawn(async move {
-            let _ = abortable.await; // Ok(()) on completion, Err on abort — both fine
+            let _ = abortable.await; // Ok(()) on completion, Err on abort —
+                                     // both fine
         });
 
         *self.driver_handle.lock().unwrap() = Some(abort_handle);
@@ -2162,10 +2163,10 @@ fn walk_children(node: &ReactiveViewModel, f: &dyn Fn(&ReactiveViewModel)) {
 mod tests {
     use std::collections::HashMap;
 
-    use holon_api::ChangeOrigin;
-    use holon_api::Value;
     use holon_api::widget_spec::DataRow;
     use holon_api::widget_spec::EnrichedRow;
+    use holon_api::ChangeOrigin;
+    use holon_api::Value;
 
     use super::*;
     use crate::reactive::ReactiveRowSet;
@@ -2368,7 +2369,8 @@ mod tests {
                 Some(keys[pos - 1].as_str())
             };
             let next = keys.get(pos).map(|s| s.as_str());
-            let k = gen_key_between(prev, next).expect("gen_key_between mints a valid key"); // ALLOW(order_minting): test-only reproduction of the order owner's sibling-key minting to prove the virtual-slot sort contract
+            let k = gen_key_between(prev, next).expect("gen_key_between mints a valid key"); // ALLOW(order_minting): test-only reproduction of the order owner's sibling-key
+                                                                                             // minting to prove the virtual-slot sort contract
             keys.insert(pos, k);
         }
         keys

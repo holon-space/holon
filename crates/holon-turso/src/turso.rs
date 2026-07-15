@@ -1,20 +1,29 @@
-use async_trait::async_trait;
-use futures::future::FutureExt;
-use serde_json;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicU64;
-use tokio::sync::{broadcast, mpsc, oneshot};
+
+use async_trait::async_trait;
+use futures::future::FutureExt;
+use serde_json;
+use tokio::sync::broadcast;
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio_stream::wrappers::ReceiverStream;
+use turso_core::Database;
+use turso_core::DatabaseOpts;
 use turso_core::MemoryIO;
+use turso_core::OpenFlags;
 #[cfg(target_family = "unix")]
 use turso_core::UnixIO;
 use turso_core::types::RelationChangeEvent;
-use turso_core::{Database, DatabaseOpts, OpenFlags};
-use turso_sdk_kit::rsapi::{DatabaseChangeType, TursoConnection, TursoDatabaseConfig};
+use turso_sdk_kit::rsapi::DatabaseChangeType;
+use turso_sdk_kit::rsapi::TursoConnection;
+use turso_sdk_kit::rsapi::TursoDatabaseConfig;
 
 /// Host-IO seam for wasm32: browser workers register their `turso_core::IO`
 /// implementation (e.g. an OPFS shim) here before opening a file-backed
@@ -47,12 +56,24 @@ pub mod wasm_io {
     }
 }
 
-use crate::sql_parser::{extract_created_tables, extract_table_refs, parse_sql};
-use holon_api::{
-    Batch, BatchMetadata, BatchTraceContext, BatchWithMetadata, CHANGE_ORIGIN_COLUMN, Value,
-};
-use holon_api::{Change, ChangeOrigin};
-use holon_core::storage::{Filter, Resource, Result, StorageBackend, StorageEntity, StorageError};
+use holon_api::Batch;
+use holon_api::BatchMetadata;
+use holon_api::BatchTraceContext;
+use holon_api::BatchWithMetadata;
+use holon_api::CHANGE_ORIGIN_COLUMN;
+use holon_api::Change;
+use holon_api::ChangeOrigin;
+use holon_api::Value;
+use holon_core::storage::Filter;
+use holon_core::storage::Resource;
+use holon_core::storage::Result;
+use holon_core::storage::StorageBackend;
+use holon_core::storage::StorageEntity;
+use holon_core::storage::StorageError;
+
+use crate::sql_parser::extract_created_tables;
+use crate::sql_parser::extract_table_refs;
+use crate::sql_parser::parse_sql;
 
 // ============================================================================
 // Types moved from turso_actor.rs
@@ -115,7 +136,8 @@ pub enum DbCommand {
         response: oneshot::Sender<Result<Vec<StorageEntity>>>,
     },
 
-    /// Execute a statement (INSERT, UPDATE, DELETE) and return affected row count
+    /// Execute a statement (INSERT, UPDATE, DELETE) and return affected row
+    /// count
     Execute {
         sql: String,
         params: Vec<turso::Value>,
@@ -193,7 +215,8 @@ pub enum DbCommand {
 /// the same statement + bindings executed twice (definitely redundant work).
 /// Values are hashed, never logged, so row content stays out of traces.
 fn named_params_fingerprint(params: &HashMap<String, Value>) -> String {
-    use std::hash::{Hash, Hasher};
+    use std::hash::Hash;
+    use std::hash::Hasher;
     if params.is_empty() {
         return "-".to_string();
     }
@@ -210,7 +233,8 @@ fn named_params_fingerprint(params: &HashMap<String, Value>) -> String {
 /// Positional-parameter sibling of [`named_params_fingerprint`], for
 /// `execute` spans.
 fn positional_params_fingerprint(params: &[turso::Value]) -> String {
-    use std::hash::{Hash, Hasher};
+    use std::hash::Hash;
+    use std::hash::Hasher;
     if params.is_empty() {
         return "-".to_string();
     }
@@ -289,7 +313,8 @@ impl DbHandle {
         self.execute(sql, params).await
     }
 
-    /// Execute a statement (INSERT, UPDATE, DELETE) and return affected row count
+    /// Execute a statement (INSERT, UPDATE, DELETE) and return affected row
+    /// count
     #[tracing::instrument(skip(self, params), fields(sql = %sql.chars().take(120).collect::<String>(), params_fp = %positional_params_fingerprint(&params)))]
     pub async fn execute(&self, sql: &str, params: Vec<turso::Value>) -> Result<u64> {
         let (response_tx, response_rx) = oneshot::channel();
@@ -440,7 +465,8 @@ impl DbHandle {
     /// * `sql` - The DDL SQL to execute
     /// * `provides` - Resources this operation creates
     /// * `requires` - Resources this operation depends on
-    /// * `priority` - Execution priority (higher = sooner among ready operations)
+    /// * `priority` - Execution priority (higher = sooner among ready
+    ///   operations)
     #[tracing::instrument(skip(self, provides, requires), fields(sql = %sql.chars().take(120).collect::<String>()))]
     pub async fn execute_ddl_with_deps(
         &self,
@@ -484,10 +510,9 @@ impl DbHandle {
                         .collect();
 
                     Err(StorageError::DatabaseError(format!(
-                        "DDL timed out after {:?} waiting for dependencies.\n\
-                         SQL: {}...\n\
-                         Required: {:?}\n\n\
-                         Call mark_available() for resources created outside the actor.",
+                        "DDL timed out after {:?} waiting for dependencies.\nSQL: \
+                         {}...\nRequired: {:?}\n\nCall mark_available() for resources created \
+                         outside the actor.",
                         DEPENDENCY_TIMEOUT, sql_preview, missing_resources
                     )))
                 }
@@ -539,10 +564,9 @@ impl DbHandle {
                         inferred_deps.iter().map(|r| r.name().to_string()).collect();
 
                     Err(StorageError::DatabaseError(format!(
-                        "DDL timed out after {:?} waiting for dependencies.\n\
-                         SQL: {}...\n\
-                         Inferred required: {:?}\n\n\
-                         Call mark_available() for resources created outside the actor.",
+                        "DDL timed out after {:?} waiting for dependencies.\nSQL: {}...\nInferred \
+                         required: {:?}\n\nCall mark_available() for resources created outside \
+                         the actor.",
                         DEPENDENCY_TIMEOUT, sql_preview, missing_resources
                     )))
                 }
@@ -746,7 +770,8 @@ fn turso_value_to_value(value: turso_core::Value) -> Value {
     }
 }
 
-/// Parse a Value that may be JSON object text or already an Object into a HashMap.
+/// Parse a Value that may be JSON object text or already an Object into a
+/// HashMap.
 fn parse_json_object(value: Value) -> Option<HashMap<String, Value>> {
     match value {
         Value::Object(obj) => Some(obj),
@@ -768,8 +793,8 @@ fn parse_json_object(value: Value) -> Option<HashMap<String, Value>> {
 /// (`parse_row_values_with_schema`) so both paths produce the same
 /// representation for the same row:
 ///
-/// - `data`: synthesized by the UNION-query rewriter (`json_object(*) AS
-///   data`, see sql_parser.rs) — parsed and flattened into top-level fields.
+/// - `data`: synthesized by the UNION-query rewriter (`json_object(*) AS data`,
+///   see sql_parser.rs) — parsed and flattened into top-level fields.
 /// - `properties`: the JSON object column on `block_raw` — parsed into
 ///   `Value::Object` (Null / non-object becomes an empty Object).
 ///
@@ -826,7 +851,8 @@ pub(crate) fn default_turso_config() -> TursoDatabaseConfig {
 /// A change notification from a materialized view
 ///
 /// Note: The row_changes() method automatically coalesces DELETE+INSERT pairs
-/// into UPDATE events to prevent UI flicker when materialized views are updated.
+/// into UPDATE events to prevent UI flicker when materialized views are
+/// updated.
 ///
 /// **IMPORTANT - UI Keying Requirements**:
 ///
@@ -861,9 +887,10 @@ pub struct RowChange {
 
 /// The type of change and associated data
 ///
-/// **Note**: For `Created` and `Updated` variants, the ROWID is stored in `data["_rowid"]`.
-/// For `Deleted`, the `id` field is the entity ID (extracted from the deleted row data).
-/// See `RowChange` documentation for UI keying requirements.
+/// **Note**: For `Created` and `Updated` variants, the ROWID is stored in
+/// `data["_rowid"]`. For `Deleted`, the `id` field is the entity ID (extracted
+/// from the deleted row data). See `RowChange` documentation for UI keying
+/// requirements.
 pub type ChangeData = Change<StorageEntity>;
 
 /// Strip the Turso-side `relation_name` wrapper: consumers downstream of the
@@ -883,8 +910,9 @@ pub type RowChangeStream = ReceiverStream<BatchWithMetadata<RowChange>>;
 /// - INSERT + DELETE for the same (relation, entity_id) → no-op (both dropped)
 /// - All other changes pass through unchanged
 ///
-/// This is a pure function suitable for both synchronous use in `process_cdc_event()`
-/// and as the `merge` function for `holon_api::reactive::coalesce()`.
+/// This is a pure function suitable for both synchronous use in
+/// `process_cdc_event()` and as the `merge` function for
+/// `holon_api::reactive::coalesce()`.
 pub(crate) fn coalesce_row_changes(changes: Vec<RowChange>) -> Vec<RowChange> {
     let mut slots: Vec<Option<RowChange>> = changes.into_iter().map(Some).collect();
     let mut pending_deletes: HashMap<(String, String), usize> = HashMap::new();
@@ -1010,7 +1038,8 @@ fn trace_sql_positional(tag: &str, sql: &str, params: &[turso::Value]) {
                 .expect("now within range")
                 .format("%Y-%m-%dT%H:%M:%S%.6f");
             eprintln!(
-                "{ts}Z TRACE holon::storage::turso: [TursoBackend] {tag}: {sql} -- params: {params:?}"
+                "{ts}Z TRACE holon::storage::turso: [TursoBackend] {tag}: {sql} -- params: \
+                 {params:?}"
             );
         }
         tracing::trace!("[TursoBackend] {tag}: {sql} -- params: {params:?}");
@@ -1039,7 +1068,8 @@ fn trace_sql_named(tag: &str, sql: &str, params: &HashMap<String, Value>) {
             .expect("now within range")
             .format("%Y-%m-%dT%H:%M:%S%.6f");
         eprintln!(
-            "{ts}Z TRACE holon::storage::turso: [TursoBackend] {tag}: {sql} -- params: {params_str}"
+            "{ts}Z TRACE holon::storage::turso: [TursoBackend] {tag}: {sql} -- params: \
+             {params_str}"
         );
     }
     tracing::trace!("[TursoBackend] {tag}: {sql} -- params: {params_str}");
@@ -1084,16 +1114,21 @@ impl std::fmt::Debug for TursoBackend {
 ///
 /// From the docs:
 /// How is Turso Database different from Turso's libSQL?
-/// Turso Database is a project to build the next evolution of SQLite in Rust, with a strong open contribution focus and features like native async support, vector search, and more.
-/// The libSQL project is also an attempt to evolve SQLite in a similar direction, but through a fork rather than a rewrite.
-/// Rewriting SQLite in Rust started as an unassuming experiment, and due to its incredible success, replaces libSQL as our intended direction.
+/// Turso Database is a project to build the next evolution of SQLite in Rust,
+/// with a strong open contribution focus and features like native async
+/// support, vector search, and more. The libSQL project is also an attempt to
+/// evolve SQLite in a similar direction, but through a fork rather than a
+/// rewrite. Rewriting SQLite in Rust started as an unassuming experiment, and
+/// due to its incredible success, replaces libSQL as our intended direction.
 impl TursoBackend {
     /// Open a Turso database file and return the Database handle.
     ///
-    /// This is used internally by `new()` to create the database before setting up the actor.
+    /// This is used internally by `new()` to create the database before setting
+    /// up the actor.
     ///
     /// # Platform Support
-    /// - **Unix-like systems** (macOS, Linux, BSD, iOS): Full file-based storage support via UnixIO
+    /// - **Unix-like systems** (macOS, Linux, BSD, iOS): Full file-based
+    ///   storage support via UnixIO
     /// - **Windows**: Not yet supported
     #[cfg(target_family = "unix")]
     pub fn open_database<P: AsRef<Path>>(db_path: P) -> Result<Arc<Database>> {
@@ -1144,8 +1179,8 @@ impl TursoBackend {
             let io = wasm_io::registered().ok_or_else(|| {
                 StorageError::DatabaseError(format!(
                     "open_database('{db_path_str}'): no wasm IO registered — call \
-                     holon_turso::register_wasm_io (e.g. with the OPFS shim) before \
-                     opening a file-backed database on wasm32"
+                     holon_turso::register_wasm_io (e.g. with the OPFS shim) before opening a \
+                     file-backed database on wasm32"
                 ))
             })?;
             Database::open_file_with_flags(io, db_path_str, OpenFlags::Create, opts, None)
@@ -1162,17 +1197,20 @@ impl TursoBackend {
         ))
     }
 
-    /// Create a new TursoBackend, spawning an internal actor for database operations.
+    /// Create a new TursoBackend, spawning an internal actor for database
+    /// operations.
     ///
-    /// This creates a single connection that is owned by the actor and processes
-    /// all commands sequentially, eliminating race conditions.
+    /// This creates a single connection that is owned by the actor and
+    /// processes all commands sequentially, eliminating race conditions.
     ///
-    /// Returns `(Self, DbHandle)` - the backend and a handle for sending commands.
+    /// Returns `(Self, DbHandle)` - the backend and a handle for sending
+    /// commands.
     pub fn new(
         db: Arc<Database>,
         cdc_broadcast: broadcast::Sender<BatchWithMetadata<RowChange>>,
     ) -> Result<(Self, DbHandle)> {
-        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::atomic::AtomicU64;
+        use std::sync::atomic::Ordering;
         // Create connection for actor
         let conn = Self::create_connection_internal(&db)?;
 
@@ -1187,7 +1225,8 @@ impl TursoBackend {
                 .expect("now within range")
                 .format("%Y-%m-%dT%H:%M:%S%.6f");
             eprintln!(
-                "{ts}Z TRACE holon::storage::turso: [TursoBackend] set_change_callback: registering CDC callback"
+                "{ts}Z TRACE holon::storage::turso: [TursoBackend] set_change_callback: \
+                 registering CDC callback"
             );
         }
         tracing::trace!("[TursoBackend] set_change_callback: registering CDC callback");
@@ -1260,7 +1299,8 @@ impl TursoBackend {
         ));
 
         tracing::info!(
-            "[TursoBackend] Created - all database operations will be serialized through internal actor"
+            "[TursoBackend] Created - all database operations will be serialized through internal \
+             actor"
         );
 
         let backend = Self {
@@ -1356,7 +1396,8 @@ impl TursoBackend {
         Self::create_connection_internal(&self.db)
     }
 
-    /// Helper to parse a row of turso_core::Value into our Entity type using schema
+    /// Helper to parse a row of turso_core::Value into our Entity type using
+    /// schema
     pub fn parse_row_values_with_schema(
         values: &[turso_core::Value],
         columns: &[Arc<str>],
@@ -1604,14 +1645,16 @@ impl TursoBackend {
                         "unknown panic".to_string()
                     };
                     tracing::error!(
-                        "[TursoBackend::Actor] Caught panic during command processing: {}. Actor continues.",
+                        "[TursoBackend::Actor] Caught panic during command processing: {}. Actor \
+                         continues.",
                         msg
                     );
                     // If a panic left a transaction open, roll it back to prevent
                     // the connection from being stuck (which silences CDC callbacks).
                     if !conn.is_autocommit().unwrap_or(true) {
                         tracing::error!(
-                            "[TursoBackend::Actor] Connection stuck in transaction after panic, rolling back"
+                            "[TursoBackend::Actor] Connection stuck in transaction after panic, \
+                             rolling back"
                         );
                         if let Err(e) = conn.execute("ROLLBACK", ()).await {
                             tracing::error!(
@@ -1627,7 +1670,8 @@ impl TursoBackend {
         tracing::info!("[TursoBackend::Actor] Actor loop ended");
     }
 
-    /// Process a single actor command. Returns true if the actor should shut down.
+    /// Process a single actor command. Returns true if the actor should shut
+    /// down.
     async fn process_actor_command(
         cmd: DbCommand,
         conn: &turso::Connection,
@@ -1805,7 +1849,8 @@ impl TursoBackend {
             .await
             .map_err(|e| StorageError::DatabaseError(format!("Failed to prepare query: {}", e)))?;
 
-        // Convert column names to Arc<str> once per statement; rows below only Arc::clone
+        // Convert column names to Arc<str> once per statement; rows below only
+        // Arc::clone
         let col_names: Vec<Arc<str>> = stmt.columns().iter().map(|c| Arc::from(c.name())).collect();
 
         let mut rows = stmt
@@ -1848,7 +1893,8 @@ impl TursoBackend {
             .await
             .map_err(|e| StorageError::DatabaseError(format!("Failed to prepare query: {}", e)))?;
 
-        // Convert column names to Arc<str> once per statement; rows below only Arc::clone
+        // Convert column names to Arc<str> once per statement; rows below only
+        // Arc::clone
         let col_names: Vec<Arc<str>> = stmt.columns().iter().map(|c| Arc::from(c.name())).collect();
 
         let mut rows = stmt
@@ -1924,11 +1970,11 @@ impl TursoBackend {
                 Err(_elapsed) => {
                     let sql_preview: String = sql.chars().take(160).collect();
                     return Err(StorageError::DatabaseError(format!(
-                        "DDL execution timed out after {:?} — actor would have hung. \
-                         Suspected Turso chained-matview (matview-on-matview) limitation: \
-                         CREATE MATERIALIZED VIEW selecting FROM another matview hangs \
-                         indefinitely in Turso IVM. See \
-                         .claude/skills/turso-chained-matview-hang/SKILL.md. SQL: {}...",
+                        "DDL execution timed out after {:?} — actor would have hung. Suspected \
+                         Turso chained-matview (matview-on-matview) limitation: CREATE \
+                         MATERIALIZED VIEW selecting FROM another matview hangs indefinitely in \
+                         Turso IVM. See .claude/skills/turso-chained-matview-hang/SKILL.md. SQL: \
+                         {}...",
                         timeout, sql_preview
                     )));
                 }
@@ -1948,9 +1994,9 @@ impl TursoBackend {
     /// Upper bound on a single DDL statement's execution inside the actor.
     ///
     /// Kept well under the caller-side `DEPENDENCY_TIMEOUT` (120s) so a genuine
-    /// hang is caught here first (freeing the actor) rather than only abandoning
-    /// one caller's wait. Overridable via `HOLON_DDL_TIMEOUT_MS` so tests can
-    /// exercise the hang guard without a 30s wall.
+    /// hang is caught here first (freeing the actor) rather than only
+    /// abandoning one caller's wait. Overridable via `HOLON_DDL_TIMEOUT_MS`
+    /// so tests can exercise the hang guard without a 30s wall.
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     fn ddl_execution_timeout() -> std::time::Duration {
         const DDL_EXECUTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -1977,7 +2023,8 @@ impl TursoBackend {
         if let Err(e) = conn.execute("BEGIN TRANSACTION", ()).await {
             if !conn.is_autocommit().unwrap_or(true) {
                 tracing::warn!(
-                    "[TursoBackend::Actor] BEGIN failed with stale transaction, rolling back and retrying: {}",
+                    "[TursoBackend::Actor] BEGIN failed with stale transaction, rolling back and \
+                     retrying: {}",
                     e
                 );
                 if let Err(rollback_err) = conn.execute("ROLLBACK", ()).await {
@@ -2033,7 +2080,8 @@ impl TursoBackend {
         Ok(())
     }
 
-    /// Execute statements within a transaction (helper for proper error handling)
+    /// Execute statements within a transaction (helper for proper error
+    /// handling)
     async fn execute_statements_in_transaction(
         conn: &turso::Connection,
         statements: Vec<(String, Vec<turso::Value>)>,
@@ -2645,10 +2693,12 @@ mod cdc_coalescer_tests {
 /// - CDC subscriptions work correctly
 #[cfg(test)]
 mod integration_tests {
-    use super::*;
     use std::sync::Arc;
+
     use tempfile::tempdir;
     use tokio::sync::RwLock;
+
+    use super::*;
 
     /// Helper to create a test backend
     async fn create_test_backend() -> Result<(Arc<RwLock<TursoBackend>>, DbHandle)> {
@@ -2739,7 +2789,8 @@ mod integration_tests {
         handle.shutdown().await.unwrap();
     }
 
-    /// Test that concurrent queries are serialized (no "database locked" errors)
+    /// Test that concurrent queries are serialized (no "database locked"
+    /// errors)
     #[tokio::test]
     async fn test_query_serialization() {
         let (_backend, handle) = create_test_backend().await.unwrap();
@@ -2860,7 +2911,8 @@ mod integration_tests {
         // parse strictly at their own boundary) — same as the CDC path.
         let rows = handle
             .query(
-                "SELECT id, COALESCE(json_group_array(content) FILTER (WHERE content IS NOT NULL), '[]') AS tags FROM sniff_test GROUP BY id",
+                "SELECT id, COALESCE(json_group_array(content) FILTER (WHERE content IS NOT \
+                 NULL), '[]') AS tags FROM sniff_test GROUP BY id",
                 HashMap::new(),
             )
             .await
@@ -2924,7 +2976,8 @@ mod integration_tests {
             let h = handle.clone();
             ddl_handles.push(tokio::spawn(async move {
                 h.execute_ddl(&format!(
-                    "CREATE VIEW IF NOT EXISTS view_{} AS SELECT * FROM test_interleave WHERE id LIKE 'id_%'",
+                    "CREATE VIEW IF NOT EXISTS view_{} AS SELECT * FROM test_interleave WHERE id \
+                     LIKE 'id_%'",
                     i
                 ))
                 .await

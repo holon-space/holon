@@ -11,10 +11,10 @@ use std::sync::Mutex;
 use futures_signals::signal::Signal;
 use futures_signals::signal::SignalExt;
 use futures_signals::signal_vec::SignalVec;
-use holon_api::Value;
 use holon_api::render_types::OperationParam;
 use holon_api::render_types::OperationWiring;
 use holon_api::render_types::TypeHint;
+use holon_api::Value;
 
 use crate::operation_matcher::MatchedOperation;
 use crate::operation_matcher::{self};

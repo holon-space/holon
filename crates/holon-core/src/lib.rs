@@ -45,6 +45,7 @@ mod block_operations_tests;
 pub use operation_log::OperationLogEntry;
 pub use operation_log::OperationStatus;
 pub use operation_wrapper::OperationWrapper;
+pub use traits::generate_sync_operation;
 pub use traits::BlockDataSourceHelpers;
 pub use traits::BlockEntity;
 pub use traits::BlockMaintenanceHelpers;
@@ -76,17 +77,16 @@ pub use traits::TaskOperations;
 pub use traits::TextOperations;
 pub use traits::UndoAction;
 pub use traits::UnknownOperationError;
-pub use traits::generate_sync_operation;
 // Re-export macro-generated operation dispatch functions
 pub use traits::{
     __operations_block_operations, __operations_crud_operations, __operations_mark_operations,
     __operations_move_operations, __operations_rename_operations, __operations_task_operations,
     __operations_text_operations,
 };
+pub use undo::verify_precondition;
 pub use undo::FieldFingerprint;
 pub use undo::Precondition;
 pub use undo::UndoEntry;
 pub use undo::UndoStack;
 pub use undo::UndoStateReader;
 pub use undo::UndoStore;
-pub use undo::verify_precondition;

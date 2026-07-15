@@ -20,8 +20,8 @@ use holon_frontend::geometry::GeometryProvider;
 use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::launch_holon_window_rebindable;
 use holon_gpui::navigation_state::NavigationState;
-use holon_gpui::reset::FreshSut;
 use holon_gpui::reset::build_fresh_sut;
+use holon_gpui::reset::FreshSut;
 
 fn real_text_system() -> Arc<dyn PlatformTextSystem> {
     gpui_platform::current_platform(true).text_system()

@@ -33,14 +33,14 @@ use holon::sync::LoroModule;
 use holon::sync::PublishErrorTracker;
 use holon_core::CrudAuthority;
 use holon_core::OperationProvider;
-use holon_frontend::FrontendSession;
-use holon_frontend::SessionParts;
 use holon_frontend::config::HolonConfig;
 use holon_frontend::config::SessionConfig;
 use holon_frontend::preferences::PrefKey;
 use holon_frontend::preferences::{self};
 use holon_frontend::render_services::register_render_services;
 use holon_frontend::theme;
+use holon_frontend::FrontendSession;
+use holon_frontend::SessionParts;
 
 use crate::mcp_integrations::McpIntegrationRegistry;
 

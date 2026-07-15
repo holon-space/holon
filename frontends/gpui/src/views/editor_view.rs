@@ -5,7 +5,6 @@ use futures_signals::signal::ReadOnlyMutable;
 use futures_signals::signal::SignalExt;
 use gpui::prelude::*;
 use gpui::*;
-use gpui_component::RopeExt;
 use gpui_component::input::Backspace;
 use gpui_component::input::Enter;
 use gpui_component::input::Escape;
@@ -18,14 +17,14 @@ use gpui_component::input::MoveUp;
 use gpui_component::input::OutdentInline;
 use gpui_component::input::Paste;
 use gpui_component::menu::PopupMenuItem;
+use gpui_component::RopeExt;
 use holon_api::widget_spec::DataRow;
-use holon_frontend::RowOrigin;
-use holon_frontend::cell::CursorBias;
 use holon_frontend::cell::compute_text_delta;
+use holon_frontend::cell::CursorBias;
+use holon_frontend::editor_view_model::structural_block_action;
 use holon_frontend::editor_view_model::EditorAction;
 use holon_frontend::editor_view_model::EditorKey;
 use holon_frontend::editor_view_model::EditorViewModel;
-use holon_frontend::editor_view_model::structural_block_action;
 use holon_frontend::input::InputAction;
 use holon_frontend::input::WidgetInput;
 use holon_frontend::navigation::Boundary;
@@ -33,6 +32,7 @@ use holon_frontend::navigation::CursorHint;
 use holon_frontend::navigation::NavDirection;
 use holon_frontend::popup_menu::PopupState;
 use holon_frontend::reactive::BuilderServices;
+use holon_frontend::RowOrigin;
 
 use crate::geometry::BoundsRegistry;
 use crate::navigation_state::NavigationState;
@@ -1692,8 +1692,8 @@ mod echo_suppression {
     //! CONVERGED (reset the block) under the old code. The seq guard makes it a
     //! drop.
 
-    use super::EchoDecision;
     use super::evaluate_data_sync_echo;
+    use super::EchoDecision;
 
     // A block seeded at boot carries write_seq 0 (the column default) until the
     // editor writes it. The editor's own keystrokes carry strictly-increasing

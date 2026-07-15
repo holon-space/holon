@@ -6,9 +6,9 @@ use chrono::Utc;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::value::Value;
 use crate::Marking;
 use crate::TokenState;
-use crate::value::Value;
 
 #[derive(Clone, Debug)]
 pub struct YamlToken {

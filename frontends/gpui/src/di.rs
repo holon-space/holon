@@ -28,8 +28,8 @@ use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive::BuilderServicesSlot;
 use holon_frontend::reactive::ReactiveEngine;
 use holon_frontend::reactive::RenderInterpreterInjectorExt;
-use holon_mcp::McpInjectorExt;
 use holon_mcp::di::McpServerHandle;
+use holon_mcp::McpInjectorExt;
 
 fn to_di_err(phase: &str, e: &dyn std::fmt::Display) -> fluxdi::Error {
     fluxdi::Error::module_lifecycle_failed("GpuiModule", phase, &e.to_string())

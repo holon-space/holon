@@ -43,13 +43,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use holon_api::widget_spec::DataRow;
 use holon_api::EntityUri;
 use holon_api::Occurrence;
 use holon_api::OccurrenceId;
 use holon_api::QueryLanguage;
 use holon_api::RowKey;
 use holon_api::Value;
-use holon_api::widget_spec::DataRow;
 
 /// The session-level advice sidecar: anchor → synthesized advice rows (rank
 /// order). Read synchronously by `advice_children`, replaced wholesale by

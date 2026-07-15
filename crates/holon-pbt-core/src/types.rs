@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use holon_api::Value;
 use holon_api::entity_uri::EntityUri;
+use holon_api::Value;
 
 /// Maps a document's stable block-id key to its live doc URI, shared across a
 /// SUT adapter and the composed builder. (Moved verbatim from

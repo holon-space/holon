@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use holon_frontend::LayoutHint;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
 use holon_frontend::view_model::DrawerMode;
+use holon_frontend::LayoutHint;
 
 use super::prelude::*;
 

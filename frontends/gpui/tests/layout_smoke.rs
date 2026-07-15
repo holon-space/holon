@@ -21,13 +21,13 @@ use std::sync::Arc;
 use gpui::TestAppContext;
 use holon_frontend::geometry::ElementInfo;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
-use support::BoundsSnapshot;
 use support::assert_all_nonzero;
 use support::assert_containment;
 use support::assert_layout_ok;
 use support::assert_no_sibling_overlap;
 use support::assert_nonempty;
 use support::render_fixture;
+use support::BoundsSnapshot;
 
 // ── Widget property helper ────────────────────────────────────────────
 

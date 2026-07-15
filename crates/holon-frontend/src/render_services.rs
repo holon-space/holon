@@ -12,12 +12,12 @@ use fluxdi::Injector;
 use fluxdi::Provider;
 use fluxdi::Shared;
 
-use crate::FrontendSession;
-use crate::ReactiveViewModel;
 use crate::reactive::BuilderServicesSlot;
 use crate::reactive::ReactiveEngine;
 use crate::reactive::RenderInterpreterFn;
 use crate::render_interpreter::RenderInterpreter;
+use crate::FrontendSession;
+use crate::ReactiveViewModel;
 
 /// Register the render stack: `BuilderServicesSlot` (OnceLock that breaks the
 /// engine↔interpreter cycle, populated by the platform shell after resolving

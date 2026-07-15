@@ -2286,11 +2286,9 @@ mod trait_unit_tests {
         assert_eq!(inner.op_name, "op");
 
         assert!(!UndoAction::DeclaredIrreversible("x").is_reversible());
-        assert!(
-            UndoAction::DeclaredIrreversible("x")
-                .into_option()
-                .is_none()
-        );
+        assert!(UndoAction::DeclaredIrreversible("x")
+            .into_option()
+            .is_none());
         assert!(UndoAction::Undeclared.is_undeclared());
     }
 

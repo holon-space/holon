@@ -15,8 +15,8 @@ use std::sync::Arc;
 use fluxdi::Injector;
 use fluxdi::Provider;
 use fluxdi::Shared;
-use holon_api::EntityUri;
 use holon_api::block::Block;
+use holon_api::EntityUri;
 use holon_core::block_ordering::BlockOrdering;
 use holon_filesystem::AliasRegistrar;
 use holon_filesystem::BlockDelta;
@@ -588,9 +588,9 @@ pub async fn run_file_sync_controller(
     fs: Arc<dyn holon_filesystem::FileSystem>,
     change_source: Arc<dyn holon_filesystem::FileChangeSource>,
 ) {
-    use tracing::Instrument;
     use tracing::error;
     use tracing::info;
+    use tracing::Instrument;
 
     let init_result = async { controller.initialize().await }
         .instrument(tracing::info_span!("org.startup.controller_initialize"))

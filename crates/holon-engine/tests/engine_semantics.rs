@@ -7,10 +7,6 @@ use std::collections::BTreeMap;
 
 use chrono::DateTime;
 use chrono::Utc;
-use holon_engine::Marking;
-use holon_engine::NetDef;
-use holon_engine::PrecondSpec;
-use holon_engine::TransitionDef;
 use holon_engine::engine::Engine;
 use holon_engine::guard::RhaiEvaluator;
 use holon_engine::objective;
@@ -23,6 +19,10 @@ use holon_engine::yaml::net::YamlNet;
 use holon_engine::yaml::net::YamlNetFile;
 use holon_engine::yaml::state::YamlMarking;
 use holon_engine::yaml::state::YamlToken;
+use holon_engine::Marking;
+use holon_engine::NetDef;
+use holon_engine::PrecondSpec;
+use holon_engine::TransitionDef;
 
 fn net_from_yaml(yaml: &str) -> YamlNet {
     let file: YamlNetFile = serde_yaml::from_str(yaml).expect("net yaml must parse");
@@ -430,11 +430,9 @@ transitions:
     let errors = net.validate();
     assert_eq!(errors.len(), 2, "errors: {errors:?}");
     assert!(errors.iter().any(|e| e.contains("unbound name 'ghost'")));
-    assert!(
-        errors
-            .iter()
-            .any(|e| e.contains("'x' not re-produced in any output"))
-    );
+    assert!(errors
+        .iter()
+        .any(|e| e.contains("'x' not re-produced in any output")));
 }
 
 #[test]

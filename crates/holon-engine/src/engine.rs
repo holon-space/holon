@@ -1,15 +1,15 @@
 use std::collections::BTreeMap;
 
-use crate::Marking;
-use crate::NetDef;
-use crate::TokenState;
-use crate::TransitionDef;
 use crate::arc::AttrInit;
 use crate::guard::RhaiEvaluator;
 use crate::value::Value;
 use crate::yaml::history::AttrChange;
 use crate::yaml::history::CreatedToken;
 use crate::yaml::history::Event;
+use crate::Marking;
+use crate::NetDef;
+use crate::TokenState;
+use crate::TransitionDef;
 
 /// A binding of input arc bind-names to actual token ids, plus captured
 /// placeholders.

@@ -1,9 +1,13 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{
-    Attribute, Block, Expr, Ident, Token, Type,
-    parse::{Parse, ParseStream},
-};
+use syn::Attribute;
+use syn::Block;
+use syn::Expr;
+use syn::Ident;
+use syn::Token;
+use syn::Type;
+use syn::parse::Parse;
+use syn::parse::ParseStream;
 
 // ─── Types ──────────────────────────────────────────────────────────
 
@@ -136,7 +140,8 @@ fn parse_param_type(input: ParseStream) -> syn::Result<ParamType> {
         other => Err(syn::Error::new_spanned(
             ty,
             format!(
-                "unsupported param type `{other}`, expected one of: String, Option<String>, bool, f32, f64, Value, Collection, Expr"
+                "unsupported param type `{other}`, expected one of: String, Option<String>, bool, \
+                 f32, f64, Value, Collection, Expr"
             ),
         )),
     }
@@ -341,8 +346,8 @@ fn generate_extraction(params: &[WidgetParam]) -> proc_macro2::TokenStream {
 }
 
 /// Generate the body of `resolve_props_from_args`: extraction of simple params
-/// (String, bool, f64, f32, Option<String>, Value) into a `HashMap<String, Value>`.
-/// Skips Collection and Expr params entirely.
+/// (String, bool, f64, f32, Option<String>, Value) into a `HashMap<String,
+/// Value>`. Skips Collection and Expr params entirely.
 fn generate_resolve_props_body(params: &[WidgetParam]) -> proc_macro2::TokenStream {
     let mut positional_idx = 0usize;
     let mut stmts = Vec::new();
@@ -574,8 +579,10 @@ fn generate_meta(widget_name: &str, params: &[WidgetParam]) -> proc_macro2::Toke
 ///
 /// Supports three forms:
 /// 1. `widget_builder! { fn badge(label: String); }` — auto-body
-/// 2. `widget_builder! { fn section(title: String, children: Collection) { ... } }` — extraction + user body
-/// 3. `widget_builder! { raw fn tree(ba: BA<'_>) -> ViewModel { ... } }` — raw, just WIDGET_META
+/// 2. `widget_builder! { fn section(title: String, children: Collection) { ...
+///    } }` — extraction + user body
+/// 3. `widget_builder! { raw fn tree(ba: BA<'_>) -> ViewModel { ... } }` — raw,
+///    just WIDGET_META
 pub fn widget_builder_impl(input: TokenStream) -> TokenStream {
     // Check if first token is `raw`
     let input_str = input.to_string();
@@ -634,7 +641,8 @@ pub fn widget_builder_impl(input: TokenStream) -> TokenStream {
                 }
             }
             None => {
-                // Auto-body: build delegates to resolve_props_from_args (no separate extraction)
+                // Auto-body: build delegates to resolve_props_from_args (no separate
+                // extraction)
                 let auto_body = generate_auto_body(&widget_name, &input.params);
                 quote! {
                     #meta

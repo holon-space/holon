@@ -2,8 +2,8 @@
 //!
 //! Each transition kind owns its data (a struct), generation strategy
 //! (`holon_pbt_core::TransitionFactory<ReferenceState>`), and behaviour
-//! (`holon_pbt_core::TransitionImpl<Ref, S>`, bound on fine-grained SUT caps). The
-//! `declare_e2e_transitions!` macro generates the dispatch enum, the
+//! (`holon_pbt_core::TransitionImpl<Ref, S>`, bound on fine-grained SUT caps).
+//! The `declare_e2e_transitions!` macro generates the dispatch enum, the
 //! `From<variant>` impls, the hand-rolled trait dispatch on the enum, the
 //! `SqlBudget` dispatch, and the strategy aggregator.
 //!
@@ -21,12 +21,12 @@
 //! `transition_budgets::SqlBudget` trait so the shared behaviour trait stays
 //! medium-agnostic.
 //!
-//! - There is no bundle trait. Each transition's `TransitionImpl` is
-//!   bound on exactly the fine-grained SUT capability traits it drives
-//!   (via `cap_transition!`); the `E2ETransition` enum's `TransitionImpl`
-//!   is bound on the inlined union of every variant's caps (via
-//!   `declare_e2e_transitions!`), so a variant narrowed to a single cap
-//!   still satisfies it. The former coarse `SutHandle` view was deleted.
+//! - There is no bundle trait. Each transition's `TransitionImpl` is bound on
+//!   exactly the fine-grained SUT capability traits it drives (via
+//!   `cap_transition!`); the `E2ETransition` enum's `TransitionImpl` is bound
+//!   on the inlined union of every variant's caps (via
+//!   `declare_e2e_transitions!`), so a variant narrowed to a single cap still
+//!   satisfies it. The former coarse `SutHandle` view was deleted.
 
 /// Per-variant weight multiplier read from the `HOLON_PBT_WEIGHTS`
 /// environment variable. The macro `declare_e2e_transitions!` applies
@@ -227,6 +227,7 @@ macro_rules! declare_e2e_transitions {
             + ::holon_pbt_core::capabilities::SutMutate
             + ::holon_pbt_core::capabilities::SutSeamMutate
             + ::holon_pbt_core::capabilities::SutBlockCreate
+            + ::holon_pbt_core::capabilities::SutTemplateInstantiate
             + ::holon_pbt_core::capabilities::SutClockAdvance
             + ::holon_pbt_core::capabilities::SutFixtureFs
             + ::holon_pbt_core::capabilities::SutAppLifecycle
@@ -362,7 +363,8 @@ macro_rules! declare_e2e_transitions {
 /// `SqlBudget::expected_sql`.
 #[cfg(test)]
 mod cap_transition_generic_arm_selftest {
-    use ::holon_pbt_core::capabilities::{RefBlockTree, SutBlockTreeWrite};
+    use ::holon_pbt_core::capabilities::RefBlockTree;
+    use ::holon_pbt_core::capabilities::SutBlockTreeWrite;
     use ::holon_pbt_core::composition::CapId;
 
     #[derive(Clone, Debug)]
@@ -393,8 +395,9 @@ mod cap_transition_generic_arm_selftest {
     #[cfg(feature = "otel-testing")]
     #[test]
     fn sql_budget_clause_emits_generic_expected_sql() {
-        use crate::pbt::transition_budgets::SqlBudget;
         use ::holon_pbt_core::capabilities::RefSqlCardinality;
+
+        use crate::pbt::transition_budgets::SqlBudget;
 
         struct DummyRef;
         impl RefSqlCardinality for DummyRef {

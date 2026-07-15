@@ -7,18 +7,21 @@
 //! shared `SwitchViewModeReason` into the integration-tests `Reason`
 //! enum (the enum drives the rejection histogram).
 
+use holon_layout_testing::LayoutRef;
+use holon_layout_testing::LayoutSut;
 use holon_layout_testing::transitions::switch_view_mode::SwitchViewModeReason;
-use holon_layout_testing::{LayoutRef, LayoutSut};
-use holon_pbt_core::{TransitionFactory, TransitionImpl, TransitionRef};
+pub use holon_pbt_core::SwitchViewMode;
+use holon_pbt_core::TransitionFactory;
+use holon_pbt_core::TransitionImpl;
+use holon_pbt_core::TransitionRef;
+use holon_pbt_core::capabilities::SutBlockInteract;
+use holon_pbt_core::validation::Reason;
+use holon_pbt_core::validation::map_nevec;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-pub use holon_pbt_core::SwitchViewMode;
-
 use crate::pbt::layout_bridge::SutClickAdapter;
 use crate::pbt::reference_state::ReferenceState;
-use holon_pbt_core::capabilities::SutBlockInteract;
-use holon_pbt_core::validation::{Reason, map_nevec};
 
 fn map_reason(r: SwitchViewModeReason) -> Reason {
     match r {

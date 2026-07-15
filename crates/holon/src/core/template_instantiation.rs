@@ -400,9 +400,7 @@ fn template_marker_key<'a>(
     props: &'a BTreeMap<String, serde_json::Value>,
     marker: &str,
 ) -> Option<&'a String> {
-    props
-        .keys()
-        .find(|k| k.eq_ignore_ascii_case(marker))
+    props.keys().find(|k| k.eq_ignore_ascii_case(marker))
 }
 
 fn template_marker_value<'a>(
@@ -763,10 +761,7 @@ mod tests {
         ]);
         let err = InstantiateRequest::from_params(&p).unwrap_err();
         let msg = format!("{err:#}");
-        assert!(
-            msg.contains("must be a non-empty string"),
-            "got: {msg}"
-        );
+        assert!(msg.contains("must be a non-empty string"), "got: {msg}");
     }
 
     #[test]
@@ -778,10 +773,7 @@ mod tests {
         ]);
         let err = InstantiateRequest::from_params(&p).unwrap_err();
         let msg = format!("{err:#}");
-        assert!(
-            msg.contains("must be a non-empty string"),
-            "got: {msg}"
-        );
+        assert!(msg.contains("must be a non-empty string"), "got: {msg}");
     }
 
     #[test]
@@ -805,10 +797,7 @@ mod tests {
         assert_eq!(req.bindings.get("int_val").unwrap(), "42");
         assert_eq!(req.bindings.get("float_val").unwrap(), "3.14");
         assert_eq!(req.bindings.get("bool_val").unwrap(), "true");
-        assert_eq!(
-            req.bindings.get("dt_val").unwrap(),
-            "2026-07-12T00:00:00Z"
-        );
+        assert_eq!(req.bindings.get("dt_val").unwrap(), "2026-07-12T00:00:00Z");
     }
 
     #[test]
@@ -819,10 +808,7 @@ mod tests {
             ("context_key", Value::String("key1".into())),
         ]);
         let mut bindings = std::collections::HashMap::new();
-        bindings.insert(
-            "arr".to_string(),
-            Value::Array(vec![Value::Integer(1)]),
-        );
+        bindings.insert("arr".to_string(), Value::Array(vec![Value::Integer(1)]));
         p.insert(Arc::from("bindings"), Value::Object(bindings));
 
         let err = InstantiateRequest::from_params(&p).unwrap_err();
@@ -837,10 +823,7 @@ mod tests {
             ("target_parent", Value::String("block:parent".into())),
             ("context_key", Value::String("key1".into())),
         ]);
-        p.insert(
-            Arc::from("bindings"),
-            Value::String("not-an-object".into()),
-        );
+        p.insert(Arc::from("bindings"), Value::String("not-an-object".into()));
 
         let err = InstantiateRequest::from_params(&p).unwrap_err();
         let msg = format!("{err:#}");

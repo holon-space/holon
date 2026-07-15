@@ -10,8 +10,8 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use holon_api::EntityUri;
 use holon_api::block::Block;
+use holon_api::EntityUri;
 
 /// Read-only access to blocks, organized by document.
 ///

@@ -4,13 +4,13 @@
 //! org blocks. Kept local (not shared via `holon-orgmode`) so this crate does
 //! not depend on the org sync stack; the field set is the format-neutral core.
 
-use holon_api::ContentType;
-use holon_api::EntityUri;
-use holon_api::ROUTING_DOC_URI_KEY;
-use holon_api::StorageEntity;
-use holon_api::Value;
 use holon_api::block::Block;
 use holon_api::marks_to_json;
+use holon_api::ContentType;
+use holon_api::EntityUri;
+use holon_api::StorageEntity;
+use holon_api::Value;
+use holon_api::ROUTING_DOC_URI_KEY;
 use holon_org_format::OrgBlockExt;
 
 pub fn build_block_params(

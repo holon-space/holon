@@ -1,7 +1,7 @@
-use holon_api::EntityUri;
-use holon_api::Value;
 use holon_api::block::Block;
 use holon_api::types::ContentType;
+use holon_api::EntityUri;
+use holon_api::Value;
 
 use crate::models::OrgBlockExt;
 

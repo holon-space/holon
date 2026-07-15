@@ -97,6 +97,7 @@ mod expand_toggle;
 pub mod focus_editable_text;
 mod git_init;
 pub mod indent;
+mod instantiate_template;
 mod jj_git_init;
 pub mod join_block;
 pub mod move_cursor;
@@ -161,6 +162,7 @@ pub use holon_loro_testing::transitions::{
     AddPeer, CreateStaleLoro, MergeFromPeer, PeerCharEdit, PeerEdit, SyncWithPeer,
 };
 pub use indent::Indent;
+pub use instantiate_template::InstantiateTemplate;
 pub use jj_git_init::JjGitInit;
 pub use join_block::JoinBlock;
 pub use move_cursor::MoveCursor;
@@ -217,6 +219,7 @@ crate::declare_e2e_transitions! {
         FocusEditableText(FocusEditableText),
         GitInit(GitInit),
         Indent(Indent),
+        InstantiateTemplate(InstantiateTemplate),
         JjGitInit(JjGitInit),
         JoinBlock(JoinBlock),
         MoveCursor(MoveCursor),

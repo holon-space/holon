@@ -44,7 +44,6 @@
 //! makes the active layout rule-drivable for free.
 //! See `docs/Proposals/PerspectivesAsData-C8.md`.
 
-use crate::Value;
 use crate::block::Block;
 use crate::entity_uri::EntityUri;
 use crate::render_types::RenderExpr;
@@ -52,6 +51,7 @@ use crate::types::EntityName;
 use crate::types::QueryLanguage;
 use crate::types::Region;
 use crate::types::SourceLanguage;
+use crate::Value;
 
 /// The property on the well-known root-layout block that points at the active
 /// perspective block. Absent → the root-layout block is itself the active

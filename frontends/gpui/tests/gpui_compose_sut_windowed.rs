@@ -47,16 +47,16 @@ use holon_integration_tests::pbt::composed::builder::compose_sut_windowed_base;
 use holon_integration_tests::pbt::composed::harness::ComposedSut;
 use holon_integration_tests::pbt::composed::wide_e2e::WideE2E;
 use holon_integration_tests::pbt::composed::wide_e2e::WideE2EMachine;
-use holon_integration_tests::pbt::fixtures::FixtureStep;
 use holon_integration_tests::pbt::fixtures::replay_steps;
+use holon_integration_tests::pbt::fixtures::FixtureStep;
 use holon_integration_tests::pbt::op_write_cap::IdResolver;
 use holon_integration_tests::pbt::transitions::ClickBlock;
 use holon_integration_tests::pbt::transitions::E2ETransition;
 use holon_integration_tests::pbt::window_slice::builders::overlay_windowed_caps;
 use holon_integration_tests::pbt::window_slice::builders::window_layout;
-use holon_pbt_core::ComponentSet;
 // Caps must be in scope to read them through the `CapMap` (capmap_adapter forwards).
 use holon_pbt_core::capabilities::{SutBackend, SutBlockInteract, SutDriver, SutLayout};
+use holon_pbt_core::ComponentSet;
 use proptest_state_machine::ReferenceStateMachine;
 use proptest_state_machine::StateMachineTest;
 

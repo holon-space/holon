@@ -17,8 +17,8 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
 use anyhow::anyhow;
+use anyhow::Result;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 

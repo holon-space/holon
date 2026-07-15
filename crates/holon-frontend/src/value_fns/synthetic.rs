@@ -10,9 +10,9 @@ use std::sync::Arc;
 use futures_signals::signal_vec::MutableVec;
 use futures_signals::signal_vec::SignalVec;
 use futures_signals::signal_vec::SignalVecExt;
-use holon_api::ReactiveRowProvider;
 use holon_api::ptr_identity;
 use holon_api::widget_spec::DataRow;
+use holon_api::ReactiveRowProvider;
 
 /// A `ReactiveRowProvider` backed by a `MutableVec`. Callers push rows
 /// at construction time (or later via `push`) and the provider exposes

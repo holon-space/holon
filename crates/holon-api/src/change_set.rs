@@ -42,10 +42,10 @@
 
 use std::collections::BTreeMap;
 
-use crate::Value;
-use crate::entity::POSITION_AFTER_BLOCK_ID_PARAM;
 use crate::entity::StorageEntity;
+use crate::entity::POSITION_AFTER_BLOCK_ID_PARAM;
 use crate::entity_uri::EntityUri;
+use crate::Value;
 
 /// Fields that an `update` op carries for bookkeeping, not as a representable
 /// field mutation. They never decode to a [`ChangeOp::SetField`].
@@ -444,16 +444,14 @@ mod tests {
         let cs = ChangeSet::from_ops(&ops, Provenance::default());
         // One Relocate + one SetField (content); sort_key/parent_id fold into Relocate.
         assert_eq!(cs.ops.len(), 2);
-        assert!(
-            cs.ops
-                .iter()
-                .any(|o| matches!(o, ChangeOp::Relocate { .. }))
-        );
-        assert!(
-            cs.ops
-                .iter()
-                .any(|o| matches!(o, ChangeOp::SetField { field, .. } if field == "content"))
-        );
+        assert!(cs
+            .ops
+            .iter()
+            .any(|o| matches!(o, ChangeOp::Relocate { .. })));
+        assert!(cs
+            .ops
+            .iter()
+            .any(|o| matches!(o, ChangeOp::SetField { field, .. } if field == "content")));
         // Re-encodes to exactly one `update` for block:a.
         assert_eq!(*cs.reencode_op_names().get("update").unwrap(), 1);
         assert!(agrees_with_ops(&cs, &ops).is_ok());

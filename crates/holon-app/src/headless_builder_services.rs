@@ -9,18 +9,18 @@ use std::sync::Arc;
 use anyhow::Result;
 use futures_signals::signal::Mutable;
 use holon::api::BackendEngine;
-use holon_api::EntityUri;
-use holon_api::QueryLanguage;
 use holon_api::entity_profile::ProfileCache;
 use holon_api::render_types::RenderExpr;
 use holon_api::widget_spec::DataRow;
+use holon_api::EntityUri;
+use holon_api::QueryLanguage;
+use holon_frontend::reactive::table_expr;
+use holon_frontend::reactive::BuilderServices;
+use holon_frontend::reactive_view_model::ReactiveViewModel;
+use holon_frontend::render_interpreter::RenderInterpreter;
 use holon_frontend::QueryContext;
 use holon_frontend::RenderContext;
 use holon_frontend::WidgetState;
-use holon_frontend::reactive::BuilderServices;
-use holon_frontend::reactive::table_expr;
-use holon_frontend::reactive_view_model::ReactiveViewModel;
-use holon_frontend::render_interpreter::RenderInterpreter;
 
 /// `BuilderServices` stub for the MCP `describe_ui` path, which renders the
 /// UI tree without an interactive `ReactiveEngine` (no focus, no provider

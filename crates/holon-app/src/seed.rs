@@ -207,8 +207,8 @@ fn seed_routing_doc(
 mod routing_tests {
     use std::collections::HashMap;
 
-    use holon_api::EntityUri;
     use holon_api::block::Block;
+    use holon_api::EntityUri;
     use holon_frontend::FrontendSession;
 
     use super::seed_routing_doc;

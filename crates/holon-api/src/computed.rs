@@ -10,10 +10,10 @@ use std::collections::HashMap;
 use rhai::Engine as RhaiEngine;
 use rhai::Scope;
 
-use crate::Value;
-use crate::entity_profile::CompiledComputedField;
 use crate::entity_profile::dynamic_to_value;
 use crate::entity_profile::value_to_dynamic;
+use crate::entity_profile::CompiledComputedField;
+use crate::Value;
 
 /// Evaluate pre-compiled computed fields in order, mutating the context in
 /// place.

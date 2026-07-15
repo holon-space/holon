@@ -32,8 +32,8 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use holon_api::EntityUri;
 use holon_api::block::Block;
+use holon_api::EntityUri;
 
 /// Fallible result with a thread-safe boxed error, matching the convention in
 /// [`crate::traits`].

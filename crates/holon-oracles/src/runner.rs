@@ -16,12 +16,12 @@ use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 
-use crate::OracleMode;
 use crate::checks::ParentRow;
 use crate::checks::SourceLanguageRow;
 use crate::checks::{self};
 use crate::status::OracleStatus;
 use crate::status::Violation;
+use crate::OracleMode;
 
 /// Live-state snapshot access, implemented by the frontend at the boundary
 /// (SQL row → typed row parsing happens in the impl, fail-loud).

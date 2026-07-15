@@ -30,15 +30,15 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use holon_api::Value;
 use holon_api::render_types::OperationWiring;
 use holon_api::render_types::RenderExpr;
 use holon_api::render_types::RuleSpec;
 use holon_api::widget_spec::DataRow;
+use holon_api::Value;
 
-use crate::RenderContext;
 use crate::reactive::BuilderServices;
 use crate::render_interpreter::WithEntity;
+use crate::RenderContext;
 
 /// Parse a `rules:` argument value into a `Vec<RuleSpec>`.
 ///

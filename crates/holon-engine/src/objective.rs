@@ -1,6 +1,6 @@
+use crate::guard::RhaiEvaluator;
 use crate::Marking;
 use crate::NetDef;
-use crate::guard::RhaiEvaluator;
 
 pub struct ObjectiveResult {
     pub value: f64,

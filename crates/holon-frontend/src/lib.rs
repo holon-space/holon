@@ -36,6 +36,7 @@ pub mod lane_filtered_provider;
 /// depend on `holon-frontend` already; this saves them adding a direct
 /// `holon-core` dep just to import `Cell<String>` / `TextOp` / etc.
 pub mod cell {
+    pub use holon_core::cell::compute_text_delta;
     pub use holon_core::cell::Cell;
     pub use holon_core::cell::CellBacking;
     pub use holon_core::cell::CursorAnchor;
@@ -45,7 +46,6 @@ pub mod cell {
     pub use holon_core::cell::TextCellBacking;
     pub use holon_core::cell::TextDelta;
     pub use holon_core::cell::TextOp;
-    pub use holon_core::cell::compute_text_delta;
     pub use holon_core::cell_registry::CellCache;
     pub use holon_core::cell_registry::EntityCellRegistry;
     pub use holon_core::cell_registry::EntityCellRegistryExt;
@@ -255,19 +255,19 @@ pub use preferences::PrefKey;
 pub use preferences::PrefSection;
 pub use preferences::PrefType;
 pub use preferences::PreferenceDef;
+pub use reactive::interpret_pure;
 pub use reactive::LiveBlock;
 pub use reactive::StubBuilderServices;
 pub use reactive::WatchGuard;
-pub use reactive::interpret_pure;
 pub use reactive_view::CollectionConfig;
 pub use reactive_view::ReactiveView;
+pub use reactive_view_model::collection_variant_of;
+pub use reactive_view_model::extract_item_template;
+pub use reactive_view_model::variants_match;
 pub use reactive_view_model::CollectionVariant;
 pub use reactive_view_model::InterpretFn;
 pub use reactive_view_model::ReactiveSlot;
 pub use reactive_view_model::ReactiveViewModel;
-pub use reactive_view_model::collection_variant_of;
-pub use reactive_view_model::extract_item_template;
-pub use reactive_view_model::variants_match;
 pub use render_context::AvailableSpace;
 pub use render_context::LayoutHint;
 pub use render_context::RenderContext;
@@ -835,9 +835,9 @@ impl<T> FrontendSession<T> {
 
 #[cfg(test)]
 mod journals_seed_tests {
+    use holon_api::block::Block;
     use holon_api::ContentType;
     use holon_api::SourceLanguage;
-    use holon_api::block::Block;
 
     use super::*;
 
