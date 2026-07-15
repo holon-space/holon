@@ -2990,12 +2990,17 @@ mod teeth {
         );
         let failures = report.failures();
         assert!(
-            !failures.is_empty(),
-            "Phase 1 expected RED (inv-embedded-page-collapsed-lazy fails) but got green. \
-             If embedded pages are ALREADY collapsed+lazy-loaded, the fix may already be in place."
+            failures.is_empty(),
+            "Phase 3 data-half GREEN (embedded page descendants absent from main panel): \
+             inv-embedded-page-collapsed-lazy must pass because the new holon_sql recursive CTE \
+             stops at non-root page boundaries — descendants of the embedded page are no longer \
+             fetched by the panel query. Failures (if any): {failures:?}"
         );
         eprintln!(
-            "[embedded_page_renders_collapsed_and_lazy] RED (expected in Phase 1): failures = {failures:?}"
+            "[embedded_page_renders_collapsed_and_lazy] GREEN (Phase 3 data half): \
+             no ref-known descendants of the embedded page appear in the main-panel widget tree. \
+             The 'no expand_toggle' display-half prong is deferred to the parallel display \
+             workstream."
         );
     }
 }

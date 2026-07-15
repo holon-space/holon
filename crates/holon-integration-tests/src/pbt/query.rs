@@ -57,7 +57,16 @@ pub enum QuerySource {
     /// the focus-root(s) for `region`. The default layout's panel form
     /// (`MATCH (fr:focus_root),(root:block)<-[:CHILD_OF*0..max]-(d:block)
     /// WHERE fr.region = R AND root.id = fr.root_id RETURN d`).
-    FocusRootDescendants { region: String, max_depth: u32 },
+    FocusRootDescendants {
+        region: String,
+        max_depth: u32,
+        /// When true, the recursive descent stops at non-root pages (page
+        /// identity via `block_tags.tag = 'Page'`). The new holon_sql layout
+        /// queries (Phase 3 data half of embedded-page collapse+lazy) set
+        /// this; the legacy GQL form and the no-user-index-org default do
+        /// not.
+        stop_at_pages: bool,
+    },
     /// The production seeded left-sidebar watch from
     /// `assets/default/index.org`: every page block except the
     /// `__default__` seed page. SQL-only — `SELECT b.* FROM block b JOIN
@@ -97,6 +106,7 @@ impl QuerySource {
                     QuerySource::FocusRootDescendants {
                         region: "main".to_string(),
                         max_depth: 20,
+                        stop_at_pages: false,
                     }
                 } else {
                     QuerySource::AllBlocks
@@ -107,6 +117,7 @@ impl QuerySource {
                     QuerySource::FocusRootDescendants {
                         region: gql_focus_region(q),
                         max_depth: 20,
+                        stop_at_pages: false,
                     }
                 } else if let Some((min_depth, max_depth)) = gql_childof_star_bounds(q) {
                     QuerySource::DescendantsOfAny {
@@ -122,7 +133,20 @@ impl QuerySource {
                 }
             }
             QueryLanguage::HolonSql => {
-                if q.contains("parent_id") && q.contains("content_type") {
+                if q.contains("focus_roots") && q.contains("focus_descendants") {
+                    let region = if q.contains("region = 'right'") {
+                        "right"
+                    } else if q.contains("region = 'main'") {
+                        "main"
+                    } else {
+                        "main"
+                    };
+                    QuerySource::FocusRootDescendants {
+                        region: region.to_string(),
+                        max_depth: 20,
+                        stop_at_pages: true,
+                    }
+                } else if q.contains("parent_id") && q.contains("content_type") {
                     QuerySource::DirectChildren {
                         context: layout_block.clone(),
                     }
@@ -384,7 +408,7 @@ impl TestQuery {
                 format!("MATCH (root:block)<-[:CHILD_OF*{min_depth}..{max_depth}]-(d:block)"),
                 "d",
             ),
-            QuerySource::FocusRootDescendants { region, max_depth } => (
+            QuerySource::FocusRootDescendants { region, max_depth, .. } => (
                 format!(
                     "MATCH (fr:focus_root), (root:block)<-[:CHILD_OF*0..{max_depth}]-(d:block) \
                      WHERE fr.region = '{region}' AND root.id = fr.root_id"
@@ -466,7 +490,7 @@ impl TestQuery {
             ) => format!(
                 "MATCH (root:block)<-[:CHILD_OF*{min_depth}..{max_depth}]-(d:block) RETURN d"
             ),
-            (QuerySource::FocusRootDescendants { region, max_depth }, _) => format!(
+            (QuerySource::FocusRootDescendants { region, max_depth, .. }, _) => format!(
                 "MATCH (fr:focus_root), (root:block)<-[:CHILD_OF*0..{max_depth}]-(d:block) WHERE \
                  fr.region = '{region}' AND root.id = fr.root_id RETURN d"
             ),
@@ -536,16 +560,29 @@ impl TestQuery {
                 .filter(|b| depth_from_some_root(blocks, &b.id) >= *min_depth)
                 .map(|b| b.id.clone())
                 .collect(),
-            QuerySource::FocusRootDescendants { region, max_depth } => {
-                // Same `CHILD_OF*` mechanism as DescendantsOfAny — does NOT
-                // filter `content_type = 'source'`. Callers that only want
-                // editable content filter to text blocks themselves.
+            QuerySource::FocusRootDescendants {
+                region,
+                max_depth,
+                stop_at_pages,
+            } => {
                 let roots = focus_roots.get(region).cloned().unwrap_or_default();
-                blocks
-                    .values()
-                    .filter(|b| descendant_within(blocks, &b.id, &roots, *max_depth))
-                    .map(|b| b.id.clone())
-                    .collect()
+                if *stop_at_pages {
+                    blocks
+                        .values()
+                        .filter(|b| {
+                            descendant_within_stopping_at_pages(
+                                blocks, &b.id, &roots, *max_depth,
+                            )
+                        })
+                        .map(|b| b.id.clone())
+                        .collect()
+                } else {
+                    blocks
+                        .values()
+                        .filter(|b| descendant_within(blocks, &b.id, &roots, *max_depth))
+                        .map(|b| b.id.clone())
+                        .collect()
+                }
             }
             QuerySource::PageBlocks => {
                 let default_page = EntityUri::block("__default__");
@@ -710,6 +747,43 @@ fn descendant_within(
         let parent = block.parent_id.clone();
         if roots.contains(&parent) {
             return true;
+        }
+        if parent.is_no_parent() || parent.is_sentinel() {
+            return false;
+        }
+        current = parent;
+    }
+    false
+}
+
+/// Like [`descendant_within`] but the traversal stops at any non-root page:
+/// a block whose nearest-root ancestor path includes a page that is not itself
+/// a root is excluded. This mirrors the Phase 3 holon_sql recursive CTE's
+/// `LEFT JOIN block_tags ... WHERE fd._depth = 0 OR bt.block_id IS NULL`
+/// guard, which descends into children of the root (depth 0) unconditionally
+/// but into children of non-root nodes only if those nodes are not pages.
+fn descendant_within_stopping_at_pages(
+    blocks: &BTreeMap<EntityUri, Block>,
+    id: &EntityUri,
+    roots: &BTreeSet<EntityUri>,
+    max_depth: u32,
+) -> bool {
+    if roots.contains(id) {
+        return true;
+    }
+    let mut current = id.clone();
+    for _ in 0..max_depth.min(50) {
+        let Some(block) = blocks.get(&current) else {
+            return false;
+        };
+        let parent = block.parent_id.clone();
+        if roots.contains(&parent) {
+            return true;
+        }
+        // If the current node is a non-root page, the SQL query stops
+        // descending here — so `id` (a descendant of this page) is excluded.
+        if block.is_page() {
+            return false;
         }
         if parent.is_no_parent() || parent.is_sentinel() {
             return false;

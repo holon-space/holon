@@ -147,10 +147,14 @@ pub async fn seed_default_layout(engine: &Arc<BackendEngine>) -> anyhow::Result<
         (
             "block:default-main-panel::src::0",
             "block:default-main-panel",
-            "MATCH (fr:focus_root), (root:block)<-[:CHILD_OF*0..20]-(d:block) WHERE fr.region = \
-             'main' AND root.id = fr.root_id RETURN d",
+            "WITH RECURSIVE focus_descendants AS (\n  SELECT b.*, 0 AS _depth\n  FROM \
+             focus_roots fr\n  JOIN block b ON b.id = fr.root_id\n  WHERE fr.region = 'main'\n  \
+             UNION ALL\n  SELECT child.*, fd._depth + 1\n  FROM focus_descendants fd\n  JOIN block \
+             child ON child.parent_id = fd.id\n  LEFT JOIN block_tags bt ON bt.block_id = fd.id \
+             AND bt.tag = 'Page'\n  WHERE fd._depth = 0 OR bt.block_id IS NULL\n)\nSELECT * FROM \
+             focus_descendants ORDER BY _depth, sort_key",
             "source",
-            "holon_gql",
+            "holon_sql",
             "a8",
             r#"{"sequence":7}"#,
         ),
