@@ -111,10 +111,6 @@ where
                     && n.props.get("expanded").map(String::as_str) == Some("false")
             });
 
-            if has_collapsed_toggle {
-                continue;
-            }
-
             // Check whether any ref-known strict descendant of this page appears in
             // the panel's entity ids — the signal of eager/un-collapsed rendering.
             let descendants_in_panel: Vec<String> = non_seed
@@ -132,7 +128,7 @@ where
                 .map(|u| u.as_str().to_string())
                 .collect();
 
-            if !descendants_in_panel.is_empty() {
+            if !has_collapsed_toggle && !descendants_in_panel.is_empty() {
                 return InvariantResult::Fail(format!(
                     "[inv-embedded-page-collapsed-lazy] embedded page {page_str} (strict descendant \
                      of main focus root{roots}) is rendered EAGER/EXPANDED: no collapsed \
@@ -145,6 +141,24 @@ where
                         .map(|s| format!(" {s}"))
                         .collect::<Vec<_>>()
                         .join(""),
+                ));
+            }
+
+            if !has_collapsed_toggle {
+                return InvariantResult::Fail(format!(
+                    "[inv-embedded-page-collapsed-lazy] embedded page {page_str} is missing \
+                     a collapsed expand_toggle — no expand_toggle with target_id=='{page_str}' \
+                     and expanded='false' found in the main-panel widget tree. Affordance prong \
+                     FAILS.",
+                ));
+            }
+
+            if !descendants_in_panel.is_empty() {
+                return InvariantResult::Fail(format!(
+                    "[inv-embedded-page-collapsed-lazy] embedded page {page_str} has a collapsed \
+                     expand_toggle (affordance prong PASSES) but its ref-known strict descendants \
+                     {descendants_in_panel:?} are present in the main-panel widget tree — \
+                     descendants prong FAILS (children leaked past the lazy gate).",
                 ));
             }
         }

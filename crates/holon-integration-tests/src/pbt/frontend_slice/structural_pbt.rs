@@ -2885,17 +2885,15 @@ mod teeth {
         }
     }
 
-    /// **Phase 1 RED: embedded page renders collapsed + lazy-loaded.**
+    /// **Phase 2+3 FULL GREEN: embedded page renders collapsed + lazy, both halves.**
     ///
     /// Boots a custom topology where a non-seed page (`test-date-page`) sits
     /// under `block:journals` with a child block (`test-date-child`), focuses
     /// the main panel on `block:journals`, then runs
-    /// `inv-embedded-page-collapsed-lazy`. The invariant RED-fails because
-    /// today embedded pages render eagerly — the child appears in the main
-    /// panel widget tree with no collapsed `expand_toggle` marking the page.
-    ///
-    /// This is the Phase 1 RED oracle. It currently FAILS (expected). Phases
-    /// 2+3 will make it green by implementing the display/query fix.
+    /// `inv-embedded-page-collapsed-lazy`. Both prongs pass: (a) the
+    /// `embedded_page` profile variant wraps the page in a collapsed
+    /// `expand_toggle`, and (b) the holon_sql recursive CTE stops at non-root
+    /// page boundaries so no descendants leak into the widget tree snapshot.
     #[tokio::test(flavor = "multi_thread")]
     async fn embedded_page_renders_collapsed_and_lazy() {
         use holon_pbt_core::capabilities::CapRegion;
@@ -2991,16 +2989,15 @@ mod teeth {
         let failures = report.failures();
         assert!(
             failures.is_empty(),
-            "Phase 3 data-half GREEN (embedded page descendants absent from main panel): \
-             inv-embedded-page-collapsed-lazy must pass because the new holon_sql recursive CTE \
-             stops at non-root page boundaries — descendants of the embedded page are no longer \
-             fetched by the panel query. Failures (if any): {failures:?}"
+            "Phase 2+3 FULL GREEN (embedded page collapsed + lazy, both halves): \
+             inv-embedded-page-collapsed-lazy must pass because (a) the embedded_page \
+             profile variant wraps the page in a collapsed expand_toggle, and (b) the \
+             holon_sql recursive CTE stops at non-root page boundaries so no descendants \
+             leak into the widget tree. Failures (if any): {failures:?}"
         );
         eprintln!(
-            "[embedded_page_renders_collapsed_and_lazy] GREEN (Phase 3 data half): \
-             no ref-known descendants of the embedded page appear in the main-panel widget tree. \
-             The 'no expand_toggle' display-half prong is deferred to the parallel display \
-             workstream."
+            "[embedded_page_renders_collapsed_and_lazy] GREEN (both halves): \
+             collapsed expand_toggle present, no leaked descendants."
         );
     }
 }
