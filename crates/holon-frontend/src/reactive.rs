@@ -162,6 +162,18 @@ pub trait BuilderServices: Send + Sync {
     /// Look up widget state by block ID.
     fn widget_state(&self, id: &str) -> WidgetState;
 
+    /// View-local expansion seed for an `expand_toggle` whose `target_id` is
+    /// `target_id`: `Some(expanded)` when the user has driven this toggle,
+    /// `None` (default) to keep the collapsed-until-clicked default. The
+    /// engine-backed impl records the read for fail-loud driver checks. This is
+    /// the only mechanism that survives a fresh `snapshot()` for profile-driven
+    /// embedded pages (no `collapsed` field). Default `None` keeps every
+    /// non-engine `BuilderServices` behaviour-identical.
+    fn block_expanded_view(&self, target_id: &str) -> Option<bool> {
+        let _ = target_id;
+        None
+    }
+
     /// Look up the *explicitly stored* widget state, or `None` when the user
     /// never toggled it. The default treats every widget as explicit (i.e.
     /// preserves the legacy open-by-default semantics); the real session-backed
@@ -1106,6 +1118,23 @@ pub struct UiState {
     /// `focused_block`, which also moves on same-page block clicks (which
     /// must NOT reset scroll). Not a render signal; polled during render.
     main_nav_generation: Mutable<u64>,
+    /// View-local expansion state for `expand_toggle` widgets, keyed by the
+    /// widget's `target_id` (bare block id). Purely a VIEW concern (RATIFIED
+    /// 2026-07-16, Option B): never persisted, never written to the document,
+    /// no `collapsed` column involved. The `expand_toggle` shadow builder seeds
+    /// its `expanded` gate from this on (re)build when an entry exists,
+    /// otherwise keeps the collapsed-until-clicked default. This is the ONLY
+    /// mechanism that survives a fresh `snapshot()` for profile-driven embedded
+    /// pages (whose `expand_toggle` is synthesized during recursive resolve and
+    /// carries no `collapsed` field). NB this deliberately reintroduces a small
+    /// engine-level view cache for expand state, which an earlier note above
+    /// ("no engine-level caches") had removed — see the ruling.
+    expanded_view: Mutex<HashMap<String, bool>>,
+    /// Fail-loud companion to [`Self::expanded_view`]: every `target_id` an
+    /// `expand_toggle` builder has read a seed for since the last write. Lets a
+    /// driver detect a view-state write for a target that renders no
+    /// `expand_toggle` (the write would otherwise be silently absorbed).
+    expanded_view_observed: Mutex<std::collections::HashSet<String>>,
 }
 
 impl UiState {
@@ -1117,7 +1146,49 @@ impl UiState {
             pending_caret_seed: Mutable::new(None),
             focused_occurrence: Mutable::new(None),
             main_nav_generation: Mutable::new(0),
+            expanded_view: Mutex::new(HashMap::new()),
+            expanded_view_observed: Mutex::new(std::collections::HashSet::new()),
         }
+    }
+
+    /// Seed value for an `expand_toggle` whose `target_id` is `target_id`, or
+    /// `None` when the user has never driven this toggle (builder then keeps its
+    /// collapsed-until-clicked default). Records the read so a driver can tell
+    /// the toggle actually rendered (fail-loud companion to
+    /// [`Self::set_block_expanded_view`]).
+    pub(crate) fn block_expanded_view(&self, target_id: &str) -> Option<bool> {
+        // Normalize the key: the driver strips the `block:` scheme while the
+        // `expand_toggle` builder reads the (schemed) row `id`. Keying on the
+        // bare id makes both sides agree.
+        let key = target_id.strip_prefix("block:").unwrap_or(target_id);
+        self.expanded_view_observed
+            .lock()
+            .unwrap()
+            .insert(key.to_string());
+        self.expanded_view.lock().unwrap().get(key).copied()
+    }
+
+    /// Record view-local expansion intent for `target_id` and bump
+    /// `viewport_generation` so mounted frontends re-render (the same
+    /// invalidation breakpoint/viewport changes use). Clears the observed flag
+    /// so a subsequent re-render can confirm the toggle actually re-rendered.
+    pub(crate) fn set_block_expanded_view(&self, target_id: &str, expanded: bool) {
+        let key = target_id.strip_prefix("block:").unwrap_or(target_id);
+        self.expanded_view
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), expanded);
+        self.expanded_view_observed.lock().unwrap().remove(key);
+        self.viewport_generation
+            .set(self.viewport_generation.get() + 1);
+    }
+
+    /// Whether an `expand_toggle` builder has read a seed for `target_id` since
+    /// the last [`Self::set_block_expanded_view`] — i.e. the target's toggle
+    /// actually (re)rendered.
+    pub(crate) fn expand_toggle_observed(&self, target_id: &str) -> bool {
+        let key = target_id.strip_prefix("block:").unwrap_or(target_id);
+        self.expanded_view_observed.lock().unwrap().contains(key)
     }
 
     /// Current main-region navigation generation. Bumped on each page change in
@@ -2317,6 +2388,10 @@ impl BuilderServices for ReactiveEngine {
 
     fn widget_state(&self, id: &str) -> WidgetState {
         self.session.widget_state(id)
+    }
+
+    fn block_expanded_view(&self, target_id: &str) -> Option<bool> {
+        self.ui_state.block_expanded_view(target_id)
     }
 
     fn widget_state_explicit(&self, id: &str) -> Option<WidgetState> {

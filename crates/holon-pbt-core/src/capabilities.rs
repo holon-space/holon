@@ -2042,8 +2042,20 @@ pub trait RefToggle {
 /// and the concrete `LayoutRef` adapters share one implementation.
 pub trait RefToggleMut: RefToggle {
     /// Set `id`'s expand-toggle expanded state (`ExpandToggle` → `true`,
-    /// `ToggleCollapse` → `false`).
+    /// `ToggleCollapse` → `false`), including any document `collapsed` field
+    /// mutation the production chevron handler dispatches. Use
+    /// [`set_expanded_view_local`] for profile-driven toggles whose collapse is
+    /// purely view-local.
     fn set_expanded(&mut self, id: &EntityUri, expanded: bool);
+    /// Set `id`'s expand-toggle expanded state WITHOUT modelling any document
+    /// `collapsed` field mutation. For profile-driven toggles (e.g.
+    /// `embedded_page`) where the toggle's lazy-gate semantics are entirely
+    /// view-local — no `collapsed` column exists on the target block. Default
+    /// delegates to [`set_expanded`] so existing explicit-render-expr toggle
+    /// impls keep the two-field semantics.
+    fn set_expanded_view_local(&mut self, id: &EntityUri, expanded: bool) {
+        self.set_expanded(id, expanded);
+    }
     /// `ToggleDrawer`: flip the drawer panel `id`'s open/closed bit
     /// (default-open, so an untracked drawer flips to closed).
     fn toggle_drawer(&mut self, id: &str);
