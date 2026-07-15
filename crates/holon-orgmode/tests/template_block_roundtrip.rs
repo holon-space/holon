@@ -104,22 +104,22 @@ fn template_subtree_round_trips_through_org_adapter() {
 
 // -- W3(a): template with TODO + bold marks + [[link]] marks in children ---
 
-const TPL_WITH_MARKS_ORG: &str = "\
-* {{greeting}}
-:PROPERTIES:
-:ID: tpl-marks-root
-:TEMPLATE: marks-template
-:TEMPLATE_VARS: greeting
-:END:
-** TODO Review *{{greeting}}* notes
-:PROPERTIES:
-:ID: tpl-marks-todo
-:END:
-** Check [[https://example.com][the docs]] for {{greeting}}
-:PROPERTIES:
-:ID: tpl-marks-link
-:END:
-";
+const TPL_WITH_MARKS_ORG: &str = concat!(
+    "* {{greeting}}\n",
+    ":PROPERTIES:\n",
+    ":ID: tpl-marks-root\n",
+    ":TEMPLATE: marks-template\n",
+    ":TEMPLATE_VARS: greeting\n",
+    ":END:\n",
+    "** TODO Review *{{greeting}}* notes\n",
+    ":PROPERTIES:\n",
+    ":ID: tpl-marks-todo\n",
+    ":END:\n",
+    "** Check [[https://example.com][the docs]] for {{greeting}}\n",
+    ":PROPERTIES:\n",
+    ":ID: tpl-marks-link\n",
+    ":END:\n",
+);
 
 #[test]
 fn template_with_marks_round_trips_stable() {
@@ -252,8 +252,8 @@ fn template_with_underscore_var_round_trips_verbatim() {
             .unwrap_or("(not found)");
         assert!(
             rendered.contains("{{my_var}}"),
-            "underscore placeholder must NOT be mangled by org renderer; \
-             line content: '{line_with_var}'\nfull render:\n{rendered}"
+            "underscore placeholder must NOT be mangled by org renderer; line content: \
+             '{line_with_var}'\nfull render:\n{rendered}"
         );
     }
 

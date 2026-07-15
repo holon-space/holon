@@ -26,6 +26,7 @@ pub use holon_frontend::user_driver::ReactiveEngineDriver;
 pub use holon_frontend::user_driver::UserDriver;
 use holon_pbt_core::capabilities::SutBlockCreate;
 use holon_pbt_core::capabilities::SutBlockTreeWrite;
+use holon_pbt_core::capabilities::SutTemplateInstantiate;
 
 use crate::pbt::op_write_cap::IdResolver;
 
@@ -295,5 +296,82 @@ impl UserDriver for DirectUserDriver {
 
     fn displayed_text(&self, _: &EntityUri) -> Option<String> {
         None
+    }
+}
+
+const TPL_CHILD: &str = "block:tpl-c1";
+
+/// Op-floor `SutTemplateInstantiate`: seeds the canned template blocks
+/// (idempotent `block.create`), then dispatches
+/// `block.instantiate_template` through the production engine.
+#[async_trait::async_trait(?Send)]
+impl SutTemplateInstantiate for DirectUserDriver {
+    async fn instantiate_template(
+        &self,
+        template_id: &EntityUri,
+        target_parent: &EntityUri,
+        context_key: &str,
+        bindings: &[(String, String)],
+    ) {
+        // Seed the template blocks idempotent (UPSERT).
+        let mut root_params: HashMap<String, Value> = HashMap::new();
+        root_params.insert("id".to_string(), Value::String(template_id.to_string()));
+        root_params.insert("content".to_string(), Value::String("{{date}}".to_string()));
+        root_params.insert("template".to_string(), Value::String("t".to_string()));
+        root_params.insert(
+            "template_vars".to_string(),
+            Value::String("date, mood=neutral".to_string()),
+        );
+        self.synthetic_dispatch("block", "create", root_params)
+            .await
+            .unwrap_or_else(|e| {
+                panic!("[DirectUserDriver floor] seed tpl root {template_id} failed: {e:#}")
+            });
+
+        let child_id = TPL_CHILD.to_string();
+        let mut child_params: HashMap<String, Value> = HashMap::new();
+        child_params.insert("id".to_string(), Value::String(child_id.clone()));
+        child_params.insert(
+            "parent_id".to_string(),
+            Value::String(template_id.to_string()),
+        );
+        child_params.insert(
+            "content".to_string(),
+            Value::String("see {{date}} now".to_string()),
+        );
+        child_params.insert(
+            "marks".to_string(),
+            Value::String(r#"[{"start":0,"end":3,"kind":"Bold"}]"#.to_string()),
+        );
+        self.synthetic_dispatch("block", "create", child_params)
+            .await
+            .unwrap_or_else(|e| {
+                panic!("[DirectUserDriver floor] seed tpl child {child_id} failed: {e:#}")
+            });
+
+        // Dispatch instantiate_template.
+        let bindings_obj: HashMap<String, Value> = bindings
+            .iter()
+            .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+            .collect();
+        let mut params: HashMap<String, Value> = HashMap::new();
+        params.insert(
+            "template_id".to_string(),
+            Value::String(template_id.to_string()),
+        );
+        params.insert(
+            "target_parent".to_string(),
+            Value::String(self.resolve(target_parent).to_string()),
+        );
+        params.insert(
+            "context_key".to_string(),
+            Value::String(context_key.to_string()),
+        );
+        params.insert("bindings".to_string(), Value::Object(bindings_obj));
+        self.synthetic_dispatch("block", "instantiate_template", params)
+            .await
+            .unwrap_or_else(|e| {
+                panic!("[DirectUserDriver floor] block/instantiate_template failed: {e:#}")
+            });
     }
 }

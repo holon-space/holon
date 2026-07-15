@@ -612,8 +612,8 @@ mod tests {
         // Plain committed read races the promotion: not yet visible.
         assert!(
             GeometryProvider::element_info(&reg, slot).is_none(),
-            "post-cold record must stay staged until the next begin_pass/flush — \
-             this is the race that made the single-shot click fail"
+            "post-cold record must stay staged until the next begin_pass/flush — this is the race \
+             that made the single-shot click fail"
         );
 
         // Flush-on-read promotes the last frame's staged bounds on demand, so

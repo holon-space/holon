@@ -459,7 +459,8 @@ pub fn assert_change_sequence(
 
     if expected_idx < expected_sequence.len() {
         return Err(anyhow::anyhow!(
-            "Expected sequence not found. Found {} changes, but only matched {}/{} expected changes",
+            "Expected sequence not found. Found {} changes, but only matched {}/{} expected \
+             changes",
             found_changes.len(),
             expected_idx,
             expected_sequence.len()

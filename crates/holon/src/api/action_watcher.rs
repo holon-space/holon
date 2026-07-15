@@ -350,8 +350,9 @@ mod tests {
     const JOURNAL_ACTION: &str =
         "block.create(#{parent_id: \"block:journals\", content: col(\"name\")})";
 
-    const TEMPLATE_ACTION: &str = "block.instantiate_template(#{template_id: \"block:day-tpl\", target_parent: \
-         \"block:journals\", context_key: col(\"name\"), bindings: #{date: col(\"name\")}})";
+    const TEMPLATE_ACTION: &str = "block.instantiate_template(#{template_id: \"block:day-tpl\", \
+                                   target_parent: \"block:journals\", context_key: col(\"name\"), \
+                                   bindings: #{date: col(\"name\")}})";
 
     /// A test engine with the `block` SQL operation provider registered (writes
     /// to `block_raw`), mirroring the production wiring in `loro_module.rs`.

@@ -48,6 +48,7 @@ use holon_pbt_core::capabilities::SutEditorMirrorRead;
 use holon_pbt_core::capabilities::SutFocus;
 use holon_pbt_core::capabilities::SutQueryResults;
 use holon_pbt_core::capabilities::SutSqlProjection;
+use holon_pbt_core::capabilities::SutTemplateInstantiate;
 use holon_pbt_core::composition::CapMap;
 use holon_pbt_core::composition::CapProvider;
 use holon_pbt_core::types::DocUriMap;
@@ -491,7 +492,9 @@ async fn compose_sut_seeded_impl(
         // runs under this no-UI (storage-only) pin — deterministic `block.create`
         // dispatch with AND without an explicit id (the mint-when-absent path),
         // which the UI-only creation-slot gesture could not reach here.
-        caps.insert(floor as Arc<dyn SutBlockCreate>);
+        caps.insert(floor.clone() as Arc<dyn SutBlockCreate>);
+        // Template-instantiation cap at the same op-floor rung.
+        caps.insert(floor as Arc<dyn SutTemplateInstantiate>);
         engine = Some(eng);
     }
 

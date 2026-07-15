@@ -140,7 +140,8 @@ fn parse_param_type(input: ParseStream) -> syn::Result<ParamType> {
         other => Err(syn::Error::new_spanned(
             ty,
             format!(
-                "unsupported param type `{other}`, expected one of: String, Option<String>, bool, f32, f64, Value, Collection, Expr"
+                "unsupported param type `{other}`, expected one of: String, Option<String>, bool, \
+                 f32, f64, Value, Collection, Expr"
             ),
         )),
     }

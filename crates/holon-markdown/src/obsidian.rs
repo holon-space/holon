@@ -355,7 +355,8 @@ impl FileFormatAdapter for ObsidianMarkdownAdapter {
     }
 
     fn doc_id_from_content(&self, _content: &str) -> Option<String> {
-        None // Obsidian identity is path/basename; no embedded stable id by default.
+        None // Obsidian identity is path/basename; no embedded stable id by
+        // default.
     }
 
     fn build_block_params(

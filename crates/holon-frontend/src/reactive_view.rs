@@ -908,7 +908,8 @@ impl ReactiveView {
         let abortable = futures::future::Abortable::new(driver, abort_reg);
 
         rt.spawn(async move {
-            let _ = abortable.await; // Ok(()) on completion, Err on abort — both fine
+            let _ = abortable.await; // Ok(()) on completion, Err on abort —
+            // both fine
         });
 
         *self.driver_handle.lock().unwrap() = Some(abort_handle);
@@ -2368,7 +2369,8 @@ mod tests {
                 Some(keys[pos - 1].as_str())
             };
             let next = keys.get(pos).map(|s| s.as_str());
-            let k = gen_key_between(prev, next).expect("gen_key_between mints a valid key"); // ALLOW(order_minting): test-only reproduction of the order owner's sibling-key minting to prove the virtual-slot sort contract
+            let k = gen_key_between(prev, next).expect("gen_key_between mints a valid key"); // ALLOW(order_minting): test-only reproduction of the order owner's sibling-key
+            // minting to prove the virtual-slot sort contract
             keys.insert(pos, k);
         }
         keys

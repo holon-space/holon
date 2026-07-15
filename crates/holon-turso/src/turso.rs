@@ -510,10 +510,9 @@ impl DbHandle {
                         .collect();
 
                     Err(StorageError::DatabaseError(format!(
-                        "DDL timed out after {:?} waiting for dependencies.\n\
-                         SQL: {}...\n\
-                         Required: {:?}\n\n\
-                         Call mark_available() for resources created outside the actor.",
+                        "DDL timed out after {:?} waiting for dependencies.\nSQL: \
+                         {}...\nRequired: {:?}\n\nCall mark_available() for resources created \
+                         outside the actor.",
                         DEPENDENCY_TIMEOUT, sql_preview, missing_resources
                     )))
                 }
@@ -565,10 +564,9 @@ impl DbHandle {
                         inferred_deps.iter().map(|r| r.name().to_string()).collect();
 
                     Err(StorageError::DatabaseError(format!(
-                        "DDL timed out after {:?} waiting for dependencies.\n\
-                         SQL: {}...\n\
-                         Inferred required: {:?}\n\n\
-                         Call mark_available() for resources created outside the actor.",
+                        "DDL timed out after {:?} waiting for dependencies.\nSQL: {}...\nInferred \
+                         required: {:?}\n\nCall mark_available() for resources created outside \
+                         the actor.",
                         DEPENDENCY_TIMEOUT, sql_preview, missing_resources
                     )))
                 }
@@ -1040,7 +1038,8 @@ fn trace_sql_positional(tag: &str, sql: &str, params: &[turso::Value]) {
                 .expect("now within range")
                 .format("%Y-%m-%dT%H:%M:%S%.6f");
             eprintln!(
-                "{ts}Z TRACE holon::storage::turso: [TursoBackend] {tag}: {sql} -- params: {params:?}"
+                "{ts}Z TRACE holon::storage::turso: [TursoBackend] {tag}: {sql} -- params: \
+                 {params:?}"
             );
         }
         tracing::trace!("[TursoBackend] {tag}: {sql} -- params: {params:?}");
@@ -1069,7 +1068,8 @@ fn trace_sql_named(tag: &str, sql: &str, params: &HashMap<String, Value>) {
             .expect("now within range")
             .format("%Y-%m-%dT%H:%M:%S%.6f");
         eprintln!(
-            "{ts}Z TRACE holon::storage::turso: [TursoBackend] {tag}: {sql} -- params: {params_str}"
+            "{ts}Z TRACE holon::storage::turso: [TursoBackend] {tag}: {sql} -- params: \
+             {params_str}"
         );
     }
     tracing::trace!("[TursoBackend] {tag}: {sql} -- params: {params_str}");
@@ -1179,8 +1179,8 @@ impl TursoBackend {
             let io = wasm_io::registered().ok_or_else(|| {
                 StorageError::DatabaseError(format!(
                     "open_database('{db_path_str}'): no wasm IO registered — call \
-                     holon_turso::register_wasm_io (e.g. with the OPFS shim) before \
-                     opening a file-backed database on wasm32"
+                     holon_turso::register_wasm_io (e.g. with the OPFS shim) before opening a \
+                     file-backed database on wasm32"
                 ))
             })?;
             Database::open_file_with_flags(io, db_path_str, OpenFlags::Create, opts, None)
@@ -1225,7 +1225,8 @@ impl TursoBackend {
                 .expect("now within range")
                 .format("%Y-%m-%dT%H:%M:%S%.6f");
             eprintln!(
-                "{ts}Z TRACE holon::storage::turso: [TursoBackend] set_change_callback: registering CDC callback"
+                "{ts}Z TRACE holon::storage::turso: [TursoBackend] set_change_callback: \
+                 registering CDC callback"
             );
         }
         tracing::trace!("[TursoBackend] set_change_callback: registering CDC callback");
@@ -1298,7 +1299,8 @@ impl TursoBackend {
         ));
 
         tracing::info!(
-            "[TursoBackend] Created - all database operations will be serialized through internal actor"
+            "[TursoBackend] Created - all database operations will be serialized through internal \
+             actor"
         );
 
         let backend = Self {
@@ -1643,14 +1645,16 @@ impl TursoBackend {
                         "unknown panic".to_string()
                     };
                     tracing::error!(
-                        "[TursoBackend::Actor] Caught panic during command processing: {}. Actor continues.",
+                        "[TursoBackend::Actor] Caught panic during command processing: {}. Actor \
+                         continues.",
                         msg
                     );
                     // If a panic left a transaction open, roll it back to prevent
                     // the connection from being stuck (which silences CDC callbacks).
                     if !conn.is_autocommit().unwrap_or(true) {
                         tracing::error!(
-                            "[TursoBackend::Actor] Connection stuck in transaction after panic, rolling back"
+                            "[TursoBackend::Actor] Connection stuck in transaction after panic, \
+                             rolling back"
                         );
                         if let Err(e) = conn.execute("ROLLBACK", ()).await {
                             tracing::error!(
@@ -1966,11 +1970,11 @@ impl TursoBackend {
                 Err(_elapsed) => {
                     let sql_preview: String = sql.chars().take(160).collect();
                     return Err(StorageError::DatabaseError(format!(
-                        "DDL execution timed out after {:?} — actor would have hung. \
-                         Suspected Turso chained-matview (matview-on-matview) limitation: \
-                         CREATE MATERIALIZED VIEW selecting FROM another matview hangs \
-                         indefinitely in Turso IVM. See \
-                         .claude/skills/turso-chained-matview-hang/SKILL.md. SQL: {}...",
+                        "DDL execution timed out after {:?} — actor would have hung. Suspected \
+                         Turso chained-matview (matview-on-matview) limitation: CREATE \
+                         MATERIALIZED VIEW selecting FROM another matview hangs indefinitely in \
+                         Turso IVM. See .claude/skills/turso-chained-matview-hang/SKILL.md. SQL: \
+                         {}...",
                         timeout, sql_preview
                     )));
                 }
@@ -2019,7 +2023,8 @@ impl TursoBackend {
         if let Err(e) = conn.execute("BEGIN TRANSACTION", ()).await {
             if !conn.is_autocommit().unwrap_or(true) {
                 tracing::warn!(
-                    "[TursoBackend::Actor] BEGIN failed with stale transaction, rolling back and retrying: {}",
+                    "[TursoBackend::Actor] BEGIN failed with stale transaction, rolling back and \
+                     retrying: {}",
                     e
                 );
                 if let Err(rollback_err) = conn.execute("ROLLBACK", ()).await {
@@ -2906,7 +2911,8 @@ mod integration_tests {
         // parse strictly at their own boundary) — same as the CDC path.
         let rows = handle
             .query(
-                "SELECT id, COALESCE(json_group_array(content) FILTER (WHERE content IS NOT NULL), '[]') AS tags FROM sniff_test GROUP BY id",
+                "SELECT id, COALESCE(json_group_array(content) FILTER (WHERE content IS NOT \
+                 NULL), '[]') AS tags FROM sniff_test GROUP BY id",
                 HashMap::new(),
             )
             .await
@@ -2970,7 +2976,8 @@ mod integration_tests {
             let h = handle.clone();
             ddl_handles.push(tokio::spawn(async move {
                 h.execute_ddl(&format!(
-                    "CREATE VIEW IF NOT EXISTS view_{} AS SELECT * FROM test_interleave WHERE id LIKE 'id_%'",
+                    "CREATE VIEW IF NOT EXISTS view_{} AS SELECT * FROM test_interleave WHERE id \
+                     LIKE 'id_%'",
                     i
                 ))
                 .await
