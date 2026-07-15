@@ -98,10 +98,13 @@ pub fn resolve_states<K: RowKey>(args: &ResolvedArgs, row: &HashMap<K, Value>) -
     if let Some(states_expr) = args.get_template("states") {
         let val = eval_to_value(states_expr, row);
         if let Value::Array(items) = val {
-            return items
+            let states: Vec<String> = items
                 .iter()
                 .filter_map(|v| v.as_string().map(|s| s.to_string()))
                 .collect();
+            if !states.is_empty() {
+                return states;
+            }
         }
     }
     vec![
@@ -1414,6 +1417,59 @@ mod mutation_gap_tests {
         let default = resolve_states(&empty_args(), &row);
         assert_eq!(
             default,
+            vec![
+                String::new(),
+                "TODO".to_string(),
+                "DOING".to_string(),
+                "DONE".to_string()
+            ]
+        );
+    }
+
+    /// When a document has no `#+TODO:` keywords, `todo_states` evaluates
+    /// to `Value::Null`. `resolve_states` must fall back to the default
+    /// cycle `["", "TODO", "DOING", "DONE"]` — otherwise a task block in a
+    /// journal day page (which never declares `#+TODO:`) would cycle from
+    /// TODO straight to empty, skipping DOING.
+    #[test]
+    fn resolve_states_null_value_falls_back_to_default() {
+        let row: HashMap<String, Value> = [("sts".to_string(), Value::Null)].into_iter().collect();
+        let mut args = empty_args();
+        args.templates.insert(
+            "states".to_string(),
+            RenderExpr::ColumnRef {
+                name: "sts".to_string(),
+            },
+        );
+        assert_eq!(
+            resolve_states(&args, &row),
+            vec![
+                String::new(),
+                "TODO".to_string(),
+                "DOING".to_string(),
+                "DONE".to_string()
+            ]
+        );
+    }
+
+    /// When a document explicitly sets an empty `#+TODO:` list (or the
+    /// stored JSON is `[]`), `resolve_states` receives an empty Array and
+    /// must still fall back to the default cycle — otherwise `cycle_state`
+    /// would return `""` for every click.
+    #[test]
+    fn resolve_states_empty_array_falls_back_to_default() {
+        let row: HashMap<String, Value> = [("sts".to_string(), Value::Array(vec![]))]
+            .into_iter()
+            .collect();
+        let mut args = empty_args();
+        args.templates.insert(
+            "states".to_string(),
+            RenderExpr::ColumnRef {
+                name: "sts".to_string(),
+            },
+        );
+        assert_eq!(
+            resolve_states(&args, &row),
             vec![
                 String::new(),
                 "TODO".to_string(),
