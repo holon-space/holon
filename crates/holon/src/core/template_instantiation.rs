@@ -669,4 +669,170 @@ mod tests {
         let err = plan_instantiation(&[root], &request(&[("date", "d")])).unwrap_err();
         assert!(format!("{err:#}").contains("unterminated"));
     }
+
+    // -- W1: InstantiateRequest::from_params boundary tests -----------------
+
+    fn params(pairs: &[(&str, Value)]) -> StorageEntity {
+        pairs
+            .iter()
+            .map(|(k, v)| (Arc::from(*k), v.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn from_params_missing_required_template_id() {
+        let p = params(&[
+            ("target_parent", Value::String("block:parent".into())),
+            ("context_key", Value::String("key1".into())),
+        ]);
+        let err = InstantiateRequest::from_params(&p).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("missing required param 'template_id'"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn from_params_missing_target_parent() {
+        let p = params(&[
+            ("template_id", Value::String("block:tpl".into())),
+            ("context_key", Value::String("key1".into())),
+        ]);
+        let err = InstantiateRequest::from_params(&p).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("missing required param 'target_parent'"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn from_params_missing_context_key() {
+        let p = params(&[
+            ("template_id", Value::String("block:tpl".into())),
+            ("target_parent", Value::String("block:parent".into())),
+        ]);
+        let err = InstantiateRequest::from_params(&p).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("missing required param 'context_key'"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn from_params_empty_string_param_fails() {
+        let p = params(&[
+            ("template_id", Value::String("".into())),
+            ("target_parent", Value::String("block:parent".into())),
+            ("context_key", Value::String("key1".into())),
+        ]);
+        let err = InstantiateRequest::from_params(&p).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("must be a non-empty string"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn from_params_non_string_param_fails() {
+        let p = params(&[
+            ("template_id", Value::Integer(42)),
+            ("target_parent", Value::String("block:parent".into())),
+            ("context_key", Value::String("key1".into())),
+        ]);
+        let err = InstantiateRequest::from_params(&p).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("must be a non-empty string"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn from_params_scalar_bindings_rendered_to_strings() {
+        let mut p = params(&[
+            ("template_id", Value::String("block:tpl".into())),
+            ("target_parent", Value::String("block:parent".into())),
+            ("context_key", Value::String("key1".into())),
+        ]);
+        let mut bindings = std::collections::HashMap::new();
+        bindings.insert("int_val".to_string(), Value::Integer(42));
+        bindings.insert("float_val".to_string(), Value::Float(3.14));
+        bindings.insert("bool_val".to_string(), Value::Boolean(true));
+        bindings.insert(
+            "dt_val".to_string(),
+            Value::DateTime("2026-07-12T00:00:00Z".into()),
+        );
+        p.insert(Arc::from("bindings"), Value::Object(bindings));
+
+        let req = InstantiateRequest::from_params(&p).unwrap();
+        assert_eq!(req.bindings.get("int_val").unwrap(), "42");
+        assert_eq!(req.bindings.get("float_val").unwrap(), "3.14");
+        assert_eq!(req.bindings.get("bool_val").unwrap(), "true");
+        assert_eq!(
+            req.bindings.get("dt_val").unwrap(),
+            "2026-07-12T00:00:00Z"
+        );
+    }
+
+    #[test]
+    fn from_params_non_scalar_binding_fails() {
+        let mut p = params(&[
+            ("template_id", Value::String("block:tpl".into())),
+            ("target_parent", Value::String("block:parent".into())),
+            ("context_key", Value::String("key1".into())),
+        ]);
+        let mut bindings = std::collections::HashMap::new();
+        bindings.insert(
+            "arr".to_string(),
+            Value::Array(vec![Value::Integer(1)]),
+        );
+        p.insert(Arc::from("bindings"), Value::Object(bindings));
+
+        let err = InstantiateRequest::from_params(&p).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("must be a scalar"), "got: {msg}");
+    }
+
+    #[test]
+    fn from_params_bindings_not_object_fails() {
+        let mut p = params(&[
+            ("template_id", Value::String("block:tpl".into())),
+            ("target_parent", Value::String("block:parent".into())),
+            ("context_key", Value::String("key1".into())),
+        ]);
+        p.insert(
+            Arc::from("bindings"),
+            Value::String("not-an-object".into()),
+        );
+
+        let err = InstantiateRequest::from_params(&p).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("must be an object"), "got: {msg}");
+    }
+
+    #[test]
+    fn from_params_null_bindings_tolerated() {
+        // No bindings key at all.
+        let p = params(&[
+            ("template_id", Value::String("block:tpl".into())),
+            ("target_parent", Value::String("block:parent".into())),
+            ("context_key", Value::String("key1".into())),
+        ]);
+        let req = InstantiateRequest::from_params(&p).unwrap();
+        assert!(req.bindings.is_empty());
+
+        // Explicit null.
+        let mut p2 = params(&[
+            ("template_id", Value::String("block:tpl".into())),
+            ("target_parent", Value::String("block:parent".into())),
+            ("context_key", Value::String("key1".into())),
+        ]);
+        p2.insert(Arc::from("bindings"), Value::Null);
+        let req2 = InstantiateRequest::from_params(&p2).unwrap();
+        assert!(req2.bindings.is_empty());
+    }
 }
