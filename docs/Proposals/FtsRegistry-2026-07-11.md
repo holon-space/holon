@@ -5,6 +5,19 @@ fork's Tantivy index method; registry = generalize the fork's Func-enum
 resolution path, split **by function shape** — scalar/predicate via the Func
 enum, set-valued (relation-returning) via the matview/TVF declaration path.
 
+## Status (2026-07-15)
+
+**LANDED.** `EngineFunctionDecl` (`crates/holon-turso/src/engine_functions.rs`)
+and the FTS E2E test (`crates/holon-integration-tests/tests/fts_query_block_e2e.rs`)
+are shipped. The Turso fork's Tantivy backend (behind `fts` feature + runtime
+`--experimental-index-method` flag) is enabled in the native path.
+
+Still open (follow-ups):
+- `engine_function` in `holon_sql` validation
+- Guard planner consuming `dual_evaluable` when ADR 0024 Phase 2 lands
+- FTS over blocks matview (fork-side)
+- Tokenizer/weights defaults (product decision)
+
 ## 1. Feature plumbing
 
 The fork already ships FTS: `core/index_method/fts.rs` (Tantivy behind a

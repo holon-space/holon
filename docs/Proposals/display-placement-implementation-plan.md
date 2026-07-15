@@ -23,6 +23,19 @@ merged. Ship on symbolic ranking first. Vectors, P4 (temporal source), and the
 
 ---
 
+## Status (2026-07-15)
+
+**PARTIALLY LANDED.** Phase 1b spike (focus-collision) was greenlit (PROCEED,
+2026-07-06). Phase 0 `RowOrigin` retype landed and is in production. The advice
+plan was rewritten and split into its own document
+(`advice-feature-implementation-plan.md`), which is landed through step 6.
+
+Still open:
+- Phase 1a inert-render bit-identity invariant (WIP behind env var)
+- Focus re-keying (separate ADR, not yet started)
+- Phase 3 reference edges + curation
+- Phase 4 advice-as-configuration
+
 ## Phase 1b — Focus-collision spike: the real go/no-go (FIRST, throwaway)
 
 **Goal:** prove that an **editable, focusable** display-placed occurrence of a

@@ -18,6 +18,20 @@ ideas, anything). During triage each item takes one of three exits:
 3. **(new, falls out of this design) gets LINKED** — referenced from Holon, but Todoist
    remains authoritative.
 
+## Status (2026-07-15)
+
+**OPEN (designed; R1-R4 ruled 2026-07-13; zero implementation).** No `assimilated_from`
+property, no `confirm_assimilation` operation, no identity-mapping relation exist in
+the code. The C5 trust-gate stream is woven into the design but the assimilation-specific
+connector work has not started.
+
+Still open:
+- G1 identity-mapping relation (S, build first)
+- G2 multi-block transactional promotion (M)
+- G3 outbound effect queue + drain (M)
+- G4 sidecar assimilation: section (S)
+- G5 full lease governance (L, deferred)
+
 **Relates to:** ADR 0024 (P4 effect taxonomy, deterministic effect ids, leases; place
 kinds — canonical/ratcheted vs display/maintained), ADR 0025 (ops are the only
 propagation currency; connectors emit ops, never mutate state behind the projection),

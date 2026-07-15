@@ -7,6 +7,18 @@ is a consequence of its substrate choices: rules/tokens/history are blocks, so
 the UX is **render profiles over vault data, not a new app**. The PKM is the
 automation IDE.
 
+## Status (2026-07-15)
+
+**OPEN (design only).** Direction agreed with Martin 2026-07-09; no implementation
+exists. The design is a companion to ADR 0024 and awaits its Phase 2+ substrate.
+
+Still open:
+- Rule card rendering
+- Provenance badge (hover-only, decided)
+- Dry-run before enable
+- Automations page as query
+- Open forks: undo scope, action bar placement, ghost-state visual language
+
 ## Personas
 
 1. **Author** — writes rules. Human first; increasingly an *agent* (agents

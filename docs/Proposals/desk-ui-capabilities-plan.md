@@ -9,6 +9,17 @@ Environment desk and similar rich spatial UIs — not the data model (ADR 0026
 **Scope: plan only.** No implementation here. Each phase names its riskiest
 assumption and a de-risking spike. Phases are risk-first.
 
+## Status (2026-07-15)
+
+**OPEN (designed, senior-reviewed 2026-07-14, not implemented).** All 8 phases are
+open. The plan was code-grounded and reviewed; it corrects two wrong gap claims and
+resolves three design questions against the current codebase. No rendering, spatial
+layout, or theme code has been written for the desk.
+
+Still open:
+- All 8 phases; P1-P4 are the critical path for desk v1
+- P2/P6/P8 are desk-independent and could ship first
+
 ## Code-grounded corrections to the assumed gap list
 
 The assignment listed eight gaps; two were wrong versus the code, and the plan

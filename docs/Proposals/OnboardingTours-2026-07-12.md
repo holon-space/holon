@@ -12,6 +12,24 @@ instantiation-as-operation" pattern this doc copies wholesale).
 
 ---
 
+## Status (2026-07-15)
+
+**OPEN (designed; vertical-slice spike landed).** `parse_tour`
+(`crates/holon-frontend/src/tour.rs:186`) with an integration test
+(`crates/holon-integration-tests/tests/tour_spike.rs`) proves the block-subtree
+tour model is parseable. No overlay rendering, step engine, or anchor-id scheme
+has been implemented.
+
+Still open (in build order):
+- G4 generalize `AdviceSidecar` into session-level authored-VM channel
+- G1 stable anchor-id scheme
+- G2 anchored-overlay layer
+- G3 wait-for predicate subscription
+- G6 overlay/anchor observability in driver ladder
+- G5 progress-identity
+
+---
+
 ## 0. The five questions, answered up front
 
 1. **What is this called?** An **interactive walkthrough with gated (action-required)
