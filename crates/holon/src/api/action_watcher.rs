@@ -238,8 +238,13 @@ async fn run_pair_watcher_inner(
                 // (set_field/update/delete) must NOT re-fire on Updated — they
                 // would re-execute a side effect with no dedup (a pre-existing
                 // re-fire hazard deferred to Phase-2 inhibitor guards). Gate
-                // strictly on the operation kind.
-                Change::Updated { data, .. } if parsed_action.operation == "create" => {
+                // strictly on the operation kind. `instantiate_template` is also
+                // safe — it derives deterministic instance ids from context_key,
+                // so re-fire converges.
+                Change::Updated { data, .. }
+                    if parsed_action.operation == "create"
+                        || parsed_action.operation == "instantiate_template" =>
+                {
                     fire_action(&engine, status, &entity_name, &parsed_action, &rule, &data).await;
                 }
                 _ => {}
@@ -344,6 +349,9 @@ mod tests {
 
     const JOURNAL_ACTION: &str =
         "block.create(#{parent_id: \"block:journals\", content: col(\"name\")})";
+
+    const TEMPLATE_ACTION: &str = "block.instantiate_template(#{template_id: \"block:day-tpl\", target_parent: \
+         \"block:journals\", context_key: col(\"name\"), bindings: #{date: col(\"name\")}})";
 
     /// A test engine with the `block` SQL operation provider registered (writes
     /// to `block_raw`), mirroring the production wiring in `loro_module.rs`.
@@ -509,8 +517,6 @@ mod tests {
                 .unwrap();
         }
 
-        const TEMPLATE_ACTION: &str = "block.instantiate_template(#{template_id: \"block:day-tpl\", target_parent: \
-             \"block:journals\", context_key: col(\"name\"), bindings: #{date: col(\"name\")}})";
         let parsed = parse_action_dsl(TEMPLATE_ACTION).unwrap();
         let entity = EntityName::new(&parsed.entity);
         let rule = RuleId::new("journals::template::0");
@@ -608,6 +614,106 @@ mod tests {
             .unwrap();
 
         wait_for_children(&engine, 2, Duration::from_secs(15)).await;
+
+        watcher.abort();
+    }
+
+    /// The clock-backed template instantiation fires on initial row Created
+    /// and re-fires on day-rollover Updated to create the next day's instance.
+    /// Deterministic ids keep each day at exactly one block; a duplicate same-
+    /// day UPDATE converges (still exactly one per day).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn clock_rollover_refires_template_instantiation() {
+        let engine = block_engine().await;
+        seed_journals_parent(&engine).await;
+
+        // Seed a one-child template (same as the rule-fired test).
+        for (id, parent, content, props) in [
+            ("block:day-tpl", None, "{{date}}", Some(("daily", "date"))),
+            (
+                "block:day-tpl-c1",
+                Some("block:day-tpl"),
+                "Agenda for {{date}}",
+                None,
+            ),
+        ] {
+            let mut params = StorageEntity::new();
+            params.insert("id".into(), Value::String(id.to_string()));
+            params.insert("content".into(), Value::String(content.to_string()));
+            if let Some(p) = parent {
+                params.insert("parent_id".into(), Value::String(p.to_string()));
+            }
+            if let Some((name, vars)) = props {
+                params.insert("template".into(), Value::String(name.to_string()));
+                params.insert("template_vars".into(), Value::String(vars.to_string()));
+            }
+            engine
+                .execute_operation(
+                    &EntityName::new("block"),
+                    "create",
+                    params,
+                    holon_api::OpOrigin::User,
+                )
+                .await
+                .unwrap();
+        }
+
+        // Pin the clock day row.
+        engine
+            .db_handle()
+            .execute(
+                "INSERT INTO clock (grain, today, epoch_day, updated_at) VALUES ('day', \
+                 '2026-07-10', 20679, '2026-07-10T00:00:00Z') ON CONFLICT(grain) DO UPDATE SET \
+                 today = excluded.today, epoch_day = excluded.epoch_day, updated_at = \
+                 excluded.updated_at",
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        let watcher = tokio::spawn(run_pair_watcher(
+            engine.clone(),
+            engine.rule_status().clone(),
+            "journals::template::0".to_string(),
+            "SELECT today as name FROM clock WHERE grain = 'day'".to_string(),
+            "holon_sql".to_string(),
+            TEMPLATE_ACTION.to_string(),
+        ));
+
+        // Initial Created → day-1 instance.
+        wait_for_children(&engine, 1, Duration::from_secs(15)).await;
+
+        // Day rollover: rowid-stable UPDATE → day-2 instance.
+        engine
+            .db_handle()
+            .execute(
+                "UPDATE clock SET today = '2026-07-11', epoch_day = 20680, updated_at = \
+                 '2026-07-11T00:00:00Z' WHERE grain = 'day'",
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        wait_for_children(&engine, 2, Duration::from_secs(15)).await;
+
+        // Duplicate same-day fire converges: still exactly two instances.
+        engine
+            .db_handle()
+            .execute(
+                "UPDATE clock SET today = '2026-07-11', epoch_day = 20680, updated_at = \
+                 '2026-07-11T00:00:01Z' WHERE grain = 'day'",
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        // Small sleep to let the re-fire land, then assert convergence.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            count_journal_children(&engine).await,
+            2,
+            "duplicate same-day re-fire must converge (deterministic instance id)"
+        );
 
         watcher.abort();
     }
