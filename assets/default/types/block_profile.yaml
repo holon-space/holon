@@ -45,12 +45,29 @@ computed:
   # A rule using the retired `action` language — surfaced loud on the card.
   is_legacy_rule: 'source_language == "action"'
   todo_states: 'if is_def_var("document_id") && document_id != () { let d = document(document_id); if d != () { d.todo_keywords } else { () } } else { () }'
+  is_page_row: 'tags != () && tags.contains("\"Page\"")'
 
 variants:
   - name: page_title
     priority: 2
     condition: 'role == "page_title"'
     render: 'text(col("content"), #{style: "h1"})'
+  # Embedded page-blocks: non-root pages (strict descendants of the focus root)
+  # rendered as a collapsed expand_toggle with lazy subtree. condition uses
+  # is_def_var guard because rows from live_query content queries have no `role`
+  # column, so `role != "page_title"` would raise "Variable not found". Priority
+  # 1 slots between page_title (2) and rule_card (0).
+  - name: embedded_page
+    priority: 1
+    condition: 'is_page_row && (!is_def_var("role") || role != "page_title")'
+    render: >-
+      expand_toggle(#{
+        header: row(icon("orgmode"), text(col("content"))),
+        content: live_query(#{
+          prql: "from descendants",
+          item_template: tree(#{parent_id: col("parent_id"), sortkey: col("sort_key"), item_template: render_entity()})
+        })
+      })
   # NOTE: the former `root_layout` variant (hardcoded 3-column layout keyed on
   # `id == "block:root-layout"`) is GONE: the ROOT display slot's layout is now
   # synthesized from perspective/panel DATA by both render-derivation arms
