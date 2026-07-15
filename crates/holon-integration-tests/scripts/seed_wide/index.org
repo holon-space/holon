@@ -18,8 +18,20 @@ SELECT b.* FROM block b JOIN block_tags bt ON bt.block_id = b.id WHERE bt.tag = 
 :PROPERTIES:
 :ID: default-main-panel
 :END:
-#+BEGIN_SRC holon_gql :id default-main-panel::src::0
-MATCH (fr:focus_root), (root:block)<-[:CHILD_OF*0..20]-(d:block) WHERE fr.region = 'main' AND root.id = fr.root_id RETURN d
+#+BEGIN_SRC holon_sql :id default-main-panel::src::0
+WITH RECURSIVE focus_descendants AS (
+  SELECT b.*, 0 AS _depth
+  FROM focus_roots fr
+  JOIN block b ON b.id = fr.root_id
+  WHERE fr.region = 'main'
+  UNION ALL
+  SELECT child.*, fd._depth + 1
+  FROM focus_descendants fd
+  JOIN block child ON child.parent_id = fd.id
+  LEFT JOIN block_tags bt ON bt.block_id = fd.id AND bt.tag = 'Page'
+  WHERE fd._depth = 0 OR bt.block_id IS NULL
+)
+SELECT * FROM focus_descendants ORDER BY _depth, sort_key
 #+END_SRC
 ** Right Sidebar
 :PROPERTIES:
@@ -29,8 +41,20 @@ MATCH (fr:focus_root), (root:block)<-[:CHILD_OF*0..20]-(d:block) WHERE fr.region
 #+BEGIN_SRC render :id default-right-sidebar::render::0
 tree(#{parent_id: col("parent_id"), sortkey: col("sort_key"), item_template: render_entity(), rules: [#{when: eq("level", 0), override: #{role: "page_title", show_bullet: false, show_chevron: false}}]})
 #+END_SRC
-#+BEGIN_SRC holon_gql :id default-right-sidebar::src::0
-MATCH (fr:focus_root), (root:block)<-[:CHILD_OF*0..20]-(d:block) WHERE fr.region = 'right' AND root.id = fr.root_id RETURN d ORDER BY fr.added_ts DESC, d.sort_key
+#+BEGIN_SRC holon_sql :id default-right-sidebar::src::0
+WITH RECURSIVE focus_descendants AS (
+  SELECT b.*, fr.added_ts, 0 AS _depth
+  FROM focus_roots fr
+  JOIN block b ON b.id = fr.root_id
+  WHERE fr.region = 'right'
+  UNION ALL
+  SELECT child.*, fd.added_ts, fd._depth + 1
+  FROM focus_descendants fd
+  JOIN block child ON child.parent_id = fd.id
+  LEFT JOIN block_tags bt ON bt.block_id = fd.id AND bt.tag = 'Page'
+  WHERE fd._depth = 0 OR bt.block_id IS NULL
+)
+SELECT * FROM focus_descendants ORDER BY added_ts DESC, sort_key
 #+END_SRC
 ** Advice Rules
 :PROPERTIES:
