@@ -118,6 +118,8 @@ impl GraphSchemaRegistry {
                     id_col: td.primary_key.clone(),
                     label: label.clone(),
                     columns,
+                    extension_column: None,
+                    multi_value_properties: HashMap::new(),
                 }),
             );
 
@@ -171,6 +173,8 @@ impl GraphSchemaRegistry {
                     id_col: node_def.id_column,
                     label: node_def.label,
                     columns,
+                    extension_column: None,
+                    multi_value_properties: HashMap::new(),
                 }),
             );
         }

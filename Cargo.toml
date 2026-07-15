@@ -293,3 +293,8 @@ gpui-mobile = { git = "https://github.com/holon-space/gpui-mobile.git", branch =
 # Until then the local `path` is intentionally retained so this machine builds.
 [patch."https://github.com/holon-space/gpui-component"]
 gpui-component = { path = "/Users/martin/Workspaces/rust/gpui-component/crates/ui" }
+
+# Pre-existing ed25519-dalek 3.0.0-pre.1 incompatible with pkcs8 0.11: locally
+# patched to pass KeyError::Invalid to KeyMalformed (matching 3.0.0-rc.0 fix).
+[patch.crates-io]
+ed25519-dalek = { path = ".cargo/patches/ed25519-dalek" }

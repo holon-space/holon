@@ -364,8 +364,8 @@ impl GeometryDriver {
                 .collect::<Vec<_>>()
                 .join(",");
             let line = format!(
-                "{{\"ts_ms\":{millis},\"step\":{step},\"phase\":{:?},\"label\":{:?},\"png\":{:?},\\
-                 "entities\":[{entities_json}]}}\n",
+                "{{\"ts_ms\":{millis},\"step\":{step},\"phase\":{:?},\"label\":{:?},\"png\":{:?},\
+                 \"entities\":[{entities_json}]}}\n",
                 phase_str, label, filename,
             );
             if config.replay_jsonl.is_none() {

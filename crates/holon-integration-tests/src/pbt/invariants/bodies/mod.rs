@@ -23,6 +23,7 @@ pub mod main_panel_rows_match_focus;
 // in holon-pbt-core (auto-derived `inv-navigation-focus`); body file deleted.
 pub mod companion_has_no_child_page_headings;
 pub mod display_placement_canonical_inert;
+pub mod embedded_page_collapsed_lazy;
 pub mod every_page_has_its_own_file;
 pub mod no_errors;
 pub mod no_orphan_blocks;

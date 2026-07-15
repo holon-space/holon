@@ -106,6 +106,11 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // main-panel rendered ref-known blocks must be in Main's current
         // focus-root subtree. Needs SutRenderer + RefViewSelection/RefLayout/RefFocus.
         invariants::main_panel_rows_match_focus::wire(),
+        // Embedded-page collapsed+lazy (Phase 1 RED): non-seed pages that are
+        // strict descendants of the main focus root must render collapsed with
+        // children lazy-loaded. Needs SutRenderer + RefBlockTree/RefLayout/
+        // RefViewSelection/RefFocus/RefToggle.
+        invariants::embedded_page_collapsed_lazy::wire(),
         // Auto-derived by `capability_pair! { pub trait ViewSelection … }` in
         // holon-pbt-core (the `#[compare] fn current_view` method).
         holon_pbt_core::capabilities::inv_pair_view_selection_current_view(),

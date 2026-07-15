@@ -2884,4 +2884,123 @@ mod teeth {
             );
         }
     }
+
+    /// **Phase 1 RED: embedded page renders collapsed + lazy-loaded.**
+    ///
+    /// Boots a custom topology where a non-seed page (`test-date-page`) sits
+    /// under `block:journals` with a child block (`test-date-child`), focuses
+    /// the main panel on `block:journals`, then runs
+    /// `inv-embedded-page-collapsed-lazy`. The invariant RED-fails because
+    /// today embedded pages render eagerly — the child appears in the main
+    /// panel widget tree with no collapsed `expand_toggle` marking the page.
+    ///
+    /// This is the Phase 1 RED oracle. It currently FAILS (expected). Phases
+    /// 2+3 will make it green by implementing the display/query fix.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn embedded_page_renders_collapsed_and_lazy() {
+        use holon_pbt_core::capabilities::CapRegion;
+        use holon_pbt_core::capabilities::RefNavHistoryMut;
+        use holon_pbt_core::capabilities::SutFocusWrite;
+        use holon_pbt_core::composition::CapInvariant;
+
+        use crate::pbt::composed::invariants::embedded_page_collapsed_lazy;
+
+        // Org files: a Journals.org shell with a non-seed Page heading and
+        // a child note under it.
+        let journals_org = concat!(
+            "#+ID: journals\n",
+            "* 2026-07-14 :Page:\n",
+            ":PROPERTIES:\n",
+            ":ID: test-date-page\n",
+            ":END:\n",
+            "A journal date page.\n",
+            "** A note for the day\n",
+            ":PROPERTIES:\n",
+            ":ID: test-date-child\n",
+            ":END:\n",
+            "This child should be lazy-loaded.\n",
+        );
+        const STRUCTURAL_PAGE_ORG: &str = "#+ID: structural-page\n";
+
+        let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
+        let comp = Arc::new(
+            HeadlessFrontendComponent::new(
+                &[
+                    ("Journals.org", journals_org),
+                    ("structural-page.org", STRUCTURAL_PAGE_ORG),
+                ],
+                Duration::from_millis(600),
+            )
+            .await,
+        );
+        let _engine = comp.engine();
+        let mut caps = CapMap::new();
+        comp.clone().register_non_gesture(&mut caps);
+        comp.clone()
+            .register_gesture_writes(&mut caps, comp.driver());
+        caps.insert(comp.clone() as Arc<dyn SutSqlProjection>);
+        tokio::time::sleep(SETTLE).await;
+
+        // Build the ref: seed structural-page, model test-date-page as a
+        // non-seed page child of journals, with test-date-child as its child.
+        let mut oracle = structural_ref();
+        let journals = holon_api::EntityUri::parse("block:journals").expect("journals id");
+        let date_page = holon_api::EntityUri::block("test-date-page");
+        let child = holon_api::EntityUri::block("test-date-child");
+
+        let mut date_block = Block::new_text(date_page.clone(), journals.clone(), "2026-07-14");
+        date_block.set_page(true);
+        oracle
+            .domain
+            .block_state
+            .blocks
+            .insert(date_page.clone(), date_block);
+        oracle
+            .domain
+            .block_state
+            .block_documents
+            .insert(date_page.clone(), date_page.clone());
+
+        let child_block = Block::new_text(child.clone(), date_page.clone(), "A note for the day");
+        oracle
+            .domain
+            .block_state
+            .blocks
+            .insert(child.clone(), child_block);
+        oracle
+            .domain
+            .block_state
+            .block_documents
+            .insert(child.clone(), date_page.clone());
+
+        // Navigate the SUT focus to journals so the date page appears in
+        // the main panel.
+        comp.apply_navigate_focus(CapRegion::Main, &journals).await;
+        tokio::time::sleep(SETTLE).await;
+
+        // Also navigate the ref so focus roots include journals.
+        oracle.nav_focus(holon_api::Region::Main, &journals);
+
+        let resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
+        drop_ref_off_thread(oracle);
+
+        let registry: Vec<Box<dyn CapInvariant>> = vec![embedded_page_collapsed_lazy::wire()];
+        let report = run_with_seeded_ref(&registry, &caps, resolved).await;
+
+        let ran: Vec<_> = report.ran_ids().into_iter().collect();
+        assert!(
+            ran.iter()
+                .any(|id| *id == "inv-embedded-page-collapsed-lazy"),
+            "inv-embedded-page-collapsed-lazy must select + run (ran: {ran:?})"
+        );
+        let failures = report.failures();
+        assert!(
+            !failures.is_empty(),
+            "Phase 1 expected RED (inv-embedded-page-collapsed-lazy fails) but got green. \
+             If embedded pages are ALREADY collapsed+lazy-loaded, the fix may already be in place."
+        );
+        eprintln!(
+            "[embedded_page_renders_collapsed_and_lazy] RED (expected in Phase 1): failures = {failures:?}"
+        );
+    }
 }
