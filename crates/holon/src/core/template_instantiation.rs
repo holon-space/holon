@@ -199,13 +199,13 @@ pub fn plan_instantiation(
         );
     }
     let root_props = parse_properties(root)?;
-    if !root_props.contains_key(TEMPLATE_MARKER_PROPERTY) {
+    if template_marker_value(&root_props, TEMPLATE_MARKER_PROPERTY).is_none() {
         bail!(
             "block '{}' is not a template: missing the '{TEMPLATE_MARKER_PROPERTY}' property",
             root.id
         );
     }
-    let vars = match root_props.get(TEMPLATE_VARS_PROPERTY) {
+    let vars = match template_marker_value(&root_props, TEMPLATE_VARS_PROPERTY) {
         Some(serde_json::Value::String(raw)) => TemplateVars::parse(raw)
             .with_context(|| format!("template '{}': invalid template_vars", root.id))?,
         Some(other) => bail!(
@@ -323,8 +323,8 @@ pub fn plan_instantiation(
             }
         }
         if is_root {
-            props.remove(TEMPLATE_MARKER_PROPERTY);
-            props.remove(TEMPLATE_VARS_PROPERTY);
+            remove_template_marker(&mut props, TEMPLATE_MARKER_PROPERTY);
+            remove_template_marker(&mut props, TEMPLATE_VARS_PROPERTY);
             props.insert(
                 INSTANCE_OF_PROPERTY.to_string(),
                 serde_json::Value::String(request.template_id.clone()),
@@ -390,6 +390,39 @@ fn parse_properties(node: &TemplateNode) -> Result<BTreeMap<String, serde_json::
             }
         }
     }
+}
+
+/// Case-insensitive lookup for template-marker keys. The org parser
+/// writes `:TEMPLATE:` / `:TEMPLATE_VARS:` drawer properties with the
+/// exact casing from the org file; direct programmatic creation uses
+/// lowercase. Both must resolve.
+fn template_marker_key<'a>(
+    props: &'a BTreeMap<String, serde_json::Value>,
+    marker: &str,
+) -> Option<&'a String> {
+    props
+        .keys()
+        .find(|k| k.eq_ignore_ascii_case(marker))
+}
+
+fn template_marker_value<'a>(
+    props: &'a BTreeMap<String, serde_json::Value>,
+    marker: &str,
+) -> Option<&'a serde_json::Value> {
+    template_marker_key(props, marker).and_then(|k| props.get(k))
+}
+
+/// Remove a template-marker key case-insensitively, returning the
+/// actual key that was removed (if any).
+fn remove_template_marker(
+    props: &mut BTreeMap<String, serde_json::Value>,
+    marker: &str,
+) -> Option<String> {
+    let key = template_marker_key(props, marker).cloned();
+    if let Some(ref k) = key {
+        props.remove(k);
+    }
+    key
 }
 
 /// A single `{{var}}` → value replacement inside one content string, in

@@ -5003,6 +5003,7 @@ dependencies = [
  "holon-loro",
  "holon-macros",
  "holon-org-format",
+ "holon-orgmode",
  "holon-petri",
  "holon-profiles",
  "holon-turso",
