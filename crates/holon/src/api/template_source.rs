@@ -24,6 +24,9 @@ use crate::storage::turso::DbHandle;
 #[async_trait]
 pub trait TemplateSource: Send + Sync {
     async fn load_subtree(&self, root_id: &str) -> Result<Vec<TemplateNode>>;
+    /// Verify a block id exists in the backing store. `instantiate_template`
+    /// calls this to fail loud on a bogus `target_parent` before planning.
+    async fn exists(&self, id: &str) -> Result<bool>;
 }
 
 /// Guard against a corrupted parent chain (a `parent_id` cycle would loop the
@@ -64,6 +67,20 @@ impl TursoTemplateSource {
 
 #[async_trait]
 impl TemplateSource for TursoTemplateSource {
+    async fn exists(&self, id: &str) -> Result<bool> {
+        let sql = format!(
+            "SELECT 1 FROM {} WHERE id = '{}' LIMIT 1",
+            self.table_name,
+            id.replace('\'', "''"),
+        );
+        let rows = self
+            .db_handle
+            .query(&sql, HashMap::new())
+            .await
+            .map_err(|e| anyhow::anyhow!("existence check for '{id}': {e}"))?;
+        Ok(!rows.is_empty())
+    }
+
     async fn load_subtree(&self, root_id: &str) -> Result<Vec<TemplateNode>> {
         let sql = format!(
             "SELECT id, parent_id, content, content_type, block_type, sort_key, collapsed, \

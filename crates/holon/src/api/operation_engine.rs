@@ -17,6 +17,7 @@ use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
 
 use anyhow::Result;
+use anyhow::bail;
 use async_trait::async_trait;
 use holon_api::ACCEPT_PROPOSAL_OP;
 use holon_api::EntityName;
@@ -422,6 +423,15 @@ impl DispatchingOperationEngine {
             )
         })?;
         let request = InstantiateRequest::from_params(params)?;
+        // Fail loud on a bogus target_parent — silently creating an orphaned
+        // subtree violates the C2a invariant (every block has a reachable
+        // parent chain to a page root).
+        if !source.exists(&request.target_parent).await? {
+            bail!(
+                "instantiate_template: target_parent '{}' does not exist",
+                request.target_parent
+            );
+        }
         let nodes = source.load_subtree(&request.template_id).await?;
         let plan = plan_instantiation(&nodes, &request)?;
 
@@ -1219,6 +1229,66 @@ mod instantiate_template_tests {
             0,
             "failed instantiation must create nothing"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn nonexistent_target_parent_fails_loud_and_creates_nothing() {
+        let engine = block_engine().await;
+        // Seed the template subtree (block:tpl + child) but NOT the target
+        // parent — instantiate into a bogus parent must fail loud.
+        seed_template_without_target(&engine).await;
+
+        let err = engine
+            .execute_operation(
+                &EntityName::new("block"),
+                "instantiate_template",
+                instantiate_params("k1", &[("date", "2026-07-12")]),
+                OpOrigin::User,
+            )
+            .await
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("block:target"),
+            "error must name the missing parent; got: {msg}"
+        );
+        assert!(
+            msg.contains("target_parent"),
+            "error must mention target_parent; got: {msg}"
+        );
+        assert_eq!(
+            instance_roots(&engine).await.len(),
+            0,
+            "bogus-parent instantiation must create nothing"
+        );
+    }
+
+    /// Like `seed_template` but does NOT create `block:target` — used for
+    /// bogus-parent tests.
+    async fn seed_template_without_target(engine: &BackendEngine) {
+        create_block(
+            engine,
+            &[
+                ("id", Value::String("block:tpl".into())),
+                ("content", Value::String("{{date}}".into())),
+                ("template", Value::String("daily".into())),
+                ("template_vars", Value::String("date, mood=neutral".into())),
+            ],
+        )
+        .await;
+        create_block(
+            engine,
+            &[
+                ("id", Value::String("block:tpl-c1".into())),
+                ("parent_id", Value::String("block:tpl".into())),
+                ("content", Value::String("see {{date}} now".into())),
+                (
+                    "marks",
+                    Value::String(r#"[{"start":0,"end":3,"kind":"Bold"}]"#.into()),
+                ),
+            ],
+        )
+        .await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
