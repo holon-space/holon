@@ -1045,7 +1045,8 @@ mod tests {
         // survives render -> re-parse losslessly, converged to `:REQUIRES:`.
         use crate::org_renderer::OrgRenderer;
 
-        let content = "* TODO Task\n:PROPERTIES:\n:BLOCKED-BY: orient-daily-view now-query-mcp\n:ID: t1\n:END:\n";
+        let content = "* TODO Task\n:PROPERTIES:\n:BLOCKED-BY: orient-daily-view \
+                       now-query-mcp\n:ID: t1\n:END:\n";
         let path = PathBuf::from("/test/file.org");
         let root = PathBuf::from("/test");
         let file_id = generate_file_id(&path, &root);

@@ -94,8 +94,8 @@ async fn drain_journal_changes(
 async fn read_counts(handle: &DbHandle) -> Vec<(String, String, String, i64)> {
     let rows = handle
         .query(
-            "SELECT origin, transition_id, day, effect_count FROM automations_journal \
-             ORDER BY origin, transition_id, day",
+            "SELECT origin, transition_id, day, effect_count FROM automations_journal ORDER BY \
+             origin, transition_id, day",
             HashMap::new(),
         )
         .await

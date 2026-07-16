@@ -247,6 +247,23 @@ Feature-gate hazard: pass member features explicitly (memory: gate-required-feat
   **executor**. Blast radius: frontends/mcp, frontends/holon-worker, assets/queries, docs.
 
 ### INC 4 — Fidelity honesty: rebuild story (RULING REQUIRED — fork F2 below)
+- **STATUS 2026-07-16 — MINIMUM (F2b honest-partial) LANDED; FULL (F2a Loro fidelity) PARKED
+  awaiting Martin's ruling.** Shipped:
+  - New `HistoryFidelity::Partial` variant (`crates/holon-api/src/history.rs`) — recovers the
+    block-stamp create-provenance subset, never the full op stream.
+  - Fidelity is now COMPUTED, not caller-asserted: `TursoHistoryStore::new` dropped its
+    `fidelity` parameter; `fidelity()` returns `Partial` (the guarantee `rebuild` actually
+    delivers). Removed the rejected `HistoryFidelity::Loro` over-claim at every call site
+    (`backend_engine.rs`, `holon_service.rs`, tests).
+  - `HistoryStore::rebuild()` implemented (`crates/holon/src/api/history_store.rs`): truncates
+    `block_history`, then replays one `create` event per extant block carrying its `_provenance`
+    stamp (read from `block_raw` via `json_extract`, ordered `(at_millis, id)` for determinism).
+    Field-delta history left no substrate trace → omitted (not fabricated). `DegradedHistoryStore`
+    rebuild fails loud (no substrate). Rebuild contract disclosed in the `history.rs` module docs.
+  - Tests: `rebuild_recovers_create_provenance_subset_and_is_deterministic` (create-provenance
+    subset recovered, field-deltas provably NOT, two rebuilds byte-identical, `fidelity() ==
+    Partial`); degraded-rebuild-fails-loud assertion added. All history lib + integration tests
+    green; keystone signature = accepted journals ingest-data-loss baseline only (no regression).
 - Minimum (no ruling needed): implement `rebuild()` = drop table + replay what the substrate
   CAN prove — a disclosed partial rebuild (creates with their stamped `_provenance`; everything
   else with `origin=unknown` or omitted) — and change the constructor-asserted

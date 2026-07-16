@@ -140,10 +140,10 @@ where
             // MUST have a toggle for every embedded page.
             if toggle.is_none() {
                 return InvariantResult::Fail(format!(
-                    "[inv-embedded-page-collapsed-lazy] embedded page {page_str} (strict descendant \
-                     of main focus root{roots}) has NO expand_toggle in the main-panel widget tree. \
-                     Affordance prong FAILS — the embedded_page profile variant must wrap the page \
-                     in an expand_toggle.",
+                    "[inv-embedded-page-collapsed-lazy] embedded page {page_str} (strict \
+                     descendant of main focus root{roots}) has NO expand_toggle in the main-panel \
+                     widget tree. Affordance prong FAILS — the embedded_page profile variant must \
+                     wrap the page in an expand_toggle.",
                     roots = focus_root_strs
                         .iter()
                         .map(|s| format!(" {s}"))
@@ -158,9 +158,9 @@ where
                 // Consistency check: widget toggle should also report expanded.
                 if !toggle_expanded {
                     return InvariantResult::Fail(format!(
-                        "[inv-embedded-page-collapsed-lazy] embedded page {page_str} is expanded in \
-                         the ref model but the widget tree toggle reports expanded=false. Ref-model \
-                         vs SUT consistency FAILS.",
+                        "[inv-embedded-page-collapsed-lazy] embedded page {page_str} is expanded \
+                         in the ref model but the widget tree toggle reports expanded=false. \
+                         Ref-model vs SUT consistency FAILS.",
                     ));
                 }
             } else {
@@ -168,17 +168,18 @@ where
                 // may appear in the panel.
                 if toggle_expanded {
                     return InvariantResult::Fail(format!(
-                        "[inv-embedded-page-collapsed-lazy] embedded page {page_str} is collapsed in \
-                         the ref model but the widget tree toggle reports expanded=true. Ref-model \
-                         vs SUT consistency FAILS.",
+                        "[inv-embedded-page-collapsed-lazy] embedded page {page_str} is collapsed \
+                         in the ref model but the widget tree toggle reports expanded=true. \
+                         Ref-model vs SUT consistency FAILS.",
                     ));
                 }
                 if !descendants_in_panel.is_empty() {
                     return InvariantResult::Fail(format!(
-                        "[inv-embedded-page-collapsed-lazy] embedded page {page_str} has a collapsed \
-                         expand_toggle (affordance prong PASSES) but its ref-known strict descendants \
-                         {descendants_in_panel:?} are present in the main-panel widget tree — \
-                         descendants prong FAILS (children leaked past the lazy gate).",
+                        "[inv-embedded-page-collapsed-lazy] embedded page {page_str} has a \
+                         collapsed expand_toggle (affordance prong PASSES) but its ref-known \
+                         strict descendants {descendants_in_panel:?} are present in the \
+                         main-panel widget tree — descendants prong FAILS (children leaked past \
+                         the lazy gate).",
                     ));
                 }
             }

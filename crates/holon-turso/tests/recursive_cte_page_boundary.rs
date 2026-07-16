@@ -16,19 +16,12 @@ use holon_turso::turso::TursoBackend;
 /// BY is omitted because Turso IVM rejects column-reference ORDER BY in matview
 /// definitions; the production path strips it via `strip_order_by` before DDL.
 const MAIN_PANEL_CTE: &str = "\
-WITH RECURSIVE focus_descendants AS (\
-  SELECT b.*, 0 AS _depth \
-  FROM focus_roots fr \
-  JOIN block b ON b.id = fr.root_id \
-  WHERE fr.region = 'main' \
-  UNION ALL \
-  SELECT child.*, fd._depth + 1 \
-  FROM focus_descendants fd \
-  JOIN block child ON child.parent_id = fd.id \
-  LEFT JOIN block_tags bt ON bt.block_id = fd.id AND bt.tag = 'Page' \
-  WHERE fd._depth = 0 OR bt.block_id IS NULL \
-) \
-SELECT * FROM focus_descendants";
+WITH RECURSIVE focus_descendants AS (SELECT b.*, 0 AS _depth FROM focus_roots fr JOIN block b ON \
+                              b.id = fr.root_id WHERE fr.region = 'main' UNION ALL SELECT \
+                              child.*, fd._depth + 1 FROM focus_descendants fd JOIN block child \
+                              ON child.parent_id = fd.id LEFT JOIN block_tags bt ON bt.block_id = \
+                              fd.id AND bt.tag = 'Page' WHERE fd._depth = 0 OR bt.block_id IS \
+                              NULL ) SELECT * FROM focus_descendants";
 
 async fn setup() -> DbHandle {
     let (_backend, handle) = TursoBackend::new_in_memory().await.expect("in-memory db");
@@ -36,34 +29,23 @@ async fn setup() -> DbHandle {
 
     handle
         .execute_ddl(
-            "CREATE TABLE block (\
-             id TEXT PRIMARY KEY, \
-             parent_id TEXT, \
-             sort_key TEXT NOT NULL DEFAULT 'A0', \
-             content TEXT NOT NULL DEFAULT '', \
-             content_type TEXT NOT NULL DEFAULT 'text'\
-             )",
+            "CREATE TABLE block (id TEXT PRIMARY KEY, parent_id TEXT, sort_key TEXT NOT NULL \
+             DEFAULT 'A0', content TEXT NOT NULL DEFAULT '', content_type TEXT NOT NULL DEFAULT \
+             'text')",
         )
         .await
         .expect("create block");
     handle
         .execute_ddl(
-            "CREATE TABLE block_tags (\
-             block_id TEXT NOT NULL, \
-             tag TEXT NOT NULL, \
-             PRIMARY KEY (block_id, tag)\
-             )",
+            "CREATE TABLE block_tags (block_id TEXT NOT NULL, tag TEXT NOT NULL, PRIMARY KEY \
+             (block_id, tag))",
         )
         .await
         .expect("create block_tags");
     handle
         .execute_ddl(
-            "CREATE TABLE focus_roots (\
-             region TEXT NOT NULL, \
-             root_id TEXT NOT NULL, \
-             added_ts INTEGER NOT NULL DEFAULT 0, \
-             history_id TEXT\
-             )",
+            "CREATE TABLE focus_roots (region TEXT NOT NULL, root_id TEXT NOT NULL, added_ts \
+             INTEGER NOT NULL DEFAULT 0, history_id TEXT)",
         )
         .await
         .expect("create focus_roots");

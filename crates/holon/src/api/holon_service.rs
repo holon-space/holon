@@ -185,16 +185,12 @@ impl HolonService {
         self.history_store().count(filter).await
     }
 
-    /// The typed history accessor over this engine's db handle. Fidelity
-    /// matches the production (Loro-projected) wiring in
-    /// [`crate::api::BackendEngine`]; for reads it is disclosure only. The
-    /// `block_history` table is boot-owned by `HistorySchemaModule`, so the
-    /// accessor never lazily creates it.
+    /// The typed history accessor over this engine's db handle. The store
+    /// computes its own honest rebuild fidelity (`HistoryFidelity::Partial`);
+    /// for reads it is disclosure only. The `block_history` table is boot-owned
+    /// by `HistorySchemaModule`, so the accessor never lazily creates it.
     fn history_store(&self) -> crate::api::TursoHistoryStore {
-        crate::api::TursoHistoryStore::new(
-            self.engine.db_handle().clone(),
-            holon_api::HistoryFidelity::Loro,
-        )
+        crate::api::TursoHistoryStore::new(self.engine.db_handle().clone())
     }
 
     /// Compile and start watching a query for CDC changes.

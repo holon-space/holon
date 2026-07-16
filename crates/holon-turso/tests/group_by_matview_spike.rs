@@ -25,8 +25,8 @@ async fn setup() -> DbHandle {
     std::mem::forget(_backend); // keep the actor alive for the test
     handle
         .execute_ddl(
-            "CREATE TABLE evt (seq INTEGER PRIMARY KEY, origin TEXT NOT NULL, \
-             transition_id TEXT, day TEXT NOT NULL)",
+            "CREATE TABLE evt (seq INTEGER PRIMARY KEY, origin TEXT NOT NULL, transition_id TEXT, \
+             day TEXT NOT NULL)",
         )
         .await
         .expect("create base table");
@@ -62,8 +62,8 @@ async fn delete_evt(handle: &DbHandle, seq: i64) {
 async fn read_journal(handle: &DbHandle) -> Vec<(String, String, String, i64)> {
     let rows = handle
         .query(
-            "SELECT origin, transition_id, day, n FROM evt_journal \
-             ORDER BY origin, transition_id, day",
+            "SELECT origin, transition_id, day, n FROM evt_journal ORDER BY origin, \
+             transition_id, day",
             HashMap::new(),
         )
         .await
@@ -101,8 +101,8 @@ async fn group_by_count_matview_over_table_is_ivm_maintained() {
     let created = reconcile_named_view(
         &handle,
         "evt_journal",
-        "SELECT origin, transition_id, day, COUNT(*) AS n FROM evt \
-         GROUP BY origin, transition_id, day",
+        "SELECT origin, transition_id, day, COUNT(*) AS n FROM evt GROUP BY origin, \
+         transition_id, day",
     )
     .await
     .expect("grouped matview DDL must succeed (no hang)");

@@ -1891,8 +1891,7 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     let trimmed = seg.trim();
                     if trimmed.is_empty() {
                         return Err(format!(
-                            "create_page_from_link: empty segment in target \
-                             '{target}'"
+                            "create_page_from_link: empty segment in target '{target}'"
                         )
                         .into());
                     }
@@ -1956,10 +1955,7 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 if !link_stmts.is_empty() {
                     let all_stmts: Vec<_> = link_stmts.into_iter().map(|s| (s, vec![])).collect();
                     self.db_handle.transaction(all_stmts).await.map_err(|e| {
-                        format!(
-                            "create_page_from_link: failed to heal \
-                                 dangling links: {e}"
-                        )
+                        format!("create_page_from_link: failed to heal dangling links: {e}")
                     })?;
                 }
 
@@ -1971,8 +1967,7 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 // lands we can collapse this into a single undo entry.
                 Ok(OperationResult::declared_irreversible(
                     Vec::new(),
-                    "create_page_from_link — page-chain creation + link \
-                     healing",
+                    "create_page_from_link — page-chain creation + link healing",
                 )
                 .with_response(Value::String(leaf_id)))
             }
