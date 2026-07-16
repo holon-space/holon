@@ -203,4 +203,55 @@ impl BlockState {
             Some(parent.parent_id.clone())
         }
     }
+
+    /// Check if `block_id` is a descendant of any block in `roots` (or is
+    /// itself in `roots`).
+    pub fn is_descendant_of_any(
+        &self,
+        block_id: &EntityUri,
+        roots: &std::collections::BTreeSet<EntityUri>,
+    ) -> bool {
+        if roots.contains(block_id) {
+            return true;
+        }
+        // Walk up parent chain
+        let mut current = block_id.clone();
+        for _ in 0..50 {
+            if let Some(block) = self.blocks.get(&current) {
+                if roots.contains(&block.parent_id) {
+                    return true;
+                }
+                if block.parent_id.is_no_parent() || block.parent_id.is_sentinel() {
+                    return false;
+                }
+                current = block.parent_id.clone();
+            } else {
+                return false;
+            }
+        }
+        false
+    }
+
+    /// Depth-first collection of text-block descendants of `parent_id`, in
+    /// canonical child order, recording each visited block's parent (skipping
+    /// the synthetic `no_parent` root). Backs `build_reference_navigator`'s
+    /// tree/outline navigator construction.
+    pub fn collect_dfs_order(
+        &self,
+        parent_id: &EntityUri,
+        dfs_order: &mut Vec<EntityUri>,
+        parent_map: &mut std::collections::HashMap<EntityUri, EntityUri>,
+    ) {
+        let children = self.sorted_children_of(parent_id);
+        for child in children {
+            if child.content_type != ContentType::Text {
+                continue;
+            }
+            dfs_order.push(child.id.clone());
+            if parent_id != &EntityUri::no_parent() {
+                parent_map.insert(child.id.clone(), parent_id.clone());
+            }
+            self.collect_dfs_order(&child.id, dfs_order, parent_map);
+        }
+    }
 }

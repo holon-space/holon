@@ -734,16 +734,14 @@ impl ReferenceState {
     /// Returns expected query results for a watch using the TestQuery
     /// evaluator.
     pub fn query_results(&self, watch_spec: &WatchSpec) -> Vec<HashMap<String, Value>> {
-        watch_spec.query.evaluate(&self.domain.block_state.blocks)
+        self.domain.query_results(watch_spec)
     }
 
     /// Check if index.org exists with the structure required by
     /// initial_widget(). Generate a synthetic `block:ref-doc-N` URI for a
     /// new document and bump the counter.
     pub fn next_synthetic_doc_uri(&mut self) -> EntityUri {
-        let uri = EntityUri::block(&format!("ref-doc-{}", self.action.next_doc_id));
-        self.action.next_doc_id += 1;
-        uri
+        self.action.next_synthetic_doc_uri()
     }
 
     /// Find a page block by its title (first line of content, e.g. "index").
@@ -755,60 +753,20 @@ impl ReferenceState {
     /// user-written index.org). Used to gate render_entity, ReactiveEngine,
     /// and ViewModel checks.
     pub fn is_properly_setup(&self) -> bool {
-        !self.domain.layout_blocks.query_source_ids.is_empty() || self.has_user_index_org()
+        self.domain.is_properly_setup()
     }
 
     /// Whether the user has written an index.org with query+render blocks.
     /// Used to gate block comparison invariants (seed blocks don't round-trip
     /// through org files).
     pub fn has_user_index_org(&self) -> bool {
-        let index_doc_uri = match self.doc_uri_by_name("index") {
-            Some(uri) => uri,
-            None => return false,
-        };
-
-        let root_blocks: Vec<&Block> = self
-            .domain
-            .block_state
-            .blocks
-            .values()
-            .filter(|b| b.parent_id == index_doc_uri)
-            .collect();
-
-        root_blocks.iter().any(|root_block| {
-            self.domain.block_state.blocks.values().any(|child| {
-                child.parent_id == root_block.id
-                    && child.content_type == ContentType::Source
-                    && child
-                        .source_language
-                        .as_ref()
-                        .and_then(|sl| sl.as_query())
-                        .is_some()
-            })
-        })
+        self.domain.has_user_index_org()
     }
 
     /// Get the first root layout block ID from index.org (a heading with a
     /// query source child).
     pub fn root_layout_block_id(&self) -> Option<EntityUri> {
-        let index_doc_uri = self.doc_uri_by_name("index")?;
-        self.domain
-            .block_state
-            .blocks
-            .values()
-            .filter(|b| b.parent_id == index_doc_uri)
-            .find(|root_block| {
-                self.domain.block_state.blocks.values().any(|child| {
-                    child.parent_id == root_block.id
-                        && child.content_type == ContentType::Source
-                        && child
-                            .source_language
-                            .as_ref()
-                            .and_then(|sl| sl.as_query())
-                            .is_some()
-                })
-            })
-            .map(|b| b.id.clone())
+        self.domain.root_layout_block_id()
     }
 
     /// Whether the active main-panel layout renders `block_id` as a
@@ -957,34 +915,14 @@ impl ReferenceState {
     /// Get the active `RenderExpr` for the root layout's render source block.
     /// Returns `None` if no render source is tracked.
     pub fn root_render_expr(&self) -> Option<&RenderExpr> {
-        let root_id = self.root_layout_block_id()?;
-        // Find the render source block that is a child of the root layout
-        self.domain
-            .layout_blocks
-            .render_source_ids
-            .iter()
-            .find(|id| {
-                self.domain
-                    .block_state
-                    .blocks
-                    .get(*id)
-                    .map(|b| b.parent_id == root_id)
-                    .unwrap_or(false)
-            })
-            .and_then(|id| self.domain.render_expressions.get(id))
+        self.domain.root_render_expr()
     }
 
     /// Name of the active render expression for `region` (e.g. "tree",
     /// "outline", "list"). Used by `build_reference_navigator` to pick
     /// the right `CollectionNavigator` shape for arrow-key navigation.
-    pub fn active_render_expr_name(&self, _: Region) -> Option<String> {
-        // For now, use the main panel's render expression (region is ignored
-        // because the PBT currently only has one navigable region).
-        let expr = self.main_panel_render_expr().or(self.root_render_expr())?;
-        match expr {
-            RenderExpr::FunctionCall { name, .. } => Some(name.clone()),
-            _ => None,
-        }
+    pub fn active_render_expr_name(&self, region: Region) -> Option<String> {
+        self.domain.active_render_expr_name(region)
     }
 
     /// Build a reference-state `CollectionNavigator` for `region` to mirror
@@ -1025,7 +963,11 @@ impl ReferenceState {
             Some("tree") | Some("outline") => {
                 let mut dfs_order = Vec::new();
                 let mut parent_map = std::collections::HashMap::new();
-                self.collect_dfs_order(&focus_id, &mut dfs_order, &mut parent_map);
+                self.domain.block_state.collect_dfs_order(
+                    &focus_id,
+                    &mut dfs_order,
+                    &mut parent_map,
+                );
                 if dfs_order.is_empty() {
                     return None;
                 }
@@ -1045,25 +987,6 @@ impl ReferenceState {
                 }
                 Some(Box::new(ListNavigator::new(ids)))
             }
-        }
-    }
-
-    fn collect_dfs_order(
-        &self,
-        parent_id: &EntityUri,
-        dfs_order: &mut Vec<EntityUri>,
-        parent_map: &mut std::collections::HashMap<EntityUri, EntityUri>,
-    ) {
-        let children = self.sorted_children_of(parent_id);
-        for child in children {
-            if child.content_type != ContentType::Text {
-                continue;
-            }
-            dfs_order.push(child.id.clone());
-            if parent_id != &EntityUri::no_parent() {
-                parent_map.insert(child.id.clone(), parent_id.clone());
-            }
-            self.collect_dfs_order(&child.id, dfs_order, parent_map);
         }
     }
 
@@ -1151,24 +1074,7 @@ impl ReferenceState {
     /// prod treats as plain editor-focus targets, breaking
     /// `inv-focus-roots-consistent-with-ref`.
     pub fn predicts_navigation_focus(&self, uri: &EntityUri, region: Region) -> bool {
-        if region != Region::LeftSidebar {
-            return false;
-        }
-        // A user index.org replaces the whole 3-column layout: there is no
-        // LeftSidebar live_block at all, so no sidebar row ever binds
-        // `navigation.focus` (same family as DragDropBlock's
-        // CustomLayoutNotDraggable gate).
-        if self.has_user_index_org() {
-            return false;
-        }
-        let Some(block) = self.domain.block_state.blocks.get(uri) else {
-            return false;
-        };
-        if block.content_type != ContentType::Text || !block.is_page() {
-            return false;
-        }
-        let t = block.title();
-        !t.is_empty() && t != "index" && t != "__default__"
+        self.domain.predicts_navigation_focus(uri, region)
     }
 
     /// Block IDs in the predicted LeftSidebar render set — the same set
@@ -1177,19 +1083,7 @@ impl ReferenceState {
     /// this is also the candidate set for `ClickBlock(LeftSidebar)` and
     /// `NavigateFocus` generators.
     pub fn predicted_sidebar_navigation_targets(&self) -> Vec<EntityUri> {
-        self.domain
-            .block_state
-            .blocks
-            .values()
-            .filter(|b| {
-                if b.content_type != ContentType::Text || !b.is_page() {
-                    return false;
-                }
-                let t = b.title();
-                !t.is_empty() && t != "index" && t != "__default__"
-            })
-            .map(|b| b.id.clone())
-            .collect()
+        self.domain.predicted_sidebar_navigation_targets()
     }
 
     /// Get IDs of text blocks only (not source blocks).
@@ -1681,25 +1575,9 @@ impl ReferenceState {
         block_id: &EntityUri,
         roots: &std::collections::BTreeSet<EntityUri>,
     ) -> bool {
-        if roots.contains(block_id) {
-            return true;
-        }
-        // Walk up parent chain
-        let mut current = block_id.clone();
-        for _ in 0..50 {
-            if let Some(block) = self.domain.block_state.blocks.get(&current) {
-                if roots.contains(&block.parent_id) {
-                    return true;
-                }
-                if block.parent_id.is_no_parent() || block.parent_id.is_sentinel() {
-                    return false;
-                }
-                current = block.parent_id.clone();
-            } else {
-                return false;
-            }
-        }
-        false
+        self.domain
+            .block_state
+            .is_descendant_of_any(block_id, roots)
     }
 
     pub fn has_blocks_profile(&self) -> bool {
@@ -1820,30 +1698,13 @@ impl ReferenceState {
     /// block state so callers (e.g. `inv-viewmodel-root-matches-render-expr`)
     /// never embed that literal themselves.
     pub fn main_panel_block_id(&self) -> Option<EntityUri> {
-        let main_panel_id = EntityUri::parse("block:default-main-panel").expect("static id");
-        self.domain
-            .block_state
-            .blocks
-            .contains_key(&main_panel_id)
-            .then(|| main_panel_id.clone())
+        self.domain.main_panel_block_id()
     }
 
     /// Get the main panel's render expression (the render source child of the
     /// main panel headline).
     pub fn main_panel_render_expr(&self) -> Option<&RenderExpr> {
-        let main_panel_id = self.main_panel_block_id()?;
-        self.domain
-            .layout_blocks
-            .render_source_ids
-            .iter()
-            .find(|id| {
-                self.domain
-                    .block_state
-                    .blocks
-                    .get(*id)
-                    .is_some_and(|b| b.parent_id == main_panel_id)
-            })
-            .and_then(|id| self.domain.render_expressions.get(id))
+        self.domain.main_panel_render_expr()
     }
 }
 

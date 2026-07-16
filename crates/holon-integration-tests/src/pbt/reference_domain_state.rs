@@ -11,12 +11,17 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
+use holon_api::ContentType;
 use holon_api::EntityName;
+use holon_api::Region;
+use holon_api::Value;
+use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
 use holon_api::render_types::RenderExpr;
 
 use super::block_state::BlockState;
 use super::block_state::LayoutBlockInfo;
+use super::query::WatchSpec;
 
 /// Tier-1 domain data extracted from `ReferenceState` (ADR 0004 Phase 2).
 ///
@@ -87,6 +92,189 @@ impl ReferenceDomainState {
 
     pub fn has_blocks_profile(&self) -> bool {
         self.active_profiles.contains_key("block")
+    }
+
+    /// Whether the system has a valid root layout (from seed blocks or
+    /// user-written index.org). Used to gate render_entity, ReactiveEngine,
+    /// and ViewModel checks.
+    pub fn is_properly_setup(&self) -> bool {
+        !self.layout_blocks.query_source_ids.is_empty() || self.has_user_index_org()
+    }
+
+    /// Whether the user has written an index.org with query+render blocks.
+    /// Used to gate block comparison invariants (seed blocks don't round-trip
+    /// through org files).
+    pub fn has_user_index_org(&self) -> bool {
+        let index_doc_uri = match self.block_state.doc_uri_by_name("index") {
+            Some(uri) => uri,
+            None => return false,
+        };
+
+        let root_blocks: Vec<&Block> = self
+            .block_state
+            .blocks
+            .values()
+            .filter(|b| b.parent_id == index_doc_uri)
+            .collect();
+
+        root_blocks.iter().any(|root_block| {
+            self.block_state.blocks.values().any(|child| {
+                child.parent_id == root_block.id
+                    && child.content_type == ContentType::Source
+                    && child
+                        .source_language
+                        .as_ref()
+                        .and_then(|sl| sl.as_query())
+                        .is_some()
+            })
+        })
+    }
+
+    /// Get the first root layout block ID from index.org (a heading with a
+    /// query source child).
+    pub fn root_layout_block_id(&self) -> Option<EntityUri> {
+        let index_doc_uri = self.block_state.doc_uri_by_name("index")?;
+        self.block_state
+            .blocks
+            .values()
+            .filter(|b| b.parent_id == index_doc_uri)
+            .find(|root_block| {
+                self.block_state.blocks.values().any(|child| {
+                    child.parent_id == root_block.id
+                        && child.content_type == ContentType::Source
+                        && child
+                            .source_language
+                            .as_ref()
+                            .and_then(|sl| sl.as_query())
+                            .is_some()
+                })
+            })
+            .map(|b| b.id.clone())
+    }
+
+    /// The id of the layout's main-panel container block, when the active
+    /// layout has one. Identified semantically: a render-source block whose
+    /// parent is the main-panel container resolves the container id back out.
+    /// Returns `None` in layout-less mode (no main-panel render source).
+    ///
+    /// The well-known default-layout main panel id is the seed id
+    /// `block:default-main-panel`; this accessor returns it from the resolved
+    /// block state so callers (e.g. `inv-viewmodel-root-matches-render-expr`)
+    /// never embed that literal themselves.
+    pub fn main_panel_block_id(&self) -> Option<EntityUri> {
+        let main_panel_id = EntityUri::parse("block:default-main-panel").expect("static id");
+        self.block_state
+            .blocks
+            .contains_key(&main_panel_id)
+            .then(|| main_panel_id.clone())
+    }
+
+    /// Get the main panel's render expression (the render source child of the
+    /// main panel headline).
+    pub fn main_panel_render_expr(&self) -> Option<&RenderExpr> {
+        let main_panel_id = self.main_panel_block_id()?;
+        self.layout_blocks
+            .render_source_ids
+            .iter()
+            .find(|id| {
+                self.block_state
+                    .blocks
+                    .get(*id)
+                    .is_some_and(|b| b.parent_id == main_panel_id)
+            })
+            .and_then(|id| self.render_expressions.get(id))
+    }
+
+    /// Get the active `RenderExpr` for the root layout's render source block.
+    /// Returns `None` if no render source is tracked.
+    pub fn root_render_expr(&self) -> Option<&RenderExpr> {
+        let root_id = self.root_layout_block_id()?;
+        // Find the render source block that is a child of the root layout
+        self.layout_blocks
+            .render_source_ids
+            .iter()
+            .find(|id| {
+                self.block_state
+                    .blocks
+                    .get(*id)
+                    .map(|b| b.parent_id == root_id)
+                    .unwrap_or(false)
+            })
+            .and_then(|id| self.render_expressions.get(id))
+    }
+
+    /// Name of the active render expression for `region` (e.g. "tree",
+    /// "outline", "list"). Used by `build_reference_navigator` to pick
+    /// the right `CollectionNavigator` shape for arrow-key navigation.
+    pub fn active_render_expr_name(&self, _: Region) -> Option<String> {
+        // For now, use the main panel's render expression (region is ignored
+        // because the PBT currently only has one navigable region).
+        let expr = self.main_panel_render_expr().or(self.root_render_expr())?;
+        match expr {
+            RenderExpr::FunctionCall { name, .. } => Some(name.clone()),
+            _ => None,
+        }
+    }
+
+    /// Whether a click on `uri` in `region` is predicted to dispatch
+    /// `navigation.focus(region=main, block_id=uri)` — the bound action the
+    /// default LeftSidebar wraps each doc selectable in.
+    ///
+    /// The default sidebar PRQL selects page blocks with non-special
+    /// titles (not "index" / "__default__"), and the layout wraps every
+    /// row in `selectable(action: navigation.focus(region="main",
+    /// block_id=col("id")))`. Used by `ClickBlock::apply_to_ref`
+    /// (LeftSidebar branch) and `NavigateFocus` to gate the
+    /// navigation-history + open_pins mutations on whether prod would
+    /// actually dispatch the bound intent. Without this, the ref model
+    /// would push nav-history entries for sidebar clicks on entities
+    /// prod treats as plain editor-focus targets, breaking
+    /// `inv-focus-roots-consistent-with-ref`.
+    pub fn predicts_navigation_focus(&self, uri: &EntityUri, region: Region) -> bool {
+        if region != Region::LeftSidebar {
+            return false;
+        }
+        // A user index.org replaces the whole 3-column layout: there is no
+        // LeftSidebar live_block at all, so no sidebar row ever binds
+        // `navigation.focus` (same family as DragDropBlock's
+        // CustomLayoutNotDraggable gate).
+        if self.has_user_index_org() {
+            return false;
+        }
+        let Some(block) = self.block_state.blocks.get(uri) else {
+            return false;
+        };
+        if block.content_type != ContentType::Text || !block.is_page() {
+            return false;
+        }
+        let t = block.title();
+        !t.is_empty() && t != "index" && t != "__default__"
+    }
+
+    /// Block IDs in the predicted LeftSidebar render set — the same set
+    /// the default sidebar PRQL produces. Each entry is wrapped by the
+    /// default layout in a selectable bound to `navigation.focus`, so
+    /// this is also the candidate set for `ClickBlock(LeftSidebar)` and
+    /// `NavigateFocus` generators.
+    pub fn predicted_sidebar_navigation_targets(&self) -> Vec<EntityUri> {
+        self.block_state
+            .blocks
+            .values()
+            .filter(|b| {
+                if b.content_type != ContentType::Text || !b.is_page() {
+                    return false;
+                }
+                let t = b.title();
+                !t.is_empty() && t != "index" && t != "__default__"
+            })
+            .map(|b| b.id.clone())
+            .collect()
+    }
+
+    /// Returns expected query results for a watch using the TestQuery
+    /// evaluator.
+    pub fn query_results(&self, watch_spec: &WatchSpec) -> Vec<HashMap<String, Value>> {
+        watch_spec.query.evaluate(&self.block_state.blocks)
     }
 }
 

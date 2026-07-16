@@ -6,6 +6,8 @@
 //! action engine isn't wired — isolating it here lets a reduced wiring drop
 //! the fragment instead of carrying dead state.
 
+use holon_api::entity_uri::EntityUri;
+
 use super::block_state::BlockState;
 
 /// Action-engine actor state extracted from `ReferenceState` (ADR 0004 Phase
@@ -38,6 +40,14 @@ impl ActionActorState {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         }
+    }
+
+    /// Generate a synthetic `block:ref-doc-N` URI for a new document and bump
+    /// the counter.
+    pub fn next_synthetic_doc_uri(&mut self) -> EntityUri {
+        let uri = EntityUri::block(&format!("ref-doc-{}", self.next_doc_id));
+        self.next_doc_id += 1;
+        uri
     }
 }
 
