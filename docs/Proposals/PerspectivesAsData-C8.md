@@ -5,6 +5,16 @@ ordinary query in both render arms + `LocalStateStore` with COALESCE
 precedence. Increment 3 (view-mode-as-data) is design-note-only; see
 "Implementation status" at the end.
 
+## Status (2026-07-16)
+
+**Render-arm wiring LANDED.** Both render-derivation arms now resolve the active
+perspective via `PerspectiveSpec::parse`: Turso arm in
+`crates/holon/src/api/block_domain.rs` (`render_root_slot`), no-Turso arm in
+`crates/holon/src/api/loro_ui_watcher.rs` (`resolve_active_perspective` /
+`active_perspective_id`). The only remaining C8 gap is **view-mode-as-data
+(Increment 3)** — see the "Still open (Increment 3)" list below, which superseded
+the render-consumption items (those are now landed).
+
 ## Status (2026-07-15)
 
 **PARTIALLY LANDED.** Increments 1 (slot resolution via query) and 2

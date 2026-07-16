@@ -6,6 +6,23 @@ the integration tree. Question answered (Martin's framing): the vision's workflo
 personalities must be definable AT RUNTIME AS DATA (blocks, profiles, queries, render DSL) — what
 fundamental generic functionality is still missing?
 
+## Status (2026-07-16)
+
+Further landings since 2026-07-15 (verified against the tree):
+
+- **C6 clock grains + recurrence — LANDED.** `Grain` enum + `Recurrence::desugar` in
+  `crates/holon-api/src/clock.rs`; fine-grain scheduling in the "C6: fine grains +
+  recurrence" block of `crates/holon/src/sync/clock_scheduler.rs`.
+- **C7 verb parser — LANDED** except the user-extensible dictionary-as-blocks piece.
+  `VerbOp` + `DEFAULT_VERB_DICT` in `crates/holon-petri/src/parser.rs`.
+- **C8 perspectives render-arm wiring — LANDED** except view-mode-as-data (Increment 3).
+  `PerspectiveSpec::parse` resolved in `crates/holon/src/api/block_domain.rs`; both
+  render-derivation arms wired via `crates/holon/src/api/loro_ui_watcher.rs`
+  (`resolve_active_perspective`). See `docs/Proposals/PerspectivesAsData-C8.md`.
+
+The "Still open" list below reflects the 2026-07-15 snapshot; C6, C7 (bar the
+dictionary-as-blocks item), and the C8 render-arm wiring are now landed per the above.
+
 ## Status (2026-07-15)
 
 **MOSTLY LANDED.** C4 computed fields (`DerivedFieldPlan`, hybrid seat, 2026-07-12),
