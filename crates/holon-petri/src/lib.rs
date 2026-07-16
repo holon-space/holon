@@ -34,6 +34,7 @@ use chrono::Utc;
 use holon_api::CompiledExpr;
 use holon_api::EntityUri;
 use holon_api::block::Block;
+use holon_api::computation::Computation;
 use holon_api::types::DependsOn;
 use holon_api::types::Priority;
 use holon_api::types::TaskState;
@@ -312,12 +313,14 @@ impl Marking for TaskMarking {
 // Prototype system — replaces MaterializeConfig + scoring helpers
 // ---------------------------------------------------------------------------
 
-/// A prototype property value: either a literal number or a pre-compiled Rhai
-/// expression.
+/// A prototype property value: either a literal number or a derived
+/// [`Computation`]. The computation is produced by the A2 subset parser (typed,
+/// SQL-plantable) when the `=` expression is in the subset, otherwise by the
+/// full Rhai compiler as a disclosed [`Computation::Script`] (seat B).
 #[derive(Clone, Debug)]
 pub enum PrototypeValue {
     Literal(f64),
-    Computed(CompiledExpr),
+    Computed(Computation),
 }
 
 impl PartialEq for PrototypeValue {
@@ -338,8 +341,26 @@ impl PrototypeValue {
     /// f64.
     pub fn parse(engine: &RhaiEngine, raw: &str) -> Result<Self, String> {
         if let Some(expr) = raw.strip_prefix('=') {
-            let compiled = CompiledExpr::compile(engine, expr)?;
-            Ok(PrototypeValue::Computed(compiled))
+            // A2: try the typed subset parser first (seat A, SQL-plantable). On
+            // reject, compile the full Rhai expression as a disclosed Script
+            // (seat B). A genuine Rhai compile error stays loud, enriched with
+            // the subset rejection reason.
+            match holon_api::expr_parser::parse(expr) {
+                Ok(comp) => Ok(PrototypeValue::Computed(comp)),
+                Err(subset_err) => {
+                    // Outside the typed subset -> Rhai Script (seat B). This
+                    // routing is disclosed downstream at `DerivedFieldPlan::plan`
+                    // time. A genuine Rhai error stays loud, enriched with the
+                    // subset rejection reason.
+                    let compiled = CompiledExpr::compile(engine, expr).map_err(|rhai_err| {
+                        format!(
+                            "expression '{expr}' is neither A2-subset-parseable ({subset_err}) \
+                             nor valid Rhai ({rhai_err})"
+                        )
+                    })?;
+                    Ok(PrototypeValue::Computed(Computation::Script(compiled)))
+                }
+            }
         } else {
             raw.parse::<f64>()
                 .map(PrototypeValue::Literal)
@@ -369,45 +390,32 @@ pub const DEFAULT_TASK_PROTOTYPE: &[(&str, f64)] = &[
 ];
 
 fn default_computed_props(engine: &RhaiEngine) -> Vec<(&'static str, PrototypeValue)> {
+    // Route each default through `PrototypeValue::parse` (the `=` boundary) so
+    // they take the SAME A2-subset-first path as user-declared props. All four
+    // defaults ARE in the subset, so they become typed, SQL-plantable
+    // Computations (seat A) — verified by the flagship equivalence test.
+    let prop =
+        |src: &str| PrototypeValue::parse(engine, src).expect("default computed prop must parse");
     vec![
         (
             "priority_weight",
-            PrototypeValue::Computed(
-                CompiledExpr::compile(
-                    engine,
-                    "switch priority { 3.0 => 100.0, 2.0 => 40.0, 1.0 => 15.0, _ => 1.0 }",
-                )
-                .expect("default priority_weight must compile"),
-            ),
+            prop("=switch priority { 3.0 => 100.0, 2.0 => 40.0, 1.0 => 15.0, _ => 1.0 }"),
         ),
         (
             "urgency_weight",
-            PrototypeValue::Computed(
-                CompiledExpr::compile(
-                    engine,
-                    "if days_to_deadline > deadline_buffer_days { 0.0 } else if days_to_deadline \
-                     <= 0.0 { deadline_penalty } else { deadline_penalty * (1.0 - \
-                     days_to_deadline / deadline_buffer_days) }",
-                )
-                .expect("default urgency_weight must compile"),
+            prop(
+                "=if days_to_deadline > deadline_buffer_days { 0.0 } else if days_to_deadline \
+                 <= 0.0 { deadline_penalty } else { deadline_penalty * (1.0 - days_to_deadline \
+                 / deadline_buffer_days) }",
             ),
         ),
         (
             "position_weight",
-            PrototypeValue::Computed(
-                CompiledExpr::compile(engine, "0.001 * (max_position - position)")
-                    .expect("default position_weight must compile"),
-            ),
+            prop("=0.001 * (max_position - position)"),
         ),
         (
             "task_weight",
-            PrototypeValue::Computed(
-                CompiledExpr::compile(
-                    engine,
-                    "priority_weight * (1.0 + urgency_weight) + position_weight",
-                )
-                .expect("default task_weight must compile"),
-            ),
+            prop("=priority_weight * (1.0 + urgency_weight) + position_weight"),
         ),
     ]
 }
@@ -427,15 +435,15 @@ pub fn resolve_prototype(
     }
 
     let mut literals: BTreeMap<String, f64> = BTreeMap::new();
-    let mut computed: BTreeMap<String, &CompiledExpr> = BTreeMap::new();
+    let mut computed: BTreeMap<String, &Computation> = BTreeMap::new();
 
     for (k, v) in &merged {
         match v {
             PrototypeValue::Literal(f) => {
                 literals.insert(k.clone(), *f);
             }
-            PrototypeValue::Computed(compiled) => {
-                computed.insert(k.clone(), compiled);
+            PrototypeValue::Computed(comp) => {
+                computed.insert(k.clone(), comp);
             }
         }
     }
@@ -459,14 +467,12 @@ pub fn resolve_prototype(
         .collect();
 
     for name in &sorted {
-        let compiled = computed[name.as_str()];
-        let value = holon_api::computation::Computation::Script(compiled.clone())
-            .eval(&ctx)
-            .map_err(|e| PetriError::ComputedEval {
-                name: name.clone(),
-                detail: e.to_string(),
-                expr: compiled.source.clone(),
-            })?;
+        let comp = computed[name.as_str()];
+        let value = comp.eval(&ctx).map_err(|e| PetriError::ComputedEval {
+            name: name.clone(),
+            detail: e.to_string(),
+            expr: computation_source(comp),
+        })?;
         let val = value
             .as_f64()
             .ok_or_else(|| PetriError::ComputedNonNumeric {
@@ -480,17 +486,36 @@ pub fn resolve_prototype(
     Ok(literals)
 }
 
+/// A human-readable source for a computed [`Computation`], for error messages.
+/// `Script` carries its original Rhai text; typed shapes have no source string,
+/// so a structural debug rendering stands in.
+fn computation_source(comp: &Computation) -> String {
+    match comp {
+        Computation::Script(expr) => expr.source.clone(),
+        other => format!("{other:?}"),
+    }
+}
+
+/// Does `comp` reference the field `other`? `Script` is opaque to structural
+/// walking, so its Rhai source is scanned; typed shapes report their exact
+/// referenced fields.
+fn computation_references(comp: &Computation, other: &str) -> bool {
+    match comp {
+        Computation::Script(expr) => holon_core::util::expr_references(&expr.source, other),
+        typed => typed.referenced_fields().contains(other),
+    }
+}
+
 /// Topological sort of computed properties by dependency.
 /// Scans each expression for references to other computed property names.
-fn topo_sort_computed(computed: &BTreeMap<String, &CompiledExpr>) -> Vec<String> {
+fn topo_sort_computed(computed: &BTreeMap<String, &Computation>) -> Vec<String> {
     let computed_names: HashSet<&str> = computed.keys().map(|s| s.as_str()).collect();
     let mut deps: HashMap<&str, Vec<&str>> = HashMap::new();
 
-    for (name, compiled) in computed {
+    for (name, comp) in computed {
         let mut name_deps = Vec::new();
         for other in &computed_names {
-            if *other != name.as_str() && holon_core::util::expr_references(&compiled.source, other)
-            {
+            if *other != name.as_str() && computation_references(comp, other) {
                 name_deps.push(*other);
             }
         }
@@ -1010,8 +1035,8 @@ fn resolve_sequential_deps(tasks: &mut [TaskInfo]) {
     }
 }
 
-// ALLOW(unused_param): self-token attributes are fixed today; descriptor kept
-// for imminent capacity wiring
+// descriptor kept for imminent capacity wiring
+// ALLOW(unused_param): self-token attributes are fixed today
 fn build_self_token(_self_desc: &SelfDescriptor) -> TaskToken {
     TaskToken {
         id: "self".to_string(),
@@ -1425,8 +1450,7 @@ mod tests {
     #[test]
     fn resolve_prototype_evaluates_through_computation_and_chains() {
         let engine = holon_expr::bounded_engine();
-        let computed =
-            |src: &str| PrototypeValue::Computed(CompiledExpr::compile(&engine, src).unwrap());
+        let computed = |src: &str| PrototypeValue::parse(&engine, &format!("={src}")).unwrap();
 
         let mut prototype: BTreeMap<String, PrototypeValue> = BTreeMap::new();
         prototype.insert(
@@ -1456,9 +1480,11 @@ mod tests {
     fn resolve_prototype_is_fail_loud_on_non_numeric() {
         let engine = holon_expr::bounded_engine();
         let mut prototype: BTreeMap<String, PrototypeValue> = BTreeMap::new();
+        // A string literal is outside the A2 subset, so this falls back to a
+        // Rhai Script that yields a non-numeric value -> fail-loud.
         prototype.insert(
             "bad".to_string(),
-            PrototypeValue::Computed(CompiledExpr::compile(&engine, "\"not a number\"").unwrap()),
+            PrototypeValue::parse(&engine, "=\"not a number\"").unwrap(),
         );
 
         let err = resolve_prototype(&prototype, &BTreeMap::new(), &BTreeMap::new())

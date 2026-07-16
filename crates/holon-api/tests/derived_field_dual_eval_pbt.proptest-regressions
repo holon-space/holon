@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 1e6b6db27b60b6ac6c5392015c1e3592200eee5199f36dff6983d8c318ea0d72 # shrinks to expr = If([(Cmp { op: Eq, lhs: IntLit(0), rhs: IntLit(0) }, SwitchInt(1, [(1, Bin(Add, FloatLit(1), Bin(Add, IntLit(1), DivInt(IntVar(1), 5))))], DivInt(IntLit(2), 3)))], SwitchInt(0, [(2, Bin(Add, DivFloat(FloatVar(0), 5), Bin(Sub, FloatVar(1), IntVar(1)))), (4, DivFloat(DivInt(FloatLit(4), 2), 4)), (4, Bin(Sub, IntVar(1), FloatVar(0)))], DivFloat(Bin(Mul, FloatLit(3), FloatLit(1)), 3))), vals = [889393744, 755191531, 129032120, 2676970553]
+cc 3c536ecc4e8d6bcd0396a2d31909740b3095c6716d494274759865bd744d0f4e # shrinks to expr = SwitchFloat(1, [(2, IntLit(0))], If([(Cmp { op: Gt, lhs: FloatLit(1), rhs: FloatLit(0) }, SwitchInt(0, [(1, IntLit(0))], DivInt(DivInt(IntLit(1), 1), 2)))], IntLit(0))), vals = [1052835938, 0, 0, 270493245]

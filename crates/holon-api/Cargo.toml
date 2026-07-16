@@ -28,5 +28,8 @@ once_cell.workspace = true
 regex.workspace = true
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
+[dev-dependencies]
+proptest.workspace = true
+
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 wasm-bindgen-futures = "0.4"

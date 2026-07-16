@@ -28,6 +28,7 @@ pub mod effect_id;
 pub mod entity;
 pub mod entity_profile;
 pub mod entity_uri;
+pub mod expr_parser;
 mod hashmap_value_conversions;
 pub mod history;
 pub mod inline_mark;

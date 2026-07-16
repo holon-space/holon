@@ -16,6 +16,31 @@
 //!   evaluate it in a *disclosed* degraded mode (in-memory over candidate
 //!   rows), never emit a WHERE clause that silently drops the term.
 //!
+//! ## Numeric semantics (type-faithful, mirrors the repo's Rhai engine)
+//!
+//! `eval` keeps `Integer` and `Float` distinct through arithmetic, matching
+//! Rhai's default **checked** integer arithmetic (verified against
+//! `bounded_engine`, rhai 1.x, no `unchecked` feature):
+//!
+//! - `int op int` → `int` — including **integer division** (`5 / 2 = 2`, `-5 /
+//!   2 = -2`, truncating toward zero). Overflow and integer division-by-zero
+//!   **fail loud** ([`ComputeError::Arithmetic`]), exactly as Rhai raises
+//!   `Addition overflow` / `Division by zero`.
+//! - mixed `int`/`float` (either operand float) → `float` (Rhai promotes the
+//!   integer). Float arithmetic is IEEE and NOT checked: `x/0.0` → ±inf,
+//!   `0.0/0.0` → NaN, same as Rhai.
+//!
+//! Equality has TWO faces, because Rhai's `==` and `switch` disagree on
+//! cross-type numerics (both verified against the engine):
+//!
+//! - [`Computation::Compare`] `==`/`!=` and the ordering ops are **numeric**
+//!   (`5 == 5.0` is true) — matching Rhai `==` AND SQLite `=`.
+//! - [`Computation::Case`] (the `switch` shape) is **type-strict** (`switch 2 {
+//!   2.0 => … }` does NOT match) — matching Rhai `switch`. Its SQL lowering
+//!   uses SQLite's numeric `=`, so eval and SQL agree only when a switch's
+//!   scrutinee and case labels share a numeric type; the A2 domain keeps them
+//!   same-type.
+//!
 //! A boolean [`Predicate`] is the boolean-valued case, embedded verbatim (it is
 //! `flutter_rust_bridge:non_opaque` and crosses to Dart; `Computation` is
 //! engine-side only and may hold an opaque Rhai AST, so it *embeds* rather than
@@ -67,6 +92,67 @@ impl ArithOp {
     }
 }
 
+/// Comparison operators for the [`Computation::Compare`] shape (a
+/// boolean-valued comparison between two sub-computations — unlike
+/// [`Predicate`], both sides are arbitrary expressions, so `field > field` is
+/// expressible).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CmpOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+impl CmpOp {
+    /// Evaluate the comparison. `Eq`/`Ne` use numeric-aware value equality;
+    /// the ordering operators require numeric operands (fail-loud otherwise).
+    fn apply(self, l: &Value, r: &Value) -> Result<bool, ComputeError> {
+        match self {
+            CmpOp::Eq => Ok(values_match(l, r)),
+            CmpOp::Ne => Ok(!values_match(l, r)),
+            CmpOp::Lt | CmpOp::Le | CmpOp::Gt | CmpOp::Ge => {
+                let x = as_number(l, "comparison left operand")?;
+                let y = as_number(r, "comparison right operand")?;
+                Ok(match self {
+                    CmpOp::Lt => x < y,
+                    CmpOp::Le => x <= y,
+                    CmpOp::Gt => x > y,
+                    CmpOp::Ge => x >= y,
+                    CmpOp::Eq | CmpOp::Ne => unreachable!(),
+                })
+            }
+        }
+    }
+
+    fn sql(self) -> &'static str {
+        match self {
+            CmpOp::Eq => "=",
+            CmpOp::Ne => "!=",
+            CmpOp::Lt => "<",
+            CmpOp::Le => "<=",
+            CmpOp::Gt => ">",
+            CmpOp::Ge => ">=",
+        }
+    }
+}
+
+/// Numeric-aware value equality: two numbers compare by `f64`, everything else
+/// by structural [`Value`] equality. Used ONLY by [`CmpOp`] `Eq`/`Ne`,
+/// mirroring Rhai's coercing `==` (`5 == 5.0` is true) and SQLite's numeric
+/// `=`.
+///
+/// [`Computation::Case`] deliberately does NOT use this — Rhai `switch` is
+/// type-strict, so Case matches with structural `Value` equality.
+fn values_match(a: &Value, b: &Value) -> bool {
+    match (a.as_f64(), b.as_f64()) {
+        (Some(x), Some(y)) => x == y,
+        _ => a == b,
+    }
+}
+
 /// A value-producing computation over a named-value context.
 ///
 /// This type is **not** FRB-exposed (it may carry an opaque Rhai AST). The
@@ -84,6 +170,38 @@ pub enum Computation {
         lhs: Box<Computation>,
         rhs: Box<Computation>,
     },
+    /// A boolean comparison between two sub-computations (`lhs op rhs`).
+    /// Distinct from [`Predicate`], which compares a named field to a literal
+    /// `Value`; here both sides are expressions, so `field > field` and
+    /// `expr <= 0` are expressible. Produced by the A2 subset parser for the
+    /// conditions of `if`.
+    Compare {
+        op: CmpOp,
+        lhs: Box<Computation>,
+        rhs: Box<Computation>,
+    },
+    /// A multi-way conditional with **equality-match on a scrutinee** (the
+    /// `switch`/`if` shape): evaluate `scrutinee`, then take the `result` of
+    /// the first `(match_value, result)` branch whose `match_value` equals
+    /// it (numeric-aware; see [`values_match`]), else `else_`.
+    ///
+    /// - `switch x { a => r1, b => r2, _ => e }` maps directly: `scrutinee =
+    ///   x`, branches `[(a, r1), (b, r2)]`, `else_ = e`.
+    /// - `if c1 { r1 } else if c2 { r2 } else { e }` maps with `scrutinee =
+    ///   Lit(Boolean(true))` and branches `[(c1, r1), (c2, r2)]` — each
+    ///   `match_value` is the boolean condition.
+    ///
+    /// **SQL lowering deliberately targets nested `iif(...)`, NOT `CASE
+    /// WHEN`**: the Turso fork's IVM matview planner rejects `CASE` at DDL
+    /// ("Cannot convert LogicalExpr to AST Expr: Case"), but accepts `iif`
+    /// (proven in `holon-turso/tests/json_extract_matview_spike.rs`). Affinity
+    /// note: `iif(scrutinee = match_value, …)` relies on SQLite's numeric
+    /// comparison, matching the in-memory `values_match`.
+    Case {
+        scrutinee: Box<Computation>,
+        branches: Vec<(Computation, Computation)>,
+        else_: Box<Computation>,
+    },
     /// The boolean-valued shape — reuses the FRB predicate and its tuned
     /// semantics.
     Predicate(Predicate),
@@ -97,8 +215,22 @@ pub enum Computation {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ComputeError {
     MissingField(String),
-    NotNumeric { context: String, value: Value },
-    Script { source: String, detail: String },
+    NotNumeric {
+        context: String,
+        value: Value,
+    },
+    Script {
+        source: String,
+        detail: String,
+    },
+    /// Integer overflow or integer division-by-zero — the same conditions
+    /// Rhai's default **checked** integer arithmetic raises as runtime errors.
+    /// Float arithmetic is NOT checked (mirrors Rhai): `x/0.0` yields ±inf and
+    /// `0.0/0.0` NaN at eval time (a non-finite value is only rejected later,
+    /// at SQL-plant time).
+    Arithmetic {
+        detail: String,
+    },
 }
 
 impl fmt::Display for ComputeError {
@@ -112,6 +244,9 @@ impl fmt::Display for ComputeError {
             }
             ComputeError::Script { source, detail } => {
                 write!(f, "Rhai evaluation failed for `{source}`: {detail}")
+            }
+            ComputeError::Arithmetic { detail } => {
+                write!(f, "arithmetic error: {detail}")
             }
         }
     }
@@ -178,6 +313,9 @@ pub enum InlineError {
     /// A [`Value::Array`]/[`Value::Object`]/[`Value::Null`]-shaped literal
     /// cannot be inlined as a scalar column expression.
     NonScalarLiteral { value: Value },
+    /// A non-finite float (`±inf`/`NaN`) has no SQLite literal syntax; planting
+    /// one would silently corrupt the column, so it is a loud planning error.
+    NonFiniteFloat { value: f64 },
 }
 
 impl fmt::Display for InlineError {
@@ -194,6 +332,13 @@ impl fmt::Display for InlineError {
                     "cannot inline non-scalar literal into SQL column: {value:?}"
                 )
             }
+            InlineError::NonFiniteFloat { value } => {
+                write!(
+                    f,
+                    "cannot inline non-finite float ({value}) as a SQL literal; SQLite has no \
+                     inf/NaN literal"
+                )
+            }
         }
     }
 }
@@ -203,7 +348,15 @@ impl std::error::Error for InlineError {}
 fn value_to_sql_literal(v: &Value) -> Result<String, InlineError> {
     Ok(match v {
         Value::Integer(i) => i.to_string(),
-        Value::Float(f) => format!("{f}"),
+        // `{:?}` for f64 always renders a decimal point or exponent, so the
+        // literal keeps REAL affinity in SQLite (`3.0`, not `3` which would take
+        // integer division). Non-finite floats have no SQL literal — fail loud.
+        Value::Float(f) => {
+            if !f.is_finite() {
+                return Err(InlineError::NonFiniteFloat { value: *f });
+            }
+            format!("{f:?}")
+        }
         Value::Boolean(b) => {
             if *b {
                 "1".into()
@@ -253,12 +406,69 @@ impl Computation {
                 .cloned()
                 .ok_or_else(|| ComputeError::MissingField(name.clone())),
             Computation::Arith { op, lhs, rhs } => {
-                let l = as_number(&lhs.eval(ctx)?, "arithmetic left operand")?;
-                let r = as_number(&rhs.eval(ctx)?, "arithmetic right operand")?;
-                Ok(Value::Float(op.apply(l, r)))
+                let l = lhs.eval(ctx)?;
+                let r = rhs.eval(ctx)?;
+                arith_apply(*op, &l, &r)
+            }
+            Computation::Compare { op, lhs, rhs } => {
+                let l = lhs.eval(ctx)?;
+                let r = rhs.eval(ctx)?;
+                Ok(Value::Boolean(op.apply(&l, &r)?))
+            }
+            Computation::Case {
+                scrutinee,
+                branches,
+                else_,
+            } => {
+                // Type-strict equality (structural `Value`) — mirrors Rhai's
+                // type-sensitive `switch`, NOT the numeric `==`.
+                let s = scrutinee.eval(ctx)?;
+                for (match_value, result) in branches {
+                    if s == match_value.eval(ctx)? {
+                        return result.eval(ctx);
+                    }
+                }
+                else_.eval(ctx)
             }
             Computation::Predicate(p) => Ok(Value::Boolean(p.evaluate(ctx))),
             Computation::Script(expr) => eval_script(expr, ctx),
+        }
+    }
+
+    /// The set of context-field names this computation reads. `Script` is
+    /// opaque to structural walking (a compiled Rhai AST) and contributes
+    /// nothing here — callers that need Script dependencies must scan
+    /// [`CompiledExpr::source`] themselves. Used for topological ordering of
+    /// dependent derived fields.
+    pub fn referenced_fields(&self) -> std::collections::BTreeSet<String> {
+        let mut out = std::collections::BTreeSet::new();
+        self.collect_fields(&mut out);
+        out
+    }
+
+    fn collect_fields(&self, out: &mut std::collections::BTreeSet<String>) {
+        match self {
+            Computation::Lit(_) | Computation::Script(_) => {}
+            Computation::Field(name) => {
+                out.insert(name.clone());
+            }
+            Computation::Arith { lhs, rhs, .. } | Computation::Compare { lhs, rhs, .. } => {
+                lhs.collect_fields(out);
+                rhs.collect_fields(out);
+            }
+            Computation::Case {
+                scrutinee,
+                branches,
+                else_,
+            } => {
+                scrutinee.collect_fields(out);
+                for (match_value, result) in branches {
+                    match_value.collect_fields(out);
+                    result.collect_fields(out);
+                }
+                else_.collect_fields(out);
+            }
+            Computation::Predicate(p) => collect_predicate_fields(p, out),
         }
     }
 
@@ -278,11 +488,86 @@ impl Computation {
                     params,
                 ))
             }
+            Computation::Compare { op, lhs, rhs } => {
+                let l = lhs.compile_sql()?;
+                let r = rhs.compile_sql()?;
+                let mut params = l.params;
+                params.extend(r.params);
+                Ok(SqlFragment::new(
+                    format!("({} {} {})", l.sql, op.sql(), r.sql),
+                    params,
+                ))
+            }
+            Computation::Case {
+                scrutinee,
+                branches,
+                else_,
+            } => {
+                let s = scrutinee.compile_sql()?;
+                let e = else_.compile_sql()?;
+                build_iif_chain(&s, branches, &e)
+            }
             Computation::Predicate(p) => predicate_to_sql(p),
             Computation::Script(expr) => Err(SqlUnsupported::Script {
                 source: expr.source.clone(),
             }),
         }
+    }
+}
+
+/// Lower a [`Computation::Case`] to a nested `iif(...)` chain. Each branch
+/// becomes `iif(<scrutinee> = <match_value>, <result>, <rest>)`; the innermost
+/// `<rest>` is the else expression. `iif` is used instead of SQL `CASE` because
+/// the Turso fork's IVM planner rejects `CASE` in a matview SELECT (spike:
+/// `json_extract_matview_spike.rs`). The scrutinee fragment is re-emitted per
+/// branch, so its params repeat in left-to-right placeholder order — consistent
+/// with [`SqlFragment::inline_sql`].
+fn build_iif_chain(
+    scrutinee: &SqlFragment,
+    branches: &[(Computation, Computation)],
+    else_frag: &SqlFragment,
+) -> Result<SqlFragment, SqlUnsupported> {
+    match branches.split_first() {
+        None => Ok(else_frag.clone()),
+        Some(((match_value, result), rest)) => {
+            let mv = match_value.compile_sql()?;
+            let res = result.compile_sql()?;
+            let inner = build_iif_chain(scrutinee, rest, else_frag)?;
+            let mut params = scrutinee.params.clone();
+            params.extend(mv.params);
+            params.extend(res.params);
+            params.extend(inner.params);
+            Ok(SqlFragment::new(
+                format!(
+                    "iif({} = {}, {}, {})",
+                    scrutinee.sql, mv.sql, res.sql, inner.sql
+                ),
+                params,
+            ))
+        }
+    }
+}
+
+/// Collect the field names referenced by a [`Predicate`] into `out`.
+fn collect_predicate_fields(pred: &Predicate, out: &mut std::collections::BTreeSet<String>) {
+    match pred {
+        Predicate::Eq { field, .. }
+        | Predicate::Ne { field, .. }
+        | Predicate::Gt { field, .. }
+        | Predicate::Lt { field, .. }
+        | Predicate::Gte { field, .. }
+        | Predicate::Lte { field, .. }
+        | Predicate::IsNotNull(field)
+        | Predicate::Var(field) => {
+            out.insert(field.clone());
+        }
+        Predicate::Not(inner) => collect_predicate_fields(inner, out),
+        Predicate::And(preds) | Predicate::Or(preds) => {
+            for p in preds {
+                collect_predicate_fields(p, out);
+            }
+        }
+        Predicate::Always => {}
     }
 }
 
@@ -293,6 +578,33 @@ fn as_number(v: &Value, context: &str) -> Result<f64, ComputeError> {
     })
 }
 
+/// Type-faithful arithmetic mirroring Rhai: `int op int` stays integer
+/// (checked; overflow / integer-div-by-zero fail loud), any float operand
+/// promotes to a float result (IEEE, unchecked). See the module header.
+fn arith_apply(op: ArithOp, lhs: &Value, rhs: &Value) -> Result<Value, ComputeError> {
+    if let (Value::Integer(a), Value::Integer(b)) = (lhs, rhs) {
+        let (a, b) = (*a, *b);
+        let checked = match op {
+            ArithOp::Add => a.checked_add(b),
+            ArithOp::Sub => a.checked_sub(b),
+            ArithOp::Mul => a.checked_mul(b),
+            // checked_div also rejects i64::MIN / -1 overflow.
+            ArithOp::Div => a.checked_div(b),
+        };
+        return checked.map(Value::Integer).ok_or_else(|| {
+            let detail = if op == ArithOp::Div && b == 0 {
+                format!("integer division by zero: {a} / 0")
+            } else {
+                format!("integer overflow: {a} {} {b}", op.sql())
+            };
+            ComputeError::Arithmetic { detail }
+        });
+    }
+    let a = as_number(lhs, "arithmetic left operand")?;
+    let b = as_number(rhs, "arithmetic right operand")?;
+    Ok(Value::Float(op.apply(a, b)))
+}
+
 /// Evaluate a compiled Rhai expression over `ctx` — the same single-expression
 /// path `rank_tasks` uses, generalized to arbitrary [`Value`] inputs.
 fn eval_script(expr: &CompiledExpr, ctx: &Context) -> Result<Value, ComputeError> {
@@ -300,7 +612,12 @@ fn eval_script(expr: &CompiledExpr, ctx: &Context) -> Result<Value, ComputeError
     let mut scope = Scope::new();
     for (k, v) in ctx {
         match v {
-            Value::Integer(i) => scope.push(k.clone(), *i as f64),
+            // Push integers as Rhai INT (i64), NOT coerced to f64: coercion made
+            // the Script (seat B) path disagree with the typed (seat A) path on
+            // integer semantics — `switch j { 1 => … }` is type-strict, so a
+            // silently-float `j` would miss. Type-faithful marshalling keeps the
+            // two seats observably identical.
+            Value::Integer(i) => scope.push(k.clone(), *i),
             Value::Float(f) => scope.push(k.clone(), *f),
             Value::Boolean(b) => scope.push(k.clone(), *b),
             Value::String(s) => scope.push(k.clone(), s.clone()),
@@ -834,6 +1151,186 @@ mod tests {
         let plan = DerivedFieldPlan::plan(vec![script]);
         let mut c = ctx(&[]);
         assert!(plan.evaluate_stage(&mut c).is_err());
+    }
+
+    fn f(name: &str) -> Box<Computation> {
+        Box::new(Computation::Field(name.into()))
+    }
+
+    fn lit(x: f64) -> Box<Computation> {
+        Box::new(Computation::Lit(Value::Float(x)))
+    }
+
+    #[test]
+    fn compare_eval_and_sql() {
+        let c = ctx(&[("a", Value::Float(3.0)), ("b", Value::Float(5.0))]);
+        let gt = Computation::Compare {
+            op: CmpOp::Gt,
+            lhs: f("a"),
+            rhs: f("b"),
+        };
+        assert_eq!(gt.eval(&c).unwrap(), Value::Boolean(false));
+        assert_eq!(gt.compile_sql().unwrap().inline_sql().unwrap(), "(a > b)");
+    }
+
+    #[test]
+    fn case_switch_eval_matches_first_equal_branch() {
+        // switch priority { 3.0 => 100.0, 2.0 => 40.0, _ => 1.0 }
+        let case = Computation::Case {
+            scrutinee: f("priority"),
+            branches: vec![
+                (Computation::Lit(Value::Float(3.0)), *lit(100.0)),
+                (Computation::Lit(Value::Float(2.0)), *lit(40.0)),
+            ],
+            else_: lit(1.0),
+        };
+        assert_eq!(
+            case.eval(&ctx(&[("priority", Value::Float(2.0))])).unwrap(),
+            Value::Float(40.0)
+        );
+        assert_eq!(
+            case.eval(&ctx(&[("priority", Value::Float(9.0))])).unwrap(),
+            Value::Float(1.0) // falls to else
+        );
+    }
+
+    #[test]
+    fn case_lowers_to_nested_iif_not_case_when() {
+        // The spike-mandated lowering: CASE is rejected by the fork IVM, iif is not.
+        let case = Computation::Case {
+            scrutinee: f("priority"),
+            branches: vec![
+                (Computation::Lit(Value::Float(3.0)), *lit(100.0)),
+                (Computation::Lit(Value::Float(2.0)), *lit(40.0)),
+            ],
+            else_: lit(1.0),
+        };
+        let sql = case.compile_sql().unwrap().inline_sql().unwrap();
+        assert_eq!(
+            sql,
+            "iif(priority = 3.0, 100.0, iif(priority = 2.0, 40.0, 1.0))"
+        );
+        assert!(!sql.contains("CASE"), "must NOT emit SQL CASE");
+    }
+
+    #[test]
+    fn case_if_shape_uses_boolean_scrutinee() {
+        // if a > b { 10.0 } else { 20.0 }  == Case over scrutinee `true`.
+        let case = Computation::Case {
+            scrutinee: Box::new(Computation::Lit(Value::Boolean(true))),
+            branches: vec![(
+                Computation::Compare {
+                    op: CmpOp::Gt,
+                    lhs: f("a"),
+                    rhs: f("b"),
+                },
+                *lit(10.0),
+            )],
+            else_: lit(20.0),
+        };
+        assert_eq!(
+            case.eval(&ctx(&[("a", Value::Float(7.0)), ("b", Value::Float(1.0))]))
+                .unwrap(),
+            Value::Float(10.0)
+        );
+        assert_eq!(
+            case.compile_sql().unwrap().inline_sql().unwrap(),
+            "iif(1 = (a > b), 10.0, 20.0)"
+        );
+    }
+
+    #[test]
+    fn case_referenced_fields_walks_all_arms() {
+        let case = Computation::Case {
+            scrutinee: f("s"),
+            branches: vec![(*f("m"), *f("r"))],
+            else_: f("e"),
+        };
+        let fields = case.referenced_fields();
+        assert!(["s", "m", "r", "e"].iter().all(|n| fields.contains(*n)));
+    }
+
+    fn ilit(i: i64) -> Box<Computation> {
+        Box::new(Computation::Lit(Value::Integer(i)))
+    }
+
+    fn arith(op: ArithOp, l: Box<Computation>, r: Box<Computation>) -> Computation {
+        Computation::Arith { op, lhs: l, rhs: r }
+    }
+
+    #[test]
+    fn int_arithmetic_is_type_faithful_integer_division() {
+        // 5 / 2 = 2 (integer division), matching Rhai; NOT 2.5.
+        let e = arith(ArithOp::Div, ilit(5), ilit(2));
+        assert_eq!(e.eval(&ctx(&[])).unwrap(), Value::Integer(2));
+        // 9 / 4 + 1 = 2 + 1 = 3.
+        let e = arith(
+            ArithOp::Add,
+            Box::new(arith(ArithOp::Div, ilit(9), ilit(4))),
+            ilit(1),
+        );
+        assert_eq!(e.eval(&ctx(&[])).unwrap(), Value::Integer(3));
+    }
+
+    #[test]
+    fn mixed_int_float_arithmetic_promotes_to_float() {
+        // 5 / 2.0 = 2.5 (mixed promotes), matching Rhai.
+        let e = arith(ArithOp::Div, ilit(5), lit(2.0));
+        assert_eq!(e.eval(&ctx(&[])).unwrap(), Value::Float(2.5));
+    }
+
+    #[test]
+    fn integer_division_by_zero_is_fail_loud() {
+        let e = arith(ArithOp::Div, ilit(5), ilit(0));
+        assert!(matches!(
+            e.eval(&ctx(&[])),
+            Err(ComputeError::Arithmetic { .. })
+        ));
+    }
+
+    #[test]
+    fn integer_overflow_is_fail_loud() {
+        let e = arith(ArithOp::Add, ilit(i64::MAX), ilit(1));
+        assert!(matches!(
+            e.eval(&ctx(&[])),
+            Err(ComputeError::Arithmetic { .. })
+        ));
+    }
+
+    #[test]
+    fn whole_float_literal_plants_with_decimal_point() {
+        // 3.0 / 2.0 must plant as `(3.0 / 2.0)` (=1.5), NOT `(3 / 2)` (=1 in
+        // SQLite integer division). This is the eval-vs-SQL refutation fix.
+        let e = arith(ArithOp::Div, lit(3.0), lit(2.0));
+        assert_eq!(
+            e.compile_sql().unwrap().inline_sql().unwrap(),
+            "(3.0 / 2.0)"
+        );
+    }
+
+    #[test]
+    fn case_switch_is_type_strict_like_rhai() {
+        // switch (int 2) { 2.0 => 100, _ => 1 } does NOT match the float case.
+        let case = Computation::Case {
+            scrutinee: ilit(2),
+            branches: vec![(Computation::Lit(Value::Float(2.0)), *ilit(100))],
+            else_: ilit(1),
+        };
+        assert_eq!(case.eval(&ctx(&[])).unwrap(), Value::Integer(1));
+    }
+
+    #[test]
+    fn non_finite_float_literal_is_a_loud_plant_error() {
+        let frag = SqlFragment::new("x = ?", vec![Value::Float(f64::INFINITY)]);
+        assert!(matches!(
+            frag.inline_sql(),
+            Err(InlineError::NonFiniteFloat { .. })
+        ));
+        let nan = SqlFragment::new("x = ?", vec![Value::Float(f64::NAN)]);
+        assert!(matches!(
+            nan.inline_sql(),
+            Err(InlineError::NonFiniteFloat { .. })
+        ));
     }
 
     #[test]
