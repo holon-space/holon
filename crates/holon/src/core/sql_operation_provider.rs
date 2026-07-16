@@ -2018,6 +2018,28 @@ impl OriginTaggedWrites for SqlOperationProvider {
             };
             row_sql.extend(prepared.row_statements);
             edge_sql.extend(prepared.edge_statements);
+
+            // block_links junction (links increment 2): the single-op
+            // create/update paths derive it from the `marks` param via
+            // `block_link_statements`, but that call lives OUTSIDE `prepare_*`,
+            // so the batch path — the Loro→SQL projection sink
+            // (`execute_batch_with_origin`, the DEFAULT Loro/Upstream app
+            // wiring) — never populated the junction. Result (dogfood row 32):
+            // `block_raw.marks` written but `block_links` EMPTY, so wiki-links
+            // render as literal text and backlinks are impossible. Derive it
+            // here for the same block create/update ops the single-op paths do.
+            if self.entity_name == "block" && matches!(op_name.as_str(), "create" | "update") {
+                if let Some(id) = params.get("id").and_then(|v| v.as_string()) {
+                    if let Some(marks) = params.get("marks") {
+                        edge_sql.extend(self.block_link_statements(id, marks).await?);
+                    }
+                    if Self::params_tag_page(params) {
+                        if let Some(content) = params.get("content").and_then(|v| v.as_string()) {
+                            edge_sql.extend(Self::page_reresolve_statements(id, content));
+                        }
+                    }
+                }
+            }
         }
 
         // Rows-then-edges: every `block_raw` row of the WHOLE batch is written
