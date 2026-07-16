@@ -1,5 +1,11 @@
 //! File-per-transition pattern for the E2E PBT.
 //!
+//! @pbt kind transition-dispatch
+//! @pbt covers transition-enum-dispatch — declare_e2e_transitions! generated
+//!   E2ETransition enum: variant union caps, hand-rolled trait match, strategy
+//!   aggregator (RESTRICTED file — structural recommendations in
+//!   docs/Testing/PBT-Audit-2026-07-16.md, not edited here).
+//!
 //! Each transition kind owns its data (a struct), generation strategy
 //! (`holon_pbt_core::TransitionFactory<ReferenceState>`), and behaviour
 //! (`holon_pbt_core::TransitionImpl<Ref, S>`, bound on fine-grained SUT caps).

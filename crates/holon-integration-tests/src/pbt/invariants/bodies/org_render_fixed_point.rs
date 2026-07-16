@@ -1,5 +1,13 @@
 //! `inv-org-render-fixed-point`.
 //!
+//! @pbt oracle roundtrip — render(SQL) == on-disk bytes fixed point (bounded
+//!   wait for a STABLE fixed point to reject transient projection lag)
+//! @pbt covers org-echo-loop — render != disk that PERSISTS, forcing
+//!   re_render_all_tracked to keep rewriting the file and re-firing FSEvents
+//! @pbt slips-if-removed a property-drawer / sibling round-trip asymmetry
+//!   (e.g. :share-role: mount) diverges render from disk; the app spins in an
+//!   FSEvent echo loop the blocks-match-ref family never sees
+//!
 //! Re-renders every tracked org file from the current SQL state and asserts
 //! the output equals the bytes already on disk — guards against the
 //! echo-suppression loop spin where `render(SQL) != disk` would force

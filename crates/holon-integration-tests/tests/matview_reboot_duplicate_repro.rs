@@ -17,6 +17,11 @@
 //! and per-id the `block` matview count matches `block_raw`.
 //!
 //! Expected to FAIL until the reboot consolidation gap is fixed.
+//!
+//! @pbt kind harness
+//! @pbt covers reboot-matview-dup — duplicate matview rows after reboot
+//! (BugFunnel 90) @pbt overlaps general_e2e_composed_pbt — kept: no reboot
+//! transition in keystone
 
 use std::sync::Arc;
 use std::time::Duration;

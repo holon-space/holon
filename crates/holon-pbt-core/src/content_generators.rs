@@ -1,5 +1,13 @@
 //! Shared block-content proptest strategies.
 //!
+//! @pbt kind generator
+//! @pbt gen extended arms (multi-byte, empty, whitespace-only, org-special
+//!   prefixes, mid-word underscores) are the ONLY producers of those classes;
+//!   every default consumer mixes them at ~4/10 weight EXCEPT the org-special
+//!   spelling sub-arm and the empty/whitespace sub-arms, which are 1/N INSIDE
+//!   extended_content_arm — so empty content and `:PROPERTIES:`-prefix
+//! headlines   arrive at ~4% each even when the extended arm is live
+//!
 //! Pure proptest generators (no reference-state or SUT types), lifted to the
 //! shared floor so both the central keystone generators and the co-located
 //! per-subsystem transitions (`holon-loro-testing`'s peer edits) draw the same

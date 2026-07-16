@@ -1,5 +1,11 @@
 //! Transition: navigate forward in the per-region navigation history.
 //!
+//! @pbt rung dispatch
+//!   UNFAITHFUL SHORTCUT (audit TR-NAV): dispatches `navigation.go_forward`
+//!   directly, bypassing the leader-chord path.
+//! @pbt covers nav-forward — per-region navigation history forward (op-level
+//! only)
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:612-619`
 //! (generator), `state_machine.rs:3171-3173` (precondition),
 //! `state_machine.rs:2251-2259` (ref-state apply),

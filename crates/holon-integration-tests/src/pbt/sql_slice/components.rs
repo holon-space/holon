@@ -4,6 +4,11 @@
 //! reactive engine, frontend, navigation, or CDC-mirror machinery that the
 //! monolithic `E2ESut` carries.
 //!
+//! @pbt kind sut-arm
+//! @pbt covers sql-slice — real Turso `BackendEngine` over `block_raw`, driven
+//!   through production block ops; no reactive engine / frontend / CDC mirror.
+//!   Storage-layer arm of the future `E2ESut` replacement (§F2 convergence).
+//!
 //! This is deliberately the storage-layer slice of the *future `E2ESut`
 //! replacement*: it reuses `E2ESut`'s own SQL realization (the same `block_raw`
 //! queries, the shared [`parse_block_row`](crate::pbt::sut_row_parsing)) so

@@ -1,6 +1,12 @@
 //! Transition: set a block **edge field** (`tags` / `requires`) on an existing
 //! block — the MODIFY path of the junction-backed, set-valued attributes.
 //!
+//! @pbt rung dispatch
+//!   `apply_set_edge_field` routes a `set_field` op through EdgeFieldWriter
+//!   over the real engine (Loro-authority mode, journaled for undo). No edge-
+//!   field UI gesture exists.
+//! @pbt covers edge-field-set — tags/requires edge write -> project() -> SQL
+//!
 //! This is the only transition that mutates an edge field on an *already
 //! created* block, so it is the one that exercises the Loro→SQL change gate
 //! (`loro_sync_controller::blocks_differ`) for edge fields. It is parameterized

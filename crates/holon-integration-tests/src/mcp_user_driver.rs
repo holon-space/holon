@@ -1,6 +1,10 @@
 //! `McpUserDriver` — the out-of-process rung of the driver ladder (§8.11
 //! in `docs/Testing/PbtCompositionDesign.md`).
 //!
+//! @pbt kind driver
+//! @pbt covers live-mcp — top (out-of-process) driver rung; unsupported verbs
+//!   panic-loud (never fake), read-before-refresh panics. Exemplary fail-loud.
+//!
 //! Drives a REAL running Holon app (iOS simulator, desktop GPUI, …)
 //! through its embedded MCP server over streamable HTTP. The MCP tool
 //! handlers (`frontends/mcp/src/tools.rs`) terminate in the exact same

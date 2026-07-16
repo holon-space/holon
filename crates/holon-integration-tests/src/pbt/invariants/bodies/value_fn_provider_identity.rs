@@ -1,5 +1,13 @@
 //! `inv-value-fn-provider-identity`.
 //!
+//! @pbt oracle correspondence — each intermediate ViewModel StateToggle.current
+//!   vs the ref task_state, over drained emission toggles
+//! @pbt covers cdc-enrichment-glitch — a transient wrong StateToggle in an
+//!   intermediate emission that a later structural re-render masks
+//! @pbt slips-if-removed flatten_properties mishandles a CDC Value::String and
+//!   a checkbox flashes the wrong state mid-transition; the settled frame is
+//!   correct so a post-settle-only oracle never sees it
+//!
 //! Every intermediate ViewModel emission across a transition must carry
 //! correct `StateToggle` values. A background task collects ALL emissions
 //! from the reactive stream; this checks each `StateToggle`'s `current`

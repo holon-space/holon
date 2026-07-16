@@ -1,4 +1,10 @@
 //! `RefEditorMirror` / `RefEditorMirrorMut`.
+//!
+//! @pbt kind ref
+//! @pbt covers editor-mirror — headless mirror of the live GPUI/TUI
+//!   `InputState` (active editor block + dirty/clean buffer text). FIDELITY:
+//!   the clean-buffer refresh-from-content-cell (dirty buffers keep pending
+//!   user text) is modeled in `apply_content_mutation`, not here.
 
 use holon_api::entity_uri::EntityUri;
 use holon_pbt_core::capabilities::RefEditorMirror;

@@ -20,6 +20,12 @@
 //! function for preconditions / apply_to_ref, then invokes the SUT-side
 //! mutation directly on `EditorPureSut` (which the pure slice owns; no
 //! `dyn SutHandle` indirection since this slice has no wide-PBT SUT).
+//!
+//! @pbt kind harness
+//! @pbt covers editor-transition-sharing — proves migrated editor transitions
+//! are SHARED with WideE2E, not duplicated @pbt overlaps
+//! general_e2e_composed_pbt — kept as fast storage-free editor fuzz + sharing
+//! proof
 
 #![cfg(feature = "pbt")]
 

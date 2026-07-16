@@ -1,5 +1,10 @@
 //! Transition: type characters into the active editor.
 //!
+//! @pbt rung input-pipeline
+//!   `apply_type_chars` drives editor keystrokes through the production
+//!   ReactiveEngineDriver -> HeadlessEditorMirror.
+//! @pbt covers editor-typing — character keystrokes -> MutableText edit
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:1650-1662`
 //! (generator), `state_machine.rs:3552-3556` (precondition, shared arm),
 //! `state_machine.rs:2961-2964` (ref-state apply),

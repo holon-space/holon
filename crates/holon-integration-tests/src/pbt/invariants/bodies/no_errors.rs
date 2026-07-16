@@ -1,5 +1,12 @@
 //! `inv-no-errors` — app-runtime error log is empty.
 //!
+//! @pbt oracle internal-consistency
+//! @pbt covers app-error-log-empty — no Flutter/event publish error logged
+//!   since startup (the app-level counter, distinct from widget-tree errors)
+//! @pbt slips-if-removed a DDL/sync race that logs a publish error during
+//!   initial document sync ships silent data-loss on boot; the UI may look
+//!   fine while a document failed to sync and nothing else asserts on it
+//!
 //! The general "did the app error during this run" guard, distinct from the
 //! component-specific error invariants (`inv-loro-no-errors`,
 //! `inv-viewmodel-no-error-widgets`, `inv-frontend-no-error-widgets`,

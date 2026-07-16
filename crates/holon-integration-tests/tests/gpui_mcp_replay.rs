@@ -21,6 +21,10 @@
 //! uncommitted in the editor. Asserting on a commit would conflate driver
 //! correctness with that bug. Because nothing is committed, this smoke is
 //! non-destructive (the typed text lives only in the transient editor).
+//!
+//! @pbt kind harness
+//! @pbt covers mcp-driver-rung — drives a real running app through embedded MCP
+//! (driver-ladder de-risk rung)
 
 use std::time::Duration;
 

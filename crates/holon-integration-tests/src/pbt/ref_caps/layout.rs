@@ -1,4 +1,12 @@
 //! `RefLayout` / `RefRenderExpr` / `RefLayoutInteract` / `RefLayoutMutate`.
+//!
+//! @pbt kind ref
+//! @pbt covers layout-render-config — layout-block classification
+//!   (headline / query-source / render-source), author-intent `RenderExpr` per
+//!   render source, and interactivity/draggability predictions. FIDELITY: the
+//!   render-expr↔Rhai mapping is a closed vocabulary (`render_expr_from_rhai`);
+//!   a Rhai string outside it round-trips as an untracked render (table()
+//!   fallback in `get_block_data`, disclosed via warn).
 
 use std::collections::BTreeSet;
 

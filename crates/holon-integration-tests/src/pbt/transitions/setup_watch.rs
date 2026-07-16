@@ -1,5 +1,10 @@
 //! Transition: set up a query watch (post-startup).
 //!
+//! @pbt rung dispatch
+//!   `register_watch` compiles + registers the query watcher directly (no
+//!   UI gesture for registering a watch).
+//! @pbt covers watch-register — query watch registration + CDC subscription
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:519-532`
 //! (generator), `state_machine.rs:3160` (precondition),
 //! `state_machine.rs:2203-2215` (ref-state apply),

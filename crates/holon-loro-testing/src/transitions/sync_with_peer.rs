@@ -1,5 +1,9 @@
 //! Transition: bidirectional sync between primary's LoroDoc and a peer.
 //!
+//! @pbt rung external
+//!   bidirectional CRDT sync between primary and peer.
+//! @pbt covers loro-bidi-sync — two-way LoroDoc convergence
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:1537-1541`
 //! (generator), `state_machine.rs:3513-3515` (precondition),
 //! `state_machine.rs:2848-2919` (ref-state apply),

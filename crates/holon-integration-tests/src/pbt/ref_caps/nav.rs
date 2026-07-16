@@ -1,5 +1,11 @@
 //! `RefPins` / `RefPinsMut` / `RefNavHistory` / `RefNavHistoryMut` /
 //! `RefArrowNav`.
+//!
+//! @pbt kind ref
+//! @pbt covers navigation-history — models `navigation_history` rows: open
+//!   pins per region, the AUTOINCREMENT `id` counter (`next_history_id`,
+//!   bumped on INSERT not UPDATE), close-prior-then-insert focus contract, and
+//!   arrow-nav target order. Row-id semantics are HAND-mirrored from SQLite.
 
 use holon_api::Region;
 use holon_api::entity_uri::EntityUri;

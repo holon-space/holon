@@ -1,5 +1,12 @@
 //! `inv-displayed-text/*` — the render-axis text-equivalence family.
 //!
+//! @pbt oracle correspondence
+//! @pbt covers displayed-text staleness — text-widget / ViewModel content vs
+//!   ref block content (or the live editor text while editing)
+//! @pbt slips-if-removed after split/join the row's data signal fires but the
+//!   editable_text InputState or VM `content` prop skips the update; the user
+//!   sees stale text on screen
+//!
 //! Same property at two layers: the text bound to a block-bound text widget
 //! (`editable_text`, `rendered_text`, `text`) must equal what the reference
 //! says for that block — the live editor text while an editor is open on it,

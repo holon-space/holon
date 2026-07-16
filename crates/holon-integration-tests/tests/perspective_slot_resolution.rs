@@ -11,6 +11,10 @@
 //! 3. the perspective's `profile_override` drives the collection panel's
 //!    resolved variants (`resolve_collection_variants_named`), so the panel's
 //!    default view mode switches too.
+//!
+//! @pbt kind harness
+//! @pbt covers perspective-slot-resolution — C8 root display slot resolves via
+//! perspective-data query
 
 use std::collections::HashMap;
 use std::sync::Arc;

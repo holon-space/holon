@@ -1,5 +1,12 @@
 //! `inv-editable-text-has-draggable`.
 //!
+//! @pbt oracle internal-consistency — SUT widget-tree pairing check; the ref
+//!   cap gates a skip only (`has_blocks_profile`), it is not compared against
+//! @pbt covers drag-affordance pairing — every editable_text/rendered_text in
+//!   a block-profile subtree paired with a same-id draggable
+//! @pbt slips-if-removed a render path emits editable_text without its
+//!   draggable wrapper (row_id None); drag&drop silently breaks for those rows
+//!
 //! Walks `WidgetSnapshot` trees per-block using `SutRenderer::widget_tree_for`,
 //! BFS-discovered from `live_block` references.
 //!

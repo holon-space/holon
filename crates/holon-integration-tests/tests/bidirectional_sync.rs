@@ -6,6 +6,10 @@
 //! - Backward: UI mutation via BackendEngine → FileSyncController → Org file on
 //!   disk
 //! - Round-trip: Both directions in sequence, verifying stability
+//!
+//! @pbt kind harness
+//! @pbt covers orgmode-backend-sync — full OrgMode<->Backend bidirectional sync
+//! loop
 
 use std::sync::Arc;
 use std::time::Duration;

@@ -6,6 +6,9 @@
 //! selection (`run_selected(&composed_invariant_catalog(), &these_components,
 //! &ref)`) picks the subset whose `Needs` these components satisfy.
 //!
+//! @pbt kind slice-mod
+//! @pbt covers memory-slice — component list + builders for the in-memory arm.
+//!
 //! Why a pure-memory slice exists and §8.5's `min_sut` reclassification does
 //! **not** (doc §8.6): the structural invariants' *E2ESut* realization reads
 //! Turso SQL, so reclassifying `min_sut → [BlockTree]` would pull them into a

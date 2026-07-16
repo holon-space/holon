@@ -18,6 +18,14 @@
 //! fragment ([`super::reference_domain_state::ReferenceDomainState`]) and the
 //! production UI state — this is the PBT reference model's prediction of UI
 //! actor state.
+//!
+//! @pbt kind ref
+//! @pbt covers ui-actor-state — Tier-3 UI actor fragment (nav history, focus,
+//!   cursor, widget open-state, pins, active editor). Read-only lens over the
+//!   domain fragment; owns only UI-actor-private facts. Several fields
+//!   HAND-mirror SQLite tables — `next_history_id` (AUTOINCREMENT),
+//!   `drawer_open` (`widget_open` table), `open_pins` (`focus_roots` source
+//!   rows); keep them in sync with those schemas.
 
 use std::collections::HashMap;
 use std::collections::HashSet;

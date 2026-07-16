@@ -1,5 +1,10 @@
 //! Transition: concurrent schema init stress test (post-startup).
 //!
+//! @pbt rung dispatch
+//!   `concurrent_schema_init` is a storage-level race probe with no user
+//!   gesture (faithful floor).
+//! @pbt covers concurrent-schema-init-race — parallel matview/schema setup
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:862-868`
 //! (generator), `state_machine.rs:3190-3194` (precondition),
 //! `state_machine.rs:2481-2484` (ref-state apply),

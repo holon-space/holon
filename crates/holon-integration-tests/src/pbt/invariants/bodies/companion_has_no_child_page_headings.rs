@@ -6,6 +6,13 @@
 //! 2026-07-12 — a backlink, if wanted, is a user-authored `[[…]]` mark, never a
 //! writeback artifact).
 //!
+//! @pbt oracle correspondence
+//! @pbt covers writeback de-inline — a folder-companion `.org` retaining a
+//!   heading for a block the ref models as a `Page` doc-root (is_page_block)
+//! @pbt slips-if-removed companion writeback keeps a child page inlined (or a
+//!   leftover backlink line); the page is double-represented and a
+//!   store-rebuild-from-disk re-ingests it under the wrong parent
+//!
 //! This is the WRITEBACK-side twin of `inv-sidebar-page-tag-preserved` (the
 //! ingest-side page-tag-preservation oracle, Fork A). Fork A guarantees the
 //! inlined page keeps its `Page` tag; Fork B guarantees the companion's

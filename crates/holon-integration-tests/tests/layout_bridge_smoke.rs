@@ -9,6 +9,11 @@
 //! and the trait obligations are satisfied. Run-time exercise lands
 //! when the variants are added to `declare_e2e_transitions!`
 //! (follow-up).
+//!
+//! @pbt kind harness
+//! @pbt covers layout-bridge-typelevel — type-level proof shared
+//! holon_layout_testing impls bind ReferenceState @pbt overlaps arch-lint —
+//! compile-only
 
 #![cfg(feature = "pbt")]
 

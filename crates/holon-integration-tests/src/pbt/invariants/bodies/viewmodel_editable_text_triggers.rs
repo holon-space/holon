@@ -1,5 +1,12 @@
 //! `inv-viewmodel-editable-text-triggers`.
 //!
+//! @pbt oracle internal-consistency
+//! @pbt covers editable-text-trigger-wiring — render-DSL regression:
+//!   editor has bound ops but no input triggers
+//! @pbt slips-if-removed an editable_text with delete/set_field ops but
+//!   empty triggers ships; typing never fires on_text_changed, so the
+//!   slash-menu / wiki-link popups and bound ops are unreachable from input
+//!
 //! Relies on `props["trigger_count"]` in the `WidgetSnapshot` translation
 //! for `EditableText`.
 //!

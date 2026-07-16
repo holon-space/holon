@@ -1,5 +1,10 @@
 //! Transition: create a new document (post-startup).
 //!
+//! @pbt rung external
+//!   writes an empty org file into the watched org_root; the production
+//!   FileSyncController ingests it and mints the page block.
+//! @pbt covers doc-create-ingest — new-doc file -> watcher -> block_raw page
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:447-455`
 //! (generator), `state_machine.rs:3117` (precondition),
 //! `state_machine.rs:2126-2147` (ref-state apply),

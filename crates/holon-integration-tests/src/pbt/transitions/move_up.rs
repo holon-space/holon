@@ -1,5 +1,10 @@
 //! Transition: move the focused block up (swap with its previous sibling).
 //!
+//! @pbt rung input-pipeline
+//!   KEYSTONE: send_block_chord resolves the bound Alt+Up chord; fixed-id
+//!   slices fall back to OpDispatchWriter (dispatch floor).
+//! @pbt covers reorder-chord-up — Alt+Up chord -> move_up reducer
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:1138-1153`
 //! (generator), `state_machine.rs:3344-3358` (precondition),
 //! `state_machine.rs:2667-2671` (ref-state apply),

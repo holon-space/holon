@@ -21,6 +21,10 @@
 //! - Todoist fake enabled → concurrent DDL during startup
 //! - GQL query source in index.org → triggers graph matview creation
 //! - set_field on render block → UPDATE cascades through IVM
+//!
+//! @pbt kind harness
+//! @pbt covers turso-ivm-index-corruption — Turso IVM
+//! index-points-to-nonexistent-row repro
 
 use std::collections::HashMap;
 use std::sync::Arc;

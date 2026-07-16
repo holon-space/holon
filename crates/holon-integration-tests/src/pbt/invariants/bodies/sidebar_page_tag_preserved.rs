@@ -2,6 +2,14 @@
 //! `Page` doc-root must STILL carry the `Page` tag in the SUT's live
 //! projection.
 //!
+//! @pbt oracle correspondence — SUT live-projection is_page vs ref
+//!   is_page_block, over ids present in the SUT snapshot
+//! @pbt covers page-demotion — a Page doc-root whose `Page` tag is stripped in
+//!   the SUT projection while its block row survives
+//! @pbt slips-if-removed a folder-companion .org inlines a page-file doc-root
+//!   as a plain heading, stripping its `Page` tag on cold-boot reconcile; the
+//!   page vanishes from the sidebar and the id-set compare can't see it
+//!
 //! This is the sidebar oracle: the left sidebar renders exactly the blocks
 //! whose `tags` contain `"Page"` (`tag='Page'`). A page silently DEMOTED (its
 //! `Page` tag stripped) vanishes from the sidebar even though its block row

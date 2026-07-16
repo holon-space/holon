@@ -1,5 +1,10 @@
 //! Loro sync-quiescence helper, co-located with the Loro SUT it serves.
 //!
+//! @pbt kind cap-plumbing
+//! @pbt covers loro-slice (full) — settle barrier before a post-merge read.
+//!   AUDIT: on timeout it only `eprintln`s and RETURNS (no Err/panic) — a
+//!   never-quiescing sync is not surfaced to the caller (see SUT-6).
+//!
 //! Waits until the `LoroSyncController`'s `last_synced` watermark matches the
 //! global doc's current `oplog_frontiers()`. Used by [`crate::LoroSut`]'s
 //! peer-sync ops and by the central `TestEnvironment::wait_for_loro_quiescence`

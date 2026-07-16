@@ -15,6 +15,10 @@
 //! stranded-vault condition — then dispatches `block.split_block` through the
 //! real engine. Pre-guard this errored; post-guard the create falls through
 //! to the SQL path (disclosed) and the tree stays untouched.
+//!
+//! @pbt kind harness
+//! @pbt covers loro-unseeded-split — Loro-over-unseeded-vault split failure
+//! class
 
 use std::collections::HashMap;
 use std::sync::Arc;

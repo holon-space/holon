@@ -7,6 +7,10 @@
 //! Before the fix, every read bumped the refcount with no matching release,
 //! so `unwatch`'s refcount==0 branch was unreachable for any block ever
 //! snapshotted: the tokio watcher + CDC stream leaked for the app's lifetime.
+//!
+//! @pbt kind harness
+//! @pbt covers watcher-refcount-raii — H1 watcher refcount RAII on read-only
+//! snapshots
 
 use std::sync::Arc;
 

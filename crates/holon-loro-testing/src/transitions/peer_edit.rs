@@ -1,5 +1,9 @@
 //! Transition: edit a block on a peer's LoroDoc directly.
 //!
+//! @pbt rung external
+//!   edits a block on a peer's LoroDoc directly (CRDT stimulus).
+//! @pbt covers loro-peer-edit — peer-side block mutation on LoroDoc
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:1481-1534`
 //! (generator), `state_machine.rs:3494-3511` (precondition),
 //! `state_machine.rs:2788-2818` (ref-state apply),

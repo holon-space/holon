@@ -1,5 +1,15 @@
 //! `inv-viewmodel-tree-virtual-slots`.
 //!
+//! @pbt oracle internal-consistency — R:RefBlockTree only LOCATES the Main
+//!   focus roots; nothing from ref is compared as an expected value, the
+//!   assertions are structural (slot order, no state_toggle in title subtree)
+//! @pbt covers virtual-slot-misorder + page-title-wrong-variant — creation
+//!   slot not last child; focused page title on the default (state_toggle)
+//!   variant instead of the page_title bare-text variant
+//! @pbt slips-if-removed the "add new block" slot renders above the page
+//!   title, or the title renders as an editable state_toggle row instead of
+//!   an h1; both dogfood regressions ship (devlog 2026-07-05)
+//!
 //! Locks in two GPUI render regressions the app currently exhibits — both
 //! observed during dogfood triage, see
 //! `devlog/2026-07-05-011500-gpui-dogfood-triage.md`:

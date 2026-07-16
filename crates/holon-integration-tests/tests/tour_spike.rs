@@ -14,6 +14,9 @@
 //!      via the block snapshot the reads see).
 //!   3. Action-gated advance ("create a block under X") is an engine-observable
 //!      state change the `ChildCreatedUnder` predicate evaluates correctly.
+//!
+//! @pbt kind harness
+//! @pbt covers onboarding-tour-spike — onboarding-tour vertical-slice spike
 
 use std::collections::HashMap;
 use std::sync::Arc;

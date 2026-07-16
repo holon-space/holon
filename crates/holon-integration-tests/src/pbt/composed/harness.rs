@@ -29,6 +29,10 @@
 //! The reconcile + scaffold-injection + check are the composed-SUT *execution
 //! kernel* — the same logic the eventual wide-PBT-over-`compose_sut` path
 //! needs, so this is not slice-only scaffolding.
+//!
+//! @pbt kind infra
+//! @pbt covers composed-harness — generic ComposedSut StateMachineTest:
+//! per-tick reconcile + catalog check + non-vacuity floor
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;

@@ -1,4 +1,22 @@
 //! Reference model for the PBT state machine.
+//!
+//! @pbt kind ref
+//! @pbt oracle correspondence — the single `ReferenceState` oracle. Its
+//!   `BuilderServices::interpret` REUSES the production `ShadowInterpreter`
+//!   (render engine) driven from the ref's OWN block map (`get_block_data`),
+//!   never SUT read-back: legitimate reused-not-under-test-engine oracle,
+//!   deliberately blind to render-engine-internal bugs (covered by its own
+//!   tier), sharp on the ref↔SUT projection axis.
+//! @pbt covers block-tree/sibling-order — the structural mutation helpers
+//!   (`move_block`/`outdent_block`/`swap_sequence`/`split_block`/`join_block`)
+//!   each independently predict post-op sibling order. FIDELITY DRIFT:
+//!   `move_block` deliberately SUPPRESSES the canonical re-sort (models the
+//!   production fractional `sort_key`), whereas `outdent`/`swap`/content
+//!   mutations funnel through `recanon_and_rebuild` →
+//!   `assign_reference_sequences_canonical`, a HAND-mirror of the org
+//!   `process_headlines` re-emission order (Source<Image<Text). A move
+//!   followed by a same-parent content mutation re-canonicalizes and can
+//!   silently reorder what the move placed — see the REF honesty-drift finding.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;

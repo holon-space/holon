@@ -13,6 +13,11 @@
 //!
 //! Run: `cargo test -p holon-integration-tests --features pbt --test
 //! query_equivalence_pbt`
+//!
+//! @pbt kind harness
+//! @pbt covers testquery-equivalence — TestQuery vs production query
+//! equivalence for LAYOUT queries @pbt overlaps general_e2e_composed_pbt —
+//! kept: distinct oracle, isolation
 
 #![cfg(feature = "pbt")]
 

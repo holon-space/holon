@@ -1,5 +1,9 @@
 //! UiDriver trait — abstracts how UI interactions are dispatched during PBT.
 //!
+//! @pbt kind driver
+//! @pbt covers window-slice — geometry/input driver-ladder rungs (FFI fallback
+//!   ⊏ geometry+input) for driving a real frontend during windowed PBT.
+//!
 //! Three levels:
 //! 1. **FfiDriver**: All operations go through FFI fallback (headless testing).
 //! 2. **GeometryDriver**: Uses element bounds + input simulation for supported

@@ -6,6 +6,12 @@
 //! quiescence; no struct "holds" it (ADR-0004 canonicity reframing). This
 //! struct isolates the sort_key-free, adapter-independent domain data so it can
 //! be the single fragment shared across all wirings.
+//!
+//! @pbt kind ref
+//! @pbt covers domain-truth — single-homed Tier-1 domain fragment (block tree,
+//!   layout/profile classification, author-intent render config, seed profile).
+//!   The one owner of these facts; the actor/UI/loro fragments are read-only
+//!   lenses over it. No datum is double-homed here.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;

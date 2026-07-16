@@ -1,5 +1,13 @@
 //! [`DriverInputComponent`] — a driver-agnostic SUT input/focus provider.
 //!
+//! @pbt kind sut-component
+//! @pbt gen NOT a generator — no input distribution lives here; every gesture
+//!   (click/drag/arrow/slash/keystroke) forwards verbatim to the production
+//!   `UserDriver`. Which ids, regions, keys, and step-counts are exercised is
+//!   decided entirely by the block-interaction / arrow-navigate transition
+//!   generators upstream. `resolver` remaps oracle ids to SUT-minted ids
+//!   (headless composed only) so a gesture never drives a ghost block.
+//!
 //! Wraps any production [`UserDriver`] and provides the gesture caps
 //! ([`SutDriver`] focus-read, plus [`SutBlockInteract`] + [`SutArrowNavigate`]
 //! input when a driver is installed) by forwarding to it — it NEVER

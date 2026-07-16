@@ -1,5 +1,10 @@
 //! `RefWiring` / `RefViewSelection` / `RefViewSelectionMut` /
 //! `RefSqlCardinality` — the remaining harness/misc-state capability impls.
+//!
+//! @pbt kind ref
+//! @pbt covers view-selection — active view + render-expr name per region, the
+//!   cap-set gate (`RefWiring`, harness config not domain state), and the SQL
+//!   row-cardinality budget model (`RefSqlCardinality`).
 
 use holon_pbt_core::capabilities::CapRegion;
 use holon_pbt_core::capabilities::RefSqlCardinality;

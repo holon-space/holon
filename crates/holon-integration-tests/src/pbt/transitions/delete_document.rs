@@ -1,5 +1,8 @@
 //! Transition: delete a previously created document (post-startup).
 //!
+//! @pbt rung external
+//! @pbt covers doc-delete — fs delete -> watcher removal -> block_raw page drop
+//!
 //! Inverse of [`CreateDocument`](super::create_document::CreateDocument).
 //! Models an EXTERNAL deletion — the user removing the org file outside
 //! Holon (`rm` in the vault), the scenario the prod bug was observed in.

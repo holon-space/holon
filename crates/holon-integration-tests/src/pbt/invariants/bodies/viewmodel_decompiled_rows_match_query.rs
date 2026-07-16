@@ -1,5 +1,14 @@
 //! `inv-viewmodel-decompiled-rows-match-query`.
 //!
+//! @pbt oracle sut-internal — SUT decompiled rendered `content` vs SUT query
+//!   data_rows `content` (ordered equality, filtered to ref visible_columns);
+//!   DOCTRINE-SUSPECT: ref models no interpret_pure display tree, so the query
+//!   result is the closest in-SUT ground truth and no ref render exists
+//! @pbt covers row-drop — the interpreter renders an ordered SUBSET of the
+//!   query rows (a dropped row the old subset-only check let pass)
+//! @pbt slips-if-removed interpret_pure drops or reorders a data row; the list
+//!   silently shows fewer rows than the query returned
+//!
 //! Gated by `is_properly_setup()` only (NOT `!nav_only`).
 //!
 //! Asserts (Strict) that the per-row rendered `content` strings EQUAL the

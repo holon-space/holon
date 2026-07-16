@@ -1,5 +1,12 @@
 //! `inv-live-children-match-ref`.
 //!
+//! @pbt oracle correspondence
+//! @pbt covers sibling-order — SQL projection sort_key order vs ref document
+//!   order, per parent, non-seed blocks only
+//! @pbt slips-if-removed org-ingested block whose Loro fractional index
+//!   never reaches SQL sort_key (stuck at default "A0") silently mis-sorts
+//!   against moved siblings; UI shows wrong order, nothing else observes it
+//!
 //! Per-parent sibling-order equality between the SQL projection and the
 //! reference model. For every parent of a non-seed block, the projection's
 //! `sorted_children` (ordered by `sort_key`, the authoritative fractional

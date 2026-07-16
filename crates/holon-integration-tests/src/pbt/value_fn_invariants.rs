@@ -2,6 +2,26 @@
 //! (inv-value-fn-provider-arg-variance/inv-value-fn-provider-identity/
 //! inv-sql-budget).
 //!
+//! @pbt kind module
+//! Shared SUT-side walker, NOT an invariant body. Feeds three
+//!   downstream bodies; oracle class is per-consumer:
+//! @pbt oracle sut-internal (arg-variance-13) — provider cache-identity
+//!   stability + bottom_dock structural presence over the SUT
+//!   ReactiveViewModel; no ref projection of Arc identity exists. Its vfn13
+//!   sub-check is metamorphic (identities stable across two interpret passes);
+//!   vfn11 is a ref-focus-gated existence check (weak correspondence)
+//! @pbt oracle correspondence (provider-identity) — drained VM StateToggle
+//!   `current` vs the reference `task_state_of`, per tracked block
+//! @pbt oracle budget (sql-budget) — per-transition SQL/wall/RSS count vs a
+//!   frozen expected budget (does not use this walker)
+//! @pbt covers provider-cache-coupling — ReactiveEngine/interpret_pure/
+//!   ProviderCache Arc churn, CDC-enrichment StateToggle glitches
+//! @pbt slips-if-removed a ProviderCache regression mints a fresh Arc per
+//!   re-interpret (identity flicker), forcing needless row rebuilds and UI
+//!   flicker; a flatten_properties CDC glitch emits a wrong StateToggle
+//!   visible for one frame before a structural re-render masks it — both
+//!   invisible once these consumers lose their walker
+//!
 //! Walks a `ReactiveViewModel` and surfaces every `Reactive` node that is
 //! backed by a live `ReactiveRowProvider` — the providers produced by
 //! value functions like `focus_chain()`, `ops_of(uri)`, `chain_ops(level)`

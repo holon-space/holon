@@ -1,5 +1,14 @@
 //! `inv-task-state-storage-coherence`.
 //!
+//! @pbt oracle sut-internal — SQL block_raw.properties task_state vs the Loro
+//!   tag projection, two SUT stores compared to each other; DOCTRINE-SUSPECT:
+//!   no ref models the Loro-tag task_state, so no ref differential is possible
+//! @pbt covers loro-sql-desync — the two stores disagree on presence or value
+//!   of task_state for the same block
+//! @pbt slips-if-removed a CDC / tag-projection bug lets Loro and SQL drift on
+//!   task_state; a render reading one store shows a checkbox the other store
+//!   contradicts
+//!
 //! Cross-checks `task_state` between `block_raw.properties` (SQL) and
 //! the Loro tag projection, catching Loro↔SQL desync at the data layer
 //! before any rendering bug surfaces.

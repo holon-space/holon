@@ -20,6 +20,11 @@
 //!    "Block not found" / placeholder-root path. If the re-seed ever declines
 //!    (guarded), the assertions flip to the disclosed SQL-owned branch instead
 //!    of failing blind.
+//!
+//! @pbt kind harness
+//! @pbt covers restart-persistence(loro-unseeded) — true-restart twin,
+//! unseeded-vault Loro @pbt overlaps general_e2e_composed_pbt — kept: no
+//! restart transition in keystone
 
 use std::collections::HashMap;
 use std::sync::Arc;

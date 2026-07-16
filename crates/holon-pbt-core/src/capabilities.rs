@@ -1,6 +1,10 @@
 //! PBT capability traits — the reference-side (`Ref*`) and SUT-side (`Sut*`)
 //! read/write surfaces the composed PBT catalog and `wide_e2e` runner bind on.
 //!
+//! @pbt kind cap-surface
+//! @pbt covers all-slices — the component-oriented capability trait vocabulary
+//!   every SUT arm and reference implements; selection is by presence of these.
+//!
 //! Each cap is a narrow trait hosted on `CapMap` (via `#[capmap_adapter]`, or
 //! emitted in pairs by `capability_pair!`). Reference impls live in
 //! `reference_capabilities.rs`; SUT impls in the composed components.

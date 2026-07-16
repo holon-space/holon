@@ -1,5 +1,17 @@
 //! Language-neutral query representation for PBT testing.
 //!
+//! @pbt kind oracle
+//! @pbt gen `QuerySource` has 5 variants but the file generator only mints 3
+//!   (AllBlocks, DirectChildren, DescendantsOfAny); FocusRootDescendants and
+//!   PageBlocks are seeded by the default layout / start_app only, never by a
+//!   user-authored index.org override — so a layout-override bug specific to
+//!   the focus-root or page-blocks traversal is not reachable via WriteOrgFile
+//! @pbt gen watched-query generator (`generate_test_query`) is fixed: always
+//!   AllBlocks + the same 6 columns + 0..=2 preds drawn from a 4-element
+//!   `generate_predicate` set (Ne/Eq×2/IsNotNull) — no Lt/Gt/Contains, no
+//!   custom-property predicates, no negation; the predicate compiler's untested
+//!   surface is the AST in query_ast.rs, not this one
+//!
 //! `TestQuery` compiles to PRQL, SQL, or GQL and evaluates against the
 //! reference model. Uses `holon_api::Predicate` directly — no separate
 //! TestPredicate type.

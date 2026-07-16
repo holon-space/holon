@@ -1,5 +1,13 @@
 //! `inv-source-language-iff-source` — ADR-0004 domain invariant.
 //!
+//! @pbt oracle internal-consistency — source_language present iff content_type
+//!   is Source, over the SUT write-side snapshot (no ref)
+//! @pbt covers source-lang-projection — a Source row that lost its language or
+//!   a Text/Image row that grew one
+//! @pbt slips-if-removed an adapter projection corrupts source_language; a
+//!   Source block renders with no language (or a Text block sprouts one) and
+//!   no differential oracle flags it
+//!
 //! Domain rule: a block carries a `source_language` **iff** its
 //! `content_type` is [`ContentType::Source`]. Text and Image blocks carry
 //! `None`; Source blocks carry `Some(lang)`. This is a property of the domain

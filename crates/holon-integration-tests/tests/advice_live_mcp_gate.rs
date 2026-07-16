@@ -32,6 +32,11 @@
 //! `try_start_embedded_mcp` helper (`pbt/ui_harness.rs`), but backs the server
 //! with an in-process composed session rather than an external app, so no live
 //! app / iOS sim is required. Requires `--features pbt`.
+//!
+//! @pbt kind harness
+//! @pbt covers advice-live-mcp-gate — advice weave proven over a LIVE
+//! out-of-process MCP app @pbt overlaps general_e2e_composed_pbt_live_mcp —
+//! kept: out-of-process thread affinity
 
 use holon_api::EdgeFieldUpdate;
 use holon_api::EntityUri;

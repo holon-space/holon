@@ -24,6 +24,10 @@
 //! frontend (`HeadlessFrontendComponent`, async org boot + scaffold capture),
 //! editor (`InMemEditorComponent`), and windowed GPUI (E4) arms are not yet
 //! wired — guarded fail-loud below, not silently skipped.
+//!
+//! @pbt kind infra
+//! @pbt covers compose-sut-builder — the CapMap-by-subsystem production SUT
+//! builder (the ONE builder replacing per-slice *_wide)
 
 use std::collections::BTreeSet;
 use std::sync::Arc;

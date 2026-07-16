@@ -1,5 +1,12 @@
 //! `inv-watch-rows-match-ref` (STRICT).
 //!
+//! @pbt oracle correspondence
+//! @pbt covers cdc-watch-divergence — per-watch CDC-delivered ui_model rows
+//!   (id set, selected fields, parent_id) disagree with ref expected rows
+//! @pbt slips-if-removed a Turso IVM CDC bug delivers wrong/missing/spurious
+//!   rows or a wrong parent_id (e.g. block:root-layout) to a live watch; the
+//!   watched query panel shows stale or wrong data
+//!
 //! Per-watch equality between each registered watch's CDC-delivered rows
 //! (the SUT's `ui_model`, keyed by query_id) and the reference model's
 //! expected rows for that watch (`query_results(watch_spec)`). Checks the

@@ -1,6 +1,13 @@
 //! Transition: indent the focused block (make it a child of its previous
 //! sibling).
 //!
+//! @pbt rung input-pipeline
+//!   KEYSTONE: KeystrokeBlockTreeWriter drives the bound chord (Tab) through
+//!   the production chord-resolution path. FIXED-ID lib slices (no resolver)
+//!   fall back to OpDispatchWriter raw op dispatch (dispatch floor).
+//! @pbt covers indent-chord — indent chord -> bubble_input -> structural
+//! reducer
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:1106-1121`
 //! (generator), `state_machine.rs:3314-3328` (precondition),
 //! `state_machine.rs:2648-2660` (ref-state apply),

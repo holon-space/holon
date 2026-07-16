@@ -1,5 +1,12 @@
 //! `inv-embedded-page-collapsed-lazy`.
 //!
+//! @pbt oracle correspondence
+//! @pbt covers lazy embedded-page gating — expand_toggle presence and
+//!   collapsed→no-descendants-in-panel vs the ref expansion state
+//! @pbt slips-if-removed a collapsed embedded page leaks its children into the
+//!   main panel (lazy gate bypassed → unbounded eager load) or renders with no
+//!   expand_toggle affordance
+//!
 //! Embedded page-blocks (non-seed pages that are strict descendants of the Main
 //! region's current focus root) must render with an `expand_toggle` widget node
 //! targeting them. When collapsed (default / ref not in `expanded_toggles`):

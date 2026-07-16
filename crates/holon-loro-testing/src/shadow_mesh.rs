@@ -1,5 +1,10 @@
 //! E-solid shadow Loro peer mesh — the oracle-side CRDT predictor.
 //!
+//! @pbt kind oracle
+//! @pbt covers loro-slice (peer-mesh) — reference-side CRDT convergence
+//!   predictor; runs REAL Loro merges fed from ref intent (see audit caveat:
+//!   same engine as SUT ⇒ a pure Loro merge-ordering bug is in the blind spot).
+//!
 //! A `ShadowMesh` is a fresh Loro universe (primary doc, peer id 1, matching
 //! the PBT-pinned production primary; shadow peers at `100 + idx`, matching
 //! `LoroSut::apply_add_peer`) that the reference model drives through the SAME

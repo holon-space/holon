@@ -1,5 +1,14 @@
 //! `inv-window-focus-matches-engine-focus`.
 //!
+//! @pbt oracle sut-internal — compares the engine's focused_block against the
+//!   per-frame window RenderedElement::focused; both are SUT authorities and
+//!   the ref model has no window-focus projection to compare against
+//! @pbt covers focus-steal-back / zombie-editor (ADR 0010) — window focus
+//!   settles on an editor different from engine focus
+//! @pbt slips-if-removed a stale window-focused editor keeps focus after
+//!   engine focus moves; keystrokes meant for the newly focused block get
+//!   consumed by the zombie editor
+//!
 //! SUT-internal coherence between the two focus authorities (ADR 0010):
 //! the engine's in-memory `focused_block` (moves synchronously on
 //! click/split/join op responses) and WINDOW focus (follows via a spawned

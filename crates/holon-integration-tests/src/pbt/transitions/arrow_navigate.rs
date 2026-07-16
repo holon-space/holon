@@ -1,5 +1,10 @@
 //! Transition: arrow-key navigation from the currently focused block.
 //!
+//! @pbt rung input-pipeline
+//!   `apply_arrow_navigate` drives `send_raw_keystroke_until_handled` (real
+//!   arrow keys) through the installed UserDriver -> intent -> focus move.
+//! @pbt covers arrow-key-nav — keyboard arrow -> click-intent -> focus reducer
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:673-703`
 //! (generator), `state_machine.rs:3181-3183` (precondition),
 //! `state_machine.rs:2316-2451` (ref-state apply),

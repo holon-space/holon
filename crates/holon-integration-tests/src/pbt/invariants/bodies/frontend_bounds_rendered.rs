@@ -1,5 +1,13 @@
 //! `inv-frontend-bounds-rendered`.
 //!
+//! @pbt oracle internal-consistency
+//! @pbt covers render-layout-coherence — VM-emitted entities actually laid
+//!   out (sizes, no error widgets, y-order/contiguity, not visually empty);
+//!   RefLayout only gates the content-presence sub-checks
+//! @pbt slips-if-removed a render-expr that emits a widget the gpui window
+//!   never lays out (zero-size / off-screen / silently dropped) ships a
+//!   blank or mis-ordered panel that headless VM-only checks cannot see
+//!
 //! The geometry compound that lived inside the inline `inv-frontend-engine`
 //! block: verifies the gpui window actually laid out the elements the
 //! frontend ViewModel emitted. Reads [`SutLayout::rendered_elements`] (the

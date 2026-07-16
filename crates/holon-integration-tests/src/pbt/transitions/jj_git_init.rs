@@ -1,5 +1,8 @@
 //! Transition: initialize a jj repository.
 //!
+//! @pbt rung external
+//! @pbt covers jj-init — jj repository initialization
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:367-369`
 //! (generator), `state_machine.rs:3104` (precondition),
 //! `state_machine.rs:1938-1941` (ref-state apply),

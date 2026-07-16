@@ -1,6 +1,10 @@
 //! Frontend-neutral scaffolding for PBT harnesses (the composed windowed
 //! runners: `gpui_composed_windowed_loop`, `tui_ui_pbt`, …).
 //!
+//! @pbt kind harness
+//! @pbt covers window-slice/live-mcp — env/config scaffolding + geometry-ready
+//!   gate + embedded-MCP boot for the cross-thread windowed runners.
+//!
 //! These helpers orchestrate the cross-thread / cross-runtime dance around a
 //! frontend rendering a composed SUT (`with_windowed_wide_sut` on gpui, the
 //! TUI composed runner in `frontends/tui/tests/common/pbt_main.rs`):

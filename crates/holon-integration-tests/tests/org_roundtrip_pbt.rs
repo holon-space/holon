@@ -30,6 +30,12 @@
 //! - generic `:PROPERTIES:` drawer keys must survive
 //! - headline TODO keyword must survive
 //! - nested headline trees must survive
+//!
+//! @pbt kind harness
+//! @pbt covers org-parse-render-fixedpoint — pure parser+renderer round-trip
+//! fixed point, no boot @pbt overlaps
+//! general_e2e_composed_pbt(inv-org-render-fixed-point) — kept: microsecond
+//! storage-free fuzz the wide test cannot match
 
 #![cfg(feature = "pbt")]
 
