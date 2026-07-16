@@ -77,6 +77,11 @@ def main():
     e2e_by_action = defaultdict(list)
     dispatch_by_action = defaultdict(list)
     proj_ms, proj_snap, proj_blocks = [], [], []
+    # mode=full|incremental counts, and per-reason breakdown of the full passes.
+    # `reason` is a new field (Inc 0 of the reseed-latency workstream); logs from
+    # before it landed have no `reason`, bucketed as "unlabeled" for back-compat.
+    proj_mode_counts = defaultdict(int)
+    full_reason_counts = defaultdict(int)
     rows_ms, rows_n = [], []
     # Boot ingest (and any other unrecognized stage): bucket generically by stage
     # name so new instrumentation surfaces without a script edit. `feed_timeouts`
@@ -108,6 +113,10 @@ def main():
             if v is not None:
                 dispatch_by_action[f.get("action", "?")].append(v)
         elif stage == "projection":
+            mode = f.get("mode", "?")
+            proj_mode_counts[mode] += 1
+            if mode == "full":
+                full_reason_counts[f.get("reason", "unlabeled")] += 1
             for lst, k in ((proj_ms, "ms"), (proj_snap, "snapshot_ms"),
                            (proj_blocks, "blocks")):
                 v = num(f, k)
@@ -165,6 +174,26 @@ def main():
         if vals:
             n, p50, p95, mx, mean = stats(vals)
             print(f"{name:<28}{n:>6}{p50:>9.1f}{p95:>9.1f}{mx:>9.1f}{mean:>9.1f}")
+
+    if proj_mode_counts:
+        full_n = proj_mode_counts.get("full", 0)
+        incr_n = proj_mode_counts.get("incremental", 0)
+        print("\n== PROJECTION MODE ATTRIBUTION ==")
+        print(f"  incremental (O(changed) fast path): {incr_n}")
+        print(f"  full (reseed walk):                 {full_n}")
+        # Legitimate seeds vs the four reseed leaks vs sink-fail recovery.
+        legit = {"coldboot"}
+        leaks = {"empty_pending_moved_frontier", "unsettled", "orphan",
+                 "oversized"}
+        if full_reason_counts:
+            print("  full-pass reasons:")
+            for reason in sorted(full_reason_counts,
+                                 key=lambda r: -full_reason_counts[r]):
+                cnt = full_reason_counts[reason]
+                tag = ("seed" if reason in legit else
+                       "LEAK" if reason in leaks else
+                       "recovery" if reason == "sink_fail" else "?")
+                print(f"    {reason:<32}{cnt:>6}  [{tag}]")
 
     if misc_by_stage:
         print("\n== BOOT INGEST (stage=boot_*, per file unless noted) ==")

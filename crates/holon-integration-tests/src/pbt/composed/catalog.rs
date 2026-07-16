@@ -167,6 +167,12 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // guard the advice `No id found` background-worker panic slipped past).
         #[cfg(feature = "otel-testing")]
         invariants::observed_errors::wire(),
+        // No interactive transition triggered an O(N) full reseed at steady
+        // state (BugFunnel row 71, reseed-latency Inc 0). Needs the composed
+        // `ReseedAttribution` cap the `wide_e2e` slice registers; observe-only
+        // (never RED) until `HOLON_PBT_RESEED_ORACLE=enforce` flips it.
+        #[cfg(feature = "otel-testing")]
+        invariants::reseed_leak::wire(),
     ];
     // Correspondence-registry entries (one CapInvariant per store projection;
     // see `holon_pbt_core::correspondence`). The Turso storage-pipeline arms
@@ -234,6 +240,8 @@ pub fn pbt_footprint() -> PbtFootprint {
     invariant_ids.push("inv-sql-budget");
     #[cfg(feature = "otel-testing")]
     invariant_ids.push("inv-no-observed-errors");
+    #[cfg(feature = "otel-testing")]
+    invariant_ids.push("inv-no-steady-reseed-leak");
     invariant_ids.extend_from_slice(CENTRAL_INVARIANT_IDS_TAIL);
     PbtFootprint {
         crate_id: CrateId::Central,

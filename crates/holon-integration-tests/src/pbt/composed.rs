@@ -45,6 +45,11 @@ pub mod span_metrics;
 /// `inv-no-observed-errors`.
 pub mod observed_errors;
 
+/// Process-global LoroProjection full-reseed attribution surface for
+/// `inv-no-steady-reseed-leak` (Inc 0 of the reseed-latency workstream). The
+/// tracing layer that feeds it is wired in [`crate::test_tracing`].
+pub mod reseed_observer;
+
 /// The generic composed-SUT `StateMachineTest` harness (E3 increment 3).
 /// Available under the `pbt` feature (not just `cfg(test)`) so the **macro
 /// repoint** can drive a `ComposedSut`-backed StateMachineTest from a `tests/`
