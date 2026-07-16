@@ -1,4 +1,17 @@
 //! `RefBlockTree` / `RefBlockTreeMut` / `RefApplyMutationMut` / `RefBackend`.
+//!
+//! @pbt kind ref
+//! @pbt covers block-tree-truth — models the canonical block tree (parentage,
+//!   sibling order, layout/seed/page classification) the block-correspondence
+//!   invariants compare against.
+//! @pbt covers org-disk-view — `RefBackend::org_blocks` predicts on-disk org
+//!   form; REUSES the real `holon_orgmode::parser::split_headline_tags` (via
+//!   `apply_org_headline_tag_split`) fed from ref content — legit reuse, blind
+//!   only to a bug INSIDE that shared parser fn (its own tier), not a hand-mirror.
+//! @pbt covers apply-mutation — `RefApplyMutationMut::apply_content_mutation`
+//!   is a SECOND block-tree applier (`Mutation::apply_to` + canonical re-sort),
+//!   distinct from `reference_state.rs`'s structural helpers; the two sequence
+//!   disciplines can disagree on post-op sibling order (see honesty-drift finding).
 
 use std::collections::BTreeSet;
 

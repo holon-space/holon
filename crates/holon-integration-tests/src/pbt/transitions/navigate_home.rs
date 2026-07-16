@@ -1,5 +1,11 @@
 //! Transition: navigate home (return to root) in a region.
 //!
+//! @pbt rung dispatch
+//!   UNFAITHFUL SHORTCUT (audit TR-NAV): `apply_navigate_home` dispatches
+//!   `navigation.go_home` directly, bypassing the leader-h chord path (the
+//!   same op the GPUI/CLI leader-h dispatches).
+//! @pbt covers nav-home — return-to-root in a region (op-level only)
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:621-626`
 //! (generator), `state_machine.rs:3174` (precondition),
 //! `state_machine.rs:2260-2276` (ref-state apply),

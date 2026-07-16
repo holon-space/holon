@@ -14,6 +14,9 @@
 //! Assertion: every `:ID:` present in the source file must (a) be present in
 //! the DB reachable from the GPUI document root after boot, and (b) survive in
 //! the re-rendered file on disk.
+//!
+//! @pbt kind harness
+//! @pbt covers region-writeback-loss — region-writeback data-loss P0 repro (dogfood 2026-07-10)
 
 use std::collections::HashMap;
 use std::collections::HashSet;

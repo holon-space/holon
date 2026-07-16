@@ -1,5 +1,11 @@
 //! `inv-focus-matches-ref`.
 //!
+//! @pbt oracle correspondence
+//! @pbt covers global focus tracking — engine `focused_block` vs ref global
+//!   focus (resolved) after a focus-changing transition
+//! @pbt slips-if-removed a focus op leaves the engine focused on the wrong
+//!   block or unfocused (steal-back / lost-focus); keyboard input routes to
+//!   the wrong row
 //!
 //! Checks that the reactive/frontend engine's global `focused_block`
 //! matches the reference model's global focus after every focus-changing

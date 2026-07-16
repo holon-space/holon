@@ -1,5 +1,10 @@
 //! Transition: unpin a block from a sidebar (LogSeq-style X button).
 //!
+//! @pbt rung dispatch
+//!   UNFAITHFUL SHORTCUT (audit TR-NAV): title is an X-button gesture, but
+//!   `unpin_block` dispatches `navigation.close` directly.
+//! @pbt covers unpin — remove pinned block (op-level only)
+//!
 //! Mirrors the `navigation.close(history_id)` op invoked by the right
 //! sidebar's per-row X button. Production behavior:
 //! - UPDATE `closed_at` on one specific `navigation_history` row.

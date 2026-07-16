@@ -1,5 +1,10 @@
 //! Transition: simulate app restart.
 //!
+//! @pbt rung external
+//!   file-touch re-trigger of the production FileSyncController (NOT a true
+//!   reboot — faithful to E2ESut::simulate_restart).
+//! @pbt covers restart-reingest — org re-parse on file touch
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:825-830`
 //! (generator), `state_machine.rs:3184-3186` (precondition),
 //! `state_machine.rs:2453-2456` (ref-state apply),

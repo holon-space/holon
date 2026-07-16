@@ -1,4 +1,10 @@
 //! `RefFocus` / `RefFocusMut` / `RefFocusRoots` / `RefGlobalFocus`.
+//!
+//! @pbt kind ref
+//! @pbt covers navigation-focus — per-region focused entity + cursor and the
+//!   `focus_roots` set (mirrors `schema/matview_focus_roots.sql`: open pins /
+//!   `navigation_history WHERE closed_at IS NULL`). The matview shape is
+//!   HAND-modeled in `expected_focus_root_ids`; keep it in sync with that SQL.
 
 use std::collections::BTreeSet;
 

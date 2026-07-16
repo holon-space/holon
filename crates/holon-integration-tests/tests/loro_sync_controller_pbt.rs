@@ -15,6 +15,10 @@
 //! 3. `wait_for_quiescence` blocks until `last_synced == oplog_frontiers`.
 //! 4. `check_invariants` runs both the multi-peer structural/convergence checks
 //!    (S1–S3, C1–C3) and the bridge-level checks (I1–I3).
+//!
+//! @pbt kind harness
+//! @pbt covers loro-multipeer-bridge — LoroSyncController over multi_peer GroupTransition stream
+//! @pbt overlaps general_e2e_composed_pbt — kept: CRDT multi-peer model the wide test cannot express
 
 use std::sync::Arc;
 

@@ -1,5 +1,17 @@
 //! Loro-private reference-state extension (RefStateSplit Inc 5).
 //!
+//! @pbt kind ref
+//! @pbt oracle correspondence — the peer-merge oracle REUSES the REAL Loro CRDT
+//!   sync on shadow docs, driven from ref intent (primary block data passed in
+//!   by parameter, peer edits applied to owned replicas), never SUT read-back.
+//!   Strongest reused-not-under-test-engine oracle for concurrent-merge
+//!   sibling order + text interleaving. Independence rests on the two Clone
+//!   seams: `clock_feed` SHARES its cell (harness Lamport side-channel, not
+//!   model state); `shadow_mesh` DEEP-FORKS every doc per proptest step/case.
+//! @pbt covers peer-replicas — each `PeerRefState` owns its own block replica;
+//!   this is CRDT modeling, not double-homing of the single-homed primary
+//!   (which lives in the domain fragment and is passed in read-only).
+//!
 //! The reference model's Loro-only state — peer instances, the E-solid shadow
 //! CRDT mesh, and the Lamport `clock_feed` side-channel — factored out of the
 //! central monolith into the subsystem crate that owns Loro (co-location north

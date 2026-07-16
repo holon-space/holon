@@ -13,6 +13,9 @@
 //! **Adding an invariant = add its module under `invariants/` and append one
 //! `wire()` line here.** Nothing else changes; every slice picks it up for
 //! free.
+//!
+//! @pbt kind infra
+//! @pbt covers invariant-catalog — the shared CapInvariant catalog assembled as a per-crate contribution fold
 
 use holon_pbt_core::composition::CapInvariant;
 use holon_pbt_core::contribution::CrateId;

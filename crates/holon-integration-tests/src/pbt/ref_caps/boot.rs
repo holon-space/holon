@@ -1,4 +1,9 @@
 //! `RefLifecycle` / `RefBoot` / `RefBootMut`.
+//!
+//! @pbt kind ref
+//! @pbt covers app-lifecycle — models `app_started`, `is_properly_setup`,
+//!   `enable_loro` (wiring-derived) and the pre-boot on-disk workspace
+//!   (dirs / org files / git-jj init) a `StartApp` observes.
 
 use holon_api::Region;
 use holon_api::entity_uri::EntityUri;

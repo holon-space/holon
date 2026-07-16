@@ -8,6 +8,10 @@
 //! `SutHandle`) and asserts, at compile time, that `TypeChars`,
 //! `DeleteBackward`, and `MoveCursor` can drive it. If the narrowing
 //! ever regresses to `S: SutHandle`, this test stops compiling.
+//!
+//! @pbt kind harness
+//! @pbt covers cross-medium-cap-reuse(compile-time) — Stage2/B2 compile-time proof of cross-medium transition reuse
+//! @pbt overlaps arch-lint — compile-only; candidate to replace with a module-boundary lint
 
 #![cfg(feature = "pbt")]
 

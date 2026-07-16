@@ -1,5 +1,11 @@
 //! Transition: join a block into its previous sibling (or parent).
 //!
+//! @pbt rung input-pipeline
+//!   KEYSTONE: KeystrokeBlockTreeWriter drives Backspace-at-start via the
+//!   editor keystroke path; fixed-id slices fall back to OpDispatchWriter
+//!   (dispatch floor).
+//! @pbt covers join-backspace — backspace-at-start -> join into previous sibling
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:1194-1245`
 //! (generator), `state_machine.rs:3438-3486` (precondition),
 //! `state_machine.rs:2693-2718` (ref-state apply),

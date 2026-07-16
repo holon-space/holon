@@ -7,6 +7,9 @@
 //!    matview). This is what a user's `holon_sql` source block does.
 //! 2. `fts_direct_query_over_block_content` — the same query via a direct
 //!    one-shot read, isolating engine-level FTS from the IVM/matview layer.
+//!
+//! @pbt kind harness
+//! @pbt covers fts-query-block — fts_match over block content through the real engine
 
 #![cfg(feature = "test-infra")]
 

@@ -1,5 +1,14 @@
 //! Fixture replay — value-level regression persistence.
 //!
+//! @pbt kind fixture
+//! @pbt gen value-level (not seed-level) corpus: a stored `Vec<T>` survives any
+//!   generator/strategy edit, so a regression pinned here stays reproducible
+//!   even after the distribution that first found it is retuned — the durable
+//!   backstop for every gated-arm coverage hole below. `CaptureEnvironment`
+//!   records the wiring + env flags a capture ran under; a replay under a
+//!   different HOLON_PBT_* gate silently changes the transition alphabet, so
+//!   `mismatch_report` must be consulted before trusting a green replay.
+//!
 //! Proptest's stock `FileFailurePersistence` only stores RNG seeds; any
 //! strategy change invalidates them. For PBT slices that share transitions
 //! across multiple consumers (cf. PbtSlicing.md), a *value-level* fixture

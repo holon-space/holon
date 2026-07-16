@@ -1,5 +1,10 @@
 //! Transition: outdent the focused block (move it up to its grandparent level).
 //!
+//! @pbt rung input-pipeline
+//!   KEYSTONE: chord (Shift+Tab) via KeystrokeBlockTreeWriter; fixed-id slices
+//!   fall back to OpDispatchWriter (dispatch floor).
+//! @pbt covers outdent-chord — outdent chord -> structural reducer
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:1122-1137`
 //! (generator), `state_machine.rs:3329-3343` (precondition),
 //! `state_machine.rs:2662-2665` (ref-state apply),

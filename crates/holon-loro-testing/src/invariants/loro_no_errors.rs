@@ -4,6 +4,14 @@
 //! CRDT has no sync controller, so `loro_had_errors` is structurally `false`);
 //! its real teeth run in the ONE PBT (full mode), where `compose_sut` backs
 //! `SutLoroLog` with the live `LoroSyncControllerHandle` error counter.
+//!
+//! @pbt oracle internal-consistency
+//! @pbt covers loro-sync-error — LoroSyncController dropped/failed-to-apply
+//!   events (a gap in the SQL→Loro mirror), checked on the SUT alone
+//! @pbt slips-if-removed an outdent/indent/split whose new parent is not yet a
+//!   TreeID makes the controller log `Cannot resolve parent URI` and silently
+//!   drop the event; the Loro tree diverges from SQL with no failing check to
+//!   surface it
 
 use holon_pbt_core::RunMode;
 use holon_pbt_core::capabilities::SutLoroLog;

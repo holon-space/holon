@@ -5,6 +5,11 @@
 //! but **windowless**: no GPUI, no geometry, no display link. This is the
 //! ViewModel/Renderer slice of the future `E2ESut` replacement.
 //!
+//! @pbt kind sut-arm
+//! @pbt covers frontend-slice — real headless `FrontendSession` + `ReactiveEngine`
+//!   over Turso via the production DI path, windowless. Provides `SutRenderer`
+//!   over the real CDC→watch→interpret path plus `SutBackend`/nav/editor caps.
+//!
 //! It provides [`SutRenderer`] over the same headless interpret pipeline
 //! `E2ESut` uses for its render invariants: `ReactiveEngine::ensure_watching` →
 //! `ReactiveRenderedRows::snapshot` → `holon_frontend::interpret_pure` against

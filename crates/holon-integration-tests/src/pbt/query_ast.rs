@@ -1,5 +1,14 @@
 //! In-memory query AST for PBT ground-truth (Track 1E).
 //!
+//! @pbt kind oracle
+//! @pbt gen ORPHANED relative to the keystone: no transition, invariant, or
+//!   generator constructs a `QueryAst` or calls `now_query_ast`. The 7-variant
+//!   Predicate surface — crucially the compound And/Or/Not nesting — is
+//!   exercised ONLY by this module's three hand-written unit tests over the ONE
+//!   canonical now-query. The gql/sql compound-predicate compile path is never
+//!   fuzzed; a nested And(Or(Not(..))) SQL-lowering bug would slip. Either wire
+//!   a QueryAst generator into a watched-query transition or delete as dead.
+//!
 //! Goal: a single declarative description of "which blocks should be in the
 //! result set" that can be (a) **evaluated** against the PBT reference state
 //! (a `HashMap<EntityUri, Block>`) and (b) **compiled** to the canonical

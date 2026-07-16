@@ -1,4 +1,23 @@
 //! Proptest strategy generators for PBT transitions.
+//!
+//! @pbt kind generator
+//! @pbt gen content strategies (content/edit/typing/bulk) mix the multi-byte /
+//!   empty / whitespace / org-special `extended_content_arm` UNCONDITIONALLY at
+//!   ~40-50% — it is NOT behind HOLON_PBT_EXTENDED_GEN. Only three arms are
+//!   env-gated: file-tree nesting (parent-selector), GQL query language
+//!   (generate_query_language), and the profile-in-no-override file arm. (Prior
+//!   header claim that byte-offset classes are ASCII-hidden by default was
+//!   stale — those classes ARE in the default gate.)
+//! @pbt covers content-vocabulary — shared ADVICE_TAG_POOL keeps advice
+//!   invariants non-vacuous (anchor/candidate tag collisions)
+//! @pbt gen file-tree is FLAT by default (every heading parents to doc root);
+//!   the parent-selector arm (heading i → sel % (i+1)) only fires under
+//!   HOLON_PBT_EXTENDED_GEN, so headline-depth / nested-page bug classes are
+//!   NOT reached by the default gate (runtime nesting only via Create/mutation)
+//! @pbt gen ADVICE_TAG_POOL couples two floors: rule-block presence IS floored
+//!   (advice_rule_arm_reachable_in_default_mix ~20/200) but the tag COLLISION
+//!   that makes advice_expectation nonempty is NOT — a SetEdgeField weight/pool
+//!   change can silently drop advice invariants to the exp-empty vacuous path
 
 use std::collections::HashMap;
 use std::collections::HashSet;

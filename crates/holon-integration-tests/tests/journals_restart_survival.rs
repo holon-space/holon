@@ -17,6 +17,10 @@
 //! keystone never exercises. Reuses the two-boot persistent-DB harness shape
 //! from `matview_reboot_duplicate_repro.rs`. Expected to FAIL until the seed
 //! routing is fixed.
+//!
+//! @pbt kind harness
+//! @pbt covers restart-persistence(journals) — Journals view definition survives restart-over-existing-vault (BugFunnel 144)
+//! @pbt overlaps general_e2e_composed_pbt — kept: keystone has NO restart transition, cannot reach this class
 
 use std::sync::Arc;
 use std::time::Duration;

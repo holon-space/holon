@@ -1,5 +1,13 @@
 //! `inv-no-parent-cycles` — ADR-0004 domain invariant.
 //!
+//! @pbt oracle internal-consistency — the SUT parent chain terminates at a
+//!   root without revisiting a node (structural, no ref)
+//! @pbt covers parent-cycle — a write path bypassing BlockMutation::validate /
+//!   tree.mov admits a cyclic parent_id into the projection
+//! @pbt slips-if-removed a mutation-guard regression lets a block become its
+//!   own ancestor; projection walks / render recursion spin forever and no
+//!   other oracle observes the cycle
+//!
 //! Domain rule: the block parent relation is acyclic — following `parent_id`
 //! from any block eventually reaches a root (no-parent / sentinel) without
 //! revisiting a node. Cycles are rejected at mutation time

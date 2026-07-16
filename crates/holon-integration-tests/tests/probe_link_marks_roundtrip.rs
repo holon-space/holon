@@ -5,6 +5,9 @@
 //! held `marks = NULL`, write-back re-rendered the stripped label, and the
 //! `[[…]]` link syntax was destroyed on disk (`inv-blocks-match-ref/org` marks
 //! divergence in the composed keystone). Loro is the default authority here.
+//!
+//! @pbt kind harness
+//! @pbt covers link-marks-roundtrip — inline [[link]] marks round-trip through Loro to block_raw and disk
 
 use std::collections::HashMap;
 use std::sync::Arc;

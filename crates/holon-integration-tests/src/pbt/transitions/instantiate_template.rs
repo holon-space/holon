@@ -4,6 +4,12 @@
 //! `instantiate_template`. The ref side models the expected instance blocks
 //! using the production deterministic-instance-id function, so existing
 //! block-comparison invariants verify the result.
+//!
+//! @pbt rung dispatch
+//!   `instantiate_template` mints template blocks via `block.create` dispatch;
+//!   storage-only pin uses the op-floor SutTemplateInstantiate. No template
+//!   gesture verified (see UNCERTAIN).
+//! @pbt covers template-instantiate — canned inline template -> block.create fan-out
 
 use holon_api::EntityUri;
 use holon_pbt_core::TransitionFactory;

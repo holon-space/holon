@@ -1,5 +1,9 @@
 //! OTel / performance-metrics component for the PBT SUT.
 //!
+//! @pbt kind sut-arm
+//! @pbt covers all-slices (span-metrics) — non-functional SUT arm: per-transition
+//!   span/RSS/wall metrics feeding `inv-sql-budget` (latency SLO teeth).
+//!
 //! Owns the per-transition span collector and RSS sampling. Hosted by the
 //! composed `span_metrics` component (`composed/span_metrics.rs`), which
 //! forwards the lifecycle hooks — `on_transition_start` (reset before each

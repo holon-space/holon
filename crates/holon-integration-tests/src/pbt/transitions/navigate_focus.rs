@@ -1,5 +1,10 @@
 //! Transition: navigate to a specific block within a region.
 //!
+//! @pbt rung input-pipeline
+//!   `apply_navigate_focus_via`: sidebar click_entity(left_sidebar) -> the
+//!   entry's bound navigation.focus intent (find_click_intent -> dispatch).
+//! @pbt covers sidebar-nav-focus — sidebar click -> navigation.focus intent + SQL nav write
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:568-601`
 //! (generator), `state_machine.rs:3165-3167` (precondition),
 //! `state_machine.rs:2222-2241` (ref-state apply),

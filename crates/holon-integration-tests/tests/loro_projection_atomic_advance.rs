@@ -15,6 +15,9 @@
 //! `TempDir`, the global doc force-initialized, real block nodes inserted into
 //! the global tree, and an in-memory sink standing in for both the
 //! `OriginTaggedWrites` command bus and the `SinkReader` read side.
+//!
+//! @pbt kind harness
+//! @pbt covers loro-projection-atomic — atomic base-advance fault injection for Loro→SQL projection
 
 use std::collections::HashMap;
 use std::sync::Arc;

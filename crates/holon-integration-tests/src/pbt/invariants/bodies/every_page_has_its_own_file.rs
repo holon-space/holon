@@ -6,6 +6,13 @@
 //! than one (a DOUBLE-HOMED page — the same id `#+ID:`-rooting two files, a
 //! duplicate/split-identity hazard) is allowed.
 //!
+//! @pbt oracle correspondence
+//! @pbt covers page materialization — every ref `Page` doc-root owns exactly
+//!   one `#+ID:`-rooted file (not fileless, not double-homed)
+//! @pbt slips-if-removed a nested page stays store-only (fileless, row 137) and
+//!   vanishes on store-rebuild-from-disk, or double-homes across two files and
+//!   splits its identity
+//!
 //! This is the materialization-side twin of
 //! `inv-companion-has-no-child-page-headings`: the companion oracle asserts the
 //! *inlining* file de-inlines a child page; THIS oracle asserts the child page

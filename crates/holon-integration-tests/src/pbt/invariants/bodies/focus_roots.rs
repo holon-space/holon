@@ -1,6 +1,13 @@
 //! `inv-focus-roots` — the `focus_roots` matview's per-region root set matches
 //! the reference's expected focus roots.
 //!
+//! @pbt oracle correspondence
+//! @pbt covers focus-root-drift — per-region open-focus-root set
+//!   (nav_history → focus_roots matview) vs ref expected roots
+//! @pbt slips-if-removed a close-path that fails to set closed_at leaves a
+//!   stale root in the matview; the region keeps focusing the old subtree,
+//!   the main panel shows the wrong page, and no other invariant notices
+//!
 //! Strict with a CDC-lag → `Skipped` downgrade (same shape as
 //! `inv-blocks-match-ref/matview`): the body first compares the CDC-driven
 //! `LiveData<FocusRoot>` mirror (`SutBackend::live_focus_root_rows`) to the

@@ -1,5 +1,14 @@
 //! `inv-live-tree-matches-fresh`.
 //!
+//! @pbt oracle metamorphic — SUT-internal (no ref): the incremental
+//!   `set_data` result must equal a fresh interpretation of the same rows;
+//!   no ref projection of the live collection-driver path exists, so the
+//!   fresh rebuild IS the oracle for the props children should see
+//! @pbt covers set-data-prop-propagation — live vs fresh per-item prop diff
+//! @pbt slips-if-removed the collection driver's set_data fails to push an
+//!   updated prop (state_toggle checked, editable_text value) to an existing
+//!   child widget; GPUI shows stale content while the fresh tree is correct
+//!
 //! The persistent live ViewModel tree (the collection driver's `set_data`
 //! path, mirroring the GPUI frontend) must agree with a fresh interpretation
 //! of the same data rows. The fresh tree always reflects current data, so it

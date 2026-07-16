@@ -1,3 +1,6 @@
+//! @pbt kind harness
+//! @pbt covers multiline-serializer — multiline org serializer unit check
+
 // Standalone test of serialize_blocks_to_org for multi-line content
 use holon_api::EntityUri;
 use holon_api::block::Block;

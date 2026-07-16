@@ -22,6 +22,9 @@
 //!  5. task keywords: recognized (`DONE`) parses; not-yet-recognized dialect
 //!     keywords (`LATER`/`NOW`) are PRESERVED VERBATIM as content — WS-3 will
 //!     map them to `task_state` (see the `#[ignore]` stub at the bottom).
+//!
+//! @pbt kind harness
+//! @pbt covers logseq-vault-ingest — real LogSeq :org vault ingest (ForeignVaultCompat Inc 1)
 
 use std::collections::HashMap;
 use std::sync::Arc;

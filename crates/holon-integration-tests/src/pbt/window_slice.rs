@@ -3,6 +3,9 @@
 //! headless `frontend_slice` cannot: [`SutLayout`] geometry (real element
 //! bounds), backed by a live gpui window's [`BoundsRegistry`].
 //!
+//! @pbt kind slice-mod
+//! @pbt covers window-slice — component + builders + seed for the windowed arm.
+//!
 //! ## The Send / `!Send` split (the key E4 design point)
 //!
 //! The gpui `TestApp` that owns the window is `!Send`/single-threaded and must

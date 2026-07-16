@@ -1,5 +1,11 @@
 //! `inv-viewmodel-root-matches-render-expr`.
 //!
+//! @pbt oracle correspondence
+//! @pbt covers root-render-misplacement — active content render expr not at
+//!   the root (layout-less) or inside the main panel (3-column)
+//! @pbt slips-if-removed the engine renders the wrong widget kind at the
+//!   root / main panel (content missing or wrong view mode); the user sees
+//!   wrong or absent primary content
 //!
 //! Asserts the active **content** render expression is rendered in the right
 //! place, in EITHER of the two rendering modes the GPUI app passes through:

@@ -4,6 +4,10 @@
 //! set of active query watches the server is serving. Per ADR 0004 this state
 //! must vanish when the MCP server isn't wired — isolating it here lets a
 //! non-MCP wiring drop the fragment instead of carrying dead state.
+//!
+//! @pbt kind ref
+//! @pbt covers mcp-actor-state — the active query-watch set (`query_id →
+//!   WatchSpec`) the MCP server serves; single-homed watch registry.
 
 use std::collections::HashMap;
 

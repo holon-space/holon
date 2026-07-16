@@ -5,6 +5,9 @@
 //! storage realization re-runs the entire applicable catalog *for free*, by
 //! capability presence, with zero catalog duplication (§6 payoff).
 //!
+//! @pbt kind slice-mod
+//! @pbt covers loro-slice — re-exports the co-located `LoroBackendComponent`.
+//!
 //! Beyond the block-tree caps it shares with the memory slice, the
 //! [`LoroBackendComponent`] also provides [`SutLoroLog`], unlocking the
 //! Loro-specific invariants (`inv-loro-no-errors`,

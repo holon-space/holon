@@ -1,5 +1,12 @@
 //! Transition: navigate back in the per-region navigation history.
 //!
+//! @pbt rung dispatch
+//!   UNFAITHFUL SHORTCUT (audit TR-NAV): `navigate_back` dispatches the
+//!   `navigation.go_back` provider op directly through the session, bypassing
+//!   the leader-chord path a real user (and E2ESut's synthetic_dispatch) takes.
+//!   A headless chord path demonstrably exists (see move_up/down send_block_chord).
+//! @pbt covers nav-back — per-region navigation history back (op-level only)
+//!
 //! Pilot variant for the file-per-transition refactor. Mirrors the
 //! legacy logic split across `state_machine.rs:603-610` (generator),
 //! `state_machine.rs:3168-3170` (precondition),

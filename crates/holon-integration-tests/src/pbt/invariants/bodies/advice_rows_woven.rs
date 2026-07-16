@@ -1,5 +1,13 @@
 //! `inv-advice-rows-woven` — snapshot-level advice weave (ADR 0021/0022/0023).
 //!
+//! @pbt oracle correspondence
+//! @pbt covers advice-weave — top-K suppression-filtered lessons per anchor,
+//!   in non-increasing score order with top-K boundary dominance, vs the ref
+//!   expectation
+//! @pbt slips-if-removed renderer weaves a suppressed lesson, the wrong top-K,
+//!   or ascending-score order under an anchor; the advice section shows wrong
+//!   recommendations and nothing else observes it
+//!
 //! The rendered widget tree must weave, under each anchor node, exactly the
 //! advice rows the reference expects for that anchor: the top-K
 //! suppression-filtered lessons, in non-increasing score order, each stamped

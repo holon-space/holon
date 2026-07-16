@@ -1,5 +1,11 @@
 //! Transition: split a block at a byte position.
 //!
+//! @pbt rung input-pipeline
+//! @pbt covers editor-split — Enter-at-cursor split via the live InputState
+//!   capture_action path (editor_view.rs), not the chord resolver
+//! @pbt gen position weighted toward content byte boundaries of the focused
+//!   block; shrinks toward position 0 via proptest default
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:1171-1191`
 //! (generator), `state_machine.rs:3426-3436` (precondition),
 //! `state_machine.rs:2687-2691` (ref-state apply),

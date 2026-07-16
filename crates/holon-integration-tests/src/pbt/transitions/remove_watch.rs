@@ -1,5 +1,11 @@
 //! Transition: remove an active watch (post-startup).
 //!
+//! @pbt rung dispatch
+//!   `unregister_watch` drops the tracked WatchGuard (Drop releases the query
+//!   watcher). OBSERVABILITY HOLE (audit TR-OBS): no invariant checks a
+//!   torn-down watch actually stopped emitting / released resources.
+//! @pbt covers watch-teardown — watch removal + guard drop
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:534-542`
 //! (generator), `state_machine.rs:3161-3163` (precondition),
 //! `state_machine.rs:2216-2218` (ref-state apply),

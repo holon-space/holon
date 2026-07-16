@@ -16,6 +16,9 @@
 //! SUT's drivable caps (peer/seam/E4/fixture cap-gate out; watches + mutate are
 //! DELIBERATELY narrowed pending B5 / the Loro-doc-unification fix —
 //! see [`wide_e2e_ref`]).
+//!
+//! @pbt kind slice
+//! @pbt covers wide-e2e-swap — the composed general_e2e slice: production E2ETransition over compose_sut, wiring-drawn
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;

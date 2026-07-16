@@ -20,6 +20,9 @@
 //! `strict|warn|skip`, pattern is an invariant-id glob with a single optional
 //! `*` (`inv-focus-roots`, `inv-value-fn-provider*`, `*match-ref*`, `*`),
 //! case-insensitive, first-match-wins.
+//!
+//! @pbt kind infra
+//! @pbt covers invariant-softening-knob — HOLON_PBT_INVARIANTS env-only disclosed per-invariant softening
 
 /// A runtime override of an invariant's effective failure disposition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

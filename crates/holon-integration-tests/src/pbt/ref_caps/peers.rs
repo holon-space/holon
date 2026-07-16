@@ -1,5 +1,13 @@
 //! `RefPeers` / `RefPeersMut` (Phase 6a) — thin orphan-rule impls.
 //!
+//! @pbt kind ref
+//! @pbt covers loro-peer-merge — orphan-rule delegates to
+//!   `holon_loro_testing::ref_ext::LoroRefExt`, which REUSES the REAL Loro CRDT
+//!   sync on shadow docs fed from ref intent (not SUT read-back) — the
+//!   strongest reused-not-under-test-engine oracle for concurrent-merge order /
+//!   text interleaving. The peer→primary block merge + `recanon_and_rebuild`
+//!   fixpoint stay core-side (`merge_peer_blocks_into_primary`).
+//!
 //! The trait lives in `holon-pbt-core`, the concrete `ReferenceState` in this
 //! crate, so the impls must stay here (orphan rule). The Loro-private *logic*
 //! moved to `holon_loro_testing::ref_ext::LoroRefExt` (RefStateSplit Inc 5);

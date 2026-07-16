@@ -23,6 +23,9 @@
 //! Option A): [`LiveMcpE2E::build`] rebuilds the vault from the embedded
 //! `scripts/seed_wide/*.org` seed and self-checks the resulting `block_raw` id
 //! set, so every proptest case starts from the same deterministic tree.
+//!
+//! @pbt kind infra
+//! @pbt covers live-mcp-slice — out-of-process twin of the keystone over a live MCP app
 
 use std::collections::BTreeSet;
 use std::path::Path;

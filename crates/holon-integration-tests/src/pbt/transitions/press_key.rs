@@ -1,5 +1,10 @@
 //! Transition: press a structural key chord in the active editor.
 //!
+//! @pbt rung input-pipeline
+//!   `press_key` drives `send_raw_keystroke` for each chord key through the
+//!   production UserDriver.
+//! @pbt covers structural-chord — raw key chord -> bubble_input resolution
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:1682-1717`
 //! (generator), `state_machine.rs:3558-3560` (precondition),
 //! `state_machine.rs:2975-3051` (ref-state apply),

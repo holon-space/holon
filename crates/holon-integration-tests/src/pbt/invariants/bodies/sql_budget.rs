@@ -1,6 +1,15 @@
 //! `inv-sql-budget` (`otel-testing` only) — per-transition SQL/wall/memory
 //! budget.
 //!
+//! @pbt oracle budget — per-transition SQL read/write/DDL + wall + RSS counts
+//!   vs an expected budget (canonical id home; body dispatched via
+//!   composed::span_metrics::InvComposedBudget)
+//! @pbt covers perf-regression — a transition issuing N+1 / over-budget SQL or
+//!   blowing the wall / memory ceiling
+//! @pbt slips-if-removed a change adds an O(N) query-per-row or a full
+//!   reprojection to a hot transition; latency silently regresses past the SLO
+//!   with no failing test (only fires when HOLON_PERF_BUDGET enforces)
+//!
 //! ## E3: relocated off `E2ESut` onto the composed slice
 //! The budget was historically dispatched natively over `E2ESut` via a
 //! `SutSpanMetrics` cap binding `Invariant<ReferenceState, S>`. That body could

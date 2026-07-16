@@ -1,5 +1,9 @@
 //! The SUT components of the memory-wide slice. Each is a [`CapProvider`] that
 //! contributes one or more capabilities to a composed `CapMap`.
+//!
+//! @pbt kind sut-arm
+//! @pbt covers memory-slice — in-memory store arm: no projection, no CDC, no
+//!   async settle; exists purely for speed (microseconds/case)
 
 use std::collections::HashMap;
 use std::sync::Arc;

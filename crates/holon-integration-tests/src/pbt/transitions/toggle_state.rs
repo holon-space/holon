@@ -1,6 +1,11 @@
 //! Transition: toggle the task state of a block via the StateToggle widget
 //! path.
 //!
+//! @pbt rung input-pipeline
+//!   `apply_toggle_state_to_sut`: wait_for_widget_kind(state_toggle) +
+//!   click_entity through the production driver.
+//! @pbt covers task-state-cycle — state_toggle click -> task-state cycle
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:941-1054`
 //! (generator), `state_machine.rs:3236-3262` (precondition),
 //! `state_machine.rs:2519-2533` (ref-state apply),

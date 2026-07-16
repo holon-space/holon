@@ -1,5 +1,11 @@
 //! Transition: switch the current view (post-startup).
 //!
+//! @pbt rung dispatch
+//!   VACUOUS (audit TR-VAC): `switch_view` is a pure harness field write
+//!   (`*current_view.lock() = name`) that no production view-switch path
+//!   drives — the oracle reads back the same field. Tests nothing of prod.
+//! @pbt covers view-switch — current-view selection (harness mirror only; no prod path)
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:544-553`
 //! (generator), `state_machine.rs:3164` (precondition),
 //! `state_machine.rs:2219-2221` (ref-state apply),

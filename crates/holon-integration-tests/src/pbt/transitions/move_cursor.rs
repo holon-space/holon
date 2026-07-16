@@ -1,5 +1,9 @@
 //! Transition: move the active editor's caret to a byte position.
 //!
+//! @pbt rung input-pipeline
+//!   `apply_move_cursor` drives caret keystrokes through the editor pipeline.
+//! @pbt covers editor-caret-move — caret keystroke -> InputState cursor
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:1637-1648`
 //! (generator), `state_machine.rs:3552-3556` (precondition, shared arm),
 //! `state_machine.rs:2956-2959` (ref-state apply),

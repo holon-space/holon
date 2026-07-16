@@ -17,6 +17,14 @@
 //! v1 narrowings (all liftable, all fail loud): the keystone generator mints a
 //! single active rule whose anchor and candidate source are both
 //! `AnchorSelector::HasTag` — any other selector variant `unreachable!`s.
+//!
+//! @pbt kind ref
+//! @pbt covers advice-weave — INDEPENDENT Rust re-implementation of the advice
+//!   matview + read-time weave (self-join `shared_tag_count`, suppression
+//!   anti-join, K-cut, sort DESC). Differential against the SUT's Turso IVM SQL
+//!   path — uncorrelated derivation, NOT a mirror. FIDELITY: hand-encodes the
+//!   contract pinned in `holon-advice` matview_build.rs / synthesis.rs — must
+//!   track those; the `HasTag`-only narrowing is fail-loud (`unreachable!`).
 
 use std::collections::BTreeMap;
 

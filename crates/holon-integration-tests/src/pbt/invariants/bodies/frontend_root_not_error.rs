@@ -1,5 +1,12 @@
 //! `inv-frontend-root-not-error`.
 //!
+//! @pbt oracle internal-consistency
+//! @pbt covers root-not-error — the frontend root ViewModel node is not the
+//!   Error variant
+//! @pbt slips-if-removed a broken root render-expr collapses the entire
+//!   window to a single error node; the whole app is unusable yet no
+//!   correspondence check runs because there is no valid tree to compare
+//!
 //! Checks that the frontend's root ViewModel node is not the Error variant.
 //!
 //! 1-subsystem invariant — touches only ViewModel.

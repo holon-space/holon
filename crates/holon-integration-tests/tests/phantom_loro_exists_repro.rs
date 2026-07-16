@@ -30,6 +30,9 @@
 //! If `[PHANTOM-LORO-TRACE]` appears for `bulk-0-N` (N >= 1) BEFORE
 //! the corresponding `apply_create` call in the same batch, the race is
 //! reproduced. The matched `tree_id` in the trace identifies the writer.
+//!
+//! @pbt kind harness
+//! @pbt covers phantom-loro-exists — phantom-Loro-exists race (Phase 3.7 gate)
 
 use std::sync::Arc;
 use std::time::Duration;

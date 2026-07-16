@@ -1,5 +1,8 @@
 //! Transition: initialize a git repository.
 //!
+//! @pbt rung external
+//! @pbt covers git-init — git repository initialization
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:363-365`
 //! (generator), `state_machine.rs:3103` (precondition),
 //! `state_machine.rs:1935-1937` (ref-state apply),

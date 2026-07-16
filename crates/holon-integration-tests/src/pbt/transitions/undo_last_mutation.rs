@@ -1,5 +1,12 @@
 //! Transition: undo the last UI mutation.
 //!
+//! @pbt rung dispatch
+//!   `undo_last_mutation` calls `engine.undo()` directly; cmd+z is unbound in
+//!   production (undo-ruling), so no higher rung exists yet. OBSERVABILITY OK:
+//!   the ref does a full block_state snapshot/restore, so block-tree
+//!   correspondence observes wrong-content restores (cursor is only reset).
+//! @pbt covers undo-stack — engine undo restores the pre-mutation block tree
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:1417-1418`
 //! (generator), `state_machine.rs:3488` (precondition),
 //! `state_machine.rs:2720-2726` (ref-state apply),

@@ -1,5 +1,10 @@
 //! Transition: click on a focusable rendered block to focus it.
 //!
+//! @pbt rung input-pipeline
+//!   `apply_click_block_to_sut`: wait_for_bounds + click_entity +
+//!   wait_for_engine_focus through the production UserDriver.
+//! @pbt covers click-to-focus — pointer click -> find_click_intent -> focus
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:628-670`
 //! (generator), `state_machine.rs:3175-3180` (precondition),
 //! `state_machine.rs:2277-2315` (ref-state apply),
