@@ -1566,6 +1566,69 @@ impl ReferenceStateMachine for WideE2EWindowedMachine {
     }
 }
 
+// ── F11: wiring-draw distribution floor ──────────────────────────────────
+//
+// A generator regression that silently stops drawing an arm (e.g. the rare,
+// low-probability Turso query-adapter at `QUERY_ADAPTER_INCLUSION_PROB`, or an
+// actor) would make an entire invariant family (SQL projections, ActionEngine
+// advice, …) run ZERO times over a keystone run and still pass GREEN. The floor
+// makes that loud: over N draws of the SAME strategy the keystone uses
+// (`any_valid_wiring()` over `wiring_axes()`), EVERY component in the drawable
+// universe must be drawn at least once.
+//
+// Modeled on the F2 engagement floor: a pure, unit-testable decision
+// (`wiring_draw_floor_violations`) plus a deterministic sampling test that is
+// the actual regression guard ("over N cases"). Unlike the per-sequence
+// engagement floor, the wiring floor is cross-draw by nature — each sequence
+// draws exactly ONE wiring, so a per-sequence teardown hook could never observe
+// "all arms drawn". Its teeth therefore live in the sampling test, not a
+// teardown assertion. Per-case wiring is separately disclosed live via the
+// `[wide-e2e wiring]` line, so a real run log still yields the observed
+// distribution; this floor asserts the strategy can produce every arm.
+
+/// One drawable wiring component across the three axes — the granularity the
+/// distribution floor requires to be non-empty over a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum WiringComponent {
+    Storage(StorageAdapter),
+    Sync(holon_pbt_core::SyncAdapter),
+    Actor(Actor),
+}
+
+/// The drawable component universe for the CURRENT axes (`wiring_axes()`,
+/// env-overridable). The floor requires each of these to be drawn ≥1× over a
+/// run.
+pub fn drawable_wiring_universe() -> BTreeSet<WiringComponent> {
+    let (storage, sync, actors) = holon_pbt_core::wiring_axes();
+    storage
+        .into_iter()
+        .map(WiringComponent::Storage)
+        .chain(sync.into_iter().map(WiringComponent::Sync))
+        .chain(actors.into_iter().map(WiringComponent::Actor))
+        .collect()
+}
+
+/// The components a single drawn wiring exercises.
+pub fn wiring_components(w: &Wiring) -> BTreeSet<WiringComponent> {
+    w.storage_adapters
+        .iter()
+        .copied()
+        .map(WiringComponent::Storage)
+        .chain(w.sync_adapters.iter().copied().map(WiringComponent::Sync))
+        .chain(w.actors.iter().copied().map(WiringComponent::Actor))
+        .collect()
+}
+
+/// Pure floor decision: components in the drawable `universe` that never
+/// appeared across the accumulated `seen` draws. Non-empty ⇒ an arm was never
+/// drawn ⇒ its invariant family ran zero times (vacuity by omission).
+pub fn wiring_draw_floor_violations(
+    seen: &BTreeSet<WiringComponent>,
+    universe: &BTreeSet<WiringComponent>,
+) -> Vec<WiringComponent> {
+    universe.difference(seen).copied().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use holon_pbt_core::capabilities::PeerEditOp;
@@ -1575,6 +1638,79 @@ mod tests {
     use crate::pbt::transitions::MergeFromPeer;
     use crate::pbt::transitions::PeerEdit;
     use crate::pbt::transitions::SyncWithPeer;
+
+    /// F11 pure-floor: a component present in the drawable universe but never
+    /// seen across the accumulated draws MUST be reported as a violation — this
+    /// is the "a generator regression skewed an arm to zero" signal. Mirrors
+    /// the F2 `engagement_floor_violations` unit test.
+    #[test]
+    fn wiring_draw_floor_flags_never_drawn_arm() {
+        let universe: BTreeSet<WiringComponent> = [
+            WiringComponent::Storage(StorageAdapter::Loro),
+            WiringComponent::Storage(StorageAdapter::Turso),
+            WiringComponent::Actor(Actor::ActionEngine),
+        ]
+        .into_iter()
+        .collect();
+        // Turso was never drawn (the regression the floor exists to catch).
+        let seen: BTreeSet<WiringComponent> = [
+            WiringComponent::Storage(StorageAdapter::Loro),
+            WiringComponent::Actor(Actor::ActionEngine),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            wiring_draw_floor_violations(&seen, &universe),
+            vec![WiringComponent::Storage(StorageAdapter::Turso)]
+        );
+    }
+
+    /// F11 pure-floor: full coverage owes no violation.
+    #[test]
+    fn wiring_draw_floor_passes_when_every_arm_drawn() {
+        let universe = drawable_wiring_universe();
+        assert!(
+            wiring_draw_floor_violations(&universe, &universe).is_empty(),
+            "a seen-set equal to the universe must satisfy the floor"
+        );
+    }
+
+    /// F11 live guard ("over N cases"): the ACTUAL keystone strategy
+    /// (`any_valid_wiring()` over the current `wiring_axes()`) must be able to
+    /// draw every component in its drawable universe over N draws. A generator
+    /// regression that skews an arm (e.g. the rare
+    /// `QUERY_ADAPTER_INCLUSION_PROB` Turso arm) to zero fails HERE instead
+    /// of silently vacating that arm's invariant family in the keystone.
+    /// Deterministic (fixed-seed runner).
+    #[test]
+    fn any_valid_wiring_draws_every_arm_over_n() {
+        use proptest::strategy::ValueTree;
+        use proptest::test_runner::Config;
+        use proptest::test_runner::TestRunner;
+
+        let strategy = holon_pbt_core::any_valid_wiring();
+        let mut runner = TestRunner::new(Config {
+            cases: 1,
+            ..Config::default()
+        });
+        let mut seen: BTreeSet<WiringComponent> = BTreeSet::new();
+        // 2048 draws: at Turso's 0.15 inclusion prob the rarest arm still lands
+        // ~300× — the floor is deterministic, not flaky.
+        for _ in 0..2048 {
+            if let Ok(tree) = strategy.new_tree(&mut runner) {
+                seen.extend(wiring_components(&tree.current()));
+            }
+        }
+        let universe = drawable_wiring_universe();
+        let missing = wiring_draw_floor_violations(&seen, &universe);
+        assert!(
+            missing.is_empty(),
+            "wiring-draw floor: components in the drawable universe were NEVER drawn over 2048 \
+             draws of `any_valid_wiring()` — the generator skews them to zero, which would \
+             silence their invariant family in the keystone: {missing:?} (universe: {universe:?}, \
+             seen: {seen:?})"
+        );
+    }
 
     /// Seed-generalization validation (the §8.10 next-step gate): a
     /// **Loro-only** wide draw (no Turso ⇒ no frontend) boots EMPTY through

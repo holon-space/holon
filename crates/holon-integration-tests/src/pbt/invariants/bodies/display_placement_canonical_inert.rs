@@ -55,6 +55,24 @@ where
     }
 
     async fn check(&self, _: &R, sut: &S) -> InvariantResult {
+        // ── F8: selection paired with the injection seam's env gate ──
+        // The display-placed node is only injected when HOLON_PBT_DISPLAY_PLACED
+        // is set (`frontend_slice::components::inject_display_placed`, keyed off
+        // the SAME env). With it unset there is no node to prove inert, so this
+        // invariant is NOT APPLICABLE this run — disclose it as `Skipped`
+        // (counted + visible in `report.ran`) rather than fail non-vacuity. This
+        // makes the default keystone deterministic and green; setting the env
+        // exercises the real Phase 1a inertness check below (which may legitimately
+        // RED on a real display-placement perturbation — the WIP signal).
+        if std::env::var("HOLON_PBT_DISPLAY_PLACED").is_err() {
+            return InvariantResult::Skipped(
+                "[inv-display-placement-canonical-inert] SKIPPED: HOLON_PBT_DISPLAY_PLACED unset \
+                 — no display-placed injection this run (selection paired with the injection \
+                 seam's env gate). Set HOLON_PBT_DISPLAY_PLACED=1 to exercise Phase 1a inertness."
+                    .into(),
+            );
+        }
+
         // ── Non-vacuity: the widget tree MUST contain a display-placed node ──
         let tree = sut.widget_tree_snapshot().await;
         let placed_ids: Vec<String> = tree

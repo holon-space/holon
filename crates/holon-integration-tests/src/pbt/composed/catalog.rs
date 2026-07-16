@@ -133,8 +133,9 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // proves a display-placed row does not perturb canonical projections
         // (block-id set, org render, consolidation). Needs SutBackend +
         // SutOrgRender + SutRenderer. The injection seam is gated by
-        // HOLON_PBT_DISPLAY_PLACED; unset → invariant fails non-vacuity
-        // (no display-placed node in the tree).
+        // HOLON_PBT_DISPLAY_PLACED; the body pairs its selection with that same
+        // env (F8): unset → `Skipped` (counted, visible, deterministic green);
+        // set → runs the Phase 1a inertness check (may RED on a real gap).
         invariants::display_placement_canonical_inert::wire(),
         // Advice weave (ADR 0021/0022/0023): the rendered tree must weave each
         // anchor's top-K suppression-filtered advice rows. Needs `SutRenderer` +

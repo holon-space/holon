@@ -531,6 +531,12 @@ components:
   kind: module
   invariant_ids:
   - inv-no-observed-errors
+- file: crates/holon-integration-tests/src/pbt/composed/reseed_observer.rs
+  kind: module
+  invariant_ids:
+  - inv-no-steady-reseed-leak
+  env_gates:
+  - HOLON_PBT_RESEED_ORACLE
 - file: crates/holon-integration-tests/src/pbt/composed/span_metrics.rs
   kind: module
   provides_caps:
@@ -711,11 +717,11 @@ components:
   slips-if-removed:
   - renderer weaves a suppressed lesson, the wrong top-K, or ascending-score order under an anchor; the
     advice section shows wrong recommendations and nothing else observes it
+  oracle:
+  - correspondence
   covers:
   - advice-weave — top-K suppression-filtered lessons per anchor, in non-increasing score order with top-K
     boundary dominance, vs the ref expectation
-  oracle:
-  - correspondence
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/block_ids_match_ref.rs
   kind: invariant
   invariant_ids:
@@ -727,10 +733,10 @@ components:
   slips-if-removed:
   - a block created in the ref never reaches SQL (or a ghost row survives a delete); the block is silently
     missing from / extra in every SQL-backed query and panel
-  covers:
-  - block-tree drift — SQL projection block-id set vs ref non-seed block ids (coarse set equality)
   oracle:
   - correspondence
+  covers:
+  - block-tree drift — SQL projection block-id set vs ref non-seed block ids (coarse set equality)
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/block_tags_references_exist.rs
   kind: invariant
   invariant_ids:
@@ -740,11 +746,11 @@ components:
   slips-if-removed:
   - a block DELETE that leaves its block_tags rows behind (cascade not wired) creates orphan junction
     rows that resurface phantom tags in tag-driven queries
+  oracle:
+  - internal-consistency
   covers:
   - junction referential integrity — block_tags.block_id orphaned w.r.t. block_raw (no DB-level FK in
     Turso IVM mode)
-  oracle:
-  - internal-consistency
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/companion_has_no_child_page_headings.rs
   kind: invariant
   invariant_ids:
@@ -756,11 +762,11 @@ components:
   slips-if-removed:
   - companion writeback keeps a child page inlined (or a leftover backlink line); the page is double-represented
     and a store-rebuild-from-disk re-ingests it under the wrong parent
+  oracle:
+  - correspondence
   covers:
   - writeback de-inline — a folder-companion `.org` retaining a heading for a block the ref models as
     a `Page` doc-root (is_page_block)
-  oracle:
-  - correspondence
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/display_placement_canonical_inert.rs
   kind: invariant
   invariant_ids:
@@ -769,16 +775,18 @@ components:
   - SutBackend
   - SutOrgRender
   - SutRenderer
+  env_gates:
+  - HOLON_PBT_DISPLAY_PLACED
   slips-if-removed:
   - a placement path that writes to SQL/Loro/org instead of staying render-only corrupts canonical state
     while the row still displays
-  covers:
-  - display-placement inertness — a display-placed widget node must not perturb SQL / Loro / org canonical
-    state
   oracle:
   - sut-internal — the display-placed injection is a post-snapshot widget-tree node with no reference
     projection, so inertness is proven by SUT canonical self-reads (org fixed-point + placed-id-is-real),
     not a ref
+  covers:
+  - display-placement inertness — a display-placed widget node must not perturb SQL / Loro / org canonical
+    state
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/displayed_text.rs
   kind: invariant
   invariant_ids:
@@ -793,11 +801,11 @@ components:
   slips-if-removed:
   - after split/join the row's data signal fires but the editable_text InputState or VM `content` prop
     skips the update; the user sees stale text on screen
+  oracle:
+  - correspondence
   covers:
   - displayed-text staleness — text-widget / ViewModel content vs ref block content (or the live editor
     text while editing)
-  oracle:
-  - correspondence
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/editable_text_has_draggable.rs
   kind: invariant
   invariant_ids:
@@ -809,12 +817,12 @@ components:
   slips-if-removed:
   - a render path emits editable_text without its draggable wrapper (row_id None); drag&drop silently
     breaks for those rows
-  covers:
-  - drag-affordance pairing — every editable_text/rendered_text in a block-profile subtree paired with
-    a same-id draggable
   oracle:
   - internal-consistency — SUT widget-tree pairing check; the ref cap gates a skip only (`has_blocks_profile`),
     it is not compared against
+  covers:
+  - drag-affordance pairing — every editable_text/rendered_text in a block-profile subtree paired with
+    a same-id draggable
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/embedded_page_collapsed_lazy.rs
   kind: invariant
   invariant_ids:
@@ -828,11 +836,11 @@ components:
   slips-if-removed:
   - a collapsed embedded page leaks its children into the main panel (lazy gate bypassed → unbounded eager
     load) or renders with no expand_toggle affordance
+  oracle:
+  - correspondence
   covers:
   - lazy embedded-page gating — expand_toggle presence and collapsed→no-descendants-in-panel vs the ref
     expansion state
-  oracle:
-  - correspondence
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/every_page_has_its_own_file.rs
   kind: invariant
   invariant_ids:
@@ -843,11 +851,11 @@ components:
   slips-if-removed:
   - a nested page stays store-only (fileless, row 137) and vanishes on store-rebuild-from-disk, or double-homes
     across two files and splits its identity
+  oracle:
+  - correspondence
   covers:
   - page materialization — every ref `Page` doc-root owns exactly one `#+ID:`-rooted file (not fileless,
     not double-homed)
-  oracle:
-  - correspondence
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/focus_matches_ref.rs
   kind: invariant
   invariant_ids:
@@ -860,11 +868,11 @@ components:
   slips-if-removed:
   - a focus op leaves the engine focused on the wrong block or unfocused (steal-back / lost-focus); keyboard
     input routes to the wrong row
+  oracle:
+  - correspondence
   covers:
   - global focus tracking — engine `focused_block` vs ref global focus (resolved) after a focus-changing
     transition
-  oracle:
-  - correspondence
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/focus_roots.rs
   kind: invariant
   invariant_ids:
@@ -874,11 +882,11 @@ components:
   slips-if-removed:
   - a close-path that fails to set closed_at leaves a stale root in the matview; the region keeps focusing
     the old subtree, the main panel shows the wrong page, and no other invariant notices
+  oracle:
+  - correspondence
   covers:
   - focus-root-drift — per-region open-focus-root set (nav_history → focus_roots matview) vs ref expected
     roots
-  oracle:
-  - correspondence
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/frontend_bounds_rendered.rs
   kind: invariant
   invariant_ids:
@@ -891,11 +899,11 @@ components:
   slips-if-removed:
   - a render-expr that emits a widget the gpui window never lays out (zero-size / off-screen / silently
     dropped) ships a blank or mis-ordered panel that headless VM-only checks cannot see
+  oracle:
+  - internal-consistency
   covers:
   - render-layout-coherence — VM-emitted entities actually laid out (sizes, no error widgets, y-order/contiguity,
     not visually empty); RefLayout only gates the content-presence sub-checks
-  oracle:
-  - internal-consistency
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/frontend_engine.rs
   kind: invariant
   invariant_ids:
@@ -905,11 +913,11 @@ components:
   slips-if-removed:
   - a matview/CDC/waker stall that leaves the root perpetually `loading` ships a permanently blank window
     that the headless engine, having no live window, never exercises
+  oracle:
+  - internal-consistency
   covers:
   - render-liveness — the gpui window's ReactiveEngine resolves the root layout to a settled (non-loading)
     ViewModel
-  oracle:
-  - internal-consistency
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/frontend_no_error_widgets.rs
   kind: invariant
   invariant_ids:
@@ -919,11 +927,11 @@ components:
   slips-if-removed:
   - a render expression that evaluates to an error node (bad query, missing field, interp panic) renders
     a red error card in the live window where the user would see it but no assertion fires
+  oracle:
+  - internal-consistency
   covers:
   - no-error-widgets — no Error widget in the laid-out BoundsRegistry (authoritative) or, absent geometry,
     the ViewModel tree
-  oracle:
-  - internal-consistency
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/frontend_root_not_error.rs
   kind: invariant
   invariant_ids:
@@ -933,10 +941,10 @@ components:
   slips-if-removed:
   - a broken root render-expr collapses the entire window to a single error node; the whole app is unusable
     yet no correspondence check runs because there is no valid tree to compare
-  covers:
-  - root-not-error — the frontend root ViewModel node is not the Error variant
   oracle:
   - internal-consistency
+  covers:
+  - root-not-error — the frontend root ViewModel node is not the Error variant
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/live_children_match_ref.rs
   kind: invariant
   invariant_ids:
@@ -949,10 +957,10 @@ components:
   slips-if-removed:
   - org-ingested block whose Loro fractional index never reaches SQL sort_key (stuck at default "A0")
     silently mis-sorts against moved siblings; UI shows wrong order, nothing else observes it
-  covers:
-  - sibling-order — SQL projection sort_key order vs ref document order, per parent, non-seed blocks only
   oracle:
   - correspondence
+  covers:
+  - sibling-order — SQL projection sort_key order vs ref document order, per parent, non-seed blocks only
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/live_tree_matches_fresh.rs
   kind: invariant
   invariant_ids:
@@ -962,12 +970,12 @@ components:
   slips-if-removed:
   - the collection driver's set_data fails to push an updated prop (state_toggle checked, editable_text
     value) to an existing child widget; GPUI shows stale content while the fresh tree is correct
-  covers:
-  - set-data-prop-propagation — live vs fresh per-item prop diff
   oracle:
   - 'metamorphic — SUT-internal (no ref): the incremental `set_data` result must equal a fresh interpretation
     of the same rows; no ref projection of the live collection-driver path exists, so the fresh rebuild
     IS the oracle for the props children should see'
+  covers:
+  - set-data-prop-propagation — live vs fresh per-item prop diff
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/main_panel_rows_match_focus.rs
   kind: invariant
   invariant_ids:
@@ -979,10 +987,10 @@ components:
   slips-if-removed:
   - a CDC delete that fails to propagate through the focus_roots→main-panel chained matview leaves the
     previous root's rows in the panel after navigation (dioxus w4-web-05, GPUI stale sidebar)
-  covers:
-  - stale-rows-on-nav — ref-known main-panel rows must ⊆ Main's current focus-root subtree (ref.expected_visible_content_ids)
   oracle:
   - correspondence
+  covers:
+  - stale-rows-on-nav — ref-known main-panel rows must ⊆ Main's current focus-root subtree (ref.expected_visible_content_ids)
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/mod.rs
   kind: invariant
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/no_errors.rs
@@ -994,11 +1002,11 @@ components:
   slips-if-removed:
   - a DDL/sync race that logs a publish error during initial document sync ships silent data-loss on boot;
     the UI may look fine while a document failed to sync and nothing else asserts on it
+  oracle:
+  - internal-consistency
   covers:
   - app-error-log-empty — no Flutter/event publish error logged since startup (the app-level counter,
     distinct from widget-tree errors)
-  oracle:
-  - internal-consistency
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/no_orphan_blocks.rs
   kind: invariant
   invariant_ids:
@@ -1008,11 +1016,11 @@ components:
   slips-if-removed:
   - the projection drops a parent node while keeping its children; the children become unreachable in
     the tree and silently vanish from every view rooted above the lost node
+  oracle:
+  - internal-consistency
   covers:
   - no-orphan-blocks — every non-root block's parent_id resolves to a block present in the same matview
     snapshot
-  oracle:
-  - internal-consistency
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/no_page_under_non_page.rs
   kind: invariant
   invariant_ids:
@@ -1022,11 +1030,11 @@ components:
   slips-if-removed:
   - a generator/seed change reparents a page under a non-page; DocumentManager::name_chain bails deep
     in writeback instead of a clean keystone RED at the ref boundary
-  covers:
-  - page-hierarchy — a page nested under a non-page block
   oracle:
   - internal-consistency — ref-side structural tripwire on the generator/seed guarantee (walks the ref
     parent chain; reads no SUT)
+  covers:
+  - page-hierarchy — a page nested under a non-page block
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/no_parent_cycles.rs
   kind: invariant
   invariant_ids:
@@ -1036,12 +1044,12 @@ components:
   slips-if-removed:
   - a mutation-guard regression lets a block become its own ancestor; projection walks / render recursion
     spin forever and no other oracle observes the cycle
-  covers:
-  - parent-cycle — a write path bypassing BlockMutation::validate / tree.mov admits a cyclic parent_id
-    into the projection
   oracle:
   - internal-consistency — the SUT parent chain terminates at a root without revisiting a node (structural,
     no ref)
+  covers:
+  - parent-cycle — a write path bypassing BlockMutation::validate / tree.mov admits a cyclic parent_id
+    into the projection
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/org_render_fixed_point.rs
   kind: invariant
   invariant_ids:
@@ -1051,12 +1059,12 @@ components:
   slips-if-removed:
   - 'a property-drawer / sibling round-trip asymmetry (e.g. :share-role: mount) diverges render from disk;
     the app spins in an FSEvent echo loop the blocks-match-ref family never sees'
-  covers:
-  - org-echo-loop — render != disk that PERSISTS, forcing re_render_all_tracked to keep rewriting the
-    file and re-firing FSEvents
   oracle:
   - roundtrip — render(SQL) == on-disk bytes fixed point (bounded wait for a STABLE fixed point to reject
     transient projection lag)
+  covers:
+  - org-echo-loop — render != disk that PERSISTS, forcing re_render_all_tracked to keep rewriting the
+    file and re-firing FSEvents
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/sidebar_page_tag_preserved.rs
   kind: invariant
   invariant_ids:
@@ -1068,11 +1076,11 @@ components:
   slips-if-removed:
   - a folder-companion .org inlines a page-file doc-root as a plain heading, stripping its `Page` tag
     on cold-boot reconcile; the page vanishes from the sidebar and the id-set compare can't see it
+  oracle:
+  - correspondence — SUT live-projection is_page vs ref is_page_block, over ids present in the SUT snapshot
   covers:
   - page-demotion — a Page doc-root whose `Page` tag is stripped in the SUT projection while its block
     row survives
-  oracle:
-  - correspondence — SUT live-projection is_page vs ref is_page_block, over ids present in the SUT snapshot
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/source_language_iff_source.rs
   kind: invariant
   invariant_ids:
@@ -1082,11 +1090,11 @@ components:
   slips-if-removed:
   - an adapter projection corrupts source_language; a Source block renders with no language (or a Text
     block sprouts one) and no differential oracle flags it
-  covers:
-  - source-lang-projection — a Source row that lost its language or a Text/Image row that grew one
   oracle:
   - internal-consistency — source_language present iff content_type is Source, over the SUT write-side
     snapshot (no ref)
+  covers:
+  - source-lang-projection — a Source row that lost its language or a Text/Image row that grew one
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/sql_budget.rs
   kind: invariant
   invariant_ids:
@@ -1096,11 +1104,11 @@ components:
   slips-if-removed:
   - a change adds an O(N) query-per-row or a full reprojection to a hot transition; latency silently regresses
     past the SLO with no failing test (only fires when HOLON_PERF_BUDGET enforces)
-  covers:
-  - perf-regression — a transition issuing N+1 / over-budget SQL or blowing the wall / memory ceiling
   oracle:
   - budget — per-transition SQL read/write/DDL + wall + RSS counts vs an expected budget (canonical id
     home; body dispatched via composed::span_metrics::InvComposedBudget)
+  covers:
+  - perf-regression — a transition issuing N+1 / over-budget SQL or blowing the wall / memory ceiling
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/task_state_storage_coherence.rs
   kind: invariant
   invariant_ids:
@@ -1113,15 +1121,15 @@ components:
   slips-if-removed:
   - a CDC / tag-projection bug lets a store drift from the canonical task_state; a render reading it shows
     a checkbox the model contradicts
-  covers:
-  - loro-sql-desync — either store disagrees with the ref (and so, transitively, with the other) on presence
-    or value of task_state
   oracle:
   - 'correspondence — each block''s task_state in BOTH SUT stores (SQL `block_raw.properties` and the
     Loro tag projection) is compared to the REFERENCE (`RefTaskState::task_state_of`). Store-to-store
     coherence falls out: if both equal the ref, they equal each other. Re-anchored from the former SUT↔SUT
     comparison (F4) so a shared enrichment/CDC bug writing the same wrong value to BOTH stores can no
     longer stay green.'
+  covers:
+  - loro-sql-desync — either store disagrees with the ref (and so, transitively, with the other) on presence
+    or value of task_state
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/value_fn_provider_arg_variance_13.rs
   kind: invariant
   invariant_ids:
@@ -1134,12 +1142,12 @@ components:
   slips-if-removed:
   - a provider-cache regression re-allocates identities each interpret pass (or yields no focus rows under
     a focus_chain expr); the UI re-mounts / flickers streamed widgets with no other signal
-  covers:
-  - provider-cache-wiring — the ReactiveEngine / interpret_pure / ProviderCache coupling drops rows, churns
-    Arc identity, or flickers
   oracle:
   - internal-consistency — structural well-formedness of the SUT ProviderStabilityReport (bottom_dock
     presence, provider rows, cache identity); vfn13 is metamorphic (pass-1 identities reappear in pass-2)
+  covers:
+  - provider-cache-wiring — the ReactiveEngine / interpret_pure / ProviderCache coupling drops rows, churns
+    Arc identity, or flickers
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/value_fn_provider_identity.rs
   kind: invariant
   invariant_ids:
@@ -1152,12 +1160,12 @@ components:
   slips-if-removed:
   - flatten_properties mishandles a CDC Value::String and a checkbox flashes the wrong state mid-transition;
     the settled frame is correct so a post-settle-only oracle never sees it
-  covers:
-  - cdc-enrichment-glitch — a transient wrong StateToggle in an intermediate emission that a later structural
-    re-render masks
   oracle:
   - correspondence — each intermediate ViewModel StateToggle.current vs the ref task_state, over drained
     emission toggles
+  covers:
+  - cdc-enrichment-glitch — a transient wrong StateToggle in an intermediate emission that a later structural
+    re-render masks
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/viewmodel_decompiled_rows_match_query.rs
   kind: invariant
   invariant_ids:
@@ -1166,13 +1174,13 @@ components:
   - SutRenderer
   slips-if-removed:
   - interpret_pure drops or reorders a data row; the list silently shows fewer rows than the query returned
-  covers:
-  - row-drop — the interpreter renders an ordered SUBSET of the query rows (a dropped row the old subset-only
-    check let pass)
   oracle:
   - 'sut-internal — SUT decompiled rendered `content` vs SUT query data_rows `content` (ordered equality,
     filtered to ref visible_columns); DOCTRINE-SUSPECT: ref models no interpret_pure display tree, so
     the query result is the closest in-SUT ground truth and no ref render exists'
+  covers:
+  - row-drop — the interpreter renders an ordered SUBSET of the query rows (a dropped row the old subset-only
+    check let pass)
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/viewmodel_editable_text_triggers.rs
   kind: invariant
   invariant_ids:
@@ -1182,10 +1190,10 @@ components:
   slips-if-removed:
   - an editable_text with delete/set_field ops but empty triggers ships; typing never fires on_text_changed,
     so the slash-menu / wiki-link popups and bound ops are unreachable from input
-  covers:
-  - 'editable-text-trigger-wiring — render-DSL regression: editor has bound ops but no input triggers'
   oracle:
   - internal-consistency
+  covers:
+  - 'editable-text-trigger-wiring — render-DSL regression: editor has bound ops but no input triggers'
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/viewmodel_entity_ids_subset_of_data.rs
   kind: invariant
   invariant_ids:
@@ -1197,10 +1205,10 @@ components:
   slips-if-removed:
   - a render bug mints a widget with a fabricated or stale entity id (leftover peer row, mis-resolved
     uri); the UI shows a ghost row pointing at a non-existent block, nothing else observes it
-  covers:
-  - phantom-entity — a rendered entity id that is neither a root query-data row nor a ref-known block
   oracle:
   - correspondence
+  covers:
+  - phantom-entity — a rendered entity id that is neither a root query-data row nor a ref-known block
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/viewmodel_no_error_widgets.rs
   kind: invariant
   invariant_ids:
@@ -1208,11 +1216,11 @@ components:
   slips-if-removed:
   - a CDC/interpret failure renders Error placeholders in the user-visible tree; the app looks structurally
     fine but shows error boxes and no oracle flags it
+  oracle:
+  - internal-consistency
   covers:
   - error-widget-in-tree — render-pipeline fault (matview fault, CDC delivery bug, shadow-interp panic)
     leaves Error nodes in the tree
-  oracle:
-  - internal-consistency
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/viewmodel_root_matches_render_expr.rs
   kind: invariant
   invariant_ids:
@@ -1222,11 +1230,11 @@ components:
   slips-if-removed:
   - the engine renders the wrong widget kind at the root / main panel (content missing or wrong view mode);
     the user sees wrong or absent primary content
+  oracle:
+  - correspondence
   covers:
   - root-render-misplacement — active content render expr not at the root (layout-less) or inside the
     main panel (3-column)
-  oracle:
-  - correspondence
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/viewmodel_shows_source_when_no_query.rs
   kind: invariant
   invariant_ids:
@@ -1236,13 +1244,13 @@ components:
   slips-if-removed:
   - without a query engine the app attempts a full-mode render of a query block and shows an error/blank
     instead of the source editor; the degraded-mode contract silently breaks
-  covers:
-  - degradation-regression — no-Turso wiring fails to degrade a query-source block to the bare `source_editor`
-    view (ADR 0004 Phase 9)
   oracle:
   - sut-internal — ref is cap-blind to the storage backend and would predict the full-mode render, so
     a ref comparison is a guaranteed false Fail; the expected value is fixed by the sut_absent-SutQueryResults
     selection
+  covers:
+  - degradation-regression — no-Turso wiring fails to degrade a query-source block to the bare `source_editor`
+    view (ADR 0004 Phase 9)
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/viewmodel_snapshot.rs
   kind: invariant
   invariant_ids:
@@ -1252,10 +1260,10 @@ components:
   slips-if-removed:
   - a render-pipeline fault makes the whole root layout an error widget; the entire screen is an error
     box, unobserved
-  covers:
-  - root-error-widget — headless interpret_pure pipeline yields an `error` root layout
   oracle:
   - internal-consistency
+  covers:
+  - root-error-widget — headless interpret_pure pipeline yields an `error` root layout
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/viewmodel_state_toggle_correct.rs
   kind: invariant
   invariant_ids:
@@ -1268,11 +1276,11 @@ components:
   slips-if-removed:
   - a task block's toggle shows the wrong state or label, or lacks a task_state-affecting op; clicking
     the checkbox can't cycle state or displays a stale value
+  oracle:
+  - correspondence
   covers:
   - state-toggle-divergence — rendered StateToggle current/label/field/ops disagree with the ref block's
     task_state
-  oracle:
-  - correspondence
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/viewmodel_tree_virtual_slots.rs
   kind: invariant
   invariant_ids:
@@ -1284,12 +1292,12 @@ components:
   slips-if-removed:
   - the "add new block" slot renders above the page title, or the title renders as an editable state_toggle
     row instead of an h1; both dogfood regressions ship (devlog 2026-07-05)
-  covers:
-  - virtual-slot-misorder + page-title-wrong-variant — creation slot not last child; focused page title
-    on the default (state_toggle) variant instead of the page_title bare-text variant
   oracle:
   - internal-consistency — R:RefBlockTree only LOCATES the Main focus roots; nothing from ref is compared
     as an expected value, the assertions are structural (slot order, no state_toggle in title subtree)
+  covers:
+  - virtual-slot-misorder + page-title-wrong-variant — creation slot not last child; focused page title
+    on the default (state_toggle) variant instead of the page_title bare-text variant
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/watch_rows_match_ref.rs
   kind: invariant
   invariant_ids:
@@ -1297,11 +1305,11 @@ components:
   slips-if-removed:
   - a Turso IVM CDC bug delivers wrong/missing/spurious rows or a wrong parent_id (e.g. block:root-layout)
     to a live watch; the watched query panel shows stale or wrong data
+  oracle:
+  - correspondence
   covers:
   - cdc-watch-divergence — per-watch CDC-delivered ui_model rows (id set, selected fields, parent_id)
     disagree with ref expected rows
-  oracle:
-  - correspondence
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/window_focus_matches_engine_focus.rs
   kind: invariant
   invariant_ids:
@@ -1312,12 +1320,12 @@ components:
   slips-if-removed:
   - a stale window-focused editor keeps focus after engine focus moves; keystrokes meant for the newly
     focused block get consumed by the zombie editor
-  covers:
-  - focus-steal-back / zombie-editor (ADR 0010) — window focus settles on an editor different from engine
-    focus
   oracle:
   - sut-internal — compares the engine's focused_block against the per-frame window RenderedElement::focused;
     both are SUT authorities and the ref model has no window-focus projection to compare against
+  covers:
+  - focus-steal-back / zombie-editor (ADR 0010) — window focus settles on an editor different from engine
+    focus
 - file: crates/holon-integration-tests/src/pbt/layout_bridge.rs
   kind: module
   requires_sut_caps:
@@ -1532,6 +1540,11 @@ components:
     lenses over it. No datum is double-homed here.
 - file: crates/holon-integration-tests/src/pbt/reference_state.rs
   kind: ref
+  oracle:
+  - 'correspondence — the single `ReferenceState` oracle. Its `BuilderServices::interpret` REUSES the
+    production `ShadowInterpreter` (render engine) driven from the ref''s OWN block map (`get_block_data`),
+    never SUT read-back: legitimate reused-not-under-test-engine oracle, deliberately blind to render-engine-internal
+    bugs (covered by its own tier), sharp on the ref↔SUT projection axis.'
   covers:
   - 'block-tree/sibling-order — the structural mutation helpers (`move_block`/`outdent_block`/`swap_sequence`/`split_block`/`join_block`)
     each independently predict post-op sibling order. FIDELITY DRIFT: `move_block` deliberately SUPPRESSES
@@ -1540,11 +1553,6 @@ components:
     of the org `process_headlines` re-emission order (Source<Image<Text). A move followed by a same-parent
     content mutation re-canonicalizes and can silently reorder what the move placed — see the REF honesty-drift
     finding.'
-  oracle:
-  - 'correspondence — the single `ReferenceState` oracle. Its `BuilderServices::interpret` REUSES the
-    production `ShadowInterpreter` (render engine) driven from the ref''s OWN block map (`get_block_data`),
-    never SUT read-back: legitimate reused-not-under-test-engine oracle, deliberately blind to render-engine-internal
-    bugs (covered by its own tier), sharp on the ref↔SUT projection axis.'
 - file: crates/holon-integration-tests/src/pbt/sql_loro_slice/builders.rs
   kind: module
   requires_sut_caps:
@@ -2436,9 +2444,6 @@ components:
     row rebuilds and UI flicker; a flatten_properties CDC glitch emits a wrong StateToggle visible for
     one frame before a structural re-render masks it — both invisible once these consumers lose their
     walker
-  covers:
-  - provider-cache-coupling — ReactiveEngine/interpret_pure/ ProviderCache Arc churn, CDC-enrichment StateToggle
-    glitches
   oracle:
   - sut-internal (arg-variance-13) — provider cache-identity stability + bottom_dock structural presence
     over the SUT ReactiveViewModel; no ref projection of Arc identity exists. Its vfn13 sub-check is metamorphic
@@ -2448,6 +2453,9 @@ components:
     per tracked block
   - budget (sql-budget) — per-transition SQL/wall/RSS count vs a frozen expected budget (does not use
     this walker)
+  covers:
+  - provider-cache-coupling — ReactiveEngine/interpret_pure/ ProviderCache Arc churn, CDC-enrichment StateToggle
+    glitches
 - file: crates/holon-integration-tests/src/pbt/window_slice/builders.rs
   kind: module
   requires_sut_caps:
@@ -2830,11 +2838,11 @@ components:
   slips-if-removed:
   - the SQL→Loro mirror drops or corrupts a block field (e.g. marks or parent) on outdent/split; the SQL
     arm still matches ref so the Loro-only divergence — the tree the CRDT-backed UI reads — ships silently
+  oracle:
+  - correspondence
   covers:
   - loro-blocks-field-match — Loro store block-field divergence from the reference model (content/parent/marks
     drift in the SQL→Loro mirror), non-seed blocks only
-  oracle:
-  - correspondence
 - file: crates/holon-loro-testing/src/invariants/loro_children_match_ref.rs
   kind: module
   invariant_ids:
@@ -2847,11 +2855,11 @@ components:
   - a CRDT move/indent reassigns a fractional index non-monotonically, leaving Loro siblings out of order
     while SQL sort_key stays correct; a UI driven from the Loro tree shows the wrong order and no other
     observer catches it
+  oracle:
+  - correspondence
   covers:
   - loro-sibling-order — Loro fractional-index child order vs the reference document order, per parent,
     non-seed blocks only
-  oracle:
-  - correspondence
 - file: crates/holon-loro-testing/src/invariants/loro_no_errors.rs
   kind: module
   invariant_ids:
@@ -2862,11 +2870,11 @@ components:
   - an outdent/indent/split whose new parent is not yet a TreeID makes the controller log `Cannot resolve
     parent URI` and silently drop the event; the Loro tree diverges from SQL with no failing check to
     surface it
+  oracle:
+  - internal-consistency
   covers:
   - loro-sync-error — LoroSyncController dropped/failed-to-apply events (a gap in the SQL→Loro mirror),
     checked on the SUT alone
-  oracle:
-  - internal-consistency
 - file: crates/holon-loro-testing/src/invariants.rs
   kind: invariant
 - file: crates/holon-loro-testing/src/peer_ops.rs
@@ -2881,15 +2889,15 @@ components:
     + `tracing::error!`), never a silent return — a never-quiescing sync is surfaced to the caller (F7).
 - file: crates/holon-loro-testing/src/ref_ext.rs
   kind: ref
-  covers:
-  - peer-replicas — each `PeerRefState` owns its own block replica; this is CRDT modeling, not double-homing
-    of the single-homed primary (which lives in the domain fragment and is passed in read-only).
   oracle:
   - 'correspondence — the peer-merge oracle REUSES the REAL Loro CRDT sync on shadow docs, driven from
     ref intent (primary block data passed in by parameter, peer edits applied to owned replicas), never
     SUT read-back. Strongest reused-not-under-test-engine oracle for concurrent-merge sibling order +
     text interleaving. Independence rests on the two Clone seams: `clock_feed` SHARES its cell (harness
     Lamport side-channel, not model state); `shadow_mesh` DEEP-FORKS every doc per proptest step/case.'
+  covers:
+  - peer-replicas — each `PeerRefState` owns its own block replica; this is CRDT modeling, not double-homing
+    of the single-homed primary (which lives in the domain fragment and is passed in read-only).
 - file: crates/holon-loro-testing/src/shadow_mesh.rs
   kind: oracle
   covers:

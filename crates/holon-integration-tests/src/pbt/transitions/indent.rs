@@ -97,7 +97,8 @@ pub fn indent_weighted_generator<R: RefBlockTree + RefLifecycle>(
         let strat = prop::sample::select(candidates)
             .prop_map(|block_id| Indent { block_id })
             .boxed();
-        (1, strat)
+        // F16: raise structural chord weight 1 → 20 (was ~1/180 vs split=100).
+        (20, strat)
     })
 }
 

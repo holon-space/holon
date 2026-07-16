@@ -295,16 +295,31 @@ pub struct ComposedSut<S: ComposedSlice> {
     /// `check_invariants` read; a no-op for the headless path. See
     /// [`SettleHook`].
     settle: SettleHook,
-    /// Engagement ledger (F2): the ids of required invariants that produced at
-    /// least one NON-`Skipped` (gate-passed) verdict somewhere across THIS
-    /// sequence. Populated in `check_invariants` (interior mutability — the
-    /// trait method borrows `&Self`), asserted against the required floor in
-    /// `teardown`. Distinguishes "selected + ran" (the per-tick floor) from
-    /// "exercised with teeth": an invariant that early-returns `Skipped` on
-    /// every tick is selected but never proves anything, and must fail the
-    /// engagement floor rather than pass vacuously.
-    engaged: std::cell::RefCell<std::collections::BTreeSet<&'static str>>,
+    /// Engagement ledger (F2 + vacuity-dashboard sweep): a per-invariant tally
+    /// of how many ticks produced a NON-`Skipped` (gate-passed) verdict vs a
+    /// `Skipped` one, over THIS sequence, for EVERY invariant that ran (not
+    /// just the floor set). Populated in `check_invariants` (interior
+    /// mutability — the trait method borrows `&Self`); the floor set is
+    /// derived (engaged > 0) and asserted in `teardown`, which also emits
+    /// an observe-only summary line. Distinguishes "selected + ran" (the
+    /// per-tick floor) from "exercised with teeth": an invariant that
+    /// early-returns `Skipped` on every tick is selected but never proves
+    /// anything, and must fail the engagement floor (for floor-set ids)
+    /// rather than pass vacuously. The full per-invariant tally is the
+    /// vacuity dashboard primitive: it surfaces always-`Skipped` invariants
+    /// (engaged=0) even outside the floor set.
+    engaged: std::cell::RefCell<std::collections::BTreeMap<&'static str, EngageTally>>,
     _slice: PhantomData<S>,
+}
+
+/// Per-invariant engagement tally for the observe-only vacuity dashboard: how
+/// many ticks this sequence saw the invariant produce a gate-passed
+/// (non-`Skipped`) verdict vs a `Skipped` one. `engaged == 0 && skipped > 0`
+/// is the always-Skipped (potentially-vacuous) signal.
+#[derive(Default, Clone, Copy)]
+pub(crate) struct EngageTally {
+    pub engaged: u32,
+    pub skipped: u32,
 }
 
 impl<S: ComposedSlice> ComposedSut<S> {
@@ -337,7 +352,7 @@ impl<S: ComposedSlice> ComposedSut<S> {
             scaffold_ids,
             rt,
             settle,
-            engaged: std::cell::RefCell::new(std::collections::BTreeSet::new()),
+            engaged: std::cell::RefCell::new(std::collections::BTreeMap::new()),
             _slice: PhantomData,
         }
     }
@@ -466,7 +481,7 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
             scaffold_ids,
             rt,
             settle: Box::new(|| {}),
-            engaged: std::cell::RefCell::new(std::collections::BTreeSet::new()),
+            engaged: std::cell::RefCell::new(std::collections::BTreeMap::new()),
             _slice: PhantomData,
         }
     }
@@ -617,10 +632,13 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
             );
         }
         {
-            let mut engaged = sut.engaged.borrow_mut();
+            let mut ledger = sut.engaged.borrow_mut();
             for (id, result) in &report.ran {
-                if !matches!(result, InvariantResult::Skipped(_)) {
-                    engaged.insert(id.0);
+                let tally = ledger.entry(id.0).or_default();
+                if matches!(result, InvariantResult::Skipped(_)) {
+                    tally.skipped += 1;
+                } else {
+                    tally.engaged += 1;
                 }
             }
         }
@@ -666,7 +684,26 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
     /// accumulator, deferred (see the audit's "validate on the two F1
     /// invariants first, then sweep").
     fn teardown(sut: Self, ref_state: ReferenceState) {
-        let engaged = sut.engaged.borrow();
+        let ledger = sut.engaged.borrow();
+        // Observe-only vacuity dashboard (telemetry sweep): one line per
+        // sequence, `<id>=<engaged>/<total>` for EVERY invariant that ran this
+        // sequence. `engaged=0` (i.e. `0/N`) flags an always-`Skipped`
+        // invariant — a vacuity candidate — even for ids outside the scoped
+        // engagement floor. Greppable via `[engagement summary]`.
+        eprintln!(
+            "[engagement summary] {}",
+            ledger
+                .iter()
+                .map(|(id, t)| format!("{id}={}/{}", t.engaged, t.engaged + t.skipped))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        // The engaged SET (ids with ≥1 non-`Skipped` verdict) drives the floor.
+        let engaged: std::collections::BTreeSet<&'static str> = ledger
+            .iter()
+            .filter(|(_, t)| t.engaged > 0)
+            .map(|(id, _)| *id)
+            .collect();
         // Only draws that actually SELECT the invariant owe engagement — a
         // Loro-only draw with no renderer never selects the viewmodel ones.
         let required: std::collections::BTreeSet<&'static str> = S::required_invariants(&ref_state)

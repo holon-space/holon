@@ -101,7 +101,11 @@ pub fn move_up_weighted_generator<R: RefBlockTree + RefFocus + RefLifecycle>(
         let instance = MoveUp {
             block_id: focus_str,
         };
-        (1, Just(instance).boxed())
+        // F16 (chord-sampling starvation): structural chords were weight 1 vs
+        // split_block's 100 (~1/180 of the mass). Raise to 20 so the
+        // highest-value input-pipeline path is actually sampled; guarded above,
+        // so an invalid draw is filtered rather than flooding.
+        (20, Just(instance).boxed())
     })
 }
 
