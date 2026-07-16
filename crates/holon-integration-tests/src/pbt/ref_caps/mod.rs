@@ -37,6 +37,7 @@ use holon_pbt_core::capabilities::RefClock;
 use holon_pbt_core::capabilities::RefEditorMirror;
 use holon_pbt_core::capabilities::RefFocus;
 use holon_pbt_core::capabilities::RefGlobalFocus;
+use holon_pbt_core::capabilities::RefHistoryExpectation;
 use holon_pbt_core::capabilities::RefLayout;
 use holon_pbt_core::capabilities::RefTaskState;
 use holon_pbt_core::capabilities::RefToggle;
@@ -160,6 +161,12 @@ impl holon_pbt_core::composition::CapProvider for ReferenceState {
         // existing slices: selection ANDs SUT∧ref cap sets, and only a slice
         // supplying the matching `SutJournalCount` selects it.
         caps.insert(self.clone() as Arc<dyn RefClock>);
+        // `RefHistoryExpectation` carries the C2 provenance-oracle expectation
+        // (ever-created id anchor + UI-driven op-group floor) the `history_*`
+        // correspondences read. Harmless to existing slices: selection ANDs
+        // SUT∧ref cap sets, and only a Turso arm supplying the matching
+        // `SutHistory` selects the history invariants.
+        caps.insert(self.clone() as Arc<dyn RefHistoryExpectation>);
         caps.insert(self as Arc<dyn RefGlobalFocus>);
     }
 }

@@ -48,6 +48,7 @@ use holon_pbt_core::capabilities::SutEditorMirrorWrite;
 use holon_pbt_core::capabilities::SutErrorLog;
 use holon_pbt_core::capabilities::SutFocus;
 use holon_pbt_core::capabilities::SutFocusWrite;
+use holon_pbt_core::capabilities::SutHistory;
 use holon_pbt_core::capabilities::SutHistoryWrite;
 use holon_pbt_core::capabilities::SutMcpEmit;
 use holon_pbt_core::capabilities::SutMutate;
@@ -1978,11 +1979,39 @@ impl SutClockAdvance for HeadlessFrontendComponent {
     }
 }
 
+/// `SutHistory` (C2 provenance oracle read cap): read the `block_history`
+/// relation this component's engine records into. Backs the phantom-history
+/// subset check (`history_block_ids`) and the missed-history op-group floor
+/// (`history_op_group_count`).
+#[async_trait::async_trait(?Send)]
+impl SutHistory for HeadlessFrontendComponent {
+    async fn history_block_ids(&self) -> BTreeSet<EntityUri> {
+        self.sql_query("SELECT DISTINCT block_id FROM block_history")
+            .await
+            .iter()
+            .map(
+                |row| match row.get("block_id").and_then(|v| v.as_string()) {
+                    Some(s) => EntityUri::from_raw(s),
+                    None => panic!("block_history.block_id: expected TEXT, got {row:?}"),
+                },
+            )
+            .collect()
+    }
+
+    async fn history_op_group_count(&self) -> usize {
+        let rows = self
+            .sql_query("SELECT COUNT(DISTINCT op_group) AS n FROM block_history")
+            .await;
+        match rows.first().and_then(|r| r.get("n")) {
+            Some(holon_api::Value::Integer(i)) => *i as usize,
+            other => panic!("count(distinct op_group): expected INTEGER, got {other:?}"),
+        }
+    }
+}
+
 /// `SutHistoryWrite` (the `UndoLastMutation` / `Redo` transitions): undo/redo
 /// the last committed mutation through the production `BackendEngine` undo
-/// stack — the same `engine().undo()/redo()` path `E2ESut` drives. The
-/// `ref_state`-dependent block-convergence settle lives in the harness seam
-/// (`block_tree_post_action`), so the cap is a pure `&self` action here.
+/// stack.
 #[async_trait::async_trait(?Send)]
 impl SutHistoryWrite for HeadlessFrontendComponent {
     async fn undo_last_mutation(&self) {

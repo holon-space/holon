@@ -2508,6 +2508,42 @@ pub trait SutClockAdvance {
     async fn advance_clock_days(&self, days: i64) -> String;
 }
 
+/// SUT capability: read the C2 op/effect history relation (`block_history`)
+/// for the keystone provenance correspondences. Hosted only where a real
+/// `TursoHistoryStore` is wired (Turso present); an org-only draw omits it, so
+/// the history invariants deselect cleanly — no phantom/missed-history claim
+/// without a recording substrate.
+#[holon_macros::capmap_adapter]
+pub trait SutHistory {
+    /// The distinct `block_id`s that appear in `block_history` op-group rows —
+    /// every block the recorded op/effect stream has touched so far.
+    async fn history_block_ids(&self) -> BTreeSet<EntityUri>;
+    /// The number of distinct `op_group`s recorded so far (one per
+    /// history-recording `execute_operation` call with ≥1 field delta).
+    async fn history_op_group_count(&self) -> usize;
+}
+
+/// Reference-side expectation for the C2 history relation, derived by the
+/// harness from the per-tick id-reconcile map (the authoritative record of
+/// which blocks the oracle drove into existence). Feeds the two keystone
+/// provenance correspondences: `ever_created_ids` bounds PHANTOM history
+/// (every recorded id must be one the oracle knows/knew),
+/// `min_recorded_op_groups` bounds MISSED history (each oracle-driven create
+/// records ≥1 op_group).
+#[holon_macros::capmap_adapter]
+pub trait RefHistoryExpectation {
+    /// Every real block id the oracle minted via the reconcile — a SUPERSET
+    /// anchor for the phantom-history subset check (bigger only weakens the
+    /// check, never false-fails it).
+    fn ever_created_ids(&self) -> BTreeSet<EntityUri>;
+    /// A conservative lower bound on the distinct `op_group`s the SUT must have
+    /// recorded: the count of UI-driven (synthetic→real reconciled) creates,
+    /// each routed through `execute_operation` recording ≥1 delta. Excludes
+    /// born-equal external/peer creates (org-ingest / Loro path — no engine
+    /// history), so the bound never over-counts.
+    fn min_recorded_op_groups(&self) -> usize;
+}
+
 /// SUT capability: app lifecycle for the wide PBT — boot, restart, document
 /// creation, and the concurrent-schema-init regression probe. `&self`,
 /// `ref_state`-free; `ref_state`-derived values are precomputed at the
