@@ -4,13 +4,17 @@
 //!   maintained from the op/effect stream, queryable typed *and* joinable
 //!   directly by matviews/PRQL (Martin's ruling allows the SQL surface). A
 //!   disclosed ephemeral cache: rebuildable, never authoritative (Layer 3/4).
+//!   The table's DDL is owned by `HistorySchemaModule` (holon-turso) and runs
+//!   at boot — this type is only the typed accessor and fails loud if the
+//!   schema module did not run.
 //! - [`DegradedHistoryStore`] — org-standalone vaults with no Turso query
-//!   substrate. Reads fail loud with a disclosed reason; `record` is a
+//!   substrate. Reads fail loud with a disclosed reason; `record_batch` is a
 //!   disclosed no-op. Mirrors the CRDT-vs-LWW capability split.
 
 use anyhow::Context;
 use anyhow::Result;
 use async_trait::async_trait;
+use holon_api::history::utc_day;
 use holon_api::HistoryEvent;
 use holon_api::HistoryFidelity;
 use holon_api::HistoryQuery;
@@ -20,64 +24,60 @@ use tokio::sync::OnceCell;
 
 use crate::storage::DbHandle;
 
-const CREATE_TABLE_SQL: &str = "\
-CREATE TABLE IF NOT EXISTS block_history (
-    seq INTEGER PRIMARY KEY,
-    block_id TEXT NOT NULL,
-    op_name TEXT NOT NULL,
-    origin TEXT NOT NULL,
-    transition_id TEXT,
-    session_id TEXT,
-    tool_call_id TEXT,
-    field TEXT,
-    new_value TEXT,
-    at_millis INTEGER NOT NULL
-)";
-
-const CREATE_INDEX_BLOCK: &str =
-    "CREATE INDEX IF NOT EXISTS idx_block_history_block ON block_history(block_id)";
-const CREATE_INDEX_SESSION: &str =
-    "CREATE INDEX IF NOT EXISTS idx_block_history_session ON block_history(session_id)";
-const CREATE_INDEX_AT: &str =
-    "CREATE INDEX IF NOT EXISTS idx_block_history_at ON block_history(at_millis)";
-
 /// A Turso-projected [`HistoryStore`]. The relation is a real SQL table so it
 /// is directly joinable; this type is the thin typed accessor over it.
 pub struct TursoHistoryStore {
     db: DbHandle,
     fidelity: HistoryFidelity,
-    schema: OnceCell<()>,
+    /// Next `op_group` to assign, seeded once from `MAX(op_group)` in the
+    /// table — a deterministic monotonic sequence (pure function of table
+    /// state and call order, never random, so PBT replay and
+    /// rebuild-from-stream stay deterministic) that is unique across engine
+    /// restarts (a session-scoped counter would collide after a restart).
+    next_group: OnceCell<std::sync::atomic::AtomicI64>,
 }
+
+const INSERT_SQL: &str = "INSERT INTO block_history (entity_name, block_id, \
+     op_name, origin, transition_id, session_id, tool_call_id, effect_id, \
+     field, old_value, new_value, at_millis, day, op_group) \
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+const SELECT_COLS: &str = "entity_name, block_id, op_name, origin, \
+     transition_id, session_id, tool_call_id, effect_id, field, old_value, \
+     new_value, at_millis, op_group";
 
 impl TursoHistoryStore {
     /// Wrap a database handle. `fidelity` discloses the rebuild guarantee for
     /// the active vault mode (Loro store present → [`HistoryFidelity::Loro`]).
-    /// The schema is created lazily on first use (so construction stays sync).
+    /// The `block_history` table itself is created at boot by
+    /// `HistorySchemaModule`; this accessor fails loud if it is absent.
     pub fn new(db: DbHandle, fidelity: HistoryFidelity) -> Self {
         Self {
             db,
             fidelity,
-            schema: OnceCell::new(),
+            next_group: OnceCell::new(),
         }
     }
 
-    async fn ensure_schema(&self) -> Result<()> {
-        self.schema
+    /// The next fresh `op_group`, atomically. Seeded lazily from the table so
+    /// groups stay unique across restarts and deterministic under replay.
+    async fn next_op_group(&self) -> Result<i64> {
+        let counter = self
+            .next_group
             .get_or_try_init(|| async {
-                self.db
-                    .execute_ddl(CREATE_TABLE_SQL)
+                let rows = self
+                    .db
+                    .query_positional(
+                        "SELECT COALESCE(MAX(op_group), 0) AS g FROM block_history",
+                        vec![],
+                    )
                     .await
-                    .context("creating block_history table")?;
-                for ddl in [CREATE_INDEX_BLOCK, CREATE_INDEX_SESSION, CREATE_INDEX_AT] {
-                    self.db
-                        .execute_ddl(ddl)
-                        .await
-                        .context("creating block_history index")?;
-                }
-                anyhow::Ok(())
+                    .context("seeding block_history op_group sequence")?;
+                let max = req_int(rows.first().context("MAX(op_group) returned no row")?, "g")?;
+                anyhow::Ok(std::sync::atomic::AtomicI64::new(max + 1))
             })
             .await?;
-        Ok(())
+        Ok(counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst))
     }
 
     /// Build the `WHERE` clause + positional params for a filter. Kept together
@@ -86,16 +86,22 @@ impl TursoHistoryStore {
         let mut clauses: Vec<&str> = Vec::new();
         let mut params: Vec<Value> = Vec::new();
         for (col, v) in [
+            ("entity_name = ?", &filter.entity_name),
             ("block_id = ?", &filter.block_id),
             ("origin = ?", &filter.origin),
             ("session_id = ?", &filter.session_id),
             ("field = ?", &filter.field),
             ("new_value = ?", &filter.new_value),
+            ("day = ?", &filter.day),
         ] {
             if let Some(s) = v {
                 clauses.push(col);
                 params.push(Value::String(s.clone()));
             }
+        }
+        if let Some(group) = filter.op_group {
+            clauses.push("op_group = ?");
+            params.push(Value::Integer(group));
         }
         if let Some(since) = filter.since_millis {
             clauses.push("at_millis >= ?");
@@ -140,16 +146,44 @@ fn req_int(row: &holon_core::storage::types::StorageEntity, col: &str) -> Result
 
 fn row_to_event(row: &holon_core::storage::types::StorageEntity) -> Result<HistoryEvent> {
     Ok(HistoryEvent {
+        entity_name: req_text(row, "entity_name")?,
         block_id: req_text(row, "block_id")?,
         op_name: req_text(row, "op_name")?,
         origin: req_text(row, "origin")?,
         transition_id: opt_text(row, "transition_id")?,
         session_id: opt_text(row, "session_id")?,
         tool_call_id: opt_text(row, "tool_call_id")?,
+        effect_id: opt_text(row, "effect_id")?,
         field: opt_text(row, "field")?,
+        old_value: opt_text(row, "old_value")?,
         new_value: opt_text(row, "new_value")?,
         at_millis: req_int(row, "at_millis")?,
+        op_group: Some(req_int(row, "op_group")?),
     })
+}
+
+/// The positional params for one event row, in [`INSERT_SQL`] column order.
+/// `day` is derived here from `at_millis` (UTC, disclosed — see
+/// [`holon_api::history::utc_day`]) so it can never drift from the timestamp.
+fn insert_params(event: HistoryEvent, op_group: i64) -> Vec<turso::Value> {
+    let day = utc_day(event.at_millis);
+    let opt = |o: Option<String>| o.map(turso::Value::Text).unwrap_or(turso::Value::Null);
+    vec![
+        turso::Value::Text(event.entity_name),
+        turso::Value::Text(event.block_id),
+        turso::Value::Text(event.op_name),
+        turso::Value::Text(event.origin),
+        opt(event.transition_id),
+        opt(event.session_id),
+        opt(event.tool_call_id),
+        opt(event.effect_id),
+        opt(event.field),
+        opt(event.old_value),
+        opt(event.new_value),
+        turso::Value::Integer(event.at_millis),
+        turso::Value::Text(day),
+        turso::Value::Integer(op_group),
+    ]
 }
 
 #[async_trait]
@@ -158,40 +192,26 @@ impl HistoryStore for TursoHistoryStore {
         self.fidelity
     }
 
-    async fn record(&self, event: HistoryEvent) -> Result<()> {
-        self.ensure_schema().await?;
-        let params = vec![
-            Value::String(event.block_id),
-            Value::String(event.op_name),
-            Value::String(event.origin),
-            event
-                .transition_id
-                .map(Value::String)
-                .unwrap_or(Value::Null),
-            event.session_id.map(Value::String).unwrap_or(Value::Null),
-            event.tool_call_id.map(Value::String).unwrap_or(Value::Null),
-            event.field.map(Value::String).unwrap_or(Value::Null),
-            event.new_value.map(Value::String).unwrap_or(Value::Null),
-            Value::Integer(event.at_millis),
-        ];
+    async fn record_batch(&self, events: Vec<HistoryEvent>) -> Result<()> {
+        if events.is_empty() {
+            return Ok(());
+        }
+        let op_group = self.next_op_group().await?;
+        let statements: Vec<(String, Vec<turso::Value>)> = events
+            .into_iter()
+            .map(|event| (INSERT_SQL.to_string(), insert_params(event, op_group)))
+            .collect();
         self.db
-            .execute_values(
-                "INSERT INTO block_history (block_id, op_name, origin, transition_id, session_id, \
-                 tool_call_id, field, new_value, at_millis) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params,
-            )
+            .transaction(statements)
             .await
-            .context("recording block_history event")?;
+            .context("recording block_history event batch")?;
         Ok(())
     }
 
     async fn query(&self, filter: &HistoryQuery) -> Result<Vec<HistoryEvent>> {
-        self.ensure_schema().await?;
         let (where_sql, params) = Self::where_clause(filter);
-        let sql = format!(
-            "SELECT block_id, op_name, origin, transition_id, session_id, tool_call_id, field, \
-             new_value, at_millis FROM block_history{where_sql} ORDER BY seq ASC"
-        );
+        let sql =
+            format!("SELECT {SELECT_COLS} FROM block_history{where_sql} ORDER BY seq ASC");
         let rows = self
             .db
             .query_positional(&sql, params.iter().map(value_to_turso).collect())
@@ -201,7 +221,6 @@ impl HistoryStore for TursoHistoryStore {
     }
 
     async fn count(&self, filter: &HistoryQuery) -> Result<u64> {
-        self.ensure_schema().await?;
         let (where_sql, params) = Self::where_clause(filter);
         let sql = format!("SELECT COUNT(*) AS n FROM block_history{where_sql}");
         let rows = self
@@ -228,8 +247,9 @@ fn value_to_turso(v: &Value) -> turso::Value {
 
 /// The degraded [`HistoryStore`] for org-standalone vaults with no Turso query
 /// substrate. Discloses loudly: a warning at construction, [`HistoryFidelity::
-/// None`], `record` is a disclosed no-op (so provenance stamping's block writes
-/// never fail for lack of a cache), and reads return a loud, disclosed error.
+/// None`], `record_batch` is a disclosed no-op (so provenance stamping's block
+/// writes never fail for lack of a cache), and reads return a loud, disclosed
+/// error.
 pub struct DegradedHistoryStore {
     reason: String,
 }
@@ -258,29 +278,33 @@ impl HistoryStore for DegradedHistoryStore {
         HistoryFidelity::None
     }
 
-    async fn record(&self, _event: HistoryEvent) -> Result<()> {
+    async fn record_batch(&self, _: Vec<HistoryEvent>) -> Result<()> {
         // Disclosed no-op: nothing to record into (no query substrate). The
         // construction warning is the disclosure; failing here would break the
         // op path for lack of an ephemeral cache.
         Ok(())
     }
 
-    async fn query(&self, _filter: &HistoryQuery) -> Result<Vec<HistoryEvent>> {
+    async fn query(&self, _: &HistoryQuery) -> Result<Vec<HistoryEvent>> {
         anyhow::bail!("{}", self.reason)
     }
 
-    async fn count(&self, _filter: &HistoryQuery) -> Result<u64> {
+    async fn count(&self, _: &HistoryQuery) -> Result<u64> {
         anyhow::bail!("{}", self.reason)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use holon_turso::schema_module::SchemaModule;
+    use holon_turso::schema_modules::HistorySchemaModule;
+
     use super::*;
     use crate::storage::turso::TursoBackend;
 
     async fn store() -> (TursoBackend, TursoHistoryStore) {
         let (backend, db) = TursoBackend::new_in_memory().await.unwrap();
+        HistorySchemaModule.ensure_schema(&db).await.unwrap();
         (backend, TursoHistoryStore::new(db, HistoryFidelity::Loro))
     }
 
@@ -292,15 +316,19 @@ mod tests {
         at: i64,
     ) -> HistoryEvent {
         HistoryEvent {
+            entity_name: "block".to_string(),
             block_id: block.to_string(),
             op_name: op.to_string(),
             origin: "rule".to_string(),
             transition_id: Some("rule:postpone".to_string()),
             session_id: None,
             tool_call_id: None,
+            effect_id: None,
             field: field.map(str::to_string),
+            old_value: None,
             new_value: value.map(str::to_string),
             at_millis: at,
+            op_group: None,
         }
     }
 
@@ -361,6 +389,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn batch_shares_one_op_group_and_groups_are_distinct() {
+        let (_backend, store) = store().await;
+        // One op touching two fields: one batch, one group.
+        store
+            .record_batch(vec![
+                ev("A", "update", Some("status"), Some("doing"), 10),
+                ev("A", "update", Some("title"), Some("x"), 10),
+            ])
+            .await
+            .unwrap();
+        // A second op: a fresh group.
+        store
+            .record(ev("A", "set_field", Some("status"), Some("done"), 20))
+            .await
+            .unwrap();
+
+        let all = store.query(&HistoryQuery::for_block("A")).await.unwrap();
+        assert_eq!(all.len(), 3);
+        let g0 = all[0].op_group.expect("read-back rows carry op_group");
+        assert_eq!(all[1].op_group, Some(g0), "one op = one group");
+        let g2 = all[2].op_group.unwrap();
+        assert_ne!(g2, g0, "distinct ops get distinct groups");
+
+        // The group filter selects exactly the op's rows.
+        let group_rows = store
+            .query(&HistoryQuery {
+                op_group: Some(g0),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(group_rows.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn op_group_unique_across_store_reopen() {
+        // Two accessors over the SAME db (an engine restart): the second must
+        // seed past the first's groups, never reuse them.
+        let (_backend, first) = store().await;
+        first
+            .record(ev("A", "create", None, Some("x"), 1))
+            .await
+            .unwrap();
+        first
+            .record(ev("A", "set_field", Some("s"), Some("y"), 2))
+            .await
+            .unwrap();
+
+        let reopened = TursoHistoryStore::new(first.db.clone(), HistoryFidelity::Loro);
+        reopened
+            .record(ev("A", "set_field", Some("s"), Some("z"), 3))
+            .await
+            .unwrap();
+
+        let all = reopened.query(&HistoryQuery::default()).await.unwrap();
+        let mut groups: Vec<i64> = all.iter().map(|e| e.op_group.unwrap()).collect();
+        let before_dedup = groups.len();
+        groups.dedup();
+        assert_eq!(groups.len(), before_dedup, "no op_group reuse: {groups:?}");
+        assert!(
+            groups.windows(2).all(|w| w[0] < w[1]),
+            "monotonic: {groups:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn day_column_is_derived_and_queryable() {
+        let (_backend, store) = store().await;
+        // Two events a day apart; the day filter must separate them.
+        let noon = 1_784_203_200_000_i64;
+        store
+            .record(ev("A", "create", None, None, noon))
+            .await
+            .unwrap();
+        store
+            .record(ev("B", "create", None, None, noon + 86_400_000))
+            .await
+            .unwrap();
+        let day = holon_api::history::utc_day(noon);
+        let rows = store
+            .query(&HistoryQuery {
+                day: Some(day.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "day {day} selects only the first event");
+        assert_eq!(rows[0].block_id, "A");
+    }
+
+    #[tokio::test]
     async fn rebuild_from_stream_reproduces_relation() {
         // Ephemerality proof: the relation is a pure function of the event
         // stream. Record a stream, snapshot the answers, then replay the SAME
@@ -398,6 +517,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_table_shape_is_dropped_and_recreated() {
+        // A pre-op_group (schema v1) table must be replaced at boot, not
+        // migrated — the relation is a disclosed ephemeral cache.
+        let (_backend, db) = TursoBackend::new_in_memory().await.unwrap();
+        db.execute_ddl(
+            "CREATE TABLE block_history (seq INTEGER PRIMARY KEY, \
+             block_id TEXT NOT NULL, at_millis INTEGER NOT NULL)",
+        )
+        .await
+        .unwrap();
+        HistorySchemaModule.ensure_schema(&db).await.unwrap();
+        // The v2 accessor works against the recreated table.
+        let store = TursoHistoryStore::new(db, HistoryFidelity::Loro);
+        store
+            .record(ev("A", "create", None, None, 1))
+            .await
+            .unwrap();
+        assert_eq!(store.count(&HistoryQuery::default()).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
     async fn degraded_store_is_loud() {
         let degraded = DegradedHistoryStore::new();
         assert_eq!(degraded.fidelity(), HistoryFidelity::None);
@@ -413,7 +553,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("org-standalone degraded mode"), "got: {err}");
-        assert!(err.contains("_provenance"), "discloses the fallback: {err}");
+        assert!(err.contains("_provenance"), "discloses the block stamp: {err}");
         let count_err = degraded
             .count(&HistoryQuery::default())
             .await

@@ -164,6 +164,7 @@ fn stamp_params(
 /// provenance ids derived from `origin` via [`ProvenanceStamp`] so the stream
 /// and the block stamp never disagree. Pure and clock-free (unit-testable).
 fn history_events_for(
+    entity_name: &str,
     op_name: &str,
     origin: &OpOrigin,
     changes: &[holon_core::FieldDelta],
@@ -173,15 +174,22 @@ fn history_events_for(
     changes
         .iter()
         .map(|delta| HistoryEvent {
+            entity_name: entity_name.to_string(),
             block_id: delta.entity_id.clone(),
             op_name: op_name.to_string(),
             origin: stamp.origin.clone(),
             transition_id: stamp.transition_id.clone(),
             session_id: stamp.session_id.clone(),
             tool_call_id: stamp.tool_call_id.clone(),
+            // Reserved for ADR 0024 effect firings; the dispatch chokepoint
+            // has no effect id yet, so the column stays NULL for now.
+            effect_id: None,
             field: Some(delta.field.clone()),
+            old_value: Some(render_value(&delta.old_value)),
             new_value: Some(render_value(&delta.new_value)),
             at_millis: stamp.at_millis,
+            // Assigned by the store per record_batch call (one op = one group).
+            op_group: None,
         })
         .collect()
 }
@@ -351,20 +359,22 @@ impl DispatchingOperationEngine {
     }
 
     /// Append one [`HistoryEvent`] per field delta of a completed op to the
-    /// history relation. Provenance ids are derived from `origin` (reusing the
-    /// same [`ProvenanceStamp`] extraction as the block stamp, so the two
-    /// surfaces never disagree). The timestamp is the injected clock.
+    /// history relation, as ONE batch in one transaction (the store assigns
+    /// the batch a shared `op_group`). Provenance ids are derived from
+    /// `origin` (reusing the same [`ProvenanceStamp`] extraction as the block
+    /// stamp, so the two surfaces never disagree). The timestamp is the
+    /// injected clock.
     async fn record_history(
         &self,
         history: &dyn HistoryStore,
+        entity_name: &str,
         op_name: &str,
         origin: &OpOrigin,
         changes: &[holon_core::FieldDelta],
     ) -> Result<()> {
-        for event in history_events_for(op_name, origin, changes, self.clock.now_millis()) {
-            history.record(event).await?;
-        }
-        Ok(())
+        let events =
+            history_events_for(entity_name, op_name, origin, changes, self.clock.now_millis());
+        history.record_batch(events).await
     }
 
     /// Dispatch a stored op verbatim (used for inverse/forward replay). Never
@@ -585,7 +595,7 @@ impl DispatchingOperationEngine {
             })?;
 
         if let Some(history) = &self.history {
-            self.record_history(history.as_ref(), "create", origin, &result.changes)
+            self.record_history(history.as_ref(), "block", "create", origin, &result.changes)
                 .await?;
         }
 
@@ -886,7 +896,13 @@ impl OperationEngine for DispatchingOperationEngine {
         // the property stamp does not, and answers "postponed N times". Fails
         // loud (the relation is rebuildable but errors are never swallowed).
         if let Some(history) = &self.history {
-            self.record_history(history.as_ref(), op_name, &origin, &result.changes)
+            self.record_history(
+                history.as_ref(),
+                entity_name.as_str(),
+                op_name,
+                &origin,
+                &result.changes,
+            )
                 .await?;
         }
 
@@ -1378,16 +1394,20 @@ mod provenance_stamp_tests {
         let origin = OpOrigin::Rule {
             transition_id: "rule:postpone".into(),
         };
-        let events = history_events_for("set_field", &origin, &changes, 999);
+        let events = history_events_for("block", "set_field", &origin, &changes, 999);
 
         assert_eq!(events.len(), 2, "one event per field delta");
+        assert_eq!(events[0].entity_name, "block");
         assert_eq!(events[0].block_id, "A");
         assert_eq!(events[0].op_name, "set_field");
         assert_eq!(events[0].origin, "rule");
         assert_eq!(events[0].transition_id.as_deref(), Some("rule:postpone"));
         assert_eq!(events[0].field.as_deref(), Some("status"));
+        assert_eq!(events[0].old_value.as_deref(), Some("null"));
         assert_eq!(events[0].new_value.as_deref(), Some("postponed"));
         assert_eq!(events[0].at_millis, 999);
+        assert_eq!(events[0].op_group, None, "group is store-assigned");
+        assert_eq!(events[0].effect_id, None, "reserved until effects dispatch");
         // Non-string values render for query matching.
         assert_eq!(events[1].new_value.as_deref(), Some("7"));
     }
@@ -1399,7 +1419,7 @@ mod provenance_stamp_tests {
             session_id: "mcp-session:s".into(),
             tool_call_id: "tool-call:c".into(),
         };
-        let events = history_events_for("create", &origin, &changes, 1);
+        let events = history_events_for("block", "create", &origin, &changes, 1);
         assert_eq!(events[0].origin, "agent");
         assert_eq!(events[0].session_id.as_deref(), Some("mcp-session:s"));
         assert_eq!(events[0].tool_call_id.as_deref(), Some("tool-call:c"));

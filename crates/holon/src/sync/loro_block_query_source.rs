@@ -190,8 +190,14 @@ pub fn register_loro_operation_engine(
     dispatcher
         .assert_content_write_capability()
         .expect("[loro_block_query_source] operation-registry assembly check failed");
-    let engine: Arc<dyn OperationEngine> =
-        Arc::new(DispatchingOperationEngine::new(Arc::new(dispatcher)));
+    // History relation (C2b): no Turso query substrate here, so wire the
+    // DISCLOSED degraded store (warns at construction; reads fail loud) rather
+    // than silently omitting history.
+    let engine: Arc<dyn OperationEngine> = Arc::new(
+        DispatchingOperationEngine::new(Arc::new(dispatcher)).with_history_store(Arc::new(
+            crate::api::DegradedHistoryStore::new(),
+        )),
+    );
     injector.provide::<dyn OperationEngine>(Provider::root(move |_| engine.clone()));
 }
 
