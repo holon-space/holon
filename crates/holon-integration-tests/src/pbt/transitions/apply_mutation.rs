@@ -4,8 +4,9 @@
 //!   routed on the composed CapMap by MutationSource: External -> org-file
 //!   rewrite via SutSeamMutate (FileSyncController re-ingest); LoroPeer ->
 //!   SutLoro peer apply. No in-process op dispatch.
-//! @pbt covers mutation-source-differential — org vs Loro ingress the shrinker can localize
-//! @pbt gen source-gated to implemented arms (LoroPeer, External); UI/Action gated OUT of the composed alphabet
+//! @pbt covers mutation-source-differential — org vs Loro ingress the shrinker
+//! can localize @pbt gen source-gated to implemented arms (LoroPeer, External);
+//! UI/Action gated OUT of the composed alphabet
 //!
 //! Mirrors the legacy logic split across `state_machine.rs:469-823`
 //! (generator), `state_machine.rs:3118-3159` (precondition),

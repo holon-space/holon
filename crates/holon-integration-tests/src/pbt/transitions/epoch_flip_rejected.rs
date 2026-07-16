@@ -2,7 +2,8 @@
 //!
 //! @pbt rung dispatch
 //!   `assert_epoch_flip_rejected` is a consolidator-level assertion probe.
-//! @pbt covers consolidator-epoch-flip-reject — stale epoch flip must be rejected
+//! @pbt covers consolidator-epoch-flip-reject — stale epoch flip must be
+//! rejected
 //!
 //! Spec 0008 §4.2(b): with the app already running, a SECOND in-process boot
 //! over the SAME vault/db/config paths but with the consolidator flipped (Loro

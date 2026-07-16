@@ -23,7 +23,8 @@
 //! non-destructive (the typed text lives only in the transient editor).
 //!
 //! @pbt kind harness
-//! @pbt covers mcp-driver-rung — drives a real running app through embedded MCP (driver-ladder de-risk rung)
+//! @pbt covers mcp-driver-rung — drives a real running app through embedded MCP
+//! (driver-ladder de-risk rung)
 
 use std::time::Duration;
 

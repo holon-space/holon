@@ -17,7 +17,8 @@
 //! them), so the check stays green while the alphabet widens.
 //!
 //! @pbt kind infra
-//! @pbt covers windowed-composed-check — single-sourced E4 windowed composition check
+//! @pbt covers windowed-composed-check — single-sourced E4 windowed composition
+//! check
 
 use std::sync::Arc;
 

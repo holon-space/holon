@@ -3,7 +3,8 @@
 //! @pbt rung input-pipeline
 //!   `apply_trigger_slash_command_to_sut`: click + type '/' + command chars +
 //!   Enter, every step a real UserDriver gesture.
-//! @pbt covers slash-command — slash-menu keystroke sequence -> command dispatch
+//! @pbt covers slash-command — slash-menu keystroke sequence -> command
+//! dispatch
 //!
 //! Mirrors the legacy logic split across `state_machine.rs:1057-1081`
 //! (generator), `state_machine.rs:3263-3277` (precondition),

@@ -10,7 +10,8 @@
 //! @pbt covers action-actor-state — lifecycle flag, `next_doc_id` allocator,
 //!   last-transition tag (Markov weighting), and the undo/redo `BlockState`
 //!   snapshot stacks. FIDELITY: `next_doc_id`/`next_id` are monotonic across
-//!   undo/redo by design (prod never reuses a burned id, see `pop_undo_to_redo`).
+//!   undo/redo by design (prod never reuses a burned id, see
+//! `pop_undo_to_redo`).
 
 use holon_api::entity_uri::EntityUri;
 

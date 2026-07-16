@@ -389,8 +389,9 @@ pub struct ReferenceState {
     /// harness `run_report` from the id-reconcile map. `history_ever_created`
     /// = every real id the oracle minted (anchor for the phantom-history subset
     /// check); `history_min_op_groups` = the UI-driven create count the SUT's
-    /// `block_history` must meet or exceed (missed-history lower bound). Empty /
-    /// zero on a bare state; the harness fills them just before the check.
+    /// `block_history` must meet or exceed (missed-history lower bound). Empty
+    /// / zero on a bare state; the harness fills them just before the
+    /// check.
     pub history_ever_created: BTreeSet<EntityUri>,
     pub history_min_op_groups: usize,
 }

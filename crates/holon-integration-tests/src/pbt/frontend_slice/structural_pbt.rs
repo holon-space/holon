@@ -2890,8 +2890,13 @@ mod teeth {
     /// (`test-date-child`) under it, registers the frontend caps, and focuses
     /// the main panel on `block:journals` so the date page renders embedded.
     /// Returns `(comp, caps, journals, date_page, child)`.
-    async fn setup_embedded_page_sut()
-    -> (Arc<HeadlessFrontendComponent>, CapMap, EntityUri, EntityUri, EntityUri) {
+    async fn setup_embedded_page_sut() -> (
+        Arc<HeadlessFrontendComponent>,
+        CapMap,
+        EntityUri,
+        EntityUri,
+        EntityUri,
+    ) {
         use holon_pbt_core::capabilities::CapRegion;
         use holon_pbt_core::capabilities::SutFocusWrite;
 
@@ -2952,14 +2957,22 @@ mod teeth {
         let mut oracle = structural_ref();
         let mut date_block = Block::new_text(date_page.clone(), journals.clone(), "2026-07-14");
         date_block.set_page(true);
-        oracle.domain.block_state.blocks.insert(date_page.clone(), date_block);
+        oracle
+            .domain
+            .block_state
+            .blocks
+            .insert(date_page.clone(), date_block);
         oracle
             .domain
             .block_state
             .block_documents
             .insert(date_page.clone(), date_page.clone());
         let child_block = Block::new_text(child.clone(), date_page.clone(), "A note for the day");
-        oracle.domain.block_state.blocks.insert(child.clone(), child_block);
+        oracle
+            .domain
+            .block_state
+            .blocks
+            .insert(child.clone(), child_block);
         oracle
             .domain
             .block_state
@@ -3000,18 +3013,21 @@ mod teeth {
         let report_a = run_with_seeded_ref(&registry, &caps, resolved_a).await;
         let ran_a: Vec<_> = report_a.ran_ids().into_iter().collect();
         assert!(
-            ran_a.iter().any(|id| *id == "inv-embedded-page-collapsed-lazy"),
-            "Phase A (collapsed): inv-embedded-page-collapsed-lazy must select + run (ran: {ran_a:?})"
+            ran_a
+                .iter()
+                .any(|id| *id == "inv-embedded-page-collapsed-lazy"),
+            "Phase A (collapsed): inv-embedded-page-collapsed-lazy must select + run (ran: \
+             {ran_a:?})"
         );
         let failures_a = report_a.failures();
         assert!(
             failures_a.is_empty(),
-            "Phase A (collapsed): inv-embedded-page-collapsed-lazy must PASS — embedded page \
-             with collapsed expand_toggle, no leaked descendants. Failures: {failures_a:?}"
+            "Phase A (collapsed): inv-embedded-page-collapsed-lazy must PASS — embedded page with \
+             collapsed expand_toggle, no leaked descendants. Failures: {failures_a:?}"
         );
         eprintln!(
-            "[embedded_page_renders_collapsed_and_lazy] Phase A GREEN: \
-             collapsed expand_toggle present, no leaked descendants."
+            "[embedded_page_renders_collapsed_and_lazy] Phase A GREEN: collapsed expand_toggle \
+             present, no leaked descendants."
         );
     }
 
@@ -3021,8 +3037,8 @@ mod teeth {
     /// rendered `expand_toggle` reports `expanded=true`. Green via the
     /// view-local expansion store (RATIFIED 2026-07-16, Option B):
     /// `set_block_expanded` records the intent in the engine's non-persistent
-    /// `UiState.expanded_view`, and the `expand_toggle` shadow builder seeds its
-    /// gate from it on rebuild — so the flip survives the fresh
+    /// `UiState.expanded_view`, and the `expand_toggle` shadow builder seeds
+    /// its gate from it on rebuild — so the flip survives the fresh
     /// `widget_tree_snapshot()` even though embedded pages carry no `collapsed`
     /// document field.
     #[tokio::test(flavor = "multi_thread")]
@@ -3053,8 +3069,11 @@ mod teeth {
         let report_b = run_with_seeded_ref(&registry, &caps, resolved_b).await;
         let ran_b: Vec<_> = report_b.ran_ids().into_iter().collect();
         assert!(
-            ran_b.iter().any(|id| *id == "inv-embedded-page-collapsed-lazy"),
-            "Phase B (expanded): inv-embedded-page-collapsed-lazy must select + run (ran: {ran_b:?})"
+            ran_b
+                .iter()
+                .any(|id| *id == "inv-embedded-page-collapsed-lazy"),
+            "Phase B (expanded): inv-embedded-page-collapsed-lazy must select + run (ran: \
+             {ran_b:?})"
         );
         let failures_b = report_b.failures();
         assert!(
@@ -3063,19 +3082,20 @@ mod teeth {
              expanded, descendants permitted/present via lazy live_query. Failures: {failures_b:?}"
         );
         eprintln!(
-            "[embedded_page_expand_toggle_drives_expanded] Phase B GREEN: \
-             expanded toggle accepted, descendants permitted."
+            "[embedded_page_expand_toggle_drives_expanded] Phase B GREEN: expanded toggle \
+             accepted, descendants permitted."
         );
     }
 
     /// **Journal Overview feed (DOGFOOD_MVP A2+A3).**
     ///
-    /// The `block:journals` page's own feed (`::src::0` holon_sql + `::render::0`)
-    /// lists its `Page`-tagged day-entries NEWEST-FIRST, each rendered as a
-    /// DEFAULT-EXPANDED embedded page (via the `embedded_page_expanded` profile
-    /// variant, keyed on the `expand_default` column + the `default_expanded`
-    /// expand_toggle param), separated by a `divider()`. Prong (a): the feed
-    /// snapshot has one expanded `expand_toggle` per day-entry in newest-first
+    /// The `block:journals` page's own feed (`::src::0` holon_sql +
+    /// `::render::0`) lists its `Page`-tagged day-entries NEWEST-FIRST,
+    /// each rendered as a DEFAULT-EXPANDED embedded page (via the
+    /// `embedded_page_expanded` profile variant, keyed on the
+    /// `expand_default` column + the `default_expanded` expand_toggle
+    /// param), separated by a `divider()`. Prong (a): the feed snapshot has
+    /// one expanded `expand_toggle` per day-entry in newest-first
     /// order, with one `divider` each. Prong (b): a plain embedded page under a
     /// DIFFERENT focus root (no `expand_default`) still renders COLLAPSED — the
     /// global default is unchanged; only the feed context expands.
@@ -3155,8 +3175,8 @@ mod teeth {
         let pos_0714 = order.iter().position(|id| *id == "block:day-0714");
         assert!(
             matches!((pos_0715, pos_0714), (Some(a), Some(b)) if a < b),
-            "feed lists day-entries NEWEST-FIRST (ORDER BY content DESC): 0715 before 0714, \
-             got order {order:?}: {feed:#?}"
+            "feed lists day-entries NEWEST-FIRST (ORDER BY content DESC): 0715 before 0714, got \
+             order {order:?}: {feed:#?}"
         );
         for n in &toggles {
             assert_eq!(

@@ -1,8 +1,9 @@
 //! Capability-composition spine for trivially-sliceable PBT (γ design).
 //!
 //! @pbt kind cap-plumbing
-//! @pbt covers all-slices — CapMap typemap (insert fail-loud, expect panic-loud),
-//!   Config builder, CapInvariant selection (needs⁺⊆present ∧ needs⁻∩present=∅).
+//! @pbt covers all-slices — CapMap typemap (insert fail-loud, expect
+//! panic-loud),   Config builder, CapInvariant selection (needs⁺⊆present ∧
+//! needs⁻∩present=∅).
 //!
 //! **Relationship to production DI (`fluxdi`) — NESTED, not parallel (ADR 0019
 //! §5).** `fluxdi` (`holon_app::wiring::add_frontend`) *assembles the real

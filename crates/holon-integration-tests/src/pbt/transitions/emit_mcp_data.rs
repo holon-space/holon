@@ -4,7 +4,8 @@
 //!   purpose is an MCP re-emission; but the headless frontend has no
 //!   PbtMcpIntegration attached -> `emit_mcp_data` is a faithful no-op AND no
 //!   invariant observes an emission on this path (see audit finding TR-OBS).
-//! @pbt covers mcp-ivm-reemission — CDC re-eval to detect duplicate MCP emission
+//! @pbt covers mcp-ivm-reemission — CDC re-eval to detect duplicate MCP
+//! emission
 //!
 //! Mirrors the legacy logic split across `state_machine.rs:1424-1427`
 //! (generator), `state_machine.rs:3490` (precondition),

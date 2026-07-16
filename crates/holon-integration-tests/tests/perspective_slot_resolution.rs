@@ -13,7 +13,8 @@
 //!    default view mode switches too.
 //!
 //! @pbt kind harness
-//! @pbt covers perspective-slot-resolution — C8 root display slot resolves via perspective-data query
+//! @pbt covers perspective-slot-resolution — C8 root display slot resolves via
+//! perspective-data query
 
 use std::collections::HashMap;
 use std::sync::Arc;

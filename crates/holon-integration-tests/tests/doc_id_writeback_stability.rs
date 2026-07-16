@@ -22,7 +22,8 @@
 //! `FileSyncController` runs the ingest→writeback loop.
 //!
 //! @pbt kind harness
-//! @pbt covers doc-id-writeback-stability — doc #+ID re-mint data-loss pin (dogfood 2026-07-10)
+//! @pbt covers doc-id-writeback-stability — doc #+ID re-mint data-loss pin
+//! (dogfood 2026-07-10)
 
 use std::sync::Arc;
 use std::time::Duration;

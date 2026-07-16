@@ -131,7 +131,8 @@ pub fn parse_org_file(
 ) -> Result<ParseResult> {
     // Use the file stem (no extension) as the page title. The reference model
     // and PBT downstream consumers all normalize on stem.
-    // ALLOW(fallback): file stem is a deterministic title source, not a failure-mode shim
+    // ALLOW(fallback): file stem is a deterministic title source, not a
+    // failure-mode shim
     let file_name = path
         .file_stem()
         .and_then(|n| n.to_str())
@@ -443,7 +444,8 @@ fn process_headlines(
                     .split(|c: char| c == ',' || c.is_whitespace())
                     .filter(|s| !s.is_empty())
                 {
-                    // ALLOW(entity_uri_from_raw): org drawer REQUIRES/BLOCKED-BY bare slug at parse boundary
+                    // ALLOW(entity_uri_from_raw): org drawer REQUIRES/BLOCKED-BY bare slug at parse
+                    // boundary
                     let uri = EntityUri::from_raw(slug);
                     if !block.requires.contains(&uri) {
                         block.requires.push(uri);
@@ -457,7 +459,8 @@ fn process_headlines(
                 block.advice_suppressed = value
                     .split(|c: char| c == ',' || c.is_whitespace())
                     .filter(|s| !s.is_empty())
-                    // ALLOW(entity_uri_from_raw): org drawer ADVICE_SUPPRESSED bare slug at parse boundary
+                    // ALLOW(entity_uri_from_raw): org drawer ADVICE_SUPPRESSED bare slug at parse
+                    // boundary
                     .map(|s| EntityUri::from_raw(s))
                     .collect();
             } else if key.eq_ignore_ascii_case("COLLAPSED") {
@@ -556,7 +559,8 @@ fn process_headlines(
                                 .split(|c: char| c == ',' || c.is_whitespace())
                                 .filter(|s| !s.is_empty())
                             {
-                                // ALLOW(entity_uri_from_raw): org src-block REQUIRES/BLOCKED-BY header arg bare slug at parse boundary
+                                // ALLOW(entity_uri_from_raw): org src-block REQUIRES/BLOCKED-BY
+                                // header arg bare slug at parse boundary
                                 let uri = EntityUri::from_raw(slug);
                                 if !src_block.requires.contains(&uri) {
                                     src_block.requires.push(uri);
@@ -1013,8 +1017,7 @@ mod tests {
         // dependency edge (block_requires junction). It must lift into
         // `block.requires` exactly like `:REQUIRES:`, and NOT leak as a raw
         // property.
-        let content =
-            "* TODO Task\n:PROPERTIES:\n:ID: t1\n:BLOCKED-BY: foo, bar baz\n:END:\n";
+        let content = "* TODO Task\n:PROPERTIES:\n:ID: t1\n:BLOCKED-BY: foo, bar baz\n:END:\n";
         let result = parse_test_org(content);
 
         let h = result.blocks.iter().find(|b| b.id.id() == "t1").unwrap();
@@ -1042,8 +1045,8 @@ mod tests {
         // survives render -> re-parse losslessly, converged to `:REQUIRES:`.
         use crate::org_renderer::OrgRenderer;
 
-        let content =
-            "* TODO Task\n:PROPERTIES:\n:BLOCKED-BY: orient-daily-view now-query-mcp\n:ID: t1\n:END:\n";
+        let content = "* TODO Task\n:PROPERTIES:\n:BLOCKED-BY: orient-daily-view \
+                       now-query-mcp\n:ID: t1\n:END:\n";
         let path = PathBuf::from("/test/file.org");
         let root = PathBuf::from("/test");
         let file_id = generate_file_id(&path, &root);
@@ -1330,7 +1333,10 @@ mod tests {
             Some(TaskState::active("LATER"))
         );
         assert_eq!(result.blocks[0].org_title(), "Draft the proposal");
-        assert_eq!(result.blocks[1].task_state(), Some(TaskState::active("NOW")));
+        assert_eq!(
+            result.blocks[1].task_state(),
+            Some(TaskState::active("NOW"))
+        );
         assert_eq!(result.blocks[1].org_title(), "Review the draft");
         assert_eq!(result.blocks[2].task_state(), Some(TaskState::done("DONE")));
 

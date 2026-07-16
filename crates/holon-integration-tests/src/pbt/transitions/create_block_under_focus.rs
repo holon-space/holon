@@ -1,11 +1,12 @@
 //! Transition: create a block through the focused panel's creation slot.
 //!
 //! @pbt rung input-pipeline
-//!   no-id arm drives the production creation-slot gesture (`commit_creation_slot`,
-//!   re-resolves parent from the live rowset). Explicit-id arm dispatches
-//!   `block.create{id,..}` directly (no born-equal-id slot gesture exists).
-//! @pbt covers creation-slot — creation-slot gesture mint under focus root
-//! @pbt gen both id-present (direct create) and id-absent (slot gesture) arms
+//!   no-id arm drives the production creation-slot gesture
+//! (`commit_creation_slot`,   re-resolves parent from the live rowset).
+//! Explicit-id arm dispatches   `block.create{id,..}` directly (no
+//! born-equal-id slot gesture exists). @pbt covers creation-slot —
+//! creation-slot gesture mint under focus root @pbt gen both id-present (direct
+//! create) and id-absent (slot gesture) arms
 //!
 //! The capstone WP-G gate. Drives the "type here to create" gesture a real
 //! user performs — focus the live `:__virtual:<parent>` creation slot of the

@@ -25,8 +25,9 @@
 //! duplicate `id`. It is expected to FAIL, demonstrating the duplicate.
 //!
 //! @pbt kind harness
-//! @pbt covers matview-dup-forced-weights — duplicate matview row surfaced by keystone at forced weights
-//! @pbt overlaps general_e2e_composed_pbt — kept: fast localized repro of a keystone-surfaced bug
+//! @pbt covers matview-dup-forced-weights — duplicate matview row surfaced by
+//! keystone at forced weights @pbt overlaps general_e2e_composed_pbt — kept:
+//! fast localized repro of a keystone-surfaced bug
 
 use std::sync::Arc;
 use std::time::Duration;

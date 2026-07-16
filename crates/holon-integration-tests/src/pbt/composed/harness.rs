@@ -31,7 +31,8 @@
 //! needs, so this is not slice-only scaffolding.
 //!
 //! @pbt kind infra
-//! @pbt covers composed-harness — generic ComposedSut StateMachineTest: per-tick reconcile + catalog check + non-vacuity floor
+//! @pbt covers composed-harness — generic ComposedSut StateMachineTest:
+//! per-tick reconcile + catalog check + non-vacuity floor
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;

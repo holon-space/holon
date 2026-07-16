@@ -6,9 +6,10 @@
 //! ViewModel/Renderer slice of the future `E2ESut` replacement.
 //!
 //! @pbt kind sut-arm
-//! @pbt covers frontend-slice — real headless `FrontendSession` + `ReactiveEngine`
-//!   over Turso via the production DI path, windowless. Provides `SutRenderer`
-//!   over the real CDC→watch→interpret path plus `SutBackend`/nav/editor caps.
+//! @pbt covers frontend-slice — real headless `FrontendSession` +
+//! `ReactiveEngine`   over Turso via the production DI path, windowless.
+//! Provides `SutRenderer`   over the real CDC→watch→interpret path plus
+//! `SutBackend`/nav/editor caps.
 //!
 //! It provides [`SutRenderer`] over the same headless interpret pipeline
 //! `E2ESut` uses for its render invariants: `ReactiveEngine::ensure_watching` →
@@ -49,11 +50,11 @@ use holon_pbt_core::capabilities::SutBlockCreate;
 use holon_pbt_core::capabilities::SutBlockTreeWrite;
 use holon_pbt_core::capabilities::SutClockAdvance;
 use holon_pbt_core::capabilities::SutEditorMirrorRead;
-use holon_pbt_core::capabilities::SutHistory;
 use holon_pbt_core::capabilities::SutEditorMirrorWrite;
 use holon_pbt_core::capabilities::SutErrorLog;
 use holon_pbt_core::capabilities::SutFocus;
 use holon_pbt_core::capabilities::SutFocusWrite;
+use holon_pbt_core::capabilities::SutHistory;
 use holon_pbt_core::capabilities::SutHistoryWrite;
 use holon_pbt_core::capabilities::SutMcpEmit;
 use holon_pbt_core::capabilities::SutMutate;
@@ -1995,10 +1996,12 @@ impl SutHistory for HeadlessFrontendComponent {
         self.sql_query("SELECT DISTINCT block_id FROM block_history")
             .await
             .iter()
-            .map(|row| match row.get("block_id").and_then(|v| v.as_string()) {
-                Some(s) => EntityUri::from_raw(s),
-                None => panic!("block_history.block_id: expected TEXT, got {row:?}"),
-            })
+            .map(
+                |row| match row.get("block_id").and_then(|v| v.as_string()) {
+                    Some(s) => EntityUri::from_raw(s),
+                    None => panic!("block_history.block_id: expected TEXT, got {row:?}"),
+                },
+            )
             .collect()
     }
 

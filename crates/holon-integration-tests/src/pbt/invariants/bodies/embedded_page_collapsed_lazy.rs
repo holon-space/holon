@@ -10,10 +10,10 @@
 //! Embedded page-blocks (non-seed pages that are strict descendants of the Main
 //! region's current focus root) must render with an `expand_toggle` widget node
 //! targeting them. When collapsed (default / ref not in `expanded_toggles`):
-//! `expanded=="false"` AND no ref-known strict descendant of the page may appear
-//! in the main-panel widget tree (children are lazy-loaded on expand). When
-//! expanded (ref in `expanded_toggles`): `expanded=="true"` OR descendants MAY
-//! appear (settle-tolerant — the lazy live_query fires asynchronously).
+//! `expanded=="false"` AND no ref-known strict descendant of the page may
+//! appear in the main-panel widget tree (children are lazy-loaded on expand).
+//! When expanded (ref in `expanded_toggles`): `expanded=="true"` OR descendants
+//! MAY appear (settle-tolerant — the lazy live_query fires asynchronously).
 //!
 //! Skip semantics: returns Skip when the widget tree / main-panel is not ready
 //! (same gating as `inv-main-panel-rows-match-focus`) or when the ref contains
@@ -104,20 +104,23 @@ where
             );
         }
 
-        let focus_root_strs: Vec<String> =
-            main_focus_roots.iter().map(|r| r.as_str().to_string()).collect();
+        let focus_root_strs: Vec<String> = main_focus_roots
+            .iter()
+            .map(|r| r.as_str().to_string())
+            .collect();
         let expand_toggles: Vec<&WidgetSnapshot> = panel.collect_by_kind("expand_toggle");
 
         for page in &embedded_pages {
             let page_str = page.as_str().to_string();
             let ref_expanded = ref_.is_expanded(page);
 
-            let toggle = expand_toggles.iter().find(|n| {
-                n.props.get("target_id").map(String::as_str) == Some(page_str.as_str())
-            });
-            let toggle_expanded =
-                toggle.and_then(|t| t.props.get("expanded"))
-                    .map(String::as_str) == Some("true");
+            let toggle = expand_toggles
+                .iter()
+                .find(|n| n.props.get("target_id").map(String::as_str) == Some(page_str.as_str()));
+            let toggle_expanded = toggle
+                .and_then(|t| t.props.get("expanded"))
+                .map(String::as_str)
+                == Some("true");
 
             let descendants_in_panel: Vec<String> = non_seed
                 .iter()
@@ -137,10 +140,10 @@ where
             // MUST have a toggle for every embedded page.
             if toggle.is_none() {
                 return InvariantResult::Fail(format!(
-                    "[inv-embedded-page-collapsed-lazy] embedded page {page_str} (strict descendant \
-                     of main focus root{roots}) has NO expand_toggle in the main-panel widget tree. \
-                     Affordance prong FAILS — the embedded_page profile variant must wrap the page \
-                     in an expand_toggle.",
+                    "[inv-embedded-page-collapsed-lazy] embedded page {page_str} (strict \
+                     descendant of main focus root{roots}) has NO expand_toggle in the main-panel \
+                     widget tree. Affordance prong FAILS — the embedded_page profile variant must \
+                     wrap the page in an expand_toggle.",
                     roots = focus_root_strs
                         .iter()
                         .map(|s| format!(" {s}"))
@@ -155,9 +158,9 @@ where
                 // Consistency check: widget toggle should also report expanded.
                 if !toggle_expanded {
                     return InvariantResult::Fail(format!(
-                        "[inv-embedded-page-collapsed-lazy] embedded page {page_str} is expanded in \
-                         the ref model but the widget tree toggle reports expanded=false. Ref-model \
-                         vs SUT consistency FAILS.",
+                        "[inv-embedded-page-collapsed-lazy] embedded page {page_str} is expanded \
+                         in the ref model but the widget tree toggle reports expanded=false. \
+                         Ref-model vs SUT consistency FAILS.",
                     ));
                 }
             } else {
@@ -165,17 +168,18 @@ where
                 // may appear in the panel.
                 if toggle_expanded {
                     return InvariantResult::Fail(format!(
-                        "[inv-embedded-page-collapsed-lazy] embedded page {page_str} is collapsed in \
-                         the ref model but the widget tree toggle reports expanded=true. Ref-model \
-                         vs SUT consistency FAILS.",
+                        "[inv-embedded-page-collapsed-lazy] embedded page {page_str} is collapsed \
+                         in the ref model but the widget tree toggle reports expanded=true. \
+                         Ref-model vs SUT consistency FAILS.",
                     ));
                 }
                 if !descendants_in_panel.is_empty() {
                     return InvariantResult::Fail(format!(
-                        "[inv-embedded-page-collapsed-lazy] embedded page {page_str} has a collapsed \
-                         expand_toggle (affordance prong PASSES) but its ref-known strict descendants \
-                         {descendants_in_panel:?} are present in the main-panel widget tree — \
-                         descendants prong FAILS (children leaked past the lazy gate).",
+                        "[inv-embedded-page-collapsed-lazy] embedded page {page_str} has a \
+                         collapsed expand_toggle (affordance prong PASSES) but its ref-known \
+                         strict descendants {descendants_in_panel:?} are present in the \
+                         main-panel widget tree — descendants prong FAILS (children leaked past \
+                         the lazy gate).",
                     ));
                 }
             }

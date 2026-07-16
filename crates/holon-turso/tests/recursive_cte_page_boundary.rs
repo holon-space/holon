@@ -2,7 +2,8 @@
 //! page boundaries can be created as a Turso matview and produces correct
 //! results through inserts and tag mutations.
 //!
-//! The tested SQL is the main-panel query shape from `assets/default/index.org`.
+//! The tested SQL is the main-panel query shape from
+//! `assets/default/index.org`.
 
 use std::collections::HashMap;
 
@@ -11,23 +12,16 @@ use holon_turso::turso::DbHandle;
 use holon_turso::turso::TursoBackend;
 
 /// The main-panel recursive CTE, inlined. The `block` matview is emulated by a
-/// plain `block` table (no edge-field hydrations needed for this test). ORDER BY
-/// is omitted because Turso IVM rejects column-reference ORDER BY in matview
+/// plain `block` table (no edge-field hydrations needed for this test). ORDER
+/// BY is omitted because Turso IVM rejects column-reference ORDER BY in matview
 /// definitions; the production path strips it via `strip_order_by` before DDL.
 const MAIN_PANEL_CTE: &str = "\
-WITH RECURSIVE focus_descendants AS (\
-  SELECT b.*, 0 AS _depth \
-  FROM focus_roots fr \
-  JOIN block b ON b.id = fr.root_id \
-  WHERE fr.region = 'main' \
-  UNION ALL \
-  SELECT child.*, fd._depth + 1 \
-  FROM focus_descendants fd \
-  JOIN block child ON child.parent_id = fd.id \
-  LEFT JOIN block_tags bt ON bt.block_id = fd.id AND bt.tag = 'Page' \
-  WHERE fd._depth = 0 OR bt.block_id IS NULL \
-) \
-SELECT * FROM focus_descendants";
+WITH RECURSIVE focus_descendants AS (SELECT b.*, 0 AS _depth FROM focus_roots fr JOIN block b ON \
+                              b.id = fr.root_id WHERE fr.region = 'main' UNION ALL SELECT \
+                              child.*, fd._depth + 1 FROM focus_descendants fd JOIN block child \
+                              ON child.parent_id = fd.id LEFT JOIN block_tags bt ON bt.block_id = \
+                              fd.id AND bt.tag = 'Page' WHERE fd._depth = 0 OR bt.block_id IS \
+                              NULL ) SELECT * FROM focus_descendants";
 
 async fn setup() -> DbHandle {
     let (_backend, handle) = TursoBackend::new_in_memory().await.expect("in-memory db");
@@ -35,34 +29,23 @@ async fn setup() -> DbHandle {
 
     handle
         .execute_ddl(
-            "CREATE TABLE block (\
-             id TEXT PRIMARY KEY, \
-             parent_id TEXT, \
-             sort_key TEXT NOT NULL DEFAULT 'A0', \
-             content TEXT NOT NULL DEFAULT '', \
-             content_type TEXT NOT NULL DEFAULT 'text'\
-             )",
+            "CREATE TABLE block (id TEXT PRIMARY KEY, parent_id TEXT, sort_key TEXT NOT NULL \
+             DEFAULT 'A0', content TEXT NOT NULL DEFAULT '', content_type TEXT NOT NULL DEFAULT \
+             'text')",
         )
         .await
         .expect("create block");
     handle
         .execute_ddl(
-            "CREATE TABLE block_tags (\
-             block_id TEXT NOT NULL, \
-             tag TEXT NOT NULL, \
-             PRIMARY KEY (block_id, tag)\
-             )",
+            "CREATE TABLE block_tags (block_id TEXT NOT NULL, tag TEXT NOT NULL, PRIMARY KEY \
+             (block_id, tag))",
         )
         .await
         .expect("create block_tags");
     handle
         .execute_ddl(
-            "CREATE TABLE focus_roots (\
-             region TEXT NOT NULL, \
-             root_id TEXT NOT NULL, \
-             added_ts INTEGER NOT NULL DEFAULT 0, \
-             history_id TEXT\
-             )",
+            "CREATE TABLE focus_roots (region TEXT NOT NULL, root_id TEXT NOT NULL, added_ts \
+             INTEGER NOT NULL DEFAULT 0, history_id TEXT)",
         )
         .await
         .expect("create focus_roots");
@@ -116,7 +99,10 @@ async fn set_focus(handle: &DbHandle, region: &str, root_id: &str) {
 
 async fn read_descendants(handle: &DbHandle) -> Vec<String> {
     let rows = handle
-        .query("SELECT id FROM focus_descendants_view ORDER BY _depth, sort_key", HashMap::new())
+        .query(
+            "SELECT id FROM focus_descendants_view ORDER BY _depth, sort_key",
+            HashMap::new(),
+        )
         .await
         .expect("query view");
     rows.iter()
@@ -144,8 +130,11 @@ async fn recursive_cte_stops_at_non_root_pages() {
 
     let ids = read_descendants(&handle).await;
     // root + child (page boundary: grandchild excluded)
-    assert_eq!(ids, vec!["root".to_string(), "child".to_string()],
-        "expected root + child only (grandchild blocked by page boundary)");
+    assert_eq!(
+        ids,
+        vec!["root".to_string(), "child".to_string()],
+        "expected root + child only (grandchild blocked by page boundary)"
+    );
 }
 
 #[tokio::test]
@@ -166,13 +155,23 @@ async fn recursive_cte_includes_children_of_non_page_intermediaries() {
 
     let ids = read_descendants_alias(&handle, "focus_descendants_folder").await;
     // root + folder + nested (boundary at nested; deep excluded)
-    assert_eq!(ids, vec!["root".to_string(), "folder".to_string(), "nested".to_string()],
-        "expected root + folder + nested only (deep blocked by page boundary at nested)");
+    assert_eq!(
+        ids,
+        vec![
+            "root".to_string(),
+            "folder".to_string(),
+            "nested".to_string()
+        ],
+        "expected root + folder + nested only (deep blocked by page boundary at nested)"
+    );
 }
 
 async fn read_descendants_alias(handle: &DbHandle, view_name: &str) -> Vec<String> {
     let sql = format!("SELECT id FROM {view_name} ORDER BY _depth, sort_key");
-    let rows = handle.query(&sql, HashMap::new()).await.expect("query view");
+    let rows = handle
+        .query(&sql, HashMap::new())
+        .await
+        .expect("query view");
     rows.iter()
         .map(|r| match r.get("id") {
             Some(holon_api::Value::String(s)) => s.clone(),
@@ -198,8 +197,11 @@ async fn recursive_cte_ivm_updates_on_tag_insert() {
 
     // Before tagging: all three visible
     let ids = read_descendants_alias(&handle, "focus_descendants_ivm").await;
-    assert_eq!(ids, vec!["root", "mid", "leaf"],
-        "before tagging: all blocks visible");
+    assert_eq!(
+        ids,
+        vec!["root", "mid", "leaf"],
+        "before tagging: all blocks visible"
+    );
 
     // Tag mid as Page — IVM must remove leaf from the result
     tag_page(&handle, "mid").await;
@@ -208,6 +210,9 @@ async fn recursive_cte_ivm_updates_on_tag_insert() {
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     let ids = read_descendants_alias(&handle, "focus_descendants_ivm").await;
-    assert_eq!(ids, vec!["root", "mid"],
-        "after tagging mid as Page: leaf must be excluded (page boundary at mid)");
+    assert_eq!(
+        ids,
+        vec!["root", "mid"],
+        "after tagging mid as Page: leaf must be excluded (page boundary at mid)"
+    );
 }

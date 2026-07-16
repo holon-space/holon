@@ -162,8 +162,9 @@ pub enum ViewKind {
         #[serde(default)]
         checked: bool,
     },
-    /// A horizontal separator line (LogSeq-style, between Journal-feed entries).
-    /// A leaf with no fields; the frontend divider builder draws the rule.
+    /// A horizontal separator line (LogSeq-style, between Journal-feed
+    /// entries). A leaf with no fields; the frontend divider builder draws
+    /// the rule.
     Divider,
     Spacer {
         #[serde(default)]

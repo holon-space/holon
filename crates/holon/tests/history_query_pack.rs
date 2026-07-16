@@ -12,7 +12,6 @@ use holon::api::TursoHistoryStore;
 use holon::storage::schema_module::SchemaModule;
 use holon::storage::turso::TursoBackend;
 use holon_api::HistoryEvent;
-use holon_api::HistoryFidelity;
 use holon_api::HistoryStore;
 use holon_api::StorageEntity;
 use holon_api::Value;
@@ -81,22 +80,63 @@ fn cell_str(row: &StorageEntity, key: &str) -> Option<String> {
 async fn seeded_history() -> (TursoBackend, holon::storage::DbHandle, TursoHistoryStore) {
     let (backend, db) = TursoBackend::new_in_memory().await.unwrap();
     HistorySchemaModule.ensure_schema(&db).await.unwrap();
-    let store = TursoHistoryStore::new(db.clone(), HistoryFidelity::Loro);
+    let store = TursoHistoryStore::new(db.clone());
     for e in [
-        ev("A", "create", "agent", None, Some("sess-1"), Some("c1"), None, None, 10),
         ev(
-            "A", "set_field", "agent", None, Some("sess-1"), Some("c1"),
-            Some("status"), Some("doing"), 20,
+            "A",
+            "create",
+            "agent",
+            None,
+            Some("sess-1"),
+            Some("c1"),
+            None,
+            None,
+            10,
         ),
         ev(
-            "A", "set_field", "rule", Some("rule:postpone"), None, None,
-            Some("status"), Some("postponed"), 30,
+            "A",
+            "set_field",
+            "agent",
+            None,
+            Some("sess-1"),
+            Some("c1"),
+            Some("status"),
+            Some("doing"),
+            20,
         ),
         ev(
-            "B", "set_field", "rule", Some("rule:postpone"), None, None,
-            Some("status"), Some("postponed"), 40,
+            "A",
+            "set_field",
+            "rule",
+            Some("rule:postpone"),
+            None,
+            None,
+            Some("status"),
+            Some("postponed"),
+            30,
         ),
-        ev("B", "set_field", "user", None, None, None, Some("title"), Some("x"), 50),
+        ev(
+            "B",
+            "set_field",
+            "rule",
+            Some("rule:postpone"),
+            None,
+            None,
+            Some("status"),
+            Some("postponed"),
+            40,
+        ),
+        ev(
+            "B",
+            "set_field",
+            "user",
+            None,
+            None,
+            None,
+            Some("title"),
+            Some("x"),
+            50,
+        ),
     ] {
         store.record(e).await.unwrap();
     }
@@ -157,7 +197,10 @@ async fn q5_block_timeline_is_ordered_with_provenance() {
         "ordered oldest→newest by seq"
     );
     // The last event is the rule postpone, carrying its firing provenance.
-    assert_eq!(cell_str(&rows[2], "new_value").as_deref(), Some("postponed"));
+    assert_eq!(
+        cell_str(&rows[2], "new_value").as_deref(),
+        Some("postponed")
+    );
     assert_eq!(cell_str(&rows[2], "origin").as_deref(), Some("rule"));
     assert_eq!(
         cell_str(&rows[2], "transition_id").as_deref(),
@@ -179,7 +222,7 @@ async fn q3_automations_journal_reads_the_ivm_maintained_matview() {
         .await
         .unwrap();
 
-    let store = TursoHistoryStore::new(handle.clone(), HistoryFidelity::Loro);
+    let store = TursoHistoryStore::new(handle.clone());
     // Two rule:postpone fires on day 1, one on day 2; one unrelated rule fire.
     for (block, transition, day_offset) in [
         ("A", "rule:postpone", 0),
@@ -189,8 +232,15 @@ async fn q3_automations_journal_reads_the_ivm_maintained_matview() {
     ] {
         store
             .record(ev(
-                block, "set_field", "rule", Some(transition), None, None,
-                Some("status"), Some("postponed"), 1_784_203_200_000_i64 + day_offset,
+                block,
+                "set_field",
+                "rule",
+                Some(transition),
+                None,
+                None,
+                Some("status"),
+                Some("postponed"),
+                1_784_203_200_000_i64 + day_offset,
             ))
             .await
             .unwrap();
@@ -200,7 +250,11 @@ async fn q3_automations_journal_reads_the_ivm_maintained_matview() {
         .query(Q3_AUTOMATIONS_JOURNAL, HashMap::new())
         .await
         .unwrap();
-    assert_eq!(rows.len(), 3, "three (origin, transition, day) groups: {rows:?}");
+    assert_eq!(
+        rows.len(),
+        3,
+        "three (origin, transition, day) groups: {rows:?}"
+    );
 
     let day1_postpone = rows
         .iter()
@@ -285,12 +339,19 @@ async fn q4_joins_trust_stats_with_history_fire_counts() {
     }
 
     // Two rule:postpone fires actually landed; the agent proposer never fired.
-    let store = TursoHistoryStore::new(handle.clone(), HistoryFidelity::Loro);
+    let store = TursoHistoryStore::new(handle.clone());
     for block in ["A", "B"] {
         store
             .record(ev(
-                block, "set_field", "rule", Some("rule:postpone"), None, None,
-                Some("status"), Some("postponed"), 10,
+                block,
+                "set_field",
+                "rule",
+                Some("rule:postpone"),
+                None,
+                None,
+                Some("status"),
+                Some("postponed"),
+                10,
             ))
             .await
             .unwrap();

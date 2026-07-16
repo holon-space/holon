@@ -194,9 +194,8 @@ pub fn register_loro_operation_engine(
     // DISCLOSED degraded store (warns at construction; reads fail loud) rather
     // than silently omitting history.
     let engine: Arc<dyn OperationEngine> = Arc::new(
-        DispatchingOperationEngine::new(Arc::new(dispatcher)).with_history_store(Arc::new(
-            crate::api::DegradedHistoryStore::new(),
-        )),
+        DispatchingOperationEngine::new(Arc::new(dispatcher))
+            .with_history_store(Arc::new(crate::api::DegradedHistoryStore::new())),
     );
     injector.provide::<dyn OperationEngine>(Provider::root(move |_| engine.clone()));
 }

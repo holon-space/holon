@@ -2,7 +2,8 @@
 //!
 //! @pbt rung dispatch
 //!   no-op: `apply_to_sut` does nothing (search-space filler, no SUT effect).
-//! @pbt covers search-space-exploration — no-op interleaving for schedule diversity
+//! @pbt covers search-space-exploration — no-op interleaving for schedule
+//! diversity
 //!
 //! Mirrors the legacy logic from `state_machine.rs:3075` (precondition),
 //! `state_machine.rs:1736` (ref-state apply), and

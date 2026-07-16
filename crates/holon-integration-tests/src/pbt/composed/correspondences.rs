@@ -748,10 +748,7 @@ mod tests {
     }
 
     impl holon_pbt_core::composition::CapProvider for StubHistory {
-        fn register(
-            self: std::sync::Arc<Self>,
-            caps: &mut holon_pbt_core::composition::CapMap,
-        ) {
+        fn register(self: std::sync::Arc<Self>, caps: &mut holon_pbt_core::composition::CapMap) {
             caps.insert(self as std::sync::Arc<dyn SutHistory>);
         }
     }
@@ -765,9 +762,9 @@ mod tests {
             .build()
     }
 
-    /// Catch (doc §6 gate): a `block_history` row whose `block_id` the reference
-    /// never created/knew (a phantom/ghost recording) is caught by
-    /// `inv-history-no-phantom-rows/block_history`.
+    /// Catch (doc §6 gate): a `block_history` row whose `block_id` the
+    /// reference never created/knew (a phantom/ghost recording) is caught
+    /// by `inv-history-no-phantom-rows/block_history`.
     #[tokio::test]
     async fn history_phantom_row_is_caught() {
         let sut = stub_history_sut(vec![uri("block:ghost")], 1);
@@ -791,9 +788,9 @@ mod tests {
         );
     }
 
-    /// Pass: every recorded `block_id` is a block the reference created/knew, so
-    /// the phantom-history subset check is green (id-space + ever-created anchor
-    /// wired correctly).
+    /// Pass: every recorded `block_id` is a block the reference created/knew,
+    /// so the phantom-history subset check is green (id-space +
+    /// ever-created anchor wired correctly).
     #[tokio::test]
     async fn history_known_rows_pass_phantom_check() {
         let sut = stub_history_sut(vec![uri("block:c1")], 1);
@@ -818,9 +815,9 @@ mod tests {
         );
     }
 
-    /// Catch (doc §6 gate): the oracle drove more UI creates than `block_history`
-    /// recorded op_groups (a missed-history recording) — caught by
-    /// `inv-history-records-all-creates/block_history`.
+    /// Catch (doc §6 gate): the oracle drove more UI creates than
+    /// `block_history` recorded op_groups (a missed-history recording) —
+    /// caught by `inv-history-records-all-creates/block_history`.
     #[tokio::test]
     async fn history_missed_create_is_caught() {
         let sut = stub_history_sut(vec![], 1);

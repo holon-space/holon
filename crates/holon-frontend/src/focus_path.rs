@@ -1194,10 +1194,7 @@ mod tests {
                     name: "cycle_task_state".into(),
                     entity_name: "block".into(),
                     trigger: Some(Trigger::KeyChord {
-                        chord: KeyChord::new(&[
-                            crate::input::Key::Cmd,
-                            crate::input::Key::Enter,
-                        ]),
+                        chord: KeyChord::new(&[crate::input::Key::Cmd, crate::input::Key::Enter]),
                     }),
                     ..Default::default()
                 },
@@ -1205,8 +1202,7 @@ mod tests {
         ];
 
         let tree = Arc::new(column(vec![vm]));
-        let fp =
-            build_focus_path(&tree, &uri("entity-2")).expect("entity-2 not found");
+        let fp = build_focus_path(&tree, &uri("entity-2")).expect("entity-2 not found");
 
         let input = WidgetInput::chord(&[crate::input::Key::Cmd, crate::input::Key::Enter]);
         match fp.bubble_input(&uri("entity-2"), &input) {
@@ -1218,9 +1214,7 @@ mod tests {
                 assert_eq!(entity_name, "block");
                 assert_eq!(operation.name, "cycle_task_state");
             }
-            other => panic!(
-                "Cmd+Enter should resolve to cycle_task_state, got {other:?}"
-            ),
+            other => panic!("Cmd+Enter should resolve to cycle_task_state, got {other:?}"),
         }
 
         // click on state_toggle (no key chord) must NOT resolve to

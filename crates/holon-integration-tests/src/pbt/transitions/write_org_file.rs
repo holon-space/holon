@@ -1,8 +1,9 @@
 //! Transition: write an org file to the temp directory.
 //!
 //! @pbt rung external
-//!   writes an org file to the watched temp dir -> FileSyncController re-ingest.
-//! @pbt covers org-writeback-roundtrip — org disk write -> parse -> block_raw
+//!   writes an org file to the watched temp dir -> FileSyncController
+//! re-ingest. @pbt covers org-writeback-roundtrip — org disk write -> parse ->
+//! block_raw
 //!
 //! Mirrors the legacy logic split across `state_machine.rs:326-338`
 //! (generator), `state_machine.rs:3077-3101` (precondition),

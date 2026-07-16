@@ -18,7 +18,8 @@
 //! see [`wide_e2e_ref`]).
 //!
 //! @pbt kind slice
-//! @pbt covers wide-e2e-swap — the composed general_e2e slice: production E2ETransition over compose_sut, wiring-drawn
+//! @pbt covers wide-e2e-swap — the composed general_e2e slice: production
+//! E2ETransition over compose_sut, wiring-drawn
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;

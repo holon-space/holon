@@ -713,8 +713,7 @@ impl SchemaModule for HistorySchemaModule {
     async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
         let stored = db_handle
             .query_positional(
-                "SELECT sql FROM sqlite_master WHERE type = 'table' \
-                 AND name = 'block_history'",
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'block_history'",
                 vec![],
             )
             .await?;
@@ -729,9 +728,9 @@ impl SchemaModule for HistorySchemaModule {
             };
             if !ddl.contains(HISTORY_SENTINEL_COLUMN) {
                 tracing::warn!(
-                    "[HistorySchemaModule] block_history has a stale shape \
-                     (no `{HISTORY_SENTINEL_COLUMN}` column); dropping and \
-                     recreating (the relation is a disclosed ephemeral cache)"
+                    "[HistorySchemaModule] block_history has a stale shape (no \
+                     `{HISTORY_SENTINEL_COLUMN}` column); dropping and recreating (the relation \
+                     is a disclosed ephemeral cache)"
                 );
                 db_handle.execute_ddl("DROP TABLE block_history").await?;
             }

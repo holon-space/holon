@@ -2,7 +2,8 @@
 //!
 //! @pbt kind cap-plumbing
 //! @pbt covers sql-slice/frontend-slice — shared fail-loud SQL-row→Block parser
-//!   so the SQL invariant path and LiveData mirror stay byte-for-byte identical.
+//!   so the SQL invariant path and LiveData mirror stay byte-for-byte
+//! identical.
 //!
 //! - [`parse_block_row`] turns a SQL row from the `block` matview into a typed
 //!   [`Block`]. Used by `inv-backend-blocks-match-ref`'s SQL path and the

@@ -798,7 +798,11 @@ impl UserDriver for ReactiveEngineDriver {
         // ruling). Flip the node gate for an immediate mounted re-render and
         // dispatch `set_field(collapsed)` so the SUT block row changes. This
         // path is unchanged; the view-local store below stays empty for it.
-        if let Some(gate) = self.engine.snapshot_reactive(&root_uri).find_expand_toggle_gate(bare) {
+        if let Some(gate) = self
+            .engine
+            .snapshot_reactive(&root_uri)
+            .find_expand_toggle_gate(bare)
+        {
             gate.set(expanded);
             let intent = OperationIntent::set_field(
                 &EntityName::new("block"),
@@ -817,7 +821,9 @@ impl UserDriver for ReactiveEngineDriver {
         // (RATIFIED 2026-07-16, Option B). Record the intent in the engine's
         // non-persistent view store — the `expand_toggle` builder seeds its gate
         // from it on the next (re)build — and bump the render generation.
-        self.engine.ui_state().set_block_expanded_view(bare, expanded);
+        self.engine
+            .ui_state()
+            .set_block_expanded_view(bare, expanded);
 
         // Fail loud: force the render pipeline to rebuild (recursive `snapshot`
         // warms one nested level per call, so loop to a short deadline like the

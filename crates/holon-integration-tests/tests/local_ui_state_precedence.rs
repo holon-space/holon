@@ -10,7 +10,8 @@
 //!    disclosed, C2b ephemeral-cache doctrine.)
 //!
 //! @pbt kind harness
-//! @pbt covers local-ui-state-precedence — C8 LocalStateStore slot-precedence-in-query
+//! @pbt covers local-ui-state-precedence — C8 LocalStateStore
+//! slot-precedence-in-query
 
 use std::sync::Arc;
 use std::time::Duration;

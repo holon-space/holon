@@ -11,8 +11,9 @@
 //! (follow-up).
 //!
 //! @pbt kind harness
-//! @pbt covers layout-bridge-typelevel — type-level proof shared holon_layout_testing impls bind ReferenceState
-//! @pbt overlaps arch-lint — compile-only
+//! @pbt covers layout-bridge-typelevel — type-level proof shared
+//! holon_layout_testing impls bind ReferenceState @pbt overlaps arch-lint —
+//! compile-only
 
 #![cfg(feature = "pbt")]
 

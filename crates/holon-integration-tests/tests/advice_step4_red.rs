@@ -29,8 +29,10 @@
 //! re-checking. No invariant is softened.
 //!
 //! @pbt kind harness
-//! @pbt covers advice-weave-green-proof — deterministic composed sequence pinning the advice synthesis+weave
-//! @pbt overlaps general_e2e_composed_pbt — CONVERGENCE CANDIDATE: deterministic composed sequence = a stored regression seed
+//! @pbt covers advice-weave-green-proof — deterministic composed sequence
+//! pinning the advice synthesis+weave @pbt overlaps general_e2e_composed_pbt —
+//! CONVERGENCE CANDIDATE: deterministic composed sequence = a stored regression
+//! seed
 
 use std::collections::HashMap;
 

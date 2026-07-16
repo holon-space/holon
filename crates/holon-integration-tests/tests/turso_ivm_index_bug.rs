@@ -23,7 +23,8 @@
 //! - set_field on render block → UPDATE cascades through IVM
 //!
 //! @pbt kind harness
-//! @pbt covers turso-ivm-index-corruption — Turso IVM index-points-to-nonexistent-row repro
+//! @pbt covers turso-ivm-index-corruption — Turso IVM
+//! index-points-to-nonexistent-row repro
 
 use std::collections::HashMap;
 use std::sync::Arc;

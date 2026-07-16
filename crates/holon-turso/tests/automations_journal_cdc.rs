@@ -4,11 +4,11 @@
 //! `automations_journal` groups `block_history` by `(origin, transition_id,
 //! day)` and counts (ADR 0024 P8). This test proves the reactivity promise (F1a
 //! — "the Watcher notices the 7th postponement immediately"): subscribe to the
-//! matview's CDC stream, append a rule-origin history row, and assert a `Change`
-//! arrives keyed on `automations_journal`. The O(delta) assertion follows the
-//! `derived_field_matview.rs` precedent — a second row in the same group emits
-//! ONE update batch (not a re-emission of every group), and a row in a new
-//! group emits a single new Created.
+//! matview's CDC stream, append a rule-origin history row, and assert a
+//! `Change` arrives keyed on `automations_journal`. The O(delta) assertion
+//! follows the `derived_field_matview.rs` precedent — a second row in the same
+//! group emits ONE update batch (not a re-emission of every group), and a row
+//! in a new group emits a single new Created.
 //!
 //! History rows are appended with direct SQL matching the shape
 //! `TursoHistoryStore::record` writes (origin `rule`, non-null `op_group`); the
@@ -94,8 +94,8 @@ async fn drain_journal_changes(
 async fn read_counts(handle: &DbHandle) -> Vec<(String, String, String, i64)> {
     let rows = handle
         .query(
-            "SELECT origin, transition_id, day, effect_count FROM automations_journal \
-             ORDER BY origin, transition_id, day",
+            "SELECT origin, transition_id, day, effect_count FROM automations_journal ORDER BY \
+             origin, transition_id, day",
             HashMap::new(),
         )
         .await
@@ -129,7 +129,12 @@ async fn rule_origin_history_row_fires_journal_cdc_and_maintains_delta() {
     );
     assert_eq!(
         read_counts(&handle).await,
-        vec![("rule".into(), "delegate-work".into(), "2026-07-16".into(), 1)],
+        vec![(
+            "rule".into(),
+            "delegate-work".into(),
+            "2026-07-16".into(),
+            1
+        )],
     );
 
     // O(delta): a second effect in the SAME group emits CDC for that group only
@@ -147,7 +152,12 @@ async fn rule_origin_history_row_fires_journal_cdc_and_maintains_delta() {
     );
     assert_eq!(
         read_counts(&handle).await,
-        vec![("rule".into(), "delegate-work".into(), "2026-07-16".into(), 2)],
+        vec![(
+            "rule".into(),
+            "delegate-work".into(),
+            "2026-07-16".into(),
+            2
+        )],
     );
 
     // A distinct day is a new group — one new Created, first group untouched.
@@ -161,8 +171,18 @@ async fn rule_origin_history_row_fires_journal_cdc_and_maintains_delta() {
     assert_eq!(
         read_counts(&handle).await,
         vec![
-            ("rule".into(), "delegate-work".into(), "2026-07-16".into(), 2),
-            ("rule".into(), "delegate-work".into(), "2026-07-17".into(), 1),
+            (
+                "rule".into(),
+                "delegate-work".into(),
+                "2026-07-16".into(),
+                2
+            ),
+            (
+                "rule".into(),
+                "delegate-work".into(),
+                "2026-07-17".into(),
+                1
+            ),
         ],
     );
 }

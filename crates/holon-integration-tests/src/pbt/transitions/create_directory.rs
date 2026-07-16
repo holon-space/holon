@@ -1,7 +1,8 @@
 //! Transition: create a directory in the temp workspace.
 //!
 //! @pbt rung external
-//! @pbt covers workspace-dir-create — fs directory creation in the temp workspace
+//! @pbt covers workspace-dir-create — fs directory creation in the temp
+//! workspace
 //!
 //! Mirrors the legacy logic split across `state_machine.rs:354-361`
 //! (generator), `state_machine.rs:3102` (precondition),

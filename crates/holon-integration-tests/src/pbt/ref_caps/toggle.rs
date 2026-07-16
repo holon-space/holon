@@ -3,7 +3,8 @@
 //! @pbt kind ref
 //! @pbt covers expand-collapse — `is_expanded` (embedded-page lazy-collapse
 //!   model) + task-state keyword for the ViewModel `value_fn_provider`
-//!   invariants. Untracked toggles default open (see `widget_state`, disclosed).
+//!   invariants. Untracked toggles default open (see `widget_state`,
+//! disclosed).
 
 use std::sync::Arc;
 

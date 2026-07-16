@@ -2531,8 +2531,9 @@ pub trait SutHistory {
 /// harness from the per-tick id-reconcile map (the authoritative record of
 /// which blocks the oracle drove into existence). Feeds the two keystone
 /// provenance correspondences: `ever_created_ids` bounds PHANTOM history
-/// (every recorded id must be one the oracle knows/knew), `min_recorded_op_groups`
-/// bounds MISSED history (each oracle-driven create records ≥1 op_group).
+/// (every recorded id must be one the oracle knows/knew),
+/// `min_recorded_op_groups` bounds MISSED history (each oracle-driven create
+/// records ≥1 op_group).
 #[holon_macros::capmap_adapter]
 pub trait RefHistoryExpectation {
     /// Every real block id the oracle minted via the reconcile — a SUPERSET

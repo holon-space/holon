@@ -1,10 +1,11 @@
 //! Transition: switch the active view mode on a rendered ViewModeSwitcher.
 //!
 //! @pbt rung input-pipeline
-//!   RESIDUAL (concrete ReferenceState, audit TR-RESID): drives SutBlockInteract
-//!   click via the LayoutSut/SutClickAdapter bridge. Blocked from generic-R by
-//!   the concrete `LayoutRef::new(&ReferenceState)` layout-testing bridge.
-//! @pbt covers view-mode-switch — ViewModeSwitcher click -> mode change
+//!   RESIDUAL (concrete ReferenceState, audit TR-RESID): drives
+//! SutBlockInteract   click via the LayoutSut/SutClickAdapter bridge. Blocked
+//! from generic-R by   the concrete `LayoutRef::new(&ReferenceState)`
+//! layout-testing bridge. @pbt covers view-mode-switch — ViewModeSwitcher click
+//! -> mode change
 //!
 //! Delegates entirely to the shared `holon_pbt_core::SwitchViewMode`
 //! variant + the `TransitionFactory` / `TransitionImpl` bodies in

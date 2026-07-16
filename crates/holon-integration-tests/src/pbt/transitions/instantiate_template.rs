@@ -9,7 +9,8 @@
 //!   `instantiate_template` mints template blocks via `block.create` dispatch;
 //!   storage-only pin uses the op-floor SutTemplateInstantiate. No template
 //!   gesture verified (see UNCERTAIN).
-//! @pbt covers template-instantiate — canned inline template -> block.create fan-out
+//! @pbt covers template-instantiate — canned inline template -> block.create
+//! fan-out
 
 use holon_api::EntityUri;
 use holon_pbt_core::TransitionFactory;

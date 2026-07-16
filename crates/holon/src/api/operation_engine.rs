@@ -372,8 +372,13 @@ impl DispatchingOperationEngine {
         origin: &OpOrigin,
         changes: &[holon_core::FieldDelta],
     ) -> Result<()> {
-        let events =
-            history_events_for(entity_name, op_name, origin, changes, self.clock.now_millis());
+        let events = history_events_for(
+            entity_name,
+            op_name,
+            origin,
+            changes,
+            self.clock.now_millis(),
+        );
         history.record_batch(events).await
     }
 
@@ -903,7 +908,7 @@ impl OperationEngine for DispatchingOperationEngine {
                 &origin,
                 &result.changes,
             )
-                .await?;
+            .await?;
         }
 
         Ok(result.response)

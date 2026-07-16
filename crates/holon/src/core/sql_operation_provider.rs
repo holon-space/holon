@@ -1235,13 +1235,11 @@ impl OperationProvider for SqlOperationProvider {
                 entity_short_name: self.entity_short_name.clone(),
                 name: "create_page_from_link".to_string(),
                 display_name: "Create Page From Link".to_string(),
-                description: "Create a page chain from a wiki-link target"
-                    .to_string(),
+                description: "Create a page chain from a wiki-link target".to_string(),
                 required_params: vec![OperationParam {
                     name: "target".to_string(),
                     type_hint: TypeHint::String,
-                    description: "Wiki-link target (e.g. Projects/X)"
-                        .to_string(),
+                    description: "Wiki-link target (e.g. Projects/X)".to_string(),
                 }],
                 ..Default::default()
             },
@@ -1881,9 +1879,7 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     .to_string();
 
                 if target.trim().is_empty() {
-                    return Err(
-                        "create_page_from_link: target must not be empty".into(),
-                    );
+                    return Err("create_page_from_link: target must not be empty".into());
                 }
 
                 let segments: Vec<&str> = target.split('/').collect();
@@ -1895,8 +1891,7 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     let trimmed = seg.trim();
                     if trimmed.is_empty() {
                         return Err(format!(
-                            "create_page_from_link: empty segment in target \
-                             '{target}'"
+                            "create_page_from_link: empty segment in target '{target}'"
                         )
                         .into());
                     }
@@ -1927,25 +1922,15 @@ impl OriginTaggedWrites for SqlOperationProvider {
                         None => {
                             // Create the page at this level.
                             let id = format!("block:{}", uuid::Uuid::new_v4());
-                            let mut create_params: StorageEntity =
-                                HashMap::new();
-                            create_params.insert(
-                                "id".into(),
-                                Value::String(id.clone()),
-                            );
-                            create_params.insert(
-                                "content".into(),
-                                Value::String(trimmed.to_string()),
-                            );
-                            create_params.insert(
-                                "parent_id".into(),
-                                Value::String(parent_id.clone()),
-                            );
+                            let mut create_params: StorageEntity = HashMap::new();
+                            create_params.insert("id".into(), Value::String(id.clone()));
+                            create_params
+                                .insert("content".into(), Value::String(trimmed.to_string()));
+                            create_params
+                                .insert("parent_id".into(), Value::String(parent_id.clone()));
                             create_params.insert(
                                 "tags".into(),
-                                Value::Array(vec![Value::String(
-                                    "Page".to_string(),
-                                )]),
+                                Value::Array(vec![Value::String("Page".to_string())]),
                             );
                             self.execute_operation_with_origin(
                                 entity_name,
@@ -1966,22 +1951,12 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 }
 
                 // Heal any dangling name-links to this page chain.
-                let link_stmts =
-                    Self::page_reresolve_statements(&leaf_id, &target);
+                let link_stmts = Self::page_reresolve_statements(&leaf_id, &target);
                 if !link_stmts.is_empty() {
-                    let all_stmts: Vec<_> = link_stmts
-                        .into_iter()
-                        .map(|s| (s, vec![]))
-                        .collect();
-                    self.db_handle
-                        .transaction(all_stmts)
-                        .await
-                        .map_err(|e| {
-                            format!(
-                                "create_page_from_link: failed to heal \
-                                 dangling links: {e}"
-                            )
-                        })?;
+                    let all_stmts: Vec<_> = link_stmts.into_iter().map(|s| (s, vec![])).collect();
+                    self.db_handle.transaction(all_stmts).await.map_err(|e| {
+                        format!("create_page_from_link: failed to heal dangling links: {e}")
+                    })?;
                 }
 
                 // Grafting a new page into the tree is reversible via
@@ -1992,8 +1967,7 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 // lands we can collapse this into a single undo entry.
                 Ok(OperationResult::declared_irreversible(
                     Vec::new(),
-                    "create_page_from_link — page-chain creation + link \
-                     healing",
+                    "create_page_from_link — page-chain creation + link healing",
                 )
                 .with_response(Value::String(leaf_id)))
             }

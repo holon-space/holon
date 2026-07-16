@@ -111,7 +111,11 @@ pub fn sorted_rows(rows: &[Arc<DataRow>], sort_key: Option<&str>) -> Vec<Arc<Dat
         let (col, descending) = parse_sort_key(spec);
         sorted.sort_by(|a, b| {
             let ord = cmp_values(a.get(col), b.get(col));
-            if descending { ord.reverse() } else { ord }
+            if descending {
+                ord.reverse()
+            } else {
+                ord
+            }
         });
     }
     sorted
@@ -1496,12 +1500,7 @@ mod mutation_gap_tests {
     /// TODO straight to empty, skipping DOING.
     #[test]
     fn resolve_states_null_value_falls_back_to_default() {
-        let row: HashMap<String, Value> = [(
-            "sts".to_string(),
-            Value::Null,
-        )]
-        .into_iter()
-        .collect();
+        let row: HashMap<String, Value> = [("sts".to_string(), Value::Null)].into_iter().collect();
         let mut args = empty_args();
         args.templates.insert(
             "states".to_string(),
@@ -1526,12 +1525,9 @@ mod mutation_gap_tests {
     /// would return `""` for every click.
     #[test]
     fn resolve_states_empty_array_falls_back_to_default() {
-        let row: HashMap<String, Value> = [(
-            "sts".to_string(),
-            Value::Array(vec![]),
-        )]
-        .into_iter()
-        .collect();
+        let row: HashMap<String, Value> = [("sts".to_string(), Value::Array(vec![]))]
+            .into_iter()
+            .collect();
         let mut args = empty_args();
         args.templates.insert(
             "states".to_string(),

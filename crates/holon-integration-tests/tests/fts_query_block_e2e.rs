@@ -9,7 +9,8 @@
 //!    one-shot read, isolating engine-level FTS from the IVM/matview layer.
 //!
 //! @pbt kind harness
-//! @pbt covers fts-query-block — fts_match over block content through the real engine
+//! @pbt covers fts-query-block — fts_match over block content through the real
+//! engine
 
 #![cfg(feature = "test-infra")]
 

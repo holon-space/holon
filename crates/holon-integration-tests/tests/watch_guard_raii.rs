@@ -9,7 +9,8 @@
 //! snapshotted: the tokio watcher + CDC stream leaked for the app's lifetime.
 //!
 //! @pbt kind harness
-//! @pbt covers watcher-refcount-raii — H1 watcher refcount RAII on read-only snapshots
+//! @pbt covers watcher-refcount-raii — H1 watcher refcount RAII on read-only
+//! snapshots
 
 use std::sync::Arc;
 

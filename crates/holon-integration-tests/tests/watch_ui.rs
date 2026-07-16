@@ -7,7 +7,8 @@
 //!   operation
 //!
 //! @pbt kind harness
-//! @pbt covers uievent-stream-lifecycle — UiEvent stream happy-path + error-recovery
+//! @pbt covers uievent-stream-lifecycle — UiEvent stream happy-path +
+//! error-recovery
 
 use std::collections::HashMap;
 use std::sync::Arc;

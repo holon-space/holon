@@ -990,11 +990,7 @@ mod tests {
         assert_eq!(out, input);
         assert_eq!(marks.len(), 1);
         let m = &marks[0];
-        assert_eq!(
-            m.start,
-            4,
-            "block-ref mark starts after 'see '"
-        );
+        assert_eq!(m.start, 4, "block-ref mark starts after 'see '");
         assert_eq!(
             m.end,
             4 + BLOCK_REF_ORG.chars().count(),

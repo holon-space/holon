@@ -3,12 +3,12 @@
 //!
 //! @pbt kind ref
 //! @pbt covers ref-capmap-wiring — `CapProvider::register` exposes the single
-//!   `ReferenceState` as the ref `CapMap` for `run_selected`. Every `caps.insert`
-//!   is registered UNCONDITIONALLY; selection is `SUT ∧ ref` (`Needs`), so a ref
-//!   cap with no matching SUT cap is inert (deselects), NOT a vacuity feeder.
-//!   FIDELITY: over-registering a ref cap could newly SELECT a catalog invariant
-//!   (the "catalog scope creep" risk) — each `caps.insert` comment states which
-//!   SUT slice gates it.
+//!   `ReferenceState` as the ref `CapMap` for `run_selected`. Every
+//! `caps.insert`   is registered UNCONDITIONALLY; selection is `SUT ∧ ref`
+//! (`Needs`), so a ref   cap with no matching SUT cap is inert (deselects), NOT
+//! a vacuity feeder.   FIDELITY: over-registering a ref cap could newly SELECT
+//! a catalog invariant   (the "catalog scope creep" risk) — each `caps.insert`
+//! comment states which   SUT slice gates it.
 //!
 //! Translates between the capability traits' stringly-typed `EntityUri`
 //! surface and `ReferenceState`'s `EntityUri`-based internals. Zero

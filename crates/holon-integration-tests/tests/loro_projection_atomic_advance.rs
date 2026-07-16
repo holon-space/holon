@@ -17,7 +17,8 @@
 //! `OriginTaggedWrites` command bus and the `SinkReader` read side.
 //!
 //! @pbt kind harness
-//! @pbt covers loro-projection-atomic — atomic base-advance fault injection for Loro→SQL projection
+//! @pbt covers loro-projection-atomic — atomic base-advance fault injection for
+//! Loro→SQL projection
 
 use std::collections::HashMap;
 use std::sync::Arc;

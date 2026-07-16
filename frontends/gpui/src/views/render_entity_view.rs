@@ -4,7 +4,8 @@ use gpui::*;
 use gpui_component::input::Enter;
 use holon_api::EntityName;
 use holon_api::EntityUri;
-use holon_frontend::input::{Key, WidgetInput};
+use holon_frontend::input::Key;
+use holon_frontend::input::WidgetInput;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
 use holon_frontend::RenderContext;
@@ -140,25 +141,18 @@ impl Render for RenderEntityView {
                 .child(child_el)
                 .capture_action(move |_: &Enter, window, cx| {
                     if window.modifiers().platform {
-                        let input = WidgetInput::chord(
-                            &[Key::Cmd, Key::Enter],
-                        );
-                        if let Some(action) =
-                            nav.bubble_input(&entity_id, &input)
-                        {
+                        let input = WidgetInput::chord(&[Key::Cmd, Key::Enter]);
+                        if let Some(action) = nav.bubble_input(&entity_id, &input) {
                             match action {
                                 holon_frontend::input::InputAction::ExecuteOperation {
                                     entity_name,
                                     operation,
                                     entity_id,
                                 } => {
-                                    let mut params =
-                                        std::collections::HashMap::new();
+                                    let mut params = std::collections::HashMap::new();
                                     params.insert(
                                         "id".into(),
-                                        holon_api::Value::String(
-                                            entity_id.as_str().to_string(),
-                                        ),
+                                        holon_api::Value::String(entity_id.as_str().to_string()),
                                     );
                                     services.dispatch_intent(
                                         holon_frontend::operations::OperationIntent::new(

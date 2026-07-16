@@ -15,20 +15,19 @@
 //! Two candidate sources:
 //!
 //! 1. Explicit render-expression toggles: blocks whose render expression
-//!    mentions `expand_toggle` AND are currently collapsed. The generator
-//!    first checks these (original path).
+//!    mentions `expand_toggle` AND are currently collapsed. The generator first
+//!    checks these (original path).
 //!
-//! 2. Profile-driven toggles: non-seed page blocks that are strict
-//!    descendants of the main focus root (e.g. `embedded_page` profile
-//!    variant wraps them in `expand_toggle` with lazy live_query content).
-//!    The generator enumerates these via `RefBlockTree` without depending
-//!    on `render_expr_mentions` (which never matches profile-driven
-//!    toggles).
+//! 2. Profile-driven toggles: non-seed page blocks that are strict descendants
+//!    of the main focus root (e.g. `embedded_page` profile variant wraps them
+//!    in `expand_toggle` with lazy live_query content). The generator
+//!    enumerates these via `RefBlockTree` without depending on
+//!    `render_expr_mentions` (which never matches profile-driven toggles).
 //!
 //! The two paths differ in apply semantics:
 //! - Explicit toggles: `set_expanded` also models `block.collapsed`.
-//! - Profile-driven: `set_expanded_view_local` — view-local only, no
-//!   document `collapsed` field mutation.
+//! - Profile-driven: `set_expanded_view_local` — view-local only, no document
+//!   `collapsed` field mutation.
 
 use holon_api::EntityUri;
 use holon_pbt_core::TransitionFactory;

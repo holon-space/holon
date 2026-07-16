@@ -34,8 +34,9 @@
 //! app / iOS sim is required. Requires `--features pbt`.
 //!
 //! @pbt kind harness
-//! @pbt covers advice-live-mcp-gate — advice weave proven over a LIVE out-of-process MCP app
-//! @pbt overlaps general_e2e_composed_pbt_live_mcp — kept: out-of-process thread affinity
+//! @pbt covers advice-live-mcp-gate — advice weave proven over a LIVE
+//! out-of-process MCP app @pbt overlaps general_e2e_composed_pbt_live_mcp —
+//! kept: out-of-process thread affinity
 
 use holon_api::EdgeFieldUpdate;
 use holon_api::EntityUri;
@@ -88,8 +89,7 @@ fn advice_rule_file() -> WriteOrgFile {
         "      has_tag: lesson\n",
         "k: 2\n",
     );
-    let parsed =
-        holon_advice::parse_advice_rule(yaml).expect("hand-built advice rule must parse");
+    let parsed = holon_advice::parse_advice_rule(yaml).expect("hand-built advice rule must parse");
     assert!(parsed.active);
     assert_eq!(parsed.k.get(), 2);
 
@@ -225,7 +225,11 @@ fn advice_live_mcp_gate() {
     //    green by advice_step4_red): ACTIVE rule, anchor on its own page, three
     //    lessons on another page, navigate the main panel to the anchor page,
     //    then pool-tag so b∩a=3, c∩a=2, d∩a=1 → k=2 woven {b,c}, d truncated. ──
-    let (ref_state, sut) = step(ref_state, sut, E2ETransition::WriteOrgFile(advice_rule_file()));
+    let (ref_state, sut) = step(
+        ref_state,
+        sut,
+        E2ETransition::WriteOrgFile(advice_rule_file()),
+    );
     let (ref_state, sut) = step(ref_state, sut, E2ETransition::WriteOrgFile(anchor_file()));
     let (ref_state, sut) = step(ref_state, sut, E2ETransition::WriteOrgFile(lessons_file()));
 
@@ -275,8 +279,7 @@ fn advice_live_mcp_gate() {
         .handle()
         .reactive()
         .expect("full_headless boots a ReactiveEngine");
-    sut.runtime()
-        .block_on(reactive.refresh_advice_sidecar());
+    sut.runtime().block_on(reactive.refresh_advice_sidecar());
 
     // ── Attach the embedded holon MCP server over THIS session and connect a
     //    driver — every assertion below crosses the MCP wire. ──
@@ -317,24 +320,24 @@ fn advice_live_mcp_gate() {
     let ui_str = serde_json::to_string(&ui).expect("serialize describe_ui json");
     assert!(
         ids.contains(lesson_b.as_str()),
-        "describe_ui: top lesson {lesson_b} must be woven under the anchor \
-         (it lives on a separate page, so a rendered row with this id is the \
-         weave). rendered ids={ids:?} ui={ui_str}"
+        "describe_ui: top lesson {lesson_b} must be woven under the anchor (it lives on a \
+         separate page, so a rendered row with this id is the weave). rendered ids={ids:?} \
+         ui={ui_str}"
     );
     assert!(
         ids.contains(lesson_c.as_str()),
-        "describe_ui: 2nd lesson {lesson_c} must be woven under the anchor. \
-         rendered ids={ids:?} ui={ui_str}"
+        "describe_ui: 2nd lesson {lesson_c} must be woven under the anchor. rendered ids={ids:?} \
+         ui={ui_str}"
     );
     assert!(
         !ids.contains(lesson_d.as_str()),
-        "describe_ui: {lesson_d} is the k=2 truncation → no woven row pre-dismiss. \
-         rendered ids={ids:?} ui={ui_str}"
+        "describe_ui: {lesson_d} is the k=2 truncation → no woven row pre-dismiss. rendered \
+         ids={ids:?} ui={ui_str}"
     );
     assert!(
         ui_str.contains("dismiss_advice"),
-        "describe_ui: woven advice rows must carry the read-only dismiss_advice \
-         affordance (ADR 0021). ui={ui_str}"
+        "describe_ui: woven advice rows must carry the read-only dismiss_advice affordance (ADR \
+         0021). ui={ui_str}"
     );
 
     // ── 2. Dismissal over MCP removes the top lesson, backfills the 3rd, and
@@ -350,36 +353,32 @@ fn advice_live_mcp_gate() {
         ))
         .expect("dismiss_advice over MCP");
     sut.settle_projections();
-    sut.runtime()
-        .block_on(reactive.refresh_advice_sidecar());
+    sut.runtime().block_on(reactive.refresh_advice_sidecar());
 
     let ui = sut.runtime().block_on(main_panel_ui(&driver));
     let ids = rendered_entity_ids(&ui);
     let ui_str = serde_json::to_string(&ui).expect("serialize describe_ui json");
     assert!(
         !ids.contains(lesson_b.as_str()),
-        "describe_ui post-dismiss: {lesson_b}'s woven row must be gone (its id may \
-         still appear in the anchor's advice_suppressed column — that is expected). \
-         rendered ids={ids:?} ui={ui_str}"
+        "describe_ui post-dismiss: {lesson_b}'s woven row must be gone (its id may still appear \
+         in the anchor's advice_suppressed column — that is expected). rendered ids={ids:?} \
+         ui={ui_str}"
     );
     assert!(
         ids.contains(lesson_c.as_str()),
-        "describe_ui post-dismiss: {lesson_c} must remain woven. \
-         rendered ids={ids:?} ui={ui_str}"
+        "describe_ui post-dismiss: {lesson_c} must remain woven. rendered ids={ids:?} ui={ui_str}"
     );
     assert!(
         ids.contains(lesson_d.as_str()),
-        "describe_ui post-dismiss: {lesson_d} must BACKFILL at k=2. \
-         rendered ids={ids:?} ui={ui_str}"
+        "describe_ui post-dismiss: {lesson_d} must BACKFILL at k=2. rendered ids={ids:?} \
+         ui={ui_str}"
     );
 
     // Persistence: the dismissal is durable in the authored exclusion set
     // (`advice_suppressed`), read over the wire.
     let rows = sut
         .runtime()
-        .block_on(driver.execute_raw_sql(
-            "SELECT anchor_id, lesson_id FROM advice_suppressed",
-        ))
+        .block_on(driver.execute_raw_sql("SELECT anchor_id, lesson_id FROM advice_suppressed"))
         .expect("execute_raw_sql advice_suppressed over MCP");
     let rows_str = serde_json::to_string(&rows).expect("serialize rows");
     assert!(
@@ -399,20 +398,17 @@ fn advice_live_mcp_gate() {
         ))
         .expect("delete lesson-c over MCP");
     sut.settle_projections();
-    sut.runtime()
-        .block_on(reactive.refresh_advice_sidecar());
+    sut.runtime().block_on(reactive.refresh_advice_sidecar());
 
     let matview_rows = sut
         .runtime()
-        .block_on(driver.execute_raw_sql(
-            "SELECT lesson_id FROM advice_rule_pbt_lessons",
-        ))
+        .block_on(driver.execute_raw_sql("SELECT lesson_id FROM advice_rule_pbt_lessons"))
         .expect("execute_raw_sql advice matview over MCP");
     let matview_str = serde_json::to_string(&matview_rows).expect("serialize matview rows");
     assert!(
         !matview_str.contains(lesson_c.as_str()),
-        "deleted lesson {lesson_c} must leave no dangling row in advice_rule_pbt_lessons; \
-         got {matview_str}"
+        "deleted lesson {lesson_c} must leave no dangling row in advice_rule_pbt_lessons; got \
+         {matview_str}"
     );
     assert!(
         matview_str.contains(lesson_d.as_str()),

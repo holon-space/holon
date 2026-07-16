@@ -17,7 +17,8 @@
 //! `crates/holon-turso/sql/schema/block_requires.sql`.
 //!
 //! @pbt kind harness
-//! @pbt covers forward-edge-ingest — forward-edge ingest abort regression (dogfood 2026-07-10)
+//! @pbt covers forward-edge-ingest — forward-edge ingest abort regression
+//! (dogfood 2026-07-10)
 
 use std::collections::HashSet;
 use std::sync::Arc;

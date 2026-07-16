@@ -17,7 +17,6 @@ use holon::api::TursoHistoryStore;
 use holon::storage::schema_module::SchemaModule;
 use holon::storage::turso::TursoBackend;
 use holon_api::HistoryEvent;
-use holon_api::HistoryFidelity;
 use holon_api::HistoryStore;
 use holon_turso::schema_modules::HistorySchemaModule;
 use tempfile::TempDir;
@@ -58,7 +57,7 @@ async fn history_record_batch_overhead() {
         .ensure_schema(&handle)
         .await
         .expect("history schema");
-    let store = TursoHistoryStore::new(handle, HistoryFidelity::Loro);
+    let store = TursoHistoryStore::new(handle);
 
     const WARMUP: i64 = 20;
     const ITERS: i64 = 300;
@@ -82,8 +81,8 @@ async fn history_record_batch_overhead() {
         let p95 = percentile(&micros, 0.95);
         let max = micros.last().copied().unwrap();
         eprintln!(
-            "history overhead {label}: p50={p50}us p95={p95}us max={max}us \
-             over {ITERS} iters (file-backed Turso)"
+            "history overhead {label}: p50={p50}us p95={p95}us max={max}us over {ITERS} iters \
+             (file-backed Turso)"
         );
         assert!(
             p95 < 5_000,

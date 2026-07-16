@@ -15,7 +15,8 @@
 //! free.
 //!
 //! @pbt kind infra
-//! @pbt covers invariant-catalog — the shared CapInvariant catalog assembled as a per-crate contribution fold
+//! @pbt covers invariant-catalog — the shared CapInvariant catalog assembled as
+//! a per-crate contribution fold
 
 use holon_pbt_core::composition::CapInvariant;
 use holon_pbt_core::contribution::CrateId;

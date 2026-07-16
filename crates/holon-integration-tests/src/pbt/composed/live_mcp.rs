@@ -25,7 +25,8 @@
 //! set, so every proptest case starts from the same deterministic tree.
 //!
 //! @pbt kind infra
-//! @pbt covers live-mcp-slice — out-of-process twin of the keystone over a live MCP app
+//! @pbt covers live-mcp-slice — out-of-process twin of the keystone over a live
+//! MCP app
 
 use std::collections::BTreeSet;
 use std::path::Path;

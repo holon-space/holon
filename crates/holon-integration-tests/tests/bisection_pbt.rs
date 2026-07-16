@@ -20,8 +20,9 @@
 //!    no-op. This is the CLI/env entry of ADR 0009 migration step 4.
 //!
 //! @pbt kind harness
-//! @pbt covers replay-portability-bisection — ADR 0009 cross-ComponentSet replay + component bisection machinery
-//! @pbt overlaps general_e2e_composed_pbt — kept: tests the bisection/replay infra itself
+//! @pbt covers replay-portability-bisection — ADR 0009 cross-ComponentSet
+//! replay + component bisection machinery @pbt overlaps
+//! general_e2e_composed_pbt — kept: tests the bisection/replay infra itself
 
 #![cfg(feature = "pbt")]
 

@@ -420,7 +420,9 @@ impl TestQuery {
                 format!("MATCH (root:block)<-[:CHILD_OF*{min_depth}..{max_depth}]-(d:block)"),
                 "d",
             ),
-            QuerySource::FocusRootDescendants { region, max_depth, .. } => (
+            QuerySource::FocusRootDescendants {
+                region, max_depth, ..
+            } => (
                 format!(
                     "MATCH (fr:focus_root), (root:block)<-[:CHILD_OF*0..{max_depth}]-(d:block) \
                      WHERE fr.region = '{region}' AND root.id = fr.root_id"
@@ -502,7 +504,12 @@ impl TestQuery {
             ) => format!(
                 "MATCH (root:block)<-[:CHILD_OF*{min_depth}..{max_depth}]-(d:block) RETURN d"
             ),
-            (QuerySource::FocusRootDescendants { region, max_depth, .. }, _) => format!(
+            (
+                QuerySource::FocusRootDescendants {
+                    region, max_depth, ..
+                },
+                _,
+            ) => format!(
                 "MATCH (fr:focus_root), (root:block)<-[:CHILD_OF*0..{max_depth}]-(d:block) WHERE \
                  fr.region = '{region}' AND root.id = fr.root_id RETURN d"
             ),
@@ -582,9 +589,7 @@ impl TestQuery {
                     blocks
                         .values()
                         .filter(|b| {
-                            descendant_within_stopping_at_pages(
-                                blocks, &b.id, &roots, *max_depth,
-                            )
+                            descendant_within_stopping_at_pages(blocks, &b.id, &roots, *max_depth)
                         })
                         .map(|b| b.id.clone())
                         .collect()

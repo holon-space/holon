@@ -467,10 +467,12 @@ pub fn resolve_prototype(
                 detail: e.to_string(),
                 expr: compiled.source.clone(),
             })?;
-        let val = value.as_f64().ok_or_else(|| PetriError::ComputedNonNumeric {
-            name: name.clone(),
-            detail: format!("{value:?}"),
-        })?;
+        let val = value
+            .as_f64()
+            .ok_or_else(|| PetriError::ComputedNonNumeric {
+                name: name.clone(),
+                detail: format!("{value:?}"),
+            })?;
         ctx.insert(name.clone(), holon_api::Value::Float(val));
         literals.insert(name.clone(), val);
     }
@@ -1008,7 +1010,8 @@ fn resolve_sequential_deps(tasks: &mut [TaskInfo]) {
     }
 }
 
-// ALLOW(unused_param): self-token attributes are fixed today; descriptor kept for imminent capacity wiring
+// ALLOW(unused_param): self-token attributes are fixed today; descriptor kept
+// for imminent capacity wiring
 fn build_self_token(_self_desc: &SelfDescriptor) -> TaskToken {
     TaskToken {
         id: "self".to_string(),
@@ -1417,21 +1420,20 @@ mod tests {
     /// expressions through the shared `holon_api::computation::Computation`
     /// evaluator. This pins that the switch/if/arithmetic shapes rank_tasks
     /// depends on still resolve identically AND that dependent fields chain in
-    /// topological order (task_weight reads the freshly-computed priority_weight).
+    /// topological order (task_weight reads the freshly-computed
+    /// priority_weight).
     #[test]
     fn resolve_prototype_evaluates_through_computation_and_chains() {
         let engine = holon_expr::bounded_engine();
-        let computed = |src: &str| PrototypeValue::Computed(CompiledExpr::compile(&engine, src).unwrap());
+        let computed =
+            |src: &str| PrototypeValue::Computed(CompiledExpr::compile(&engine, src).unwrap());
 
         let mut prototype: BTreeMap<String, PrototypeValue> = BTreeMap::new();
         prototype.insert(
             "priority_weight".to_string(),
             computed("switch priority { 3.0 => 100.0, 2.0 => 40.0, _ => 1.0 }"),
         );
-        prototype.insert(
-            "task_weight".to_string(),
-            computed("priority_weight * 2.0"),
-        );
+        prototype.insert("task_weight".to_string(), computed("priority_weight * 2.0"));
 
         let mut context: BTreeMap<String, f64> = BTreeMap::new();
         context.insert("priority".to_string(), 3.0);

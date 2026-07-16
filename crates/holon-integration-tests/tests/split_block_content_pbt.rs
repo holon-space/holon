@@ -44,8 +44,10 @@
 //! resumed.
 //!
 //! @pbt kind harness
-//! @pbt covers split-content-routing — SplitBlock content routing, driven through ComposedSut<WideE2E>
-//! @pbt overlaps general_e2e_composed_pbt — CONVERGENCE CANDIDATE: already on the wide machine; convert to a stored regression seed once catalog covers the teeth
+//! @pbt covers split-content-routing — SplitBlock content routing, driven
+//! through ComposedSut<WideE2E> @pbt overlaps general_e2e_composed_pbt —
+//! CONVERGENCE CANDIDATE: already on the wide machine; convert to a stored
+//! regression seed once catalog covers the teeth
 
 #![cfg(feature = "pbt")]
 

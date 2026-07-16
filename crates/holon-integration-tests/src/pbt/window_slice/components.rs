@@ -1,9 +1,10 @@
 //! [`GpuiWindowComponent`] — the windowed `SutLayout` provider.
 //!
 //! @pbt kind sut-arm
-//! @pbt covers window-slice — live gpui window `BoundsRegistry` read through the
-//!   `GeometryProvider` port; supplies the real element-geometry `SutLayout`
-//!   cap the headless frontend arm cannot (E4 of the E2ESut dissolution).
+//! @pbt covers window-slice — live gpui window `BoundsRegistry` read through
+//! the   `GeometryProvider` port; supplies the real element-geometry
+//! `SutLayout`   cap the headless frontend arm cannot (E4 of the E2ESut
+//! dissolution).
 //!
 //! Holds a `Box<dyn GeometryProvider>` (a live window's `BoundsRegistry` clone,
 //! a `Send` handle) and realizes the geometry caps by reading it — the same

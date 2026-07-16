@@ -221,8 +221,8 @@ proptest! {
 /// Directed store round-trip for the blocked-by / `requires` dependency edge.
 ///
 /// `:BLOCKED-BY:` is the org-drawer alias of the `requires` edge field (single
-/// `block_requires` junction; owner ruling 2026-07-16 — see ORG_SYNTAX.md). This
-/// exercises that edge end-to-end through the SQL provider's generic edge
+/// `block_requires` junction; owner ruling 2026-07-16 — see ORG_SYNTAX.md).
+/// This exercises that edge end-to-end through the SQL provider's generic edge
 /// partition: create → `block_requires` junction rows → `CacheBlockReader`
 /// hydration back into `Block.requires`.
 ///
@@ -282,8 +282,14 @@ fn blocked_by_requires_edge_round_trips_through_store() {
             .iter()
             .map(|r| {
                 (
-                    r.get("block_id").and_then(|v| v.as_string()).unwrap().to_string(),
-                    r.get("required_id").and_then(|v| v.as_string()).unwrap().to_string(),
+                    r.get("block_id")
+                        .and_then(|v| v.as_string())
+                        .unwrap()
+                        .to_string(),
+                    r.get("required_id")
+                        .and_then(|v| v.as_string())
+                        .unwrap()
+                        .to_string(),
                 )
             })
             .collect();

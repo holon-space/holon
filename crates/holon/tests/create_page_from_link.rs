@@ -5,8 +5,8 @@
 //!    wiki-link, both pages created at the right levels.
 //! 2. Dangling link healing — the source block's `block_links` row is
 //!    re-resolved to the leaf page.
-//! 3. Idempotency — a second invocation creates nothing new and returns
-//!    the same leaf id.
+//! 3. Idempotency — a second invocation creates nothing new and returns the
+//!    same leaf id.
 //! 4. Empty target produces an error.
 
 use std::collections::HashMap;
@@ -102,22 +102,19 @@ fn create_params(id: &str, content: &str) -> holon_api::StorageEntity {
 
 async fn link_resolved(handle: &holon::storage::turso::DbHandle, source: &str) -> Option<String> {
     let sql = format!(
-        "SELECT resolved_id FROM block_links WHERE source_block_id = 'block:{source}' \
-         AND kind = 'page'"
+        "SELECT resolved_id FROM block_links WHERE source_block_id = 'block:{source}' AND kind = \
+         'page'"
     );
     let rows = handle.query(&sql, HashMap::new()).await.expect("query");
-    rows.into_iter().next().and_then(|r| {
-        match r.get("resolved_id") {
+    rows.into_iter()
+        .next()
+        .and_then(|r| match r.get("resolved_id") {
             Some(Value::String(s)) => Some(s.clone()),
             _ => None,
-        }
-    })
+        })
 }
 
-async fn block_content(
-    handle: &holon::storage::turso::DbHandle,
-    id: &str,
-) -> Option<String> {
+async fn block_content(handle: &holon::storage::turso::DbHandle, id: &str) -> Option<String> {
     let sql = format!(
         "SELECT content FROM block_raw WHERE id = '{}'",
         id.replace('\'', "''")
@@ -128,13 +125,14 @@ async fn block_content(
         .expect("query")
         .into_iter()
         .next()
-        .and_then(|r| r.get("content").and_then(|v| v.as_string()).map(|s| s.to_string()))
+        .and_then(|r| {
+            r.get("content")
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_string())
+        })
 }
 
-async fn block_parent(
-    handle: &holon::storage::turso::DbHandle,
-    id: &str,
-) -> Option<String> {
+async fn block_parent(handle: &holon::storage::turso::DbHandle, id: &str) -> Option<String> {
     let sql = format!(
         "SELECT parent_id FROM block_raw WHERE id = '{}'",
         id.replace('\'', "''")
@@ -145,20 +143,15 @@ async fn block_parent(
         .expect("query")
         .into_iter()
         .next()
-        .and_then(|r| {
-            match r.get("parent_id") {
-                Some(Value::String(s)) => Some(s.clone()),
-                Some(Value::Null) => None,
-                None => None,
-                _ => None,
-            }
+        .and_then(|r| match r.get("parent_id") {
+            Some(Value::String(s)) => Some(s.clone()),
+            Some(Value::Null) => None,
+            None => None,
+            _ => None,
         })
 }
 
-async fn block_has_page_tag(
-    handle: &holon::storage::turso::DbHandle,
-    id: &str,
-) -> bool {
+async fn block_has_page_tag(handle: &holon::storage::turso::DbHandle, id: &str) -> bool {
     let sql = format!(
         "SELECT 1 FROM block_tags WHERE block_id = '{}' AND tag = 'Page'",
         id.replace('\'', "''")
@@ -226,8 +219,8 @@ async fn create_page_from_link_creates_page_chain_and_heals_dangling_link() {
     assert!(leaf_id.starts_with("block:"), "leaf id must be a block URI");
 
     // 3. Assert: `Projects` page exists, Page-tagged, at the top-level parent.
-    let projects_sql = "SELECT id FROM block_raw b JOIN block_tags t ON t.block_id = b.id \
-                       AND t.tag = 'Page' WHERE b.content = 'Projects'";
+    let projects_sql = "SELECT id FROM block_raw b JOIN block_tags t ON t.block_id = b.id AND \
+                        t.tag = 'Page' WHERE b.content = 'Projects'";
     let proj_rows = handle
         .query(projects_sql, HashMap::new())
         .await
@@ -256,7 +249,11 @@ async fn create_page_from_link_creates_page_chain_and_heals_dangling_link() {
          WHERE b.content = 'X' AND b.parent_id = '{projects_id}'"
     );
     let x_rows = handle.query(&x_sql, HashMap::new()).await.expect("query");
-    assert_eq!(x_rows.len(), 1, "exactly one X page under Projects must exist");
+    assert_eq!(
+        x_rows.len(),
+        1,
+        "exactly one X page under Projects must exist"
+    );
     let x_id = x_rows[0]
         .get("id")
         .and_then(|v| v.as_string())
@@ -273,8 +270,8 @@ async fn create_page_from_link_creates_page_chain_and_heals_dangling_link() {
         "X block content must be 'X'"
     );
 
-    // 5. Assert: the source block's dangling link is now healed (resolved_id =
-    //    the X page).
+    // 5. Assert: the source block's dangling link is now healed (resolved_id = the
+    //    X page).
     let resolved = link_resolved(&handle, "src").await;
     assert_eq!(
         resolved.as_deref(),
@@ -325,8 +322,5 @@ async fn create_page_from_link_empty_target_is_error() {
     let result = provider
         .execute_operation(&entity, "create_page_from_link", op_params)
         .await;
-    assert!(
-        result.is_err(),
-        "empty target must produce an error"
-    );
+    assert!(result.is_err(), "empty target must produce an error");
 }

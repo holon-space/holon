@@ -14,12 +14,14 @@
 use anyhow::Context;
 use anyhow::Result;
 use async_trait::async_trait;
-use holon_api::history::utc_day;
 use holon_api::HistoryEvent;
 use holon_api::HistoryFidelity;
 use holon_api::HistoryQuery;
 use holon_api::HistoryStore;
+use holon_api::PROVENANCE_PROPERTY;
+use holon_api::ProvenanceStamp;
 use holon_api::Value;
+use holon_api::history::utc_day;
 use tokio::sync::OnceCell;
 
 use crate::storage::DbHandle;
@@ -28,7 +30,6 @@ use crate::storage::DbHandle;
 /// is directly joinable; this type is the thin typed accessor over it.
 pub struct TursoHistoryStore {
     db: DbHandle,
-    fidelity: HistoryFidelity,
     /// Next `op_group` to assign, seeded once from `MAX(op_group)` in the
     /// table — a deterministic monotonic sequence (pure function of table
     /// state and call order, never random, so PBT replay and
@@ -37,24 +38,33 @@ pub struct TursoHistoryStore {
     next_group: OnceCell<std::sync::atomic::AtomicI64>,
 }
 
-const INSERT_SQL: &str = "INSERT INTO block_history (entity_name, block_id, \
-     op_name, origin, transition_id, session_id, tool_call_id, effect_id, \
-     field, old_value, new_value, at_millis, day, op_group) \
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+const INSERT_SQL: &str = "INSERT INTO block_history (entity_name, block_id, op_name, origin, \
+                          transition_id, session_id, tool_call_id, effect_id, field, old_value, \
+                          new_value, at_millis, day, op_group) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, \
+                          ?, ?, ?, ?, ?)";
 
-const SELECT_COLS: &str = "entity_name, block_id, op_name, origin, \
-     transition_id, session_id, tool_call_id, effect_id, field, old_value, \
-     new_value, at_millis, op_group";
+const SELECT_COLS: &str = "entity_name, block_id, op_name, origin, transition_id, session_id, \
+                           tool_call_id, effect_id, field, old_value, new_value, at_millis, \
+                           op_group";
+
+/// The substrate-rebuild read: every extant block that carries a `_provenance`
+/// stamp, ordered deterministically by `(at_millis, id)` so the rebuilt
+/// relation is byte-identical across runs. `properties` comes back structured
+/// (the query path parses the known JSON column into an `Object`).
+const REBUILD_SELECT_SQL: &str = "SELECT id, properties FROM block_raw WHERE \
+                                  json_extract(properties, '$._provenance') IS NOT NULL ORDER BY \
+                                  json_extract(properties, '$._provenance.at_millis') ASC, id ASC";
 
 impl TursoHistoryStore {
-    /// Wrap a database handle. `fidelity` discloses the rebuild guarantee for
-    /// the active vault mode (Loro store present → [`HistoryFidelity::Loro`]).
+    /// Wrap a database handle. The disclosed rebuild guarantee is COMPUTED
+    /// ([`Self::fidelity`] → [`HistoryFidelity::Partial`]), not injected by the
+    /// caller — it reports exactly what [`Self::rebuild`] can reproduce, so no
+    /// call site can re-introduce the rejected `Loro` over-claim (C2 fork F2b).
     /// The `block_history` table itself is created at boot by
     /// `HistorySchemaModule`; this accessor fails loud if it is absent.
-    pub fn new(db: DbHandle, fidelity: HistoryFidelity) -> Self {
+    pub fn new(db: DbHandle) -> Self {
         Self {
             db,
-            fidelity,
             next_group: OnceCell::new(),
         }
     }
@@ -189,7 +199,10 @@ fn insert_params(event: HistoryEvent, op_group: i64) -> Vec<turso::Value> {
 #[async_trait]
 impl HistoryStore for TursoHistoryStore {
     fn fidelity(&self) -> HistoryFidelity {
-        self.fidelity
+        // Computed, not injected: the guarantee this store's `rebuild` actually
+        // delivers today — the block-stamp create-provenance subset, never the
+        // full Loro op stream (see the module docs' rebuild contract).
+        HistoryFidelity::Partial
     }
 
     async fn record_batch(&self, events: Vec<HistoryEvent>) -> Result<()> {
@@ -210,8 +223,7 @@ impl HistoryStore for TursoHistoryStore {
 
     async fn query(&self, filter: &HistoryQuery) -> Result<Vec<HistoryEvent>> {
         let (where_sql, params) = Self::where_clause(filter);
-        let sql =
-            format!("SELECT {SELECT_COLS} FROM block_history{where_sql} ORDER BY seq ASC");
+        let sql = format!("SELECT {SELECT_COLS} FROM block_history{where_sql} ORDER BY seq ASC");
         let rows = self
             .db
             .query_positional(&sql, params.iter().map(value_to_turso).collect())
@@ -231,6 +243,74 @@ impl HistoryStore for TursoHistoryStore {
         let n = req_int(rows.first().context("COUNT(*) returned no row")?, "n")?;
         Ok(n as u64)
     }
+
+    async fn rebuild(&self) -> Result<()> {
+        // Truncate the ephemeral cache; the relation is a pure function of the
+        // substrate, so a rebuild starts from empty (never migrated/merged).
+        self.db
+            .execute("DELETE FROM block_history", vec![])
+            .await
+            .context("truncating block_history for rebuild")?;
+
+        let rows = self
+            .db
+            .query_positional(REBUILD_SELECT_SQL, vec![])
+            .await
+            .context("reading block provenance stamps for rebuild")?;
+
+        // Deterministic op_group assignment: rows are already ordered by
+        // (at_millis, id); each recovered create is its own group 1..N.
+        let mut statements: Vec<(String, Vec<turso::Value>)> = Vec::with_capacity(rows.len());
+        for (idx, row) in rows.iter().enumerate() {
+            let event = create_event_from_stamp_row(row)?;
+            statements.push((INSERT_SQL.to_string(), insert_params(event, idx as i64 + 1)));
+        }
+        if !statements.is_empty() {
+            self.db
+                .transaction(statements)
+                .await
+                .context("inserting rebuilt block_history create events")?;
+        }
+        Ok(())
+    }
+}
+
+/// Build the one recoverable `create` event for a `(id, properties)` row of the
+/// rebuild read. The block's `_provenance` stamp is the provable trace (its
+/// latest authorship); field-delta history is not recoverable and is omitted
+/// (`field`/`old_value`/`new_value` = `None`). Fails loud on a malformed stamp
+/// rather than fabricating provenance.
+fn create_event_from_stamp_row(
+    row: &holon_core::storage::types::StorageEntity,
+) -> Result<HistoryEvent> {
+    let block_id = req_text(row, "id")?;
+    let props = match row.get("properties") {
+        Some(Value::Object(m)) => m,
+        other => {
+            anyhow::bail!("block_raw.properties for {block_id} expected Object, got {other:?}")
+        }
+    };
+    let stamp_value = props.get(PROVENANCE_PROPERTY).with_context(|| {
+        format!("block {block_id} matched the provenance filter but has no {PROVENANCE_PROPERTY}")
+    })?;
+    let stamp = ProvenanceStamp::from_value(stamp_value).with_context(|| {
+        format!("parsing {PROVENANCE_PROPERTY} of block {block_id} during rebuild")
+    })?;
+    Ok(HistoryEvent {
+        entity_name: "block".to_string(),
+        block_id,
+        op_name: "create".to_string(),
+        origin: stamp.origin,
+        transition_id: stamp.transition_id,
+        session_id: stamp.session_id,
+        tool_call_id: stamp.tool_call_id,
+        effect_id: None,
+        field: None,
+        old_value: None,
+        new_value: None,
+        at_millis: stamp.at_millis,
+        op_group: None,
+    })
 }
 
 /// Convert a `holon_api::Value` positional param into a `turso::Value`. Only
@@ -292,6 +372,12 @@ impl HistoryStore for DegradedHistoryStore {
     async fn count(&self, _: &HistoryQuery) -> Result<u64> {
         anyhow::bail!("{}", self.reason)
     }
+
+    async fn rebuild(&self) -> Result<()> {
+        // No query substrate to read block stamps from — nothing to rebuild
+        // into. Fail loud rather than silently report success.
+        anyhow::bail!("{}", self.reason)
+    }
 }
 
 #[cfg(test)]
@@ -305,7 +391,38 @@ mod tests {
     async fn store() -> (TursoBackend, TursoHistoryStore) {
         let (backend, db) = TursoBackend::new_in_memory().await.unwrap();
         HistorySchemaModule.ensure_schema(&db).await.unwrap();
-        (backend, TursoHistoryStore::new(db, HistoryFidelity::Loro))
+        (backend, TursoHistoryStore::new(db))
+    }
+
+    /// A store whose db also has `block_raw` (via [`CoreSchemaModule`]) so the
+    /// substrate-rebuild path has real block rows with `_provenance` stamps to
+    /// read. Returns the `DbHandle` so the test can insert stamped blocks.
+    async fn store_with_blocks() -> (TursoBackend, crate::storage::DbHandle, TursoHistoryStore) {
+        let (backend, db) = TursoBackend::new_in_memory().await.unwrap();
+        holon_turso::schema_modules::CoreSchemaModule
+            .ensure_schema(&db)
+            .await
+            .unwrap();
+        HistorySchemaModule.ensure_schema(&db).await.unwrap();
+        (backend, db.clone(), TursoHistoryStore::new(db))
+    }
+
+    /// Insert a block into `block_raw` carrying a `_provenance` stamp (the
+    /// substrate trace `rebuild` recovers). `props_json` is the raw JSON stored
+    /// in the `properties` column.
+    async fn insert_stamped_block(db: &crate::storage::DbHandle, id: &str, props_json: &str) {
+        db.execute(
+            // Test-only substrate seeding — stands in for a real block create so
+            // `rebuild` has a `_provenance` stamp to recover; not a prod path.
+            // ALLOW(sole_block_writer): test-only substrate seeding.
+            "INSERT INTO block_raw (id, parent_id, properties) VALUES (?, 'sentinel:no_parent', ?)",
+            vec![
+                turso::Value::Text(id.to_string()),
+                turso::Value::Text(props_json.to_string()),
+            ],
+        )
+        .await
+        .unwrap();
     }
 
     fn ev(
@@ -437,7 +554,7 @@ mod tests {
             .await
             .unwrap();
 
-        let reopened = TursoHistoryStore::new(first.db.clone(), HistoryFidelity::Loro);
+        let reopened = TursoHistoryStore::new(first.db.clone());
         reopened
             .record(ev("A", "set_field", Some("s"), Some("z"), 3))
             .await
@@ -517,19 +634,111 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rebuild_recovers_create_provenance_subset_and_is_deterministic() {
+        // Substrate rebuild (honest partial, C2 INC 4): drop the relation and
+        // replay ONLY what the block store durably preserves — the `_provenance`
+        // stamp per extant block, as one `create` event. Field-delta history is
+        // NOT recovered (disclosed by HistoryFidelity::Partial).
+        let (_backend, db, store) = store_with_blocks().await;
+
+        // Two stamped blocks: an agent create and a rule (postpone) authorship,
+        // out of at_millis order to prove the rebuild's deterministic ordering.
+        insert_stamped_block(
+            &db,
+            "block:B",
+            r#"{"_provenance":{"origin":"rule","at_millis":40,"transition_id":"rule:postpone"}}"#,
+        )
+        .await;
+        insert_stamped_block(
+            &db,
+            "block:A",
+            r#"{"_provenance":{"origin":"agent","at_millis":10,"session_id":"s1","tool_call_id":"c1"}}"#,
+        )
+        .await;
+
+        // A live field-delta event that the rebuild MUST drop (unrecoverable).
+        store
+            .record(ev(
+                "block:A",
+                "set_field",
+                Some("status"),
+                Some("postponed"),
+                15,
+            ))
+            .await
+            .unwrap();
+
+        store.rebuild().await.unwrap();
+
+        // The provable subset: one create-provenance event per stamped block.
+        let a = store
+            .query(&HistoryQuery::for_block("block:A"))
+            .await
+            .unwrap();
+        assert_eq!(a.len(), 1, "one recovered create per block");
+        assert_eq!(a[0].op_name, "create");
+        assert_eq!(a[0].origin, "agent");
+        assert_eq!(a[0].session_id.as_deref(), Some("s1"));
+        assert_eq!(a[0].tool_call_id.as_deref(), Some("c1"));
+        assert_eq!(a[0].at_millis, 10);
+        assert_eq!(a[0].field, None, "field-delta detail is not recovered");
+
+        let b = store
+            .query(&HistoryQuery::for_block("block:B"))
+            .await
+            .unwrap();
+        assert_eq!(b[0].origin, "rule");
+        assert_eq!(b[0].transition_id.as_deref(), Some("rule:postpone"));
+
+        // Deterministic ordering: recovered by (at_millis, id) → A (10) then B (40).
+        let all = store.query(&HistoryQuery::default()).await.unwrap();
+        assert_eq!(
+            all.len(),
+            2,
+            "only creates; the field-delta event was dropped"
+        );
+        assert_eq!(all[0].block_id, "block:A");
+        assert_eq!(all[1].block_id, "block:B");
+        assert!(all[0].op_group.unwrap() < all[1].op_group.unwrap());
+
+        // The dropped field-delta stream is NOT substrate-rebuildable.
+        let postponed = store
+            .count(&HistoryQuery::transitions_to(
+                "block:A",
+                "status",
+                "postponed",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            postponed, 0,
+            "field-delta history is not rebuildable (partial)"
+        );
+
+        // Determinism: a second rebuild yields byte-identical rows.
+        let before = store.query(&HistoryQuery::default()).await.unwrap();
+        store.rebuild().await.unwrap();
+        let after = store.query(&HistoryQuery::default()).await.unwrap();
+        assert_eq!(before, after, "rebuild is deterministic across runs");
+
+        // The reported fidelity equals the implemented (partial) guarantee.
+        assert_eq!(store.fidelity(), HistoryFidelity::Partial);
+    }
+
+    #[tokio::test]
     async fn stale_table_shape_is_dropped_and_recreated() {
         // A pre-op_group (schema v1) table must be replaced at boot, not
         // migrated — the relation is a disclosed ephemeral cache.
         let (_backend, db) = TursoBackend::new_in_memory().await.unwrap();
         db.execute_ddl(
-            "CREATE TABLE block_history (seq INTEGER PRIMARY KEY, \
-             block_id TEXT NOT NULL, at_millis INTEGER NOT NULL)",
+            "CREATE TABLE block_history (seq INTEGER PRIMARY KEY, block_id TEXT NOT NULL, \
+             at_millis INTEGER NOT NULL)",
         )
         .await
         .unwrap();
         HistorySchemaModule.ensure_schema(&db).await.unwrap();
         // The v2 accessor works against the recreated table.
-        let store = TursoHistoryStore::new(db, HistoryFidelity::Loro);
+        let store = TursoHistoryStore::new(db);
         store
             .record(ev("A", "create", None, None, 1))
             .await
@@ -553,12 +762,18 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("org-standalone degraded mode"), "got: {err}");
-        assert!(err.contains("_provenance"), "discloses the block stamp: {err}");
+        assert!(
+            err.contains("_provenance"),
+            "discloses the block stamp: {err}"
+        );
         let count_err = degraded
             .count(&HistoryQuery::default())
             .await
             .unwrap_err()
             .to_string();
         assert!(count_err.contains("history relation unavailable"));
+        // rebuild has no substrate to read → fails loud, never fake-success.
+        let rebuild_err = degraded.rebuild().await.unwrap_err().to_string();
+        assert!(rebuild_err.contains("history relation unavailable"));
     }
 }

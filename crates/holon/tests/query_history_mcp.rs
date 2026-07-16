@@ -79,7 +79,10 @@ impl OperationProvider for DeltaProvider {
                     .await
                     .map_err(|e| format!("update failed: {e}"))?;
                 Ok(OperationResult::irreversible(vec![FieldDelta::new(
-                    id, field, Value::Null, value,
+                    id,
+                    field,
+                    Value::Null,
+                    value,
                 )]))
             }
             "create" => {
@@ -95,7 +98,10 @@ impl OperationProvider for DeltaProvider {
                 Ok(OperationResult::irreversible(Vec::new()))
             }
             "delete" => {
-                let sql = format!("DELETE FROM block_raw WHERE id = '{}'", id.replace('\'', "''"));
+                let sql = format!(
+                    "DELETE FROM block_raw WHERE id = '{}'",
+                    id.replace('\'', "''")
+                );
                 self.db_handle
                     .execute(&sql, vec![])
                     .await
@@ -111,7 +117,8 @@ impl OperationProvider for DeltaProvider {
 async fn query_history_sees_a_dispatched_op() {
     let ctx = E2ETestContext::with_providers(|module| {
         module.with_operation_provider_factory(|backend| {
-            let db_handle = tokio::task::block_in_place(|| backend.blocking_read().handle().clone());
+            let db_handle =
+                tokio::task::block_in_place(|| backend.blocking_read().handle().clone());
             Arc::new(DeltaProvider {
                 db_handle,
                 entity_name: EntityName::new("block"),
@@ -162,7 +169,11 @@ async fn query_history_sees_a_dispatched_op() {
         .query_history(&args.into_query())
         .await
         .expect("query_history");
-    assert_eq!(events.len(), 1, "the dispatched op is in history: {events:?}");
+    assert_eq!(
+        events.len(),
+        1,
+        "the dispatched op is in history: {events:?}"
+    );
     let e = &events[0];
     assert_eq!(e.block_id, "block:a");
     assert_eq!(e.field.as_deref(), Some("content"));
