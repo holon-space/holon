@@ -19,8 +19,8 @@ holon_macros::widget_builder! {
             .unwrap_or("")
             .to_string();
 
-        // The lazy gate starts CLOSED regardless of the row: `expand_toggle`
-        // is a lazy-section widget (claude-history style) whose default is
+        // The lazy gate starts CLOSED by default: `expand_toggle` is a
+        // lazy-section widget (claude-history style) whose default is
         // collapsed-until-clicked — a block row's default `collapsed = 0`
         // means "not explicitly folded", NOT "auto-expand this section".
         // (The outline tree's `tree_item` wrapper is the widget whose default
@@ -28,13 +28,25 @@ holon_macros::widget_builder! {
         // still flows both ways here: the GPUI chevron dispatches
         // `set_field(collapsed)` on click, and the subscription below
         // folds/unfolds the gate when the field CHANGES externally.
+        //
+        // A particular embedding context may seed the gate OPEN via
+        // `default_expanded: true` (the Journal-feed knob): the lazy content
+        // then materialises eagerly (children loaded) instead of on first
+        // click, while the global default stays collapsed+lazy. Fail loud if
+        // the arg is present but not a boolean — never silently coerce config.
+        let default_expanded = match ba.args.get_bool_strict("default_expanded") {
+            Ok(v) => v.unwrap_or(false),
+            Err(msg) => return ViewModel::error("expand_toggle", msg),
+        };
         let initial_collapsed = row_collapsed(ba.ctx.row());
         // Seed the gate from the engine's view-local expansion store (RATIFIED
         // 2026-07-16, Option B) when the user has driven this toggle; otherwise
-        // keep the collapsed-until-clicked default (`false`). This is what makes
-        // a driven expand survive a fresh `snapshot()` for profile-driven
-        // embedded pages, which carry no `collapsed` document field.
-        let seed_expanded = ba.services.block_expanded_view(&target_id).unwrap_or(false);
+        // fall back to the `default_expanded` embedding knob (itself `false`
+        // unless the context seeds it open — the Journal-feed case). This is
+        // what makes a driven expand survive a fresh `snapshot()` for
+        // profile-driven embedded pages, which carry no `collapsed` document
+        // field. Precedence: explicit store entry > default_expanded > false.
+        let seed_expanded = ba.services.block_expanded_view(&target_id).unwrap_or(default_expanded);
         let expanded = futures_signals::signal::Mutable::new(seed_expanded);
 
         let header = ba.args.get_template("header")

@@ -25,13 +25,45 @@ pub fn sort_key_column(args: &ResolvedArgs) -> Option<&str> {
     // Both spellings are accepted template args (see `is_template_arg`);
     // profiles/index.org write `sortkey:`, so ignoring it here silently
     // fell back to `data_row_sort_key`.
+    //
+    // Two authoring forms are honored: `sortkey: col("name")` and the plain
+    // string form `sortkey: "name"` / `sortkey: "-name"`. The leading `-`
+    // means DESCENDING (`sorted_rows` strips it and reverses); the journal
+    // feed uses `"-content"` for newest-first. The string form is returned
+    // verbatim (with any `-`) so the direction survives to the sort.
     match args
         .get_template("sortkey")
         .or_else(|| args.get_template("sort_key"))
     {
         Some(RenderExpr::ColumnRef { name }) => Some(name.as_str()),
+        Some(RenderExpr::Literal {
+            value: Value::String(s),
+        }) => Some(s.as_str()),
         _ => None,
     }
+}
+
+/// Split a sort-key spec into `(column, descending)`. A leading `-` marks a
+/// descending sort (e.g. `"-content"` → `("content", true)`); otherwise
+/// ascending.
+pub fn parse_sort_key(spec: &str) -> (&str, bool) {
+    match spec.strip_prefix('-') {
+        Some(rest) => (rest, true),
+        None => (spec, false),
+    }
+}
+
+/// Invert the lexicographic ordering of a `sort_value` key so an
+/// ASCENDING string sort (the streaming `MutableTree`'s only order) yields a
+/// DESCENDING result. Each Unicode scalar is complemented against the scalar
+/// range; the streaming path uses this for `-`-prefixed sort keys so its order
+/// matches the static path's `ord.reverse()`. Exact for the fixed-width keys
+/// `sort_value` emits (ISO dates, zero-padded numbers); it does not attempt to
+/// correct prefix-length effects for ragged strings.
+pub fn reverse_order_key(key: &str) -> String {
+    key.chars()
+        .map(|c| char::from_u32(0x0010_FFFF - c as u32).unwrap_or('\u{FFFD}'))
+        .collect()
 }
 
 /// Convert a sort key value to a string whose lexicographic ordering
@@ -75,8 +107,12 @@ pub fn cmp_values(a: Option<&Value>, b: Option<&Value>) -> std::cmp::Ordering {
 
 pub fn sorted_rows(rows: &[Arc<DataRow>], sort_key: Option<&str>) -> Vec<Arc<DataRow>> {
     let mut sorted: Vec<_> = rows.to_vec();
-    if let Some(key) = sort_key {
-        sorted.sort_by(|a, b| cmp_values(a.get(key), b.get(key)));
+    if let Some(spec) = sort_key {
+        let (col, descending) = parse_sort_key(spec);
+        sorted.sort_by(|a, b| {
+            let ord = cmp_values(a.get(col), b.get(col));
+            if descending { ord.reverse() } else { ord }
+        });
     }
     sorted
 }
@@ -412,6 +448,18 @@ impl ResolvedArgs {
             Value::Boolean(b) => Some(*b),
             _ => None,
         })
+    }
+
+    /// Read a named bool arg, failing loud when it is present with a
+    /// non-boolean value. `Ok(None)` = absent, `Ok(Some(b))` = a real boolean,
+    /// `Err` = present but not a boolean literal (a config bug the caller must
+    /// surface, never silently coerce).
+    pub fn get_bool_strict(&self, name: &str) -> Result<Option<bool>, String> {
+        match self.named.get(name) {
+            None => Ok(None),
+            Some(Value::Boolean(b)) => Ok(Some(*b)),
+            Some(other) => Err(format!("arg `{name}` must be a boolean, got {other:?}")),
+        }
     }
 
     /// Get positional arg as string, coercing non-string values.
