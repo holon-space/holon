@@ -16,6 +16,7 @@ use holon_api::HistoryFidelity;
 use holon_api::HistoryStore;
 use holon_api::StorageEntity;
 use holon_api::Value;
+use holon_turso::schema_modules::AutomationsJournalSchemaModule;
 use holon_turso::schema_modules::CoreSchemaModule;
 use holon_turso::schema_modules::HistorySchemaModule;
 use holon_turso::schema_modules::TrustProposalsSchemaModule;
@@ -25,6 +26,8 @@ use tokio::sync::broadcast;
 const Q1_SUPERVISION: &str = include_str!("../../../assets/queries/history_supervision.sql");
 const Q2_TRANSITIONS: &str =
     include_str!("../../../assets/queries/history_transitions_by_transition.sql");
+const Q3_AUTOMATIONS_JOURNAL: &str =
+    include_str!("../../../assets/queries/history_automations_journal.sql");
 const Q4_TRUST_FIRES: &str = include_str!("../../../assets/queries/history_trust_fires.sql");
 const Q5_TIMELINE: &str = include_str!("../../../assets/queries/history_block_timeline.sql");
 
@@ -160,6 +163,71 @@ async fn q5_block_timeline_is_ordered_with_provenance() {
         cell_str(&rows[2], "transition_id").as_deref(),
         Some("rule:postpone")
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn q3_automations_journal_reads_the_ivm_maintained_matview() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("q3.db");
+    let db = TursoBackend::open_database(&db_path).expect("open db");
+    let (cdc_tx, _cdc_rx) = broadcast::channel(1024);
+    let (_backend, handle) = TursoBackend::new(db, cdc_tx).expect("create backend");
+
+    HistorySchemaModule.ensure_schema(&handle).await.unwrap();
+    AutomationsJournalSchemaModule
+        .ensure_schema(&handle)
+        .await
+        .unwrap();
+
+    let store = TursoHistoryStore::new(handle.clone(), HistoryFidelity::Loro);
+    // Two rule:postpone fires on day 1, one on day 2; one unrelated rule fire.
+    for (block, transition, day_offset) in [
+        ("A", "rule:postpone", 0),
+        ("B", "rule:postpone", 0),
+        ("A", "rule:postpone", 86_400_000),
+        ("C", "rule:delegate-work", 0),
+    ] {
+        store
+            .record(ev(
+                block, "set_field", "rule", Some(transition), None, None,
+                Some("status"), Some("postponed"), 1_784_203_200_000_i64 + day_offset,
+            ))
+            .await
+            .unwrap();
+    }
+
+    let rows = handle
+        .query(Q3_AUTOMATIONS_JOURNAL, HashMap::new())
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 3, "three (origin, transition, day) groups: {rows:?}");
+
+    let day1_postpone = rows
+        .iter()
+        .find(|r| {
+            cell_str(r, "transition_id").as_deref() == Some("rule:postpone")
+                && cell_str(r, "day").as_deref() == Some("2026-07-16")
+        })
+        .expect("day-1 rule:postpone group");
+    assert_eq!(cell_i64(day1_postpone, "effect_count"), 2);
+
+    let day2_postpone = rows
+        .iter()
+        .find(|r| {
+            cell_str(r, "transition_id").as_deref() == Some("rule:postpone")
+                && cell_str(r, "day").as_deref() == Some("2026-07-17")
+        })
+        .expect("day-2 rule:postpone group");
+    assert_eq!(cell_i64(day2_postpone, "effect_count"), 1);
+
+    let delegate = rows
+        .iter()
+        .find(|r| cell_str(r, "transition_id").as_deref() == Some("rule:delegate-work"))
+        .expect("delegate-work group");
+    assert_eq!(cell_i64(delegate, "effect_count"), 1);
+
+    // Ordered newest day first.
+    assert_eq!(cell_str(&rows[0], "day").as_deref(), Some("2026-07-17"));
 }
 
 fn proposal_properties(status: &str, origin: &str, transition: Option<&str>) -> String {
