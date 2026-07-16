@@ -27,6 +27,7 @@ use super::schema_providers::BlockHierarchyView;
 use super::schema_providers::CoreTables;
 use super::schema_providers::DbReady;
 use super::schema_providers::GraphEavSchema;
+use super::schema_providers::HistoryTables;
 use super::schema_providers::IdentityTables;
 use super::schema_providers::LinkTables;
 use super::schema_providers::NavigationTables;
@@ -556,6 +557,12 @@ pub fn register_core_services_with_backend(
                     .map(|c| c.0.clone())
                     .unwrap_or_else(|_| Arc::new(holon_api::SystemClock));
 
+                // BackendEngine::new wires TursoHistoryStore (C2b) over the raw
+                // db handle; `block_history` must exist before any engine op
+                // records history (lazy wirings never resolve this marker
+                // otherwise — fresh-db GPUI boot panicked in seed_default_layout).
+                let _history = inj.resolve_async::<DbReady<HistoryTables>>().await;
+
                 Shared::new(
                     create_initialized_engine(
                         backend,
@@ -570,6 +577,7 @@ pub fn register_core_services_with_backend(
             }
         })
         .with_dependency::<DbReady<CoreTables>>()
+        .with_dependency::<DbReady<HistoryTables>>()
         .with_dependency::<DbReady<BlockHierarchyView>>()
         .with_dependency::<DbReady<NavigationTables>>()
         .with_dependency::<DbReady<SyncStateTables>>()
