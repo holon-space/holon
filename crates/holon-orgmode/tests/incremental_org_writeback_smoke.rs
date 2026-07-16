@@ -736,3 +736,151 @@ async fn on_block_removed_unknown_block_falls_back() {
         "an unroutable removal must report false so the caller sanctions the bulk pass"
     );
 }
+
+/// A `DocumentManager` whose `name_chain` resolves the DOCUMENT (so
+/// `on_block_changed` can find the file to write back) but FAILS LOUD for every
+/// other id. This is the exact shape of the real-vault first-boot corruption
+/// (BugFunnel row 23/29): a same-named subdir page (`Projects/Holon.org`)
+/// collided with a `* Holon` heading in `Projects.org`, the re-homed subtree
+/// blocks landed in a prohibited page-under-non-page topology, and
+/// `name_chain(child)` bailed (`sync_ports.rs`) — a 749-strong error storm.
+struct FailingChildNameChainDocManager {
+    doc: Block,
+}
+
+#[async_trait]
+impl DocumentManager for FailingChildNameChainDocManager {
+    async fn find_by_parent_and_name(
+        &self,
+        _: &EntityUri,
+        _: &str,
+    ) -> anyhow::Result<Option<Block>> {
+        Ok(None)
+    }
+
+    async fn create(&self, doc: Block) -> anyhow::Result<Block> {
+        Ok(doc)
+    }
+
+    async fn get_by_id(&self, id: &EntityUri) -> anyhow::Result<Option<Block>> {
+        Ok((self.doc.id == *id).then(|| self.doc.clone()))
+    }
+
+    async fn update_metadata(&self, _: &Block) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn name_chain(&self, id: &EntityUri) -> anyhow::Result<Vec<String>> {
+        if *id == self.doc.id {
+            Ok(vec!["doc".to_string()])
+        } else {
+            anyhow::bail!(
+                "name_chain({id}): non-page ancestor found while walking to root — pages under \
+                 non-pages are prohibited (test stand-in for the real-vault first-boot topology)"
+            )
+        }
+    }
+}
+
+fn build_harness_with_failing_child_name_chain(n: usize) -> Harness {
+    let (doc, blocks) = make_doc_and_n_blocks(n);
+    let reader = Arc::new(CountingBlockReader::new(doc.id.clone(), blocks));
+    let doc_manager = Arc::new(FailingChildNameChainDocManager { doc: doc.clone() });
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    let fs = Arc::new(RealFileSystem);
+    let controller = new_org_sync_controller(
+        reader.clone(),
+        doc_manager,
+        root.clone(),
+        Arc::new(LiveOrderOrdering {
+            reader: reader.clone(),
+        }),
+        fs,
+    );
+    let path = holon_core::CanonicalPath::new(&root)
+        .into_path_buf()
+        .join("doc.org");
+    Harness {
+        controller,
+        reader,
+        doc,
+        path,
+        _tmp: tmp,
+    }
+}
+
+/// **BugFunnel row 23/29 (RED-first): a SMALL ungrounded drop whose blocks FAIL
+/// `name_chain` (a prohibited page-under-non-page topology) HARD-VETOES +
+/// quarantines, even though the drop count is FAR under the mass-truncation
+/// threshold.** This is the first-boot Projects.org destruction: the re-homed
+/// subtree blocks were absent from the projection, their `name_chain` failed
+/// loud (the 749-error storm), they stayed UNGROUNDED — but the count fell
+/// under the 25% threshold so the truncated file was written anyway (6,245
+/// lines deleted). A name_chain grounding failure must ABORT the write, never
+/// fall through the threshold. Pre-fix this test is RED (the write proceeds and
+/// disk loses `heading 6`/`heading 7`).
+#[tokio::test]
+async fn name_chain_failed_ungrounded_drop_hard_vetoes() {
+    // 8 blocks on disk; threshold = max(3, 8/4=2) = 3. We drop only 2 —
+    // deliberately UNDER the threshold, so the mass-truncation tripwire never
+    // fires; the veto must come from the name_chain grounding failure alone.
+    let mut h = build_harness_with_failing_child_name_chain(8);
+    let all = h.reader.blocks.lock().unwrap().clone();
+    let b0 = all[0].clone();
+
+    // Seed disk with all 8 blocks.
+    h.controller
+        .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b0.clone()))
+        .await
+        .unwrap();
+    let seeded = std::fs::read_to_string(&h.path).unwrap();
+    assert!(
+        seeded.contains("heading 7"),
+        "precondition: all 8 blocks on disk; got {seeded:?}"
+    );
+
+    // The store loses the last 2 blocks (a SMALL drop, under threshold). Force a
+    // reseed via a tags change on b0 (Upsert, no sanctioned removal). The dropped
+    // blocks' `name_chain` fails loud → UNRESOLVABLE → hard veto.
+    let keep: Vec<Block> = all[..6].to_vec();
+    h.reader.set_blocks(keep);
+    let mut b0_tagged = b0.clone();
+    let mut tags = Tags::default();
+    tags.insert("Page");
+    b0_tagged.tags = tags;
+    h.reader.set_block(b0_tagged.clone());
+
+    let veto = h
+        .controller
+        .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b0_tagged))
+        .await;
+    assert!(
+        veto.is_err(),
+        "a name_chain-failed ungrounded drop must HARD-VETO the write (Err), even though 2 < \
+         threshold 3"
+    );
+    let msg = format!("{:#}", veto.unwrap_err());
+    assert!(
+        msg.contains("UNRESOLVABLE"),
+        "veto error must name the unresolvable-drop guard; got {msg}"
+    );
+
+    // Disk intact — the truncated projection was refused.
+    let after = std::fs::read_to_string(&h.path).unwrap();
+    assert!(
+        after.contains("heading 7"),
+        "the vetoed write must leave all 8 blocks on disk; got {after:?}"
+    );
+
+    // Quarantined: a subsequent benign edit is skipped (no truncated write).
+    h.controller
+        .on_block_changed(&h.doc.id, &BlockDelta::Upsert(b0))
+        .await
+        .expect("a quarantined file's later edit is skipped (Ok), not an error");
+    let after_second = std::fs::read_to_string(&h.path).unwrap();
+    assert!(
+        after_second.contains("heading 7"),
+        "the file stays quarantined — no truncated write over disk; got {after_second:?}"
+    );
+}
