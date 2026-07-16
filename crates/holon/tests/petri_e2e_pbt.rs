@@ -29,6 +29,7 @@ use holon_api::EntityUri;
 use holon_api::Priority;
 use holon_api::Value as HValue;
 use holon_api::block::Block;
+use holon_api::computation::Computation;
 use holon_api::types::DependsOn;
 use holon_engine::Marking;
 use holon_engine::NetDef;
@@ -757,11 +758,7 @@ fn find_previous_sibling(ref_state: &PetriRefState, block: &RefBlock) -> Option<
 
 // --- Individual invariant functions ---
 
-fn check_self_token(
-    _ref_state: &PetriRefState,
-    marking: &TaskMarking,
-    _self_desc: &SelfDescriptor,
-) {
+fn check_self_token(_: &PetriRefState, marking: &TaskMarking, _: &SelfDescriptor) {
     let self_tok = marking.token("self").expect("self token must always exist");
     assert_eq!(self_tok.id(), "self", "self token id() must return 'self'");
     assert_eq!(
@@ -1382,9 +1379,17 @@ impl PetriSUT {
                     PrototypeValue::Literal(f) => {
                         proto_block.set_property(k, HValue::Float(*f));
                     }
-                    PrototypeValue::Computed(compiled) => {
-                        proto_block
-                            .set_property(k, HValue::String(format!("={}", compiled.source)));
+                    PrototypeValue::Computed(comp) => {
+                        // The generator only inserts Literals into the prototype
+                        // block today; a Script round-trips via its Rhai source.
+                        // A typed computed has no source string — unreachable here.
+                        let src = match comp {
+                            Computation::Script(e) => e.source.clone(),
+                            other => panic!(
+                                "prototype block has no typed computeds to serialize: {other:?}"
+                            ),
+                        };
+                        proto_block.set_property(k, HValue::String(format!("={src}")));
                     }
                 }
             }
