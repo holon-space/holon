@@ -15,8 +15,10 @@ use holon_pbt_core::block_compare::compare_blocks;
 use holon_pbt_core::capabilities::EntityUri;
 use holon_pbt_core::capabilities::RefBackend;
 use holon_pbt_core::capabilities::RefEditorMirror;
+use holon_pbt_core::capabilities::RefHistoryExpectation;
 use holon_pbt_core::capabilities::RefLayout;
 use holon_pbt_core::capabilities::SutEditorMirrorRead;
+use holon_pbt_core::capabilities::SutHistory;
 use holon_pbt_core::capabilities::SutOrgRead;
 use holon_pbt_core::capabilities::SutRenderer;
 use holon_pbt_core::composition::CapId;
@@ -354,8 +356,155 @@ fn compare_no_ghost_rows(
 // co-located to `holon-turso-testing` (Phase 2) — its observable + comparator
 // (and their unit tests) now live in `holon_turso_testing::correspondences`.
 
+// ─── Observable: C2 provenance — no PHANTOM history (subset) ─────────────────
+
+/// Every `block_id` recorded in the SUT's `block_history` op/effect stream must
+/// be a block the reference model created or knew (G9, phantom guard). The
+/// reference anchor is the union of the live block universe and every id the
+/// oracle minted (`RefHistoryExpectation::ever_created_ids`, which retains
+/// create-then-deleted ids from the reconcile map). Asymmetric SUBSET check:
+/// history ⊆ known-universe. A recorded id outside it is a phantom/ghost
+/// history row (a mis-keyed or leaked recording). Cap-gated on `SutHistory`, so
+/// an org-only draw (no recording substrate) deselects cleanly.
+pub struct HistoryNoPhantomRows;
+
+impl Observable for HistoryNoPhantomRows {
+    type Value = BTreeSet<EntityUri>;
+    const NAME: &'static str = "history-no-phantom-rows";
+}
+
+pub fn history_no_phantom_rows() -> Correspondence<HistoryNoPhantomRows> {
+    Correspondence {
+        ref_project: ref_history_universe,
+        stores: vec![StoreProjection {
+            id: "inv-history-no-phantom-rows/block_history",
+            store: "block_history",
+            needs: Needs {
+                sut_present: vec![CapId::of::<dyn SutHistory>()],
+                sut_absent: Vec::new(),
+                ref_present: vec![
+                    CapId::of::<dyn RefHistoryExpectation>(),
+                    CapId::of::<dyn RefLayout>(),
+                ],
+            },
+            extract: extract_history_block_ids,
+            compare: NamedCompare {
+                name: "compare_history_subset{no_phantom}",
+                f: compare_history_no_phantom,
+            },
+            converge: Converge::None,
+        }],
+    }
+}
+
+fn ref_history_universe(refs: &CapMap) -> Extraction<BTreeSet<EntityUri>> {
+    let universe: BTreeSet<EntityUri> = RefLayout::all_block_ids(refs)
+        .into_iter()
+        .chain(RefLayout::layout_block_ids(refs))
+        .chain(RefLayout::profile_block_ids(refs))
+        .chain(RefHistoryExpectation::ever_created_ids(refs))
+        .collect();
+    Extraction::Value(universe)
+}
+
+fn extract_history_block_ids<'a>(
+    sut: &'a CapMap,
+    _: &'a CapMap,
+) -> Pin<Box<dyn Future<Output = Extraction<BTreeSet<EntityUri>>> + 'a>> {
+    Box::pin(async move { Extraction::Value(SutHistory::history_block_ids(sut).await) })
+}
+
+fn compare_history_no_phantom(
+    history_ids: &BTreeSet<EntityUri>,
+    universe: &BTreeSet<EntityUri>,
+) -> Result<(), String> {
+    let phantom: Vec<&EntityUri> = history_ids
+        .iter()
+        .filter(|id| !universe.contains(*id))
+        .collect();
+    if phantom.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "[inv-history-no-phantom-rows/block_history] PHANTOM HISTORY: {} block id(s) recorded in \
+         block_history are unknown to the reference (never created/known): {phantom:?}\n  history \
+         ids: {} recorded\n  ref universe (live ∪ ever-created): {} known",
+        phantom.len(),
+        history_ids.len(),
+        universe.len(),
+    ))
+}
+
+// ─── Observable: C2 provenance — no MISSED history (op-group floor) ──────────
+
+/// The SUT's `block_history` must record at least as many distinct `op_group`s
+/// as the oracle drove UI creates (G9, missed-history guard). Each UI-driven
+/// create routes through `execute_operation` and records ≥1 field delta = one
+/// `op_group`; the reference floor is the count of synthetic→real reconciled
+/// mints (`RefHistoryExpectation::min_recorded_op_groups`), which excludes
+/// born-equal external/peer creates that record no engine history. A
+/// conservative LOWER BOUND (`sut ≥ ref`): extra SUT recordings (edits,
+/// boot-rule firings) only help. A shortfall means a create silently failed to
+/// record — the missed-history prod bug this guards. Cap-gated on `SutHistory`.
+pub struct HistoryOpGroupFloor;
+
+impl Observable for HistoryOpGroupFloor {
+    type Value = usize;
+    const NAME: &'static str = "history-records-all-creates";
+}
+
+pub fn history_records_all_creates() -> Correspondence<HistoryOpGroupFloor> {
+    Correspondence {
+        ref_project: ref_min_op_groups,
+        stores: vec![StoreProjection {
+            id: "inv-history-records-all-creates/block_history",
+            store: "block_history",
+            needs: Needs {
+                sut_present: vec![CapId::of::<dyn SutHistory>()],
+                sut_absent: Vec::new(),
+                ref_present: vec![CapId::of::<dyn RefHistoryExpectation>()],
+            },
+            extract: extract_history_op_group_count,
+            compare: NamedCompare {
+                name: "compare_op_group_floor{>=}",
+                f: compare_op_group_floor,
+            },
+            converge: Converge::None,
+        }],
+    }
+}
+
+fn ref_min_op_groups(refs: &CapMap) -> Extraction<usize> {
+    Extraction::Value(RefHistoryExpectation::min_recorded_op_groups(refs))
+}
+
+fn extract_history_op_group_count<'a>(
+    sut: &'a CapMap,
+    _: &'a CapMap,
+) -> Pin<Box<dyn Future<Output = Extraction<usize>> + 'a>> {
+    Box::pin(async move { Extraction::Value(SutHistory::history_op_group_count(sut).await) })
+}
+
+fn compare_op_group_floor(sut_count: &usize, ref_floor: &usize) -> Result<(), String> {
+    if sut_count >= ref_floor {
+        return Ok(());
+    }
+    Err(format!(
+        "[inv-history-records-all-creates/block_history] MISSED HISTORY: block_history has \
+         {sut_count} distinct op_group(s) but the oracle drove {ref_floor} UI create(s) that each \
+         must record ≥1 — {} create(s) went unrecorded",
+        ref_floor - sut_count,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
+    use holon_pbt_core::capabilities::EntityUri;
+    use holon_pbt_core::capabilities::SutHistory;
+    use holon_pbt_core::composition::CapMap;
+
     use crate::pbt::composed::fixtures::*;
     use crate::pbt::composed::subsystem_seed::run_with_seeded_ref;
     use crate::pbt::composed::subsystem_seed::seed_ref;
@@ -578,4 +727,140 @@ mod tests {
 
     // NOTE: the pure comparator tests for the advice-matview twin co-located to
     // `holon-turso-testing` (Phase 2) alongside `compare_advice_matviews`.
+
+    /// A controllable `SutHistory` double: returns the exact `block_history`
+    /// block-id set + op-group count the test wants, so the two C2 provenance
+    /// correspondences can be driven to catch / pass without a real recording
+    /// engine (the journals ingest-loss RED blocks full keystone sequences).
+    struct StubHistory {
+        block_ids: BTreeSet<EntityUri>,
+        op_group_count: usize,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl SutHistory for StubHistory {
+        async fn history_block_ids(&self) -> BTreeSet<EntityUri> {
+            self.block_ids.clone()
+        }
+        async fn history_op_group_count(&self) -> usize {
+            self.op_group_count
+        }
+    }
+
+    impl holon_pbt_core::composition::CapProvider for StubHistory {
+        fn register(
+            self: std::sync::Arc<Self>,
+            caps: &mut holon_pbt_core::composition::CapMap,
+        ) {
+            caps.insert(self as std::sync::Arc<dyn SutHistory>);
+        }
+    }
+
+    fn stub_history_sut(block_ids: Vec<EntityUri>, op_group_count: usize) -> CapMap {
+        holon_pbt_core::composition::Config::new()
+            .with(StubHistory {
+                block_ids: block_ids.into_iter().collect(),
+                op_group_count,
+            })
+            .build()
+    }
+
+    /// Catch (doc §6 gate): a `block_history` row whose `block_id` the reference
+    /// never created/knew (a phantom/ghost recording) is caught by
+    /// `inv-history-no-phantom-rows/block_history`.
+    #[tokio::test]
+    async fn history_phantom_row_is_caught() {
+        let sut = stub_history_sut(vec![uri("block:ghost")], 1);
+        let ref_state = seed_ref(vec![Block::new_text(
+            uri("block:c1"),
+            EntityUri::no_parent(),
+            "c1",
+        )]);
+        let report = run_with_seeded_ref(
+            &composed_invariant_catalog(),
+            &sut,
+            crate::pbt::reference_state::Resolved::identity(ref_state),
+        )
+        .await;
+        let failures = report.failures();
+        assert!(
+            failures
+                .iter()
+                .any(|(id, _)| *id == "inv-history-no-phantom-rows/block_history"),
+            "a phantom history block_id must be caught; failures={failures:?}",
+        );
+    }
+
+    /// Pass: every recorded `block_id` is a block the reference created/knew, so
+    /// the phantom-history subset check is green (id-space + ever-created anchor
+    /// wired correctly).
+    #[tokio::test]
+    async fn history_known_rows_pass_phantom_check() {
+        let sut = stub_history_sut(vec![uri("block:c1")], 1);
+        let ref_state = seed_ref(vec![Block::new_text(
+            uri("block:c1"),
+            EntityUri::no_parent(),
+            "c1",
+        )]);
+        let report = run_with_seeded_ref(
+            &composed_invariant_catalog(),
+            &sut,
+            crate::pbt::reference_state::Resolved::identity(ref_state),
+        )
+        .await;
+        assert!(
+            !report
+                .failures()
+                .iter()
+                .any(|(id, _)| *id == "inv-history-no-phantom-rows/block_history"),
+            "recorded ids are all known; the subset check must pass; failures={:?}",
+            report.failures(),
+        );
+    }
+
+    /// Catch (doc §6 gate): the oracle drove more UI creates than `block_history`
+    /// recorded op_groups (a missed-history recording) — caught by
+    /// `inv-history-records-all-creates/block_history`.
+    #[tokio::test]
+    async fn history_missed_create_is_caught() {
+        let sut = stub_history_sut(vec![], 1);
+        let mut ref_state = seed_ref(vec![]);
+        ref_state.history_min_op_groups = 3;
+        let report = run_with_seeded_ref(
+            &composed_invariant_catalog(),
+            &sut,
+            crate::pbt::reference_state::Resolved::identity(ref_state),
+        )
+        .await;
+        let failures = report.failures();
+        assert!(
+            failures
+                .iter()
+                .any(|(id, _)| *id == "inv-history-records-all-creates/block_history"),
+            "a create recorded fewer op_groups than driven must be caught; failures={failures:?}",
+        );
+    }
+
+    /// Pass: `block_history` recorded at least as many op_groups as UI creates
+    /// driven (the lower bound holds; extra recordings are fine).
+    #[tokio::test]
+    async fn history_op_group_floor_is_met() {
+        let sut = stub_history_sut(vec![], 5);
+        let mut ref_state = seed_ref(vec![]);
+        ref_state.history_min_op_groups = 3;
+        let report = run_with_seeded_ref(
+            &composed_invariant_catalog(),
+            &sut,
+            crate::pbt::reference_state::Resolved::identity(ref_state),
+        )
+        .await;
+        assert!(
+            !report
+                .failures()
+                .iter()
+                .any(|(id, _)| *id == "inv-history-records-all-creates/block_history"),
+            "the op-group floor is met; the check must pass; failures={:?}",
+            report.failures(),
+        );
+    }
 }

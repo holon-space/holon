@@ -366,6 +366,15 @@ pub struct ReferenceState {
 
     /// Calendar-clock model for the `AdvanceDay` transition (ADR 0024 §6).
     pub clock: ClockState,
+
+    /// C2 history-oracle expectation (NOT model state proper): populated by the
+    /// harness `run_report` from the id-reconcile map. `history_ever_created`
+    /// = every real id the oracle minted (anchor for the phantom-history subset
+    /// check); `history_min_op_groups` = the UI-driven create count the SUT's
+    /// `block_history` must meet or exceed (missed-history lower bound). Empty /
+    /// zero on a bare state; the harness fills them just before the check.
+    pub history_ever_created: BTreeSet<EntityUri>,
+    pub history_min_op_groups: usize,
 }
 
 /// Witness that a [`ReferenceState`]'s ids live in the SUT's id space — either
@@ -515,6 +524,8 @@ impl ReferenceState {
             },
             loro: LoroRefExt::default(),
             clock: ClockState::new(),
+            history_ever_created: BTreeSet::new(),
+            history_min_op_groups: 0,
         }
     }
 

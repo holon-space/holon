@@ -18,6 +18,7 @@ use std::marker::PhantomData;
 use fluxdi::Injector;
 use fluxdi::Provider;
 use fluxdi::Shared;
+use holon_turso::schema_modules::AutomationsJournalSchemaModule;
 use holon_turso::schema_modules::BlockHierarchySchemaModule;
 use holon_turso::schema_modules::BlockMatviewSchemaModule;
 use holon_turso::schema_modules::BlockRequirementEdgesSchemaModule;
@@ -92,6 +93,11 @@ impl DbResource for OperationTables {}
 /// cache; ADR 0024 P8).
 pub struct HistoryTables;
 impl DbResource for HistoryTables {}
+
+/// `automations_journal` matview — effects grouped by
+/// `(origin, transition_id, day)` over `block_history` (ADR 0024 P8).
+pub struct AutomationsJournalView;
+impl DbResource for AutomationsJournalView {}
 
 /// `block_requires`, `block_tags` junction tables (FK to `block_raw`).
 pub struct BlockTables;
@@ -248,6 +254,20 @@ pub fn register_schema_providers(injector: &Injector) {
         Shared::new(DbReady::<HistoryTables>::new())
     }));
 
+    // -- AutomationsJournalView (matview grouped over block_history — depends on
+    // HistoryTables only) --
+    injector.provide::<DbReady<AutomationsJournalView>>(
+        Provider::root_async(|inj| async move {
+            let _hist = inj.resolve_async::<DbReady<HistoryTables>>().await;
+            let db = inj.resolve::<dyn DbHandleProvider>();
+            run_schema_module(&AutomationsJournalSchemaModule, &db.handle())
+                .await
+                .expect("AutomationsJournalView schema init failed");
+            Shared::new(DbReady::<AutomationsJournalView>::new())
+        })
+        .with_dependency::<DbReady<HistoryTables>>(),
+    );
+
     // -- BlockTables (depends on CoreTables: junction FKs reference block_raw.id)
     // --
     injector.provide::<DbReady<BlockTables>>(
@@ -330,5 +350,6 @@ pub fn all_schema_roots() -> Vec<std::any::TypeId> {
         TypeId::of::<DbReady<LinkTables>>(),
         TypeId::of::<DbReady<GraphEavSchema>>(),
         TypeId::of::<DbReady<TrustProposalsView>>(),
+        TypeId::of::<DbReady<AutomationsJournalView>>(),
     ]
 }

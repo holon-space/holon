@@ -46,6 +46,7 @@ use holon_pbt_core::capabilities::SutBlockTreeWrite;
 use holon_pbt_core::capabilities::SutEdgeFieldWrite;
 use holon_pbt_core::capabilities::SutEditorMirrorRead;
 use holon_pbt_core::capabilities::SutFocus;
+use holon_pbt_core::capabilities::SutHistory;
 use holon_pbt_core::capabilities::SutQueryResults;
 use holon_pbt_core::capabilities::SutSqlProjection;
 use holon_pbt_core::capabilities::SutTemplateInstantiate;
@@ -359,6 +360,13 @@ async fn compose_sut_seeded_impl(
         // selected for the wide composed PBT and (via `sut_absent`) keeps the degraded
         // `inv-viewmodel-shows-source-when-no-query` twin deselected here.
         caps.insert(comp.clone() as Arc<dyn SutQueryResults>);
+        // `SutHistory` (C2 provenance oracle read cap): this frontend's
+        // `BackendEngine` unconditionally wires a real `TursoHistoryStore`, so
+        // expose `block_history` to the phantom/missed-history correspondences.
+        // Not gated by `has_editor` — history is recorded for every op the
+        // engine dispatches. Org-only draws never reach this arm, so they omit
+        // the cap and the history invariants deselect honestly.
+        caps.insert(comp.clone() as Arc<dyn SutHistory>);
         // The editor READ cap (the WRITE cap is in `register`). Selects the
         // `inv-editor-{text,caret}-matches-ref` invariants — added only when the config
         // drives the editor, so non-editor frontend configs keep their selection.

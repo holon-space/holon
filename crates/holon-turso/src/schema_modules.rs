@@ -744,6 +744,40 @@ impl SchemaModule for HistorySchemaModule {
     }
 }
 
+/// The C2 automation-journal matview (ADR 0024 P8): `block_history` effects
+/// grouped by `(origin, transition_id, day)` with a per-group count. IVM
+/// maintains it O(delta) over the `block_history` base TABLE — a rule watching
+/// this relation sees the 7th postponement the moment its history row lands
+/// (F1(a)). Registered like `trust_proposals` via [`reconcile_named_view`].
+pub struct AutomationsJournalSchemaModule;
+
+#[async_trait]
+impl SchemaModule for AutomationsJournalSchemaModule {
+    fn name(&self) -> &str {
+        "automations_journal"
+    }
+
+    fn provides(&self) -> Vec<Resource> {
+        vec![Resource::schema("automations_journal")]
+    }
+
+    fn requires(&self) -> Vec<Resource> {
+        vec![Resource::schema("block_history")]
+    }
+
+    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
+        tracing::info!("[AutomationsJournalSchemaModule] Reconciling automations_journal matview");
+        reconcile_named_view(
+            db_handle,
+            "automations_journal",
+            include_str!("../sql/schema/automations_journal_matview.sql"),
+        )
+        .await
+        .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+        Ok(())
+    }
+}
+
 /// Link schema module providing the block_link table.
 ///
 /// Indexes wiki-style `[[...]]` links extracted from block content.
