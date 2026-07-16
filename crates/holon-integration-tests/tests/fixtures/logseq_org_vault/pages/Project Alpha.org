@@ -1,0 +1,12 @@
+:PROPERTIES:
+:id: 7c9e6a10-1000-4a00-9000-000000000009
+:END:
+#+title: Project Alpha
+* Design the ingest shim
+:PROPERTIES:
+:id: 7c9e6a10-1001-4a00-9000-000000000010
+:END:
+* Compare with [[Project Beta]]
+:PROPERTIES:
+:id: 7c9e6a10-1002-4a00-9000-000000000011
+:END:

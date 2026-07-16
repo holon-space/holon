@@ -1,0 +1,24 @@
+* Morning review linked to [[Project Alpha]]
+:PROPERTIES:
+:id: 7c9e6a10-0001-4a00-9000-000000000001
+:END:
+* LATER Draft the Q3 roadmap
+:PROPERTIES:
+:id: 7c9e6a10-0002-4a00-9000-000000000002
+:END:
+SCHEDULED: <2026-07-16 Thu>
+:LOGBOOK:
+CLOCK: [2026-07-15 Wed 09:00:00]--[2026-07-15 Wed 09:45:00] =>  0:45
+:END:
+* NOW Pair on ((7c9e6a10-1001-4a00-9000-000000000010))
+:PROPERTIES:
+:id: 7c9e6a10-0003-4a00-9000-000000000003
+:END:
+* DONE Reply to the compat thread
+:PROPERTIES:
+:id: 7c9e6a10-0004-4a00-9000-000000000004
+:END:
+* Follow up on [[Nonexistent Page]]
+:PROPERTIES:
+:id: 7c9e6a10-0005-4a00-9000-000000000005
+:END:
