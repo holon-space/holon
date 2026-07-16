@@ -1096,6 +1096,87 @@ mod advice_rule_tests {
         );
     }
 
+    /// Stage-2 reachability floor for the advice weave (F3). Stage 1
+    /// (`advice_rule_arm_reachable_in_default_mix`) only proves a RULE BLOCK is
+    /// drawn. What makes BOTH advice keystone invariants non-vacuous is a
+    /// non-empty `AdviceExpectation.scored` — a tag COLLISION between the
+    /// rule's anchor/source tags and the tags `SetEdgeField` lands on
+    /// blocks. Nothing floored that collision, so a `SetEdgeField` weight
+    /// change or an `ADVICE_TAG_POOL` retune could silently make `scored`
+    /// always empty (the empty-empty anchor is skipped, so
+    /// `check_advice_relation` is never exercised) while the stage-1
+    /// rule-presence floor stays green.
+    ///
+    /// This floors the collision over the SAME generator space both sides draw
+    /// from: rule anchor/source tags (distinct, from `ADVICE_TAG_POOL`, as
+    /// `file_with_advice_rule` draws) + per-block tag sets
+    /// (`subsequence(ADVICE_TAG_POOL, 1..=3)`, as the `SetEdgeField` pool
+    /// sub-arm draws). A non-empty `scored` — computed by the SAME
+    /// `expectation_for` the oracle uses — must be reachable at non-trivial
+    /// frequency.
+    #[test]
+    fn advice_scored_nonempty_reachable_in_default_mix() {
+        use proptest::strategy::Strategy;
+        use proptest::strategy::ValueTree;
+        use proptest::test_runner::TestRunner;
+
+        use crate::pbt::advice_expectation::expectation_for;
+
+        let mut runner = TestRunner::deterministic();
+        let scenario = (
+            // Rule tags: distinct pool tags + small k (the `file_with_advice_rule` draw).
+            (
+                prop::sample::select(ADVICE_TAG_POOL.to_vec()),
+                prop::sample::select(ADVICE_TAG_POOL.to_vec()),
+                1..=3u8,
+            )
+                .prop_filter("anchor and source tags must differ", |(a, s, _)| a != s),
+            // Per-block tag sets: the `SetEdgeField` pool sub-arm draw. Four
+            // blocks (one anchor + three candidates) is enough for a collision.
+            proptest::collection::vec(
+                proptest::sample::subsequence(ADVICE_TAG_POOL.to_vec(), 1..=3),
+                4,
+            ),
+        );
+
+        let root = EntityUri::parse("block:root").expect("root uri");
+        let hits = (0..400)
+            .filter(|_| {
+                let ((anchor_tag, source_tag, k), tag_sets) = scenario
+                    .new_tree(&mut runner)
+                    .expect("advice scenario strategy must draw")
+                    .current();
+                let yaml = format!(
+                    "name: pbt_lessons\nactive: true\nanchor:\n  has_tag: {anchor_tag}\n\
+                     candidates:\n  tag_overlap_recency:\n    source:\n      has_tag: \
+                     {source_tag}\nk: {k}\n"
+                );
+                let rule =
+                    holon_advice::parse_advice_rule(&yaml).expect("generated advice rule parses");
+                let blocks: std::collections::BTreeMap<EntityUri, Block> = tag_sets
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, tags)| {
+                        let id = EntityUri::parse(&format!("block:b{i}")).expect("block uri");
+                        let mut b = Block::new_text(id.clone(), root.clone(), String::new());
+                        b.tags = holon_api::Tags::from_tag_iter(tags.into_iter().map(String::from));
+                        (id, b)
+                    })
+                    .collect();
+                blocks
+                    .keys()
+                    .any(|aid| !expectation_for(&blocks, &rule, aid).scored.is_empty())
+            })
+            .count();
+
+        assert!(
+            hits > 20,
+            "advice tag-collision near-vacuous: only {hits}/400 draws produced a non-empty \
+             `scored` — the rule tags and the SetEdgeField pool tags no longer overlap, so both \
+             advice invariants would run vacuously (a pool/weight retune vacated the weave)"
+        );
+    }
+
     proptest! {
         /// Pins the advice-rule YAML template shut: any draw over the same input
         /// space the `file_with_advice_rule` arm uses (distinct pool tags, small

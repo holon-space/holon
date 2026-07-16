@@ -322,6 +322,42 @@ pub fn task_state_maps(sql: Vec<(EntityUri, &str)>, loro: Vec<(EntityUri, &str)>
         .build()
 }
 
+// ─── Reference task_state double ──────────────────────────────────────────
+
+/// A hand-crafted [`RefTaskState`] reference — its `id → task_state` map is the
+/// canonical task_state `inv-task-state-storage-coherence` anchors BOTH SUT
+/// stores against (F4). An id absent from the map yields `None`.
+#[derive(Default)]
+pub struct FixtureRefTaskState {
+    pub task_state: HashMap<EntityUri, String>,
+}
+
+impl holon_pbt_core::capabilities::RefTaskState for FixtureRefTaskState {
+    fn task_state_of(&self, id: &EntityUri) -> Option<String> {
+        self.task_state.get(id).cloned()
+    }
+}
+
+impl CapProvider for FixtureRefTaskState {
+    fn register(self: Arc<Self>, caps: &mut CapMap) {
+        caps.insert(self as Arc<dyn holon_pbt_core::capabilities::RefTaskState>);
+    }
+}
+
+/// Build a reference `CapMap` hosting `RefTaskState` over a hand-set
+/// `id → task_state` map — the ref side `inv-task-state-storage-coherence`
+/// now needs to select and to compare both SUT stores against.
+pub fn ref_task_state(states: Vec<(EntityUri, &str)>) -> CapMap {
+    Config::new()
+        .with(FixtureRefTaskState {
+            task_state: states
+                .into_iter()
+                .map(|(id, s)| (id, s.to_string()))
+                .collect(),
+        })
+        .build()
+}
+
 // ─── ViewModel SUT double ─────────────────────────────────────────────────
 
 /// A hand-crafted [`SutViewSelection`] SUT — its `headless_error_node_count`

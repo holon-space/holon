@@ -85,11 +85,15 @@ impl LoroSut {
     }
 
     /// Wait for the controller to import + reconcile peer changes into SQL.
+    /// Fails loud if the sync never quiesces (F7): a hung peer-sync must not be
+    /// mistaken for a settled read.
     async fn wait_for_quiescence(&self, timeout: Duration) {
         let Some(handle) = self.sync_handle.as_ref() else {
             return;
         };
-        wait_for_loro_quiescence_on(handle, &self.doc_store, timeout).await;
+        wait_for_loro_quiescence_on(handle, &self.doc_store, timeout)
+            .await
+            .expect("LoroSut::wait_for_quiescence: peer sync did not quiesce before the deadline");
     }
 
     /// Read all blocks from the LoroTree.

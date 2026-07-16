@@ -29,8 +29,12 @@ use crate::pbt::transition_budgets::REACTIVE_BASE;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::docs_tolerance;
 
-/// Simulate an app restart: clears last_projection and triggers re-sync.
-/// Blocks are preserved; the system re-processes files from disk.
+/// Re-trigger an org re-ingest (NOT a true reboot). The SUT apply touch-writes
+/// the on-disk org files so the running `FileSyncController` re-parses them;
+/// blocks are preserved and re-processed from disk. It does NOT drop+reopen the
+/// Turso handle, rehydrate the Loro container, or restart the engine — the true
+/// persistence-across-restart class (a real `RebootStorage`) is a separate,
+/// unbuilt transition (F9 fork). Do not read this as a storage reboot.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SimulateRestart;
 
@@ -41,9 +45,11 @@ impl<R: RefLifecycle + RefLayout> TransitionFactory<R> for SimulateRestart {
 
     type Reason = Reason;
     fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
-        // Turso-only: restart reopens the Turso DB from disk and waits on the
-        // CDC accumulator via `ctx.engine()`. The no-Turso restart story (rebuild
-        // the Loro container + re-ingest org) is out of scope for a1.
+        // Turso-only: the re-ingest waits on the CDC accumulator via
+        // `ctx.engine()`, so it needs the Turso wiring. (It does NOT reopen the
+        // DB from disk — see the type-level doc comment; F9.) The no-Turso
+        // re-ingest story (rebuild the Loro container + re-ingest org) is out of
+        // scope for a1.
         ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Turso)
     }
     fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {

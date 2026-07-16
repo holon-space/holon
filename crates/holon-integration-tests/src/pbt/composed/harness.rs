@@ -33,6 +33,22 @@
 //! @pbt kind infra
 //! @pbt covers composed-harness — generic ComposedSut StateMachineTest:
 //! per-tick reconcile + catalog check + non-vacuity floor
+//!
+//! ## Baseline-RED masking (READ before validating a new invariant here)
+//! The shipped standard keystone carries ONE accepted baseline RED — the
+//! journals ingest-data-loss (`block:journals::action::0` /
+//! `journals::auto-create` missing from the SUT). proptest reports and shrinks
+//! to the FIRST failing case, and the journals blocks are in the SEED, so a
+//! draw that seeds journals diverges at the tick-0 `check_invariants` catch
+//! (the `hard.is_empty()` assert) BEFORE any full-render case runs and before
+//! ANY sequence reaches `teardown`. Consequence: a newly-un-blinded render
+//! invariant that reds on a REACHED full_headless case, and the per-sequence
+//! engagement floor in `teardown`, are BOTH invisible to the standard gate — it
+//! green/reds purely on journals. To actually exercise them you MUST bypass the
+//! mask, e.g. `PROPTEST_CASES=1 HOLON_PBT_FORCE_FULL=1
+//! HOLON_PBT_INVARIANTS='*match-ref*:skip,*block-content*:skip'` to soften the
+//! journals family so a full-render case is reached. Do not conclude "green =
+//! validated" from a standard run that never got past journals.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -48,6 +64,7 @@ use holon_pbt_core::capabilities::SutLoroLog;
 use holon_pbt_core::composition::CapMap;
 use holon_pbt_core::composition::InvariantId;
 use holon_pbt_core::composition::RunReport;
+use holon_pbt_core::invariant::InvariantResult;
 use proptest_state_machine::ReferenceStateMachine;
 use proptest_state_machine::StateMachineTest;
 
@@ -278,6 +295,15 @@ pub struct ComposedSut<S: ComposedSlice> {
     /// `check_invariants` read; a no-op for the headless path. See
     /// [`SettleHook`].
     settle: SettleHook,
+    /// Engagement ledger (F2): the ids of required invariants that produced at
+    /// least one NON-`Skipped` (gate-passed) verdict somewhere across THIS
+    /// sequence. Populated in `check_invariants` (interior mutability — the
+    /// trait method borrows `&Self`), asserted against the required floor in
+    /// `teardown`. Distinguishes "selected + ran" (the per-tick floor) from
+    /// "exercised with teeth": an invariant that early-returns `Skipped` on
+    /// every tick is selected but never proves anything, and must fail the
+    /// engagement floor rather than pass vacuously.
+    engaged: std::cell::RefCell<std::collections::BTreeSet<&'static str>>,
     _slice: PhantomData<S>,
 }
 
@@ -311,6 +337,7 @@ impl<S: ComposedSlice> ComposedSut<S> {
             scaffold_ids,
             rt,
             settle,
+            engaged: std::cell::RefCell::new(std::collections::BTreeSet::new()),
             _slice: PhantomData,
         }
     }
@@ -363,6 +390,46 @@ impl<S: ComposedSlice> ComposedSut<S> {
     }
 }
 
+/// Invariants for which "selected every tick but `Skipped` every tick" is a
+/// permanent-vacuity bug rather than legitimate not-applicable-this-sequence.
+/// Engages at ANY settled render (the seeded 3-column layout is present in
+/// every full_headless sequence, including at tick 0), so a per-sequence
+/// engagement requirement is sound — and is exactly the F1 regression guard: it
+/// was silently vacuous behind a `has_root_render_expr()` gate the wide
+/// 3-column layout keeps permanently false, so it early-returned `Ok` and
+/// satisfied the old "appears in `ran`" floor while checking nothing.
+/// Empirically PROVEN to engage+pass over reached full-render cases (mask
+/// bypassed).
+///
+/// NOTE — `inv-viewmodel-root-matches-render-expr` is DELIBERATELY NOT here.
+/// Its `has_root_render_expr()` gate was un-blinded the same way (vacuous `Ok`
+/// → honest `Skipped`), but its 3-column path drills the main panel and never
+/// reaches a rendered content-kind verdict in the wide seed — it `Skipped` on
+/// EVERY tick of every full-render case (this engagement floor CAUGHT that).
+/// Making it engage needs a layout/generator change (a static main-panel render
+/// expr whose rendered widget kind is assertable), i.e. a FORK — flagged,
+/// deferred. Its restructure (honest `Skipped`, never a fake `Ok`) still lands
+/// as a strict improvement.
+const ENGAGEMENT_FLOOR: &[&str] = &["inv-viewmodel-entity-ids-subset-of-data"];
+
+/// The engagement floor's pure decision (extracted so it is unit-testable
+/// without booting a full slice — the `teardown` hook that calls it never runs
+/// under the shipped keystone gate, which short-circuits on the journals RED in
+/// `check_invariants` before any sequence reaches teardown). Returns the
+/// [`ENGAGEMENT_FLOOR`] ids that this draw SELECTED (`required`) but that never
+/// produced a non-`Skipped` verdict (`engaged`) — i.e. selected-but-vacuous.
+fn engagement_floor_violations(
+    engaged: &std::collections::BTreeSet<&str>,
+    required: &std::collections::BTreeSet<&str>,
+) -> Vec<&'static str> {
+    ENGAGEMENT_FLOOR
+        .iter()
+        .copied()
+        .filter(|id| required.contains(id))
+        .filter(|id| !engaged.contains(id))
+        .collect()
+}
+
 impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
     type SystemUnderTest = Self;
     type Reference = S::Machine;
@@ -399,6 +466,7 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
             scaffold_ids,
             rt,
             settle: Box::new(|| {}),
+            engaged: std::cell::RefCell::new(std::collections::BTreeSet::new()),
             _slice: PhantomData,
         }
     }
@@ -533,13 +601,28 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
             hard.is_empty(),
             "reconciled composed sequence diverged from the oracle: {hard:?}"
         );
+        // Per-tick SELECTION floor: every required invariant must be selected
+        // (present in `report.ran`) at every tick — a silent deselect fails
+        // loud HERE. Selection alone, however, is not proof of exercise: a body
+        // may appear in `ran` with a `Skipped` verdict on every tick and still
+        // observe nothing (F2). So, in addition, record engagement — an id that
+        // produced a NON-`Skipped` verdict this tick — into the per-sequence
+        // ledger; `teardown` asserts each required id engaged at least once.
         for id in S::required_invariants(ref_state) {
             assert!(
                 report.ran.iter().any(|(ran_id, _)| *ran_id == id),
-                "non-vacuity: {} must run over real data (ran: {:?})",
+                "non-vacuity (selection): {} must be selected + run over real data (ran: {:?})",
                 id.0,
                 report.ran_ids()
             );
+        }
+        {
+            let mut engaged = sut.engaged.borrow_mut();
+            for (id, result) in &report.ran {
+                if !matches!(result, InvariantResult::Skipped(_)) {
+                    engaged.insert(id.0);
+                }
+            }
         }
         // Windowed non-vacuity floor: when this SUT hosts a window (a `SutLayout` cap
         // is present — true only on the §Round-5 windowed path), the windowed
@@ -562,6 +645,42 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
                 report.deselected.iter().map(|d| d.0).collect::<Vec<_>>(),
             );
         }
+    }
+
+    /// Per-sequence ENGAGEMENT floor (F2): a required invariant that was
+    /// selected every tick but `Skipped` on every tick observed nothing — it is
+    /// selected, not exercised. Assert each id in [`ENGAGEMENT_FLOOR`] that
+    /// this draw actually selected produced at least one NON-`Skipped`
+    /// (gate-passed) verdict somewhere across the sequence. This is the
+    /// "selected ≠ exercised with teeth" gate: without it a body that
+    /// early-returns before its assertion (the old vacuous `Ok`, now
+    /// `Skipped`) satisfies the floor while proving nothing.
+    ///
+    /// SCOPE: the floor covers only invariants that engage at ANY settled
+    /// render (so every full_headless sequence, even a zero-transition one,
+    /// exercises them). A blanket "every required invariant must engage per
+    /// sequence" is UNSOUND — invariants gated on state a short sequence
+    /// never reaches (editor mirror with no edit, toggle with no toggle, …)
+    /// legitimately Skip across a whole sequence and would false-red.
+    /// Sweeping the floor to those needs a process-global (cross-sequence)
+    /// accumulator, deferred (see the audit's "validate on the two F1
+    /// invariants first, then sweep").
+    fn teardown(sut: Self, ref_state: ReferenceState) {
+        let engaged = sut.engaged.borrow();
+        // Only draws that actually SELECT the invariant owe engagement — a
+        // Loro-only draw with no renderer never selects the viewmodel ones.
+        let required: std::collections::BTreeSet<&'static str> = S::required_invariants(&ref_state)
+            .into_iter()
+            .map(|id| id.0)
+            .collect();
+        let unengaged = engagement_floor_violations(&engaged, &required);
+        assert!(
+            unengaged.is_empty(),
+            "non-vacuity (engagement): invariant(s) were selected but never produced a \
+             non-Skipped (gate-passed) verdict across the whole sequence — selected, never \
+             exercised with teeth: {unengaged:?} (engaged: {:?})",
+            engaged.iter().collect::<Vec<_>>(),
+        );
     }
 }
 
@@ -587,5 +706,47 @@ impl<S: ComposedSlice> crate::pbt::fixtures::FixtureAssertable for ComposedSut<S
                 &self.caps,
                 &self.resolver,
             ))
+    }
+}
+
+#[cfg(test)]
+mod engagement_floor_tests {
+    use std::collections::BTreeSet;
+
+    use super::ENGAGEMENT_FLOOR;
+    use super::engagement_floor_violations;
+
+    /// The exact "selected ≠ exercised" case the shipped keystone gate MASKS:
+    /// an `ENGAGEMENT_FLOOR` invariant that this draw SELECTED (present in
+    /// `required`) but that only ever returned `Skipped` (absent from
+    /// `engaged`) MUST violate the floor. Without this, the un-blinded F1
+    /// invariants could early-return `Skipped` on every tick and still pass —
+    /// the vacuity the floor exists to catch. (The `teardown` hook that calls
+    /// this never runs under the standard keystone, which reds on the journals
+    /// baseline in `check_invariants` first, so this pure check is the guard.)
+    #[test]
+    fn floor_fails_when_selected_but_never_engaged() {
+        let id = ENGAGEMENT_FLOOR[0];
+        let required: BTreeSet<&str> = [id].into_iter().collect();
+        let engaged: BTreeSet<&str> = BTreeSet::new();
+        assert_eq!(engagement_floor_violations(&engaged, &required), vec![id]);
+    }
+
+    /// A single non-`Skipped` verdict somewhere in the sequence satisfies it.
+    #[test]
+    fn floor_passes_when_engaged() {
+        let id = ENGAGEMENT_FLOOR[0];
+        let required: BTreeSet<&str> = [id].into_iter().collect();
+        let engaged: BTreeSet<&str> = [id].into_iter().collect();
+        assert!(engagement_floor_violations(&engaged, &required).is_empty());
+    }
+
+    /// A draw that never SELECTED the invariant (a Loro-only draw with no
+    /// renderer) owes no engagement — the floor must not false-red there.
+    #[test]
+    fn floor_ignores_unselected_invariants() {
+        let required: BTreeSet<&str> = BTreeSet::new();
+        let engaged: BTreeSet<&str> = BTreeSet::new();
+        assert!(engagement_floor_violations(&engaged, &required).is_empty());
     }
 }

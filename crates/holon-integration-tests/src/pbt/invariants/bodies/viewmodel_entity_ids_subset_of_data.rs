@@ -16,12 +16,22 @@
 //! layout, not the root's query data, so subtracting the ref-known block set
 //! makes the check layout-agnostic instead of hard-coding those IDs.
 //!
-//! A rendered entity that is *neither* query data nor a real ref block is a
-//! genuine phantom-entity violation and still `Fail`s.
+//! DECLARED display-only UI ids are excluded before the subset check: a
+//! `:__virtual:<parent>` CreationPlaceholder ("type here to create") slot and
+//! ADR-0015 display-placed occurrences carry ids with no backing block and are
+//! intended UI, not phantom data (BugFunnel row 80 — the "backing rows +
+//! declared virtual slots" class). Exclusion is via the TYPED `RowOrigin`
+//! classifier + `collect_canonical_entity_ids`, never an id-infix sniff.
 //!
-//! The check is gated on:
-//! - The ref model tracking a render expression (i.e. `has_root_render_expr()`)
-//! - Both the tree-id set and the data-id set being non-empty
+//! A rendered entity that is *neither* query data nor a real ref block AND is
+//! not a declared UI slot is a genuine phantom-entity violation and still
+//! `Fail`s.
+//!
+//! The check reaches its assertion whenever both the rendered tree-id set and
+//! the root layout's query-data-id set are non-empty (true at any settled
+//! 3-column state); an empty tree/data set this tick is Skipped, not a vacuous
+//! Ok. It does NOT gate on `has_root_render_expr()` — that gate is permanently
+//! false under the wide run's 3-column layout and blinded this backstop (F1).
 //!
 //! Status: functional.
 
@@ -49,12 +59,28 @@ where
     }
 
     async fn check(&self, ref_: &R, sut: &S) -> InvariantResult {
-        if !ref_.has_root_render_expr() {
-            return InvariantResult::Ok;
-        }
-
+        // NB: NO `has_root_render_expr()` gate. In the wide composed run the
+        // default 3-column layout keeps its render sources on the PANELS, not on
+        // `root-layout`, so that gate is permanently false there and silently
+        // blinds this phantom-id backstop (F1). The check needs only a rendered
+        // tree + the root layout's query data — both present in 3-column mode
+        // (the root layout watch carries the panel rows).
         let root = sut.widget_tree_snapshot().await;
-        let tree_ids = root.collect_entity_ids();
+        // Exclude DECLARED display-only UI ids that legitimately have no backing
+        // block (they are intended UI, not phantom data — see BugFunnel row 80,
+        // "rendered rows vs backing rows + DECLARED VIRTUAL SLOTS"):
+        //  - `collect_canonical_entity_ids()` drops display-placed occurrences (ADR
+        //    0015 `props["occurrence"]`).
+        //  - a `:__virtual:<parent>` CreationPlaceholder ("type here to create") slot
+        //    carries a synthetic id and no backing block; detect it with the TYPED
+        //    `RowOrigin` classifier, never an id-infix sniff.
+        // A genuinely fabricated NON-virtual id is still flagged — the phantom
+        // teeth are intact; only the designed UI slots are excluded.
+        let tree_ids: std::collections::BTreeSet<String> = root
+            .collect_canonical_entity_ids()
+            .into_iter()
+            .filter(|id| !holon_frontend::RowOrigin::from_id(id).is_creation_placeholder())
+            .collect();
         // `data_ids`/`ref_known` are `EntityUri`; widget-tree `entity_id`s are
         // raw strings — compare on the string surface.
         let data_ids: std::collections::BTreeSet<String> = sut
@@ -64,8 +90,16 @@ where
             .map(|u| u.as_str().to_string())
             .collect();
 
+        // Not-applicable this snapshot tick: nothing rendered yet, or the root
+        // layout's query data hasn't arrived. Disclosed as Skipped so the
+        // non-vacuity engagement floor does NOT count it as exercised (F2) —
+        // a vacuous `Ok` here would let the floor pass without a real check.
         if tree_ids.is_empty() || data_ids.is_empty() {
-            return InvariantResult::Ok;
+            return InvariantResult::Skipped(format!(
+                "no rendered entity ids ({}) or no root query data ({}) this snapshot tick",
+                tree_ids.len(),
+                data_ids.len()
+            ));
         }
 
         // Every block the reference model knows exists (incl. seed/source and
