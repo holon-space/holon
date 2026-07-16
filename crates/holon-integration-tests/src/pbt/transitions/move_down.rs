@@ -108,7 +108,8 @@ pub fn move_down_weighted_generator<R: RefBlockTree + RefFocus + RefLifecycle>(
         let instance = MoveDown {
             block_id: focus_str,
         };
-        (1, Just(instance).boxed())
+        // F16: raise structural chord weight 1 → 20 (was ~1/180 vs split=100).
+        (20, Just(instance).boxed())
     })
 }
 

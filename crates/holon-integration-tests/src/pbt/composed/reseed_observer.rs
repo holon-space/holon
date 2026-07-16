@@ -29,33 +29,46 @@
 //! per (reason) on stderr the first time it fires at steady state — the
 //! non-vacuity evidence the baseline is read from.
 
-// ── NON-VACUITY BASELINE (keystone N, current unfixed tree, 2026-07-16) ──────
-// Recorded by running `general_e2e_composed_pbt` with this observer armed
-// (`RUST_LOG=holon_latency=debug`, default features). Result per full-reseed
-// reason at keystone N (`sequential 1..40`, PROPTEST_CASES=16):
+// ── NON-VACUITY BASELINE (keystone N, RE-MEASURED 2026-07-17) ────────────────
+// SUPERSEDES the 2026-07-16 table below. The earlier table was measured under
+// the tick-0 journals abort (keystone reddened at the FIRST `check_invariants`
+// before any interactive transition ran), so it reported every reason as "never
+// reached" — an ARTIFACT of the abort, not a real steady-state measurement.
 //
-//   reason                          fires at keystone N?
-//   ------------------------------  --------------------
-//   empty_pending_moved_frontier    NO  (never reached)
-//   unsettled                       NO  (never reached)
-//   orphan                          NO  (never reached)
-//   oversized                       NO  (never reached)
-//   coldboot (legit seed)           NO  (never reached)
-//   sink_fail (recovery)            NO  (never reached)
+// Two changes lifted the abort: (1) the journals ingest-data-loss oracle fix
+// landed; (2) F8 paired `inv-display-placement-canonical-inert`'s selection
+// with its injection env, so the default keystone no longer reds on it. Full
+// interactive sequences now run to steady state. Re-measured by running
+// `general_e2e_composed_pbt` with the observer armed under
+// `HOLON_PBT_RESEED_ORACLE=enforce HOLON_PBT_FORCE_FULL=1 PROPTEST_CASES=32`
+// (confounding non-reseed reds — the `CreateBlockUnderFocus` history gap and
+// the advice-injection collision — softened to `warn` so sequences run long; 89
+// per-sequence reseed summaries observed):
 //
-// The keystone aborts at the PRE-EXISTING boot-seed journals ingest-data-loss
-// RED (`inv-blocks-match-ref/block_raw`, forward `:REQUIRES:` target-FK abort)
-// at the FIRST `check_invariants`, BEFORE any interactive transition applies.
-// The Loro→SQL projection loop that emits `mode=full` events only runs on
-// interactive Loro commits (during `apply`), so no projection event fires at
-// steady state — the oracle ran 3×/run and reported `incremental=0 full=0
-// steady_leaks=0`. The observer→cap→invariant chain is therefore verified LIVE
-// but is VACUOUS at keystone N until the journals RED is lifted.
+//   reason                          fires at keystone N (steady state)?
+//   ------------------------------  -----------------------------------
+//   coldboot (legit boot seed)      YES — 4–6× per sequence (NOT a leak)
+//   empty_pending_moved_frontier    NO
+//   unsettled                       NO
+//   orphan                          NO
+//   oversized                       NO
+//   sink_fail (recovery)            NO
 //
-// Consequence: NONE of the four leak fixes (later increments) can be
-// keystone-guarded at current N — each needs the wall-clock soak / diag guard
-// (`HOLON_SOAK_SEED_FILES`) for non-vacuity until an interactive keystone
-// reaches steady state. See docs/Testing/BugFunnel.md row 71.
+// Steady state IS now reached: `incremental` passes scale with sequence length
+// (observed 1..61 per sequence), so the O(changed) fast path handles the
+// generated interactive edits. Across ALL 89 summaries: `steady_leaks=0`, every
+// `mode=full` pass is `coldboot`. Under `enforce` the invariant did NOT red on
+// the reseed axis.
+//
+// Consequence for the enforce-flip: the prerequisite is NOT "reasons now fire"
+// — none of the four LEAK reasons fire at keystone N, so flipping `enforce`
+// would be GREEN but VACUOUS (no leak occurs for it to catch). The keystone now
+// actively CONFIRMS the incremental path holds at N (a strict improvement over
+// the old "never reached" vacuity), but still cannot PROVE it catches a leak
+// regression — that non-vacuity needs the wall-clock soak / diag guard
+// (`HOLON_SOAK_SEED_FILES`) where a real O(N) reseed leak reproduces. Do NOT
+// flip `enforce` by default on this basis (reseed workstream's call).
+// See docs/Testing/BugFunnel.md row 71.
 // ─────────────────────────────────────────────────────────────────────────────
 
 use std::collections::BTreeMap;
