@@ -212,10 +212,8 @@ fn check_block_id_set(label: &str, sut: &[Block], ref_: &[Block]) -> Result<(), 
 }
 
 /// MISSING-in-SUT — the INGEST DATA LOSS direction. Every reference-expected
-/// non-seed block id must be PRESENT in the SUT projection; one that was parsed
-/// but never landed is silent ingest data loss (e.g. a forward
-/// `:REQUIRES:`/`:BLOCKED-BY:` target-FK abort dropping every block from the
-/// offending one onward — dogfood 2026-07-10 P0).
+/// non-seed block id must be PRESENT in the SUT projection; one that the oracle
+/// models but the SUT projection lacks is a divergence to be root-caused.
 ///
 /// This function takes NO filter, BY DESIGN: the missing direction is
 /// structurally unscopable. There is never a legitimate reason for a
@@ -230,10 +228,20 @@ fn check_no_missing_ids(
     if missing.is_empty() {
         return Ok(());
     }
+    // FACTS ONLY — never assert a specific cause here. This message historically
+    // baked in a "forward `:REQUIRES:`/`:BLOCKED-BY:` target-FK abort" story as
+    // fact, which mislead multiple sessions for months (the keystone RED it fired
+    // on was actually a per-draw seed/oracle asymmetry, no edge fields involved).
+    // State only which ids are missing from which relation, plus a NEUTRAL triage
+    // hint listing candidate causes without privileging any.
     Err(format!(
-        "[{label}] INGEST DATA LOSS: {} reference-expected block id(s) were parsed but never \
-         landed in the SUT projection (a forward `:REQUIRES:`/`:BLOCKED-BY:` target-FK abort \
-         silently drops every block from the offending one onward), missing: {:?}",
+        "[{label}] INGEST DATA LOSS: {} reference-expected block id(s) present in the oracle but \
+         absent from the SUT `{label}` relation, missing: {:?}. Common causes (verify, do not \
+         assume): (1) ingest ordering — a block inserted before its parent/target; (2) seed/oracle \
+         asymmetry — the oracle models a block this draw's SUT arm never seeds (e.g. a \
+         frontend-only boot seed under a non-frontend draw); (3) an FK abort during insert — but \
+         first check whether the missing blocks actually carry `requires`/`advice_suppressed` edge \
+         fields before assuming FK.",
         missing.len(),
         missing.iter().take(10).collect::<Vec<_>>(),
     ))

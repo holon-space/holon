@@ -828,13 +828,13 @@ pub async fn boot_and_seed_wide(
     // 300ms boot settle can return before that chain lands, so await the journal
     // in `block_raw` BEFORE the scaffold snapshot / invariant checks — else a
     // not-yet-fired journal false-diverges `inv-blocks-match-ref` as "missing in
-    // SQL". Only an ActionEngine (⇒ Turso) frontend boot fires it; fail loud on
-    // timeout so a genuinely-dropped firing is a RED, not a hang.
-    if has_frontend
-        && set
-            .wiring
-            .has_actor(holon_pbt_core::wiring::Actor::ActionEngine)
-    {
+    // SQL". EVERY frontend (Turso) boot fires it — the rule-firing machinery
+    // (ClockScheduler + action watchers) runs unconditionally on any non-wasm
+    // Turso boot, NOT behind the `Actor::ActionEngine` label (see the oracle's
+    // `seed_boot_journal` gate in `wide_e2e_ref_for`). Await it on every frontend
+    // draw so the snapshot is taken AFTER it lands; fail loud on timeout so a
+    // genuinely-dropped firing is a RED, not a hang.
+    if has_frontend {
         let journal_id = crate::pbt::frontend_slice::components::keystone_boot_journal_id();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
@@ -907,13 +907,14 @@ pub async fn boot_and_seed_wide(
     // it keeps them non-seed so a dropped `fe-blocked`/`fe-target` diverges the
     // block-id sets and fires `inv-blocks-match-ref/{block_raw,matview}` as
     // INGEST DATA LOSS. The journal auto-create RULE blocks (`Journal
-    // Auto-Create` heading + `holon_sql` trigger + `holon_rule` action, seeded
-    // on every boot) and the boot-FIRED journal day-block are non-seed children
-    // of journals — kept compared, like the forward-edge children, so a dropped
-    // rule block or a missing/duplicate boot journal fires
-    // `inv-blocks-match-ref`. Listed unconditionally: a no-op for a draw where
-    // an id is in neither `booted` nor `ref_ids` (e.g. the boot journal on a
-    // non-ActionEngine draw).
+    // Auto-Create` heading + `holon_rule` action, seeded on every boot) and the
+    // boot-FIRED journal day-block are non-seed children of journals — kept
+    // compared, like the forward-edge children, so a dropped rule block or a
+    // missing/duplicate boot journal fires `inv-blocks-match-ref`. Listed
+    // unconditionally: a no-op for a draw where an id is in neither `booted` nor
+    // `ref_ids` (e.g. the auto-create rule + boot journal on a non-frontend
+    // draw, which `wide_e2e_ref_for` keeps out of the oracle — they are seeded
+    // only by a frontend boot's `build_default_layout_blocks`).
     let tree: BTreeSet<EntityUri> = [ids.parent.clone(), ids.c1.clone(), ids.c2.clone()]
         .into_iter()
         .chain(FORWARD_EDGE_IDS.into_iter().map(EntityUri::block))
@@ -1195,13 +1196,50 @@ pub fn wide_e2e_ref_for(wiring: &Wiring) -> ReferenceState {
         if folder_companion_enabled() {
             seed_folder_companion(&mut state);
         }
-        // Journals boot auto-create closure (dogfood #4): a Turso + ActionEngine
-        // frontend boot fires the seeded rule once for the fixed keystone clock
-        // day, minting ONE journal day-block under `block:journals`. Model it as a
-        // non-seed child. Gated on `Actor::ActionEngine` (implies Turso — a
-        // frontend draw without the action watcher never fires the rule).
-        if wiring.has_actor(holon_pbt_core::wiring::Actor::ActionEngine) {
-            seed_boot_journal(&mut state);
+        // Journals boot auto-create closure (dogfood #4): a frontend (Turso)
+        // boot fires the seeded rule once for the fixed keystone clock day,
+        // minting ONE journal day-block under `block:journals`. Model it as a
+        // non-seed child of EVERY frontend draw.
+        //
+        // Prod evidence (2026-07-16): the rule-firing machinery is NOT gated on
+        // the `Actor::ActionEngine` PBT label — the `ClockScheduler`
+        // (`registration.rs`: `spawn_clock_scheduler` in `create_initialized_engine`,
+        // "Every embedder resolves through this shared path") and
+        // `start_action_watchers` (`holon-app/wiring.rs`, only `#[cfg(not(wasm32))]`)
+        // BOTH run unconditionally on every non-wasm Turso frontend boot, and prod
+        // has zero imports of the `Actor` enum. The SUT fires the boot journal on
+        // any Turso draw, so the prior `has_actor(ActionEngine)` gate here was too
+        // narrow: a `storage={Turso} actors={}` draw fired it in the SUT but the
+        // oracle did not model it → a spurious `inv-blocks-match-ref/{org,block_raw,
+        // matview}` divergence (SUT +1 block). The actor stays a label describing
+        // which transitions a draw can express, not a prod gate. `seed_boot_journal`
+        // is a no-op when no ViewModel booted (a non-frontend draw takes the `else`),
+        // so the ViewModel gate alone is the right scope.
+        seed_boot_journal(&mut state);
+    } else {
+        // Non-frontend (Loro/storage-only) draw: the journal auto-create RULE
+        // (`Journal Auto-Create` heading + `holon_rule` action) is seeded ONLY by
+        // a frontend boot's `build_default_layout_blocks` — a storage-only config
+        // has no frontend session and never mints it. `seed_booted_layout_into_ref`
+        // (run via `wide_ref()` under the fixed `{Loro, EditorState}` subsystem
+        // wiring) models it unconditionally, which for a non-frontend draw made the
+        // oracle expect a block the SUT structurally cannot have: a false
+        // `inv-blocks-match-ref` INGEST-DATA-LOSS RED at boot AND — once that no
+        // longer aborts — a `peer_update_block: block not found` panic when a
+        // `PeerEdit` transition targets the ref-modeled-but-SUT-absent rule block.
+        // Drop it from the oracle here (mirroring how the forward-edge corpus /
+        // boot journal are added ONLY for a frontend draw), so a non-frontend draw
+        // neither compares nor targets it. The page-display layer
+        // (`journals`/`src::0`/`render::0`) stays modeled — it is scaffold-filtered
+        // and never a mutation/peer target.
+        for id in [
+            holon_frontend::JOURNALS_AUTO_CREATE_ID,
+            holon_frontend::JOURNALS_ACTION_ID,
+        ] {
+            let uri = EntityUri::parse(id).expect("journals rule id");
+            state.domain.block_state.blocks.remove(&uri);
+            state.domain.block_state.block_documents.remove(&uri);
+            state.domain.layout_blocks.headline_ids.remove(&uri);
         }
     }
     state.with_cap_set(cap_set_for_wiring(wiring))

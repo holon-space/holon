@@ -177,7 +177,9 @@ pub(crate) fn seed_booted_layout_into_ref(state: &mut ReferenceState, fresh: boo
     // belong to the journals page document. The auto-create RULE is modeled
     // just after this loop (also seeded by `build_default_layout_blocks`); the
     // boot-FIRED journal day-block is modeled only for the composed frontend
-    // arm (see `wide_e2e`), since only a Turso + ActionEngine boot fires it.
+    // arm (see `wide_e2e`), since EVERY Turso frontend boot fires it — the
+    // rule-firing machinery runs unconditionally on any non-wasm Turso boot, not
+    // behind the `Actor::ActionEngine` label.
     let journals_uri = EntityUri::parse(holon_frontend::JOURNALS_PAGE_ID).expect("journals id");
     for block in holon_frontend::journals_page_blocks() {
         let block_id = block.id.clone();
