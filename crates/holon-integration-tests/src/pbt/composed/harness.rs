@@ -229,6 +229,17 @@ pub trait ComposedSlice {
         let map = resolver.lock().expect("resolver lock").clone();
         let mut resolved = ref_state.with_resolved_doc_uris(&map);
         inject_scaffold_seed(&mut resolved, scaffold_ids);
+        // C2 provenance oracle: stash the id-reconcile map's expectation into the
+        // resolved ref so `RefHistoryExpectation` can surface it. `ever_created`
+        // = every real id the oracle minted (phantom-history anchor).
+        // `min_op_groups` counts only synthetic→real reconciled (UI-driven)
+        // creates — born-equal external/peer ids (key == value) are excluded, as
+        // their org-ingest / Loro path records no engine history.
+        {
+            let inner = resolved.inner_mut();
+            inner.history_ever_created = map.values().cloned().collect();
+            inner.history_min_op_groups = map.iter().filter(|(k, v)| k != v).count();
+        }
         // Freeze the budget window for `inv-sql-budget` (if a span-metrics provider is
         // wired): everything up to this check is the transition's cost; the invariant
         // bodies below must not count against it. Hands the host the post-transition

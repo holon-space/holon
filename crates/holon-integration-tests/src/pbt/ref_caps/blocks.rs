@@ -10,6 +10,7 @@ use holon_pbt_core::capabilities::RefApplyMutationMut;
 use holon_pbt_core::capabilities::RefBackend;
 use holon_pbt_core::capabilities::RefBlockTree;
 use holon_pbt_core::capabilities::RefBlockTreeMut;
+use holon_pbt_core::capabilities::RefHistoryExpectation;
 
 use super::super::reference_state::ReferenceState;
 use super::cap_id;
@@ -391,5 +392,18 @@ impl RefBackend for ReferenceState {
                 b
             })
             .collect()
+    }
+}
+
+/// C2 provenance-oracle expectation. The values are stamped onto the resolved
+/// ref by the harness `run_report` (from the id-reconcile map); this cap just
+/// surfaces them to the `history_*` correspondences.
+impl RefHistoryExpectation for ReferenceState {
+    fn ever_created_ids(&self) -> BTreeSet<EntityUri> {
+        self.history_ever_created.clone()
+    }
+
+    fn min_recorded_op_groups(&self) -> usize {
+        self.history_min_op_groups
     }
 }

@@ -180,6 +180,11 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
     catalog.extend(correspondences::active_editor_caret().wire());
     catalog.extend(correspondences::org_blocks().wire());
     catalog.extend(correspondences::matview_ghost_rows().wire());
+    // C2 provenance oracles (G9): phantom-history subset + missed-history
+    // op-group floor over `block_history`. Cap-gated on `SutHistory` (Turso
+    // arm only), checked at the combined-fixed-point settle.
+    catalog.extend(correspondences::history_no_phantom_rows().wire());
+    catalog.extend(correspondences::history_records_all_creates().wire());
     catalog
 }
 
@@ -262,6 +267,7 @@ const CENTRAL_INVARIANT_IDS_HEAD: &[&str] = &[
     "inv-frontend-root-not-error",
     "inv-live-tree-matches-fresh",
     "inv-main-panel-rows-match-focus",
+    "inv-embedded-page-collapsed-lazy",
     "inv-pair-view-selection-current-view",
     "inv-value-fn-provider-identity",
     "inv-value-fn-provider-arg-variance-13",
@@ -292,6 +298,8 @@ const CENTRAL_INVARIANT_IDS_TAIL: &[&str] = &[
     "inv-editor-caret/mirror",
     "inv-blocks-match-ref/org",
     "inv-matview-consistent-with-ref/root_layout",
+    "inv-history-no-phantom-rows/block_history",
+    "inv-history-records-all-creates/block_history",
 ];
 
 #[cfg(test)]
