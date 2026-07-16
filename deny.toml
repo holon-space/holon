@@ -26,6 +26,22 @@ ignore = [
     # We don't enable DNSSEC validation through iroh, so the vulnerable paths are unreachable.
     "RUSTSEC-2026-0118",
     "RUSTSEC-2026-0119",
+    # proc-macro-error2 unmaintained, pulled in via gpui -> stacksafe-macro ->
+    # stacksafe. No fix available upstream (author confirmed unmaintained,
+    # recommends manyhow/proc-macro2-diagnostics as replacements — that's an
+    # upstream gpui/stacksafe migration, not ours to make).
+    "RUSTSEC-2026-0173",
+    # quick-xml quadratic-attribute-scan / unbounded-namespace-alloc DoS —
+    # both require parsing attacker-controlled XML. Our only quick-xml paths
+    # are xcb/wayland-scanner parsing build-time Wayland protocol XML and X11
+    # introspection (screenshot/window-capture tooling via xcap, dev-only) —
+    # never untrusted network input. Unreachable in our usage.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+    # rustybuzz / ttf-parser unmaintained, transitive via gpui's font stack
+    # (usvg/cosmic-text/fontdb). No safe upgrade available upstream yet.
+    "RUSTSEC-2026-0206",
+    "RUSTSEC-2026-0192",
 ]
 
 [licenses]

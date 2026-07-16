@@ -74,7 +74,8 @@ holon-frontend = { path = "../../crates/holon-frontend", default-features = fals
 [patch.crates-io]
 symlink = { path = "patches/symlink" }
 
-# Point the turso git dependency at the local checkout (git source). Pinned to
+# Point the turso git dependency at the pushed cherry-pick branch (was: a
+# local-only file:// checkout — non-reproducible, 404s on CI). Pinned to
 # rev 84bb233a = e2737c65 (the wasm-buildable line this worker already pinned:
 # `load_extension` off wasm, git-sourced so turso's workspace-hack doesn't
 # collide with holon's path-sourced one) + a SURGICAL cherry-pick of the two IVM
@@ -89,18 +90,19 @@ symlink = { path = "patches/symlink" }
 # matview desynced from the intact `block_raw` base on reopen (rows dropped incl.
 # `block:root-layout`, others tripled — non-deterministic DBSP MergeOperator
 # rowids). BugFunnel 2026-07-13 "Edit+reload permanently loses root-layout".
-# The cherry-pick commit lives in the local turso repo's shared object store
-# (created via `git worktree`); re-create/bump it when the fork advances.
+# Pushed to nightscape/turso branch `holon-worker-b1-fix`; pinned by rev (not
+# branch) so a future push to that branch can't silently change what resolves
+# here — re-create/bump the rev when the fork advances.
 [patch."https://github.com/nightscape/turso.git"]
-turso = { git = "file:///Users/martin/Workspaces/bigdata/turso", rev = "84bb233a00a29be30f1204b46c912b34f43f090b" }
-turso_core = { git = "file:///Users/martin/Workspaces/bigdata/turso", rev = "84bb233a00a29be30f1204b46c912b34f43f090b" }
-turso_ext = { git = "file:///Users/martin/Workspaces/bigdata/turso", rev = "84bb233a00a29be30f1204b46c912b34f43f090b" }
-turso_macros = { git = "file:///Users/martin/Workspaces/bigdata/turso", rev = "84bb233a00a29be30f1204b46c912b34f43f090b" }
-turso_parser = { git = "file:///Users/martin/Workspaces/bigdata/turso", rev = "84bb233a00a29be30f1204b46c912b34f43f090b" }
-turso_sdk_kit = { git = "file:///Users/martin/Workspaces/bigdata/turso", rev = "84bb233a00a29be30f1204b46c912b34f43f090b" }
-turso_sdk_kit_macros = { git = "file:///Users/martin/Workspaces/bigdata/turso", rev = "84bb233a00a29be30f1204b46c912b34f43f090b" }
-turso_sync_engine = { git = "file:///Users/martin/Workspaces/bigdata/turso", rev = "84bb233a00a29be30f1204b46c912b34f43f090b" }
-turso_sync_sdk_kit = { git = "file:///Users/martin/Workspaces/bigdata/turso", rev = "84bb233a00a29be30f1204b46c912b34f43f090b" }
+turso = { git = "https://github.com/nightscape/turso-worker-wasm-fix.git", rev = "84bb233a00a29be30f1204b46c912b34f43f090b" }
+turso_core = { git = "https://github.com/nightscape/turso-worker-wasm-fix.git", rev = "84bb233a00a29be30f1204b46c912b34f43f090b" }
+turso_ext = { git = "https://github.com/nightscape/turso-worker-wasm-fix.git", rev = "84bb233a00a29be30f1204b46c912b34f43f090b" }
+turso_macros = { git = "https://github.com/nightscape/turso-worker-wasm-fix.git", rev = "84bb233a00a29be30f1204b46c912b34f43f090b" }
+turso_parser = { git = "https://github.com/nightscape/turso-worker-wasm-fix.git", rev = "84bb233a00a29be30f1204b46c912b34f43f090b" }
+turso_sdk_kit = { git = "https://github.com/nightscape/turso-worker-wasm-fix.git", rev = "84bb233a00a29be30f1204b46c912b34f43f090b" }
+turso_sdk_kit_macros = { git = "https://github.com/nightscape/turso-worker-wasm-fix.git", rev = "84bb233a00a29be30f1204b46c912b34f43f090b" }
+turso_sync_engine = { git = "https://github.com/nightscape/turso-worker-wasm-fix.git", rev = "84bb233a00a29be30f1204b46c912b34f43f090b" }
+turso_sync_sdk_kit = { git = "https://github.com/nightscape/turso-worker-wasm-fix.git", rev = "84bb233a00a29be30f1204b46c912b34f43f090b" }
 
 [build-dependencies]
 napi-build = "2.3.1"
