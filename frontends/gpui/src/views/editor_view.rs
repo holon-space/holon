@@ -145,6 +145,7 @@ pub struct EditorView {
     /// per-row `Mutable` cell). Cell-attached editors bypass this gate
     /// (Increment G).
     prev_focused: std::cell::Cell<bool>,
+    #[cfg(feature = "mobile")]
     /// The soft-keyboard focus generation this editor claimed on its last
     /// focus-gain (see `crate::mobile::editor_focus_gained`). Passed back on
     /// blur so a stale editor's late-arriving blur cannot hide the keyboard
@@ -658,6 +659,7 @@ impl EditorView {
             _remote_delta_subscription,
             last_local_seq: holon_api::write_seq::WriteSeq::ZERO.get(),
             prev_focused: std::cell::Cell::new(false),
+            #[cfg(feature = "mobile")]
             focus_gen: std::cell::Cell::new(0),
         }
     }
