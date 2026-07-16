@@ -21,11 +21,9 @@ Each file lives in `assets/queries/` and is exercised by
 |-------|------|-------|
 | Q1 supervision | `assets/queries/history_supervision.sql` | Per-session / per-tool-call op counts (`ops` = distinct op groups, `events` = field-delta rows). |
 | Q2 transitions | `assets/queries/history_transitions_by_transition.sql` | Op fire counts grouped by `transition_id` — the "postponed N times" primitive generalized. |
+| Q3 automations journal | `assets/queries/history_automations_journal.sql` | The user-facing "Daily journal — created 2026-07-10 ⚙" read, over the IVM-maintained `automations_journal` matview (grouped by origin/transition_id/day, `AutomationsJournalSchemaModule`) — not raw `block_history`. |
 | Q4 trust × fires | `assets/queries/history_trust_fires.sql` | `TRUST_PROPOSAL_STATS_SQL` acceptance stats per `(origin, transition_id)` LEFT JOINed with history fire counts ("proposed vs did"). |
 | Q5 forensic timeline | `assets/queries/history_block_timeline.sql` | Full ordered history for one block (named param `$block_id`). |
-
-Q3 (the automations journal over the INC2 matview) is a separate lane and is not
-part of this pack.
 
 ## `query_history` MCP tool
 
