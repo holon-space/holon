@@ -102,8 +102,8 @@ fn create_params(id: &str, content: &str) -> holon_api::StorageEntity {
 
 async fn link_resolved(handle: &holon::storage::turso::DbHandle, source: &str) -> Option<String> {
     let sql = format!(
-        "SELECT resolved_id FROM block_links WHERE source_block_id = 'block:{source}' \
-         AND kind = 'page'"
+        "SELECT resolved_id FROM block_links WHERE source_block_id = 'block:{source}' AND kind = \
+         'page'"
     );
     let rows = handle.query(&sql, HashMap::new()).await.expect("query");
     rows.into_iter()
@@ -219,8 +219,8 @@ async fn create_page_from_link_creates_page_chain_and_heals_dangling_link() {
     assert!(leaf_id.starts_with("block:"), "leaf id must be a block URI");
 
     // 3. Assert: `Projects` page exists, Page-tagged, at the top-level parent.
-    let projects_sql = "SELECT id FROM block_raw b JOIN block_tags t ON t.block_id = b.id \
-                       AND t.tag = 'Page' WHERE b.content = 'Projects'";
+    let projects_sql = "SELECT id FROM block_raw b JOIN block_tags t ON t.block_id = b.id AND \
+                        t.tag = 'Page' WHERE b.content = 'Projects'";
     let proj_rows = handle
         .query(projects_sql, HashMap::new())
         .await

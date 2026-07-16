@@ -21,6 +21,29 @@
 //! CRDT-vs-LWW capability split (a `LoroMemory` container "deliberately gives
 //! up SQL/GQL/PRQL queries").
 //!
+//! # Rebuild contract (honest partial — C2 INC 4, fork F2b)
+//!
+//! [`HistoryStore::rebuild`] truncates the relation and repopulates it from
+//! what the substrate can **prove**, disclosed exactly by [`HistoryFidelity`]:
+//!
+//! - The block store durably keeps each block's `_provenance` stamp (its
+//!   *latest* authorship — origin, ids, timestamp). Rebuild recovers, per
+//!   extant stamped block, **one `create` event** carrying that stamp. This is
+//!   the provable subset.
+//! - It does **not** recover the intermediate field-delta stream (a block's
+//!   current row holds current values, not the historical deltas, and prior
+//!   `old_value`s are unknowable), so state-transition counts like "postponed N
+//!   times" are NOT rebuildable. Rather than fabricate provenance for ops that
+//!   left no trace, rebuild omits them — and the store reports
+//!   [`HistoryFidelity::Partial`], never [`HistoryFidelity::Loro`].
+//!
+//! Full (Loro) fidelity — riding provenance on Loro commit metadata so the
+//! whole op stream is losslessly recoverable — is PARKED (frontier work; C2
+//! fork F2a, awaiting Martin's ruling). Rebuild is deterministic: ordering the
+//! recovered stamps by `(at_millis, block_id)` and assigning `op_group`s
+//! sequentially, two rebuilds of the same substrate produce byte-identical
+//! rows.
+//!
 //! # Schema evolution
 //!
 //! Because the relation is ephemeral and rebuildable, its migration story is
@@ -34,14 +57,28 @@ use serde::Serialize;
 
 /// How completely the history relation can be **rebuilt** from the substrate's
 /// own durable history — the ADR 0024 P8 ladder (`Loro op history ≻ jj/git ≻
-/// none`). Orthogonal to whether the relation is *currently* populated; it is a
-/// disclosed statement of rebuild guarantee, not of live contents.
+/// block stamps ≻ none`). Orthogonal to whether the relation is *currently*
+/// populated; it is a disclosed statement of rebuild guarantee, not of live
+/// contents. The reported value is **computed from what the store's `rebuild`
+/// can actually reproduce today**, never asserted by the caller — reporting a
+/// stronger value than the implemented rebuilder can deliver is an undisclosed
+/// over-claim the fail-loud philosophy forbids.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HistoryFidelity {
     /// Loro op history present — the relation is fully rebuildable op-by-op.
+    /// PARKED: no rebuilder recovers the full op stream yet (needs provenance
+    /// ridden on Loro commit metadata — C2 fork F2a, awaiting ruling). No store
+    /// reports this today; a store must NOT claim it without the rebuilder.
     Loro,
     /// Only jj/git commit history — rebuild is coarse (commit granularity).
     Jj,
+    /// Partial: rebuild recovers only what the block substrate durably
+    /// preserves — one `create` event per extant block, carrying that
+    /// block's stamped `_provenance` (its latest authorship: origin + ids +
+    /// timestamp). Intermediate field-delta events (the "postponed N times"
+    /// stream) left no recoverable trace and are NOT reproduced. The honest
+    /// guarantee of the Turso store until full (Loro) fidelity exists.
+    Partial,
     /// No durable history source and/or no query substrate — the relation holds
     /// only what accrued this session, or is absent (org-standalone degraded).
     None,
@@ -53,6 +90,7 @@ impl HistoryFidelity {
         match self {
             HistoryFidelity::Loro => "loro",
             HistoryFidelity::Jj => "jj",
+            HistoryFidelity::Partial => "partial",
             HistoryFidelity::None => "none",
         }
     }
@@ -246,4 +284,13 @@ pub trait HistoryStore: Send + Sync {
     /// Count events matching `filter` — the "postponed N times" primitive
     /// (`count(&HistoryQuery::transitions_to(block, "status", "postponed"))`).
     async fn count(&self, filter: &HistoryQuery) -> anyhow::Result<u64>;
+
+    /// Truncate the relation and repopulate it from what the substrate can
+    /// prove — the disclosed **partial** rebuild (see the module docs' rebuild
+    /// contract and [`HistoryFidelity::Partial`]): one `create` event per
+    /// extant block carrying its stamped `_provenance`; the field-delta
+    /// stream is not recovered. Deterministic (two rebuilds → identical
+    /// rows). Fails loud on a substrate read/write error (never silently
+    /// produces a partial relation).
+    async fn rebuild(&self) -> anyhow::Result<()>;
 }

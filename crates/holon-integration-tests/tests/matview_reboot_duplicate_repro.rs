@@ -112,13 +112,9 @@ async fn matview_base_mismatches(env: &TestEnvironment) -> Vec<(String, i64, i64
             // The `block` matview intentionally filters the parent sentinel
             // (`WHERE b.id != 'sentinel:no_parent'`), so exclude it here too;
             // every other id must appear exactly once in both.
-            "SELECT br.id AS id, \
-                    (SELECT COUNT(*) FROM block_raw r WHERE r.id = br.id) AS base_cnt, \
-                    (SELECT COUNT(*) FROM block m WHERE m.id = br.id) AS mv_cnt \
-             FROM block_raw br \
-             WHERE br.id != 'sentinel:no_parent' \
-             GROUP BY br.id \
-             HAVING base_cnt != mv_cnt",
+            "SELECT br.id AS id, (SELECT COUNT(*) FROM block_raw r WHERE r.id = br.id) AS \
+             base_cnt, (SELECT COUNT(*) FROM block m WHERE m.id = br.id) AS mv_cnt FROM block_raw \
+             br WHERE br.id != 'sentinel:no_parent' GROUP BY br.id HAVING base_cnt != mv_cnt",
             QueryLanguage::HolonSql,
         )
         .await
@@ -215,8 +211,8 @@ fn block_matview_no_duplicates_after_reboot_over_existing_db() {
         let mismatches = matview_base_mismatches(&env).await;
         assert!(
             mismatches.is_empty(),
-            "[reboot] `block` matview row-count diverges from `block_raw` per id \
-             (id, base, matview): {mismatches:?}\n{}",
+            "[reboot] `block` matview row-count diverges from `block_raw` per id (id, base, \
+             matview): {mismatches:?}\n{}",
             dump_counts(&env).await
         );
     });
@@ -272,15 +268,15 @@ fn block_matview_with_edge_fields_no_duplicates_after_reboot() {
         let dupes = duplicate_ids(&env).await;
         assert!(
             dupes.is_empty(),
-            "[reboot-edge] `block` matview has DUPLICATE rows after restart with edge \
-             fields present: {dupes:?}\n{}",
+            "[reboot-edge] `block` matview has DUPLICATE rows after restart with edge fields \
+             present: {dupes:?}\n{}",
             dump_counts(&env).await
         );
         let mismatches = matview_base_mismatches(&env).await;
         assert!(
             mismatches.is_empty(),
-            "[reboot-edge] `block` matview row-count diverges from `block_raw` per id \
-             (id, base, matview): {mismatches:?}\n{}",
+            "[reboot-edge] `block` matview row-count diverges from `block_raw` per id (id, base, \
+             matview): {mismatches:?}\n{}",
             dump_counts(&env).await
         );
     });

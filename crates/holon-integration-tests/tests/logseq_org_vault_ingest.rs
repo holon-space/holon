@@ -121,8 +121,7 @@ fn logseq_org_vault_ingests_without_loss() {
             .collect();
         assert!(
             missing.is_empty(),
-            "LogSeq-org headlines silently dropped on ingest: {missing:?}\n\
-             present ids: {:?}",
+            "LogSeq-org headlines silently dropped on ingest: {missing:?}\npresent ids: {:?}",
             blocks.keys().collect::<Vec<_>>()
         );
 
@@ -147,8 +146,8 @@ fn logseq_org_vault_ingests_without_loss() {
         assert!(
             now_marks.contains("\"type\":\"internal\"")
                 && now_marks.contains("block:7c9e6a10-1001-4a00-9000-000000000010"),
-            "((uuid)) block-ref did not become an Internal link mark targeting \
-             the referenced block: marks={now_marks:?}"
+            "((uuid)) block-ref did not become an Internal link mark targeting the referenced \
+             block: marks={now_marks:?}"
         );
 
         // ── 4. bare `[[Page]]` → Name link mark; dangling represented ─────
@@ -165,8 +164,8 @@ fn logseq_org_vault_ingests_without_loss() {
         assert!(
             dangling_marks.contains("\"type\":\"name\"")
                 && dangling_marks.contains("Nonexistent Page"),
-            "DANGLING [[Nonexistent Page]] was dropped instead of represented as \
-             a Name mark: marks={dangling_marks:?}"
+            "DANGLING [[Nonexistent Page]] was dropped instead of represented as a Name mark: \
+             marks={dangling_marks:?}"
         );
 
         // ── 5. task keywords: DONE parsed, LATER/NOW preserved verbatim ───
@@ -181,8 +180,8 @@ fn logseq_org_vault_ingests_without_loss() {
         );
         assert!(
             done_blob.contains("DONE") || field(done_block, "completed") == "1",
-            "DONE keyword lost on ingest (neither task_state nor content nor \
-             completed carries it): {done_blob:?}"
+            "DONE keyword lost on ingest (neither task_state nor content nor completed carries \
+             it): {done_blob:?}"
         );
 
         // LATER / NOW are LogSeq dialect keywords, recognized since WS-3
@@ -194,8 +193,8 @@ fn logseq_org_vault_ingests_without_loss() {
         );
         assert!(
             later_props.contains("task_state") && later_props.contains("LATER"),
-            "LATER dialect keyword lost on ingest — WS-3 maps it to \
-             task_state: properties={later_props:?}"
+            "LATER dialect keyword lost on ingest — WS-3 maps it to task_state: \
+             properties={later_props:?}"
         );
         let now_props = field(
             &blocks["7c9e6a10-0003-4a00-9000-000000000003"],
@@ -203,8 +202,8 @@ fn logseq_org_vault_ingests_without_loss() {
         );
         assert!(
             now_props.contains("task_state") && now_props.contains("NOW"),
-            "NOW dialect keyword lost on ingest — WS-3 maps it to \
-             task_state: properties={now_props:?}"
+            "NOW dialect keyword lost on ingest — WS-3 maps it to task_state: \
+             properties={now_props:?}"
         );
     });
 }
@@ -229,8 +228,8 @@ fn logseq_later_now_map_to_task_state() {
         // content no longer carries the bare marker.
         assert!(
             props.contains("task_state") && props.contains("LATER"),
-            "WS-3 not yet implemented: LATER did not map to a task_state \
-             property: properties={props:?}"
+            "WS-3 not yet implemented: LATER did not map to a task_state property: \
+             properties={props:?}"
         );
         assert!(
             !field(later, "content").contains("LATER"),

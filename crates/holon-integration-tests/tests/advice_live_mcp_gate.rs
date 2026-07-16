@@ -320,24 +320,24 @@ fn advice_live_mcp_gate() {
     let ui_str = serde_json::to_string(&ui).expect("serialize describe_ui json");
     assert!(
         ids.contains(lesson_b.as_str()),
-        "describe_ui: top lesson {lesson_b} must be woven under the anchor \
-         (it lives on a separate page, so a rendered row with this id is the \
-         weave). rendered ids={ids:?} ui={ui_str}"
+        "describe_ui: top lesson {lesson_b} must be woven under the anchor (it lives on a \
+         separate page, so a rendered row with this id is the weave). rendered ids={ids:?} \
+         ui={ui_str}"
     );
     assert!(
         ids.contains(lesson_c.as_str()),
-        "describe_ui: 2nd lesson {lesson_c} must be woven under the anchor. \
-         rendered ids={ids:?} ui={ui_str}"
+        "describe_ui: 2nd lesson {lesson_c} must be woven under the anchor. rendered ids={ids:?} \
+         ui={ui_str}"
     );
     assert!(
         !ids.contains(lesson_d.as_str()),
-        "describe_ui: {lesson_d} is the k=2 truncation → no woven row pre-dismiss. \
-         rendered ids={ids:?} ui={ui_str}"
+        "describe_ui: {lesson_d} is the k=2 truncation → no woven row pre-dismiss. rendered \
+         ids={ids:?} ui={ui_str}"
     );
     assert!(
         ui_str.contains("dismiss_advice"),
-        "describe_ui: woven advice rows must carry the read-only dismiss_advice \
-         affordance (ADR 0021). ui={ui_str}"
+        "describe_ui: woven advice rows must carry the read-only dismiss_advice affordance (ADR \
+         0021). ui={ui_str}"
     );
 
     // ── 2. Dismissal over MCP removes the top lesson, backfills the 3rd, and
@@ -360,19 +360,18 @@ fn advice_live_mcp_gate() {
     let ui_str = serde_json::to_string(&ui).expect("serialize describe_ui json");
     assert!(
         !ids.contains(lesson_b.as_str()),
-        "describe_ui post-dismiss: {lesson_b}'s woven row must be gone (its id may \
-         still appear in the anchor's advice_suppressed column — that is expected). \
-         rendered ids={ids:?} ui={ui_str}"
+        "describe_ui post-dismiss: {lesson_b}'s woven row must be gone (its id may still appear \
+         in the anchor's advice_suppressed column — that is expected). rendered ids={ids:?} \
+         ui={ui_str}"
     );
     assert!(
         ids.contains(lesson_c.as_str()),
-        "describe_ui post-dismiss: {lesson_c} must remain woven. \
-         rendered ids={ids:?} ui={ui_str}"
+        "describe_ui post-dismiss: {lesson_c} must remain woven. rendered ids={ids:?} ui={ui_str}"
     );
     assert!(
         ids.contains(lesson_d.as_str()),
-        "describe_ui post-dismiss: {lesson_d} must BACKFILL at k=2. \
-         rendered ids={ids:?} ui={ui_str}"
+        "describe_ui post-dismiss: {lesson_d} must BACKFILL at k=2. rendered ids={ids:?} \
+         ui={ui_str}"
     );
 
     // Persistence: the dismissal is durable in the authored exclusion set
@@ -408,8 +407,8 @@ fn advice_live_mcp_gate() {
     let matview_str = serde_json::to_string(&matview_rows).expect("serialize matview rows");
     assert!(
         !matview_str.contains(lesson_c.as_str()),
-        "deleted lesson {lesson_c} must leave no dangling row in advice_rule_pbt_lessons; \
-         got {matview_str}"
+        "deleted lesson {lesson_c} must leave no dangling row in advice_rule_pbt_lessons; got \
+         {matview_str}"
     );
     assert!(
         matview_str.contains(lesson_d.as_str()),

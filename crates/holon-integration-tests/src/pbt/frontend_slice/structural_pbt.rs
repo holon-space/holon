@@ -3016,17 +3016,18 @@ mod teeth {
             ran_a
                 .iter()
                 .any(|id| *id == "inv-embedded-page-collapsed-lazy"),
-            "Phase A (collapsed): inv-embedded-page-collapsed-lazy must select + run (ran: {ran_a:?})"
+            "Phase A (collapsed): inv-embedded-page-collapsed-lazy must select + run (ran: \
+             {ran_a:?})"
         );
         let failures_a = report_a.failures();
         assert!(
             failures_a.is_empty(),
-            "Phase A (collapsed): inv-embedded-page-collapsed-lazy must PASS — embedded page \
-             with collapsed expand_toggle, no leaked descendants. Failures: {failures_a:?}"
+            "Phase A (collapsed): inv-embedded-page-collapsed-lazy must PASS — embedded page with \
+             collapsed expand_toggle, no leaked descendants. Failures: {failures_a:?}"
         );
         eprintln!(
-            "[embedded_page_renders_collapsed_and_lazy] Phase A GREEN: \
-             collapsed expand_toggle present, no leaked descendants."
+            "[embedded_page_renders_collapsed_and_lazy] Phase A GREEN: collapsed expand_toggle \
+             present, no leaked descendants."
         );
     }
 
@@ -3071,7 +3072,8 @@ mod teeth {
             ran_b
                 .iter()
                 .any(|id| *id == "inv-embedded-page-collapsed-lazy"),
-            "Phase B (expanded): inv-embedded-page-collapsed-lazy must select + run (ran: {ran_b:?})"
+            "Phase B (expanded): inv-embedded-page-collapsed-lazy must select + run (ran: \
+             {ran_b:?})"
         );
         let failures_b = report_b.failures();
         assert!(
@@ -3080,8 +3082,8 @@ mod teeth {
              expanded, descendants permitted/present via lazy live_query. Failures: {failures_b:?}"
         );
         eprintln!(
-            "[embedded_page_expand_toggle_drives_expanded] Phase B GREEN: \
-             expanded toggle accepted, descendants permitted."
+            "[embedded_page_expand_toggle_drives_expanded] Phase B GREEN: expanded toggle \
+             accepted, descendants permitted."
         );
     }
 
@@ -3173,8 +3175,8 @@ mod teeth {
         let pos_0714 = order.iter().position(|id| *id == "block:day-0714");
         assert!(
             matches!((pos_0715, pos_0714), (Some(a), Some(b)) if a < b),
-            "feed lists day-entries NEWEST-FIRST (ORDER BY content DESC): 0715 before 0714, \
-             got order {order:?}: {feed:#?}"
+            "feed lists day-entries NEWEST-FIRST (ORDER BY content DESC): 0715 before 0714, got \
+             order {order:?}: {feed:#?}"
         );
         for n in &toggles {
             assert_eq!(

@@ -1152,9 +1152,9 @@ impl UiState {
     }
 
     /// Seed value for an `expand_toggle` whose `target_id` is `target_id`, or
-    /// `None` when the user has never driven this toggle (builder then keeps its
-    /// collapsed-until-clicked default). Records the read so a driver can tell
-    /// the toggle actually rendered (fail-loud companion to
+    /// `None` when the user has never driven this toggle (builder then keeps
+    /// its collapsed-until-clicked default). Records the read so a driver
+    /// can tell the toggle actually rendered (fail-loud companion to
     /// [`Self::set_block_expanded_view`]).
     pub(crate) fn block_expanded_view(&self, target_id: &str) -> Option<bool> {
         // Normalize the key: the driver strips the `block:` scheme while the

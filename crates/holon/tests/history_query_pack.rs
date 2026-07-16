@@ -12,7 +12,6 @@ use holon::api::TursoHistoryStore;
 use holon::storage::schema_module::SchemaModule;
 use holon::storage::turso::TursoBackend;
 use holon_api::HistoryEvent;
-use holon_api::HistoryFidelity;
 use holon_api::HistoryStore;
 use holon_api::StorageEntity;
 use holon_api::Value;
@@ -81,7 +80,7 @@ fn cell_str(row: &StorageEntity, key: &str) -> Option<String> {
 async fn seeded_history() -> (TursoBackend, holon::storage::DbHandle, TursoHistoryStore) {
     let (backend, db) = TursoBackend::new_in_memory().await.unwrap();
     HistorySchemaModule.ensure_schema(&db).await.unwrap();
-    let store = TursoHistoryStore::new(db.clone(), HistoryFidelity::Loro);
+    let store = TursoHistoryStore::new(db.clone());
     for e in [
         ev(
             "A",
@@ -223,7 +222,7 @@ async fn q3_automations_journal_reads_the_ivm_maintained_matview() {
         .await
         .unwrap();
 
-    let store = TursoHistoryStore::new(handle.clone(), HistoryFidelity::Loro);
+    let store = TursoHistoryStore::new(handle.clone());
     // Two rule:postpone fires on day 1, one on day 2; one unrelated rule fire.
     for (block, transition, day_offset) in [
         ("A", "rule:postpone", 0),
@@ -340,7 +339,7 @@ async fn q4_joins_trust_stats_with_history_fire_counts() {
     }
 
     // Two rule:postpone fires actually landed; the agent proposer never fired.
-    let store = TursoHistoryStore::new(handle.clone(), HistoryFidelity::Loro);
+    let store = TursoHistoryStore::new(handle.clone());
     for block in ["A", "B"] {
         store
             .record(ev(

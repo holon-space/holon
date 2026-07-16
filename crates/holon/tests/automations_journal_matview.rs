@@ -71,8 +71,7 @@ async fn automations_journal_matview_is_listed_and_projects_grouped_counts() {
 
     let rows = handle
         .query(
-            "SELECT origin, transition_id, day, effect_count FROM automations_journal \
-             ORDER BY day",
+            "SELECT origin, transition_id, day, effect_count FROM automations_journal ORDER BY day",
             HashMap::new(),
         )
         .await
