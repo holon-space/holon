@@ -1,5 +1,13 @@
 //! Transition: edit a block's LoroText container on a peer at character level.
 //!
+//! @pbt rung external
+//!   DEAD TRANSITION (audit TR-DEAD): `weighted_generator` returns None
+//!   unconditionally -> never emitted by any strategy. Character-level
+//!   concurrent LoroText merges are UNTESTED (coverage hole).
+//! @pbt covers loro-char-merge — char-level concurrent LoroText edit (NEVER
+//! GENERATED) @pbt gen weighted_generator returns None unconditionally (dead
+//! arm)
+//!
 //! Mirrors the legacy logic split across (no generator — never generated),
 //! `state_machine.rs:3517-3524` (precondition),
 //! `state_machine.rs:2921-2932` (ref-state apply),

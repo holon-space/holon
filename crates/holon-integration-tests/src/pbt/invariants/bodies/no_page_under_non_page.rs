@@ -5,6 +5,13 @@
 //! root, must ALL be pages — else the ancestor is the root itself. Pages under
 //! non-pages are prohibited.
 //!
+//! @pbt oracle internal-consistency — ref-side structural tripwire on the
+//!   generator/seed guarantee (walks the ref parent chain; reads no SUT)
+//! @pbt covers page-hierarchy — a page nested under a non-page block
+//! @pbt slips-if-removed a generator/seed change reparents a page under a
+//!   non-page; DocumentManager::name_chain bails deep in writeback instead of
+//!   a clean keystone RED at the ref boundary
+//!
 //! ## Why a ref-only oracle (no SUT cap)
 //!
 //! This is the *generator guarantee's* tripwire, not a SUT⇄ref differential.

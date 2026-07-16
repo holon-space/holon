@@ -1,5 +1,10 @@
 //! Transition: bulk external add of blocks via org file write (post-startup).
 //!
+//! @pbt rung external
+//!   `bulk_external_add` writes an org file and lets the production
+//!   FileSyncController re-ingest it.
+//! @pbt covers bulk-org-ingest — multi-block org write -> parser -> block_raw
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:833-860`
 //! (generator), `state_machine.rs:3187-3189` (precondition),
 //! `state_machine.rs:2457-2480` (ref-state apply),

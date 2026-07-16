@@ -1,5 +1,11 @@
 //! Transition: pin a block to the right sidebar (LogSeq-style shift+click).
 //!
+//! @pbt rung dispatch
+//!   UNFAITHFUL SHORTCUT (audit TR-NAV): title is a shift+click gesture, but
+//!   `pin_block` dispatches `navigation.focus_pin` directly; the shift+click
+//!   click-intent path is untested headless.
+//! @pbt covers pin-sidebar — pin block to sidebar (op-level only)
+//!
 //! Mirrors the `navigation.focus_pin(region, block_id)` op invoked by the
 //! GPUI bullet's shift-click action (see
 //! `frontends/gpui/src/views/render_entity_view.rs`). Production behavior:

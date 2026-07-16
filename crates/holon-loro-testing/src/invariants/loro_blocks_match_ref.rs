@@ -3,6 +3,15 @@
 //! that the correspondence framework + observable + `block_compare` leaf live
 //! on the pbt-core floor.
 //!
+//! @pbt oracle correspondence
+//! @pbt covers loro-blocks-field-match — Loro store block-field divergence
+//!   from the reference model (content/parent/marks drift in the SQL→Loro
+//!   mirror), non-seed blocks only
+//! @pbt slips-if-removed the SQL→Loro mirror drops or corrupts a block field
+//!   (e.g. marks or parent) on outdent/split; the SQL arm still matches ref so
+//!   the Loro-only divergence — the tree the CRDT-backed UI reads — ships
+//!   silently
+//!
 //! The live Loro tree's non-seed blocks must field-match the reference model.
 //! Unobservable (disclosed Skip) when Loro isn't enabled on the variant; strict
 //! (`Converge::None`) otherwise — seeds materialize into the Loro store, so a

@@ -1,5 +1,10 @@
 //! Per-tick memoisation wrapper for SUT capability reads.
 //!
+//! @pbt kind cap-plumbing
+//! @pbt covers all-slices — memoises ONE SUT's own reads within a single tick
+//! so   co-scheduled invariants see a consistent snapshot; not a cross-SUT
+//! source.
+//!
 //! Multiple invariants evaluated in the same tick often need the same
 //! SUT snapshot. `drain_vm_emissions` is particularly tricky: it has
 //! drain-once semantics — calling it twice returns an empty Vec the

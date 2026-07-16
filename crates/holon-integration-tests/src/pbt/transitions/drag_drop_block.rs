@@ -1,6 +1,11 @@
 //! Transition: drag the focused block onto a target, making it a child of the
 //! target.
 //!
+//! @pbt rung input-pipeline
+//!   `drag_drop_block` drives a real pointer drag (geometry) through the
+//!   production UserDriver.
+//! @pbt covers drag-reorder — pointer drag -> reparent under target
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:1248-1319`
 //! (generator), `state_machine.rs:3374-3425` (precondition),
 //! `state_machine.rs:2679-2685` (ref-state apply),

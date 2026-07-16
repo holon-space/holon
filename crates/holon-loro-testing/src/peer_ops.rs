@@ -1,5 +1,13 @@
 //! Stable-ID-aware operations on Loro-only peers.
 //!
+//! @pbt kind sut-driver
+//! @pbt gen NOT a generator — these are the SUT-side write primitives a
+//!   PeerEdit transition drives; peer content distribution lives in
+//!   `holon_pbt_core::content_generators::peer_content_strategy`.
+//! `pos_codepoint`   is caller-supplied: whether insert/delete positions ever
+//! hit 0 / len /   mid-multibyte-cluster boundaries depends entirely on the
+//! PeerEdit   generator upstream, not this file.
+//!
 //! Wraps `multi_peer` helpers with UUID-based block identity so that
 //! peer-created blocks carry the same stable IDs as the primary instance.
 

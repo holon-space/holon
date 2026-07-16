@@ -1,5 +1,9 @@
 //! Optional Loro validation layer for PBT.
 //!
+//! @pbt kind sut-arm
+//! @pbt covers loro-slice (full/peer-mesh) — owns the multi-peer Loro sync
+//!   surface (AddPeer/PeerEdit/Sync/Merge) and reads the live LoroTree back.
+//!
 //! When Loro is enabled, reads all blocks from the LoroTree and compares them
 //! against the reference model. With stable IDs, blocks already have UUID-based
 //! IDs in their CRDT metadata, so no ID normalization is needed.

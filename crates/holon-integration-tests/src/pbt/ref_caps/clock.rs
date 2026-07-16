@@ -1,4 +1,10 @@
 //! `RefClock` / `RefClockMut` (ADR 0024 §6 AdvanceDay).
+//!
+//! @pbt kind ref
+//! @pbt covers journal-count — thin delegate to `ClockState`: current day +
+//!   `visited_days` cardinality = predicted journal-block count (one per
+//!   distinct day). Boot day agrees with the SUT by construction (shared
+//!   `KEYSTONE_CLOCK_BOOT_MS`), no read-back side channel.
 
 use holon_pbt_core::capabilities::RefClock;
 use holon_pbt_core::capabilities::RefClockMut;

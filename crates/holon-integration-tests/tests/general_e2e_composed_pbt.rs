@@ -23,6 +23,10 @@
 //! lives in the `pbt`-gated [`crate::pbt::composed::wide_e2e`] module (the
 //! single source of truth, also driven by the lib `frontend_wide_pbt` + teeth);
 //! this file is just the integration entry point.
+//!
+//! @pbt kind keystone
+//! @pbt covers the-one-composed-convergence-PBT — random valid wiring over
+//! compose_sut, full invariant catalog per tick
 
 use holon_integration_tests::pbt::composed::harness::ComposedSut;
 use holon_integration_tests::pbt::composed::live_mcp::LiveMcpE2E;

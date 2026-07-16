@@ -1,5 +1,9 @@
 //! Transition: one-directional merge — peer's changes → primary.
 //!
+//! @pbt rung external
+//!   one-directional CRDT merge (peer -> primary), no UI path.
+//! @pbt covers loro-merge-oneway — one-way peer delta import
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:1543-1547`
 //! (generator), `state_machine.rs:3513-3515` (precondition, shared with
 //! SyncWithPeer), `state_machine.rs:2820-2846` (ref-state apply),

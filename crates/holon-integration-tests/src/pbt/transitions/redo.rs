@@ -1,5 +1,10 @@
 //! Transition: redo the last undone mutation.
 //!
+//! @pbt rung dispatch
+//!   `redo` calls `engine.redo()` directly; no redo keybinding is bound in
+//!   production (undo-ruling), so no higher rung exists yet to exercise.
+//! @pbt covers redo-stack — engine redo restores the last undone mutation
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:1420-1421`
 //! (generator), `state_machine.rs:3489` (precondition),
 //! `state_machine.rs:2727-2732` (ref-state apply),

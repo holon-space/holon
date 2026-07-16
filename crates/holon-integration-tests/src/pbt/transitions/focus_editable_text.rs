@@ -1,5 +1,11 @@
 //! Transition: focus an editable text block in the main region.
 //!
+//! @pbt rung input-pipeline
+//!   `apply_focus_editable_text_to_sut`: click_entity(main) through the
+//!   production driver (editable_text binds no intent -> falls through to
+//!   in-memory set_focus, ADR 0010).
+//! @pbt covers focus-editor-click — main-panel click -> editor focus
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:1563-1628`
 //! (generator), `state_machine.rs:3529-3550` (precondition),
 //! `state_machine.rs:2935-2955` (ref-state apply),

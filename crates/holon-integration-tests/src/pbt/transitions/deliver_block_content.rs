@@ -1,5 +1,12 @@
 //! Transition: deliver async content into a deferred `live_block` placeholder.
 //!
+//! @pbt rung dispatch
+//!   BACKEND-PBT-ONLY: `apply_to_sut` panics in the composed runner (the
+//!   backend PBT rejects it). Never dispatched into any composed alphabet;
+//!   a deferred-live-block delivery probe for the pure backend slice only.
+//! @pbt covers deferred-live-block-delivery — async content into a live_block
+//! placeholder (backend slice)
+//!
 //! Only meaningful in the fast-UI layout PBT (where blueprints can mount
 //! deferred placeholders). The integration-tests PBT runs a real backend
 //! that always returns real data — no deferred placeholders to deliver.

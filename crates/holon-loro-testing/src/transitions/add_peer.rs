@@ -1,5 +1,9 @@
 //! Transition: add a Loro-only peer instance.
 //!
+//! @pbt rung external
+//!   CRDT peer add (out-of-process sync stimulus, no UI path).
+//! @pbt covers loro-peer-add — new Loro-only peer instance
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:1431-1433`
 //! (generator), `state_machine.rs:3491-3492` (precondition),
 //! `state_machine.rs:2738-2786` (ref-state apply),

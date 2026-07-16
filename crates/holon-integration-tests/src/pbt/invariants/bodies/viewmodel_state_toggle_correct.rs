@@ -1,5 +1,12 @@
 //! `inv-viewmodel-state-toggle-correct`.
 //!
+//! @pbt oracle correspondence
+//! @pbt covers state-toggle-divergence — rendered StateToggle
+//!   current/label/field/ops disagree with the ref block's task_state
+//! @pbt slips-if-removed a task block's toggle shows the wrong state or
+//!   label, or lacks a task_state-affecting op; clicking the checkbox can't
+//!   cycle state or displays a stale value
+//!
 //! Expressed against the frontend-agnostic `WidgetSnapshot` IR so it runs in
 //! any slice whose SUT implements `SutRenderer`.
 //!

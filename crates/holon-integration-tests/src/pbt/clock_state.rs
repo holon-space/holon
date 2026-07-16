@@ -1,5 +1,11 @@
 //! Reference-side calendar-clock model (ADR 0024 §6). Extracted from
 //! `reference_state.rs`.
+//!
+//! @pbt kind ref
+//! @pbt covers journal-count — `visited_days` cardinality predicts the
+//!   journal-rule output (one block per distinct day; same-day re-tick
+//!   idempotent). Boot day agrees with the SUT `TestClock` by construction via
+//!   the shared `KEYSTONE_CLOCK_BOOT_MS` constant — no read-back side channel.
 
 /// The fixed wall-clock instant the composed frontend boot injects (local noon
 /// on 2026-01-15, timezone-robust). Both the SUT's `TestClock` and the

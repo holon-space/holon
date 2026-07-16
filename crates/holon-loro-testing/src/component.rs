@@ -1,6 +1,10 @@
 //! The SUT component of the Loro-storage slice: a [`CapProvider`] wrapping a
 //! **real** `holon-loro` `LoroBackend` (the production CRDT, not a re-impl).
 //!
+//! @pbt kind sut-arm
+//! @pbt covers loro-slice — real `LoroBackend` CRDT read directly through
+//!   `CoreOperations`; no SQL projection/CDC, so live view IS the store.
+//!
 //! It provides two caps:
 //! - [`SutBackend`] over the Loro store — so **every already-wired block-tree
 //!   invariant** in the shared catalog (`no_parent_cycles`, `source_language`,

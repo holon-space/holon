@@ -1,4 +1,9 @@
 //! `RefWatchesMut` / `RefWatch`.
+//!
+//! @pbt kind ref
+//! @pbt covers active-watches — MCP-server actor's active query watches
+//!   (`query_id → WatchSpec`) and expected rows via the `TestQuery` evaluator
+//!   (an independent PRQL-subset evaluator, not the SUT's Turso path).
 
 use holon_pbt_core::capabilities::RefWatch;
 use holon_pbt_core::capabilities::RefWatchesMut;

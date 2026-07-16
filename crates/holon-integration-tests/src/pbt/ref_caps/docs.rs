@@ -1,4 +1,10 @@
 //! `RefDocuments` / `RefDocumentsMut`.
+//!
+//! @pbt kind ref
+//! @pbt covers doc-identity — file-adapter doc identity + naming
+//!   (`doc_uri → filename`, page-block creation on `insert_document`). Delete
+//!   cascades through the SAME `Mutation::Delete` + canonical re-sort machinery
+//!   `apply_content_mutation` uses (single applier discipline for deletes).
 
 use holon_api::ContentType;
 use holon_api::SourceLanguage;

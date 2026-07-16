@@ -21,6 +21,11 @@
 //!
 //! After the fix: boot must NOT panic, the OTHER files must still ingest, and
 //! runtime sync (the armed watch loop) must survive so a post-boot edit lands.
+//!
+//! @pbt kind harness
+//! @pbt covers boot-scan-bad-file — boot survives a malformed vault file
+//! (dogfood 2026-07-10) @pbt overlaps general_e2e_composed_pbt — kept: no
+//! boot-scan-of-bad-vault path in keystone
 
 use std::sync::Arc;
 use std::time::Duration;

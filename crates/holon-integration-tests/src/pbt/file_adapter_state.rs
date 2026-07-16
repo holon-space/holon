@@ -14,6 +14,11 @@
 //! structure — a single source of truth); the undo-persistence concern is
 //! moot while the undo subsystem is dormant (see `push_undo_snapshot`). The
 //! `Document.filename` semantics themselves are pending ADR 0009.
+//!
+//! @pbt kind ref
+//! @pbt covers file-adapter-state — `doc_uri → filename` map (doc identity =
+//!   its keyset, single source of truth) plus pre-boot file/VCS flags. An
+//!   adapter concern, not domain identity.
 
 use std::collections::BTreeMap;
 

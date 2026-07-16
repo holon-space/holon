@@ -1,5 +1,12 @@
 //! `inv-main-panel-rows-match-focus`.
 //!
+//! @pbt oracle correspondence
+//! @pbt covers stale-rows-on-nav — ref-known main-panel rows must ⊆ Main's
+//!   current focus-root subtree (ref.expected_visible_content_ids)
+//! @pbt slips-if-removed a CDC delete that fails to propagate through the
+//!   focus_roots→main-panel chained matview leaves the previous root's rows
+//!   in the panel after navigation (dioxus w4-web-05, GPUI stale sidebar)
+//!
 //! **No stale rows after navigation**: every reference-known block rendered
 //! inside the MAIN PANEL widget subtree must belong to the Main region's
 //! *current* focus-root subtree (`RefLayout::expected_visible_content_ids`,

@@ -6,6 +6,9 @@
 //! Its `HeadlessFrontendComponent` provides `SutRenderer` (over the real
 //! CDC→watch→`interpret_pure` render path) + `SutBackend` (over `block_raw`),
 //! so the renderer invariants *and* the block-tree catalog both run over it.
+//!
+//! @pbt kind slice-mod
+//! @pbt covers frontend-slice — modules + builders for the headless FE arm.
 
 pub mod block_query_component;
 pub mod builders;

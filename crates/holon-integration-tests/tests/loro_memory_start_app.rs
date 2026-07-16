@@ -12,6 +12,9 @@
 //! whole no-Turso render path (snapshot → `UiEvent` → `ReactiveEngine`) paints
 //! real rows and tracks live churn (add + delete) — everything except the GPUI
 //! window, which needs a display.
+//!
+//! @pbt kind harness
+//! @pbt covers backend-selection-di — a2 backend selection at start_app via DI
 
 use std::collections::HashMap;
 use std::sync::Arc;

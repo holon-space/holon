@@ -1,5 +1,10 @@
 //! Transition: toggle a drawer's open/closed state.
 //!
+//! @pbt rung input-pipeline
+//!   RESIDUAL (concrete ReferenceState, audit TR-RESID): SutBlockInteract click
+//!   via LayoutSut bridge. Blocked by the concrete LayoutRef bridge.
+//! @pbt covers drawer-toggle-click — drawer open/close gesture
+//!
 //! Delegates to shared `holon_pbt_core::ToggleDrawer`. Maps reasons,
 //! mirrors the drawer-open flip into `ReferenceState.drawer_open`.
 

@@ -1,5 +1,9 @@
 //! Typed wiring manifest (ADR 0007).
 //!
+//! @pbt kind cap-plumbing
+//! @pbt covers all-slices — storage/sync/actor manifest + validity rules +
+//!   shrinkable `any_valid_wiring` strategy; fail-loud parse of env overrides.
+//!
 //! A [`Wiring`] declares which storage adapters, sync adapters, and actors
 //! are present in a given composition of Holon. It is the single input to
 //! both:

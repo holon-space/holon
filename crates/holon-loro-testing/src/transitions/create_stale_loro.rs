@@ -1,5 +1,9 @@
 //! Transition: create a stale/corrupted .loro file before app startup.
 //!
+//! @pbt rung external
+//!   writes a corrupt .loro file before boot (fs stimulus).
+//! @pbt covers stale-loro-recovery — corrupt CRDT file at startup
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:371-392`
 //! (generator), `state_machine.rs:3105-3108` (precondition),
 //! `state_machine.rs:1942-1946` (ref-state apply),

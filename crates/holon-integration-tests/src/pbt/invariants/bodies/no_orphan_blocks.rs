@@ -5,7 +5,16 @@
 //! Pure `SutBackend` self-consistency — no ref, no CDC-lag gate. The
 //! deterministic convergence settle (`WideE2E::settle_after_apply` →
 //! `converge_projections`) quiesces the matview before the check, so an orphan
-//! here is a real projection bug, not a mid-CDC artifact. The former
+//! here is a real projection bug, not a mid-CDC artifact.
+//!
+//! @pbt oracle internal-consistency
+//! @pbt covers no-orphan-blocks — every non-root block's parent_id resolves
+//!   to a block present in the same matview snapshot
+//! @pbt slips-if-removed the projection drops a parent node while keeping its
+//!   children; the children become unreachable in the tree and silently
+//!   vanish from every view rooted above the lost node
+//!
+//! The former
 //! `live_blocks_stale` staleness gate (matview-vs-`block_raw` upstream consult)
 //! was proven dead under the settle — its `Lag` arm never fired across a full
 //! keystone run with the arm converted to a hard failure — and removed

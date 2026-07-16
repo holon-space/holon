@@ -15,6 +15,10 @@
 //! *invariants* (the block/storage families deselect — no `SutBackend` here);
 //! the extra input caps add no new selected invariant (no invariant body binds
 //! them), so the check stays green while the alphabet widens.
+//!
+//! @pbt kind infra
+//! @pbt covers windowed-composed-check — single-sourced E4 windowed composition
+//! check
 
 use std::sync::Arc;
 

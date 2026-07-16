@@ -1,5 +1,11 @@
 //! `inv-viewmodel-entity-ids-subset-of-data`.
 //!
+//! @pbt oracle correspondence
+//! @pbt covers phantom-entity — a rendered entity id that is neither a
+//!   root query-data row nor a ref-known block
+//! @pbt slips-if-removed a render bug mints a widget with a fabricated or
+//!   stale entity id (leftover peer row, mis-resolved uri); the UI shows a
+//!   ghost row pointing at a non-existent block, nothing else observes it
 //!
 //! Catches *phantom* entities in the rendered ViewModel tree: every entity ID
 //! the user sees must correspond either to a row of the root layout's query

@@ -1,5 +1,14 @@
 //! Block-tree fragments of the PBT reference model: layout classification and
 //! the canonical block map. Extracted from `reference_state.rs`.
+//!
+//! @pbt kind ref
+//! @pbt covers sibling-order-contract — `children_of` is the encoding-free
+//!   child-id contract crossing to the SUT (no `sort_key`/`sequence` strings).
+//!   FIDELITY: `sorted_children_of` orders by (sequence, id); those sequences
+//!   are stamped by `assign_reference_sequences_canonical`, whose ordering is a
+//!   hand-mirror of the org re-emission order — see the sibling-order finding.
+//! @pbt covers determinism — `BTreeMap` (not `HashMap`) is load-bearing: the
+//!   canonicalizer derives sequence numbers from iteration order.
 
 use std::collections::BTreeMap;
 use std::collections::HashSet;

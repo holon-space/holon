@@ -6,6 +6,14 @@
 //! slice: a CRDT reorder bug surfaces as a per-parent order divergence against
 //! the independent reference.
 //!
+//! @pbt oracle correspondence
+//! @pbt covers loro-sibling-order — Loro fractional-index child order vs the
+//!   reference document order, per parent, non-seed blocks only
+//! @pbt slips-if-removed a CRDT move/indent reassigns a fractional index
+//!   non-monotonically, leaving Loro siblings out of order while SQL sort_key
+//!   stays correct; a UI driven from the Loro tree shows the wrong order and
+//!   no other observer catches it
+//!
 //! Retired the old cross-backend `sort_key` *byte*-equality check (ADR 0005):
 //! ordering encoding is adapter-internal and never compared byte-for-byte
 //! across adapters; instead each adapter must agree with the reference on the

@@ -1,5 +1,11 @@
 //! Transition: move the focused block down (swap with its next sibling).
 //!
+//! @pbt rung input-pipeline
+//!   KEYSTONE: send_block_chord resolves the bound Alt+Down chord from the
+//!   live registry -> bubble_input -> ExecuteOperation; fixed-id slices fall
+//!   back to OpDispatchWriter (dispatch floor).
+//! @pbt covers reorder-chord-down — Alt+Down chord -> move_down reducer
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:1154-1169`
 //! (generator), `state_machine.rs:3359-3373` (precondition),
 //! `state_machine.rs:2673-2677` (ref-state apply),

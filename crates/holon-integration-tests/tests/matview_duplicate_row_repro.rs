@@ -23,6 +23,11 @@
 //! This test boots the minimal composed Loro+Turso stack (no UI), applies the
 //! two edge writes, settles projection, and asserts the `block` matview has no
 //! duplicate `id`. It is expected to FAIL, demonstrating the duplicate.
+//!
+//! @pbt kind harness
+//! @pbt covers matview-dup-forced-weights — duplicate matview row surfaced by
+//! keystone at forced weights @pbt overlaps general_e2e_composed_pbt — kept:
+//! fast localized repro of a keystone-surfaced bug
 
 use std::sync::Arc;
 use std::time::Duration;

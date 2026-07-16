@@ -1,5 +1,14 @@
 //! `inv-display-placement-canonical-inert`.
 //!
+//! @pbt oracle sut-internal — the display-placed injection is a post-snapshot
+//!   widget-tree node with no reference projection, so inertness is proven by
+//!   SUT canonical self-reads (org fixed-point + placed-id-is-real), not a ref
+//! @pbt covers display-placement inertness — a display-placed widget node must
+//!   not perturb SQL / Loro / org canonical state
+//! @pbt slips-if-removed a placement path that writes to SQL/Loro/org instead
+//!   of staying render-only corrupts canonical state while the row still
+//!   displays
+//!
 //! Phase 1a gate invariant (§ ADR 0015 Evidence): proves a display-placed row
 //! is inert w.r.t. the canonical projection. With the
 //! `HOLON_PBT_DISPLAY_PLACED` injection active (a display-placed `live_block`

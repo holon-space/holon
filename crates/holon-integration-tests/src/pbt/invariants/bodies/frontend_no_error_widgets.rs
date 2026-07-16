@@ -1,5 +1,12 @@
 //! `inv-frontend-no-error-widgets`.
 //!
+//! @pbt oracle internal-consistency
+//! @pbt covers no-error-widgets — no Error widget in the laid-out
+//!   BoundsRegistry (authoritative) or, absent geometry, the ViewModel tree
+//! @pbt slips-if-removed a render expression that evaluates to an error node
+//!   (bad query, missing field, interp panic) renders a red error card in
+//!   the live window where the user would see it but no assertion fires
+//!
 //! Asserts no Error widgets exist in the rendered frontend ViewModel tree.
 //!
 //! 2-subsystem invariant — ViewModel + FrontendBounds. The BoundsRegistry

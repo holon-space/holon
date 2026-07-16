@@ -1,5 +1,10 @@
 //! Transition: toggle an `expand_toggle` widget's collapsed state.
 //!
+//! @pbt rung input-pipeline
+//!   RESIDUAL (concrete ReferenceState, audit TR-RESID): SutBlockInteract click
+//!   via LayoutSut bridge. Blocked by the concrete LayoutRef bridge.
+//! @pbt covers collapse-click — expand_toggle click -> collapse
+//!
 //! Delegates to shared `holon_pbt_core::ToggleCollapse`. Maps reasons.
 
 use holon_api::EntityUri;

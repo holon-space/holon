@@ -1,5 +1,10 @@
 //! Transition: expand a collapsed `expand_toggle` widget.
 //!
+//! @pbt rung input-pipeline
+//!   `expand_toggle` drives `UserDriver::set_block_expanded` (real chevron
+//!   flip) -> view-local gate mutable.
+//! @pbt covers expand-chevron — chevron gesture -> collapsed-gate flip
+//!
 //! Production behavior: the user clicks the chevron on an `expand_toggle`.
 //! GPUI's `expand_toggle` builder flips its `expanded: Mutable<bool>` to
 //! `true`; on the next render `LazyReactiveSlot::materialize_if_gated`

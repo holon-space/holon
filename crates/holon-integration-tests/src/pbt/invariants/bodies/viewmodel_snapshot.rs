@@ -1,5 +1,11 @@
 //! `inv-viewmodel-snapshot`.
 //!
+//! @pbt oracle internal-consistency
+//! @pbt covers root-error-widget — headless interpret_pure pipeline yields
+//!   an `error` root layout
+//! @pbt slips-if-removed a render-pipeline fault makes the whole root layout
+//!   an error widget; the entire screen is an error box, unobserved
+//!
 //! Asserts the root widget of the headless ViewModel snapshot is not an
 //! `error` widget.
 //!

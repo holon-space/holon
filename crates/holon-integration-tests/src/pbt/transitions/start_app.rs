@@ -1,5 +1,11 @@
 //! Transition: start the application.
 //!
+//! @pbt rung external
+//!   app boot/lifecycle stimulus. NOTE: unimplemented on the headless
+//!   frontend component (panics) and NOT in any composed alphabet yet —
+//!   lifecycle is a later increment.
+//! @pbt covers app-boot — application startup + seeded sidebar watch
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:339-351`
 //! (generator), `state_machine.rs:3109-3114` (precondition),
 //! `state_machine.rs:1947-2123` (ref-state apply),

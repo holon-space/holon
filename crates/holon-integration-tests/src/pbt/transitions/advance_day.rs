@@ -1,5 +1,13 @@
 //! Transition: advance the ambient calendar day (ADR 0024 §6 capstone).
 //!
+//! @pbt rung dispatch
+//!   ambient time stimulus — no user gesture exists; `advance_clock_days`
+//!   advances the injected TestClock + runs the production `reconcile_clock`
+//!   (ADR 0024 §6), the faithful floor (no higher rung to descend from).
+//! @pbt covers clock-day-rollover — reconcile_clock re-fires the journal rule
+//! via CDC @pbt gen days in a small band incl 0 (idempotence probe: Unchanged,
+//! no CDC)
+//!
 //! The Phase-1 rule-firing keystone transition. Drives the day-rollover a real
 //! user experiences by advancing the **injected fake `Clock`** and letting the
 //! production `ClockScheduler` propagate the new day through the reactive path

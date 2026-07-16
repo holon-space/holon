@@ -1,5 +1,10 @@
 //! Transition: delete characters backward in the active editor.
 //!
+//! @pbt rung input-pipeline
+//!   `apply_delete_backward` drives editor backspace keystrokes through the
+//!   production ReactiveEngineDriver -> HeadlessEditorMirror.
+//! @pbt covers editor-backspace — backspace keystroke -> MutableText edit
+//!
 //! Mirrors the legacy logic split across `state_machine.rs:1664-1680`
 //! (generator), `state_machine.rs:3552-3556` (precondition, shared arm),
 //! `state_machine.rs:2966-2969` (ref-state apply),

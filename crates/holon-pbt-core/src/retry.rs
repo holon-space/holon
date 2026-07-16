@@ -1,5 +1,9 @@
 //! Generic "retry an async predicate until it succeeds or a deadline passes".
 //!
+//! @pbt kind cap-plumbing
+//! @pbt covers all-slices — the eventual-consistency timing primitive; fails
+//!   LOUD on deadline (returns the last Err), never a Skip/mask of divergence.
+//!
 //! Not specific to any one surface: it's the eventual-consistency primitive for
 //! any read that may settle slightly after the action that caused it — a
 //! CDC-fed Turso IVM matview, a file-watcher round-trip, a focus mirror, a

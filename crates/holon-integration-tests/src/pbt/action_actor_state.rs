@@ -5,6 +5,13 @@
 //! the undo/redo snapshot stacks. Per ADR 0004 this state must vanish when the
 //! action engine isn't wired — isolating it here lets a reduced wiring drop
 //! the fragment instead of carrying dead state.
+//!
+//! @pbt kind ref
+//! @pbt covers action-actor-state — lifecycle flag, `next_doc_id` allocator,
+//!   last-transition tag (Markov weighting), and the undo/redo `BlockState`
+//!   snapshot stacks. FIDELITY: `next_doc_id`/`next_id` are monotonic across
+//!   undo/redo by design (prod never reuses a burned id, see
+//! `pop_undo_to_redo`).
 
 use holon_api::entity_uri::EntityUri;
 
