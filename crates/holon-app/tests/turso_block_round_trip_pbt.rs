@@ -217,3 +217,105 @@ proptest! {
         result?;
     }
 }
+
+/// Directed store round-trip for the blocked-by / `requires` dependency edge.
+///
+/// `:BLOCKED-BY:` is the org-drawer alias of the `requires` edge field (single
+/// `block_requires` junction; owner ruling 2026-07-16 — see ORG_SYNTAX.md).
+/// This exercises that edge end-to-end through the SQL provider's generic edge
+/// partition: create → `block_requires` junction rows → `CacheBlockReader`
+/// hydration back into `Block.requires`.
+///
+/// It is a directed test (not folded into the proptest above) because the
+/// proptest harness is independently RED on main — it parents generated root
+/// headlines to a `doc_id` it never inserts, violating the `block_raw` parent
+/// FK. This test seeds the document block so every parent FK is satisfied.
+#[test]
+fn blocked_by_requires_edge_round_trips_through_store() {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (_backend, handle) = TursoBackend::new_in_memory().await.expect("turso init");
+        setup_production_schema(&handle).await;
+
+        let descriptors = BlockSchemaModule.edge_fields();
+        let provider = Arc::new(SqlOperationProvider::with_edge_fields(
+            handle.clone(),
+            BLOCK_WRITE_TABLE.to_string(),
+            "block".to_string(),
+            "block".to_string(),
+            descriptors,
+        ));
+        let entity: EntityName = "block".to_string().into();
+
+        // Seed the document root (parent = sentinel:no_parent, seeded by
+        // CoreSchemaModule) so the blocks beneath it satisfy the parent FK.
+        let doc_id = holon_api::EntityUri::block(&Uuid::new_v4().to_string());
+        let target_id = holon_api::EntityUri::block("dep-target-a");
+        let dependent_id = holon_api::EntityUri::block("dependent-b");
+
+        let doc = Block::new_text(doc_id.clone(), holon_api::EntityUri::no_parent(), "Doc");
+        let target = Block::new_text(target_id.clone(), doc_id.clone(), "A");
+        let mut dependent = Block::new_text(dependent_id.clone(), doc_id.clone(), "B");
+        // `dependent` is blocked-by `target` (the `requires` edge).
+        dependent.requires = vec![target_id.clone()];
+
+        for blk in [doc, target, dependent.clone()] {
+            let params = block_to_params(&holon::api::SnapshotBlock {
+                block: blk.clone(),
+                sort_key: "A0".to_string(),
+            });
+            provider
+                .execute_operation(&entity, "create", params)
+                .await
+                .unwrap_or_else(|e| panic!("create {}: {e}", blk.id));
+        }
+
+        // (1) The edge was partitioned into the block_requires junction.
+        let junction = handle
+            .query(
+                "SELECT block_id, required_id FROM block_requires ORDER BY block_id",
+                HashMap::new(),
+            )
+            .await
+            .expect("query block_requires");
+        let pairs: Vec<(String, String)> = junction
+            .iter()
+            .map(|r| {
+                (
+                    r.get("block_id")
+                        .and_then(|v| v.as_string())
+                        .unwrap()
+                        .to_string(),
+                    r.get("required_id")
+                        .and_then(|v| v.as_string())
+                        .unwrap()
+                        .to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![(dependent_id.to_string(), target_id.to_string())],
+            "the blocked-by/requires edge must land as exactly one block_requires row"
+        );
+
+        // (2) CacheBlockReader hydration reconstructs Block.requires from the
+        //     junction (the production read path).
+        let cache: Arc<QueryableCache<Block>> = Arc::new(
+            QueryableCache::<Block>::new(handle.clone(), Block::type_definition())
+                .await
+                .expect("cache"),
+        );
+        let reader: Arc<dyn BlockReader> = Arc::new(CacheBlockReader::new(cache));
+        let blocks = reader.get_blocks(&doc_id).await.expect("get_blocks");
+        let got = blocks
+            .iter()
+            .find(|b| b.id == dependent_id)
+            .expect("dependent block must hydrate");
+        assert_eq!(
+            got.requires,
+            vec![target_id.clone()],
+            "hydrated Block.requires must reproduce the blocked-by edge"
+        );
+    });
+}
