@@ -121,8 +121,13 @@ impl BlockResolver for HashMapBlockResolver {
     }
 }
 
-/// Default active keywords when file doesn't specify custom TODO config
-pub const DEFAULT_ACTIVE_KEYWORDS: &[&str] = &["TODO", "DOING"];
+/// Default active keywords when file doesn't specify custom TODO config.
+///
+/// Includes the LogSeq dialect keywords `LATER` (TODO-family, not started)
+/// and `NOW` (DOING-family, in progress) so foreign LogSeq vaults — which
+/// carry no `#+TODO:` header — parse their headline keywords as task states
+/// rather than title text (ForeignVaultCompat §4).
+pub const DEFAULT_ACTIVE_KEYWORDS: &[&str] = &["TODO", "DOING", "LATER", "NOW"];
 
 /// Default done keywords when file doesn't specify custom TODO config
 pub const DEFAULT_DONE_KEYWORDS: &[&str] = &["DONE", "CANCELLED", "CLOSED"];

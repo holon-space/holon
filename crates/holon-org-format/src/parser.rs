@@ -1206,6 +1206,53 @@ mod tests {
     }
 
     #[test]
+    fn test_logseq_dialect_keywords_recognized() {
+        // A foreign LogSeq vault carries no `#+TODO:` header. LATER and NOW
+        // must still parse as task keywords (ForeignVaultCompat §4): LATER is
+        // TODO-family (active, not started), NOW is DOING-family (active, in
+        // progress). Neither is a done keyword.
+        let content = "* LATER Draft the proposal\n* NOW Review the draft\n* DONE Ship it";
+        let result = parse_test_org(content);
+
+        assert_eq!(result.blocks.len(), 3);
+        assert_eq!(
+            result.blocks[0].task_state(),
+            Some(TaskState::active("LATER"))
+        );
+        assert_eq!(result.blocks[0].org_title(), "Draft the proposal");
+        assert_eq!(result.blocks[1].task_state(), Some(TaskState::active("NOW")));
+        assert_eq!(result.blocks[1].org_title(), "Review the draft");
+        assert_eq!(result.blocks[2].task_state(), Some(TaskState::done("DONE")));
+
+        // NOW is DOING-family (drives the in-progress glyph); LATER is not.
+        assert!(result.blocks[1].task_state().unwrap().is_doing());
+        assert!(!result.blocks[0].task_state().unwrap().is_doing());
+    }
+
+    #[test]
+    fn test_logseq_dialect_keyword_round_trips_byte_identical() {
+        // Round-trip fidelity (ADR 0025 write-back doctrine): a LATER/NOW
+        // block must render back with the SAME source keyword, never
+        // normalized to TODO/DOING.
+        use crate::models::ToOrg;
+        for keyword in ["LATER", "NOW"] {
+            let content = format!("* {keyword} Task headline");
+            let result = parse_test_org(&content);
+            let block = &result.blocks[0];
+
+            // The typed keyword renders back to its exact source spelling.
+            assert_eq!(block.task_state().unwrap().to_string(), keyword);
+
+            // The full headline line renders byte-identical.
+            let rendered = block.to_org();
+            assert_eq!(
+                rendered.lines().next().unwrap(),
+                format!("* {keyword} Task headline")
+            );
+        }
+    }
+
+    #[test]
     fn test_custom_done_keyword_preserves_category() {
         // `set_task_state` must not destroy the category the parser derived
         // from the file's `#+TODO:` config: SHIPPED is a done keyword here

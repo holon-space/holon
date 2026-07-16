@@ -40,10 +40,13 @@ pub fn accent_for_state(state: &str) -> &'static str {
     let key = state.trim().to_ascii_uppercase();
     match key.as_str() {
         "DONE" | "COMPLETED" | "FINISHED" | "CLOSED" => ACCENT_DONE,
-        "DOING" | "IN PROGRESS" | "IN-PROGRESS" | "INPROGRESS" | "NEXT" | "STARTED" => {
+        // `NOW` is LogSeq's in-progress keyword (DOING-family); `LATER` is
+        // its not-started keyword (TODO-family, neutral) — ForeignVaultCompat §4.
+        "DOING" | "NOW" | "IN PROGRESS" | "IN-PROGRESS" | "INPROGRESS" | "NEXT" | "STARTED" => {
             ACCENT_ACTIVE
         }
         "BLOCKED" | "BLOCK" | "WAIT" | "WAITING" | "HOLD" | "ON HOLD" => ACCENT_BLOCKED,
+        "LATER" | "TODO" | "OPEN" | "" => ACCENT_NEUTRAL,
         _ => ACCENT_NEUTRAL,
     }
 }

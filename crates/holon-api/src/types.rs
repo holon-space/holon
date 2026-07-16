@@ -583,8 +583,14 @@ impl TaskState {
         !self.is_done()
     }
 
+    /// Whether this state is in the DOING (in-progress) family. Drives the
+    /// half-filled progress glyph. `NOW` is LogSeq's in-progress keyword
+    /// (its flow is LATER -> NOW -> DONE), so it maps to the same family as
+    /// the native `DOING` (ForeignVaultCompat §4). The source keyword is
+    /// preserved on `self.keyword`, so this family check never loses the
+    /// original spelling on write-back.
     pub fn is_doing(&self) -> bool {
-        self.keyword == "DOING"
+        matches!(self.keyword.as_str(), "DOING" | "NOW")
     }
 }
 
