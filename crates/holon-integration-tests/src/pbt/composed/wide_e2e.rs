@@ -867,6 +867,16 @@ pub async fn boot_and_seed_wide(
         use crate::pbt::composed::observed_errors::ObservedProblems;
         caps.insert(std::sync::Arc::new(ComposedObservedErrors::new())
             as std::sync::Arc<dyn ObservedProblems>);
+
+        // Reseed-attribution pin (Inc 0): the read cap + a per-case reset of the
+        // process-global observer, so each case's full-reseed attribution starts
+        // clean (mirrors the `SpanCollector::reset` in the harness).
+        use crate::pbt::composed::reseed_observer::ComposedReseedObserver;
+        use crate::pbt::composed::reseed_observer::ReseedAttribution;
+        use crate::pbt::composed::reseed_observer::ReseedObserver;
+        ReseedObserver::global().reset();
+        caps.insert(std::sync::Arc::new(ComposedReseedObserver::new())
+            as std::sync::Arc<dyn ReseedAttribution>);
     }
 
     // Scaffold = everything the SUT booted OR the oracle models, EXCEPT the
@@ -1351,6 +1361,13 @@ impl ComposedSlice for WideE2E {
         if let Some(m) = caps.get::<dyn crate::pbt::composed::span_metrics::SutMetricsLifecycle>() {
             m.note_transition_start(transition);
         }
+        // Reseed-attribution pin (Inc 0): mark the observer steady (post-seed) and
+        // attribute every full-reseed event fired during this transition's apply +
+        // settle to its label. Boot/seed projection events precede the first call
+        // and stay tagged non-steady (legitimate `coldboot`, not a leak).
+        #[cfg(feature = "otel-testing")]
+        crate::pbt::composed::reseed_observer::ReseedObserver::global()
+            .note_transition(&format!("{transition:?}"));
         TransitionImpl::apply_to_sut(transition, ref_state, caps).await;
     }
 

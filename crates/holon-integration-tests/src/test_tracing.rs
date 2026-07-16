@@ -90,11 +90,7 @@ impl tracing::field::Visit for MessageVisitor {
 }
 
 impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ErrorCaptureLayer {
-    fn on_event(
-        &self,
-        event: &tracing::Event<'_>,
-        _ctx: tracing_subscriber::layer::Context<'_, S>,
-    ) {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
         if *event.metadata().level() != tracing::Level::ERROR {
             return;
         }
@@ -290,6 +286,21 @@ impl SpanCollector {
                             EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
                         ),
                 );
+
+            // Reseed-attribution observer (Inc 0). Pinned to the `holon_latency`
+            // target only (via `Targets`). This DOES raise the registry's
+            // `max_level_hint` to DEBUG; what keeps the hot DEBUG render-tree
+            // spans out of this layer is per-layer interest caching — the
+            // `Targets` filter reports interest for `holon_latency` callsites
+            // ONLY, so every other DEBUG callsite is disabled for this layer
+            // (same mechanism as `error_capture` above).
+            #[cfg(feature = "pbt")]
+            let registry = registry.with(
+                crate::pbt::composed::reseed_observer::ReseedObserverLayer.with_filter(
+                    tracing_subscriber::filter::Targets::new()
+                        .with_target("holon_latency", tracing::Level::DEBUG),
+                ),
+            );
 
             // tokio-console async-wait profiler. `spawn()` starts the gRPC
             // aggregator on its own background thread+runtime (no ambient

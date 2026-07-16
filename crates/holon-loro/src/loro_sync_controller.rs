@@ -73,6 +73,49 @@ pub const SIDECAR_FILENAME: &str = "holon_tree.loro.sync";
 /// with the `crdt_incr_bench` at scale.
 const INCREMENTAL_BATCH_MAX: usize = 512;
 
+/// Why a `project()` pass took the full-reseed walk instead of the O(changed)
+/// incremental fast path. Threaded from each trigger site to `emit_ops` so the
+/// `holon_latency` projection event can attribute every `mode=full` emission to
+/// a specific cause — the per-reason telemetry the reseed-latency workstream
+/// (BugFunnel row 71) needs to tell legitimate seeds (`coldboot`) apart from
+/// the four reseed *leaks* (`empty_pending_moved_frontier`, `unsettled`,
+/// `orphan`, `oversized`) and the recovery path (`sink_fail`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FullReason {
+    /// Not seeded/armed at entry: cold-boot seed or unarmed bootstrap
+    /// reconcile.
+    ColdBoot,
+    /// Seeded+armed, but the drained queue was empty while the oplog frontier
+    /// moved (pre-subscription boot window, filtered Checkout, or reseed race).
+    EmptyPendingMovedFrontier,
+    /// Seeded+armed, incremental batch read an unsettled (meta-incomplete)
+    /// tree.
+    Unsettled,
+    /// Seeded+armed, incremental batch contained an orphan create (a changed
+    /// node's parent absent from the O(changed) batch) → reseed from sink
+    /// truth.
+    Orphan,
+    /// Seeded+armed, but the drained batch exceeded the incremental cap
+    /// (`INCREMENTAL_BATCH_MAX.max(live_len)`) — cold org-scan / bulk import.
+    Oversized,
+    /// A prior pass's incremental sink write failed (batch rolled back); this
+    /// pass rebuilds the base from sink truth and retries.
+    SinkFail,
+}
+
+impl FullReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            FullReason::ColdBoot => "coldboot",
+            FullReason::EmptyPendingMovedFrontier => "empty_pending_moved_frontier",
+            FullReason::Unsettled => "unsettled",
+            FullReason::Orphan => "orphan",
+            FullReason::Oversized => "oversized",
+            FullReason::SinkFail => "sink_fail",
+        }
+    }
+}
+
 /// Bidirectional sync between Loro and the abstract command/event bus.
 pub struct LoroSyncController {
     doc_store: Arc<RwLock<LoroDocumentStore>>,
@@ -319,6 +362,13 @@ pub struct LoroProjection {
     /// `Arc` so `LoroSyncController::start` can hand the same queue to the
     /// callback. Only the incremental fast path consumes it.
     pending: Arc<StdMutex<Vec<crate::loro_backend::PendingChange>>>,
+    /// Set when a pass clears `seeded` and RETURNS (the incremental sink-write
+    /// failure at `emit_ops` Err) so the *next* pass's full walk — which sees
+    /// only `seeded == false` at entry, indistinguishable from cold boot — can
+    /// attribute its `mode=full` event to `sink_fail` rather than `coldboot`.
+    /// Taken (cleared) by that next full walk. The orphan reseed falls through
+    /// in the SAME pass and sets its reason locally, so it does not use this.
+    pending_reseed_reason: StdMutex<Option<FullReason>>,
 }
 
 impl LoroProjection {
@@ -348,6 +398,7 @@ impl LoroProjection {
             seeded: AtomicBool::new(false),
             tid_index: StdMutex::new(HashMap::new()),
             pending: Arc::new(StdMutex::new(Vec::new())),
+            pending_reseed_reason: StdMutex::new(None),
         }
     }
 
@@ -454,6 +505,23 @@ impl LoroProjection {
         let last = self.last_synced.lock().unwrap().clone();
         let seeded = self.seeded.load(Ordering::SeqCst);
         let armed = self.armed.load(Ordering::SeqCst);
+
+        // Reason threaded to `emit_ops` if this pass reaches the full walk.
+        // seeded+armed at entry → set at the specific fall-through site below.
+        // Not seeded/armed → cold boot, unless a prior pass recorded `sink_fail`
+        // when its incremental write failed and returned (taken here). `None`
+        // reaching the full walk is a logic error (fails loud via `.expect`).
+        let mut full_reason: Option<FullReason> = if seeded && armed {
+            None
+        } else {
+            Some(
+                self.pending_reseed_reason
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap_or(FullReason::ColdBoot),
+            )
+        };
 
         // ── Incremental fast path — O(changed), event-driven, no checkout ─────
         // The SOLE steady-state projector. Once seeded+armed, drain the
@@ -581,6 +649,7 @@ impl LoroProjection {
                         // in-memory `live` base is not trustworthy until the reseed
                         // re-establishes it.)
                         self.seeded.store(false, Ordering::SeqCst);
+                        full_reason = Some(FullReason::Orphan);
                         tracing::warn!(
                             "[LoroProjection] incremental batch has orphan create(s) (a changed \
                              node's parent is absent from this O(changed) batch); reseeding from \
@@ -596,6 +665,7 @@ impl LoroProjection {
                                 snapshot_ms,
                                 after_len,
                                 before_len,
+                                "incremental",
                                 "incremental",
                             )
                             .await
@@ -620,17 +690,30 @@ impl LoroProjection {
                                 // `live`/`last_synced` untouched and force a full
                                 // reseed next pass so the base is rebuilt from truth
                                 // and the change retried — never silently dropped
-                                // (Q9: reseed, not requeue).
+                                // (Q9: reseed, not requeue). Record the cause so
+                                // the next pass's full walk labels itself
+                                // `sink_fail`, not `coldboot`.
                                 self.seeded.store(false, Ordering::SeqCst);
+                                *self.pending_reseed_reason.lock().unwrap() =
+                                    Some(FullReason::SinkFail);
                                 return Err(e);
                             }
                         }
                     }
                 } else {
+                    full_reason = Some(FullReason::Unsettled);
                     tracing::warn!(
                         "[LoroProjection] incremental pass unsettled; reseeding from full snapshot"
                     );
                 }
+            } else {
+                // Not a bounded incremental batch: empty queue with a moved
+                // frontier, or an oversized batch (cold org-scan / bulk import).
+                full_reason = Some(if pending.is_empty() {
+                    FullReason::EmptyPendingMovedFrontier
+                } else {
+                    FullReason::Oversized
+                });
             }
             // Not a bounded incremental batch (or unsettled) → drop through to
             // the full reseed path below, which reads current state (no
@@ -706,20 +789,34 @@ impl LoroProjection {
         let before_len = before.len();
         let after_len = after.len();
 
+        // Every path that reaches here set `full_reason`; `None` = logic error.
+        let full_reason = full_reason
+            .expect("full reseed walk reached without a reason set")
+            .as_str();
+
         // Apply to the sink FIRST; commit the new base state only AFTER the write
         // succeeds, so a failed apply (batch rollback) never advances `live` /
         // `last_synced` ahead of the sink (silent drift). On failure the pass
         // returns `Err` with the base untouched and retries next wake.
-        self.emit_ops(
-            ops,
-            current,
-            &t0,
-            snapshot_ms,
-            after_len,
-            before_len,
-            "full",
-        )
-        .await?;
+        if let Err(e) = self
+            .emit_ops(
+                ops,
+                current,
+                &t0,
+                snapshot_ms,
+                after_len,
+                before_len,
+                "full",
+                full_reason,
+            )
+            .await
+        {
+            // Symmetric with the incremental path's Err arm: record `sink_fail`
+            // so a retry pass (which sees only `seeded == false`) is labeled by
+            // its true cause — a sink write failure — not mislabeled `coldboot`.
+            *self.pending_reseed_reason.lock().unwrap() = Some(FullReason::SinkFail);
+            return Err(e);
+        }
 
         // Seed / refresh the incremental state — only on a settled snapshot — so
         // the next pass can take the fast path (and so a later reseed diffs against
@@ -753,6 +850,7 @@ impl LoroProjection {
         after_len: usize,
         before_len: usize,
         mode: &str,
+        reason: &str,
     ) -> Result<()> {
         // FK-safe create ordering — the single write chokepoint's guarantee.
         // The `block_raw.parent_id` self-FK is DEFERRABLE INITIALLY DEFERRED, but
@@ -822,6 +920,7 @@ impl LoroProjection {
                 snapshot_ms = snapshot_ms as u64,
                 ms = t0.elapsed().as_millis() as u64,
                 mode = mode,
+                reason = reason,
                 "holon_latency",
             );
         }
