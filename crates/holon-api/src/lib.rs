@@ -67,6 +67,7 @@ pub use entity_profile::VirtualChildConfig;
 pub use history::HistoryEvent;
 pub use history::HistoryFidelity;
 pub use history::HistoryQuery;
+pub use history::HistoryQueryArgs;
 pub use history::HistoryStore;
 pub use operation_engine::OpOrigin;
 pub use operation_engine::OperationEngine;

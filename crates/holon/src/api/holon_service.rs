@@ -12,6 +12,7 @@ use anyhow::Context;
 use anyhow::Result;
 use holon_api::EntityName;
 use holon_api::EntityUri;
+use holon_api::HistoryStore;
 use holon_api::OperationDescriptor;
 use holon_api::QueryContext;
 use holon_api::QueryLanguage;
@@ -163,6 +164,37 @@ impl HolonService {
             rows,
             duration: t0.elapsed(),
         })
+    }
+
+    // ── History / provenance (C2b, ADR 0024 P8) ───────────────────────
+
+    /// Query the op/effect history relation (`block_history`) through the typed
+    /// [`HistoryStore`] accessor. The relation is a disclosed ephemeral cache;
+    /// raw SQL over `block_history` via [`Self::execute_raw_sql`] is equally
+    /// sanctioned (Martin's ruling 2026-07-11) — this is the thin typed
+    /// surface.
+    pub async fn query_history(
+        &self,
+        filter: &holon_api::HistoryQuery,
+    ) -> Result<Vec<holon_api::HistoryEvent>> {
+        self.history_store().query(filter).await
+    }
+
+    /// Count events matching `filter` — the "postponed N times" primitive.
+    pub async fn count_history(&self, filter: &holon_api::HistoryQuery) -> Result<u64> {
+        self.history_store().count(filter).await
+    }
+
+    /// The typed history accessor over this engine's db handle. Fidelity
+    /// matches the production (Loro-projected) wiring in
+    /// [`crate::api::BackendEngine`]; for reads it is disclosure only. The
+    /// `block_history` table is boot-owned by `HistorySchemaModule`, so the
+    /// accessor never lazily creates it.
+    fn history_store(&self) -> crate::api::TursoHistoryStore {
+        crate::api::TursoHistoryStore::new(
+            self.engine.db_handle().clone(),
+            holon_api::HistoryFidelity::Loro,
+        )
     }
 
     /// Compile and start watching a query for CDC changes.

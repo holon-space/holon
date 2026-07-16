@@ -148,3 +148,7 @@ required-features = ["test-helpers"]
 name = "undo_inverse_wave1"
 required-features = ["test-helpers"]
 
+[[test]]
+name = "query_history_mcp"
+required-features = ["test-helpers"]
+

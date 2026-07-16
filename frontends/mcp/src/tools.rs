@@ -945,6 +945,43 @@ impl HolonMcpServer {
         self.finalize_query_response(&query_result.rows, Some(duration_ms), false)
     }
 
+    #[tool(
+        description = "Query the C2b op/effect history relation (block_history, ADR 0024 P8): \
+                       every op the engine ran, in order, with provenance (origin, firing \
+                       transition, driving agent session/tool-call). Filter fields mirror \
+                       HistoryQuery (block_id, session_id, origin, field, new_value, day, \
+                       op_group, since_millis, until_millis); set count=true for the match count \
+                       instead of rows. Unknown filter keys are a loud error. Raw SQL over \
+                       block_history via execute_raw_sql / execute_query is equally sanctioned."
+    )]
+    async fn query_history(
+        &self,
+        Parameters(params): Parameters<QueryHistoryParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let args: holon_api::HistoryQueryArgs = params.into();
+        let filter = args.into_query();
+        let service = self.service();
+        let payload = if args.count {
+            let n = service.count_history(&filter).await.map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("count_history failed: {e}"), None)
+            })?;
+            serde_json::json!({ "count": n })
+        } else {
+            let events = service.query_history(&filter).await.map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("query_history failed: {e}"), None)
+            })?;
+            serde_json::json!({ "events": events, "row_count": events.len() })
+        };
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string(&payload).map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    "serialization_failed",
+                    Some(serde_json::json!({ "error": e.to_string() })),
+                )
+            })?,
+        )]))
+    }
+
     // --- Debug / inspection tools ---
 
     #[tool(
