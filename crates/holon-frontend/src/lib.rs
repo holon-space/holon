@@ -105,19 +105,32 @@ pub fn journals_page_blocks() -> Vec<holon_api::block::Block> {
     let mut page = Block::new_text(journals.clone(), EntityUri::no_parent(), "Journals");
     page.set_page(true);
 
+    // holon_sql (not prql): the recursive descendant expansion and the
+    // `expand_default` marker are simplest expressed in SQL. Only `Page`-tagged
+    // day-entries (via the block_tags junction), newest-first. `1 AS
+    // expand_default` tags every feed row so `render_entity` routes it to the
+    // `embedded_page_expanded` profile variant (default-expanded), not the
+    // collapsed `embedded_page`.
     let src = Block::new_source(
         uri(JOURNALS_SRC_ID),
         journals.clone(),
-        "holon_prql",
-        "from block\nfilter parent_id == 'block:journals'\nfilter content_type != \
-         'source'\nfilter content != null\nsort {-content}",
+        "holon_sql",
+        concat!(
+            "SELECT b.*, 1 AS expand_default FROM block b ",
+            "JOIN block_tags bt ON bt.block_id = b.id AND bt.tag = 'Page' ",
+            "WHERE b.parent_id = 'block:journals' ORDER BY b.content DESC",
+        ),
     );
 
+    // LogSeq-style feed: each day-entry rendered as a default-EXPANDED embedded
+    // page (via the `embedded_page_expanded` variant, keyed on `expand_default`),
+    // separated by a `divider()`. `render_entity()` per row keeps the embedded
+    // page-boundary + lazy-descendant semantics (children load on materialise).
     let render = Block::new_source(
         uri(JOURNALS_RENDER_ID),
         journals,
         "render",
-        r#"list(#{sortkey: "-content", item_template: selectable(row(icon("calendar"), spacer(6), text(col("content"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})})})"#,
+        r#"list(#{sortkey: "-content", item_template: column(render_entity(), divider())})"#,
     );
 
     vec![page, src, render]
@@ -873,7 +886,7 @@ mod journals_seed_tests {
         }
         assert_eq!(
             find(&blocks, JOURNALS_SRC_ID).source_language,
-            Some(SourceLanguage::Query(holon_api::QueryLanguage::HolonPrql))
+            Some(SourceLanguage::Query(holon_api::QueryLanguage::HolonSql))
         );
         assert!(matches!(
             find(&blocks, JOURNALS_RENDER_ID).source_language,

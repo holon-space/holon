@@ -1204,7 +1204,20 @@ impl ReactiveView {
         let get_sort_key: Arc<dyn Fn(&holon_api::widget_spec::DataRow) -> String + Send + Sync> = {
             Arc::new(move |row: &holon_api::widget_spec::DataRow| -> String {
                 match &config_sort_key {
-                    Some(col) => holon_api::render_eval::sort_value(row.get(col)),
+                    Some(spec) => {
+                        // Honor the `-`-prefixed DESCENDING convention (e.g.
+                        // `sortkey: "-content"` for the newest-first journal
+                        // feed). The tree sorts keys ascending, so a descending
+                        // spec inverts the key ordering — mirroring the static
+                        // path's `sorted_rows` reverse.
+                        let (col, descending) = holon_api::render_eval::parse_sort_key(spec);
+                        let key = holon_api::render_eval::sort_value(row.get(col));
+                        if descending {
+                            holon_api::render_eval::reverse_order_key(&key)
+                        } else {
+                            key
+                        }
+                    }
                     None => extract_sort_key(row),
                 }
             })

@@ -1,13 +1,9 @@
 * Journals
-#+BEGIN_SRC holon_prql :id journals::src::0
-from block
-filter parent_id == 'block:journals'
-filter content_type != 'source'
-filter content != null
-sort {-content}
+#+BEGIN_SRC holon_sql :id journals::src::0
+SELECT b.*, 1 AS expand_default FROM block b JOIN block_tags bt ON bt.block_id = b.id AND bt.tag = 'Page' WHERE b.parent_id = 'block:journals' ORDER BY b.content DESC
 #+END_SRC
 #+BEGIN_SRC render :id journals::render::0
-list(#{sortkey: "-content", item_template: selectable(row(icon("calendar"), spacer(6), text(col("content"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})})})
+list(#{sortkey: "-content", item_template: column(render_entity(), divider())})
 #+END_SRC
 ** Journal Auto-Create
 #+BEGIN_SRC holon_rule :id journals::action::0
