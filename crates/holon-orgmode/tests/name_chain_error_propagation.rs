@@ -58,7 +58,7 @@ impl Visit for MsgVisitor<'_> {
 }
 
 impl<S: tracing::Subscriber> Layer<S> for ErrorCapture {
-    fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+    fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
         if *event.metadata().level() == tracing::Level::ERROR {
             let mut buf = String::new();
             event.record(&mut MsgVisitor(&mut buf));
@@ -213,6 +213,53 @@ fn fixtures() -> Fixtures {
     }
 }
 
+/// Row-23/29 write-back destruction fixture. A page `container`
+/// (→ `Container.org`) whose subtree contains a PROHIBITED page (`prohibited`
+/// parented to the non-page `b1`), so `name_chain(prohibited)` fails loud — the
+/// exact real-vault first-boot shape where a re-homed `* Holon` subtree landed
+/// page-under-non-page. `truncate` picks what `get_blocks(container)` returns:
+/// the FULL subtree (used to seed `Container.org` on disk) or LEAVES-ONLY (the
+/// re-homed projection that drops the prohibited subtree). `by_id` is always
+/// the full topology, so the REAL `name_chain` assertion runs against it.
+fn container_fixtures(truncate: bool) -> Fixtures {
+    let container = page("container", EntityUri::no_parent(), "Container");
+    let leaf1 = non_page("leaf1", container.id.clone(), "leaf one body");
+    let leaf2 = non_page("leaf2", container.id.clone(), "leaf two body");
+    let b1 = non_page("b1", container.id.clone(), "a plain section (non-page)");
+    let prohibited = page("prohibited", b1.id.clone(), "Prohibited Page");
+    let prohibited_child = non_page("prohibited-child", prohibited.id.clone(), "prohibited body");
+
+    let mut by_id = HashMap::new();
+    for b in [
+        &container,
+        &leaf1,
+        &leaf2,
+        &b1,
+        &prohibited,
+        &prohibited_child,
+    ] {
+        by_id.insert(b.id.clone(), b.clone());
+    }
+
+    // `get_blocks(container)` returns the doc's blocks FLAT (the renderer rebuilds
+    // the tree from parent_id). Full = seed; truncated = the drop that de-inlined
+    // the prohibited subtree.
+    let doc_blocks = if truncate {
+        vec![leaf1, leaf2]
+    } else {
+        vec![leaf1, leaf2, b1, prohibited.clone(), prohibited_child]
+    };
+    let mut children = HashMap::new();
+    children.insert(container.id.clone(), doc_blocks);
+
+    Fixtures {
+        by_id,
+        children,
+        legit_id: container.id.clone(),
+        prohibited_id: prohibited.id.clone(),
+    }
+}
+
 fn build_controller(
     f: &Fixtures,
     documents: Vec<EntityUri>,
@@ -328,6 +375,82 @@ async fn sweep_skips_prohibited_doc_but_materializes_the_legit_one() {
         errors.iter().any(|e| e.contains("prohibited")),
         "expected an ERROR-level tracing event for the skipped prohibited doc; captured: \
          {errors:?}"
+    );
+}
+
+/// **BugFunnel row 23/29 (RED-first, PROD-FAITHFUL): a write-back that would
+/// DROP a prohibited-topology subtree HARD-VETOES + quarantines — driven by the
+/// REAL `name_chain` assertion, no stub.** This reproduces the first-boot
+/// 6,245-line `Projects.org` destruction: a `* Holon` heading collided with a
+/// same-named subdir page, the re-homed subtree landed page-under-non-page, and
+/// on the block-driven re-render its blocks were absent from the projection.
+/// The tripwire's sibling-grounding called the REAL `name_chain` on those
+/// absent blocks → it failed loud (the 749-error storm) → they stayed
+/// UNGROUNDED — but the count fell under the 25% mass-truncation threshold and
+/// the truncated file was written anyway. The fix: a name_chain grounding
+/// failure makes the drop UNRESOLVABLE, which ABORTS the write regardless of
+/// the threshold. Pre-fix this is RED (Container.org is rewritten without the
+/// prohibited subtree).
+#[tokio::test]
+async fn writeback_drop_of_prohibited_subtree_hard_vetoes_prod_name_chain() {
+    let cap = ErrorCapture::default();
+    let _guard = tracing::subscriber::set_default(tracing_subscriber::registry().with(cap.clone()));
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    let container = EntityUri::block("container");
+    let path = root.join("Container.org");
+
+    // 1) Seed Container.org on disk with the FULL subtree (incl. the prohibited
+    //    page under the non-page `b1`). The store returns the whole doc, so the
+    //    render is complete and nothing is dropped.
+    let full = container_fixtures(false);
+    let leaf1 = full.by_id[&EntityUri::block("leaf1")].clone();
+    let mut seeder = build_controller(&full, vec![], root.clone());
+    seeder
+        .on_block_changed(&container, &BlockDelta::Upsert(leaf1.clone()))
+        .await
+        .expect("seeding the full Container.org must succeed (no drop)");
+    let seeded = std::fs::read_to_string(&path).expect("Container.org must exist after seed");
+    assert!(
+        seeded.contains("Prohibited Page") && seeded.contains("prohibited body"),
+        "precondition: the full prohibited subtree is on disk; got {seeded:?}"
+    );
+
+    // 2) The store now returns ONLY the leaves — the prohibited subtree was
+    //    re-homed/de-inlined, so a re-render drops it. A fresh controller's
+    //    tripwire grounds the absent blocks via the REAL name_chain, which fails
+    //    loud (prohibited page under non-page `b1`) → UNRESOLVABLE → HARD VETO.
+    let truncated = container_fixtures(true);
+    let mut controller = build_controller(&truncated, vec![], root.clone());
+    let veto = controller
+        .on_block_changed(&container, &BlockDelta::Upsert(leaf1))
+        .await;
+    assert!(
+        veto.is_err(),
+        "a write-back dropping a prohibited-topology subtree (name_chain fails loud) must \
+         HARD-VETO, never silently truncate the file"
+    );
+    let msg = format!("{:#}", veto.unwrap_err());
+    assert!(
+        msg.contains("UNRESOLVABLE"),
+        "the veto must name the unresolvable-drop guard; got {msg}"
+    );
+
+    // 3) Disk is intact — the truncated projection was refused.
+    let after = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        after.contains("Prohibited Page") && after.contains("prohibited body"),
+        "the vetoed write must leave the full subtree on disk; got {after:?}"
+    );
+
+    // 4) The grounding failure was surfaced loudly (fail-loud, not silent).
+    let errors = cap.errors();
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.contains("name_chain failed loud") || e.contains("UNRESOLVABLE")),
+        "expected a loud ERROR for the name_chain grounding failure; captured: {errors:?}"
     );
 }
 

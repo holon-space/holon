@@ -84,6 +84,25 @@ pub enum BlockDelta {
 const TRIPWIRE_MIN_DROP_BLOCKS: usize = 3;
 const TRIPWIRE_DROP_FRACTION_DENOM: usize = 4;
 
+/// Outcome of grounding a write-back's absent (drop-candidate) blocks against
+/// the sibling files they may have de-inlined into.
+///
+/// `siblings` is the surviving-projection union (each distinct sibling file's
+/// on-disk content). `unresolvable` is the id of every absent block whose
+/// own-file path could NOT be resolved because `name_chain` failed loud (a
+/// prohibited page-under-non-page topology; BugFunnel row 23 / row 29). A
+/// non-empty `unresolvable` set means write-back genuinely CANNOT prove where
+/// those blocks went — so the guard must ABORT the write (quarantine) rather
+/// than silently tolerate the drop under the mass-truncation threshold. This is
+/// the fix for the first-boot 6,245-line Projects.org destruction, where a
+/// name_chain-failed grounding storm left blocks ungrounded but the count fell
+/// under the 25% threshold and the truncated file was written anyway.
+#[derive(Debug, Default)]
+struct SiblingGrounding {
+    siblings: Vec<(PathBuf, String)>,
+    unresolvable: Vec<String>,
+}
+
 pub struct FileSyncController {
     /// What we last wrote to (or confirmed on) disk, per file.
     /// Uses CanonicalPath to resolve macOS /var → /private/var symlinks,
@@ -2281,7 +2300,7 @@ impl FileSyncController {
     /// recovery path CARRYING this id (di.rs accumulates it into the
     /// `sanctioned_removals` set passed to
     /// [`re_render_all_tracked`](Self::re_render_all_tracked)), so even the
-    /// fallback stays op-grounded.
+    /// bulk recovery path stays op-grounded.
     #[tracing::instrument(skip(self), name = "org.on_block_removed", fields(block_id = %block_id))]
     pub async fn on_block_removed(&mut self, block_id: &EntityUri) -> Result<bool> {
         if self
@@ -3075,31 +3094,36 @@ impl FileSyncController {
     /// sibling-file union (see
     /// [`writeback_sibling_grounding`](Self::writeback_sibling_grounding))
     /// plus `sanctioned_removals` (the triggering delta's `Remove` ids; empty
-    /// on recovery/ingest paths). Returns the verdict (dropped `id:
-    /// excerpt` list + source block count for the tripwire threshold); real
-    /// parse/IO defects propagate as `Err` (never swallowed).
+    /// on recovery/ingest paths). Returns `(verdict, unresolvable)`: the
+    /// verdict (dropped `id: excerpt` list + source block count for the
+    /// tripwire threshold) and the ids of absent blocks whose own-file path
+    /// could not be resolved (name_chain failed loud — a HARD-veto signal,
+    /// see [`SiblingGrounding`]). Real parse/IO defects propagate as `Err`
+    /// (never swallowed).
     async fn writeback_drops(
         &self,
         path: &Path,
         source: &str,
         rendered: &str,
         sanctioned_removals: &HashSet<String>,
-    ) -> Result<WritebackDropVerdict> {
-        let siblings = self
+    ) -> Result<(WritebackDropVerdict, Vec<String>)> {
+        let grounding = self
             .writeback_sibling_grounding(path, source, rendered, sanctioned_removals)
             .await?;
-        let sibling_refs: Vec<(&Path, &str)> = siblings
+        let sibling_refs: Vec<(&Path, &str)> = grounding
+            .siblings
             .iter()
             .map(|(p, c)| (p.as_path(), c.as_str()))
             .collect();
-        self.format.writeback_drops(
+        let verdict = self.format.writeback_drops(
             path,
             source,
             rendered,
             &sibling_refs,
             sanctioned_removals,
             &self.root_dir,
-        )
+        )?;
+        Ok((verdict, grounding.unresolvable))
     }
 
     /// Collect the sibling-file grounding for the write-back guard: the on-disk
@@ -3117,7 +3141,7 @@ impl FileSyncController {
         source: &str,
         rendered: &str,
         sanctioned_removals: &HashSet<String>,
-    ) -> Result<Vec<(PathBuf, String)>> {
+    ) -> Result<SiblingGrounding> {
         let parent = EntityUri::no_parent();
         let source_parsed = self.format.parse(path, source, &parent, &self.root_dir)?;
         let rendered_parsed = self.format.parse(path, rendered, &parent, &self.root_dir)?;
@@ -3128,7 +3152,7 @@ impl FileSyncController {
             .collect();
 
         let self_canonical = CanonicalPath::new(path);
-        let mut siblings: Vec<(PathBuf, String)> = Vec::new();
+        let mut grounding = SiblingGrounding::default();
         let mut seen: HashSet<CanonicalPath> = HashSet::new();
         for block in &source_parsed.blocks {
             let id = block.id.as_str();
@@ -3139,23 +3163,27 @@ impl FileSyncController {
                 Ok(Some(p)) => p,
                 Ok(None) => continue,
                 Err(e) => {
-                    // §3.1 Finding A / R11: this absent block's own-file path
-                    // could not be resolved (name_chain failed loud — a
-                    // prohibited topology). Previously this was an unlogged
-                    // `None => continue`, which silently treated the block as
-                    // "no sibling home" and let the mass-truncation tripwire
-                    // fire on an unrelated companion. Surface it loudly; the
-                    // block stays ungrounded (honest — we genuinely cannot prove
-                    // where it went), so the tripwire's refusal is the SAFE
-                    // outcome rather than a silent truncation.
+                    // §3.1 Finding A / R11 + BugFunnel row 23/29: this absent
+                    // (drop-candidate) block's own-file path could NOT be
+                    // resolved because `name_chain` failed loud (a prohibited
+                    // page-under-non-page topology). We genuinely cannot prove
+                    // where this block went, so it is UNRESOLVABLE — record it
+                    // and surface it loudly. The tripwire treats any unresolvable
+                    // drop as a HARD veto (abort + quarantine), independent of the
+                    // mass-truncation threshold: a name_chain-failed grounding
+                    // storm must ABORT the write, never let the truncated
+                    // projection reach disk (the first-boot 6,245-line Projects.org
+                    // destruction: 749 such failures fell under the 25% threshold
+                    // and the file was rewritten anyway).
                     tracing::error!(
                         block_id = %block.id,
                         path = %path.display(),
                         error = %format!("{e:#}"),
                         "[FileSyncController] writeback_sibling_grounding: could not resolve \
-                         an absent block's own-file path (name_chain failed loud) — leaving it \
-                         UNGROUNDED (guard may veto this write, which is the safe outcome).",
+                         an absent block's own-file path (name_chain failed loud) — UNRESOLVABLE; \
+                         the guard will ABORT + quarantine this write (the safe outcome).",
                     );
+                    grounding.unresolvable.push(block.id.as_str().to_string());
                     continue;
                 }
             };
@@ -3165,10 +3193,10 @@ impl FileSyncController {
             }
             let content = read_disk_or_empty(&self.fs, &sibling).await?;
             if !content.trim().is_empty() {
-                siblings.push((sibling, content));
+                grounding.siblings.push((sibling, content));
             }
         }
-        Ok(siblings)
+        Ok(grounding)
     }
 
     /// Fork B B1' / ADR 0025 recovery-path MASS-TRUNCATION tripwire.
@@ -3208,9 +3236,31 @@ impl FileSyncController {
         rendered: &str,
         sanctioned_removals: &HashSet<String>,
     ) -> Result<()> {
-        let verdict = self
+        let (verdict, unresolvable) = self
             .writeback_drops(path, source, rendered, sanctioned_removals)
             .await?;
+
+        // HARD veto (BugFunnel row 23/29): any absent block whose own-file path
+        // could NOT be resolved (name_chain failed loud — a prohibited topology)
+        // is UNRESOLVABLE. We cannot prove it was preserved elsewhere, so the
+        // grounding failure must ABORT the write regardless of the count — never
+        // let it fall under the mass-truncation threshold. This is the fix for the
+        // first-boot 6,245-line Projects.org destruction (749 name_chain failures
+        // that stayed under the 25% threshold and truncated the file anyway).
+        if !unresolvable.is_empty() {
+            let err = anyhow::anyhow!(
+                "UNRESOLVABLE WRITE-BACK DROP: {} on-disk block(s) are absent from the projection \
+                 AND their own-file path could not be resolved (name_chain failed loud — a \
+                 prohibited page-under-non-page topology). Write-back cannot prove these blocks \
+                 were preserved elsewhere, so the write is REFUSED to avoid silent data loss \
+                 (BugFunnel row 23). Unresolvable: {:?}",
+                unresolvable.len(),
+                unresolvable,
+            );
+            self.quarantine_writeback(path, &err);
+            return Err(err);
+        }
+
         let threshold = std::cmp::max(
             TRIPWIRE_MIN_DROP_BLOCKS,
             verdict.source_block_count / TRIPWIRE_DROP_FRACTION_DENOM,
