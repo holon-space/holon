@@ -50,9 +50,7 @@ use holon_engine::arc::OutputArc;
 pub use holon_engine::engine::Engine;
 pub use holon_engine::engine::RankedTransition;
 use holon_engine::value::Value;
-use rhai::Dynamic;
 use rhai::Engine as RhaiEngine;
-use rhai::Scope;
 
 mod parser;
 pub use parser::DEFAULT_VERB_DICT;
@@ -419,7 +417,6 @@ fn default_computed_props(engine: &RhaiEngine) -> Vec<(&'static str, PrototypeVa
 ///
 /// Returns all final attribute values as f64s.
 pub fn resolve_prototype(
-    engine: &RhaiEngine,
     prototype_props: &BTreeMap<String, PrototypeValue>,
     instance_props: &BTreeMap<String, PrototypeValue>,
     context_props: &BTreeMap<String, f64>,
@@ -449,31 +446,34 @@ pub fn resolve_prototype(
 
     let sorted = topo_sort_computed(&computed);
 
-    let mut scope = Scope::new();
-    for (k, v) in &literals {
-        scope.push(k.clone(), *v);
-    }
+    // C4 convergence: evaluate each computed prototype expression through the
+    // shared, fail-loud `Computation` evaluator (holon-api) instead of a private
+    // Rhai loop. rank_tasks scoring and the C4 derived-field pipeline now run the
+    // SAME bounded engine + coercion, so a computed field cannot rank one way
+    // here and materialize another way in the pipeline. Results thread back into
+    // the Value-typed context so later fields depend on earlier ones (topo
+    // order preserved).
+    let mut ctx: holon_api::computation::Context = literals
+        .iter()
+        .map(|(k, v)| (k.clone(), holon_api::Value::Float(*v)))
+        .collect();
 
     for name in &sorted {
         let compiled = computed[name.as_str()];
-        let result: Dynamic = engine
-            .eval_ast_with_scope(&mut scope, &compiled.ast)
+        let value = holon_api::computation::Computation::Script(compiled.clone())
+            .eval(&ctx)
             .map_err(|e| PetriError::ComputedEval {
                 name: name.clone(),
                 detail: e.to_string(),
                 expr: compiled.source.clone(),
             })?;
-        let val = if result.is_float() {
-            result.as_float().unwrap()
-        } else if result.is_int() {
-            result.as_int().unwrap() as f64
-        } else {
-            return Err(PetriError::ComputedNonNumeric {
+        let val = value
+            .as_f64()
+            .ok_or_else(|| PetriError::ComputedNonNumeric {
                 name: name.clone(),
-                detail: format!("{result:?}"),
-            });
-        };
-        scope.push(name.clone(), val);
+                detail: format!("{value:?}"),
+            })?;
+        ctx.insert(name.clone(), holon_api::Value::Float(val));
         literals.insert(name.clone(), val);
     }
 
@@ -946,7 +946,7 @@ pub fn materialize_at(
     for task in &active {
         let instance_props = task_to_instance_props_from_info(task);
         let context = build_context_props(task, now, max_position);
-        let resolved = resolve_prototype(&rhai_engine, prototype_props, &instance_props, &context)?;
+        let resolved = resolve_prototype(prototype_props, &instance_props, &context)?;
         let weight = resolved.get("task_weight").copied().unwrap_or(1.0);
         task_weights.insert(task.block_id.clone(), weight);
     }
@@ -1010,6 +1010,8 @@ fn resolve_sequential_deps(tasks: &mut [TaskInfo]) {
     }
 }
 
+// ALLOW(unused_param): self-token attributes are fixed today; descriptor kept
+// for imminent capacity wiring
 fn build_self_token(_self_desc: &SelfDescriptor) -> TaskToken {
     TaskToken {
         id: "self".to_string(),
@@ -1412,6 +1414,59 @@ mod tests {
         let mut b = Block::new_text(id.clone(), EntityUri::block("parent-1"), content);
         b.set_property("task_state", holon_api::Value::String(state.to_string()));
         b
+    }
+
+    /// C4 convergence: `resolve_prototype` now evaluates computed prototype
+    /// expressions through the shared `holon_api::computation::Computation`
+    /// evaluator. This pins that the switch/if/arithmetic shapes rank_tasks
+    /// depends on still resolve identically AND that dependent fields chain in
+    /// topological order (task_weight reads the freshly-computed
+    /// priority_weight).
+    #[test]
+    fn resolve_prototype_evaluates_through_computation_and_chains() {
+        let engine = holon_expr::bounded_engine();
+        let computed =
+            |src: &str| PrototypeValue::Computed(CompiledExpr::compile(&engine, src).unwrap());
+
+        let mut prototype: BTreeMap<String, PrototypeValue> = BTreeMap::new();
+        prototype.insert(
+            "priority_weight".to_string(),
+            computed("switch priority { 3.0 => 100.0, 2.0 => 40.0, _ => 1.0 }"),
+        );
+        prototype.insert("task_weight".to_string(), computed("priority_weight * 2.0"));
+
+        let mut context: BTreeMap<String, f64> = BTreeMap::new();
+        context.insert("priority".to_string(), 3.0);
+
+        let resolved = resolve_prototype(&prototype, &BTreeMap::new(), &context)
+            .expect("resolve_prototype must succeed");
+
+        assert_eq!(resolved.get("priority_weight").copied(), Some(100.0));
+        assert_eq!(
+            resolved.get("task_weight").copied(),
+            Some(200.0),
+            "task_weight must chain off the freshly-computed priority_weight"
+        );
+    }
+
+    /// C4 convergence keeps the fail-loud contract: a computed expression that
+    /// yields a non-numeric value surfaces as `PetriError`, never a silent
+    /// default — matching the shared evaluator's semantics.
+    #[test]
+    fn resolve_prototype_is_fail_loud_on_non_numeric() {
+        let engine = holon_expr::bounded_engine();
+        let mut prototype: BTreeMap<String, PrototypeValue> = BTreeMap::new();
+        prototype.insert(
+            "bad".to_string(),
+            PrototypeValue::Computed(CompiledExpr::compile(&engine, "\"not a number\"").unwrap()),
+        );
+
+        let err = resolve_prototype(&prototype, &BTreeMap::new(), &BTreeMap::new())
+            .expect_err("non-numeric computed value must fail loud");
+        assert!(
+            matches!(err, PetriError::ComputedNonNumeric { .. }),
+            "expected ComputedNonNumeric, got {err:?}"
+        );
     }
 
     /// Real block ids are EntityUris (`block:<uuid>`) whose `:`/`-` are invalid
