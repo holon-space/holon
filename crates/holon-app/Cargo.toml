@@ -2,6 +2,7 @@
 name = "holon-app"
 version = "0.1.0"
 edition = "2021"
+publish = false
 
 # The wiring crate (storage de-leak Stage 6, ADR plan quirky-dazzling-map):
 # owns all DI assembly that names concrete backends (BackendEngine, Loro/OrgMode

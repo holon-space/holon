@@ -25,7 +25,12 @@ on:
 
 env:
   FLUTTER_VERSION: "3.35.0"
-  RUST_VERSION: stable
+  # rust-toolchain.toml pins nightly; every cargo invocation in this repo
+  # auto-overrides to it regardless of what's installed here. Match it so
+  # the toolchain that actually receives `components: rustfmt, clippy`
+  # below is the one cargo uses (previously installed `stable` with those
+  # components, then silently ran on an auto-installed bare nightly instead).
+  RUST_VERSION: nightly
   FRB_VERSION: "2.11.1"
 
 jobs:
