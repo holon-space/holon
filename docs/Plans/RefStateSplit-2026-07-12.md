@@ -96,6 +96,10 @@ ReferenceState (composition root; stays the single CapProvider for cross-cutting
 `blur_active_editor` / `commit_active_editor_if_changed` (editor→blocks commit
 contract), `clear_focus_if_deleted` / `reset_cursor_if_focused` (blocks→focus),
 `split_block` / `join_block` / `move_block` / `outdent_block` (blocks + editor + focus),
+the rest of the **recanon-orchestrator family** — `swap_sequence`, `apply_mutation`,
+`create_block_under(_with_id)`, `recompute_derived` — (mutate-then-recanonicalize:
+they depend on root-pinned `recanon_and_rebuild` / `push_undo_snapshot`, so they
+cannot move without dragging those along; amendment 2026-07-16, Inc 4 verifier),
 `recanon_and_rebuild` / `rebuild_profile_tracking` (blocks→profiles→render exprs),
 `push_undo_snapshot` / `pop_undo_to_redo` (action stack clones domain `BlockState`),
 `shadow_catch_up_primary` (core blocks → loro ext), `with_resolved_doc_uris` /
@@ -248,6 +252,11 @@ criterion for each method: *does the body read/write more than one fragment (or
 harness)? then it stays on the root.*
 - **DONE:** gate green; every method remaining in `refstate/mod.rs` provably touches
   ≥ 2 fragments (spot-check in review).
+  *Criterion restated 2026-07-16 (Inc 4 verifier finding): "fragment" here is
+  CONCERN-level, not struct-field-level — a method also stays on the root when it
+  participates in a root-pinned cross-fragment contract (recanon, undo snapshot,
+  editor commit), even if its body syntactically touches only `self.domain`. The
+  §1 list, including the recanon-orchestrator family, is the authority.*
 - **Blast radius:** internal to 3 files + `ref_caps/` forwarding targets.
   **Risk: MED** — judgment calls on borderline methods (`expected_focus_root_ids`
   reads ui only → could move to `UIUserState`, but it mirrors a SQL matview and is
