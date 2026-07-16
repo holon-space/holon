@@ -5,6 +5,14 @@ fork's Tantivy index method; registry = generalize the fork's Func-enum
 resolution path, split **by function shape** — scalar/predicate via the Func
 enum, set-valued (relation-returning) via the matview/TVF declaration path.
 
+## Status (2026-07-16)
+
+Re-verified against the tree: C3 core is LANDED — `fts` feature in the workspace
+`Cargo.toml`, registrations (`fts_match`/`fts_score`/`fts_highlight`) in
+`crates/holon-turso/src/engine_functions.rs`, and the passing E2E test
+`crates/holon-integration-tests/tests/fts_query_block_e2e.rs`. The §7 follow-ups
+below remain open. (2026-07-15 stamp already accurate; no body change needed.)
+
 ## Status (2026-07-15)
 
 **LANDED.** `EngineFunctionDecl` (`crates/holon-turso/src/engine_functions.rs`)

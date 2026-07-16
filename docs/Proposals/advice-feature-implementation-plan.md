@@ -600,13 +600,16 @@ regression. Never commit an auto-saved seed for the softened invariant.
   anchor-denormalized matview + read-time `WHERE anchor_id=?`. Two DDL rules:
   matview `ORDER BY` needs **column ordinals**; suppression anti-join = **LEFT JOIN
   … IS NULL** (`NOT EXISTS` rejected, compiler.rs:3550).
-  **BLOCKER for Increment F:** Holon's turso pin `73d59b02` predates every needed
-  IVM feature; the fork's rebased `holon` branch (local tip `612df12705`+, 494
-  commits) was never pushed — remote tip *is* the current pin, histories diverged.
-  Unblock = user force-pushes the local `holon` branch of
-  `~/Workspaces/bigdata/turso` to `nightscape/turso`, then targeted
-  `cargo update -p turso -p turso_core -p turso_sdk_kit -p turso_ext …` (NEVER bare
-  `cargo update` — ed25519 lock hazard) + keystone re-gate.
+  **BLOCKER for Increment F — RESOLVED (Status 2026-07-16).** The turso pin was
+  advanced to `3dd5d689` (see `Cargo.toml` / `Cargo.lock`), which carries every needed
+  IVM feature; Increment F wiring landed (`crates/holon-advice/src/{synthesis,holon_rule,
+  lowering,reconcile_plan}.rs`; anti-join matview built). Only the step-7 live-MCP gate
+  remains open. *(Historical blocker text:* Holon's turso pin `73d59b02` predated every
+  needed IVM feature; the fork's rebased `holon` branch was never pushed — remote tip
+  *was* the then-current pin, histories diverged. Unblock was = user force-pushes the
+  local `holon` branch of `~/Workspaces/bigdata/turso` to `nightscape/turso`, then
+  targeted `cargo update -p turso -p turso_core -p turso_sdk_kit -p turso_ext …` — NEVER
+  bare `cargo update`, ed25519 lock hazard — + keystone re-gate.*)
 - **Multiplicity question — RESOLVED (2026-07-07, ADR 0021):** advice v1 renders
   **read-only children** (dismiss affordance + click-through to canonical); the
   `focused_block` window-global focus hazard, not a GPUI cache collision, was the
