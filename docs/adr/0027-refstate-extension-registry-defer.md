@@ -140,3 +140,33 @@ chokepoint), `crates/holon-loro-testing/src/ref_ext.rs` (Clone seams :22–40,
 `crates/holon-pbt-core/src/composition.rs` (CapMap :124 — `#[derive(Default)]`,
 not Clone), `docs/Testing/PbtCompositionDesign.md` §5.3/§5.5/§8.9,
 `docs/Plans/RefStateSplit-2026-07-12.md` §3 Increment 6.
+
+## Appendix: reversibility experiment (2026-07-16, throwaway worktree)
+
+The rider-1 de-risking experiment was run same-day: `RefExtMap` + `HasRefExts`
+sketched in holon-pbt-core, `RefPeersMut::add_peer` ported through the combined
+accessor, compiled against Inc 5 real signatures.
+
+**Verdict: compiles cleanly, zero borrow contortions.** The split-borrow defect
+flagged in the options doc is cured exactly as proposed: the concrete impl
+performs the field-disjoint split, so
+`fn ref_ext_mut_with_core<T: RefExt>(&mut self) -> (&mut T, RefCoreView<_>)`
+is fine as a trait method. Option 0 is confirmed cheap-to-reverse.
+
+Two findings amend the deferred Option A design:
+
+1. **`RefExt: Any + Debug + Send + Sync`** (not just `Send`). `ReferenceState`
+   is `Sync`-constrained (BuilderServices impl; a spawn-drop in
+   `subsystem_seed.rs`), so every registered extension must be `Sync` — a
+   load-bearing constraint on future extension authors, enforced at their
+   `impl RefExt`.
+2. **`RefCoreView` = holon-api block maps + abstract predicate traits.** The
+   ported cap needs a layout-membership check whose type lives in
+   integration-tests; the working shape is a pbt-core
+   `LayoutMembership { fn is_layout_member(&self, &EntityUri) -> bool }`
+   carried as `&dyn LayoutMembership`. Future caps reading other core slices
+   widen the view or add sibling accessors — a small, real addition to the
+   options doc line-count budget.
+
+Unmeasured (skipped for budget): per-step cap-read counts (the hoisting
+question). Measure before building Option A.
