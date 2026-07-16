@@ -1388,7 +1388,8 @@ impl TestEnvironment {
             return;
         };
         holon_loro_testing::quiescence::wait_for_loro_quiescence_on(handle, doc_store, timeout)
-            .await;
+            .await
+            .expect("wait_for_loro_quiescence: loro sync did not quiesce before the deadline");
     }
 
     /// Create an org file in the temp directory (requires running app).

@@ -11,6 +11,7 @@
 use std::marker::PhantomData;
 
 use holon_pbt_core::RunMode;
+use holon_pbt_core::capabilities::RefTaskState;
 use holon_pbt_core::capabilities::SutLoroTaskState;
 use holon_pbt_core::capabilities::SutSqlProjection;
 use holon_pbt_core::composition::BridgedInvariant;
@@ -31,7 +32,9 @@ pub fn wire() -> Box<dyn CapInvariant> {
                 CapId::of::<dyn SutLoroTaskState>(),
             ],
             sut_absent: Vec::new(),
-            ref_present: Vec::new(),
+            // Re-anchored to the ref (F4): the body now compares both SUT stores
+            // to `RefTaskState`, so the ref cap is a real selection dependency.
+            ref_present: vec![CapId::of::<dyn RefTaskState>()],
         },
     ))
 }
@@ -48,17 +51,18 @@ mod tests {
         let b = uri("block:b");
         let sut = task_state_maps(
             vec![(a.clone(), "TODO"), (b.clone(), "DONE")],
-            vec![(a, "TODO"), (b, "DONE")],
+            vec![(a.clone(), "TODO"), (b.clone(), "DONE")],
         );
+        let ref_ = ref_task_state(vec![(a, "TODO"), (b, "DONE")]);
 
-        let report = run_selected(&composed_invariant_catalog(), &sut, &CapMap::new()).await;
+        let report = run_selected(&composed_invariant_catalog(), &sut, &ref_).await;
 
         assert!(
             report
                 .ran_ids()
                 .contains(&"inv-task-state-storage-coherence"),
-            "wiring SutSqlProjection + SutLoroTaskState must select the coherence invariant; \
-             ran={:?}",
+            "wiring SutSqlProjection + SutLoroTaskState (+ ref RefTaskState) must select the \
+             coherence invariant; ran={:?}",
             report.ran_ids(),
         );
         assert!(
@@ -96,9 +100,12 @@ mod tests {
     #[tokio::test]
     async fn task_state_coherence_catches_sql_loro_divergence() {
         let a = uri("block:a");
-        let sut = task_state_maps(vec![(a.clone(), "TODO")], vec![(a, "DONE")]);
+        // Ref says TODO; SQL agrees, Loro says DONE — the Loro store diverges
+        // from the canonical task_state, which the ref anchor catches.
+        let sut = task_state_maps(vec![(a.clone(), "TODO")], vec![(a.clone(), "DONE")]);
+        let ref_ = ref_task_state(vec![(a, "TODO")]);
 
-        let report = run_selected(&composed_invariant_catalog(), &sut, &CapMap::new()).await;
+        let report = run_selected(&composed_invariant_catalog(), &sut, &ref_).await;
 
         let failures = report.failures();
         assert!(

@@ -38,43 +38,20 @@ List all available tests without running them:
 cargo nextest list
 ```
 
-### Test Profiles
-
-We have configured multiple profiles for different testing scenarios:
-
-**`default`** - Standard development testing with pretty output and parallel execution (default)
-
-```bash
-cargo nextest run
-```
-
-**`quick`** - Fast sanity checks (60s timeout)
-
-```bash
-cargo nextest run --profile quick
-```
-
-**`ci`** - Strict CI/CD runs with JSON output, sequential execution, and retries
-
-```bash
-cargo nextest run --profile ci
-```
-
-**`dev`** - Development with verbose output and fail-fast mode (stops after first failure)
-
-```bash
-cargo nextest run --profile dev
-```
-
 ### Configuration
 
-Test runner configuration is in `.config/nextest.toml` in the workspace root. Key settings:
+Test runner configuration is the SINGLE file `.config/nextest.toml` (the only
+path cargo-nextest reads — a root `Nextest.toml` is inert and was deleted, F12).
+It defines one `default` profile plus per-binary `slow-timeout` overrides so the
+long-running E2E / PBT suites (`general_e2e_composed_pbt`, `turso_storage_pbt`,
+…) get a larger hard cap than ordinary tests.
 
-- **`test-threads`**: Number of parallel test threads (`auto` = all available CPUs)
-- **`timeout`**: Individual test timeout in seconds (default: 300s)
-- **`retries`**: Number of retries for flaky tests
-- **`fail-fast`**: Stop after first failure
-- **`output.format`**: `pretty` (default), `dot` (compact), or `json` (machine-readable)
+**PBT tests must NEVER carry nextest `retries`.** A property-based test that only
+passes on retry is hiding non-determinism — a real flaky-divergence bug the
+retry would silently paper over. The live config sets no `retries` anywhere;
+keep it that way. (The deleted root `Nextest.toml` carried an inert
+`retries = 1/2`; "fixing" a flaky PBT by re-adding retries is the wrong fix —
+root-cause the non-determinism instead.)
 
 ### Combining with Code Coverage
 

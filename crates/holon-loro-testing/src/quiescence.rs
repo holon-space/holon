@@ -2,8 +2,8 @@
 //!
 //! @pbt kind cap-plumbing
 //! @pbt covers loro-slice (full) — settle barrier before a post-merge read.
-//!   AUDIT: on timeout it only `eprintln`s and RETURNS (no Err/panic) — a
-//!   never-quiescing sync is not surfaced to the caller (see SUT-6).
+//!   Fails LOUD on timeout (returns `Err` + `tracing::error!`), never a silent
+//!   return — a never-quiescing sync is surfaced to the caller (F7).
 //!
 //! Waits until the `LoroSyncController`'s `last_synced` watermark matches the
 //! global doc's current `oplog_frontiers()`. Used by [`crate::LoroSut`]'s
@@ -22,7 +22,7 @@ pub async fn wait_for_loro_quiescence_on(
     handle: &Arc<LoroSyncControllerHandle>,
     doc_store: &Arc<RwLock<LoroDocumentStore>>,
     timeout: std::time::Duration,
-) {
+) -> Result<(), String> {
     use tracing::field;
     let span = tracing::info_span!(
         "wait_for_loro_quiescence",
@@ -47,13 +47,21 @@ pub async fn wait_for_loro_quiescence_on(
         if handle.last_synced_frontiers() == current {
             span.record("attempts", attempts);
             span.record("timed_out", false);
-            return;
+            return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
             span.record("attempts", attempts);
             span.record("timed_out", true);
-            eprintln!("[wait_for_loro_quiescence] timeout after {:?}", timeout);
-            return;
+            // Fail loud: emit through tracing (so `inv-no-observed-errors` and
+            // the span collector can SEE it — an `eprintln` bypassed both) AND
+            // return `Err` so the caller cannot mistake a hung sync for a
+            // settled one (F7).
+            let msg = format!(
+                "loro sync never quiesced within {timeout:?} after {attempts} attempts: \
+                 controller last_synced_frontiers != global oplog_frontiers"
+            );
+            tracing::error!(target: "holon_loro", "{msg}");
+            return Err(msg);
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }

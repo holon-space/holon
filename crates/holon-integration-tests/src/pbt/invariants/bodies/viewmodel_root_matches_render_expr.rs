@@ -31,7 +31,11 @@
 //! falls through to the drill, which `Fail`s when the content isn't where the
 //! main panel should render it — the assertion is never weakened.
 //!
-//! Gated on `root_render_ready()` (Skipped when loading / spacer / not
+//! Applicability: reaches its assertion in EITHER mode — layout-less (a root
+//! render expr exists) OR 3-column (a main panel exists). It does NOT gate on
+//! `has_root_render_expr()` alone; under the wide 3-column layout that gate is
+//! permanently false and used to blind this invariant to a vacuous `Ok` (F1).
+//! Then gated on `root_render_ready()` (Skipped when loading / spacer / not
 //! watchable / interpret panic), mirroring `inv-viewmodel-snapshot`.
 //! In layout mode the main-panel content can also be unrendered in a
 //! given headless snapshot tick even though the layout itself has settled — its
@@ -43,7 +47,16 @@
 //! expected render expr name still Fails — the assertion is never weakened.
 //! Bodies never panic.
 //!
-//! Status: functional.
+//! Status: functional, but NOT yet engaging in the wide keystone. Un-blinding
+//! the `has_root_render_expr()` gate (F1) turned its permanent vacuous `Ok`
+//! into an honest `Skipped` — a strict improvement — but its 3-column
+//! main-panel drill never reaches a rendered content-kind verdict against the
+//! current wide seed (it `Skipped` on every sampled tick of every full-render
+//! case; the F2 engagement floor caught this). Making it ENGAGE needs a
+//! layout/generator change — a static main-panel render source whose rendered
+//! widget kind is assertable — which is a FORK (deferred). It is therefore
+//! deliberately NOT in the harness `ENGAGEMENT_FLOOR`; only
+//! `inv-viewmodel-entity-ids-subset-of-data` (which does engage) is floored.
 
 use holon_pbt_core::capabilities::RefViewSelection;
 use holon_pbt_core::capabilities::SutRenderer;
@@ -95,9 +108,30 @@ where
     }
 
     async fn check(&self, ref_: &R, sut: &S) -> InvariantResult {
-        // Inline gate: skip when there's no root render expr at all.
-        if !ref_.has_root_render_expr() {
-            return InvariantResult::Ok;
+        let root_expr_name = ref_.root_render_expr_name();
+        let main_panel_id = ref_.main_panel_block_id();
+
+        // Applicability gate. The invariant reaches its assertion in EITHER
+        // mode: layout-less (a root render expr exists) OR 3-column (a main
+        // panel exists). We deliberately do NOT gate on `has_root_render_expr()`
+        // alone — under the wide run's default 3-column layout the render
+        // sources sit on the PANELS, so that gate is permanently false and used
+        // to blind this invariant to a vacuous `Ok` (F1). We reach the
+        // assertion via the main-panel drill, exactly as
+        // `inv-main-panel-rows-match-focus` does.
+        if root_expr_name.is_none() && main_panel_id.is_none() {
+            // Distinguish "no root render expr at all" (not applicable → Skip)
+            // from "root render expr present but NOT a FunctionCall" (the
+            // inline's old `panic!` case → Fail; bodies never panic).
+            if ref_.has_root_render_expr() {
+                return InvariantResult::Fail(
+                    "[inv-viewmodel-root-matches-render-expr] root render expr must be FunctionCall"
+                        .into(),
+                );
+            }
+            return InvariantResult::Skipped(
+                "no root render expr and no main-panel block id (layout not yet settled)".into(),
+            );
         }
 
         // Faithful readiness gate: skip transient placeholder roots
@@ -109,31 +143,23 @@ where
             );
         }
 
-        // A root render expr that exists but isn't a FunctionCall was the
-        // inline's `panic!` case — surface as Fail (bodies never panic).
-        let Some(root_expr_name) = ref_.root_render_expr_name() else {
-            return InvariantResult::Fail(
-                "[inv-viewmodel-root-matches-render-expr] root render expr must be FunctionCall"
-                    .into(),
-            );
-        };
-
         let root = sut.widget_tree_snapshot().await;
         let root_kind = root.kind.as_str();
 
-        // ── Mode detection (derived from the snapshot) ────────────────────
-        // Layout-less: the root IS the content render expr, or the engine
-        // wrapped it in a `view_mode_switcher` whose first child is.
-        let layout_less_match = root_kind == root_expr_name
-            || (root_kind == "view_mode_switcher"
-                && root
-                    .children
-                    .first()
-                    .map(|c| c.kind.as_str() == root_expr_name)
-                    .unwrap_or(false));
-
-        if layout_less_match {
-            return InvariantResult::Ok;
+        // ── Layout-less mode (only when a root render expr name exists) ────
+        // The root IS the content render expr, or the engine wrapped it in a
+        // `view_mode_switcher` whose first child is.
+        if let Some(name) = root_expr_name.as_deref() {
+            let layout_less_match = root_kind == name
+                || (root_kind == "view_mode_switcher"
+                    && root
+                        .children
+                        .first()
+                        .map(|c| c.kind.as_str() == name)
+                        .unwrap_or(false));
+            if layout_less_match {
+                return InvariantResult::Ok;
+            }
         }
 
         // ── 3-column layout mode ──────────────────────────────────────────
@@ -141,20 +167,28 @@ where
         // must live inside the main panel subtree. Locate the main panel
         // SEMANTICALLY by its ref-model block id, then compare its content
         // child to the main panel's expected render expr name.
-        let Some(main_panel_id) = ref_.main_panel_block_id() else {
-            // No semantic main-panel id available, yet the root isn't the
-            // content either — the content render expr is genuinely absent
+        let Some(main_panel_id) = main_panel_id else {
+            // We only reach here with `root_expr_name` Some (the gate above
+            // returned otherwise): the root isn't the content and there's no
+            // main panel to drill — the content render expr is genuinely absent
             // from where it should be.
             return InvariantResult::Fail(format!(
                 "[inv-viewmodel-root-matches-render-expr] Root widget '{root_kind}' is not the \
-                 expected content render expr '{root_expr_name}' and the reference model has no \
-                 main-panel block id to drill into"
+                 expected content render expr '{}' and the reference model has no \
+                 main-panel block id to drill into",
+                root_expr_name.as_deref().unwrap_or("<none>")
             ));
         };
 
-        let expected_panel_name = ref_
-            .main_panel_render_expr_name()
-            .unwrap_or(root_expr_name.clone());
+        let Some(expected_panel_name) = ref_.main_panel_render_expr_name().or(root_expr_name)
+        else {
+            // A main panel exists but neither it nor the root exposes a
+            // FunctionCall render-expr name — nothing to compare against yet.
+            return InvariantResult::Skipped(format!(
+                "main-panel node (id '{}') has no FunctionCall render expr name yet",
+                main_panel_id.as_str()
+            ));
+        };
 
         let Some(panel_node) = find_by_entity_id(&root, main_panel_id.as_str()) else {
             // A `columns` layout with the main-panel node still absent is a
