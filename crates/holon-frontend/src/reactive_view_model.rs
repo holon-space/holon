@@ -866,6 +866,7 @@ impl ReactiveViewModel {
             "checkbox" => ViewKind::Checkbox {
                 checked: self.prop_bool("checked").unwrap_or(false),
             },
+            "divider" => ViewKind::Divider,
             "spacer" => ViewKind::Spacer {
                 width: self.prop_f64("width").unwrap_or(0.0) as f32,
                 height: self.prop_f64("height").unwrap_or(0.0) as f32,
@@ -1058,8 +1059,7 @@ impl ReactiveViewModel {
             "view_mode_switcher" => {
                 let entity_uri = self
                     .prop_str("entity_uri")
-                    // ALLOW(entity_uri_from_raw): prop_str('entity_uri') render-spec node prop
-                    // value
+                    // ALLOW(entity_uri_from_raw): render-spec 'entity_uri' node prop value
                     .map(|s| EntityUri::from_raw(&s))
                     // ALLOW(entity_uri_from_raw): hardcoded 'unknown' sentinel default literal
                     .unwrap_or_else(|| EntityUri::from_raw("unknown"));
@@ -1264,8 +1264,7 @@ impl ReactiveViewModel {
         }
     }
 
-    // ALLOW(unused_param): _widget kept in signature for caller readability and
-    // future use
+    // ALLOW(unused_param): _widget kept in signature for caller readability
     pub fn error(_widget: impl Into<String>, message: impl Into<String>) -> Self {
         let mut props = HashMap::new();
         props.insert("message".to_string(), Value::String(message.into()));

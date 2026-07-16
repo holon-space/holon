@@ -52,6 +52,27 @@ variants:
     priority: 2
     condition: 'role == "page_title"'
     render: 'text(col("content"), #{style: "h1"})'
+  # Embedded page-blocks rendered EXPANDED by default (children eagerly loaded).
+  # Selected when the embedding query TAGS its rows with an `expand_default`
+  # column (the Journal-feed context adds `1 AS expand_default`); plain embedded
+  # pages lack the column, so `is_def_var("expand_default")` is false and they
+  # fall through to the collapsed `embedded_page` variant below. Priority 2 (same
+  # tier as page_title, whose `role == "page_title"` never matches a feed row) so
+  # it is checked before the collapsed embedded_page (priority 1). The
+  # `default_expanded: true` param seeds the expand_toggle gate OPEN; the header
+  # is a click-to-open navigation link (LogSeq-style journal feed).
+  - name: embedded_page_expanded
+    priority: 2
+    condition: 'is_def_var("expand_default") && expand_default == 1 && (!is_def_var("role") || role != "page_title")'
+    render: >-
+      expand_toggle(#{
+        default_expanded: true,
+        header: selectable(row(icon("orgmode"), text(col("content"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})}),
+        content: live_query(#{
+          prql: "from descendants",
+          item_template: tree(#{parent_id: col("parent_id"), sortkey: col("sort_key"), item_template: render_entity()})
+        })
+      })
   # Embedded page-blocks: non-root pages (strict descendants of the focus root)
   # rendered as a collapsed expand_toggle with lazy subtree. condition uses
   # is_def_var guard because rows from live_query content queries have no `role`

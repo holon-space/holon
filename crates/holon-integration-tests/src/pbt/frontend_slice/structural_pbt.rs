@@ -3067,4 +3067,133 @@ mod teeth {
              expanded toggle accepted, descendants permitted."
         );
     }
+
+    /// **Journal Overview feed (DOGFOOD_MVP A2+A3).**
+    ///
+    /// The `block:journals` page's own feed (`::src::0` holon_sql + `::render::0`)
+    /// lists its `Page`-tagged day-entries NEWEST-FIRST, each rendered as a
+    /// DEFAULT-EXPANDED embedded page (via the `embedded_page_expanded` profile
+    /// variant, keyed on the `expand_default` column + the `default_expanded`
+    /// expand_toggle param), separated by a `divider()`. Prong (a): the feed
+    /// snapshot has one expanded `expand_toggle` per day-entry in newest-first
+    /// order, with one `divider` each. Prong (b): a plain embedded page under a
+    /// DIFFERENT focus root (no `expand_default`) still renders COLLAPSED — the
+    /// global default is unchanged; only the feed context expands.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn journal_feed_expanded_newest_first_with_divider() {
+        use holon_pbt_core::capabilities::CapRegion;
+        use holon_pbt_core::capabilities::SutFocusWrite;
+        use holon_pbt_core::capabilities::SutRenderer;
+
+        // Journals doc: two Page day-entries (newest = 2026-07-15), each with a
+        // child note under it. The child's parent is the day-entry, NOT journals,
+        // so the feed query (parent_id == journals) never lists it directly.
+        let journals_org = concat!(
+            "#+ID: journals\n",
+            "* 2026-07-14 :Page:\n",
+            ":PROPERTIES:\n:ID: day-0714\n:END:\n",
+            "Log for the 14th.\n",
+            "** morning note\n",
+            ":PROPERTIES:\n:ID: day-0714-child\n:END:\n",
+            "* 2026-07-15 :Page:\n",
+            ":PROPERTIES:\n:ID: day-0715\n:END:\n",
+            "Log for the 15th.\n",
+            "** evening note\n",
+            ":PROPERTIES:\n:ID: day-0715-child\n:END:\n",
+        );
+        // A plain notebook Page holding a plain sub-page — the collapsed control.
+        let plain_org = concat!(
+            "#+ID: plain-doc\n",
+            "* Notebook :Page:\n",
+            ":PROPERTIES:\n:ID: plain-notebook\n:END:\n",
+            "** A plain day :Page:\n",
+            ":PROPERTIES:\n:ID: plain-page\n:END:\n",
+            "Plain content.\n",
+            "*** a child note\n",
+            ":PROPERTIES:\n:ID: plain-child\n:END:\n",
+        );
+
+        let comp = Arc::new(
+            HeadlessFrontendComponent::new(
+                &[("Journals.org", journals_org), ("plain-doc.org", plain_org)],
+                Duration::from_millis(600),
+            )
+            .await,
+        );
+        tokio::time::sleep(SETTLE).await;
+
+        let journals = EntityUri::parse("block:journals").expect("journals id");
+
+        // ── Prong (a): the journals feed, newest-first, expanded, with dividers.
+        // Poll until the feed query has populated (the block_tags 'Page' rows +
+        // CDC settle asynchronously; under parallel-test CPU load a single
+        // snapshot can race ahead of that population and see an empty list).
+        let mut feed = comp
+            .widget_tree_for(&journals)
+            .await
+            .expect("journals page renders its own feed (::src::0 + ::render::0)");
+        for _ in 0..40 {
+            if feed.collect_by_kind("expand_toggle").len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(SETTLE).await;
+            feed = comp
+                .widget_tree_for(&journals)
+                .await
+                .expect("journals page renders its own feed (::src::0 + ::render::0)");
+        }
+
+        let toggles = feed.collect_by_kind("expand_toggle");
+        let order: Vec<&str> = toggles
+            .iter()
+            .filter_map(|n| n.props.get("target_id").map(String::as_str))
+            .collect();
+        // Relative NEWEST-FIRST: 2026-07-15 must precede 2026-07-14. (The journal
+        // auto-create rule may inject a further "today" entry ahead of both — a
+        // still-newest-first extra — so assert relative order, not an exact set.)
+        let pos_0715 = order.iter().position(|id| *id == "block:day-0715");
+        let pos_0714 = order.iter().position(|id| *id == "block:day-0714");
+        assert!(
+            matches!((pos_0715, pos_0714), (Some(a), Some(b)) if a < b),
+            "feed lists day-entries NEWEST-FIRST (ORDER BY content DESC): 0715 before 0714, \
+             got order {order:?}: {feed:#?}"
+        );
+        for n in &toggles {
+            assert_eq!(
+                n.props.get("expanded").map(String::as_str),
+                Some("true"),
+                "feed entry {:?} must be DEFAULT-EXPANDED (embedded_page_expanded variant): {n:#?}",
+                n.props.get("target_id"),
+            );
+        }
+        let dividers = feed.collect_by_kind("divider");
+        assert_eq!(
+            dividers.len(),
+            toggles.len(),
+            "one divider() between/after each feed entry ({} entries): {feed:#?}",
+            toggles.len(),
+        );
+
+        // ── Prong (b): a plain embedded page elsewhere stays COLLAPSED.
+        let notebook = EntityUri::parse("block:plain-notebook").expect("notebook id");
+        comp.apply_navigate_focus(CapRegion::Main, &notebook).await;
+        tokio::time::sleep(SETTLE).await;
+        let root = comp.widget_tree_snapshot().await;
+        let plain_toggle = root
+            .collect_by_kind("expand_toggle")
+            .into_iter()
+            .find(|n| n.props.get("target_id").map(String::as_str) == Some("block:plain-page"))
+            .expect("plain embedded page renders an expand_toggle in the main panel");
+        assert_eq!(
+            plain_toggle.props.get("expanded").map(String::as_str),
+            Some("false"),
+            "a plain embedded page (no expand_default) stays COLLAPSED while feed entries expand: \
+             {plain_toggle:#?}"
+        );
+
+        eprintln!(
+            "[journal_feed_expanded_newest_first_with_divider] GREEN: feed newest-first \
+             (0715,0714) expanded + dividers; plain embedded page collapsed."
+        );
+    }
 }

@@ -162,6 +162,9 @@ pub enum ViewKind {
         #[serde(default)]
         checked: bool,
     },
+    /// A horizontal separator line (LogSeq-style, between Journal-feed entries).
+    /// A leaf with no fields; the frontend divider builder draws the rule.
+    Divider,
     Spacer {
         #[serde(default)]
         width: f32,
@@ -427,6 +430,7 @@ impl ViewKind {
             ViewKind::Badge { .. } => "badge",
             ViewKind::Icon { .. } => "icon",
             ViewKind::Checkbox { .. } => "checkbox",
+            ViewKind::Divider => "divider",
             ViewKind::Spacer { .. } => "spacer",
             ViewKind::EditableText { .. } => "editable_text",
             ViewKind::RenderedText { .. } => "rendered_text",
@@ -1046,6 +1050,9 @@ impl ViewModel {
             ViewKind::Spacer { .. } => {
                 let _ = writeln!(out, "{pad}spacer{ops_suffix}");
             }
+            ViewKind::Divider => {
+                let _ = writeln!(out, "{pad}divider{ops_suffix}");
+            }
             ViewKind::EditableText { content, .. } => {
                 let _ = writeln!(out, "{pad}editable_text {content:?}{ops_suffix}");
             }
@@ -1348,6 +1355,7 @@ impl ViewModel {
             | ViewKind::Badge { .. }
             | ViewKind::Icon { .. }
             | ViewKind::Checkbox { .. }
+            | ViewKind::Divider
             | ViewKind::Spacer { .. }
             | ViewKind::EditableText { .. }
             | ViewKind::RenderedText { .. }
@@ -1391,6 +1399,7 @@ impl ViewModel {
             ViewKind::Badge { .. } => "badge",
             ViewKind::Icon { .. } => "icon",
             ViewKind::Checkbox { .. } => "checkbox",
+            ViewKind::Divider => "divider",
             ViewKind::Spacer { .. } => "spacer",
             ViewKind::EditableText { .. } => "editable_text",
             ViewKind::RenderedText { .. } => "rendered_text",
