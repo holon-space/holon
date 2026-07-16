@@ -2025,6 +2025,13 @@ pub trait RefWatchesMut {
 
 /// Reference-side expand-toggle read surface (`ExpandToggle`'s generator +
 /// precondition). Backing: `ui.tab.expanded_toggles`.
+///
+/// `#[capmap_adapter]` hosts the read side on `CapMap` (sync, owned return) so
+/// composed-slice invariants can gate on it via `Needs`, exactly like sibling
+/// read caps (`RefClock`, `RefLayout`). The mutation half stays on
+/// [`RefToggleMut`] without the adapter — mutations drive the concrete
+/// `ReferenceState` through `apply_to_ref`, not the shared `CapMap`.
+#[holon_macros::capmap_adapter]
 pub trait RefToggle {
     /// True iff `id`'s `expand_toggle` widget is currently expanded.
     fn is_expanded(&self, id: &EntityUri) -> bool;
