@@ -23,6 +23,7 @@ use holon_turso::schema_modules::BlockMatviewSchemaModule;
 use holon_turso::schema_modules::BlockRequirementEdgesSchemaModule;
 use holon_turso::schema_modules::BlockSchemaModule;
 use holon_turso::schema_modules::CoreSchemaModule;
+use holon_turso::schema_modules::HistorySchemaModule;
 use holon_turso::schema_modules::IdentitySchemaModule;
 use holon_turso::schema_modules::LinkSchemaModule;
 use holon_turso::schema_modules::NavigationSchemaModule;
@@ -86,6 +87,11 @@ impl DbResource for SyncStateTables {}
 /// `operation` table for undo/redo.
 pub struct OperationTables;
 impl DbResource for OperationTables {}
+
+/// `block_history` — the C2b op/effect history relation (disclosed ephemeral
+/// cache; ADR 0024 P8).
+pub struct HistoryTables;
+impl DbResource for HistoryTables {}
 
 /// `block_requires`, `block_tags` junction tables (FK to `block_raw`).
 pub struct BlockTables;
@@ -229,6 +235,17 @@ pub fn register_schema_providers(injector: &Injector) {
             .await
             .expect("OperationTables schema init failed");
         Shared::new(DbReady::<OperationTables>::new())
+    }));
+
+    // -- HistoryTables (no deps): the C2b block_history relation, boot-owned
+    // here so it is queryable (PRQL/raw SQL/list_tables) from session start —
+    // never lazily created by its accessor --
+    injector.provide::<DbReady<HistoryTables>>(Provider::root_async(|inj| async move {
+        let db = inj.resolve::<dyn DbHandleProvider>();
+        run_schema_module(&HistorySchemaModule, &db.handle())
+            .await
+            .expect("HistoryTables schema init failed");
+        Shared::new(DbReady::<HistoryTables>::new())
     }));
 
     // -- BlockTables (depends on CoreTables: junction FKs reference block_raw.id)
