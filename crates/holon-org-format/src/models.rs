@@ -741,12 +741,24 @@ impl OrgBlockExt for Block {
         // (added at parse boundary); strip the scheme on the way out so the
         // org file keeps bare slugs (per docs/Reference/ORG_SYNTAX.md). Joined with
         // spaces (org-edna convention).
+        //
+        // Rendered under the canonical `:REQUIRES:` drawer key (owner ruling
+        // 2026-07-16). `:BLOCKED-BY:` is accepted as an input alias by the parser
+        // and converges to `:REQUIRES:` on write-back — both name the SAME
+        // `block_requires` edge (there is no distinct `BlockedBy` EdgeField; see
+        // block_requires.sql and crates/holon-api/src/edge_field.rs).
         if !self.requires.is_empty() {
-            let bare: Vec<String> = self
+            // Sort the bare slugs: this edge is a SET of blockers (order is not
+            // semantic), and the junction hydration (`json_group_array` over
+            // `block_requires`, no ORDER BY) does not guarantee insertion order.
+            // A sorted canonical form makes the org round-trip deterministic
+            // through the store regardless of aggregation order.
+            let mut bare: Vec<String> = self
                 .requires
                 .iter()
                 .map(|uri| uri.id().to_string())
                 .collect();
+            bare.sort();
             result.insert("REQUIRES".to_string(), bare.join(" "));
         }
 

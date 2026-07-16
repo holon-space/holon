@@ -102,6 +102,42 @@ parent heading's section:
 2. **URI parsing ambiguity** — bare IDs like `j-09-::src::0` can be mis-parsed as scheme `j-09-` with path `::src::0` by RFC 3986 parsers. By convention, org files always store bare IDs and the parser always wraps them.
 3. **Single source of truth** — the `EntityUri` type enforces the scheme internally; the org file just stores the identity
 
+## Edge-field drawers: dependency edge (`:REQUIRES:` / `:BLOCKED-BY:`)
+
+A block's dependency edge — "this block is blocked by / depends on these
+blocks" — is a single edge field (`Block.requires`, projected to the
+`block_requires` junction; see `crates/holon-turso/sql/schema/block_requires.sql`,
+whose own comment names both spellings for this one edge). It has **two accepted
+org-drawer spellings on read** and **one canonical spelling on write**:
+
+| Spelling | On read (parse) | On write (render) |
+|----------|-----------------|-------------------|
+| `:REQUIRES: a b`   | lifted into `Block.requires` | **canonical** — always emitted |
+| `:BLOCKED-BY: a b` | lifted into `Block.requires` (accepted alias) | never emitted (converges to `:REQUIRES:`) |
+
+- Values are bare IDs (whitespace- or comma-separated), promoted to `block:`
+  URIs at the parse boundary and stripped back to bare on render, exactly like
+  IDs above.
+- **Canonical form is `:REQUIRES:`** (owner ruling 2026-07-16). A `:BLOCKED-BY:`
+  drawer therefore converges to `:REQUIRES:` on the first write-back — a
+  *convergent canonical form* (the org analogue of the foreign-vault O4 ruling,
+  `docs/Proposals/ForeignVaultCompat-2026-07-12.md` §6a): the edge is preserved
+  losslessly; only the interchangeable keyword normalizes, and it reaches a
+  fixed point in one pass.
+- Rendered targets are **sorted** (the edge is a set of blockers; order is not
+  semantic), which also makes the round-trip deterministic through the
+  `json_group_array` junction hydration (no `ORDER BY`).
+- There is **no distinct `BlockedBy` edge field**: `EdgeField` enumerates only
+  `Tags`, `Requires`, `AdviceSuppressed` (`crates/holon-api/src/edge_field.rs`).
+  `:BLOCKED-BY:` is an accepted input surface spelling of the `Requires` edge,
+  not a second junction.
+
+| Role | File | Key function/line |
+|------|------|-------------------|
+| Parse `:REQUIRES:`/`:BLOCKED-BY:` drawer | `parser.rs` | headline loop unions both keys into `block.requires` |
+| Parse `:REQUIRES`/`:BLOCKED-BY` src header-arg | `parser.rs` | source-block header-arg loop unions both keys |
+| Render canonical `:REQUIRES:` | `models.rs` | `drawer_properties()` inserts sorted `REQUIRES` |
+
 ### Code locations
 
 | Role | File | Key function/line |

@@ -129,10 +129,10 @@ pub fn parse_org_file(
     parent_dir_id: &EntityUri,
     root: &Path,
 ) -> Result<ParseResult> {
+    // Use the file stem (no extension) as the page title. The reference model
+    // and PBT downstream consumers all normalize on stem.
     // ALLOW(fallback): file stem is a deterministic title source, not a
-    // failure-mode shim Use the file stem (no extension) as the page title
-    // fallback. The reference model and PBT downstream consumers all normalize
-    // on stem.
+    // failure-mode shim
     let file_name = path
         .file_stem()
         .and_then(|n| n.to_str())
@@ -434,14 +434,23 @@ fn process_headlines(
         // matches block.id (per docs/Reference/ORG_SYNTAX.md). Anything else stays as
         // a flat string property on block.properties.
         for (key, value) in string_properties.iter() {
-            if key.eq_ignore_ascii_case("REQUIRES") {
-                block.requires = value
+            if key.eq_ignore_ascii_case("REQUIRES") || key.eq_ignore_ascii_case("BLOCKED-BY") {
+                // `:REQUIRES:` and `:BLOCKED-BY:` are two org-drawer spellings of
+                // the SAME dependency edge (the `block_requires` junction — see
+                // block_requires.sql). Accept both on input and UNION them into
+                // `block.requires`; the renderer emits the canonical
+                // `:REQUIRES:` (ruling 2026-07-16; `:BLOCKED-BY:` converges).
+                for slug in value
                     .split(|c: char| c == ',' || c.is_whitespace())
                     .filter(|s| !s.is_empty())
-                    // ALLOW(entity_uri_from_raw): org drawer REQUIRES value: bare slug promoted at
-                    // parse boundary
-                    .map(|s| EntityUri::from_raw(s))
-                    .collect();
+                {
+                    // ALLOW(entity_uri_from_raw): org drawer REQUIRES/BLOCKED-BY bare slug at parse
+                    // boundary
+                    let uri = EntityUri::from_raw(slug);
+                    if !block.requires.contains(&uri) {
+                        block.requires.push(uri);
+                    }
+                }
             } else if key.eq_ignore_ascii_case("ADVICE_SUPPRESSED") {
                 // `:ADVICE_SUPPRESSED:` is the authored advice-suppression
                 // exclusion set (ADR 0021): identical bare-ID grammar to
@@ -450,8 +459,8 @@ fn process_headlines(
                 block.advice_suppressed = value
                     .split(|c: char| c == ',' || c.is_whitespace())
                     .filter(|s| !s.is_empty())
-                    // ALLOW(entity_uri_from_raw): org drawer ADVICE_SUPPRESSED value: bare slug
-                    // promoted at parse boundary
+                    // ALLOW(entity_uri_from_raw): org drawer ADVICE_SUPPRESSED bare slug at parse
+                    // boundary
                     .map(|s| EntityUri::from_raw(s))
                     .collect();
             } else if key.eq_ignore_ascii_case("COLLAPSED") {
@@ -536,20 +545,27 @@ fn process_headlines(
                 for (k, v) in source_block.header_args {
                     if KNOWN_HEADER_ARGS.contains(&k.as_str()) {
                         standard_args.insert(k, v);
-                    } else if k.eq_ignore_ascii_case("REQUIRES") {
-                        // `:REQUIRES <bare>` is an edge-typed header arg emitted by
-                        // `source_block_to_org` via `drawer_properties()`. Lift it
-                        // into the typed `block.requires` edge field so it round-trips
-                        // as an edge (not a raw string property), symmetric with the
-                        // headline path above.
+                    } else if k.eq_ignore_ascii_case("REQUIRES")
+                        || k.eq_ignore_ascii_case("BLOCKED-BY")
+                    {
+                        // `:BLOCKED-BY <bare>` (canonical) / `:REQUIRES <bare>`
+                        // (legacy alias) is an edge-typed header arg emitted by
+                        // `source_block_to_org` via `drawer_properties()`. UNION
+                        // both spellings into the typed `block.requires` edge field
+                        // (the `block_requires` junction) so it round-trips as an
+                        // edge, symmetric with the headline path above.
                         if let Some(s) = v.as_string() {
-                            src_block.requires = s
+                            for slug in s
                                 .split(|c: char| c == ',' || c.is_whitespace())
                                 .filter(|s| !s.is_empty())
-                                // ALLOW(entity_uri_from_raw): org src-block REQUIRES header arg:
-                                // bare slug promoted at parse boundary
-                                .map(EntityUri::from_raw)
-                                .collect();
+                            {
+                                // ALLOW(entity_uri_from_raw): org src-block REQUIRES/BLOCKED-BY
+                                // header arg bare slug at parse boundary
+                                let uri = EntityUri::from_raw(slug);
+                                if !src_block.requires.contains(&uri) {
+                                    src_block.requires.push(uri);
+                                }
+                            }
                         }
                     } else if k.eq_ignore_ascii_case("ADVICE_SUPPRESSED") {
                         if let Some(s) = v.as_string() {
@@ -685,13 +701,11 @@ struct SectionContent {
     image_paths: Vec<String>,
     // ALLOW(fallback): orgize misclassifies SCHEDULED as PARAGRAPH when properties drawer precedes
     // planning
-    /// SCHEDULED extracted from paragraph text (fallback when orgize
-    /// misclassifies)
+    /// SCHEDULED recovered from paragraph text when orgize misclassifies it.
     scheduled_fallback: Option<String>,
     // ALLOW(fallback): orgize misclassifies DEADLINE as PARAGRAPH when properties drawer precedes
     // planning
-    /// DEADLINE extracted from paragraph text (fallback when orgize
-    /// misclassifies)
+    /// DEADLINE recovered from paragraph text when orgize misclassifies it.
     deadline_fallback: Option<String>,
 }
 
@@ -994,6 +1008,104 @@ mod tests {
                 EntityUri::parse("block:baz").unwrap(),
             ],
             "bare slugs (comma- or whitespace-separated) must be normalised to block: URIs"
+        );
+    }
+
+    #[test]
+    fn test_blocked_by_drawer_lifts_into_requires_edge() {
+        // `:BLOCKED-BY:` is the canonical org-drawer spelling of the `requires`
+        // dependency edge (block_requires junction). It must lift into
+        // `block.requires` exactly like `:REQUIRES:`, and NOT leak as a raw
+        // property.
+        let content = "* TODO Task\n:PROPERTIES:\n:ID: t1\n:BLOCKED-BY: foo, bar baz\n:END:\n";
+        let result = parse_test_org(content);
+
+        let h = result.blocks.iter().find(|b| b.id.id() == "t1").unwrap();
+        assert_eq!(
+            h.requires,
+            vec![
+                EntityUri::parse("block:foo").unwrap(),
+                EntityUri::parse("block:bar").unwrap(),
+                EntityUri::parse("block:baz").unwrap(),
+            ],
+            ":BLOCKED-BY: must lift into block.requires as block: URIs"
+        );
+        assert!(
+            !h.properties.contains_key("BLOCKED-BY"),
+            "`BLOCKED-BY` must NOT leak into properties; found: {:?}",
+            h.properties
+        );
+    }
+
+    #[test]
+    fn test_blocked_by_edge_roundtrips_via_canonical_requires() {
+        // End-to-end org round-trip for the dependency edge through the real
+        // render path (`OrgRenderer::render_entitys`). Canonical render key is
+        // `:REQUIRES:` (owner ruling 2026-07-16); a `:BLOCKED-BY:`-authored edge
+        // survives render -> re-parse losslessly, converged to `:REQUIRES:`.
+        use crate::org_renderer::OrgRenderer;
+
+        let content = "* TODO Task\n:PROPERTIES:\n:BLOCKED-BY: orient-daily-view now-query-mcp\n:ID: t1\n:END:\n";
+        let path = PathBuf::from("/test/file.org");
+        let root = PathBuf::from("/test");
+        let file_id = generate_file_id(&path, &root);
+
+        let result = parse_org_file(&path, content, &EntityUri::no_parent(), &root).unwrap();
+        let h = result.blocks.iter().find(|b| b.id.id() == "t1").unwrap();
+        assert_eq!(
+            h.requires,
+            vec![
+                EntityUri::parse("block:orient-daily-view").unwrap(),
+                EntityUri::parse("block:now-query-mcp").unwrap(),
+            ],
+            ":BLOCKED-BY: must lift into block.requires"
+        );
+
+        let rendered = OrgRenderer::render_entitys(&result.blocks, &path, &file_id);
+        // Canonical key :REQUIRES:, targets sorted (set-valued edge):
+        // "now-query-mcp" < "orient-daily-view".
+        assert!(
+            rendered.contains(":REQUIRES: now-query-mcp orient-daily-view"),
+            "renderer must emit the canonical sorted :REQUIRES: drawer; got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains(":BLOCKED-BY:"),
+            ":BLOCKED-BY: must converge to :REQUIRES: on render; got:\n{rendered}"
+        );
+
+        // Re-parse the rendered text: the typed edge survives (sorted order).
+        let result2 = parse_org_file(&path, &rendered, &EntityUri::no_parent(), &root).unwrap();
+        let h2 = result2.blocks.iter().find(|b| b.id.id() == "t1").unwrap();
+        assert_eq!(
+            h2.requires,
+            vec![
+                EntityUri::parse("block:now-query-mcp").unwrap(),
+                EntityUri::parse("block:orient-daily-view").unwrap(),
+            ],
+            "dependency edge must survive render -> re-parse (sorted canonical order)"
+        );
+    }
+
+    #[test]
+    fn test_blocked_by_alias_converges_to_requires_on_writeback() {
+        // `:BLOCKED-BY:` input is accepted and converges to the canonical
+        // `:REQUIRES:` spelling on re-render (convergent canonical form; owner
+        // ruling 2026-07-16). Both spellings name the same block_requires edge.
+        use crate::org_renderer::OrgRenderer;
+
+        let content = "* TODO Task\n:PROPERTIES:\n:BLOCKED-BY: dep-a\n:ID: t2\n:END:\n";
+        let path = PathBuf::from("/test/file.org");
+        let root = PathBuf::from("/test");
+        let file_id = generate_file_id(&path, &root);
+
+        let result = parse_org_file(&path, content, &EntityUri::no_parent(), &root).unwrap();
+        let h = result.blocks.iter().find(|b| b.id.id() == "t2").unwrap();
+        assert_eq!(h.requires, vec![EntityUri::parse("block:dep-a").unwrap()]);
+
+        let rendered = OrgRenderer::render_entitys(&result.blocks, &path, &file_id);
+        assert!(
+            rendered.contains(":REQUIRES: dep-a") && !rendered.contains(":BLOCKED-BY:"),
+            ":BLOCKED-BY: input must render back as canonical :REQUIRES:; got:\n{rendered}"
         );
     }
 
