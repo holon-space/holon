@@ -48,6 +48,21 @@ pub fn resolve_computed_fields(
 /// Like `resolve_computed_fields` but takes a pre-configured engine and scope,
 /// allowing callers (e.g., EntityProfile) to inject custom functions or
 /// variables.
+///
+/// **Disclosed degraded mode (C4 caller contract).** This is the production
+/// enrich seat (`ui_watcher::enrich_row` → `resolve_computed_only`). A field
+/// whose Rhai evaluation fails is the `Err` half of the fail-loud
+/// [`crate::computation::Computation`] evaluator's contract — a caller that
+/// runs per-row on the render path cannot abort rendering, so it takes the
+/// *disclosed-degraded* path: log the failure at `warn` (named field + error,
+/// never the silent `debug` swallow this replaced) and substitute `Null` so
+/// the stream keeps flowing. Priority order (repo rule): a visible degraded
+/// signal beats a silent fake. NOTE: this path keeps its **caller-provided
+/// engine** deliberately — that engine carries the custom entity-lookup Rhai
+/// functions registered by the profile resolver (`register_entity_lookups`),
+/// which the default `bounded_engine()` behind `Computation::eval` lacks.
+/// Unifying onto `Computation::eval` therefore requires an injectable-engine
+/// entry point and is a separate, verified follow-up.
 pub fn resolve_computed_fields_with_scope(
     engine: &RhaiEngine,
     scope: &mut Scope,
@@ -55,12 +70,18 @@ pub fn resolve_computed_fields_with_scope(
     context: &mut HashMap<String, Value>,
 ) {
     for (name, compiled) in fields {
-        let result = engine
-            .eval_ast_with_scope::<rhai::Dynamic>(scope, &compiled.ast)
-            .unwrap_or_else(|e| {
-                tracing::debug!("Computed field '{name}' eval error: {e}");
+        let result = match engine.eval_ast_with_scope::<rhai::Dynamic>(scope, &compiled.ast) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    field = %name,
+                    error = %e,
+                    "C4 enrich: computed field eval failed — DISCLOSED degraded mode, \
+                     substituting Null (was a silent debug-level swallow)"
+                );
                 rhai::Dynamic::UNIT
-            });
+            }
+        };
         scope.push(name.clone(), result.clone());
         context.insert(name.clone(), dynamic_to_value(&result));
     }
