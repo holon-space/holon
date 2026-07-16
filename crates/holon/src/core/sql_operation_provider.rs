@@ -1757,7 +1757,24 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     }
                 }
                 if let Some(prepared) = prepared {
-                    self.execute_prepared(prepared).await?;
+                    // Atomicity: an edge-field write is DELETE-then-INSERT (per-block
+                    // replace). In AUTOCOMMIT the Turso fork's deferred-FK check
+                    // fails loud but does NOT roll back the partial DELETE, so a
+                    // rejected INSERT would leave the junction half-cleared. Run row
+                    // + edge statements in ONE transaction — mirrors the create path
+                    // — so any failure rolls the whole update back instead of
+                    // leaving a torn edge set. (`execute_prepared`'s per-statement
+                    // autocommit did NOT give this guarantee.)
+                    let stmts: Vec<(String, Vec<turso::Value>)> = prepared
+                        .row_statements
+                        .iter()
+                        .chain(&prepared.edge_statements)
+                        .map(|s| (s.clone(), vec![]))
+                        .collect();
+                    self.db_handle
+                        .transaction(stmts)
+                        .await
+                        .map_err(|e| format!("Failed to execute update transaction: {}", e))?;
                 }
                 Ok(OperationResult::irreversible(Vec::new()))
             }

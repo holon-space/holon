@@ -114,6 +114,8 @@ fn build_schema() -> GraphSchema {
             id_col: "id".into(),
             label: "task".into(),
             columns,
+            extension_column: None,
+            multi_value_properties: HashMap::new(),
         }),
     );
 
