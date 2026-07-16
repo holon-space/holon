@@ -191,6 +191,67 @@ pub struct ExecuteRawSqlParams {
     pub params: HashMap<String, serde_json::Value>,
 }
 
+/// Filter for the `query_history` tool (C2b op/effect history, ADR 0024 P8).
+/// Every field mirrors `holon_api::HistoryQuery`; `count` returns the match
+/// count instead of the rows. `deny_unknown_fields` makes an unknown/misspelled
+/// filter key a LOUD error at the boundary (parse-don't-validate) rather than a
+/// silently-ignored filter that would return the wrong rows.
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QueryHistoryParams {
+    /// Entity type the op ran on (e.g. `block`).
+    #[serde(default)]
+    pub entity_name: Option<String>,
+    /// The affected block id.
+    #[serde(default)]
+    pub block_id: Option<String>,
+    /// Provenance origin tag (`user` / `agent` / `rule` / `sync` / ...).
+    #[serde(default)]
+    pub origin: Option<String>,
+    /// Driving agent session id.
+    #[serde(default)]
+    pub session_id: Option<String>,
+    /// The field that changed.
+    #[serde(default)]
+    pub field: Option<String>,
+    /// The new field value (the "moved to X" predicate).
+    #[serde(default)]
+    pub new_value: Option<String>,
+    /// UTC calendar day (`YYYY-MM-DD`).
+    #[serde(default)]
+    pub day: Option<String>,
+    /// All events of one op group.
+    #[serde(default)]
+    pub op_group: Option<i64>,
+    /// Inclusive lower bound on `at_millis`.
+    #[serde(default)]
+    pub since_millis: Option<i64>,
+    /// Exclusive upper bound on `at_millis`.
+    #[serde(default)]
+    pub until_millis: Option<i64>,
+    /// Return the match count instead of the event rows.
+    #[serde(default)]
+    pub count: bool,
+}
+
+impl From<QueryHistoryParams> for holon_api::HistoryQueryArgs {
+    fn from(p: QueryHistoryParams) -> Self {
+        holon_api::HistoryQueryArgs {
+            entity_name: p.entity_name,
+            block_id: p.block_id,
+            origin: p.origin,
+            session_id: p.session_id,
+            field: p.field,
+            new_value: p.new_value,
+            day: p.day,
+            op_group: p.op_group,
+            since_millis: p.since_millis,
+            until_millis: p.until_millis,
+            count: p.count,
+        }
+    }
+}
+
 // --- Debug tool types ---
 
 #[derive(Serialize, Deserialize, JsonSchema)]
