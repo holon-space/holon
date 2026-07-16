@@ -35,7 +35,7 @@ warning and labels the output:
 | Repo variable | When unset / not `"true"` | When `"true"` |
 |---|---|---|
 | `APPLE_RELEASE_ENABLED` | Desktop: macOS artifact is built but **unsigned**, named `…-unsigned.zip`, release notes say so. Mobile: iOS job is skipped entirely (a stub job logs why). | macOS is codesigned + notarized; iOS builds a signed IPA and uploads to TestFlight. |
-| `ANDROID_RELEASE_ENABLED` | Android job is skipped entirely (a stub job logs why). | Android builds a **release-keystore-signed** APK and uploads to the Play internal track. |
+| `ANDROID_RELEASE_ENABLED` | Android jobs are skipped entirely (stub jobs log why). | Mobile (`mobile-v*`): builds a **release-keystore-signed** APK and uploads to the Play internal track. Desktop (`v*`): additionally attaches the same-shaped sideloadable `holon-release.apk` to every desktop GitHub Release (no store involvement). |
 
 Windows is intentionally unsigned in v1 (decision: no paid or free signing
 cert yet). Users see one SmartScreen prompt; the release notes say so.

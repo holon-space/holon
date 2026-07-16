@@ -29,6 +29,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           APPLE_RELEASE_ENABLED: ${{ vars.APPLE_RELEASE_ENABLED }}
+          ANDROID_RELEASE_ENABLED: ${{ vars.ANDROID_RELEASE_ENABLED }}
         run: |
           tag="$GITHUB_REF_NAME"
           if [ "$APPLE_RELEASE_ENABLED" = "true" ]; then
@@ -36,12 +37,18 @@ jobs:
           else
             macos_line="- **macOS**: ⚠️ **UNSIGNED** (Apple Developer Program enrollment pending). Gatekeeper will block the first launch — right-click the app → Open, or run \`xattr -dr com.apple.quarantine Holon.app\`. This build will be signed + notarized once the repo variable \`APPLE_RELEASE_ENABLED\` is set to \`true\` (see docs/Operations/ReleasePipeline.md)."
           fi
+          if [ "$ANDROID_RELEASE_ENABLED" = "true" ]; then
+            android_line="- **Android**: \`holon-release.apk\` attached for sideloading (arm64), signed with the release keystore. Not a store submission — those go through \`mobile-v*\` tags."
+          else
+            android_line="- **Android**: no APK attached — requires the release keystore secrets and repo variable \`ANDROID_RELEASE_ENABLED=true\` (see docs/Operations/ReleasePipeline.md)."
+          fi
           cat > notes.md <<EOF
           ## Signing status
 
           $macos_line
           - **Windows**: unsigned (no code-signing certificate for v1) — Windows SmartScreen will show a "protected your PC" prompt once; choose "More info" → "Run anyway".
           - **Linux**: tarball, no OS-level signing applies.
+          $android_line
 
           ## Verify build provenance (recommended)
 
@@ -234,3 +241,103 @@ jobs:
         run: |
           gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber \
             dist/Holon-* dist/SHA256SUMS-*.txt
+
+  # Sideloadable APK on every desktop release (store submissions stay on
+  # mobile-v* tags → release-mobile.yml). Android refuses to install unsigned
+  # APKs, so this needs the release keystore — same gate as the store path.
+  android-apk-skipped:
+    name: Android APK (skipped)
+    if: vars.ANDROID_RELEASE_ENABLED != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Explain why the APK is skipped
+        run: |
+          echo "::warning::Android APK SKIPPED: repo variable ANDROID_RELEASE_ENABLED is not 'true'."
+          echo "Android cannot install unsigned APKs, so a sideloadable APK requires the release"
+          echo "keystore secrets (ANDROID_RELEASE_*). Set them + ANDROID_RELEASE_ENABLED=true and"
+          echo "every v* release will carry holon-release.apk. Step-by-step: docs/Operations/ReleasePipeline.md"
+
+  android-apk:
+    name: Android APK → GitHub Release
+    if: vars.ANDROID_RELEASE_ENABLED == 'true'
+    needs: create-release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          targets: aarch64-linux-android
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-release-android-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-release-android-
+
+      - name: Install Android SDK components (pinned versions from build script)
+        run: |
+          # `yes` dies with SIGPIPE (141) when sdkmanager exits; under this shell's
+          # pipefail that would fail the step even on success. The `|| true` guards
+          # ONLY the `yes` writer — sdkmanager's own exit code still fails the step.
+          (yes || true) | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "ndk;29.0.14206865" "build-tools;36.0.0" "platforms;android-36"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
+
+      - name: Install cargo-ndk
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+
+      - name: Derive version + versionCode from tag
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          IFS=. read -r major minor patch <<< "$version"
+          echo "VERSION_NAME=$version" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=$((major * 10000 + minor * 100 + patch))" >> "$GITHUB_ENV"
+
+      - name: Build Android .so
+        run: |
+          cargo ndk -t arm64-v8a -P 33 build --locked \
+            -p holon-gpui --no-default-features --features mobile \
+            --lib --release
+
+      - name: Package release-signed APK
+        env:
+          ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+        run: |
+          KEYSTORE_FILE="$RUNNER_TEMP/release.jks"
+          printf '%s' "$ANDROID_RELEASE_KEYSTORE_BASE64" | base64 -d > "$KEYSTORE_FILE"
+          export KEYSTORE_FILE
+          bash frontends/gpui/android/build-release-apk.sh
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: frontends/gpui/android/build-release/holon-release.apk
+
+      - name: Upload APK to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber \
+            frontends/gpui/android/build-release/holon-release.apk
