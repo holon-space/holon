@@ -4412,6 +4412,7 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.5.1"
+source = "git+https://github.com/holon-space/gpui-component?branch=holon#8caad84618ccdbb22c7c49b786a7065b0010e527"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -4454,6 +4455,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-macros"
 version = "0.5.1"
+source = "git+https://github.com/holon-space/gpui-component?branch=holon#8caad84618ccdbb22c7c49b786a7065b0010e527"
 dependencies = [
  "proc-macro2",
  "quote",
