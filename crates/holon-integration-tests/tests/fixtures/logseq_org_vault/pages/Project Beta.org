@@ -1,0 +1,8 @@
+:PROPERTIES:
+:id: 7c9e6a10-2000-4a00-9000-00000000000c
+:END:
+#+title: Project Beta
+* Back-reference to [[Project Alpha]]
+:PROPERTIES:
+:id: 7c9e6a10-2001-4a00-9000-00000000000d
+:END:
