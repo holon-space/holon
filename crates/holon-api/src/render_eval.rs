@@ -119,6 +119,17 @@ pub fn cycle_state(current: &str, states: &[String]) -> String {
     if states.is_empty() {
         return String::new();
     }
+    // LogSeq dialect flow (ForeignVaultCompat §4): a block already in a
+    // LogSeq keyword stays in the LogSeq ring — LATER -> NOW -> DONE — rather
+    // than snapping into the native TODO/DOING/DONE ring (which the default
+    // `states` list carries and which does not contain LATER/NOW). This keeps
+    // an imported LogSeq task's keyword faithful across a cycle. Once it
+    // reaches DONE it re-enters the native ring (DONE -> "" -> TODO).
+    match current {
+        "LATER" => return "NOW".to_string(),
+        "NOW" => return "DONE".to_string(),
+        _ => {}
+    }
     let idx = states.iter().position(|s| s == current).unwrap_or(0);
     let next = (idx + 1) % states.len();
     states[next].clone()
@@ -148,6 +159,12 @@ pub fn state_display(state: &str) -> (&str, &str) {
         "DOING" => ("DOING", "warning"),
         "DONE" => ("[x]", "success"),
         "CANCELLED" => ("CANCELLED", "error"),
+        // LogSeq dialect (ForeignVaultCompat §4): LATER is TODO-family
+        // (not started), NOW is DOING-family (in progress). Rendered with
+        // the same accents as their native counterparts; the label keeps
+        // the source keyword for round-trip fidelity.
+        "LATER" => ("LATER", "muted"),
+        "NOW" => ("NOW", "warning"),
         _ => (state, "primary"),
     }
 }
@@ -448,11 +465,10 @@ pub trait ValueFnLookup {
 }
 
 /// Built-in value functions available to every caller — `concat` for
-/// now, more added later. Frontend registries chain through this as a
-/// fallback so user-supplied registrations can still override built-in //
-/// ALLOW(fallback): doc describes registry chaining order names (collision
-/// check at `register_value_fn` enforces uniqueness against widgets, not
-/// against the core list).
+/// now, more added later. Frontend registries chain through this as the
+/// base layer so user-supplied registrations can still override built-in
+/// names (collision check at `register_value_fn` enforces uniqueness
+/// against widgets, not against the core list).
 ///
 /// Replaces the previous `EmptyValueFnLookup` + inline `if name ==
 /// "concat"` shim that lived in `eval_to_interp`.
@@ -585,9 +601,8 @@ pub fn eval_to_value<K: RowKey>(expr: &RenderExpr, row: &HashMap<K, Value>) -> V
 /// Drives argument evaluation for `resolve_args_with`. Dispatches
 /// `FunctionCall`s through the provided registry; unknown names
 /// (other than the legacy `concat` shim) produce `Value::Null`. The
-/// pre-F1 "silently return first arg" fallback is gone — a typo'd //
-/// ALLOW(fallback): historical name in doc comment function call now produces a
-/// visible `Null` at the consumer.
+/// pre-F1 "silently return first arg" behavior is gone — a typo'd
+/// function call now produces a visible `Null` at the consumer.
 pub fn eval_to_interp<K: RowKey>(
     expr: &RenderExpr,
     row: &HashMap<K, Value>,
