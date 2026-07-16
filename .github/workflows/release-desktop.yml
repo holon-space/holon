@@ -1,0 +1,236 @@
+name: Release (Desktop)
+
+# Desktop release: v*.*.* tags → macOS/Linux/Windows artifacts on a GitHub
+# Release, each with SLSA build provenance via GitHub Artifact Attestations.
+# Mobile releases use mobile-v*.*.* tags → release-mobile.yml.
+# Full operator guide: docs/Operations/ReleasePipeline.md
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+# Permissions are scoped per-job: only the build job needs attestation perms.
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  create-release:
+    name: Create GitHub Release
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Create release for tag (if absent)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APPLE_RELEASE_ENABLED: ${{ vars.APPLE_RELEASE_ENABLED }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          if [ "$APPLE_RELEASE_ENABLED" = "true" ]; then
+            macos_line="- **macOS**: signed with a Developer ID certificate and notarized by Apple."
+          else
+            macos_line="- **macOS**: ⚠️ **UNSIGNED** (Apple Developer Program enrollment pending). Gatekeeper will block the first launch — right-click the app → Open, or run \`xattr -dr com.apple.quarantine Holon.app\`. This build will be signed + notarized once the repo variable \`APPLE_RELEASE_ENABLED\` is set to \`true\` (see docs/Operations/ReleasePipeline.md)."
+          fi
+          cat > notes.md <<EOF
+          ## Signing status
+
+          $macos_line
+          - **Windows**: unsigned (no code-signing certificate for v1) — Windows SmartScreen will show a "protected your PC" prompt once; choose "More info" → "Run anyway".
+          - **Linux**: tarball, no OS-level signing applies.
+
+          ## Verify build provenance (recommended)
+
+          Every artifact carries a GitHub Artifact Attestation (SLSA build
+          provenance) cryptographically proving it was built by this
+          repository's release workflow from this exact tag — this, not OS
+          code-signing, is the "no injected code" guarantee:
+
+          \`\`\`
+          gh attestation verify <downloaded-file> --repo $GITHUB_REPOSITORY
+          \`\`\`
+
+          Per-OS \`SHA256SUMS-<os>.txt\` files are attached for plain checksum verification.
+          EOF
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "Release $tag already exists — build jobs will attach artifacts to it."
+          else
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
+              --title "Holon $tag" --notes-file notes.md
+          fi
+
+  build:
+    name: Build ${{ matrix.platform }}
+    needs: create-release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform: macos
+          - os: ubuntu-latest
+            platform: linux
+          - os: windows-latest
+            platform: windows
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      # rust-toolchain.toml pins channel = "nightly"; install it the same way
+      # ci.yml installs toolchains (dtolnay action).
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-release-
+
+      - name: Install GPUI Linux build deps
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake pkg-config \
+            libfontconfig1-dev libwayland-dev libxkbcommon-dev \
+            libxcb1-dev libx11-dev libasound2-dev libudev-dev libssl-dev
+
+      - name: Derive version from tag
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      # macOS ships one universal2 binary (arm64 + x86_64 lipo'd together)
+      # instead of two per-arch downloads: one artifact, no user confusion
+      # about which Mac they have, at the cost of a second cargo build.
+      - name: Build (macOS, universal2)
+        if: matrix.platform == 'macos'
+        run: |
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          cargo build --release --locked -p holon-gpui --target aarch64-apple-darwin
+          cargo build --release --locked -p holon-gpui --target x86_64-apple-darwin
+          mkdir -p dist
+          lipo -create \
+            target/aarch64-apple-darwin/release/holon-gpui \
+            target/x86_64-apple-darwin/release/holon-gpui \
+            -output dist/holon-gpui-universal
+          lipo -info dist/holon-gpui-universal
+
+      - name: Bundle Holon.app
+        if: matrix.platform == 'macos'
+        run: bash scripts/bundle-macos.sh dist/holon-gpui-universal dist
+
+      - name: Codesign + notarize Holon.app
+        if: matrix.platform == 'macos' && vars.APPLE_RELEASE_ENABLED == 'true'
+        env:
+          MACOS_DEVELOPER_ID_CERT_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_CERT_P12_BASE64 }}
+          MACOS_DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_CERT_PASSWORD }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/release.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 24)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          printf '%s' "$MACOS_DEVELOPER_ID_CERT_P12_BASE64" | base64 -d > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN_PATH" \
+            -P "$MACOS_DEVELOPER_ID_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
+
+          codesign --force --options runtime --timestamp \
+            --sign "Developer ID Application" dist/Holon.app/Contents/MacOS/holon-gpui
+          codesign --force --options runtime --timestamp \
+            --sign "Developer ID Application" dist/Holon.app
+          codesign --verify --deep --strict dist/Holon.app
+
+          printf '%s' "$APPLE_API_KEY_P8_BASE64" | base64 -d > "$RUNNER_TEMP/asc-key.p8"
+          ditto -c -k --keepParent dist/Holon.app "$RUNNER_TEMP/notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
+            --key "$RUNNER_TEMP/asc-key.p8" \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER_ID" \
+            --wait
+          xcrun stapler staple dist/Holon.app
+
+      - name: Package (macOS)
+        if: matrix.platform == 'macos'
+        env:
+          APPLE_RELEASE_ENABLED: ${{ vars.APPLE_RELEASE_ENABLED }}
+        run: |
+          if [ "$APPLE_RELEASE_ENABLED" = "true" ]; then
+            name="Holon-$VERSION-macOS-universal"
+          else
+            echo "::warning::macOS build is UNSIGNED: repo variable APPLE_RELEASE_ENABLED is not 'true'." \
+              "Enroll in the Apple Developer Program, add the MACOS_*/APPLE_* secrets, and set the" \
+              "variable to enable signing + notarization (docs/Operations/ReleasePipeline.md)."
+            name="Holon-$VERSION-macOS-universal-unsigned"
+          fi
+          ditto -c -k --keepParent dist/Holon.app "dist/$name.zip"
+          rm -rf dist/Holon.app dist/holon-gpui-universal
+          (cd dist && shasum -a 256 "$name.zip" > SHA256SUMS-macos.txt)
+
+      - name: Build + package (Linux)
+        if: matrix.platform == 'linux'
+        env:
+          # GPUI dlopens libfontconfig instead of static-linking (see
+          # frontends/gpui/justfile) — keeps the binary portable across distros.
+          RUST_FONTCONFIG_DLOPEN: on
+        run: |
+          cargo build --release --locked -p holon-gpui
+          name="Holon-$VERSION-linux-x86_64"
+          mkdir -p "dist/$name"
+          cp target/release/holon-gpui "dist/$name/"
+          cp -R assets "dist/$name/assets"
+          tar -czf "dist/$name.tar.gz" -C dist "$name"
+          rm -rf "dist/${name:?}"
+          (cd dist && sha256sum "$name.tar.gz" > SHA256SUMS-linux.txt)
+
+      - name: Build + package (Windows)
+        if: matrix.platform == 'windows'
+        run: |
+          cargo build --release --locked -p holon-gpui
+          name="Holon-$VERSION-windows-x86_64"
+          mkdir -p "dist/staging"
+          cp target/release/holon-gpui.exe dist/staging/
+          cp -R assets dist/staging/assets
+          (cd dist/staging && 7z a "../$name.zip" .)
+          rm -rf dist/staging
+          (cd dist && sha256sum "$name.zip" > SHA256SUMS-windows.txt)
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          # dist/* also covers the SHA256SUMS files, so checksum manifests
+          # carry provenance too, not just the payload artifacts.
+          subject-path: |
+            dist/*
+
+      - name: Upload artifacts to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber \
+            dist/Holon-* dist/SHA256SUMS-*.txt
