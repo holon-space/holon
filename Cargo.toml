@@ -269,31 +269,6 @@ gpui_platform = { git = "https://github.com/holon-space/zed.git", branch = "holo
 [patch."https://github.com/itsbalamurali/gpui-mobile"]
 gpui-mobile = { git = "https://github.com/holon-space/gpui-mobile.git", branch = "holon" }
 
-# NON-REPRODUCIBLE BUILD — needs owner action to convert to a git pin.
-#
-# This patch points at a local clone because the required gpui-component state
-# is not published anywhere a git pin could reach it, verified 2026-07-06:
-#   * The clone's HEAD is b8e6266 "feat(input): add context_menu_extender hook"
-#     (2026-04-20). It is a jj-local commit (only reachable via refs/jj/keep),
-#     NOT on origin/holon (b8e9511) — origin/holon is behind by 10 commits,
-#     including this very hook. So a `git = …, rev = "b8e6266"` pin would 404
-#     on CI / other machines.
-#   * The clone's working tree is also DIRTY (uncommitted edits to
-#     crates/ui/src/input/state.rs, +20/-3), so no existing commit is even
-#     behaviour-identical to what builds here today.
-#
-# To make this reproducible the owner must, in
-# /Users/martin/Workspaces/rust/gpui-component:
-#   1. commit the working-tree changes to crates/ui/src/input/state.rs,
-#   2. push that commit (and b8e6266's ancestry) to a branch on
-#      holon-space/gpui-component, then
-#   3. replace the two lines below with the git+branch/rev spec, matching the
-#      form already used in frontends/gpui/Cargo.toml
-#      (git = "https://github.com/holon-space/gpui-component", branch = "holon").
-# Until then the local `path` is intentionally retained so this machine builds.
-[patch."https://github.com/holon-space/gpui-component"]
-gpui-component = { path = "/Users/martin/Workspaces/rust/gpui-component/crates/ui" }
-
 # Pre-existing ed25519-dalek 3.0.0-pre.1 incompatible with pkcs8 0.11: locally
 # patched to pass KeyError::Invalid to KeyMalformed (matching 3.0.0-rc.0 fix).
 [patch.crates-io]
