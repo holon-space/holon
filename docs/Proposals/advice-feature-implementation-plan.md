@@ -35,7 +35,10 @@ the Phase-1b spike detail).
 machinery are all in place.
 
 Still open:
-- Step 7 live-MCP gate
+- ~~Step 7 live-MCP gate~~ CLOSED 2026-07-16: `crates/holon-integration-tests/tests/advice_live_mcp_gate.rs`
+  drives the embedded `holon` MCP server over the composed session — weave observed
+  via `describe_ui` (b,c woven, d truncated at k=2), `dismiss_advice` removes + persists,
+  `delete` leaves no dangling matview row. The advice feature is complete.
 - Increment G (editor content-sync consolidation, optional)
 - Increment H (app-layer reranker, ADR 0023)
 
