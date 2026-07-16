@@ -1,0 +1,2 @@
+app_identifier("space.holon.gpui")
+team_id(ENV["APPLE_TEAM_ID"])
