@@ -680,6 +680,69 @@ impl SchemaModule for OperationsSchemaModule {
     }
 }
 
+/// History schema module providing the `block_history` table — the C2b
+/// op/effect history relation (ADR 0024 P8), a disclosed ephemeral cache.
+///
+/// SINGLE OWNER of this table's DDL (`sql/schema/history.sql`);
+/// `TursoHistoryStore` is only the typed accessor and assumes the table
+/// exists. Schema evolution is drop + recreate: a table whose stored DDL
+/// lacks the current version's sentinel column is dropped and rebuilt —
+/// contractually fine, the relation is rebuildable and never authoritative.
+pub struct HistorySchemaModule;
+
+/// Column unique to the current `block_history` shape; its absence from the
+/// stored DDL marks a stale table (bump alongside `history.sql`'s
+/// `schema-version` comment when the shape changes again).
+const HISTORY_SENTINEL_COLUMN: &str = "op_group";
+
+#[async_trait]
+impl SchemaModule for HistorySchemaModule {
+    fn name(&self) -> &str {
+        "history"
+    }
+
+    fn provides(&self) -> Vec<Resource> {
+        vec![Resource::schema("block_history")]
+    }
+
+    fn requires(&self) -> Vec<Resource> {
+        vec![]
+    }
+
+    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
+        let stored = db_handle
+            .query_positional(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' \
+                 AND name = 'block_history'",
+                vec![],
+            )
+            .await?;
+        if let Some(row) = stored.first() {
+            let ddl = match row.get("sql") {
+                Some(holon_api::Value::String(s)) => s.clone(),
+                other => {
+                    return Err(StorageError::SchemaError(format!(
+                        "sqlite_master.sql for block_history: expected TEXT, got {other:?}"
+                    )));
+                }
+            };
+            if !ddl.contains(HISTORY_SENTINEL_COLUMN) {
+                tracing::warn!(
+                    "[HistorySchemaModule] block_history has a stale shape \
+                     (no `{HISTORY_SENTINEL_COLUMN}` column); dropping and \
+                     recreating (the relation is a disclosed ephemeral cache)"
+                );
+                db_handle.execute_ddl("DROP TABLE block_history").await?;
+            }
+        }
+        for stmt in sql_statements(include_str!("../sql/schema/history.sql")) {
+            db_handle.execute_ddl(stmt).await?;
+        }
+        tracing::info!("[HistorySchemaModule] block_history table ready");
+        Ok(())
+    }
+}
+
 /// Link schema module providing the block_link table.
 ///
 /// Indexes wiki-style `[[...]]` links extracted from block content.
