@@ -294,7 +294,8 @@ harness)? then it stays on the root.*
   (`PROPTEST_CASES` bumped) before merge.
 
 ### Increment 6 — decision point: open extension registry (§5.5 backlog (b))
-> **Status (2026-07-16): AWAITING MARTIN RULING** — options doc in preparation.
+> **RULED 2026-07-16: Option 0 (defer; plain fields stay), see ADR 0027;
+> revisit trigger = second private RefExt in hand.**
 
 Replace the hardcoded private-fragment fields (`loro`, `files`, `mcp`) with the typemap
 registry so a new subsystem crate can register its private ref-state without editing
