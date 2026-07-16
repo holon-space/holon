@@ -166,6 +166,58 @@ impl HistoryQuery {
     }
 }
 
+/// The parse-don't-validate boundary shape for an external `query_history`
+/// request (MCP tool / worker). Every field mirrors [`HistoryQuery`]; `count`
+/// selects the count primitive over the row list. `deny_unknown_fields` makes
+/// an unknown/misspelled filter key a LOUD deserialization error at the
+/// boundary — never a silently-ignored filter that returns the wrong rows.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HistoryQueryArgs {
+    #[serde(default)]
+    pub entity_name: Option<String>,
+    #[serde(default)]
+    pub block_id: Option<String>,
+    #[serde(default)]
+    pub origin: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub field: Option<String>,
+    #[serde(default)]
+    pub new_value: Option<String>,
+    #[serde(default)]
+    pub day: Option<String>,
+    #[serde(default)]
+    pub op_group: Option<i64>,
+    #[serde(default)]
+    pub since_millis: Option<i64>,
+    #[serde(default)]
+    pub until_millis: Option<i64>,
+    /// Return the match count instead of the event rows.
+    #[serde(default)]
+    pub count: bool,
+}
+
+impl HistoryQueryArgs {
+    /// Project the parsed args into the store's [`HistoryQuery`] filter (drops
+    /// the `count` flag, which the caller reads separately).
+    pub fn into_query(&self) -> HistoryQuery {
+        HistoryQuery {
+            entity_name: self.entity_name.clone(),
+            block_id: self.block_id.clone(),
+            origin: self.origin.clone(),
+            session_id: self.session_id.clone(),
+            field: self.field.clone(),
+            new_value: self.new_value.clone(),
+            day: self.day.clone(),
+            op_group: self.op_group,
+            since_millis: self.since_millis,
+            until_millis: self.until_millis,
+        }
+    }
+}
+
 /// The queryable op/effect history relation (C2b).
 ///
 /// A disclosed ephemeral cache; see the module docs. Implementations:

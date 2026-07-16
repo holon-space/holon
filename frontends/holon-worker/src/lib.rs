@@ -795,6 +795,21 @@ mod backend {
                 Ok(serde_json::json!({"compiled_sql": compiled, "render_spec": null}))
             }
 
+            "query_history" => {
+                // Parse-don't-validate: deny_unknown_fields makes a misspelled
+                // filter key a loud error, never a silently-ignored filter.
+                let query_args: holon_api::HistoryQueryArgs = serde_json::from_value(args)?;
+                let filter = query_args.into_query();
+                if query_args.count {
+                    let n = runtime.block_on(service.count_history(&filter))?;
+                    Ok(serde_json::json!({ "count": n }))
+                } else {
+                    let events = runtime.block_on(service.query_history(&filter))?;
+                    let row_count = events.len();
+                    Ok(serde_json::json!({ "events": events, "row_count": row_count }))
+                }
+            }
+
             "list_tables" => {
                 let listing = runtime.block_on(service.list_tables())?;
                 let tables: Vec<serde_json::Value> = listing
