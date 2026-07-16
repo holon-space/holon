@@ -113,6 +113,15 @@ impl WideHandle {
         self.engine.as_ref()
     }
 
+    /// The booted `ReactiveEngine` — the `BuilderServices` host that carries
+    /// the advice weave sidecar. `None` for a Loro-only (no-frontend) draw.
+    /// The live-MCP advice gate backs an embedded MCP server with this exact
+    /// instance so `describe_ui` over the wire reads the same woven rows the
+    /// composed SUT settles in-process.
+    pub fn reactive(&self) -> Option<Arc<holon_frontend::reactive::ReactiveEngine>> {
+        self.frontend.as_ref().map(|f| f.reactive())
+    }
+
     /// Build the settle handle from a booted builder bundle — the windowed
     /// harness ([`windowed_composed_sut`]) reuses the base session's
     /// engine/frontend so its per-apply settle converges the same three
