@@ -1,7 +1,9 @@
 # Plan: Splitting the keystone reference model into sub-ref-states
 
 **Date:** 2026-07-12
-**Status:** PROPOSED (senior-review pending)
+**Status:** APPROVED (senior-reviewed 2026-07-15). Increments 1, 2, 3, 5 LANDED;
+Increment 4 in flight (2026-07-16); Increment 6 awaiting Martin ruling (options doc
+in preparation). Per-increment landed-state notes in §3. Verified 2026-07-16.
 **Target:** `crates/holon-integration-tests/src/pbt/reference_state.rs` (2,398 lines) and
 `crates/holon-integration-tests/src/pbt/reference_capabilities.rs` (2,181 lines)
 **Prior art (binding):** ADR 0012, `docs/Testing/PbtCompositionDesign.md` §5.1/§5.4/§5.5,
@@ -182,7 +184,13 @@ signature is UNCHANGED** — same 4 `fe-*` blocks, same invariant — not that i
 A *different* windowed signature after Inc 4 means the ui-fragment method push-down
 perturbed focus/nav prediction and must be investigated before merge.
 
+> **Status (2026-07-16): LANDED** — Increments 1, 2, 3, 5 are in the tree; Increment 4
+> in flight; Increment 6 awaiting a Martin ruling. Per-increment state noted inline below.
+
 ### Increment 1 — type extraction (pure moves)
+> **Status (2026-07-16): LANDED** — see `crates/holon-integration-tests/src/pbt/block_state.rs`
+> and `pbt/ui_types.rs`.
+
 Move type **definitions + their inherent impls** out of `reference_state.rs`:
 `BlockState`/`LayoutBlockInfo` → `pbt/block_state.rs`; `ActiveEditor`/`CursorPosition`/
 `NavigationHistory`/`OpenPinEntry` → `pbt/ui_types.rs`; `ClockState` →
@@ -199,6 +207,9 @@ commit if it keeps the diff reviewable, and must be gone at the increment's end)
   with the code.
 
 ### Increment 2 — split `reference_capabilities.rs` into `ref_caps/` (pure file split)
+> **Status (2026-07-16): LANDED** — see `crates/holon-integration-tests/src/pbt/ref_caps/`;
+> `reference_capabilities.rs` deleted.
+
 One file per trait cluster (§1 layout). No signature or body changes; `mod.rs` keeps
 `reference_state_ref_caps()`, `CapProvider`, and the id-translation helpers
 (`cap_id`, `parse_id`, `from_cap_region`).
@@ -208,6 +219,9 @@ One file per trait cluster (§1 layout). No signature or body changes; `mod.rs` 
   `pbt/mod.rs` re-exports keep call sites untouched. **Risk: LOW.**
 
 ### Increment 3 — harness residue → `HarnessEnv`
+> **Status (2026-07-16): LANDED** — `HarnessEnv` lives in
+> `crates/holon-integration-tests/src/pbt/reference_state.rs`.
+
 Gather `runtime`, `wiring`, `cap_set`, `real_editor`, `interpreter` into
 `HarnessEnv` (a field of `ReferenceState`); move `pre_startup_directories`,
 `pre_startup_file_count`, `git_initialized`, `jj_initialized` into
@@ -221,6 +235,8 @@ on `ReferenceState`.
   moves with the Loro ext in Inc 5, where its seam is documented).
 
 ### Increment 4 — method push-down (domain & ui)
+> **Status (2026-07-16): IN FLIGHT.**
+
 Move single-fragment method **bodies** onto the fragment (`impl BlockState` /
 `impl ReferenceDomainState`: `sorted_children_of`, `children_of`, `previous_sibling`,
 `next_sibling`, `grandparent`, `text_block_ids`, `no_content_update_set`,
@@ -240,6 +256,9 @@ harness)? then it stays on the root.*
   list, not the mechanics.
 
 ### Increment 5 — Loro-private extension → `holon-loro-testing` (the co-location step)
+> **Status (2026-07-16): LANDED** — see `crates/holon-loro-testing/src/ref_ext.rs` and
+> `crates/holon-loro-testing/src/shadow_mesh.rs`.
+
 1. Move `shadow_mesh.rs` → `crates/holon-loro-testing/src/shadow_mesh.rs`.
 2. Move `PeerRefState` + new `LoroRefExt { peers, shadow_mesh, clock_feed }` into
    `crates/holon-loro-testing/src/ref_ext.rs`; port the **inherent** logic of the
@@ -266,6 +285,8 @@ harness)? then it stays on the root.*
   (`PROPTEST_CASES` bumped) before merge.
 
 ### Increment 6 — decision point: open extension registry (§5.5 backlog (b))
+> **Status (2026-07-16): AWAITING MARTIN RULING** — options doc in preparation.
+
 Replace the hardcoded private-fragment fields (`loro`, `files`, `mcp`) with the typemap
 registry so a new subsystem crate can register its private ref-state without editing
 `ReferenceState`. **Not scheduled** — this is an architecture fork (typemap ergonomics
