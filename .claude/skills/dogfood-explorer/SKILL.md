@@ -106,6 +106,46 @@ piping to a JSON parser, or read stdout only with `2>/dev/null`.
 
 ---
 
+## 1a. Standing session rules (reusable across invocations)
+
+- **Vault safety — ABSOLUTE.** Martin's real vaults are `~/Workspaces/pkm/holon-pkm`,
+  `obsidian-pkm`, `logseq-pkm`. NEVER point the app at them, NEVER write to them. Before
+  launching, `cp -R` each needed vault to a `/tmp/dogfood-<date>-…` copy and run ONLY against
+  the copies. Vault content is personal: never quote it in reports or BugFunnel — synthesize
+  anonymized reproductions.
+- **VCS:** never run jj/git write commands from a dogfood session; leave all file changes
+  (skill edits, BugFunnel rows) uncommitted — the orchestrator owns VCS.
+- **Builds** run as BLOCKING/foreground-style commands with long timeouts (or background with
+  completion notification); never `cargo update`. `tee` build and app logs under a per-session
+  `/tmp/dogfood-<date>-logs/` dir.
+- **Latency SLO:** p95 interaction→projection-visible > 200ms is itself a bug — triage it.
+- **Vault root is single and launch-time-fixed** (`HOLON_VAULT_ROOT`; `VaultConfig.root` is a
+  single `Option<PathBuf>`, `crates/holon-frontend/src/config.rs`). Testing another vault
+  (e.g. an Obsidian or LogSeq copy) = a SEPARATE launch on another port with its own sandbox
+  config dir. There is no runtime add-vault.
+- **App failing to build/boot on a vault copy is itself a P1 finding** — triage and report
+  after ~2 fix attempts; don't fight it endlessly.
+
+## 1b. MCP client integrations — paths & wiring (verified 2026-07-16)
+
+- Integrations are declared as **yaml sidecars in the repo at `docs/integrations/*.yaml`**
+  (currently: `claude-history.yaml`, `todoist.yaml`, `jsonplaceholder.yaml`; README.md has the
+  model). There is NO GitHub integration sidecar (only the `assets/themes/github.yaml` theme and
+  `crates/holon-mcp-client/examples/github_probe.rs`).
+- **Runtime loader reads `{config_dir}/integrations/*.yaml`** — NOT the repo path:
+  `crates/holon-app/src/wiring.rs` → `resolve_mcp_integrations_dir` →
+  `config_dir.join("integrations")` (`crates/holon-frontend/src/config.rs`), loaded by
+  `crates/holon-mcp-client/src/integration_config.rs::load_integration_configs`.
+  So in a sandbox launch you MUST `mkdir -p $SANDBOX/config/integrations && cp
+  <ws>/docs/integrations/*.yaml $SANDBOX/config/integrations/` or the app loads none.
+- `claude-history.yaml` = the Claude Code integration: stdio child-process to
+  `/Users/martin/Workspaces/ai/claude-code-history-mcp/target/debug/claude-code-history-mcp`
+  (env `CLAUDE_DATA_DIR`); entities session/task/message. Verify the binary exists before
+  expecting it to connect; `todoist.yaml` needs a real API token (expect a loud connect failure
+  without one — a SILENT failure is a finding).
+- Invocation surface once loaded: `execute_operation` with the MCP entity name
+  (`OperationDispatcher` → `McpOperationProvider`); discover via `list_operations`.
+
 ## 2. Session protocol (per exploratory step)
 
 1. **Known state.** Fresh launch on an empty/seeded vault IS the known state. `reset_vault` only
@@ -191,6 +231,46 @@ piping to a JSON parser, or read stdout only with `2>/dev/null`.
 
 **Transients are in scope.** The keystone settles-then-asserts; a wrong render that self-heals is
 still a finding. Screenshot + describe_ui before it settles.
+
+## 3a. Feature checklist — maintained, grows every session
+
+**Standing instruction (every invocation):** before you start driving, ask the caller for — or
+harvest yourself from recent commits (`jj log`/`git log --oneline -30`, changelog, memory files) —
+any newly-landed **user-visible** features, and ADD them here as reusable checks. This checklist
+only ever grows; never delete an item, only refine its phrasing. Drive each item through the live
+app over MCP; verify rendered vs internal (SQL) vs disk (org file) per §2.5.
+
+Reusable checks (not session-specific):
+
+1. **MCP client integrations (GitHub, Claude Code, …).** Integrations are declared as
+   `docs/integrations/*.yaml` sidecars. Enumerate what sidecars exist; confirm the app WIRES them
+   (find the loader, confirm the launched binary's cwd resolves the sidecar path); attempt a live
+   call through whatever surface exposes them (proxy/aggregator/command/source-block). A requested
+   integration with no sidecar = a finding, not a pass.
+2. **Advice feature.** Find (or create) a page where an "advice" weave is visible; verify the weave
+   renders and that dismiss/suppress PERSISTS across reload (junction `advice_suppressed`).
+3. **`holon_rule` source blocks** (type is `holon_rule`, singular; see
+   `crates/holon-advice/src/holon_rule.rs`, `assets/queries/holon_rule_discovery.sql`). Find a page
+   with one and confirm it works; if feasible author one scheduled at `now+2min` (use
+   `now_for_agent` for the app clock) and verify it fires at most once.
+4. **Block→page transformation.** Verify a new page's org file is WRITTEN on disk (in the vault
+   copy) and the promoted blocks are REMOVED from their previous org file.
+5. **Obsidian & LogSeq vault support.** Can an Obsidian vault and a LogSeq vault be added, read AND
+   written? LogSeq compat: `LATER`/`NOW` states, lowercase `:id:`, `((uuid))` block refs must ingest.
+6. **Nested pages collapsed by default.** Confirm nested pages render collapsed on first paint.
+7. **Drag & drop**, including dropping INTO an expanded nested page. If the MCP surface exposes no
+   drag primitive, that is a PERCEPTION-gap finding for BugFunnel — check `describe_ui`/available
+   tools first, never silently skip.
+8. **Clickable wiki-links in read mode.** Click a `[[link]]`; verify `navigation.focus` moves to
+   the target.
+9. **Undo/redo.** Word-boundary grouping while typing; `can_undo`/`undo`/`redo` MCP tools; check
+   whether cmd+z is bound in the UI (historically UNBOUND — verify current state).
+10. **Journal feed.** Dividers between days, DESC sort order, entries default-expanded.
+11. **Edge fields.** `REQUIRES` (canonical; was `BLOCKED-BY`) renders and round-trips to disk.
+12. **Backlinks.** `block_links` junction: create a `[[link]]`, confirm the target page shows the
+    backlink (columns `source_block_id`/`target`/`kind`/`resolved_id`).
+13. **Page-hierarchy rule.** Pages must not appear under non-page parents (fix landed 079014ef);
+    try to provoke a page nested under a non-page.
 
 ## 4. Bug handling — triage every finding
 
