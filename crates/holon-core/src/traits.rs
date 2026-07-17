@@ -906,6 +906,27 @@ where
         // Compute new depth for descendants' delta-update.
         let maybe_parent: Option<T> = self.get_by_id(parent_id.as_str()).await?;
         let parent: T = maybe_parent.ok_or_else(|| anyhow::anyhow!("Parent not found"))?;
+
+        // No-pages-under-non-pages (interim ruling 2026-07-13, Fork B B1): a page
+        // block may only be reparented under another page (an org file nests only
+        // under an org file). Enforced HERE, at the single shared write chokepoint
+        // for every reparenting op — `move_block` itself plus `indent`/`outdent`/
+        // `move_up`/`move_down`, which all route through it — so both the SQL and
+        // Loro providers (each using this default `BlockOperations` impl) reject it
+        // identically. This is the WRITE-side guard; `name_chain` (writeback) is the
+        // downstream READ-side tripwire. Fail loud rather than let the prohibited
+        // topology land and surface deep in writeback.
+        if block.is_page() && !parent.is_page() {
+            return Err(anyhow::anyhow!(
+                "move_block: refusing to reparent page block '{}' under non-page parent '{}' — \
+                 pages under non-pages are prohibited (interim ruling 2026-07-13); a page may only \
+                 nest under another page",
+                id_str,
+                parent_id.as_str(),
+            )
+            .into());
+        }
+
         let new_depth = parent.depth() + 1;
         let depth_delta = new_depth - old_depth;
 
