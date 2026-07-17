@@ -602,10 +602,17 @@ impl SchemaModule for NavigationSchemaModule {
                 label: "focus_root".into(),
                 table_name: "focus_roots".into(),
                 id_column: "root_id".into(),
+                // Every column the `focus_roots` matview projects
+                // (see sql/schema/matview_focus_roots.sql) must be
+                // declared here, or a GQL query referencing it (e.g. the
+                // right-sidebar `ORDER BY fr.added_ts`) fails to compile
+                // with `UnknownProperty`. The bundled-query smoke test in
+                // holon::di::registration pins this correspondence.
                 columns: vec![
                     ("region".into(), "region".into()),
-                    ("block_id".into(), "block_id".into()),
                     ("root_id".into(), "root_id".into()),
+                    ("added_ts".into(), "added_ts".into()),
+                    ("history_id".into(), "history_id".into()),
                 ],
             },
         ];
