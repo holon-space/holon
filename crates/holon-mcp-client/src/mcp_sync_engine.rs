@@ -715,3 +715,334 @@ impl SyncableProvider for McpSyncEngine {
         .await
     }
 }
+
+#[cfg(test)]
+mod mirror_cutover_tests {
+    //! Post-cutover proofs for the engine-owned in-memory mirror:
+    //!  (a) a storm of full-sync resyncs reads the DatabaseActor exactly ONCE
+    //!      per entity (the seed) — the whole point of the mirror;
+    //!  (b) a stateful correspondence PBT: after every interleaved
+    //!      full-sync / incremental / clear-and-resync step the mirror's rows
+    //!      equal the cache's rows (DB = ground truth), compared with the same
+    //!      value semantics as `fetched_matches_cached`;
+    //!  (c) an idempotence slice: re-syncing identical records emits zero
+    //!      changes.
+    //!
+    //! The cache double stores an extra `_change_origin` field on write (as the
+    //! real `QueryableCache` does) so the correspondence oracle exercises the
+    //! amendment: the mirror-vs-cache comparator must ignore fields the cache
+    //! adds, and surface any genuine value divergence.
+
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering::SeqCst;
+
+    use async_trait::async_trait;
+    use holon_core::DataSource;
+    use holon_core::traits::Result as CoreResult;
+
+    use super::*;
+
+    /// Key a row exactly as the mirror and the full-sync diff do: parse the
+    /// prefixed id column to an `EntityUri` and stringify it.
+    fn key_of(id_col: &str, e: &DynamicEntity) -> String {
+        let raw = match e.get(id_col) {
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Integer(n)) => n.to_string(),
+            other => panic!("row has no usable id column '{id_col}': {other:?}"),
+        };
+        // ALLOW(entity_uri_from_raw): test cache keys rows the same way the sync diff
+        // does
+        EntityUri::from_raw(&raw).to_string()
+    }
+
+    /// A faithful in-memory `EntityCache<DynamicEntity>` that counts reads and
+    /// writes and mimics the real cache's `_change_origin` stamping.
+    struct CountingCache {
+        id_col: String,
+        rows: Mutex<BTreeMap<String, DynamicEntity>>,
+        get_all_calls: AtomicUsize,
+        get_all_ids_calls: AtomicUsize,
+        apply_batch_calls: AtomicUsize,
+    }
+
+    impl CountingCache {
+        fn new(id_col: &str) -> Self {
+            Self {
+                id_col: id_col.to_string(),
+                rows: Mutex::new(BTreeMap::new()),
+                get_all_calls: AtomicUsize::new(0),
+                get_all_ids_calls: AtomicUsize::new(0),
+                apply_batch_calls: AtomicUsize::new(0),
+            }
+        }
+        fn get_all_calls(&self) -> usize {
+            self.get_all_calls.load(SeqCst)
+        }
+        /// Snapshot ids as keyed in the cache.
+        fn ids(&self) -> Vec<String> {
+            let mut ks: Vec<String> = self.rows.lock().unwrap().keys().cloned().collect();
+            ks.sort();
+            ks
+        }
+        /// Simulate a full-resync `clear_cache`: empty the table.
+        fn clear(&self) {
+            self.rows.lock().unwrap().clear();
+        }
+    }
+
+    #[async_trait]
+    impl DataSource<DynamicEntity> for CountingCache {
+        async fn get_all(&self) -> CoreResult<Vec<DynamicEntity>> {
+            self.get_all_calls.fetch_add(1, SeqCst);
+            Ok(self.rows.lock().unwrap().values().cloned().collect())
+        }
+        async fn get_by_id(&self, id: &str) -> CoreResult<Option<DynamicEntity>> {
+            Ok(self.rows.lock().unwrap().get(id).cloned())
+        }
+    }
+
+    #[async_trait]
+    impl EntityCache<DynamicEntity> for CountingCache {
+        async fn get_all_ids(&self) -> CoreResult<Vec<EntityUri>> {
+            self.get_all_ids_calls.fetch_add(1, SeqCst);
+            let keys: Vec<String> = self.rows.lock().unwrap().keys().cloned().collect();
+            // ALLOW(entity_uri_from_raw): test cache re-derives typed ids from its own
+            // string keys
+            Ok(keys.iter().map(|k| EntityUri::from_raw(k)).collect())
+        }
+        async fn apply_batch(
+            &self,
+            changes: &[Change<DynamicEntity>],
+            // ALLOW(unused_param): sync-token persistence is out of scope for this cache double
+            _sync_token: Option<&holon_api::SyncTokenUpdate>,
+        ) -> CoreResult<()> {
+            self.apply_batch_calls.fetch_add(1, SeqCst);
+            let mut rows = self.rows.lock().unwrap();
+            for change in changes {
+                match change {
+                    Change::Created { data, .. } => {
+                        let key = key_of(&self.id_col, data);
+                        let mut stored = data.clone();
+                        // The real cache stamps every written row with its origin.
+                        stored.set("_change_origin", Value::String("local".to_string()));
+                        rows.insert(key, stored);
+                    }
+                    Change::Updated { id, data, .. } => {
+                        let mut stored = data.clone();
+                        stored.set("_change_origin", Value::String("local".to_string()));
+                        rows.insert(id.clone(), stored);
+                    }
+                    Change::Deleted { id, .. } => {
+                        rows.remove(id);
+                    }
+                    Change::FieldsChanged { .. } => panic!("cache got unexpected FieldsChanged"),
+                }
+            }
+            Ok(())
+        }
+        async fn upsert(&self, item: &DynamicEntity) -> CoreResult<()> {
+            let key = key_of(&self.id_col, item);
+            self.rows.lock().unwrap().insert(key, item.clone());
+            Ok(())
+        }
+        async fn delete(&self, id: &str) -> CoreResult<()> {
+            self.rows.lock().unwrap().remove(id);
+            Ok(())
+        }
+    }
+
+    /// A fetched JSON record with a prefixed-able id and one data field.
+    fn record(id: &str, title: &str) -> serde_json::Map<String, serde_json::Value> {
+        serde_json::json!({ "id": id, "title": title })
+            .as_object()
+            .unwrap()
+            .clone()
+    }
+
+    fn records(rows: &[(&str, &str)]) -> Vec<serde_json::Map<String, serde_json::Value>> {
+        rows.iter().map(|(id, t)| record(id, t)).collect()
+    }
+
+    // Hyphenated: production schemes come from `EntityName::as_str()` (hyphens),
+    // which is a valid URI scheme, so `EntityUri::from_raw` round-trips it.
+    const SCHEME: &str = "cc-session";
+
+    async fn full_sync(
+        recs: &[serde_json::Map<String, serde_json::Value>],
+        mirror: &EntityMirror,
+        cache: &CountingCache,
+    ) -> usize {
+        apply_full_sync("session", "id", SCHEME, recs, mirror, cache)
+            .await
+            .unwrap()
+    }
+
+    /// Oracle: when the mirror is seeded, its rows must equal the cache's rows
+    /// — same key set, each mirror row a value-subset of the cache row (the
+    /// cache's extra `_change_origin` is ignored, matching
+    /// `fetched_matches_cached`).
+    fn assert_mirror_matches_cache(mirror: &EntityMirror, cache: &CountingCache) {
+        if !mirror.is_seeded() {
+            return;
+        }
+        let snapshot = mirror.snapshot();
+        let mut mirror_ids: Vec<String> = snapshot.iter().map(|e| key_of("id", e)).collect();
+        mirror_ids.sort();
+        assert_eq!(
+            mirror_ids,
+            cache.ids(),
+            "mirror id set diverged from cache id set"
+        );
+        let cache_rows = cache.rows.lock().unwrap();
+        for e in &snapshot {
+            let key = key_of("id", e);
+            let cached = cache_rows.get(&key).expect("cache missing mirrored row");
+            assert!(
+                fetched_matches_cached(e, cached),
+                "mirror row {key} value-diverged from cache row: mirror={:?} cache={:?}",
+                e.fields,
+                cached.fields
+            );
+        }
+    }
+
+    /// (3a) A storm of full-sync resyncs reads the cache's full rows exactly
+    /// once (the seed); every later fire diffs the in-memory mirror. Final
+    /// contents equal the last fetched set.
+    #[tokio::test]
+    async fn storm_of_resyncs_reads_cache_once_then_stays_consistent() {
+        let cache = CountingCache::new("id");
+        let mirror = EntityMirror::new(SCHEME.to_string(), "id".to_string());
+
+        // Initial full sync (empty cache → seed reads once, all records created).
+        full_sync(&records(&[("a", "A"), ("b", "B")]), &mirror, &cache).await;
+        assert_eq!(cache.get_all_calls(), 1, "seed read happens exactly once");
+
+        // 50 resyncs with a churning record set: add, update, remove.
+        let mut last_ids: Vec<String> = Vec::new();
+        for i in 0..50 {
+            let recs = match i % 4 {
+                0 => records(&[("a", "A"), ("b", "B"), ("c", "C")]),
+                1 => records(&[("a", "A2"), ("b", "B")]),
+                2 => records(&[("b", "B"), ("c", "C"), ("d", "D")]),
+                _ => records(&[("a", "A"), ("b", "B")]),
+            };
+            last_ids = recs.iter().map(|r| key_of_json(r)).collect();
+            last_ids.sort();
+            full_sync(&recs, &mirror, &cache).await;
+            assert_mirror_matches_cache(&mirror, &cache);
+        }
+
+        assert_eq!(
+            cache.get_all_calls(),
+            1,
+            "no full-row DatabaseActor read after the single seed, across 50 resyncs"
+        );
+        assert_eq!(
+            cache.ids(),
+            last_ids,
+            "final cache contents = last fetched set"
+        );
+    }
+
+    fn key_of_json(r: &serde_json::Map<String, serde_json::Value>) -> String {
+        let id = r.get("id").unwrap().as_str().unwrap();
+        // ALLOW(entity_uri_from_raw): test derives the expected key like the sync
+        // boundary
+        EntityUri::from_raw(&format!("{SCHEME}:{id}")).to_string()
+    }
+
+    /// (3c) Idempotent resync: applying identical records twice emits changes
+    /// the first time and zero the second.
+    #[tokio::test]
+    async fn idempotent_resync_emits_zero_changes() {
+        let cache = CountingCache::new("id");
+        let mirror = EntityMirror::new(SCHEME.to_string(), "id".to_string());
+        let recs = records(&[("a", "A"), ("b", "B"), ("c", "C")]);
+
+        let first = full_sync(&recs, &mirror, &cache).await;
+        assert_eq!(first, 3, "first sync creates all three rows");
+        let second = full_sync(&recs, &mirror, &cache).await;
+        assert_eq!(second, 0, "re-syncing identical records emits no changes");
+        assert_mirror_matches_cache(&mirror, &cache);
+    }
+
+    /// A tiny deterministic RNG so the stateful PBT is reproducible without a
+    /// proptest dependency (no Cargo.lock churn).
+    struct Lcg(u64);
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Self(seed.wrapping_mul(2862933555777941757).wrapping_add(1))
+        }
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0 >> 16
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+
+    /// (3b) Stateful correspondence PBT. Random interleavings of full syncs,
+    /// incremental (cursor) syncs, and clear-and-resync (full_sync flow: cache
+    /// cleared + mirror reset) must always leave the seeded mirror equal to the
+    /// cache.
+    #[tokio::test]
+    async fn mirror_stays_consistent_with_cache_under_interleavings() {
+        let ids = ["a", "b", "c", "d", "e"];
+        for seed in 0..250u64 {
+            let cache = CountingCache::new("id");
+            let mirror = EntityMirror::new(SCHEME.to_string(), "id".to_string());
+            let mut rng = Lcg::new(seed);
+
+            for _ in 0..40 {
+                match rng.below(5) {
+                    // Full sync of a random subset with random titles.
+                    0 | 1 => {
+                        let mut chosen: Vec<(&str, &str)> = Vec::new();
+                        for id in ids {
+                            if rng.below(2) == 0 {
+                                let title = if rng.below(2) == 0 { "X" } else { "Y" };
+                                chosen.push((id, title));
+                            }
+                        }
+                        let recs = records(&chosen);
+                        full_sync(&recs, &mirror, &cache).await;
+                    }
+                    // Incremental (cursor) sync: a couple of created/updated rows.
+                    2 => {
+                        let id = ids[rng.below(ids.len() as u64) as usize];
+                        let title = if rng.below(2) == 0 { "Z" } else { "W" };
+                        let recs = records(&[(id, title)]);
+                        apply_incremental("session", "id", SCHEME, &recs, &mirror, &cache)
+                            .await
+                            .unwrap();
+                    }
+                    // Clear-and-resync: the full_sync operation empties the cache
+                    // + tokens and the engine resets the mirror, then re-syncs.
+                    3 => {
+                        cache.clear();
+                        mirror.reset();
+                        let mut chosen: Vec<(&str, &str)> = Vec::new();
+                        for id in ids {
+                            if rng.below(2) == 0 {
+                                chosen.push((id, "R"));
+                            }
+                        }
+                        full_sync(&records(&chosen), &mirror, &cache).await;
+                    }
+                    // Full sync to empty (server dropped everything).
+                    _ => {
+                        full_sync(&[], &mirror, &cache).await;
+                    }
+                }
+                assert_mirror_matches_cache(&mirror, &cache);
+            }
+        }
+    }
+}
