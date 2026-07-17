@@ -124,6 +124,39 @@ impl DocumentManager for FixtureDocManager {
     }
 }
 
+/// TRULY PROD-FAITHFUL doc manager: `get_by_id` returns a block ONLY if it is a
+/// `Page`, mirroring `LiveDocumentManager`'s `WHERE tag='Page'` matview. A
+/// non-page content block is invisible to the page store (`None`), exactly as
+/// in prod — the shape `FixtureDocManager` (which serves any seeded block) does
+/// not reproduce.
+struct PageOnlyDocManager {
+    by_id: HashMap<EntityUri, Block>,
+}
+
+#[async_trait]
+impl DocumentManager for PageOnlyDocManager {
+    async fn find_by_parent_and_name(
+        &self,
+        parent_id: &EntityUri,
+        title: &str,
+    ) -> anyhow::Result<Option<Block>> {
+        Ok(self
+            .by_id
+            .values()
+            .find(|d| d.parent_id == *parent_id && d.is_page() && d.title() == title)
+            .cloned())
+    }
+    async fn create(&self, doc: Block) -> anyhow::Result<Block> {
+        Ok(doc)
+    }
+    async fn get_by_id(&self, id: &EntityUri) -> anyhow::Result<Option<Block>> {
+        Ok(self.by_id.get(id).filter(|b| b.is_page()).cloned())
+    }
+    async fn update_metadata(&self, _: &Block) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
 struct NoopOrdering;
 
 #[async_trait]
@@ -451,6 +484,120 @@ async fn writeback_drop_of_prohibited_subtree_hard_vetoes_prod_name_chain() {
             .iter()
             .any(|e| e.contains("name_chain failed loud") || e.contains("UNRESOLVABLE")),
         "expected a loud ERROR for the name_chain grounding failure; captured: {errors:?}"
+    );
+}
+
+/// **BugFunnel row 23/29 (RED-first, TRULY PROD-FAITHFUL): a folder-companion
+/// whose projection legitimately DE-INLINES a child page must PROCEED, not be
+/// falsely hard-vetoed by a `name_chain` grounding storm.**
+///
+/// This reproduces the real `Projects.org` first-boot storm more faithfully
+/// than [`writeback_drop_of_prohibited_subtree_hard_vetoes_prod_name_chain`],
+/// which seeds the non-page blocks INTO the doc manager. In prod the page store
+/// (`LiveDocumentManager`'s `WHERE tag='Page'` matview) tracks ONLY pages, so
+/// `get_by_id` returns `None` for a non-page content heading — the actual log
+/// signature was "Page block '…' not found in name_chain" (the ancestor-lookup
+/// branch), NOT "non-page ancestor". Here `PageOnlyDocManager.get_by_id`
+/// mirrors that: it returns a block only if it is a `Page`.
+///
+/// Topology: a companion page `container` (→ `Container.org`) inlines a CHILD
+/// PAGE `child` (→ `Container/Child.org`) whose subtree holds a NON-PAGE
+/// heading `child-body`. The store's render of `Container.org` de-inlines the
+/// whole child subtree, so both `child` and `child-body` are absent from the
+/// projection. Write-back grounding resolves each absent block:
+///   - `child` is a page → resolves to its own sibling file
+///     `Container/Child.org` (whose on-disk content grounds the drop);
+///   - `child-body` is NOT a page → `get_by_id` misses → PRE-FIX `name_chain`
+///     hit "not found" and marked it UNRESOLVABLE → false HARD-VETO +
+///     quarantine at every boot. POST-FIX it resolves to an empty chain
+///     (`Ok(None)`, "not a page"), the sibling grounding covers it, and the
+///     legitimate de-inline write PROCEEDS.
+#[tokio::test]
+async fn companion_deinline_of_child_page_content_is_not_vetoed_prod_page_only_store() {
+    let cap = ErrorCapture::default();
+    let _guard = tracing::subscriber::set_default(tracing_subscriber::registry().with(cap.clone()));
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    let container = EntityUri::block("container");
+    let container_path = root.join("Container.org");
+    let child_path = root.join("Container").join("Child.org");
+
+    // Seed the settled folder-companion on disk:
+    //  - Container.org (companion) still inlines the child page + its non-page body
+    //    — the pre-de-inline source about to be re-rendered.
+    //  - Container/Child.org (sibling) owns the de-inlined child subtree.
+    std::fs::create_dir_all(child_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &container_path,
+        "#+ID: container\n* Child\n:PROPERTIES:\n:ID: child\n:END:\n** child body text\n\
+         :PROPERTIES:\n:ID: child-body\n:END:\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &child_path,
+        "#+ID: child\n* child body text\n:PROPERTIES:\n:ID: child-body\n:END:\n",
+    )
+    .unwrap();
+
+    // Page store holds ONLY the two PAGES (container, child) — never the
+    // non-page `child-body`, exactly like the `WHERE tag='Page'` matview.
+    let container_page = page("container", EntityUri::no_parent(), "Container");
+    let child_page = page("child", container.clone(), "Child");
+    let child_body = non_page("child-body", EntityUri::block("child"), "child body text");
+
+    let mut reader_by_id = HashMap::new();
+    for b in [&container_page, &child_page, &child_body] {
+        reader_by_id.insert(b.id.clone(), b.clone());
+    }
+    // The render of Container.org de-inlines the child subtree → empty body.
+    let mut children = HashMap::new();
+    children.insert(container.clone(), Vec::<Block>::new());
+
+    let reader = Arc::new(FixtureReader {
+        by_id: reader_by_id,
+        children,
+        documents: vec![],
+    });
+    let mut page_only = HashMap::new();
+    page_only.insert(container_page.id.clone(), container_page.clone());
+    page_only.insert(child_page.id.clone(), child_page.clone());
+    let doc_manager = Arc::new(PageOnlyDocManager { by_id: page_only });
+    let mut controller = new_org_sync_controller(
+        reader,
+        doc_manager,
+        root.clone(),
+        Arc::new(NoopOrdering),
+        Arc::new(RealFileSystem),
+    );
+
+    // The de-inline is legitimate — the child subtree is preserved in the
+    // sibling file — so the write must PROCEED, not hard-veto.
+    let result = controller
+        .on_block_changed(&container, &BlockDelta::Upsert(container_page.clone()))
+        .await;
+    assert!(
+        result.is_ok(),
+        "a legitimate companion de-inline (child subtree preserved in its sibling file) must NOT \
+         be hard-vetoed by a name_chain grounding storm; got {:?}",
+        result.err().map(|e| format!("{e:#}")),
+    );
+
+    // No UNRESOLVABLE / name_chain-failed error was emitted — the storm is gone.
+    let errors = cap.errors();
+    assert!(
+        !errors
+            .iter()
+            .any(|e| e.contains("UNRESOLVABLE") || e.contains("name_chain failed loud")),
+        "the folder-companion de-inline must not emit any UNRESOLVABLE / name_chain grounding \
+         error; captured: {errors:?}"
+    );
+
+    // The child subtree is still safe in its own file (nothing was destroyed).
+    let sibling = std::fs::read_to_string(&child_path).unwrap();
+    assert!(
+        sibling.contains("child body text") && sibling.contains("child-body"),
+        "the child page's own file must be untouched; got {sibling:?}"
     );
 }
 

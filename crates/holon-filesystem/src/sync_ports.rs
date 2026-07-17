@@ -197,9 +197,35 @@ pub trait DocumentManager: Send + Sync {
                 break;
             }
 
-            let doc = self.get_by_id(&current_id).await?.ok_or_else(|| {
-                anyhow::anyhow!("Page block '{}' not found in name_chain", current_id)
-            })?;
+            let doc = match self.get_by_id(&current_id).await? {
+                Some(doc) => doc,
+                None if is_self => {
+                    // The page store tracks ONLY `Page`-tagged blocks (e.g.
+                    // `LiveDocumentManager`'s `WHERE tag='Page'` matview). A miss
+                    // on the STARTING block therefore means it is simply not a
+                    // page — it owns no file. Resolve to an empty chain;
+                    // `doc_id_to_path` maps that to `Ok(None)` ("not a page,
+                    // skip"). This is the folder-companion de-inline case: the
+                    // non-page content headings of a de-inlined child page are
+                    // absent from the companion's projection, and write-back
+                    // grounding must NOT treat them as an unresolvable hard-veto
+                    // (BugFunnel row 23/29 — the 749-error `Projects.org` storm).
+                    return Ok(Vec::new());
+                }
+                None => {
+                    // A miss on an ANCESTOR (we are walking up from a real page)
+                    // means that page's structural ancestry is broken — its
+                    // parent is not itself a page in the store. That IS a
+                    // fail-loud error (interim ruling 2026-07-13).
+                    anyhow::bail!(
+                        "name_chain({doc_id}): ancestor '{current_id}' of a page is absent from \
+                         the page store — a page's structural ancestors must themselves all be \
+                         pages (interim ruling 2026-07-13); chain so far (root-to-here, reversed \
+                         at return) = {:?}",
+                        chain
+                    );
+                }
+            };
 
             if doc.is_page() {
                 chain.push(doc.title());
@@ -356,15 +382,11 @@ mod name_chain_tests {
 
     #[async_trait]
     impl DocumentManager for MockDocManager {
-        async fn find_by_parent_and_name(
-            &self,
-            _parent_id: &EntityUri,
-            _title: &str,
-        ) -> Result<Option<Block>> {
+        async fn find_by_parent_and_name(&self, _: &EntityUri, _: &str) -> Result<Option<Block>> {
             unimplemented!("not exercised by name_chain")
         }
 
-        async fn create(&self, _doc: Block) -> Result<Block> {
+        async fn create(&self, _: Block) -> Result<Block> {
             unimplemented!("not exercised by name_chain")
         }
 
@@ -372,7 +394,7 @@ mod name_chain_tests {
             Ok(self.by_id.get(id).cloned())
         }
 
-        async fn update_metadata(&self, _doc: &Block) -> Result<()> {
+        async fn update_metadata(&self, _: &Block) -> Result<()> {
             unimplemented!("not exercised by name_chain")
         }
     }
@@ -419,6 +441,30 @@ mod name_chain_tests {
             "error must name the offending non-page ancestor '{}'; got: {msg}",
             b1.id
         );
+    }
+
+    /// PROD-FAITHFUL (BugFunnel row 23/29): the page store (e.g.
+    /// `LiveDocumentManager`'s `WHERE tag='Page'` matview) contains ONLY pages,
+    /// so `get_by_id` on a NON-page content block returns `None`. `name_chain`
+    /// of such a block must resolve to an EMPTY chain ("not a page → owns no
+    /// file"), NOT fail loud: a non-page content heading is a legitimate benign
+    /// input (the folder-companion de-inline storm where the nested non-page
+    /// content of a de-inlined child page is absent from the companion's
+    /// projection), and `doc_id_to_path` maps the empty chain to `Ok(None)`
+    /// (skip). Before the fix this hit the ancestor-not-found `bail` and
+    /// produced the 749-error `Projects.org` UNRESOLVABLE storm.
+    #[tokio::test]
+    async fn non_page_self_absent_from_page_store_resolves_empty() {
+        // The store holds ONLY the page root; the content heading is not a page
+        // and is therefore absent from the page store (get_by_id → None).
+        let root = page("Projects", EntityUri::no_parent(), "Projects");
+        let mgr = MockDocManager::new(vec![root]);
+        let content_id = EntityUri::block("content-heading");
+        let chain = mgr.name_chain(&content_id).await.expect(
+            "a non-page block absent from the page store must resolve to an empty chain, not fail \
+             loud",
+        );
+        assert!(chain.is_empty(), "expected empty chain, got {chain:?}");
     }
 
     /// A chain rooted at a NON-`no_parent` sentinel (a synthetic root that is
