@@ -3216,4 +3216,120 @@ mod teeth {
              (0715,0714) expanded + dividers; plain embedded page collapsed."
         );
     }
+
+    /// **dogfood #6 row 34 — RED-first repro pinning the OPEN architecture
+    /// bug.**
+    ///
+    /// The journal feed (`block:journals::render::0` =
+    /// `list(sortkey:"-content", item_template: column(render_entity(),
+    /// divider()))` over `::src::0` which tags rows with `expand_default`)
+    /// is UNREACHABLE via the app's navigation
+    /// path. `apply_navigate_focus(Main, journals)` makes the main panel render
+    /// `block:default-main-panel` — a query-source block with NO
+    /// `render_source`, so `BlockDomain::render_expr_for` resolves the
+    /// collection profile's `tree_view`
+    /// (`assets/default/types/collection_profile.yaml`): a tree keyed
+    /// on `sort_key`, `item_template = render_entity()`, level-0 forced to
+    /// `page_title`. `render_entity` → `shared_render_entity_build` resolves
+    /// the render PURELY from the entity PROFILE and NEVER consults a
+    /// block's own `render_source`; only `render_expr_for`'s
+    /// `has_render_source` arm does, and that arm is reached only by
+    /// directly watching `block:journals` (which `widget_tree_for(&
+    /// journals)` — the A2/A3 test path — does, but the app's
+    /// focus navigation does not). So the day-entries render as generic
+    /// `embedded_page` (collapsed, no `expand_default`) tree items sorted by
+    /// `sort_key` — explaining ALL THREE dogfood symptoms at once (arrival/
+    /// sort_key order instead of content DESC; no `divider()`; mixed/collapsed
+    /// expansion instead of default-expanded).
+    ///
+    /// `#[ignore]` because it is RED on `main` and pins an OPEN architecture
+    /// decision (how a focused Page delegates the main panel to its own
+    /// `render_source`) — see docs/Testing/BugFunnel.md row 34. Compare the two
+    /// dumps below: DIRECT (`widget_tree_for`) shows the real feed; MAIN-PANEL
+    /// (the app path) does not. Remove `#[ignore]` once the delegation lands.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "RED on main: journal feed render_source unreachable via focus \
+                navigation — open architecture bug (BugFunnel row 34)"]
+    async fn journal_feed_via_main_panel_focus_shows_feed() {
+        use holon_pbt_core::capabilities::CapRegion;
+        use holon_pbt_core::capabilities::SutFocusWrite;
+        use holon_pbt_core::capabilities::SutRenderer;
+
+        let journals_org = concat!(
+            "#+ID: journals\n",
+            "* 2026-07-14 :Page:\n",
+            ":PROPERTIES:\n:ID: day-0714\n:END:\n",
+            "Log for the 14th.\n",
+            "** morning note\n",
+            ":PROPERTIES:\n:ID: day-0714-child\n:END:\n",
+            "* 2026-07-15 :Page:\n",
+            ":PROPERTIES:\n:ID: day-0715\n:END:\n",
+            "Log for the 15th.\n",
+            "** evening note\n",
+            ":PROPERTIES:\n:ID: day-0715-child\n:END:\n",
+        );
+
+        let comp = Arc::new(
+            HeadlessFrontendComponent::new(
+                &[("Journals.org", journals_org)],
+                Duration::from_millis(600),
+            )
+            .await,
+        );
+        tokio::time::sleep(SETTLE).await;
+
+        let journals = EntityUri::parse("block:journals").expect("journals id");
+        comp.apply_navigate_focus(CapRegion::Main, &journals).await;
+        tokio::time::sleep(SETTLE).await;
+
+        let root = comp.widget_tree_snapshot().await;
+
+        let mut kinds = std::collections::BTreeMap::<String, usize>::new();
+        for n in root.walk() {
+            *kinds.entry(n.kind.clone()).or_default() += 1;
+        }
+        eprintln!("[repro] MAIN-PANEL (app path) widget kinds: {kinds:?}");
+        for t in root.collect_by_kind("expand_toggle") {
+            eprintln!(
+                "[repro] MAIN-PANEL expand_toggle target={:?} expanded={:?}",
+                t.props.get("target_id"),
+                t.props.get("expanded")
+            );
+        }
+        // Reference: DIRECT render of the journals page (the A2/A3 test path).
+        let feed = comp
+            .widget_tree_for(&journals)
+            .await
+            .expect("direct journals render");
+        eprintln!(
+            "[repro] DIRECT feed dividers={} expand_toggles={} (the feed the app SHOULD show)",
+            feed.collect_by_kind("divider").len(),
+            feed.collect_by_kind("expand_toggle").len(),
+        );
+
+        // The app's focus path MUST show the journals feed: default-expanded
+        // embedded pages, newest-first, divider-separated. These fail today.
+        let toggles = root.collect_by_kind("expand_toggle");
+        let pos = |id: &str| {
+            toggles
+                .iter()
+                .position(|t| t.props.get("target_id").map(String::as_str) == Some(id))
+        };
+        assert!(
+            matches!((pos("block:day-0715"), pos("block:day-0714")), (Some(a), Some(b)) if a < b),
+            "main panel must list day-entries NEWEST-FIRST (0715 before 0714): {root:#?}"
+        );
+        for t in &toggles {
+            assert_eq!(
+                t.props.get("expanded").map(String::as_str),
+                Some("true"),
+                "main-panel feed entries must be DEFAULT-EXPANDED: {t:#?}"
+            );
+        }
+        assert_eq!(
+            root.collect_by_kind("divider").len(),
+            toggles.len(),
+            "one divider() per feed entry in the main panel: {root:#?}"
+        );
+    }
 }

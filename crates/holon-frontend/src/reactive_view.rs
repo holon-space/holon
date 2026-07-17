@@ -1578,10 +1578,19 @@ impl ReactiveView {
             let interpret = interpret_and_attach.clone();
             Arc::new(move || {
                 let mut lock = entries.lock().unwrap();
-                if let Some(ref key_name) = sort_key {
+                if let Some(ref spec) = sort_key {
+                    // Honor the `-`-prefixed DESCENDING convention (e.g.
+                    // `sortkey: "-content"` for the newest-first journal feed).
+                    // The raw spec is a sort DIRECTIVE, not a column name — using
+                    // it verbatim as `row.get("-content")` finds no column and
+                    // silently degrades to the `ka.cmp(kb)` arrival-order tie
+                    // (dogfood #6 row 34: feed rendered arrival-order). Mirrors
+                    // the static `sorted_rows` + tree-driver `parse_sort_key`.
+                    let (col, descending) = holon_api::render_eval::parse_sort_key(spec);
                     lock.sort_by(|(ka, a), (kb, b)| {
-                        holon_api::render_eval::cmp_values(a.get(key_name), b.get(key_name))
-                            .then_with(|| ka.cmp(kb))
+                        let ord = holon_api::render_eval::cmp_values(a.get(col), b.get(col));
+                        let ord = if descending { ord.reverse() } else { ord };
+                        ord.then_with(|| ka.cmp(kb))
                     });
                 }
                 let parent_space = space.get_cloned();
@@ -2585,6 +2594,88 @@ mod tests {
         );
 
         view.stop();
+    }
+
+    /// dogfood #6 row 34 (flat-driver half): the STREAMING `list` collection —
+    /// the journal feed's own render path (`block:journals::render::0`) — must
+    /// honor the `-`-prefixed DESCENDING sort convention. Rows arrive
+    /// ASCENDING; `sort_key = "-content"` must render them NEWEST-FIRST.
+    ///
+    /// RED before the `parse_sort_key` fix in `create_flat_driver`'s
+    /// `full_rebuild`: it used the raw spec `"-content"` verbatim as a column
+    /// name (`row.get("-content")` → no such column → `None` for every row →
+    /// the `cmp_values` result is always `Equal` and the sort degrades to the
+    /// `ka.cmp(kb)` arrival-order tie). The static `sorted_rows` and the tree
+    /// driver already parse the prefix; only this flat streaming driver was
+    /// missed by the A2/A3 landing.
+    #[tokio::test]
+    async fn flat_driver_honors_descending_sort_key_prefix() {
+        crate::shadow_builders::register_render_dsl_widget_names();
+
+        let row_set = ReactiveRowSet::new();
+        row_set.set_generation(1);
+        // Arrive in ascending / mixed order (10 last, as in the aged vault).
+        for content in [
+            "2026-07-11",
+            "2026-07-12",
+            "2026-07-13",
+            "2026-07-15",
+            "2026-07-16",
+            "2026-07-10",
+        ] {
+            row_set.apply_change(
+                holon_api::Change::Created {
+                    data: enriched(make_row(content, content)),
+                    origin: remote_origin(),
+                },
+                1,
+            );
+        }
+        let row_set = Arc::new(row_set);
+        let data_source: Arc<dyn holon_api::ReactiveRowProvider> = row_set.clone();
+
+        let item_template = holon_api::render_dsl::parse_render_dsl(r#"text(col("content"))"#)
+            .expect("item_template parses");
+
+        let view = ReactiveView::new_collection(
+            CollectionConfig {
+                layout: CollectionVariant::from_name("list", 0.0).expect("`list` layout"),
+                item_template,
+                sort_key: Some("-content".to_string()),
+                virtual_child: None,
+                rules: Vec::new(),
+            },
+            data_source,
+            None,
+            None,
+        );
+
+        let services: Arc<dyn crate::reactive::BuilderServices> =
+            Arc::new(StubBuilderServices::new());
+        view.start(services, &tokio::runtime::Handle::current());
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        let order: Vec<String> = view
+            .items
+            .lock_ref()
+            .iter()
+            .filter_map(|n| n.prop_str("content"))
+            .collect();
+        view.stop();
+
+        assert_eq!(
+            order,
+            vec![
+                "2026-07-16",
+                "2026-07-15",
+                "2026-07-13",
+                "2026-07-12",
+                "2026-07-11",
+                "2026-07-10",
+            ],
+            "streaming `list` must sort NEWEST-FIRST for sort_key=\"-content\" (DESC by content); \
+             got {order:?}"
+        );
     }
 
     /// Increment B smallest-first-step (also validates Increment G's premise):
