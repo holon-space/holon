@@ -222,40 +222,6 @@ fn edge_string_targets(value: &Value, field: &str) -> std::result::Result<Vec<St
     }
 }
 
-/// Hand-built descriptor for the `dismiss_advice` operation (ADR 0021/0022).
-///
-/// Params: `anchor_id` (the block the advice is woven under) and `lesson_id`
-/// (the dismissed advice row). Both are block ids. The frontend emits this op
-/// with those two params from a per-lesson dismiss affordance.
-fn dismiss_advice_descriptor() -> OperationDescriptor {
-    use holon_api::render_types::OperationParam;
-    use holon_api::render_types::TypeHint;
-    let block = EntityName::from("block");
-    OperationDescriptor {
-        entity_name: block.clone(),
-        entity_short_name: "block".to_string(),
-        id_column: "id".to_string(),
-        name: "dismiss_advice".to_string(),
-        display_name: "Dismiss advice".to_string(),
-        description: "Suppress this advice lesson under its anchor block".to_string(),
-        required_params: vec![
-            OperationParam {
-                name: "anchor_id".to_string(),
-                type_hint: TypeHint::EntityId {
-                    entity_name: block.clone(),
-                },
-                description: "The anchor block the advice is woven under".to_string(),
-            },
-            OperationParam {
-                name: "lesson_id".to_string(),
-                type_hint: TypeHint::EntityId { entity_name: block },
-                description: "The advice lesson block to dismiss".to_string(),
-            },
-        ],
-        ..Default::default()
-    }
-}
-
 #[async_trait]
 impl CrudOperations<Block> for LoroBlockOperations {
     async fn set_field(&self, id: &str, field: &str, value: Value) -> Result<OperationResult> {
@@ -356,15 +322,15 @@ impl CrudOperations<Block> for LoroBlockOperations {
                             .to_string();
                         // `obj` is a Value::Object payload (set_field caller serialized
                         // marks as a JSON string), not a CDC row from the jsonb column.
-                        // ALLOW(jsonb_as_string): payload field, not CDC row.
-                        let marks_json =
-                            obj.get("marks")
-                                .and_then(|v| v.as_string())
-                                .ok_or_else(|| {
-                                    "set_field('content', Object): missing 'marks' JSON string \
+                        let marks_json = obj
+                            .get("marks")
+                            // ALLOW(jsonb_as_string): payload field, not CDC row.
+                            .and_then(|v| v.as_string())
+                            .ok_or_else(|| {
+                                "set_field('content', Object): missing 'marks' JSON string \
                                      field"
-                                        .to_string()
-                                })?;
+                                    .to_string()
+                            })?;
                         let marks: Vec<holon_api::MarkSpan> =
                             holon_api::marks_from_json(marks_json).map_err(|e| {
                                 format!("set_field('content'): marks JSON parse error: {e}")
@@ -909,10 +875,14 @@ impl OperationProvider for LoroBlockOperations {
             id_column,
         ));
 
-        // Advice dismissal (ADR 0021/0022) — a bespoke read-modify-write append that
-        // isn't one of the macro-generated CRUD/block/text traits, so its descriptor
-        // is built by hand. The frontend binds this to a per-lesson dismiss affordance.
-        ops.push(dismiss_advice_descriptor());
+        // Advice dismissal (ADR 0021/0022) — a bespoke read-modify-write append
+        // that isn't one of the macro-generated CRUD/block/text traits. Its
+        // descriptor is the ONE hand-built op shared by both write authorities,
+        // so it lives in the shared catalog (BugFunnel row 26 was its drift).
+        ops.push(holon_core::block_op_catalog::dismiss_advice_descriptor(
+            &EntityName::from(entity_name),
+            short_name,
+        ));
 
         ops
     }
@@ -1344,7 +1314,10 @@ mod advice_dismiss_tests {
 
     #[test]
     fn dismiss_advice_descriptor_shape() {
-        let d = dismiss_advice_descriptor();
+        let d = holon_core::block_op_catalog::dismiss_advice_descriptor(
+            &EntityName::from("block"),
+            "block",
+        );
         assert_eq!(d.name, "dismiss_advice");
         assert_eq!(d.entity_name, EntityName::new("block"));
         let names: Vec<&str> = d.required_params.iter().map(|p| p.name.as_str()).collect();

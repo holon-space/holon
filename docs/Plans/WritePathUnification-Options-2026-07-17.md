@@ -413,3 +413,110 @@ step 3 expensive.
   `ConsolidatorWrite` seam be shaped so future entities (pages, edges as
   first-class) join without re-forking? (Cheap to leave generic; costs one
   type parameter.)
+
+---
+
+## 8. Status — implementation (ruling: Option D = A's increments 0–2)
+
+Martin ruled: proceed with the recommendation — ship **D** as **A's
+de-risking increments 0–2**. This section tracks the landed increments.
+
+### Increment 0 — shared op-descriptor catalog + parity assertion — **LANDED**
+
+- **Catalog home:** `crates/holon-core/src/block_op_catalog.rs` (holon-core is
+  the lowest crate both authorities depend on; `holon-api` ← `holon-core` ←
+  `holon-loro` ← `holon`).
+- **Parity certificate:** `crates/holon/tests/block_op_catalog_parity.rs`
+  (`both_block_providers_source_catalog_descriptors_identically`) — builds BOTH
+  block authorities (`SqlOperationProvider` with the `advice_suppressed` edge
+  field, `LoroBlockOperations`) and asserts every catalog-owned descriptor is
+  **byte-identical** in both providers' `operations()`.
+
+- **Scope finding (important — refines the doc's increment-0 framing).** The
+  literal "both providers' `operations()` == catalog" is *not* achievable as
+  set-equality, and that is **forced, not incidental**: the two providers
+  legitimately advertise different op *sets*. `SqlOperationProvider` is a
+  generic table writer with a deliberately minimal hand-built set (`set_field`,
+  `create`, `update`, `delete`, `cycle_task_state`, `create_page_from_link`,
+  and — gated on owning the edge field — `dismiss_advice`); `LoroBlockOperations`
+  advertises the **full block vocabulary** via the `#[operations_trait]`
+  macro (CRUD + block + mark + text + task) plus `dismiss_advice`. The
+  macro-generated families are **already single-sourced** from the trait macro,
+  so they are not the drift surface. The drift surface is the **bespoke**
+  descriptors hand-built in *both* providers — today exactly **one**:
+  `dismiss_advice`, which is precisely bug #2's descriptor (SQL used
+  `TypeHint::String`, Loro `TypeHint::EntityId` — live I1 drift). The catalog
+  therefore owns the bespoke descriptor set (one entry so far), and the parity
+  assertion is correctly scoped to *catalog-owned* descriptors — it agrees
+  byte-for-byte in both providers and grows automatically as increments 1–2
+  move more metadata into the catalog. Canonical hint chosen: `EntityId`
+  (parse-don't-validate; a block id, not a bare string).
+
+- **Gate:** `cargo nextest run -p holon -p holon-loro -p holon-turso
+  --no-fail-fast` → 527 passed. The 17 failures + 1 timeout are **identical to
+  the base commit** (verified by re-running the same gate on `60972a33`: base =
+  526 passed / same 17+1 failures; the +1 pass on this branch is the new parity
+  test). Those pre-existing failures are peer/CRDT sync
+  (`test_*_sync`/`reliability`/`stress`), the delete-inverse `block_links`
+  schema-setup gap (`delete_inverse_classification_tests`), and the known
+  turso-PBT deadlock (`test_turso_backend_state_machine`) — none reachable by a
+  descriptor-only diff. All four regression tests pass:
+  `wiki_link_ingest_populates_marks_and_junction_{sqlonly,loro}`,
+  `prod_session_dispatches_dismiss_advice`,
+  `create_reports_id_field_delta_for_history`, plus the two matview-pass count
+  tests.
+
+### Regression manifest — where each of the four asymmetry bugs now lives
+
+| # | Bug | Class | Home after increment 0 |
+|---|---|---|---|
+| 2 | `dismiss_advice` descriptor drift | I1 | **ONE home** — `block_op_catalog::dismiss_advice_descriptor`; parity test is the certificate. ✓ |
+| 4 | Loro-create emits no history delta | I3 | **Still two sites** (`loro_block_operations.rs` create + `sql_operation_provider.rs` create), agreeing by convention. Unified in **increment 2** (`history_deltas` into the catalog). |
+| 1 | `block_links` junction empty in batch path | I4 | **Still two call sites** (single-op create/update/set_field + `execute_batch_with_origin`). Unified in **A step 3** (the sink rule) — *out of scope of increments 0–2*; tracked, not touched. |
+| 3 | O(N²) boot-ingest (batching shape) | I5 | **Untouched** — trait-default-vs-override. Unified in **A step 4** — *out of scope of increments 0–2*. |
+
+### Increment 1 — typed `BlockOp` parse — **HALTED at the boundary; needs a ruling**
+
+Increment 1 as cut ("typed `BlockOp` parse … providers take typed ops — kills
+I2; **moves marks extraction into parse → kills I7**") cannot be shipped
+*exactly* as a de-risking prefix. Two grounded blockers surfaced while reading
+the write path:
+
+1. **The I7 half is gated on unresolved Q3.** "Moves marks extraction into
+   parse" is precisely open question **Q3** (§7) — the doc itself asks *"Fold
+   into `BlockOpCatalog::parse` (A step 1) so create gets it for free?"* and
+   leaves it unruled. Marks-on-create is a **behaviour change** (BugFunnel
+   row-34 residual), and the existing set_field marks path is not a pure
+   parse: it is the dispatcher's **stateful, DB-reading** follow-up
+   (`operation_dispatcher.rs:713-754`, `content_marks_followup`) that compares
+   extracted marks against the block's *stored* marks to avoid the
+   over-dispatch that nulled live links (BugFunnel #66). Folding it into a pure
+   catalog `parse` either changes create behaviour (Q3) or entangles with that
+   execution-layer follow-up — which Option D ("execution bodies stay where
+   they are") and Option A (defers to step 3) both keep out of the prefix.
+
+2. **The I2 half is only partially centralizable.** `SqlOperationProvider`
+   partitions create/update params into columns vs edge-junctions vs the
+   `properties` blob using **per-instance schema** (`self.known_columns`,
+   `self.edge_fields`, `prepare_create`/`partition_params`) — mode- and
+   schema-specific, so it cannot move into a mode-invariant catalog `parse`. A
+   shared `BlockOp::Create { id, parent_id, content, content_type,
+   source_*, rest }` can type only the ~5 fixed fields; the dynamic tail
+   (`rest`) still partitions inside SQL. Modest payoff for a delicate hot-path
+   edit to both providers' create/set_field/delete prologues.
+
+3. **Increment 2 is blocked behind this.** `history_deltas(op: &BlockOp)` is
+   keyed on increment 1's `BlockOp`, so increment 2 cannot land until the
+   `BlockOp` vocabulary exists.
+
+**Fork for the ruling (does not change increment 0, which stands):**
+- **(A)** Rule Q3 = *fold marks into parse* → implement full increment 1
+  (I2 + I7), accepting edits to the dispatcher's stateful marks follow-up
+  (regression risk on #66). Then increment 2.
+- **(B)** Rule Q3 = *defer marks* → implement increment 1 as I2-only typed
+  parse (fixed fields centralized; SQL dynamic tail stays), I7 deferred with a
+  TODO. Then increment 2 (`history_deltas` on `BlockOp`).
+- **(C)** Accept that increment 1's de-risking payoff is small and Q3-/step-3-
+  entangled → stop at increment 0 (the highest-value target — I1 killed, bug
+  #2 given one home) and revisit 1–2 alongside the Q1 (undo) and Q3 (marks)
+  rulings when step 3–4 are scheduled.

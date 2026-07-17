@@ -1254,26 +1254,11 @@ impl OperationProvider for SqlOperationProvider {
         // this provider, and the woven advice row's `dismiss_advice` op_button
         // was undispatchable ("No provider registered for entity: block").
         if self.edge_fields.contains_key("advice_suppressed") {
-            ops.push(OperationDescriptor {
-                entity_name: self.entity_name.clone().into(),
-                entity_short_name: self.entity_short_name.clone(),
-                name: "dismiss_advice".to_string(),
-                display_name: "Dismiss advice".to_string(),
-                description: "Suppress this advice lesson under its anchor block".to_string(),
-                required_params: vec![
-                    OperationParam {
-                        name: "anchor_id".to_string(),
-                        type_hint: TypeHint::String,
-                        description: "The anchor block the advice is woven under".to_string(),
-                    },
-                    OperationParam {
-                        name: "lesson_id".to_string(),
-                        type_hint: TypeHint::String,
-                        description: "The advice lesson block to dismiss".to_string(),
-                    },
-                ],
-                ..Default::default()
-            });
+            let entity: EntityName = self.entity_name.clone().into();
+            ops.push(holon_core::block_op_catalog::dismiss_advice_descriptor(
+                &entity,
+                &self.entity_short_name,
+            ));
         }
         ops
     }
