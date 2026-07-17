@@ -1156,7 +1156,7 @@ impl SqlOperationProvider {
 #[async_trait]
 impl OperationProvider for SqlOperationProvider {
     fn operations(&self) -> Vec<OperationDescriptor> {
-        vec![
+        let mut ops = vec![
             OperationDescriptor {
                 entity_name: self.entity_name.clone().into(),
                 entity_short_name: self.entity_short_name.clone(),
@@ -1243,7 +1243,39 @@ impl OperationProvider for SqlOperationProvider {
                 }],
                 ..Default::default()
             },
-        ]
+        ];
+
+        // `dismiss_advice` (ADR 0021/0022) is the SqlOnly-authority twin of the
+        // Loro provider's op: it appends a lesson to the anchor's
+        // `advice_suppressed` set. Only advertise it when this provider owns
+        // that edge field (the `block` entity) — otherwise a non-block
+        // SqlOperationProvider would falsely claim to dispatch it. This closes
+        // BugFunnel row 26: in SqlOnly prod GPUI the block CRUD authority is
+        // this provider, and the woven advice row's `dismiss_advice` op_button
+        // was undispatchable ("No provider registered for entity: block").
+        if self.edge_fields.contains_key("advice_suppressed") {
+            ops.push(OperationDescriptor {
+                entity_name: self.entity_name.clone().into(),
+                entity_short_name: self.entity_short_name.clone(),
+                name: "dismiss_advice".to_string(),
+                display_name: "Dismiss advice".to_string(),
+                description: "Suppress this advice lesson under its anchor block".to_string(),
+                required_params: vec![
+                    OperationParam {
+                        name: "anchor_id".to_string(),
+                        type_hint: TypeHint::String,
+                        description: "The anchor block the advice is woven under".to_string(),
+                    },
+                    OperationParam {
+                        name: "lesson_id".to_string(),
+                        type_hint: TypeHint::String,
+                        description: "The advice lesson block to dismiss".to_string(),
+                    },
+                ],
+                ..Default::default()
+            });
+        }
+        ops
     }
 
     async fn execute_operation(
@@ -1970,6 +2002,48 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     "create_page_from_link — page-chain creation + link healing",
                 )
                 .with_response(Value::String(leaf_id)))
+            }
+            "dismiss_advice" => {
+                // Append the lesson to the anchor's `advice_suppressed` set
+                // (ADR 0021/0022). A SINGLE per-row `INSERT OR IGNORE` against
+                // the junction's PRIMARY KEY (anchor_id, lesson_id): idempotent
+                // (a repeat dismiss is a PK-collision no-op) and inherently
+                // conflict-free — there is no read-then-write, so two concurrent
+                // dismissals cannot lose an update the way a whole-set
+                // capture-then-replace would. Wrapped in `db_handle.transaction`
+                // per the repo rule that block writes are transactional (even
+                // though this junction's FK is IMMEDIATE, not the deferred-FK
+                // autocommit-no-rollback hazard). This is intentionally NOT the
+                // Loro provider's semantics: `LoroBlockOperations::dismiss_advice`
+                // does a whole-array LWW replace over one meta key, so two
+                // concurrent Loro dismissals of different lessons CAN clobber —
+                // the SQL junction has no such limitation.
+                let anchor_id = params
+                    .get("anchor_id")
+                    .and_then(|v| v.as_string())
+                    .ok_or("dismiss_advice: missing 'anchor_id' parameter")?;
+                let lesson_id = params
+                    .get("lesson_id")
+                    .and_then(|v| v.as_string())
+                    .ok_or("dismiss_advice: missing 'lesson_id' parameter")?;
+                let descriptor = self.edge_fields.get("advice_suppressed").ok_or(
+                    "dismiss_advice: 'advice_suppressed' edge field is not registered on this \
+                     provider",
+                )?;
+
+                let stmt = format!(
+                    "INSERT OR IGNORE INTO {jt} ({sc}, {tc}) VALUES ('{anchor}', '{lesson}')",
+                    jt = descriptor.join_table,
+                    sc = Self::quote_identifier(&descriptor.source_col),
+                    tc = Self::quote_identifier(&descriptor.target_col),
+                    anchor = anchor_id.replace('\'', "''"),
+                    lesson = lesson_id.replace('\'', "''"),
+                );
+                self.db_handle
+                    .transaction(vec![(stmt, vec![])])
+                    .await
+                    .map_err(|e| format!("dismiss_advice: {e}"))?;
+                Ok(OperationResult::irreversible(Vec::new()))
             }
             _ => Err(format!("Unknown operation: {}", op_name).into()),
         }
