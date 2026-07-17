@@ -181,4 +181,31 @@ mod tests {
         let sql = "SELECT \"weird LIMIT col\" FROM t";
         assert_eq!(strip_order_by(sql), sql);
     }
+
+    // Keyword that runs exactly to end-of-input: pins the `after > len` bound
+    // (kills `>`→`>=`) and the `after >= len` after-ok check (kills `>=`→`<`,
+    // which would index past the slice and panic).
+    #[test]
+    fn bare_trailing_keyword_at_eof_is_stripped() {
+        assert_eq!(strip_order_by("SELECT * FROM t LIMIT"), "SELECT * FROM t");
+    }
+
+    // Keyword immediately preceded by `)` with no whitespace: forces the
+    // second `bytes[idx - 1] == b')'` before-ok branch (kills the `idx - 1`
+    // index arithmetic mutants there, which the whitespace branch otherwise
+    // masks).
+    #[test]
+    fn keyword_right_after_close_paren_is_stripped() {
+        assert_eq!(
+            strip_order_by("SELECT * FROM (SELECT 1)LIMIT 5"),
+            "SELECT * FROM (SELECT 1)"
+        );
+    }
+
+    // Unterminated quote reaching end-of-input: pins the inner `i < len` scan
+    // bound (kills `<`→`<=`, which would read one past the slice and panic).
+    #[test]
+    fn unterminated_quote_to_eof_is_noop() {
+        assert_eq!(strip_order_by("SELECT '"), "SELECT '");
+    }
 }
