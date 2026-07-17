@@ -25,6 +25,7 @@ pub mod mcp_vtable;
 pub mod rest_transport;
 pub mod sync_freshness;
 
+pub use holon_core::SyncGate;
 pub use integration_config::IntegrationFileConfig;
 pub use integration_config::load_integration_configs;
 pub use mcp_integration::AuthMode;
@@ -34,6 +35,7 @@ pub use mcp_integration::McpIntegrationConfig;
 pub use mcp_integration::McpTransport;
 pub use mcp_integration::PendingOAuthFlows;
 pub use mcp_integration::SyncEvent;
+pub use mcp_integration::SyncLoopTuning;
 pub use mcp_integration::build_mcp_integration;
 pub use mcp_integration::spawn_sync_event_loop;
 pub use mcp_notification_handler::NotifyingClientHandler;

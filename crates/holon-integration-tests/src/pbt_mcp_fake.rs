@@ -292,7 +292,12 @@ impl PbtMcpIntegration {
         // Spawn serialized sync-event consumer + notification forwarder
         let engine_for_listener = sync_engine.clone();
         let (sync_event_tx, sync_event_rx) = tokio::sync::mpsc::unbounded_channel();
-        holon_mcp_client::spawn_sync_event_loop(sync_event_rx, engine_for_listener);
+        holon_mcp_client::spawn_sync_event_loop(
+            sync_event_rx,
+            engine_for_listener,
+            holon_mcp_client::SyncGate::opened(),
+            holon_mcp_client::SyncLoopTuning::test(),
+        );
         tokio::spawn(async move {
             let mut update_rx = update_rx;
             while let Some(uri) = update_rx.0.recv().await {
