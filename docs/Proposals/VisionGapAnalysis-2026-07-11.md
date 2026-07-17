@@ -6,6 +6,27 @@ the integration tree. Question answered (Martin's framing): the vision's workflo
 personalities must be definable AT RUNTIME AS DATA (blocks, profiles, queries, render DSL) — what
 fundamental generic functionality is still missing?
 
+## Status (2026-07-17)
+
+Tree-verified sweep (scout, 2026-07-17):
+
+- **C2 provenance + history — LANDED.** `_provenance` properties on blocks + `block_history`
+  relation with deterministic `op_group` sequencing, queryable via `HistoryStore`
+  (`crates/holon-api/src/history_store.rs`) and joinable by matviews/PRQL.
+- **C4 derived fields remainder — LANDED** per the 2026-07-16 ruling: `Computation::Case`
+  (`crates/holon-api/src/computation.rs`), A2 subset parser → seat A / Rhai fallback seat B,
+  `block_derived` sidecar matview + CDC watcher (`crates/holon-turso/src/schema_modules.rs`,
+  `crates/holon-turso/tests/derived_field_sidecar.rs`); json_extract-in-IVM spike proven.
+  Detail: `docs/Plans/DERIVED-FIELDS-A2.md`.
+- **C8 increment 3 — LANDED** (no `activate_perspective` op by design — switching is ordinary
+  `set_field` on `ACTIVE_PERSPECTIVE_PROPERTY`); both render arms resolve the active
+  perspective (`block_domain::render_root_slot`, `loro_ui_watcher::derive_render_expr`).
+- **Remaining open**: C7 dictionary-as-blocks (verb dict still hardcoded,
+  `crates/holon-petri/src/parser.rs` — `parse_with_dict` seam exists) and C1 rest
+  background runner (fail-loud stub at `crates/holon-mcp-client/src/mcp_integration.rs:346`;
+  poll-only runner missing) + leases/read-write (ruling still needed). Both in flight
+  2026-07-17.
+
 ## Status (2026-07-16)
 
 Further landings since 2026-07-15 (verified against the tree):
