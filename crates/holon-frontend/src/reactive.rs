@@ -2900,13 +2900,19 @@ fn maybe_mirror_navigation_focus(ui_state: &UiState, intent: &crate::operations:
         // dispatched op — clicks call `set_focus` directly and split/join set
         // it from their op result; see ADR 0010.)
         Ok(NavigationOp::Focus) => {
-            let block_id = intent
-                .params
-                .get("block_id")
-                .and_then(|v| v.as_string())
-                // ALLOW(entity_uri_from_raw): block_id from intent.params Value map
-                // (operation-intent ingest)
-                .map(|s| EntityUri::from_raw(s));
+            let block_id = intent.params.get("block_id").and_then(|v| v.as_string());
+            // End-to-end latency: navigation is a first-class interaction.
+            // Start the interaction clock keyed on the focused block; the
+            // `latency_e2e` correlator closes it (stage="e2e", action="navigate")
+            // when the page's rows land in a LiveData mirror — a child row
+            // carries `parent_id = block_id`. Tokenless (reads carry no
+            // `write_seq`).
+            if let Some(target) = block_id {
+                holon_api::latency_e2e::interaction_dispatched("navigate", target, None);
+            }
+            // ALLOW(entity_uri_from_raw): block_id from intent.params Value map
+            // (operation-intent ingest)
+            let block_id = block_id.map(EntityUri::from_raw);
             // ALLOW(direct_focus_mutation): mirror of navigation.focus into UiState for
             // value-fn graph; intentional, see surrounding comment.
             ui_state.set_focus(block_id);
@@ -3398,6 +3404,27 @@ mod tests {
         params.insert("region".to_string(), Value::String(region.to_string()));
         params.insert("block_id".to_string(), Value::String(block_id.to_string()));
         crate::operations::OperationIntent::new("navigation".into(), "focus".to_string(), params)
+    }
+
+    /// The real navigation wiring must start the end-to-end latency clock:
+    /// driving a `navigation.focus` intent through
+    /// `maybe_mirror_navigation_focus` (the path both `dispatch_intent` and
+    /// `dispatch_intent_sync` take) must enroll a `navigate` interaction
+    /// for the focused `block_id` in the process-global `latency_e2e`
+    /// registry. A unique target keeps this hermetic under the parallel
+    /// runner. Guards against a regression where nav ops carry `block_id`
+    /// (not `id`) and so slip past the clock.
+    #[test]
+    fn navigation_focus_starts_latency_clock() {
+        let ui = UiState::new();
+        let target = "block:nav-latency-clock-probe";
+        maybe_mirror_navigation_focus(&ui, &nav_focus_intent("main", target));
+        assert!(
+            holon_api::latency_e2e::pending_targets()
+                .iter()
+                .any(|t| t == target),
+            "navigation.focus must enroll a latency interaction for its block_id"
+        );
     }
 
     /// The main-panel scroll-reset signal (dogfood #5 row 146): a page
