@@ -107,7 +107,32 @@ pub fn write_seq_from_params(params: &HashMap<String, crate::Value>) -> Option<W
 pub fn interaction_dispatched(action: &str, target: &str, seq: Option<WriteSeq>) {
     let mut pending = PENDING.lock().expect("latency_e2e mutex poisoned");
     let now = Instant::now();
-    pending.retain(|e| now.duration_since(e.t0) < EXPIRY);
+    pending.retain(|e| {
+        if now.duration_since(e.t0) < EXPIRY {
+            return true;
+        }
+        // Fail-loud disclosure: a navigation interaction that never saw its
+        // target's rows within EXPIRY. Some warm navigations legitimately
+        // expire (the page was already materialized, so no CDC batch arrives);
+        // but a persistent stream of these on freshly-materialized pages means
+        // the dispatched `block_id` and the delivered `parent_id` disagree on
+        // scheme, so the correlation silently never closes. Surface it as a
+        // greppable line instead of dropping it — the alternative (this
+        // module's original silent drop) is what let the whole nav-latency
+        // gap stay invisible. Write entries keep the documented silent-expiry
+        // (no-op re-commits are expected to lapse), so only navigate warns.
+        if e.action == "navigate" {
+            tracing::warn!(
+                target: "holon_latency",
+                stage = "e2e_expired",
+                action = %e.action,
+                block = %e.target,
+                waited_ms = now.duration_since(e.t0).as_millis() as u64,
+                "holon_latency: navigation interaction expired without delivered rows",
+            );
+        }
+        false
+    });
     if pending.len() >= MAX_PENDING {
         pending.remove(0);
     }
@@ -118,6 +143,19 @@ pub fn interaction_dispatched(action: &str, target: &str, seq: Option<WriteSeq>)
         t0: now,
     });
     PENDING_LEN.store(pending.len(), Ordering::Release);
+}
+
+/// Diagnostic inspection of the correlation registry: the targets of all
+/// currently-pending interactions. Lets another crate prove the dispatch
+/// wiring started the clock (e.g. that `navigation.focus` enrolled its
+/// `block_id`) without reaching into this module's internals.
+pub fn pending_targets() -> Vec<String> {
+    PENDING
+        .lock()
+        .expect("latency_e2e mutex poisoned")
+        .iter()
+        .map(|p| p.target.clone())
+        .collect()
 }
 
 /// Report the entities made visible by an applied `LiveData` batch, as
@@ -165,8 +203,8 @@ pub fn rows_delivered<'a>(
 /// 1. **Exact op-instance match** — if the batch delivered a `WriteSeq` equal
 ///    to some pending entry's token, that entry is the winner (the newest such
 ///    on a tie). This closes exactly the op instance that produced the delta.
-/// 2. **Tokenless fallback** — else, if the batch delivered any tokenless row
-///    for the target, the winner is the *newest* pending entry for that target.
+/// 2. **Tokenless path** — else, if the batch delivered any tokenless row for
+///    the target, the winner is the *newest* pending entry for that target.
 /// 3. Otherwise (only non-matching tokens) nothing is closed — the delta
 ///    belongs to an untracked dispatch; mis-attributing it would be worse than
 ///    emitting nothing.
@@ -202,7 +240,7 @@ fn close_delivered<S: AsRef<str>>(
                 winner = Some(i);
             }
         }
-        // 2. tokenless fallback — newest entry for the target (any token state).
+        // 2. tokenless path — newest entry for the target (any token state).
         if winner.is_none() && has_tokenless {
             for (i, p) in pending.iter().enumerate() {
                 if p.target != target {
@@ -368,5 +406,39 @@ mod tests {
         rows_delivered("block", [("block:unrelated", None)]);
         let pending = PENDING.lock().unwrap();
         assert!(pending.iter().any(|p| p.target == "block:e2e-test-b"));
+    }
+
+    /// Navigation is a first-class e2e interaction: dispatched tokenless keyed
+    /// on the focused page id, closed when the page's child rows land. In prod
+    /// a child row carries `parent_id = page_id`, which `LiveData::subscribe`
+    /// emits as a tokenless delivery for the page id — closing the `navigate`
+    /// entry and yielding the interaction→rows-visible measurement.
+    #[test]
+    fn navigation_closes_on_page_child_row() {
+        let base = Instant::now();
+        let mut pending = vec![pend("navigate", "block:page", None, base)];
+        let now = base + Duration::from_millis(12);
+        // The page's child row delivers a tokenless entry for the page id
+        // (via the child's `parent_id`).
+        let closed = close_delivered(&mut pending, &[("block:page", None)], now);
+        assert_eq!(closed.len(), 1, "navigation produces one e2e measurement");
+        assert_eq!(closed[0].action, "navigate");
+        assert_eq!(closed[0].ms, 12);
+        assert!(pending.is_empty(), "the navigate entry is consumed");
+    }
+
+    /// End-to-end through the process-global registry: a dispatched navigation
+    /// closes when the page's rows are delivered, so a `stage="e2e"`
+    /// `action="navigate"` event is emitted (the emit is unconditional once an
+    /// entry closes).
+    #[test]
+    fn global_navigation_dispatch_and_delivery_clears_entry() {
+        interaction_dispatched("navigate", "block:e2e-nav-test", None);
+        rows_delivered("block", [("block:e2e-nav-test", None)]);
+        let pending = PENDING.lock().unwrap();
+        assert!(
+            pending.iter().all(|p| p.target != "block:e2e-nav-test"),
+            "navigation entry must be consumed when the page's rows land"
+        );
     }
 }

@@ -1009,6 +1009,30 @@ fn full_sql_tracing() -> bool {
     *FULL.get_or_init(|| std::env::var("HOLON_TRACE_SQL").is_ok())
 }
 
+/// The object name a DDL statement targets (the matview/table/index name),
+/// for the `holon_latency` `matview_ddl` stage. Best-effort token scan: the
+/// name follows the `VIEW`/`TABLE`/`INDEX` keyword, past any `IF NOT EXISTS`.
+fn ddl_target_name(sql: &str) -> &str {
+    let mut tokens = sql.split_whitespace();
+    while let Some(tok) = tokens.next() {
+        if tok.eq_ignore_ascii_case("view")
+            || tok.eq_ignore_ascii_case("table")
+            || tok.eq_ignore_ascii_case("index")
+        {
+            for name in tokens.by_ref() {
+                if name.eq_ignore_ascii_case("if")
+                    || name.eq_ignore_ascii_case("not")
+                    || name.eq_ignore_ascii_case("exists")
+                {
+                    continue;
+                }
+                return name.trim_matches(|c: char| c == '"' || c == '`' || c == '(');
+            }
+        }
+    }
+    "ddl"
+}
+
 fn trace_sql(tag: &str, sql: &str) {
     if full_sql_tracing() {
         // In release builds, workspace-hack's `release_max_level_info` compiles
@@ -1946,6 +1970,13 @@ impl TursoBackend {
     /// Handle a DDL command
     async fn handle_ddl(conn: &turso::Connection, sql: &str) -> Result<()> {
         trace_sql("actor_ddl", sql);
+        // Latency stage (matview/read-path maintenance): a `CREATE MATERIALIZED
+        // VIEW watch_view_*` cold-materializes here on page navigation and can
+        // take seconds (recursive IVM warm-up). This is the choke point every
+        // watch-view maintenance passes through — one greppable line per DDL,
+        // so a 12s cold materialization is visible in a log. Greppable via
+        // target="holon_latency".
+        let t_ddl = std::time::Instant::now();
 
         // The actor processes commands sequentially, so an unbounded DDL await
         // parks the *entire* DB actor: every later query/exec queues behind it
@@ -1987,6 +2018,13 @@ impl TursoBackend {
             })?;
         }
 
+        tracing::debug!(
+            target: "holon_latency",
+            stage = "matview_ddl",
+            view = ddl_target_name(sql),
+            ms = t_ddl.elapsed().as_millis() as u64,
+            "holon_latency",
+        );
         tracing::debug!("[TursoBackend::Actor] DDL completed successfully");
         Ok(())
     }

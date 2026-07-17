@@ -57,6 +57,23 @@ fn env_filter() -> EnvFilter {
     EnvFilter::try_from_default_env().unwrap_or_else(|_| DEFAULT_FILTER.into())
 }
 
+/// Whether to install the live latency-SLO oracle layer. `HOLON_ORACLES=off`
+/// opts out everywhere. Otherwise on by default in debug; in release it is
+/// opt-in via `HOLON_LATENCY_SLO` (`1`/`true`/`on`) so dogfooding a release
+/// build can still surface SLO breaches.
+fn latency_slo_enabled() -> bool {
+    if !holon_oracles::OracleMode::from_env().enabled() {
+        return false;
+    }
+    if cfg!(debug_assertions) {
+        return true;
+    }
+    matches!(
+        std::env::var("HOLON_LATENCY_SLO").as_deref(),
+        Ok("1") | Ok("true") | Ok("on")
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LogFormat {
     Human,
@@ -194,12 +211,13 @@ fn init_with_destinations(destinations: &[LogDest]) -> LogGuard {
     #[cfg(feature = "chrome-trace")]
     let (chrome_layer, chrome_guard) = crate::memory_monitor::chrome_trace::layer();
 
-    // Live-oracle latency SLO (debug builds): watch the existing
-    // `holon_latency` stage events (dispatch/rows always; projection when
-    // CRDT is on); a stage slower than the SLO becomes a violation (banner +
-    // error log). HOLON_ORACLES=off opts out; HOLON_ORACLES_SLO_MS tunes.
-    #[cfg(debug_assertions)]
-    if holon_oracles::OracleMode::from_env().enabled() {
+    // Live-oracle latency SLO: watch the existing `holon_latency` stage events
+    // (dispatch/rows always; projection when CRDT is on); a stage slower than
+    // the SLO becomes a violation (banner + error log). Always compiled;
+    // enabled by default in debug, opt-in in release via `HOLON_LATENCY_SLO=1`
+    // so dogfooding a release build can still catch SLO breaches.
+    // HOLON_ORACLES=off opts out everywhere; HOLON_ORACLES_SLO_MS tunes.
+    if latency_slo_enabled() {
         layers.push(Box::new(holon_oracles::latency::LatencySloLayer::from_env()));
     }
 
