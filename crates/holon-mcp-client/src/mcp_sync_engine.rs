@@ -24,6 +24,7 @@ use tracing::info;
 use tracing::info_span;
 use tracing::warn;
 
+use crate::entity_mirror::EntityMirror;
 use crate::mcp_sidecar::McpSidecar;
 use crate::mcp_sync_strategy::SyncStrategy;
 use crate::mcp_sync_strategy::expand_uri_template;
@@ -56,6 +57,187 @@ fn fetched_matches_cached(fetched: &DynamicEntity, cached: &DynamicEntity) -> bo
     true
 }
 
+/// Convert a fetched JSON record into a `DynamicEntity`, prefixing the ID
+/// column with the entity's URI scheme.
+fn record_to_entity(
+    entity_name: &str,
+    id_col: &str,
+    scheme: &str,
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> DynamicEntity {
+    let mut entity = DynamicEntity::new(entity_name);
+    for (key, json_val) in obj {
+        let value = json_value_to_holon_value(json_val);
+        if key == id_col {
+            match prefixed_id(scheme, &value) {
+                Some(prefixed) => entity.set(key.as_str(), Value::String(prefixed)),
+                None => entity.set(key.as_str(), value),
+            }
+        } else {
+            entity.set(key.as_str(), value);
+        }
+    }
+    entity
+}
+
+/// Extract the prefixed ID from a fetched JSON record as an `EntityUri`.
+fn record_id(
+    id_col: &str,
+    scheme: &str,
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Option<EntityUri> {
+    let val = obj.get(id_col)?;
+    let raw = prefixed_id(scheme, &json_value_to_holon_value(val))?;
+    // ALLOW(entity_uri_from_raw): remote MCP JSON record id at sync boundary
+    Some(EntityUri::from_raw(&raw))
+}
+
+/// Full-sync diff: seed the mirror once, then diff the freshly fetched records
+/// against the engine-owned mirror (never re-reading the `DatabaseActor`),
+/// apply the resulting `Change` batch transactionally, and write the same batch
+/// through to the mirror so it stays consistent with the cache table.
+async fn apply_full_sync(
+    entity_name: &str,
+    id_col: &str,
+    scheme: &str,
+    records: &[serde_json::Map<String, serde_json::Value>],
+    mirror: &EntityMirror,
+    cache: &dyn EntityCache<DynamicEntity>,
+) -> Result<usize> {
+    // Lazily seed ONCE from the cache; every later full sync diffs the mirror.
+    if !mirror.is_seeded() {
+        let rows = cache.get_all().await?;
+        mirror.seed(rows);
+    }
+
+    let snapshot = mirror.snapshot();
+    let existing_by_id: HashMap<EntityUri, &DynamicEntity> = snapshot
+        .iter()
+        .filter_map(|e| {
+            let id_str = match e.get(id_col) {
+                Some(Value::String(s)) => s.clone(),
+                Some(Value::Integer(n)) => n.to_string(),
+                _ => return None,
+            };
+            // ALLOW(entity_uri_from_raw): mirror row id column, already scheme-prefixed
+            Some((EntityUri::from_raw(&id_str), e.as_ref()))
+        })
+        .collect();
+    let existing_ids: HashSet<EntityUri> = existing_by_id.keys().cloned().collect();
+
+    let fetched_ids: HashSet<EntityUri> = records
+        .iter()
+        .filter_map(|obj| record_id(id_col, scheme, obj))
+        .collect();
+
+    let new_ids_count = fetched_ids.difference(&existing_ids).count();
+    let overlapping_count = fetched_ids.len() - new_ids_count;
+    let removed_ids: Vec<EntityUri> = existing_ids.difference(&fetched_ids).cloned().collect();
+
+    let mut changes: Vec<Change<DynamicEntity>> = Vec::new();
+    let mut updated_count = 0usize;
+
+    for obj in records {
+        let Some(id) = record_id(id_col, scheme, obj) else {
+            continue;
+        };
+        let entity = record_to_entity(entity_name, id_col, scheme, obj);
+        match existing_by_id.get(&id) {
+            None => {
+                changes.push(Change::Created {
+                    data: entity,
+                    origin: ChangeOrigin::local_with_current_span(),
+                });
+            }
+            Some(cached) if !fetched_matches_cached(&entity, cached) => {
+                updated_count += 1;
+                changes.push(Change::Updated {
+                    id: id.to_string(),
+                    data: entity,
+                    origin: ChangeOrigin::local_with_current_span(),
+                });
+            }
+            Some(_) => {}
+        }
+    }
+
+    let new_count = changes
+        .iter()
+        .filter(|c| matches!(c, Change::Created { .. }))
+        .count();
+
+    for id in &removed_ids {
+        changes.push(Change::Deleted {
+            id: id.to_string(),
+            origin: ChangeOrigin::local_with_current_span(),
+        });
+    }
+
+    // Sequence: apply_batch (transactional) → on Ok write the SAME batch through
+    // to the mirror. On Err the mirror is left untouched (matches the rollback).
+    let applied = changes.len();
+    if !changes.is_empty() {
+        cache.apply_batch(&changes, None).await?;
+        mirror.apply(&changes);
+    }
+
+    info!(
+        entity = entity_name,
+        new = new_count,
+        updated = updated_count,
+        removed = removed_ids.len(),
+        unchanged = overlapping_count.saturating_sub(updated_count),
+        "sync_entity: full sync diff"
+    );
+
+    // Debug-only divergence guard: the mirror must match the real cache after a
+    // full sync. A mismatch means an external writer (e.g. a full-resync
+    // `clear_cache`) emptied the table without the engine resetting the mirror.
+    // Release builds rely on the mirror-consistency PBT instead.
+    #[cfg(debug_assertions)]
+    {
+        let cache_id_count = cache.get_all_ids().await?.len();
+        let mirror_len = mirror.len();
+        assert_eq!(
+            mirror_len, cache_id_count,
+            "mirror divergence for '{entity_name}': mirror has {mirror_len} rows, cache has \
+             {cache_id_count} — was the cache cleared without resetting the mirror?"
+        );
+    }
+
+    Ok(applied)
+}
+
+/// Incremental (cursor) sync: the server already filtered to new/changed
+/// records, so every record is a `Created`. Applies the batch to the cache and
+/// — if the mirror is already seeded — writes the batch through so a later full
+/// sync diffs correctly. If the mirror is not yet seeded, the eventual first
+/// full sync seeds from the cache (which already holds these rows).
+async fn apply_incremental(
+    entity_name: &str,
+    id_col: &str,
+    scheme: &str,
+    records: &[serde_json::Map<String, serde_json::Value>],
+    mirror: &EntityMirror,
+    cache: &dyn EntityCache<DynamicEntity>,
+) -> Result<usize> {
+    let changes: Vec<Change<DynamicEntity>> = records
+        .iter()
+        .map(|obj| Change::Created {
+            data: record_to_entity(entity_name, id_col, scheme, obj),
+            origin: ChangeOrigin::local_with_current_span(),
+        })
+        .collect();
+
+    if !changes.is_empty() {
+        cache.apply_batch(&changes, None).await?;
+        if mirror.is_seeded() {
+            mirror.apply(&changes);
+        }
+    }
+    Ok(changes.len())
+}
+
 /// Describes an FDW-backed vtable entity that should be refreshed on resource
 /// notifications.
 pub struct VtableSubscription {
@@ -86,6 +268,11 @@ pub struct McpSyncEngine {
     vtable_subscriptions: Vec<VtableSubscription>,
     /// Database handle for executing FDW cache refresh queries.
     db_handle: Option<DbHandle>,
+    /// One write-through in-memory mirror per sync-strategy entity, replacing
+    /// the per-fire `get_all_ids`/`get_all` DatabaseActor reads in the
+    /// full-sync diff. Seeded lazily on the first full sync; reset on
+    /// full-resync.
+    mirrors: HashMap<String, Arc<EntityMirror>>,
 }
 
 impl McpSyncEngine {
@@ -109,6 +296,22 @@ impl McpSyncEngine {
             })
             .collect();
 
+        // One mirror per sync-strategy entity, keyed by entity name. Each carries
+        // the entity's scheme (prefixed name) and id column so it can key rows
+        // exactly as the sync diff does. All start unseeded — seeded lazily on
+        // the first full sync.
+        let mirrors: HashMap<String, Arc<EntityMirror>> = strategies
+            .keys()
+            .map(|name| {
+                let entity_type = sidecar.prefixed_name(name).as_str().to_string();
+                let id_column = sidecar.id_column(name);
+                (
+                    name.clone(),
+                    Arc::new(EntityMirror::new(entity_type, id_column)),
+                )
+            })
+            .collect();
+
         Self {
             peer,
             strategies,
@@ -119,44 +322,18 @@ impl McpSyncEngine {
             sidecar,
             vtable_subscriptions,
             db_handle,
+            mirrors,
         }
     }
 
-    /// Convert a fetched JSON record into a `DynamicEntity`, prefixing the ID
-    /// column with the entity's URI scheme.
-    fn record_to_entity(
-        &self,
-        entity_name: &str,
-        id_col: &str,
-        scheme: &str,
-        obj: &serde_json::Map<String, serde_json::Value>,
-    ) -> DynamicEntity {
-        let mut entity = DynamicEntity::new(entity_name);
-        for (key, json_val) in obj {
-            let value = json_value_to_holon_value(json_val);
-            if key == id_col {
-                match prefixed_id(scheme, &value) {
-                    Some(prefixed) => entity.set(key.as_str(), Value::String(prefixed)),
-                    None => entity.set(key.as_str(), value),
-                }
-            } else {
-                entity.set(key.as_str(), value);
-            }
+    /// Reset every entity mirror to unseeded. Called at the start of a full
+    /// sweep (`SyncableProvider::sync`), which runs after the `full_sync`
+    /// operation clears the cache tables + tokens — the mirrors re-seed from
+    /// the (now-empty) caches on the next per-entity diff.
+    fn reset_all_mirrors(&self) {
+        for mirror in self.mirrors.values() {
+            mirror.reset();
         }
-        entity
-    }
-
-    /// Extract the prefixed ID from a fetched JSON record as an `EntityUri`.
-    fn record_id(
-        &self,
-        id_col: &str,
-        scheme: &str,
-        obj: &serde_json::Map<String, serde_json::Value>,
-    ) -> Option<EntityUri> {
-        let val = obj.get(id_col)?;
-        let raw = prefixed_id(scheme, &json_value_to_holon_value(val))?;
-        // ALLOW(entity_uri_from_raw): remote MCP JSON record id at sync boundary
-        Some(EntityUri::from_raw(&raw))
     }
 
     /// Sync a single entity using its strategy.
@@ -203,20 +380,25 @@ impl McpSyncEngine {
         let entity_type = self.sidecar.prefixed_name(entity_name);
         let scheme = entity_type.as_str();
 
-        if let Some(new_cursor) = fetch_result.new_cursor.clone() {
-            // Incremental sync — server already filtered to new/changed records
-            let changes: Vec<Change<DynamicEntity>> = fetch_result
-                .records
-                .iter()
-                .map(|obj| Change::Created {
-                    data: self.record_to_entity(entity_name, &id_col, scheme, obj),
-                    origin: ChangeOrigin::local_with_current_span(),
-                })
-                .collect();
+        // The engine-owned mirror replaces the per-fire `get_all_ids`/`get_all`
+        // DatabaseActor reads: it is seeded once and kept consistent by
+        // write-through after every committed batch (the engine is the sole
+        // writer to this sync entity's cache table — enforced by the
+        // sync-vs-`vtable.write_through` config check at connect).
+        let mirror = self.mirrors.get(entity_name).ok_or_else(|| {
+            format!("sync_entity '{entity_name}': no in-memory mirror (engine wiring bug)")
+        })?;
 
-            if !changes.is_empty() {
-                cache.apply_batch(&changes, None).await?;
-            }
+        if let Some(new_cursor) = fetch_result.new_cursor.clone() {
+            let applied = apply_incremental(
+                entity_name,
+                &id_col,
+                scheme,
+                &fetch_result.records,
+                mirror,
+                cache,
+            )
+            .await?;
 
             self.token_store
                 .save_token(
@@ -228,107 +410,19 @@ impl McpSyncEngine {
 
             info!(
                 entity = entity_name,
-                records = changes.len(),
+                records = applied,
                 "sync_entity: incremental sync applied"
             );
         } else {
-            // Full sync — diff against existing cache to minimise writes.
-            // First pass: lightweight ID-only query to detect the common append-only case.
-            let existing_ids: HashSet<EntityUri> = cache.get_all_ids().await?.into_iter().collect();
-
-            let fetched_ids: HashSet<EntityUri> = fetch_result
-                .records
-                .iter()
-                .filter_map(|obj| self.record_id(&id_col, scheme, obj))
-                .collect();
-
-            let new_ids: HashSet<&EntityUri> = fetched_ids.difference(&existing_ids).collect();
-            let removed_ids: HashSet<&EntityUri> = existing_ids.difference(&fetched_ids).collect();
-            let overlapping_count = fetched_ids.len() - new_ids.len();
-
-            // If there are overlapping IDs, we need full rows to detect field-level
-            // changes. If it's purely append + delete (no overlap), skip the
-            // expensive get_all.
-            let (mut changes, updated_count) = if overlapping_count > 0 {
-                let existing: Vec<DynamicEntity> = cache.get_all().await?;
-                let existing_by_id: HashMap<EntityUri, &DynamicEntity> = existing
-                    .iter()
-                    .filter_map(|e| {
-                        let id_str = match e.get(&id_col) {
-                            Some(Value::String(s)) => s.clone(),
-                            Some(Value::Integer(n)) => n.to_string(),
-                            _ => return None,
-                        };
-                        // ALLOW(entity_uri_from_raw): DynamicEntity id-column string from
-                        // cache.get_all (no typed id)
-                        Some((EntityUri::from_raw(&id_str), e))
-                    })
-                    .collect();
-
-                let mut changes: Vec<Change<DynamicEntity>> = Vec::new();
-                let mut updated = 0usize;
-
-                for obj in &fetch_result.records {
-                    let Some(id) = self.record_id(&id_col, scheme, obj) else {
-                        continue;
-                    };
-                    let entity = self.record_to_entity(entity_name, &id_col, scheme, obj);
-                    match existing_by_id.get(&id) {
-                        None => {
-                            changes.push(Change::Created {
-                                data: entity,
-                                origin: ChangeOrigin::local_with_current_span(),
-                            });
-                        }
-                        Some(cached) if !fetched_matches_cached(&entity, cached) => {
-                            updated += 1;
-                            changes.push(Change::Updated {
-                                id: id.to_string(),
-                                data: entity,
-                                origin: ChangeOrigin::local_with_current_span(),
-                            });
-                        }
-                        Some(_) => {}
-                    }
-                }
-                (changes, updated)
-            } else {
-                // Pure append — all fetched records are new
-                let changes: Vec<Change<DynamicEntity>> = fetch_result
-                    .records
-                    .iter()
-                    .map(|obj| Change::Created {
-                        data: self.record_to_entity(entity_name, &id_col, scheme, obj),
-                        origin: ChangeOrigin::local_with_current_span(),
-                    })
-                    .collect();
-                (changes, 0)
-            };
-
-            for id in &removed_ids {
-                changes.push(Change::Deleted {
-                    id: id.to_string(),
-                    origin: ChangeOrigin::local_with_current_span(),
-                });
-            }
-
-            let new_count = changes
-                .iter()
-                .filter(|c| matches!(c, Change::Created { .. }))
-                .count();
-
-            if !changes.is_empty() {
-                cache.apply_batch(&changes, None).await?;
-            }
-
-            info!(
-                entity = entity_name,
-                new = new_count,
-                updated = updated_count,
-                removed = removed_ids.len(),
-                unchanged = overlapping_count.saturating_sub(updated_count),
-                "sync_entity: full sync diff"
-            );
+            apply_full_sync(
+                entity_name,
+                &id_col,
+                scheme,
+                &fetch_result.records,
+                mirror,
+                cache,
+            )
+            .await?;
         }
 
         Ok(())
@@ -589,6 +683,17 @@ impl SyncableProvider for McpSyncEngine {
         let span = info_span!("mcp_full_sync", provider = %self.provider_name);
         async {
             info!("mcp_full_sync: starting");
+
+            // Full sweep is the engine's full-resync entry point: it runs at the
+            // initial boot sync and when the `full_sync` operation clears every
+            // cache table + sync token before re-syncing. In the latter case the
+            // tables were just emptied, so the mirrors must be reset here (they
+            // re-seed from the now-empty cache on the first per-entity diff) —
+            // this is how the engine is "informed" of the external clear without
+            // a cross-crate wire from the operation dispatcher. Routine
+            // notification/poll syncs never call `sync`, so their mirrors persist
+            // and keep serving diffs with zero DatabaseActor reads.
+            self.reset_all_mirrors();
 
             for (entity_name, strategy) in &self.strategies {
                 let cache = match self.caches.get(entity_name) {

@@ -566,6 +566,30 @@ async fn finish_integration(
         }
     }
 
+    // Fail loud on a sync-vs-write_through clash: the engine's in-memory mirror
+    // assumes it is the SOLE writer to a sync entity's cache table (it keeps the
+    // mirror consistent by write-through after each committed batch). A
+    // `vtable.write_through` entity has the FDW cursor writing the same table for
+    // IVM — a second, unobserved writer that would silently desync the mirror.
+    // These two mechanisms must never target the same cache table.
+    for (entity_name, entity_config) in &sidecar.entities {
+        let has_sync = entity_config.sync.is_some();
+        let has_write_through = entity_config
+            .vtable
+            .as_ref()
+            .is_some_and(|v| v.write_through);
+        if has_sync && has_write_through {
+            let table = sidecar.prefixed_name(entity_name).table_name();
+            anyhow::bail!(
+                "provider '{provider_name}': entity '{entity_name}' declares both a `sync` \
+                 strategy and `vtable.write_through` on cache table '{table}'. The sync engine's \
+                 in-memory mirror requires the engine to be the sole writer of a sync entity's \
+                 table; a write-through FDW cursor on the same table would desync it. Split them \
+                 into separate entities/tables or drop one."
+            );
+        }
+    }
+
     // Build caches and strategies.
     // Table names and ID schemes use prefixed names (e.g. "cc_session"),
     // but internal keys use original entity names (e.g. "session").
