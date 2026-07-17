@@ -13,6 +13,7 @@
 //! - `TaskOperations`: Task-specific operations (set_state, set_priority,
 //!   set_due_date)
 
+pub mod block_op_catalog;
 pub mod block_ordering;
 pub mod canonical_path;
 pub mod cell;
