@@ -242,6 +242,11 @@ jobs:
           echo "VERSION_CODE=$((major * 10000 + minor * 100 + patch))" >> "$GITHUB_ENV"
 
       - name: Build Android .so
+        env:
+          # yeslogic-fontconfig-sys build script runs pkg-config, which cannot
+          # cross-compile for Android; dlopen mode skips it (GPUI dlopens
+          # libfontconfig at runtime). Mirrors frontends/gpui/justfile.
+          RUST_FONTCONFIG_DLOPEN: on
         run: |
           # rust-toolchain.toml pins nightly-2026-07-15; the dtolnay `targets:` input
           # added the Android std to plain `nightly`, not the pin, so cargo ndk (on the
