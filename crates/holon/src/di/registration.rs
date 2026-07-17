@@ -116,7 +116,20 @@ async fn init_sync_token_store(db_handle: DbHandle) -> Arc<dyn SyncTokenStore> {
 fn build_graph_schema_registry(type_registry: &TypeRegistry) -> GraphSchemaRegistry {
     let mut registry = GraphSchemaRegistry::new();
 
-    for type_def in type_registry.all() {
+    for mut type_def in type_registry.all() {
+        // `sort_key` is a physical `block` column (the internal fractional
+        // index) that lives outside the `Block` struct (ADR 0005), so the
+        // derived type_def omits it. GQL panel queries legitimately ORDER BY
+        // `d.sort_key`, so expose it as a queryable graph property. `RETURN d`
+        // projects `node.*`, so this only enables property references — it does
+        // not change the projected column set.
+        if type_def.graph_label.as_deref() == Some("block")
+            && !type_def.fields.iter().any(|f| f.name == "sort_key")
+        {
+            type_def
+                .fields
+                .push(holon_api::entity::FieldSchema::new("sort_key", "TEXT"));
+        }
         registry.register_type(type_def);
     }
 
@@ -588,4 +601,107 @@ pub fn register_core_services_with_backend(
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod bundled_gql_query_smoke {
+    //! Boot the production GQL `GraphSchema` (the same schema modules the app
+    //! wires) and compile every shipped/desk GQL query against it. Catches the
+    //! "a bundled query references a property the entity does not declare"
+    //! class (BugFunnel row 37: `UnknownProperty { entity: "focus_root",
+    //! property: "added_ts" }`) at test time instead of as a permanently-broken
+    //! panel at boot.
+
+    use super::build_graph_schema_registry;
+    use super::create_default_registry;
+
+    /// Extract the body of every `#+BEGIN_SRC holon_gql … #+END_SRC` block.
+    fn extract_gql_blocks(org: &str) -> Vec<String> {
+        let mut blocks = Vec::new();
+        let mut current: Option<Vec<&str>> = None;
+        for line in org.lines() {
+            let trimmed = line.trim_start();
+            if current.is_none() {
+                if trimmed
+                    .to_ascii_lowercase()
+                    .starts_with("#+begin_src holon_gql")
+                {
+                    current = Some(Vec::new());
+                }
+            } else if trimmed.to_ascii_lowercase().starts_with("#+end_src") {
+                let body = current.take().unwrap().join("\n");
+                blocks.push(body);
+            } else {
+                current.as_mut().unwrap().push(line);
+            }
+        }
+        assert!(
+            current.is_none(),
+            "unterminated #+BEGIN_SRC holon_gql block"
+        );
+        blocks
+    }
+
+    fn compile(gql: &str, schema: &gql_transform::resolver::GraphSchema) -> Result<(), String> {
+        let parsed =
+            gql_parser::parse(gql).map_err(|e| format!("GQL parse error: {}", e.message))?;
+        let query = match parsed {
+            gql_parser::QueryOrUnion::Query(q) => q,
+            gql_parser::QueryOrUnion::Union(_) => {
+                return Err("UNION queries not supported".into());
+            }
+        };
+        gql_transform::transform(&query, schema)
+            .map(|_| ())
+            .map_err(|e| format!("GQL transform error: {e:?}"))
+    }
+
+    #[test]
+    fn every_bundled_and_desk_gql_query_compiles_against_booted_schema() {
+        let type_registry = create_default_registry().expect("default TypeRegistry");
+        let schema = build_graph_schema_registry(&type_registry).build();
+
+        // Canonical desk panel queries: the forms the frontend emits and that
+        // real vaults persist on disk. The right-sidebar query orders by
+        // `fr.added_ts`, which is the exact reference that regressed.
+        let mut corpus: Vec<(String, String)> = vec![
+            (
+                "desk:right-sidebar".into(),
+                "MATCH (fr:focus_root), (root:block)<-[:CHILD_OF*0..20]-(d:block) WHERE \
+                 fr.region = 'right' AND root.id = fr.root_id RETURN d ORDER BY fr.added_ts \
+                 DESC, d.sort_key"
+                    .into(),
+            ),
+            (
+                "desk:main-panel".into(),
+                "MATCH (fr:focus_root), (root:block)<-[:CHILD_OF*0..20]-(d:block) WHERE \
+                 fr.region = 'main' AND root.id = fr.root_id RETURN d"
+                    .into(),
+            ),
+        ];
+
+        // Any holon_gql block shipped in the default vault assets (future-proof:
+        // currently the panels ship as holon_sql, but if a GQL block is ever
+        // bundled it is auto-covered here).
+        let index_org = include_str!("../../../../assets/default/index.org");
+        for (i, body) in extract_gql_blocks(index_org).into_iter().enumerate() {
+            corpus.push((format!("assets/default/index.org#gql[{i}]"), body));
+        }
+
+        let failures: Vec<String> = corpus
+            .iter()
+            .filter_map(|(name, q)| {
+                compile(q, &schema)
+                    .err()
+                    .map(|e| format!("  {name}: {e}\n    query: {q}"))
+            })
+            .collect();
+
+        assert!(
+            failures.is_empty(),
+            "shipped/bundled GQL queries failed to compile against the booted schema \
+             (broken-at-boot):\n{}",
+            failures.join("\n")
+        );
+    }
 }

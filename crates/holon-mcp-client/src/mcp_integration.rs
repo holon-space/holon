@@ -11,6 +11,7 @@ use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::Instrument;
+use tracing::error;
 use tracing::info;
 use tracing::warn;
 
@@ -23,6 +24,7 @@ use crate::mcp_provider::McpRunningService;
 use crate::mcp_provider::connect_mcp_child_with_handler;
 use crate::mcp_provider::connect_mcp_oauth_with_handler;
 use crate::mcp_provider::connect_mcp_with_handler;
+use crate::mcp_resource_discovery::is_concrete_uri;
 use crate::mcp_resource_discovery::parse_resource_template_meta;
 use crate::mcp_sidecar::EntityConfig;
 use crate::mcp_sidecar::McpSidecar;
@@ -427,6 +429,35 @@ async fn build_oauth_integration(
 
 /// Common integration finalization: build caches, discover resources, build
 /// strategies, subscribe.
+/// Build a sync strategy for every entity that declares a `SyncConfig`,
+/// collecting per-entity failures instead of aborting on the first one.
+///
+/// Returns `(strategies, failures)`. A failure means that entity will not
+/// sync, but the rest of the integration is unaffected — this is the
+/// disclosed-degradation contract that keeps a single bad (often
+/// auto-discovered) entity from taking down the whole integration.
+fn build_entity_strategies(
+    entities: &HashMap<String, EntityConfig>,
+) -> (
+    HashMap<String, Box<dyn SyncStrategy>>,
+    Vec<(String, anyhow::Error)>,
+) {
+    let mut strategies: HashMap<String, Box<dyn SyncStrategy>> = HashMap::new();
+    let mut failures: Vec<(String, anyhow::Error)> = Vec::new();
+    for (entity_name, entity_config) in entities {
+        let Some(ref sync_config) = entity_config.sync else {
+            continue;
+        };
+        match sync_config.into_strategy() {
+            Ok(strategy) => {
+                strategies.insert(entity_name.clone(), strategy);
+            }
+            Err(err) => failures.push((entity_name.clone(), err)),
+        }
+    }
+    (strategies, failures)
+}
+
 async fn finish_integration(
     peer: rmcp::service::Peer<rmcp::RoleClient>,
     service: McpRunningService,
@@ -477,10 +508,34 @@ async fn finish_integration(
 
             let short_name = meta.entity_name.clone();
 
-            info!(
-                "[finish_integration] Auto-discovered entity '{}' from resource template '{}'",
-                meta.entity_name, meta.uri_template
-            );
+            // Only concrete templates back a standalone list sync. A
+            // parameterized template (e.g. `.../{project_id}/plan`) has no
+            // parent value here, so it is registered as a schema-only entity
+            // (cache table, reachable via parent fan-out) rather than given an
+            // unbuildable `list_resource` strategy — which previously aborted
+            // the WHOLE integration at `into_strategy` (BugFunnel row 27).
+            let sync = if is_concrete_uri(&meta.uri_template) {
+                info!(
+                    "[finish_integration] Auto-discovered entity '{}' from resource template '{}'",
+                    meta.entity_name, meta.uri_template
+                );
+                Some(SyncConfig {
+                    list_tool: None,
+                    extract_path: None,
+                    list_params: HashMap::new(),
+                    cursor: None,
+                    list_resource: Some(meta.uri_template),
+                    uri_params: HashMap::new(),
+                    interval: None,
+                })
+            } else {
+                info!(
+                    "[finish_integration] Auto-discovered entity '{}' from PARAMETERIZED template \
+                     '{}' — registered schema-only (no standalone list sync; needs a parent key)",
+                    meta.entity_name, meta.uri_template
+                );
+                None
+            };
 
             sidecar.entities.insert(
                 meta.entity_name.clone(),
@@ -489,15 +544,7 @@ async fn finish_integration(
                     source_name: None,
                     id_column: Some(id_column),
                     schema: meta.fields,
-                    sync: Some(SyncConfig {
-                        list_tool: None,
-                        extract_path: None,
-                        list_params: HashMap::new(),
-                        cursor: None,
-                        list_resource: Some(meta.uri_template),
-                        uri_params: HashMap::new(),
-                        interval: None,
-                    }),
+                    sync,
                     vtable: None,
                     profile_variants: Vec::new(),
                 },
@@ -510,7 +557,6 @@ async fn finish_integration(
     // but internal keys use original entity names (e.g. "session").
     let mut caches: HashMap<String, Arc<dyn EntityCache<DynamicEntity>>> = HashMap::new();
     let mut entity_readers: HashMap<String, Arc<dyn EntityFieldReader>> = HashMap::new();
-    let mut strategies: HashMap<String, Box<dyn SyncStrategy>> = HashMap::new();
 
     for (entity_name, entity_config) in &sidecar.entities {
         let entity = sidecar.prefixed_name(entity_name);
@@ -526,13 +572,18 @@ async fn finish_integration(
             );
             caches.insert(entity_name.clone(), cache);
         }
+    }
 
-        if let Some(ref sync_config) = entity_config.sync {
-            let strategy = sync_config.into_strategy().with_context(|| {
-                format!("[finish_integration] Failed to build strategy for '{entity_name}'")
-            })?;
-            strategies.insert(entity_name.clone(), strategy);
-        }
+    // Build sync strategies with disclosed degradation: one entity whose
+    // `SyncConfig` cannot form a strategy is skipped and reported loudly, so a
+    // single bad entity (e.g. an auto-discovered one) never sinks the whole
+    // integration. The declared, working entities survive (BugFunnel row 27).
+    let (strategies, strategy_failures) = build_entity_strategies(&sidecar.entities);
+    for (entity_name, err) in &strategy_failures {
+        error!(
+            "[finish_integration] Entity '{entity_name}' will NOT sync — failed to build strategy: \
+             {err:#}. Integration '{provider_name}' still connects (disclosed degradation)."
+        );
     }
 
     // Register foreign tables for entities with vtable config.
@@ -832,5 +883,89 @@ impl EntityFieldReader for DynamicEntityFieldReader {
             let entity: Option<DynamicEntity> = self.0.get_by_id(&id).await?;
             Ok(entity.map(|e| e.to_entity().fields.into_iter().collect()))
         })
+    }
+}
+
+#[cfg(test)]
+mod integration_resilience_tests {
+    //! BugFunnel row 27: an auto-discovered entity whose resource template has
+    //! an unexpandable param used to abort the WHOLE integration at
+    //! `into_strategy`. These tests pin the two fixes: (1) a parameterized
+    //! template is not turned into an unbuildable list sync, and (2) even if a
+    //! bad strategy config slips through, it is skipped (not fatal) so the
+    //! declared entities survive.
+
+    use super::*;
+    use crate::mcp_resource_discovery::is_concrete_uri;
+
+    fn entity(sync: Option<SyncConfig>) -> EntityConfig {
+        EntityConfig {
+            short_name: None,
+            source_name: None,
+            id_column: Some("id".into()),
+            schema: Vec::new(),
+            sync,
+            vtable: None,
+            profile_variants: Vec::new(),
+        }
+    }
+
+    fn tool_sync() -> SyncConfig {
+        SyncConfig {
+            list_tool: Some("list_sessions".into()),
+            extract_path: Some("data".into()),
+            list_params: HashMap::new(),
+            cursor: None,
+            list_resource: None,
+            uri_params: HashMap::new(),
+            interval: None,
+        }
+    }
+
+    /// The exact unbuildable config auto-discovery produced pre-fix: a
+    /// parameterized `list_resource` with no `uri_params` to expand it.
+    fn parameterized_resource_sync() -> SyncConfig {
+        SyncConfig {
+            list_tool: None,
+            extract_path: None,
+            list_params: HashMap::new(),
+            cursor: None,
+            list_resource: Some("claude-history://projects/{project_id}/plan".into()),
+            uri_params: HashMap::new(),
+            interval: None,
+        }
+    }
+
+    #[test]
+    fn parameterized_template_is_not_a_listable_resource() {
+        assert!(!is_concrete_uri(
+            "claude-history://projects/{project_id}/plan"
+        ));
+        assert!(is_concrete_uri("claude-history://projects"));
+    }
+
+    #[test]
+    fn parameterized_resource_sync_fails_into_strategy() {
+        // Documents the trigger: without the shape fix, this is the config
+        // auto-discovery attached, and it errors when built.
+        assert!(parameterized_resource_sync().into_strategy().is_err());
+    }
+
+    #[test]
+    fn one_unbuildable_entity_does_not_sink_the_declared_ones() {
+        let mut entities: HashMap<String, EntityConfig> = HashMap::new();
+        entities.insert("session".into(), entity(Some(tool_sync())));
+        entities.insert("plan".into(), entity(Some(parameterized_resource_sync())));
+        entities.insert("message".into(), entity(None));
+
+        let (strategies, failures) = build_entity_strategies(&entities);
+
+        // The declared, working entity survives.
+        assert!(strategies.contains_key("session"));
+        // The unbuildable one is reported, not fatal.
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].0, "plan");
+        // The sync-less entity contributes neither a strategy nor a failure.
+        assert!(!strategies.contains_key("message"));
     }
 }
