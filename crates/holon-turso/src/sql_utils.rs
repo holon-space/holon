@@ -66,6 +66,27 @@ mod tests {
         let val = Value::Object(HashMap::from([("key".into(), Value::String("val".into()))]));
         assert_eq!(value_to_sql_literal(&val), "'{\"key\":\"val\"}'");
     }
+
+    // A `-` that is NOT part of a `--` comment must not swallow the following
+    // `;`. Kills both `== b'-'`→`!= b'-'` and `&&`→`||` in the comment guard:
+    // either mutation treats the arithmetic minus as a comment start and folds
+    // the two statements into one.
+    #[test]
+    fn minus_operator_is_not_a_comment() {
+        let stmts: Vec<&str> = sql_statements("SELECT a-1; SELECT 2").collect();
+        assert_eq!(stmts, vec!["SELECT a-1", "SELECT 2"]);
+    }
+
+    // A `;` inside a `--` line comment must not split the statement — the
+    // regression the function exists to prevent.
+    #[test]
+    fn semicolon_inside_line_comment_does_not_split() {
+        let sql = "CREATE TABLE t (a INT -- note; keep\n);\nSELECT 1";
+        let stmts: Vec<&str> = sql_statements(sql).collect();
+        assert_eq!(stmts.len(), 2);
+        assert!(stmts[0].contains("note; keep"));
+        assert_eq!(stmts[1], "SELECT 1");
+    }
 }
 
 /// Split a semicolon-delimited SQL file into individual statements.

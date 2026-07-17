@@ -892,6 +892,40 @@ mod tests {
         assert_ne!(normalize_view_sql(v1), normalize_view_sql(v2));
     }
 
+    // Word-boundary identifier matching drives the DDL dependency ordering
+    // (a matview depending on another must be created after it). Pins the
+    // positive match, the whitespace/underscore tokenizer boundary, and the
+    // no-substring-false-positive contract.
+    #[test]
+    fn sql_references_identifier_matches_whole_tokens_only() {
+        assert!(sql_references_identifier(
+            "SELECT x FROM foo JOIN bar",
+            "foo"
+        ));
+        // underscore is part of an identifier, not a delimiter (kills the
+        // `== '_'` -> `!= '_'` split-predicate mutant).
+        assert!(sql_references_identifier(
+            "SELECT * FROM my_table",
+            "my_table"
+        ));
+        // case-insensitive whole-token match.
+        assert!(sql_references_identifier("select * from FOO", "foo"));
+        // substring must NOT match (kills the `-> false`/`delete !` mutants that
+        // would make every call match-nothing or match-everything).
+        assert!(!sql_references_identifier("SELECT * FROM foobar", "foo"));
+        assert!(!sql_references_identifier("SELECT * FROM other", "foo"));
+    }
+
+    #[test]
+    fn compute_view_name_is_deterministic_prefixed_and_distinct() {
+        let a = MatviewManager::compute_view_name("SELECT id FROM block");
+        let a_again = MatviewManager::compute_view_name("SELECT id FROM block");
+        let b = MatviewManager::compute_view_name("SELECT id, content FROM block");
+        assert!(a.starts_with("watch_view_"), "got {a}");
+        assert_eq!(a, a_again, "same SQL must yield same view name");
+        assert_ne!(a, b, "different SQL must yield different view names");
+    }
+
     /// Boot-time idempotency + crash recovery for `reconcile_named_view`.
     ///
     /// 1. First reconcile creates the matview.

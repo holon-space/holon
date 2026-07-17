@@ -2409,6 +2409,61 @@ mod tests {
     }
 
     #[test]
+    fn named_params_fingerprint_empty_is_dash_and_discriminates() {
+        assert_eq!(named_params_fingerprint(&HashMap::new()), "-");
+        let mut a = HashMap::new();
+        a.insert("k".to_string(), Value::Integer(1));
+        let mut b = HashMap::new();
+        b.insert("k".to_string(), Value::Integer(2));
+        assert_ne!(named_params_fingerprint(&a), "-");
+        assert_ne!(named_params_fingerprint(&a), named_params_fingerprint(&b));
+        assert_eq!(
+            named_params_fingerprint(&a),
+            named_params_fingerprint(&a.clone())
+        );
+    }
+
+    #[test]
+    fn positional_params_fingerprint_empty_is_dash_and_discriminates() {
+        assert_eq!(positional_params_fingerprint(&[]), "-");
+        let a = [value_to_turso_param(&Value::Integer(1))];
+        let b = [value_to_turso_param(&Value::Integer(2))];
+        assert_ne!(positional_params_fingerprint(&a), "-");
+        assert_ne!(
+            positional_params_fingerprint(&a),
+            positional_params_fingerprint(&b)
+        );
+    }
+
+    // `$name` binding is injection-adjacent: the name-char predicate decides
+    // where a placeholder ends. Underscore must be part of the name (kills the
+    // `|| next == '_'` -> `&&` / `== '_'` -> `!= '_'` mutants on both the peek
+    // and the inner scan), and a `$` not followed by a name char stays literal.
+    #[test]
+    fn bind_parameters_treats_underscore_as_name_char() {
+        let mut params = HashMap::new();
+        params.insert("foo_bar".to_string(), Value::Integer(7));
+        let (sql, vals) = bind_parameters("SELECT $foo_bar", &params).expect("bind");
+        assert_eq!(sql, "SELECT ?");
+        assert_eq!(vals.len(), 1);
+    }
+
+    #[test]
+    fn bind_parameters_leading_underscore_name() {
+        let mut params = HashMap::new();
+        params.insert("_priv".to_string(), Value::Integer(1));
+        let (sql, _) = bind_parameters("SELECT $_priv", &params).expect("bind");
+        assert_eq!(sql, "SELECT ?");
+    }
+
+    #[test]
+    fn bind_parameters_bare_dollar_is_literal() {
+        let (sql, vals) = bind_parameters("cost $ 5", &HashMap::new()).expect("bind");
+        assert_eq!(sql, "cost $ 5");
+        assert!(vals.is_empty());
+    }
+
+    #[test]
     fn test_parse_json_object_object() {
         let mut obj = HashMap::new();
         obj.insert("key1".to_string(), Value::String("value1".to_string()));

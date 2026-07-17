@@ -267,3 +267,34 @@ pub async fn spawn_derived_field_reconciler(
 
     Ok(DerivedFieldReconcilerHandle { aborts })
 }
+
+#[cfg(test)]
+mod tests {
+    use holon_api::computation::Computation;
+
+    use super::*;
+
+    // Provenance must be stable for equal computations and discriminate
+    // different ones — it is the staleness signal for the `block_derived`
+    // sidecar. A constant return (`""` / `"xyzzy"`) collapses all fields to one
+    // provenance, so a declaration change would never be detected as stale.
+    #[test]
+    fn provenance_is_computation_only_stable_and_discriminating() {
+        let a = DerivedField {
+            name: "score".into(),
+            computation: Computation::Field("a".into()),
+        };
+        // Same computation, different field name => same provenance (hash is
+        // over `computation` only).
+        let a_renamed = DerivedField {
+            name: "renamed".into(),
+            computation: Computation::Field("a".into()),
+        };
+        let b = DerivedField {
+            name: "score".into(),
+            computation: Computation::Field("b".into()),
+        };
+        assert_eq!(provenance_of(&a), provenance_of(&a_renamed));
+        assert_ne!(provenance_of(&a), provenance_of(&b));
+    }
+}

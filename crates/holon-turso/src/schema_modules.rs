@@ -997,6 +997,76 @@ mod tests {
         assert!(requires.contains(&Resource::schema("block")));
     }
 
+    fn requires_descriptor() -> EdgeFieldDescriptor {
+        EdgeFieldDescriptor {
+            entity: "block".into(),
+            field: "requires".into(),
+            join_table: "block_requires".into(),
+            source_col: "source_id".into(),
+            target_col: "target_id".into(),
+        }
+    }
+
+    #[test]
+    fn edge_agg_view_name_appends_agg_suffix() {
+        assert_eq!(
+            edge_agg_view_name(&requires_descriptor()),
+            "block_requires_agg"
+        );
+    }
+
+    #[test]
+    fn edge_agg_view_select_groups_targets_by_source() {
+        assert_eq!(
+            edge_agg_view_select(&requires_descriptor()),
+            "SELECT source_id AS source_id, json_group_array(target_id) AS vals \
+             FROM block_requires GROUP BY source_id"
+        );
+    }
+
+    // The `block` matview SELECT is read by every projection: column order and
+    // the sentinel-exclusion WHERE are load-bearing for correctness. Pin the
+    // full string for a single-junction shape.
+    #[test]
+    fn block_matview_select_exact_shape() {
+        assert_eq!(
+            block_matview_select(&[requires_descriptor()]),
+            "SELECT b.id, b.parent_id, b.depth, b.sort_key, b.content, b.content_type, \
+             b.source_language, b.source_name, b.properties, b.marks, b.collapsed, b.completed, \
+             b.block_type, b.created_at, b.updated_at, b._change_origin, b.write_seq, \
+             COALESCE(block_requires_agg.vals, '[]') AS requires FROM block_raw b \
+             LEFT OUTER JOIN block_requires_agg ON block_requires_agg.source_id = b.id \
+             WHERE b.id != 'sentinel:no_parent'"
+        );
+    }
+
+    #[test]
+    fn block_matview_select_with_computed_appends_planted_column() {
+        let sql = block_matview_select_with_computed(
+            &[requires_descriptor()],
+            &[PlantedColumn {
+                name: "is_done".into(),
+                sql: "completed = 1".into(),
+            }],
+        );
+        assert!(sql.contains("COALESCE(block_requires_agg.vals, '[]') AS requires"));
+        assert!(sql.contains("(completed = 1) AS is_done"));
+        assert!(sql.ends_with("WHERE b.id != 'sentinel:no_parent'"));
+    }
+
+    #[test]
+    fn block_edge_fields_are_all_block_scoped_and_nonempty() {
+        let fields = block_edge_fields();
+        assert!(
+            !fields.is_empty(),
+            "block must declare at least one edge field"
+        );
+        assert!(
+            fields.iter().all(|d| d.entity == "block"),
+            "block_edge_fields must only return entity==block descriptors"
+        );
+    }
+
     #[test]
     fn test_identity_schema_module_provides() {
         let module = IdentitySchemaModule;

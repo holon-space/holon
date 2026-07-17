@@ -58,3 +58,62 @@ pub fn instance_state_root(db_path: &Path) -> Option<PathBuf> {
     }
     Some(parent.join(".holon"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // is_ephemeral is reached through the public DurableReplicaState surface;
+    // these pin both truth values and the `||` vs `&&` shape (invariant 10:
+    // the epoch guard uses durable_paths to decide what a mode-switch may wipe).
+
+    #[test]
+    fn file_backed_db_is_durable_with_all_sidecars() {
+        let state = TursoDurableState::new("/var/data/holon.db");
+        // file-backed => is_ephemeral() == false => the three sidecar paths.
+        assert_eq!(
+            state.durable_paths(),
+            vec![
+                PathBuf::from("/var/data/holon.db"),
+                PathBuf::from("/var/data/holon.db-wal"),
+                PathBuf::from("/var/data/holon.db-shm"),
+            ]
+        );
+    }
+
+    #[test]
+    fn memory_db_is_ephemeral_no_paths() {
+        // starts_with(":memory:") arm of the `||`.
+        assert!(
+            TursoDurableState::new(":memory:")
+                .durable_paths()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn empty_path_is_ephemeral_no_paths() {
+        // is_empty() arm of the `||` — kills `|| -> &&` (empty && :memory: is
+        // never both-true, so `&&` would wrongly report empty as durable).
+        assert!(TursoDurableState::new("").durable_paths().is_empty());
+    }
+
+    #[test]
+    fn instance_state_root_file_backed_anchors_next_to_db() {
+        assert_eq!(
+            instance_state_root(Path::new("/var/data/holon.db")),
+            Some(PathBuf::from("/var/data/.holon"))
+        );
+    }
+
+    #[test]
+    fn instance_state_root_memory_is_none() {
+        assert_eq!(instance_state_root(Path::new(":memory:")), None);
+    }
+
+    #[test]
+    fn instance_state_root_bare_filename_has_no_parent_dir() {
+        // parent() is Some("") for a bare name => the empty-parent guard => None.
+        assert_eq!(instance_state_root(Path::new("holon.db")), None);
+    }
+}
