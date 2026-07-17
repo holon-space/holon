@@ -132,6 +132,17 @@ impl SqlProjectionComponent {
         self.execute_op("set_field", params).await;
     }
 
+    /// Append one tag to a block's `tags` set via the production element-wise
+    /// `add_tag` operation — the same op prod uses to mark a block a `Page`
+    /// (`tag="Page"`). Used to seed a page-root so its `is_page()` matches the
+    /// oracle, closing the structural-slice oracle/seed asymmetry.
+    pub async fn add_tag(&self, id: &EntityUri, tag: &str) {
+        let mut params: StorageEntity = HashMap::new();
+        params.insert("id".into(), Value::String(id.to_string()));
+        params.insert("tag".into(), Value::String(tag.to_string()));
+        self.execute_op("add_tag", params).await;
+    }
+
     /// Delete a block via the production `delete` operation.
     pub async fn delete_block(&self, id: &EntityUri) {
         let mut params: StorageEntity = HashMap::new();
