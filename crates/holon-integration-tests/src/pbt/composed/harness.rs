@@ -401,6 +401,16 @@ impl<S: ComposedSlice> ComposedSut<S> {
         ))
     }
 
+    /// The number of blocks the SUT store currently holds (the same
+    /// `sut_ids` set the per-tick reconcile and the block invariants read).
+    /// The soak reseed-reproduction rung uses it to prove the vault booted to
+    /// scale before it starts measuring reseeds — a post-boot count far below
+    /// the requested `HOLON_SOAK_SEED_BLOCKS` is itself a finding (boot ended
+    /// unsettled / under-seeded), not a silent pass.
+    pub fn sut_block_count(&self) -> usize {
+        self.rt.block_on(sut_ids(&self.caps)).len()
+    }
+
     /// The live cap set this SUT's `CapMap` actually provides. The windowed
     /// harness feeds this into the oracle (`wide_e2e_windowed_ref`) so
     /// `aggregate_transitions` narrows the generated alphabet to exactly
