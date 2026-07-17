@@ -370,6 +370,11 @@ jobs:
 
       - name: Build Android .so
         run: |
+          # rust-toolchain.toml pins nightly-2026-07-15; the dtolnay `targets:` input
+          # added the Android std to plain `nightly`, not the pin, so cargo ndk (on the
+          # pinned toolchain) could not find std for aarch64-linux-android (E0463). Add
+          # it to the active toolchain here, like the macOS job installs its targets.
+          rustup target add aarch64-linux-android
           cargo ndk -t arm64-v8a -P 33 build --locked \
             -p holon-gpui --no-default-features --features mobile \
             --lib --release
