@@ -1292,6 +1292,21 @@ mod mutation_gap_tests {
     }
 
     #[test]
+    fn new_rich_carries_parent_id() {
+        let rich = Block::new_rich(
+            uri("block:r1"),
+            uri("block:parent"),
+            "rich text",
+            Vec::<MarkSpan>::new(),
+        );
+        assert_eq!(rich.id, uri("block:r1"));
+        // Constructor must carry the passed parent_id (not drop it to default).
+        assert_eq!(rich.parent_id, uri("block:parent"));
+        assert_ne!(rich.parent_id, EntityUri::no_parent());
+        assert_eq!(rich.content, "rich text");
+    }
+
+    #[test]
     fn block_predicates_titles_and_mime() {
         let mut b = Block::new_text(uri("block:b1"), EntityUri::no_parent(), "line1\nline2");
         assert_eq!(b.title(), "line1");
@@ -1304,6 +1319,9 @@ mod mutation_gap_tests {
         assert!(!b.is_page());
 
         let src = Block::new_source(uri("block:s1"), uri("block:b1"), "holon_prql", "from x");
+        // Constructor must carry the passed parent_id (not drop it to default).
+        assert_eq!(src.parent_id, uri("block:b1"));
+        assert_ne!(src.parent_id, EntityUri::no_parent());
         assert!(src.is_source_block());
         assert!(src.is_prql_block());
         assert!(!b.is_source_block());
@@ -1312,6 +1330,9 @@ mod mutation_gap_tests {
         assert!(!py.is_prql_block());
 
         let img = Block::new_image(uri("block:i1"), uri("block:b1"), "attachments/pic.png");
+        // Constructor must carry the passed id (not drop it to a random default).
+        assert_eq!(img.id, uri("block:i1"));
+        assert_eq!(img.parent_id, uri("block:b1"));
         assert!(img.is_image_block());
         assert_eq!(img.image_mime(), Some("image/png"));
         let jpg = Block::new_image(uri("block:i2"), uri("block:b1"), "a/b.JPG");
