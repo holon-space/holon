@@ -19,6 +19,7 @@ use fluxdi::Injector;
 use fluxdi::Provider;
 use fluxdi::Shared;
 use holon_turso::schema_modules::AutomationsJournalSchemaModule;
+use holon_turso::schema_modules::BlockDerivedSchemaModule;
 use holon_turso::schema_modules::BlockHierarchySchemaModule;
 use holon_turso::schema_modules::BlockMatviewSchemaModule;
 use holon_turso::schema_modules::BlockRequirementEdgesSchemaModule;
@@ -119,6 +120,12 @@ impl DbResource for GraphEavSchema {}
 /// `trust_proposals` supervision matview (C5 trust gate; FROM `block_raw`).
 pub struct TrustProposalsView;
 impl DbResource for TrustProposalsView {}
+
+/// `block_derived` — the C4 derived-field SIDECAR table (narrow
+/// `(block_id, field_name)` cache; maintained reactively by the derived-field
+/// CDC watcher, not by boot DDL beyond table creation).
+pub struct BlockDerivedTable;
+impl DbResource for BlockDerivedTable {}
 
 // ---------------------------------------------------------------------------
 // Helper: run a SchemaModule's DDL via DbHandle
@@ -243,6 +250,17 @@ pub fn register_schema_providers(injector: &Injector) {
         Shared::new(DbReady::<OperationTables>::new())
     }));
 
+    // -- BlockDerivedTable (no DDL deps): the C4 derived-field sidecar table.
+    // Table creation is dependency-free; the CDC watcher that populates it
+    // binds to the block matview at runtime, not at DDL time. --
+    injector.provide::<DbReady<BlockDerivedTable>>(Provider::root_async(|inj| async move {
+        let db = inj.resolve::<dyn DbHandleProvider>();
+        run_schema_module(&BlockDerivedSchemaModule, &db.handle())
+            .await
+            .expect("BlockDerivedTable schema init failed");
+        Shared::new(DbReady::<BlockDerivedTable>::new())
+    }));
+
     // -- HistoryTables (no deps): the C2b block_history relation, boot-owned
     // here so it is queryable (PRQL/raw SQL/list_tables) from session start —
     // never lazily created by its accessor --
@@ -351,5 +369,6 @@ pub fn all_schema_roots() -> Vec<std::any::TypeId> {
         TypeId::of::<DbReady<GraphEavSchema>>(),
         TypeId::of::<DbReady<TrustProposalsView>>(),
         TypeId::of::<DbReady<AutomationsJournalView>>(),
+        TypeId::of::<DbReady<BlockDerivedTable>>(),
     ]
 }
