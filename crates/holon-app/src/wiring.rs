@@ -98,6 +98,15 @@ impl FrontendInjectorExt for Injector {
             move |_| Shared::new(LockedKeys(k.clone()))
         }));
 
+        // Boot-ordering gate for provider syncs. Starts `DeferredUntilScan`;
+        // the `post_ready` scan barrier opens it once the org initial scan has
+        // finished, so MCP/provider syncs never contend with boot ingest on the
+        // serialized DatabaseActor.
+        self.provide::<holon_core::SyncGate>(Provider::root({
+            let gate = holon_core::SyncGate::new();
+            move |_| Shared::new(gate.clone())
+        }));
+
         // ThemeRegistry + PreferenceDefs
         let post_write_hook = holon_config.hooks.post_org_write.clone();
 
@@ -465,6 +474,22 @@ impl FrontendInjectorExt for Injector {
                                     });
                                 }
                             }
+                        }
+                        // Org initial scan is done (success, degraded, or no
+                        // org module at all) — the serialized DatabaseActor is
+                        // no longer saturated by boot ingest. Open the sync gate
+                        // so deferred provider syncs run against an idle actor.
+                        // Opened on EVERY path so a deferred sync always
+                        // eventually runs (fail-loud: never a silent never-sync).
+                        match resolver_bg.try_resolve::<holon_core::SyncGate>() {
+                            Ok(gate) => {
+                                gate.open();
+                                tracing::info!("[post_ready] org scan complete — sync gate opened");
+                            }
+                            Err(e) => tracing::error!(
+                                "[post_ready] SyncGate failed to resolve — deferred MCP syncs \
+                                 will fall back to the 600s watchdog: {e}"
+                            ),
                         }
                         let _ = resolver_bg
                             .try_resolve_async::<holon::sync::LoroSyncControllerHandle>()

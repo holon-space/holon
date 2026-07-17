@@ -8,6 +8,7 @@ use fluxdi::Provider;
 use fluxdi::Shared;
 use holon_api::EntityName;
 use holon_core::OperationProvider;
+use holon_core::SyncGate;
 use holon_core::SyncTokenStore;
 use holon_mcp_client::IntegrationFileConfig;
 use holon_mcp_client::McpIntegration;
@@ -123,6 +124,11 @@ impl Module for McpIntegrationsModule {
                 let token_store: Arc<dyn SyncTokenStore> =
                     resolver.resolve_async::<dyn SyncTokenStore>().await;
                 let type_registry = resolver.resolve::<TypeRegistry>();
+                // Boot-ordering gate: provider syncs (initial + notification-
+                // driven) wait for the org initial scan to finish before
+                // touching the serialized DatabaseActor. Registered in
+                // `add_frontend`, opened by the `post_ready` scan barrier.
+                let sync_gate: SyncGate = (*resolver.resolve::<SyncGate>()).clone();
 
                 // Layered `${VAR}` resolver: environment variable wins, then a
                 // settings value whose key matches case-insensitively with `.`/`_`
@@ -182,6 +188,7 @@ impl Module for McpIntegrationsModule {
                         cache_factory.clone(),
                         token_store.clone(),
                         &pending_flows,
+                        sync_gate.clone(),
                     )
                     .await;
 

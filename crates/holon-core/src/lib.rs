@@ -27,6 +27,7 @@ pub mod operation_wrapper;
 pub mod publish_errors;
 pub mod replica_state;
 pub mod storage;
+pub mod sync_gate;
 pub mod traits;
 pub mod undo;
 pub mod util;
@@ -38,6 +39,8 @@ pub use entity_cache::EntityCache;
 pub use file_format::FileFormatAdapter;
 pub use file_format::FileFormatParseResult;
 pub use publish_errors::PublishErrorTracker;
+pub use sync_gate::SyncGate;
+pub use sync_gate::SyncGateState;
 
 #[cfg(test)]
 mod block_operations_tests;

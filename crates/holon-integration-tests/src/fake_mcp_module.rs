@@ -289,7 +289,12 @@ async fn build_handle(db_handle: DbHandle) -> anyhow::Result<FakeMcpHandle> {
     sync_engine.sync_all().await?;
     sync_engine.subscribe_all().await?;
     let (sync_event_tx, sync_event_rx) = tokio::sync::mpsc::unbounded_channel();
-    holon_mcp_client::spawn_sync_event_loop(sync_event_rx, sync_engine.clone());
+    holon_mcp_client::spawn_sync_event_loop(
+        sync_event_rx,
+        sync_engine.clone(),
+        holon_mcp_client::SyncGate::opened(),
+        holon_mcp_client::SyncLoopTuning::test(),
+    );
     tokio::spawn(async move {
         let mut update_rx = update_rx;
         while let Some(uri) = update_rx.0.recv().await {

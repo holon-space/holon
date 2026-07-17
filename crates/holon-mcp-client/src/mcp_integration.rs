@@ -1,10 +1,13 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use holon_api::DynamicEntity;
 use holon_core::CacheFactory;
 use holon_core::EntityCache;
+use holon_core::SyncGate;
 use holon_core::SyncTokenStore;
 use holon_turso::turso::DbHandle;
 use tokio::sync::Mutex;
@@ -172,6 +175,7 @@ struct PendingOAuth {
     cache_factory: Arc<dyn CacheFactory>,
     token_store: Arc<dyn SyncTokenStore>,
     provider_name: String,
+    sync_gate: SyncGate,
 }
 
 /// Registry of in-flight OAuth flows awaiting user consent.
@@ -237,6 +241,7 @@ impl PendingOAuthFlows {
             pending.token_store,
             pending.provider_name,
             receiver,
+            pending.sync_gate,
         )
         .await
     }
@@ -255,6 +260,7 @@ pub async fn build_mcp_integration(
     cache_factory: Arc<dyn CacheFactory>,
     token_store: Arc<dyn SyncTokenStore>,
     pending_flows: &PendingOAuthFlows,
+    sync_gate: SyncGate,
 ) -> anyhow::Result<McpConnectionResult> {
     let sidecar = McpSidecar::from_yaml(&config.sidecar_yaml)?;
 
@@ -272,6 +278,7 @@ pub async fn build_mcp_integration(
                     token_store,
                     config.provider_name,
                     receiver,
+                    sync_gate,
                 )
                 .await?;
                 Ok(McpConnectionResult::Connected(integration))
@@ -289,6 +296,7 @@ pub async fn build_mcp_integration(
                     token_store,
                     config.provider_name,
                     receiver,
+                    sync_gate,
                 )
                 .await?;
                 Ok(McpConnectionResult::Connected(integration))
@@ -303,6 +311,7 @@ pub async fn build_mcp_integration(
                     token_store,
                     config.provider_name,
                     pending_flows,
+                    sync_gate,
                 )
                 .await
             }
@@ -320,6 +329,7 @@ pub async fn build_mcp_integration(
                 token_store,
                 config.provider_name,
                 receiver,
+                sync_gate,
             )
             .await?;
             Ok(McpConnectionResult::Connected(integration))
@@ -354,6 +364,7 @@ async fn build_oauth_integration(
     token_store: Arc<dyn SyncTokenStore>,
     provider_name: String,
     pending_flows: &PendingOAuthFlows,
+    sync_gate: SyncGate,
 ) -> anyhow::Result<McpConnectionResult> {
     use rmcp::transport::auth::AuthorizationManager;
 
@@ -380,6 +391,7 @@ async fn build_oauth_integration(
             token_store,
             provider_name,
             receiver,
+            sync_gate,
         )
         .await?;
         return Ok(McpConnectionResult::Connected(integration));
@@ -417,6 +429,7 @@ async fn build_oauth_integration(
                 cache_factory,
                 token_store,
                 provider_name: provider_name.clone(),
+                sync_gate,
             },
         )
         .await;
@@ -467,6 +480,7 @@ async fn finish_integration(
     token_store: Arc<dyn SyncTokenStore>,
     provider_name: String,
     receiver: ResourceUpdateReceiver,
+    sync_gate: SyncGate,
 ) -> anyhow::Result<McpIntegration> {
     // Auto-discover entities from resource templates
     let templates = peer
@@ -769,7 +783,12 @@ async fn finish_integration(
     // resyncs, and poll ticks all flow through the same channel, so per-entity
     // sync work never overlaps.
     let (sync_event_tx, sync_event_rx) = mpsc::unbounded_channel::<SyncEvent>();
-    let sync_event_task = spawn_sync_event_loop(sync_event_rx, sync_engine.clone());
+    let sync_event_task = spawn_sync_event_loop(
+        sync_event_rx,
+        sync_engine.clone(),
+        sync_gate,
+        SyncLoopTuning::default(),
+    );
 
     let mut background_tasks = Vec::new();
 
@@ -815,45 +834,235 @@ async fn finish_integration(
     })
 }
 
+/// The sync operations the serialized loop drives. Abstracted from
+/// [`McpSyncEngine`] so the gate + debounce logic is unit-testable against a
+/// counting fake with no live MCP peer.
+#[async_trait::async_trait]
+pub trait ResyncSink: Send + Sync {
+    async fn sync_all(&self) -> anyhow::Result<()>;
+    async fn resync_by_uri(&self, uri: &str) -> anyhow::Result<()>;
+    async fn sync_entity_by_name(&self, entity: &str) -> anyhow::Result<()>;
+}
+
+#[async_trait::async_trait]
+impl ResyncSink for McpSyncEngine {
+    async fn sync_all(&self) -> anyhow::Result<()> {
+        McpSyncEngine::sync_all(self).await
+    }
+    async fn resync_by_uri(&self, uri: &str) -> anyhow::Result<()> {
+        McpSyncEngine::resync_by_uri(self, uri).await
+    }
+    async fn sync_entity_by_name(&self, entity: &str) -> anyhow::Result<()> {
+        McpSyncEngine::sync_entity_by_name(self, entity).await
+    }
+}
+
+/// Timing knobs for the serialized sync loop. `Default` carries production
+/// values; [`SyncLoopTuning::test`] collapses them for fast tests.
+#[derive(Debug, Clone, Copy)]
+pub struct SyncLoopTuning {
+    /// Trailing-edge debounce: a pending re-sync absorbs further signals until
+    /// the stream is quiet for this long, then runs once.
+    pub debounce: Duration,
+    /// Hard coalescing ceiling: under sustained signals that never quiet,
+    /// force a drain this long after the first pending signal so re-syncs
+    /// can't be starved.
+    pub max_coalesce: Duration,
+    /// How often to loudly re-warn while a sync is still deferred behind the
+    /// boot scan gate — makes a long/stuck deferral visible, never silent.
+    pub gate_warn_every: Duration,
+    /// Absolute deferral ceiling: if the gate has still not opened after this,
+    /// proceed with the sync in DISCLOSED degraded mode (fail-loud: a deferred
+    /// sync must eventually run). Sized well above any realistic boot scan.
+    pub gate_watchdog: Duration,
+}
+
+impl Default for SyncLoopTuning {
+    fn default() -> Self {
+        Self {
+            debounce: Duration::from_secs(2),
+            max_coalesce: Duration::from_secs(10),
+            gate_warn_every: Duration::from_secs(60),
+            gate_watchdog: Duration::from_secs(600),
+        }
+    }
+}
+
+impl SyncLoopTuning {
+    /// Near-immediate timings for tests that assert coalescing without waiting
+    /// wall-clock seconds.
+    pub fn test() -> Self {
+        Self {
+            debounce: Duration::from_millis(40),
+            max_coalesce: Duration::from_millis(200),
+            gate_warn_every: Duration::from_millis(50),
+            gate_watchdog: Duration::from_secs(5),
+        }
+    }
+}
+
+/// Coalesced sync work accumulated between drains. Deduplicates per resource so
+/// N rapid "resource updated" signals for one URI collapse into ONE re-sync.
+#[derive(Debug, Default)]
+struct PendingSyncWork {
+    sync_all: bool,
+    uris: HashSet<String>,
+    poll_entities: HashSet<String>,
+}
+
+impl PendingSyncWork {
+    fn absorb(&mut self, event: SyncEvent) {
+        match event {
+            SyncEvent::SyncAll => self.sync_all = true,
+            SyncEvent::NotificationUri(uri) => {
+                self.uris.insert(uri);
+            }
+            SyncEvent::PollTick(entity) => {
+                self.poll_entities.insert(entity);
+            }
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        !self.sync_all && self.uris.is_empty() && self.poll_entities.is_empty()
+    }
+
+    async fn execute<S: ResyncSink + ?Sized>(self, sync_engine: &S) {
+        // A full sync covers every entity, so it subsumes any pending per-URI
+        // resyncs and poll ticks that queued alongside it.
+        if self.sync_all {
+            let span = tracing::info_span!("initial_sync");
+            async {
+                if let Err(e) = sync_engine.sync_all().await {
+                    warn!(error = %e, "initial sync failed");
+                }
+            }
+            .instrument(span)
+            .await;
+            return;
+        }
+        for uri in self.uris {
+            let span = tracing::info_span!("subscription_resync", %uri);
+            async {
+                info!("resource updated, re-syncing (coalesced)...");
+                if let Err(e) = sync_engine.resync_by_uri(&uri).await {
+                    warn!(error = %e, "failed to resync");
+                }
+            }
+            .instrument(span)
+            .await;
+        }
+        for entity in self.poll_entities {
+            let span = tracing::info_span!("poll_resync", %entity);
+            async {
+                if let Err(e) = sync_engine.sync_entity_by_name(&entity).await {
+                    warn!(error = %e, "poll resync failed");
+                }
+            }
+            .instrument(span)
+            .await;
+        }
+    }
+}
+
+/// Wait for the boot-scan gate to open before any sync runs, keeping a stuck
+/// deferral visible and guaranteeing the sync eventually runs.
+async fn await_gate(gate: &SyncGate, tuning: &SyncLoopTuning) {
+    if gate.state() == holon_core::SyncGateState::Open {
+        return;
+    }
+    info!("sync deferred until org initial scan completes");
+    let started = tokio::time::Instant::now();
+    let mut warn_tick =
+        tokio::time::interval_at(started + tuning.gate_warn_every, tuning.gate_warn_every);
+    let watchdog = tokio::time::sleep(tuning.gate_watchdog);
+    tokio::pin!(watchdog);
+    loop {
+        tokio::select! {
+            r = gate.wait_open() => {
+                match r {
+                    Ok(()) => info!("org initial scan complete — sync gate open"),
+                    Err(e) => warn!(error = %e, "sync gate closed during teardown — proceeding"),
+                }
+                return;
+            }
+            _ = &mut watchdog => {
+                error!(
+                    waited_s = started.elapsed().as_secs(),
+                    "sync gate never opened — org initial scan may be wedged; proceeding with sync \
+                     in DISCLOSED degraded mode (may contend with the scan)"
+                );
+                return;
+            }
+            _ = warn_tick.tick() => {
+                warn!(
+                    waited_s = started.elapsed().as_secs(),
+                    "sync still deferred — org initial scan in progress"
+                );
+            }
+        }
+    }
+}
+
 /// Spawn the single consumer that serializes all sync work for an integration:
 /// the initial full sync, notification-driven resyncs, and poll ticks.
-pub fn spawn_sync_event_loop(
+///
+/// Two levers keep provider syncs from starving the boot org scan on the
+/// serialized `DatabaseActor`:
+/// 1. DEFER — nothing runs until `gate` opens (org initial scan complete);
+///    events that arrive during the scan buffer in the channel and coalesce.
+/// 2. DEBOUNCE — per-resource trailing-edge coalescing so a storm of "resource
+///    updated" notifications collapses into one re-sync per URI.
+pub fn spawn_sync_event_loop<S: ResyncSink + 'static>(
     mut receiver: mpsc::UnboundedReceiver<SyncEvent>,
-    sync_engine: Arc<McpSyncEngine>,
+    sync_engine: Arc<S>,
+    gate: SyncGate,
+    tuning: SyncLoopTuning,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        while let Some(event) = receiver.recv().await {
-            match event {
-                SyncEvent::SyncAll => {
-                    let span = tracing::info_span!("initial_sync");
-                    async {
-                        if let Err(e) = sync_engine.sync_all().await {
-                            warn!(error = %e, "initial sync failed");
+        // Lever 1: hold everything until the boot scan is done. Signals queue
+        // in the unbounded channel meanwhile and are drained + coalesced below.
+        await_gate(&gate, &tuning).await;
+
+        // Lever 2: trailing-edge + max-wait debounce over the serialized stream.
+        let mut pending = PendingSyncWork::default();
+        let mut trailing: Option<tokio::time::Instant> = None;
+        let mut hard: Option<tokio::time::Instant> = None;
+
+        loop {
+            let fire_at = match (trailing, hard) {
+                (Some(t), Some(h)) => Some(t.min(h)),
+                (Some(t), None) => Some(t),
+                (None, Some(h)) => Some(h),
+                (None, None) => None,
+            };
+            tokio::select! {
+                maybe_event = receiver.recv() => {
+                    match maybe_event {
+                        Some(event) => {
+                            if pending.is_empty() {
+                                hard = Some(tokio::time::Instant::now() + tuning.max_coalesce);
+                            }
+                            pending.absorb(event);
+                            trailing = Some(tokio::time::Instant::now() + tuning.debounce);
+                        }
+                        None => {
+                            if !pending.is_empty() {
+                                std::mem::take(&mut pending).execute(sync_engine.as_ref()).await;
+                            }
+                            break;
                         }
                     }
-                    .instrument(span)
-                    .await;
                 }
-                SyncEvent::NotificationUri(uri) => {
-                    let span = tracing::info_span!("subscription_resync", %uri);
-                    async {
-                        info!("resource updated, re-syncing...");
-                        if let Err(e) = sync_engine.resync_by_uri(&uri).await {
-                            warn!(error = %e, "failed to resync");
-                        }
+                _ = async {
+                    match fire_at {
+                        Some(d) => tokio::time::sleep_until(d).await,
+                        None => std::future::pending::<()>().await,
                     }
-                    .instrument(span)
-                    .await;
-                }
-                SyncEvent::PollTick(entity) => {
-                    let span = tracing::info_span!("poll_resync", %entity);
-                    async {
-                        if let Err(e) = sync_engine.sync_entity_by_name(&entity).await {
-                            warn!(error = %e, "poll resync failed");
-                        }
-                    }
-                    .instrument(span)
-                    .await;
+                }, if fire_at.is_some() => {
+                    trailing = None;
+                    hard = None;
+                    std::mem::take(&mut pending).execute(sync_engine.as_ref()).await;
                 }
             }
         }
@@ -967,5 +1176,166 @@ mod integration_resilience_tests {
         assert_eq!(failures[0].0, "plan");
         // The sync-less entity contributes neither a strategy nor a failure.
         assert!(!strategies.contains_key("message"));
+    }
+}
+
+#[cfg(test)]
+mod sync_loop_gate_debounce_tests {
+    //! Boot MCP-sync-vs-scan contention fix. Reproduces the storm: a mock MCP
+    //! resource-update flood during a simulated scan window, asserting the two
+    //! levers — DEFER (nothing runs before the gate opens) and
+    //! DEBOUNCE/COALESCE (N rapid signals per resource collapse into one
+    //! re-sync).
+
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering::SeqCst;
+    use std::time::Duration;
+
+    use super::*;
+
+    #[derive(Default)]
+    struct CountingSink {
+        sync_all: AtomicUsize,
+        resyncs: Mutex<Vec<String>>,
+        polls: Mutex<Vec<String>>,
+    }
+
+    impl CountingSink {
+        fn total(&self) -> usize {
+            self.sync_all.load(SeqCst)
+                + self.resyncs.lock().unwrap().len()
+                + self.polls.lock().unwrap().len()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ResyncSink for CountingSink {
+        async fn sync_all(&self) -> anyhow::Result<()> {
+            self.sync_all.fetch_add(1, SeqCst);
+            Ok(())
+        }
+        async fn resync_by_uri(&self, uri: &str) -> anyhow::Result<()> {
+            self.resyncs.lock().unwrap().push(uri.to_string());
+            Ok(())
+        }
+        async fn sync_entity_by_name(&self, entity: &str) -> anyhow::Result<()> {
+            self.polls.lock().unwrap().push(entity.to_string());
+            Ok(())
+        }
+    }
+
+    const PROJECTS: &str = "claude-history://projects";
+    const TASKS: &str = "claude-history://tasks";
+    const SESSIONS: &str = "claude-history://sessions";
+
+    /// (a) Zero sync work runs while the gate is closed (scan in progress);
+    /// (b) after the gate opens, the buffered storm collapses to ONE coalesced
+    /// full sync (a pending `SyncAll` subsumes the per-URI resyncs).
+    #[tokio::test(start_paused = true)]
+    async fn nothing_runs_before_scan_complete_then_one_coalesced_sync() {
+        let sink = Arc::new(CountingSink::default());
+        let gate = SyncGate::new(); // DeferredUntilScan
+        let (tx, rx) = mpsc::unbounded_channel();
+        let handle = spawn_sync_event_loop(rx, sink.clone(), gate.clone(), SyncLoopTuning::test());
+
+        // Boot enqueues the initial sync, then a resource-update storm arrives
+        // during the (still-running) scan.
+        tx.send(SyncEvent::SyncAll).unwrap();
+        for _ in 0..47 {
+            tx.send(SyncEvent::NotificationUri(PROJECTS.to_string()))
+                .unwrap();
+            tx.send(SyncEvent::NotificationUri(TASKS.to_string()))
+                .unwrap();
+        }
+
+        // Advance well past the debounce window while the gate is CLOSED.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            sink.total(),
+            0,
+            "no sync may run before the org scan completes (gate closed)"
+        );
+
+        // Scan completes → gate opens.
+        gate.open();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        assert_eq!(
+            sink.sync_all.load(SeqCst),
+            1,
+            "the buffered storm collapses to exactly one full sync"
+        );
+        assert_eq!(
+            sink.resyncs.lock().unwrap().len(),
+            0,
+            "per-URI resyncs are subsumed by the coalesced full sync"
+        );
+
+        drop(tx);
+        let _ = handle.await;
+    }
+
+    /// A storm of rapid notifications for the SAME resource collapses into one
+    /// re-sync; distinct resources each get exactly one.
+    #[tokio::test(start_paused = true)]
+    async fn debounce_collapses_per_resource() {
+        let sink = Arc::new(CountingSink::default());
+        let (tx, rx) = mpsc::unbounded_channel();
+        let handle =
+            spawn_sync_event_loop(rx, sink.clone(), SyncGate::opened(), SyncLoopTuning::test());
+
+        for _ in 0..47 {
+            tx.send(SyncEvent::NotificationUri(PROJECTS.to_string()))
+                .unwrap();
+        }
+        for _ in 0..16 {
+            tx.send(SyncEvent::NotificationUri(TASKS.to_string()))
+                .unwrap();
+            tx.send(SyncEvent::NotificationUri(SESSIONS.to_string()))
+                .unwrap();
+        }
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let mut got = sink.resyncs.lock().unwrap().clone();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                PROJECTS.to_string(),
+                SESSIONS.to_string(),
+                TASKS.to_string()
+            ],
+            "79 signals across 3 resources collapse to one re-sync each"
+        );
+
+        drop(tx);
+        let _ = handle.await;
+    }
+
+    /// The gate's watchdog guarantees a deferred sync eventually runs even if
+    /// the gate never opens (fail-loud: disclosed degraded mode, never a silent
+    /// never-sync).
+    #[tokio::test(start_paused = true)]
+    async fn watchdog_runs_sync_if_gate_never_opens() {
+        let sink = Arc::new(CountingSink::default());
+        let (tx, rx) = mpsc::unbounded_channel();
+        // Gate stays DeferredUntilScan forever (no open() call).
+        let handle =
+            spawn_sync_event_loop(rx, sink.clone(), SyncGate::new(), SyncLoopTuning::test());
+        tx.send(SyncEvent::NotificationUri(PROJECTS.to_string()))
+            .unwrap();
+
+        // Past the test watchdog (5s) + debounce.
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        assert_eq!(
+            sink.resyncs.lock().unwrap().as_slice(),
+            &[PROJECTS.to_string()],
+            "watchdog proceeds so the deferred sync still runs"
+        );
+
+        drop(tx);
+        let _ = handle.await;
     }
 }
