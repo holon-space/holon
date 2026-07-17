@@ -11,6 +11,7 @@
 //! `OperationProvider`s.
 
 pub mod credential_store;
+pub mod entity_mirror;
 pub mod integration_config;
 pub mod mcp_call_surface;
 pub mod mcp_integration;
