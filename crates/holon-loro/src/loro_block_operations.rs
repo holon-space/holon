@@ -630,7 +630,22 @@ impl CrudOperations<Block> for LoroBlockOperations {
                 "id".to_string(),
                 Value::String(block_with_props.id.to_string()),
             );
-            OperationResult::new(vec![], block_op("delete", params))
+            // Emit the create as one `id` field delta (Null → minted id), exactly
+            // as the SqlOperationProvider create path does. This is what the
+            // engine's `record_history` chokepoint consumes to append a
+            // `block_history` op_group — without a delta the batch is empty and a
+            // Loro-consolidator create silently records NO history, so the C2
+            // `inv-history-records-all-creates` op-group floor is missed. The
+            // delta is non-vacuous (old != new), so undo journaling is unchanged.
+            OperationResult::new(
+                vec![FieldDelta::new(
+                    block_with_props.id.to_string(),
+                    "id",
+                    Value::Null,
+                    Value::String(block_with_props.id.to_string()),
+                )],
+                block_op("delete", params),
+            )
         } else {
             OperationResult::irreversible(vec![])
         };
@@ -1349,6 +1364,46 @@ mod intent_boundary_tests {
             dir.path().to_path_buf(),
         )));
         (LoroBlockOperations::new(store), dir)
+    }
+
+    /// C2 provenance (`inv-history-records-all-creates`): a genuine Loro-backed
+    /// create MUST report one `id` field delta (Null → minted id), the same
+    /// shape the SQL create path emits. The engine's `record_history`
+    /// chokepoint records `block_history` op_groups from this delta stream — an
+    /// empty `changes` vector made every Loro-consolidator create silently
+    /// record NO history, missing the op-group floor. An upsert over an
+    /// existing block stays irreversible with no delta (no phantom create).
+    #[tokio::test]
+    async fn create_reports_id_field_delta_for_history() {
+        let (ops, _dir) = ops_over_temp_store();
+        let backend = ops.get_backend("").await.expect("backend");
+        let root = backend.create_placeholder_root("root").await.expect("root");
+        let root_uri = EntityUri::parse_owned(root).expect("root uri");
+        ops.save_doc("").await.expect("save");
+
+        let mut fields: StorageEntity = HashMap::new();
+        fields.insert("parent_id".into(), Value::String(root_uri.to_string()));
+        fields.insert("content".into(), Value::String("hello".into()));
+        let (block_id, result) = ops.create(fields).await.expect("create");
+
+        assert_eq!(
+            result.changes.len(),
+            1,
+            "a genuine create must report exactly one field delta for history, got {:?}",
+            result.changes
+        );
+        let delta = &result.changes[0];
+        assert_eq!(
+            delta.entity_id, block_id,
+            "delta must key the created block"
+        );
+        assert_eq!(delta.field, "id", "the create delta is the `id` field");
+        assert_eq!(delta.old_value, Value::Null, "pre-create `id` is Null");
+        assert_eq!(
+            delta.new_value,
+            Value::String(block_id.clone()),
+            "post-create `id` is the minted id"
+        );
     }
 
     /// Model.md invariant 3 at the provider surface: a `set_field` intent
